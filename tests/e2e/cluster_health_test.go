@@ -3,8 +3,8 @@ package e2e
 import (
 	"encoding/json"
 	"os/exec"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,21 +14,34 @@ import (
 // of singleton vs cluster. With no configured peers the local-mode rule
 // does not fire, so issues should be empty (apart from EC degraded if
 // backend is degraded).
-func runClusterAdminCLIHealth(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runClusterHealthCLICases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runClusterHealthCLICases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Cluster admin CLI health", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runClusterHealthCLICases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	binary := getBinary()
-	sock := tgt.adminSockPath()
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-	t.Run("JSON", func(t *testing.T) {
+			runClusterHealthCLICases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runClusterHealthCLICases(getTgt func() s3Target) {
+	ginkgo.It("renders JSON", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		binary := getBinary()
+		sock := tgt.adminSockPath()
+
 		out, err := exec.Command(binary, "cluster",
 			"--endpoint", sock,
 			"health", "--format", "json",
@@ -42,7 +55,12 @@ func runClusterHealthCLICases(t *testing.T, tgt s3Target) {
 		assert.True(t, ok, "quorum object expected")
 	})
 
-	t.Run("TextRender", func(t *testing.T) {
+	ginkgo.It("renders text", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		binary := getBinary()
+		sock := tgt.adminSockPath()
+
 		out, err := exec.Command(binary, "cluster",
 			"--endpoint", sock,
 			"health",
