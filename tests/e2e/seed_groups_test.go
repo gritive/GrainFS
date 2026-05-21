@@ -2,26 +2,31 @@ package e2e
 
 import (
 	"fmt"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func TestSeedGroupsAutoFromNodeCountE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
-		runSeedGroupsAutoCases(t)
+var _ = ginkgo.Describe("Seed groups", func() {
+	ginkgo.Context("MRCluster3Node", func() {
+		const numNodes = 3
+		var groupDirs map[string]int
+
+		ginkgo.BeforeEach(func() {
+			c := startStaticMRCluster(ginkgo.GinkgoTB(), numNodes)
+			groupDirs = countGroupDirsAcrossNodes(c)
+		})
+
+		runSeedGroupsAutoCases(func() map[string]int { return groupDirs })
 	})
-}
+})
 
-func runSeedGroupsAutoCases(t *testing.T) {
-	t.Helper()
-	const numNodes = 3
-	wantSeedGroups := numNodes * 4
-
-	c := startStaticMRCluster(t, numNodes)
-	groupDirs := countGroupDirsAcrossNodes(c)
-
-	t.Run("AutoSeededGroupDirsExist", func(t *testing.T) {
+func runSeedGroupsAutoCases(getGroupDirs func() map[string]int) {
+	ginkgo.It("creates auto-seeded group directories", func() {
+		t := ginkgo.GinkgoTB()
+		const numNodes = 3
+		wantSeedGroups := numNodes * 4
+		groupDirs := getGroupDirs()
 		// group-0 is legacy metadata compatibility; normal object placement uses
 		// group-1..N-1, so verify the auto-seeded normal group headroom.
 		for i := 1; i < wantSeedGroups; i++ {

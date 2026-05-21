@@ -13,14 +13,16 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func startEncryptionServer(t *testing.T) (*s3.Client, string, string, func()) {
+func startEncryptionServer(t testing.TB) (*s3.Client, string, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-enc-e2e-*")
 	require.NoError(t, err)
+	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	keyFile := filepath.Join(dir, "encryption.key")
 	key := make([]byte, 32)
@@ -43,6 +45,12 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, string, func()) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
+	ginkgo.DeferCleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
@@ -50,64 +58,57 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, string, func()) {
 	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 60*time.Second)
 	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
 
-	cleanup := func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		os.RemoveAll(dir)
-	}
-
-	return client, dir, bootstrap.SAID, cleanup
+	return client, dir, bootstrap.SAID
 }
 
-func TestEncryption_AtRest(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		client, dataDir, saID, cleanup := startEncryptionServer(t)
-		defer cleanup()
+var _ = ginkgo.Describe("Encryption at rest", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("does not store plaintext in raw shards", func() {
+			t := ginkgo.GinkgoTB()
+			client, dataDir, saID := startEncryptionServer(t)
 
-		ctx := context.Background()
+			ctx := context.Background()
 
-		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, "enc-test", client)
+			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, "enc-test", client)
 
-		content := strings.Repeat("this is sensitive data that must be encrypted at rest\n", 2048)
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("enc-test"),
-			Key:    aws.String("secret.txt"),
-			Body:   strings.NewReader(content),
-		})
-		require.NoError(t, err)
-
-		var shardPaths []string
-		shardRoot := filepath.Join(dataDir, "shards", "enc-test", "secret.txt")
-		err = filepath.WalkDir(shardRoot, func(path string, d os.DirEntry, walkErr error) error {
-			if walkErr != nil || d == nil || d.IsDir() {
-				return nil
-			}
-			if strings.HasPrefix(filepath.Base(path), "shard_") {
-				shardPaths = append(shardPaths, path)
-			}
-			return nil
-		})
-		require.NoError(t, err)
-		require.NotEmpty(t, shardPaths, "expected encrypted object shards under %s", shardRoot)
-
-		for _, shardPath := range shardPaths {
-			rawShard, err := os.ReadFile(shardPath)
+			content := strings.Repeat("this is sensitive data that must be encrypted at rest\n", 2048)
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String("enc-test"),
+				Key:    aws.String("secret.txt"),
+				Body:   strings.NewReader(content),
+			})
 			require.NoError(t, err)
-			assert.NotContains(t, string(rawShard), "sensitive data", "raw shard %s must not contain plaintext", shardPath)
-			assert.NotContains(t, string(rawShard), content, "raw shard %s must not contain full plaintext", shardPath)
-		}
 
-		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String("enc-test"),
-			Key:    aws.String("secret.txt"),
+			var shardPaths []string
+			shardRoot := filepath.Join(dataDir, "shards", "enc-test", "secret.txt")
+			err = filepath.WalkDir(shardRoot, func(path string, d os.DirEntry, walkErr error) error {
+				if walkErr != nil || d == nil || d.IsDir() {
+					return nil
+				}
+				if strings.HasPrefix(filepath.Base(path), "shard_") {
+					shardPaths = append(shardPaths, path)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, shardPaths, "expected encrypted object shards under %s", shardRoot)
+
+			for _, shardPath := range shardPaths {
+				rawShard, err := os.ReadFile(shardPath)
+				require.NoError(t, err)
+				assert.NotContains(t, string(rawShard), "sensitive data", "raw shard %s must not contain plaintext", shardPath)
+				assert.NotContains(t, string(rawShard), content, "raw shard %s must not contain full plaintext", shardPath)
+			}
+
+			getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String("enc-test"),
+				Key:    aws.String("secret.txt"),
+			})
+			require.NoError(t, err)
+			defer getOut.Body.Close()
+
+			body, _ := io.ReadAll(getOut.Body)
+			assert.Equal(t, content, string(body))
 		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
-
-		body, _ := io.ReadAll(getOut.Body)
-		assert.Equal(t, content, string(body))
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-	})
-}
+})

@@ -3,8 +3,8 @@ package e2e
 import (
 	"os/exec"
 	"strings"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,21 +14,34 @@ import (
 // either the fallback "single-node mode" / "no shard groups" message or
 // the topology-derived placement table, so the same assertions hold on
 // both fixtures.
-func TestClusterPlacementCLIE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runClusterPlacementCLICases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runClusterPlacementCLICases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Cluster placement CLI", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runClusterPlacementCLICases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	binary := getBinary()
-	sock := tgt.adminSockPath()
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-	t.Run("NoPlacement", func(t *testing.T) {
+			runClusterPlacementCLICases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runClusterPlacementCLICases(getTgt func() s3Target) {
+	ginkgo.It("renders fallback or placement table without a bucket", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		binary := getBinary()
+		sock := tgt.adminSockPath()
+
 		out, err := exec.Command(binary, "cluster",
 			"--endpoint", sock,
 			"placement",
@@ -46,7 +59,12 @@ func runClusterPlacementCLICases(t *testing.T, tgt s3Target) {
 		assert.True(t, hasFallback, "expected one of fallback or table render; got: %q", output)
 	})
 
-	t.Run("UnknownBucket", func(t *testing.T) {
+	ginkgo.It("renders fallback or bucket status for an unknown bucket", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		binary := getBinary()
+		sock := tgt.adminSockPath()
+
 		out, err := exec.Command(binary, "cluster",
 			"--endpoint", sock,
 			"placement", "no-such-bucket",

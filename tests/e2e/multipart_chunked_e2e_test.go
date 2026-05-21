@@ -27,34 +27,34 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const streamingPayloadSentinel = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
 
-func runMultipartChunkedUploadPart(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runMultipartChunkedCases(t, newSingleNodeS3Target())
+func runMultipartChunkedUploadPartSpecs() {
+	ginkgo.Context("ChunkedUploadPart SingleNode", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSingleNodeS3Target()
+		})
+		runMultipartChunkedCases(func() s3Target { return tgt })
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runMultipartChunkedCases(t, newSharedClusterS3Target(t))
+	ginkgo.Context("ChunkedUploadPart Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		runMultipartChunkedCases(func() s3Target { return tgt })
 	})
 }
 
-func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-
-	if tgt.isCluster {
-		probe := tgt.name + "-mp-chunked-probe"
-		tgt.createBkt(t, probe)
-		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
-		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
-	}
-
-	t.Run("ChunkedFramingStripped", func(t *testing.T) {
+func runMultipartChunkedCases(getTgt func() s3Target) {
+	ginkgo.It("strips aws-chunked framing from uploaded parts", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-chunked-probe")
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "mp-chunked")
 		key := "warp-style-multipart.bin"
@@ -123,7 +123,8 @@ func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("LargeCompleteNonAlignedFinalSegment", func(t *testing.T) {
+	ginkgo.It("completes a large upload with a non-aligned final segment", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-chunked-probe")
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "mp-large-complete")
 		key := "large-complete.bin"
@@ -179,7 +180,8 @@ func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
 		require.True(t, bytes.Equal(want, got), "body mismatch")
 	})
 
-	t.Run("SegmentSpansPartBoundary", func(t *testing.T) {
+	ginkgo.It("reads correctly when a segment spans a part boundary", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-chunked-probe")
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "mp-segment-boundary")
 		key := "segment-spans-part-boundary.bin"
@@ -239,7 +241,7 @@ func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
 // and SigV4 header signing (with payload hash = STREAMING-... so the server
 // does not require chunk signatures to be valid — only the framing needs to
 // parse). Returns the ETag the server reports for the stored part.
-func uploadPartChunked(t *testing.T, ctx context.Context, tgt s3Target, bucket, key, uploadID string, partN int, plaintext []byte) string {
+func uploadPartChunked(t testing.TB, ctx context.Context, tgt s3Target, bucket, key, uploadID string, partN int, plaintext []byte) string {
 	t.Helper()
 
 	// One data chunk + zero-length terminator. Each chunk header carries a

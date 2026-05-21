@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,20 +27,32 @@ type e2eNfsExportList struct {
 // TestNFSMultiExportCLIE2E exercises the `grainfs nfs export` admin CLI
 // surface (add/list/update/remove + missing-bucket rejection). Shared
 // single + shared cluster fixtures — sub-tests pick unique bucket names.
-func TestNFSMultiExportCLIE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runNFSMultiExportCLICases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runNFSMultiExportCLICases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("NFS multi-export CLI", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runNFSMultiExportCLICases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	dataDir := filepath.Dir(tgt.adminSockPath())
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-	t.Run("Lifecycle", func(t *testing.T) {
+			runNFSMultiExportCLICases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runNFSMultiExportCLICases(getTgt func() s3Target) {
+	ginkgo.It("adds, lists, updates, and removes an export", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		dataDir := filepath.Dir(tgt.adminSockPath())
 		bucket := tgt.uniqueBucket(t, "nfsexp")
 
 		added := runNfsExportJSON(t, dataDir, "add", bucket, "--ro")
@@ -63,7 +76,10 @@ func runNFSMultiExportCLICases(t *testing.T, tgt s3Target) {
 		require.NotContains(t, exportBuckets(listNfsExports(t, dataDir)), bucket)
 	})
 
-	t.Run("RejectsMissingBucket", func(t *testing.T) {
+	ginkgo.It("rejects a missing bucket", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		dataDir := filepath.Dir(tgt.adminSockPath())
 		missing := fmt.Sprintf("nfs-missing-%d", freePort())
 		out, code := runCLI(t, dataDir, "nfs", "export", "add", missing)
 		require.NotEqual(t, 0, code)
@@ -71,7 +87,7 @@ func runNFSMultiExportCLICases(t *testing.T, tgt s3Target) {
 	})
 }
 
-func runNfsExportJSON(t *testing.T, dataDir, verb, bucket string, flags ...string) e2eNfsExport {
+func runNfsExportJSON(t testing.TB, dataDir, verb, bucket string, flags ...string) e2eNfsExport {
 	t.Helper()
 	args := []string{"nfs", "export", verb, bucket, "--json"}
 	args = append(args, flags...)
@@ -89,7 +105,7 @@ func runNfsExportJSON(t *testing.T, dataDir, verb, bucket string, flags ...strin
 	return parseSingleNfsExport(t, out)
 }
 
-func parseSingleNfsExport(t *testing.T, raw string) e2eNfsExport {
+func parseSingleNfsExport(t testing.TB, raw string) e2eNfsExport {
 	t.Helper()
 	var resp e2eNfsExportList
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp))
@@ -97,14 +113,14 @@ func parseSingleNfsExport(t *testing.T, raw string) e2eNfsExport {
 	return resp.Exports[0]
 }
 
-func listNfsExports(t *testing.T, dataDir string) []e2eNfsExport {
+func listNfsExports(t testing.TB, dataDir string) []e2eNfsExport {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--json")
 	require.Equalf(t, 0, code, "%s", out)
 	return parseNfsExportList(t, out)
 }
 
-func parseNfsExportList(t *testing.T, raw string) []e2eNfsExport {
+func parseNfsExportList(t testing.TB, raw string) []e2eNfsExport {
 	t.Helper()
 	var resp e2eNfsExportList
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp))

@@ -4,24 +4,35 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
 // TestAppendMidSizeBodyE2E proves AppendObject accepts 8 MiB bodies after
 // DefaultMaxForwardBodyBytes was raised from 5 MiB to 64 MiB (matching the
 // HTTP layer appendBodyMaxBytes). See design 2026-05-19 § Follow-up 3.
-func runAppendMidSizeBody(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		tgt := newSingleNodeS3Target()
-		runMidSizeAppendCase(t, tgt)
+func runAppendMidSizeBodySpecs() {
+	ginkgo.Context("MidSizeBody SingleNode", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSingleNodeS3Target()
+		})
+		ginkgo.It("accepts an 8MiB append body", func() {
+			runMidSizeAppendCase(ginkgo.GinkgoTB(), tgt)
+		})
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		tgt := newSharedClusterS3Target(t)
-		runMidSizeAppendCase(t, tgt)
+	ginkgo.Context("MidSizeBody Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		ginkgo.It("accepts an 8MiB append body", func() {
+			runMidSizeAppendCase(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
-func runMidSizeAppendCase(t *testing.T, tgt s3Target) {
+func runMidSizeAppendCase(t testing.TB, tgt s3Target) {
 	t.Helper()
 	bucket := "append-mid-" + tgt.name
 	tgt.createBkt(t, bucket)

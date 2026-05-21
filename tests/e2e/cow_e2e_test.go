@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +33,7 @@ func cowDataDir(tgt s3Target) string {
 	return filepath.Dir(tgt.adminSockPath())
 }
 
-func cowCreateVolume(t *testing.T, dataDir, name string, sizeBytes int64) {
+func cowCreateVolume(t testing.TB, dataDir, name string, sizeBytes int64) {
 	t.Helper()
 	var (
 		out  string
@@ -44,7 +45,7 @@ func cowCreateVolume(t *testing.T, dataDir, name string, sizeBytes int64) {
 	}, 30*time.Second, 500*time.Millisecond, "create volume %s: code=%d output=%s", name, code, out)
 }
 
-func cowDeleteVolume(t *testing.T, dataDir, name string) {
+func cowDeleteVolume(t testing.TB, dataDir, name string) {
 	t.Helper()
 	var (
 		out  string
@@ -56,7 +57,7 @@ func cowDeleteVolume(t *testing.T, dataDir, name string) {
 	}, 30*time.Second, 500*time.Millisecond, "delete volume %s: code=%d output=%s", name, code, out)
 }
 
-func cowCleanupVolume(t *testing.T, dataDir, name string) {
+func cowCleanupVolume(t testing.TB, dataDir, name string) {
 	t.Helper()
 	var (
 		out  string
@@ -76,7 +77,7 @@ func cowCleanupVolume(t *testing.T, dataDir, name string) {
 	}
 }
 
-func cowCreateSnapshot(t *testing.T, dataDir, volName string) string {
+func cowCreateSnapshot(t testing.TB, dataDir, volName string) string {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "create", volName, "--format", "json")
 	require.Equal(t, 0, code, out)
@@ -86,13 +87,13 @@ func cowCreateSnapshot(t *testing.T, dataDir, volName string) string {
 	return snap.ID
 }
 
-func cowRollback(t *testing.T, dataDir, volName, snapID string) {
+func cowRollback(t testing.TB, dataDir, volName, snapID string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "rollback", volName, snapID)
 	require.Equal(t, 0, code, out)
 }
 
-func cowListSnapshots(t *testing.T, dataDir, volName string) []cowSnapResp {
+func cowListSnapshots(t testing.TB, dataDir, volName string) []cowSnapResp {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "list", volName, "--format", "json")
 	require.Equal(t, 0, code, out)
@@ -101,49 +102,59 @@ func cowListSnapshots(t *testing.T, dataDir, volName string) []cowSnapResp {
 	return snaps
 }
 
-func cowDeleteSnapshot(t *testing.T, dataDir, volName, snapID string) {
+func cowDeleteSnapshot(t testing.TB, dataDir, volName, snapID string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "delete", volName, snapID)
 	require.Equal(t, 0, code, out)
 }
 
-func cowWriteAt(t *testing.T, dataDir, volName string, offset int64, content string) {
+func cowWriteAt(t testing.TB, dataDir, volName string, offset int64, content string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "write-at", volName, "--offset", fmt.Sprintf("%d", offset), "--content", content)
 	require.Equal(t, 0, code, out)
 }
 
-func cowReadAt(t *testing.T, dataDir, volName string, offset, length int64) string {
+func cowReadAt(t testing.TB, dataDir, volName string, offset, length int64) string {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "read-at", volName, "--offset", fmt.Sprintf("%d", offset), "--length", fmt.Sprintf("%d", length))
 	require.Equal(t, 0, code, out)
 	return out
 }
 
-// TestCoWE2E groups the three CoW CLI flows (snapshot rollback, list/delete,
-// clone lifecycle independence) under one entry. Shared single + shared
-// cluster fixtures; each sub-test picks a unique volume name.
-func TestCoWE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runCoWCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("CoW volumes", func() {
+	describeCoWContext("SingleNode", func(testing.TB) s3Target {
+		return newSingleNodeS3Target()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runCoWCases(t, newSharedClusterS3Target(t))
+	describeCoWContext("Cluster4Node", func(t testing.TB) s3Target {
+		return newSharedClusterS3Target(t)
+	})
+})
+
+func describeCoWContext(name string, factory func(testing.TB) s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runCoWCases(func() s3Target { return tgt })
 	})
 }
 
-func runCoWCases(t *testing.T, tgt s3Target) {
-	t.Helper()
+func runCoWCases(getTgt func() s3Target) {
 	const volSize = 4 * 1024 * 1024
-	dataDir := func() string { return cowDataDir(tgt) }
 
-	t.Run("SnapshotRollbackRestoresData", func(t *testing.T) {
+	ginkgo.It("restores volume data after snapshot rollback", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		dataDir := func() string { return cowDataDir(tgt) }
 		volName := fmt.Sprintf("cow-rollback-vol-%d", time.Now().UnixNano())
 		original := "cow-original-content"
 		modified := "cow-modified-content"
 
 		cowCreateVolume(t, dataDir(), volName, volSize)
-		t.Cleanup(func() { cowCleanupVolume(t, dataDir(), volName) })
+		ginkgo.DeferCleanup(cowCleanupVolume, t, dataDir(), volName)
 
 		cowWriteAt(t, dataDir(), volName, 0, original)
 		snapID := cowCreateSnapshot(t, dataDir(), volName)
@@ -157,11 +168,14 @@ func runCoWCases(t *testing.T, tgt s3Target) {
 		require.Equal(t, original, got)
 	})
 
-	t.Run("SnapshotListAndDelete", func(t *testing.T) {
+	ginkgo.It("lists and deletes snapshots", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		dataDir := func() string { return cowDataDir(tgt) }
 		volName := fmt.Sprintf("cow-snaplist-vol-%d", time.Now().UnixNano())
 
 		cowCreateVolume(t, dataDir(), volName, volSize)
-		t.Cleanup(func() { cowCleanupVolume(t, dataDir(), volName) })
+		ginkgo.DeferCleanup(cowCleanupVolume, t, dataDir(), volName)
 
 		var ids []string
 		for i := 0; i < 3; i++ {
@@ -185,7 +199,10 @@ func runCoWCases(t *testing.T, tgt s3Target) {
 	// the lifecycle level: deleting one does not delete the other. Full
 	// block-data independence (write to clone, verify source unchanged)
 	// requires NFS access to the cloned volume and is covered in NBD E2E.
-	t.Run("CloneLifecycleIndependence", func(t *testing.T) {
+	ginkgo.It("keeps clone lifecycle independent from the source", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		dataDir := func() string { return cowDataDir(tgt) }
 		srcName := fmt.Sprintf("cow-clone-src-%d", time.Now().UnixNano())
 		dstName := fmt.Sprintf("cow-clone-dst-%d", time.Now().UnixNano())
 		original := "clone-original-content"
@@ -193,7 +210,7 @@ func runCoWCases(t *testing.T, tgt s3Target) {
 
 		cowCreateVolume(t, dataDir(), srcName, volSize)
 		srcDeleted := false
-		t.Cleanup(func() {
+		ginkgo.DeferCleanup(func() {
 			if !srcDeleted {
 				cowDeleteVolume(t, dataDir(), srcName)
 			}
@@ -202,7 +219,7 @@ func runCoWCases(t *testing.T, tgt s3Target) {
 
 		out, code := runCLI(t, dataDir(), "volume", "clone", srcName, dstName)
 		require.Equal(t, 0, code, out)
-		t.Cleanup(func() { cowCleanupVolume(t, dataDir(), dstName) })
+		ginkgo.DeferCleanup(cowCleanupVolume, t, dataDir(), dstName)
 
 		got := cowReadAt(t, dataDir(), dstName, 0, int64(len(original)))
 		require.Equal(t, original, got)

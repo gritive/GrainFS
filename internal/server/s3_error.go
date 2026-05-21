@@ -38,7 +38,7 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusPreconditionFailed, "PreconditionFailed", err.Error())
 	case errors.Is(err, storage.ErrInvalidCopySource):
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
-	case errors.Is(err, storage.ErrBucketNotFound):
+	case errors.Is(err, storage.ErrBucketNotFound), errors.Is(err, storage.ErrNoSuchBucket):
 		writeXMLError(c, consts.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
 	case errors.Is(err, storage.ErrBucketAlreadyExists):
 		writeXMLError(c, consts.StatusConflict, "BucketAlreadyOwnedByYou", "Your previous request to create the named bucket succeeded")

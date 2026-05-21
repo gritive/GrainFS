@@ -4,8 +4,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,20 +14,31 @@ import (
 // exposed and reads zero on the shared fixtures (no split observed). Shared
 // single + shared cluster — Prometheus scrape is read-only, no state
 // mutation across sub-tests.
-func TestSplitBrainE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runSplitBrainCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runSplitBrainCases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Split brain metrics", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runSplitBrainCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	endpoint := tgt.endpoint(0)
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-	t.Run("MetricExposed", func(t *testing.T) {
+			runSplitBrainCases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runSplitBrainCases(getTgt func() s3Target) {
+	ginkgo.It("exposes the split brain indicator metric", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		resp, err := http.Get(endpoint + "/metrics")
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -39,7 +50,9 @@ func runSplitBrainCases(t *testing.T, tgt s3Target) {
 			"/metrics must expose split brain indicator")
 	})
 
-	t.Run("ValueIsZero", func(t *testing.T) {
+	ginkgo.It("reports zero in steady state", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		resp, err := http.Get(endpoint + "/metrics")
 		require.NoError(t, err)
 		defer resp.Body.Close()

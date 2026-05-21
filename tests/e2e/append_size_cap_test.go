@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"testing"
 
 	"github.com/aws/smithy-go"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,25 +23,31 @@ import (
 // package-global single fixture cannot accept per-test --append-size-cap-bytes
 // without races across tests; newDedicatedSingleNodeS3Target spawns its own
 // grainfs process with the cap arg threaded through.
-func runAppendSizeCap(t *testing.T) {
+func runAppendSizeCapSpecs() {
 	smallCap := int64(4 * 1024)
 	capArg := []string{"--append-size-cap-bytes", fmt.Sprintf("%d", smallCap)}
 
-	t.Run("SingleNode", func(t *testing.T) {
-		tgt := newDedicatedSingleNodeS3Target(t, capArg)
-		runSizeCapCases(t, tgt, smallCap)
+	ginkgo.Context("SizeCap SingleNode", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newDedicatedSingleNodeS3Target(ginkgo.GinkgoTB(), capArg)
+		})
+		runSizeCapCases(func() s3Target { return tgt }, smallCap)
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		tgt := newClusterS3TargetWithExtraArgs(t, 4, capArg)
-		runSizeCapCases(t, tgt, smallCap)
+	ginkgo.Context("SizeCap Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newClusterS3TargetWithExtraArgs(ginkgo.GinkgoTB(), 4, capArg)
+		})
+		runSizeCapCases(func() s3Target { return tgt }, smallCap)
 	})
 }
 
-func runSizeCapCases(t *testing.T, tgt s3Target, smallCap int64) {
-	t.Helper()
-
-	t.Run("RejectAtCap", func(t *testing.T) {
+func runSizeCapCases(getTgt func() s3Target, smallCap int64) {
+	ginkgo.It("rejects an append over the cap", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		bucket := tgt.uniqueBucket(t, "reject")
 		key := "obj-over"
 		body := bytes.Repeat([]byte("x"), int(smallCap-1))
@@ -54,7 +60,9 @@ func runSizeCapCases(t *testing.T, tgt s3Target, smallCap int64) {
 			"over-cap append must surface EntityTooLarge, got %s", apiErr.ErrorCode())
 	})
 
-	t.Run("ConcurrentRaceAtCap", func(t *testing.T) {
+	ginkgo.It("serializes concurrent appends near the cap", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		bucket := tgt.uniqueBucket(t, "race")
 		key := "obj-race"
 		prefill := bytes.Repeat([]byte("x"), int(smallCap-4))

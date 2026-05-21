@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,11 +21,11 @@ import (
 // directory (Unix-socket paths on macOS are capped at 104 chars, so /var/folders
 // TempDir can't host the admin socket). Returns the data dir + HTTP port + a
 // teardown closure.
-func startTestServer(t *testing.T, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
+func startTestServer(t testing.TB, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
 	return startTestServerOnPort(t, 0, extraArgs...)
 }
 
-func startTestServerOnPort(t *testing.T, port int, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
+func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
@@ -83,7 +84,7 @@ func startTestServerOnPort(t *testing.T, port int, extraArgs ...string) (dataDir
 
 // waitForVolumeReady retries `volume list` until it returns 0 (cluster ready
 // to serve volume bucket queries) or the deadline expires.
-func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
+func waitForVolumeReady(t testing.TB, dataDir string, timeout time.Duration) {
 	t.Helper()
 	binary, err := filepath.Abs(getBinary())
 	require.NoError(t, err)
@@ -101,7 +102,7 @@ func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
 	t.Fatalf("volume bucket never became ready within %v: last output:\n%s", timeout, lastOut)
 }
 
-func runCLI(t *testing.T, dataDir string, args ...string) (stdout string, exitCode int) {
+func runCLI(t testing.TB, dataDir string, args ...string) (stdout string, exitCode int) {
 	t.Helper()
 	full := append([]string{}, args...)
 	if !containsFlag(full, "--endpoint") {
@@ -130,33 +131,43 @@ func containsFlag(args []string, flag string) bool {
 	return false
 }
 
-// TestVolumeCLIGuardsE2E groups negative-path checks on the volume CLI /
-// data-plane surface that complement TestVolumeE2E's happy-path coverage:
-//
-//   - CLIHintWhenNoEndpoint: invoking the binary without --endpoint in an
-//     empty cwd prints the actionable hint instead of a stack trace. The
-//     binary computes this before any server connection, so the assertion
-//     is identical on both fixtures — kept under both branches for shape
-//     parity with the rest of the suite.
-//   - DataPlaneVolumesPathHidden (A6 regression): /volumes/* admin endpoints
-//     were removed from the data plane; /volumes/ now falls through to the
-//     S3 bucket handler and must not return admin-shaped JSON.
-func TestVolumeCLIGuardsE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runVolumeCLIGuardsCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVolumeCLIGuardsCases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Volume CLI guards", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func(t testing.TB) s3Target
+	}{
+		{
+			name: "SingleNode",
+			mk: func(t testing.TB) s3Target {
+				return newSingleNodeS3Target()
+			},
+		},
+		{
+			name: "Cluster4Node",
+			mk: func(t testing.TB) s3Target {
+				return newSharedClusterS3Target(t)
+			},
+		},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runVolumeCLIGuardsCases(t *testing.T, tgt s3Target) {
-	t.Helper()
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk(ginkgo.GinkgoTB())
+			})
 
-	t.Run("CLIHintWhenNoEndpoint", func(t *testing.T) {
+			runVolumeCLIGuardsCases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runVolumeCLIGuardsCases(tgt func() s3Target) {
+	ginkgo.It("prints a hint when no endpoint is configured", func() {
+		t := ginkgo.GinkgoTB()
 		cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
 		require.NoError(t, err)
-		defer os.RemoveAll(cwd)
+		ginkgo.DeferCleanup(os.RemoveAll, cwd)
 
 		binary, err := filepath.Abs(getBinary())
 		require.NoError(t, err)
@@ -168,10 +179,11 @@ func runVolumeCLIGuardsCases(t *testing.T, tgt s3Target) {
 		require.Contains(t, string(out), "Hint")
 	})
 
-	t.Run("DataPlaneVolumesPathHidden", func(t *testing.T) {
-		resp, err := http.Get(tgt.endpoint(0) + "/volumes/")
+	ginkgo.It("keeps admin volume paths off the data plane", func() {
+		t := ginkgo.GinkgoTB()
+		resp, err := http.Get(tgt().endpoint(0) + "/volumes/")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		body, _ := io.ReadAll(resp.Body)
 		require.NotContains(t, string(body), `"volumes":`,
 			"data plane should no longer expose the admin volumes endpoint")

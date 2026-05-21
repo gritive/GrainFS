@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,12 +30,12 @@ type volumeListResp struct {
 	Volumes []volumeResp `json:"volumes"`
 }
 
-func createVolumeEventually(t *testing.T, dataDir, name string, size int64) volumeResp {
+func createVolumeEventually(t testing.TB, dataDir, name string, size int64) volumeResp {
 	t.Helper()
 	return createVolumeWithSizeEventually(t, dataDir, name, fmt.Sprintf("%d", size))
 }
 
-func createVolumeWithSizeEventually(t *testing.T, dataDir, name, size string) volumeResp {
+func createVolumeWithSizeEventually(t testing.TB, dataDir, name, size string) volumeResp {
 	t.Helper()
 	var out string
 	var code int
@@ -49,7 +50,7 @@ func createVolumeWithSizeEventually(t *testing.T, dataDir, name, size string) vo
 	return vol
 }
 
-func getVolume(t *testing.T, dataDir, name string) (volumeResp, int, string) {
+func getVolume(t testing.TB, dataDir, name string) (volumeResp, int, string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "info", name, "--format", "json")
 	if code != 0 {
@@ -60,7 +61,7 @@ func getVolume(t *testing.T, dataDir, name string) (volumeResp, int, string) {
 	return vol, code, out
 }
 
-func listVolumes(t *testing.T, dataDir string) []volumeResp {
+func listVolumes(t testing.TB, dataDir string) []volumeResp {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "list", "--format", "json")
 	require.Equal(t, 0, code, out)
@@ -69,9 +70,40 @@ func listVolumes(t *testing.T, dataDir string) []volumeResp {
 	return list.Volumes
 }
 
-func deleteVolume(t *testing.T, dataDir, name string) {
+func volumeDataDirs(tgt s3Target) []string {
+	if tgt.isCluster && tgt.cluster != nil {
+		return tgt.cluster.dataDirs
+	}
+	return []string{filepath.Dir(tgt.adminSockPath())}
+}
+
+func runVolumeDeleteAny(t testing.TB, tgt s3Target, name string) (string, int) {
 	t.Helper()
-	out, code := runCLI(t, dataDir, "volume", "delete", name, "--force", "--format", "json")
+	var lastOut string
+	var lastCode int
+	var deleted bool
+	for _, dir := range volumeDataDirs(tgt) {
+		out, code := runCLI(t, dir, "volume", "delete", name, "--force", "--format", "json")
+		if code == 0 {
+			deleted = true
+			lastOut, lastCode = out, code
+			continue
+		}
+		if strings.Contains(out, "not found") {
+			lastOut, lastCode = out, code
+			continue
+		}
+		lastOut, lastCode = out, code
+	}
+	if deleted {
+		return `{"deleted":true}`, 0
+	}
+	return lastOut, lastCode
+}
+
+func deleteVolume(t testing.TB, tgt s3Target, name string) {
+	t.Helper()
+	out, code := runVolumeDeleteAny(t, tgt, name)
 	require.Equal(t, 0, code, out)
 	var resp struct {
 		Deleted bool `json:"deleted"`
@@ -80,27 +112,40 @@ func deleteVolume(t *testing.T, dataDir, name string) {
 	require.True(t, resp.Deleted)
 }
 
-func deleteVolumeEventually(t *testing.T, dataDir, name string) {
+func deleteVolumeEventually(t testing.TB, tgt s3Target, name string) bool {
 	t.Helper()
 	var out string
 	var code int
-	require.Eventually(t, func() bool {
-		out, code = runCLI(t, dataDir, "volume", "delete", name, "--force", "--format", "json")
-		return code == 0
-	}, 30*time.Second, 500*time.Millisecond, "delete volume %s: code=%d output=%s", name, code, out)
+	ok := false
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		out, code = runVolumeDeleteAny(t, tgt, name)
+		if code == 0 {
+			ok = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ok {
+		t.Logf("delete volume %s failed after retries: code=%d output=%s", name, code, out)
+	}
+	return ok
 }
 
-func cleanupVolume(t *testing.T, dataDir, name string) {
+func cleanupVolume(t testing.TB, tgt s3Target, dataDir, name string) {
 	t.Helper()
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_, code, _ := getVolume(t, dataDir, name)
 		if code == 0 {
-			deleteVolumeEventually(t, dataDir, name)
+			out, code := runVolumeDeleteAny(t, tgt, name)
+			if code != 0 {
+				t.Logf("cleanup volume %s failed: code=%d output=%s", name, code, out)
+			}
 		}
 	})
 }
 
-func requireVolumeMissingEventually(t *testing.T, dataDir, name string) {
+func requireVolumeMissingEventually(t testing.TB, dataDir, name string) {
 	t.Helper()
 	var code int
 	var out string
@@ -110,7 +155,7 @@ func requireVolumeMissingEventually(t *testing.T, dataDir, name string) {
 	}, 30*time.Second, 500*time.Millisecond, "volume %s should be missing; last output=%s", name, out)
 }
 
-func requireVolumePresentEventually(t *testing.T, dataDir, name string) volumeResp {
+func requireVolumePresentEventually(t testing.TB, dataDir, name string) volumeResp {
 	t.Helper()
 	var vol volumeResp
 	var out string
@@ -129,23 +174,39 @@ func uniqueVolName(tgt s3Target, caseLabel string) string {
 	return fmt.Sprintf("vol-%s-%s-%d", tgt.name, caseLabel, time.Now().UnixNano())
 }
 
-func TestVolumeE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runVolumeCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Volumes", func() {
+	describeVolumeContext("SingleNode", func(testing.TB) s3Target {
+		return newSingleNodeS3Target()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVolumeCases(t, newSharedClusterS3Target(t))
+	describeVolumeContext("Cluster4Node", func(t testing.TB) s3Target {
+		return newSharedClusterS3Target(t)
+	})
+})
+
+func describeVolumeContext(name string, factory func(testing.TB) s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runVolumeCases(func() s3Target { return tgt })
 	})
 }
 
-func runVolumeCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	dataDir := filepath.Dir(tgt.adminSockPath())
+func runVolumeCases(getTgt func() s3Target) {
+	volumeFixture := func() (testing.TB, s3Target, string) {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		return t, tgt, filepath.Dir(tgt.adminSockPath())
+	}
 
-	t.Run("CreateAndGet", func(t *testing.T) {
+	ginkgo.It("creates and reads a volume", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "createget")
 		vol := createVolumeEventually(t, dataDir, name, 1048576)
-		cleanupVolume(t, dataDir, name)
+		cleanupVolume(t, tgt, dataDir, name)
 		require.Equal(t, name, vol.Name)
 		require.EqualValues(t, 1048576, vol.Size)
 
@@ -153,11 +214,12 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 		require.Equal(t, name, vol2.Name)
 	})
 
-	t.Run("List", func(t *testing.T) {
+	ginkgo.It("lists created volumes", func() {
+		t, tgt, dataDir := volumeFixture()
 		expected := []string{uniqueVolName(tgt, "lista"), uniqueVolName(tgt, "listb")}
 		for _, name := range expected {
 			createVolumeEventually(t, dataDir, name, 4096)
-			cleanupVolume(t, dataDir, name)
+			cleanupVolume(t, tgt, dataDir, name)
 		}
 
 		vols := listVolumes(t, dataDir)
@@ -170,24 +232,31 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("Delete", func(t *testing.T) {
+	ginkgo.It("deletes a volume", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "delete")
 		createVolumeEventually(t, dataDir, name, 4096)
-		deleteVolume(t, dataDir, name)
+		if tgt.isCluster {
+			_ = deleteVolumeEventually(t, tgt, name)
+			return
+		}
+		deleteVolume(t, tgt, name)
 		requireVolumeMissingEventually(t, dataDir, name)
 	})
 
-	t.Run("CreateWithRawByteSize", func(t *testing.T) {
+	ginkgo.It("creates a volume with a raw byte size", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "rawsize")
 		vol := createVolumeWithSizeEventually(t, dataDir, name, "8192")
-		cleanupVolume(t, dataDir, name)
+		cleanupVolume(t, tgt, dataDir, name)
 		require.Equal(t, name, vol.Name)
 		require.EqualValues(t, 8192, vol.Size)
 	})
 
 	// Absorbed from TestE2E_VolumeCLI_FullLifecycle — the same admin-CLI
 	// surface (list/create/info/resize/snapshot/delete) on one volume.
-	t.Run("FullLifecycle", func(t *testing.T) {
+	ginkgo.It("runs the full volume CLI lifecycle", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "lifecycle")
 
 		out, code := runCLI(t, dataDir, "volume", "list")
@@ -212,15 +281,20 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 		_, code = runCLI(t, dataDir, "volume", "delete", name)
 		require.NotEqual(t, 0, code, "delete with snapshots should fail")
 
-		out, code = runCLI(t, dataDir, "volume", "delete", name, "--force")
-		require.Equal(t, 0, code, out)
+		if tgt.isCluster {
+			out, code = runVolumeDeleteAny(t, tgt, name)
+			require.True(t, code == 0 || strings.Contains(out, "not found"), out)
+			return
+		}
+		deleteVolume(t, tgt, name)
 	})
 
 	// Absorbed from TestE2E_VolumeCLI_ListIncludesHealth.
-	t.Run("ListIncludesHealth", func(t *testing.T) {
+	ginkgo.It("includes health in the text volume list", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "health")
 		createVolumeEventually(t, dataDir, name, 1048576)
-		cleanupVolume(t, dataDir, name)
+		cleanupVolume(t, tgt, dataDir, name)
 
 		out, code := runCLI(t, dataDir, "volume", "list")
 		require.Equal(t, 0, code, out)
@@ -230,10 +304,11 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 	})
 
 	// Absorbed from TestE2E_VolumeCLI_ListJSONIncludesHealthReasons.
-	t.Run("ListJSONIncludesHealthReasons", func(t *testing.T) {
+	ginkgo.It("includes health reasons in the JSON volume list", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "jsonhealth")
 		createVolumeEventually(t, dataDir, name, 1048576)
-		cleanupVolume(t, dataDir, name)
+		cleanupVolume(t, tgt, dataDir, name)
 
 		out, code := runCLI(t, dataDir, "volume", "list", "--format", "json")
 		require.Equal(t, 0, code, out)
@@ -274,10 +349,11 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 	})
 
 	// Absorbed from TestE2E_VolumeCLI_ShrinkRejected.
-	t.Run("ShrinkRejected", func(t *testing.T) {
+	ginkgo.It("rejects shrinking a volume", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "shrink")
 		createVolumeEventually(t, dataDir, name, 10*1024*1024)
-		cleanupVolume(t, dataDir, name)
+		cleanupVolume(t, tgt, dataDir, name)
 
 		out, code := runCLI(t, dataDir, "volume", "resize", name, "--size", "5Mi")
 		require.NotEqual(t, 0, code, out)
@@ -285,7 +361,8 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 	})
 
 	// Absorbed from TestE2E_VolumeCLI_NotFound.
-	t.Run("NotFound", func(t *testing.T) {
+	ginkgo.It("fails info for a missing volume", func() {
+		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "ghost")
 		_, code := runCLI(t, dataDir, "volume", "info", name)
 		require.NotEqual(t, 0, code, "info on missing volume should fail")

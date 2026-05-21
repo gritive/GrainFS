@@ -4,39 +4,28 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"testing"
+
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-func TestObjectBrowser_ServesUI(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+var _ = ginkgo.Describe("Object browser", func() {
+	ginkgo.It("serves the object browser UI", func() {
 		resp, err := http.Get(testServerURL + "/ui/")
-		if err != nil {
-			t.Fatalf("get ui: %v", err)
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200, got %d", resp.StatusCode)
-		}
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		html := string(body)
 
 		// Verify it's the object browser, not just a status dashboard
-		if !strings.Contains(html, "Object Browser") {
-			t.Fatal("expected 'Object Browser' in UI response")
-		}
+		gomega.Expect(strings.Contains(html, "Object Browser")).To(gomega.BeTrue())
 
 		// Verify volume management tab exists
-		if !strings.Contains(html, "Volumes") {
-			t.Fatal("expected 'Volumes' tab in UI response")
-		}
+		gomega.Expect(strings.Contains(html, "Volumes")).To(gomega.BeTrue())
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-	})
-}
+})

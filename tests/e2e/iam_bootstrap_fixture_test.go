@@ -64,7 +64,7 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 // bootstrapped. Returns the *e2eCluster; cleanup is registered via
 // startE2ECluster's t.Cleanup. Admin UDS sock paths are
 // c.dataDirs[i]+"/admin.sock".
-func startUnbootstrappedCluster(t *testing.T, nodes int) *e2eCluster {
+func startUnbootstrappedCluster(t testing.TB, nodes int) *e2eCluster {
 	t.Helper()
 	return startE2ECluster(t, e2eClusterOptions{
 		Nodes:       nodes,
@@ -90,7 +90,7 @@ type iamBootstrapTarget struct {
 // newSingleNodeBootstrapTarget returns an iamBootstrapTarget backed by a
 // freshly spawned unbootstrapped single-node server. Cleanup is registered
 // via t.Cleanup inside startUnbootstrappedSingleNode.
-func newSingleNodeBootstrapTarget(t *testing.T) iamBootstrapTarget {
+func newSingleNodeBootstrapTarget(t testing.TB) iamBootstrapTarget {
 	t.Helper()
 	dir, url, sock, _ := startUnbootstrappedSingleNode(t)
 	return iamBootstrapTarget{
@@ -107,7 +107,7 @@ func newSingleNodeBootstrapTarget(t *testing.T) iamBootstrapTarget {
 // newClusterBootstrapTarget returns an iamBootstrapTarget backed by a freshly
 // spawned 4-node cluster with no admin SA. Cleanup is registered via
 // startE2ECluster's t.Cleanup.
-func newClusterBootstrapTarget(t *testing.T) iamBootstrapTarget {
+func newClusterBootstrapTarget(t testing.TB) iamBootstrapTarget {
 	t.Helper()
 	c := startUnbootstrappedCluster(t, 4)
 	return iamBootstrapTarget{

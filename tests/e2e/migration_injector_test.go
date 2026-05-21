@@ -7,115 +7,115 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestMigrationInjector_CopiesFromSourceToDest verifies the `grainfs migrate inject`
 // command copies all objects from a source GrainFS to a destination GrainFS.
-func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		binary := getBinary()
-		ctx := context.Background()
+var _ = ginkgo.Describe("Migration injector", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("copies objects from source to destination", func() {
+			t := ginkgo.GinkgoTB()
+			binary := getBinary()
+			ctx := context.Background()
 
-		// --- Source GrainFS ---
-		srcDir, err := os.MkdirTemp("", "grainfs-migrate-src-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(srcDir)
+			// --- Source GrainFS ---
+			srcDir, err := os.MkdirTemp("", "grainfs-migrate-src-*")
+			require.NoError(t, err)
+			ginkgo.DeferCleanup(os.RemoveAll, srcDir)
 
-		srcPort := freePort()
-		srcCmd := exec.Command(binary, "serve",
-			"--data", srcDir,
-			"--port", fmt.Sprintf("%d", srcPort),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--scrub-interval", "0",
-			"--lifecycle-interval", "0",
-			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		)
-		srcCmd.Stdout = os.Stdout
-		srcCmd.Stderr = os.Stderr
-		require.NoError(t, srcCmd.Start())
-		defer terminateProcess(srcCmd)
-		waitForPort(t, srcPort, 30*time.Second)
+			srcPort := freePort()
+			srcCmd := exec.Command(binary, "serve",
+				"--data", srcDir,
+				"--port", fmt.Sprintf("%d", srcPort),
+				"--nfs4-port", fmt.Sprintf("%d", freePort()),
+				"--nbd-port", fmt.Sprintf("%d", freePort()),
+				"--scrub-interval", "0",
+				"--lifecycle-interval", "0",
+				"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+			)
+			srcCmd.Stdout = os.Stdout
+			srcCmd.Stderr = os.Stderr
+			require.NoError(t, srcCmd.Start())
+			ginkgo.DeferCleanup(terminateProcess, srcCmd)
+			waitForPort(t, srcPort, 30*time.Second)
 
-		srcEndpoint := fmt.Sprintf("http://127.0.0.1:%d", srcPort)
-		srcBootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{srcDir}, 30*time.Second)
-		srcAK, srcSK := srcBootstrap.AccessKey, srcBootstrap.SecretKey
-		srcClient := s3ClientFor(srcEndpoint, srcAK, srcSK)
+			srcEndpoint := fmt.Sprintf("http://127.0.0.1:%d", srcPort)
+			srcBootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{srcDir}, 30*time.Second)
+			srcAK, srcSK := srcBootstrap.AccessKey, srcBootstrap.SecretKey
+			srcClient := s3ClientFor(srcEndpoint, srcAK, srcSK)
 
-		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{srcDir}, srcBootstrap.SAID, "data", srcClient)
-		_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("data"),
-			Key:    aws.String("hello.txt"),
-			Body:   strings.NewReader("hello from source"),
-		})
-		require.NoError(t, err)
-		_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("data"),
-			Key:    aws.String("world.txt"),
-			Body:   strings.NewReader("world from source"),
-		})
-		require.NoError(t, err)
-
-		// --- Destination GrainFS ---
-		dstDir, err := os.MkdirTemp("", "grainfs-migrate-dst-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(dstDir)
-
-		dstPort := freePort()
-		dstCmd := exec.Command(binary, "serve",
-			"--data", dstDir,
-			"--port", fmt.Sprintf("%d", dstPort),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--scrub-interval", "0",
-			"--lifecycle-interval", "0",
-			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		)
-		dstCmd.Stdout = os.Stdout
-		dstCmd.Stderr = os.Stderr
-		require.NoError(t, dstCmd.Start())
-		defer terminateProcess(dstCmd)
-		waitForPort(t, dstPort, 30*time.Second)
-
-		dstEndpoint := fmt.Sprintf("http://127.0.0.1:%d", dstPort)
-		dstBootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dstDir}, 30*time.Second)
-		dstAK, dstSK := dstBootstrap.AccessKey, dstBootstrap.SecretKey
-		dstClient := s3ClientFor(dstEndpoint, dstAK, dstSK)
-		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dstDir}, dstBootstrap.SAID, "data", dstClient)
-
-		// --- Run migration injector ---
-		injectCmd := exec.Command(binary, "migrate", "inject",
-			"--src", srcEndpoint,
-			"--src-access-key", srcAK,
-			"--src-secret-key", srcSK,
-			"--dst", dstEndpoint,
-			"--dst-access-key", dstAK,
-			"--dst-secret-key", dstSK,
-		)
-		injectCmd.Stdout = os.Stdout
-		injectCmd.Stderr = os.Stderr
-		require.NoError(t, injectCmd.Run(), "migrate inject must succeed")
-
-		// Verify objects are in destination
-		for _, key := range []string{"hello.txt", "world.txt"} {
-			getResp, err := dstClient.GetObject(ctx, &s3.GetObjectInput{
+			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{srcDir}, srcBootstrap.SAID, "data", srcClient)
+			_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
 				Bucket: aws.String("data"),
-				Key:    aws.String(key),
+				Key:    aws.String("hello.txt"),
+				Body:   strings.NewReader("hello from source"),
 			})
-			require.NoError(t, err, "object %s must exist in destination after migration", key)
-			body, _ := io.ReadAll(getResp.Body)
-			getResp.Body.Close()
-			assert.True(t, strings.Contains(string(body), "source"), "content must match source")
-		}
+			require.NoError(t, err)
+			_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String("data"),
+				Key:    aws.String("world.txt"),
+				Body:   strings.NewReader("world from source"),
+			})
+			require.NoError(t, err)
+
+			// --- Destination GrainFS ---
+			dstDir, err := os.MkdirTemp("", "grainfs-migrate-dst-*")
+			require.NoError(t, err)
+			ginkgo.DeferCleanup(os.RemoveAll, dstDir)
+
+			dstPort := freePort()
+			dstCmd := exec.Command(binary, "serve",
+				"--data", dstDir,
+				"--port", fmt.Sprintf("%d", dstPort),
+				"--nfs4-port", fmt.Sprintf("%d", freePort()),
+				"--nbd-port", fmt.Sprintf("%d", freePort()),
+				"--scrub-interval", "0",
+				"--lifecycle-interval", "0",
+				"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+			)
+			dstCmd.Stdout = os.Stdout
+			dstCmd.Stderr = os.Stderr
+			require.NoError(t, dstCmd.Start())
+			ginkgo.DeferCleanup(terminateProcess, dstCmd)
+			waitForPort(t, dstPort, 30*time.Second)
+
+			dstEndpoint := fmt.Sprintf("http://127.0.0.1:%d", dstPort)
+			dstBootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dstDir}, 30*time.Second)
+			dstAK, dstSK := dstBootstrap.AccessKey, dstBootstrap.SecretKey
+			dstClient := s3ClientFor(dstEndpoint, dstAK, dstSK)
+			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dstDir}, dstBootstrap.SAID, "data", dstClient)
+
+			// --- Run migration injector ---
+			injectCmd := exec.Command(binary, "migrate", "inject",
+				"--src", srcEndpoint,
+				"--src-access-key", srcAK,
+				"--src-secret-key", srcSK,
+				"--dst", dstEndpoint,
+				"--dst-access-key", dstAK,
+				"--dst-secret-key", dstSK,
+			)
+			injectCmd.Stdout = os.Stdout
+			injectCmd.Stderr = os.Stderr
+			require.NoError(t, injectCmd.Run(), "migrate inject must succeed")
+
+			// Verify objects are in destination
+			for _, key := range []string{"hello.txt", "world.txt"} {
+				getResp, err := dstClient.GetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String("data"),
+					Key:    aws.String(key),
+				})
+				require.NoError(t, err, "object %s must exist in destination after migration", key)
+				body, _ := io.ReadAll(getResp.Body)
+				getResp.Body.Close()
+				assert.True(t, strings.Contains(string(body), "source"), "content must match source")
+			}
+		})
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-	})
-}
+})

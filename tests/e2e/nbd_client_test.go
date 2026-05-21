@@ -31,7 +31,7 @@ type e2eNBDClient struct {
 	handle uint64
 }
 
-func ensureE2ENBDVolume(t *testing.T, ctx context.Context, c *e2eCluster, name string, size int64) {
+func ensureE2ENBDVolume(t testing.TB, ctx context.Context, c *e2eCluster, name string, size int64) {
 	t.Helper()
 	leaderIdx := c.leaderIdx
 	if leaderIdx < 0 {
@@ -45,10 +45,12 @@ func ensureE2ENBDVolume(t *testing.T, ctx context.Context, c *e2eCluster, name s
 	}
 }
 
-func dialE2ENBD(t *testing.T, addr string, export string) *e2eNBDClient {
+func dialE2ENBD(t testing.TB, addr string, export string) *e2eNBDClient {
 	t.Helper()
-	conn, err := net.Dial("tcp", addr)
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).Dial("tcp", addr)
 	require.NoError(t, err)
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	t.Cleanup(func() { _ = conn.SetDeadline(time.Time{}) })
 
 	hdr := make([]byte, 18)
 	_, err = io.ReadFull(conn, hdr)
@@ -72,6 +74,7 @@ func dialE2ENBD(t *testing.T, addr string, export string) *e2eNBDClient {
 	exportData := make([]byte, 134)
 	_, err = io.ReadFull(conn, exportData)
 	require.NoError(t, err)
+	require.NoError(t, conn.SetDeadline(time.Time{}))
 
 	return &e2eNBDClient{conn: conn}
 }
@@ -80,7 +83,7 @@ func (c *e2eNBDClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *e2eNBDClient) WriteAt(t *testing.T, off uint64, data []byte) {
+func (c *e2eNBDClient) WriteAt(t testing.TB, off uint64, data []byte) {
 	t.Helper()
 	c.handle++
 	req := make([]byte, 28+len(data))
@@ -99,7 +102,7 @@ func (c *e2eNBDClient) WriteAt(t *testing.T, off uint64, data []byte) {
 	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "write error")
 }
 
-func (c *e2eNBDClient) Flush(t *testing.T) {
+func (c *e2eNBDClient) Flush(t testing.TB) {
 	t.Helper()
 	c.handle++
 	req := make([]byte, 28)
@@ -115,7 +118,7 @@ func (c *e2eNBDClient) Flush(t *testing.T) {
 	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "flush error")
 }
 
-func requireNBDReadEventually(t *testing.T, client *e2eNBDClient, off uint64, want []byte) {
+func requireNBDReadEventually(t testing.TB, client *e2eNBDClient, off uint64, want []byte) {
 	t.Helper()
 	var got []byte
 	var lastErr error
@@ -133,7 +136,7 @@ func requireNBDReadEventually(t *testing.T, client *e2eNBDClient, off uint64, wa
 		"offset=%d got=%x want=%x err=%v", off, got, want, lastErr)
 }
 
-func (c *e2eNBDClient) ReadAt(t *testing.T, off uint64, size uint32) []byte {
+func (c *e2eNBDClient) ReadAt(t testing.TB, off uint64, size uint32) []byte {
 	t.Helper()
 	got, err := c.tryReadAt(off, size)
 	require.NoError(t, err)
@@ -141,6 +144,9 @@ func (c *e2eNBDClient) ReadAt(t *testing.T, off uint64, size uint32) []byte {
 }
 
 func (c *e2eNBDClient) tryReadAt(off uint64, size uint32) ([]byte, error) {
+	_ = c.conn.SetDeadline(time.Now().Add(5 * time.Second))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+
 	c.handle++
 	req := make([]byte, 28)
 	binary.BigEndian.PutUint32(req[0:4], e2eNBDRequestMagic)

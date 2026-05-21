@@ -2,13 +2,13 @@ package e2e
 
 import (
 	"fmt"
-	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2EDedupSnapshot validates the full dedup+snapshot lifecycle via the
+// Dedup snapshot specs validate the full dedup+snapshot lifecycle via the
 // grainfs CLI against an isolated server with --dedup=true.
 //
 // Historical regression target: before PR-B, the second CreateSnapshot under
@@ -23,40 +23,44 @@ import (
 //
 // The isolated server's data dir is removed on teardown, so no explicit
 // volume/snapshot cleanup is needed.
-func TestE2EDedupSnapshot(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		dataDir, _, _ := startTestServer(t, "--dedup=true")
+var _ = ginkgo.Describe("Dedup snapshots", func() {
+	ginkgo.Context("SingleNode", func() {
+		var dataDir string
 
-		volName := fmt.Sprintf("dedup-snap-e2e-%d", time.Now().UnixNano())
-		cowCreateVolume(t, dataDir, volName, 4*1024*1024)
+		ginkgo.BeforeEach(func() {
+			dataDir, _, _ = startTestServer(ginkgo.GinkgoTB(), "--dedup=true")
+		})
 
-		// First snapshot — pre-PR-B this worked.
-		snap1 := cowCreateSnapshot(t, dataDir, volName)
-		require.NotEmpty(t, snap1)
+		ginkgo.It("supports create, list, rollback, and delete", func() {
+			t := ginkgo.GinkgoTB()
+			volName := fmt.Sprintf("dedup-snap-e2e-%d", time.Now().UnixNano())
+			cowCreateVolume(t, dataDir, volName, 4*1024*1024)
 
-		// Second snapshot — pre-PR-B this returned the "dedup + snapshots not
-		// supported in Phase A" hard error. After PR-B it must succeed.
-		snap2 := cowCreateSnapshot(t, dataDir, volName)
-		require.NotEmpty(t, snap2)
-		require.NotEqual(t, snap1, snap2)
+			// First snapshot — pre-PR-B this worked.
+			snap1 := cowCreateSnapshot(t, dataDir, volName)
+			require.NotEmpty(t, snap1)
 
-		// List: both snapshots should appear.
-		snaps := cowListSnapshots(t, dataDir, volName)
-		require.Len(t, snaps, 2, "expected 2 snapshots under dedup")
+			// Second snapshot — pre-PR-B this returned the "dedup + snapshots not
+			// supported in Phase A" hard error. After PR-B it must succeed.
+			snap2 := cowCreateSnapshot(t, dataDir, volName)
+			require.NotEmpty(t, snap2)
+			require.NotEqual(t, snap1, snap2)
 
-		// Rollback to snap1 — must not error; snapshot maps are preserved.
-		cowRollback(t, dataDir, volName, snap1)
-		snaps = cowListSnapshots(t, dataDir, volName)
-		require.GreaterOrEqual(t, len(snaps), 1, "rollback must preserve at least the target snap")
+			// List: both snapshots should appear.
+			snaps := cowListSnapshots(t, dataDir, volName)
+			require.Len(t, snaps, 2, "expected 2 snapshots under dedup")
 
-		// Delete snap2 to exercise the dedup DeleteSnapshot path.
-		cowDeleteSnapshot(t, dataDir, volName, snap2)
-		snaps = cowListSnapshots(t, dataDir, volName)
-		for _, s := range snaps {
-			require.NotEqual(t, snap2, s.ID, "deleted snap must not reappear")
-		}
+			// Rollback to snap1 — must not error; snapshot maps are preserved.
+			cowRollback(t, dataDir, volName, snap1)
+			snaps = cowListSnapshots(t, dataDir, volName)
+			require.GreaterOrEqual(t, len(snaps), 1, "rollback must preserve at least the target snap")
+
+			// Delete snap2 to exercise the dedup DeleteSnapshot path.
+			cowDeleteSnapshot(t, dataDir, volName, snap2)
+			snaps = cowListSnapshots(t, dataDir, volName)
+			for _, s := range snaps {
+				require.NotEqual(t, snap2, s.ID, "deleted snap must not reappear")
+			}
+		})
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-	})
-}
+})

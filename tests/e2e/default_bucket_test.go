@@ -32,8 +32,4 @@ var _ = ginkgo.Describe("Default bucket", ginkgo.Label("bucket"), func() {
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
-
-	ginkgo.It("exists on cluster startup", func() {
-		_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-	})
 })

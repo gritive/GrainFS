@@ -28,6 +28,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,12 +40,24 @@ import (
 // internal/cluster/coalesce_owner_failure_test.go; this e2e focuses on the
 // happy-path observable behavior (round-trip + metrics) on both deployment
 // shapes.
-func runAppendCoalesce(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runCoalesceCase(t, newSingleNodeS3Target())
+func runAppendCoalesceSpecs() {
+	ginkgo.Context("Coalesce SingleNode", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSingleNodeS3Target()
+		})
+		ginkgo.It("coalesces append segments", func() {
+			runCoalesceCase(ginkgo.GinkgoTB(), tgt)
+		})
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runCoalesceCase(t, newSharedClusterS3Target(t))
+	ginkgo.Context("Coalesce Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		ginkgo.It("coalesces append segments", func() {
+			runCoalesceCase(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
@@ -52,7 +65,7 @@ func runAppendCoalesce(t *testing.T) {
 // asserts the metric ticks on at least one node. Loops over tgt.nodes for
 // per-node convergence and metric scraping — single has nodes=1, cluster
 // has nodes=4.
-func runCoalesceCase(t *testing.T, tgt s3Target) {
+func runCoalesceCase(t testing.TB, tgt s3Target) {
 	bucket := tgt.uniqueBucket(t, "coalesce")
 	client := tgt.pickNode(0)
 	key := "obj-coalesce"
@@ -133,12 +146,12 @@ func getObjectRange(client *s3.Client, bucket, key string, startInclusive, endIn
 // for both single (1 endpoint) and cluster (N endpoints) targets via
 // tgt.endpoint(i).
 // Lightweight parser — accepts the prometheus text format line "name{labels} value".
-func metricCounterAtLeast(t *testing.T, tgt s3Target, nodeIdx int, metricLine string, threshold float64) bool {
+func metricCounterAtLeast(t testing.TB, tgt s3Target, nodeIdx int, metricLine string, threshold float64) bool {
 	value, ok := metricCounterValue(t, tgt, nodeIdx, metricLine)
 	return ok && value >= threshold
 }
 
-func metricCounterTotal(t *testing.T, tgt s3Target, metricLine string) float64 {
+func metricCounterTotal(t testing.TB, tgt s3Target, metricLine string) float64 {
 	t.Helper()
 	var total float64
 	for i := 0; i < tgt.nodes; i++ {
@@ -149,7 +162,7 @@ func metricCounterTotal(t *testing.T, tgt s3Target, metricLine string) float64 {
 	return total
 }
 
-func metricCounterValue(t *testing.T, tgt s3Target, nodeIdx int, metricLine string) (float64, bool) {
+func metricCounterValue(t testing.TB, tgt s3Target, nodeIdx int, metricLine string) (float64, bool) {
 	t.Helper()
 	url := tgt.endpoint(nodeIdx) + "/metrics"
 	resp, err := http.Get(url)

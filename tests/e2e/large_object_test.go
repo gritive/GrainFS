@@ -27,34 +27,57 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLargeObjectE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runLargeObjectCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Large objects", func() {
+	describeLargeObjectTarget("SingleNode", func(testing.TB) s3Target {
+		return newSingleNodeS3Target()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runLargeObjectCases(t, newSharedClusterS3Target(t))
+	describeLargeObjectTarget("Cluster4Node", func(t testing.TB) s3Target {
+		return newSharedClusterS3Target(t)
 	})
-	t.Run("Cluster_64MiB_RoundTrip", func(t *testing.T) {
-		runLargeObjectRoundTrip(t, newSharedClusterS3Target(t), "large64", 64<<20)
+
+	ginkgo.Context("Cluster4Node extras", func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("round-trips a 64MiB object", func() {
+			runLargeObjectRoundTrip(ginkgo.GinkgoTB(), tgt, "large64", 64<<20)
+		})
+		ginkgo.It("records chunk fanout breadth", func() {
+			runClusterFanoutBreadth(ginkgo.GinkgoTB(), tgt)
+		})
+		ginkgo.It("reads a range across a chunk boundary", func() {
+			runLargeObjectRangeAcrossChunkBoundary(ginkgo.GinkgoTB(), tgt)
+		})
+		ginkgo.It("keeps appendable objects working", func() {
+			runLargeObjectClusterAppendable(ginkgo.GinkgoTB(), tgt)
+		})
 	})
-	t.Run("Cluster_FanoutBreadth", func(t *testing.T) {
-		runClusterFanoutBreadth(t, newSharedClusterS3Target(t))
-	})
-	t.Run("Cluster_LargeObjectReadAt_CrossSegment", func(t *testing.T) {
-		runLargeObjectRangeAcrossChunkBoundary(t, newSharedClusterS3Target(t))
-	})
-	t.Run("Cluster_AppendableStillWorks", func(t *testing.T) {
-		runLargeObjectClusterAppendable(t, newSharedClusterS3Target(t))
+})
+
+func describeLargeObjectTarget(name string, factory func(testing.TB) s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runLargeObjectCases(func() s3Target { return tgt })
 	})
 }
 
-func runLargeObjectCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-
-	t.Run("RoundTrip100MiB", func(t *testing.T) {
+func runLargeObjectCases(getTgt func() s3Target) {
+	ginkgo.It("round-trips a 100MiB object", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "large100")
 		data := largeObjectRandomBytes(100 << 20)
@@ -71,9 +94,9 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("blob"),
 		})
 		require.NoError(t, err)
+		ginkgo.DeferCleanup(out.Body.Close)
 		got, err := io.ReadAll(out.Body)
 		require.NoError(t, err)
-		out.Body.Close()
 		require.Equal(t, len(data), len(got), "100 MiB length")
 		requireByteEqual(t, data, got, "100 MiB body must round-trip byte-identical")
 
@@ -82,7 +105,10 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 		require.Equal(t, wantETag, aws.ToString(out.ETag), "simple-PUT ETag = MD5(plaintext)")
 	})
 
-	t.Run("RoundTrip256MiB", func(t *testing.T) {
+	ginkgo.It("round-trips a 256MiB object", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		// 256 MiB = 16 segments × 16 MiB DefaultChunkSize — exercises the
 		// SegmentWriter worker pool, multi-segment HeadObject metadata, and
 		// the SegmentReader parallel fetch path. Originally specified as
@@ -106,19 +132,19 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("blob"),
 		})
 		require.NoError(t, err)
+		ginkgo.DeferCleanup(out.Body.Close)
 		got, err := io.ReadAll(out.Body)
 		require.NoError(t, err)
-		out.Body.Close()
 		require.Equal(t, len(data), len(got), "256 MiB length")
 		requireByteEqual(t, data, got, "256 MiB body must round-trip byte-identical")
 	})
 
-	t.Run("RangeAcrossChunkBoundary", func(t *testing.T) {
-		runLargeObjectRangeAcrossChunkBoundary(t, tgt)
+	ginkgo.It("reads a range across a chunk boundary", func() {
+		runLargeObjectRangeAcrossChunkBoundary(ginkgo.GinkgoTB(), getTgt())
 	})
 }
 
-func runLargeObjectRoundTrip(t *testing.T, tgt s3Target, bucketCase string, size int) {
+func runLargeObjectRoundTrip(t testing.TB, tgt s3Target, bucketCase string, size int) {
 	t.Helper()
 	ctx := context.Background()
 	client := tgt.pickNode(0)
@@ -137,9 +163,9 @@ func runLargeObjectRoundTrip(t *testing.T, tgt s3Target, bucketCase string, size
 		Key:    aws.String("blob"),
 	})
 	require.NoError(t, err)
+	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
 	require.NoError(t, err)
-	out.Body.Close()
 	require.Equal(t, len(data), len(got), "%d-byte length", size)
 	requireByteEqual(t, data, got, "%d-byte body must round-trip byte-identical", size)
 
@@ -155,7 +181,7 @@ func runLargeObjectRoundTrip(t *testing.T, tgt s3Target, bucketCase string, size
 	require.Equal(t, wantETag, aws.ToString(out.ETag), "simple-PUT ETag = MD5(plaintext)")
 }
 
-func requireByteEqual(t *testing.T, want, got []byte, msgAndArgs ...any) {
+func requireByteEqual(t testing.TB, want, got []byte, msgAndArgs ...any) {
 	t.Helper()
 	if bytes.Equal(got, want) {
 		return
@@ -188,7 +214,7 @@ func requireByteEqual(t *testing.T, want, got []byte, msgAndArgs ...any) {
 	require.Equal(t, want, got, msgAndArgs...)
 }
 
-func runClusterFanoutBreadth(t *testing.T, tgt s3Target) {
+func runClusterFanoutBreadth(t testing.TB, tgt s3Target) {
 	t.Helper()
 	require.True(t, tgt.isCluster, "fan-out breadth case requires cluster fixture")
 	ctx := context.Background()
@@ -216,7 +242,7 @@ func runClusterFanoutBreadth(t *testing.T, tgt s3Target) {
 	}, 10*time.Second, 200*time.Millisecond, "chunk fan-out breadth histogram was not observed")
 }
 
-func runLargeObjectRangeAcrossChunkBoundary(t *testing.T, tgt s3Target) {
+func runLargeObjectRangeAcrossChunkBoundary(t testing.TB, tgt s3Target) {
 	t.Helper()
 	// Phase 1.6.7 closed the single-node gap: PackedBackend now
 	// implements storage.PartialIO, so the wal/pullthrough wrappers
@@ -244,13 +270,13 @@ func runLargeObjectRangeAcrossChunkBoundary(t *testing.T, tgt s3Target) {
 		Range:  aws.String("bytes=" + strconv.FormatInt(from, 10) + "-" + strconv.FormatInt(to, 10)),
 	})
 	require.NoError(t, err)
+	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
 	require.NoError(t, err)
-	out.Body.Close()
 	require.Equal(t, data[from:to+1], got, "range across boundary must match")
 }
 
-func runLargeObjectClusterAppendable(t *testing.T, tgt s3Target) {
+func runLargeObjectClusterAppendable(t testing.TB, tgt s3Target) {
 	t.Helper()
 	require.True(t, tgt.isCluster, "appendable case requires cluster fixture")
 	bucket := tgt.uniqueBucket(t, "appendable")
@@ -261,7 +287,7 @@ func runLargeObjectClusterAppendable(t *testing.T, tgt s3Target) {
 	require.Equal(t, []byte("large-object-append"), getObject(t, client, bucket, key))
 }
 
-func chunkFanoutHistogram(t *testing.T, tgt s3Target, nodeIdx int) (count, sum float64, ok bool) {
+func chunkFanoutHistogram(t testing.TB, tgt s3Target, nodeIdx int) (count, sum float64, ok bool) {
 	t.Helper()
 	resp, err := http.Get(tgt.endpoint(nodeIdx) + "/metrics")
 	if err != nil {

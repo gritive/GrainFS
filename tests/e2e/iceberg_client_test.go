@@ -21,7 +21,7 @@ import (
 //
 // Iceberg REST callers (apache/iceberg-go, custom raw http) reach GrainFS
 // through this helper in e2e tests.
-func newIcebergSigV4Client(t *testing.T, accessKey, secretKey, region string) *http.Client {
+func newIcebergSigV4Client(t testing.TB, accessKey, secretKey, region string) *http.Client {
 	t.Helper()
 	return &http.Client{
 		Transport: &sigv4IcebergRoundTripper{
@@ -29,7 +29,7 @@ func newIcebergSigV4Client(t *testing.T, accessKey, secretKey, region string) *h
 			secretKey: secretKey,
 			region:    region,
 			service:   "s3",
-			inner:     http.DefaultTransport,
+			inner:     &http.Transport{DisableKeepAlives: true},
 		},
 		Timeout: 30 * time.Second,
 	}

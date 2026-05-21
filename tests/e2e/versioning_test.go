@@ -5,45 +5,59 @@ import (
 	"errors"
 	"io"
 	"strings"
-	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestS3VersioningE2E exercises the versioning surface against both single-node
-// and the shared 4-node cluster. Subtests that genuinely require the cluster
-// (cross-node fan-out) opt out via tgt.isCluster checks.
-func TestS3VersioningE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runVersioningCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("S3 versioning", ginkgo.Label("bucket"), func() {
+	describeVersioningContext("SingleNode", func() s3Target {
+		return newSingleNodeS3Target()
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVersioningCases(t, newSharedClusterS3Target(t))
+	describeVersioningContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describeVersioningContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, func() {
+		var (
+			tgt    s3Target
+			client *s3.Client
+		)
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory()
+			client = tgt.pickNode(0)
+		})
+
+		runVersioningCases(func() s3Target { return tgt }, func() *s3.Client { return client })
 	})
 }
 
-func runVersioningCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-
-	enableVersioning := func(t *testing.T, bkt string) {
-		t.Helper()
-		_, err := client.PutBucketVersioning(context.Background(), &s3.PutBucketVersioningInput{
-			Bucket: aws.String(bkt),
-			VersioningConfiguration: &types.VersioningConfiguration{
-				Status: types.BucketVersioningStatusEnabled,
-			},
-		})
+func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
+	enableVersioning := func(bkt string) {
+		t := ginkgo.GinkgoTB()
+		client := getClient()
+		_, err := client.PutBucketVersioning(context.Background(),
+			&s3.PutBucketVersioningInput{
+				Bucket: aws.String(bkt),
+				VersioningConfiguration: &types.VersioningConfiguration{
+					Status: types.BucketVersioningStatusEnabled,
+				},
+			})
 		require.NoError(t, err)
 	}
 
-	putVersion := func(t *testing.T, bkt, key, body string) string {
-		t.Helper()
+	putVersion := func(bkt, key, body string) string {
+		t := ginkgo.GinkgoTB()
+		client := getClient()
 		out, err := client.PutObject(context.Background(), &s3.PutObjectInput{
 			Bucket: aws.String(bkt),
 			Key:    aws.String(key),
@@ -55,7 +69,10 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		return vid
 	}
 
-	t.Run("EnableAndStatus", func(t *testing.T) {
+	ginkgo.It("enables and reports bucket versioning (EnableAndStatus)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "enable")
 
@@ -65,46 +82,52 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		require.NoError(t, err)
 		assert.NotEqual(t, types.BucketVersioningStatusEnabled, gout.Status)
 
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 
 		gout, err = client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(bkt)})
 		require.NoError(t, err)
 		assert.Equal(t, types.BucketVersioningStatusEnabled, gout.Status)
 	})
 
-	t.Run("PutGetByVersionID", func(t *testing.T) {
+	ginkgo.It("puts and gets by version ID (PutGetByVersionID)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "putget")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "obj.txt"
 
-		vid1 := putVersion(t, bkt, key, "content-v1")
-		vid2 := putVersion(t, bkt, key, "content-v2")
+		vid1 := putVersion(bkt, key, "content-v1")
+		vid2 := putVersion(bkt, key, "content-v2")
 		assert.NotEqual(t, vid1, vid2)
 
 		latest, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bkt), Key: aws.String(key)})
 		require.NoError(t, err)
+		ginkgo.DeferCleanup(latest.Body.Close)
 		latestBody, _ := io.ReadAll(latest.Body)
-		latest.Body.Close()
 		assert.Equal(t, []byte("content-v2"), latestBody)
 
 		v1, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid1),
 		})
 		require.NoError(t, err)
+		ginkgo.DeferCleanup(v1.Body.Close)
 		v1Body, _ := io.ReadAll(v1.Body)
-		v1.Body.Close()
 		assert.Equal(t, []byte("content-v1"), v1Body)
 	})
 
-	t.Run("HeadByVersionID", func(t *testing.T) {
+	ginkgo.It("heads by version ID (HeadByVersionID)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "headvid")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "obj.txt"
 
-		vid1 := putVersion(t, bkt, key, "content-v1")
-		vid2 := putVersion(t, bkt, key, "content-v2")
+		vid1 := putVersion(bkt, key, "content-v1")
+		vid2 := putVersion(bkt, key, "content-v2")
 
 		// HEAD ?versionId=<vid1> → 200, x-amz-version-id == vid1.
 		h1, err := client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -131,14 +154,14 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, "NotFound", apiErr.ErrorCode())
 	})
 
-	t.Run("HeadByVersionID_AllNodes", func(t *testing.T) {
-		if !tgt.isCluster {
-		}
+	ginkgo.It("heads by version ID through all nodes (HeadByVersionID_AllNodes)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "headvidfan")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "obj.txt"
-		vid := putVersion(t, bkt, key, "fanout")
+		vid := putVersion(bkt, key, "fanout")
 
 		for i := 0; i < tgt.nodes; i++ {
 			c := tgt.pickNode(i)
@@ -150,12 +173,15 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("HeadByVersionID_DeleteMarker", func(t *testing.T) {
+	ginkgo.It("returns MethodNotAllowed for delete marker head by version ID (HeadByVersionID_DeleteMarker)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "headmark")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "obj.txt"
-		_ = putVersion(t, bkt, key, "before")
+		_ = putVersion(bkt, key, "before")
 
 		// Soft delete creates a delete marker; capture its versionId.
 		delOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -178,13 +204,16 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("SoftDelete", func(t *testing.T) {
+	ginkgo.It("soft deletes current version (SoftDelete)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "softdel")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "file.txt"
-		_ = putVersion(t, bkt, key, "v1")
-		_ = putVersion(t, bkt, key, "v2")
+		_ = putVersion(bkt, key, "v1")
+		_ = putVersion(bkt, key, "v2")
 
 		delOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key),
@@ -199,13 +228,16 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		require.Error(t, err, "GET after soft-delete must return 404")
 	})
 
-	t.Run("HardDeleteByVersionID", func(t *testing.T) {
+	ginkgo.It("hard deletes a specific version ID (HardDeleteByVersionID)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "harddel")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "file.txt"
-		vid1 := putVersion(t, bkt, key, "v1")
-		_ = putVersion(t, bkt, key, "v2")
+		vid1 := putVersion(bkt, key, "v1")
+		_ = putVersion(bkt, key, "v2")
 
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid1),
@@ -218,13 +250,16 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		require.Error(t, err, "GET of hard-deleted version must fail")
 	})
 
-	t.Run("ListVersions", func(t *testing.T) {
+	ginkgo.It("lists object versions (ListVersions)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "list")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "file.txt"
-		vid1 := putVersion(t, bkt, key, "v1")
-		vid2 := putVersion(t, bkt, key, "v2")
+		vid1 := putVersion(bkt, key, "v1")
+		vid2 := putVersion(bkt, key, "v2")
 
 		// Cluster's ListObjectVersions may include a "null" pseudo-version per
 		// PutObject (differs from the in-process EC fixture). Assert what we
@@ -252,12 +287,15 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 		// versioning-init flows — out of scope here.
 	})
 
-	t.Run("ListVersionsWithDeleteMarker", func(t *testing.T) {
+	ginkgo.It("lists versions with delete marker (ListVersionsWithDeleteMarker)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "listmark")
-		enableVersioning(t, bkt)
+		enableVersioning(bkt)
 		key := "file.txt"
-		_ = putVersion(t, bkt, key, "v1")
+		_ = putVersion(bkt, key, "v1")
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bkt), Key: aws.String(key)})
 		require.NoError(t, err)
 

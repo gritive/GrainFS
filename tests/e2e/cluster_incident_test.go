@@ -19,6 +19,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/logging"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,7 +38,7 @@ type incidentState struct {
 	} `json:"scope"`
 }
 
-func fetchIncidents(t *testing.T, endpoint string) []incidentState {
+func fetchIncidents(t testing.TB, endpoint string) []incidentState {
 	t.Helper()
 	resp, err := http.Get(endpoint + "/api/incidents?limit=50")
 	require.NoError(t, err)
@@ -48,8 +49,9 @@ func fetchIncidents(t *testing.T, endpoint string) []incidentState {
 	return out
 }
 
-func TestClusterIncidentMissingShardFixedWithReceiptE2E(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("Cluster incidents", func() {
+	ginkgo.It("fixes a missing shard incident with a signed receipt", func() {
+		t := ginkgo.GinkgoTB()
 		const (
 			clusterKey = "E2E-CLUSTER-INCIDENT-KEY"
 			bucketName = "incident-bucket"
@@ -67,7 +69,7 @@ func TestClusterIncidentMissingShardFixedWithReceiptE2E(t *testing.T) {
 			DisableNBD:    true,
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		endpoints := c.httpURLs
 		leaderIdx, err := c.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
 		require.NoError(t, err)
@@ -125,10 +127,9 @@ func TestClusterIncidentMissingShardFixedWithReceiptE2E(t *testing.T) {
 		_, receiptStatus := signedGet(t, ctx, signer, creds, endpoints[victimNode]+"/api/receipts/"+url.PathEscape(found.Proof.ReceiptID))
 		require.Equal(t, http.StatusOK, receiptStatus)
 	})
-}
 
-func TestQuarantineIncidentE2E(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+	ginkgo.It("isolates a corrupt shard incident without blocking unrelated objects", func() {
+		t := ginkgo.GinkgoTB()
 		binary := getBinary()
 		if _, err := os.Stat(binary); err != nil {
 		}
@@ -148,7 +149,7 @@ func TestQuarantineIncidentE2E(t *testing.T) {
 			DisableNBD:    true,
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		leaderIdx, err := c.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
 		require.NoError(t, err)
 		client := c.S3Client(leaderIdx)
@@ -197,4 +198,4 @@ func TestQuarantineIncidentE2E(t *testing.T) {
 		_, err = client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucketName), Key: aws.String("good")})
 		require.NoError(t, err, "unrelated object in same bucket must keep working")
 	})
-}
+})

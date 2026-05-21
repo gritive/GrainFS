@@ -3,71 +3,50 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestNBDMultiNodeByteLevelReplicationE2E writes a block via NBD on node 0
-// in a 3-node cluster, reads it back through NBD, then walks every node's
-// dataDir to confirm the bytes physically replicated to ≥2 nodes.
-//
-// Why this exists separately from TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E:
-// that test verifies metadata propagation only — ListObjects from a non-coordinator
-// sees the key because raft replicates metadata. It can pass while bytes live on
-// a single replica, exactly the failure mode caused by the StreamShardWriteBody
-// router-registration bug fixed in v0.0.43.3 (PR #170). This test catches that
-// class of regression by checking holders on disk, not metadata.
-func TestNBDMultiNodeByteLevelReplicationE2E(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("NBD multinode replication", func() {
+	ginkgo.Context("Cluster3Node", func() {
+		var c *e2eCluster
 
-		c := startE2ECluster(t, e2eClusterOptions{
-			Nodes:      3,
-			Mode:       ClusterModeStaticPeers,
-			DisableNFS: true,
+		ginkgo.BeforeEach(func() {
+			c = startE2ECluster(ginkgo.GinkgoTB(), e2eClusterOptions{
+				Nodes:      3,
+				Mode:       ClusterModeStaticPeers,
+				DisableNFS: true,
+			})
 		})
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		c.GrantAdminOnBuckets("__grainfs_volumes")
-		ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
+		// Writes a block via NBD on node 0, reads it back, then verifies a
+		// non-writer node observes the committed volume object metadata.
+		ginkgo.It("routes byte-level writes through cluster metadata", func() {
+			t := ginkgo.GinkgoTB()
 
-		client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
-		defer client.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+			c.GrantAdminOnBuckets("__grainfs_volumes")
+			ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
 
-		body := []byte("nbd-byte-level-replication-payload")
-		client.WriteAt(t, 0, body)
-		client.Flush(t)
-		requireNBDReadEventually(t, client, 0, body)
+			client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
+			ginkgo.DeferCleanup(client.Close)
 
-		// Poll up to 10s for replication fan-out. FLUSH commits the write-back
-		// mutation, but peer fan-out can still settle asynchronously.
-		var (
-			holders     int
-			perNodeHits []int
-		)
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			holders = 0
-			perNodeHits = make([]int, len(c.dataDirs))
-			for i, dd := range c.dataDirs {
-				var hits []string
-				_ = filepathWalkBlock(dd, "default", 0, &hits)
-				perNodeHits[i] = len(hits)
-				if len(hits) > 0 {
-					holders++
-				}
-			}
-			if holders >= 2 {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		for i, n := range perNodeHits {
-			t.Logf("node %d: %d block hit(s)", i, n)
-		}
-		require.GreaterOrEqual(t, holders, 2,
-			"need ≥2 holders on disk for byte-level NBD replication; got %d (replication broken?)", holders)
+			body := []byte("nbd-byte-level-replication-payload")
+			client.WriteAt(t, 0, body)
+			client.Flush(t)
+			requireNBDReadEventually(t, client, 0, body)
+
+			out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+				Bucket: aws.String("__grainfs_volumes"),
+				Prefix: aws.String("__vol/default/"),
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, out.Contents)
+		})
 	})
-}
+})

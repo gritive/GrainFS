@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,11 +12,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
-
-func TestLifecycleConfigGinkgo(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Lifecycle Config e2e (PoC)")
-}
 
 var _ = ginkgo.Describe("Lifecycle config", func() {
 	describeLifecycleConfigContext("SingleNode", func() (s3Target, *lifecycleFixture) {

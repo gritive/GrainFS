@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
-	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func runWaitForWritableEndpointUsesPerAttemptTimeout(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+func registerWaitForWritableEndpointUsesPerAttemptTimeout() {
+	ginkgo.It("uses the per-attempt timeout", func() {
+		t := ginkgo.GinkgoTB()
 		endpoints := []string{"node-a", "node-b", "node-c"}
 		var calls int32
 
@@ -43,8 +44,9 @@ func runWaitForWritableEndpointUsesPerAttemptTimeout(t *testing.T) {
 	})
 }
 
-func runWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+func registerWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail() {
+	ginkgo.It("returns an error when all endpoints fail", func() {
+		t := ginkgo.GinkgoTB()
 		endpoints := []string{"node-a", "node-b"}
 
 		_, err := waitForWritableEndpoint(
@@ -64,8 +66,9 @@ func runWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail(t *testing.T) {
 	})
 }
 
-// TestWaitForWritableEndpointE2E groups waitForWritableEndpoint probe behaviors.
-func TestWaitForWritableEndpointE2E(t *testing.T) {
-	t.Run("UsesPerAttemptTimeout", runWaitForWritableEndpointUsesPerAttemptTimeout)
-	t.Run("ReturnsErrorWhenAllEndpointsFail", runWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail)
-}
+var _ = ginkgo.Describe("Wait for writable endpoint", func() {
+	ginkgo.Context("SingleNode", func() {
+		registerWaitForWritableEndpointUsesPerAttemptTimeout()
+		registerWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail()
+	})
+})

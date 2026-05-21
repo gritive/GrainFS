@@ -17,11 +17,6 @@ import (
 	"github.com/onsi/gomega"
 )
 
-func TestObjectTaggingE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Object tagging e2e")
-}
-
 var _ = ginkgo.Describe("Object tagging", func() {
 	describeObjectTaggingContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()

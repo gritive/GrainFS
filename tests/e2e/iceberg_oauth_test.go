@@ -10,10 +10,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestIcebergOAuthE2E exercises the §4 OAuth2 client_credentials token endpoint
+// Iceberg OAuth specs exercise the §4 OAuth2 client_credentials token endpoint
 // (POST /iceberg/v1/oauth/tokens) and adjacent SigV4 access on the warehouse
 // bucket. Dual-target: SingleNode + Cluster3Node, per R10 convention.
 //
@@ -29,27 +30,39 @@ import (
 //     PUT/GET on the warehouse bucket via SigV4 (the bearer is the iceberg-side
 //     credential; S3-side is SigV4 throughout). Proves minting a bearer does
 //     not break the SigV4 path — the test never sends the bearer.
-func TestIcebergOAuthE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIcebergOAuthCases(t, newSingleNodeIcebergTarget(t))
+var _ = ginkgo.Describe("Iceberg OAuth", func() {
+	describeIcebergOAuthContext("SingleNode", func(t testing.TB) *icebergTarget {
+		return newSingleNodeIcebergTarget(t)
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runIcebergOAuthCases(t, newSharedClusterIcebergTarget(t))
-	})
-}
 
-func runIcebergOAuthCases(t *testing.T, tgt *icebergTarget) {
-	t.Run("S3SigV4_NoBearerNeeded_PutGetRoundtrip", func(t *testing.T) {
-		runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t, tgt)
+	describeIcebergOAuthContext("Cluster3Node", func(t testing.TB) *icebergTarget {
+		return newSharedClusterIcebergTarget(t)
 	})
-	t.Run("MintToken_HappyPath", func(t *testing.T) {
-		runIcebergOAuthMintTokenHappyPath(t, tgt)
-	})
-	t.Run("MintToken_WrongSecret_401", func(t *testing.T) {
-		runIcebergOAuthMintTokenWrongSecret401(t, tgt)
-	})
-	t.Run("PostMintToken_SigV4StillWorks", func(t *testing.T) {
-		runIcebergOAuthPostMintTokenSigV4StillWorks(t, tgt)
+})
+
+func describeIcebergOAuthContext(name string, factory func(testing.TB) *icebergTarget) {
+	ginkgo.Context(name, func() {
+		var tgt *icebergTarget
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("allows SigV4 S3 round trips without bearer tokens", func() {
+			runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(ginkgo.GinkgoTB(), tgt)
+		})
+
+		ginkgo.It("mints bearer tokens with valid client credentials", func() {
+			runIcebergOAuthMintTokenHappyPath(ginkgo.GinkgoTB(), tgt)
+		})
+
+		ginkgo.It("rejects token minting with a wrong client secret", func() {
+			runIcebergOAuthMintTokenWrongSecret401(ginkgo.GinkgoTB(), tgt)
+		})
+
+		ginkgo.It("keeps SigV4 S3 access working after minting a bearer token", func() {
+			runIcebergOAuthPostMintTokenSigV4StillWorks(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
@@ -62,7 +75,7 @@ func runIcebergOAuthCases(t *testing.T, tgt *icebergTarget) {
 // covered separately by Task 71 (Phase 0 magical-moment quickstart) which
 // boots a fresh iam.anon-enabled=true fixture; this case does not duplicate
 // that scope.
-func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t *testing.T, tgt *icebergTarget) {
+func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	bucket := tgt.uniqueWarehouse(t, "sigv4-nobearer")
 	key := "sigv4/hello.txt"
@@ -80,7 +93,7 @@ func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t *testing.T, tgt *iceb
 		Key:    aws.String(key),
 	})
 	require.NoError(t, err, "SigV4 GetObject must succeed without minting a bearer")
-	defer out.Body.Close()
+	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
 	require.NoError(t, err)
 	require.Equal(t, body, got)
@@ -89,7 +102,7 @@ func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t *testing.T, tgt *iceb
 // runIcebergOAuthMintTokenHappyPath mints a bearer for a fresh SA with
 // readwrite policy attached, scoped to PRINCIPAL_ROLE:<warehouse>. The
 // returned JWT must be a 3-segment compact-serialization HS256 token.
-func runIcebergOAuthMintTokenHappyPath(t *testing.T, tgt *icebergTarget) {
+func runIcebergOAuthMintTokenHappyPath(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	warehouse := tgt.uniqueWarehouse(t, "minttok")
 	saID, ak, sk := tgt.adminCreateSA(t, "minttok")
@@ -105,7 +118,7 @@ func runIcebergOAuthMintTokenHappyPath(t *testing.T, tgt *icebergTarget) {
 // runIcebergOAuthMintTokenWrongSecret401 asserts that supplying the wrong
 // client_secret returns 401 with no JWT. Constant-time compare lives in the
 // server (§4 F8); this test validates the surface contract.
-func runIcebergOAuthMintTokenWrongSecret401(t *testing.T, tgt *icebergTarget) {
+func runIcebergOAuthMintTokenWrongSecret401(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	warehouse := tgt.uniqueWarehouse(t, "wrongsec")
 	saID, ak, _ := tgt.adminCreateSA(t, "wrongsec")
@@ -121,7 +134,7 @@ func runIcebergOAuthMintTokenWrongSecret401(t *testing.T, tgt *icebergTarget) {
 // (S3 side is SigV4 throughout — the bearer is iceberg-side only). The
 // bearer is intentionally never sent; the test value is proving that the
 // act of minting does not break the SigV4 path.
-func runIcebergOAuthPostMintTokenSigV4StillWorks(t *testing.T, tgt *icebergTarget) {
+func runIcebergOAuthPostMintTokenSigV4StillWorks(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	warehouse := tgt.uniqueWarehouse(t, "bearer-s3")
 	saID, ak, sk := tgt.adminCreateSA(t, "bearer-s3")
@@ -147,7 +160,7 @@ func runIcebergOAuthPostMintTokenSigV4StillWorks(t *testing.T, tgt *icebergTarge
 		Key:    aws.String(key),
 	})
 	require.NoError(t, err, "post-mint SigV4 GetObject must succeed")
-	defer out.Body.Close()
+	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
 	require.NoError(t, err)
 	require.Equal(t, body, got)

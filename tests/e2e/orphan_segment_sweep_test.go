@@ -10,25 +10,19 @@ import (
 	"testing"
 	"time"
 
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestOrphanSegmentSweepE2E exercises the cluster scrubber's orphan-segment
-// sweep path. Single-node uses the standard scrubber and references the
-// shared single fixture for shape consistency; the real cluster walker
-// dispatch is exercised on the Cluster4Node branch.
-func TestOrphanSegmentSweepE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		_ = newSingleNodeS3Target()
-		// Single-node scrubber is exercised by TestVolumeScrubE2E; this entry
-		// is the dual-fixture mirror for the cluster orphan walker.
+var _ = ginkgo.Describe("Orphan segment sweep", func() {
+	ginkgo.Context("Cluster4Node", func() {
+		ginkgo.It("deletes old orphan segments and increments metrics", func() {
+			runOrphanSegmentSweepCases(ginkgo.GinkgoTB())
+		})
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runOrphanSegmentSweepCases(t)
-	})
-}
+})
 
-func runOrphanSegmentSweepCases(t *testing.T) {
+func runOrphanSegmentSweepCases(t testing.TB) {
 	t.Helper()
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:         4,
@@ -77,7 +71,7 @@ func runOrphanSegmentSweepCases(t *testing.T) {
 			continue
 		}
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			continue
 		}

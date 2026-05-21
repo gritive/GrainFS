@@ -22,42 +22,67 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func runAppendObject(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		tgt := newSingleNodeS3Target()
-		runCommonAppendCases(t, tgt)
+var _ = ginkgo.Describe("Append objects", func() {
+	runAppendObjectSpecs()
+	runAppendCoalesceSpecs()
+	runAppendMidSizeBodySpecs()
+	runAppendForwardBufferSaturationSpecs()
+	runAppendSizeCapSpecs()
+})
+
+func runAppendObjectSpecs() {
+	ginkgo.Context("AppendObject SingleNode", func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = newSingleNodeS3Target()
+		})
+
+		runCommonAppendCases(func() s3Target { return tgt })
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		// Dedicated (non-shared) — runClusterOnlyAppendCases contains
-		// OwnerKillSurvives which kills + restarts a node; running that on
-		// the shared fixture would temporarily degrade subsequent tests
-		// reading from sharedCluster. Split off once that case is moved
-		// to its own file.
-		tgt := newClusterS3Target(t, 4)
-		runCommonAppendCases(t, tgt)
-		runClusterOnlyAppendCases(t, tgt)
+	ginkgo.Context("AppendObject Cluster4Node", func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			// Dedicated (non-shared) — runClusterOnlyAppendCases contains
+			// OwnerKillSurvives which kills + restarts a node; running that on
+			// the shared fixture would temporarily degrade subsequent tests
+			// reading from sharedCluster. Split off once that case is moved
+			// to its own file.
+			tgt = newClusterS3Target(ginkgo.GinkgoTB(), 4)
+		})
+
+		runCommonAppendCases(func() s3Target { return tgt })
+		runClusterOnlyAppendCases(func() s3Target { return tgt })
 	})
 }
 
 // ----- cases (common) -----
 
-func runCommonAppendCases(t *testing.T, tgt s3Target) {
-	bucket := "append-" + tgt.name
-	tgt.createBkt(t, bucket)
-	client := tgt.pickNode(0)
+func appendFixture(getTgt func() s3Target, bucketPrefix string) (testing.TB, s3Target, string, *s3.Client) {
+	t := ginkgo.GinkgoTB()
+	tgt := getTgt()
+	bucket := tgt.uniqueBucket(t, bucketPrefix+"bucket")
+	return t, tgt, bucket, tgt.pickNode(0)
+}
 
-	t.Run("InitialAppend", func(t *testing.T) {
+func runCommonAppendCases(getTgt func() s3Target) {
+	ginkgo.It("performs an initial append", func() {
+		t, _, bucket, client := appendFixture(getTgt, "append-")
+
 		key := "obj-init"
 		require.NoError(t, putAppend(client, bucket, key, 0, []byte("hello")))
 		require.Equal(t, []byte("hello"), getObject(t, client, bucket, key))
 	})
 
-	t.Run("SequentialAppends", func(t *testing.T) {
+	ginkgo.It("performs sequential appends", func() {
+		t, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-seq"
 		require.NoError(t, putAppend(client, bucket, key, 0, []byte("foo")))
 		require.NoError(t, putAppend(client, bucket, key, 3, []byte("bar")))
@@ -65,7 +90,8 @@ func runCommonAppendCases(t *testing.T, tgt s3Target) {
 		require.Equal(t, []byte("foobarbaz"), getObject(t, client, bucket, key))
 	})
 
-	t.Run("OffsetMismatch", func(t *testing.T) {
+	ginkgo.It("rejects an offset mismatch", func() {
+		t, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-mismatch"
 		require.NoError(t, putAppend(client, bucket, key, 0, []byte("aaa")))
 		err := putAppend(client, bucket, key, 99, []byte("bbb"))
@@ -75,7 +101,8 @@ func runCommonAppendCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, "InvalidWriteOffset", apiErr.ErrorCode())
 	})
 
-	t.Run("PlainPutOverwritesAppendable", func(t *testing.T) {
+	ginkgo.It("lets a plain PUT overwrite an appendable object", func() {
+		t, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-overwrite"
 		require.NoError(t, putAppend(client, bucket, key, 0, []byte("aaaa")))
 		// Plain PUT (no x-amz-write-offset-bytes header) overwrites the
@@ -89,7 +116,8 @@ func runCommonAppendCases(t *testing.T, tgt s3Target) {
 		require.Equal(t, []byte("xx"), getObject(t, client, bucket, key))
 	})
 
-	t.Run("AppendToExistingPlainPutAtCurrentOffset", func(t *testing.T) {
+	ginkgo.It("appends to an existing plain PUT at the current offset", func() {
+		t, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-plain-then-append"
 		_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
@@ -128,12 +156,10 @@ func findOwnerForSingleGroup(c *e2eCluster) int {
 
 // ----- cases (cluster-only) -----
 
-func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
-	require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
-	bucket := "append-" + tgt.name + "-cluster"
-	tgt.createBkt(t, bucket)
-
-	t.Run("ConcurrentAppendsFromDifferentNodes", func(t *testing.T) {
+func runClusterOnlyAppendCases(getTgt func() s3Target) {
+	ginkgo.It("serializes concurrent appends from different nodes", func() {
+		t, tgt, bucket, _ := appendFixture(getTgt, "append-")
+		require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
 		// All N goroutines race for offset 0 from different nodes. Exactly
 		// one must win; the rest must surface InvalidWriteOffset. This
 		// exercises the cluster forwarding + raft-serialized offset check.
@@ -164,7 +190,9 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, int64(tgt.nodes-1), atomic.LoadInt64(&mismatches), "all losers must surface InvalidWriteOffset")
 	})
 
-	t.Run("AppendsFromDifferentNodesForwardToOwner", func(t *testing.T) {
+	ginkgo.It("forwards appends from different nodes to the owner", func() {
+		t, tgt, bucket, _ := appendFixture(getTgt, "append-")
+		require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
 		// Serial appends, each issued against a different node. The
 		// distributed backend must forward to the owner so the final
 		// object reflects every chunk in order. This validates the
@@ -179,13 +207,20 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 			offset += int64(len(chunk))
 		}
 		// Read back from any node — every replica must converge.
-		for i := 0; i < tgt.nodes; i++ {
-			body := getObject(t, tgt.pickNode(i), bucket, key)
-			assert.Equal(t, []byte("alphabetagammadelta"), body, "node %d view", i)
-		}
+		require.Eventually(t, func() bool {
+			for i := 0; i < tgt.nodes; i++ {
+				body := getObject(t, tgt.pickNode(i), bucket, key)
+				if !bytes.Equal([]byte("alphabetagammadelta"), body) {
+					return false
+				}
+			}
+			return true
+		}, 10*time.Second, 200*time.Millisecond)
 	})
 
-	t.Run("StatThenAppendAcrossNodesIsLinearizable", func(t *testing.T) {
+	ginkgo.It("keeps stat then append linearizable across nodes", func() {
+		t, tgt, bucket, _ := appendFixture(getTgt, "append-")
+		require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
 		key := "obj-stat-append-roundrobin"
 		chunk := []byte("0123456789abcdef")
 		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, chunk))
@@ -254,7 +289,8 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, int64(64*len(chunk)), *head.ContentLength)
 	})
 
-	t.Run("OwnerKillSurvives", func(t *testing.T) {
+	ginkgo.It("survives owner kill after coalesce", func() {
+		t, tgt, _, _ := appendFixture(getTgt, "append-")
 		require.True(t, tgt.isCluster)
 		c := tgt.cluster
 		require.NotNil(t, c)
@@ -337,7 +373,7 @@ func putAppend(client *s3.Client, bucket, key string, offset int64, body []byte)
 	return err
 }
 
-func getObject(t *testing.T, client *s3.Client, bucket, key string) []byte {
+func getObject(t testing.TB, client *s3.Client, bucket, key string) []byte {
 	t.Helper()
 	resp, err := client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -348,13 +384,4 @@ func getObject(t *testing.T, client *s3.Client, bucket, key string) []byte {
 	data, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return data
-}
-
-// TestAppendObjectsE2E groups all S3 AppendObject scenarios under one entry.
-func TestAppendObjectsE2E(t *testing.T) {
-	t.Run("AppendObject", runAppendObject)
-	t.Run("Coalesce", runAppendCoalesce)
-	t.Run("MidSizeBody", runAppendMidSizeBody)
-	t.Run("ForwardBufferSaturation", runAppendForwardBufferSaturation)
-	t.Run("SizeCap", runAppendSizeCap)
 }

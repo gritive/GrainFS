@@ -28,7 +28,7 @@ import (
 //	"Admin" → s3:* on arn:aws:s3:::bucket-X[/*]
 //
 // bucket="*" uses Resource:"*" (wildcard across all buckets).
-func attachAdminPolicyOnBucket(t *testing.T, tgt iamAdminTarget, saID, bucket, role string) {
+func attachAdminPolicyOnBucket(t testing.TB, tgt iamAdminTarget, saID, bucket, role string) {
 	t.Helper()
 	actions := policyActionsForRole(t, role)
 
@@ -66,7 +66,7 @@ func attachAdminPolicyOnBucket(t *testing.T, tgt iamAdminTarget, saID, bucket, r
 
 // policyActionsForRole returns the IAM action list for the given role name.
 // Action lists are derived from internal/iam/builtin/policies.go equivalents.
-func policyActionsForRole(t *testing.T, role string) []string {
+func policyActionsForRole(t testing.TB, role string) []string {
 	t.Helper()
 	switch role {
 	case "Read":

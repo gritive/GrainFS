@@ -1278,6 +1278,26 @@ func TestClusterCoordinator_RouteReadFallbackClearsMissingIndexError(t *testing.
 	require.Equal(t, "g1", target.GroupID)
 }
 
+func TestClusterCoordinator_HeadObject_MissingIndexedObjectReturnsNotFound(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"self"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &emptyObjectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self"}},
+		}},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithECConfig(ECConfig{DataShards: 1})
+
+	_, err := c.HeadObject(context.Background(), "bk", "missing.txt")
+
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")

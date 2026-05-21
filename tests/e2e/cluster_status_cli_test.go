@@ -3,8 +3,8 @@ package e2e
 import (
 	"encoding/json"
 	"os/exec"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,25 +16,38 @@ import (
 //
 // The cluster CLI uses the admin Unix socket (mode 0660 + admin-group)
 // since v0.0.89; HTTP /api/cluster/status remains for the dashboard.
-func runClusterAdminCLIStatus(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runClusterStatusCLICases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runClusterStatusCLICases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Cluster admin CLI status", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runClusterStatusCLICases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	binary := getBinary()
-	sock := tgt.adminSockPath()
-	expectedPeers := 0
-	if tgt.isCluster {
-		expectedPeers = tgt.nodes - 1
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
+
+			runClusterStatusCLICases(func() s3Target { return tgt })
+		})
 	}
+})
 
-	t.Run("JSON", func(t *testing.T) {
+func runClusterStatusCLICases(getTgt func() s3Target) {
+	ginkgo.It("renders JSON", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		binary := getBinary()
+		sock := tgt.adminSockPath()
+		expectedPeers := 0
+		if tgt.isCluster {
+			expectedPeers = tgt.nodes - 1
+		}
+
 		out, err := exec.Command(binary, "cluster",
 			"--endpoint", sock,
 			"status", "--format", "json",
@@ -49,7 +62,12 @@ func runClusterStatusCLICases(t *testing.T, tgt s3Target) {
 		assert.Len(t, peers, expectedPeers, "peer count must match deployment shape")
 	})
 
-	t.Run("HumanReadable", func(t *testing.T) {
+	ginkgo.It("renders text", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		binary := getBinary()
+		sock := tgt.adminSockPath()
+
 		out, err := exec.Command(binary, "cluster",
 			"--endpoint", sock,
 			"status", "--format", "text",
@@ -60,11 +78,4 @@ func runClusterStatusCLICases(t *testing.T, tgt s3Target) {
 		assert.Contains(t, output, "mode", "human-readable output must include mode")
 		assert.Contains(t, output, "cluster", "unified path shows cluster mode")
 	})
-}
-
-// TestClusterAdminCLIE2E groups cluster admin CLI status checks.
-func TestClusterAdminCLIE2E(t *testing.T) {
-	t.Run("Status", runClusterAdminCLIStatus)
-	t.Run("Health", runClusterAdminCLIHealth)
-	t.Run("BalancerStatus", runClusterAdminCLIBalancerStatus)
 }

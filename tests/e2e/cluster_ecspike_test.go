@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster/ecspike"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,11 +38,11 @@ func (n *ecspikeNode) kill() {
 // startEcspikeCluster spawns 6 independent grainfs serve processes in local mode
 // on loopback. Returns the node list and a cleanup func. Uses existing test
 // harness helpers (freePort, waitForPort, newS3Client).
-func startEcspikeCluster(t *testing.T) ([]*ecspikeNode, func()) {
+func startEcspikeCluster(t testing.TB) ([]*ecspikeNode, func()) {
 	return startEcspikeClusterOpts(t)
 }
 
-func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
+func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 	t.Helper()
 	binary := getBinary()
 
@@ -89,10 +90,11 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			cmd:      cmd,
 			logFile:  logFile,
 		}
-		t.Cleanup(func() {
+		nodeIndex := i
+		ginkgo.DeferCleanup(func() {
 			_ = logFile.Close()
 			if keepE2EArtifacts() {
-				t.Logf("ECSpike node %d stderr saved to %s", i, logFile.Name())
+				t.Logf("ECSpike node %d stderr saved to %s", nodeIndex, logFile.Name())
 			}
 		})
 		if err := cmd.Start(); err != nil {
@@ -110,7 +112,7 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 	return nodes, cleanup
 }
 
-func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.Config, nodes []*ecspikeNode, clients map[string]*s3.Client) {
+func requireECSpikeBucketsReady(t testing.TB, ctx context.Context, cfg *ecspike.Config, nodes []*ecspikeNode, clients map[string]*s3.Client) {
 	t.Helper()
 
 	const readinessKey = "__grainfs_e2e_ready"
@@ -133,19 +135,15 @@ func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.
 	}
 }
 
-// TestECSpike_KillOneNodeStillReadable is the single Stage 2 go/no-go E2E test.
-//
-// Goal: prove that a 4+2 Reed-Solomon cluster survives a single-node failure
-// and returns identical bytes after reconstruction, plus measure client-side
-// p95 latency for 16MB PUT to drive the go/no-go decision.
-func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("EC spike cluster", func() {
+	ginkgo.It("survives one killed node and remains readable", func() {
+		t := ginkgo.GinkgoTB()
 
 		nodes, cleanup := startEcspikeCluster(t)
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 
 		// Prepare config using the package's S3 helper for each node.
 		endpoints := make([]string, len(nodes))
@@ -208,17 +206,17 @@ func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
 		// cluster for honest baseline.
 		measureECSpikeP95(t)
 	})
-}
+})
 
 // measureECSpikeP95 spawns a fresh 6-node cluster, does 100 × 16MB PUTs, and
 // reports p50/p95/p99. Separate cluster so kills don't skew timing.
-func measureECSpikeP95(t *testing.T) {
+func measureECSpikeP95(t testing.TB) {
 	t.Helper()
 	nodes, cleanup := startEcspikeCluster(t)
-	defer cleanup()
+	ginkgo.DeferCleanup(cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	ginkgo.DeferCleanup(cancel)
 
 	endpoints := make([]string, len(nodes))
 	for i, n := range nodes {

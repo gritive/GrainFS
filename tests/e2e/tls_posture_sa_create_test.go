@@ -25,28 +25,47 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestTLSPostureSACreateE2E proves that the admin UDS rejects the first SA
-// create when the node-local TLS posture would refuse the implied anon flip,
-// and accepts it once one of the three remediation knobs is in place.
-func TestTLSPostureSACreateE2E(t *testing.T) {
-	// Neutralize any host-level GRAINFS_TLS_CERT/KEY that would silently relax
-	// the "no cert" precondition by pointing at an unrelated file.
-	t.Setenv("GRAINFS_TLS_CERT", "")
-	t.Setenv("GRAINFS_TLS_KEY", "")
-
-	t.Run("SingleNode", func(t *testing.T) {
-		runTLSPostureSACreateCases(t, "single", newPhase0SingleNodeTarget)
+// TLS posture SA create proves that the admin UDS rejects the first SA create
+// when the node-local TLS posture would refuse the implied anon flip, and
+// accepts it once one of the three remediation knobs is in place.
+var _ = ginkgo.Describe("TLS posture SA create", func() {
+	ginkgo.BeforeEach(func() {
+		// Neutralize any host-level GRAINFS_TLS_CERT/KEY that would silently
+		// relax the "no cert" precondition by pointing at an unrelated file.
+		setEnvForSpec("GRAINFS_TLS_CERT", "")
+		setEnvForSpec("GRAINFS_TLS_KEY", "")
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runTLSPostureSACreateCases(t, "cluster3", newPhase0ClusterTarget)
+
+	describeTLSPostureSACreateContext("SingleNode", "single", newPhase0SingleNodeTarget)
+	describeTLSPostureSACreateContext("Cluster3Node", "cluster3", newPhase0ClusterTarget)
+})
+
+func setEnvForSpec(key, value string) {
+	t := ginkgo.GinkgoTB()
+	old, ok := os.LookupEnv(key)
+	require.NoError(t, os.Setenv(key, value))
+	ginkgo.DeferCleanup(func() {
+		if ok {
+			require.NoError(t, os.Setenv(key, old))
+			return
+		}
+		require.NoError(t, os.Unsetenv(key))
 	})
 }
 
-func runTLSPostureSACreateCases(t *testing.T, tgtName string, newFixture func(*testing.T) *phase0Target) {
-	t.Run("FirstSA_NoCert_NoProxy_Rejected", func(t *testing.T) {
+func describeTLSPostureSACreateContext(name, tgtName string, factory func(testing.TB) *phase0Target) {
+	ginkgo.Context(name, func() {
+		runTLSPostureSACreateCases(tgtName, factory)
+	})
+}
+
+func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *phase0Target) {
+	ginkgo.It("rejects the first SA create without cert or trusted proxy", func() {
+		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "admin")
@@ -66,7 +85,8 @@ func runTLSPostureSACreateCases(t *testing.T, tgtName string, newFixture func(*t
 		return
 	}
 
-	t.Run("FirstSA_WithCert_Succeeds", func(t *testing.T) {
+	ginkgo.It("accepts the first SA create when a TLS cert exists", func() {
+		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
 		// Drop a self-signed cert at the default TLS path. The posture gate
 		// only needs the file to exist (it doesn't read or validate the cert
@@ -82,7 +102,8 @@ func runTLSPostureSACreateCases(t *testing.T, tgtName string, newFixture func(*t
 			"SA create with cert on disk must succeed; body=%s", body)
 	})
 
-	t.Run("FirstSA_WithTrustedProxy_Succeeds", func(t *testing.T) {
+	ginkgo.It("accepts the first SA create when trusted-proxy.cidr is set", func() {
+		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
@@ -91,7 +112,8 @@ func runTLSPostureSACreateCases(t *testing.T, tgtName string, newFixture func(*t
 			"SA create with trusted-proxy.cidr set must succeed; body=%s", body)
 	})
 
-	t.Run("SecondSA_BadPosture_NotBlocked", func(t *testing.T) {
+	ginkgo.It("does not block a second SA create after posture becomes unsafe", func() {
+		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
 		// Use the trusted-proxy.cidr knob to let the first SA through.
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
@@ -118,7 +140,7 @@ func runTLSPostureSACreateCases(t *testing.T, tgtName string, newFixture func(*t
 // postIAMSARaw POSTs /v1/iam/sa over the admin UDS and returns (status, body).
 // Unlike iamCreateSA / iamDo it does NOT fatal on non-2xx — the test inspects
 // the status explicitly.
-func postIAMSARaw(t *testing.T, sock, name string) (int, string) {
+func postIAMSARaw(t testing.TB, sock, name string) (int, string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"name": name})
 	require.NoError(t, err)
@@ -135,7 +157,7 @@ func postIAMSARaw(t *testing.T, sock, name string) (int, string) {
 
 // dataDirFor extracts the dataDir from an admin.sock path. The admin socket
 // lives at <dataDir>/admin.sock so the parent dir IS the dataDir.
-func dataDirFor(t *testing.T, sock string) string {
+func dataDirFor(t testing.TB, sock string) string {
 	t.Helper()
 	return filepath.Dir(sock)
 }
@@ -150,7 +172,7 @@ func ensureDir(dir string) error {
 }
 
 // unsetTrustedProxy clears trusted-proxy.cidr via admin UDS DELETE.
-func unsetTrustedProxy(t *testing.T, sock string) {
+func unsetTrustedProxy(t testing.TB, sock string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodDelete, "http://unix/v1/config/trusted-proxy.cidr", nil)
@@ -164,7 +186,7 @@ func unsetTrustedProxy(t *testing.T, sock string) {
 }
 
 // getTrustedProxy reads trusted-proxy.cidr and returns its raw string value.
-func getTrustedProxy(t *testing.T, sock string) string {
+func getTrustedProxy(t testing.TB, sock string) string {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodGet, "http://unix/v1/config/trusted-proxy.cidr", nil)

@@ -12,12 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-// TestIcebergConcurrentCommitsE2E proves the iceberg REST catalog tolerates
+// Iceberg concurrent commits proves the iceberg REST catalog tolerates
 // concurrent CommitTable from multiple workers without returning 503.
 //
 // Cluster4Node reproduces (smaller, deterministic) the catalog-commits
@@ -35,17 +36,25 @@ import (
 // optimistic-concurrency lock and 409/200 split on the same surface
 // contract, so a 409-vs-200 split regression surfaces on both targets
 // rather than only under cluster load.
-func TestIcebergConcurrentCommitsE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIcebergConcurrentCommitCase(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Iceberg concurrent commits", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("tolerates concurrent table commits", func() {
+			runIcebergConcurrentCommitCase(ginkgo.GinkgoTB(), newSingleNodeS3Target())
+		})
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runIcebergConcurrentCommitCase(t, newSharedClusterS3Target(t))
+	ginkgo.Context("Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		ginkgo.It("tolerates concurrent table commits", func() {
+			runIcebergConcurrentCommitCase(ginkgo.GinkgoTB(), tgt)
+		})
 	})
-}
+})
 
-func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
+func runIcebergConcurrentCommitCase(t testing.TB, tgt s3Target) {
 	t.Helper()
 
 	// Build the URL fan-out from the target. Single-node has 1 endpoint,
@@ -193,7 +202,7 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 	// Cleanup: drop tables + namespace. Best-effort; do not fail the test
 	// on cleanup errors because the assertion above is the gate.
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cleanupCancel()
+	ginkgo.DeferCleanup(cleanupCancel)
 	for i := 0; i < numTables; i++ {
 		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodDelete,
 			fmt.Sprintf("%s/v1/namespaces/%s/tables/t%d", leaderBase, nsName, i), nil)
@@ -214,7 +223,7 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 // On non-2xx, the body is read and logged at t.Helper level for diagnosis.
 // The iceberg catalog routes require SigV4 auth post-#427, so callers must
 // thread the fixture's access/secret pair through.
-func postIcebergCommit(t *testing.T, url, body, accessKey, secretKey string) int {
+func postIcebergCommit(t testing.TB, url, body, accessKey, secretKey string) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
@@ -241,7 +250,7 @@ func postIcebergCommit(t *testing.T, url, body, accessKey, secretKey string) int
 // postIcebergJSONHelper posts a JSON body to url and requires the status.
 // Mirrors the in-package postIcebergJSON helper from internal/server/iceberg_api_test.go
 // but lives here because tests/e2e cannot import the server package's test helpers.
-func postIcebergJSONHelper(t *testing.T, url, body, accessKey, secretKey string, wantStatus int) {
+func postIcebergJSONHelper(t testing.TB, url, body, accessKey, secretKey string, wantStatus int) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body)))
 	require.NoError(t, err)

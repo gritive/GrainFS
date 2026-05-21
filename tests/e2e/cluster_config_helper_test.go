@@ -43,7 +43,7 @@ func adminUDSClient(dataDir string) *http.Client {
 // SetClusterConfig PATCHes /v1/cluster/config on the given node's admin UDS
 // and returns the post-apply rev. Body is a map of kebab-case keys (plus the
 // optional "reset_keys"). Duration-typed keys take a string ("5s", "100ms").
-func SetClusterConfig(t *testing.T, dataDir string, body map[string]any) uint64 {
+func SetClusterConfig(t testing.TB, dataDir string, body map[string]any) uint64 {
 	t.Helper()
 	buf, err := json.Marshal(body)
 	require.NoError(t, err)
@@ -102,7 +102,7 @@ func patchSnapshotIntervalM(dataDir string, dur string) error {
 // GetClusterConfig GETs /v1/cluster/config on the given node's admin UDS and
 // returns the parsed response. Used by hot-reload tests to verify followers
 // observe a leader-applied change.
-func GetClusterConfig(t *testing.T, dataDir string) clusterConfigGetResponse {
+func GetClusterConfig(t testing.TB, dataDir string) clusterConfigGetResponse {
 	t.Helper()
 	resp, err := adminUDSClient(dataDir).Get("http://unix/v1/cluster/config")
 	require.NoError(t, err)

@@ -14,39 +14,38 @@ import (
 	"context"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const multipartPartSize = 5 * 1024 * 1024 // 5 MiB — warp's minimum part.size
 
-func runMultipartGetPartNumber(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runMultipartGetPartNumberCases(t, newSingleNodeS3Target())
+func runMultipartGetPartNumberSpecs() {
+	ginkgo.Context("GetPartNumber SingleNode", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSingleNodeS3Target()
+		})
+		runMultipartGetPartNumberCases(func() s3Target { return tgt })
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runMultipartGetPartNumberCases(t, newSharedClusterS3Target(t))
+	ginkgo.Context("GetPartNumber Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		runMultipartGetPartNumberCases(func() s3Target { return tgt })
 	})
 }
 
-func runMultipartGetPartNumberCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-
-	if tgt.isCluster {
-		probe := tgt.name + "-mp-pn-probe"
-		tgt.createBkt(t, probe)
-		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
-		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
-	}
-
-	t.Run("TwoEqualParts5MiB", func(t *testing.T) {
+func runMultipartGetPartNumberCases(getTgt func() s3Target) {
+	ginkgo.It("serves full and numbered GETs for two equal 5MiB parts", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-pn-probe")
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "mp-pn-two")
 		key := "warp-multipart.bin"
@@ -94,44 +93,35 @@ func runMultipartGetPartNumberCases(t *testing.T, tgt s3Target) {
 		require.NoError(t, err)
 
 		// Full GET — must return concatenated plaintext, no encryption overhead leaked.
-		t.Run("FullGet", func(t *testing.T) {
-			out, err := client.GetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String(bucket),
-				Key:    aws.String(key),
-			})
-			require.NoError(t, err)
-			defer out.Body.Close()
-			body, err := io.ReadAll(out.Body)
-			require.NoError(t, err)
-			expected := append(append([]byte{}, part1...), part2...)
-			assert.Equal(t, int64(len(expected)), aws.ToInt64(out.ContentLength), "Content-Length header")
-			assert.Equal(t, len(expected), len(body), "body byte length")
-			if len(body) == len(expected) {
-				assert.Equal(t, expected[:32], body[:32], "first 32 bytes")
-				assert.Equal(t, expected[len(expected)-32:], body[len(body)-32:], "last 32 bytes")
-			}
+		out, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
 		})
+		require.NoError(t, err)
+		defer out.Body.Close()
+		body, err := io.ReadAll(out.Body)
+		require.NoError(t, err)
+		expected := append(append([]byte{}, part1...), part2...)
+		assert.Equal(t, int64(len(expected)), aws.ToInt64(out.ContentLength), "Content-Length header")
+		assert.Equal(t, len(expected), len(body), "body byte length")
+		if len(body) == len(expected) {
+			assert.Equal(t, expected[:32], body[:32], "first 32 bytes")
+			assert.Equal(t, expected[len(expected)-32:], body[len(body)-32:], "last 32 bytes")
+		}
 
-		t.Run("PartNumber1", func(t *testing.T) {
-			assertPart(t, client, ctx, bucket, key, 1, part1, 2)
-		})
+		assertPart(t, client, ctx, bucket, key, 1, part1, 2)
+		assertPart(t, client, ctx, bucket, key, 2, part2, 2)
 
-		t.Run("PartNumber2", func(t *testing.T) {
-			assertPart(t, client, ctx, bucket, key, 2, part2, 2)
+		_, err = client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket:     aws.String(bucket),
+			Key:        aws.String(key),
+			PartNumber: aws.Int32(3),
 		})
-
-		t.Run("PartNumber3_NotSatisfiable", func(t *testing.T) {
-			_, err := client.GetObject(ctx, &s3.GetObjectInput{
-				Bucket:     aws.String(bucket),
-				Key:        aws.String(key),
-				PartNumber: aws.Int32(3),
-			})
-			require.Error(t, err, "partNumber > parts count must error")
-		})
+		require.Error(t, err, "partNumber > parts count must error")
 	})
 }
 
-func assertPart(t *testing.T, client *s3.Client, ctx context.Context, bucket, key string, partN int32, expected []byte, totalParts int32) {
+func assertPart(t testing.TB, client *s3.Client, ctx context.Context, bucket, key string, partN int32, expected []byte, totalParts int32) {
 	t.Helper()
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket:     aws.String(bucket),

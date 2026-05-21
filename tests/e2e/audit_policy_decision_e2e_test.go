@@ -21,13 +21,14 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestAuditPolicyDecisionE2E asserts that the policy decision columns added in
+// Audit policy decision specs assert that the policy decision columns added in
 // §6 T48' (matched_policy_id, matched_sid, authz_latency_us,
-// condition_context_json) are populated for committed audit rows. Two
-// scenarios are exercised per the standard SingleNode/Cluster4Node duality:
+// condition_context_json) are populated for committed audit rows. The standard
+// SingleNode/Cluster3Node duality is exercised for:
 //
 //   - Allow: admin SA PUT/GET on a normal bucket — authz_latency_us must be
 //     non-NULL.
@@ -39,28 +40,40 @@ import (
 //
 // Cluster mode reuses the same case helper to satisfy the parity rule for
 // user-facing audit columns.
-func TestAuditPolicyDecisionE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		const commitInterval = 8 * time.Second
-		tgt := newSingleNodeIcebergTargetWithAudit(t, commitInterval)
-		runAuditPolicyDecisionCases(t, tgt, commitInterval)
+var _ = ginkgo.Describe("Audit policy decisions", func() {
+	const commitInterval = 8 * time.Second
+
+	describeAuditPolicyDecisionContext("SingleNode", func(t testing.TB) *icebergTarget {
+		return newSingleNodeIcebergTargetWithAudit(t, commitInterval)
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		const commitInterval = 8 * time.Second
-		tgt := newSharedClusterIcebergTargetWithAudit(t, commitInterval)
-		runAuditPolicyDecisionCases(t, tgt, commitInterval)
+
+	describeAuditPolicyDecisionContext("Cluster3Node", func(t testing.TB) *icebergTarget {
+		return newSharedClusterIcebergTargetWithAudit(t, commitInterval)
+	})
+})
+
+func describeAuditPolicyDecisionContext(name string, factory func(testing.TB) *icebergTarget) {
+	ginkgo.Context(name, func() {
+		var tgt *icebergTarget
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runAuditPolicyDecisionCases(func() *icebergTarget { return tgt })
 	})
 }
 
-// runAuditPolicyDecisionCases drives the shared subtests against a target.
-func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterval time.Duration) {
-	t.Run("AllowCarriesLatencyAndMatchedPolicy", func(t *testing.T) {
+func runAuditPolicyDecisionCases(getTgt func() *icebergTarget) {
+	ginkgo.It("commits allow rows with latency and matched policy", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		id := tgt.caseSeq.Add(1)
 		bucket := fmt.Sprintf("test-policydec-%s-%d", tgt.name, id)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		tgt.createBucketWithAdminPolicy(t, bucket)
-		t.Cleanup(func() {
+		ginkgo.DeferCleanup(func() {
 			_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
 				Bucket: aws.String(bucket),
 			})
@@ -87,33 +100,34 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
 			fmt.Sprintf("bucket = '%s' AND method = 'PUT'", bucket),
 			1, 30*time.Second)
-		t.Logf("policy_decision_allow_%s commit_interval=%s ok", tgt.name, commitInterval)
+		t.Logf("policy_decision_allow_%s ok", tgt.name)
 	})
 
-	t.Run("DenyCarriesAuthStatusDenyAndErrReason", func(t *testing.T) {
-		// An unsigned PUT against a non-default bucket hits the Layer 1 IAM
-		// grant deny path (anonymous, no policy match). The audit row must
-		// carry auth_status="deny" and a non-empty err_reason populated by
-		// the authz handler via auditErrReasonKey.
+	ginkgo.It("commits deny rows with auth status and error reason", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		// A signed PUT from a service account without grants hits the Layer 1
+		// IAM grant deny path. The audit row must carry auth_status="deny" and
+		// a non-empty err_reason populated by the authz handler via
+		// auditErrReasonKey.
 		id := tgt.caseSeq.Add(1)
 		bucket := fmt.Sprintf("test-policydec-deny-%s-%d", tgt.name, id)
 		tgt.createBucketWithAdminPolicy(t, bucket)
-		t.Cleanup(func() {
+		ginkgo.DeferCleanup(func() {
 			_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
 				Bucket: aws.String(bucket),
 			})
 		})
 
 		const key = "policy-deny-obj"
-		// Anonymous (unsigned) PUT — must be rejected by Layer 1.
-		anonPutEndpoint := tgt.endpoint(0) + "/" + bucket + "/" + key
-		req, err := http.NewRequest(http.MethodPut, anonPutEndpoint,
-			strings.NewReader("nope"))
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-		require.GreaterOrEqual(t, resp.StatusCode, 400, "unsigned PUT must be rejected")
+		_, ak, sk := tgt.adminCreateSA(t, "deny-no-grant")
+		denyClient := ecS3Client(tgt.endpoint(0), ak, sk)
+		_, err := denyClient.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("nope"),
+		})
+		require.Error(t, err, "signed PUT without grants must be rejected")
 
 		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
 			fmt.Sprintf("bucket = '%s' AND method = 'PUT'", bucket),
@@ -121,7 +135,9 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		t.Logf("policy_decision_deny_%s ok", tgt.name)
 	})
 
-	t.Run("AnonDefaultDenyIsAudited", func(t *testing.T) {
+	ginkgo.It("audits anonymous default-bucket denies", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		// Anonymous access to the default bucket is denied when IAM auth is
 		// active. The audit row must classify the request as deny.
 		const bucket = "default"
@@ -131,14 +147,14 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		// follows reads back; if GET 404s, audit still emits with the
 		// classified anon-allow status).
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		_, err := tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 			Body:   strings.NewReader("anon"),
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() {
+		ginkgo.DeferCleanup(func() {
 			_, _ = tgt.s3Client(0).DeleteObject(context.Background(), &s3.DeleteObjectInput{
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
@@ -153,7 +169,7 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		require.NoError(t, err)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
-		_ = resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		// The implicit anon Allow on /default returns 200; some configurations
 		// may return 404 if the read races with replication. Either way the
 		// audit row must classify as anon_allow because Layer 1 allowed.

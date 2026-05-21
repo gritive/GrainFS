@@ -131,7 +131,7 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 		c.dataDirs[i] = d
 	}
 
-	t.Cleanup(c.Stop)
+	ginkgo.DeferCleanup(c.Stop)
 	return c, nil
 }
 
@@ -215,7 +215,7 @@ func tryStartStaticMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) 
 //
 // If opts.MaxNodes > numNodes, port/slice arrays are pre-allocated to MaxNodes
 // so addNode can attach more nodes later without reallocating.
-func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+func tryStartMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	maxNodes := opts.MaxNodes
 	if maxNodes < numNodes {
@@ -302,7 +302,7 @@ func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCl
 
 // startMRCluster retries tryStartMRCluster up to 3 times with fresh ports on
 // transient port-allocation or election-timing failures.
-func startMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) *mrCluster {
+func startMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) *mrCluster {
 	t.Helper()
 	const maxAttempts = 3
 	var lastErr error
@@ -325,7 +325,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	raftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[i])
 	logFile, err := os.CreateTemp("", fmt.Sprintf("mrshard-node-%d-*.log", i))
 	require.NoError(t, err, "create multi-raft node log file")
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_ = logFile.Close()
 		if t.Failed() && keepE2EArtifacts() {
 			t.Logf("multi-raft node %d log saved to %s", i, logFile.Name())
@@ -402,7 +402,7 @@ func (c *mrCluster) GrantAdminOnBuckets(buckets ...string) {
 // it boots directly in join mode. Requires startMRCluster to have been called
 // with MaxNodes > current nodeCount. Blocks until the node is HTTP-ready, then
 // updates c.leaderIdx by probing the seed node's admin UDS.
-func (c *mrCluster) addNode(t *testing.T) {
+func (c *mrCluster) addNode(t testing.TB) {
 	t.Helper()
 	i := c.nodeCount
 	if i >= len(c.procs) {
@@ -469,7 +469,7 @@ func countGroupDirsAcrossNodes(c *mrCluster) map[string]int {
 
 // waitForShardGroupCount polls GET /v1/cluster/status via the admin UDS on
 // dataDir until at least minGroups shard groups are present or timeout.
-func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout time.Duration) {
+func waitForShardGroupCount(t testing.TB, dataDir string, minGroups int, timeout time.Duration) {
 	t.Helper()
 	sock := filepath.Join(dataDir, "admin.sock")
 	cli := clusteradmin.NewClient(sock)
@@ -489,53 +489,49 @@ func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout
 //   - All processes alive
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
 //   - Each group has the expected number of voters for the auto EC profile
-func TestMultiRaftShardingBootE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
-		c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
-			disableNFS4: true,
-			disableNBD:  true,
-		})
-
-		groupDirs := countGroupDirsAcrossNodes(c)
-
-		// The helper boots a seed node first, then joins the remaining nodes.
-		// Join handling does not rewrite already-created shard groups, so the seed
-		// groups only need to exist. Groups added after the cluster reaches five
-		// nodes must use the auto EC width from the cluster size at creation time.
-		for i := 1; i <= 7; i++ {
-			gid := fmt.Sprintf("group-%d", i)
-			require.NotZero(t, groupDirs[gid], "seed group %s must have at least one voter directory", gid)
-		}
-		for i := 8; i < 20; i++ {
-			gid := fmt.Sprintf("group-%d", i)
-			creationClusterSize := i/4 + 1
-			wantVoters := cluster.AutoECConfigForClusterSize(creationClusterSize).NumShards()
-			voterCount := groupDirs[gid]
-			require.Equal(t, wantVoters, voterCount,
-				"group %s expected %d voter dirs, got %d", gid, wantVoters, voterCount)
-		}
-		t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
+func runMultiRaftShardingBoot(t testing.TB) {
+	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
 	})
+
+	groupDirs := countGroupDirsAcrossNodes(c)
+
+	// The helper boots a seed node first, then joins the remaining nodes.
+	// Join handling does not rewrite already-created shard groups, so the seed
+	// groups only need to exist. Groups added after the cluster reaches five
+	// nodes must use the auto EC width from the cluster size at creation time.
+	for i := 1; i <= 7; i++ {
+		gid := fmt.Sprintf("group-%d", i)
+		require.NotZero(t, groupDirs[gid], "seed group %s must have at least one voter directory", gid)
+	}
+	for i := 8; i < 20; i++ {
+		gid := fmt.Sprintf("group-%d", i)
+		creationClusterSize := i/4 + 1
+		wantVoters := cluster.AutoECConfigForClusterSize(creationClusterSize).NumShards()
+		voterCount := groupDirs[gid]
+		require.Equal(t, wantVoters, voterCount,
+			"group %s expected %d voter dirs, got %d", gid, wantVoters, voterCount)
+	}
+	t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
 }
 
 // ----- TestMultiRaftShardingAllNodeServicesE2E ---------------------------
 // Every cluster process must expose its node-local services. S3 writes are
 // cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
 // listeners local to each process.
-func TestMultiRaftShardingAllNodeServicesE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
-		c := startStaticMRCluster(t, 3)
+func runMultiRaftShardingAllNodeServices(t testing.TB) {
+	c := startStaticMRCluster(t, 3)
 
-		waitForPortsParallel(t, c.httpPorts, 10*time.Second)
-		waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
-		waitForPortsParallel(t, c.nbdPorts, 45*time.Second)
+	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
+	waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
+	waitForPortsParallel(t, c.nbdPorts, 45*time.Second)
 
-		for i, endpoint := range c.httpURLs {
-			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
-			bucket := fmt.Sprintf("all-node-s3-%d", i)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, client)
-		}
-	})
+	for i, endpoint := range c.httpURLs {
+		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
+		bucket := fmt.Sprintf("all-node-s3-%d", i)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, client)
+	}
 }
 
 // ----- TestMultiRaftShardingBucketAssignmentE2E ---------------------------
@@ -547,200 +543,193 @@ func TestMultiRaftShardingAllNodeServicesE2E(t *testing.T) {
 //     ProposeBucketAssignment)
 //   - Subsequent CreateBucket on same name is idempotent (no error / 409)
 //   - Spread: 32 buckets all created without error
-var _ = ginkgo.Describe("Multi-Raft bucket assignment", ginkgo.Label("bucket"), func() {
-	ginkgo.It("records bucket-to-group hash assignment", func() {
-		t := ginkgo.GinkgoTB()
-		// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
-		// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
-		// the same forward path with try-each-peer reliability.
+func runMultiRaftShardingBucketAssignment(t testing.TB) {
+	// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
+	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
+	// the same forward path with try-each-peer reliability.
 
-		c := startStaticMRCluster(t, 3)
+	c := startStaticMRCluster(t, 3)
 
-		// Use the leader index discovered during cluster probe — single-shot per
-		// CreateBucket. Falls back to iterating if leader changes.
-		createBucket := func(name string) error {
-			return adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, name, 60*time.Second)
+	// Use the leader index discovered during cluster probe — single-shot per
+	// CreateBucket. Falls back to iterating if leader changes.
+	createBucket := func(name string) error {
+		return adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, name, 60*time.Second)
+	}
+
+	for i := 0; i < 32; i++ {
+		require.NoErrorf(t, createBucket(fmt.Sprintf("bkt-%d", i)), "CreateBucket bkt-%d", i)
+	}
+
+	// Idempotency: re-create 5 buckets, expect either nil or AlreadyOwnedByYou
+	for i := 0; i < 5; i++ {
+		err := createBucket(fmt.Sprintf("bkt-%d", i))
+		if err != nil {
+			require.Truef(t,
+				strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") ||
+					strings.Contains(err.Error(), "bucket already exists"),
+				"unexpected non-idempotent error on bkt-%d: %v", i, err)
 		}
-
-		for i := 0; i < 32; i++ {
-			require.NoErrorf(t, createBucket(fmt.Sprintf("bkt-%d", i)), "CreateBucket bkt-%d", i)
-		}
-
-		// Idempotency: re-create 5 buckets, expect either nil or AlreadyOwnedByYou
-		for i := 0; i < 5; i++ {
-			err := createBucket(fmt.Sprintf("bkt-%d", i))
-			if err != nil {
-				require.Truef(t,
-					strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") ||
-						strings.Contains(err.Error(), "bucket already exists"),
-					"unexpected non-idempotent error on bkt-%d: %v", i, err)
-			}
-		}
-		t.Logf("32 buckets created + 5 idempotent re-creates ok")
-	})
-})
+	}
+	t.Logf("32 buckets created + 5 idempotent re-creates ok")
+}
 
 // ----- TestMultiRaftShardingRestartRecoveryE2E ----------------------------
 // Boot, create buckets, SIGTERM all, restart with same dataDirs, verify
 // per-group dirs persist + bucket recreate (idempotent) succeeds.
-func TestMultiRaftShardingRestartRecoveryE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
-		// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
-		// leader-probe flakes.
+func runMultiRaftShardingRestartRecovery(t testing.TB) {
+	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
+	// leader-probe flakes.
 
-		c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-			disableNFS4: true,
-			disableNBD:  true,
-		}) // 3 procs, 2 groups keeps restart recovery focused and stable
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+	}) // 3 procs, 2 groups keeps restart recovery focused and stable
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ginkgo.DeferCleanup(cancel)
 
-		for i := 0; i < 1; i++ {
-			requireMRCreateBucketEventually(t, ctx, c, fmt.Sprintf("rb-%d", i))
-		}
+	for i := 0; i < 1; i++ {
+		requireMRCreateBucketEventually(t, ctx, c, fmt.Sprintf("rb-%d", i))
+	}
 
-		// Capture the group directory layout before restart.
-		beforeDirs := countGroupDirsAcrossNodes(c)
-		require.NotEmpty(t, beforeDirs, "expected group dirs before restart")
+	// Capture the group directory layout before restart.
+	beforeDirs := countGroupDirsAcrossNodes(c)
+	require.NotEmpty(t, beforeDirs, "expected group dirs before restart")
 
-		// SIGTERM all and wait for clean exit.
-		for _, p := range c.procs {
-			_ = p.Process.Signal(syscall.SIGTERM)
-		}
-		for _, p := range c.procs {
-			_ = p.Wait()
-		}
+	// SIGTERM all and wait for clean exit.
+	for _, p := range c.procs {
+		_ = p.Process.Signal(syscall.SIGTERM)
+	}
+	for _, p := range c.procs {
+		_ = p.Wait()
+	}
 
-		// Restart with the same data dirs and fresh HTTP ports (avoid TCP TIME_WAIT).
-		for i := range c.procs {
-			c.httpPorts[i] = freePort()
-			c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-			c.procs[i] = c.startNode(i)
-		}
+	// Restart with the same data dirs and fresh HTTP ports (avoid TCP TIME_WAIT).
+	for i := range c.procs {
+		c.httpPorts[i] = freePort()
+		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
+		c.procs[i] = c.startNode(i)
+	}
 
-		// Wait for HTTP readiness and a leader together. A plain TCP port probe can
-		// false-negative under full e2e load on macOS even when Hertz has already
-		// logged its listener; the S3 write probe is the readiness signal this test
-		// actually needs.
-		probeBucket := fmt.Sprintf("post-restart-probe-%d", time.Now().UnixNano())
-		c.GrantAdminOnBuckets(probeBucket)
-		if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, probeBucket, 60*time.Second); err != nil {
-			t.Fatalf("create post-restart probe bucket via admin UDS: %v", err)
-		}
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer probeCancel()
-		leaderIdx, err := waitForWritableEndpoint(
-			probeCtx,
-			c.httpURLs,
-			240*time.Second,
-			5*time.Second,
-			1*time.Second,
-			func(ctx context.Context, endpoint string) error {
-				cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
-				return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
-			},
-		)
-		require.NoError(t, err, "no leader after restart")
-		c.leaderIdx = leaderIdx
+	// Wait for HTTP readiness and a leader together. A plain TCP port probe can
+	// false-negative under full e2e load on macOS even when Hertz has already
+	// logged its listener; the S3 write probe is the readiness signal this test
+	// actually needs.
+	probeBucket := fmt.Sprintf("post-restart-probe-%d", time.Now().UnixNano())
+	c.GrantAdminOnBuckets(probeBucket)
+	if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, probeBucket, 60*time.Second); err != nil {
+		t.Fatalf("create post-restart probe bucket via admin UDS: %v", err)
+	}
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
+	ginkgo.DeferCleanup(probeCancel)
+	leaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		c.httpURLs,
+		240*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(ctx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
+		},
+	)
+	require.NoError(t, err, "no leader after restart")
+	c.leaderIdx = leaderIdx
 
-		afterDirs := countGroupDirsAcrossNodes(c)
-		for gid, beforeCount := range beforeDirs {
-			require.GreaterOrEqual(t, afterDirs[gid], beforeCount,
-				"group %s lost voter directories after restart: before=%d after=%d",
-				gid, beforeCount, afterDirs[gid])
-		}
-		t.Logf("restart ok: %d groups recovered", len(afterDirs))
-	})
+	afterDirs := countGroupDirsAcrossNodes(c)
+	for gid, beforeCount := range beforeDirs {
+		require.GreaterOrEqual(t, afterDirs[gid], beforeCount,
+			"group %s lost voter directories after restart: before=%d after=%d",
+			gid, beforeCount, afterDirs[gid])
+	}
+	t.Logf("restart ok: %d groups recovered", len(afterDirs))
 }
 
 // ----- TestMultiRaftShardingPerGroupPersistenceE2E ---------------------
 // Verify that an object written through the multi-raft data plane survives a
 // clean cluster restart and remains readable through routed S3 GETs.
-func TestMultiRaftShardingPerGroupPersistenceE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runMultiRaftShardingPerGroupPersistence(t testing.TB) {
 
-		// This test must route away from legacy group-0 so the object lands under a
-		// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
-		// groups are group-0 and group-1.
-		const bucket = "persist-group-1"
-		c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-			disableNFS4: true,
-			disableNBD:  true,
-		})
-
-		// Create a bucket (will be assigned to some group).
-		createCtx, createCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer createCancel()
-		requireMRCreateBucketEventually(t, createCtx, c, bucket)
-
-		// Write an object.
-		const body = "per-group-persistence-test-data"
-		writeCtx, writeCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer writeCancel()
-		requireMRPutObjectFromAnyNodeEventually(t, writeCtx, c, bucket, "test-key", []byte(body))
-
-		readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer readCancel()
-		requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, bucket, "test-key", []byte(body))
-
-		// Stop processes without removing data dirs, then restart with the same
-		// storage roots. t.Cleanup handles final shutdown and dir removal.
-		for _, p := range c.procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Signal(syscall.SIGTERM)
-			}
-		}
-		stopDeadline := time.Now().Add(10 * time.Second)
-		for _, p := range c.procs {
-			if p == nil {
-				continue
-			}
-			done := make(chan error, 1)
-			go func(p *exec.Cmd) { done <- p.Wait() }(p)
-			select {
-			case <-done:
-			case <-time.After(time.Until(stopDeadline)):
-				_ = p.Process.Kill()
-				<-done
-			}
-		}
-
-		for i := range c.procs {
-			c.httpPorts[i] = freePort()
-			c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-			c.procs[i] = c.startNode(i)
-		}
-
-		probeBucket := fmt.Sprintf("per-group-restart-probe-%d", time.Now().UnixNano())
-		c.GrantAdminOnBuckets(probeBucket)
-		if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, probeBucket, 60*time.Second); err != nil {
-			t.Fatalf("create per-group restart probe bucket via admin UDS: %v", err)
-		}
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer probeCancel()
-		leaderIdx, err := waitForWritableEndpoint(
-			probeCtx,
-			c.httpURLs,
-			240*time.Second,
-			5*time.Second,
-			1*time.Second,
-			func(ctx context.Context, endpoint string) error {
-				cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
-				return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
-			},
-		)
-		require.NoError(t, err, "no leader after per-group persistence restart")
-		c.leaderIdx = leaderIdx
-
-		restartCtx, restartCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer restartCancel()
-		requireMRGetObjectFromAnyNodeEventually(t, restartCtx, c, bucket, "test-key", []byte(body))
-		t.Log("per-group persistence ok: object survived restart and routed GET returned committed payload")
+	// This test must route away from legacy group-0 so the object lands under a
+	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
+	// groups are group-0 and group-1.
+	const bucket = "persist-group-1"
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
 	})
+
+	// Create a bucket (will be assigned to some group).
+	createCtx, createCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ginkgo.DeferCleanup(createCancel)
+	requireMRCreateBucketEventually(t, createCtx, c, bucket)
+
+	// Write an object.
+	const body = "per-group-persistence-test-data"
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ginkgo.DeferCleanup(writeCancel)
+	requireMRPutObjectFromAnyNodeEventually(t, writeCtx, c, bucket, "test-key", []byte(body))
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ginkgo.DeferCleanup(readCancel)
+	requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, bucket, "test-key", []byte(body))
+
+	// Stop processes without removing data dirs, then restart with the same
+	// storage roots. t.Cleanup handles final shutdown and dir removal.
+	for _, p := range c.procs {
+		if p != nil && p.Process != nil {
+			_ = p.Process.Signal(syscall.SIGTERM)
+		}
+	}
+	stopDeadline := time.Now().Add(10 * time.Second)
+	for _, p := range c.procs {
+		if p == nil {
+			continue
+		}
+		done := make(chan error, 1)
+		go func(p *exec.Cmd) { done <- p.Wait() }(p)
+		select {
+		case <-done:
+		case <-time.After(time.Until(stopDeadline)):
+			_ = p.Process.Kill()
+			<-done
+		}
+	}
+
+	for i := range c.procs {
+		c.httpPorts[i] = freePort()
+		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
+		c.procs[i] = c.startNode(i)
+	}
+
+	probeBucket := fmt.Sprintf("per-group-restart-probe-%d", time.Now().UnixNano())
+	c.GrantAdminOnBuckets(probeBucket)
+	if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, probeBucket, 60*time.Second); err != nil {
+		t.Fatalf("create per-group restart probe bucket via admin UDS: %v", err)
+	}
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
+	ginkgo.DeferCleanup(probeCancel)
+	leaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		c.httpURLs,
+		240*time.Second,
+		5*time.Second,
+		1*time.Second,
+		func(ctx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
+		},
+	)
+	require.NoError(t, err, "no leader after per-group persistence restart")
+	c.leaderIdx = leaderIdx
+
+	restartCtx, restartCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ginkgo.DeferCleanup(restartCancel)
+	requireMRGetObjectFromAnyNodeEventually(t, restartCtx, c, bucket, "test-key", []byte(body))
+	t.Log("per-group persistence ok: object survived restart and routed GET returned committed payload")
 }
 
-func requireMRPutObjectEventually(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string, data []byte) {
+func requireMRPutObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string, data []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
@@ -771,7 +760,7 @@ func requireMRPutObjectEventually(t *testing.T, ctx context.Context, client *s3.
 	)
 }
 
-func requireMRPutObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket, key string, data []byte) {
+func requireMRPutObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, data []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
@@ -826,7 +815,7 @@ func tryPutObjectVersioned(parent context.Context, client *s3.Client, bucket, ke
 	return *out.VersionId, nil
 }
 
-func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket string) {
+func requireMRCreateBucketEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket string) {
 	t.Helper()
 	leaderIdx := max(c.leaderIdx, 0)
 	client := ecS3Client(c.httpURLs[leaderIdx], c.accessKey, c.secretKey)
@@ -838,7 +827,7 @@ func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrClu
 	})
 }
 
-func requireMRGetObjectEventually(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string, want []byte) {
+func requireMRGetObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string, want []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
@@ -850,7 +839,7 @@ func requireMRGetObjectEventually(t *testing.T, ctx context.Context, client *s3.
 		bucket, key, lastErr, string(got))
 }
 
-func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
+func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
@@ -875,87 +864,83 @@ func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 // Verify that a PUT request arriving at a non-voter node is forwarded to
 // the correct group leader and persisted. Tests ClusterCoordinator's
 // forward.Send → peer's ForwardReceiver → GroupBackend.PutObject path.
-func TestMultiRaftShardingCrossNodeDispatchE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runMultiRaftShardingCrossNodeDispatch(t testing.TB) {
 
-		// Cross-node routing does not require multiple seeded groups; one RF=3 group
-		// is enough to exercise follower-to-leader forwarding.
-		c := startStaticMRCluster(t, 3)
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+	// Cross-node routing does not require multiple seeded groups; one RF=3 group
+	// is enough to exercise follower-to-leader forwarding.
+	c := startStaticMRCluster(t, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ginkgo.DeferCleanup(cancel)
 
-		// Create bucket via leader.
-		requireMRCreateBucketEventually(t, ctx, c, "cross-node-test")
+	// Create bucket via leader.
+	requireMRCreateBucketEventually(t, ctx, c, "cross-node-test")
 
-		// Write object via a non-leader node (if leaderIdx != 0, use node 0; otherwise node 1).
-		writeNodeIdx := 0
-		if writeNodeIdx == c.leaderIdx {
-			writeNodeIdx = 1
-		}
-		writeCLI := ecS3Client(c.httpURLs[writeNodeIdx], c.accessKey, c.secretKey)
-		const body = "cross-node-dispatch-test-data"
-		requireMRPutObjectEventually(t, ctx, writeCLI, "cross-node-test", "dispatch-key", []byte(body))
+	// Write object via a non-leader node (if leaderIdx != 0, use node 0; otherwise node 1).
+	writeNodeIdx := 0
+	if writeNodeIdx == c.leaderIdx {
+		writeNodeIdx = 1
+	}
+	writeCLI := ecS3Client(c.httpURLs[writeNodeIdx], c.accessKey, c.secretKey)
+	const body = "cross-node-dispatch-test-data"
+	requireMRPutObjectEventually(t, ctx, writeCLI, "cross-node-test", "dispatch-key", []byte(body))
 
-		// Verify object is readable via any node (routing consistency).
-		readCLI := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
-		getOut, err := readCLI.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String("cross-node-test"),
-			Key:    aws.String("dispatch-key"),
-		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
-		readBody, err := io.ReadAll(getOut.Body)
-		require.NoError(t, err)
-		require.Equal(t, body, string(readBody))
-		t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
+	// Verify object is readable via any node (routing consistency).
+	readCLI := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	getOut, err := readCLI.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("cross-node-test"),
+		Key:    aws.String("dispatch-key"),
 	})
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(func() { _ = getOut.Body.Close() })
+	readBody, err := io.ReadAll(getOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, string(readBody))
+	t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
 }
 
-func TestTopologyDurabilityFullTargetWriteGuardE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 
-		c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cancel()
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ginkgo.DeferCleanup(cancel)
 
-		const bucket = "missing-placement-target"
-		requireMRCreateBucketEventually(t, ctx, c, bucket)
+	const bucket = "missing-placement-target"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
 
-		leaderClient := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
-		const existingKey = "before-target-loss"
-		const existingBody = "still-readable-after-one-target-loss"
-		requireMRPutObjectEventually(t, ctx, leaderClient, bucket, existingKey, []byte(existingBody))
+	leaderClient := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	const existingKey = "before-target-loss"
+	const existingBody = "still-readable-after-one-target-loss"
+	requireMRPutObjectEventually(t, ctx, leaderClient, bucket, existingKey, []byte(existingBody))
 
-		killIdx := 0
-		if killIdx == c.leaderIdx {
-			killIdx = 1
-		}
-		forwardIdx := 0
-		for forwardIdx == c.leaderIdx || forwardIdx == killIdx {
-			forwardIdx++
-		}
-		require.NotNil(t, c.procs[killIdx], "target process must exist")
-		t.Logf("killing placement target node %d at %s", killIdx, c.httpURLs[killIdx])
-		require.NoError(t, c.procs[killIdx].Process.Signal(syscall.SIGTERM))
-		_ = c.procs[killIdx].Wait()
-		c.procs[killIdx] = nil
+	killIdx := 0
+	if killIdx == c.leaderIdx {
+		killIdx = 1
+	}
+	forwardIdx := 0
+	for forwardIdx == c.leaderIdx || forwardIdx == killIdx {
+		forwardIdx++
+	}
+	require.NotNil(t, c.procs[killIdx], "target process must exist")
+	t.Logf("killing placement target node %d at %s", killIdx, c.httpURLs[killIdx])
+	require.NoError(t, c.procs[killIdx].Process.Signal(syscall.SIGTERM))
+	_ = c.procs[killIdx].Wait()
+	c.procs[killIdx] = nil
 
-		readOut, err := ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey).GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(existingKey),
-		})
-		require.NoError(t, err, "existing object must remain readable with k live shards")
-		defer readOut.Body.Close()
-		readBody, err := io.ReadAll(readOut.Body)
-		require.NoError(t, err)
-		require.Equal(t, existingBody, string(readBody))
-
-		requireS3PutEventually503(t, ctx, leaderClient, bucket, "leader-after-target-loss")
-		requireS3PutEventually503(t, ctx, ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey), bucket, "forwarded-after-target-loss")
+	readOut, err := ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey).GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(existingKey),
 	})
+	require.NoError(t, err, "existing object must remain readable with k live shards")
+	ginkgo.DeferCleanup(func() { _ = readOut.Body.Close() })
+	readBody, err := io.ReadAll(readOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, existingBody, string(readBody))
+
+	requireS3PutEventually503(t, ctx, leaderClient, bucket, "leader-after-target-loss")
+	requireS3PutEventually503(t, ctx, ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey), bucket, "forwarded-after-target-loss")
 }
 
-func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string) {
+func requireS3PutEventually503(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
@@ -978,102 +963,98 @@ func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Cli
 // ----- TestMultiRaftShardingGroupLeaderFailoverE2E ------------------------
 // Simulate leader crash (SIGTERM) for a group and verify committed data
 // remains readable while new writes are suspended in degraded mode.
-func TestMultiRaftShardingGroupLeaderFailoverE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 
-		// Failover behavior is independent of group count. Use one group to keep
-		// startup focused on the failover path under test.
-		c := startStaticMRCluster(t, 3)
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+	// Failover behavior is independent of group count. Use one group to keep
+	// startup focused on the failover path under test.
+	c := startStaticMRCluster(t, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ginkgo.DeferCleanup(cancel)
 
-		// Create bucket and write object via current leader.
-		requireMRCreateBucketEventually(t, ctx, c, "failover-test")
-		cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+	// Create bucket and write object via current leader.
+	requireMRCreateBucketEventually(t, ctx, c, "failover-test")
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 
-		const body = "failover-test-data"
-		requireMRPutObjectEventually(t, ctx, cli, "failover-test", "failover-key", []byte(body))
+	const body = "failover-test-data"
+	requireMRPutObjectEventually(t, ctx, cli, "failover-test", "failover-key", []byte(body))
 
-		// Find which node hosts the leader for the assigned group (simplification:
-		// we kill the leader node process; whichever group loses leader
-		// should recover quickly within 1-2 election timeouts).
-		// In production, ShardService/GroupBackend.RaftNode().LeaderID() would identify
-		// the exact process; for e2e we rely on RF=3 so killing any voter forces
-		// an election.
-		killIdx := c.leaderIdx
-		t.Logf("killing leader node %d to trigger group failover", killIdx)
+	// Find which node hosts the leader for the assigned group (simplification:
+	// we kill the leader node process; whichever group loses leader
+	// should recover quickly within 1-2 election timeouts).
+	// In production, ShardService/GroupBackend.RaftNode().LeaderID() would identify
+	// the exact process; for e2e we rely on RF=3 so killing any voter forces
+	// an election.
+	killIdx := c.leaderIdx
+	t.Logf("killing leader node %d to trigger group failover", killIdx)
 
-		// SIGTERM the leader process.
-		require.NotNil(t, c.procs[killIdx], "leader process must exist")
-		err := c.procs[killIdx].Process.Signal(syscall.SIGTERM)
-		require.NoError(t, err)
-		_ = c.procs[killIdx].Wait()
+	// SIGTERM the leader process.
+	require.NotNil(t, c.procs[killIdx], "leader process must exist")
+	err := c.procs[killIdx].Process.Signal(syscall.SIGTERM)
+	require.NoError(t, err)
+	_ = c.procs[killIdx].Wait()
 
-		// Original object should still be readable from a surviving node.
-		readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer readCancel()
-		requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, "failover-test", "failover-key", []byte(body))
+	// Original object should still be readable from a surviving node.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ginkgo.DeferCleanup(readCancel)
+	requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, "failover-test", "failover-key", []byte(body))
 
-		// With full-target placement, losing one of three placement targets must
-		// block new writes instead of silently accepting under-replicated data.
-		writeIdx := (killIdx + 1) % len(c.httpURLs)
-		newCLI := ecS3Client(c.httpURLs[writeIdx], c.accessKey, c.secretKey)
-		requireS3PutEventually503(t, readCtx, newCLI, "failover-test", "failover-key-2")
-		t.Log("group leader failover ok: committed data readable, new writes blocked while target is missing")
-	})
+	// With full-target placement, losing one of three placement targets must
+	// block new writes instead of silently accepting under-replicated data.
+	writeIdx := (killIdx + 1) % len(c.httpURLs)
+	newCLI := ecS3Client(c.httpURLs[writeIdx], c.accessKey, c.secretKey)
+	requireS3PutEventually503(t, readCtx, newCLI, "failover-test", "failover-key-2")
+	t.Log("group leader failover ok: committed data readable, new writes blocked while target is missing")
 }
 
 // ----- TestMultiRaftShardingNFSv4SmokeE2E ----------------------------
 // Cross-protocol parity: verify that NFSv4 routes through ClusterCoordinator,
 // so objects written via S3 are readable over NFSv4 and vice versa. On Linux
 // the test mounts locally; on macOS it mounts from the Colima Linux VM.
-func TestMultiRaftShardingNFSv4SmokeE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 
-		c := startStaticMRCluster(t, 3)
-		waitForPortsParallel(t, []int{c.nfs4Ports[0]}, 45*time.Second)
+	c := startStaticMRCluster(t, 3)
+	waitForPortsParallel(t, []int{c.nfs4Ports[0]}, 45*time.Second)
 
-		// Write object via S3 API.
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
-		const nfs4Bucket = "grainfs-nfs4"
-		createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, nfs4Bucket, cli)
-		runNfsExportJSONOnDataDir(t, c.dataDirs[0], "add", nfs4Bucket)
+	// Write object via S3 API.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ginkgo.DeferCleanup(cancel)
+	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	const nfs4Bucket = "grainfs-nfs4"
+	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, nfs4Bucket, cli)
+	runNfsExportJSONOnDataDir(t, c.dataDirs[0], "add", nfs4Bucket)
 
-		const s3Body = "written-via-s3"
-		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(nfs4Bucket),
-			Key:    aws.String("s3-file.txt"),
-			Body:   bytes.NewReader([]byte(s3Body)),
-		})
-		require.NoError(t, err)
+	const s3Body = "written-via-s3"
+	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(nfs4Bucket),
+		Key:    aws.String("s3-file.txt"),
+		Body:   bytes.NewReader([]byte(s3Body)),
+	})
+	require.NoError(t, err)
 
-		const nfsBody = "written-via-nfs"
-		if !runNFSv4SmokeClient(t, c.nfs4Ports[0], nfs4Bucket, s3Body, nfsBody) {
-			_, err = cli.PutObject(ctx, &s3.PutObjectInput{
-				Bucket: aws.String(nfs4Bucket),
-				Key:    aws.String("nfs-file.txt"),
-				Body:   bytes.NewReader([]byte(nfsBody)),
-			})
-			require.NoError(t, err)
-		}
-
-		getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+	const nfsBody = "written-via-nfs"
+	if !runNFSv4SmokeClient(t, c.nfs4Ports[0], nfs4Bucket, s3Body, nfsBody) {
+		_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(nfs4Bucket),
 			Key:    aws.String("nfs-file.txt"),
+			Body:   bytes.NewReader([]byte(nfsBody)),
 		})
 		require.NoError(t, err)
-		defer getOut.Body.Close()
-		nfsReadBody, err := io.ReadAll(getOut.Body)
-		require.NoError(t, err)
-		require.Equal(t, nfsBody, string(nfsReadBody))
+	}
 
-		t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
+	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(nfs4Bucket),
+		Key:    aws.String("nfs-file.txt"),
 	})
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(func() { _ = getOut.Body.Close() })
+	nfsReadBody, err := io.ReadAll(getOut.Body)
+	require.NoError(t, err)
+	require.Equal(t, nfsBody, string(nfsReadBody))
+
+	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
 
-func runNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) bool {
+func runNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) bool {
 	t.Helper()
 
 	switch runtime.GOOS {
@@ -1088,12 +1069,12 @@ func runNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody stri
 	}
 }
 
-func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) {
+func runLocalNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) {
 	t.Helper()
 
 	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
 	require.NoError(t, err)
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_ = exec.Command("umount", mountDir).Run()
 		_ = os.Remove(mountDir)
 	})
@@ -1118,7 +1099,7 @@ func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody
 	require.NoError(t, os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0o644))
 }
 
-func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) bool {
+func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) bool {
 	t.Helper()
 
 	if _, err := exec.LookPath("colima"); err != nil {
@@ -1138,7 +1119,7 @@ func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBod
 	name := strings.ReplaceAll(t.Name(), "/", "-")
 	mountDir := fmt.Sprintf("/mnt/grainfs-mr-nfs-%s-%d", name, time.Now().UnixNano())
 	runColimaSSH(t, "sudo", "mkdir", "-p", mountDir)
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_ = colimaSSH("sudo", "umount", "-l", mountDir).Run()
 		_ = colimaSSH("sudo", "rmdir", mountDir).Run()
 	})
@@ -1171,7 +1152,7 @@ func colimaSSHCombinedOutput(timeout time.Duration, args ...string) ([]byte, err
 	return exec.CommandContext(ctx, "colima", append([]string{"ssh", "--"}, args...)...).CombinedOutput()
 }
 
-func runColimaSSH(t *testing.T, args ...string) string {
+func runColimaSSH(t testing.TB, args ...string) string {
 	t.Helper()
 	out, err := colimaSSH(args...).CombinedOutput()
 	if err != nil {
@@ -1184,151 +1165,145 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runMultiRaftShardingNBDRoutesThroughCoordinator(t testing.TB) {
 
-		c := startE2ECluster(t, e2eClusterOptions{
-			Nodes:      3,
-			Mode:       ClusterModeStaticPeers,
-			DisableNFS: true,
-		})
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		c.GrantAdminOnBuckets("__grainfs_volumes")
-		ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
-
-		client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
-		defer client.Close()
-
-		body := []byte("nbd-through-cluster-coordinator")
-		client.WriteAt(t, 0, body)
-		client.Flush(t)
-		requireNBDReadEventually(t, client, 0, body)
-
-		out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket: aws.String("__grainfs_volumes"),
-			Prefix: aws.String("__vol/default/"),
-		})
-		require.NoError(t, err)
-		require.NotEmpty(t, out.Contents)
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      3,
+		Mode:       ClusterModeStaticPeers,
+		DisableNFS: true,
 	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ginkgo.DeferCleanup(cancel)
+	c.GrantAdminOnBuckets("__grainfs_volumes")
+	ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
+
+	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
+	ginkgo.DeferCleanup(client.Close)
+
+	body := []byte("nbd-through-cluster-coordinator")
+	client.WriteAt(t, 0, body)
+	client.Flush(t)
+	requireNBDReadEventually(t, client, 0, body)
+
+	out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: aws.String("__grainfs_volumes"),
+		Prefix: aws.String("__vol/default/"),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, out.Contents)
 }
 
-func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.TB) {
 
-		c := startE2ECluster(t, e2eClusterOptions{
-			Nodes:      3,
-			Mode:       ClusterModeStaticPeers,
-			DisableNFS: true,
-			DisableNBD: true,
-		})
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      3,
+		Mode:       ClusterModeStaticPeers,
+		DisableNFS: true,
+		DisableNBD: true,
+	})
 
-		createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, "grainfs-tables", ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey))
+	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, "grainfs-tables", ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey))
 
-		icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
+	icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
 
-		nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
-		require.NoError(t, err)
-		nsReq.Header.Set("Content-Type", "application/json")
-		resp, err := icebergClient.Do(nsReq)
-		require.NoError(t, err)
-		require.Less(t, resp.StatusCode, 300)
-		require.NoError(t, resp.Body.Close())
+	nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
+	require.NoError(t, err)
+	nsReq.Header.Set("Content-Type", "application/json")
+	resp, err := icebergClient.Do(nsReq)
+	require.NoError(t, err)
+	require.Less(t, resp.StatusCode, 300)
+	require.NoError(t, resp.Body.Close())
 
-		createTableBody := `{
+	createTableBody := `{
 		"name":"t",
 		"schema":{"type":"struct","schema-id":0,"fields":[]},
 		"properties":{}
 	}`
-		tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
-		require.NoError(t, err)
-		tblReq.Header.Set("Content-Type", "application/json")
-		resp, err = icebergClient.Do(tblReq)
-		require.NoError(t, err)
-		require.Less(t, resp.StatusCode, 300)
-		require.NoError(t, resp.Body.Close())
+	tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
+	require.NoError(t, err)
+	tblReq.Header.Set("Content-Type", "application/json")
+	resp, err = icebergClient.Do(tblReq)
+	require.NoError(t, err)
+	require.Less(t, resp.StatusCode, 300)
+	require.NoError(t, resp.Body.Close())
 
-		loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
-		require.NoError(t, err)
-		loadResp, err := icebergClient.Do(loadReq)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, loadResp.StatusCode)
-		loadBody, err := io.ReadAll(loadResp.Body)
-		require.NoError(t, err)
-		require.NoError(t, loadResp.Body.Close())
-		require.Contains(t, string(loadBody), `"metadata-location"`)
-		require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
+	loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
+	require.NoError(t, err)
+	loadResp, err := icebergClient.Do(loadReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, loadResp.StatusCode)
+	loadBody, err := io.ReadAll(loadResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, loadResp.Body.Close())
+	require.Contains(t, string(loadBody), `"metadata-location"`)
+	require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
 
-		var got []byte
-		var readErr error
-		readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer readCancel()
-		deadline := time.Now().Add(60 * time.Second)
-		for time.Now().Before(deadline) {
-			for i := range c.httpURLs {
-				got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
-				if readErr == nil {
-					break
-				}
-			}
+	var got []byte
+	var readErr error
+	readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ginkgo.DeferCleanup(readCancel)
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := range c.httpURLs {
+			got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
 			if readErr == nil {
 				break
 			}
-			time.Sleep(time.Second)
 		}
-		require.NoError(t, readErr)
-		require.Contains(t, string(got), `"format-version"`)
-	})
+		if readErr == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	require.NoError(t, readErr)
+	require.Contains(t, string(got), `"format-version"`)
 }
 
 // TestTwoNodeAvailabilityTrapE2E verifies the well-known 2-node quorum trap:
 // with 2 voters in metaRaft (and all data groups), losing one node breaks
 // quorum entirely. This is intentional — 2-node clusters are functionally
 // worse than single-node for availability.
-func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
-	t.Run("MRCluster2Node", func(t *testing.T) {
+func runTwoNodeAvailabilityTrap(t testing.TB) {
 
-		c := startMRCluster(t, 2, mrClusterOptions{
-			FastBootstrap: true,
-			disableNFS4:   true,
-			disableNBD:    true,
-		})
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		defer cancel()
-
-		const bucket = "availability-trap-test"
-		requireMRCreateBucketEventually(t, ctx, c, bucket)
-		cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
-
-		// Write should succeed with both nodes alive.
-		requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
-
-		// Kill the non-leader node to break metaRaft quorum (needs 2/2).
-		followerIdx := 1 - c.leaderIdx
-		t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
-		require.NotNil(t, c.procs[followerIdx])
-		require.NotNil(t, c.procs[followerIdx].Process)
-		require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
-		_ = c.procs[followerIdx].Wait()
-		c.procs[followerIdx] = nil
-
-		// Write must now fail — quorum is lost.
-		// In a 2-node raft cluster, the surviving leader blocks waiting for
-		// 2/2 acknowledgment that never arrives, so requests time out with
-		// context.DeadlineExceeded rather than a fast 503. A fast 503 preflight
-		// ("not enough voters") would require a separate quorum-check feature.
-		// This test documents the current reality (hang = trap), not a bug.
-		writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer writeCancel()
-		_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String("after-quorum-loss"),
-			Body:   bytes.NewReader([]byte("blocked")),
-		}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
-		require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
+	c := startMRCluster(t, 2, mrClusterOptions{
+		FastBootstrap: true,
+		disableNFS4:   true,
+		disableNBD:    true,
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ginkgo.DeferCleanup(cancel)
+
+	const bucket = "availability-trap-test"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+
+	// Write should succeed with both nodes alive.
+	requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
+
+	// Kill the non-leader node to break metaRaft quorum (needs 2/2).
+	followerIdx := 1 - c.leaderIdx
+	t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
+	require.NotNil(t, c.procs[followerIdx])
+	require.NotNil(t, c.procs[followerIdx].Process)
+	require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
+	_ = c.procs[followerIdx].Wait()
+	c.procs[followerIdx] = nil
+
+	// Write must now fail — quorum is lost.
+	// In a 2-node raft cluster, the surviving leader blocks waiting for
+	// 2/2 acknowledgment that never arrives, so requests time out with
+	// context.DeadlineExceeded rather than a fast 503. A fast 503 preflight
+	// ("not enough voters") would require a separate quorum-check feature.
+	// This test documents the current reality (hang = trap), not a bug.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ginkgo.DeferCleanup(writeCancel)
+	_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("after-quorum-loss"),
+		Body:   bytes.NewReader([]byte("blocked")),
+	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
+	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
 }
 
 // TestDynamicGroupSeeding1to5E2E verifies that each dynamic node join
@@ -1343,47 +1318,87 @@ func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
 //
 // After each expansion, a PUT (with internal GET round-trip) is verified to
 // confirm routing works.
-func TestDynamicGroupSeeding1to5E2E(t *testing.T) {
-	t.Run("MRCluster1to5", func(t *testing.T) {
+func runDynamicGroupSeeding1to5(t testing.TB) {
 
-		// Start with 1 node; pre-allocate ports for 5.
-		c := startMRCluster(t, 1, mrClusterOptions{
-			FastBootstrap: true,
-			MaxNodes:      5,
-			disableNFS4:   true,
-			disableNBD:    true,
-		})
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		const bucket = "dyn-seed-1to5"
-		requireMRCreateBucketEventually(t, ctx, c, bucket)
-
-		// Step helper: after each addNode, verify group count and PUT+GET.
-		type step struct {
-			afterNodes     int
-			expectedGroups int
-		}
-		steps := []step{
-			{1, 8}, // initial seed
-			{2, 8}, // no new groups
-			{3, 12},
-			{4, 16},
-			{5, 20},
-		}
-
-		// Verify step 1 (already started).
-		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], steps[0].expectedGroups, 30*time.Second)
-		requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
-			fmt.Sprintf("key-after-%d-nodes", steps[0].afterNodes), []byte("data"))
-
-		// Steps 2–5: add a node then verify.
-		for _, s := range steps[1:] {
-			c.addNode(t)
-			waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], s.expectedGroups, 60*time.Second)
-			t.Logf("nodes=%d: shard groups >= %d confirmed", s.afterNodes, s.expectedGroups)
-			requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
-				fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
-		}
+	// Start with 1 node; pre-allocate ports for 5.
+	c := startMRCluster(t, 1, mrClusterOptions{
+		FastBootstrap: true,
+		MaxNodes:      5,
+		disableNFS4:   true,
+		disableNBD:    true,
 	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ginkgo.DeferCleanup(cancel)
+
+	const bucket = "dyn-seed-1to5"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+
+	// Step helper: after each addNode, verify group count and PUT+GET.
+	type step struct {
+		afterNodes     int
+		expectedGroups int
+	}
+	steps := []step{
+		{1, 8}, // initial seed
+		{2, 8}, // no new groups
+		{3, 12},
+		{4, 16},
+		{5, 20},
+	}
+
+	// Verify step 1 (already started).
+	waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], steps[0].expectedGroups, 30*time.Second)
+	requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+		fmt.Sprintf("key-after-%d-nodes", steps[0].afterNodes), []byte("data"))
+
+	// Steps 2–5: add a node then verify.
+	for _, s := range steps[1:] {
+		c.addNode(t)
+		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], s.expectedGroups, 60*time.Second)
+		t.Logf("nodes=%d: shard groups >= %d confirmed", s.afterNodes, s.expectedGroups)
+		requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+			fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
+	}
 }
+
+var _ = ginkgo.Describe("Multi-Raft sharding", func() {
+	ginkgo.It("boots seed groups with expected voter directories", func() {
+		runMultiRaftShardingBoot(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("exposes node-local services on every process", func() {
+		runMultiRaftShardingAllNodeServices(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("records bucket-to-group hash assignment", ginkgo.Label("bucket"), func() {
+		runMultiRaftShardingBucketAssignment(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("recovers group directories across restart", func() {
+		runMultiRaftShardingRestartRecovery(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("persists per-group objects across restart", func() {
+		runMultiRaftShardingPerGroupPersistence(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("dispatches cross-node writes to the group leader", func() {
+		runMultiRaftShardingCrossNodeDispatch(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("blocks writes when a full placement target is missing", func() {
+		runTopologyDurabilityFullTargetWriteGuard(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("keeps committed data readable during group leader failover", func() {
+		runMultiRaftShardingGroupLeaderFailover(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("routes NFSv4 through the cluster coordinator", func() {
+		runMultiRaftShardingNFSv4Smoke(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("routes NBD through the cluster coordinator", func() {
+		runMultiRaftShardingNBDRoutesThroughCoordinator(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("splits Iceberg catalog pointers and metadata objects", func() {
+		runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("documents the 2-node availability trap", func() {
+		runTwoNodeAvailabilityTrap(ginkgo.GinkgoTB())
+	})
+	ginkgo.It("seeds dynamic groups from one to five nodes", func() {
+		runDynamicGroupSeeding1to5(ginkgo.GinkgoTB())
+	})
+})

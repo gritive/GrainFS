@@ -5,26 +5,38 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRaftSnapshotAdminE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runRaftSnapshotAdminCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runRaftSnapshotAdminCases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Raft snapshot admin", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runRaftSnapshotAdminCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	endpoint := tgt.endpoint(0)
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-	t.Run("TriggerStatusAndMetrics", func(t *testing.T) {
+			runRaftSnapshotAdminCases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runRaftSnapshotAdminCases(getTgt func() s3Target) {
+	ginkgo.It("triggers a snapshot and reports status and metrics", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		endpoint := tgt.endpoint(0)
 		_ = tgt.uniqueBucket(t, "raftsnap")
 
 		resp, err := http.Post(endpoint+"/admin/raft/snapshot", "application/json", nil) //nolint:noctx

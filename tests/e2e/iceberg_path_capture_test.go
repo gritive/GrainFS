@@ -10,10 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestIcebergPathCaptureE2E pins the URL path that iceberg-go's REST driver
+// Iceberg path capture specs pin the URL path that iceberg-go's REST driver
 // composes when minting an OAuth2 token. The contract under test is the path
 // string: outbound POST must hit "<catalog-base>/v1/oauth/tokens" — where
 // catalog-base is "<endpoint>/iceberg" (NO trailing /v1).
@@ -34,21 +35,31 @@ import (
 //     component under the /iceberg catalog base rather than a trailing segment
 //     of the base. The contract under test is the path string, not the auth
 //     posture, so the assertion is fixture-independent.
-func TestIcebergPathCaptureE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIcebergPathCaptureCases(t, newSingleNodeIcebergTarget(t))
+var _ = ginkgo.Describe("Iceberg REST path capture", func() {
+	describeIcebergPathCaptureContext("SingleNode", func(t testing.TB) *icebergTarget {
+		return newSingleNodeIcebergTarget(t)
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runIcebergPathCaptureCases(t, newSharedClusterIcebergTarget(t))
-	})
-}
 
-func runIcebergPathCaptureCases(t *testing.T, tgt *icebergTarget) {
-	t.Run("OutboundTokenPath_ExactMatch", func(t *testing.T) {
-		runIcebergPathCaptureOutboundTokenPathExactMatch(t, tgt)
+	describeIcebergPathCaptureContext("Cluster3Node", func(t testing.TB) *icebergTarget {
+		return newSharedClusterIcebergTarget(t)
 	})
-	t.Run("CatalogBaseURI_NoTrailingV1", func(t *testing.T) {
-		runIcebergPathCaptureCatalogBaseURINoTrailingV1(t, tgt)
+})
+
+func describeIcebergPathCaptureContext(name string, factory func(testing.TB) *icebergTarget) {
+	ginkgo.Context(name, func() {
+		var tgt *icebergTarget
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("posts token requests to the exact Iceberg OAuth path", func() {
+			runIcebergPathCaptureOutboundTokenPathExactMatch(ginkgo.GinkgoTB(), tgt)
+		})
+
+		ginkgo.It("exposes config under an Iceberg catalog base without trailing v1", func() {
+			runIcebergPathCaptureCatalogBaseURINoTrailingV1(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
@@ -58,7 +69,7 @@ func runIcebergPathCaptureCases(t *testing.T, tgt *icebergTarget) {
 // asserts the proxy captured exactly "/iceberg/v1/oauth/tokens". Cluster mode
 // targets node 0 only — outbound SDK URL is single-binary behavior and
 // cluster determinism is not the point.
-func runIcebergPathCaptureOutboundTokenPathExactMatch(t *testing.T, tgt *icebergTarget) {
+func runIcebergPathCaptureOutboundTokenPathExactMatch(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	wh := tgt.uniqueWarehouse(t, "pathcap")
 	saID, ak, sk := tgt.adminCreateSA(t, "pathcap")
@@ -91,7 +102,7 @@ func runIcebergPathCaptureOutboundTokenPathExactMatch(t *testing.T, tgt *iceberg
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}))
-	defer proxy.Close()
+	ginkgo.DeferCleanup(proxy.Close)
 
 	// iceberg-go-style composition: catalog base + "/v1/oauth/tokens".
 	catalogBase := proxy.URL + "/iceberg"
@@ -110,7 +121,7 @@ func runIcebergPathCaptureOutboundTokenPathExactMatch(t *testing.T, tgt *iceberg
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	ginkgo.DeferCleanup(resp.Body.Close)
 	require.Equal(t, http.StatusOK, resp.StatusCode,
 		"outbound token POST must succeed through proxy")
 
@@ -132,14 +143,14 @@ func runIcebergPathCaptureOutboundTokenPathExactMatch(t *testing.T, tgt *iceberg
 //
 // A 404 here would mean /v1 is not a path prefix under /iceberg, i.e. the
 // catalog base has drifted to include /v1.
-func runIcebergPathCaptureCatalogBaseURINoTrailingV1(t *testing.T, tgt *icebergTarget) {
+func runIcebergPathCaptureCatalogBaseURINoTrailingV1(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodGet, tgt.endpoint(0)+"/iceberg/v1/config", nil)
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	ginkgo.DeferCleanup(resp.Body.Close)
 
 	require.NotEqual(t, http.StatusNotFound, resp.StatusCode,
 		"catalog must expose /v1/config under /iceberg base (catalog base must NOT include /v1)")

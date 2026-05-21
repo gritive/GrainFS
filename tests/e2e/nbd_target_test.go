@@ -33,7 +33,7 @@ type nbdTarget struct {
 // internal/nbd/handshake.go: exportNameMatches), so we cannot create per-case
 // unique exports. The atomic seq is preserved for future per-case offset
 // isolation if additional matrix cases need it.
-func (tgt *nbdTarget) uniqueDevice(t *testing.T, caseName string, sizeBytes int64) string {
+func (tgt *nbdTarget) uniqueDevice(t testing.TB, caseName string, sizeBytes int64) string {
 	t.Helper()
 	_ = tgt.caseSeq.Add(1) // reserved for future per-case offset isolation
 	_ = caseName
@@ -51,7 +51,7 @@ func (tgt *nbdTarget) uniqueDevice(t *testing.T, caseName string, sizeBytes int6
 
 // ensureSingleNodeNBDVolume mirrors ensureE2ENBDVolume but uses the single-node
 // fixture's admin socket (testServerDataDir + /admin.sock).
-func ensureSingleNodeNBDVolume(t *testing.T, ctx context.Context, name string, size int64) {
+func ensureSingleNodeNBDVolume(t testing.TB, ctx context.Context, name string, size int64) {
 	t.Helper()
 	cli, err := volumeadmin.NewClient(filepath.Join(testServerDataDir, "admin.sock"))
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func ensureSingleNodeNBDVolume(t *testing.T, ctx context.Context, name string, s
 	}
 }
 
-func newSingleNodeNBDTarget(t *testing.T) *nbdTarget {
+func newSingleNodeNBDTarget(t testing.TB) *nbdTarget {
 	t.Helper()
 	return &nbdTarget{
 		name:       "single",
@@ -74,7 +74,7 @@ func newSingleNodeNBDTarget(t *testing.T) *nbdTarget {
 	}
 }
 
-func newSharedClusterNBDTarget(t *testing.T) *nbdTarget {
+func newSharedClusterNBDTarget(t testing.TB) *nbdTarget {
 	t.Helper()
 	c := getOrInitSharedCluster(t) // 4-node *e2eCluster, NBD now enabled
 	n := len(c.httpURLs)

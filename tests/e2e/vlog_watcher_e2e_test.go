@@ -19,13 +19,14 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
 // scrapeMetric returns the first sample value matching name + label substring,
 // or -1 if not found. Tests that need the full label-set should parse via
 // expfmt; substring matching is sufficient here.
-func scrapeMetric(t *testing.T, endpoint, name, labelSubstr string) float64 {
+func scrapeMetric(t testing.TB, endpoint, name, labelSubstr string) float64 {
 	t.Helper()
 	resp, err := http.Get(endpoint + "/metrics")
 	require.NoError(t, err)
@@ -66,204 +67,240 @@ var vlogWatcherArgs = []string{
 	"--vlog-critical-ratio=0.5",
 }
 
-// TestVlogWatcherE2E exercises the predictive vlog watcher's three observable
+// Vlog watcher exercises the predictive vlog watcher's three observable
 // surfaces: live metrics, GC counter advance under sustained write, and
 // incident emission once observed vlog usage crosses --vlog-warn-ratio.
 // Each branch boots one dedicated fixture with the union of all watcher
 // flags; sub-tests run sequentially on it.
-func TestVlogWatcherE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runVlogWatcherCases(t, newDedicatedSingleNodeS3Target(t, vlogWatcherArgs))
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVlogWatcherCases(t, newClusterS3TargetWithExtraArgs(t, 4, vlogWatcherArgs))
-	})
+var _ = ginkgo.Describe("Vlog watcher", ginkgo.Ordered, func() {
+	registerWatcherTarget := func(name string, newTarget func(testing.TB, []string) s3Target) {
+		ginkgo.Context("Predictive watcher "+name, func() {
+			var tgt s3Target
+			ginkgo.BeforeAll(func() {
+				tgt = newTarget(ginkgo.GinkgoTB(), vlogWatcherArgs)
+			})
+
+			ginkgo.It("publishes live metrics", func() {
+				runVlogWatcherMetricsLive(ginkgo.GinkgoTB(), tgt)
+			})
+			ginkgo.It("advances GC counters under sustained writes", func() {
+				runVlogWatcherSustainedWriteNoStarvation(ginkgo.GinkgoTB(), tgt)
+			})
+			ginkgo.It("emits an incident on vlog pressure", func() {
+				runVlogWatcherFiresOnLeak(ginkgo.GinkgoTB(), tgt)
+			})
+		})
+	}
+
+	registerGCTickerTarget := func(name string, newTarget func(testing.TB, []string) s3Target) {
+		args := []string{
+			"--badger-gc-interval=500ms",
+			"--vlog-smoke-defer=2s",
+		}
+		ginkgo.Context("GC ticker "+name, func() {
+			var tgt s3Target
+			ginkgo.BeforeEach(func() {
+				tgt = newTarget(ginkgo.GinkgoTB(), args)
+			})
+
+			ginkgo.It("recovers after deletion", func() {
+				runGCTickerRecoversAfterDeletion(ginkgo.GinkgoTB(), tgt)
+			})
+		})
+	}
+
+	registerStrictTarget := func(name string, newTarget func(testing.TB, []string) s3Target) {
+		args := []string{
+			"--strict-vlog-registry=true",
+			"--vlog-smoke-defer=3s",
+		}
+		ginkgo.Context("Strict registry "+name, func() {
+			var tgt s3Target
+			ginkgo.BeforeEach(func() {
+				tgt = newTarget(ginkgo.GinkgoTB(), args)
+			})
+
+			ginkgo.It("fatally exits or emits an incident for a planted file", func() {
+				runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(ginkgo.GinkgoTB(), tgt)
+			})
+		})
+	}
+
+	single := func(t testing.TB, args []string) s3Target {
+		return newDedicatedSingleNodeS3Target(t, args)
+	}
+	cluster := func(t testing.TB, args []string) s3Target {
+		return newClusterS3TargetWithExtraArgs(t, 4, args)
+	}
+
+	registerWatcherTarget("SingleNode", single)
+	registerWatcherTarget("Cluster4Node", cluster)
+	registerGCTickerTarget("SingleNode", single)
+	registerGCTickerTarget("Cluster4Node", cluster)
+	registerStrictTarget("SingleNode", single)
+	registerStrictTarget("Cluster4Node", cluster)
+})
+
+func runVlogWatcherMetricsLive(t testing.TB, tgt s3Target) {
+	t.Helper()
+	endpoint := tgt.endpoint(0)
+
+	require.Eventually(t, func() bool {
+		return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
+	}, 8*time.Second, 200*time.Millisecond,
+		"vlog_limit_bytes must be > 0 (proves statfs Snapshot() ran)")
+
+	require.GreaterOrEqual(t,
+		scrapeMetric(t, endpoint, "grainfs_vlog_used_ratio", ""), 0.0,
+		"vlog_used_ratio gauge must be present (recorder running)")
+
+	require.Eventually(t, func() bool {
+		return scrapeMetric(t, endpoint, "grainfs_vlog_bytes_by_category", `category="meta"`) >= 0
+	}, 8*time.Second, 200*time.Millisecond,
+		"meta category must have a vlog_bytes_by_category sample")
 }
 
-func runVlogWatcherCases(t *testing.T, tgt s3Target) {
+func runVlogWatcherSustainedWriteNoStarvation(t testing.TB, tgt s3Target) {
 	t.Helper()
 	endpoint := tgt.endpoint(0)
 	cli := tgt.pickNode(0)
 	ctx := context.Background()
 
-	t.Run("MetricsLive", func(t *testing.T) {
-		require.Eventually(t, func() bool {
-			return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
-		}, 8*time.Second, 200*time.Millisecond,
-			"vlog_limit_bytes must be > 0 (proves statfs Snapshot() ran)")
-
-		require.GreaterOrEqual(t,
-			scrapeMetric(t, endpoint, "grainfs_vlog_used_ratio", ""), 0.0,
-			"vlog_used_ratio gauge must be present (recorder running)")
-
-		require.Eventually(t, func() bool {
-			return scrapeMetric(t, endpoint, "grainfs_vlog_bytes_by_category", `category="meta"`) >= 0
-		}, 8*time.Second, 200*time.Millisecond,
-			"meta category must have a vlog_bytes_by_category sample")
-	})
-
-	t.Run("SustainedWriteNoStarvation", func(t *testing.T) {
-		for i := 0; i < 3; i++ {
-			bucket := tgt.uniqueBucket(t, fmt.Sprintf("vlogns%d", i))
-			for j := 0; j < 6; j++ {
-				payload := make([]byte, 1024)
-				_, _ = rand.Read(payload)
-				_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-					Bucket: aws.String(bucket),
-					Key:    aws.String(fmt.Sprintf("k-%d", j)),
-					Body:   bytes.NewReader(payload),
-				})
-				require.NoError(t, err)
-			}
-		}
-
-		categories := []string{"meta"}
-		for _, cat := range categories {
-			labelSubstr := fmt.Sprintf(`category=%q`, cat)
-			require.Eventually(t, func() bool {
-				v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", labelSubstr)
-				return v > 0
-			}, 10*time.Second, 200*time.Millisecond,
-				"GC runs counter must advance for category=%s within 10s", cat)
-		}
-	})
-
-	t.Run("FiresOnLeak", func(t *testing.T) {
-		require.Eventually(t, func() bool {
-			return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
-		}, 8*time.Second, 200*time.Millisecond, "watcher must be running")
-
-		bucket := tgt.uniqueBucket(t, "vlogleak")
-		payload := make([]byte, 4096)
-		_, _ = rand.Read(payload)
-		for i := 0; i < 50; i++ {
+	for i := 0; i < 3; i++ {
+		bucket := tgt.uniqueBucket(t, fmt.Sprintf("vlogns%d", i))
+		for j := 0; j < 6; j++ {
+			payload := make([]byte, 1024)
+			_, _ = rand.Read(payload)
 			_, err := cli.PutObject(ctx, &s3.PutObjectInput{
 				Bucket: aws.String(bucket),
-				Key:    aws.String(fmt.Sprintf("k-%d", i)),
+				Key:    aws.String(fmt.Sprintf("k-%d", j)),
 				Body:   bytes.NewReader(payload),
 			})
 			require.NoError(t, err)
 		}
-
-		// Badger's db.Size() metric is refreshed by an internal 1-minute ticker.
-		require.Eventually(t, func() bool {
-			for _, inc := range fetchIncidentsSafe(t, endpoint) {
-				if inc.Cause == "vlog_pressure" {
-					return true
-				}
-			}
-			return false
-		}, 90*time.Second, 1*time.Second,
-			"watcher must record a vlog_pressure incident once vlog crosses warn ratio")
-	})
-}
-
-// TestGCTickerE2E boots a fixture with a fast GC ticker and asserts that
-// grainfs_badger_gc_runs_total advances within several ticks. The metric
-// is wired by gcMetricsRecorder; this regression catches the case where the
-// counter declaration drifts away from the increment site.
-func TestGCTickerE2E(t *testing.T) {
-	args := []string{
-		"--badger-gc-interval=500ms",
-		"--vlog-smoke-defer=2s",
 	}
-	t.Run("SingleNode", func(t *testing.T) {
-		runGCTickerCases(t, newDedicatedSingleNodeS3Target(t, args))
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runGCTickerCases(t, newClusterS3TargetWithExtraArgs(t, 4, args))
-	})
+
+	categories := []string{"meta"}
+	for _, cat := range categories {
+		labelSubstr := fmt.Sprintf(`category=%q`, cat)
+		require.Eventually(t, func() bool {
+			v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", labelSubstr)
+			return v > 0
+		}, 10*time.Second, 200*time.Millisecond,
+			"GC runs counter must advance for category=%s within 10s", cat)
+	}
 }
 
-func runGCTickerCases(t *testing.T, tgt s3Target) {
+func runVlogWatcherFiresOnLeak(t testing.TB, tgt s3Target) {
 	t.Helper()
 	endpoint := tgt.endpoint(0)
 	cli := tgt.pickNode(0)
 	ctx := context.Background()
 
-	t.Run("RecoversAfterDeletion", func(t *testing.T) {
-		bucket := tgt.uniqueBucket(t, "gctick")
-		for i := 0; i < 4; i++ {
-			_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-				Bucket: aws.String(bucket),
-				Key:    aws.String(fmt.Sprintf("k-%d", i)),
-				Body:   bytes.NewReader([]byte("payload")),
-			})
-			require.NoError(t, err)
-		}
+	require.Eventually(t, func() bool {
+		return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
+	}, 8*time.Second, 200*time.Millisecond, "watcher must be running")
 
-		require.Eventually(t, func() bool {
-			v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", `category="meta"`)
-			return v > 0
-		}, 10*time.Second, 200*time.Millisecond, "meta category GC counter must advance")
-	})
+	bucket := tgt.uniqueBucket(t, "vlogleak")
+	payload := make([]byte, 4096)
+	_, _ = rand.Read(payload)
+	for i := 0; i < 50; i++ {
+		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(fmt.Sprintf("k-%d", i)),
+			Body:   bytes.NewReader(payload),
+		})
+		require.NoError(t, err)
+	}
+
+	// Badger's db.Size() metric is refreshed by an internal 1-minute ticker.
+	require.Eventually(t, func() bool {
+		for _, inc := range fetchIncidentsSafe(t, endpoint) {
+			if inc.Cause == "vlog_pressure" {
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second, 1*time.Second,
+		"watcher must record a vlog_pressure incident once vlog crosses warn ratio")
 }
 
-// TestVlogStrictRegistryE2E plants an unregistered .vlog file before the
+// GC ticker boots a fixture with a fast GC ticker and asserts that
+// grainfs_badger_gc_runs_total advances within several ticks. The metric
+// is wired by gcMetricsRecorder; this regression catches the case where the
+// counter declaration drifts away from the increment site.
+func runGCTickerRecoversAfterDeletion(t testing.TB, tgt s3Target) {
+	t.Helper()
+	endpoint := tgt.endpoint(0)
+	cli := tgt.pickNode(0)
+	ctx := context.Background()
+
+	bucket := tgt.uniqueBucket(t, "gctick")
+	for i := 0; i < 4; i++ {
+		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(fmt.Sprintf("k-%d", i)),
+			Body:   bytes.NewReader([]byte("payload")),
+		})
+		require.NoError(t, err)
+	}
+
+	require.Eventually(t, func() bool {
+		v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", `category="meta"`)
+		return v > 0
+	}, 10*time.Second, 200*time.Millisecond, "meta category GC counter must advance")
+}
+
+// Strict registry plants an unregistered .vlog file before the
 // smoke deferral elapses, then asserts that strict mode either fatally exits
 // the process OR emits a registry_under_populated incident. Destructive:
 // the fixture may exit non-zero — single sub-test per branch, no other
 // sub-tests can share this fixture.
-func TestVlogStrictRegistryE2E(t *testing.T) {
-	args := []string{
-		"--strict-vlog-registry=true",
-		"--vlog-smoke-defer=3s",
-	}
-	t.Run("SingleNode", func(t *testing.T) {
-		runVlogStrictRegistryCases(t, newDedicatedSingleNodeS3Target(t, args))
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVlogStrictRegistryCases(t, newClusterS3TargetWithExtraArgs(t, 4, args))
-	})
-}
-
-func runVlogStrictRegistryCases(t *testing.T, tgt s3Target) {
+func runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(t testing.TB, tgt s3Target) {
 	t.Helper()
 	endpoint := tgt.endpoint(0)
 	dataDir := filepath.Dir(tgt.adminSockPath())
 
-	t.Run("PlantedFileTriggersFatalOrIncident", func(t *testing.T) {
-		// Plant an unregistered vlog directory before the 3s smoke defer expires.
-		plantDir := filepath.Join(dataDir, "fake-rogue-db")
-		require.NoError(t, os.MkdirAll(plantDir, 0o755))
-		plantFile := filepath.Join(plantDir, "000001.vlog")
-		require.NoError(t, os.WriteFile(plantFile, []byte("rogue"), 0o644))
+	// Plant an unregistered vlog directory before the 3s smoke defer expires.
+	plantDir := filepath.Join(dataDir, "fake-rogue-db")
+	require.NoError(t, os.MkdirAll(plantDir, 0o755))
+	plantFile := filepath.Join(plantDir, "000001.vlog")
+	require.NoError(t, os.WriteFile(plantFile, []byte("rogue"), 0o644))
 
-		// Either path is acceptable: process exits non-zero, or incident is
-		// recorded. We probe by hitting the data-plane HTTP server: when
-		// grainfs has exited the listener is gone and Get returns
-		// "connection refused" within milliseconds.
-		deadline := time.Now().Add(12 * time.Second)
-		exited := false
-		incidentRaised := false
-		probe := &http.Client{Timeout: 500 * time.Millisecond}
-		for time.Now().Before(deadline) {
-			resp, err := probe.Get(endpoint + "/metrics")
-			if err != nil {
-				exited = true
-				break
-			}
-			_ = resp.Body.Close()
-			incidents := fetchIncidentsSafe(t, endpoint)
-			for _, inc := range incidents {
-				if inc.Cause == "registry_under_populated" {
-					incidentRaised = true
-					break
-				}
-			}
-			if incidentRaised {
-				break
-			}
-			time.Sleep(300 * time.Millisecond)
+	// Either path is acceptable: process exits non-zero, or incident is
+	// recorded. We probe by hitting the data-plane HTTP server: when
+	// grainfs has exited the listener is gone and Get returns
+	// "connection refused" within milliseconds.
+	deadline := time.Now().Add(12 * time.Second)
+	exited := false
+	incidentRaised := false
+	probe := &http.Client{Timeout: 500 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := probe.Get(endpoint + "/metrics")
+		if err != nil {
+			exited = true
+			break
 		}
-		require.True(t, exited || incidentRaised,
-			"strict mode must fatally exit or emit registry_under_populated incident")
-	})
+		_ = resp.Body.Close()
+		incidents := fetchIncidentsSafe(t, endpoint)
+		for _, inc := range incidents {
+			if inc.Cause == "registry_under_populated" {
+				incidentRaised = true
+				break
+			}
+		}
+		if incidentRaised {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	require.True(t, exited || incidentRaised,
+		"strict mode must fatally exit or emit registry_under_populated incident")
 }
 
 // fetchIncidentsSafe is fetchIncidents that returns nil instead of failing
 // the test when the endpoint is briefly unreachable (e.g. process is exiting).
-func fetchIncidentsSafe(t *testing.T, endpoint string) []incidentState {
+func fetchIncidentsSafe(t testing.TB, endpoint string) []incidentState {
 	t.Helper()
 	resp, err := http.Get(endpoint + "/api/incidents?limit=50")
 	if err != nil {

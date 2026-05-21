@@ -17,12 +17,13 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/smithy-go/logging"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/receipt"
 )
 
-// TestHealReceiptAPI3NodeE2E verifies the Phase 16 Slice 2 resolution
+// Heal receipt API verifies the Phase 16 Slice 2 resolution
 // chain end-to-end against a real 3-node cluster.
 //
 // Covers all four resolution paths the API exposes:
@@ -33,14 +34,27 @@ import (
 //
 // Receipts are pre-seeded into each node's BadgerDB before the node starts
 // (Slice 2 does not emit receipts from the scrubber yet; that wiring lands in
-// Slice 3). HTTP requests use AWS SigV4 because /api/receipts/:id sits behind
-// the same S3-HMAC auth middleware as object endpoints.
+// Slice 3). Primary HTTP requests use AWS SigV4; the final case documents
+// the current Phase 0 anonymous-read behavior while iam.anon-enabled remains
+// true.
 //
 // The test sets --heal-receipt-window=1 so only the most recent receipt on
 // node C is gossiped. The older one must resolve via broadcast fallback —
 // that is the path Slice 2 exists to provide.
-func TestHealReceiptAPI3NodeE2E(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
+	var (
+		ctx       context.Context
+		signer    *v4.Signer
+		creds     aws.Credentials
+		httpURL   func(int) string
+		idLocalA  string
+		idCHot    string
+		idCOld    string
+		idMissing string
+	)
+
+	ginkgo.BeforeAll(func() {
+		t := ginkgo.GinkgoTB()
 		binary := getBinary()
 		if _, err := os.Stat(binary); err != nil {
 		}
@@ -57,7 +71,7 @@ func TestHealReceiptAPI3NodeE2E(t *testing.T) {
 		raftAddr := func(i int) string {
 			return fmt.Sprintf("127.0.0.1:%d", raftPorts[i])
 		}
-		httpURL := func(i int) string {
+		httpURL = func(i int) string {
 			return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i])
 		}
 
@@ -66,19 +80,19 @@ func TestHealReceiptAPI3NodeE2E(t *testing.T) {
 			d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-receipt-e2e-%d-*", i))
 			require.NoError(t, err)
 			dataDirs[i] = d
-			t.Cleanup(func() { _ = os.RemoveAll(d) })
+			ginkgo.DeferCleanup(os.RemoveAll, d)
 		}
 		encKeyFile := makeSharedEncryptionKeyFile(t)
 
 		// ReceiptIDs used across the test — literal ids make log output readable.
 		const (
-			idLocalA   = "rcpt-on-A-local"
-			idCHot     = "rcpt-on-C-hot-gossiped"
-			idCOld     = "rcpt-on-C-cold-outside-window"
-			idMissing  = "rcpt-nowhere-found"
 			bucketName = "audit-test"
 			objectKey  = "some/key"
 		)
+		idLocalA = "rcpt-on-A-local"
+		idCHot = "rcpt-on-C-hot-gossiped"
+		idCOld = "rcpt-on-C-cold-outside-window"
+		idMissing = "rcpt-nowhere-found"
 
 		// Pre-seed: open each node's receipt BadgerDB BEFORE the process starts,
 		// write signed receipts, close. The node will inherit these on open.
@@ -113,7 +127,7 @@ func TestHealReceiptAPI3NodeE2E(t *testing.T) {
 		// Spawn 3 nodes: seed first, then followers via .join-pending.
 		procs := make([]*exec.Cmd, 3)
 		procs[0] = startNode(0)
-		t.Cleanup(func() {
+		ginkgo.DeferCleanup(func() {
 			for _, p := range procs {
 				if p != nil && p.Process != nil {
 					_ = p.Process.Kill()
@@ -149,52 +163,60 @@ func TestHealReceiptAPI3NodeE2E(t *testing.T) {
 		// DisableURIPathEscaping matches what the S3 client does — the server's
 		// verifier builds its canonical URI from r.URL.Path unchanged, so any
 		// extra percent-encoding at sign time would produce a signature mismatch.
-		signer := v4.NewSigner(func(o *v4.SignerOptions) {
+		signer = v4.NewSigner(func(o *v4.SignerOptions) {
 			o.DisableURIPathEscaping = true
 			if testing.Verbose() {
 				o.Logger = logging.NewStandardLogger(os.Stderr)
 				o.LogSigning = true
 			}
 		})
-		creds := aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secretKey}
-		ctx := context.Background()
-
-		t.Run("LocalHit_QueryANodeForItsOwnReceipt", func(t *testing.T) {
-			body, status := signedGet(t, ctx, signer, creds, httpURL(0)+"/api/receipts/"+idLocalA)
-			require.Equal(t, http.StatusOK, status, "node A should answer locally for its own receipt; body=%s", body)
-			require.Contains(t, string(body), idLocalA)
-		})
-
-		t.Run("RoutingCacheHit_QueryBForReceiptOnCThatWasGossiped", func(t *testing.T) {
-			body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCHot)
-			require.Equal(t, http.StatusOK, status, "node B should route via gossip cache to C; body=%s", body)
-			require.Contains(t, string(body), idCHot)
-		})
-
-		t.Run("BroadcastFallback_QueryBForReceiptOnCOutsideGossipWindow", func(t *testing.T) {
-			body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCOld)
-			require.Equal(t, http.StatusOK, status, "node B should find receipt via broadcast fan-out; body=%s", body)
-			require.Contains(t, string(body), idCOld)
-		})
-
-		t.Run("NotFound_UnknownReceiptReturns404", func(t *testing.T) {
-			body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idMissing)
-			require.Equal(t, http.StatusNotFound, status, "missing receipt must return 404, got body=%s", body)
-		})
-
-		t.Run("UnauthenticatedRequestIsRejected", func(t *testing.T) {
-			resp, err := http.Get(httpURL(0) + "/api/receipts/" + idLocalA)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-			require.Equal(t, http.StatusForbidden, resp.StatusCode, "unsigned request must be rejected")
-		})
+		creds = aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secretKey}
+		ctx = context.Background()
 	})
-}
+
+	ginkgo.It("answers locally for a node's own receipt", func() {
+		t := ginkgo.GinkgoTB()
+		body, status := signedGet(t, ctx, signer, creds, httpURL(0)+"/api/receipts/"+idLocalA)
+		require.Equal(t, http.StatusOK, status, "node A should answer locally for its own receipt; body=%s", body)
+		require.Contains(t, string(body), idLocalA)
+	})
+
+	ginkgo.It("routes via gossip cache to a peer", func() {
+		t := ginkgo.GinkgoTB()
+		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCHot)
+		require.Equal(t, http.StatusOK, status, "node B should route via gossip cache to C; body=%s", body)
+		require.Contains(t, string(body), idCHot)
+	})
+
+	ginkgo.It("falls back to broadcast for receipts outside the gossip window", func() {
+		t := ginkgo.GinkgoTB()
+		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCOld)
+		require.Equal(t, http.StatusOK, status, "node B should find receipt via broadcast fan-out; body=%s", body)
+		require.Contains(t, string(body), idCOld)
+	})
+
+	ginkgo.It("returns 404 for missing receipts", func() {
+		t := ginkgo.GinkgoTB()
+		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idMissing)
+		require.Equal(t, http.StatusNotFound, status, "missing receipt must return 404, got body=%s", body)
+	})
+
+	ginkgo.It("allows unauthenticated reads while Phase 0 anonymous mode is enabled", func() {
+		t := ginkgo.GinkgoTB()
+		resp, err := http.Get(httpURL(0) + "/api/receipts/" + idLocalA)
+		require.NoError(t, err)
+		ginkgo.DeferCleanup(resp.Body.Close)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "unsigned request should follow Phase 0 anonymous mode; body=%s", body)
+		require.Contains(t, string(body), idLocalA)
+	})
+})
 
 // seedReceipt opens the target receipts/ BadgerDB on disk, writes one
 // HMAC-signed HealReceipt, and closes cleanly. Must be invoked before the
 // grainfs process starts on that dataDir (BadgerDB takes an exclusive lock).
-func seedReceipt(t *testing.T, dataDir, psk, id string, ts time.Time, bucket, key string) {
+func seedReceipt(t testing.TB, dataDir, psk, id string, ts time.Time, bucket, key string) {
 	t.Helper()
 	dir := filepath.Join(dataDir, "receipts")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -230,7 +252,7 @@ func seedReceipt(t *testing.T, dataDir, psk, id string, ts time.Time, bucket, ke
 // set it explicitly before signing to match what the signer hashed into the
 // canonical request. Without this the server and client compute different
 // canonical requests and the signature never verifies.
-func signedGet(t *testing.T, ctx context.Context, signer *v4.Signer, creds aws.Credentials, url string) ([]byte, int) {
+func signedGet(t testing.TB, ctx context.Context, signer *v4.Signer, creds aws.Credentials, url string) ([]byte, int) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	require.NoError(t, err)

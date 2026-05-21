@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.310.0] - 2026-05-21
+
+### Changed
+
+- **E2E tests now run as native Ginkgo specs.** The suite keeps one top-level
+  `Describe` per file, shares setup through Ginkgo fixtures, and uses
+  `DeferCleanup` for process, socket, and fixture teardown.
+- Single-node and cluster variants now run the same spec bodies through shared
+  target helpers, reducing drift between deployment shapes.
+
+### Fixed
+
+- E2E cleanup no longer sends signals to unrelated process groups when a helper
+  process was not started with its own process group.
+- E2E specs close idle HTTP connections between examples and disable keep-alives
+  for Iceberg SigV4 clients to avoid stale connection and file-descriptor buildup
+  during long suite runs.
+- The admin UDS first-service-account TLS posture precheck is wired after the
+  runtime config store is available, so the live server path now rejects unsafe
+  first SA creation before the Raft proposal.
+
 ## [0.0.309.0] - 2026-05-21
 
 ### Fixed

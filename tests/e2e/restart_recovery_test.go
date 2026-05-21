@@ -11,42 +11,25 @@ import (
 	"testing"
 	"time"
 
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestRestartRecovery_SweepsOrphanArtifacts verifies the Phase 16 Week 3
-// startup recovery path:
-//
-//  1. Plant orphan .tmp + parts/<uploadID>/ artifacts in a data dir.
-//  2. Boot grainfs against that dir.
-//  3. Confirm both artifacts are gone post-boot.
-//  4. Confirm startup-phase HealEvents were persisted to the eventstore so
-//     a dashboard reload after boot can still show what was cleaned.
-//
-// We query the eventstore (/api/eventlog?type=heal) instead of subscribing
-// to the SSE stream because SSE clients can only join AFTER boot, while
-// startup HealEvents fire DURING boot — the persisted store is the only
-// source-of-truth a freshly-loaded dashboard can read.
-func TestRestartRecoveryOrphanSweepE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runRestartRecoveryOrphanSweepCases(t)
+var _ = ginkgo.Describe("Restart recovery orphan sweep", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("sweeps startup orphan artifacts and persists heal events", func() {
+			runRestartRecoveryOrphanSweepCases(ginkgo.GinkgoTB())
+		})
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-		// The startup-recovery sweep is per-node and currently asserted on a
-		// single fresh boot — Cluster4Node branch is the shape mirror; full
-		// per-node assertion arrives when cluster startup-event surfacing
-		// is wired.
-	})
-}
+})
 
-func runRestartRecoveryOrphanSweepCases(t *testing.T) {
+func runRestartRecoveryOrphanSweepCases(t testing.TB) {
 	t.Helper()
 	binary := getBinary()
 	dir, err := os.MkdirTemp("", "grainfs-restart-recovery-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	// Plant a stale .tmp file (backdated past the 5-min in-flight guard).
 	staleTmp := filepath.Join(dir, "shards", "b", "k", "0.tmp")
@@ -73,7 +56,7 @@ func runRestartRecoveryOrphanSweepCases(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	defer func() { _ = cmd.Process.Kill() }()
+	ginkgo.DeferCleanup(func() { _ = cmd.Process.Kill() })
 
 	waitForPort(t, port, 5*time.Second)
 

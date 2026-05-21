@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -14,14 +15,28 @@ import (
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
-// TestIAMPolicyE2E validates the IAM policy admin plane (PUT/GET/DELETE/LIST/
-// ATTACH/DETACH/SIMULATE) against both single-node and cluster fixtures.
-func TestIAMPolicyE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIAMPolicyCases(t, newSingleNodeIAMAdminTarget())
+var _ = ginkgo.Describe("IAM policy", func() {
+	describeIAMPolicyContext("SingleNode", func(testing.TB) iamAdminTarget {
+		return newSingleNodeIAMAdminTarget()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runIAMPolicyCases(t, newSharedClusterIAMAdminTarget(t))
+	describeIAMPolicyContext("Cluster4Node", func(tb testing.TB) iamAdminTarget {
+		return newSharedClusterIAMAdminTarget(tb)
+	})
+})
+
+func describeIAMPolicyContext(name string, factory func(testing.TB) iamAdminTarget) {
+	ginkgo.Context(name, func() {
+		var (
+			ctx context.Context
+			tgt iamAdminTarget
+		)
+
+		ginkgo.BeforeEach(func() {
+			ctx = context.Background()
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runIAMPolicyCases(func() context.Context { return ctx }, func() iamAdminTarget { return tgt })
 	})
 }
 
@@ -35,16 +50,16 @@ const validPolicyDoc = `{
 	}]
 }`
 
-func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
-	t.Helper()
-	ctx := context.Background()
-
+func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarget) {
 	// --- Put / Get / Delete / List ---
 
-	t.Run("PutGetDelete", func(t *testing.T) {
+	ginkgo.It("puts, gets, deletes, and rejects missing policies (PutGetDelete)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		name := "e2e-pgd-" + tgt.name
-		t.Cleanup(func() { _ = c.PolicyDelete(ctx, name) })
+		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, name) })
 
 		require.NoError(t, c.PolicyPut(ctx, name, []byte(validPolicyDoc)))
 
@@ -63,10 +78,13 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		requireAdminStatus(t, err, http.StatusNotFound)
 	})
 
-	t.Run("ListIncludesCustom", func(t *testing.T) {
+	ginkgo.It("lists custom policies (ListIncludesCustom)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		name := "e2e-list-" + tgt.name
-		t.Cleanup(func() { _ = c.PolicyDelete(ctx, name) })
+		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, name) })
 		require.NoError(t, c.PolicyPut(ctx, name, []byte(validPolicyDoc)))
 
 		names, err := c.PolicyList(ctx)
@@ -74,7 +92,10 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		require.Contains(t, names, name)
 	})
 
-	t.Run("PutBuiltinName_403", func(t *testing.T) {
+	ginkgo.It("rejects writes to builtin policy names (PutBuiltinName_403)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		// "readonly" is a builtin — server must refuse with 403.
 		err := c.PolicyPut(ctx, "readonly", []byte(validPolicyDoc))
@@ -86,13 +107,19 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 	// the router before the handler guard (F32) runs. The guard IS exercised via
 	// body-param routes (SimulateEmptySAID_400 below) and unit tests.
 
-	t.Run("GetMissing_404", func(t *testing.T) {
+	ginkgo.It("returns 404 for missing policies (GetMissing_404)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		_, err := c.PolicyGet(ctx, "does-not-exist-e2e-"+tgt.name)
 		requireAdminStatus(t, err, http.StatusNotFound)
 	})
 
-	t.Run("PutInvalidPolicy_400", func(t *testing.T) {
+	ginkgo.It("rejects invalid policy documents (PutInvalidPolicy_400)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		// NotAction is explicitly banned by policy.Parse — the server must
 		// reject this with 400 before the Raft round-trip.
@@ -101,7 +128,10 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		requireAdminStatus(t, err, http.StatusBadRequest)
 	})
 
-	t.Run("DeleteBuiltinName_403", func(t *testing.T) {
+	ginkgo.It("rejects deleting builtin policies (DeleteBuiltinName_403)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		err := c.PolicyDelete(ctx, "readonly")
 		requireAdminStatus(t, err, http.StatusForbidden)
@@ -109,10 +139,13 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 
 	// --- Attach / Detach ---
 
-	t.Run("AttachDetach", func(t *testing.T) {
+	ginkgo.It("attaches and detaches policies from service accounts (AttachDetach)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		policyName := "e2e-attach-" + tgt.name
-		t.Cleanup(func() { _ = c.PolicyDelete(ctx, policyName) })
+		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, policyName) })
 		require.NoError(t, c.PolicyPut(ctx, policyName, []byte(validPolicyDoc)))
 
 		saID, _, _ := tgt.uniqueSA(t, "attach-detach")
@@ -123,16 +156,19 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 
 	// --- Simulate ---
 
-	t.Run("Simulate_Allow", func(t *testing.T) {
+	ginkgo.It("simulates allowed policy decisions (Simulate_Allow)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		policyName := "e2e-sim-allow-" + tgt.name
-		t.Cleanup(func() { _ = c.PolicyDelete(ctx, policyName) })
+		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, policyName) })
 		require.NoError(t, c.PolicyPut(ctx, policyName, []byte(validPolicyDoc)))
 
 		saID, _, _ := tgt.uniqueSA(t, "simulate-allow")
 
 		require.NoError(t, c.PolicyAttachToSA(ctx, policyName, saID))
-		t.Cleanup(func() { _ = c.PolicyDetachFromSA(ctx, policyName, saID) })
+		ginkgo.DeferCleanup(func() { _ = c.PolicyDetachFromSA(ctx, policyName, saID) })
 
 		resp, err := c.PolicySimulate(ctx, iamadmin.PolicySimulateRequest{
 			SAID:     saID,
@@ -143,7 +179,10 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		assert.Equal(t, "Allow", resp.Effect)
 	})
 
-	t.Run("Simulate_Deny", func(t *testing.T) {
+	ginkgo.It("simulates implicit deny policy decisions (Simulate_Deny)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		// SA with no policy attached → implicit deny.
 		saID, _, _ := tgt.uniqueSA(t, "simulate-deny")
@@ -157,7 +196,10 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		assert.Equal(t, "Deny", resp.Effect)
 	})
 
-	t.Run("SimulateEmptySAID_400", func(t *testing.T) {
+	ginkgo.It("rejects policy simulation with an empty service account id (SimulateEmptySAID_400)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		_, err := c.PolicySimulate(ctx, iamadmin.PolicySimulateRequest{
 			SAID:     "",
@@ -169,7 +211,8 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 
 	// --- Local validation (no UDS dial) ---
 
-	t.Run("Validate_Local", func(t *testing.T) {
+	ginkgo.It("validates policy documents locally (Validate_Local)", func() {
+		t := ginkgo.GinkgoTB()
 		// Valid doc must parse without error.
 		_, err := policy.Parse([]byte(validPolicyDoc))
 		require.NoError(t, err)
@@ -183,7 +226,7 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 
 // requireAdminStatus asserts that err is a *adminapi.Error with the given
 // HTTP status code. Fails the test with a descriptive message if not.
-func requireAdminStatus(t *testing.T, err error, wantStatus int) {
+func requireAdminStatus(t testing.TB, err error, wantStatus int) {
 	t.Helper()
 	require.Error(t, err, "expected an error with status %d", wantStatus)
 	var aerr *adminapi.Error
