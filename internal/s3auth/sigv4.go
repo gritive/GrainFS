@@ -56,7 +56,7 @@ func (v *Verifier) LookupSecret(accessKey string) string {
 // Returns the access key if valid, or an error.
 func (v *Verifier) Verify(r *http.Request) (string, error) {
 	// Check for query-string presigned URL first
-	if hasPresignedAlgorithm(r) {
+	if HasPresignedAlgorithm(r) {
 		return v.verifyPresigned(r)
 	}
 
@@ -210,7 +210,12 @@ func parseCredentialParts(credential string) (accessKey, date, region, service s
 	return accessKey, date, region, service, accessKey != "" && date != "" && region != "" && service != ""
 }
 
-func hasPresignedAlgorithm(r *http.Request) bool {
+// HasPresignedAlgorithm reports whether the request's raw query string carries
+// a non-empty X-Amz-Algorithm parameter (accepting percent-encoded keys). This
+// is the canonical "is this a SigV4 presigned URL?" predicate; consumers
+// outside the s3auth package use it to distinguish presigned requests from
+// truly anonymous (no auth) requests.
+func HasPresignedAlgorithm(r *http.Request) bool {
 	raw := r.URL.RawQuery
 	for raw != "" {
 		part, rest, found := strings.Cut(raw, "&")
@@ -293,7 +298,7 @@ func calculateSignature(secretKey, date, region, service, stringToSign string) s
 // Skips the 4-round key derivation — use when the signing key is cached.
 // Still performs full canonical request construction and HMAC verification.
 func (v *Verifier) VerifyWithSigningKey(r *http.Request, accessKey string, signingKey []byte) error {
-	if hasPresignedAlgorithm(r) {
+	if HasPresignedAlgorithm(r) {
 		return v.verifyPresignedWithKey(r, signingKey)
 	}
 	return v.verifyHeaderWithKey(r, accessKey, signingKey)

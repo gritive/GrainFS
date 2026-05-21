@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.305.0] - 2026-05-21
+## [0.0.306.0] - 2026-05-21
 
 ### Fixed
 
@@ -20,6 +20,50 @@
   `DeferCleanup` bucket cleanup.
 - Added focused cluster/storage regression coverage for preserving SSE metadata
   through forwarded PUT requests and backend-native mutation result delegation.
+
+## [0.0.305.0] - 2026-05-21
+
+### Fixed
+
+- **F#41**: Phase 0 anonymous access on `s3://default` was broken for PUT/LIST/DELETE
+  due to the auth middleware's anon fast-path being gated to GET/HEAD only. The
+  startup banner and README promised "any client can read/write s3://default" but
+  PUT/LIST returned 403. Middleware now defers to the authorizer for all verbs when
+  `iam.anon-enabled=true` (presigned URLs continue through SigV4), restoring the
+  contract. `WithBearerConfig` was also wired into production boot (previously only
+  set in test fixtures, leaving iceberg Phase 0 anon-skip latently dead). Discovered
+  while implementing the T71 e2e quickstart test.
+- **F#41b**: Layer 3 object-ACL gate was denying anon GET on `s3://default` for
+  objects written with default (private) ACL. The L1 `ReasonDefaultBucketImplicitAnon`
+  allow signal now propagates to Layer 3, which skips the private-ACL deny only for
+  that specific L1 reason. ACLs on other buckets remain enforced (the existing
+  `request_authz_test.go` private-ACL deny case stays untouched). Completes the
+  Phase 0 round-trip the banner promises.
+- **F#41-ext**: Anon fast-path now covers `s3://default` regardless of `iam.anon-enabled`.
+  The startup banner promises "default remains public" but Phase 2 (anon-disabled) was
+  blocking anon PUT/LIST on the default bucket. Default bucket now always allows unsigned
+  requests at the middleware layer; the authorizer's `ReasonDefaultBucketImplicitAnon`
+  Allow path takes it from there. Discovered during T73 (Phase 0 → Phase 2 transition e2e).
+
+### Changed
+
+- **Refactor**: `HasPresignedAlgorithm` exported from `internal/s3auth` for
+  trust-boundary consistency between authn middleware and SigV4 verifier
+  (was duplicated as an inline check). `DefaultBucketName` extracted to
+  `internal/reservedname` and referenced at both trust-boundary sites
+  (`authn_middleware.go`, `authorizer.go`). Closes a drift hazard noted by review.
+
+### Tests
+
+- **§9 Session 2 e2e (T71-T73)**: Phase 0 contract + cluster-aware revocation suite.
+  - `TestPhase0QuickstartE2E` (T71, 10 sub-cases): anon PUT/LIST/GET/DELETE on
+    `s3://default` + iceberg anon regression case + cluster-aware F#46 known-gap
+    branch (cluster GET on deleted key returns 405 instead of 404).
+  - `TestThreeNodeRevocationE2E` (T72, 4 sub-cases, F#14): cross-node policy detach
+    + key revoke propagation within one Raft apply round-trip. SingleNode + Cluster4Node.
+  - `TestPhaseTransitionE2E` (T73, 6 sub-cases, F#26): Phase 0 → Phase 2 atomic flip
+    during anon traffic. Default-bucket anon survives the flip (banner guarantee);
+    non-default-bucket anon denied post-flip; no torn state during the flip window.
 
 ## [0.0.304.1] - 2026-05-21
 

@@ -73,8 +73,8 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 	// D#2: "default" bucket carries an implicit anon policy unless the operator
 	// has attached an explicit bucket policy. Implicit policy survives Phase 0→2
 	// transitions (i.e., it does NOT depend on iam.anon-enabled).
-	if saID == "" && bucket == "default" {
-		hasExplicit, err := a.resolver.HasBucketPolicy(ctx, "default")
+	if saID == "" && bucket == reservedname.DefaultBucketName {
+		hasExplicit, err := a.resolver.HasBucketPolicy(ctx, reservedname.DefaultBucketName)
 		if err == nil && !hasExplicit {
 			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonDefaultBucketImplicitAnon, ConditionContext: cc}
 		}
