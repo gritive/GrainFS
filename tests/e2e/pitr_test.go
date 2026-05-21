@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,7 +21,7 @@ type pitrResponse struct {
 	StaleBlobs         []map[string]any `json:"stale_blobs"`
 }
 
-func createPITRSnapshot(t *testing.T, serverURL, reason string) {
+func createPITRSnapshot(t testing.TB, serverURL, reason string) {
 	t.Helper()
 	var lastErr error
 	var lastStatus int
@@ -50,46 +51,63 @@ func createPITRSnapshot(t *testing.T, serverURL, reason string) {
 		lastErr, lastStatus, lastBody)
 }
 
-// TestPITRE2E exercises the /admin/pitr HTTP surface (WAL replay, target-time
-// exclusion, invalid time, no snapshot) against both single-node and 4-node
-// cluster fixtures. /admin/pitr mutates global metadata state — dedicated
-// per-branch fixture, one boot per branch, sub-tests run in sequence.
-func TestPITRE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runPITRCases(t, newDedicatedSingleNodeS3Target(t, nil))
+var _ = ginkgo.Describe("PITR", func() {
+	describePITRContext("SingleNode", func(t testing.TB) s3Target {
+		return newDedicatedSingleNodeS3Target(t, nil)
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runPITRCases(t, newClusterS3TargetWithExtraArgs(t, 4, nil))
+	describePITRContext("Cluster4Node", func(t testing.TB) s3Target {
+		return newClusterS3TargetWithExtraArgs(t, 4, nil)
+	})
+})
+
+func describePITRContext(name string, factory func(testing.TB) s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runPITRCases(func() s3Target { return tgt })
 	})
 }
 
-func runPITRCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	serverURL := tgt.endpoint(0)
-	client := tgt.pickNode(0)
+func runPITRCases(getTgt func() s3Target) {
 	ctx := context.Background()
 
 	// Invalid-input cases first so they don't accumulate fixture state.
-	t.Run("InvalidTime", func(t *testing.T) {
+	ginkgo.It("rejects an invalid target time", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		serverURL := tgt.endpoint(0)
+
 		resp, err := postJSON(serverURL+"/admin/pitr", map[string]string{"to": "not-a-time"})
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 
-	t.Run("NoSnapshot", func(t *testing.T) {
+	ginkgo.It("rejects a target before any snapshot", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		serverURL := tgt.endpoint(0)
+
 		// epoch+1s is always before any snapshot this fixture will produce,
 		// so the "no snapshot before target" check is stable regardless of
 		// what other sub-tests have already run on this fixture.
 		veryOldTime := time.Unix(1, 0).UTC().Format(time.RFC3339Nano)
 		resp, err := postJSON(serverURL+"/admin/pitr", map[string]string{"to": veryOldTime})
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		require.True(t, resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest,
 			"expected 404 or 400, got %d", resp.StatusCode)
 	})
 
-	t.Run("WALReplayAddsObjects", func(t *testing.T) {
+	ginkgo.It("replays WAL entries to add objects before the target time", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		serverURL := tgt.endpoint(0)
+		client := tgt.pickNode(0)
 		bucket := tgt.uniqueBucket(t, "walreplay")
 		createPITRSnapshot(t, serverURL, "pitr-wal-base")
 
@@ -124,7 +142,7 @@ func runPITRCases(t *testing.T, tgt s3Target) {
 			"to": pivotTime.Format(time.RFC3339Nano),
 		})
 		require.NoError(t, err)
-		defer pitrResp.Body.Close()
+		ginkgo.DeferCleanup(pitrResp.Body.Close)
 		require.Equal(t, http.StatusOK, pitrResp.StatusCode, "PITR should succeed")
 
 		var pr pitrResponse
@@ -144,8 +162,8 @@ func runPITRCases(t *testing.T, tgt s3Target) {
 				Key:    aws.String(key),
 			})
 			require.NoError(t, err, "get %s after PITR", key)
+			ginkgo.DeferCleanup(getResp.Body.Close)
 			body, _ := io.ReadAll(getResp.Body)
-			getResp.Body.Close()
 			require.Equal(t, "included-"+key, string(body))
 		}
 
@@ -158,7 +176,11 @@ func runPITRCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("ExcludesObjectsAddedAfterTarget", func(t *testing.T) {
+	ginkgo.It("excludes objects added after the target time", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		serverURL := tgt.endpoint(0)
+		client := tgt.pickNode(0)
 		bucket := tgt.uniqueBucket(t, "excludes")
 
 		originals := []string{"orig1.txt", "orig2.txt"}
@@ -194,7 +216,7 @@ func runPITRCases(t *testing.T, tgt s3Target) {
 			"to": pivotTime.Format(time.RFC3339Nano),
 		})
 		require.NoError(t, err)
-		defer pitrResp.Body.Close()
+		ginkgo.DeferCleanup(pitrResp.Body.Close)
 		require.Equal(t, http.StatusOK, pitrResp.StatusCode)
 
 		listOut2, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})

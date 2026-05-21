@@ -31,20 +31,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func TestTLSHotSwapE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runTLSHotSwapCase(t)
+var _ = ginkgo.Describe("TLS hot swap", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("switches an existing listener from plaintext to TLS after SIGHUP", func() {
+			runTLSHotSwapCase(ginkgo.GinkgoTB())
+		})
 	})
 	// Cluster4Node intentionally omitted — see file header.
-}
+})
 
-func runTLSHotSwapCase(t *testing.T) {
+func runTLSHotSwapCase(t testing.TB) {
 	dataDir, err := os.MkdirTemp("", "grainfs-tls-hotswap-*")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	ginkgo.DeferCleanup(os.RemoveAll, dataDir)
 
 	certDir := t.TempDir()
 	certPath := filepath.Join(certDir, "cert.pem")
@@ -68,7 +71,7 @@ func runTLSHotSwapCase(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	t.Cleanup(func() { terminateProcess(cmd) })
+	ginkgo.DeferCleanup(terminateProcess, cmd)
 
 	waitForPort(t, port, 30*time.Second)
 
@@ -84,8 +87,8 @@ func runTLSHotSwapCase(t *testing.T) {
 	}
 	resp, err := plainClient.Get(plaintextURL)
 	require.NoError(t, err, "plaintext GET /metrics must succeed before TLS swap")
+	ginkgo.DeferCleanup(resp.Body.Close)
 	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Phase 2: write self-signed cert + key, SIGHUP.
@@ -129,7 +132,7 @@ func runTLSHotSwapCase(t *testing.T) {
 // is duplicated here because the e2e package can't import internal/server.
 // Both files are short and the duplication keeps the e2e fixture self-
 // contained.
-func writeSelfSignedCertE2E(t *testing.T, certPath, keyPath string) {
+func writeSelfSignedCertE2E(t testing.TB, certPath, keyPath string) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
