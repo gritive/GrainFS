@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterAwaitWriteFromNonOwnerE2E verifies that AwaitWriteFromNonOwner
@@ -27,8 +27,8 @@ func runAwaitWriteFromNonOwnerCases(getTgt func() s3Target) {
 	ginkgo.It("succeeds from at least one non-owner peer", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
-		require.True(t, tgt.isCluster, "AwaitWriteFromNonOwner requires cluster fixture")
+		gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "AwaitWriteFromNonOwner requires cluster fixture")
 		bucket := tgt.uniqueBucket(t, "awaitprobe")
-		require.NoError(t, tgt.cluster.AwaitWriteFromNonOwner(bucket, "leader-check", 15*time.Second))
+		gomega.Expect(tgt.cluster.AwaitWriteFromNonOwner(bucket, "leader-check", 15*time.Second)).To(gomega.Succeed())
 	})
 }

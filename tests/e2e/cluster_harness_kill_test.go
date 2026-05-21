@@ -6,11 +6,11 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // nodeSettled returns true when the node at baseURL reports peers==2 (3-node cluster).
-// Safe to call inside require.Eventually — does not use require internally.
+// Safe to call inside gomega.Eventually; it does not assert internally.
 func nodeSettled(baseURL string) bool {
 	resp, err := http.Get(baseURL + "/api/cluster/status")
 	if err != nil {
@@ -45,9 +45,9 @@ var _ = ginkgo.Describe("E2E cluster kill and restart", func() {
 			waitClusterSettled(t, c.httpURLs[c.leaderIdx])
 
 			c.RestartNode(t, victim)
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				return nodeSettled(c.httpURLs[victim])
-			}, 90*time.Second, 500*time.Millisecond, "restarted node never settled")
+			}, 90*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "restarted node never settled")
 		})
 	})
 })

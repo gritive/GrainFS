@@ -19,7 +19,7 @@ import (
 
 	smithy "github.com/aws/smithy-go"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestAppendForwardBufferSaturationE2E exercises the cluster forward-buffer
@@ -64,10 +64,10 @@ func runAppendForwardBufferSaturationCases(t testing.TB, tgt s3Target) {
 		}(i)
 	}
 	wg.Wait()
-	require.GreaterOrEqual(t, atomic.LoadInt64(&slowDowns), int64(1),
+	gomega.Expect(atomic.LoadInt64(&slowDowns)).To(gomega.BeNumerically(">=", 1),
 		"expected at least one 503 SlowDown from forward buffer saturation")
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i := 0; i < tgt.nodes; i++ {
 			resp, err := http.Get(tgt.endpoint(i) + "/metrics")
 			if err != nil {
@@ -80,5 +80,5 @@ func runAppendForwardBufferSaturationCases(t testing.TB, tgt s3Target) {
 			}
 		}
 		return false
-	}, 5*time.Second, 100*time.Millisecond, "rejected counter metric not exposed")
+	}, 5*time.Second, 100*time.Millisecond).Should(gomega.BeTrue(), "rejected counter metric not exposed")
 }
