@@ -129,7 +129,11 @@ func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.
 // on the S3 plane).
 func mustCreateBucket(t serverTestTB, backend *storage.LocalBackend, name string) {
 	t.Helper()
-	require.NoError(t, backend.CreateBucket(context.Background(), name), "mustCreateBucket %q", name)
+	ctx := context.Background()
+	if ctxT, ok := t.(interface{ Context() context.Context }); ok {
+		ctx = ctxT.Context()
+	}
+	require.NoError(t, backend.CreateBucket(ctx, name), "mustCreateBucket %q", name)
 }
 
 type recordingReadIndexer struct {
