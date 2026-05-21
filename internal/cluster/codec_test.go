@@ -671,7 +671,7 @@ func TestCoalesceSegmentsCmdRoundTrip(t *testing.T) {
 }
 
 // TestCoalescedShardRefECParamsRoundTrip ensures the Phase B3 EC placement
-// params (RingVersion / ECData / ECParity / NodeIDs) survive marshal+unmarshal.
+// params (ECData / ECParity / NodeIDs) survive marshal+unmarshal.
 // These fields are required by appendableReader to reconstruct the coalesced
 // blob via the EC reader (PutObject GET path).
 func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
