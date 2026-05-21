@@ -459,7 +459,7 @@ func iamSADelete(t testing.TB, sock, saID string) {
 //
 // Per /plan-eng-review override A9, the JSON wire key is "upstream_url"
 // (matches the CLI flag --upstream-url and server-side struct field UpstreamURL).
-func iamPutBucketUpstream(t *testing.T, sock, bucket, upstreamURL, ak, sk string) {
+func iamPutBucketUpstream(t testing.TB, sock, bucket, upstreamURL, ak, sk string) {
 	t.Helper()
 	body := map[string]string{
 		"bucket":       bucket,
