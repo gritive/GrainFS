@@ -424,21 +424,44 @@ start_minio() {
     return 1
   fi
 
+  local drives="${MINIO_SINGLE_DRIVES:-1}"
+  if [[ ! "$drives" =~ ^[0-9]+$ || "$drives" -lt 1 ]]; then
+    echo "minio: MINIO_SINGLE_DRIVES must be >= 1; got $drives" >&2
+    return 1
+  fi
   local data_dir="$BENCH_DIR/minio"
+  local volume_args=()
   local port console_port
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
-  mkdir -p "$data_dir"
-  register_target_data_dir "$data_dir"
+  if [[ "$drives" -eq 1 ]]; then
+    mkdir -p "$data_dir"
+    register_target_data_dir "$data_dir"
+    volume_args+=("$data_dir")
+  else
+    local idx
+    mkdir -p "$data_dir"
+    for idx in $(seq 1 "$drives"); do
+      mkdir -p "$data_dir/d${idx}"
+      register_target_data_dir "$data_dir/d${idx}"
+    done
+    volume_args+=("$data_dir/d{1...${drives}}")
+  fi
 
   MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
   MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
-  "$MINIO_BIN" server "$data_dir" \
+  "$MINIO_BIN" server "${volume_args[@]}" \
     --address "127.0.0.1:$port" \
     --console-address "127.0.0.1:$console_port" \
     >"$PROFILE_ROOT/minio.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "minio S3" 180 0.2 >&2
+  echo "  waiting for minio signed write readiness..."
+  bench_wait_s3_signed_write_ready "http://127.0.0.1:$port" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "warp-minio-ready" "${MINIO_WRITE_READY_ATTEMPTS:-120}" "${MINIO_WRITE_READY_SLEEP:-0.5}" >&2 || {
+    echo "  minio signed write readiness failed; aborting" >&2
+    return 1
+  }
+  echo "  minio signed write-ready"
   set_start_info "http://127.0.0.1:$port" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"
 }
 
@@ -930,6 +953,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     minio)
       if ! start_minio; then
         echo "minio: skipped; set MINIO_BIN or MINIO_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        stop_target_backends "$target_pid_start"
         continue
       fi
       ;;
@@ -943,6 +967,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     rustfs)
       if ! start_rustfs; then
         echo "rustfs: skipped; set RUSTFS_BIN or RUSTFS_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        stop_target_backends "$target_pid_start"
         continue
       fi
       ;;
