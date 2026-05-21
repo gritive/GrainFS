@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.316.0] - 2026-05-21
+
+### Internal
+
+- e2e coverage audit + skeleton placeholders (`PIt` with `[TODO:e2e]` prefix)
+  for user-facing operations that are wired but lack explicit e2e coverage.
+  Total 94 PIt across 14 files spanning S3, Iceberg, NFSv4, 9P, NBD, cluster
+  management (config diff/reset, recover plan/execute/verify), admin HTTP
+  endpoints (alerts, lifecycle status, audit health/s3), and CLI rest
+  (bucket info/policy/versioning, volume stat/resize/recalculate,
+  audit query, config CRUD, doctor, iceberg config, nfs debug). All
+  bodies are empty pending stubs — they compile and lint-clean but
+  remain in Ginkgo's `Pending` bucket until each is implemented.
+
 ## [0.0.315.0] - 2026-05-21
 
 ### Added
