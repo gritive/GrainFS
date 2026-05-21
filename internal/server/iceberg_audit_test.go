@@ -33,6 +33,9 @@ func (allowPolicyStore) SAGroups(_ context.Context, _ string) ([]string, error) 
 func (allowPolicyStore) GroupPolicies(_ context.Context, _ string) ([]string, error) {
 	return nil, nil
 }
+func (allowPolicyStore) MountSAPolicies(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
 func (allowPolicyStore) PolicyDoc(_ context.Context, name string) (*policy.Document, error) {
 	if name == "test-policy-id" {
 		return &policy.Document{

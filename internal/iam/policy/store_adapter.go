@@ -29,6 +29,14 @@ func (a *StoreAdapter) SAGroups(ctx context.Context, saID string) ([]string, err
 	return a.Groups.MembershipOf(ctx, saID)
 }
 
+// MountSAPolicies returns policies directly attached to the mount-SA via
+// the separate mount-SA pool (policyattach.MountSAPolicies). FU#5
+// (F-§B-resolver-mountsa) — bridges the resolver to the mount-SA attach
+// store.
+func (a *StoreAdapter) MountSAPolicies(ctx context.Context, mountSA string) ([]string, error) {
+	return a.Attach.MountSAPolicies(ctx, mountSA)
+}
+
 // GroupPolicies unions the policies attached directly to the group (group.Group.AttachedPolicies,
 // set via GroupPut) with the policies attached separately via PolicyAttachToGroupPut.
 // If the group itself does not exist (e.g. stale membership reference), returns nil

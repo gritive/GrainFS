@@ -20,10 +20,9 @@ import (
 //     mrCluster always bootstraps to Phase 2, where the 9P attach gate denies
 //     anon (does not honor S3's default-bucket implicit-anon allow path).
 //     Reported as F-§B-9P-anon-attach-phase2 (production-level gap).
-//   - AnameMountSAHit_OK: SKIPPED — pre-existing §B production gap
-//     F-§B-resolver-mountsa: StoreAdapter.SAPolicies does not dispatch
-//     mount-SA names to MountSAPolicies, so mount-SA attach with a policy
-//     attached returns EACCES at the authorizer instead of Allow.
+//   - AnameMountSAHit_OK: enabled — FU#5 (F-§B-resolver-mountsa) wires
+//     resolver to consult the mount-SA pool when RequestContext.PrincipalType
+//     is PrincipalTypeMount, which 9P attach now sets via p9AttachReqCtx.
 //   - AnameMountSAMiss_ENOENT: typo not in pool → ENOENT. Works on both
 //     SingleNode and Cluster3Node (resolver pre-check, phase-agnostic).
 //   - AnameMountSANoPolicy_EACCES: mount-SA in pool but no policy attached →
@@ -97,13 +96,23 @@ func describeP9AttachAuthContext(name string, isCluster bool, factory func(testi
 				_ = adminClient.MountSADelete(ctx, bobName)
 			})
 
-			// AnameMountSAHit_OK: alice in pool + 9PAttachOnly attached. CURRENTLY
-			// FAILS due to F-§B-resolver-mountsa.
+			// AnameMountSAHit_OK: alice in pool + 9PAttachOnly attached.
+			// FU#5 (F-§B-resolver-mountsa) wired the resolver to the
+			// mount-SA pool, so this now passes on both SingleNode and
+			// Cluster3Node.
 			ginkgo.It("hits MountSA with policy (AnameMountSAHit_OK)", func() {
-				ginkgo.Skip("F-§B-resolver-mountsa: StoreAdapter.SAPolicies does not dispatch " +
-					"mount-SA names to MountSAPolicies; production resolver returns " +
-					"empty policy set for mount-SA principals, so 9PAttach is denied " +
-					"even when 9PAttachOnly is attached. Follow-up needed.")
+				t := ginkgo.GinkgoTB()
+				aname := mountSAName + "@default"
+				f, cli, err := attachP9(t, tgt, 0, aname)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred(),
+					"mount-sa attach with 9PAttachOnly must succeed (aname=%s target=%s)",
+					aname, tgt.name)
+				if f != nil {
+					closeP9File(f)
+				}
+				if cli != nil {
+					_ = cli.Close()
+				}
 			})
 
 			// AnameMountSAMiss_ENOENT: typo not in pool → ENOENT.

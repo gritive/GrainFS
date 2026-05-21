@@ -17,7 +17,15 @@ import (
 
 // p9AttachReqCtx is the immutable policy.RequestContext used for every
 // grainfs:9PAttach evaluation. Resource="*" per spec D#6.
-var p9AttachReqCtx = policy.RequestContext{Action: "grainfs:9PAttach", Resource: "*"}
+// PrincipalType=PrincipalTypeMount routes resolver lookups to the
+// mount-SA pool (FU#5 / F-§B-resolver-mountsa); the anon (saID="") path
+// short-circuits before the pool is consulted so the type tag is a no-op
+// for anon callers.
+var p9AttachReqCtx = policy.RequestContext{
+	Action:        "grainfs:9PAttach",
+	Resource:      "*",
+	PrincipalType: policy.PrincipalTypeMount,
+}
 
 type rootFile struct {
 	noopFile

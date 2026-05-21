@@ -56,7 +56,7 @@ func (a *iamPolicyAdminAdapter) Simulate(
 	ctx context.Context,
 	saID, action, resource string,
 ) (admin.PolicySimulateResult, error) {
-	in, err := a.stores.Resolver.Effective(ctx, saID, "" /* no bucket scoping for simulate */)
+	in, err := a.stores.Resolver.Effective(ctx, saID, "" /* no bucket scoping for simulate */, policy.PrincipalTypeS3)
 	if err != nil {
 		return admin.PolicySimulateResult{}, err
 	}

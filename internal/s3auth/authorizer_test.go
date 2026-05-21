@@ -140,6 +140,9 @@ type errStore struct{ err error }
 func (e *errStore) SAPolicies(_ context.Context, _ string) ([]string, error)    { panic("not called") }
 func (e *errStore) SAGroups(_ context.Context, _ string) ([]string, error)      { panic("not called") }
 func (e *errStore) GroupPolicies(_ context.Context, _ string) ([]string, error) { panic("not called") }
+func (e *errStore) MountSAPolicies(_ context.Context, _ string) ([]string, error) {
+	panic("not called")
+}
 func (e *errStore) PolicyDoc(_ context.Context, _ string) (*policy.Document, error) {
 	panic("not called")
 }
