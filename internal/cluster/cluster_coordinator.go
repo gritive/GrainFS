@@ -848,6 +848,9 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
+	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+		return nil, nil, storage.ErrObjectNotFound
+	}
 	if indexed && entry.ECData > 0 {
 		if gb, err := c.runtimeState().localExec.ResolveObjectPlacementRead(ctx, target); err != nil {
 			return nil, nil, err
@@ -1101,9 +1104,12 @@ func (r *forwardReadValidator) Close() error {
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, _, _, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, _, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
 	if err != nil {
 		return nil, err
+	}
+	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+		return nil, storage.ErrObjectNotFound
 	}
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err

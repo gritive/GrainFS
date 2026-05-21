@@ -168,6 +168,17 @@ func TestMapError_PlacementTargetsUnavailable(t *testing.T) {
 	assert.Contains(t, got.Message, "group-1")
 }
 
+func TestMapError_NoSuchBucket(t *testing.T) {
+	c := app.NewContext(0)
+
+	mapError(c, storage.ErrNoSuchBucket)
+
+	require.Equal(t, consts.StatusNotFound, c.Response.StatusCode())
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "NoSuchBucket", got.Code)
+}
+
 func (r *recordingRaftSnapshotter) TriggerRaftSnapshot(context.Context) (raft.SnapshotResult, error) {
 	r.triggerCalls.Add(1)
 	return r.result, r.triggerErr

@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,20 +29,33 @@ func stringReader(s string) io.Reader {
 	return strings.NewReader(s)
 }
 
-func TestObjectsE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runObjectCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Objects", ginkgo.Label("bucket"), func() {
+	describeObjectContext("SingleNode", func() s3Target {
+		return newSingleNodeS3Target()
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runObjectCases(t, newSharedClusterS3Target(t))
+	describeObjectContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describeObjectContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory()
+		})
+
+		runObjectCases(func() s3Target { return tgt })
 	})
 }
 
-func runObjectCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-
-	t.Run("PutAndGet", func(t *testing.T) {
+func runObjectCases(getTgt func() s3Target) {
+	ginkgo.It("puts and gets an object (PutAndGet)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-putget"
 		tgt.createBkt(t, bucket)
@@ -59,7 +73,7 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("hello.txt"),
 		})
 		require.NoError(t, err)
-		defer out.Body.Close()
+		ginkgo.DeferCleanup(out.Body.Close)
 
 		body, err := io.ReadAll(out.Body)
 		require.NoError(t, err)
@@ -68,7 +82,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, int64(13), aws.ToInt64(out.ContentLength))
 	})
 
-	t.Run("Head", func(t *testing.T) {
+	ginkgo.It("heads an object (Head)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-head"
 		tgt.createBkt(t, bucket)
@@ -88,7 +105,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		assert.NotEmpty(t, aws.ToString(out.ETag))
 	})
 
-	t.Run("HeadNotFound", func(t *testing.T) {
+	ginkgo.It("returns NotFound when heading a missing object (HeadNotFound)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-headnf"
 		tgt.createBkt(t, bucket)
@@ -101,10 +121,13 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 
 		var apiErr smithy.APIError
 		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "NotFound", apiErr.ErrorCode())
+		assert.Equalf(t, "NotFound", apiErr.ErrorCode(), "head missing object error: %v", err)
 	})
 
-	t.Run("Delete", func(t *testing.T) {
+	ginkgo.It("deletes an object (Delete)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-del"
 		tgt.createBkt(t, bucket)
@@ -128,7 +151,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		require.Error(t, err)
 	})
 
-	t.Run("DeleteNonexistent", func(t *testing.T) {
+	ginkgo.It("deletes a nonexistent object idempotently (DeleteNonexistent)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-delnone"
 		tgt.createBkt(t, bucket)
@@ -140,7 +166,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		require.NoError(t, err)
 	})
 
-	t.Run("PutToNonexistentBucket", func(t *testing.T) {
+	ginkgo.It("rejects put to a nonexistent bucket (PutToNonexistentBucket)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
@@ -151,7 +180,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		require.Error(t, err)
 	})
 
-	t.Run("GetNonexistent", func(t *testing.T) {
+	ginkgo.It("rejects get for a missing object (GetNonexistent)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-getnone"
 		tgt.createBkt(t, bucket)
@@ -163,7 +195,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		require.Error(t, err)
 	})
 
-	t.Run("Overwrite", func(t *testing.T) {
+	ginkgo.It("overwrites an object (Overwrite)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-overwrite"
 		tgt.createBkt(t, bucket)
@@ -184,14 +219,17 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("file.txt"),
 		})
 		require.NoError(t, err)
-		defer out.Body.Close()
+		ginkgo.DeferCleanup(out.Body.Close)
 
 		body, _ := io.ReadAll(out.Body)
 		assert.Equal(t, "version2", string(body))
 		assert.Equal(t, int64(8), aws.ToInt64(out.ContentLength))
 	})
 
-	t.Run("NestedKey", func(t *testing.T) {
+	ginkgo.It("handles nested keys (NestedKey)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-nested"
 		tgt.createBkt(t, bucket)
@@ -207,13 +245,16 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("path/to/deep/file.txt"),
 		})
 		require.NoError(t, err)
-		defer out.Body.Close()
+		ginkgo.DeferCleanup(out.Body.Close)
 
 		body, _ := io.ReadAll(out.Body)
 		assert.Equal(t, "nested", string(body))
 	})
 
-	t.Run("List", func(t *testing.T) {
+	ginkgo.It("lists objects (List)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-list"
 		tgt.createBkt(t, bucket)
@@ -237,7 +278,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		assert.Len(t, out.Contents, 3)
 	})
 
-	t.Run("ListWithPrefix", func(t *testing.T) {
+	ginkgo.It("lists objects with a prefix (ListWithPrefix)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-prefix"
 		tgt.createBkt(t, bucket)
@@ -265,7 +309,10 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("Large", func(t *testing.T) {
+	ginkgo.It("round-trips a large object (Large)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-obj-large"
 		tgt.createBkt(t, bucket)
@@ -283,14 +330,17 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("large.bin"),
 		})
 		require.NoError(t, err)
-		defer out.Body.Close()
+		ginkgo.DeferCleanup(out.Body.Close)
 
 		assert.Equal(t, int64(len(data)), aws.ToInt64(out.ContentLength))
 		body, _ := io.ReadAll(out.Body)
 		assert.Equal(t, data, body)
 	})
 
-	t.Run("FormUpload", func(t *testing.T) {
+	ginkgo.It("accepts browser form upload (FormUpload)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-form-upload"
 		tgt.createBkt(t, bucket)
@@ -332,14 +382,14 @@ func runObjectCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("uploaded.txt"),
 		})
 		require.NoError(t, err)
-		defer out.Body.Close()
+		ginkgo.DeferCleanup(out.Body.Close)
 
 		data, _ := io.ReadAll(out.Body)
 		assert.Equal(t, "form upload content", string(data))
 	})
 }
 
-func writeSignedPostPolicy(t *testing.T, w *multipart.Writer, tgt s3Target, bucket, key string) {
+func writeSignedPostPolicy(t testing.TB, w *multipart.Writer, tgt s3Target, bucket, key string) {
 	t.Helper()
 	date := time.Now().UTC().Format("20060102")
 	credential := tgt.accessKey + "/" + date + "/us-east-1/s3/aws4_request"
