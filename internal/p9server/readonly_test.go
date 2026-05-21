@@ -80,6 +80,33 @@ func TestP9_Create_ReadOnlyExport_EROFS(t *testing.T) {
 	require.ErrorIs(t, err, syscall.EROFS)
 }
 
+// --- Create on rw then bucket goes ro: WriteAt on returned fid → EROFS ---
+// Regression: bucketFile.Create must propagate exportStore to returned objectFile.
+
+func TestP9_Create_ThenWrite_ReadOnlyExport_EROFS(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	exp := &stubExportStore{ro: map[string]bool{"bkt": false}} // start rw
+	bf := &bucketFile{
+		backend:     backend,
+		locks:       newObjectLocks(),
+		bucket:      "bkt",
+		exportStore: exp,
+	}
+	// Create succeeds (rw).
+	fid, _, _, err := bf.Create("new.txt", p9.WriteOnly, 0644, 0, 0)
+	require.NoError(t, err)
+	of := fid.(*objectFile)
+
+	// Flip the export to read-only.
+	exp.ro["bkt"] = true
+
+	// Write through the returned fid must now return EROFS.
+	_, err = of.WriteAt([]byte("X"), 0)
+	require.ErrorIs(t, err, syscall.EROFS)
+}
+
 // --- Remove (UnlinkAt): ro export → EROFS ---
 
 func TestP9_Remove_ReadOnlyExport_EROFS(t *testing.T) {

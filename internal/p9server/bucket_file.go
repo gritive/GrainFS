@@ -147,7 +147,7 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 		return nil, p9.QID{}, 0, syscall.EIO
 	}
 	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
-	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}, qid, 0, nil
+	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj, exportStore: f.exportStore}, qid, 0, nil
 }
 
 func (f *bucketFile) headObjectForCreate(ctx context.Context, key string) (*storage.Object, error) {
