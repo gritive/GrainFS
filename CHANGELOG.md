@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.305.0] - 2026-05-21
+
+### Added
+
+- Symlinks can now be created and inspected through the VFS, 9P, and NFSv4
+  paths using one shared metadata sidecar format.
+- 9P and NFSv4 directory listings and attribute responses now expose symlink
+  file types, sizes, and readlink targets consistently across protocols.
+
+### Changed
+
+- Protocol directory listings now hide the shared `__meta/` sidecar namespace,
+  and direct access to that reserved metadata path is rejected.
+- The 9P and NFSv4 compatibility matrices now mark symlink support as partial
+  and document that server-side target resolution is still out of scope.
+
+### Tests
+
+- Added shared metadata, VFS, 9P, and NFSv4 coverage for symlink create,
+  readlink, getattr/readdir type exposure, reserved names, rename/remove
+  sidecar handling, and existing-object error paths.
+
 ## [0.0.304.1] - 2026-05-21
 
 ### Fixed
