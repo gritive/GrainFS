@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 func TestAppendRollbackAfterPartialWrite(t *testing.T) {
@@ -29,6 +32,39 @@ func TestAppendRollbackAfterPartialWrite(t *testing.T) {
 	rec, err := DecodeRecord(bytes.NewReader(f.data))
 	require.NoError(t, err)
 	require.Equal(t, []byte("second"), rec.Payload)
+}
+
+func TestAppendTimestampMonotonicWhenClockMovesBackward(t *testing.T) {
+	f := &failingWALFile{failAfter: -1}
+	w := &WAL{file: f, lastTimestamp: time.Now().Add(time.Hour).UnixNano()}
+
+	_, err := w.Append(context.Background(), Record{Op: OpSegmentPut, Payload: []byte("a")})
+	require.NoError(t, err)
+	first := w.lastTimestamp
+	_, err = w.Append(context.Background(), Record{Op: OpSegmentPut, Payload: []byte("b")})
+	require.NoError(t, err)
+	require.Greater(t, w.lastTimestamp, first)
+
+	var timestamps []int64
+	require.NoError(t, scanRecords(bytes.NewReader(f.data), fileModePlain, nil, func(rec Record) error {
+		timestamps = append(timestamps, rec.Timestamp)
+		return nil
+	}))
+	require.Len(t, timestamps, 2)
+	require.Greater(t, timestamps[0], time.Now().UnixNano())
+	require.Greater(t, timestamps[1], timestamps[0])
+}
+
+func TestEncryptedRecordRejectsSealedFrameAboveDecodeLimit(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+	payload := bytes.Repeat([]byte{'p'}, MaxPayloadBytes)
+	bucket := strings.Repeat("b", maxRecordBodyBytes-MaxPayloadBytes-recordBodyFixedBytes)
+
+	var buf bytes.Buffer
+	err = EncodeEncryptedRecord(&buf, Record{Op: OpSegmentPut, Bucket: bucket, Payload: payload}, enc)
+	require.Error(t, err)
+	require.Empty(t, buf.Bytes())
 }
 
 type failingWALFile struct {

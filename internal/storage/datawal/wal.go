@@ -28,9 +28,10 @@ type WAL struct {
 	dir string
 	enc *encrypt.Encryptor
 
-	mu      sync.Mutex
-	file    walFile
-	lastSeq uint64
+	mu            sync.Mutex
+	file          walFile
+	lastSeq       uint64
+	lastTimestamp int64
 }
 
 type walFile interface {
@@ -47,11 +48,11 @@ func Open(dir string, enc *encrypt.Encryptor) (*WAL, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("datawal: create dir: %w", err)
 	}
-	maxSeq, err := scanMaxSeq(dir, enc)
+	state, err := scanState(dir, enc)
 	if err != nil {
 		return nil, err
 	}
-	w := &WAL{dir: dir, enc: enc, lastSeq: maxSeq}
+	w := &WAL{dir: dir, enc: enc, lastSeq: state.seq, lastTimestamp: state.timestamp}
 	if err := w.openAppendFile(); err != nil {
 		return nil, err
 	}
@@ -88,16 +89,19 @@ func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64
 	if err != nil {
 		return 0, err
 	}
+	prevSeq := w.lastSeq
+	prevTimestamp := w.lastTimestamp
 	w.lastSeq++
 	rec.Seq = w.lastSeq
-	rec.Timestamp = time.Now().UnixNano()
+	rec.Timestamp = w.nextTimestamp(time.Now().UnixNano())
 	if w.enc != nil {
 		err = EncodeEncryptedRecord(w.file, rec, w.enc)
 	} else {
 		err = EncodeRecord(w.file, rec)
 	}
 	if err != nil {
-		w.lastSeq--
+		w.lastSeq = prevSeq
+		w.lastTimestamp = prevTimestamp
 		if rollbackErr := w.rollbackAppend(offset); rollbackErr != nil {
 			return 0, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
 		}
@@ -217,23 +221,39 @@ func (w *WAL) rollbackAppend(offset int64) error {
 	return nil
 }
 
-func scanMaxSeq(dir string, enc *encrypt.Encryptor) (uint64, error) {
+func (w *WAL) nextTimestamp(now int64) int64 {
+	if now <= w.lastTimestamp {
+		now = w.lastTimestamp + 1
+	}
+	w.lastTimestamp = now
+	return now
+}
+
+type walState struct {
+	seq       uint64
+	timestamp int64
+}
+
+func scanState(dir string, enc *encrypt.Encryptor) (walState, error) {
 	files, err := segmentFiles(dir)
 	if err != nil {
-		return 0, err
+		return walState{}, err
 	}
-	var maxSeq uint64
+	var state walState
 	for _, path := range files {
 		if err := scanFile(path, enc, func(rec Record) error {
-			if rec.Seq > maxSeq {
-				maxSeq = rec.Seq
+			if rec.Seq > state.seq {
+				state.seq = rec.Seq
+			}
+			if rec.Timestamp > state.timestamp {
+				state.timestamp = rec.Timestamp
 			}
 			return nil
 		}); err != nil {
-			return 0, err
+			return walState{}, err
 		}
 	}
-	return maxSeq, nil
+	return state, nil
 }
 
 func replayFile(ctx context.Context, path string, fromSeq uint64, enc *encrypt.Encryptor, fn func(Record) error) error {
@@ -261,9 +281,13 @@ func scanFile(path string, enc *encrypt.Encryptor, fn func(Record) error) error 
 	if err := checkMode(mode, enc); err != nil {
 		return err
 	}
+	return scanRecords(f, mode, enc, fn)
+}
+
+func scanRecords(r io.Reader, mode byte, enc *encrypt.Encryptor, fn func(Record) error) error {
 	for {
 		var rec Record
-		body, err := readFrame(f)
+		body, err := readFrame(r)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return nil
 		}

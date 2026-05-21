@@ -124,6 +124,35 @@ func TestDecodeRejectsChecksumMismatch(t *testing.T) {
 	require.ErrorIs(t, err, datawal.ErrChecksumMismatch)
 }
 
+func TestDecodeRejectsTrailingBytesInCompleteRecord(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, datawal.EncodeRecord(&buf, datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k", Payload: []byte("hello")}))
+	raw := append([]byte(nil), buf.Bytes()...)
+	bodyLen := int(binary.BigEndian.Uint32(raw[:4]))
+	body := append([]byte(nil), raw[4:4+bodyLen]...)
+	body = append(body, 0xaa)
+	binary.BigEndian.PutUint32(raw[:4], uint32(len(body)))
+	raw = raw[:4]
+	raw = append(raw, body...)
+	var crc [4]byte
+	binary.BigEndian.PutUint32(crc[:], crc32.ChecksumIEEE(body))
+	raw = append(raw, crc[:]...)
+
+	_, err := datawal.DecodeRecord(bytes.NewReader(raw))
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, datawal.AppendRawForTest(dir, raw))
+
+	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	require.Error(t, err)
+}
+
 func TestAppendCopiesPayload(t *testing.T) {
 	w, err := datawal.Open(t.TempDir(), nil)
 	require.NoError(t, err)

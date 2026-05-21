@@ -28,6 +28,8 @@ const (
 	maxRecordBodyBytes = MaxPayloadBytes + 1<<20
 	maxMetadataBytes   = 1 << 20
 	encryptedRecordAAD = "datawal:record:v1"
+
+	recordBodyFixedBytes = 8 + 8 + 1 + 8 + 8 + 4 + 4 + 4 + sha256.Size + 8
 )
 
 var ErrChecksumMismatch = errors.New("datawal: checksum mismatch")
@@ -73,6 +75,10 @@ func EncodeEncryptedRecord(w io.Writer, rec Record, enc *encrypt.Encryptor) erro
 	clear(body)
 	if err != nil {
 		return fmt.Errorf("datawal: encrypt record: %w", err)
+	}
+	if len(sealed) > maxRecordBodyBytes {
+		clear(sealed)
+		return fmt.Errorf("datawal: encrypted record body too large: %d", len(sealed))
 	}
 	err = writeFrame(w, sealed)
 	clear(sealed)
@@ -166,7 +172,7 @@ func marshalRecordBody(rec Record) ([]byte, error) {
 		return nil, fmt.Errorf("datawal: metadata too large")
 	}
 	checksum := sha256.Sum256(rec.Payload)
-	size := 8 + 8 + 1 + 8 + 8 + 4 + len(bucket) + 4 + len(key) + 4 + len(target) + 32 + 8 + len(rec.Payload)
+	size := recordBodyFixedBytes + len(bucket) + len(key) + len(target) + len(rec.Payload)
 	if size > maxRecordBodyBytes {
 		return nil, fmt.Errorf("datawal: record body too large: %d", size)
 	}
@@ -234,6 +240,10 @@ func unmarshalRecordBody(body []byte) (Record, error) {
 		return rec, io.ErrUnexpectedEOF
 	}
 	rec.Payload = append([]byte(nil), body[off:off+int(payloadLen)]...)
+	off += int(payloadLen)
+	if off != len(body) {
+		return rec, fmt.Errorf("datawal: trailing record bytes: %d", len(body)-off)
+	}
 	sum := sha256.Sum256(rec.Payload)
 	if !bytes.Equal(rec.Checksum, sum[:]) {
 		return rec, ErrChecksumMismatch
