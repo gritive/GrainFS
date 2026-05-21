@@ -546,23 +546,34 @@ bench_wait_capability_ready() {
     return 1
   fi
 
-  local attempt sock body all_ready expected
+  local attempt sock body status all_ready expected
   expected="${#socks[@]}"
   for attempt in $(seq 1 "$attempts"); do
     all_ready=1
     for sock in "${socks[@]}"; do
       body=$(curl -s --unix-socket "$sock" http://_/v1/cluster/capabilities 2>/dev/null || true)
-      if [[ -z "$body" ]]; then
+      status=$(curl -s --unix-socket "$sock" http://_/v1/cluster/status 2>/dev/null || true)
+      if [[ -z "$body" || -z "$status" ]]; then
         all_ready=0
         break
       fi
-      # The gate reports peer→capability→ready. The capability is ready when
-      # every voter peer has reported it true. python3 keeps the parse
-      # readable; the bench env already uses it for IAM bootstrap JSON.
-      python3 - <<EOF "$body" "$capability" "$expected" || { all_ready=0; break; }
+      # The peer-transport gate checks raft-address evidence, not just stable
+      # node IDs. Require every peer address visible in cluster status to have
+      # the capability before starting warp, otherwise the first requests can
+      # spend measured time retrying 503 "unknown=[raft-addr]" responses.
+      python3 - <<EOF "$body" "$status" "$capability" "$expected" || { all_ready=0; break; }
 import json, sys
-body, cap, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])
-peers = (json.loads(body) or {}).get("peers", {}) or {}
+body, status, cap, expected = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+try:
+    peers = (json.loads(body) or {}).get("peers", {}) or {}
+    status = json.loads(status) or {}
+except Exception:
+    sys.exit(1)
+peer_addrs = (status.get("peer_addrs") or {}).values()
+required = [addr for addr in peer_addrs if addr]
+if required:
+    missing = [addr for addr in required if not (peers.get(addr) or {}).get(cap)]
+    sys.exit(0 if not missing else 1)
 ready = sum(1 for caps in peers.values() if caps.get(cap))
 sys.exit(0 if ready >= expected else 1)
 EOF
