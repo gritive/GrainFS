@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -133,4 +134,12 @@ func TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E(t *testing.T) {
 		_ = mux
 		assert.True(t, metaNodes[i].FSM().BucketAssignments()["photos"] == "group-0")
 	}
+}
+
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer pc.Close()
+	return pc.LocalAddr().String()
 }
