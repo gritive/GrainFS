@@ -2,6 +2,7 @@ package s3auth
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -129,5 +130,49 @@ func TestAuthorize_DefaultBucketAuthenticatedSANotImplicit(t *testing.T) {
 	r := a.Authorize(context.Background(), "sa-1", "default", policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::default/x"})
 	if r.Decision == policy.DecisionAllow {
 		t.Fatal("SA with no policies should NOT inherit default implicit anon")
+	}
+}
+
+// errStore is a policy.Store stub whose BucketPolicy always returns a transient error.
+// Other methods panic to make accidental calls obvious.
+type errStore struct{ err error }
+
+func (e *errStore) SAPolicies(_ context.Context, _ string) ([]string, error)    { panic("not called") }
+func (e *errStore) SAGroups(_ context.Context, _ string) ([]string, error)      { panic("not called") }
+func (e *errStore) GroupPolicies(_ context.Context, _ string) ([]string, error) { panic("not called") }
+func (e *errStore) PolicyDoc(_ context.Context, _ string) (*policy.Document, error) {
+	panic("not called")
+}
+func (e *errStore) BucketPolicy(_ context.Context, _ string) (*policy.Document, error) {
+	return nil, e.err
+}
+
+// TestAuthorize_DefaultBucketHasBucketPolicyTransientErr_FailClosed verifies F#43:
+// when HasBucketPolicy returns a transient error, Authorize must fail-closed (Deny)
+// rather than silently falling through to a potential Allow branch.
+func TestAuthorize_DefaultBucketHasBucketPolicyTransientErr_FailClosed(t *testing.T) {
+	transientErr := fmt.Errorf("badger: transaction conflict")
+	store := &errStore{err: transientErr}
+	res := policy.NewResolver(store, 100*time.Millisecond)
+	cfg := &stubCfg{vals: map[string]bool{
+		"iam.anon-enabled":                  true, // Phase 0: anon enabled — would Allow if fall-through
+		"iam.allow-anonymous-bucket-policy": false,
+	}}
+	a := NewAuthorizer(res, cfg)
+
+	r := a.Authorize(context.Background(), "" /* anon */, "default", policy.RequestContext{
+		Action:   "s3:GetObject",
+		Resource: "arn:aws:s3:::default/x",
+	})
+
+	if r.Decision != policy.DecisionDeny {
+		t.Fatalf("expected DecisionDeny on HasBucketPolicy transient err, got %v (reason: %s)", r.Decision, r.Reason)
+	}
+	wantPrefix := "resolver: HasBucketPolicy:"
+	if !strings.HasPrefix(r.Reason, wantPrefix) {
+		t.Fatalf("reason should start with %q, got: %s", wantPrefix, r.Reason)
+	}
+	if len(r.ConditionContext) == 0 {
+		t.Fatal("ConditionContext must be populated on Deny")
 	}
 }
