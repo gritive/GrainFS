@@ -9,10 +9,12 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/p9server"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -78,13 +80,26 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 	}
 }
 
+// NodeServicesIAMConfig carries optional IAM gate dependencies for NFS/9P
+// servers (NFS§B T8). Nil fields disable the IAM gate (backward compat).
+type NodeServicesIAMConfig struct {
+	MountSAStore *mountsastore.Store
+	Authorizer   *s3auth.Authorizer
+}
+
 // StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
 // are > 0. Returns the handle for shutdown. ri is an optional ReadIndexer
-// for linearizable NBD reads (nil = no gate).
+// for linearizable NBD reads (nil = no gate). iam is optional; nil = no IAM gate.
 func StartNodeServices(ctx context.Context, backend storage.Backend,
 	volMgr *volume.Manager, nfs4Port, nbdPort int, p9Bind string, p9Port int, ri nbd.ReadIndexer,
+	iam ...*NodeServicesIAMConfig,
 ) *NodeServices {
 	svc := &NodeServices{}
+
+	var iamCfg *NodeServicesIAMConfig
+	if len(iam) > 0 {
+		iamCfg = iam[0]
+	}
 
 	if nfs4Port > 0 {
 		nfs4Addr := fmt.Sprintf(":%d", nfs4Port)
@@ -93,7 +108,14 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			svc.nfs4Err = fmt.Errorf("nfs4 listen: %w", err)
 			log.Error().Err(svc.nfs4Err).Msg("nfs4 server start failed")
 		} else {
-			svc.nfs4Srv = nfs4server.NewServer(backend)
+			var nfs4Opts []nfs4server.ServerOption
+			if iamCfg != nil && iamCfg.MountSAStore != nil {
+				nfs4Opts = append(nfs4Opts, nfs4server.WithMountSAStore(iamCfg.MountSAStore))
+			}
+			if iamCfg != nil && iamCfg.Authorizer != nil {
+				nfs4Opts = append(nfs4Opts, nfs4server.WithNFS4Authorizer(iamCfg.Authorizer))
+			}
+			svc.nfs4Srv = nfs4server.NewServer(backend, nfs4Opts...)
 			go func() {
 				if err := svc.nfs4Srv.Serve(ln); err != nil {
 					if errors.Is(err, net.ErrClosed) {

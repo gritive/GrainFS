@@ -15,9 +15,19 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// decisionAllow mirrors policy.DecisionAllow (iota value 1) without an import
+// cycle. The package-level unit test in nfs4_mount_auth_test.go verifies the
+// value stays in sync.
+const decisionAllow = policy.DecisionAllow
+
+// nfsMountReqCtx is the immutable policy.RequestContext used for every
+// grainfs:NFSMount evaluation. Resource="*" per spec D#5.
+var nfsMountReqCtx = policy.RequestContext{Action: "grainfs:NFSMount", Resource: "*"}
 
 var opReadBufPool = pool.New(func() *bytes.Buffer { return new(bytes.Buffer) })
 var bytesReaderPool = pool.New(func() *bytes.Reader { return new(bytes.Reader) })
@@ -431,6 +441,16 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 	childPath := path.Join(d.currentPath, name)
 	childBucket, childKey := extractBucketAndKey(childPath)
 
+	// NFS§B T8: 2-phase lazy binding (spec D#5).
+	// When the IAM gate is wired (server.mountSAStore != nil) and the current fh
+	// is a bucket-level pending fh (saID="(pending)"), this LOOKUP is the
+	// resolution step: determine if 'name' is a mount-SA or an anon file path.
+	if d.server != nil && d.server.mountSAStore != nil {
+		if binding, ok := d.state.FHBinding(d.currentFH); ok && binding.saID == fhSAIDPending {
+			return d.opLookupResolvePending(name, childPath, childBucket, childKey, binding)
+		}
+	}
+
 	// Check existence: backend file, tracked directory, or root
 	exists := d.state.IsDir(childPath)
 	if !exists && d.currentPath == "/" && childKey == "" && d.server != nil {
@@ -468,10 +488,81 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 
 	fh := d.state.GetOrCreateFH(childPath)
 	if d.server != nil && childBucket != "" {
-		d.state.BindFHGeneration(fh, childBucket, d.server.exportGeneration(childBucket))
+		gen := d.server.exportGeneration(childBucket)
+		// When mount-SA store is wired: issue bucket fh with saID="(pending)" so the
+		// next LOOKUP can resolve whether this is a mount-SA path or anon access.
+		if d.server.mountSAStore != nil && childKey == "" {
+			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
+		} else {
+			d.state.BindFHGeneration(fh, childBucket, gen)
+		}
 	}
 	d.currentFH = fh
 	d.currentPath = childPath
+	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
+}
+
+// fhSAIDPending is the sentinel stored in stateBinding.saID for a bucket-level
+// fh that is awaiting the next LOOKUP to determine mount-SA vs anon binding.
+const fhSAIDPending = "(pending)"
+
+// opLookupResolvePending handles the 2nd LOOKUP from a bucket fh with
+// saID="(pending)". It resolves the 'name' component as either a mount-SA
+// (grainfs:NFSMount eval) or an anon file/dir (anon grainfs:NFSMount eval).
+// Spec D#5 error code policy:
+//   - mount-SA pool hit + grainfs:NFSMount deny → NFS4ERR_ACCESS
+//   - pool miss + file/dir exists + anon deny  → NFS4ERR_ACCESS
+//   - pool miss + no file/dir                  → NFS4ERR_NOENT
+func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childKey string, parentBinding stateBinding) OpResult {
+	ctx := context.Background()
+	gen := d.server.exportGeneration(childBucket)
+
+	if _, ok := d.server.mountSAStore.Get(name); ok {
+		// mount-SA hit: evaluate grainfs:NFSMount for this SA.
+		if d.server.authorizer != nil {
+			res := d.server.authorizer.Authorize(ctx, name, childBucket, nfsMountReqCtx)
+			if res.Decision != decisionAllow {
+				log.Debug().Str("saID", name).Str("bucket", childBucket).
+					Str("reason", res.Reason).Msg("nfs4: NFSMount denied")
+				return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+			}
+		}
+		// Confirmed mount-SA binding.
+		fh := d.state.GetOrCreateFH(childPath)
+		d.state.BindFHWithSAID(fh, childBucket, name, gen)
+		d.currentFH = fh
+		d.currentPath = childPath
+		log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP mount-SA confirmed")
+		return OpResult{OpCode: OpLookup, Status: NFS4_OK}
+	}
+
+	// Pool miss: check if it's a real backend file/dir (anon path).
+	exists := d.state.IsDir(childPath)
+	if !exists && d.backend != nil {
+		_, err := d.backend.HeadObject(ctx, childBucket, childKey)
+		exists = err == nil
+	}
+	if !exists {
+		return OpResult{OpCode: OpLookup, Status: NFS4ERR_NOENT}
+	}
+
+	// Anon path: evaluate grainfs:NFSMount with saID="" (anon).
+	// Error code policy: deny returns ACCESS, not NOENT (mount-SA existence leak avoidance).
+	if d.server.authorizer != nil {
+		res := d.server.authorizer.Authorize(ctx, "", childBucket, nfsMountReqCtx)
+		if res.Decision != decisionAllow {
+			log.Debug().Str("bucket", childBucket).
+				Str("reason", res.Reason).Msg("nfs4: anon NFSMount denied")
+			return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+		}
+	}
+
+	// Anon confirmed: issue fh with saID="" (empty = anon).
+	fh := d.state.GetOrCreateFH(childPath)
+	d.state.BindFHWithSAID(fh, childBucket, "", gen)
+	d.currentFH = fh
+	d.currentPath = childPath
+	log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP anon path confirmed")
 	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 }
 

@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -26,6 +28,35 @@ type Server struct {
 	lookups  *LookupRing
 
 	exportSource exportSource
+
+	// Mount-SA IAM gate (NFS§B T8). Both are optional (nil = no IAM gate).
+	// When non-nil, opLookup performs 2-phase lazy binding (D#5):
+	//   /<bucket>/<mount-sa> → evaluate grainfs:NFSMount
+	//   /<bucket>            → evaluate grainfs:NFSMount with anon saID
+	mountSAStore *mountsastore.Store
+	authorizer   nfsAuthorizer
+}
+
+// nfsAuthorizer is the slice of s3auth.Authorizer consumed by the NFS IAM gate.
+// Defined here (not in s3auth) so tests can inject stubs without building
+// a full policy store + resolver.
+type nfsAuthorizer interface {
+	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
+}
+
+// ServerOption configures a Server.
+type ServerOption func(*Server)
+
+// WithMountSAStore wires the mount-SA store into the NFS4 server for
+// 2-phase lazy binding auth (NFS§B T8, spec D#5).
+func WithMountSAStore(s *mountsastore.Store) ServerOption {
+	return func(srv *Server) { srv.mountSAStore = s }
+}
+
+// WithNFS4Authorizer wires the IAM authorizer for grainfs:NFSMount evaluation.
+// The concrete *s3auth.Authorizer satisfies nfsAuthorizer; tests may inject stubs.
+func WithNFS4Authorizer(a nfsAuthorizer) ServerOption {
+	return func(srv *Server) { srv.authorizer = a }
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
@@ -36,13 +67,16 @@ type Server struct {
 //
 //	grainfs bucket create __grainfs_nfs4
 //	grainfs nfs export add __grainfs_nfs4
-func NewServer(backend storage.Backend) *Server {
+func NewServer(backend storage.Backend, opts ...ServerOption) *Server {
 	s := &Server{
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 		hinter:  newUnknownExportHinter(hinterTTL),
 		lookups: NewLookupRing(1024),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.exports.Store(emptySnap)
 	if err := s.RefreshExports(context.Background()); err != nil {

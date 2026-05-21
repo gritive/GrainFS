@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -177,7 +178,15 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4/NBD)
 	// are now wired in cluster mode too, not just local.
-	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend)
+	// NFS§B T8: wire mount-SA IAM gate into NFS/9P servers when IAM is available.
+	var iamCfg *NodeServicesIAMConfig
+	if state.mountSAStore != nil && state.iamPolicyStores != nil && state.cfgStore != nil {
+		iamCfg = &NodeServicesIAMConfig{
+			MountSAStore: state.mountSAStore,
+			Authorizer:   s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore),
+		}
+	}
+	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
 		state.adminDeps.NFSDiag = nodeSvc.NFS4()
