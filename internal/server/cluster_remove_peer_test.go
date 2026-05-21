@@ -73,6 +73,7 @@ type fakeTopologyClusterInfo struct {
 	*fakeClusterInfo
 	assignments map[string]string
 	groups      []cluster.ShardGroupEntry
+	leaders     map[string]string
 }
 
 func (f *fakeTopologyClusterInfo) Snapshot() cluster.ClusterStatus {
@@ -87,6 +88,10 @@ func (f *fakeTopologyClusterInfo) Snapshot() cluster.ClusterStatus {
 			ID:      group.ID,
 			PeerIDs: append([]string(nil), group.PeerIDs...),
 		})
+	}
+	snap.ShardGroupLeaders = make(map[string]string, len(f.leaders))
+	for groupID, leaderID := range f.leaders {
+		snap.ShardGroupLeaders[groupID] = leaderID
 	}
 	return snap
 }
@@ -261,6 +266,7 @@ func TestClusterStatusIncludesBucketTopology(t *testing.T) {
 		groups: []cluster.ShardGroupEntry{
 			{ID: "group-7", PeerIDs: []string{"node-1", "node-2", "node-3"}},
 		},
+		leaders: map[string]string{"group-7": "node-2"},
 	}
 	h := setupRemovePeerServer(t, ci, nil)
 
@@ -272,8 +278,9 @@ func TestClusterStatusIncludesBucketTopology(t *testing.T) {
 	var body struct {
 		BucketAssignments map[string]string `json:"bucket_assignments"`
 		ShardGroups       []struct {
-			ID      string   `json:"id"`
-			PeerIDs []string `json:"peer_ids"`
+			ID       string   `json:"id"`
+			PeerIDs  []string `json:"peer_ids"`
+			LeaderID string   `json:"leader_id"`
 		} `json:"shard_groups"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
@@ -281,6 +288,7 @@ func TestClusterStatusIncludesBucketTopology(t *testing.T) {
 	require.Len(t, body.ShardGroups, 1)
 	require.Equal(t, "group-7", body.ShardGroups[0].ID)
 	require.Equal(t, []string{"node-1", "node-2", "node-3"}, body.ShardGroups[0].PeerIDs)
+	require.Equal(t, "node-2", body.ShardGroups[0].LeaderID)
 }
 
 func TestClusterStatus_IncludesPeerAddresses(t *testing.T) {

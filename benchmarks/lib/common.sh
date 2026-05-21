@@ -5,7 +5,9 @@ BENCHMARKS_DIR="$(cd "$BENCH_LIB_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$BENCHMARKS_DIR/.." && pwd)"
 BENCH_STRICT_HOST="${BENCH_STRICT_HOST:-0}"
 BENCH_MAX_LOAD_PER_CPU="${BENCH_MAX_LOAD_PER_CPU:-1.0}"
+BENCH_ALLOW_EXTERNAL_GRAINFS="${BENCH_ALLOW_EXTERNAL_GRAINFS:-0}"
 BENCH_HOST_GRAINFS_SERVE_COUNT=0
+BENCH_HOST_GRAINFS_ALLOWED=0
 BENCH_HOST_DISK_USED_PCT=""
 BENCH_HOST_LOAD1=""
 BENCH_HOST_CPU_COUNT=""
@@ -37,8 +39,13 @@ print(f"{load1:.2f} {cpus} {load1 / cpus:.2f}")
 PY
   )
   BENCH_HOST_PREFLIGHT_FAILURES=0
+  BENCH_HOST_GRAINFS_ALLOWED=0
   if (( ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
-    BENCH_HOST_PREFLIGHT_FAILURES=1
+    if [[ "$BENCH_ALLOW_EXTERNAL_GRAINFS" == "1" ]]; then
+      BENCH_HOST_GRAINFS_ALLOWED=1
+    else
+      BENCH_HOST_PREFLIGHT_FAILURES=1
+    fi
   fi
   if [[ -n "${BENCH_HOST_DISK_USED_PCT:-}" ]] && (( BENCH_HOST_DISK_USED_PCT >= 90 )); then
     BENCH_HOST_PREFLIGHT_FAILURES=1
@@ -62,6 +69,8 @@ PY
     uptime 2>/dev/null || true
     echo
     echo "preexisting_grainfs_serve_count: ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0}"
+    echo "allow_external_grainfs: ${BENCH_ALLOW_EXTERNAL_GRAINFS}"
+    echo "external_grainfs_allowed: ${BENCH_HOST_GRAINFS_ALLOWED}"
     echo "load1: ${BENCH_HOST_LOAD1}"
     echo "cpu_count: ${BENCH_HOST_CPU_COUNT}"
     echo "load_per_cpu: ${BENCH_HOST_LOAD_PER_CPU}"
@@ -281,6 +290,11 @@ bench_bootstrap_iam_credentials() {
 
   echo "  bootstrapping IAM credentials..."
   bench_wait_admin_socket "$data_dir" 100 0.2
+  curl -sf --unix-socket "$admin_sock" \
+    -X PUT \
+    -H 'Content-Type: application/json' \
+    -d '{"value":"127.0.0.1/32"}' \
+    'http://unix/v1/config/trusted-proxy.cidr' >/dev/null
 
   bootstrap_json=$("$binary" iam --json sa create "$name" --endpoint "$admin_sock")
   SA_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sa_id"])' <<<"$bootstrap_json")
@@ -307,6 +321,29 @@ bench_wait_cluster_leader() {
   done
 
   echo "cluster leader not ready at $base_url" >&2
+  return 1
+}
+
+bench_wait_shard_group_count() {
+  local base_url="$1"
+  local expected="$2"
+  local attempts="${3:-120}"
+  local sleep_seconds="${4:-0.5}"
+
+  for attempt in $(seq 1 "$attempts"); do
+    local status count
+    status=$(curl -sf "$base_url/api/cluster/status" 2>/dev/null || true)
+    if [[ -n "$status" ]]; then
+      count=$(python3 -c 'import sys,json; print(len((json.load(sys.stdin) or {}).get("shard_groups") or []))' <<<"$status" 2>/dev/null || true)
+      if [[ -n "$count" && "$count" =~ ^[0-9]+$ && "$count" -ge "$expected" ]]; then
+        [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "[bench] shard groups ready: $count/$expected (attempt $attempt)"
+        return 0
+      fi
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  echo "shard groups not ready at $base_url: expected >= $expected" >&2
   return 1
 }
 
@@ -416,6 +453,65 @@ bench_wait_s3_bucket_auth_ready() {
   return 1
 }
 
+bench_wait_s3_signed_write_ready() {
+  local base_urls="$1"
+  local access_key="$2"
+  local secret_key="$3"
+  local bucket="$4"
+  local attempts="${5:-120}"
+  local sleep_seconds="${6:-0.5}"
+  local urls=()
+  local first_url
+  local body_file
+  local key="ready.txt"
+  local attempt
+
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "bench_wait_s3_signed_write_ready: aws CLI is required to probe signed write readiness" >&2
+    return 1
+  fi
+
+  IFS=',' read -r -a urls <<<"$base_urls"
+  first_url="${urls[0]:-}"
+  if [[ -z "$first_url" ]]; then
+    echo "bench_wait_s3_signed_write_ready: no endpoints supplied" >&2
+    return 1
+  fi
+
+  body_file="$(mktemp "${TMPDIR:-/tmp}/bench-s3-ready.XXXXXX")"
+  printf 'ready' >"$body_file"
+
+  for attempt in $(seq 1 "$attempts"); do
+    AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
+      AWS_MAX_ATTEMPTS=1 AWS_EC2_METADATA_DISABLED=true \
+      AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+      aws --cli-connect-timeout 1 --cli-read-timeout 2 \
+        --endpoint-url "$first_url" s3api create-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+
+    local all_ready=1
+    local url
+    for url in "${urls[@]}"; do
+      if ! AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
+        AWS_MAX_ATTEMPTS=1 AWS_EC2_METADATA_DISABLED=true \
+        AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+        aws --cli-connect-timeout 1 --cli-read-timeout 2 \
+          --endpoint-url "$url" s3api put-object --bucket "$bucket" --key "$key" --body "$body_file" >/dev/null 2>&1; then
+        all_ready=0
+        break
+      fi
+    done
+    if [[ "$all_ready" == "1" ]]; then
+      rm -f "$body_file"
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  rm -f "$body_file"
+  echo "signed object write not ready for $bucket across $base_urls" >&2
+  return 1
+}
+
 bench_put_object_retry() {
   local base_url="$1"
   local bucket="$2"
@@ -455,23 +551,34 @@ bench_wait_capability_ready() {
     return 1
   fi
 
-  local attempt sock body all_ready expected
+  local attempt sock body status all_ready expected
   expected="${#socks[@]}"
   for attempt in $(seq 1 "$attempts"); do
     all_ready=1
     for sock in "${socks[@]}"; do
       body=$(curl -s --unix-socket "$sock" http://_/v1/cluster/capabilities 2>/dev/null || true)
-      if [[ -z "$body" ]]; then
+      status=$(curl -s --unix-socket "$sock" http://_/v1/cluster/status 2>/dev/null || true)
+      if [[ -z "$body" || -z "$status" ]]; then
         all_ready=0
         break
       fi
-      # The gate reports peer→capability→ready. The capability is ready when
-      # every voter peer has reported it true. python3 keeps the parse
-      # readable; the bench env already uses it for IAM bootstrap JSON.
-      python3 - <<EOF "$body" "$capability" "$expected" || { all_ready=0; break; }
+      # The peer-transport gate checks raft-address evidence, not just stable
+      # node IDs. Require every peer address visible in cluster status to have
+      # the capability before starting warp, otherwise the first requests can
+      # spend measured time retrying 503 "unknown=[raft-addr]" responses.
+      python3 - <<EOF "$body" "$status" "$capability" "$expected" || { all_ready=0; break; }
 import json, sys
-body, cap, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])
-peers = (json.loads(body) or {}).get("peers", {}) or {}
+body, status, cap, expected = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+try:
+    peers = (json.loads(body) or {}).get("peers", {}) or {}
+    status = json.loads(status) or {}
+except Exception:
+    sys.exit(1)
+peer_addrs = (status.get("peer_addrs") or {}).values()
+required = [addr for addr in peer_addrs if addr]
+if required:
+    missing = [addr for addr in required if not (peers.get(addr) or {}).get(cap)]
+    sys.exit(0 if not missing else 1)
 ready = sum(1 for caps in peers.values() if caps.get(cap))
 sys.exit(0 if ready >= expected else 1)
 EOF

@@ -395,8 +395,9 @@ type PeerLivenessRow struct {
 
 // ShardGroup describes a shard placement group on the wire.
 type ShardGroup struct {
-	ID      string   `json:"id"`
-	PeerIDs []string `json:"peer_ids"`
+	ID       string   `json:"id"`
+	PeerIDs  []string `json:"peer_ids"`
+	LeaderID string   `json:"leader_id,omitempty"`
 }
 
 // Health mirrors GET /v1/cluster/health.

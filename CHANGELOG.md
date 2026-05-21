@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.315.0] - 2026-05-21
+## [0.0.316.0] - 2026-05-21
 
 ### Internal
 
@@ -13,6 +13,33 @@
   audit query, config CRUD, doctor, iceberg config, nfs debug). All
   bodies are empty pending stubs — they compile and lint-clean but
   remain in Ginkgo's `Pending` bucket until each is implemented.
+
+## [0.0.315.0] - 2026-05-21
+
+### Added
+
+- **S3 compatibility benchmark harness now captures cluster shard leadership
+  snapshots.** GrainFS cluster benchmark runs wait for shard-group readiness and
+  write per-node `/api/cluster/status` snapshots around each warp operation,
+  including leader summaries for diagnosing placement skew.
+
+### Changed
+
+- **S3 benchmark runs now use isolated default data directories.** The harness
+  no longer reuses and pre-deletes a fixed `/tmp` path unless `BENCH_DIR` is
+  explicitly supplied.
+- **Cluster smoke baselines no longer accept arbitrary GrainFS serve flag
+  injection.** The benchmark harness removed `EXTRA_GRAINFS_SERVE_FLAGS` so
+  optimization toggles cannot silently bias PUT/multipart measurements.
+
+### Fixed
+
+- **Benchmark IAM bootstrap now satisfies the latest trusted-proxy posture
+  precondition.** Local benchmark service-account creation seeds
+  `trusted-proxy.cidr=127.0.0.1/32` before creating the benchmark SA.
+- **MinIO cluster benchmarks wait for signed write readiness before publishing
+  endpoints to warp.** This prevents first-operation latency from absorbing
+  cluster readiness lag.
 
 ## [0.0.314.0] - 2026-05-21
 
