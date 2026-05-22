@@ -1,8 +1,9 @@
 package cluster
 
-// placement_select_test.go: selectECPlacement 단위 테스트.
+// placement_select_test.go: selectECPlacementWeighted 단위 테스트.
 //
-// PlaceShards rendezvous hashing 위임을 검증한다.
+// PlaceShards rendezvous hashing 위임을 검증한다. weightedEnabled=false로
+// 레거시 비가중 경로를 테스트하며, 기존 selectECPlacement와 동치임을 보장한다.
 
 import (
 	"strconv"
@@ -16,7 +17,7 @@ func TestSelectECPlacement_AllLive(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	liveNodes := []string{"a", "b", "c"}
 
-	placement := selectECPlacement(cfg, liveNodes, "obj/v1")
+	placement := selectECPlacementWeighted(cfg, liveNodes, "obj/v1", nil, nil, false, false)
 
 	assert.Len(t, placement, cfg.NumShards())
 	expected := PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
@@ -27,7 +28,7 @@ func TestSelectECPlacement_DeadNode(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	liveNodes := []string{"a", "b", "c"}
 
-	placement := selectECPlacement(cfg, liveNodes, "obj/v1")
+	placement := selectECPlacementWeighted(cfg, liveNodes, "obj/v1", nil, nil, false, false)
 
 	assert.Len(t, placement, cfg.NumShards())
 	expected := PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
@@ -58,7 +59,7 @@ func TestSelectECPlacement_PartialDead(t *testing.T) {
 	}
 	require.NotEmpty(t, triggerKey, "HRW never selected a dead node candidate")
 
-	placement := selectECPlacement(cfg, liveNodes, triggerKey)
+	placement := selectECPlacementWeighted(cfg, liveNodes, triggerKey, nil, nil, false, false)
 	expected := PlaceShards(triggerKey, liveNodes, nil, cfg.NumShards())
 	assert.Equal(t, expected, placement)
 }

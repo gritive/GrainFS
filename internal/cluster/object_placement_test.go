@@ -2,11 +2,42 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSelectECPlacement_WeightedFromDiskAvail(t *testing.T) {
+	store := NewNodeStatsStore(2 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", DiskAvailBytes: 4_000_000_000_000, RequestsPerSec: 10})
+	store.Set(NodeStats{NodeID: "n2", DiskAvailBytes: 1_000_000_000_000, RequestsPerSec: 10})
+	store.Set(NodeStats{NodeID: "n3", DiskAvailBytes: 1_000_000_000_000, RequestsPerSec: 10})
+	store.Set(NodeStats{NodeID: "n4", DiskAvailBytes: 1_000_000_000_000, RequestsPerSec: 10})
+
+	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
+	bl.Refresh()
+
+	cfg := ECConfig{DataShards: 2, ParityShards: 1} // 3 shards/object
+	count := make(map[string]int)
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("obj-%d", i)
+		nodes := selectECPlacementWeighted(cfg, []string{"n1", "n2", "n3", "n4"}, key, store, bl, true, true)
+		for _, n := range nodes {
+			count[n]++
+		}
+	}
+	// Each iteration selects 3 of 4 nodes, so max per-node count = 1000 (one slot/iter).
+	// With 4:1:1:1 disk-avail weights, WRH selects n1 in ~97% of iterations.
+	// Assert n1 wins strongly (>900) and outranks all lighter peers.
+	assert.Greater(t, count["n1"], 900, "n1 share too low: %d", count["n1"])
+	for _, n := range []string{"n2", "n3", "n4"} {
+		assert.Greater(t, count["n1"], count[n], "n1 should outrank %s (n1=%d %s=%d)", n, count["n1"], n, count[n])
+	}
+}
 
 func TestSelectObjectPlacementGroup_ExcludesGroup0(t *testing.T) {
 	groups := []ShardGroupEntry{
