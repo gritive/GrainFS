@@ -48,7 +48,6 @@ type ecObjectWritePlan struct {
 	ExpectedETag     string
 	Config           ECConfig
 	Placement        []string
-	RingVersion      RingVersion
 	ContentType      string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
@@ -62,16 +61,15 @@ type ecObjectWritePlan struct {
 }
 
 type ecObjectWriteResult struct {
-	Size        int64
-	ETag        string
-	ModTime     int64
-	ShardKey    string
-	Placement   []string
-	RingVersion RingVersion
-	ECData      uint8
-	ECParity    uint8
-	Parts       []storage.MultipartPartEntry // populated by CompleteMultipartUpload
-	Tags        []storage.Tag                // populated by CompleteMultipartUpload (carried from multipartMeta.Tags)
+	Size      int64
+	ETag      string
+	ModTime   int64
+	ShardKey  string
+	Placement []string
+	ECData    uint8
+	ECParity  uint8
+	Parts     []storage.MultipartPartEntry // populated by CompleteMultipartUpload
+	Tags      []storage.Tag                // populated by CompleteMultipartUpload (carried from multipartMeta.Tags)
 }
 
 type ecObjectShardWriteError struct {
@@ -361,14 +359,13 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	close(written)
 
 	return ecObjectWriteResult{
-		Size:        sp.Size,
-		ETag:        sp.ETag,
-		ModTime:     time.Now().Unix(),
-		ShardKey:    shardKey,
-		Placement:   cloneStringSlice(plan.Placement),
-		RingVersion: plan.RingVersion,
-		ECData:      uint8(plan.Config.DataShards),
-		ECParity:    uint8(plan.Config.ParityShards),
+		Size:      sp.Size,
+		ETag:      sp.ETag,
+		ModTime:   time.Now().Unix(),
+		ShardKey:  shardKey,
+		Placement: cloneStringSlice(plan.Placement),
+		ECData:    uint8(plan.Config.DataShards),
+		ECParity:  uint8(plan.Config.ParityShards),
 	}, nil
 }
 
@@ -398,14 +395,13 @@ func (w ecObjectWriter) writeSingleLocalReader(
 	}
 
 	return ecObjectWriteResult{
-		Size:        sp.Size,
-		ETag:        sp.ETag,
-		ModTime:     time.Now().Unix(),
-		ShardKey:    shardKey,
-		Placement:   cloneStringSlice(plan.Placement),
-		RingVersion: plan.RingVersion,
-		ECData:      1,
-		ECParity:    0,
+		Size:      sp.Size,
+		ETag:      sp.ETag,
+		ModTime:   time.Now().Unix(),
+		ShardKey:  shardKey,
+		Placement: cloneStringSlice(plan.Placement),
+		ECData:    1,
+		ECParity:  0,
 	}, nil
 }
 

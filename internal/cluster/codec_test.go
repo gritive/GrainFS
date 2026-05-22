@@ -113,7 +113,6 @@ func TestPutObjectMetaCmd_SegmentsRoundTrip(t *testing.T) {
 				NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
 				ECData:           4,
 				ECParity:         2,
-				RingVersion:      0,
 			},
 			{
 				BlobID:           "blob-1",
@@ -125,7 +124,6 @@ func TestPutObjectMetaCmd_SegmentsRoundTrip(t *testing.T) {
 				NodeIDs:          []string{"n2", "n3", "n4", "n5", "n6", "n7"},
 				ECData:           4,
 				ECParity:         2,
-				RingVersion:      0,
 			},
 		},
 	}
@@ -224,7 +222,6 @@ func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
 		ECData:           4,
 		ECParity:         2,
 		NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-		RingVersion:      17,
 		Tags:             []storage.Tag{{Key: "env", Value: "prod"}},
 		Parts: []storage.MultipartPartEntry{
 			{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
@@ -241,7 +238,6 @@ func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
 				NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
 				ECData:           4,
 				ECParity:         2,
-				RingVersion:      7,
 			},
 			{
 				BlobID:           "blob-1",
@@ -253,7 +249,6 @@ func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
 				NodeIDs:          []string{"n2", "n3", "n4", "n5", "n6", "n7"},
 				ECData:           4,
 				ECParity:         2,
-				RingVersion:      8,
 			},
 		},
 	}
@@ -265,7 +260,6 @@ func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
 
 	assert.Equal(t, orig.Parts, got.Parts)
 	assert.Equal(t, orig.Segments, got.Segments)
-	assert.Equal(t, orig.RingVersion, got.RingVersion)
 	assert.Equal(t, orig.Tags, got.Tags)
 }
 
@@ -552,7 +546,6 @@ func TestCodec_ObjectMeta_SegmentPlacementRoundTrip(t *testing.T) {
 			Checksum:         []byte{1, 2, 3, 4},
 			PlacementGroupID: "pg-2",
 			ShardSize:        4,
-			RingVersion:      9,
 			ECData:           2,
 			ECParity:         1,
 			NodeIDs:          []string{"n1", "n2", "n3"},
@@ -678,7 +671,7 @@ func TestCoalesceSegmentsCmdRoundTrip(t *testing.T) {
 }
 
 // TestCoalescedShardRefECParamsRoundTrip ensures the Phase B3 EC placement
-// params (RingVersion / ECData / ECParity / NodeIDs) survive marshal+unmarshal.
+// params (ECData / ECParity / NodeIDs) survive marshal+unmarshal.
 // These fields are required by appendableReader to reconstruct the coalesced
 // blob via the EC reader (PutObject GET path).
 func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
@@ -686,10 +679,9 @@ func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
 		Key: "a", Size: 4096, IsAppendable: true,
 		Coalesced: []CoalescedShardRef{{
 			CoalescedID: "c1", Size: 4096, ETag: "etag-c1",
-			ShardKey:    "a/coalesced/c1",
-			Version:     1,
-			RingVersion: 7,
-			ECData:      4, ECParity: 2,
+			ShardKey: "a/coalesced/c1",
+			Version:  1,
+			ECData:   4, ECParity: 2,
 			NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"},
 		}},
 	}
@@ -705,8 +697,8 @@ func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
 		t.Fatalf("Coalesced length = %d, want 1", len(got.Coalesced))
 	}
 	c := got.Coalesced[0]
-	if c.RingVersion != 7 || c.ECData != 4 || c.ECParity != 2 {
-		t.Fatalf("EC params mismatch: ringVer=%d ecData=%d ecParity=%d", c.RingVersion, c.ECData, c.ECParity)
+	if c.ECData != 4 || c.ECParity != 2 {
+		t.Fatalf("EC params mismatch: ecData=%d ecParity=%d", c.ECData, c.ECParity)
 	}
 	if len(c.NodeIDs) != 6 || c.NodeIDs[0] != "n1" || c.NodeIDs[5] != "n6" {
 		t.Fatalf("NodeIDs mismatch: %v", c.NodeIDs)
@@ -724,7 +716,6 @@ func TestCoalesceSegmentsCmdECParamsRoundTrip(t *testing.T) {
 		ConsumedSegmentIDs: []string{"s1", "s2"},
 		Placement:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
 		ECData:             4, ECParity: 2,
-		RingVersion: 9,
 	}
 	raw, err := encodeCoalesceSegmentsCmd(in)
 	if err != nil {
@@ -734,8 +725,8 @@ func TestCoalesceSegmentsCmdECParamsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.ECData != 4 || got.ECParity != 2 || got.RingVersion != 9 {
-		t.Fatalf("EC params mismatch: ecData=%d ecParity=%d ringVer=%d", got.ECData, got.ECParity, got.RingVersion)
+	if got.ECData != 4 || got.ECParity != 2 {
+		t.Fatalf("EC params mismatch: ecData=%d ecParity=%d", got.ECData, got.ECParity)
 	}
 	if len(got.Placement) != 6 || got.Placement[0] != "n1" || got.Placement[5] != "n6" {
 		t.Fatalf("Placement mismatch: %v", got.Placement)

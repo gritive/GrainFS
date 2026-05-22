@@ -41,7 +41,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--scrub-interval", "7s",
 		"--scrub-orphan-age", "11m",
 		"--reshard-interval", "13s",
-		"--ring-reshard-interval", "17s",
 		"--datagroup-refresh-interval", "19s",
 		"--lifecycle-interval", "29s",
 		"--degraded-check-interval", "23s",
@@ -134,7 +133,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "7s", opts.ScrubInterval.String())
 	require.Equal(t, "11m0s", opts.ScrubOrphanAge.String())
 	require.Equal(t, "13s", opts.ReshardInterval.String())
-	require.Equal(t, "17s", opts.RingReshardInterval.String())
 	require.Equal(t, "19s", opts.DataGroupRefreshInterval.String())
 	require.Equal(t, "23s", opts.DegradedInterval.String())
 	require.Equal(t, "29s", opts.LifecycleInterval.String())

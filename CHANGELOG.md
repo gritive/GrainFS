@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.0.319.0] - 2026-05-22
+
+### Breaking
+
+- **HRW placement hash를 SHA-256에서 xxh3로 교체.** Same `(key, node)`가
+  다른 score로 매핑되므로 v0.0.318.0에서 sha256으로 저장된 객체 placement는
+  v0.0.319.0에서 다른 노드로 풀린다 → upgrade 시 `--data` 디렉터리 wipe 필요.
+  v0.0.318.0 자체가 fresh-cluster 가정이라 실용 영향은 미미.
+
+### Performance
+
+- `hrwUniform`이 zero-alloc hot path로 전환 (stack `[256]byte` buf + `xxh3.Hash`).
+  `PlaceShards` 호출당 alloc이 `N+1`개에서 `1`개(out slice 자체)로 감소.
+- Bench (Apple M3 / `-benchtime=15s -count=3` median):
+  | Case              | sha256 ns/op | xxh3 ns/op | speedup | sha256 allocs → xxh3 |
+  |-------------------|--------------|------------|---------|----------------------|
+  | Nil N=3  k+m=2    |          281 |         79 |    3.6× |               4 → 1 |
+  | Nil N=6  k+m=2    |          501 |        131 |    3.8× |               7 → 1 |
+  | Nil N=12 k+m=2    |         1066 |        288 |    3.7× |              13 → 1 |
+  | Nil N=24 k+m=2    |         2170 |        682 |    3.2× |              25 → 1 |
+  | Ones N=3          |          322 |        145 |    2.2× |               4 → 1 |
+  | Ones N=24         |         2742 |        938 |    2.9× |              25 → 1 |
+- `zeebo/xxh3` 의존성은 이미 `internal/storage/{checksum,etaghash}.go`에서
+  사용 중이라 신규 의존성 추가 없음.
+
+## [0.0.318.0] - 2026-05-22
+
+### Breaking
+
+- **Object placement algorithm을 vnode-based consistent hashing에서 Weighted
+  Rendezvous Hashing (W-HRW)로 단일 전환.** Ring/RingStore/RingVersion 개념을
+  코드와 메타데이터 스키마에서 완전 제거.
+- **FlatBuffers metadata schema에서 `ring_version` 필드 제거.** 기존 BadgerDB
+  metadata는 읽기 실패한다. **머지 후 `--data` 디렉터리 wipe 필수** — 본 버전은
+  빈 클러스터 시작을 전제로 한다. 옛 데이터 호환 미지원.
+- Removed CLI flag: `--ring-reshard-interval` (자동 ring topology reshard 워크플로
+  제거 — `NewRingReshardManager`/`RingReshardInterval` config 모두 사라짐).
+  노드 멤버십 변경 시 자동 객체 재배치는 후속 design에서 재도입 검토.
+
+### Internal
+
+- `selectECPlacement`가 `PlaceShards`(weighted HRW)로 위임하는 thin wrapper로
+  단순화. 호출 경로에서 ring snapshot 조회 6곳, `PlacementMeta.RingVersion`
+  필드 전파 30+곳 모두 제거.
+- `placement_resolver`가 `meta.NodeIDs` 단일 경로로 단순화 — `PlacementSourceRing`/
+  `PlacementSourceLegacy` fallback 제거.
+- `FSM.rings`, `GetRingStore`, `CurrentRingVersion`, `ReshardToRing` 모두 제거.
+- `internal/cluster/ring.go`, `ring_store.go` 파일 자체 삭제 (총 ~500 라인 cleanup).
+- Spec: `docs/superpowers/specs/2026-05-22-rendezvous-hashing-cutover-design.md`
+
 ## [0.0.317.0] - 2026-05-22
 
 ### Internal

@@ -1593,13 +1593,11 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
 	shardKey := ecObjectShardKey(key, versionID)
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
 		placementGroupID = group.ID
 		effectiveCfg = cfg
 		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-		ringVer = 0
 	} else if PlacementGroupHasFullEntry(ctx) {
 		return nil, false, err
 	}
@@ -1627,7 +1625,6 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		key,
 		versionID,
 		placementGroupID,
-		ringVer,
 		placement,
 		sp,
 		body,
@@ -1914,13 +1911,12 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 	}
 	placementMeta := PlacementMeta{
 		VersionID:        obj.VersionID,
-		RingVersion:      RingVersion(obj.RingVersion),
 		ECData:           obj.ECData,
 		ECParity:         obj.ECParity,
 		NodeIDs:          obj.NodeIDs,
 		PlacementGroupID: obj.PlacementGroupID,
 	}
-	if !obj.IsAppendable && len(obj.Segments) == 0 && placementMeta.ECData == 0 && placementMeta.RingVersion == 0 && len(placementMeta.NodeIDs) == 0 {
+	if !obj.IsAppendable && len(obj.Segments) == 0 && placementMeta.ECData == 0 && len(placementMeta.NodeIDs) == 0 {
 		return b.ReadAt(ctx, bucket, key, offset, buf)
 	}
 	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
@@ -2051,38 +2047,9 @@ func (b *DistributedBackend) encryptedShardStorage() bool {
 	return b.shardSvc != nil && b.shardSvc.encryptor != nil
 }
 
-// selectECPlacement decides where each shard for shardKey should land.
-//
-// Preference order:
-//  1. Ring-deterministic placement when ring exists AND every candidate node is
-//     in liveNodes (allLive). Returns (placement, ring.Version).
-//  2. PlacementForNodes(liveNodes) fallback when ring is missing OR any
-//     candidate is offline/unhealthy. Returns (placement, 0).
-//
-// The ringVer=0 fallback is required because EC has write-all consistency: if
-// even one ring-chosen node is dead, the whole PUT fails and the object is
-// unrecoverable. Read paths that see ringVer=0 must reconstruct via
-// metaNodeIDs (always written into object metadata) instead of recomputing
-// from a stale ring.
-func selectECPlacement(ring *Ring, ringErr error, cfg ECConfig, liveNodes []string, shardKey string) (placement []string, ringVer RingVersion) {
-	if ringErr == nil && ring != nil {
-		candidate := ring.PlacementForKey(cfg, shardKey)
-		liveSet := make(map[string]bool, len(liveNodes))
-		for _, n := range liveNodes {
-			liveSet[n] = true
-		}
-		allLive := true
-		for _, n := range candidate {
-			if !liveSet[n] {
-				allLive = false
-				break
-			}
-		}
-		if allLive {
-			return candidate, ring.Version
-		}
-	}
-	return PlacementForNodes(cfg, liveNodes, shardKey), 0
+// selectECPlacement selects shard placement for shardKey using rendezvous hashing over liveNodes.
+func selectECPlacement(cfg ECConfig, liveNodes []string, shardKey string) []string {
+	return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
 }
 
 func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
@@ -2123,18 +2090,14 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 	return ok
 }
 
-// putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
+// putObjectECData is the Phase 18 Cluster EC path: Reed-Solomon split into
 // cfg.NumShards() shards, fan-out each to its placed node (self or peer),
-// then commit metadata (with RingVersion) through Raft.
+// then commit metadata through Raft.
 //
 // Consistency: write-all. Any shard write failure → cleanup + error.
-// Placement is derived deterministically from the ring (if available) or
-// via PlacementForNodes (legacy). The RingVersion is stored in object metadata
-// so reads can recompute the same placement without a separate Raft record.
-func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
-	return b.putObjectECData(ctx, bucket, key, versionID, data, contentType, nil, "")
-}
-
+// Placement is derived deterministically via PlaceShards (HRW).
+// ECData/ECParity + NodeIDs are stored in object metadata so reads can
+// reconstruct shards without a separate Raft record.
 func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, versionID string, data []byte, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -2156,8 +2119,7 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 	// for different versions land at different paths without changing the API.
 	shardKey := ecObjectShardKey(key, versionID)
 
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
 	topologyWrite := false
 	topologyGroup := ShardGroupEntry{}
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -2166,7 +2128,6 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		placementGroupID = group.ID
 		effectiveCfg = cfg
 		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-		ringVer = 0
 	} else if PlacementGroupHasFullEntry(ctx) {
 		return nil, err
 	}
@@ -2180,9 +2141,8 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		}
 	}
 
-	// Commit metadata. RingVersion + ECData/ECParity + NodeIDs stored so reads
-	// can reconstruct shards without a separate placement record (NodeIDs fallback
-	// is used when RingVersion==0 and no placement record exists).
+	// Commit metadata. ECData/ECParity + NodeIDs stored so reads can
+	// reconstruct shards without a separate placement record.
 	// On failure, best-effort cleanup of orphaned shards.
 	plan := ecObjectWritePlan{
 		Bucket:           bucket,
@@ -2191,7 +2151,6 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		PlacementGroupID: placementGroupID,
 		Config:           effectiveCfg,
 		Placement:        placement,
-		RingVersion:      ringVer,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
@@ -2248,8 +2207,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	shardKey := ecObjectShardKey(key, versionID)
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
 	topologyWrite := false
 	topologyGroup := ShardGroupEntry{}
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -2258,7 +2216,6 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		placementGroupID = group.ID
 		effectiveCfg = cfg
 		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-		ringVer = 0
 	}
 	if len(placement) != effectiveCfg.NumShards() {
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
@@ -2273,11 +2230,11 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 
 	selfID := b.currentSelfAddr()
 	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, placement, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
 	}
 
 	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
+		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
@@ -2296,7 +2253,6 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		ExpectedETag:     expectedETag,
 		Config:           effectiveCfg,
 		Placement:        placement,
-		RingVersion:      ringVer,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
@@ -2364,7 +2320,6 @@ func (b *DistributedBackend) checkTopologyPlacementHealth(group ShardGroupEntry,
 func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	ctx context.Context,
 	bucket, key, versionID, placementGroupID string,
-	ringVer RingVersion,
 	placement []string,
 	cfg ECConfig,
 	sp *spooledObject,
@@ -2383,7 +2338,6 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 		PlacementGroupID: placementGroupID,
 		Config:           cfg,
 		Placement:        placement,
-		RingVersion:      ringVer,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
@@ -2405,7 +2359,6 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 				PlacementGroupID: placementGroupID,
 				Config:           cfg,
 				Placement:        placement,
-				RingVersion:      ringVer,
 				ContentType:      contentType,
 				UserMetadata:     cloneStringMap(userMetadata),
 				SSEAlgorithm:     sseAlgorithm,
@@ -2424,7 +2377,6 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 			PlacementGroupID: placementGroupID,
 			Config:           cfg,
 			Placement:        placement,
-			RingVersion:      ringVer,
 			ContentType:      contentType,
 			UserMetadata:     cloneStringMap(userMetadata),
 			SSEAlgorithm:     sseAlgorithm,
@@ -2455,7 +2407,6 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		ModTime:          modTime,
 		VersionID:        plan.VersionID,
 		PlacementGroupID: plan.PlacementGroupID,
-		RingVersion:      result.RingVersion,
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
@@ -2484,7 +2435,6 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		UserMetadata:     cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm:     plan.SSEAlgorithm,
 		PlacementGroupID: plan.PlacementGroupID,
-		RingVersion:      uint64(result.RingVersion),
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          cloneStringSlice(result.Placement),
@@ -2518,7 +2468,6 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
-		RingVersion:      result.RingVersion,
 		Parts:            result.Parts,
 		Tags:             result.Tags,
 	}); merr != nil {
@@ -2539,7 +2488,6 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		UserMetadata:     cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm:     plan.SSEAlgorithm,
 		PlacementGroupID: plan.PlacementGroupID,
-		RingVersion:      uint64(result.RingVersion),
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          cloneStringSlice(result.Placement),
@@ -2551,7 +2499,6 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 	ctx context.Context,
 	bucket, key, versionID, placementGroupID string,
-	ringVer RingVersion,
 	placement []string,
 	sp *spooledObject,
 	contentType string,
@@ -2573,7 +2520,6 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 		key,
 		versionID,
 		placementGroupID,
-		ringVer,
 		placement,
 		sp,
 		body,
@@ -2601,7 +2547,6 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	ctx context.Context,
 	bucket, key, versionID, placementGroupID string,
-	ringVer RingVersion,
 	placement []string,
 	sp *spooledObject,
 	body io.Reader,
@@ -2621,7 +2566,6 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		PlacementGroupID: placementGroupID,
 		Config:           ECConfig{DataShards: 1, ParityShards: 0},
 		Placement:        placement,
-		RingVersion:      ringVer,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
@@ -2648,7 +2592,6 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		ModTime:          result.ModTime,
 		VersionID:        versionID,
 		PlacementGroupID: placementGroupID,
-		RingVersion:      result.RingVersion,
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
@@ -2674,7 +2617,6 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
 		PlacementGroupID: placementGroupID,
-		RingVersion:      uint64(result.RingVersion),
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          cloneStringSlice(result.Placement),
@@ -2736,7 +2678,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 		if rerr == nil {
 			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size)
 			if ecErr != nil {
-				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s: %w", bucket, key, ecErr)
 			}
 			return rc, obj, nil
 		}
@@ -2961,69 +2903,6 @@ func (b *DistributedBackend) ECActive() bool {
 // cluster size. Used by ReshardManager to determine the target k,m for upgrades.
 func (b *DistributedBackend) EffectiveECConfig() ECConfig {
 	return EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
-}
-
-// CurrentRingVersion returns the version of the current ring (0 if none).
-func (b *DistributedBackend) CurrentRingVersion() RingVersion {
-	ring, err := b.fsm.GetRingStore().GetCurrentRing()
-	if err != nil {
-		return 0
-	}
-	return ring.Version
-}
-
-// ReshardToRing reshards an object from oldRingVer's placement to the current
-// ring's placement. It reconstructs the object data from the old layout and
-// re-fans it out using putObjectEC (which will use the current ring).
-func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error {
-	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
-	if err != nil {
-		return err
-	}
-
-	currentRing, err := b.fsm.GetRingStore().GetCurrentRing()
-	if err != nil {
-		return fmt.Errorf("reshard: no current ring: %w", err)
-	}
-	if currentRing.Version == oldRingVer {
-		return nil // already up to date
-	}
-
-	cfg := EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
-
-	placementMeta.RingVersion = oldRingVer
-	if placementMeta.ECData == 0 {
-		placementMeta.ECData = uint8(cfg.DataShards)
-		placementMeta.ECParity = uint8(cfg.ParityShards)
-	}
-	resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
-	if rerr != nil {
-		return fmt.Errorf("reshard: resolve old placement: %w", rerr)
-	}
-	oldData, err := b.newECObjectReader().ReadObject(ctx, bucket, resolved.ShardKey, resolved.Record)
-	if err != nil {
-		return fmt.Errorf("reshard: reconstruct from %s: %w", resolved.Source, err)
-	}
-
-	// EC 디코딩 결과가 원본과 일치하는지 검증 (Reed-Solomon은 무손실이어야 함).
-	// ETag 길이로 알고리즘 선택: 32=MD5 (S3 user bucket), 16=xxhash3 (internal bucket).
-	var computedETag string
-	switch len(obj.ETag) {
-	case 32: // MD5
-		h := md5.Sum(oldData)
-		computedETag = hex.EncodeToString(h[:])
-	case 16: // xxhash3
-		computedETag = storage.InternalETag(oldData)
-	default:
-		return fmt.Errorf("reshard: unknown ETag format for %s/%s: %q", bucket, key, obj.ETag)
-	}
-	if computedETag != obj.ETag {
-		return fmt.Errorf("reshard: ETag mismatch after EC reconstruction for %s/%s: got %s, want %s",
-			bucket, key, computedETag, obj.ETag)
-	}
-
-	_, err = b.putObjectEC(ctx, bucket, key, obj.VersionID, oldData, obj.ContentType)
-	return err
 }
 
 // ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
@@ -3337,7 +3216,6 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				UserMetadata:     cloneStringMap(m.UserMetadata),
 				SSEAlgorithm:     m.SSEAlgorithm,
 				PlacementGroupID: m.PlacementGroupID,
-				RingVersion:      m.RingVersion,
 				ECData:           m.ECData,
 				ECParity:         m.ECParity,
 				NodeIDs:          cloneStringSlice(m.NodeIDs),
@@ -3351,7 +3229,6 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			}
 			placement = PlacementMeta{
 				VersionID:        versionID,
-				RingVersion:      RingVersion(m.RingVersion),
 				ECData:           m.ECData,
 				ECParity:         m.ECParity,
 				NodeIDs:          m.NodeIDs,
@@ -3438,7 +3315,6 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 		if err != nil {
 			return err
 		}
-		meta.RingVersion = RingVersion(m.RingVersion)
 		meta.ECData = m.ECData
 		meta.ECParity = m.ECParity
 		meta.NodeIDs = m.NodeIDs
@@ -4350,7 +4226,6 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			UserMetadata:     cloneStringMap(m.UserMetadata),
 			SSEAlgorithm:     m.SSEAlgorithm,
 			PlacementGroupID: m.PlacementGroupID,
-			RingVersion:      m.RingVersion,
 			ECData:           m.ECData,
 			ECParity:         m.ECParity,
 			NodeIDs:          cloneStringSlice(m.NodeIDs),
@@ -4364,7 +4239,6 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 		}
 		placement = PlacementMeta{
 			VersionID:        versionID,
-			RingVersion:      RingVersion(m.RingVersion),
 			ECData:           m.ECData,
 			ECParity:         m.ECParity,
 			NodeIDs:          m.NodeIDs,
@@ -4411,7 +4285,7 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 		if rerr == nil {
 			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size)
 			if ecErr != nil {
-				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s via %s: %w", bucket, key, versionID, resolved.Source, ecErr)
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s: %w", bucket, key, versionID, ecErr)
 			}
 			return rc, obj, nil
 		}

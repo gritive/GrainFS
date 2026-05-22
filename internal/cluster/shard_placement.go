@@ -33,15 +33,14 @@ func (r PlacementRecord) ECConfigOrFallback(def ECConfig) ECConfig {
 
 // ObjectMetaRef is the tuple IterObjectMetas yields for each object.
 type ObjectMetaRef struct {
-	Bucket      string
-	Key         string
-	VersionID   string
-	Size        int64
-	ETag        string
-	RingVersion RingVersion
-	ECData      uint8
-	ECParity    uint8
-	NodeIDs     []string
+	Bucket    string
+	Key       string
+	VersionID string
+	Size      int64
+	ETag      string
+	ECData    uint8
+	ECParity  uint8
+	NodeIDs   []string
 	// PlacementGroupID is the data raft group that owns this object version.
 	PlacementGroupID string
 }
@@ -113,7 +112,6 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			}
 			ref.Size = m.Size
 			ref.ETag = m.ETag
-			ref.RingVersion = RingVersion(m.RingVersion)
 			ref.ECData = m.ECData
 			ref.ECParity = m.ECParity
 			ref.NodeIDs = m.NodeIDs
@@ -177,7 +175,6 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			}
 			ref.Size = m.Size
 			ref.ETag = m.ETag
-			ref.RingVersion = RingVersion(m.RingVersion)
 			ref.ECData = m.ECData
 			ref.ECParity = m.ECParity
 			ref.NodeIDs = m.NodeIDs

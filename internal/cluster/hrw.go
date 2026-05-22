@@ -1,10 +1,10 @@
 package cluster
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"math"
 	"slices"
+
+	"github.com/zeebo/xxh3"
 )
 
 // PlaceShards selects `count` nodes from `nodes` to host the EC shards of `key`,
@@ -84,14 +84,27 @@ func PlaceShards(key string, nodes []string, weights []float64, count int) []str
 	return out
 }
 
-// hrwUniform returns u ∈ (0, 1] derived from sha256(key + "/" + nodeID).
+// hrwUniform returns u ∈ (0, 1] derived from xxh3(key + "/" + nodeID).
+// Hot path는 stack buffer [256]byte로 alloc-free. 일반 S3 key + UUID v7 NodeID
+// (≤ ~100B) 가 들어맞는다. 256B 초과는 heap fallback.
 func hrwUniform(key, nodeID string) float64 {
-	h := sha256.New()
-	h.Write([]byte(key))
-	h.Write([]byte{'/'})
-	h.Write([]byte(nodeID))
-	sum := h.Sum(nil)
-	v := binary.BigEndian.Uint64(sum[:8])
+	const stackBuf = 256
+	var buf [stackBuf]byte
+	need := len(key) + 1 + len(nodeID)
+	var v uint64
+	if need <= stackBuf {
+		n := copy(buf[:], key)
+		buf[n] = '/'
+		n++
+		n += copy(buf[n:], nodeID)
+		v = xxh3.Hash(buf[:n])
+	} else {
+		b := make([]byte, 0, need)
+		b = append(b, key...)
+		b = append(b, '/')
+		b = append(b, nodeID...)
+		v = xxh3.Hash(b)
+	}
 	// 53-bit precision (float64 mantissa), shift to (0, 1].
 	return (float64(v>>11) + 1) / (1 << 53)
 }

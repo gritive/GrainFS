@@ -42,7 +42,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration("scrub-orphan-age", 5*time.Minute,
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
 	cmd.Flags().Duration("reshard-interval", defaultReshardInterval, "background EC reshard interval (always on; 0 resets to default 24h)")
-	cmd.Flags().Duration("ring-reshard-interval", time.Hour, "ring placement reshard interval — migrates EC objects to current ring when nodes change (always on; 0 resets to default 1h)")
 	cmd.Flags().Duration("datagroup-refresh-interval", time.Minute, "how often to scan for new DataGroups and start reshard managers (0 = only scan at startup)")
 	cmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
 	cmd.Flags().Duration("degraded-check-interval", 30*time.Second, "EC degraded-mode liveness check interval")

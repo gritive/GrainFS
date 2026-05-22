@@ -105,20 +105,8 @@ func (rcv *PutObjectMetaCmd) VersionId() []byte {
 	return nil
 }
 
-func (rcv *PutObjectMetaCmd) RingVersion() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *PutObjectMetaCmd) MutateRingVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(18, n)
-}
-
 func (rcv *PutObjectMetaCmd) EcData() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		return rcv._tab.GetByte(o + rcv._tab.Pos)
 	}
@@ -126,11 +114,11 @@ func (rcv *PutObjectMetaCmd) EcData() byte {
 }
 
 func (rcv *PutObjectMetaCmd) MutateEcData(n byte) bool {
-	return rcv._tab.MutateByteSlot(20, n)
+	return rcv._tab.MutateByteSlot(18, n)
 }
 
 func (rcv *PutObjectMetaCmd) EcParity() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		return rcv._tab.GetByte(o + rcv._tab.Pos)
 	}
@@ -138,11 +126,11 @@ func (rcv *PutObjectMetaCmd) EcParity() byte {
 }
 
 func (rcv *PutObjectMetaCmd) MutateEcParity(n byte) bool {
-	return rcv._tab.MutateByteSlot(22, n)
+	return rcv._tab.MutateByteSlot(20, n)
 }
 
 func (rcv *PutObjectMetaCmd) NodeIds(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
@@ -151,7 +139,7 @@ func (rcv *PutObjectMetaCmd) NodeIds(j int) []byte {
 }
 
 func (rcv *PutObjectMetaCmd) NodeIdsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -159,7 +147,7 @@ func (rcv *PutObjectMetaCmd) NodeIdsLength() int {
 }
 
 func (rcv *PutObjectMetaCmd) PreserveLatest() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -167,11 +155,11 @@ func (rcv *PutObjectMetaCmd) PreserveLatest() bool {
 }
 
 func (rcv *PutObjectMetaCmd) MutatePreserveLatest(n bool) bool {
-	return rcv._tab.MutateBoolSlot(26, n)
+	return rcv._tab.MutateBoolSlot(24, n)
 }
 
 func (rcv *PutObjectMetaCmd) IsDeleteMarker() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -179,11 +167,11 @@ func (rcv *PutObjectMetaCmd) IsDeleteMarker() bool {
 }
 
 func (rcv *PutObjectMetaCmd) MutateIsDeleteMarker(n bool) bool {
-	return rcv._tab.MutateBoolSlot(28, n)
+	return rcv._tab.MutateBoolSlot(26, n)
 }
 
 func (rcv *PutObjectMetaCmd) PlacementGroupId() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -191,7 +179,7 @@ func (rcv *PutObjectMetaCmd) PlacementGroupId() []byte {
 }
 
 func (rcv *PutObjectMetaCmd) UserMetadata(obj *KeyValue, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -203,7 +191,7 @@ func (rcv *PutObjectMetaCmd) UserMetadata(obj *KeyValue, j int) bool {
 }
 
 func (rcv *PutObjectMetaCmd) UserMetadataLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -211,7 +199,7 @@ func (rcv *PutObjectMetaCmd) UserMetadataLength() int {
 }
 
 func (rcv *PutObjectMetaCmd) SseAlgorithm() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -219,7 +207,7 @@ func (rcv *PutObjectMetaCmd) SseAlgorithm() []byte {
 }
 
 func (rcv *PutObjectMetaCmd) ExpectedEtag() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -227,7 +215,7 @@ func (rcv *PutObjectMetaCmd) ExpectedEtag() []byte {
 }
 
 func (rcv *PutObjectMetaCmd) Parts(obj *MultipartPartEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -239,7 +227,7 @@ func (rcv *PutObjectMetaCmd) Parts(obj *MultipartPartEntry, j int) bool {
 }
 
 func (rcv *PutObjectMetaCmd) PartsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -247,7 +235,7 @@ func (rcv *PutObjectMetaCmd) PartsLength() int {
 }
 
 func (rcv *PutObjectMetaCmd) Segments(obj *SegmentMetaEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -259,7 +247,7 @@ func (rcv *PutObjectMetaCmd) Segments(obj *SegmentMetaEntry, j int) bool {
 }
 
 func (rcv *PutObjectMetaCmd) SegmentsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -267,7 +255,7 @@ func (rcv *PutObjectMetaCmd) SegmentsLength() int {
 }
 
 func (rcv *PutObjectMetaCmd) Tags(obj *Tag, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -279,7 +267,7 @@ func (rcv *PutObjectMetaCmd) Tags(obj *Tag, j int) bool {
 }
 
 func (rcv *PutObjectMetaCmd) TagsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -287,7 +275,7 @@ func (rcv *PutObjectMetaCmd) TagsLength() int {
 }
 
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(20)
+	builder.StartObject(19)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -310,56 +298,53 @@ func PutObjectMetaCmdAddModTime(builder *flatbuffers.Builder, modTime int64) {
 func PutObjectMetaCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(versionId), 0)
 }
-func PutObjectMetaCmdAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
-	builder.PrependUint64Slot(7, ringVersion, 0)
-}
 func PutObjectMetaCmdAddEcData(builder *flatbuffers.Builder, ecData byte) {
-	builder.PrependByteSlot(8, ecData, 0)
+	builder.PrependByteSlot(7, ecData, 0)
 }
 func PutObjectMetaCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
-	builder.PrependByteSlot(9, ecParity, 0)
+	builder.PrependByteSlot(8, ecParity, 0)
 }
 func PutObjectMetaCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(nodeIds), 0)
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(nodeIds), 0)
 }
 func PutObjectMetaCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdAddPreserveLatest(builder *flatbuffers.Builder, preserveLatest bool) {
-	builder.PrependBoolSlot(11, preserveLatest, false)
+	builder.PrependBoolSlot(10, preserveLatest, false)
 }
 func PutObjectMetaCmdAddIsDeleteMarker(builder *flatbuffers.Builder, isDeleteMarker bool) {
-	builder.PrependBoolSlot(12, isDeleteMarker, false)
+	builder.PrependBoolSlot(11, isDeleteMarker, false)
 }
 func PutObjectMetaCmdAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(placementGroupId), 0)
+	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(placementGroupId), 0)
 }
 func PutObjectMetaCmdAddUserMetadata(builder *flatbuffers.Builder, userMetadata flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(userMetadata), 0)
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(userMetadata), 0)
 }
 func PutObjectMetaCmdStartUserMetadataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(sseAlgorithm), 0)
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(sseAlgorithm), 0)
 }
 func PutObjectMetaCmdAddExpectedEtag(builder *flatbuffers.Builder, expectedEtag flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(expectedEtag), 0)
+	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(expectedEtag), 0)
 }
 func PutObjectMetaCmdAddParts(builder *flatbuffers.Builder, parts flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(parts), 0)
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(parts), 0)
 }
 func PutObjectMetaCmdStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdAddSegments(builder *flatbuffers.Builder, segments flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(segments), 0)
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(segments), 0)
 }
 func PutObjectMetaCmdStartSegmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(19, flatbuffers.UOffsetT(tags), 0)
+	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(tags), 0)
 }
 func PutObjectMetaCmdStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)

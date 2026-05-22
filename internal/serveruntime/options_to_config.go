@@ -71,7 +71,6 @@ func optionsToConfig(
 	cfg.ScrubInterval = opts.ScrubInterval
 	cfg.ScrubOrphanAge = opts.ScrubOrphanAge
 	cfg.ReshardInterval = opts.ReshardInterval
-	cfg.RingReshardInterval = opts.RingReshardInterval
 	cfg.DataGroupRefreshInterval = opts.DataGroupRefreshInterval
 	cfg.DegradedInterval = opts.DegradedInterval
 

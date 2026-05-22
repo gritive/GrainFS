@@ -1,10 +1,9 @@
 package cluster
 
-// ec_metadata_test.go: NodeIDs-in-metadata fallback path for EC GetObject.
+// ec_metadata_test.go: NodeIDs-in-metadata path for EC GetObject.
 //
-// When no ring is set up (RingVersion=0) and CmdPutShardPlacement is a no-op,
-// GetObject must still reconstruct EC objects using NodeIDs stored in
-// PutObjectMetaCmd. These tests verify that path end-to-end.
+// CmdPutShardPlacement is a no-op; GetObject reconstructs EC objects using
+// NodeIDs stored in PutObjectMetaCmd. These tests verify that path end-to-end.
 //
 // To force EC active (IsActive requires >= 3 nodes), we set allNodes to
 // contain the same selfAddr repeated 3 times. liveNodes() returns 3 entries,
@@ -13,14 +12,11 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +46,6 @@ func setupECBackend(t *testing.T) *DistributedBackend {
 func TestEC_NoRing_PutGetRoundTrip(t *testing.T) {
 	backend := setupECBackend(t)
 
-	// No ring initialized — RingVersion stays 0.
 	// CmdPutShardPlacement is a no-op — no placement records in FSM.
 	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := bytes.Repeat([]byte("hello-ec-no-ring-"), 50) // 850 bytes
@@ -103,44 +98,6 @@ func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(backend.shardSvc.dataDir, "b", shardKey, "shard_0")))
 
 	require.NoError(t, backend.RepairShard(t.Context(), "b", "obj", obj.VersionID, 0))
-
-	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	assert.Equal(t, content, got)
-}
-
-func TestGetObject_UsesResolvedLegacyBareShardKey(t *testing.T) {
-	backend := setupECBackend(t)
-
-	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
-	content := bytes.Repeat([]byte("legacy-bare-placement-"), 64)
-	versionID := "v1"
-	sum := md5.Sum(content)
-
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "obj",
-		VersionID:   versionID,
-		Size:        int64(len(content)),
-		ContentType: "application/octet-stream",
-		ETag:        hex.EncodeToString(sum[:]),
-		ModTime:     1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, backend.fsm.Apply(raw))
-
-	shards, err := ECSplit(ECConfig{DataShards: 1, ParityShards: 1}, content)
-	require.NoError(t, err)
-	for i, shard := range shards {
-		require.NoError(t, backend.shardSvc.WriteLocalShard("b", "obj", i, shard))
-	}
-	require.NoError(t, backend.db.Update(func(txn *badger.Txn) error {
-		rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
-		return txn.Set(shardPlacementKey("b", "obj"), encodePlacementValue(rec))
-	}))
 
 	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
 	require.NoError(t, err)

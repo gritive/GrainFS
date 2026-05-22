@@ -168,20 +168,8 @@ func (rcv *SegmentMetaEntry) MutateEcParity(n byte) bool {
 	return rcv._tab.MutateByteSlot(20, n)
 }
 
-func (rcv *SegmentMetaEntry) RingVersion() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *SegmentMetaEntry) MutateRingVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(22, n)
-}
-
 func SegmentMetaEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(10)
+	builder.StartObject(9)
 }
 func SegmentMetaEntryAddBlobId(builder *flatbuffers.Builder, blobId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(blobId), 0)
@@ -215,9 +203,6 @@ func SegmentMetaEntryAddEcData(builder *flatbuffers.Builder, ecData byte) {
 }
 func SegmentMetaEntryAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
 	builder.PrependByteSlot(8, ecParity, 0)
-}
-func SegmentMetaEntryAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
-	builder.PrependUint64Slot(9, ringVersion, 0)
 }
 func SegmentMetaEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

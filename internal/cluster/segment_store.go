@@ -185,7 +185,6 @@ func segmentMetaEntriesToRefs(entries []SegmentMetaEntry) []storage.SegmentRef {
 			Checksum:         append([]byte(nil), entry.Checksum...),
 			PlacementGroupID: entry.PlacementGroupID,
 			ShardSize:        entry.ShardSize,
-			RingVersion:      uint64(entry.RingVersion),
 			ECData:           entry.ECData,
 			ECParity:         entry.ECParity,
 			NodeIDs:          cloneStringSlice(entry.NodeIDs),

@@ -29,22 +29,11 @@ import (
 func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
-	// Ring reshard and EC reshard share a DataGroup manager registry but run on
-	// independent intervals. Both are always-on (validated in optionsToConfig).
-	// Ring reshard is correctness-critical (stale ring placement blocks reads when
-	// old nodes are removed); EC reshard is optimization-only (N×→EC, profile upgrade).
+	// EC reshard is always-on (validated in optionsToConfig).
+	// Optimization-only: N×→EC conversion and EC profile upgrade.
 	{
 		dgMgr := state.dgMgr
 
-		startRingManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
-			gb := dg.Backend()
-			leader := gb.Node()
-			if leader == nil {
-				log.Warn().Str("group", dg.ID()).Msg("ring-reshard manager skipped: group has no raft node")
-				return
-			}
-			go cluster.NewRingReshardManager(gb, leader, cfg.RingReshardInterval).Start(managerCtx)
-		}
 		startECManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
 			leader := gb.Node()
@@ -54,10 +43,6 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 			}
 			go cluster.NewReshardManager(gb, leader, cfg.ReshardInterval).Start(managerCtx)
 		}
-
-		ringManagers := NewReshardManagerRegistry()
-		ringManagers.Refresh(ctx, dgMgr.All(), startRingManager)
-		log.Info().Dur("interval", cfg.RingReshardInterval).Msg("ring reshard manager started")
 
 		ecManagers := NewReshardManagerRegistry()
 		ecManagers.Refresh(ctx, dgMgr.All(), startECManager)
@@ -72,7 +57,6 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 					case <-ctx.Done():
 						return
 					case <-ticker.C:
-						ringManagers.Refresh(ctx, dgMgr.All(), startRingManager)
 						ecManagers.Refresh(ctx, dgMgr.All(), startECManager)
 					}
 				}
