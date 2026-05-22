@@ -964,3 +964,27 @@ func TestSnapshotRestore_ChunkedObject_StaleWhenSegmentMissing(t *testing.T) {
 	require.Equal(t, key, stale[0].Key)
 	require.Equal(t, snap.ETag, stale[0].ExpectedETag)
 }
+
+func TestLocalBackend_DataWALRestoresWriteAtAndTruncate(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	b, err := NewLocalBackendWithDataWAL(filepath.Join(dir, "objects"), dwal)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	require.NoError(t, b.CreateBucket(context.Background(), "__grainfs_vfs_default"))
+	_, err = b.WriteAt(context.Background(), "__grainfs_vfs_default", "file", 0, []byte("abcdef"))
+	require.NoError(t, err)
+	_, err = b.WriteAt(context.Background(), "__grainfs_vfs_default", "file", 2, []byte("ZZ"))
+	require.NoError(t, err)
+	require.NoError(t, b.Truncate(context.Background(), "__grainfs_vfs_default", "file", 5))
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, os.Remove(b.objectPath("__grainfs_vfs_default", "file")))
+	require.NoError(t, b.RecoverDataWAL(context.Background()))
+	buf := make([]byte, 5)
+	n, err := b.ReadAt(context.Background(), "__grainfs_vfs_default", "file", 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, []byte("abZZe"), buf)
+}

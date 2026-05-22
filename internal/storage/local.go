@@ -29,11 +29,12 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	root       string
-	db         *badger.DB
-	encryptor  *encrypt.Encryptor
-	dataWAL    DataWAL
-	dataWALDir string
+	root             string
+	db               *badger.DB
+	encryptor        *encrypt.Encryptor
+	dataWAL          DataWAL
+	dataWALDir       string
+	replayingDataWAL bool
 }
 
 type DataWAL interface {
@@ -533,6 +534,19 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 			return err
 		}
 	}
+	if b.dataWAL != nil && !b.replayingDataWAL {
+		if _, err := b.dataWAL.Append(ctx, datawal.Record{
+			Op:     datawal.OpObjectTruncate,
+			Bucket: bucket,
+			Key:    key,
+			Size:   size,
+		}); err != nil {
+			return err
+		}
+		if err := b.dataWAL.Flush(); err != nil {
+			return err
+		}
+	}
 	objPath := b.objectPath(bucket, key)
 	var currentSize int64
 	if b.encryptor != nil {
@@ -588,6 +602,23 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	}
 	if existingErr != nil && !errors.Is(existingErr, ErrObjectNotFound) {
 		return nil, existingErr
+	}
+
+	if b.dataWAL != nil && !b.replayingDataWAL {
+		cp := append([]byte(nil), data...)
+		if _, err := b.dataWAL.Append(ctx, datawal.Record{
+			Op:      datawal.OpObjectWriteAt,
+			Bucket:  bucket,
+			Key:     key,
+			Offset:  int64(offset),
+			Size:    int64(len(cp)),
+			Payload: cp,
+		}); err != nil {
+			return nil, err
+		}
+		if err := b.dataWAL.Flush(); err != nil {
+			return nil, err
+		}
 	}
 
 	objPath := b.objectPath(bucket, key)
@@ -942,6 +973,8 @@ func (b *LocalBackend) PreferWriteAt(bucket string) bool {
 }
 
 func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
+	b.replayingDataWAL = true
+	defer func() { b.replayingDataWAL = false }()
 	return datawal.Recover(ctx, b.dataWALDir, 0, b.encryptor, localDataWALMaterializer{b: b})
 }
 
