@@ -8,8 +8,6 @@ import (
 	"errors"
 	"hash"
 	"io"
-
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // IngestActor reads an HTTP body into stripe-sized chunks and pushes
@@ -89,16 +87,19 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 	return etag, total, nil
 }
 
-// newHashForBucket picks the streaming hash used to build the object's
-// ETag. External (S3-visible) buckets must use MD5 because the AWS S3
-// protocol expects the ETag of a single PUT to equal Content-MD5.
-// Internal buckets and the empty bucket return nil (no hash); their
-// ETag is filled by the storage layer elsewhere.
+// newHashForBucket returns the streaming hash used to build the
+// object's ETag. The pipeline only ever serves external (S3-visible)
+// buckets — ShouldUseActor routes internal-bucket PUTs to the legacy
+// path — so the hash is always MD5, matching the AWS S3 contract that
+// a single-PUT ETag equals the object's Content-MD5. The empty bucket
+// name (which a real PUT never has) returns nil defensively.
+//
+// Deliberately does NOT branch on IsInternalBucket: internal-bucket
+// classification is a routing concern handled in ShouldUseActor, never
+// a hash-skip shortcut here (see internal/storage/bucket.go's guard
+// doc and TODOS.md "Hash 정책 분기 가드").
 func newHashForBucket(bucket string) hash.Hash {
 	if bucket == "" {
-		return nil
-	}
-	if storage.IsInternalBucket(bucket) {
 		return nil
 	}
 	return md5.New()
