@@ -3,6 +3,8 @@ package putpipeline
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -72,4 +74,27 @@ func TestIngestActor_LastStripePadded(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		require.Equal(t, byte(0xAB), last.Data[i])
 	}
+}
+
+func TestIngestActor_ETagMD5(t *testing.T) {
+	const stripe = 1 << 20
+	body := bytes.Repeat([]byte("hello"), 100000)
+	wantSum := md5.Sum(body)
+	want := hex.EncodeToString(wantSum[:])
+
+	out := make(chan StripePlaintext, 8)
+	a := &IngestActor{out: out, stripeBytes: stripe}
+	var gotETag string
+	done := make(chan struct{})
+	go func() {
+		var err error
+		gotETag, _, err = a.Run(context.Background(), 1, "external", bytes.NewReader(body))
+		require.NoError(t, err)
+		close(out)
+		close(done)
+	}()
+	for range out {
+	}
+	<-done
+	require.Equal(t, want, gotETag)
 }
