@@ -24,7 +24,7 @@ type BoundedLoadsSnapshot struct {
 
 // BoundedLoads computes hot-node classification with hysteresis.
 type BoundedLoads struct {
-	store  *NodeStatsStore
+	store  *NodeStatsStore // dormant until Refresh (Task 2 of the plan)
 	params BoundedLoadsParams
 	snap   atomic.Pointer[BoundedLoadsSnapshot]
 }
