@@ -679,7 +679,14 @@ func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) 
 }
 
 func encryptedChunkAAD(base []byte, chunkIdx uint32) []byte {
-	aad := make([]byte, 0, len(encryptedShardMagic)+len(base)+4)
+	size := len(encryptedShardMagic) + len(base) + 4
+	var aad []byte
+	var localAAD [256]byte
+	if size <= len(localAAD) {
+		aad = localAAD[:0]
+	} else {
+		aad = make([]byte, 0, size)
+	}
 	aad = append(aad, encryptedShardMagic...)
 	aad = append(aad, base...)
 	var idx [4]byte

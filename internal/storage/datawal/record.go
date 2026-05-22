@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"sync"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
@@ -47,11 +48,38 @@ type Record struct {
 	Checksum  []byte
 }
 
+const poolMaxBufSize = 1280 * 1024 // 1.25 MiB
+
+var bufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, poolMaxBufSize)
+		return &b
+	},
+}
+
+func getBuffer(size int) []byte {
+	if size > poolMaxBufSize {
+		return make([]byte, size)
+	}
+	ptr := bufferPool.Get().(*[]byte)
+	return (*ptr)[:size]
+}
+
+func putBuffer(buf []byte) {
+	if cap(buf) < poolMaxBufSize {
+		return
+	}
+	clear(buf[:cap(buf)])
+	b := buf[:poolMaxBufSize]
+	bufferPool.Put(&b)
+}
+
 func EncodeRecord(w io.Writer, rec Record) error {
 	body, err := marshalRecordBody(rec)
 	if err != nil {
 		return err
 	}
+	defer putBuffer(body)
 	return writeFrame(w, body)
 }
 
@@ -60,7 +88,7 @@ func DecodeRecord(r io.Reader) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return unmarshalRecordBody(body)
+	return unmarshalRecordBody(body, false)
 }
 
 func EncodeEncryptedRecord(w io.Writer, rec Record, enc *encrypt.Encryptor) error {
@@ -71,7 +99,13 @@ func EncodeEncryptedRecord(w io.Writer, rec Record, enc *encrypt.Encryptor) erro
 	if err != nil {
 		return err
 	}
-	sealed, err := enc.SealValueAADTo(nil, []byte(encryptedRecordAAD), body)
+	defer putBuffer(body)
+
+	// A 1.25 MiB buffer is plenty of space for payload < 1 MiB + metadata + AEAD overhead (~31 bytes)
+	sealedBuf := getBuffer(len(body) + 128)
+	defer putBuffer(sealedBuf)
+
+	sealed, err := enc.SealValueAADTo(sealedBuf[:0], []byte(encryptedRecordAAD), body)
 	clear(body)
 	if err != nil {
 		return fmt.Errorf("datawal: encrypt record: %w", err)
@@ -93,11 +127,16 @@ func DecodeEncryptedRecord(r io.Reader, enc *encrypt.Encryptor) (Record, error) 
 	if err != nil {
 		return Record{}, err
 	}
-	body, err := enc.OpenValueAAD([]byte(encryptedRecordAAD), sealed)
+	defer clear(sealed)
+
+	bodyBuf := getBuffer(len(sealed))
+	defer putBuffer(bodyBuf)
+
+	body, err := enc.OpenValueAADTo(bodyBuf[:0], []byte(encryptedRecordAAD), sealed)
 	if err != nil {
 		return Record{}, fmt.Errorf("datawal: decrypt record: %w", err)
 	}
-	rec, err := unmarshalRecordBody(body)
+	rec, err := unmarshalRecordBody(body, true)
 	clear(body)
 	if err != nil {
 		return Record{}, err
@@ -168,18 +207,16 @@ func marshalRecordBody(rec Record) ([]byte, error) {
 	if len(rec.Payload) > MaxPayloadBytes {
 		return nil, fmt.Errorf("datawal: payload too large: %d", len(rec.Payload))
 	}
-	bucket := []byte(rec.Bucket)
-	key := []byte(rec.Key)
-	target := []byte(rec.Target)
-	if len(bucket)+len(key)+len(target) > maxMetadataBytes {
+	metaLen := len(rec.Bucket) + len(rec.Key) + len(rec.Target)
+	if metaLen > maxMetadataBytes {
 		return nil, fmt.Errorf("datawal: metadata too large")
 	}
 	checksum := sha256.Sum256(rec.Payload)
-	size := recordBodyFixedBytes + len(bucket) + len(key) + len(target) + len(rec.Payload)
+	size := recordBodyFixedBytes + metaLen + len(rec.Payload)
 	if size > maxRecordBodyBytes {
 		return nil, fmt.Errorf("datawal: record body too large: %d", size)
 	}
-	body := make([]byte, size)
+	body := getBuffer(size)
 	off := 0
 	binary.BigEndian.PutUint64(body[off:], rec.Seq)
 	off += 8
@@ -191,9 +228,9 @@ func marshalRecordBody(rec Record) ([]byte, error) {
 	off += 8
 	binary.BigEndian.PutUint64(body[off:], uint64(rec.Size))
 	off += 8
-	off = putBytes(body, off, bucket)
-	off = putBytes(body, off, key)
-	off = putBytes(body, off, target)
+	off = putString(body, off, rec.Bucket)
+	off = putString(body, off, rec.Key)
+	off = putString(body, off, rec.Target)
 	copy(body[off:], checksum[:])
 	off += sha256.Size
 	binary.BigEndian.PutUint64(body[off:], uint64(len(rec.Payload)))
@@ -202,7 +239,7 @@ func marshalRecordBody(rec Record) ([]byte, error) {
 	return body, nil
 }
 
-func unmarshalRecordBody(body []byte) (Record, error) {
+func unmarshalRecordBody(body []byte, copyBytes bool) (Record, error) {
 	var rec Record
 	off := 0
 	if len(body) < 8+8+1+8+8 {
@@ -238,7 +275,11 @@ func unmarshalRecordBody(body []byte) (Record, error) {
 	if len(body[off:]) < sha256.Size+8 {
 		return rec, io.ErrUnexpectedEOF
 	}
-	rec.Checksum = append([]byte(nil), body[off:off+sha256.Size]...)
+	if copyBytes {
+		rec.Checksum = append([]byte(nil), body[off:off+sha256.Size]...)
+	} else {
+		rec.Checksum = body[off : off+sha256.Size]
+	}
 	off += sha256.Size
 	payloadLen := binary.BigEndian.Uint64(body[off:])
 	off += 8
@@ -248,7 +289,11 @@ func unmarshalRecordBody(body []byte) (Record, error) {
 	if uint64(len(body[off:])) < payloadLen {
 		return rec, io.ErrUnexpectedEOF
 	}
-	rec.Payload = append([]byte(nil), body[off:off+int(payloadLen)]...)
+	if copyBytes {
+		rec.Payload = append([]byte(nil), body[off:off+int(payloadLen)]...)
+	} else {
+		rec.Payload = body[off : off+int(payloadLen)]
+	}
 	off += int(payloadLen)
 	if off != len(body) {
 		return rec, fmt.Errorf("datawal: trailing record bytes: %d", len(body)-off)
@@ -260,11 +305,11 @@ func unmarshalRecordBody(body []byte) (Record, error) {
 	return rec, nil
 }
 
-func putBytes(dst []byte, off int, data []byte) int {
-	binary.BigEndian.PutUint32(dst[off:], uint32(len(data)))
+func putString(dst []byte, off int, s string) int {
+	binary.BigEndian.PutUint32(dst[off:], uint32(len(s)))
 	off += 4
-	copy(dst[off:], data)
-	return off + len(data)
+	copy(dst[off:], s)
+	return off + len(s)
 }
 
 func readString(body []byte, off int) (string, int, error) {

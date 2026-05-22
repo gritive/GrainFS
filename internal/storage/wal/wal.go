@@ -423,28 +423,72 @@ func readHeader(r io.Reader) (uint32, error) {
 	return v, nil
 }
 
+const poolMaxBufSize = 256 * 1024 // 256 KB is way more than enough for metadata entries
+
+var bufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, poolMaxBufSize)
+		return &b
+	},
+}
+
+func getBuffer(size int) []byte {
+	if size > poolMaxBufSize {
+		return make([]byte, size)
+	}
+	ptr := bufferPool.Get().(*[]byte)
+	return (*ptr)[:size]
+}
+
+func putBuffer(buf []byte) {
+	if cap(buf) < poolMaxBufSize {
+		return
+	}
+	clear(buf[:cap(buf)])
+	b := buf[:poolMaxBufSize]
+	bufferPool.Put(&b)
+}
+
+func putString16(dst []byte, off int, s string) int {
+	binary.BigEndian.PutUint16(dst[off:], uint16(len(s)))
+	off += 2
+	copy(dst[off:], s)
+	return off + len(s)
+}
+
 // marshalEntry writes an entry in binary format and returns bytes written.
 func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
 	if enc == nil {
 		return marshalPlainEntry(w, e)
 	}
-	body := marshalEntryBody(e, true)
-	sealed, err := enc.SealValueAADTo(nil, walRecordAAD(e.Seq, e.Timestamp), body)
+	bodySize := 1 + 2 + len(e.Bucket) + 2 + len(e.Key) + 2 + len(e.ETag) + 2 + len(e.ContentType) + 8 + 2 + len(e.VersionID)
+	bodyBuf := getBuffer(bodySize)
+	defer putBuffer(bodyBuf)
+
+	body := marshalEntryBodyTo(bodyBuf[:0], e, true)
+	sealedSize := 3 + enc.AEADOverhead() + len(body) + enc.AEADOverhead() + 64
+	sealedBuf := getBuffer(sealedSize)
+	defer putBuffer(sealedBuf)
+
+	sealed, err := enc.SealValueAADTo(sealedBuf[:0], walRecordAAD(e.Seq, e.Timestamp), body)
 	if err != nil {
 		return 0, fmt.Errorf("wal: encrypt entry body: %w", err)
 	}
-	buf := make([]byte, 8+8+4+len(sealed))
+
+	frameSize := 8 + 8 + 4 + len(sealed)
+	frameBuf := getBuffer(frameSize)
+	defer putBuffer(frameBuf)
+
 	off := 0
-	binary.BigEndian.PutUint64(buf[off:], e.Seq)
+	binary.BigEndian.PutUint64(frameBuf[off:], e.Seq)
 	off += 8
-	binary.BigEndian.PutUint64(buf[off:], uint64(e.Timestamp))
+	binary.BigEndian.PutUint64(frameBuf[off:], uint64(e.Timestamp))
 	off += 8
-	binary.BigEndian.PutUint32(buf[off:], uint32(len(sealed)))
+	binary.BigEndian.PutUint32(frameBuf[off:], uint32(len(sealed)))
 	off += 4
-	copy(buf[off:], sealed)
-	n, err := w.Write(buf)
-	clear(body)
-	clear(sealed)
+	copy(frameBuf[off:], sealed)
+
+	n, err := w.Write(frameBuf)
 	return n, err
 }
 
@@ -452,14 +496,9 @@ func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
 // Format (v1): [8:seq][8:ts][1:op][2:bucket_len][bucket][2:key_len][key][2:etag_len][etag][2:ct_len][ct][8:size]
 // Format (v2): v1 fields + [2:versionid_len][versionid]
 func marshalPlainEntry(w io.Writer, e Entry) (int, error) {
-	bucket := []byte(e.Bucket)
-	key := []byte(e.Key)
-	etag := []byte(e.ETag)
-	ct := []byte(e.ContentType)
-	vid := []byte(e.VersionID)
-
-	size := 8 + 8 + 1 + 2 + len(bucket) + 2 + len(key) + 2 + len(etag) + 2 + len(ct) + 8 + 2 + len(vid)
-	buf := make([]byte, size)
+	size := 8 + 8 + 1 + 2 + len(e.Bucket) + 2 + len(e.Key) + 2 + len(e.ETag) + 2 + len(e.ContentType) + 8 + 2 + len(e.VersionID)
+	buf := getBuffer(size)
+	defer putBuffer(buf)
 	off := 0
 
 	binary.BigEndian.PutUint64(buf[off:], e.Seq)
@@ -468,69 +507,38 @@ func marshalPlainEntry(w io.Writer, e Entry) (int, error) {
 	off += 8
 	buf[off] = e.Op
 	off++
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(bucket)))
-	off += 2
-	copy(buf[off:], bucket)
-	off += len(bucket)
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(key)))
-	off += 2
-	copy(buf[off:], key)
-	off += len(key)
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(etag)))
-	off += 2
-	copy(buf[off:], etag)
-	off += len(etag)
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(ct)))
-	off += 2
-	copy(buf[off:], ct)
-	off += len(ct)
+	off = putString16(buf, off, e.Bucket)
+	off = putString16(buf, off, e.Key)
+	off = putString16(buf, off, e.ETag)
+	off = putString16(buf, off, e.ContentType)
 	binary.BigEndian.PutUint64(buf[off:], uint64(e.Size))
 	off += 8
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(vid)))
-	off += 2
-	copy(buf[off:], vid)
+	_ = putString16(buf, off, e.VersionID)
 
 	n, err := w.Write(buf)
 	return n, err
 }
 
-func marshalEntryBody(e Entry, includeVersionID bool) []byte {
-	bucket := []byte(e.Bucket)
-	key := []byte(e.Key)
-	etag := []byte(e.ETag)
-	ct := []byte(e.ContentType)
-	vid := []byte(e.VersionID)
-
-	size := 1 + 2 + len(bucket) + 2 + len(key) + 2 + len(etag) + 2 + len(ct) + 8
+func marshalEntryBodyTo(dst []byte, e Entry, includeVersionID bool) []byte {
+	size := 1 + 2 + len(e.Bucket) + 2 + len(e.Key) + 2 + len(e.ETag) + 2 + len(e.ContentType) + 8
 	if includeVersionID {
-		size += 2 + len(vid)
+		size += 2 + len(e.VersionID)
 	}
-	buf := make([]byte, size)
+	if cap(dst) < size {
+		dst = make([]byte, size)
+	}
+	buf := dst[:size]
 	off := 0
 	buf[off] = e.Op
 	off++
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(bucket)))
-	off += 2
-	copy(buf[off:], bucket)
-	off += len(bucket)
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(key)))
-	off += 2
-	copy(buf[off:], key)
-	off += len(key)
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(etag)))
-	off += 2
-	copy(buf[off:], etag)
-	off += len(etag)
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(ct)))
-	off += 2
-	copy(buf[off:], ct)
-	off += len(ct)
+	off = putString16(buf, off, e.Bucket)
+	off = putString16(buf, off, e.Key)
+	off = putString16(buf, off, e.ETag)
+	off = putString16(buf, off, e.ContentType)
 	binary.BigEndian.PutUint64(buf[off:], uint64(e.Size))
 	off += 8
 	if includeVersionID {
-		binary.BigEndian.PutUint16(buf[off:], uint16(len(vid)))
-		off += 2
-		copy(buf[off:], vid)
+		_ = putString16(buf, off, e.VersionID)
 	}
 	return buf
 }
@@ -561,7 +569,9 @@ func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
 }
 
 func decryptEntryBody(frame Entry, encryptedBody []byte, enc *encrypt.Encryptor) (Entry, error) {
-	body, err := enc.OpenValueAAD(walRecordAAD(frame.Seq, frame.Timestamp), encryptedBody)
+	bodyBuf := getBuffer(len(encryptedBody))
+	defer putBuffer(bodyBuf)
+	body, err := enc.OpenValueAADTo(bodyBuf[:0], walRecordAAD(frame.Seq, frame.Timestamp), encryptedBody)
 	if err != nil {
 		return Entry{}, fmt.Errorf("wal: decrypt entry body: %w", err)
 	}
