@@ -66,3 +66,24 @@ func TestBoundedLoads_Hysteresis(t *testing.T) {
 	bl.Refresh()
 	assert.False(t, bl.IsHot("n1"), "after recovery: n1 should not be hot")
 }
+
+func TestBoundedLoads_RefreshIfStaleSingleflight(t *testing.T) {
+	store := NewNodeStatsStore(2 * time.Minute)
+	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 100})
+
+	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0, MaxStale: 60 * time.Second})
+	bl.Refresh()
+	first := bl.Snapshot()
+
+	// dataVersion 동일 → 재계산 skip.
+	bl.RefreshIfStale()
+	second := bl.Snapshot()
+	assert.Same(t, first, second, "dataVersion unchanged: snapshot pointer should be reused")
+
+	// 데이터 갱신 → reload.
+	store.Set(NodeStats{NodeID: "n2", RequestsPerSec: 200})
+	bl.RefreshIfStale()
+	third := bl.Snapshot()
+	assert.NotSame(t, first, third, "dataVersion changed: snapshot should be refreshed")
+	assert.Equal(t, 150.0, third.AvgRPS)
+}

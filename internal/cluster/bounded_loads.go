@@ -3,6 +3,8 @@ package cluster
 import (
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // BoundedLoadsParams configures hot-node detection.
@@ -27,6 +29,7 @@ type BoundedLoads struct {
 	store  *NodeStatsStore
 	params BoundedLoadsParams
 	snap   atomic.Pointer[BoundedLoadsSnapshot]
+	sf     singleflight.Group
 }
 
 // NewBoundedLoads constructs a BoundedLoads bound to store with the given params.
@@ -89,6 +92,43 @@ func (bl *BoundedLoads) Refresh() {
 		DataVersion:   maxUpdated,
 	}
 	bl.snap.Store(next)
+}
+
+// RefreshIfStale recomputes the snapshot only if the underlying NodeStatsStore
+// has advanced (max UpdatedAt > snapshot.DataVersion) or the snapshot has aged
+// past params.MaxStale. Concurrent callers coalesce via singleflight.
+func (bl *BoundedLoads) RefreshIfStale() {
+	cur := bl.snap.Load()
+	if !bl.shouldRefresh(cur) {
+		return
+	}
+	_, _, _ = bl.sf.Do("refresh", func() (interface{}, error) {
+		// Re-check under singleflight to avoid duplicate work after wait.
+		cur := bl.snap.Load()
+		if !bl.shouldRefresh(cur) {
+			return nil, nil
+		}
+		bl.Refresh()
+		return nil, nil
+	})
+}
+
+func (bl *BoundedLoads) shouldRefresh(cur *BoundedLoadsSnapshot) bool {
+	if cur == nil || cur.ComputedAt.IsZero() {
+		return true
+	}
+	if bl.params.MaxStale > 0 && time.Since(cur.ComputedAt) > bl.params.MaxStale {
+		return true
+	}
+	// dataVersion advanced?
+	stats := bl.store.GetAll()
+	var maxUpdated time.Time
+	for _, ns := range stats {
+		if ns.UpdatedAt.After(maxUpdated) {
+			maxUpdated = ns.UpdatedAt
+		}
+	}
+	return maxUpdated.After(cur.DataVersion)
 }
 
 // computeHotSet applies the hysteresis state machine:
