@@ -569,21 +569,44 @@ start_rustfs() {
     return 1
   fi
 
+  local drives="${RUSTFS_SINGLE_DRIVES:-1}"
+  if [[ ! "$drives" =~ ^[0-9]+$ || "$drives" -lt 1 ]]; then
+    echo "rustfs: RUSTFS_SINGLE_DRIVES must be >= 1; got $drives" >&2
+    return 1
+  fi
   local data_dir="$BENCH_DIR/rustfs"
+  local volume_args=()
   local port console_port
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
-  mkdir -p "$data_dir"
-  register_target_data_dir "$data_dir"
+  if [[ "$drives" -eq 1 ]]; then
+    mkdir -p "$data_dir"
+    register_target_data_dir "$data_dir"
+    volume_args+=("$data_dir")
+  else
+    local idx
+    mkdir -p "$data_dir"
+    for idx in $(seq 1 "$drives"); do
+      mkdir -p "$data_dir/d${idx}"
+      register_target_data_dir "$data_dir/d${idx}"
+      volume_args+=("$data_dir/d${idx}")
+    done
+  fi
 
-  RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY" \
-  RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY" \
-  RUSTFS_REGION="us-east-1" \
-  "$RUSTFS_BIN" server \
+  local env_args=(
+    "RUSTFS_ACCESS_KEY=$RUSTFS_ACCESS_KEY"
+    "RUSTFS_SECRET_KEY=$RUSTFS_SECRET_KEY"
+    "RUSTFS_REGION=us-east-1"
+  )
+  if [[ "$drives" -gt 1 && -z "${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-}" ]]; then
+    env_args+=("RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true")
+    echo "  rustfs local multi-drive uses RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true for synthetic same-filesystem drives"
+  fi
+  env "${env_args[@]}" "$RUSTFS_BIN" server \
     --address "127.0.0.1:$port" \
     --console-enable \
     --console-address "127.0.0.1:$console_port" \
-    "$data_dir" \
+    "${volume_args[@]}" \
     >"$PROFILE_ROOT/rustfs.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "rustfs S3" 180 0.2 >&2
