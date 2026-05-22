@@ -141,9 +141,9 @@ type DistributedBackend struct {
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
 
-	nodeStatsStore *NodeStatsStore // gossip-fed disk/RPS stats; nil until Task 9 wires it
-	bl             *BoundedLoads   // hot-node detection; nil until Task 9 wires it
-	clusterCfg     *ClusterConfig  // live policy view; defaults until Task 9 replaces with MetaFSM pointer
+	nodeStatsStore *NodeStatsStore // gossip-fed disk/RPS stats; wired by StartPlacementRuntime
+	bl             *BoundedLoads   // hot-node detection; wired by StartPlacementRuntime
+	clusterCfg     *ClusterConfig  // live policy view; wired by StartPlacementRuntime (defaults until then)
 
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
@@ -240,7 +240,7 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 		logger:       log.With().Str("component", "distributed-backend").Logger(),
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
-		clusterCfg:   NewClusterConfig(), // default config until Task 9 replaces with live MetaFSM pointer
+		clusterCfg:   NewClusterConfig(), // default config until StartPlacementRuntime wires the live pointer
 	}
 	// Phase B2: wire the in-process coalesce worker + periodic backstop scan.
 	// Lifecycle is bound to Close() via coalesceCancel.
@@ -3243,8 +3243,8 @@ func (b *DistributedBackend) newECObjectReader() ecObjectReader {
 	if b.currentPeerHealth() != nil {
 		r.peerHealth = b.currentPeerHealth()
 	}
-	if b.bl != nil {
-		r.bl = b.bl // may be nil until InitBoundedLoads; computeAttemptOrder nil-guards
+	if b.bl != nil && b.clusterCfg.BoundedLoadsEnabled() {
+		r.bl = b.bl
 	}
 	return r
 }

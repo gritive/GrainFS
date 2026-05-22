@@ -1445,3 +1445,31 @@ func TestDistributedBackend_ForceDeleteBucket_SlashKeyAndVersionedPrefix(t *test
 	require.NoError(t, b.ForceDeleteBucket(ctx, "slash-bucket"))
 	require.ErrorIs(t, b.HeadBucket(ctx, "slash-bucket"), storage.ErrBucketNotFound)
 }
+
+// TestNewECObjectReader_BLFlag verifies that newECObjectReader respects the
+// BoundedLoadsEnabled cluster-config flag. When the flag is disabled at runtime,
+// ecObjectReader.bl must be nil so that computeAttemptOrder skips BL reranking —
+// matching write-path behaviour where selectECPlacementWeighted already checks blEnabled.
+func TestNewECObjectReader_BLFlag(t *testing.T) {
+	store := NewNodeStatsStore(time.Minute)
+	params := BoundedLoadsParams{C: 1.25, CLow: 1.0}
+	fakeBL := NewBoundedLoads(store, params)
+
+	t.Run("enabled (default): bl injected", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		b.bl = fakeBL
+		// Default config: BoundedLoadsEnabled == true
+		r := b.newECObjectReader()
+		require.NotNil(t, r.bl, "bl must be injected when BoundedLoadsEnabled=true")
+	})
+
+	t.Run("disabled via patch: bl not injected", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		b.bl = fakeBL
+		// Disable via patch — should make newECObjectReader skip bl injection.
+		disabled := false
+		b.clusterCfg.applyPatch(ClusterConfigPatch{BoundedLoadsEnabled: &disabled}, time.Now())
+		r := b.newECObjectReader()
+		require.Nil(t, r.bl, "bl must NOT be injected when BoundedLoadsEnabled=false")
+	})
+}
