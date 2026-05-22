@@ -610,6 +610,12 @@ start_rustfs() {
     >"$PROFILE_ROOT/rustfs.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "rustfs S3" 180 0.2 >&2
+  echo "  waiting for rustfs signed write readiness..."
+  bench_wait_s3_signed_write_ready "http://127.0.0.1:$port" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "warp-rustfs-ready" "${RUSTFS_WRITE_READY_ATTEMPTS:-120}" "${RUSTFS_WRITE_READY_SLEEP:-0.5}" >&2 || {
+    echo "  rustfs signed write readiness failed; aborting" >&2
+    return 1
+  }
+  echo "  rustfs signed write-ready"
   set_start_info "http://127.0.0.1:$port" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "local"
 }
 
