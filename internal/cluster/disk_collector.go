@@ -32,7 +32,7 @@ type DiskCfgReader interface {
 // DiskCollector periodically reads local disk stats and updates the NodeStatsStore.
 type DiskCollector struct {
 	nodeID   string
-	dataDir  string
+	dataDirs []string
 	store    *NodeStatsStore
 	interval time.Duration
 	mu       sync.RWMutex
@@ -59,9 +59,13 @@ type DiskCollector struct {
 // cfg provides live warn/critical thresholds; pass nil to disable threshold
 // callbacks (e.g. when the collector is used only for stats gossip).
 func NewDiskCollector(nodeID, dataDir string, store *NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
+	return NewMultiRootDiskCollector(nodeID, []string{dataDir}, store, interval, cfg)
+}
+
+func NewMultiRootDiskCollector(nodeID string, dataDirs []string, store *NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
 	return &DiskCollector{
 		nodeID:   nodeID,
-		dataDir:  dataDir,
+		dataDirs: dataDirs,
 		store:    store,
 		interval: interval,
 		statFunc: sysDiskStat,
@@ -86,7 +90,7 @@ func (d *DiskCollector) SetOnThreshold(fn func(level DiskThresholdLevel, pct flo
 
 // Run starts the collection loop. Blocks until ctx is cancelled.
 func (d *DiskCollector) Run(ctx context.Context) {
-	log.Info().Str("nodeID", d.nodeID).Str("dataDir", d.dataDir).Dur("interval", d.interval).Msg("disk collector started")
+	log.Info().Str("nodeID", d.nodeID).Strs("dataDirs", d.dataDirs).Dur("interval", d.interval).Msg("disk collector started")
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
 	d.collect()
@@ -104,23 +108,43 @@ func (d *DiskCollector) collect() {
 	d.mu.RLock()
 	fn := d.statFunc
 	d.mu.RUnlock()
-	usedPct, availBytes := fn(d.dataDir)
-	if usedPct == 0 && availBytes == 0 {
-		log.Warn().Str("nodeID", d.nodeID).Str("dataDir", d.dataDir).Msg("disk stat unavailable, skipping update")
+
+	var maxUsedPct float64 = -1.0
+	var minAvailBytes uint64 = ^uint64(0)
+	var collectedAny bool
+
+	for _, dir := range d.dataDirs {
+		usedPct, availBytes := fn(dir)
+		if usedPct == 0 && availBytes == 0 {
+			log.Warn().Str("nodeID", d.nodeID).Str("dir", dir).Msg("disk stat unavailable, skipping this directory")
+			continue
+		}
+		if usedPct < 0 {
+			usedPct = 0
+		} else if usedPct > 100 {
+			usedPct = 100
+		}
+		collectedAny = true
+		if usedPct > maxUsedPct {
+			maxUsedPct = usedPct
+		}
+		if availBytes < minAvailBytes {
+			minAvailBytes = availBytes
+		}
+	}
+
+	if !collectedAny {
+		log.Warn().Str("nodeID", d.nodeID).Msg("all disk stats unavailable, skipping update")
 		return
 	}
-	if usedPct < 0 {
-		usedPct = 0
-	} else if usedPct > 100 {
-		usedPct = 100
-	}
-	log.Debug().Str("nodeID", d.nodeID).Float64("usedPct", usedPct).Uint64("availBytes", availBytes).Msg("disk stat collected")
-	if d.store != nil {
-		d.store.UpdateDiskStats(d.nodeID, usedPct, availBytes)
-	}
-	metrics.DiskUsedPct.WithLabelValues(d.nodeID).Set(usedPct)
 
-	d.fireThresholdIfChanged(usedPct, availBytes)
+	log.Debug().Str("nodeID", d.nodeID).Float64("maxUsedPct", maxUsedPct).Uint64("minAvailBytes", minAvailBytes).Msg("disk stat collected")
+	if d.store != nil {
+		d.store.UpdateDiskStats(d.nodeID, maxUsedPct, minAvailBytes)
+	}
+	metrics.DiskUsedPct.WithLabelValues(d.nodeID).Set(maxUsedPct)
+
+	d.fireThresholdIfChanged(maxUsedPct, minAvailBytes)
 }
 
 // fireThresholdIfChanged fires onThreshold exactly once per OK↔Warn↔Critical

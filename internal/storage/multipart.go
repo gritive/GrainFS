@@ -20,7 +20,7 @@ func (b *LocalBackend) multipartKey(uploadID string) []byte {
 }
 
 func (b *LocalBackend) partDir(uploadID string) string {
-	return filepath.Join(b.root, "parts", uploadID)
+	return filepath.Join(b.dataRoots[0], "parts", uploadID)
 }
 
 func (b *LocalBackend) partPath(uploadID string, partNumber int) string {
@@ -589,7 +589,7 @@ type OrphanMultipartSweeper interface {
 // into Errors so a single bad subtree does not abort the whole sweep.
 func (b *LocalBackend) SweepOrphanMultiparts(ctx context.Context, before time.Time) (OrphanMultipartSweepResult, error) {
 	var res OrphanMultipartSweepResult
-	partsRoot := filepath.Join(b.root, "parts")
+	partsRoot := filepath.Join(b.dataRoots[0], "parts")
 	entries, err := os.ReadDir(partsRoot)
 	if os.IsNotExist(err) {
 		return res, nil

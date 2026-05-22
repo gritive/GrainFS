@@ -26,6 +26,8 @@ type Config struct {
 	// Network / identity
 	Addr             string
 	DataDir          string
+	DataDirs         []string
+	MetaDir          string
 	NodeID           string
 	RaftAddr         string
 	RaftAddrExplicit bool

@@ -113,7 +113,13 @@ func StartBalancer(
 		JoinedAt: time.Now(),
 	})
 
-	collector := cluster.NewDiskCollector(nodeID, dataDir, statsStore, gossipInterval, diskCfg)
+	var dirs []string
+	if shardSvc != nil {
+		dirs = shardSvc.DataDirs()
+	} else {
+		dirs = []string{dataDir}
+	}
+	collector := cluster.NewMultiRootDiskCollector(nodeID, dirs, statsStore, gossipInterval, diskCfg)
 	if testPctStr := os.Getenv("GRAINFS_TEST_DISK_PCT"); testPctStr != "" {
 		var testPct float64
 		if _, err := fmt.Sscanf(testPctStr, "%f", &testPct); err != nil {

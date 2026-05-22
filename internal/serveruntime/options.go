@@ -16,11 +16,13 @@ type ServeOptions struct {
 	Version string
 
 	// --- Listen + addressing ---
-	DataDir     string // --data
-	Port        int    // --port
-	AdminSocket string // --admin-socket
-	AdminGroup  string // --admin-group
-	PublicURL   string // --public-url
+	DataDir     string   // --data (raw string)
+	DataDirs    []string // --data (parsed multi-paths)
+	MetaDir     string   // --meta-dir
+	Port        int      // --port
+	AdminSocket string   // --admin-socket
+	AdminGroup  string   // --admin-group
+	PublicURL   string   // --public-url
 
 	// --- Cluster identity ---
 	NodeID            string // --node-id

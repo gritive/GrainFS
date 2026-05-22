@@ -14,7 +14,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -95,7 +94,7 @@ func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 	require.NotEmpty(t, obj.VersionID)
 
 	shardKey := "obj/" + obj.VersionID
-	require.NoError(t, os.Remove(filepath.Join(backend.shardSvc.dataDir, "b", shardKey, "shard_0")))
+	require.NoError(t, os.Remove(backend.shardSvc.getShardPath("b", shardKey, 0)))
 
 	require.NoError(t, backend.RepairShard(t.Context(), "b", "obj", obj.VersionID, 0))
 

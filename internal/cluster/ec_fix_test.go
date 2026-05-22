@@ -14,7 +14,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -224,7 +223,7 @@ func TestGetObjectEC_MissingDataShardUsesParity(t *testing.T) {
 	require.NoError(t, err)
 
 	shardKey := "obj/" + obj.VersionID
-	require.NoError(t, os.Remove(filepath.Join(b.shardSvc.dataDir, "bkt", shardKey, "shard_0")))
+	require.NoError(t, os.Remove(b.shardSvc.getShardPath("bkt", shardKey, 0)))
 
 	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
 	require.NoError(t, err)

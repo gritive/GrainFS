@@ -41,7 +41,7 @@ type shardFileWriter func(path string, payload []byte) error
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
-	dataDir       string
+	dataDirs      []string
 	transport     *transport.QUICTransport
 	encryptor     *encrypt.Encryptor
 	addrBook      NodeAddressBook
@@ -88,16 +88,26 @@ func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
+	return NewMultiRootShardService([]string{dataDir}, tr, opts...)
+}
+
+// NewMultiRootShardService creates a shard service rooted at multiple dataDirs/shards/.
+func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
+	resolvedDirs := make([]string, len(dataDirs))
+	for i, dir := range dataDirs {
+		resolvedDirs[i] = filepath.Join(dir, "shards")
+		if err := os.MkdirAll(resolvedDirs[i], 0o755); err != nil {
+			log.Error().Err(err).Str("dir", resolvedDirs[i]).Msg("create shard data directory")
+		}
+	}
+
 	s := &ShardService{
-		dataDir:      filepath.Join(dataDir, "shards"),
+		dataDirs:     resolvedDirs,
 		transport:    tr,
 		directWriter: writeDirect,
 	}
 	for _, opt := range opts {
 		opt(s)
-	}
-	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
-		log.Error().Err(err).Str("dir", s.dataDir).Msg("create shard data directory")
 	}
 	threshold := s.packThreshold
 	if threshold <= 0 {
@@ -106,7 +116,7 @@ func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardS
 		}
 	}
 	if threshold > 0 {
-		if pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack")); err == nil {
+		if pack, err := newShardPackStore(filepath.Join(s.dataDirs[0], ".pack")); err == nil {
 			s.packThreshold = threshold
 			s.shardPack = pack
 			log.Info().Int("threshold", threshold).Msg("cluster shard pack enabled")
@@ -115,6 +125,21 @@ func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardS
 		}
 	}
 	return s
+}
+
+// DataDirs returns the active shard data directories.
+func (s *ShardService) DataDirs() []string {
+	return s.dataDirs
+}
+
+func (s *ShardService) getShardPath(bucket, key string, shardIdx int) string {
+	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
+	return filepath.Join(targetDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+}
+
+func (s *ShardService) getShardDir(bucket, key string, shardIdx int) string {
+	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
+	return filepath.Join(targetDir, bucket, key)
 }
 
 // HandleRPC returns the stream handler function for use with a StreamRouter.
@@ -752,7 +777,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		})
 		return nil
 	}
-	dir := filepath.Join(s.dataDir, bucket, key)
+	dir := s.getShardDir(bucket, key, shardIdx)
 	mkdirStart := time.Now()
 	if err := s.ensureShardDir(dir); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
@@ -956,7 +981,7 @@ func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket,
 		}
 		body = packed
 	}
-	dir := filepath.Join(s.dataDir, bucket, key)
+	dir := s.getShardDir(bucket, key, shardIdx)
 	mkdirStart := time.Now()
 	if err := s.ensureShardDir(dir); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
@@ -1193,7 +1218,7 @@ func isUnsupportedDirectIO(err error) bool {
 // Returns an error if the shard appears encrypted but no encryptor is set
 // (downgrade guard).
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
-	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	path := s.getShardPath(bucket, key, shardIdx)
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 
 	if s.shardPack != nil {
@@ -1326,7 +1351,7 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 			return io.NopCloser(bytes.NewReader(data)), nil
 		}
 	}
-	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	path := s.getShardPath(bucket, key, shardIdx)
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1407,7 +1432,7 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 			return n, nil
 		}
 	}
-	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	path := s.getShardPath(bucket, key, shardIdx)
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -1479,7 +1504,7 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 			return io.NopCloser(bytes.NewReader(data[offset:end])), nil
 		}
 	}
-	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	path := s.getShardPath(bucket, key, shardIdx)
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1575,8 +1600,13 @@ func (s *ShardService) DeleteLocalShards(bucket, key string) error {
 			return err
 		}
 	}
-	dir := filepath.Join(s.dataDir, bucket, key)
-	return os.RemoveAll(dir)
+	for _, dataDir := range s.dataDirs {
+		dir := filepath.Join(dataDir, bucket, key)
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *ShardService) handleRead(sr *shardRequest) *transport.Message {
@@ -1588,13 +1618,7 @@ func (s *ShardService) handleRead(sr *shardRequest) *transport.Message {
 }
 
 func (s *ShardService) handleDelete(sr *shardRequest) *transport.Message {
-	if s.shardPack != nil {
-		if err := s.shardPack.deleteKey(sr.Bucket, sr.Key); err != nil {
-			return s.errorResponse(err.Error())
-		}
-	}
-	dir := filepath.Join(s.dataDir, sr.Bucket, sr.Key)
-	if err := os.RemoveAll(dir); err != nil {
+	if err := s.DeleteLocalShards(sr.Bucket, sr.Key); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
