@@ -38,6 +38,9 @@ import (
 // run.go); MUST run BEFORE bootBackendWrap (which wraps state.distBackend
 // through the wal.Backend).
 func bootWALAndForwarders(ctx context.Context, state *bootState) error {
+	if state.dataWAL == nil {
+		return fmt.Errorf("data WAL must be opened before logical WAL/forwarders")
+	}
 	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
 	w, err := wal.OpenEncrypted(state.walDir, state.cfg.Encryptor)
 	if err != nil {

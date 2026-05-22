@@ -6,6 +6,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -128,6 +130,24 @@ func (b *DistributedBackend) writeRepairedReplica(bucket, key, versionID string,
 	objPath := b.objectPathV(bucket, key, versionID)
 	if err := writeFileAtomicFromReader(objPath, bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("repair replica write %s: %w", objPath, err)
+	}
+	// writeFileAtomicFromReader is intentionally no-sync: this caller is
+	// outside the data WAL coverage, so fsync the renamed file (and its
+	// parent dir, to make the rename durable) before returning.
+	f, err := os.Open(objPath)
+	if err != nil {
+		return fmt.Errorf("repair replica reopen for fsync %s: %w", objPath, err)
+	}
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if syncErr != nil {
+		return fmt.Errorf("repair replica fsync %s: %w", objPath, syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("repair replica close %s: %w", objPath, closeErr)
+	}
+	if err := syncDir(filepath.Dir(objPath)); err != nil {
+		return fmt.Errorf("repair replica fsync dir %s: %w", objPath, err)
 	}
 	return nil
 }
