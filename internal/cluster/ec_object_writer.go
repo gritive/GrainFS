@@ -30,8 +30,20 @@ type ecObjectShardStore interface {
 	// importLocalShardFromPath atomically promotes a fully-written shard
 	// payload (final on-disk format) at srcPath into the canonical shard
 	// slot for (bucket, key, shardIdx). Used by the C rename-instead-of-copy
-	// path in writeShardReadersWithSize.
-	importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string) error
+	// path in writeShardReadersWithSize. requireFsync controls per-shard
+	// durability: pass true for shards whose loss the cluster cannot tolerate
+	// (data shards in EC-aware mode), false when an earlier WAL fsync already
+	// covers the shard (the C-path WAL metadata batch).
+	importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string, requireFsync bool) error
+	// appendShardMetadataWALBatch records one OpShardPut metadata-only entry
+	// per shard and fsyncs the WAL exactly once. Used immediately before the
+	// C-path renames so a single WAL fsync covers durability for the entire
+	// object — recovery verifies each shard's presence and defers
+	// missing-shard reconstruction to read time / scrubber.
+	appendShardMetadataWALBatch(ctx context.Context, bucket, key string, shards []shardMetaWALEntry) error
+	// hasDataWAL reports whether a data WAL is wired. When false the C-path
+	// must still fsync each data shard for crash safety (legacy fallback).
+	hasDataWAL() bool
 }
 
 type ecObjectSizedShardStore interface {
@@ -311,6 +323,37 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 		}
 	}
 
+	// C-path WAL batch: when the spool prepared every local shard in final
+	// format AND a data WAL is wired, record all shards' metadata in ONE WAL
+	// flush. After this single fsync, the per-shard rename loop can skip
+	// fsync entirely — recovery uses the WAL records to verify the on-disk
+	// state and defers missing-shard reconstruction to read time. Matches
+	// the original "fsync only in data WAL" design intent that
+	// size-aware WAL bypass had unintentionally regressed.
+	walCoversCPath := false
+	if spooled != nil && spooled.finalFormat && w.shards.hasDataWAL() {
+		var meta []shardMetaWALEntry
+		for i, node := range plan.Placement {
+			if node != w.selfID || i >= len(spooled.paths) || spooled.paths[i] == "" {
+				continue
+			}
+			if shardSize == nil {
+				continue
+			}
+			size, err := shardSize(i)
+			if err != nil {
+				continue
+			}
+			meta = append(meta, shardMetaWALEntry{shardIdx: i, size: size})
+		}
+		if len(meta) > 0 {
+			if err := w.shards.appendShardMetadataWALBatch(ctx, plan.Bucket, shardKey, meta); err != nil {
+				return ecObjectWriteResult{}, fmt.Errorf("data wal metadata batch: %w", err)
+			}
+			walCoversCPath = true
+		}
+	}
+
 	stageStart := time.Now()
 	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range plan.Placement {
@@ -326,7 +369,21 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 				// disk write per shard.
 				if spooled != nil && spooled.finalFormat && i < len(spooled.paths) && spooled.paths[i] != "" {
 					srcPath := spooled.paths[i]
-					werr = w.shards.importLocalShardFromPath(gctx, plan.Bucket, shardKey, i, srcPath)
+					// Durability layering:
+					//   - walCoversCPath=true: the batched WAL flush above
+					//     already made the metadata durable. We can skip the
+					//     per-shard fsync entirely; on crash, the WAL replay
+					//     points at missing shards and EC reconstruction
+					//     rebuilds them from surviving peers at read time.
+					//   - walCoversCPath=false (no WAL wired): no fsync
+					//     coverage exists, so each data shard must fsync
+					//     itself. Parity still skips fsync — EC reconstruct
+					//     from data shards still works.
+					shardRequireFsync := false
+					if !walCoversCPath {
+						shardRequireFsync = i < plan.Config.DataShards
+					}
+					werr = w.shards.importLocalShardFromPath(gctx, plan.Bucket, shardKey, i, srcPath, shardRequireFsync)
 					if werr == nil {
 						// Tell the spooled set we transferred ownership of
 						// this path so Cleanup() doesn't try to delete the

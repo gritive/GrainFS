@@ -394,9 +394,19 @@ func (f *fakeECObjectWriterShards) localDataDirs() []string { return nil }
 
 // importLocalShardFromPath is unreachable for the fake because localDataDirs
 // returns nil; surface a sentinel error to catch wiring regressions.
-func (f *fakeECObjectWriterShards) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string) error {
+func (f *fakeECObjectWriterShards) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string, requireFsync bool) error {
 	return fmt.Errorf("fakeECObjectWriterShards.importLocalShardFromPath called but C optimisation is disabled in tests")
 }
+
+// appendShardMetadataWALBatch is a no-op for the fake — the C-path test
+// suite never hits this method because localDataDirs returns nil.
+func (f *fakeECObjectWriterShards) appendShardMetadataWALBatch(ctx context.Context, bucket, key string, shards []shardMetaWALEntry) error {
+	return nil
+}
+
+// hasDataWAL returns false so the C-path falls back to per-shard fsync in
+// the fake (matching the legacy test fixture's behaviour).
+func (f *fakeECObjectWriterShards) hasDataWAL() bool { return false }
 
 func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
 	f.mu.Lock()

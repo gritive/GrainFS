@@ -171,17 +171,37 @@ func (s *ShardService) localDataDirs() []string {
 	return s.dataDirs
 }
 
+// hasDataWAL satisfies ecObjectShardStore: the C-path uses this to decide
+// whether the WAL batch fsync covers durability (in which case per-shard
+// fsync can be skipped).
+func (s *ShardService) hasDataWAL() bool {
+	if s == nil {
+		return false
+	}
+	return s.dataWAL != nil
+}
+
 // importLocalShardFromPath promotes a fully-written shard payload at srcPath
 // (already in the final on-disk format with the matching AAD for bucket /
 // shardKey / shardIdx) into the canonical shard slot. The source MUST live on
 // the same filesystem as the destination drive (the writer caller is
 // responsible for placing the spool file on dataDirs[shardIdx % len]).
 //
-// The operation is two steps: rename srcPath → finalPath.tmp, fsync the file,
-// then rename .tmp → finalPath. The two-step pattern mirrors writeBuffered's
-// atomic-rename recipe and survives a crash between rename and fsync because
-// the .tmp file is removed on cleanup paths.
-func (s *ShardService) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string) error {
+// requireFsync gates the durability fsync: callers pass true for shards that
+// must survive a host crash on their own (data shards in an EC-aware policy),
+// and false when EC reconstruction is allowed to rebuild a lost shard from
+// surviving peers (parity shards, or any shard when EC has enough redundancy).
+// fsync is the dominant cost on macOS APFS (~50% of PUT time at 5 MiB EC 2+2),
+// so skipping it for parity shards gives a large throughput win without
+// breaking crash-recovery guarantees: a 2+2 stripe survives loss of up to 2
+// shards, and EC reconstruction is invoked on read when CRC detects torn
+// content.
+//
+// The operation is two steps: rename srcPath → finalPath.tmp, fsync the file
+// (if requireFsync), then rename .tmp → finalPath. The two-step pattern
+// mirrors writeBuffered's atomic-rename recipe and survives a crash between
+// rename and fsync because the .tmp file is removed on cleanup paths.
+func (s *ShardService) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string, requireFsync bool) error {
 	dir := s.getShardDir(bucket, key, shardIdx)
 	if err := s.ensureShardDir(dir); err != nil {
 		return fmt.Errorf("import shard mkdir %s: %w", dir, err)
@@ -191,19 +211,21 @@ func (s *ShardService) importLocalShardFromPath(ctx context.Context, bucket, key
 	if err := os.Rename(srcPath, tmpPath); err != nil {
 		return fmt.Errorf("import shard rename %s → %s: %w", srcPath, tmpPath, err)
 	}
-	f, err := os.OpenFile(tmpPath, os.O_RDONLY, 0)
-	if err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard reopen for fsync: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard fsync: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard close: %w", err)
+	if requireFsync {
+		f, err := os.OpenFile(tmpPath, os.O_RDONLY, 0)
+		if err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("import shard reopen for fsync: %w", err)
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("import shard fsync: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("import shard close: %w", err)
+		}
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -1107,38 +1129,78 @@ func maxRawShardPayloadForWAL(encrypted bool) int64 {
 const walPayloadInlineThreshold = 1 << 20
 
 // appendShardDataWAL logs an OpShardPut record for the encoded shard payload
-// before any file mutation. Returns requireFsync = true when the caller's
-// shard file write must perform its own fsync (no WAL, or payload bypassed
-// the WAL). When requireFsync is false the WAL Flush has already made the
-// payload durable and the on-disk shard file inherits that durability via
-// atomic tmp+rename.
+// before any file mutation. Returns requireFsync = false in all cases where
+// WAL coverage exists (small inline-payload records, or large metadata-only
+// records), so callers should skip the per-shard fsync — durability comes
+// from the WAL's single Flush. Returns requireFsync = true only when no WAL
+// is wired or replay is in progress (in which case the caller MUST fsync the
+// shard file itself).
 //
-// No-op (returns true, nil) when no WAL is wired or when we are already
-// replaying records during RecoverDataWAL.
+// For small payloads (< walPayloadInlineThreshold) the WAL stores the full
+// encoded shard so RecoverDataWAL can rebuild a missing file byte-for-byte.
+// For large payloads the WAL stores ONLY the metadata (no payload) to avoid
+// 2x disk write amplification. Recovery for metadata-only records verifies
+// the final shard file exists with the expected size; if it's gone (e.g.
+// page cache loss on crash before the rename hit disk) EC reconstruction
+// rebuilds it from surviving peers at read time.
 func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) (requireFsync bool, err error) {
 	if s.dataWAL == nil || s.replayingDataWAL.Load() {
 		return true, nil
 	}
-	if len(payload) >= walPayloadInlineThreshold {
-		// Large payload: bypass WAL entirely. The shard file must self-sync.
-		return true, nil
+	rec := datawal.Record{
+		Op:     datawal.OpShardPut,
+		Bucket: bucket,
+		Key:    key,
+		Target: strconv.Itoa(shardIdx),
+		Size:   int64(len(payload)),
 	}
-	// No caller-side copy: WAL.AppendReader copies the payload internally
-	// (see internal/storage/datawal/wal.go AppendReader) before returning.
-	if _, err := s.dataWAL.Append(ctx, datawal.Record{
-		Op:      datawal.OpShardPut,
-		Bucket:  bucket,
-		Key:     key,
-		Target:  strconv.Itoa(shardIdx),
-		Size:    int64(len(payload)),
-		Payload: payload,
-	}); err != nil {
+	if len(payload) < walPayloadInlineThreshold {
+		// Small payload: inline so replay can rebuild the file.
+		rec.Payload = payload
+	}
+	// Large payload: rec.Payload stays nil — metadata-only record.
+	if _, err := s.dataWAL.Append(ctx, rec); err != nil {
 		return false, fmt.Errorf("data wal append shard: %w", err)
 	}
 	if err := s.dataWAL.Flush(); err != nil {
 		return false, fmt.Errorf("data wal flush shard: %w", err)
 	}
 	return false, nil
+}
+
+// appendShardMetadataWALBatch logs one OpShardPut metadata-only record per
+// shard then flushes once, so the C-path rename batch pays a single fsync
+// for all shards in an object instead of one per shard. Used by the EC
+// object writer when spoolECShardsToFinal lined up multiple shards on
+// their target drives and the writer is about to rename them into place.
+// Mirrors appendShardDataWAL's semantics for the >= walPayloadInlineThreshold
+// branch: the WAL records what the on-disk state SHOULD be; lost shards are
+// detected at read time and rebuilt by EC reconstruction.
+func (s *ShardService) appendShardMetadataWALBatch(ctx context.Context, bucket string, key string, shards []shardMetaWALEntry) error {
+	if s.dataWAL == nil || s.replayingDataWAL.Load() {
+		return nil
+	}
+	for _, m := range shards {
+		rec := datawal.Record{
+			Op:     datawal.OpShardPut,
+			Bucket: bucket,
+			Key:    key,
+			Target: strconv.Itoa(m.shardIdx),
+			Size:   m.size,
+		}
+		if _, err := s.dataWAL.Append(ctx, rec); err != nil {
+			return fmt.Errorf("data wal append shard metadata: %w", err)
+		}
+	}
+	if err := s.dataWAL.Flush(); err != nil {
+		return fmt.Errorf("data wal flush shard metadata batch: %w", err)
+	}
+	return nil
+}
+
+type shardMetaWALEntry struct {
+	shardIdx int
+	size     int64
 }
 
 // RecoverDataWAL replays missing shard files from the data WAL. Safe to call
@@ -1233,9 +1295,38 @@ func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 			return err
 		}
 		path := m.s.getShardPath(rec.Bucket, rec.Key, idx)
-		// WAL replay reconstructs lost shard files: durability comes from the
-		// WAL having already been flushed; the file write itself must fsync
-		// so the recovered shard outlives a second crash.
+		if len(rec.Payload) == 0 {
+			// Metadata-only record (large shard path). The on-disk file
+			// either survived the crash (rename hit fs metadata journal) or
+			// was lost from the page cache. We can't rebuild the bytes
+			// here — recovery is deferred to read time, where EC
+			// reconstruction rebuilds missing shards from surviving peers.
+			// We DO leave the WAL record in place so a scrubber pass can
+			// notice the file is gone and proactively reconstruct.
+			if info, statErr := os.Stat(path); statErr == nil {
+				if info.Size() == rec.Size {
+					return nil // already present at expected size
+				}
+				log.Warn().
+					Str("shard", path).
+					Int64("expected", rec.Size).
+					Int64("got", info.Size()).
+					Msg("data WAL replay: shard size mismatch — will reconstruct on read")
+				return nil
+			} else if os.IsNotExist(statErr) {
+				log.Warn().
+					Str("shard", path).
+					Int64("expected", rec.Size).
+					Msg("data WAL replay: shard missing — will reconstruct on read")
+				return nil
+			} else {
+				return statErr
+			}
+		}
+		// Inline-payload record (small shard path). Rebuild the file from
+		// WAL bytes. Durability comes from the WAL having already been
+		// flushed; the file write itself must fsync so the recovered shard
+		// outlives a second crash.
 		return m.s.writeShardFile(ctx, path, rec.Payload, idx, true)
 	default:
 		return nil
