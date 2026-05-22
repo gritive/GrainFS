@@ -6,14 +6,29 @@ import (
 	"sort"
 )
 
-// pickVoters returns RF voters for groupID, deterministically chosen from allNodes
-// using rendezvous hashing (HRW). Stable across processes/restarts.
+// pickVoters returns RF placement slots for groupID, deterministically chosen
+// from allNodes using rendezvous hashing (HRW). Stable across processes/
+// restarts.
 //
-// Result is sorted alphabetically — peer lists must be deterministic for raft
+// Result is sorted alphabetically — slot lists must be deterministic for raft
 // membership comparison.
+//
+// Single-node multi-slot: when allNodes has exactly one entry and rf > 1, the
+// single node is repeated to fill rf slots. Single-node multi-drive
+// deployments rely on this so the EC pipeline produces rf shards and
+// ShardService routes them across local drives via shardIdx % drive_count.
+// instantiateLocalGroup filters self out of peers before starting raft, so a
+// duplicated self list still produces a single-voter raft group.
 func pickVoters(groupID string, allNodes []string, rf int) []string {
 	if len(allNodes) == 0 {
 		return nil
+	}
+	if len(allNodes) == 1 && rf > 1 {
+		out := make([]string, rf)
+		for i := range out {
+			out[i] = allNodes[0]
+		}
+		return out
 	}
 	if rf > len(allNodes) {
 		rf = len(allNodes)
