@@ -165,7 +165,6 @@ func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
 	)
 
 	require.NotNil(t, svc.shardPack)
-	require.False(t, svc.shardPack.syncOnAppend)
 }
 
 func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {

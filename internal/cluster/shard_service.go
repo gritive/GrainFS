@@ -741,7 +741,9 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
-// Writes are crash-safe: data goes to a .tmp file, fsync'd, then renamed.
+// Writes are crash-safe: the encoded payload is appended to the data WAL
+// before any shard file mutation, and the on-disk write uses tmp + rename
+// for atomic visibility. Durability is owned by internal/storage/datawal.
 // New encrypted writes use eccodec's chunked AEAD envelope. Plain writes keep
 // the CRC envelope while that compatibility path remains available.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
@@ -804,7 +806,6 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 	})
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	dirSynced := false
 	if s.encryptor != nil {
 		encodeStart := time.Now()
 		var encoded bytes.Buffer
@@ -841,7 +842,6 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 		})
-		dirSynced = true
 	} else {
 		encodeStart := time.Now()
 		payload := eccodec.EncodeShard(data)
@@ -869,38 +869,34 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardTargetClass: "local",
 		})
 	}
-	if dirSynced {
-		return nil
-	}
+	// Directory metadata durability is owned by the data WAL: the WAL
+	// record was flushed before the on-disk write ran, so a crash after
+	// rename replays the same bytes. The dir-sync trace stage is preserved
+	// as a zero-duration event so dashboards remain stable across the
+	// fsync policy migration.
 	dirSyncStart := time.Now()
-	var dirSyncErr error
-	if d, err := os.Open(dir); err == nil {
-		dirSyncErr = d.Sync()
-		d.Close()
-	} else {
-		dirSyncErr = err
-	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
 		Bytes:            int64(len(data)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
-		Error:            putTraceErrorString(dirSyncErr),
 	})
 	return nil
 }
 
 // writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes
-// to disk using the atomic tmp + sync + rename recipe. Encoding happens in the
+// to disk using the atomic tmp + rename recipe. Encoding happens in the
 // caller so the encrypted payload can be appended to the data WAL before any
 // shard file mutation; this function only handles the on-disk I/O.
 //
-// Trace stage semantics (changed in the data WAL wiring commit; operators
-// reading dashboards should rebaseline after this lands):
+// Durability is owned by internal/storage/datawal. The trace stages below
+// retain their pre-WAL names so dashboards and operator queries keep working;
+// the EncSync / DirSync stages now wrap zero-duration no-ops because durability
+// is committed by the WAL append+flush that happens before this call. Trace
+// stage semantics:
 //   - PutTraceStageShardWriteLocalEncode: encryption into an in-memory buffer.
-//   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload
-//     only. Previously this stage also covered the encryption work because the
-//     encoder streamed straight into the file.
+//   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload.
 func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int) error {
+	_ = dir
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -940,18 +936,10 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardTargetClass: "local",
 	})
 
-	syncStart := time.Now()
-	if err := f.Sync(); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, syncStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		cleanup()
-		return fmt.Errorf("sync tmp shard: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, syncStart, PutTraceStageFields{
+	// EncSync is preserved as a zero-duration stage so dashboards keep
+	// reporting the same series; durability is owned by the data WAL.
+	encSyncStart := time.Now()
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
 		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
@@ -991,20 +979,6 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardTargetClass: "local",
 	})
 
-	dirSyncStart := time.Now()
-	var dirSyncErr error
-	if d, err := os.Open(dir); err == nil {
-		dirSyncErr = d.Sync()
-		_ = d.Close()
-	} else {
-		dirSyncErr = err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-		Error:            putTraceErrorString(dirSyncErr),
-	})
 	return nil
 }
 
@@ -1357,8 +1331,9 @@ func (s *ShardService) writeShardFile(ctx context.Context, path string, payload 
 	return nil
 }
 
-// writeBuffered is the historical write path: open + write + sync + close.
-// Kept verbatim for the !directIO branch and the direct-I/O fallback path.
+// writeBuffered is the historical write path: open + write + close.
+// Durability is owned by internal/storage/datawal; the encoded payload was
+// appended and flushed to the WAL before this call ran.
 func writeBuffered(tmp string, payload []byte) error {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -1368,11 +1343,6 @@ func writeBuffered(tmp string, payload []byte) error {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("sync tmp shard: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
@@ -1384,8 +1354,8 @@ func writeBuffered(tmp string, payload []byte) error {
 // writeDirect uses directio.OpenFile + AlignedCopy to bypass the page cache.
 // The payload is copied into an aligned buffer once; the file is truncated
 // back to the payload's true length so readers see exactly the bytes the
-// caller passed in. Sync is still required — direct I/O does not flush
-// disk firmware caches.
+// caller passed in. Durability is owned by internal/storage/datawal — the
+// encoded payload was appended and flushed to the WAL before this call.
 func writeDirect(tmp string, payload []byte) error {
 	f, err := directio.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -1395,10 +1365,6 @@ func writeDirect(tmp string, payload []byte) error {
 	if _, err := f.Write(buf); err != nil {
 		f.Close()
 		return fmt.Errorf("write tmp shard (direct): %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("sync tmp shard (direct): %w", err)
 	}
 	if alignedLen != len(payload) {
 		if err := f.Truncate(int64(len(payload))); err != nil {

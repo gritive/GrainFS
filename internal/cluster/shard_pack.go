@@ -45,9 +45,6 @@ type shardPackStore struct {
 	index     map[string]shardPackLocation
 	readFiles map[uint64]*os.File
 	scratch   []byte
-	// syncOnAppend is intentionally false by default. The shard pack is a hot
-	// path for small EC shards; per-record fsync collapses throughput.
-	syncOnAppend bool
 	// dataWAL, when non-nil, receives an OpShardPackPut / OpShardPackDelete
 	// record carrying the raw on-disk pack record bytes before the in-memory
 	// pack blob is appended. RecoverDataWAL passes nil to avoid recursion
@@ -158,11 +155,6 @@ func (s *shardPackStore) append(flag byte, key string, data []byte) error {
 	payloadOffset := s.activeOff + 9 + int64(len(key))
 	if _, err := s.active.Write(record); err != nil {
 		return err
-	}
-	if s.syncOnAppend {
-		if err := s.active.Sync(); err != nil {
-			return err
-		}
 	}
 	s.activeOff += entrySize
 
