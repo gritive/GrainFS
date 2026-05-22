@@ -167,8 +167,9 @@ type bootState struct {
 	// PR-final services-extra phases. Each field's owning phase is annotated.
 
 	// bootBalancerAndGossip
-	balancerProposer *cluster.BalancerProposer
-	gossipReceiver   *cluster.GossipReceiver
+	balancerProposer    *cluster.BalancerProposer
+	gossipReceiver      *cluster.GossipReceiver
+	placementStatsStore *cluster.NodeStatsStore // nil when balancer disabled
 
 	// bootShardService (data WAL — opened before the cluster shard service so
 	// shard writes can be logged and replayed before any QUIC stream handler

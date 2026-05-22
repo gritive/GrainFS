@@ -106,6 +106,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		Group:      cfg.AdminGroup,
 		Deps:       state.adminDeps,
 		ExtraRoutes: func(h *hzserver.Hertz) {
+			registerTestEndpoints(h, state.placementStatsStore)
 			srv.RegisterClusterAdminUDS(h)
 			if state.metaRaft != nil {
 				// Production proposer routes through MetaRaft.Propose, which

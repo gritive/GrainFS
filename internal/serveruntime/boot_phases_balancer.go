@@ -44,6 +44,7 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 		// When balancer is disabled the backend retains nodeStatsStore==nil
 		// and falls back to legacy unweighted placement.
 		state.distBackend.StartPlacementRuntime(ctx, ccfg, statsStore)
+		state.placementStatsStore = statsStore
 	}
 
 	needsCapabilityGossip := state.capabilityGate != nil
