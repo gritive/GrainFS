@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -16,7 +18,21 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts := serveruntime.ServeOptions{}
 
 	// Listen + addressing.
-	opts.DataDir, _ = cmd.Flags().GetString("data")
+	rawDirs, _ := cmd.Flags().GetString("data")
+	opts.DataDir = rawDirs
+	if rawDirs != "" {
+		for _, part := range strings.Split(rawDirs, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				opts.DataDirs = append(opts.DataDirs, trimmed)
+			}
+		}
+	}
+	if len(opts.DataDirs) == 0 {
+		opts.DataDirs = []string{"./data"}
+	}
+	opts.MetaDir, _ = cmd.Flags().GetString("meta-dir")
+
 	opts.Port, _ = cmd.Flags().GetInt("port")
 	opts.AdminSocket, _ = cmd.Flags().GetString("admin-socket")
 	opts.AdminGroup, _ = cmd.Flags().GetString("admin-group")

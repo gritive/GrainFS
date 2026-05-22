@@ -102,7 +102,10 @@ func bootValidateConfig(state *bootState) error {
 		state.raftAddr = "127.0.0.1:0"
 	}
 
-	state.metaDir = filepath.Join(cfg.DataDir, "meta")
+	state.metaDir = cfg.MetaDir
+	if state.metaDir == "" {
+		state.metaDir = filepath.Join(cfg.DataDir, "meta")
+	}
 	state.raftDir = filepath.Join(cfg.DataDir, "raft")
 	state.bootID = uuid.NewString()
 	state.roleRegistry = badgerrole.DefaultRegistry()

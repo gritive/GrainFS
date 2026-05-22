@@ -2,10 +2,11 @@ package cluster
 
 import (
 	"errors"
-	"github.com/stretchr/testify/require"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/raft"

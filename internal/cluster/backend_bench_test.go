@@ -8,7 +8,6 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -479,7 +478,7 @@ func readLocalECDataShardsParallelRawNoCRC(bk *DistributedBackend, bucket, shard
 	for i := 0; i < cfg.DataShards; i++ {
 		shardIdx := i
 		g.Go(func() error {
-			path := filepath.Join(bk.shardSvc.dataDir, bucket, shardKey, fmt.Sprintf("shard_%d", shardIdx))
+			path := bk.shardSvc.getShardPath(bucket, shardKey, shardIdx)
 			f, err := os.Open(path)
 			if err != nil {
 				return err
@@ -513,7 +512,7 @@ func openLocalECDataShardFiles(bk *DistributedBackend, bucket, shardKey string, 
 	files := make([]*os.File, 0, cfg.DataShards)
 	var payloadLen int64 = -1
 	for i := 0; i < cfg.DataShards; i++ {
-		path := filepath.Join(bk.shardSvc.dataDir, bucket, shardKey, fmt.Sprintf("shard_%d", i))
+		path := bk.shardSvc.getShardPath(bucket, shardKey, i)
 		f, err := os.Open(path)
 		if err != nil {
 			for _, f := range files {

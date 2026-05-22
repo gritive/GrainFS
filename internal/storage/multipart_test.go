@@ -207,7 +207,7 @@ func TestCompleteMultipartBucketNotFound(t *testing.T) {
 
 func TestLocalBackend_SweepOrphanMultiparts(t *testing.T) {
 	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.root, "parts")
+	partsRoot := filepath.Join(b.dataRoots[0], "parts")
 	require.NoError(t, os.MkdirAll(partsRoot, 0o755))
 
 	// old1, old2 — older than cutoff, should be removed.
@@ -256,7 +256,7 @@ func TestLocalBackend_SweepOrphanMultiparts_NoPartsDir(t *testing.T) {
 
 func TestLocalBackend_SweepOrphanMultiparts_AllFresh(t *testing.T) {
 	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.root, "parts")
+	partsRoot := filepath.Join(b.dataRoots[0], "parts")
 	require.NoError(t, os.MkdirAll(partsRoot, 0o755))
 	dir := filepath.Join(partsRoot, "active")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -268,7 +268,7 @@ func TestLocalBackend_SweepOrphanMultiparts_AllFresh(t *testing.T) {
 
 func TestOperations_SweepOrphanMultiparts_DiscoversCapability(t *testing.T) {
 	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.root, "parts")
+	partsRoot := filepath.Join(b.dataRoots[0], "parts")
 	require.NoError(t, os.MkdirAll(filepath.Join(partsRoot, "old"), 0o755))
 	require.NoError(t, os.Chtimes(filepath.Join(partsRoot, "old"), time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)))
 
@@ -290,7 +290,7 @@ func TestOperations_SweepOrphanMultiparts_NoCapability(t *testing.T) {
 
 func TestOperations_SweepOrphanMultiparts_BlockedByRecoveryGate(t *testing.T) {
 	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.root, "parts")
+	partsRoot := filepath.Join(b.dataRoots[0], "parts")
 	require.NoError(t, os.MkdirAll(filepath.Join(partsRoot, "old"), 0o755))
 	require.NoError(t, os.Chtimes(filepath.Join(partsRoot, "old"), time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)))
 

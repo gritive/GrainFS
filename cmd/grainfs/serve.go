@@ -17,7 +17,8 @@ const defaultReshardInterval = 24 * time.Hour
 // accepts. Extracted from init() so unit tests can build a fresh cobra.Command
 // and exercise serveOptionsFromCmd without touching the global serveCmd.
 func registerAllServeFlags(cmd *cobra.Command) {
-	cmd.Flags().StringP("data", "d", "./data", "data directory")
+	cmd.Flags().StringP("data", "d", "./data", "data directory (comma-separated for multi-root)")
+	cmd.Flags().String("meta-dir", "", "dedicated fast metadata storage directory (defaults to first path in --data)")
 	cmd.Flags().IntP("port", "p", 9000, "listen port")
 	cmd.Flags().String("admin-socket", "", "admin Unix socket path (default <data>/admin.sock)")
 	cmd.Flags().String("admin-group", "", "OS group name for admin socket chown (default: caller's primary group)")
@@ -130,7 +131,22 @@ func init() {
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the S3-compatible storage server",
-	RunE:  runServe,
+	Long: `Start the S3-compatible GrainFS storage server.
+
+You can configure multi-root storage directories (Multi-Drive) to enable disk-level
+resilience and Erasure Coding (EC) even on a single node. 
+
+To specify multiple data directories, pass a comma-separated list of paths to the 
+--data (-d) flag. It is highly recommended to also specify a fast SSD path via the
+--meta-dir flag to keep the BadgerDB metadata separate from payload shards.
+
+Examples:
+  # Single-node mode with 3 data drives (automatically configures 2+1 EC):
+  grainfs serve -d /mnt/hdd1,/mnt/hdd2,/mnt/hdd3 --meta-dir /mnt/ssd-meta
+
+  # Default single-drive mode (1+0 Solo):
+  grainfs serve -d ./data`,
+	RunE: runServe,
 }
 
 func runServe(cmd *cobra.Command, args []string) error {

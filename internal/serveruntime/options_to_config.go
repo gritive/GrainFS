@@ -24,6 +24,8 @@ func optionsToConfig(
 		Version:          opts.Version,
 		Addr:             addr,
 		DataDir:          opts.DataDir,
+		DataDirs:         opts.DataDirs,
+		MetaDir:          opts.MetaDir,
 		NodeID:           opts.NodeID,
 		RaftAddr:         opts.RaftAddr,
 		RaftAddrExplicit: opts.RaftAddr != "",
@@ -32,6 +34,10 @@ func optionsToConfig(
 		Encryptor:        encryptor,
 		IAMStore:         iamStore,
 		IAMApplier:       iamApplier,
+	}
+
+	if len(cfg.DataDirs) > 0 {
+		cfg.DataDir = cfg.DataDirs[0]
 	}
 
 	cfg.RaftLogGCInterval = opts.RaftLogGCInterval

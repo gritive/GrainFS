@@ -965,6 +965,96 @@ func TestSnapshotRestore_ChunkedObject_StaleWhenSegmentMissing(t *testing.T) {
 	require.Equal(t, snap.ETag, stale[0].ExpectedETag)
 }
 
+func TestMultiRootLocalBackend(t *testing.T) {
+	metaDir := t.TempDir()
+	dataRoot1 := t.TempDir()
+	dataRoot2 := t.TempDir()
+	dataRoots := []string{dataRoot1, dataRoot2}
+
+	b, err := NewMultiRootLocalBackend(metaDir, dataRoots, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { b.Close() })
+
+	bucket := "multi-root-bucket"
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
+
+	// Verify bucket directory is created in all dataRoots
+	for _, root := range dataRoots {
+		dir := filepath.Join(root, "data", bucket)
+		info, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	}
+
+	// Put multiple objects to check round-robin / hashing distribution
+	key1 := "key-one" // fnv hash will decide root
+	data1 := []byte("data-for-key-one")
+	obj1, err := b.PutObject(context.Background(), bucket, key1, bytes.NewReader(data1), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj1.Segments)
+
+	key2 := "key-two"
+	data2 := []byte("data-for-key-two-different")
+	obj2, err := b.PutObject(context.Background(), bucket, key2, bytes.NewReader(data2), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj2.Segments)
+
+	// Verify segment paths are written to correct hashed data roots
+	path1 := b.segmentPath(bucket, key1, obj1.Segments[0].BlobID)
+	path2 := b.segmentPath(bucket, key2, obj2.Segments[0].BlobID)
+
+	assert.Contains(t, []string{
+		filepath.Join(dataRoot1, "data", bucket, key1+"_segments", obj1.Segments[0].BlobID),
+		filepath.Join(dataRoot2, "data", bucket, key1+"_segments", obj1.Segments[0].BlobID),
+	}, path1)
+	assert.Contains(t, []string{
+		filepath.Join(dataRoot1, "data", bucket, key2+"_segments", obj2.Segments[0].BlobID),
+		filepath.Join(dataRoot2, "data", bucket, key2+"_segments", obj2.Segments[0].BlobID),
+	}, path2)
+
+	// File existence checks on segment files
+	_, err = os.Stat(path1)
+	require.NoError(t, err)
+	_, err = os.Stat(path2)
+	require.NoError(t, err)
+
+	// Get objects and verify content
+	rc1, meta1, err := b.GetObject(context.Background(), bucket, key1)
+	require.NoError(t, err)
+	defer rc1.Close()
+	got1, err := io.ReadAll(rc1)
+	require.NoError(t, err)
+	assert.Equal(t, data1, got1)
+	assert.Equal(t, int64(len(data1)), meta1.Size)
+
+	rc2, meta2, err := b.GetObject(context.Background(), bucket, key2)
+	require.NoError(t, err)
+	defer rc2.Close()
+	got2, err := io.ReadAll(rc2)
+	require.NoError(t, err)
+	assert.Equal(t, data2, got2)
+	assert.Equal(t, int64(len(data2)), meta2.Size)
+
+	// Delete one object and verify physical file is gone
+	require.NoError(t, b.DeleteObject(context.Background(), bucket, key1))
+	_, err = os.Stat(path1)
+	assert.True(t, os.IsNotExist(err))
+
+	// Verify key2 is still intact
+	_, err = os.Stat(path2)
+	require.NoError(t, err)
+
+	// Delete bucket and verify directories are clean
+	require.NoError(t, b.DeleteObject(context.Background(), bucket, key2))
+	require.NoError(t, b.DeleteBucket(context.Background(), bucket))
+
+	for _, root := range dataRoots {
+		dir := filepath.Join(root, "data", bucket)
+		_, err := os.Stat(dir)
+		assert.True(t, os.IsNotExist(err))
+	}
+}
+
 func TestLocalBackend_DataWALRestoresWriteAtAndTruncate(t *testing.T) {
 	dir := t.TempDir()
 	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)

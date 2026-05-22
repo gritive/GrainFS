@@ -929,7 +929,7 @@ func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
 	require.NoError(t, dwal.Flush())
-	shardPath := filepath.Join(svc.dataDir, "b", "k", "shard_0")
+	shardPath := svc.getShardPath("b", "k", 0)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, err := svc.ReadLocalShard("b", "k", 0)
@@ -944,7 +944,7 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
 	require.NoError(t, dwal.Flush())
-	shardPath := filepath.Join(svc.dataDir, "b", "streamed", "shard_1")
+	shardPath := svc.getShardPath("b", "streamed", 1)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, err := svc.ReadLocalShard("b", "streamed", 1)
@@ -965,13 +965,13 @@ func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
 	require.NoError(t, svc.WriteLocalShard("b", "packed", 0, []byte("small")))
 	require.NoError(t, svc.DeleteLocalShards("b", "packed"))
 	require.NoError(t, dwal.Flush())
-	require.NoError(t, os.RemoveAll(filepath.Join(svc.dataDir, ".pack")))
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.DataDirs()[0], ".pack")))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	_, found, err := svc.ReadLocalShardFromPack("b", "packed", 0)
 	require.NoError(t, err)
 	require.False(t, found, "pack entry must remain absent after delete replay")
 	// And there must be no resurrected per-shard file either.
-	_, statErr := os.Stat(filepath.Join(svc.dataDir, "b", "packed", "shard_0"))
+	_, statErr := os.Stat(svc.getShardPath("b", "packed", 0))
 	require.True(t, os.IsNotExist(statErr), "pack-routed write must not resurrect shard file on replay")
 }
 
@@ -1003,7 +1003,7 @@ func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
 
 	// Wipe the pack directory and recover again; the second write must
 	// reappear from the WAL.
-	require.NoError(t, os.RemoveAll(filepath.Join(svc.dataDir, ".pack")))
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.DataDirs()[0], ".pack")))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, ok, err := svc.ReadLocalShardFromPack("b", "k2", 0)
 	require.NoError(t, err)
@@ -1031,7 +1031,7 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	)
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("encrypted-payload")))
 	require.NoError(t, dwal.Flush())
-	shardPath := filepath.Join(svc.dataDir, "b", "k", "shard_0")
+	shardPath := svc.getShardPath("b", "k", 0)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, err := svc.ReadLocalShard("b", "k", 0)

@@ -142,12 +142,15 @@ func (b *DistributedBackend) ObjectExists(bucket, key string) (bool, error) {
 // root/shards/; putObjectEC composes shardKey as `key/versionID` before
 // handing it to ShardService, so the physical path includes the version.
 func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShards int) []string {
-	shardRoot := filepath.Join(b.root, "shards")
-	if b.shardSvc != nil {
-		shardRoot = b.shardSvc.dataDir
-	}
-	base := filepath.Join(shardRoot, bucket, key, versionID)
 	paths := make([]string, totalShards)
+	if b.shardSvc != nil {
+		for i := 0; i < totalShards; i++ {
+			paths[i] = b.shardSvc.getShardPath(bucket, key+"/"+versionID, i)
+		}
+		return paths
+	}
+	shardRoot := filepath.Join(b.root, "shards")
+	base := filepath.Join(shardRoot, bucket, key, versionID)
 	for i := 0; i < totalShards; i++ {
 		paths[i] = filepath.Join(base, fmt.Sprintf("shard_%d", i))
 	}
@@ -210,8 +213,17 @@ func (b *DistributedBackend) shardServiceKeyFromPath(bucket, path string) (strin
 	if b.shardSvc == nil {
 		return "", 0, false
 	}
-	rel, err := filepath.Rel(filepath.Join(b.shardSvc.dataDir, bucket), path)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+	var rel string
+	var err error
+	found := false
+	for _, dir := range b.shardSvc.dataDirs {
+		rel, err = filepath.Rel(filepath.Join(dir, bucket), path)
+		if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+			found = true
+			break
+		}
+	}
+	if !found {
 		return "", 0, false
 	}
 	base := filepath.Base(rel)

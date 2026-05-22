@@ -1,28 +1,30 @@
 # Changelog
 
-## [0.0.321.0] - 2026-05-22
+## [0.0.323.0] - 2026-05-22
 
-### Breaking
+### Added
 
-- **`grainfs backup`/`grainfs restore` CLI removed.** The existing
-  implementation only supported single-node cold backup (server shutdown ->
-  restic backup of the data directory). It had no cluster-aware semantics and
-  required full-cluster downtime to use in production, which defeats the point
-  of running a cluster. Removed in v0.0.321.0; a cluster-aware backup/restore
-  is planned in a follow-up design cycle.
-- Removed `docs/operators/backup-restore.md` and `docs/operators/drill-manual.md`.
-  Six of seven drills in drill-manual were backup-dependent; the file will be
-  rewritten alongside the redesign.
-- `docs/operators/runbook.md`: removed "Step 1: Create Pre-Deployment Backup"
-  from Deployment Procedure, "Option 2: Data Rollback" from Rollback Procedure,
-  and "Create Post-Deployment Backup" from Post-Deployment Tasks. Remaining
-  steps renumbered.
-- `Makefile` `test-backup` target removed.
-- Restic snapshots created by `<= v0.0.320.0` cannot be restored on v0.0.321.0+
-  (no CLI). If a final restore is needed, pin to a `0.0.320.x` build, restore,
-  then upgrade.
+- **Multi-Drive mount support and Dynamic Erasure Coding (Dynamic EC) on a single node (N=1) and heterogeneous cluster environments.**
+  - Dynamic EC configuration: Automatically derives the desired k+m profile based on local disk count ($D$) for single-node deploys: 1+0, 1+1 (mirror), 2+1, and (D-2)+2 (capped at 6+2).
+  - Heterogeneous nodes: Distributes incoming shards with a localized modulo dispatch (`shardIdx % D_i`) on each node, smoothing physical disk capacity across uneven environments.
+- **Tiered storage architecture separating metadata from payload shards.**
+  - Centralized BadgerDB metadata onto a single fast SSD path (`--meta-dir`) to minimize I/O contention and conserve CPU/RAM.
+  - Payload shards are round-robined across cheap multi-HDD storage paths (`--data`).
+- **EXDEV Cross-Device Link safe-write workflow.**
+  - Pre-allocates and syncs temporary shards inside the destination disk's local `.tmp/` folder before performing an atomic `os.Rename` to bypass cross-device filesystem linking constraints.
+- **DiskCollector and Scrubber multi-root integration.**
+  - **DiskCollector**: Independently monitors space across all data paths and triggers safe-mode threshold locks based on the most utilized disk.
+  - **Scrubber**: Sweeps all registered paths to identify lost or degraded shards and automatically heals them back to their original target disk.
+- **Rich CLI serve flag documentation and examples.**
+  - Expanded the `serve` command's `Long` description with comma-separated `--data` flag options, `--meta-dir` usage guidelines, and detailed bootstrap examples.
 
-## [0.0.320.0] - 2026-05-22
+### Fixed
+
+- **Test suite and linter regression fixes.**
+  - Replaced stale `shardSvc.dataDir` references with `getShardPath` calls and cleaned up unused `path/filepath` imports across cluster benchmark/test packages.
+  - Removed the unused `bucketDir` method in `local.go` to satisfy `golangci-lint` checkouts.
+
+## [0.0.322.0] - 2026-05-22
 
 ### Added
 
@@ -49,6 +51,30 @@
   not crash-driven. Raft log/store, logical PITR WAL, badger role journal,
   and write-once transport keystore keep their direct fsync calls (they
   are explicit log owners, not data paths).
+
+## [0.0.321.0] - 2026-05-22
+
+### Breaking
+
+- **`grainfs backup`/`grainfs restore` CLI removed.** The existing
+  implementation only supported single-node cold backup (server shutdown ->
+  restic backup of the data directory). It had no cluster-aware semantics and
+  required full-cluster downtime to use in production, which defeats the point
+  of running a cluster. Removed in v0.0.321.0; a cluster-aware backup/restore
+  is planned in a follow-up design cycle.
+- Removed `docs/operators/backup-restore.md` and `docs/operators/drill-manual.md`.
+  Six of seven drills in drill-manual were backup-dependent; the file will be
+  rewritten alongside the redesign.
+- `docs/operators/runbook.md`: removed "Step 1: Create Pre-Deployment Backup"
+  from Deployment Procedure, "Option 2: Data Rollback" from Rollback Procedure,
+  and "Create Post-Deployment Backup" from Post-Deployment Tasks. Remaining
+  steps renumbered.
+- `Makefile` `test-backup` target removed.
+- Restic snapshots created by `<= v0.0.320.0` cannot be restored on v0.0.321.0+
+  (no CLI). If a final restore is needed, pin to a `0.0.320.x` build, restore,
+  then upgrade.
+
+## [0.0.320.0] - 2026-05-22
 
 ## [0.0.319.0] - 2026-05-22
 

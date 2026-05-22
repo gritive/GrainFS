@@ -45,9 +45,23 @@ func bootShardService(ctx context.Context, state *bootState) error {
 
 	clusterSize := 1 + len(state.peers)
 	seedGroups := seedGroupCountForClusterSize(clusterSize)
-	state.effectiveEC = cluster.AutoECConfigForClusterSize(clusterSize)
-	if !state.effectiveEC.IsActive(clusterSize) {
-		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
+
+	var ecWidth int
+	if clusterSize == 1 {
+		ecWidth = len(state.cfg.DataDirs)
+	} else {
+		ecWidth = clusterSize
+	}
+	state.effectiveEC = cluster.AutoECConfigForClusterSize(ecWidth)
+
+	var activeCheckSize int
+	if clusterSize == 1 {
+		activeCheckSize = len(state.cfg.DataDirs)
+	} else {
+		activeCheckSize = clusterSize
+	}
+	if !state.effectiveEC.IsActive(activeCheckSize) {
+		return fmt.Errorf("no effective EC profile for dynamic EC width %d (cluster size %d, drive count %d)", ecWidth, clusterSize, len(state.cfg.DataDirs))
 	}
 	normalGroupVoters := state.effectiveEC.NumShards()
 
@@ -97,7 +111,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithNodeAddressBook(state.metaRaft.FSM()))
-	state.shardSvc = cluster.NewShardService(state.cfg.DataDir, state.quicTransport, shardSvcOpts...)
+	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.quicTransport, shardSvcOpts...)
 
 	// Replay the data WAL into the shard service before bootStreamRouter
 	// registers QUIC handlers; this keeps peers from observing partially-
@@ -208,8 +222,21 @@ func refreshRuntimeTopologyFromMetaNodes(state *bootState, nodes []cluster.MetaN
 	if clusterSize < 1 {
 		clusterSize = 1
 	}
-	cfg := cluster.AutoECConfigForClusterSize(clusterSize)
-	if cfg.IsActive(clusterSize) {
+	var ecWidth int
+	if clusterSize == 1 {
+		ecWidth = len(state.cfg.DataDirs)
+	} else {
+		ecWidth = clusterSize
+	}
+	cfg := cluster.AutoECConfigForClusterSize(ecWidth)
+
+	var activeCheckSize int
+	if clusterSize == 1 {
+		activeCheckSize = len(state.cfg.DataDirs)
+	} else {
+		activeCheckSize = clusterSize
+	}
+	if cfg.IsActive(activeCheckSize) {
 		state.effectiveEC = cfg
 		if state.distBackend != nil {
 			allNodes := runtimeTopologyNodes(state.nodeID, state.raftAddr, state.peers, nodes)
@@ -220,6 +247,7 @@ func refreshRuntimeTopologyFromMetaNodes(state *bootState, nodes []cluster.MetaN
 		}
 		log.Info().
 			Int("cluster_size", clusterSize).
+			Int("drive_count", len(state.cfg.DataDirs)).
 			Int("effective_k", cfg.DataShards).
 			Int("effective_m", cfg.ParityShards).
 			Msg("cluster EC refreshed from meta topology")

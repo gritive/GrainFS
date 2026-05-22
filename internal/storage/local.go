@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -29,7 +30,8 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	root             string
+	metaDir          string
+	dataRoots        []string
 	db               *badger.DB
 	encryptor        *encrypt.Encryptor
 	dataWAL          DataWAL
@@ -52,25 +54,49 @@ var (
 )
 
 // DB exposes the underlying BadgerDB for shared use (lifecycle, events).
+// DB exposes the underlying BadgerDB for shared use (lifecycle, events).
 func (b *LocalBackend) DB() *badger.DB { return b.db }
 
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
-	return newLocalBackend(root, nil)
+	return newLocalBackend(root, []string{root}, nil)
 }
 
 func NewEncryptedLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("encrypted local backend requires encryptor")
 	}
-	return newLocalBackend(root, enc)
+	return newLocalBackend(root, []string{root}, enc)
+}
+
+func NewMultiRootLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+	if len(dataRoots) == 0 {
+		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
+	}
+	return newLocalBackend(metaDir, dataRoots, enc)
+}
+
+func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, enc *encrypt.Encryptor, dwal DataWAL) (*LocalBackend, error) {
+	if len(dataRoots) == 0 {
+		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
+	}
+	if dwal == nil {
+		return nil, fmt.Errorf("multi-root local backend data wal requires wal")
+	}
+	b, err := newLocalBackend(metaDir, dataRoots, enc)
+	if err != nil {
+		return nil, err
+	}
+	b.dataWAL = dwal
+	b.dataWALDir = dwal.Dir()
+	return b, nil
 }
 
 func NewLocalBackendWithDataWAL(root string, dwal DataWAL) (*LocalBackend, error) {
 	if dwal == nil {
 		return nil, fmt.Errorf("local backend data wal requires wal")
 	}
-	b, err := newLocalBackend(root, nil)
+	b, err := newLocalBackend(root, []string{root}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +112,7 @@ func NewEncryptedLocalBackendWithDataWAL(root string, enc *encrypt.Encryptor, dw
 	if dwal == nil {
 		return nil, fmt.Errorf("encrypted local backend data wal requires wal")
 	}
-	b, err := newLocalBackend(root, enc)
+	b, err := newLocalBackend(root, []string{root}, enc)
 	if err != nil {
 		return nil, err
 	}
@@ -95,20 +121,28 @@ func NewEncryptedLocalBackendWithDataWAL(root string, enc *encrypt.Encryptor, dw
 	return b, nil
 }
 
-func newLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
-	dataDir := filepath.Join(root, "data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
+func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+	for _, root := range dataRoots {
+		dataDir := filepath.Join(root, "data")
+		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create data dir in %s: %w", root, err)
+		}
 	}
 
-	dbDir := filepath.Join(root, "meta")
+	dbDir := filepath.Join(metaDir, "meta")
 	opts := badgerutil.SmallOptions(dbDir)
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &LocalBackend{root: root, db: db, encryptor: enc, dataWALDir: filepath.Join(root, "datawal")}, nil
+	return &LocalBackend{
+		metaDir:    metaDir,
+		dataRoots:  dataRoots,
+		db:         db,
+		encryptor:  enc,
+		dataWALDir: filepath.Join(metaDir, "datawal"),
+	}, nil
 }
 
 // Close closes the metadata database.
@@ -124,12 +158,18 @@ func (b *LocalBackend) objectMetaKey(bucket, key string) []byte {
 	return []byte("obj:" + bucket + "/" + key)
 }
 
-func (b *LocalBackend) bucketDir(bucket string) string {
-	return filepath.Join(b.root, "data", bucket)
+func (b *LocalBackend) bucketDirForKey(bucket, key string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	targetRoot := b.dataRoots[int(h.Sum32())%len(b.dataRoots)]
+	return filepath.Join(targetRoot, "data", bucket)
 }
 
 func (b *LocalBackend) objectPath(bucket, key string) string {
-	return filepath.Join(b.root, "data", bucket, key)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	targetRoot := b.dataRoots[int(h.Sum32())%len(b.dataRoots)]
+	return filepath.Join(targetRoot, "data", bucket, key)
 }
 
 func encryptedObjectFileDomain(bucket, key string) string {
@@ -168,8 +208,11 @@ func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 			return err
 		}
 
-		if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
-			return fmt.Errorf("create bucket dir: %w", err)
+		for _, root := range b.dataRoots {
+			bDir := filepath.Join(root, "data", bucket)
+			if err := os.MkdirAll(bDir, 0o755); err != nil {
+				return fmt.Errorf("create bucket dir %s: %w", bDir, err)
+			}
 		}
 		return setBadgerValue(txn, b.encryptor, badgerDomainBucket, bk, []byte(`{}`))
 	})
@@ -206,8 +249,11 @@ func (b *LocalBackend) DeleteBucket(ctx context.Context, bucket string) error {
 			return ErrBucketNotEmpty
 		}
 
-		if err := os.RemoveAll(b.bucketDir(bucket)); err != nil {
-			return fmt.Errorf("remove bucket dir: %w", err)
+		for _, root := range b.dataRoots {
+			bDir := filepath.Join(root, "data", bucket)
+			if err := os.RemoveAll(bDir); err != nil {
+				return fmt.Errorf("remove bucket dir %s: %w", bDir, err)
+			}
 		}
 		if err := txn.Delete(bk); err != nil {
 			return err
@@ -794,10 +840,11 @@ func (b *LocalBackend) writeAtSegmentedObject(ctx context.Context, bucket, key s
 }
 
 func (b *LocalBackend) rewriteSegmentedObject(ctx context.Context, bucket, key string, obj *Object, write func(io.Writer) error) (*Object, error) {
-	if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
+	bDir := b.bucketDirForKey(bucket, key)
+	if err := os.MkdirAll(bDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create bucket dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(b.bucketDir(bucket), ".rewrite-*")
+	tmp, err := os.CreateTemp(bDir, ".rewrite-*")
 	if err != nil {
 		return nil, fmt.Errorf("create rewrite temp: %w", err)
 	}

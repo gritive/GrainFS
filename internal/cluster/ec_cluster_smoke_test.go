@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,7 +65,7 @@ func TestECCluster_Smoke_3Node(t *testing.T) {
 	require.NotEmpty(t, obj.VersionID)
 
 	shardKey := "obj/" + obj.VersionID
-	require.NoError(t, os.Remove(filepath.Join(backend.shardSvc.dataDir, "ec-smoke", shardKey, "shard_0")))
+	require.NoError(t, os.Remove(backend.shardSvc.getShardPath("ec-smoke", shardKey, 0)))
 
 	rc, _, err := backend.GetObject(context.Background(), "ec-smoke", "obj")
 	require.NoError(t, err)
