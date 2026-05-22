@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.321.0] - 2026-05-22
+
+### Breaking
+
+- **`grainfs backup`/`grainfs restore` CLI removed.** The existing
+  implementation only supported single-node cold backup (server shutdown ->
+  restic backup of the data directory). It had no cluster-aware semantics and
+  required full-cluster downtime to use in production, which defeats the point
+  of running a cluster. Removed in v0.0.321.0; a cluster-aware backup/restore
+  is planned in a follow-up design cycle.
+- Removed `docs/operators/backup-restore.md` and `docs/operators/drill-manual.md`.
+  Six of seven drills in drill-manual were backup-dependent; the file will be
+  rewritten alongside the redesign.
+- `docs/operators/runbook.md`: removed "Step 1: Create Pre-Deployment Backup"
+  from Deployment Procedure, "Option 2: Data Rollback" from Rollback Procedure,
+  and "Create Post-Deployment Backup" from Post-Deployment Tasks. Remaining
+  steps renumbered.
+- `Makefile` `test-backup` target removed.
+- Restic snapshots created by `<= v0.0.320.0` cannot be restored on v0.0.321.0+
+  (no CLI). If a final restore is needed, pin to a `0.0.320.x` build, restore,
+  then upgrade.
+
 ## [0.0.320.0] - 2026-05-22
 
 ### Added
