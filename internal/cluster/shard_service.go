@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -19,10 +20,20 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// DataWALAppender is the subset of *datawal.WAL that ShardService needs to log
+// shard writes before mutating local files. Defined as an interface so tests
+// and Task 6/7 wiring can swap implementations.
+type DataWALAppender interface {
+	Append(context.Context, datawal.Record) (uint64, error)
+	AppendReader(context.Context, datawal.Record, io.Reader) (uint64, error)
+	Flush() error
+}
 
 var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
 
@@ -54,6 +65,13 @@ type ShardService struct {
 	// filesystem confirms the win (see shardio_directio_bench_test.go).
 	directIO bool
 	dirCache sync.Map
+	// dataWAL, when set, receives an OpShardPut record before each local shard
+	// file mutation so that a torn / lost shard file can be replayed on boot.
+	dataWAL DataWALAppender
+	// replayingDataWAL is true only while RecoverDataWAL is materializing
+	// records. Atomic because shard writes fan out across goroutines (e.g. EC
+	// writer) and may consult it concurrently with boot recovery in tests.
+	replayingDataWAL atomic.Bool
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -86,6 +104,18 @@ func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 	return func(s *ShardService) { s.addrBook = book }
 }
 
+// WithDataWAL wires a data WAL into the shard service so that every local
+// shard write is logged before the shard file is mutated. RecoverDataWAL
+// replays the log on boot to restore any missing shard files.
+func WithDataWAL(w DataWALAppender) ShardServiceOption {
+	return func(s *ShardService) { s.dataWAL = w }
+}
+
+// HasDataWAL reports whether a data WAL is wired. Used by Task 7 boot wiring
+// (and its tests) to assert that production callers actually attached a WAL
+// after construction.
+func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
+
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
 	s := &ShardService{
@@ -106,7 +136,7 @@ func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardS
 		}
 	}
 	if threshold > 0 {
-		if pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack")); err == nil {
+		if pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack"), s.dataWAL); err == nil {
 			s.packThreshold = threshold
 			s.shardPack = pack
 			log.Info().Int("threshold", threshold).Msg("cluster shard pack enabled")
@@ -711,7 +741,9 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
-// Writes are crash-safe: data goes to a .tmp file, fsync'd, then renamed.
+// Writes are crash-safe: the encoded payload is appended to the data WAL
+// before any shard file mutation, and the on-disk write uses tmp + rename
+// for atomic visibility. Durability is owned by internal/storage/datawal.
 // New encrypted writes use eccodec's chunked AEAD envelope. Plain writes keep
 // the CRC envelope while that compatibility path remains available.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
@@ -735,6 +767,10 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		} else {
 			payload = eccodec.EncodeShard(data)
 		}
+		// Pack-routed writes are logged inside shardPackStore.append as
+		// OpShardPackPut so a torn pack blob can be replayed. Logging
+		// OpShardPut here too would resurrect a non-existent per-shard file
+		// on replay (pack writes never produce shard_N files).
 		fileStart := time.Now()
 		if err := s.shardPack.put(bucket, key, shardIdx, payload); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
@@ -770,11 +806,11 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 	})
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	dirSynced := false
 	if s.encryptor != nil {
-		fileStart := time.Now()
-		if err := s.writeEncryptedShardFile(ctx, dir, path, data, aad, shardIdx); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+		encodeStart := time.Now()
+		var encoded bytes.Buffer
+		if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 				Bytes:            int64(len(data)),
 				ShardIndex:       shardIdx,
 				ShardTargetClass: "local",
@@ -782,12 +818,30 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			})
 			return err
 		}
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 		})
-		dirSynced = true
+		payload := encoded.Bytes()
+		if err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload); err != nil {
+			return err
+		}
+		fileStart := time.Now()
+		if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
+			return err
+		}
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+			Bytes:            int64(len(payload)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+		})
 	} else {
 		encodeStart := time.Now()
 		payload := eccodec.EncodeShard(data)
@@ -796,6 +850,9 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 		})
+		if err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload); err != nil {
+			return err
+		}
 		fileStart := time.Now()
 		if err := s.writeShardFile(ctx, path, payload, shardIdx); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
@@ -812,33 +869,40 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardTargetClass: "local",
 		})
 	}
-	if dirSynced {
-		return nil
-	}
+	// Directory metadata durability is owned by the data WAL: the WAL
+	// record was flushed before the on-disk write ran, so a crash after
+	// rename replays the same bytes. The dir-sync trace stage is preserved
+	// as a zero-duration event so dashboards remain stable across the
+	// fsync policy migration.
 	dirSyncStart := time.Now()
-	var dirSyncErr error
-	if d, err := os.Open(dir); err == nil {
-		dirSyncErr = d.Sync()
-		d.Close()
-	} else {
-		dirSyncErr = err
-	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
 		Bytes:            int64(len(data)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
-		Error:            putTraceErrorString(dirSyncErr),
 	})
 	return nil
 }
 
-func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, data, aad []byte, shardIdx int) error {
+// writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes
+// to disk using the atomic tmp + rename recipe. Encoding happens in the
+// caller so the encrypted payload can be appended to the data WAL before any
+// shard file mutation; this function only handles the on-disk I/O.
+//
+// Durability is owned by internal/storage/datawal. The trace stages below
+// retain their pre-WAL names so dashboards and operator queries keep working;
+// the EncSync / DirSync stages now wrap zero-duration no-ops because durability
+// is committed by the WAL append+flush that happens before this call. Trace
+// stage semantics:
+//   - PutTraceStageShardWriteLocalEncode: encryption into an in-memory buffer.
+//   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload.
+func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int) error {
+	_ = dir
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
+			Bytes:            int64(len(payload)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -846,7 +910,7 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -856,35 +920,27 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 	}
 
 	writeStart := time.Now()
-	if err := eccodec.EncodeEncryptedShard(f, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+	if _, err := f.Write(payload); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
+			Bytes:            int64(len(payload)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
 		})
 		cleanup()
-		return err
+		return fmt.Errorf("write tmp shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
 
-	syncStart := time.Now()
-	if err := f.Sync(); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, syncStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		cleanup()
-		return fmt.Errorf("sync tmp shard: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, syncStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+	// EncSync is preserved as a zero-duration stage so dashboards keep
+	// reporting the same series; durability is owned by the data WAL.
+	encSyncStart := time.Now()
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
+		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -892,7 +948,7 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 	closeStart := time.Now()
 	if err := f.Close(); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
+			Bytes:            int64(len(payload)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -901,7 +957,7 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		return fmt.Errorf("close tmp shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -909,7 +965,7 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 	renameStart := time.Now()
 	if err := os.Rename(tmp, path); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
+			Bytes:            int64(len(payload)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -918,26 +974,158 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		return fmt.Errorf("rename shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
 
-	dirSyncStart := time.Now()
-	var dirSyncErr error
-	if d, err := os.Open(dir); err == nil {
-		dirSyncErr = d.Sync()
-		_ = d.Close()
-	} else {
-		dirSyncErr = err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-		Error:            putTraceErrorString(dirSyncErr),
-	})
 	return nil
+}
+
+// encryptedShardEnvelopeOverhead is a conservative upper bound on the bytes
+// the AEAD chunked encoder (eccodec.EncodeEncryptedShard) adds per
+// DefaultEncryptedChunkSize chunk of plaintext: chunk header + GCM tag, with
+// slack for the one-time shard header. 64 bytes/chunk leaves room without
+// pinning to the exact eccodec internals.
+const encryptedShardEnvelopeOverhead = 64
+
+// maxRawShardPayloadForWAL returns the largest raw plaintext shard size whose
+// encoded payload is guaranteed to fit within datawal.MaxPayloadBytes. The
+// encrypted path inflates input by chunked AEAD overhead; the plain path is
+// only the small CRC envelope and is bounded by MaxPayloadBytes directly.
+func maxRawShardPayloadForWAL(encrypted bool) int64 {
+	if !encrypted {
+		return datawal.MaxPayloadBytes
+	}
+	chunks := int64(datawal.MaxPayloadBytes/eccodec.DefaultEncryptedChunkSize) + 1
+	overhead := chunks * encryptedShardEnvelopeOverhead
+	if overhead >= datawal.MaxPayloadBytes {
+		return 0
+	}
+	return datawal.MaxPayloadBytes - overhead
+}
+
+// appendShardDataWAL logs an OpShardPut record for the encoded shard payload
+// before any file mutation. No-op when no WAL is wired or when we are already
+// replaying records during RecoverDataWAL.
+func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) error {
+	if s.dataWAL == nil || s.replayingDataWAL.Load() {
+		return nil
+	}
+	// No caller-side copy: WAL.AppendReader copies the payload internally
+	// (see internal/storage/datawal/wal.go AppendReader) before returning.
+	if _, err := s.dataWAL.Append(ctx, datawal.Record{
+		Op:      datawal.OpShardPut,
+		Bucket:  bucket,
+		Key:     key,
+		Target:  strconv.Itoa(shardIdx),
+		Size:    int64(len(payload)),
+		Payload: payload,
+	}); err != nil {
+		return fmt.Errorf("data wal append shard: %w", err)
+	}
+	if err := s.dataWAL.Flush(); err != nil {
+		return fmt.Errorf("data wal flush shard: %w", err)
+	}
+	return nil
+}
+
+// RecoverDataWAL replays missing shard files from the data WAL. Safe to call
+// when no WAL is wired (no-op). Existing shard files matching the record size
+// are skipped via HasReplacement.
+//
+// Before replaying, the in-memory shard pack (if any) is closed and dropped:
+// pack records are replayed verbatim into a freshly-opened, nil-WAL store so
+// the pre-recovery index does not shadow the WAL-driven state and so the
+// pack replay path cannot recursively append back into the WAL.
+func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
+	if s.dataWAL == nil {
+		return nil
+	}
+	if s.shardPack != nil {
+		_ = s.shardPack.Close()
+		s.shardPack = nil
+	}
+	s.replayingDataWAL.Store(true)
+	defer s.replayingDataWAL.Store(false)
+	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDir), "datawal"), 0, s.encryptor, shardDataWALMaterializer{s: s}); err != nil {
+		return err
+	}
+	// The materializer may have constructed a nil-WAL pack store while
+	// replaying OpShardPackPut/Delete records. Drop it and reopen against
+	// the live WAL so subsequent appends are durable.
+	if s.shardPack != nil {
+		_ = s.shardPack.Close()
+		s.shardPack = nil
+	}
+	if s.packThreshold > 0 {
+		pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack"), s.dataWAL)
+		if err != nil {
+			return fmt.Errorf("reopen shard pack after recovery: %w", err)
+		}
+		s.shardPack = pack
+	}
+	return nil
+}
+
+type shardDataWALMaterializer struct {
+	s *ShardService
+}
+
+func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
+	_ = ctx
+	// Pack ops are replayed unconditionally: the pack store is rebuilt from
+	// scratch in RecoverDataWAL, so an "already there" check would skip every
+	// record. The replay loop is idempotent because OpShardPackPut /
+	// OpShardPackDelete carry the original on-disk record bytes; replaying
+	// them in WAL order reproduces the pre-crash index.
+	if rec.Op == datawal.OpShardPackPut || rec.Op == datawal.OpShardPackDelete {
+		return false, nil
+	}
+	if rec.Op != datawal.OpShardPut {
+		return false, nil
+	}
+	idx, err := strconv.Atoi(rec.Target)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(m.s.dataDir, rec.Bucket, rec.Key, fmt.Sprintf("shard_%d", idx))
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Size() == rec.Size, nil
+}
+
+func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
+	switch rec.Op {
+	case datawal.OpShardPackPut, datawal.OpShardPackDelete:
+		if m.s.shardPack == nil {
+			// nil WAL: replay must not recurse back into the WAL.
+			pack, err := newShardPackStore(filepath.Join(m.s.dataDir, ".pack"), nil)
+			if err != nil {
+				return err
+			}
+			m.s.shardPack = pack
+		}
+		return m.s.shardPack.appendRawRecord(rec.Payload)
+	case datawal.OpShardPut:
+		idx, err := strconv.Atoi(rec.Target)
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(m.s.dataDir, rec.Bucket, rec.Key)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		path := filepath.Join(dir, fmt.Sprintf("shard_%d", idx))
+		return m.s.writeShardFile(ctx, path, rec.Payload, idx)
+	default:
+		return nil
+	}
 }
 
 // WriteLocalShardStream stores a shard from body without buffering plaintext.
@@ -946,6 +1134,30 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 }
 
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
+	// When a data WAL is wired we cannot stream directly to disk: the WAL must
+	// observe the full payload before any file mutation so recovery can replay
+	// it. Buffer the body (bounded by datawal.MaxPayloadBytes minus the
+	// encryption envelope overhead) and route through writeLocalShard so the
+	// encoded/encrypted bytes hit the WAL once.
+	//
+	// The 64 MiB ceiling is intentional for this first wiring: data WAL records
+	// are size-bounded. Lifting it requires extending datawal.AppendReader to
+	// stream payload chunks across multiple WAL segment writes; until then,
+	// callers see the same effective shard stream cap as before WAL wiring.
+	if s.dataWAL != nil && !s.replayingDataWAL.Load() {
+		rawCap := maxRawShardPayloadForWAL(s.encryptor != nil)
+		data, err := io.ReadAll(io.LimitReader(body, rawCap+1))
+		if err != nil {
+			return err
+		}
+		if int64(len(data)) > rawCap {
+			if s.encryptor != nil {
+				return fmt.Errorf("shard payload too large after encryption: %d raw bytes exceeds %d cap", len(data), rawCap)
+			}
+			return fmt.Errorf("data WAL shard payload too large: %d", len(data))
+		}
+		return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
+	}
 	if s.shardPack != nil && s.packThreshold > 0 {
 		packed, handled, err := s.tryWriteLocalShardStreamPack(ctx, bucket, key, shardIdx, body)
 		if err != nil {
@@ -1119,8 +1331,9 @@ func (s *ShardService) writeShardFile(ctx context.Context, path string, payload 
 	return nil
 }
 
-// writeBuffered is the historical write path: open + write + sync + close.
-// Kept verbatim for the !directIO branch and the direct-I/O fallback path.
+// writeBuffered is the historical write path: open + write + close.
+// Durability is owned by internal/storage/datawal; the encoded payload was
+// appended and flushed to the WAL before this call ran.
 func writeBuffered(tmp string, payload []byte) error {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -1130,11 +1343,6 @@ func writeBuffered(tmp string, payload []byte) error {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("sync tmp shard: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
@@ -1146,8 +1354,8 @@ func writeBuffered(tmp string, payload []byte) error {
 // writeDirect uses directio.OpenFile + AlignedCopy to bypass the page cache.
 // The payload is copied into an aligned buffer once; the file is truncated
 // back to the payload's true length so readers see exactly the bytes the
-// caller passed in. Sync is still required — direct I/O does not flush
-// disk firmware caches.
+// caller passed in. Durability is owned by internal/storage/datawal — the
+// encoded payload was appended and flushed to the WAL before this call.
 func writeDirect(tmp string, payload []byte) error {
 	f, err := directio.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -1157,10 +1365,6 @@ func writeDirect(tmp string, payload []byte) error {
 	if _, err := f.Write(buf); err != nil {
 		f.Close()
 		return fmt.Errorf("write tmp shard (direct): %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("sync tmp shard (direct): %w", err)
 	}
 	if alignedLen != len(payload) {
 		if err := f.Truncate(int64(len(payload))); err != nil {

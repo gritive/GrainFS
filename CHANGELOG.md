@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.320.0] - 2026-05-22
+## [0.0.321.0] - 2026-05-22
 
 ### Breaking
 
@@ -8,7 +8,7 @@
   데이터 디렉터리 cold-backup(서버 종료 후 restic) 만 지원해 cluster mode와
   맞지 않음 — production cluster에서는 전 노드 동시 다운타임이 필요했고
   cluster-aware한 의미가 정의되지 않았음. cluster mode 의도에 맞게 재설계가
-  필요하다고 판단해 v0.0.320.0에서 우선 기능을 제거하고 후속 design 사이클에서
+  필요하다고 판단해 v0.0.321.0에서 우선 기능을 제거하고 후속 design 사이클에서
   cluster-aware backup/restore 절차를 다시 도입할 예정.
 - `docs/operators/backup-restore.md`, `docs/operators/drill-manual.md` 제거.
   drill-manual은 backup 의존 drill (#1, #2, #3, #5, #6, #7)이 절반 이상이라
@@ -18,9 +18,37 @@
   Post-Deployment Tasks의 "Create Post-Deployment Backup" sections 제거,
   남은 Step들 재번호.
 - Makefile `test-backup` target 제거.
-- 기존 backup 결과로 만들어진 restic snapshot에서 v0.0.320.0+ 클러스터로의
-  복원 경로는 더 이상 지원되지 않음. 사용 중이던 사용자는 v0.0.319.0 이하에서
+- 기존 backup 결과로 만들어진 restic snapshot에서 v0.0.321.0+ 클러스터로의
+  복원 경로는 더 이상 지원되지 않음. 사용 중이던 사용자는 v0.0.320.0 이하에서
   restore를 마친 뒤 업그레이드해야 함.
+
+## [0.0.320.0] - 2026-05-22
+
+### Added
+
+- **Physical data WAL** (`<data-dir>/datawal/`) for crash-safe durability of object
+  segment writes, partial `WriteAt`/`Truncate` patches, and EC shard writes
+  (including shard-pack put/delete). On node restart the data WAL replays
+  before traffic is admitted, so a crash between the durable WAL flush and
+  the materialized object/shard file is invisible to clients — the bytes
+  reappear on next read instead of being lost.
+- Data WAL recovery runs at boot, restores missing segment / shard / pack
+  files, and is honored on both the single-node `LocalBackend` and the
+  cluster `ShardService`. Encrypted clusters use the same encryptor for WAL
+  segments so recovery works end-to-end on at-rest-encrypted deployments.
+
+### Changed
+
+- 9P `FSync` and NFSv4 `COMMIT` now return once the data WAL is durable
+  rather than after the materialized object file is fsynced. The protocol
+  contract is unchanged (commit = durable on disk); the layer that owns
+  durability moved from per-object fsync to the shared WAL.
+- Direct `fsync` calls removed from shard / encrypted-object / EC shard
+  atomic writers now that the data WAL owns durability. Scrubber-repair
+  writes downgrade to "next scrub pass heals" — recovery is peer-driven,
+  not crash-driven. Raft log/store, logical PITR WAL, badger role journal,
+  and write-once transport keystore keep their direct fsync calls (they
+  are explicit log owners, not data paths).
 
 ## [0.0.319.0] - 2026-05-22
 

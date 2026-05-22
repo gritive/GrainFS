@@ -387,6 +387,10 @@ func (f *objectFile) flush(ctx context.Context) error {
 	return nil
 }
 
+// FSync flushes pending writes to the backend, then asks the backend to make
+// them durable. Backends that own a data WAL (see internal/storage/datawal)
+// implement Syncable.Sync as a WAL flush rather than a direct file fsync —
+// durability is owned by the WAL, not by the materialized object file.
 func (f *objectFile) FSync() error {
 	unlock := f.locks.lock(f.bucket, f.key)
 	defer unlock()
