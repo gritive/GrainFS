@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -66,8 +67,11 @@ type ShardService struct {
 	dirCache sync.Map
 	// dataWAL, when set, receives an OpShardPut record before each local shard
 	// file mutation so that a torn / lost shard file can be replayed on boot.
-	dataWAL          DataWALAppender
-	replayingDataWAL bool
+	dataWAL DataWALAppender
+	// replayingDataWAL is true only while RecoverDataWAL is materializing
+	// records. Atomic because shard writes fan out across goroutines (e.g. EC
+	// writer) and may consult it concurrently with boot recovery in tests.
+	replayingDataWAL atomic.Bool
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -107,9 +111,10 @@ func WithDataWAL(w DataWALAppender) ShardServiceOption {
 	return func(s *ShardService) { s.dataWAL = w }
 }
 
-// HasDataWALForTest reports whether a data WAL is wired. Used by Task 7 boot
-// wiring tests; safe to call from production code as well.
-func (s *ShardService) HasDataWALForTest() bool { return s.dataWAL != nil }
+// HasDataWAL reports whether a data WAL is wired. Used by Task 7 boot wiring
+// (and its tests) to assert that production callers actually attached a WAL
+// after construction.
+func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
@@ -887,6 +892,13 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 // to disk using the atomic tmp + sync + rename recipe. Encoding happens in the
 // caller so the encrypted payload can be appended to the data WAL before any
 // shard file mutation; this function only handles the on-disk I/O.
+//
+// Trace stage semantics (changed in the data WAL wiring commit; operators
+// reading dashboards should rebaseline after this lands):
+//   - PutTraceStageShardWriteLocalEncode: encryption into an in-memory buffer.
+//   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload
+//     only. Previously this stage also covered the encryption work because the
+//     encoder streamed straight into the file.
 func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
@@ -995,20 +1007,45 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 	return nil
 }
 
+// encryptedShardEnvelopeOverhead is a conservative upper bound on the bytes
+// the AEAD chunked encoder (eccodec.EncodeEncryptedShard) adds per
+// DefaultEncryptedChunkSize chunk of plaintext: chunk header + GCM tag, with
+// slack for the one-time shard header. 64 bytes/chunk leaves room without
+// pinning to the exact eccodec internals.
+const encryptedShardEnvelopeOverhead = 64
+
+// maxRawShardPayloadForWAL returns the largest raw plaintext shard size whose
+// encoded payload is guaranteed to fit within datawal.MaxPayloadBytes. The
+// encrypted path inflates input by chunked AEAD overhead; the plain path is
+// only the small CRC envelope and is bounded by MaxPayloadBytes directly.
+func maxRawShardPayloadForWAL(encrypted bool) int64 {
+	if !encrypted {
+		return datawal.MaxPayloadBytes
+	}
+	chunks := int64(datawal.MaxPayloadBytes/eccodec.DefaultEncryptedChunkSize) + 1
+	overhead := chunks * encryptedShardEnvelopeOverhead
+	if overhead >= datawal.MaxPayloadBytes {
+		return 0
+	}
+	return datawal.MaxPayloadBytes - overhead
+}
+
 // appendShardDataWAL logs an OpShardPut record for the encoded shard payload
 // before any file mutation. No-op when no WAL is wired or when we are already
 // replaying records during RecoverDataWAL.
 func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) error {
-	if s.dataWAL == nil || s.replayingDataWAL {
+	if s.dataWAL == nil || s.replayingDataWAL.Load() {
 		return nil
 	}
+	// No caller-side copy: WAL.AppendReader copies the payload internally
+	// (see internal/storage/datawal/wal.go AppendReader) before returning.
 	if _, err := s.dataWAL.Append(ctx, datawal.Record{
 		Op:      datawal.OpShardPut,
 		Bucket:  bucket,
 		Key:     key,
 		Target:  strconv.Itoa(shardIdx),
 		Size:    int64(len(payload)),
-		Payload: append([]byte(nil), payload...),
+		Payload: payload,
 	}); err != nil {
 		return fmt.Errorf("data wal append shard: %w", err)
 	}
@@ -1025,8 +1062,8 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	if s.dataWAL == nil {
 		return nil
 	}
-	s.replayingDataWAL = true
-	defer func() { s.replayingDataWAL = false }()
+	s.replayingDataWAL.Store(true)
+	defer s.replayingDataWAL.Store(false)
 	return datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDir), "datawal"), 0, nil, shardDataWALMaterializer{s: s})
 }
 
@@ -1078,14 +1115,24 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
 	// When a data WAL is wired we cannot stream directly to disk: the WAL must
 	// observe the full payload before any file mutation so recovery can replay
-	// it. Buffer the body (bounded by datawal.MaxPayloadBytes) and route
-	// through writeLocalShard so the encoded/encrypted bytes hit the WAL once.
-	if s.dataWAL != nil && !s.replayingDataWAL {
-		data, err := io.ReadAll(io.LimitReader(body, datawal.MaxPayloadBytes+1))
+	// it. Buffer the body (bounded by datawal.MaxPayloadBytes minus the
+	// encryption envelope overhead) and route through writeLocalShard so the
+	// encoded/encrypted bytes hit the WAL once.
+	//
+	// The 64 MiB ceiling is intentional for this first wiring: data WAL records
+	// are size-bounded. Lifting it requires extending datawal.AppendReader to
+	// stream payload chunks across multiple WAL segment writes; until then,
+	// callers see the same effective shard stream cap as before WAL wiring.
+	if s.dataWAL != nil && !s.replayingDataWAL.Load() {
+		rawCap := maxRawShardPayloadForWAL(s.encryptor != nil)
+		data, err := io.ReadAll(io.LimitReader(body, rawCap+1))
 		if err != nil {
 			return err
 		}
-		if int64(len(data)) > datawal.MaxPayloadBytes {
+		if int64(len(data)) > rawCap {
+			if s.encryptor != nil {
+				return fmt.Errorf("shard payload too large after encryption: %d raw bytes exceeds %d cap", len(data), rawCap)
+			}
 			return fmt.Errorf("data WAL shard payload too large: %d", len(data))
 		}
 		return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
