@@ -6,11 +6,15 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // fakeECObjectShardFetcher records calls and returns configurable data/errors.
@@ -600,4 +604,85 @@ func TestComputeAttemptOrder_NoColdNoSwap(t *testing.T) {
 	primary, fallback := r.computeAttemptOrder(rec, cfg)
 	require.Equal(t, []int{0, 1, 2, 3}, primary)
 	require.Equal(t, []int{4, 5}, fallback)
+}
+
+// Step 1: hot > m bypass branch — safety valve coverage.
+func TestComputeAttemptOrder_HotExceedsM_Bypass(t *testing.T) {
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4", "n5"}}
+	rec.K = 4
+	rec.M = 2
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	r := ecObjectReader{bl: newFakeHot("n0", "n1", "n2")} // 3 hot > m=2
+
+	beforeBypass := testutil.ToFloat64(metrics.ClusterBLBypassedReads)
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	afterBypass := testutil.ToFloat64(metrics.ClusterBLBypassedReads)
+
+	assert.Equal(t, []int{0, 1, 2, 3}, primary)
+	assert.Equal(t, []int{4, 5}, fallback)
+	assert.Equal(t, 1.0, afterBypass-beforeBypass, "bypass counter should increment by 1")
+}
+
+// spyHotChecker records how many times IsHot was called.
+type spyHotChecker struct {
+	calls atomic.Int64
+}
+
+func (s *spyHotChecker) IsHot(string) bool {
+	s.calls.Add(1)
+	return false
+}
+
+// Step 2: contract test — computeAttemptOrder calls IsHot exactly k times (data shards only).
+// Cache-hit short-circuit in readShards returns before computeAttemptOrder runs, so
+// IsHot=0 in the cache-hit path is a structural property of readShards.
+func TestComputeAttemptOrder_CacheBypassSpy(t *testing.T) {
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4", "n5"}}
+	rec.K = 4
+	rec.M = 2
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	spy := &spyHotChecker{}
+	r := ecObjectReader{bl: spy}
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 1, 2, 3}, primary)
+	assert.Equal(t, []int{4, 5}, fallback)
+	// IsHot called exactly k=4 times (data shards probed, none hot → early exit).
+	assert.Equal(t, int64(4), spy.calls.Load())
+}
+
+// Step 4: streaming path uses computeAttemptOrder — hot data shard is not opened
+// when a parity shard satisfies k=1.
+func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
+	// ParityShards=1 with objectSize > maxECPooledReadObjectSize forces the
+	// non-buffered streaming branch and ensures Redundant()=true.
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	objectSize := int64(maxECPooledReadObjectSize + 1)
+
+	// Build fake shards: shard 0 (data) and shard 1 (parity).
+	fetcher := &fakeECObjectShardFetcher{}
+	payload := bytes.Repeat([]byte("z"), int(objectSize))
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, payload)
+
+	// n0 is hot → BL should reroute the primary read to parity (shard 1, node n1).
+	r := ecObjectReader{
+		selfID:   "node-self",
+		shards:   fetcher,
+		ecConfig: cfg,
+		bl:       newFakeHot("n0"),
+		// no cache → cacheCanStore=false → streaming branch
+	}
+	// shard 0 → node n0 (hot); shard 1 → node n1 (parity, cool)
+	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	recCfg, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	require.NoError(t, err)
+	defer closeECShardReaders(readers)
+
+	assert.Equal(t, cfg, recCfg)
+	// primary=[1] (parity swap), fallback=[0] (hot data).
+	// k=1 satisfied by shard 1 → shard 0 must not be opened.
+	assert.Nil(t, readers[0], "hot data shard should not be opened when parity satisfies k")
+	assert.NotNil(t, readers[1], "parity shard should be opened as primary")
 }

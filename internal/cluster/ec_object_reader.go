@@ -468,13 +468,19 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 		return true
 	}
 
-	for i := 0; i < recCfg.DataShards; i++ {
+	// Apply BL re-routing: hot data shards are swapped to fallback so parity
+	// is attempted first. Mirrors the same swap used in readShards.
+	primary, fallback := r.computeAttemptOrder(rec, recCfg)
+	for _, i := range primary {
 		openShard(i)
 	}
 	if available >= recCfg.DataShards {
 		return recCfg, shardReaders, nil
 	}
-	for i := recCfg.DataShards; i < len(rec.Nodes) && available < recCfg.DataShards; i++ {
+	for _, i := range fallback {
+		if available >= recCfg.DataShards {
+			break
+		}
 		openShard(i)
 	}
 	if available < recCfg.DataShards {
