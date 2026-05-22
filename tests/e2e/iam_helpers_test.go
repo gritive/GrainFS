@@ -349,24 +349,41 @@ func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 // GRAINFS_TLS_CERT/KEY env vars, or trusted-proxy.cidr — e2e picks the third.
 // Idempotent: re-running with the same value is a no-op at the FSM level.
 func seedBootstrapTrustedProxyCIDR(sock string) error {
+	return setConfigViaUDS(sock, "trusted-proxy.cidr", "127.0.0.1/32")
+}
+
+// setConfigViaUDS PUTs key=value on the admin UDS /v1/config/<key>. Used by
+// e2e fixtures that need to flip operator-path config knobs (e.g. re-enabling
+// iam.anon-enabled after the first-SA auto-flip from D#3 + F#16).
+//
+// Caveat: posture-gated keys (notably iam.anon-enabled=false) require trusted-
+// proxy.cidr or a TLS cert already on the node — otherwise the reload hook
+// rolls back the apply and the PUT surfaces as a 500. See tls_posture.go.
+func setConfigViaUDS(sock, key, value string) error {
 	client := iamUDSClient(sock)
-	body := strings.NewReader(`{"value":"127.0.0.1/32"}`)
+	payload, err := json.Marshal(struct {
+		Value string `json:"value"`
+	}{Value: value})
+	if err != nil {
+		return fmt.Errorf("encode %s value: %w", key, err)
+	}
+	body := bytes.NewReader(payload)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
-		"http://unix/v1/config/trusted-proxy.cidr", body)
+		"http://unix/v1/config/"+key, body)
 	if err != nil {
-		return fmt.Errorf("build trusted-proxy.cidr seed: %w", err)
+		return fmt.Errorf("build %s PUT: %w", key, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("seed trusted-proxy.cidr: %w", err)
+		return fmt.Errorf("PUT %s: %w", key, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		buf, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("seed trusted-proxy.cidr on %s -> %d: %s", sock, resp.StatusCode, string(buf))
+		return fmt.Errorf("PUT %s on %s -> %d: %s", key, sock, resp.StatusCode, string(buf))
 	}
 	return nil
 }

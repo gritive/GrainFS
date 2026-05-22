@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -29,6 +31,18 @@ import (
 // because seedGroups (cluster size * 4, min 8) is the durability headroom
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
+	// Open the data WAL before any cluster shard service is constructed so that
+	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
+	// before bootStreamRouter registers QUIC handlers that would otherwise
+	// surface partially-recovered state to peers.
+	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
+	dw, err := datawal.Open(state.dataWALDir, state.cfg.Encryptor)
+	if err != nil {
+		return fmt.Errorf("open data WAL: %w", err)
+	}
+	state.dataWAL = dw
+	state.AddCleanup(func() { _ = dw.Close() })
+
 	clusterSize := 1 + len(state.peers)
 	seedGroups := seedGroupCountForClusterSize(clusterSize)
 
@@ -80,7 +94,10 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
-	shardSvcOpts := []cluster.ShardServiceOption{cluster.WithEncryptor(state.cfg.Encryptor)}
+	shardSvcOpts := []cluster.ShardServiceOption{
+		cluster.WithEncryptor(state.cfg.Encryptor),
+		cluster.WithDataWAL(state.dataWAL),
+	}
 	if state.cfg.DirectIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
@@ -95,6 +112,15 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithNodeAddressBook(state.metaRaft.FSM()))
 	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.quicTransport, shardSvcOpts...)
+
+	// Replay the data WAL into the shard service before bootStreamRouter
+	// registers QUIC handlers; this keeps peers from observing partially-
+	// recovered local shard state.
+	if state.shardSvc != nil {
+		if err := state.shardSvc.RecoverDataWAL(ctx); err != nil {
+			return fmt.Errorf("recover shard data WAL: %w", err)
+		}
+	}
 	return nil
 }
 

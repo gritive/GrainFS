@@ -609,12 +609,8 @@ func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encr
 		return err
 	}
 	observeEncryptedShardStage("encode_stream", stageStart)
-	stageStart = time.Now()
-	if err := f.Sync(); err != nil {
-		cleanup()
-		return fmt.Errorf("sync tmp shard: %w", err)
-	}
-	observeEncryptedShardStage("sync_tmp", stageStart)
+	// Durability is owned by internal/storage/datawal. The tmp+rename below
+	// provides atomic visibility of already-WAL-flushed bytes.
 	stageStart = time.Now()
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
@@ -627,12 +623,6 @@ func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encr
 		return fmt.Errorf("rename shard: %w", err)
 	}
 	observeEncryptedShardStage("rename", stageStart)
-	stageStart = time.Now()
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
-	observeEncryptedShardStage("sync_dir", stageStart)
 	return nil
 }
 
@@ -831,8 +821,10 @@ func (r *sizedShardReader) verifyFooter() error {
 }
 
 // WriteShardAtomic writes data (with CRC32 footer) to path using the
-// write-tmp → fsync → rename → fsync-parent pattern so a crash mid-write
-// never leaves a torn shard at the destination.
+// tmp + rename recipe. Durability is owned by internal/storage/datawal;
+// the tmp file here provides atomic visibility of already-WAL-flushed
+// bytes, so a crash mid-write never exposes a torn shard at the
+// destination.
 func WriteShardAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
@@ -848,11 +840,6 @@ func WriteShardAtomic(path string, data []byte) error {
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("sync tmp shard: %w", err)
-	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("close tmp shard: %w", err)
@@ -860,10 +847,6 @@ func WriteShardAtomic(path string, data []byte) error {
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename shard: %w", err)
-	}
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		dir.Close()
 	}
 	return nil
 }
@@ -910,10 +893,8 @@ func writeShardStreamAtomic(path string, r io.Reader, mkdir bool) error {
 		cleanup()
 		return fmt.Errorf("write shard footer: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		cleanup()
-		return fmt.Errorf("sync tmp shard: %w", err)
-	}
+	// Durability is owned by internal/storage/datawal. The tmp+rename
+	// below provides atomic visibility of already-WAL-flushed bytes.
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close tmp shard: %w", err)
@@ -921,10 +902,6 @@ func writeShardStreamAtomic(path string, r io.Reader, mkdir bool) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename shard: %w", err)
-	}
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
 	}
 	return nil
 }

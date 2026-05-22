@@ -253,9 +253,13 @@ func (b *DistributedBackend) ReadShardIntegrity(bucket, key, path string) (scrub
 }
 
 // WriteShard writes data atomically at path under a per-object write lock.
-// The write uses tmp → fsync → rename so a crash mid-repair cannot leave a
-// torn shard. New writes are wrapped in eccodec's CRC envelope so scrubber
-// verification can distinguish corrupt shards from missing shards.
+// The write uses tmp + rename so a crash mid-repair cannot leave a torn
+// shard at the destination. Durability of the repaired bytes is not
+// committed by this call: scrubber-repair is an internal recovery write,
+// and a crash before the OS naturally flushes the page cache is healed by
+// the next scrub pass detecting the still-corrupt shard. New writes are
+// wrapped in eccodec's CRC envelope so scrubber verification can
+// distinguish corrupt shards from missing shards.
 func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) error {
 	unlock := b.acquireShardWriteLock(bucket, key)
 	defer unlock()
@@ -281,11 +285,6 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("sync tmp shard: %w", err)
-	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("close tmp shard: %w", err)
@@ -293,10 +292,6 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename shard: %w", err)
-	}
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		dir.Close()
 	}
 	return nil
 }

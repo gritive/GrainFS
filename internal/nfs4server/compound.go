@@ -1639,6 +1639,10 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult(bm0, bm1)}
 }
 
+// opCommit translates the NFSv4 COMMIT op into a backend Sync request.
+// Backends that own a data WAL implement Syncable.Sync as a WAL flush, so
+// COMMIT returns once the WAL is durable (not once the object file is
+// fsynced).
 func (d *Dispatcher) opCommit() OpResult {
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpCommit, Status: NFS4ERR_NOFILEHANDLE}

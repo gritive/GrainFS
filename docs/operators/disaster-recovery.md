@@ -31,7 +31,7 @@ This document captures lessons learned from disaster recovery drills. Each drill
 **Outcome:** PASS / FAIL
 
 **RTO Achieved:** X minutes (Target: 30 min)
-**RPO Achieved:** Last backup (X minutes before failure)
+**RPO Achieved:** Last durable write (X minutes before failure)
 
 #### What Worked
 Record procedures that worked smoothly, including commands that matched the

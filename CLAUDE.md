@@ -87,7 +87,7 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 - docs/adr/: 아키텍처 결정 기록
 - docs/architecture/request-single-cluster-flow.md: single/cluster request execution actor 설계
 - docs/operators/recover-cluster.md: RecoverCluster offline 재해 복구 절차
-- docs/operators/runbook.md, docs/operators/drill-manual.md, docs/operators/sli-slo.md: 운영/드릴/SLO 문서
+- docs/operators/runbook.md, docs/operators/sli-slo.md: 운영/SLO 문서
 
 ### 테스트 레이아웃
 - `tests/e2e/`: 일반 E2E (Go test)

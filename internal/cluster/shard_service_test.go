@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -163,7 +165,6 @@ func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
 	)
 
 	require.NotNil(t, svc.shardPack)
-	require.False(t, svc.shardPack.syncOnAppend)
 }
 
 func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
@@ -919,4 +920,121 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	// Reading shard_1 must fail because AAD doesn't match.
 	_, err := svc.ReadLocalShard("b", "k", 1)
 	require.Error(t, err, "shard moved to wrong position must fail decryption")
+}
+
+func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(dwal))
+	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
+	require.NoError(t, dwal.Flush())
+	shardPath := svc.getShardPath("b", "k", 0)
+	require.NoError(t, os.Remove(shardPath))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, err := svc.ReadLocalShard("b", "k", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), got)
+}
+
+func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(dwal))
+	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
+	require.NoError(t, dwal.Flush())
+	shardPath := svc.getShardPath("b", "streamed", 1)
+	require.NoError(t, os.Remove(shardPath))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, err := svc.ReadLocalShard("b", "streamed", 1)
+	require.NoError(t, err)
+	require.Equal(t, []byte("stream-payload"), got)
+}
+
+func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithShardPackThreshold(1024),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "packed", 0, []byte("small")))
+	require.NoError(t, svc.DeleteLocalShards("b", "packed"))
+	require.NoError(t, dwal.Flush())
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.DataDirs()[0], ".pack")))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	_, found, err := svc.ReadLocalShardFromPack("b", "packed", 0)
+	require.NoError(t, err)
+	require.False(t, found, "pack entry must remain absent after delete replay")
+	// And there must be no resurrected per-shard file either.
+	_, statErr := os.Stat(svc.getShardPath("b", "packed", 0))
+	require.True(t, os.IsNotExist(statErr), "pack-routed write must not resurrect shard file on replay")
+}
+
+// TestShardPack_DataWALWritesLoggedAfterRecovery regression-tests that the
+// pack store wired by RecoverDataWAL holds onto the live data WAL, so a
+// pack write made after recovery survives a second crash+recover cycle.
+// Pre-fix the materializer left s.shardPack pointing at a nil-WAL store and
+// subsequent pack writes were silently un-logged.
+func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithShardPackThreshold(1024),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "k1", 0, []byte("first")))
+	require.NoError(t, dwal.Flush())
+
+	// Simulate restart-and-recover.
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	// A write made AFTER recovery must produce a WAL record that can replay
+	// through a second recovery.
+	require.NoError(t, svc.WriteLocalShard("b", "k2", 0, []byte("second")))
+	require.NoError(t, dwal.Flush())
+
+	// Wipe the pack directory and recover again; the second write must
+	// reappear from the WAL.
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.DataDirs()[0], ".pack")))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, ok, err := svc.ReadLocalShardFromPack("b", "k2", 0)
+	require.NoError(t, err)
+	require.True(t, ok, "post-recovery pack write must replay through a second recovery")
+	require.Equal(t, []byte("second"), got)
+}
+
+// TestShardService_DataWALRestoresEncryptedShard regression-tests the latent
+// bug surfaced by boot wiring (see commit 775286d5): RecoverDataWAL must
+// forward the configured encryptor to datawal.Recover so the WAL segments
+// can be decrypted. Pre-fix the call passed nil and recovery failed with
+// "segment mode mismatch" once an encrypted WAL was wired in production.
+func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{0x42}, 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	require.NoError(t, err)
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithEncryptor(enc),
+		WithDataWAL(dwal),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("encrypted-payload")))
+	require.NoError(t, dwal.Flush())
+	shardPath := svc.getShardPath("b", "k", 0)
+	require.NoError(t, os.Remove(shardPath))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, err := svc.ReadLocalShard("b", "k", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("encrypted-payload"), got)
 }

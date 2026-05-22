@@ -79,12 +79,6 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
   # Verify peer IPs are correct
   cat /etc/grainfs/peers.txt
   ```
-- [ ] **Backup credentials**:
-  ```bash
-  export RESTIC_REPOSITORY=<backup-repo>
-  export RESTIC_PASSWORD="$(secret-manager read grainfs/restic-password)"
-  ```
-
 ### Safety Checks
 
 - [ ] **Run diagnostics**:
@@ -99,12 +93,6 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
   ls -la $GRAINFS_DATA_DIR/blobs
   ```
   Expected: Data directories exist and are non-empty
-
-- [ ] **Test backup access**:
-  ```bash
-  restic snapshots --repo $RESTIC_REPOSITORY
-  ```
-  Expected: Can list snapshots (no errors)
 
 ---
 
@@ -188,31 +176,7 @@ Failures that happen before the incident-state DB opens are also written under `
 
 ## Deployment Procedure
 
-### Step 1: Create Pre-Deployment Backup
-
-**CRITICAL:** Always create a backup before any deployment.
-
-```bash
-# Tag backup with deployment timestamp
-TAG="pre-deploy-$(date +%Y%m%d-%H%M%S)"
-grainfs backup \
-  --repo $RESTIC_REPOSITORY \
-  --data $GRAINFS_DATA_DIR \
-  --tag "$TAG"
-```
-
-**Verify backup was created:**
-```bash
-restic snapshots --repo $RESTIC_REPOSITORY --latest
-```
-
-Expected: Snapshot with tag `$TAG` appears in list
-
-**If backup fails:** DO NOT proceed. Investigate and fix backup issue first.
-
----
-
-### Step 2: Stop Existing `GrainFS` Process (if upgrading)
+### Step 1: Stop Existing `GrainFS` Process (if upgrading)
 
 ```bash
 # Find existing process
@@ -241,7 +205,7 @@ fi
 
 ---
 
-### Step 3: Deploy New Binary
+### Step 2: Deploy New Binary
 
 ```bash
 # Backup old binary
@@ -267,7 +231,7 @@ only unrestricted keys without `--bucket`.
 
 ---
 
-### Step 4: Start `GrainFS`
+### Step 3: Start `GrainFS`
 
 `grainfs serve` no longer accepts `--access-key`/`--secret-key`. The first cluster
 operator runs the admin SA bootstrap (see "Admin UDS Bootstrap And Permissions"
@@ -355,7 +319,7 @@ first-class cutover and progress reporting.
 
 ---
 
-### Step 5: Post-Deployment Verification
+### Step 4: Post-Deployment Verification
 
 **Wait for startup (10 seconds):**
 ```bash
@@ -417,35 +381,6 @@ LATEST_BACKUP=$(ls -t /usr/local/bin/grainfs.backup.* | head -1)
 cp $LATEST_BACKUP /usr/local/bin/grainfs
 
 # Restart with old binary
-grainfs serve \
-  --data $GRAINFS_DATA_DIR \
-  --port $GRAINFS_PORT \
-  --cluster-key "$GRAINFS_CLUSTER_KEY" \
-  > /var/log/grainfs/production.log 2>&1 &
-```
-
-### Option 2: Data Rollback (if data corruption)
-
-```bash
-# Stop GrainFS
-pgrep -f "grainfs serve" | xargs kill
-
-# Restore from pre-deployment backup
-RESTORE_SNAPSHOT=$(restic snapshots --repo $RESTIC_REPOSITORY --json | jq -r '.[] | select(.tags? | index("pre-deploy-'$(date +%Y%m%d)'")) | .id' | head -1)
-
-grainfs restore \
-  --repo $RESTIC_REPOSITORY \
-  --snapshot $RESTORE_SNAPSHOT \
-  --target $GRAINFS_DATA_DIR.restored
-
-# Verify restored data
-grainfs doctor --data $GRAINFS_DATA_DIR.restored
-
-# Switch to restored data
-mv $GRAINFS_DATA_DIR $GRAINFS_DATA_DIR.failed
-mv $GRAINFS_DATA_DIR.restored $GRAINFS_DATA_DIR
-
-# Restart
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
@@ -812,31 +747,20 @@ kubectl rollout undo deployment/grainfs --to-revision=2 -n grainfs
 
 ## Post-Deployment Tasks
 
-### Create Post-Deployment Backup
-
-After successful deployment and verification, create another backup:
-
-```bash
-TAG="post-deploy-$(date +%Y%m%d-%H%M%S)"
-grainfs backup \
-  --repo $RESTIC_REPOSITORY \
-  --data $GRAINFS_DATA_DIR \
-  --tag "$TAG"
-```
-
 ### Document Deployment
 
 Update deployment log:
 
-Record the deployment date, operator, `GrainFS` version, pre-deploy backup ID,
-post-deploy backup ID, verification result, and any issues found.
+Record the deployment date, operator, `GrainFS` version, verification result,
+and any issues found.
 
 ---
 
 ## Validation Status
 
-Track deployment drills in the deployment log. See `docs/operators/drill-manual.md`
-for drill procedures and result fields.
+Track deployment drills in the deployment log. Drill procedures are being
+redesigned alongside the cluster-aware backup/restore work — see CHANGELOG
+v0.0.320.0.
 
 ---
 

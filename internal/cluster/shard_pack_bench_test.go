@@ -25,7 +25,7 @@ func TestBuildShardPackRecordEncodesAppendRecord(t *testing.T) {
 }
 
 func BenchmarkShardPackStore_Put64KiB(b *testing.B) {
-	store, err := newShardPackStore(b.TempDir())
+	store, err := newShardPackStore(b.TempDir(), nil)
 	if err != nil {
 		b.Fatal(err)
 	}

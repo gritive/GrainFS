@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.320.0] - 2026-05-22
+## [0.0.323.0] - 2026-05-22
 
 ### Added
 
@@ -23,6 +23,58 @@
 - **Test suite and linter regression fixes.**
   - Replaced stale `shardSvc.dataDir` references with `getShardPath` calls and cleaned up unused `path/filepath` imports across cluster benchmark/test packages.
   - Removed the unused `bucketDir` method in `local.go` to satisfy `golangci-lint` checkouts.
+
+## [0.0.322.0] - 2026-05-22
+
+### Added
+
+- **Physical data WAL** (`<data-dir>/datawal/`) for crash-safe durability of object
+  segment writes, partial `WriteAt`/`Truncate` patches, and EC shard writes
+  (including shard-pack put/delete). On node restart the data WAL replays
+  before traffic is admitted, so a crash between the durable WAL flush and
+  the materialized object/shard file is invisible to clients — the bytes
+  reappear on next read instead of being lost.
+- Data WAL recovery runs at boot, restores missing segment / shard / pack
+  files, and is honored on both the single-node `LocalBackend` and the
+  cluster `ShardService`. Encrypted clusters use the same encryptor for WAL
+  segments so recovery works end-to-end on at-rest-encrypted deployments.
+
+### Changed
+
+- 9P `FSync` and NFSv4 `COMMIT` now return once the data WAL is durable
+  rather than after the materialized object file is fsynced. The protocol
+  contract is unchanged (commit = durable on disk); the layer that owns
+  durability moved from per-object fsync to the shared WAL.
+- Direct `fsync` calls removed from shard / encrypted-object / EC shard
+  atomic writers now that the data WAL owns durability. Scrubber-repair
+  writes downgrade to "next scrub pass heals" — recovery is peer-driven,
+  not crash-driven. Raft log/store, logical PITR WAL, badger role journal,
+  and write-once transport keystore keep their direct fsync calls (they
+  are explicit log owners, not data paths).
+
+## [0.0.321.0] - 2026-05-22
+
+### Breaking
+
+- **`grainfs backup`/`grainfs restore` CLI removed.** The existing
+  implementation only supported single-node cold backup (server shutdown ->
+  restic backup of the data directory). It had no cluster-aware semantics and
+  required full-cluster downtime to use in production, which defeats the point
+  of running a cluster. Removed in v0.0.321.0; a cluster-aware backup/restore
+  is planned in a follow-up design cycle.
+- Removed `docs/operators/backup-restore.md` and `docs/operators/drill-manual.md`.
+  Six of seven drills in drill-manual were backup-dependent; the file will be
+  rewritten alongside the redesign.
+- `docs/operators/runbook.md`: removed "Step 1: Create Pre-Deployment Backup"
+  from Deployment Procedure, "Option 2: Data Rollback" from Rollback Procedure,
+  and "Create Post-Deployment Backup" from Post-Deployment Tasks. Remaining
+  steps renumbered.
+- `Makefile` `test-backup` target removed.
+- Restic snapshots created by `<= v0.0.320.0` cannot be restored on v0.0.321.0+
+  (no CLI). If a final restore is needed, pin to a `0.0.320.x` build, restore,
+  then upgrade.
+
+## [0.0.320.0] - 2026-05-22
 
 ## [0.0.319.0] - 2026-05-22
 
