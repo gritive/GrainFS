@@ -15,9 +15,16 @@ type CommitCoord struct {
 // registerPut wires per-PUT response channels.
 func (c *CommitCoord) registerPut(putID uint64, w *putWaiter) {
 	// TODO Phase 4
+	_ = putID
+	_ = w
 }
 
 // Run consumes ShardWriteResults until ctx is done.
 func (c *CommitCoord) Run(ctx context.Context) {
-	// TODO Phase 4
+	// TODO Phase 4 — Phase 1 references silence unused-field lint.
+	_ = ctx
+	_ = c.in
+	_ = c.metaBatchCh
+	_ = c.waiters
+	var _ putWaiter
 }

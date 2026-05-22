@@ -16,6 +16,12 @@ type IngestActor struct {
 // (MD5/XXH3 hex), total bytes read, and any error. Out channel close
 // is the caller's responsibility (Pipeline.Put coordinates it).
 func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body io.Reader) (etag string, total int64, err error) {
-	// TODO Phase 2
+	// TODO Phase 2 — Phase 1 references silence unused-field lint.
+	_ = ctx
+	_ = putID
+	_ = bucket
+	_ = body
+	_ = a.out
+	_ = a.stripeBytes
 	return "", 0, nil
 }

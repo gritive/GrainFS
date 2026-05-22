@@ -19,3 +19,13 @@ issues:
       linters:
         - errcheck
       text: "Error return value of `(.*ReadUint.*|.*ReadOpaque|.*ReadFixed|.*ReadString|io.ReadFull)` is not checked"
+    # TEMPORARY (actor-pipeline rollout, see
+    # docs/superpowers/plans/2026-05-23-put-actor-pipeline.md): the
+    # putpipeline package is built phase-by-phase. Phase 1 lands the
+    # struct + method skeleton with empty TODO bodies, so every field
+    # and unexported method is legitimately "unused" until Phase 2-5
+    # fill them in. Remove this rule in Phase 5 task 5.6 once the real
+    # implementations reference everything.
+    - path: internal/cluster/putpipeline/
+      linters:
+        - unused

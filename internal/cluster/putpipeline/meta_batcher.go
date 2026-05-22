@@ -23,10 +23,19 @@ type MetadataBatcher struct {
 // before hitting Badger to preserve read-after-write semantics.
 func (m *MetadataBatcher) PeekPending(bucket, key, versionID string) (MetadataRecord, bool) {
 	// TODO Phase 4
+	_ = bucket
+	_ = key
+	_ = versionID
+	_ = &m.pending
 	return MetadataRecord{}, false
 }
 
 // Run consumes MetadataRecord values until ctx is done.
 func (m *MetadataBatcher) Run(ctx context.Context) {
-	// TODO Phase 4
+	// TODO Phase 4 — Phase 1 references silence unused-field lint.
+	_ = ctx
+	_ = m.in
+	_ = m.db
+	_ = m.batchSize
+	_ = m.flushAfter
 }

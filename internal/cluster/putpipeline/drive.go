@@ -17,10 +17,20 @@ type DriveActor struct {
 // shard file lives.
 func (d *DriveActor) registerPut(putID uint64, bucket, shardKey string, shardIdx int) {
 	// TODO Phase 3
+	_ = putID
+	_ = bucket
+	_ = shardKey
+	_ = shardIdx
 }
 
 // Run consumes from d.in until ctx is done. Survives chunk-handler
 // panics by recovering and re-entering the loop.
 func (d *DriveActor) Run(ctx context.Context) {
-	// TODO Phase 3
+	// TODO Phase 3 — Phase 1 references silence unused-field lint.
+	_ = ctx
+	_ = d.in
+	_ = d.dataDir
+	_ = d.commitCh
+	_ = d.pending
+	var _ shardWriteState
 }

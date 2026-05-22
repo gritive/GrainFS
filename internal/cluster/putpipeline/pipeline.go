@@ -37,21 +37,44 @@ type Pipeline struct {
 
 // New constructs and starts a Pipeline.
 func New(cfg Config) *Pipeline {
-	// TODO Phase 5
-	return nil
+	// TODO Phase 5: wire fields and start actor goroutines.
+	return &Pipeline{cfg: cfg}
 }
 
 // Put dispatches one PUT through the pipeline. Blocks until K data
 // shards complete (early-ack) and returns the storage.Object the
 // handler should send back to the client.
 func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, error) {
-	// TODO Phase 5
-	return nil, nil
+	// TODO Phase 5: drive the pipeline.
+	_ = ctx
+	_ = req
+	_ = p.nextPutID.Load()
+	_ = p.cpu
+	_ = p.commit
+	_ = p.metaBatcher
+	_ = p.driveIns
+	if len(p.drives) == 0 {
+		return nil, errNotImplemented
+	}
+	return nil, errNotImplemented
 }
 
 // Shutdown drains in-flight PUTs (with timeout) and stops all actor
 // goroutines.
 func (p *Pipeline) Shutdown(ctx context.Context) error {
-	// TODO Phase 5
+	// TODO Phase 5: cancel shutdownCtx, drain in-flight PUTs.
+	_ = ctx
+	_ = p.shutdownStop
+	if p.shutdownCtx != nil {
+		_ = p.shutdownCtx.Err()
+	}
 	return nil
+}
+
+var errNotImplemented = errPipelineStubReturned{}
+
+type errPipelineStubReturned struct{}
+
+func (errPipelineStubReturned) Error() string {
+	return "putpipeline: stub returned; Pipeline.Put not implemented yet"
 }
