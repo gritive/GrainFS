@@ -131,11 +131,16 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.distBackend)
 	assert.Nil(t, state.shardCache)
 	assert.Nil(t, state.rebalancer)
+	assert.Nil(t, state.dataWAL, "data WAL not opened before shard service phase")
+	assert.Empty(t, state.dataWALDir, "dataWALDir not set before shard service phase")
 	assert.Equal(t, 0, state.effectiveEC.NumShards(), "effectiveEC zero-value before phases")
 
-	// 1. ShardService — populates shardSvc + effectiveEC; no router yet.
+	// 1. ShardService — populates shardSvc + effectiveEC + data WAL; no router yet.
 	require.NoError(t, bootShardService(ctx, state))
 	require.NotNil(t, state.shardSvc, "shardSvc after bootShardService")
+	require.NotNil(t, state.dataWAL, "data WAL after shard service phase")
+	assert.NotEmpty(t, state.dataWALDir, "dataWALDir set after shard service phase")
+	assert.True(t, state.shardSvc.HasDataWAL(), "shard service receives data WAL")
 	require.Greater(t, state.effectiveEC.NumShards(), 0, "effectiveEC after bootShardService")
 	// Single-node cluster -> 1+0 auto profile.
 	assert.Equal(t, 1, state.effectiveEC.DataShards)

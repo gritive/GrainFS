@@ -25,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -168,6 +169,12 @@ type bootState struct {
 	// bootBalancerAndGossip
 	balancerProposer *cluster.BalancerProposer
 	gossipReceiver   *cluster.GossipReceiver
+
+	// bootShardService (data WAL — opened before the cluster shard service so
+	// shard writes can be logged and replayed before any QUIC stream handler
+	// is registered downstream by bootStreamRouter).
+	dataWAL    *datawal.WAL
+	dataWALDir string
 
 	// bootWALAndForwarders
 	wal               *wal.WAL
