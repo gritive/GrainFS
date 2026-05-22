@@ -24,6 +24,12 @@ const (
 
 	DefaultClusterSnapshotInterval = 1 * time.Hour
 	DefaultClusterSnapshotRetain   = 24
+
+	DefaultWeightedHRWEnabled      = true
+	DefaultBoundedLoadsEnabled     = true
+	DefaultBoundedLoadsC           = 1.25
+	DefaultBoundedLoadsCLow        = 1.0
+	DefaultBoundedLoadsMaxStaleTTL = 60 * time.Second
 )
 
 // DefaultAlertWebhook returns "" — webhooks are disabled by default.

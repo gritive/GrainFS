@@ -73,6 +73,16 @@ func (c *ClusterConfig) Validate() error {
 		}
 	}
 
+	if bl := c.BoundedLoadsC(); bl < 1.0 || bl > 3.0 {
+		errs = append(errs, fmt.Sprintf("bounded-loads-c must be in [1.0, 3.0], got %v", bl))
+	}
+	if blLow := c.BoundedLoadsCLow(); blLow < 0.5 || blLow >= c.BoundedLoadsC() {
+		errs = append(errs, fmt.Sprintf("bounded-loads-c-low must be in [0.5, %v), got %v", c.BoundedLoadsC(), blLow))
+	}
+	if d := c.BoundedLoadsMaxStaleTTL(); d < time.Second {
+		errs = append(errs, fmt.Sprintf("bounded-loads-max-stale-ttl must be >= 1s, got %v", d))
+	}
+
 	if len(errs) == 0 {
 		return nil
 	}
