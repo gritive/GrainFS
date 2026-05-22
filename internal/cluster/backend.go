@@ -3239,6 +3239,9 @@ func (b *DistributedBackend) newECObjectReader() ecObjectReader {
 	if b.currentPeerHealth() != nil {
 		r.peerHealth = b.currentPeerHealth()
 	}
+	if b.bl != nil {
+		r.bl = b.bl // may be nil until InitBoundedLoads; computeAttemptOrder nil-guards
+	}
 	return r
 }
 

@@ -537,3 +537,67 @@ func TestECObjectReader_CacheCanStore_FitsInCache(t *testing.T) {
 	r := ecObjectReader{cache: newFakeCache(1 << 20)}
 	require.True(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
 }
+
+// fakeHotChecker for unit tests.
+type fakeHotChecker struct {
+	hot map[string]struct{}
+}
+
+func newFakeHot(nodes ...string) *fakeHotChecker {
+	m := map[string]struct{}{}
+	for _, n := range nodes {
+		m[n] = struct{}{}
+	}
+	return &fakeHotChecker{hot: m}
+}
+
+func (f *fakeHotChecker) IsHot(nodeID string) bool {
+	_, ok := f.hot[nodeID]
+	return ok
+}
+
+func containsInt(s []int, x int) bool {
+	for _, v := range s {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func TestComputeAttemptOrder_SwapInHotDataToParity(t *testing.T) {
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4", "n5"}}
+	rec.K = 4
+	rec.M = 2
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	r := ecObjectReader{bl: newFakeHot("n0")}
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+
+	require.NotContains(t, primary, 0, "primary must not contain hot data idx 0")
+	require.True(t, containsInt(primary, 4) || containsInt(primary, 5), "primary must contain at least one parity idx")
+	require.Contains(t, fallback, 0, "fallback must contain hot data idx 0")
+	require.Len(t, primary, 4, "primary len must equal k=4")
+}
+
+func TestComputeAttemptOrder_NoBlNoSwap(t *testing.T) {
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4", "n5"}}
+	rec.K = 4
+	rec.M = 2
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	r := ecObjectReader{} // bl nil
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	require.Equal(t, []int{0, 1, 2, 3}, primary)
+	require.Equal(t, []int{4, 5}, fallback)
+}
+
+func TestComputeAttemptOrder_NoColdNoSwap(t *testing.T) {
+	// All data shards cool → no swap
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4", "n5"}}
+	rec.K = 4
+	rec.M = 2
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	r := ecObjectReader{bl: newFakeHot()} // nothing hot
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	require.Equal(t, []int{0, 1, 2, 3}, primary)
+	require.Equal(t, []int{4, 5}, fallback)
+}
