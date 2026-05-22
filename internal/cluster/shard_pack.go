@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -14,6 +15,12 @@ import (
 
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
+
+// errPackRecordCorrupt signals a CRC mismatch on a pack record. In scanFile
+// (on-disk replay) this is treated as end-of-data (torn write): the rest of
+// the blob is discarded. In appendRawRecord (WAL replay) it is a hard error:
+// the WAL payload was bit-flipped between the original append and replay.
+var errPackRecordCorrupt = errors.New("shard pack: record CRC mismatch")
 
 const (
 	shardPackMaxSize      = 256 << 20
@@ -260,9 +267,9 @@ func (s *shardPackStore) appendRawRecord(record []byte) error {
 }
 
 // scanRecord parses one on-disk pack record and updates the in-memory index.
-// Returns nil on a CRC mismatch (the caller already accepted these bytes; a
-// mismatch means the record is unusable but does not invalidate later
-// records when scanning from disk).
+// Returns errPackRecordCorrupt on a CRC mismatch. Callers decide whether the
+// mismatch is end-of-data (scanFile, torn-write convention) or a hard error
+// (appendRawRecord, WAL replay).
 func (s *shardPackStore) scanRecord(record []byte, blobID uint64, recordOffset int64) error {
 	if len(record) < 9+4 {
 		return fmt.Errorf("shard pack record too short: %d", len(record))
@@ -277,7 +284,7 @@ func (s *shardPackStore) scanRecord(record []byte, blobID uint64, recordOffset i
 	data := record[9+keyLen : 9+keyLen+dataLen]
 	crcGot := binary.BigEndian.Uint32(record[9+keyLen+dataLen:])
 	if crcGot != shardPackCRC(flag, string(key), data) {
-		return nil
+		return errPackRecordCorrupt
 	}
 	pkey := string(key)
 	switch flag {
@@ -341,6 +348,12 @@ func (s *shardPackStore) scanFile(blobID uint64, path string) error {
 			return nil
 		}
 		if err := s.scanRecord(record, blobID, off); err != nil {
+			if errors.Is(err, errPackRecordCorrupt) {
+				// Torn write: discard the rest of the blob. Preserves the
+				// pre-refactor scanFile semantics where the first CRC
+				// mismatch ends the scan.
+				return nil
+			}
 			return err
 		}
 		off += entrySize

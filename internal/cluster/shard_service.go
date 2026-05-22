@@ -1074,7 +1074,24 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	}
 	s.replayingDataWAL.Store(true)
 	defer s.replayingDataWAL.Store(false)
-	return datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDir), "datawal"), 0, nil, shardDataWALMaterializer{s: s})
+	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDir), "datawal"), 0, nil, shardDataWALMaterializer{s: s}); err != nil {
+		return err
+	}
+	// The materializer may have constructed a nil-WAL pack store while
+	// replaying OpShardPackPut/Delete records. Drop it and reopen against
+	// the live WAL so subsequent appends are durable.
+	if s.shardPack != nil {
+		_ = s.shardPack.Close()
+		s.shardPack = nil
+	}
+	if s.packThreshold > 0 {
+		pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack"), s.dataWAL)
+		if err != nil {
+			return fmt.Errorf("reopen shard pack after recovery: %w", err)
+		}
+		s.shardPack = pack
+	}
+	return nil
 }
 
 type shardDataWALMaterializer struct {

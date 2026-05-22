@@ -975,3 +975,39 @@ func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(svc.dataDir, "b", "packed", "shard_0"))
 	require.True(t, os.IsNotExist(statErr), "pack-routed write must not resurrect shard file on replay")
 }
+
+// TestShardPack_DataWALWritesLoggedAfterRecovery regression-tests that the
+// pack store wired by RecoverDataWAL holds onto the live data WAL, so a
+// pack write made after recovery survives a second crash+recover cycle.
+// Pre-fix the materializer left s.shardPack pointing at a nil-WAL store and
+// subsequent pack writes were silently un-logged.
+func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithShardPackThreshold(1024),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "k1", 0, []byte("first")))
+	require.NoError(t, dwal.Flush())
+
+	// Simulate restart-and-recover.
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	// A write made AFTER recovery must produce a WAL record that can replay
+	// through a second recovery.
+	require.NoError(t, svc.WriteLocalShard("b", "k2", 0, []byte("second")))
+	require.NoError(t, dwal.Flush())
+
+	// Wipe the pack directory and recover again; the second write must
+	// reappear from the WAL.
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.dataDir, ".pack")))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, ok, err := svc.ReadLocalShardFromPack("b", "k2", 0)
+	require.NoError(t, err)
+	require.True(t, ok, "post-recovery pack write must replay through a second recovery")
+	require.Equal(t, []byte("second"), got)
+}
