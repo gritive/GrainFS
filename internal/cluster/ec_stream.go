@@ -8,12 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/klauspost/reedsolomon"
+	"golang.org/x/sync/errgroup"
 )
+
+var ecSpoolCounter uint64
 
 const (
 	defaultECStreamBlockSize = 1 << 20
@@ -234,9 +239,10 @@ func spoolECShardsToFinal(
 		finalFormat: true,
 		aadBases:    make([][]byte, cfg.NumShards()),
 	}
-	// Per-object spool subdir on each drive: dataDirs[i%len]/tmp/.ec-spool-<stamp>
+	// Per-object spool subdir on each drive: dataDirs[i%len(dataDirs)]/tmp/.ec-spool-<stamp>
 	stamp := time.Now().UnixNano()
-	subdir := fmt.Sprintf(".ec-spool-%d", stamp)
+	cnt := atomic.AddUint64(&ecSpoolCounter, 1)
+	subdir := fmt.Sprintf(".ec-spool-%d-%d", stamp, cnt)
 	allocSpool := func(idx int) (path string, err error) {
 		drive := dataDirs[idx%len(dataDirs)]
 		dir := filepath.Join(drive, "tmp", subdir)
@@ -491,7 +497,6 @@ func spoolECShardsToFinalMemory(
 	bucket, shardKey string,
 	sp *spooledObject,
 ) (*spooledECShards, error) {
-	_ = ctx
 	stageStart := time.Now()
 	src, err := sp.Open()
 	if err != nil {
@@ -532,60 +537,86 @@ func spoolECShardsToFinalMemory(
 		aadBases:    make([][]byte, cfg.NumShards()),
 	}
 	stamp := time.Now().UnixNano()
-	subdir := fmt.Sprintf(".ec-spool-%d", stamp)
+	cnt := atomic.AddUint64(&ecSpoolCounter, 1)
+	subdir := fmt.Sprintf(".ec-spool-%d-%d", stamp, cnt)
 	cleanup := func() {
 		out.Cleanup()
 	}
 
-	shardHeader := encodeShardHeader(sp.Size)
-	stageStart = time.Now()
+	// Pre-create unique spool directories to optimize os.MkdirAll on APFS
+	uniqueDirs := make(map[string]bool)
 	for i := 0; i < cfg.NumShards(); i++ {
 		drive := dataDirs[i%len(dataDirs)]
 		dir := filepath.Join(drive, "tmp", subdir)
+		uniqueDirs[dir] = true
+	}
+	for dir := range uniqueDirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			cleanup()
 			return nil, fmt.Errorf("ec spool mkdir %s: %w", dir, err)
 		}
 		out.extraCleanupDirs = append(out.extraCleanupDirs, dir)
-		path := filepath.Join(dir, fmt.Sprintf("shard_%d", i))
-		out.paths[i] = path
-		out.aadBases[i] = []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-		if err != nil {
-			cleanup()
-			return nil, fmt.Errorf("create ec shard %d: %w", i, err)
-		}
-		cw, err := eccodec.NewEncryptedShardChunkedWriter(f, sp.encryptor, out.aadBases[i], eccodec.DefaultEncryptedChunkSize)
-		if err != nil {
-			_ = f.Close()
-			cleanup()
-			return nil, fmt.Errorf("create chunked writer %d: %w", i, err)
-		}
-		if _, err := cw.Write(shardHeader[:]); err != nil {
-			_ = cw.Close()
-			_ = f.Close()
-			cleanup()
-			return nil, fmt.Errorf("write shard header %d: %w", i, err)
-		}
-		if _, err := cw.Write(shards[i]); err != nil {
-			_ = cw.Close()
-			_ = f.Close()
-			cleanup()
-			return nil, fmt.Errorf("write shard body %d: %w", i, err)
-		}
-		if err := cw.Close(); err != nil {
-			_ = f.Close()
-			cleanup()
-			return nil, fmt.Errorf("close chunked writer %d: %w", i, err)
-		}
-		if err := f.Close(); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("close shard file %d: %w", i, err)
-		}
-		clear(shards[i])
-		if info, statErr := os.Stat(path); statErr == nil {
-			out.sizes[i] = info.Size()
-		}
+	}
+
+	shardHeader := encodeShardHeader(sp.Size)
+	stageStart = time.Now()
+
+	g, gctx := errgroup.WithContext(ctx)
+	for i := 0; i < cfg.NumShards(); i++ {
+		i := i
+		g.Go(func() error {
+			drive := dataDirs[i%len(dataDirs)]
+			dir := filepath.Join(drive, "tmp", subdir)
+			path := filepath.Join(dir, fmt.Sprintf("shard_%d", i))
+			out.paths[i] = path
+			out.aadBases[i] = []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
+
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+			if err != nil {
+				return fmt.Errorf("create ec shard %d: %w", i, err)
+			}
+			// macOS F_NOCACHE / Linux no-op. Bypasses the unified buffer
+			// cache so the chunked encrypted writer's many small
+			// fs-cached writes don't fight the page reclaimer for the
+			// shard bytes — fsync then has nothing to flush. Linux falls
+			// through (O_DIRECT would EINVAL on the chunked writer's
+			// unaligned writes); a Linux-only optimisation would need
+			// to consolidate the chunks into one aligned buffer first.
+			_ = directio.ApplyNoCacheHint(f)
+			cw, err := eccodec.NewEncryptedShardChunkedWriter(f, sp.encryptor, out.aadBases[i], eccodec.DefaultEncryptedChunkSize)
+			if err != nil {
+				_ = f.Close()
+				return fmt.Errorf("create chunked writer %d: %w", i, err)
+			}
+			if _, err := cw.Write(shardHeader[:]); err != nil {
+				_ = cw.Close()
+				_ = f.Close()
+				return fmt.Errorf("write shard header %d: %w", i, err)
+			}
+			if _, err := cw.Write(shards[i]); err != nil {
+				_ = cw.Close()
+				_ = f.Close()
+				return fmt.Errorf("write shard body %d: %w", i, err)
+			}
+			if err := cw.Close(); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("close chunked writer %d: %w", i, err)
+			}
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("close shard file %d: %w", i, err)
+			}
+			clear(shards[i])
+			if info, statErr := os.Stat(path); statErr == nil {
+				out.sizes[i] = info.Size()
+			}
+			return nil
+		})
+		_ = gctx // keep compiler happy if unused
+	}
+
+	if err := g.Wait(); err != nil {
+		cleanup()
+		return nil, err
 	}
 	observePutStage("ec_spool_shards_final_mem", "write_shards", stageStart)
 	return out, nil

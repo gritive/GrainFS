@@ -207,25 +207,33 @@ func (s *ShardService) importLocalShardFromPath(ctx context.Context, bucket, key
 		return fmt.Errorf("import shard mkdir %s: %w", dir, err)
 	}
 	finalPath := s.getShardPath(bucket, key, shardIdx)
+
+	// If fsync is not required, perform a single direct rename to eliminate
+	// metadata write overhead on macOS APFS.
+	if !requireFsync {
+		if err := os.Rename(srcPath, finalPath); err != nil {
+			return fmt.Errorf("import shard rename direct %s → %s: %w", srcPath, finalPath, err)
+		}
+		return nil
+	}
+
 	tmpPath := fmt.Sprintf("%s.%d.%d.import.tmp", finalPath, os.Getpid(), time.Now().UnixNano())
 	if err := os.Rename(srcPath, tmpPath); err != nil {
 		return fmt.Errorf("import shard rename %s → %s: %w", srcPath, tmpPath, err)
 	}
-	if requireFsync {
-		f, err := os.OpenFile(tmpPath, os.O_RDONLY, 0)
-		if err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("import shard reopen for fsync: %w", err)
-		}
-		if err := f.Sync(); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("import shard fsync: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("import shard close: %w", err)
-		}
+	f, err := os.OpenFile(tmpPath, os.O_RDONLY, 0)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard reopen for fsync: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard fsync: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard close: %w", err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)

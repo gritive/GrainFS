@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -1644,7 +1643,9 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	sp := &spooledObject{
 		Size: size,
 	}
-	h := md5.New()
+	h := md5Pool.Get().(hash.Hash)
+	h.Reset()
+	defer md5Pool.Put(h)
 	obj, err := b.putObjectSingleLocalShardFromReader(
 		ctx,
 		bucket,
@@ -1713,6 +1714,9 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 	sp := &spooledObject{
 		Size: *sizeHint,
 	}
+	h := md5Pool.Get().(hash.Hash)
+	h.Reset()
+	defer md5Pool.Put(h)
 	obj, err := b.putObjectSingleLocalShardFromReader(
 		ctx,
 		bucket,
@@ -1726,7 +1730,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 		userMetadata,
 		sseAlgorithm,
 		"ec_single_stream",
-		md5.New(),
+		h,
 		nil,
 		nil,
 		"",
@@ -4027,7 +4031,9 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 		return nil, fmt.Errorf("create part file: %w", err)
 	}
 
-	h := md5.New()
+	h := md5Pool.Get().(hash.Hash)
+	h.Reset()
+	defer md5Pool.Put(h)
 	var partWriter io.Writer = f
 	if b.encryptedShardStorage() {
 		partWriter = &encryptedSpoolRecordWriter{
@@ -4285,10 +4291,12 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 		if err != nil {
 			return nil, fmt.Errorf("open part %d: %w", partNumber, err)
 		}
-		h := md5.New()
+		h := md5Pool.Get().(hash.Hash)
+		h.Reset()
 		size, err := io.Copy(h, f)
 		f.Close()
 		if err != nil {
+			md5Pool.Put(h)
 			return nil, fmt.Errorf("hash part %d: %w", partNumber, err)
 		}
 		out = append(out, storage.Part{
@@ -4296,6 +4304,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 			ETag:       hex.EncodeToString(h.Sum(nil)),
 			Size:       size,
 		})
+		md5Pool.Put(h)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PartNumber < out[j].PartNumber })
 	if maxParts > 0 && len(out) > maxParts {

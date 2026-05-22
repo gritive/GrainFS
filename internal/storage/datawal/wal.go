@@ -33,6 +33,11 @@ type WAL struct {
 	file          walFile
 	lastSeq       uint64
 	lastTimestamp int64
+
+	// Group commit fields
+	flushedSeq uint64
+	isSyncing  bool
+	syncCond   *sync.Cond
 }
 
 type walFile interface {
@@ -54,6 +59,7 @@ func Open(dir string, enc *encrypt.Encryptor) (*WAL, error) {
 		return nil, err
 	}
 	w := &WAL{dir: dir, enc: enc, lastSeq: state.seq, lastTimestamp: state.timestamp}
+	w.syncCond = sync.NewCond(&w.mu)
 	if err := w.openAppendFile(state); err != nil {
 		return nil, err
 	}
@@ -158,12 +164,51 @@ func (w *WAL) Flush() error {
 	if w.file == nil {
 		return nil
 	}
-	return w.file.Sync()
+
+	targetSeq := w.lastSeq
+	if w.flushedSeq >= targetSeq {
+		return nil
+	}
+
+	for w.isSyncing {
+		w.syncCond.Wait()
+		if w.file == nil {
+			return nil
+		}
+		if w.flushedSeq >= targetSeq {
+			return nil
+		}
+	}
+
+	// Double check after waiting
+	if w.flushedSeq >= targetSeq {
+		return nil
+	}
+
+	w.isSyncing = true
+	file := w.file
+	w.mu.Unlock()
+
+	err := file.Sync()
+
+	w.mu.Lock()
+	w.isSyncing = false
+	if err == nil {
+		if targetSeq > w.flushedSeq {
+			w.flushedSeq = targetSeq
+		}
+	}
+	w.syncCond.Broadcast()
+
+	return err
 }
 
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	for w.isSyncing {
+		w.syncCond.Wait()
+	}
 	if w.file == nil {
 		return nil
 	}

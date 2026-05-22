@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+var md5Pool = sync.Pool{
+	New: func() any {
+		return md5.New()
+	},
+}
 
 const spoolCopyBufferSize = 1 << 20
 const maxEncryptedSpoolBlobBytes = 2 * spoolCopyBufferSize
@@ -86,11 +93,13 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*
 			}
 			storage.PutXXH3Hasher(xh)
 		} else {
-			h := md5.New()
+			h := md5Pool.Get().(hash.Hash)
+			h.Reset()
 			size, err = io.CopyBuffer(tmp, io.TeeReader(reader, h), *bufp)
 			if err == nil {
 				etag = hex.EncodeToString(h.Sum(nil))
 			}
+			md5Pool.Put(h)
 		}
 	} else {
 		size, err = io.CopyBuffer(tmp, reader, *bufp)
@@ -218,8 +227,11 @@ func spoolHashForBucket(bucket string) (io.Writer, func() string, func()) {
 			return hex.EncodeToString(buf[:])
 		}, func() { storage.PutXXH3Hasher(xh) }
 	}
-	h := md5.New()
-	return h, func() string { return hex.EncodeToString(h.Sum(nil)) }, func() {}
+	h := md5Pool.Get().(hash.Hash)
+	h.Reset()
+	return h, func() string { return hex.EncodeToString(h.Sum(nil)) }, func() {
+		md5Pool.Put(h)
+	}
 }
 
 type encryptedSpoolRecordWriter struct {

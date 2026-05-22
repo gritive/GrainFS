@@ -143,7 +143,7 @@ func (m *DegradedMonitor) check() {
 	// Degraded when the cluster can no longer place the configured EC stripe.
 	// For the 1+0 single-node profile this threshold is 1: it has no redundancy,
 	// but it still uses the EC object pipeline.
-	degraded := liveCount < minRequired
+	degraded := len(nodes) >= minRequired && liveCount < minRequired
 
 	if degraded {
 		m.tracker.Report(true, "ec_insufficient_nodes",
