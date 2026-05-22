@@ -87,6 +87,50 @@ func TestClusterConfig_Validate_Invariants(t *testing.T) {
 
 func ptrDuration(v time.Duration) *time.Duration { return &v }
 
+func TestClusterConfigValidate_BoundedLoadsC(t *testing.T) {
+	cases := []struct {
+		name      string
+		c, cLow   float64
+		wantError bool
+	}{
+		{"default", 1.25, 1.0, false},
+		{"c too small", 0.9, 1.0, true},
+		{"c too large", 3.5, 1.0, true},
+		{"c_low equal to c", 1.25, 1.25, true},
+		{"c_low above c", 1.25, 1.5, true},
+		{"c_low too small", 1.25, 0.3, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.c
+			cLow := tc.cLow
+			cfg := NewClusterConfig()
+			cfg.applyPatch(ClusterConfigPatch{
+				BoundedLoadsC:    &c,
+				BoundedLoadsCLow: &cLow,
+			}, time.Now())
+			err := cfg.Validate()
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestClusterConfigValidate_BoundedLoadsMaxStaleTTL(t *testing.T) {
+	tooShort := 500 * time.Millisecond
+	cfg := NewClusterConfig()
+	cfg.applyPatch(ClusterConfigPatch{BoundedLoadsMaxStaleTTL: &tooShort}, time.Now())
+	require.Error(t, cfg.Validate())
+
+	ok := 60 * time.Second
+	cfg2 := NewClusterConfig()
+	cfg2.applyPatch(ClusterConfigPatch{BoundedLoadsMaxStaleTTL: &ok}, time.Now())
+	require.NoError(t, cfg2.Validate())
+}
+
 func TestClusterConfig_Validate_SnapshotBounds(t *testing.T) {
 	c := NewClusterConfig()
 

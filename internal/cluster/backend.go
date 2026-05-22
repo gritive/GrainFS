@@ -27,6 +27,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -140,6 +141,10 @@ type DistributedBackend struct {
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
 
+	nodeStatsStore *NodeStatsStore // gossip-fed disk/RPS stats; wired by StartPlacementRuntime
+	bl             *BoundedLoads   // hot-node detection; wired by StartPlacementRuntime
+	clusterCfg     *ClusterConfig  // live policy view; wired by StartPlacementRuntime (defaults until then)
+
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
@@ -235,6 +240,7 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 		logger:       log.With().Str("component", "distributed-backend").Logger(),
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
+		clusterCfg:   NewClusterConfig(), // default config until StartPlacementRuntime wires the live pointer
 	}
 	// Phase B2: wire the in-process coalesce worker + periodic backstop scan.
 	// Lifecycle is bound to Close() via coalesceCancel.
@@ -380,6 +386,35 @@ func (b *DistributedBackend) SetClusterNodes(allNodes []string) {
 	topology := newBackendTopology(allNodes)
 	b.topologySnapshot.Store(topology)
 	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
+}
+
+// StartPlacementRuntime wires the live ClusterConfig and gossip-fed
+// NodeStatsStore into the backend, constructs BoundedLoads from them, and
+// starts the periodic BoundedLoads refresh goroutine. Must be called after
+// gossip infrastructure is up (store is being populated). Weighted placement
+// and BoundedLoads skip are inactive until this is called.
+//
+// ctx governs the refresh goroutine lifetime — cancel it to stop.
+func (b *DistributedBackend) StartPlacementRuntime(ctx context.Context, cfg *ClusterConfig, store *NodeStatsStore) {
+	b.clusterCfg = cfg
+	b.nodeStatsStore = store
+	b.bl = NewBoundedLoads(store, BoundedLoadsParams{
+		C:        cfg.BoundedLoadsC(),
+		CLow:     cfg.BoundedLoadsCLow(),
+		MaxStale: cfg.BoundedLoadsMaxStaleTTL(),
+	})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.bl.RefreshIfStale()
+			}
+		}
+	}()
 }
 
 // SetClusterTopology publishes membership and EC config as one immutable
@@ -1627,7 +1662,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacementWeighted(effectiveCfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
 		placementGroupID = group.ID
 		effectiveCfg = cfg
@@ -1699,7 +1734,11 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacementWeighted(
+		effectiveCfg, liveNodes, shardKey,
+		b.nodeStatsStore, b.bl,
+		b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled(),
+	)
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
 		placementGroupID = group.ID
 		effectiveCfg = cfg
@@ -2145,9 +2184,84 @@ func (b *DistributedBackend) encryptedShardStorage() bool {
 	return b.shardSvc != nil && b.shardSvc.encryptor != nil
 }
 
-// selectECPlacement selects shard placement for shardKey using rendezvous hashing over liveNodes.
-func selectECPlacement(cfg ECConfig, liveNodes []string, shardKey string) []string {
-	return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+// selectECPlacementWeighted applies disk-capacity weights and (optionally) BoundedLoads hot
+// skip. weightedEnabled=false → nil weights (legacy behaviour). bl=nil or blEnabled=false →
+// no hot skip. store=nil also falls back to unweighted.
+func selectECPlacementWeighted(
+	cfg ECConfig,
+	liveNodes []string,
+	shardKey string,
+	store *NodeStatsStore,
+	bl *BoundedLoads,
+	weightedEnabled bool,
+	blEnabled bool,
+) []string {
+	if !weightedEnabled || store == nil {
+		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+	}
+	weights := make([]float64, len(liveNodes))
+	skipReason := make([]string, len(liveNodes))
+	active := 0
+	for i, nodeID := range liveNodes {
+		ns, ok := store.Get(nodeID)
+		if !ok || ns.DiskAvailBytes == 0 {
+			weights[i] = 0
+			skipReason[i] = "stale"
+			continue
+		}
+		if blEnabled && bl != nil && bl.IsHot(nodeID) {
+			weights[i] = 0
+			skipReason[i] = "bl_hot"
+			continue
+		}
+		weights[i] = float64(ns.DiskAvailBytes)
+		active++
+	}
+
+	// All-stale safeguard: if no live data (e.g. boot before first gossip),
+	// fall back to legacy unweighted placement so writes don't fail.
+	if active == 0 && countSkippedFor(skipReason, "stale") == len(liveNodes) {
+		metrics.ClusterPlacementSkipped.WithLabelValues("*", "all_stale_fallback").Inc()
+		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+	}
+
+	// If fewer than k+m active nodes remain after BL skip, bypass BL.
+	if active < cfg.NumShards() {
+		for i := range weights {
+			if skipReason[i] == "bl_hot" {
+				ns, ok := store.Get(liveNodes[i])
+				if ok && ns.DiskAvailBytes > 0 {
+					weights[i] = float64(ns.DiskAvailBytes)
+					skipReason[i] = ""
+					active++
+				}
+			}
+		}
+		metrics.ClusterBLBypassedWrites.Inc()
+	}
+
+	// Emit per-reason skip metrics.
+	for i, r := range skipReason {
+		if r != "" {
+			metrics.ClusterPlacementSkipped.WithLabelValues(liveNodes[i], r).Inc()
+			if r == "bl_hot" {
+				metrics.ClusterBLSpilledWrites.WithLabelValues(liveNodes[i]).Inc()
+			}
+		}
+	}
+
+	return PlaceShards(shardKey, liveNodes, weights, cfg.NumShards())
+}
+
+// countSkippedFor returns the number of entries in reasons matching target.
+func countSkippedFor(reasons []string, target string) int {
+	n := 0
+	for _, r := range reasons {
+		if r == target {
+			n++
+		}
+	}
+	return n
 }
 
 func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
@@ -2217,7 +2331,7 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 	// for different versions land at different paths without changing the API.
 	shardKey := ecObjectShardKey(key, versionID)
 
-	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacementWeighted(effectiveCfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
 	topologyWrite := false
 	topologyGroup := ShardGroupEntry{}
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -2305,7 +2419,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacementWeighted(effectiveCfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
 	topologyWrite := false
 	topologyGroup := ShardGroupEntry{}
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -3128,6 +3242,9 @@ func (b *DistributedBackend) newECObjectReader() ecObjectReader {
 	}
 	if b.currentPeerHealth() != nil {
 		r.peerHealth = b.currentPeerHealth()
+	}
+	if b.bl != nil && b.clusterCfg.BoundedLoadsEnabled() {
+		r.bl = b.bl
 	}
 	return r
 }

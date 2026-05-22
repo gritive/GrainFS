@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.325.0] - 2026-05-22
+
+### Added
+
+- **Disk-capacity-aware write placement weighting.** EC shard placement now feeds each candidate node's gossip-reported `DiskAvailBytes` as an HRW weight. Nodes with more free space are selected with higher probability per object, biasing new writes toward larger disks instead of treating all nodes equally. Existing `ecRec.Nodes` placements stay frozen — no data is ever moved by this change. Toggleable via `WeightedHRWEnabled` cluster config (default on).
+- **Hot-node aware read/write routing (Bounded Loads).** When a cluster node's `RequestsPerSec` rises above `avg × c` (default `c=1.25`), new EC writes spill to other nodes and reads route around that node's data shards via parity reconstruction. Hysteresis with `avg × c_low` (default `c_low=1.0`) prevents oscillation when traffic settles in the sticky band. Hot routing applies to both buffered (cache-aware) and large-object streaming GET paths. Toggleable via `BoundedLoadsEnabled` cluster config (default on).
+- **Cluster config keys** for tuning the above: `weighted-hrw-enabled`, `bounded-loads-enabled`, `bounded-loads-c` (1.0–3.0), `bounded-loads-c-low` (0.5–c, strict less-than), `bounded-loads-max-stale-ttl` (≥1s). Defaults are safe; both features can be disabled at runtime to fall back to pre-`0.0.325.0` behaviour.
+
+### Known limitations
+
+- `BoundedLoadsC`, `BoundedLoadsCLow`, `BoundedLoadsMaxStaleTTL` are captured at process start. A runtime cluster-config patch for these values takes effect on the next process restart. The two enable flags (`WeightedHRWEnabled`, `BoundedLoadsEnabled`) are read live per request.
+- The placement bias is statistically observable (BL spill/rerank counters) but per-object shard layout is not yet exposed via an introspection endpoint, so capacity-proportionality of the resulting distribution is verified by metrics, not by direct shard-map inspection.
+
+### Observability
+
+- New Prometheus metrics:
+  - `grainfs_cluster_bl_avg_rps`, `grainfs_cluster_bl_threshold_high_rps`, `grainfs_cluster_bl_threshold_low_rps`, `grainfs_cluster_bl_hot_nodes` (gauges)
+  - `grainfs_cluster_bl_spilled_writes_total{node}`, `grainfs_cluster_bl_bypassed_writes_total`
+  - `grainfs_cluster_bl_reranked_reads_total{node}`, `grainfs_cluster_bl_bypassed_reads_total`
+  - `grainfs_cluster_bl_hot_state_transitions_total{node,direction}`
+  - `grainfs_cluster_placement_skipped_total{node,reason}` (reason = `stale`, `drain`, `bl_hot`, `all_stale_fallback`)
+  - `grainfs_cluster_bl_snapshot_refresh_total{result}` (`fresh` vs `singleflight_wait`)
+
 ## [0.0.324.0] - 2026-05-22
 
 ### Added

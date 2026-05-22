@@ -192,7 +192,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		cleanupMerged()
 		return fmt.Errorf("coalesce: no effective EC config for %d live nodes", len(liveNodes))
 	}
-	placement := selectECPlacement(cfg, liveNodes, shardKey)
+	placement := selectECPlacementWeighted(cfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
 	if len(placement) != cfg.NumShards() {
 		cleanupMerged()
 		return fmt.Errorf("coalesce: placement has %d nodes, need %d (k=%d m=%d)",

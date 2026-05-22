@@ -6,10 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 )
+
+// hotChecker is the BoundedLoads interface needed for read attempt reordering.
+// Defined here so tests can inject mocks without depending on the full BoundedLoads.
+type hotChecker interface {
+	IsHot(nodeID string) bool
+}
 
 // ecObjectShardFetcher abstracts local and remote shard I/O for EC reads.
 type ecObjectShardFetcher interface {
@@ -44,7 +52,11 @@ type ecObjectReader struct {
 	peerHealth ecObjectPeerHealth // nil = disabled
 	cache      ecObjectShardCache // nil = disabled
 	ecConfig   ECConfig           // cluster-level fallback; per-object rec overrides
+	bl         hotChecker         // nil-safe; nil → legacy behavior (no swap)
 }
+
+// Verify that *BoundedLoads satisfies hotChecker at compile time.
+var _ hotChecker = (*BoundedLoads)(nil)
 
 // ReadObject reconstructs the full object from EC shards and returns it as a
 // byte slice. shardKey is the on-disk path (key or key+"/"+versionID).
@@ -135,6 +147,79 @@ func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec
 		}
 	}
 	return done, nil
+}
+
+// computeAttemptOrder returns primary and fallback shard idx lists.
+// Hot data shards are swapped 1:1 with the lowest available parity idx.
+// Both lists are sorted ascending for deterministic ordering.
+// hot > m → bypass: primary=dataIdx, fallback=parityIdx (metric incremented).
+// bl == nil → legacy: primary=dataIdx, fallback=parityIdx.
+func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (primary, fallback []int) {
+	k := cfg.DataShards
+	m := cfg.ParityShards
+	dataIdx := make([]int, 0, k)
+	parityIdx := make([]int, 0, m)
+	for i := 0; i < k; i++ {
+		dataIdx = append(dataIdx, i)
+	}
+	for i := k; i < k+m; i++ {
+		parityIdx = append(parityIdx, i)
+	}
+
+	if r.bl == nil {
+		return dataIdx, parityIdx
+	}
+	var hotData []int
+	for _, i := range dataIdx {
+		if r.bl.IsHot(rec.Nodes[i]) {
+			hotData = append(hotData, i)
+		}
+	}
+	if len(hotData) == 0 {
+		return dataIdx, parityIdx
+	}
+	if len(hotData) > len(parityIdx) {
+		metrics.ClusterBLBypassedReads.Inc()
+		return dataIdx, parityIdx
+	}
+
+	// Swap hotData[:n] with parityIdx[:n] (n = len(hotData)).
+	parityIn := parityIdx[:len(hotData)]
+	primarySet := map[int]struct{}{}
+	for _, i := range dataIdx {
+		primarySet[i] = struct{}{}
+	}
+	for _, i := range hotData {
+		delete(primarySet, i)
+	}
+	for _, i := range parityIn {
+		primarySet[i] = struct{}{}
+	}
+	for i := range primarySet {
+		primary = append(primary, i)
+	}
+	sort.Ints(primary)
+
+	fallbackSet := map[int]struct{}{}
+	for _, i := range parityIdx {
+		fallbackSet[i] = struct{}{}
+	}
+	for _, i := range parityIn {
+		delete(fallbackSet, i)
+	}
+	for _, i := range hotData {
+		fallbackSet[i] = struct{}{}
+	}
+	for i := range fallbackSet {
+		fallback = append(fallback, i)
+	}
+	sort.Ints(fallback)
+
+	// Metric: per-hot-data-node rerank counter.
+	for _, i := range hotData {
+		metrics.ClusterBLRerankedReads.WithLabelValues(rec.Nodes[i]).Inc()
+	}
+	return primary, fallback
 }
 
 // readShards collects the k-of-n data shards needed to reconstruct the object.
@@ -290,24 +375,23 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		}
 	}
 
-	// Local data-shard fast path: if all K data shards are local, read them
-	// without spinning up goroutines.
-	dataIdx := make([]int, 0, recCfg.DataShards)
+	// Determine primary and fallback shard indices, swapping hot data shards to
+	// parity when BoundedLoads is active.
+	primary, fallback := r.computeAttemptOrder(rec, recCfg)
+
+	// Local primary-shard fast path: if all primary shards are local-or-cached,
+	// read them without spinning up goroutines.
 	localDataFastPath := true
-	for i := 0; i < recCfg.DataShards; i++ {
-		dataIdx = append(dataIdx, i)
+	for _, i := range primary {
 		if !cached[i] && rec.Nodes[i] != selfID {
 			localDataFastPath = false
+			break
 		}
 	}
 	if !localDataFastPath {
-		fetchShards(dataIdx, false)
+		fetchShards(primary, false)
 		if available < recCfg.DataShards {
-			parityIdx := make([]int, 0, recCfg.ParityShards)
-			for i := recCfg.DataShards; i < len(rec.Nodes); i++ {
-				parityIdx = append(parityIdx, i)
-			}
-			fetchShards(parityIdx, true)
+			fetchShards(fallback, true)
 			if available < recCfg.DataShards {
 				return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
 					available, len(rec.Nodes), recCfg.DataShards)
@@ -316,16 +400,12 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		return recCfg, shards, nil
 	}
 
-	fetchShards(dataIdx, false)
+	fetchShards(primary, false)
 	if available >= recCfg.DataShards {
 		return recCfg, shards, nil
 	}
 
-	parityIdx := make([]int, 0, recCfg.ParityShards)
-	for i := recCfg.DataShards; i < len(rec.Nodes); i++ {
-		parityIdx = append(parityIdx, i)
-	}
-	fetchShards(parityIdx, true)
+	fetchShards(fallback, true)
 	if available < recCfg.DataShards {
 		return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
 			available, len(rec.Nodes), recCfg.DataShards)
@@ -388,13 +468,19 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 		return true
 	}
 
-	for i := 0; i < recCfg.DataShards; i++ {
+	// Apply BL re-routing: hot data shards are swapped to fallback so parity
+	// is attempted first. Mirrors the same swap used in readShards.
+	primary, fallback := r.computeAttemptOrder(rec, recCfg)
+	for _, i := range primary {
 		openShard(i)
 	}
 	if available >= recCfg.DataShards {
 		return recCfg, shardReaders, nil
 	}
-	for i := recCfg.DataShards; i < len(rec.Nodes) && available < recCfg.DataShards; i++ {
+	for _, i := range fallback {
+		if available >= recCfg.DataShards {
+			break
+		}
 		openShard(i)
 	}
 	if available < recCfg.DataShards {

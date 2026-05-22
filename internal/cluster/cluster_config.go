@@ -28,6 +28,13 @@ type ClusterConfigPatch struct {
 	BalancerMigrationPendingTTL *time.Duration
 	BalancerGossipInterval      *time.Duration
 
+	// Phase A: weighted HRW + Phase B: bounded-loads read routing.
+	WeightedHRWEnabled      *bool
+	BoundedLoadsEnabled     *bool
+	BoundedLoadsC           *float64
+	BoundedLoadsCLow        *float64
+	BoundedLoadsMaxStaleTTL *time.Duration
+
 	AlertWebhook              *string
 	AlertWebhookSecretWrapped []byte // nil = leave alone; len()==0 with explicit nil semantics handled via ResetKeys
 
@@ -73,6 +80,12 @@ type clusterConfigSnap struct {
 	balancerMigrationMaxRetries *int32
 	balancerMigrationPendingTTL *time.Duration
 	balancerGossipInterval      *time.Duration
+
+	weightedHRWEnabled      *bool
+	boundedLoadsEnabled     *bool
+	boundedLoadsC           *float64
+	boundedLoadsCLow        *float64
+	boundedLoadsMaxStaleTTL *time.Duration
 
 	alertWebhook              string // "" if not explicitly set
 	alertWebhookHasExplicit   bool   // distinguishes default "" from explicit ""
@@ -154,6 +167,21 @@ func (c *ClusterConfig) applyPatch(p ClusterConfigPatch, ts time.Time) {
 	if p.SnapshotRetain != nil {
 		next.snapshotRetain = p.SnapshotRetain
 	}
+	if p.WeightedHRWEnabled != nil {
+		next.weightedHRWEnabled = p.WeightedHRWEnabled
+	}
+	if p.BoundedLoadsEnabled != nil {
+		next.boundedLoadsEnabled = p.BoundedLoadsEnabled
+	}
+	if p.BoundedLoadsC != nil {
+		next.boundedLoadsC = p.BoundedLoadsC
+	}
+	if p.BoundedLoadsCLow != nil {
+		next.boundedLoadsCLow = p.BoundedLoadsCLow
+	}
+	if p.BoundedLoadsMaxStaleTTL != nil {
+		next.boundedLoadsMaxStaleTTL = p.BoundedLoadsMaxStaleTTL
+	}
 
 	for _, k := range p.ResetKeys {
 		next.clearKey(k)
@@ -197,6 +225,16 @@ func (s *clusterConfigSnap) clearKey(k string) {
 		s.snapshotInterval = nil
 	case "snapshot-retain":
 		s.snapshotRetain = nil
+	case "weighted-hrw-enabled":
+		s.weightedHRWEnabled = nil
+	case "bounded-loads-enabled":
+		s.boundedLoadsEnabled = nil
+	case "bounded-loads-c":
+		s.boundedLoadsC = nil
+	case "bounded-loads-c-low":
+		s.boundedLoadsCLow = nil
+	case "bounded-loads-max-stale-ttl":
+		s.boundedLoadsMaxStaleTTL = nil
 	}
 }
 
@@ -220,6 +258,11 @@ func AllConfigKeys() []string {
 		"disk-critical-threshold",
 		"snapshot-interval",
 		"snapshot-retain",
+		"weighted-hrw-enabled",
+		"bounded-loads-enabled",
+		"bounded-loads-c",
+		"bounded-loads-c-low",
+		"bounded-loads-max-stale-ttl",
 	}
 }
 
@@ -339,6 +382,41 @@ func (c *ClusterConfig) SnapshotRetain() int32 {
 	return DefaultClusterSnapshotRetain
 }
 
+func (c *ClusterConfig) WeightedHRWEnabled() bool {
+	if v := c.snap.Load().weightedHRWEnabled; v != nil {
+		return *v
+	}
+	return DefaultWeightedHRWEnabled
+}
+
+func (c *ClusterConfig) BoundedLoadsEnabled() bool {
+	if v := c.snap.Load().boundedLoadsEnabled; v != nil {
+		return *v
+	}
+	return DefaultBoundedLoadsEnabled
+}
+
+func (c *ClusterConfig) BoundedLoadsC() float64 {
+	if v := c.snap.Load().boundedLoadsC; v != nil {
+		return *v
+	}
+	return DefaultBoundedLoadsC
+}
+
+func (c *ClusterConfig) BoundedLoadsCLow() float64 {
+	if v := c.snap.Load().boundedLoadsCLow; v != nil {
+		return *v
+	}
+	return DefaultBoundedLoadsCLow
+}
+
+func (c *ClusterConfig) BoundedLoadsMaxStaleTTL() time.Duration {
+	if v := c.snap.Load().boundedLoadsMaxStaleTTL; v != nil {
+		return *v
+	}
+	return DefaultBoundedLoadsMaxStaleTTL
+}
+
 // SourceForKey returns "default" or "explicit" — used by `cluster config show`.
 func (c *ClusterConfig) SourceForKey(key string) string {
 	s := c.snap.Load()
@@ -405,6 +483,26 @@ func (c *ClusterConfig) SourceForKey(key string) string {
 		}
 	case "snapshot-retain":
 		if s.snapshotRetain != nil {
+			return "explicit"
+		}
+	case "weighted-hrw-enabled":
+		if s.weightedHRWEnabled != nil {
+			return "explicit"
+		}
+	case "bounded-loads-enabled":
+		if s.boundedLoadsEnabled != nil {
+			return "explicit"
+		}
+	case "bounded-loads-c":
+		if s.boundedLoadsC != nil {
+			return "explicit"
+		}
+	case "bounded-loads-c-low":
+		if s.boundedLoadsCLow != nil {
+			return "explicit"
+		}
+	case "bounded-loads-max-stale-ttl":
+		if s.boundedLoadsMaxStaleTTL != nil {
 			return "explicit"
 		}
 	}
