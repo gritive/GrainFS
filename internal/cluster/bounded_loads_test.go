@@ -4,7 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 func TestBoundedLoads_EmptySnapshot(t *testing.T) {
@@ -86,4 +89,40 @@ func TestBoundedLoads_RefreshIfStaleSingleflight(t *testing.T) {
 	third := bl.Snapshot()
 	assert.NotSame(t, first, third, "dataVersion changed: snapshot should be refreshed")
 	assert.Equal(t, 150.0, third.AvgRPS)
+}
+
+func TestBoundedLoads_RefreshEmitsMetrics(t *testing.T) {
+	store := NewNodeStatsStore(2 * time.Minute)
+	store.Set(NodeStats{NodeID: "m1", RequestsPerSec: 100})
+	store.Set(NodeStats{NodeID: "m2", RequestsPerSec: 200})
+	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
+	bl.Refresh()
+	assert.Equal(t, 150.0, testutil.ToFloat64(metrics.ClusterBLAvgRPS))
+	// n2 (200) > high (187.5) → 1 hot node
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.ClusterBLHotNodes))
+}
+
+func TestBoundedLoads_HotTransitionCount(t *testing.T) {
+	// Use unique node IDs to avoid label pollution from other tests.
+	// Two baseline nodes keep avg below the spiked node's rps so hot detection fires.
+	baselineA := "trans-baseline-a"
+	baselineB := "trans-baseline-b"
+	target := "trans-target-node"
+
+	before := testutil.ToFloat64(metrics.ClusterBLHotStateTransitions.WithLabelValues(target, "enter"))
+
+	store := NewNodeStatsStore(2 * time.Minute)
+	store.Set(NodeStats{NodeID: baselineA, RequestsPerSec: 100})
+	store.Set(NodeStats{NodeID: baselineB, RequestsPerSec: 100})
+	store.Set(NodeStats{NodeID: target, RequestsPerSec: 100})
+	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
+	bl.Refresh()
+	// avg=100, high=125 → target (100) not hot
+
+	// Spike target well above high threshold: avg≈(100+100+500)/3≈233, high≈292 → 500>292 → enter
+	store.Set(NodeStats{NodeID: target, RequestsPerSec: 500})
+	bl.Refresh()
+
+	after := testutil.ToFloat64(metrics.ClusterBLHotStateTransitions.WithLabelValues(target, "enter"))
+	assert.Equal(t, 1.0, after-before)
 }

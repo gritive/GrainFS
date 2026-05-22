@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // BoundedLoadsParams configures hot-node detection.
@@ -91,6 +93,27 @@ func (bl *BoundedLoads) Refresh() {
 		ComputedAt:    time.Now(),
 		DataVersion:   maxUpdated,
 	}
+
+	// Emit gauges.
+	metrics.ClusterBLAvgRPS.Set(avg)
+	metrics.ClusterBLThresholdHighRPS.Set(high)
+	metrics.ClusterBLThresholdLowRPS.Set(low)
+	metrics.ClusterBLHotNodes.Set(float64(len(next.HotSet)))
+
+	// Emit transition counters by diffing prev vs next.HotSet.
+	if prev != nil {
+		for id := range next.HotSet {
+			if _, was := prev.HotSet[id]; !was {
+				metrics.ClusterBLHotStateTransitions.WithLabelValues(id, "enter").Inc()
+			}
+		}
+		for id := range prev.HotSet {
+			if _, still := next.HotSet[id]; !still {
+				metrics.ClusterBLHotStateTransitions.WithLabelValues(id, "exit").Inc()
+			}
+		}
+	}
+
 	bl.snap.Store(next)
 }
 
@@ -106,9 +129,11 @@ func (bl *BoundedLoads) RefreshIfStale() {
 		// Re-check under singleflight to avoid duplicate work after wait.
 		cur := bl.snap.Load()
 		if !bl.shouldRefresh(cur) {
+			metrics.ClusterBLSnapshotRefresh.WithLabelValues("singleflight_wait").Inc()
 			return nil, nil
 		}
 		bl.Refresh()
+		metrics.ClusterBLSnapshotRefresh.WithLabelValues("fresh").Inc()
 		return nil, nil
 	})
 }
