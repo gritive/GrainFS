@@ -506,6 +506,20 @@ start_minio() {
     env_args+=("MINIO_CI_CD=1")
     echo "  minio local multi-drive uses MINIO_CI_CD=1 for synthetic same-filesystem drives"
   fi
+  if [[ "${BENCH_ENCRYPTION:-0}" == "1" ]]; then
+    # Inline KMS master key (no KES required): MINIO_KMS_SECRET_KEY pairs a
+    # name with a base64-encoded 32-byte key, and MINIO_KMS_AUTO_ENCRYPTION
+    # forces SSE-S3 on every PUT so the comparison matches GrainFS's
+    # always-on at-rest encryption. Key is freshly generated per run; not
+    # an issue because data directories are wiped between bench runs.
+    local kms_key
+    kms_key=$(openssl rand -base64 32 | tr -d '\n')
+    env_args+=(
+      "MINIO_KMS_SECRET_KEY=warp-bench:${kms_key}"
+      "MINIO_KMS_AUTO_ENCRYPTION=on"
+    )
+    echo "  minio SSE-S3 auto-encryption enabled (BENCH_ENCRYPTION=1)"
+  fi
   env "${env_args[@]}" "$MINIO_BIN" server "${volume_args[@]}" \
     --address "127.0.0.1:$port" \
     --console-address "127.0.0.1:$console_port" \
@@ -652,10 +666,25 @@ start_rustfs() {
     env_args+=("RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true")
     echo "  rustfs local multi-drive uses RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true for synthetic same-filesystem drives"
   fi
+  local rustfs_extra_args=()
+  if [[ "${BENCH_ENCRYPTION:-0}" == "1" ]]; then
+    # RustFS local KMS backend: create a bench-scoped key directory and a
+    # default key id. Matches GrainFS / MinIO at-rest encryption parity.
+    local kms_dir="$data_dir/.kms"
+    mkdir -p "$kms_dir"
+    rustfs_extra_args+=(
+      "--kms-enable"
+      "--kms-backend" "local"
+      "--kms-key-dir" "$kms_dir"
+      "--kms-default-key-id" "warp-bench"
+    )
+    echo "  rustfs KMS encryption enabled (BENCH_ENCRYPTION=1, local backend)"
+  fi
   env "${env_args[@]}" "$RUSTFS_BIN" server \
     --address "127.0.0.1:$port" \
     --console-enable \
     --console-address "127.0.0.1:$console_port" \
+    "${rustfs_extra_args[@]}" \
     "${volume_args[@]}" \
     >"$PROFILE_ROOT/rustfs.log" 2>&1 &
   PIDS+=($!)
