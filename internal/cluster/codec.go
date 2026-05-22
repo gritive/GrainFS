@@ -22,7 +22,6 @@ type objectMeta struct {
 	ETag         string
 	LastModified int64
 	ACL          uint8    // s3auth.ACLGrant bitmask; 0 = private (backward compat)
-	RingVersion  uint64   // ring version used at write time (0 = pre-ring legacy)
 	ECData       uint8    // EC k (data shards)
 	ECParity     uint8    // EC m (parity shards)
 	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
@@ -48,7 +47,7 @@ type objectMeta struct {
 // CoalescedShardRef references a single coalesced blob produced by merging a
 // prefix of objectMeta.Segments. Phase B2 holds it owner-locally; Phase B3
 // distributes it via EC across NodeIDs and the EC params (NodeIDs / ECData /
-// ECParity / RingVersion) are required for the reader to reconstruct.
+// ECParity) are required for the reader to reconstruct.
 //
 // EC fields are zero-valued for legacy/B2 entries (owner-local only).
 type CoalescedShardRef struct {
@@ -57,7 +56,6 @@ type CoalescedShardRef struct {
 	ETag        string
 	ShardKey    string
 	Version     int32
-	RingVersion uint64
 	ECData      uint8
 	ECParity    uint8
 	NodeIDs     []string
@@ -203,7 +201,6 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 			}
 			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
 			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
-			clusterpb.SegmentMetaEntryAddRingVersion(b, uint64(s.RingVersion))
 			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
 		}
 		clusterpb.PutObjectMetaCmdStartSegmentsVector(b, len(segOffs))
@@ -239,7 +236,6 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddEtag(b, etagOff)
 	clusterpb.PutObjectMetaCmdAddModTime(b, c.ModTime)
 	clusterpb.PutObjectMetaCmdAddVersionId(b, vidOff)
-	clusterpb.PutObjectMetaCmdAddRingVersion(b, uint64(c.RingVersion))
 	clusterpb.PutObjectMetaCmdAddEcData(b, c.ECData)
 	clusterpb.PutObjectMetaCmdAddEcParity(b, c.ECParity)
 	if nodeIDsOff != 0 {
@@ -331,7 +327,6 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 				NodeIDs:          nodeIDs,
 				ECData:           se.EcData(),
 				ECParity:         se.EcParity(),
-				RingVersion:      RingVersion(se.RingVersion()),
 			}
 		}
 	}
@@ -343,7 +338,6 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ETag:             string(t.Etag()),
 		ModTime:          t.ModTime(),
 		VersionID:        string(t.VersionId()),
-		RingVersion:      RingVersion(t.RingVersion()),
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
@@ -508,7 +502,6 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 			}
 			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
 			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
-			clusterpb.SegmentMetaEntryAddRingVersion(b, uint64(s.RingVersion))
 			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
 		}
 		clusterpb.CompleteMultipartCmdStartSegmentsVector(b, len(segOffs))
@@ -530,7 +523,6 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	clusterpb.CompleteMultipartCmdAddPlacementGroupId(b, pgOff)
 	clusterpb.CompleteMultipartCmdAddEcData(b, c.ECData)
 	clusterpb.CompleteMultipartCmdAddEcParity(b, c.ECParity)
-	clusterpb.CompleteMultipartCmdAddRingVersion(b, uint64(c.RingVersion))
 	if nodeIDsOff != 0 {
 		clusterpb.CompleteMultipartCmdAddNodeIds(b, nodeIDsOff)
 	}
@@ -604,7 +596,6 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 				NodeIDs:          nodeIDs,
 				ECData:           se.EcData(),
 				ECParity:         se.EcParity(),
-				RingVersion:      RingVersion(se.RingVersion()),
 			}
 		}
 	}
@@ -621,7 +612,6 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
-		RingVersion:      RingVersion(t.RingVersion()),
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
@@ -809,9 +799,6 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 			if s.ECParity != 0 {
 				clusterpb.SegmentRefAddEcParity(b, s.ECParity)
 			}
-			if s.RingVersion != 0 {
-				clusterpb.SegmentRefAddRingVersion(b, s.RingVersion)
-			}
 			segOffs[i] = clusterpb.SegmentRefEnd(b)
 		}
 		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
@@ -840,7 +827,6 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 			clusterpb.CoalescedShardRefAddEtag(b, etOff)
 			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
 			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
-			clusterpb.CoalescedShardRefAddRingVersion(b, c.RingVersion)
 			clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
 			clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
 			if nodesOff != 0 {
@@ -897,7 +883,6 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddEtag(b, etagOff)
 	clusterpb.ObjectMetaAddLastModified(b, m.LastModified)
 	clusterpb.ObjectMetaAddAcl(b, m.ACL)
-	clusterpb.ObjectMetaAddRingVersion(b, m.RingVersion)
 	clusterpb.ObjectMetaAddEcData(b, m.ECData)
 	clusterpb.ObjectMetaAddEcParity(b, m.ECParity)
 	if nodeIDsOff != 0 {
@@ -970,7 +955,6 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				Checksum:         checksum,
 				PlacementGroupID: string(seg.PlacementGroupId()),
 				ShardSize:        seg.ShardSize(),
-				RingVersion:      seg.RingVersion(),
 				ECData:           seg.EcData(),
 				ECParity:         seg.EcParity(),
 				NodeIDs:          nodeIDs,
@@ -998,7 +982,6 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				ETag:        string(c.Etag()),
 				ShardKey:    string(c.ShardKey()),
 				Version:     c.Version(),
-				RingVersion: c.RingVersion(),
 				ECData:      c.EcData(),
 				ECParity:    c.EcParity(),
 				NodeIDs:     nodeIDs,
@@ -1037,7 +1020,6 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		ETag:             string(t.Etag()),
 		LastModified:     t.LastModified(),
 		ACL:              t.Acl(),
-		RingVersion:      t.RingVersion(),
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
@@ -1397,7 +1379,6 @@ func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
 	}
 	clusterpb.CoalesceSegmentsCmdAddEcData(b, c.ECData)
 	clusterpb.CoalesceSegmentsCmdAddEcParity(b, c.ECParity)
-	clusterpb.CoalesceSegmentsCmdAddRingVersion(b, c.RingVersion)
 	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
 }
 
@@ -1433,7 +1414,6 @@ func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
 		Placement:          placement,
 		ECData:             t.EcData(),
 		ECParity:           t.EcParity(),
-		RingVersion:        t.RingVersion(),
 	}, nil
 }
 
@@ -1455,31 +1435,10 @@ func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	}
 	vnodesVec := b.EndVector(len(vnOffsets))
 	clusterpb.SetRingCmdStart(b)
-	clusterpb.SetRingCmdAddVersion(b, uint64(c.Version))
+	clusterpb.SetRingCmdAddVersion(b, c.Version)
 	clusterpb.SetRingCmdAddVnodes(b, vnodesVec)
 	clusterpb.SetRingCmdAddVperNode(b, uint32(c.VPerNode))
 	return fbFinish(b, clusterpb.SetRingCmdEnd(b)), nil
-}
-
-// decodeSetRingCmd deserializes a SetRingCmd from Raft log data.
-func decodeSetRingCmd(data []byte) (SetRingCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetRingCmd {
-		return clusterpb.GetRootAsSetRingCmd(d, 0)
-	})
-	if err != nil {
-		return SetRingCmd{}, err
-	}
-	vnodes := make([]VirtualNode, t.VnodesLength())
-	for i := 0; i < t.VnodesLength(); i++ {
-		var vn clusterpb.VNodeEntry
-		t.Vnodes(&vn, i)
-		vnodes[i] = VirtualNode{Token: vn.Token(), NodeID: string(vn.NodeId())}
-	}
-	return SetRingCmd{
-		Version:  RingVersion(t.Version()),
-		VNodes:   vnodes,
-		VPerNode: int(t.VperNode()),
-	}, nil
 }
 
 // --- Payload encoding dispatch ---

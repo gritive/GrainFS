@@ -176,7 +176,6 @@ func TestRestoreObjects_PreservesCurrentECPlacementMetadata(t *testing.T) {
 		ETag:             "etag",
 		ModTime:          123,
 		VersionID:        "v1",
-		RingVersion:      42,
 		ECData:           1,
 		ECParity:         0,
 		NodeIDs:          []string{"node-a"},
@@ -205,7 +204,6 @@ func TestRestoreObjects_PreservesCurrentECPlacementMetadata(t *testing.T) {
 		return item.Value(func(v []byte) error {
 			meta, err := unmarshalObjectMeta(v)
 			require.NoError(t, err)
-			require.Equal(t, uint64(42), meta.RingVersion)
 			require.Equal(t, uint8(1), meta.ECData)
 			require.Equal(t, uint8(0), meta.ECParity)
 			require.Equal(t, []string{"node-a"}, meta.NodeIDs)

@@ -50,8 +50,9 @@ func TestIncidentRepair_RecordsVerifiedWhenConcurrentRepairAlreadyRestoredShard(
 	b := newTestDistributedBackend(t)
 	dir := t.TempDir()
 	svc := NewShardService(dir, nil)
-	b.SetShardService(svc, []string{"test-node", "other-a", "other-b", "other-c", "other-d", "other-e"})
-	writePlacement(t, b, "b", "k/v1", []string{"test-node", "other-a", "other-b", "other-c", "other-d", "other-e"})
+	nodes := []string{"test-node", "other-a", "other-b", "other-c", "other-d", "other-e"}
+	b.SetShardService(svc, nodes)
+	seedPlacementMeta(t, b, "b", "k", "v1", nodes, 4, 2)
 	require.NoError(t, svc.WriteLocalShard("b", "k/v1", 0, []byte("already-repaired")))
 
 	rec := &recordingIncidentRecorder{}

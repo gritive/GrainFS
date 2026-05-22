@@ -98,7 +98,6 @@ table PutObjectMetaCmd {
   etag:string;
   mod_time:int64;
   version_id:string;
-  ring_version:uint64 = 0;
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
@@ -132,7 +131,6 @@ table SegmentMetaEntry {
   node_ids:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
-  ring_version:uint64 = 0;
 }
 
 table DeleteObjectCmd {
@@ -183,7 +181,6 @@ table CompleteMultipartCmd {
   parts:[MultipartPartEntry];
   segments:[SegmentMetaEntry];
   tags:[Tag];
-  ring_version:uint64 = 0;
 }
 
 table AbortMultipartCmd {
@@ -219,7 +216,6 @@ table ObjectMeta {
   etag:string;
   last_modified:int64;
   acl:uint8;
-  ring_version:uint64 = 0;
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
@@ -237,7 +233,11 @@ table ObjectMeta {
 // prefix of objectMeta.segments. Phase B2 stores it owner-locally; Phase B3
 // distributes it via EC and adds placement params on the same table.
 //
-// Phase B3 EC fields (ring_version / ec_data / ec_parity / node_ids) are
+// CoalescedShardRef references one coalesced blob produced by merging a
+// prefix of objectMeta.segments. Phase B2 stores it owner-locally; Phase B3
+// distributes it via EC and adds placement params on the same table.
+//
+// Phase B3 EC fields (ec_data / ec_parity / node_ids) are
 // REQUIRED for coalesced blobs written by B3 worker (EC distribute). Legacy
 // B2 entries (owner-local only) have these fields zero-valued; reader falls
 // back to owner-local path in that case.
@@ -247,7 +247,6 @@ table CoalescedShardRef {
   etag:string;
   shard_key:string;
   version:int32 = 1;
-  ring_version:uint64 = 0;
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
@@ -272,7 +271,6 @@ table CoalesceSegmentsCmd {
   placement:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
-  ring_version:uint64 = 0;
 }
 
 // SegmentRef mirrors storage.SegmentRef — one appendable or chunked-PUT
@@ -289,7 +287,6 @@ table SegmentRef {
   node_ids:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
-  ring_version:uint64 = 0;
 }
 
 table SetBucketVersioningCmd {

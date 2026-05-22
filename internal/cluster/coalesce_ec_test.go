@@ -13,8 +13,7 @@ import (
 
 // TestProcessCoalesceJobB3ECDistributed verifies the Phase B3 coalesce
 // worker EC-distributes the coalesced blob across the placement and the
-// resulting CoalescedShardRef carries the EC params (NodeIDs / k / m /
-// RingVersion).
+// resulting CoalescedShardRef carries the EC params (NodeIDs / k / m).
 //
 // Single-node fixture is sufficient because the EC writer treats every
 // placement entry equally — when allNodes are all selfAddr the write still

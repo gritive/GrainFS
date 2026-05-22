@@ -208,7 +208,6 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			ETag:             snap.ETag,
 			ModTime:          snap.Modified,
 			VersionID:        snap.VersionID,
-			RingVersion:      placement.RingVersion,
 			ECData:           placement.ECData,
 			ECParity:         placement.ECParity,
 			NodeIDs:          placement.NodeIDs,

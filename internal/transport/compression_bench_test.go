@@ -197,7 +197,6 @@ func makePutObjectMeta(i int) []byte {
 	clusterpb.PutObjectMetaCmdAddEtag(b, etagOff)
 	clusterpb.PutObjectMetaCmdAddModTime(b, time.Now().Unix())
 	clusterpb.PutObjectMetaCmdAddVersionId(b, versionOff)
-	clusterpb.PutObjectMetaCmdAddRingVersion(b, 42)
 	clusterpb.PutObjectMetaCmdAddEcData(b, 4)
 	clusterpb.PutObjectMetaCmdAddEcParity(b, 2)
 	clusterpb.PutObjectMetaCmdAddNodeIds(b, nodesVec)

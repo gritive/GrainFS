@@ -89,20 +89,8 @@ func (rcv *CoalescedShardRef) MutateVersion(n int32) bool {
 	return rcv._tab.MutateInt32Slot(12, n)
 }
 
-func (rcv *CoalescedShardRef) RingVersion() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *CoalescedShardRef) MutateRingVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(14, n)
-}
-
 func (rcv *CoalescedShardRef) EcData() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.GetByte(o + rcv._tab.Pos)
 	}
@@ -110,11 +98,11 @@ func (rcv *CoalescedShardRef) EcData() byte {
 }
 
 func (rcv *CoalescedShardRef) MutateEcData(n byte) bool {
-	return rcv._tab.MutateByteSlot(16, n)
+	return rcv._tab.MutateByteSlot(14, n)
 }
 
 func (rcv *CoalescedShardRef) EcParity() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetByte(o + rcv._tab.Pos)
 	}
@@ -122,11 +110,11 @@ func (rcv *CoalescedShardRef) EcParity() byte {
 }
 
 func (rcv *CoalescedShardRef) MutateEcParity(n byte) bool {
-	return rcv._tab.MutateByteSlot(18, n)
+	return rcv._tab.MutateByteSlot(16, n)
 }
 
 func (rcv *CoalescedShardRef) NodeIds(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
@@ -135,7 +123,7 @@ func (rcv *CoalescedShardRef) NodeIds(j int) []byte {
 }
 
 func (rcv *CoalescedShardRef) NodeIdsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -143,7 +131,7 @@ func (rcv *CoalescedShardRef) NodeIdsLength() int {
 }
 
 func CoalescedShardRefStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(8)
 }
 func CoalescedShardRefAddCoalescedId(builder *flatbuffers.Builder, coalescedId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(coalescedId), 0)
@@ -160,17 +148,14 @@ func CoalescedShardRefAddShardKey(builder *flatbuffers.Builder, shardKey flatbuf
 func CoalescedShardRefAddVersion(builder *flatbuffers.Builder, version int32) {
 	builder.PrependInt32Slot(4, version, 1)
 }
-func CoalescedShardRefAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
-	builder.PrependUint64Slot(5, ringVersion, 0)
-}
 func CoalescedShardRefAddEcData(builder *flatbuffers.Builder, ecData byte) {
-	builder.PrependByteSlot(6, ecData, 0)
+	builder.PrependByteSlot(5, ecData, 0)
 }
 func CoalescedShardRefAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
-	builder.PrependByteSlot(7, ecParity, 0)
+	builder.PrependByteSlot(6, ecParity, 0)
 }
 func CoalescedShardRefAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(nodeIds), 0)
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(nodeIds), 0)
 }
 func CoalescedShardRefStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)

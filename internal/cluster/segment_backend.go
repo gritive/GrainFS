@@ -60,7 +60,6 @@ type segmentPlacement struct {
 	PlacementGroupID string
 	NodeIDs          []string
 	Config           ECConfig
-	RingVersion      RingVersion
 	ShardSize        int32
 }
 
@@ -411,7 +410,6 @@ func runChunkedPutWithParts(
 			ECData:           uint8(csb.placements[0].Config.DataShards),
 			ECParity:         uint8(csb.placements[0].Config.ParityShards),
 			PlacementGroupID: csb.placements[0].PlacementGroupID,
-			RingVersion:      csb.placements[0].RingVersion,
 			Segments:         segments,
 			Tags:             tags,
 		})
@@ -511,7 +509,6 @@ func buildSegmentMetaEntries(placements []segmentPlacement, refs []storage.Segme
 			NodeIDs:          p.NodeIDs,
 			ECData:           uint8(p.Config.DataShards),
 			ECParity:         uint8(p.Config.ParityShards),
-			RingVersion:      p.RingVersion,
 		}
 	}
 	return out

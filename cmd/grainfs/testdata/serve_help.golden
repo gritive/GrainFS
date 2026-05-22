@@ -59,7 +59,6 @@ Flags:
       --raft-heartbeat-interval duration                    per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost. (default 200ms)
       --raft-log-gc-interval duration                       how often Raft log GC runs (default 30s)
       --reshard-interval duration                           background EC reshard interval (always on; 0 resets to default 24h) (default 24h0m0s)
-      --ring-reshard-interval duration                      ring placement reshard interval — migrates EC objects to current ring when nodes change (always on; 0 resets to default 1h) (default 1h0m0s)
       --scrub-interval duration                             EC shard scrub interval (always on; 0 resets to default 24h) (default 24h0m0s)
       --scrub-orphan-age duration                           minimum filesystem mtime age before an orphan raw segment is eligible for sweep (default 5m0s)
       --shard-cache-size int                                EC shard cache capacity in bytes (0 disables) (default 1073741824)

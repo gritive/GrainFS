@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.318.0] - 2026-05-22
+
+### Breaking
+
+- **Object placement algorithm을 vnode-based consistent hashing에서 Weighted
+  Rendezvous Hashing (W-HRW)로 단일 전환.** Ring/RingStore/RingVersion 개념을
+  코드와 메타데이터 스키마에서 완전 제거.
+- **FlatBuffers metadata schema에서 `ring_version` 필드 제거.** 기존 BadgerDB
+  metadata는 읽기 실패한다. **머지 후 `--data` 디렉터리 wipe 필수** — 본 버전은
+  빈 클러스터 시작을 전제로 한다. 옛 데이터 호환 미지원.
+- Removed CLI flag: `--ring-reshard-interval` (자동 ring topology reshard 워크플로
+  제거 — `NewRingReshardManager`/`RingReshardInterval` config 모두 사라짐).
+  노드 멤버십 변경 시 자동 객체 재배치는 후속 design에서 재도입 검토.
+
+### Internal
+
+- `selectECPlacement`가 `PlaceShards`(weighted HRW)로 위임하는 thin wrapper로
+  단순화. 호출 경로에서 ring snapshot 조회 6곳, `PlacementMeta.RingVersion`
+  필드 전파 30+곳 모두 제거.
+- `placement_resolver`가 `meta.NodeIDs` 단일 경로로 단순화 — `PlacementSourceRing`/
+  `PlacementSourceLegacy` fallback 제거.
+- `FSM.rings`, `GetRingStore`, `CurrentRingVersion`, `ReshardToRing` 모두 제거.
+- `internal/cluster/ring.go`, `ring_store.go` 파일 자체 삭제 (총 ~500 라인 cleanup).
+- Spec: `docs/superpowers/specs/2026-05-22-rendezvous-hashing-cutover-design.md`
+
 ## [0.0.317.0] - 2026-05-22
 
 ### Internal

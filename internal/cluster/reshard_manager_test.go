@@ -25,16 +25,13 @@ func (l *fakeLeader) IsLeader() bool { return l.leader }
 // fakeConverter replaces DistributedBackend for reshard manager unit tests.
 // It tracks which (bucket,key) pairs were converted/upgraded and can simulate errors.
 type fakeConverter struct {
-	fsm                *FSM
-	active             bool
-	converted          []string
-	upgraded           []string
-	failOn             map[string]error
-	shardGroups        map[string]ShardGroupEntry
-	lastUpgradeCfg     ECConfig
-	currentRingVersion RingVersion
-	reshardToRingCalls int
-	reshardToRingErr   error
+	fsm            *FSM
+	active         bool
+	converted      []string
+	upgraded       []string
+	failOn         map[string]error
+	shardGroups    map[string]ShardGroupEntry
+	lastUpgradeCfg ECConfig
 }
 
 func (c *fakeConverter) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
@@ -62,11 +59,6 @@ func (c *fakeConverter) upgradeObjectEC(_ context.Context, bucket, key string, _
 	c.upgraded = append(c.upgraded, bucket+"/"+key)
 	c.lastUpgradeCfg = cfg
 	return nil
-}
-func (c *fakeConverter) CurrentRingVersion() RingVersion { return c.currentRingVersion }
-func (c *fakeConverter) ReshardToRing(_ context.Context, _, _ string, _ RingVersion) error {
-	c.reshardToRingCalls++
-	return c.reshardToRingErr
 }
 func (c *fakeConverter) ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error) {
 	return (&DistributedBackend{db: c.fsm.db, fsm: c.fsm}).ResolvePlacement(ctx, bucket, key, meta)
@@ -106,18 +98,6 @@ func seedObjectMetaECInGroup(t *testing.T, fsm *FSM, bucket, key, etag string, s
 		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
 		PlacementGroupID: groupID,
 		ECData:           k, ECParity: m, NodeIDs: nodes,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
-}
-
-func seedObjectMetaECWithRing(t *testing.T, fsm *FSM, bucket, key, etag string, size int64, k, m uint8, nodes []string, ringVer RingVersion) {
-	t.Helper()
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: bucket, Key: key, Size: size,
-		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
-		ECData: k, ECParity: m, NodeIDs: nodes,
-		RingVersion: ringVer,
 	})
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
@@ -300,118 +280,6 @@ func TestReshardManager_Run_UsesObjectPlacementGroupDesiredProfile(t *testing.T)
 	require.Equal(t, ECConfig{DataShards: 4, ParityShards: 2}, conv.lastUpgradeCfg)
 }
 
-// TestRingReshardManager_Run_ReshardsMismatchedVersion: ring version이 다른 EC 오브젝트를
-// ReshardToRing으로 처리한다.
-func TestRingReshardManager_Run_ReshardsMismatchedVersion(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	seedObjectMetaECWithRing(t, fsm, "bkt", "obj", "e1", 10, 4, 2,
-		[]string{"n1", "n2", "n3", "n4", "n5", "n6"}, 1)
-
-	conv := &fakeConverter{fsm: fsm, active: true, currentRingVersion: 2}
-	mgr := NewRingReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
-	cv, skip, errs := mgr.Run(context.Background())
-
-	require.Equal(t, 1, cv)
-	require.Equal(t, 0, skip)
-	require.Equal(t, 0, errs)
-	require.Equal(t, 1, conv.reshardToRingCalls)
-}
-
-// TestRingReshardManager_Run_SkipsMatchingVersion: ring version이 같으면 skip한다.
-func TestRingReshardManager_Run_SkipsMatchingVersion(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	seedObjectMetaECWithRing(t, fsm, "bkt", "obj", "e1", 10, 4, 2,
-		[]string{"n1", "n2", "n3", "n4", "n5", "n6"}, 2)
-
-	conv := &fakeConverter{fsm: fsm, active: true, currentRingVersion: 2}
-	mgr := NewRingReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
-	cv, skip, errs := mgr.Run(context.Background())
-
-	require.Equal(t, 0, cv)
-	require.Equal(t, 1, skip)
-	require.Equal(t, 0, errs)
-	require.Equal(t, 0, conv.reshardToRingCalls)
-}
-
-// TestRingReshardManager_Run_SkipsWhenNoRing: 클러스터에 ring이 없으면(currentRingVersion==0)
-// 아무것도 하지 않는다.
-func TestRingReshardManager_Run_SkipsWhenNoRing(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	seedObjectMetaEC(t, fsm, "bkt", "obj", "e1", 10, 4, 2,
-		[]string{"n1", "n2", "n3", "n4", "n5", "n6"})
-
-	conv := &fakeConverter{fsm: fsm, active: true, currentRingVersion: 0}
-	mgr := NewRingReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
-	cv, skip, errs := mgr.Run(context.Background())
-
-	require.Equal(t, 0, cv)
-	require.Equal(t, 0, skip)
-	require.Equal(t, 0, errs)
-	require.Equal(t, 0, conv.reshardToRingCalls)
-}
-
-// TestRingReshardManager_Run_ReshardLegacyObject: ring 없이 저장된 EC 오브젝트
-// (RingVersion==0)도 현재 ring이 있으면 reshard 대상이다.
-func TestRingReshardManager_Run_ReshardLegacyObject(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	seedObjectMetaEC(t, fsm, "bkt", "obj", "e1", 10, 4, 2,
-		[]string{"n1", "n2", "n3", "n4", "n5", "n6"})
-
-	conv := &fakeConverter{fsm: fsm, active: true, currentRingVersion: 2}
-	mgr := NewRingReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
-	cv, skip, errs := mgr.Run(context.Background())
-
-	require.Equal(t, 1, cv)
-	require.Equal(t, 0, skip)
-	require.Equal(t, 0, errs)
-	require.Equal(t, 1, conv.reshardToRingCalls)
-}
-
-// TestRingReshardManager_Run_ErrorPath: ReshardToRing 실패 시 errs++ totalErrors 증가.
-func TestRingReshardManager_Run_ErrorPath(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	seedObjectMetaECWithRing(t, fsm, "bkt", "obj", "e1", 10, 4, 2,
-		[]string{"n1", "n2", "n3", "n4", "n5", "n6"}, 1)
-
-	conv := &fakeConverter{
-		fsm:                fsm,
-		active:             true,
-		currentRingVersion: 2,
-		reshardToRingErr:   fmt.Errorf("simulated ring reshard failure"),
-	}
-	mgr := NewRingReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
-	cv, skip, errs := mgr.Run(context.Background())
-
-	require.Equal(t, 0, cv)
-	require.Equal(t, 0, skip)
-	require.Equal(t, 1, errs)
-	require.Equal(t, 1, conv.reshardToRingCalls)
-	require.Equal(t, uint64(1), mgr.Stats().TotalErrors)
-}
-
-// TestRingReshardManager_Run_SkipsNonECObjects: N× 오브젝트(ECData==0)는 ring reshard
-// 대상이 아니므로 skip한다.
-func TestRingReshardManager_Run_SkipsNonECObjects(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	// N× 오브젝트: ECData/ECParity 없음
-	seedObjectMeta(t, fsm, "bkt", "nx-obj", "e1", 10)
-
-	conv := &fakeConverter{fsm: fsm, active: true, currentRingVersion: 2}
-	mgr := NewRingReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
-	cv, skip, errs := mgr.Run(context.Background())
-
-	require.Equal(t, 0, cv)
-	require.Equal(t, 1, skip) // N× 오브젝트는 skip
-	require.Equal(t, 0, errs)
-	require.Equal(t, 0, conv.reshardToRingCalls)
-}
-
 func TestReshardManager_Run_HonorsMaxObjects(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
@@ -531,7 +399,6 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	oldResolved, err := backend.ResolvePlacement(context.Background(), bucket, key, oldMeta)
 	require.NoError(t, err)
-	require.Equal(t, PlacementSourceMetadata, oldResolved.Source)
 	require.Equal(t, oldCfg.NumShards(), len(oldResolved.Record.Nodes))
 	require.Equal(t, oldCfg.DataShards, oldResolved.Record.K)
 	require.Equal(t, oldCfg.ParityShards, oldResolved.Record.M)
@@ -545,7 +412,6 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	newResolved, err := backend.ResolvePlacement(context.Background(), bucket, key, newMeta)
 	require.NoError(t, err)
-	assert.Equal(t, PlacementSourceMetadata, newResolved.Source)
 	assert.Equal(t, newCfg.NumShards(), len(newResolved.Record.Nodes), "new placement shard count")
 	assert.Equal(t, newCfg.DataShards, newResolved.Record.K)
 	assert.Equal(t, newCfg.ParityShards, newResolved.Record.M)

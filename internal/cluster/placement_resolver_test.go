@@ -16,28 +16,6 @@ func newResolverTestBackend(t *testing.T) *DistributedBackend {
 	return &DistributedBackend{db: db, fsm: fsm, ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
 }
 
-func TestResolvePlacement_UsesRingWhenRingVersionPresent(t *testing.T) {
-	b := newResolverTestBackend(t)
-	ring := NewRing(7, []string{"n0", "n1", "n2", "n3"}, 10)
-	b.fsm.GetRingStore().putRing(ring)
-
-	meta := PlacementMeta{
-		VersionID:   "v1",
-		RingVersion: 7,
-		ECData:      2,
-		ECParity:    1,
-		NodeIDs:     []string{"metadata-a", "metadata-b", "metadata-c"},
-	}
-
-	got, err := b.ResolvePlacement(context.Background(), "bkt", "obj", meta)
-	require.NoError(t, err)
-
-	wantNodes := ring.PlacementForKey(ECConfig{DataShards: 2, ParityShards: 1}, "obj/v1")
-	assert.Equal(t, PlacementSourceRing, got.Source)
-	assert.Equal(t, "obj/v1", got.ShardKey)
-	assert.Equal(t, PlacementRecord{Nodes: wantNodes, K: 2, M: 1}, got.Record)
-}
-
 func TestResolvePlacement_UsesMetadataNodeIDs(t *testing.T) {
 	b := newResolverTestBackend(t)
 
@@ -49,37 +27,8 @@ func TestResolvePlacement_UsesMetadataNodeIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, PlacementSourceMetadata, got.Source)
 	assert.Equal(t, "obj/v1", got.ShardKey)
 	assert.Equal(t, PlacementRecord{Nodes: []string{"n0", "n1", "n2"}, K: 2, M: 1}, got.Record)
-}
-
-func TestResolvePlacement_MetadataWinsOverConflictingLegacy(t *testing.T) {
-	b := newResolverTestBackend(t)
-	writePlacement(t, b, "bkt", "obj/v1", []string{"legacy-a", "legacy-b", "legacy-c", "legacy-d", "legacy-e", "legacy-f"})
-
-	got, err := b.ResolvePlacement(context.Background(), "bkt", "obj", PlacementMeta{
-		VersionID: "v1",
-		ECData:    2,
-		ECParity:  1,
-		NodeIDs:   []string{"meta-a", "meta-b", "meta-c"},
-	})
-	require.NoError(t, err)
-
-	assert.Equal(t, PlacementSourceMetadata, got.Source)
-	assert.Equal(t, []string{"meta-a", "meta-b", "meta-c"}, got.Record.Nodes)
-}
-
-func TestResolvePlacement_FallsBackToLegacyPlacement(t *testing.T) {
-	b := newResolverTestBackend(t)
-	writePlacement(t, b, "bkt", "obj/v1", []string{"legacy-a", "legacy-b", "legacy-c", "legacy-d", "legacy-e", "legacy-f"})
-
-	got, err := b.ResolvePlacement(context.Background(), "bkt", "obj", PlacementMeta{VersionID: "v1"})
-	require.NoError(t, err)
-
-	assert.Equal(t, PlacementSourceLegacy, got.Source)
-	assert.Equal(t, "obj/v1", got.ShardKey)
-	assert.Equal(t, []string{"legacy-a", "legacy-b", "legacy-c", "legacy-d", "legacy-e", "legacy-f"}, got.Record.Nodes)
 }
 
 func TestResolvePlacement_ReturnsErrNotECWhenNoPlacementExists(t *testing.T) {
@@ -98,19 +47,6 @@ func TestResolvePlacement_ReturnsErrPlacementCorruptForBadMetadata(t *testing.T)
 		ECData:    2,
 		ECParity:  1,
 		NodeIDs:   []string{"only-one"},
-	})
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrPlacementCorrupt))
-}
-
-func TestResolvePlacement_ReturnsErrPlacementCorruptForMissingRing(t *testing.T) {
-	b := newResolverTestBackend(t)
-
-	_, err := b.ResolvePlacement(context.Background(), "bkt", "obj", PlacementMeta{
-		VersionID:   "v1",
-		RingVersion: 99,
-		ECData:      2,
-		ECParity:    1,
 	})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrPlacementCorrupt))
@@ -163,7 +99,6 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 		ContentType: "application/octet-stream",
 		ETag:        "etag",
 		ModTime:     1,
-		RingVersion: 7,
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{"n0", "n1", "n2"},
@@ -177,10 +112,9 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	assert.Equal(t, int64(123), obj.Size)
 	assert.Equal(t, "v1", obj.VersionID)
 	assert.Equal(t, PlacementMeta{
-		VersionID:   "v1",
-		RingVersion: 7,
-		ECData:      2,
-		ECParity:    1,
-		NodeIDs:     []string{"n0", "n1", "n2"},
+		VersionID: "v1",
+		ECData:    2,
+		ECParity:  1,
+		NodeIDs:   []string{"n0", "n1", "n2"},
 	}, meta)
 }

@@ -36,10 +36,9 @@ type CoalesceSegmentsCmd struct {
 	ConsumedSegmentIDs []string // segment blob IDs consumed by this operation
 	// Phase B3 EC placement params. Order in Placement matches shard index
 	// 0..k+m-1. Zero-valued for B2 (owner-local only).
-	Placement   []string
-	ECData      uint8
-	ECParity    uint8
-	RingVersion uint64
+	Placement []string
+	ECData    uint8
+	ECParity  uint8
 }
 
 // MaxCoalescedEntries caps how many CoalescedShardRef entries a single
@@ -62,7 +61,6 @@ func coalescedRefsToStorage(in []CoalescedShardRef) []storage.CoalescedRef {
 			Size:        c.Size,
 			ETag:        c.ETag,
 			ShardKey:    c.ShardKey,
-			RingVersion: c.RingVersion,
 			ECData:      c.ECData,
 			ECParity:    c.ECParity,
 			NodeIDs:     append([]string(nil), c.NodeIDs...),
@@ -194,8 +192,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		cleanupMerged()
 		return fmt.Errorf("coalesce: no effective EC config for %d live nodes", len(liveNodes))
 	}
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, cfg, liveNodes, shardKey)
+	placement := selectECPlacement(cfg, liveNodes, shardKey)
 	if len(placement) != cfg.NumShards() {
 		cleanupMerged()
 		return fmt.Errorf("coalesce: placement has %d nodes, need %d (k=%d m=%d)",
@@ -203,12 +200,11 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 	}
 
 	plan := ecObjectWritePlan{
-		Bucket:      job.Bucket,
-		Key:         job.Key,
-		VersionID:   "coalesced/" + coalescedID,
-		Config:      cfg,
-		Placement:   placement,
-		RingVersion: ringVer,
+		Bucket:    job.Bucket,
+		Key:       job.Key,
+		VersionID: "coalesced/" + coalescedID,
+		Config:    cfg,
+		Placement: placement,
 	}
 	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
@@ -247,7 +243,6 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		Placement:          placement,
 		ECData:             uint8(cfg.DataShards),
 		ECParity:           uint8(cfg.ParityShards),
-		RingVersion:        uint64(ringVer),
 	}
 	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
 		// EC shards committed but never referenced. Best-effort orphan cleanup

@@ -88,7 +88,6 @@ type Config struct {
 	// Scrub / reshard / degraded
 	ScrubInterval            time.Duration
 	ReshardInterval          time.Duration
-	RingReshardInterval      time.Duration
 	DataGroupRefreshInterval time.Duration
 	DegradedInterval         time.Duration
 	// ScrubOrphanAge is the minimum filesystem mtime age before an orphan raw
