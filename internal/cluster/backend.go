@@ -1734,7 +1734,11 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacementWeighted(
+		effectiveCfg, liveNodes, shardKey,
+		b.nodeStatsStore, b.bl,
+		b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled(),
+	)
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
 		placementGroupID = group.ID
 		effectiveCfg = cfg
