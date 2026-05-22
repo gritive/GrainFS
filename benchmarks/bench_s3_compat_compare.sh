@@ -90,6 +90,34 @@ set_start_info() {
   START_MODE="$4"
 }
 
+# warp_obj_size_bytes parses warp object-size strings (64KiB, 5MiB, 10MiB,
+# 1024, etc.) into bytes. Returns 0 on unparseable input so callers can
+# treat it as "unknown size, skip size-aware logic".
+warp_obj_size_bytes() {
+  local s="$1"
+  [[ -z "$s" ]] && { echo 0; return; }
+  local num unit
+  if [[ "$s" =~ ^([0-9]+)([KMGT]i?B|[KMGT]|B)?$ ]]; then
+    num="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+  else
+    echo 0
+    return
+  fi
+  case "$unit" in
+    ""|B)    echo "$num" ;;
+    K|KiB)   echo $((num * 1024)) ;;
+    KB)      echo $((num * 1000)) ;;
+    M|MiB)   echo $((num * 1024 * 1024)) ;;
+    MB)      echo $((num * 1000 * 1000)) ;;
+    G|GiB)   echo $((num * 1024 * 1024 * 1024)) ;;
+    GB)      echo $((num * 1000 * 1000 * 1000)) ;;
+    T|TiB)   echo $((num * 1024 * 1024 * 1024 * 1024)) ;;
+    TB)      echo $((num * 1000 * 1000 * 1000 * 1000)) ;;
+    *)       echo 0 ;;
+  esac
+}
+
 capture_cluster_status_snapshot() {
   local target="$1"
   local label="$2"
@@ -788,6 +816,26 @@ run_warp_case() {
     local need=$((WARP_CONCURRENT * WARP_DELETE_BATCH * 16))
     if (( objects < need )); then
       objects="$need"
+    fi
+    # Object-size aware pre-upload cap. The 16× floor was tuned for 64KiB
+    # objects (~3 GiB pre-upload); at 5 MiB it explodes to ~256 GiB per
+    # target and fills the disk before delete even starts. Cap per-target
+    # pre-upload bytes at WARP_DELETE_MAX_PREUPLOAD_BYTES (default 10 GiB).
+    local obj_bytes
+    obj_bytes=$(warp_obj_size_bytes "$WARP_OBJ_SIZE")
+    if (( obj_bytes > 0 )); then
+      local max_bytes="${WARP_DELETE_MAX_PREUPLOAD_BYTES:-10737418240}"
+      local cap=$(( max_bytes / obj_bytes ))
+      # Keep at least one full delete batch so warp does not abort with
+      # "too few objects"; if the cap is below that, fall back to the batch
+      # size and let the user override via WARP_DELETE_MAX_PREUPLOAD_BYTES.
+      if (( cap < WARP_DELETE_BATCH )); then
+        cap="$WARP_DELETE_BATCH"
+      fi
+      if (( objects > cap )); then
+        echo "  warp delete: capping --objects $objects → $cap (pre-upload ~$((obj_bytes * cap / 1024 / 1024)) MiB; obj_size=$WARP_OBJ_SIZE, max=$((max_bytes / 1024 / 1024 / 1024)) GiB)"
+        objects="$cap"
+      fi
     fi
   fi
   case "$op" in
