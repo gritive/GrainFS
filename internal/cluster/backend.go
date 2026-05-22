@@ -388,6 +388,35 @@ func (b *DistributedBackend) SetClusterNodes(allNodes []string) {
 	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
 }
 
+// StartPlacementRuntime wires the live ClusterConfig and gossip-fed
+// NodeStatsStore into the backend, constructs BoundedLoads from them, and
+// starts the periodic BoundedLoads refresh goroutine. Must be called after
+// gossip infrastructure is up (store is being populated). Weighted placement
+// and BoundedLoads skip are inactive until this is called.
+//
+// ctx governs the refresh goroutine lifetime — cancel it to stop.
+func (b *DistributedBackend) StartPlacementRuntime(ctx context.Context, cfg *ClusterConfig, store *NodeStatsStore) {
+	b.clusterCfg = cfg
+	b.nodeStatsStore = store
+	b.bl = NewBoundedLoads(store, BoundedLoadsParams{
+		C:        cfg.BoundedLoadsC(),
+		CLow:     cfg.BoundedLoadsCLow(),
+		MaxStale: cfg.BoundedLoadsMaxStaleTTL(),
+	})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.bl.RefreshIfStale()
+			}
+		}
+	}()
+}
+
 // SetClusterTopology publishes membership and EC config as one immutable
 // snapshot. Runtime join paths use this so a request never observes a widened
 // placement set with the old shard profile, or vice versa.
@@ -2185,6 +2214,13 @@ func selectECPlacementWeighted(
 		active++
 	}
 
+	// All-stale safeguard: if no live data (e.g. boot before first gossip),
+	// fall back to legacy unweighted placement so writes don't fail.
+	if active == 0 && countSkippedFor(skipReason, "stale") == len(liveNodes) {
+		metrics.ClusterPlacementSkipped.WithLabelValues("*", "all_stale_fallback").Inc()
+		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+	}
+
 	// If fewer than k+m active nodes remain after BL skip, bypass BL.
 	if active < cfg.NumShards() {
 		for i := range weights {
@@ -2211,6 +2247,17 @@ func selectECPlacementWeighted(
 	}
 
 	return PlaceShards(shardKey, liveNodes, weights, cfg.NumShards())
+}
+
+// countSkippedFor returns the number of entries in reasons matching target.
+func countSkippedFor(reasons []string, target string) int {
+	n := 0
+	for _, r := range reasons {
+		if r == target {
+			n++
+		}
+	}
+	return n
 }
 
 func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {

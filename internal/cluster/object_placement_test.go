@@ -206,3 +206,11 @@ func TestPlacementContextCarriesShardGroup(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "group-1", groupID)
 }
+
+func TestSelectECPlacement_AllStaleFallback(t *testing.T) {
+	store := NewNodeStatsStore(2 * time.Minute)
+	// store is empty — every node is stale.
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	nodes := selectECPlacementWeighted(cfg, []string{"n1", "n2", "n3", "n4"}, "key", store, nil, true, false)
+	assert.Len(t, nodes, 3, "should fall back to unweighted placement, not empty")
+}

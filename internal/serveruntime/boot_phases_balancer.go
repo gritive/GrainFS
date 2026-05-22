@@ -39,6 +39,11 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 		}
 		state.balancerProposer = bp
 		state.gossipReceiver = gr
+		// Wire gossip-fed stats + live ClusterConfig into placement. Weighted
+		// placement and BoundedLoads skip are inactive until this is called.
+		// When balancer is disabled the backend retains nodeStatsStore==nil
+		// and falls back to legacy unweighted placement.
+		state.distBackend.StartPlacementRuntime(ctx, ccfg, statsStore)
 	}
 
 	needsCapabilityGossip := state.capabilityGate != nil
