@@ -1,4 +1,18 @@
-Start the S3-compatible storage server
+Start the S3-compatible GrainFS storage server.
+
+You can configure multi-root storage directories (Multi-Drive) to enable disk-level
+resilience and Erasure Coding (EC) even on a single node. 
+
+To specify multiple data directories, pass a comma-separated list of paths to the 
+--data (-d) flag. It is highly recommended to also specify a fast SSD path via the
+--meta-dir flag to keep the BadgerDB metadata separate from payload shards.
+
+Examples:
+  # Single-node mode with 3 data drives (automatically configures 2+1 EC):
+  grainfs serve -d /mnt/hdd1,/mnt/hdd2,/mnt/hdd3 --meta-dir /mnt/ssd-meta
+
+  # Default single-drive mode (1+0 Solo):
+  grainfs serve -d ./data
 
 Usage:
   grainfs serve [flags]
@@ -18,7 +32,7 @@ Flags:
       --cluster-append-forward-buffer-max-per-request int   Max bytes any single AppendObject forward request may reserve (default 64 MiB). (default 67108864)
       --cluster-append-forward-buffer-total-bytes int       Total byte budget for AppendObject forward-body reservation pool (default 512 MiB). (default 536870912)
       --cluster-key string                                  Pre-shared key for cluster peer authentication
-  -d, --data string                                         data directory (default "./data")
+  -d, --data string                                         data directory (comma-separated for multi-root) (default "./data")
       --datagroup-refresh-interval duration                 how often to scan for new DataGroups and start reshard managers (0 = only scan at startup) (default 1m0s)
       --degraded-check-interval duration                    EC degraded-mode liveness check interval (default 30s)
       --encryption-key-file string                          path to 32-byte encryption key file (auto-generated only for solo bootstrap if omitted)
@@ -43,6 +57,7 @@ Flags:
   -h, --help                                                help for serve
       --lifecycle-interval duration                         lifecycle rule evaluation interval (0 to disable) (default 1h0m0s)
       --measure-read-amp                                    enable read-amplification simulator (informs Unified Buffer Cache decision)
+      --meta-dir string                                     dedicated fast metadata storage directory (defaults to first path in --data)
       --nbd-port int                                        NBD server port (0 = disabled). Client-side nbd-client still requires Linux. (default 10809)
       --nfs4-port int                                       NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces (default 2049)
       --node-id string                                      unique node ID (auto-generated if omitted)
