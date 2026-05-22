@@ -9,12 +9,29 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
-// BoundedLoadsParams configures hot-node detection.
+// ParamsSource exposes BoundedLoads thresholds as live getters so that
+// runtime cluster_config patches (e.g. operator dials BoundedLoadsC 1.25 → 1.5)
+// take effect on the next Refresh without a process restart. *ClusterConfig
+// implements this directly; tests can pass BoundedLoadsParams or a custom
+// mutable struct.
+type ParamsSource interface {
+	BoundedLoadsC() float64
+	BoundedLoadsCLow() float64
+	BoundedLoadsMaxStaleTTL() time.Duration
+}
+
+// BoundedLoadsParams is a static ParamsSource for tests and one-off callers.
+// Production uses *ClusterConfig directly, so values updated via raft propagate
+// on the next Refresh tick.
 type BoundedLoadsParams struct {
 	C        float64       // hot 진입 multiplier (default 1.25)
 	CLow     float64       // hot 탈출 multiplier (default 1.0, must be < C)
 	MaxStale time.Duration // 절대 max snapshot age safety net
 }
+
+func (p BoundedLoadsParams) BoundedLoadsC() float64                 { return p.C }
+func (p BoundedLoadsParams) BoundedLoadsCLow() float64              { return p.CLow }
+func (p BoundedLoadsParams) BoundedLoadsMaxStaleTTL() time.Duration { return p.MaxStale }
 
 // BoundedLoadsSnapshot is an immutable view of cluster RPS state.
 //
@@ -32,15 +49,16 @@ type BoundedLoadsSnapshot struct {
 
 // BoundedLoads computes hot-node classification with hysteresis.
 type BoundedLoads struct {
-	store  *NodeStatsStore
-	params BoundedLoadsParams
-	snap   atomic.Pointer[BoundedLoadsSnapshot]
-	sf     singleflight.Group
+	store *NodeStatsStore
+	cfg   ParamsSource // live config — read on every Refresh, not snapshotted
+	snap  atomic.Pointer[BoundedLoadsSnapshot]
+	sf    singleflight.Group
 }
 
-// NewBoundedLoads constructs a BoundedLoads bound to store with the given params.
-func NewBoundedLoads(store *NodeStatsStore, params BoundedLoadsParams) *BoundedLoads {
-	bl := &BoundedLoads{store: store, params: params}
+// NewBoundedLoads constructs a BoundedLoads bound to store. cfg is read on every
+// Refresh so cluster_config patches propagate without restart.
+func NewBoundedLoads(store *NodeStatsStore, cfg ParamsSource) *BoundedLoads {
+	bl := &BoundedLoads{store: store, cfg: cfg}
 	empty := &BoundedLoadsSnapshot{HotSet: map[string]struct{}{}}
 	bl.snap.Store(empty)
 	return bl
@@ -84,8 +102,9 @@ func (bl *BoundedLoads) Refresh() {
 		}
 	}
 	avg := sum / float64(len(stats))
-	high := avg * bl.params.C
-	low := avg * bl.params.CLow
+	// Live read from cfg — cluster_config patches take effect on the next Refresh.
+	high := avg * bl.cfg.BoundedLoadsC()
+	low := avg * bl.cfg.BoundedLoadsCLow()
 
 	// prev is always non-nil: NewBoundedLoads stores an initial empty snapshot,
 	// and Refresh always reads bl.snap.Load() before publishing.
@@ -146,7 +165,8 @@ func (bl *BoundedLoads) shouldRefresh(cur *BoundedLoadsSnapshot) bool {
 	if cur == nil || cur.ComputedAt.IsZero() {
 		return true
 	}
-	if bl.params.MaxStale > 0 && time.Since(cur.ComputedAt) > bl.params.MaxStale {
+	maxStale := bl.cfg.BoundedLoadsMaxStaleTTL()
+	if maxStale > 0 && time.Since(cur.ComputedAt) > maxStale {
 		return true
 	}
 	// dataVersion advanced?
