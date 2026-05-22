@@ -56,6 +56,8 @@ func (bl *BoundedLoads) Refresh() {
 	prev := bl.snap.Load()
 
 	if len(stats) == 0 {
+		// Empty store: reset to empty snapshot. Task 3+ owns sticky-aware expiry
+		// behavior; currently we simply clear HotSet when all nodes are gone.
 		empty := &BoundedLoadsSnapshot{
 			HotSet:     map[string]struct{}{},
 			ComputedAt: time.Now(),
@@ -76,6 +78,8 @@ func (bl *BoundedLoads) Refresh() {
 	high := avg * bl.params.C
 	low := avg * bl.params.CLow
 
+	// prev is always non-nil: NewBoundedLoads stores an initial empty snapshot,
+	// and Refresh always reads bl.snap.Load() before publishing.
 	next := &BoundedLoadsSnapshot{
 		AvgRPS:        avg,
 		HighThreshold: high,
@@ -87,13 +91,30 @@ func (bl *BoundedLoads) Refresh() {
 	bl.snap.Store(next)
 }
 
-// computeHotSet applies the hysteresis state machine.
-// Task 2: initial implementation — rps > high → hot. Task 3 adds sticky band.
-func computeHotSet(stats []NodeStats, _ *BoundedLoadsSnapshot, high, _ float64) map[string]struct{} {
+// computeHotSet applies the hysteresis state machine:
+//   - rps > high     → hot (regardless of prev state)
+//   - rps < low      → not hot (regardless of prev state)
+//   - low ≤ rps ≤ high → sticky: keep prev state
+//
+// prev is non-nil — NewBoundedLoads stores an initial empty snapshot, and
+// Refresh always reads bl.snap.Load() before publishing.
+func computeHotSet(stats []NodeStats, prev *BoundedLoadsSnapshot, high, low float64) map[string]struct{} {
 	out := make(map[string]struct{}, len(stats))
+	prevHot := map[string]struct{}{}
+	if prev != nil {
+		prevHot = prev.HotSet
+	}
 	for _, ns := range stats {
-		if ns.RequestsPerSec > high {
+		switch {
+		case ns.RequestsPerSec > high:
 			out[ns.NodeID] = struct{}{}
+		case ns.RequestsPerSec < low:
+			// not hot, omit
+		default:
+			// sticky zone: keep previous hot state
+			if _, wasHot := prevHot[ns.NodeID]; wasHot {
+				out[ns.NodeID] = struct{}{}
+			}
 		}
 	}
 	return out
