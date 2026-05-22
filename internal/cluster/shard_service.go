@@ -162,6 +162,57 @@ func (s *ShardService) DataDirs() []string {
 	return s.dataDirs
 }
 
+// localDataDirs returns the active shard data directories for the EC writer's
+// C-optimisation hook.
+func (s *ShardService) localDataDirs() []string {
+	if s == nil {
+		return nil
+	}
+	return s.dataDirs
+}
+
+// importLocalShardFromPath promotes a fully-written shard payload at srcPath
+// (already in the final on-disk format with the matching AAD for bucket /
+// shardKey / shardIdx) into the canonical shard slot. The source MUST live on
+// the same filesystem as the destination drive (the writer caller is
+// responsible for placing the spool file on dataDirs[shardIdx % len]).
+//
+// The operation is two steps: rename srcPath → finalPath.tmp, fsync the file,
+// then rename .tmp → finalPath. The two-step pattern mirrors writeBuffered's
+// atomic-rename recipe and survives a crash between rename and fsync because
+// the .tmp file is removed on cleanup paths.
+func (s *ShardService) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string) error {
+	dir := s.getShardDir(bucket, key, shardIdx)
+	if err := s.ensureShardDir(dir); err != nil {
+		return fmt.Errorf("import shard mkdir %s: %w", dir, err)
+	}
+	finalPath := s.getShardPath(bucket, key, shardIdx)
+	tmpPath := fmt.Sprintf("%s.%d.%d.import.tmp", finalPath, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(srcPath, tmpPath); err != nil {
+		return fmt.Errorf("import shard rename %s → %s: %w", srcPath, tmpPath, err)
+	}
+	f, err := os.OpenFile(tmpPath, os.O_RDONLY, 0)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard reopen for fsync: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard fsync: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard close: %w", err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("import shard finalize rename: %w", err)
+	}
+	_ = ctx // import is synchronous; ctx reserved for future cancellation
+	return nil
+}
+
 func (s *ShardService) getShardPath(bucket, key string, shardIdx int) string {
 	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
 	return filepath.Join(targetDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))

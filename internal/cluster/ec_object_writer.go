@@ -23,6 +23,15 @@ type ecObjectShardStore interface {
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
 	DeleteLocalShards(bucket, key string) error
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
+	// localDataDirs returns the shard service's local drive roots so the C
+	// optimisation in writeSpooledShards can pick a per-drive spool path.
+	// Returns an empty slice for shard services that don't expose drives.
+	localDataDirs() []string
+	// importLocalShardFromPath atomically promotes a fully-written shard
+	// payload (final on-disk format) at srcPath into the canonical shard
+	// slot for (bucket, key, shardIdx). Used by the C rename-instead-of-copy
+	// path in writeShardReadersWithSize.
+	importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string) error
 }
 
 type ecObjectSizedShardStore interface {
@@ -177,7 +186,7 @@ func (w ecObjectWriter) writeShardReaders(
 	openShard func(idx int) (io.Reader, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
-	return w.writeShardReadersWithSize(ctx, plan, sp, openShard, nil, metricPath)
+	return w.writeShardReadersWithSize(ctx, plan, sp, openShard, nil, metricPath, nil)
 }
 
 func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWritePlan, sp *spooledObject) (ecObjectWriteResult, error) {
@@ -220,7 +229,7 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 			return 0, fmt.Errorf("ec memory shard %d out of range", idx)
 		}
 		return int64(len(shards[idx])), nil
-	}, "ec_memory")
+	}, "ec_memory", nil)
 }
 
 func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
@@ -245,12 +254,29 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 			return 0, fmt.Errorf("ec data shard %d out of range", idx)
 		}
 		return int64(shardHeaderSize + len(shards[idx])), nil
-	}, "ec")
+	}, "ec", nil)
 }
 
 func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {
 	stageStart := time.Now()
-	shards, err := spoolECShards(ctx, plan.Config, spoolDir, sp)
+	// Prefer the C-optimized per-drive spool that bakes in the final shard
+	// AAD so writeShardReadersWithSize can rename-instead-of-copy on local
+	// shards. Requires an encryptor (the at-rest-encryption default) and a
+	// local ShardService that exposes its data drives. Cluster fan-out and
+	// plaintext deployments still take the legacy single-dir spool path.
+	var (
+		shards *spooledECShards
+		err    error
+	)
+	if sp != nil && sp.encrypted && sp.encryptor != nil && w.shards != nil {
+		if drives := w.shards.localDataDirs(); len(drives) > 0 {
+			shardKey := ecObjectSegmentShardKey(plan)
+			shards, err = spoolECShardsToFinal(ctx, plan.Config, drives, plan.Bucket, shardKey, sp)
+		}
+	}
+	if shards == nil {
+		shards, err = spoolECShards(ctx, plan.Config, spoolDir, sp)
+	}
 	if err != nil {
 		return ecObjectWriteResult{}, err
 	}
@@ -259,7 +285,7 @@ func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWri
 
 	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
 		return shards.OpenShard(idx)
-	}, shards.ShardSize, "ec")
+	}, shards.ShardSize, "ec", shards)
 }
 
 func (w ecObjectWriter) writeShardReadersWithSize(
@@ -269,6 +295,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
+	spooled *spooledECShards,
 ) (ecObjectWriteResult, error) {
 	shardKey := ecObjectSegmentShardKey(plan)
 	written := make(chan string, len(plan.Placement))
@@ -292,6 +319,33 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 			shardStageStart := time.Now()
 			var werr error
 			if node == w.selfID {
+				// C optimisation: when the spool wrote shard i to its target
+				// drive in the final shard format under the final AAD, the
+				// shard service can just rename the spool file into the
+				// canonical slot. Skips an entire decrypt + re-encrypt + 2nd
+				// disk write per shard.
+				if spooled != nil && spooled.finalFormat && i < len(spooled.paths) && spooled.paths[i] != "" {
+					srcPath := spooled.paths[i]
+					werr = w.shards.importLocalShardFromPath(gctx, plan.Bucket, shardKey, i, srcPath)
+					if werr == nil {
+						// Tell the spooled set we transferred ownership of
+						// this path so Cleanup() doesn't try to delete the
+						// (now-renamed-away) file.
+						spooled.paths[i] = ""
+					}
+					observePutStage("ec_write_shard", "local_rename", shardStageStart)
+					ObservePutTraceStage(ctx, PutTraceStageShardWriteLocal, shardStageStart, PutTraceStageFields{
+						ShardIndex:       i,
+						ShardTarget:      node,
+						ShardTargetClass: "local",
+						Error:            putTraceErrorString(werr),
+					})
+					if werr != nil {
+						return &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}
+					}
+					written <- node
+					return nil
+				}
 				body, err := openShard(i)
 				if err != nil {
 					return fmt.Errorf("open ec shard %d: %w", i, err)
