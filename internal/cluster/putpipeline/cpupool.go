@@ -1,6 +1,7 @@
 package putpipeline
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -11,7 +12,13 @@ import (
 )
 
 // CPUPool runs worker goroutines that EC-split incoming stripes and
-// AES-GCM-seal each shard chunk into GFSENC2 format.
+// AES-GCM-seal each shard into GFSENC2 format.
+//
+// EC split runs in parallel across workers. Encryption runs inside
+// dispatch, which the per-PUT seqGate already serializes, so each
+// shard's chunked writer is fed strictly in stripe order. The result
+// is that all chunks for one (PutID, ShardIdx), concatenated in stripe
+// order, form exactly one valid GFSENC2 stream.
 type CPUPool struct {
 	in       chan StripePlaintext
 	enc      *encrypt.Encryptor
@@ -22,6 +29,17 @@ type CPUPool struct {
 
 	seqMu sync.Mutex
 	seq   map[uint64]*seqGate
+
+	encMu    sync.Mutex
+	encByPut map[uint64][]*shardEncoder
+}
+
+// shardEncoder bundles the single long-lived chunked writer for one
+// (PutID, shardIdx) with the buffer it emits into. dispatch drains buf
+// after every stripe; the writer itself spans the whole PUT.
+type shardEncoder struct {
+	w   *eccodec.EncryptedShardChunkedWriter
+	buf *bytes.Buffer
 }
 
 // seqGate serializes chunk dispatch per PUT so each shard channel sees
@@ -37,6 +55,27 @@ func (p *CPUPool) registerPut(putID uint64, shardChans []chan<- EncryptedShardCh
 	p.mu.Lock()
 	p.outByPut[putID] = shardChans
 	p.mu.Unlock()
+
+	n := p.ecCfg.NumShards()
+	encoders := make([]*shardEncoder, n)
+	for i := 0; i < n; i++ {
+		buf := new(bytes.Buffer)
+		aad := []byte(fmt.Sprintf("put/%d/shard/%d", putID, i))
+		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, aad, eccodec.DefaultEncryptedChunkSize)
+		if err != nil {
+			// NewEncryptedShardChunkedWriter only fails on a nil
+			// encryptor or an out-of-range chunk size, both of which
+			// are pipeline-construction bugs, not runtime conditions.
+			panic(fmt.Sprintf("cpu pool: build shard encoder %d for put %d: %v", i, putID, err))
+		}
+		encoders[i] = &shardEncoder{w: w, buf: buf}
+	}
+	p.encMu.Lock()
+	if p.encByPut == nil {
+		p.encByPut = make(map[uint64][]*shardEncoder)
+	}
+	p.encByPut[putID] = encoders
+	p.encMu.Unlock()
 }
 
 func (p *CPUPool) unregisterPut(putID uint64) {
@@ -46,6 +85,16 @@ func (p *CPUPool) unregisterPut(putID uint64) {
 	p.seqMu.Lock()
 	delete(p.seq, putID)
 	p.seqMu.Unlock()
+	p.encMu.Lock()
+	delete(p.encByPut, putID)
+	p.encMu.Unlock()
+}
+
+func (p *CPUPool) shardEncoders(putID uint64) ([]*shardEncoder, bool) {
+	p.encMu.Lock()
+	defer p.encMu.Unlock()
+	encoders, ok := p.encByPut[putID]
+	return encoders, ok
 }
 
 func (p *CPUPool) shardChan(putID uint64, shardIdx int) (chan<- EncryptedShardChunk, bool) {
@@ -105,75 +154,75 @@ func (p *CPUPool) workerLoop(ctx context.Context) {
 	}
 }
 
+// processStripe runs concurrently across workers and does only the EC
+// split: it produces k+m plaintext shard byte slices. Encryption is
+// deferred to dispatch so it runs serialized per PUT.
 func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) error {
 	shards, err := cluster.ECSplitWithEncode(p.ecCfg, stripe.Data)
 	if err != nil {
 		return fmt.Errorf("cpu pool ec split: %w", err)
 	}
-	chunks := make([]EncryptedShardChunk, len(shards))
+	return p.dispatch(ctx, stripe, shards)
+}
+
+// dispatch encrypts and sends a stripe's shards to the per-shard
+// channels, holding the PUT's seqGate so each shard's chunked writer is
+// fed in StripeIdx order and chunks land in order on every channel.
+//
+// Because the seqGate admits exactly one stripe per PUT at a time, the
+// long-lived chunked writers need no extra locking: every Write/Close
+// across the whole PUT happens here, strictly in stripe order.
+func (p *CPUPool) dispatch(ctx context.Context, stripe StripePlaintext, shards [][]byte) error {
+	seq := p.acquireSeq(stripe.PutID)
+	seq.lock.Lock()
+	defer seq.lock.Unlock()
+	for seq.nextStripe != stripe.StripeIdx {
+		seq.cond.Wait()
+	}
+	defer func() {
+		seq.nextStripe++
+		seq.cond.Broadcast()
+	}()
+
+	encoders, ok := p.shardEncoders(stripe.PutID)
+	if !ok {
+		return fmt.Errorf("cpu pool: no shard encoders for put %d", stripe.PutID)
+	}
 	for i, shard := range shards {
-		ciphertext, err := p.sealShardChunk(stripe.PutID, i, shard)
-		if err != nil {
-			return fmt.Errorf("cpu pool seal shard %d: %w", i, err)
+		if i >= len(encoders) {
+			break
 		}
-		chunks[i] = EncryptedShardChunk{
+		enc := encoders[i]
+		if _, err := enc.w.Write(shard); err != nil {
+			return fmt.Errorf("cpu pool: encrypt put %d shard %d: %w", stripe.PutID, i, err)
+		}
+		if stripe.LastInPut {
+			if err := enc.w.Close(); err != nil {
+				return fmt.Errorf("cpu pool: close put %d shard %d: %w", stripe.PutID, i, err)
+			}
+		}
+		// buf.Bytes() aliases the buffer's backing array; copy out
+		// before Reset so the next stripe cannot corrupt this chunk.
+		ciphertext := make([]byte, enc.buf.Len())
+		copy(ciphertext, enc.buf.Bytes())
+		enc.buf.Reset()
+
+		out, ok := p.shardChan(stripe.PutID, i)
+		if !ok {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case out <- EncryptedShardChunk{
 			PutID:      stripe.PutID,
 			StripeIdx:  stripe.StripeIdx,
 			ShardIdx:   i,
 			Ciphertext: ciphertext,
 			Padding:    stripe.Padding,
 			LastInPut:  stripe.LastInPut,
+		}:
 		}
 	}
-	p.dispatch(ctx, stripe.PutID, stripe.StripeIdx, chunks)
 	return nil
-}
-
-// dispatch sends a stripe's chunks to the per-shard channels, holding
-// the PUT's seqGate so chunks land in StripeIdx order on every shard.
-func (p *CPUPool) dispatch(ctx context.Context, putID uint64, stripeIdx uint32, chunks []EncryptedShardChunk) {
-	seq := p.acquireSeq(putID)
-	seq.lock.Lock()
-	defer seq.lock.Unlock()
-	for seq.nextStripe != stripeIdx {
-		seq.cond.Wait()
-	}
-	for i, chunk := range chunks {
-		out, ok := p.shardChan(putID, i)
-		if !ok {
-			continue
-		}
-		select {
-		case <-ctx.Done():
-			seq.nextStripe++
-			seq.cond.Broadcast()
-			return
-		case out <- chunk:
-		}
-	}
-	seq.nextStripe++
-	seq.cond.Broadcast()
-}
-
-// sealShardChunk encrypts one shard's plaintext bytes into a complete
-// GFSENC2 chunk stream. Phase 5 will plumb the real bucket/shardKey
-// AAD; for now a deterministic per-PUT-per-shard AAD is used.
-func (p *CPUPool) sealShardChunk(putID uint64, shardIdx int, plain []byte) ([]byte, error) {
-	aad := []byte(fmt.Sprintf("put/%d/shard/%d", putID, shardIdx))
-	buf := newBuffer()
-	defer releaseBuffer(buf)
-	w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, aad, eccodec.DefaultEncryptedChunkSize)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(plain); err != nil {
-		_ = w.Close()
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	out := make([]byte, buf.Len())
-	copy(out, buf.Bytes())
-	return out, nil
 }
