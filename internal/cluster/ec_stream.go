@@ -178,6 +178,14 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	return out, nil
 }
 
+// spoolECShardsToFinalInMemoryCap is the upper bound for the in-memory EC
+// split path. Objects at or below this size run Split + Encode in memory,
+// which avoids the streaming spool's data-shard re-read + re-decrypt pass
+// during parity computation. Memory cost is bounded by source size +
+// (k+m)/k × source size; at 32 MiB the worst case is ~96 MiB per object,
+// well below single-node RSS targets at concurrent = 32.
+const spoolECShardsToFinalInMemoryCap = 32 << 20
+
 // spoolECShardsToFinal is the C optimization: per-drive spool paths sealed
 // with the final shard AAD (bucket/shardKey/idx), so writeShardReadersWithSize
 // can rename each spool file straight into its final shard slot without
@@ -186,6 +194,11 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 // possible but the unencrypted shard format adds a CRC footer that the
 // streaming writer doesn't yet emit; this commit only optimises the
 // at-rest-encrypted default).
+//
+// For payloads at or below spoolECShardsToFinalInMemoryCap the function
+// dispatches to spoolECShardsToFinalMemory which performs Split + Encode in
+// memory (one encrypt pass per shard, no disk re-read for parity). Larger
+// payloads fall through to the streaming path below.
 func spoolECShardsToFinal(
 	ctx context.Context,
 	cfg ECConfig,
@@ -198,6 +211,9 @@ func spoolECShardsToFinal(
 	}
 	if len(dataDirs) == 0 {
 		return nil, fmt.Errorf("spoolECShardsToFinal: empty dataDirs")
+	}
+	if sp.Size > 0 && sp.Size <= spoolECShardsToFinalInMemoryCap {
+		return spoolECShardsToFinalMemory(ctx, cfg, dataDirs, bucket, shardKey, sp)
 	}
 	stageStart := time.Now()
 	enc, err := reedsolomon.NewStream(
@@ -454,6 +470,124 @@ func spoolECShardsToFinal(
 		}
 	}
 	observePutStage("ec_spool_shards_final", "close_parity_files", stageStart)
+	return out, nil
+}
+
+// spoolECShardsToFinalMemory is the in-memory variant of the C-path. It
+// reads the entire spooled source into RAM, calls ecSplitBodies to compute
+// both data and parity shards in one pass (no disk re-read), then writes
+// each shard's plaintext (8-byte shardHeader || shard bytes) through the
+// encrypted chunked writer into its per-drive spool path. The result is
+// identical to spoolECShardsToFinal's streaming output: paths in final
+// shard format, sealed with final AAD, finalFormat = true.
+//
+// Saves one full encrypt-pass and one disk-read-pass per data shard vs the
+// streaming path. At 5 MiB / EC 2+2 that's 2 × 1.25 MiB AES-GCM + ~5 MiB
+// read avoided per object. Memory cost is bounded by spoolECShardsToFinalInMemoryCap.
+func spoolECShardsToFinalMemory(
+	ctx context.Context,
+	cfg ECConfig,
+	dataDirs []string,
+	bucket, shardKey string,
+	sp *spooledObject,
+) (*spooledECShards, error) {
+	_ = ctx
+	stageStart := time.Now()
+	src, err := sp.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open spooled object: %w", err)
+	}
+	plaintext := make([]byte, sp.Size)
+	if _, err := io.ReadFull(src, plaintext); err != nil {
+		_ = src.Close()
+		return nil, fmt.Errorf("read spooled object: %w", err)
+	}
+	if err := src.Close(); err != nil {
+		return nil, fmt.Errorf("close spooled object: %w", err)
+	}
+	observePutStage("ec_spool_shards_final_mem", "read_source", stageStart)
+
+	stageStart = time.Now()
+	shards, err := ecSplitBodies(cfg, plaintext)
+	if err != nil {
+		clear(plaintext)
+		return nil, fmt.Errorf("ec in-memory split+encode: %w", err)
+	}
+	// IMPORTANT: reedsolomon.Encoder.Split aliases the input buffer for the
+	// data shards (shards[0..k-1] are sub-slices of plaintext), so the
+	// plaintext buffer MUST stay alive until we've written every shard
+	// payload to disk below. Zero it out at the end of the function via a
+	// defer instead of here.
+	defer clear(plaintext)
+	observePutStage("ec_spool_shards_final_mem", "split_encode", stageStart)
+
+	out := &spooledECShards{
+		paths:       make([]string, cfg.NumShards()),
+		sizes:       make([]int64, cfg.NumShards()),
+		origSize:    sp.Size,
+		encrypted:   true,
+		encryptor:   sp.encryptor,
+		domains:     make([]string, cfg.NumShards()),
+		finalFormat: true,
+		aadBases:    make([][]byte, cfg.NumShards()),
+	}
+	stamp := time.Now().UnixNano()
+	subdir := fmt.Sprintf(".ec-spool-%d", stamp)
+	cleanup := func() {
+		out.Cleanup()
+	}
+
+	shardHeader := encodeShardHeader(sp.Size)
+	stageStart = time.Now()
+	for i := 0; i < cfg.NumShards(); i++ {
+		drive := dataDirs[i%len(dataDirs)]
+		dir := filepath.Join(drive, "tmp", subdir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			cleanup()
+			return nil, fmt.Errorf("ec spool mkdir %s: %w", dir, err)
+		}
+		out.extraCleanupDirs = append(out.extraCleanupDirs, dir)
+		path := filepath.Join(dir, fmt.Sprintf("shard_%d", i))
+		out.paths[i] = path
+		out.aadBases[i] = []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("create ec shard %d: %w", i, err)
+		}
+		cw, err := eccodec.NewEncryptedShardChunkedWriter(f, sp.encryptor, out.aadBases[i], eccodec.DefaultEncryptedChunkSize)
+		if err != nil {
+			_ = f.Close()
+			cleanup()
+			return nil, fmt.Errorf("create chunked writer %d: %w", i, err)
+		}
+		if _, err := cw.Write(shardHeader[:]); err != nil {
+			_ = cw.Close()
+			_ = f.Close()
+			cleanup()
+			return nil, fmt.Errorf("write shard header %d: %w", i, err)
+		}
+		if _, err := cw.Write(shards[i]); err != nil {
+			_ = cw.Close()
+			_ = f.Close()
+			cleanup()
+			return nil, fmt.Errorf("write shard body %d: %w", i, err)
+		}
+		if err := cw.Close(); err != nil {
+			_ = f.Close()
+			cleanup()
+			return nil, fmt.Errorf("close chunked writer %d: %w", i, err)
+		}
+		if err := f.Close(); err != nil {
+			cleanup()
+			return nil, fmt.Errorf("close shard file %d: %w", i, err)
+		}
+		clear(shards[i])
+		if info, statErr := os.Stat(path); statErr == nil {
+			out.sizes[i] = info.Size()
+		}
+	}
+	observePutStage("ec_spool_shards_final_mem", "write_shards", stageStart)
 	return out, nil
 }
 
