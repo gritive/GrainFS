@@ -126,3 +126,65 @@ func TestBoundedLoads_HotTransitionCount(t *testing.T) {
 	after := testutil.ToFloat64(metrics.ClusterBLHotStateTransitions.WithLabelValues(target, "enter"))
 	assert.Equal(t, 1.0, after-before)
 }
+
+// mutableParams lets a single test instance mutate BL thresholds mid-flight.
+// Mirrors the production pattern where *ClusterConfig is patched via raft and
+// the change becomes visible on the next BoundedLoads.Refresh.
+type mutableParams struct {
+	c, cLow  float64
+	maxStale time.Duration
+}
+
+func (p *mutableParams) BoundedLoadsC() float64                 { return p.c }
+func (p *mutableParams) BoundedLoadsCLow() float64              { return p.cLow }
+func (p *mutableParams) BoundedLoadsMaxStaleTTL() time.Duration { return p.maxStale }
+
+func TestBoundedLoads_LiveCTuning(t *testing.T) {
+	// Verify high/low thresholds reflect cfg values live (no snapshot at construction).
+	// Assert thresholds directly to avoid hysteresis sticky-band interference.
+	store := NewNodeStatsStore(2 * time.Minute)
+	store.Set(NodeStats{NodeID: "live-c-a", RequestsPerSec: 100})
+	store.Set(NodeStats{NodeID: "live-c-b", RequestsPerSec: 300})
+	// avg = 200
+
+	p := &mutableParams{c: 1.25, cLow: 1.0, maxStale: time.Minute}
+	bl := NewBoundedLoads(store, p)
+	bl.Refresh()
+	snap1 := bl.Snapshot()
+	assert.Equal(t, 250.0, snap1.HighThreshold, "c=1.25: high=200*1.25=250")
+	assert.Equal(t, 200.0, snap1.LowThreshold, "cLow=1.0: low=200*1.0=200")
+
+	// Operator dials c and cLow up. No restart, no new BoundedLoads — just
+	// mutate the shared cfg view (in production: raft cluster_config patch).
+	p.c = 1.5
+	p.cLow = 1.1
+	bl.Refresh()
+	snap2 := bl.Snapshot()
+	assert.Equal(t, 300.0, snap2.HighThreshold, "c=1.5: high=200*1.5=300 (live-tuned)")
+	assert.InDelta(t, 220.0, snap2.LowThreshold, 0.0001, "cLow=1.1: low=200*1.1=220 (live-tuned)")
+}
+
+func TestBoundedLoads_LiveMaxStaleTuning(t *testing.T) {
+	// Verify RefreshIfStale honors the live MaxStale value.
+	store := NewNodeStatsStore(2 * time.Minute)
+	store.Set(NodeStats{NodeID: "live-ms-only", RequestsPerSec: 100})
+
+	p := &mutableParams{c: 1.25, cLow: 1.0, maxStale: time.Hour}
+	bl := NewBoundedLoads(store, p)
+	bl.Refresh()
+	first := bl.Snapshot()
+
+	// Backdate the snapshot to 90s ago so a 60s MaxStale would trigger refresh.
+	stale := *first
+	stale.ComputedAt = time.Now().Add(-90 * time.Second)
+	bl.snap.Store(&stale)
+
+	// MaxStale=1h → not stale, no refresh.
+	bl.RefreshIfStale()
+	assert.Same(t, &stale, bl.Snapshot(), "MaxStale=1h: snapshot reused")
+
+	// Operator dials MaxStale down. No restart.
+	p.maxStale = 60 * time.Second
+	bl.RefreshIfStale()
+	assert.NotSame(t, &stale, bl.Snapshot(), "MaxStale=60s: stale snapshot refreshed (live-tuned)")
+}

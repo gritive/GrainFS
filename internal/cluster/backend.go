@@ -398,11 +398,9 @@ func (b *DistributedBackend) SetClusterNodes(allNodes []string) {
 func (b *DistributedBackend) StartPlacementRuntime(ctx context.Context, cfg *ClusterConfig, store *NodeStatsStore) {
 	b.clusterCfg = cfg
 	b.nodeStatsStore = store
-	b.bl = NewBoundedLoads(store, BoundedLoadsParams{
-		C:        cfg.BoundedLoadsC(),
-		CLow:     cfg.BoundedLoadsCLow(),
-		MaxStale: cfg.BoundedLoadsMaxStaleTTL(),
-	})
+	// Pass cfg directly so BoundedLoads reads C/CLow/MaxStale live on every
+	// Refresh — runtime cluster_config patches take effect without restart.
+	b.bl = NewBoundedLoads(store, cfg)
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()

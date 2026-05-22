@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.326.0] - 2026-05-22
+
+### Changed
+
+- **`BoundedLoadsC`, `BoundedLoadsCLow`, and `BoundedLoadsMaxStaleTTL` now apply live.** Previously these three thresholds were captured at process start, so an operator dialing `bounded-loads-c` from 1.25 → 1.5 via cluster_config had to wait until the next restart for the change to take effect — surprising, because the `*Enabled` flags were already live. `BoundedLoads` now reads thresholds from `*ClusterConfig` on every `Refresh` tick (default 5s), so a raft-propagated patch propagates to every node's hot-detection logic within one tick of receiving the new config. No data path changes.
+
 ## [0.0.325.0] - 2026-05-22
 
 ### Added
@@ -10,7 +16,7 @@
 
 ### Known limitations
 
-- `BoundedLoadsC`, `BoundedLoadsCLow`, `BoundedLoadsMaxStaleTTL` are captured at process start. A runtime cluster-config patch for these values takes effect on the next process restart. The two enable flags (`WeightedHRWEnabled`, `BoundedLoadsEnabled`) are read live per request.
+- `BoundedLoadsC`, `BoundedLoadsCLow`, `BoundedLoadsMaxStaleTTL` are captured at process start. A runtime cluster-config patch for these values takes effect on the next process restart. The two enable flags (`WeightedHRWEnabled`, `BoundedLoadsEnabled`) are read live per request. (Resolved in `0.0.326.0`.)
 - The placement bias is statistically observable (BL spill/rerank counters) but per-object shard layout is not yet exposed via an introspection endpoint, so capacity-proportionality of the resulting distribution is verified by metrics, not by direct shard-map inspection.
 
 ### Observability
