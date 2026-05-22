@@ -10,12 +10,12 @@ require (
 	github.com/aws/smithy-go v1.25.1
 	github.com/cloudwego/hertz v0.10.4
 	github.com/dgraph-io/badger/v4 v4.9.1
-	github.com/duckdb/duckdb-go/v2 v2.10502.0
+	github.com/duckdb/duckdb-go/v2 v2.10503.0
 	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/hugelgupf/p9 v0.4.0
+	github.com/hugelgupf/p9 v0.4.1
 	github.com/klauspost/compress v1.18.6
 	github.com/klauspost/reedsolomon v1.14.0
 	github.com/onsi/ginkgo/v2 v2.19.0
@@ -33,9 +33,9 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.uber.org/goleak v1.3.0
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.44.0
+	golang.org/x/sys v0.45.0
 	golang.org/x/time v0.15.0
 	pgregory.net/rapid v1.3.0
 )
@@ -62,12 +62,12 @@ require (
 	github.com/cloudwego/netpoll v0.7.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.0 // indirect
-	github.com/duckdb/duckdb-go-bindings v0.10502.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10502.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10502.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10502.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10502.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10502.0 // indirect
+	github.com/duckdb/duckdb-go-bindings v0.10503.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10503.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10503.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10503.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10503.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10503.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -100,11 +100,11 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/arch v0.27.0 // indirect
 	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
-	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260519071638-aa98bba5eb94 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260519071638-aa98bba5eb94 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260522162733-96412231522c // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260522162733-96412231522c // indirect
 	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
