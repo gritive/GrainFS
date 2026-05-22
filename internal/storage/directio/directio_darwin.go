@@ -30,6 +30,19 @@ func openDirect(path string, flag int, mode os.FileMode) (*os.File, error) {
 	return f, nil
 }
 
+// applyNoCacheHint enables F_NOCACHE on an already-open *os.File. Mirrors
+// what openDirect does after the open, but works on a file the caller
+// opened with vanilla os.OpenFile (or os.CreateTemp). Useful for chunked-
+// write paths that can't use the Linux O_DIRECT alignment contract but
+// still want the macOS page-cache bypass — see the EC shard final-format
+// spool in cluster/ec_stream.go.
+func applyNoCacheHint(f *os.File) error {
+	if _, err := fcntlNoCache(f.Fd()); err != nil {
+		return fmt.Errorf("apply F_NOCACHE: %w", err)
+	}
+	return nil
+}
+
 // fcntlNoCache enables F_NOCACHE on fd. The constant is not exported by
 // syscall on darwin, so we use the literal value (48) — see <fcntl.h>.
 const fNoCache = 48

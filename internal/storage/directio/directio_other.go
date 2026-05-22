@@ -21,3 +21,9 @@ func openDirect(path string, flag int, mode os.FileMode) (*os.File, error) {
 func alignedCopyImpl(data []byte) ([]byte, int) {
 	return data, len(data)
 }
+
+// applyNoCacheHint is a no-op on platforms without a recognized
+// page-cache-bypass primitive: Linux exposes O_DIRECT instead (which the
+// chunked-write callsites can't satisfy) and other platforms simply have
+// nothing to offer.
+func applyNoCacheHint(_ *os.File) error { return nil }
