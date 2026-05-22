@@ -1010,3 +1010,31 @@ func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
 	require.True(t, ok, "post-recovery pack write must replay through a second recovery")
 	require.Equal(t, []byte("second"), got)
 }
+
+// TestShardService_DataWALRestoresEncryptedShard regression-tests the latent
+// bug surfaced by boot wiring (see commit 775286d5): RecoverDataWAL must
+// forward the configured encryptor to datawal.Recover so the WAL segments
+// can be decrypted. Pre-fix the call passed nil and recovery failed with
+// "segment mode mismatch" once an encrypted WAL was wired in production.
+func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{0x42}, 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	require.NoError(t, err)
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithEncryptor(enc),
+		WithDataWAL(dwal),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("encrypted-payload")))
+	require.NoError(t, dwal.Flush())
+	shardPath := filepath.Join(svc.dataDir, "b", "k", "shard_0")
+	require.NoError(t, os.Remove(shardPath))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, err := svc.ReadLocalShard("b", "k", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("encrypted-payload"), got)
+}
