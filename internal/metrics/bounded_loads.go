@@ -72,7 +72,7 @@ var (
 	}, []string{"node", "reason"})
 
 	// ClusterBLSnapshotRefresh counts BoundedLoads snapshot refresh outcomes.
-	// result label: "ok" | "error".
+	// result label: "fresh" | "singleflight_wait".
 	ClusterBLSnapshotRefresh = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_cluster_bl_snapshot_refresh_total",
 		Help: "BoundedLoads snapshot refresh outcomes.",
