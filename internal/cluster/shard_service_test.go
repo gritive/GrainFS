@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -919,4 +921,34 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	// Reading shard_1 must fail because AAD doesn't match.
 	_, err := svc.ReadLocalShard("b", "k", 1)
 	require.Error(t, err, "shard moved to wrong position must fail decryption")
+}
+
+func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(dwal))
+	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
+	require.NoError(t, dwal.Flush())
+	shardPath := filepath.Join(svc.dataDir, "b", "k", "shard_0")
+	require.NoError(t, os.Remove(shardPath))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, err := svc.ReadLocalShard("b", "k", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), got)
+}
+
+func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(dwal))
+	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
+	require.NoError(t, dwal.Flush())
+	shardPath := filepath.Join(svc.dataDir, "b", "streamed", "shard_1")
+	require.NoError(t, os.Remove(shardPath))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	got, err := svc.ReadLocalShard("b", "streamed", 1)
+	require.NoError(t, err)
+	require.Equal(t, []byte("stream-payload"), got)
 }
