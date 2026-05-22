@@ -237,7 +237,32 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 		if err != nil {
 			return nil, err
 		}
-		return &ecReconstructStreamReader{reader: io.LimitReader(io.MultiReader(dataReaders...), origSize)}, nil
+		// Single-shard reads (e.g., 1+0 single-node EC) get no parallelism
+		// benefit from the async prefetcher and the extra goroutine hop only
+		// adds latency, so stay on the direct io.MultiReader path.
+		if len(dataReaders) <= 1 {
+			return &ecReconstructStreamReader{reader: io.LimitReader(io.MultiReader(dataReaders...), origSize)}, nil
+		}
+		prefetchers := make([]*asyncPrefetchReader, len(dataReaders))
+		readers := make([]io.Reader, len(dataReaders))
+		for i, dr := range dataReaders {
+			p := newAsyncPrefetchReader(dr, nil)
+			prefetchers[i] = p
+			readers[i] = p
+		}
+		closeAll := func() error {
+			var firstErr error
+			for _, p := range prefetchers {
+				if err := p.Close(); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			return firstErr
+		}
+		return &ecReconstructStreamReader{
+			reader: io.LimitReader(io.MultiReader(readers...), origSize),
+			close:  closeAll,
+		}, nil
 	}
 	pr, pw := io.Pipe()
 	go func() {
