@@ -45,6 +45,14 @@ table ClusterConfig {
   // Snapshot (object PITR) — interval=0 disables auto-snapshot, hot-toggleable.
   snapshot_interval_ns:               Int64Box;
   snapshot_retain:                    Int32Box;
+
+  // Weighted HRW + Bounded-loads read routing (Task 5b). Fields appended at
+  // the end of the table to preserve forward/backward wire compatibility.
+  weighted_hrw_enabled:               BoolBox;
+  bounded_loads_enabled:              BoolBox;
+  bounded_loads_c:                    DoubleBox;
+  bounded_loads_c_low:                DoubleBox;
+  bounded_loads_max_stale_ttl_ns:     Int64Box;
 }
 
 // Patch command — same fields; nil = leave alone.
@@ -79,6 +87,14 @@ table MetaClusterConfigPatchCmd {
   // clusterConfigSnap.updatedAt for the same Raft log entry, keeping snapshots
   // byte-identical. 0 = legacy/unstamped (FSM falls back to time.Now()).
   updated_at_unix_ms:                 int64;
+
+  // Weighted HRW + Bounded-loads read routing (Task 5b). Fields appended at
+  // the end of the table to preserve forward/backward wire compatibility.
+  weighted_hrw_enabled:               BoolBox;
+  bounded_loads_enabled:              BoolBox;
+  bounded_loads_c:                    DoubleBox;
+  bounded_loads_c_low:                DoubleBox;
+  bounded_loads_max_stale_ttl_ns:     Int64Box;
 }
 
 table CreateBucketCmd {

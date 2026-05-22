@@ -138,3 +138,31 @@ func TestClusterConfigCodec_SnapshotSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("snapshotRetain roundtrip: %v", snap.snapshotRetain)
 	}
 }
+
+func TestClusterConfigCodec_BoundedLoadsRoundtrip(t *testing.T) {
+	enabled := true
+	cLowVal := 0.9
+	cVal := 1.5
+	ttl := 90 * time.Second
+	patch := ClusterConfigPatch{
+		WeightedHRWEnabled:      &enabled,
+		BoundedLoadsEnabled:     &enabled,
+		BoundedLoadsC:           &cVal,
+		BoundedLoadsCLow:        &cLowVal,
+		BoundedLoadsMaxStaleTTL: &ttl,
+	}
+	enc, err := EncodeClusterConfigPatchInner(patch)
+	require.NoError(t, err)
+	dec, err := DecodeClusterConfigPatchCmd(enc)
+	require.NoError(t, err)
+	require.NotNil(t, dec.WeightedHRWEnabled)
+	require.Equal(t, true, *dec.WeightedHRWEnabled)
+	require.NotNil(t, dec.BoundedLoadsEnabled)
+	require.Equal(t, true, *dec.BoundedLoadsEnabled)
+	require.NotNil(t, dec.BoundedLoadsC)
+	require.Equal(t, 1.5, *dec.BoundedLoadsC)
+	require.NotNil(t, dec.BoundedLoadsCLow)
+	require.Equal(t, 0.9, *dec.BoundedLoadsCLow)
+	require.NotNil(t, dec.BoundedLoadsMaxStaleTTL)
+	require.Equal(t, 90*time.Second, *dec.BoundedLoadsMaxStaleTTL)
+}

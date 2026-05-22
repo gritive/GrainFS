@@ -225,6 +225,16 @@ func (s *clusterConfigSnap) clearKey(k string) {
 		s.snapshotInterval = nil
 	case "snapshot-retain":
 		s.snapshotRetain = nil
+	case "weighted-hrw-enabled":
+		s.weightedHRWEnabled = nil
+	case "bounded-loads-enabled":
+		s.boundedLoadsEnabled = nil
+	case "bounded-loads-c":
+		s.boundedLoadsC = nil
+	case "bounded-loads-c-low":
+		s.boundedLoadsCLow = nil
+	case "bounded-loads-max-stale-ttl":
+		s.boundedLoadsMaxStaleTTL = nil
 	}
 }
 
@@ -248,6 +258,11 @@ func AllConfigKeys() []string {
 		"disk-critical-threshold",
 		"snapshot-interval",
 		"snapshot-retain",
+		"weighted-hrw-enabled",
+		"bounded-loads-enabled",
+		"bounded-loads-c",
+		"bounded-loads-c-low",
+		"bounded-loads-max-stale-ttl",
 	}
 }
 
@@ -468,6 +483,26 @@ func (c *ClusterConfig) SourceForKey(key string) string {
 		}
 	case "snapshot-retain":
 		if s.snapshotRetain != nil {
+			return "explicit"
+		}
+	case "weighted-hrw-enabled":
+		if s.weightedHRWEnabled != nil {
+			return "explicit"
+		}
+	case "bounded-loads-enabled":
+		if s.boundedLoadsEnabled != nil {
+			return "explicit"
+		}
+	case "bounded-loads-c":
+		if s.boundedLoadsC != nil {
+			return "explicit"
+		}
+	case "bounded-loads-c-low":
+		if s.boundedLoadsCLow != nil {
+			return "explicit"
+		}
+	case "bounded-loads-max-stale-ttl":
+		if s.boundedLoadsMaxStaleTTL != nil {
 			return "explicit"
 		}
 	}
