@@ -368,6 +368,11 @@ func spoolEncryptedRecordAAD(domain string, record uint64) string {
 	return fmt.Sprintf("%s:%d", domain, record)
 }
 
+// writeFileAtomicFromReader materializes bytes from r at path via
+// tmp + rename for atomic visibility. It deliberately does NOT fsync the
+// tmp file: durability for commit-participating spool bytes is owned by
+// data WAL callers (see internal/storage/datawal). Pure scratch / repair
+// callers that don't need crash recovery rely on rename atomicity alone.
 func writeFileAtomicFromReader(path string, r io.Reader) error {
 	stageStart := time.Now()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -393,12 +398,6 @@ func writeFileAtomicFromReader(path string, r io.Reader) error {
 		return fmt.Errorf("write tmp object: %w", err)
 	}
 	observePutStage("write_file_atomic", "copy", stageStart)
-	stageStart = time.Now()
-	if err := tmp.Sync(); err != nil {
-		cleanup()
-		return fmt.Errorf("sync tmp object: %w", err)
-	}
-	observePutStage("write_file_atomic", "sync", stageStart)
 	stageStart = time.Now()
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)

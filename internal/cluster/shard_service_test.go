@@ -952,3 +952,26 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("stream-payload"), got)
 }
+
+func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithShardPackThreshold(1024),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "packed", 0, []byte("small")))
+	require.NoError(t, svc.DeleteLocalShards("b", "packed"))
+	require.NoError(t, dwal.Flush())
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.dataDir, ".pack")))
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+	_, found, err := svc.ReadLocalShardFromPack("b", "packed", 0)
+	require.NoError(t, err)
+	require.False(t, found, "pack entry must remain absent after delete replay")
+	// And there must be no resurrected per-shard file either.
+	_, statErr := os.Stat(filepath.Join(svc.dataDir, "b", "packed", "shard_0"))
+	require.True(t, os.IsNotExist(statErr), "pack-routed write must not resurrect shard file on replay")
+}

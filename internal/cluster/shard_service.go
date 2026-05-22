@@ -136,7 +136,7 @@ func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardS
 		}
 	}
 	if threshold > 0 {
-		if pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack")); err == nil {
+		if pack, err := newShardPackStore(filepath.Join(s.dataDir, ".pack"), s.dataWAL); err == nil {
 			s.packThreshold = threshold
 			s.shardPack = pack
 			log.Info().Int("threshold", threshold).Msg("cluster shard pack enabled")
@@ -765,9 +765,10 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		} else {
 			payload = eccodec.EncodeShard(data)
 		}
-		if err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload); err != nil {
-			return err
-		}
+		// Pack-routed writes are logged inside shardPackStore.append as
+		// OpShardPackPut so a torn pack blob can be replayed. Logging
+		// OpShardPut here too would resurrect a non-existent per-shard file
+		// on replay (pack writes never produce shard_N files).
 		fileStart := time.Now()
 		if err := s.shardPack.put(bucket, key, shardIdx, payload); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
@@ -1058,9 +1059,18 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 // RecoverDataWAL replays missing shard files from the data WAL. Safe to call
 // when no WAL is wired (no-op). Existing shard files matching the record size
 // are skipped via HasReplacement.
+//
+// Before replaying, the in-memory shard pack (if any) is closed and dropped:
+// pack records are replayed verbatim into a freshly-opened, nil-WAL store so
+// the pre-recovery index does not shadow the WAL-driven state and so the
+// pack replay path cannot recursively append back into the WAL.
 func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	if s.dataWAL == nil {
 		return nil
+	}
+	if s.shardPack != nil {
+		_ = s.shardPack.Close()
+		s.shardPack = nil
 	}
 	s.replayingDataWAL.Store(true)
 	defer s.replayingDataWAL.Store(false)
@@ -1073,6 +1083,14 @@ type shardDataWALMaterializer struct {
 
 func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
 	_ = ctx
+	// Pack ops are replayed unconditionally: the pack store is rebuilt from
+	// scratch in RecoverDataWAL, so an "already there" check would skip every
+	// record. The replay loop is idempotent because OpShardPackPut /
+	// OpShardPackDelete carry the original on-disk record bytes; replaying
+	// them in WAL order reproduces the pre-crash index.
+	if rec.Op == datawal.OpShardPackPut || rec.Op == datawal.OpShardPackDelete {
+		return false, nil
+	}
 	if rec.Op != datawal.OpShardPut {
 		return false, nil
 	}
@@ -1092,19 +1110,31 @@ func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawa
 }
 
 func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
-	if rec.Op != datawal.OpShardPut {
+	switch rec.Op {
+	case datawal.OpShardPackPut, datawal.OpShardPackDelete:
+		if m.s.shardPack == nil {
+			// nil WAL: replay must not recurse back into the WAL.
+			pack, err := newShardPackStore(filepath.Join(m.s.dataDir, ".pack"), nil)
+			if err != nil {
+				return err
+			}
+			m.s.shardPack = pack
+		}
+		return m.s.shardPack.appendRawRecord(rec.Payload)
+	case datawal.OpShardPut:
+		idx, err := strconv.Atoi(rec.Target)
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(m.s.dataDir, rec.Bucket, rec.Key)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		path := filepath.Join(dir, fmt.Sprintf("shard_%d", idx))
+		return m.s.writeShardFile(ctx, path, rec.Payload, idx)
+	default:
 		return nil
 	}
-	idx, err := strconv.Atoi(rec.Target)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Join(m.s.dataDir, rec.Bucket, rec.Key)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	path := filepath.Join(dir, fmt.Sprintf("shard_%d", idx))
-	return m.s.writeShardFile(ctx, path, rec.Payload, idx)
 }
 
 // WriteLocalShardStream stores a shard from body without buffering plaintext.

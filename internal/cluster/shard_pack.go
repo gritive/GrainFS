@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 const (
@@ -38,9 +41,14 @@ type shardPackStore struct {
 	// syncOnAppend is intentionally false by default. The shard pack is a hot
 	// path for small EC shards; per-record fsync collapses throughput.
 	syncOnAppend bool
+	// dataWAL, when non-nil, receives an OpShardPackPut / OpShardPackDelete
+	// record carrying the raw on-disk pack record bytes before the in-memory
+	// pack blob is appended. RecoverDataWAL passes nil to avoid recursion
+	// when materializing replayed records back into the pack.
+	dataWAL DataWALAppender
 }
 
-func newShardPackStore(dir string) (*shardPackStore, error) {
+func newShardPackStore(dir string, dwal DataWALAppender) (*shardPackStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -49,6 +57,7 @@ func newShardPackStore(dir string) (*shardPackStore, error) {
 		maxSize:   shardPackMaxSize,
 		index:     make(map[string]shardPackLocation),
 		readFiles: make(map[uint64]*os.File),
+		dataWAL:   dwal,
 	}
 	if err := s.scan(); err != nil {
 		return nil, err
@@ -110,6 +119,29 @@ func (s *shardPackStore) append(flag byte, key string, data []byte) error {
 	s.scratch = appendShardPackRecord(s.scratch[:0], flag, key, data)
 	record := s.scratch
 	entrySize := int64(len(record))
+
+	// Log the raw on-disk record bytes to the data WAL before mutating the
+	// pack blob so a torn write can be replayed verbatim by appendRawRecord.
+	// Skipped when no WAL is wired and when called during recovery (where the
+	// materializer constructs a nil-WAL store explicitly).
+	if s.dataWAL != nil {
+		op := datawal.OpShardPackPut
+		if flag == shardPackFlagDel {
+			op = datawal.OpShardPackDelete
+		}
+		if _, err := s.dataWAL.Append(context.Background(), datawal.Record{
+			Op:      op,
+			Target:  key,
+			Size:    int64(len(record)),
+			Payload: record,
+		}); err != nil {
+			return fmt.Errorf("data wal append shard pack: %w", err)
+		}
+		if err := s.dataWAL.Flush(); err != nil {
+			return fmt.Errorf("data wal flush shard pack: %w", err)
+		}
+	}
+
 	if s.activeOff > 0 && s.activeOff+entrySize > s.maxSize {
 		if err := s.rotate(); err != nil {
 			return err
@@ -156,10 +188,11 @@ func appendShardPackRecord(dst []byte, flag byte, key string, data []byte) []byt
 }
 
 func (s *shardPackStore) rotate() error {
+	// Per-rotation fsync of the closing blob is intentionally omitted: the data
+	// WAL owns durability for every pack record (see append above), so a
+	// crash-then-replay rebuilds the rotated blob from WAL records. The dir
+	// sync after open keeps the new blob's directory entry durable.
 	if s.active != nil {
-		if err := s.active.Sync(); err != nil {
-			return err
-		}
 		if err := s.active.Close(); err != nil {
 			return err
 		}
@@ -174,6 +207,91 @@ func (s *shardPackStore) rotate() error {
 	s.activeOff = 0
 	s.nextID = id + 1
 	return syncDir(s.dir)
+}
+
+// Close releases the active pack file handle and any cached read handles.
+// Used by RecoverDataWAL to drop the pre-recovery state before replaying
+// records onto a freshly-opened store.
+func (s *shardPackStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var firstErr error
+	if s.active != nil {
+		if err := s.active.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.active = nil
+	}
+	for id, f := range s.readFiles {
+		if err := f.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(s.readFiles, id)
+	}
+	return firstErr
+}
+
+// appendRawRecord replays a WAL-captured pack record back onto the on-disk
+// pack blob and rebuilds the in-memory index. The record bytes are exactly
+// what append wrote in the original (pre-crash) call, so scanRecord parses
+// them with the same CRC envelope used by scanFile.
+func (s *shardPackStore) appendRawRecord(record []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(record) < 9+4 {
+		return fmt.Errorf("shard pack: replay record too short: %d", len(record))
+	}
+	entrySize := int64(len(record))
+	if s.active == nil {
+		if err := s.rotate(); err != nil {
+			return err
+		}
+	} else if s.activeOff > 0 && s.activeOff+entrySize > s.maxSize {
+		if err := s.rotate(); err != nil {
+			return err
+		}
+	}
+	if _, err := s.active.Write(record); err != nil {
+		return err
+	}
+	off := s.activeOff
+	s.activeOff += entrySize
+	return s.scanRecord(record, s.activeID, off)
+}
+
+// scanRecord parses one on-disk pack record and updates the in-memory index.
+// Returns nil on a CRC mismatch (the caller already accepted these bytes; a
+// mismatch means the record is unusable but does not invalidate later
+// records when scanning from disk).
+func (s *shardPackStore) scanRecord(record []byte, blobID uint64, recordOffset int64) error {
+	if len(record) < 9+4 {
+		return fmt.Errorf("shard pack record too short: %d", len(record))
+	}
+	keyLen := binary.BigEndian.Uint32(record[0:4])
+	flag := record[4]
+	dataLen := binary.BigEndian.Uint32(record[5:9])
+	if int64(9)+int64(keyLen)+int64(dataLen)+4 != int64(len(record)) {
+		return fmt.Errorf("shard pack record length mismatch")
+	}
+	key := record[9 : 9+keyLen]
+	data := record[9+keyLen : 9+keyLen+dataLen]
+	crcGot := binary.BigEndian.Uint32(record[9+keyLen+dataLen:])
+	if crcGot != shardPackCRC(flag, string(key), data) {
+		return nil
+	}
+	pkey := string(key)
+	switch flag {
+	case shardPackFlagPut:
+		payloadOffset := recordOffset + 9 + int64(keyLen)
+		s.index[pkey] = shardPackLocation{blobID: blobID, offset: payloadOffset, length: dataLen}
+	case shardPackFlagDel:
+		for ikey := range s.index {
+			if strings.HasPrefix(ikey, pkey) {
+				delete(s.index, ikey)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *shardPackStore) scan() error {
@@ -212,39 +330,20 @@ func (s *shardPackStore) scanFile(blobID uint64, path string) error {
 			return err
 		}
 		keyLen := binary.BigEndian.Uint32(header[0:4])
-		flag := header[4]
 		dataLen := binary.BigEndian.Uint32(header[5:9])
 		entrySize := int64(len(header)) + int64(keyLen) + int64(dataLen) + 4
 		if entrySize > s.maxSize {
 			return nil
 		}
-		key := make([]byte, keyLen)
-		if _, err := io.ReadFull(f, key); err != nil {
+		record := make([]byte, entrySize)
+		copy(record[:len(header)], header[:])
+		if _, err := io.ReadFull(f, record[len(header):]); err != nil {
 			return nil
 		}
-		payloadOffset := off + int64(len(header)) + int64(keyLen)
-		data := make([]byte, dataLen)
-		if _, err := io.ReadFull(f, data); err != nil {
-			return nil
-		}
-		var crcBuf [4]byte
-		if _, err := io.ReadFull(f, crcBuf[:]); err != nil {
-			return nil
+		if err := s.scanRecord(record, blobID, off); err != nil {
+			return err
 		}
 		off += entrySize
-		if binary.BigEndian.Uint32(crcBuf[:]) != shardPackCRC(flag, string(key), data) {
-			return nil
-		}
-		pkey := string(key)
-		if flag == shardPackFlagPut {
-			s.index[pkey] = shardPackLocation{blobID: blobID, offset: payloadOffset, length: dataLen}
-		} else if flag == shardPackFlagDel {
-			for ikey := range s.index {
-				if strings.HasPrefix(ikey, pkey) {
-					delete(s.index, ikey)
-				}
-			}
-		}
 	}
 }
 
