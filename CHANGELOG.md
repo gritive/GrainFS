@@ -4,9 +4,14 @@
 
 ### Added
 
-- **Disk-capacity-aware write placement.** EC shard placement now weights each candidate node by its gossip-reported `DiskAvailBytes`. A cluster with mixed-size disks (e.g. 4TB / 1TB / 1TB / 1TB) gets a capacity-proportional shard distribution without operator intervention — new objects flow to the larger disks roughly in their capacity ratio, so the smaller nodes don't fill first. Toggleable via `WeightedHRWEnabled` cluster config (default on). Existing `ecRec.Nodes` placements stay frozen — no data is ever moved by this change.
+- **Disk-capacity-aware write placement weighting.** EC shard placement now feeds each candidate node's gossip-reported `DiskAvailBytes` as an HRW weight. Nodes with more free space are selected with higher probability per object, biasing new writes toward larger disks instead of treating all nodes equally. Existing `ecRec.Nodes` placements stay frozen — no data is ever moved by this change. Toggleable via `WeightedHRWEnabled` cluster config (default on).
 - **Hot-node aware read/write routing (Bounded Loads).** When a cluster node's `RequestsPerSec` rises above `avg × c` (default `c=1.25`), new EC writes spill to other nodes and reads route around that node's data shards via parity reconstruction. Hysteresis with `avg × c_low` (default `c_low=1.0`) prevents oscillation when traffic settles in the sticky band. Hot routing applies to both buffered (cache-aware) and large-object streaming GET paths. Toggleable via `BoundedLoadsEnabled` cluster config (default on).
 - **Cluster config keys** for tuning the above: `weighted-hrw-enabled`, `bounded-loads-enabled`, `bounded-loads-c` (1.0–3.0), `bounded-loads-c-low` (0.5–c, strict less-than), `bounded-loads-max-stale-ttl` (≥1s). Defaults are safe; both features can be disabled at runtime to fall back to pre-`0.0.325.0` behaviour.
+
+### Known limitations
+
+- `BoundedLoadsC`, `BoundedLoadsCLow`, `BoundedLoadsMaxStaleTTL` are captured at process start. A runtime cluster-config patch for these values takes effect on the next process restart. The two enable flags (`WeightedHRWEnabled`, `BoundedLoadsEnabled`) are read live per request.
+- The placement bias is statistically observable (BL spill/rerank counters) but per-object shard layout is not yet exposed via an introspection endpoint, so capacity-proportionality of the resulting distribution is verified by metrics, not by direct shard-map inspection.
 
 ### Observability
 

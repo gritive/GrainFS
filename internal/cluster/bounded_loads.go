@@ -17,11 +17,15 @@ type BoundedLoadsParams struct {
 }
 
 // BoundedLoadsSnapshot is an immutable view of cluster RPS state.
+//
+// HotSet is shared across all callers of Snapshot() — treat it as read-only.
+// Mutation will corrupt the snapshot for concurrent readers. If you need to
+// modify, make a defensive copy first.
 type BoundedLoadsSnapshot struct {
 	AvgRPS        float64
 	HighThreshold float64
 	LowThreshold  float64
-	HotSet        map[string]struct{}
+	HotSet        map[string]struct{} // read-only; see godoc above
 	ComputedAt    time.Time
 	DataVersion   time.Time // max NodeStats.UpdatedAt seen at compute time
 }
