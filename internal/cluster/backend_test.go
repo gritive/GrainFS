@@ -351,6 +351,43 @@ func TestDistributedBackend_PutObjectSmallStreamingParityECSkipsECSpool(t *testi
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestDistributedBackend_PutObjectSizeHintStreamsSingleLocalShard(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	payload := bytes.Repeat([]byte("x"), 2<<20)
+	sizeHint := int64(len(payload))
+	body := readerOnly{Reader: bytes.NewReader(payload)}
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:      "bucket",
+		Key:         "stream.bin",
+		Body:        body,
+		SizeHint:    &sizeHint,
+		ContentType: "application/octet-stream",
+	})
+	require.NoError(t, err)
+	require.Equal(t, sizeHint, obj.Size)
+	require.Equal(t, md5Hex(payload), obj.ETag)
+
+	rc, gotObj, err := b.GetObject(ctx, "bucket", "stream.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, obj.VersionID, gotObj.VersionID)
+	require.Equal(t, payload, got)
+}
+
+type readerOnly struct {
+	io.Reader
+}
+
+func md5Hex(data []byte) string {
+	sum := md5.Sum(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func TestDistributedBackend_PutObjectLargeParityECUsesSpooledShardEncoder(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))

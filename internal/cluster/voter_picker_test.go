@@ -30,15 +30,31 @@ func TestPickVoters_DifferentGroupIDsDiffer(t *testing.T) {
 	require.Greater(t, len(seen), 1, "expected at least 2 distinct voter sets across 16 groups, got %d", len(seen))
 }
 
+func TestPickVoters_SingleNode_FillsRFSlots(t *testing.T) {
+	// Single-node deployments fill rf placement slots by repeating the lone
+	// peer. Multi-drive single-node EC relies on this so the EC pipeline
+	// produces rf shards and ShardService routes them across local drives
+	// via shardIdx % drive_count. instantiateLocalGroup filters duplicated
+	// self entries before raft starts, so the duplicated slot list still
+	// yields a single-voter raft.
+	got := pickVoters("group-0", []string{"only"}, 3)
+	require.Equal(t, []string{"only", "only", "only"}, got)
+
+	// rf=1 collapses back to one slot — the EC pipeline runs as 1+0.
+	got = pickVoters("group-0", []string{"only"}, 1)
+	require.Equal(t, []string{"only"}, got)
+}
+
 func TestPickVoters_RFLargerThanCluster_Clamps(t *testing.T) {
 	nodes := []string{"node-0", "node-1"}
 	got := pickVoters("group-0", nodes, 5)
 	require.Len(t, got, 2, "RF must clamp to cluster size")
 }
 
-func TestPickVoters_SingleNode(t *testing.T) {
+func TestPickVoters_SingleNode_RFOneCollapsesToOneSlot(t *testing.T) {
+	// rf=1 keeps the single-entry behavior — caller asked for 1 slot.
 	nodes := []string{"only"}
-	got := pickVoters("group-0", nodes, 3)
+	got := pickVoters("group-0", nodes, 1)
 	require.Equal(t, []string{"only"}, got)
 }
 

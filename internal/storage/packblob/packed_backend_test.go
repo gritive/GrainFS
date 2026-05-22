@@ -44,6 +44,16 @@ func (b *countingBackend) DeleteObject(ctx context.Context, bucket, key string) 
 	return b.mockBackend.DeleteObject(ctx, bucket, key)
 }
 
+type capturePutBackend struct {
+	mockBackend
+	body io.Reader
+}
+
+func (b *capturePutBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	b.body = r
+	return b.mockBackend.PutObject(ctx, bucket, key, r, contentType)
+}
+
 type mutableVersioningSoftDeleteBackend struct {
 	storage.Backend
 	state       string
@@ -79,6 +89,19 @@ func TestPackedBackend_SmallObjectSkipsInnerMarkerWrite(t *testing.T) {
 
 	require.NoError(t, pb.DeleteObject(context.Background(), "test", "small.txt"))
 	require.Equal(t, int64(0), inner.deletes.Load(), "small packed deletes should not call inner object delete without a marker")
+}
+
+func TestPackedBackend_LargeSizedReaderPreservesInnerFastPath(t *testing.T) {
+	inner := &capturePutBackend{}
+	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	body := bytes.Repeat([]byte("x"), 128*1024)
+	reader := bytes.NewReader(body)
+	_, err = pb.PutObject(context.Background(), "test", "large.bin", reader, "application/octet-stream")
+	require.NoError(t, err)
+	require.Same(t, reader, inner.body, "large sized readers should pass through without losing ReaderAt/Len/Size")
 }
 
 func TestPackedBackend_DeleteObjectReturningMarkerDeletesPackedObjectWhenVersioningDisabled(t *testing.T) {

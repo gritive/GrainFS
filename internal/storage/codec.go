@@ -23,7 +23,13 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	var segmentsOff flatbuffers.UOffsetT
 	if len(obj.Segments) > 0 {
-		segOffs := make([]flatbuffers.UOffsetT, len(obj.Segments))
+		var segOffs []flatbuffers.UOffsetT
+		var localSegOffs [32]flatbuffers.UOffsetT
+		if len(obj.Segments) <= len(localSegOffs) {
+			segOffs = localSegOffs[:len(obj.Segments)]
+		} else {
+			segOffs = make([]flatbuffers.UOffsetT, len(obj.Segments))
+		}
 		for i := len(obj.Segments) - 1; i >= 0; i-- {
 			s := obj.Segments[i]
 			blobOff := b.CreateString(s.BlobID)
@@ -57,7 +63,13 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	var partsOff flatbuffers.UOffsetT
 	if len(obj.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(obj.Parts))
+		var partOffs []flatbuffers.UOffsetT
+		var localPartOffs [32]flatbuffers.UOffsetT
+		if len(obj.Parts) <= len(localPartOffs) {
+			partOffs = localPartOffs[:len(obj.Parts)]
+		} else {
+			partOffs = make([]flatbuffers.UOffsetT, len(obj.Parts))
+		}
 		for i := len(obj.Parts) - 1; i >= 0; i-- {
 			p := obj.Parts[i]
 			etOff := b.CreateString(p.ETag)
@@ -75,7 +87,13 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	var appendMD5sOff flatbuffers.UOffsetT
 	if len(obj.AppendCallMD5s) > 0 {
-		md5Offs := make([]flatbuffers.UOffsetT, len(obj.AppendCallMD5s))
+		var md5Offs []flatbuffers.UOffsetT
+		var localMD5Offs [32]flatbuffers.UOffsetT
+		if len(obj.AppendCallMD5s) <= len(localMD5Offs) {
+			md5Offs = localMD5Offs[:len(obj.AppendCallMD5s)]
+		} else {
+			md5Offs = make([]flatbuffers.UOffsetT, len(obj.AppendCallMD5s))
+		}
 		for i := len(obj.AppendCallMD5s) - 1; i >= 0; i-- {
 			vOff := b.CreateByteVector(obj.AppendCallMD5s[i])
 			storagepb.BytesValueStart(b)
@@ -90,7 +108,13 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	var tagsOff flatbuffers.UOffsetT
 	if len(obj.Tags) > 0 {
-		tagOffs := make([]flatbuffers.UOffsetT, len(obj.Tags))
+		var tagOffs []flatbuffers.UOffsetT
+		var localTagOffs [32]flatbuffers.UOffsetT
+		if len(obj.Tags) <= len(localTagOffs) {
+			tagOffs = localTagOffs[:len(obj.Tags)]
+		} else {
+			tagOffs = make([]flatbuffers.UOffsetT, len(obj.Tags))
+		}
 		for i, t := range obj.Tags {
 			kOff := b.CreateString(t.Key)
 			vOff := b.CreateString(t.Value)
@@ -234,12 +258,24 @@ func buildUserMetadataVector(b *flatbuffers.Builder, metadata map[string]string)
 	if len(metadata) == 0 {
 		return 0
 	}
-	keys := make([]string, 0, len(metadata))
+	var keys []string
+	var localKeys [16]string
+	if len(metadata) <= len(localKeys) {
+		keys = localKeys[:0]
+	} else {
+		keys = make([]string, 0, len(metadata))
+	}
 	for k := range metadata {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	offsets := make([]flatbuffers.UOffsetT, len(keys))
+	var offsets []flatbuffers.UOffsetT
+	var localOffsets [16]flatbuffers.UOffsetT
+	if len(keys) <= len(localOffsets) {
+		offsets = localOffsets[:len(keys)]
+	} else {
+		offsets = make([]flatbuffers.UOffsetT, len(keys))
+	}
 	for i, key := range keys {
 		keyOff := b.CreateString(key)
 		valueOff := b.CreateString(metadata[key])
@@ -278,7 +314,13 @@ func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {
 	ctOff := b.CreateString(m.ContentType)
 	var tagsOff flatbuffers.UOffsetT
 	if len(m.Tags) > 0 {
-		tagOffs := make([]flatbuffers.UOffsetT, len(m.Tags))
+		var tagOffs []flatbuffers.UOffsetT
+		var localTagOffs [32]flatbuffers.UOffsetT
+		if len(m.Tags) <= len(localTagOffs) {
+			tagOffs = localTagOffs[:len(m.Tags)]
+		} else {
+			tagOffs = make([]flatbuffers.UOffsetT, len(m.Tags))
+		}
 		for i, t := range m.Tags {
 			kOff := b.CreateString(t.Key)
 			vOff := b.CreateString(t.Value)

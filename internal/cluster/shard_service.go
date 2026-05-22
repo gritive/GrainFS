@@ -849,11 +849,12 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardTargetClass: "local",
 		})
 		payload := encoded.Bytes()
-		if err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload); err != nil {
+		requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload)
+		if err != nil {
 			return err
 		}
 		fileStart := time.Now()
-		if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx); err != nil {
+		if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
 				Bytes:            int64(len(payload)),
 				ShardIndex:       shardIdx,
@@ -875,11 +876,12 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 		})
-		if err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload); err != nil {
+		requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload)
+		if err != nil {
 			return err
 		}
 		fileStart := time.Now()
-		if err := s.writeShardFile(ctx, path, payload, shardIdx); err != nil {
+		if err := s.writeShardFile(ctx, path, payload, shardIdx, requireFsync); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
 				Bytes:            int64(len(payload)),
 				ShardIndex:       shardIdx,
@@ -920,7 +922,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 // stage semantics:
 //   - PutTraceStageShardWriteLocalEncode: encryption into an in-memory buffer.
 //   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload.
-func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int) error {
+func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int, requireFsync bool) error {
 	_ = dir
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
@@ -961,9 +963,23 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardTargetClass: "local",
 	})
 
-	// EncSync is preserved as a zero-duration stage so dashboards keep
-	// reporting the same series; durability is owned by the data WAL.
+	// EncSync owns shard-file durability whenever the WAL did NOT inline the
+	// payload (no WAL wired, or payload exceeded walPayloadInlineThreshold).
+	// When the WAL inlined the payload, the WAL's own Flush already covers
+	// durability and we skip this fsync to avoid a redundant syscall.
 	encSyncStart := time.Now()
+	if requireFsync {
+		if err := f.Sync(); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
+			cleanup()
+			return fmt.Errorf("fsync tmp shard: %w", err)
+		}
+	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
 		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
@@ -1030,12 +1046,31 @@ func maxRawShardPayloadForWAL(encrypted bool) int64 {
 	return datawal.MaxPayloadBytes - overhead
 }
 
+// walPayloadInlineThreshold is the size at which the data WAL stops inlining
+// the shard payload. Below the threshold the WAL stores the full encoded
+// payload and provides durability for the subsequent shard file write (single
+// fsync amortizes well for small random writes that would otherwise dominate
+// PUT latency). At or above the threshold the WAL is bypassed entirely and the
+// shard writer self-syncs — large objects are naturally sequential, so paying
+// the 2x write tax just to fold them through the WAL is counter-productive.
+const walPayloadInlineThreshold = 1 << 20
+
 // appendShardDataWAL logs an OpShardPut record for the encoded shard payload
-// before any file mutation. No-op when no WAL is wired or when we are already
+// before any file mutation. Returns requireFsync = true when the caller's
+// shard file write must perform its own fsync (no WAL, or payload bypassed
+// the WAL). When requireFsync is false the WAL Flush has already made the
+// payload durable and the on-disk shard file inherits that durability via
+// atomic tmp+rename.
+//
+// No-op (returns true, nil) when no WAL is wired or when we are already
 // replaying records during RecoverDataWAL.
-func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) error {
+func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) (requireFsync bool, err error) {
 	if s.dataWAL == nil || s.replayingDataWAL.Load() {
-		return nil
+		return true, nil
+	}
+	if len(payload) >= walPayloadInlineThreshold {
+		// Large payload: bypass WAL entirely. The shard file must self-sync.
+		return true, nil
 	}
 	// No caller-side copy: WAL.AppendReader copies the payload internally
 	// (see internal/storage/datawal/wal.go AppendReader) before returning.
@@ -1047,12 +1082,12 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 		Size:    int64(len(payload)),
 		Payload: payload,
 	}); err != nil {
-		return fmt.Errorf("data wal append shard: %w", err)
+		return false, fmt.Errorf("data wal append shard: %w", err)
 	}
 	if err := s.dataWAL.Flush(); err != nil {
-		return fmt.Errorf("data wal flush shard: %w", err)
+		return false, fmt.Errorf("data wal flush shard: %w", err)
 	}
-	return nil
+	return false, nil
 }
 
 // RecoverDataWAL replays missing shard files from the data WAL. Safe to call
@@ -1147,7 +1182,10 @@ func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 			return err
 		}
 		path := m.s.getShardPath(rec.Bucket, rec.Key, idx)
-		return m.s.writeShardFile(ctx, path, rec.Payload, idx)
+		// WAL replay reconstructs lost shard files: durability comes from the
+		// WAL having already been flushed; the file write itself must fsync
+		// so the recovered shard outlives a second crash.
+		return m.s.writeShardFile(ctx, path, rec.Payload, idx, true)
 	default:
 		return nil
 	}
@@ -1159,6 +1197,18 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 }
 
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, true)
+}
+
+func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
+	allowPack := true
+	if s.shardPack != nil && s.packThreshold > 0 && streamSize >= int64(s.packThreshold) {
+		allowPack = false
+	}
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, allowPack)
+}
+
+func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, allowPack bool) error {
 	// When a data WAL is wired we cannot stream directly to disk: the WAL must
 	// observe the full payload before any file mutation so recovery can replay
 	// it. Buffer the body (bounded by datawal.MaxPayloadBytes minus the
@@ -1183,7 +1233,7 @@ func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket,
 		}
 		return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
 	}
-	if s.shardPack != nil && s.packThreshold > 0 {
+	if allowPack && s.shardPack != nil && s.packThreshold > 0 {
 		packed, handled, err := s.tryWriteLocalShardStreamPack(ctx, bucket, key, shardIdx, body)
 		if err != nil {
 			return err
@@ -1296,7 +1346,7 @@ func (s *ShardService) ensureShardDir(dir string) error {
 // file is opened with platform-specific direct-I/O hints and the payload is
 // padded to alignment + truncated; when false the standard buffered path
 // runs unchanged. Errors at any step delete the tmp file before returning.
-func (s *ShardService) writeShardFile(ctx context.Context, path string, payload []byte, shardIdx int) error {
+func (s *ShardService) writeShardFile(ctx context.Context, path string, payload []byte, shardIdx int, requireFsync bool) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	if s.directIO {
 		directStart := time.Now()
@@ -1335,7 +1385,7 @@ func (s *ShardService) writeShardFile(ctx context.Context, path string, payload 
 		}
 	}
 	bufferedStart := time.Now()
-	if err := writeBuffered(tmp, payload); err != nil {
+	if err := writeBuffered(tmp, payload, requireFsync); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalBuffered, bufferedStart, PutTraceStageFields{
 			Bytes:            int64(len(payload)),
 			ShardIndex:       shardIdx,
@@ -1356,10 +1406,11 @@ func (s *ShardService) writeShardFile(ctx context.Context, path string, payload 
 	return nil
 }
 
-// writeBuffered is the historical write path: open + write + close.
-// Durability is owned by internal/storage/datawal; the encoded payload was
-// appended and flushed to the WAL before this call ran.
-func writeBuffered(tmp string, payload []byte) error {
+// writeBuffered is the historical write path: open + write + (optional fsync) +
+// close. fsync runs when the data WAL did not inline the payload — the WAL's
+// own Flush already covers durability for small WAL'd payloads, so the
+// redundant syscall is skipped for them.
+func writeBuffered(tmp string, payload []byte, requireFsync bool) error {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
@@ -1368,6 +1419,13 @@ func writeBuffered(tmp string, payload []byte) error {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)
+	}
+	if requireFsync {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("fsync tmp shard: %w", err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
@@ -1577,7 +1635,16 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 			_ = f.Close()
 			return nil, fmt.Errorf("decrypt shard: %w", err)
 		}
-		return &multiReadCloser{Reader: r, close: f.Close}, nil
+		return &multiReadCloser{Reader: r, close: func() error {
+			var closeErr error
+			if closer, ok := r.(io.Closer); ok {
+				closeErr = closer.Close()
+			}
+			if err := f.Close(); closeErr == nil {
+				closeErr = err
+			}
+			return closeErr
+		}}, nil
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		info, err := f.Stat()

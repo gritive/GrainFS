@@ -173,6 +173,37 @@ func TestEncryptedShardReader_RoundTripMultiChunk(t *testing.T) {
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	assert.Equal(t, data, got)
+
+	closer, ok := r.(io.Closer)
+	require.True(t, ok)
+	require.NoError(t, closer.Close())
+	require.NoError(t, closer.Close())
+	_, err = r.Read(make([]byte, 1))
+	require.Error(t, err)
+}
+
+func BenchmarkEncryptedShardReaderRead5MiB(b *testing.B) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	require.NoError(b, err)
+	data := bytes.Repeat([]byte("x"), 5<<20)
+	aad := []byte("v2/bucket/key/3")
+
+	var encoded bytes.Buffer
+	require.NoError(b, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, DefaultEncryptedChunkSize))
+	payload := encoded.Bytes()
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r, err := NewEncryptedShardReader(bytes.NewReader(payload), enc, aad)
+		require.NoError(b, err)
+		_, err = io.Copy(io.Discard, r)
+		require.NoError(b, err)
+		if closer, ok := r.(io.Closer); ok {
+			require.NoError(b, closer.Close())
+		}
+	}
 }
 
 func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {

@@ -119,6 +119,7 @@ type PutObjectRequest struct {
 	Bucket         string
 	Key            string
 	Body           io.Reader
+	SizeHint       *int64
 	ContentType    string
 	ACL            *uint8
 	UserMetadata   map[string]string

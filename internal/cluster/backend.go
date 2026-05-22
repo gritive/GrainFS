@@ -546,6 +546,36 @@ func (b *DistributedBackend) ecWriteNodes() []string {
 	return b.clusterNodes()
 }
 
+// effectivePlacementNodes returns the node list used for EC stripe placement.
+//
+// Multi-node clusters: equals ecWriteNodes() — each cluster peer is one
+// placement slot.
+//
+// Single-node multi-drive: returns the local node ID repeated by the local
+// drive count. This lets PlaceShards / selectECPlacement keep their
+// "len(nodes) >= NumShards" precondition without inventing a different shape
+// for single-node deployments. The downstream local writer routes shardIdx
+// to distinct drives via shardIdx % len(dataDirs), so the duplicated peer ID
+// is correct: every shard is "sent to self" and self distributes the bytes
+// across its own drives. EffectiveConfig consumers should pass
+// len(effectivePlacementNodes()) instead of len(ecWriteNodes()) when
+// computing the active EC stripe width.
+func (b *DistributedBackend) effectivePlacementNodes() []string {
+	nodes := b.ecWriteNodes()
+	if len(nodes) != 1 || b.shardSvc == nil {
+		return nodes
+	}
+	drives := len(b.shardSvc.DataDirs())
+	if drives <= 1 {
+		return nodes
+	}
+	replicated := make([]string, drives)
+	for i := range replicated {
+		replicated[i] = nodes[0]
+	}
+	return replicated
+}
+
 // TriggerRaftSnapshot forces a Raft FSM snapshot on the current leader.
 // As of M5 PR 29 v2 owns snapshot lifecycle exclusively; the apply loop
 // forwards through RaftNode.CreateSnapshot (formerly the RaftV2Snapshotter
@@ -1552,6 +1582,10 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		if handled || err != nil {
 			return obj, err
 		}
+		obj, handled, err = b.tryPutObjectSingleLocalShardKnownSize(ctx, bucket, key, versionID, r, req.SizeHint, contentType, userMetadata, sseAlgorithm)
+		if handled || err != nil {
+			return obj, err
+		}
 		obj, handled, err = b.tryPutObjectECDataInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm)
 		if handled || err != nil {
 			return obj, err
@@ -1587,7 +1621,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		}
 		placementGroupID = "group-0"
 	}
-	liveNodes := b.ecWriteNodes()
+	liveNodes := b.effectivePlacementNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
@@ -1633,6 +1667,70 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		sseAlgorithm,
 		"ec_single_memory",
 		h,
+		nil,
+		nil,
+		"",
+	)
+	return obj, true, err
+}
+
+func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
+	ctx context.Context,
+	bucket, key, versionID string,
+	r io.Reader,
+	sizeHint *int64,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+) (*storage.Object, bool, error) {
+	if sizeHint == nil || *sizeHint < 0 {
+		return nil, false, nil
+	}
+	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	if !ok {
+		if b.bypassBucketCheck {
+			return nil, false, nil
+		}
+		placementGroupID = "group-0"
+	}
+	liveNodes := b.effectivePlacementNodes()
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
+	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
+		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
+	}
+	shardKey := ecObjectShardKey(key, versionID)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+		placementGroupID = group.ID
+		effectiveCfg = cfg
+		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+	} else if PlacementGroupHasFullEntry(ctx) {
+		return nil, false, err
+	}
+	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
+		return nil, false, nil
+	}
+	if len(placement) != 1 || placement[0] != b.currentSelfAddr() {
+		return nil, false, nil
+	}
+
+	sp := &spooledObject{
+		Size: *sizeHint,
+	}
+	obj, err := b.putObjectSingleLocalShardFromReader(
+		ctx,
+		bucket,
+		key,
+		versionID,
+		placementGroupID,
+		placement,
+		sp,
+		r,
+		contentType,
+		userMetadata,
+		sseAlgorithm,
+		"ec_single_stream",
+		md5.New(),
 		nil,
 		nil,
 		"",
@@ -1700,7 +1798,7 @@ func (b *DistributedBackend) ecMemoryShardFastPathLimit(ctx context.Context) (in
 	} else if PlacementGroupHasFullEntry(ctx) {
 		return 0, false
 	}
-	liveNodes := b.ecWriteNodes()
+	liveNodes := b.effectivePlacementNodes()
 	cfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if cfg.NumShards() == 0 && !b.bypassBucketCheck {
 		cfg = AutoECConfigForClusterSize(len(liveNodes))
@@ -2106,7 +2204,7 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		}
 		placementGroupID = "group-0"
 	}
-	liveNodes := b.ecWriteNodes()
+	liveNodes := b.effectivePlacementNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
@@ -2179,7 +2277,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		}
 		placementGroupID = "group-0"
 	}
-	liveNodes := b.ecWriteNodes()
+	liveNodes := b.effectivePlacementNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
@@ -2894,15 +2992,19 @@ func (b *DistributedBackend) SetIncidentRecorder(rec IncidentRecorder) {
 func (b *DistributedBackend) LiveNodes() []string { return b.liveNodes() }
 
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
-// PutObject call (EC enabled + enough nodes for k+m split).
+// PutObject call (EC enabled + enough placement slots for k+m split).
+// Placement slots count cluster nodes in multi-node deployments and local
+// drive roots in single-node multi-drive deployments.
 func (b *DistributedBackend) ECActive() bool {
-	return b.currentECConfig().IsActive(len(b.ecWriteNodes()))
+	return b.currentECConfig().IsActive(len(b.effectivePlacementNodes()))
 }
 
 // EffectiveECConfig returns the ECConfig proportionally scaled to the current
-// cluster size. Used by ReshardManager to determine the target k,m for upgrades.
+// placement-slot count (cluster nodes, or local drives for single-node
+// multi-drive). Used by ReshardManager to determine the target k,m for
+// upgrades.
 func (b *DistributedBackend) EffectiveECConfig() ECConfig {
-	return EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
+	return EffectiveConfig(len(b.effectivePlacementNodes()), b.currentECConfig())
 }
 
 // ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
@@ -2915,7 +3017,7 @@ func (b *DistributedBackend) EffectiveECConfig() ECConfig {
 // commit overwrite both the N× copy and (post-commit) the EC shards, so the
 // last writer wins per normal PUT semantics.
 func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
-	liveNodes := b.ecWriteNodes()
+	liveNodes := b.effectivePlacementNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if !effectiveCfg.IsActive(len(liveNodes)) || b.shardSvc == nil {
 		return fmt.Errorf("ec not active: cluster_size=%d shard_svc=%v",
@@ -3082,7 +3184,7 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	}
 
 	// Re-encode with new config.
-	liveNodes := b.ecWriteNodes()
+	liveNodes := b.effectivePlacementNodes()
 	newShards, err := ECSplit(newCfg, data)
 	if err != nil {
 		return fmt.Errorf("upgrade re-split: %w", err)

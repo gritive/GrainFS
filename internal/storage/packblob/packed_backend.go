@@ -428,7 +428,9 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 
 	// Large objects pass through to inner backend
 	if large {
-		req.Body = io.MultiReader(bytes.NewReader(data), req.Body)
+		if len(data) > 0 {
+			req.Body = io.MultiReader(bytes.NewReader(data), req.Body)
+		}
 		obj, err := putInnerWithRequest(ctx, pb.inner, req)
 		if err != nil {
 			return nil, err
@@ -576,7 +578,7 @@ func putInnerWithUserMetadata(ctx context.Context, inner storage.Backend, bucket
 }
 
 func putInnerWithRequest(ctx context.Context, inner storage.Backend, req storage.PutObjectRequest) (*storage.Object, error) {
-	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" {
+	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" && req.SizeHint == nil {
 		return putInnerWithUserMetadata(ctx, inner, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
 	}
 	putter, ok := inner.(storage.RequestPutter)

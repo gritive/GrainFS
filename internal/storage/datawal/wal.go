@@ -1,7 +1,6 @@
 package datawal
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -66,25 +65,52 @@ func (w *WAL) Dir() string {
 }
 
 func (w *WAL) Append(ctx context.Context, rec Record) (uint64, error) {
-	return w.AppendReader(ctx, rec, bytes.NewReader(rec.Payload))
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(rec.Payload) > MaxPayloadBytes {
+		return 0, fmt.Errorf("datawal: payload too large: %d", len(rec.Payload))
+	}
+
+	return w.appendRecord(ctx, rec)
 }
 
 func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	payload, err := io.ReadAll(io.LimitReader(r, MaxPayloadBytes+1))
-	if err != nil {
-		return 0, err
+	var payload []byte
+	type lenReader interface {
+		Len() int
 	}
-	if len(payload) > MaxPayloadBytes {
-		return 0, fmt.Errorf("datawal: payload too large: %d", len(payload))
+	if lr, ok := r.(lenReader); ok {
+		sz := lr.Len()
+		if sz > MaxPayloadBytes {
+			return 0, fmt.Errorf("datawal: payload too large: %d", sz)
+		}
+		payload = make([]byte, sz)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return 0, err
+		}
+	} else {
+		var err error
+		payload, err = io.ReadAll(io.LimitReader(r, MaxPayloadBytes+1))
+		if err != nil {
+			return 0, err
+		}
+		if len(payload) > MaxPayloadBytes {
+			return 0, fmt.Errorf("datawal: payload too large: %d", len(payload))
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	rec.Payload = append([]byte(nil), payload...)
+	rec.Payload = payload
 
+	return w.appendRecord(ctx, rec)
+}
+
+func (w *WAL) appendRecord(ctx context.Context, rec Record) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -407,17 +433,20 @@ func scanRecords(r io.ReadSeeker, mode byte, enc *encrypt.Encryptor, allowTrunca
 			return goodBytes, err
 		}
 		if mode == fileModeEncrypted {
-			plain, err := enc.OpenValueAAD([]byte(encryptedRecordAAD), body)
+			plainBuf := getBuffer(len(body))
+			plain, err := enc.OpenValueAADTo(plainBuf[:0], []byte(encryptedRecordAAD), body)
 			if err != nil {
+				putBuffer(plainBuf)
 				return goodBytes, fmt.Errorf("datawal: decrypt record: %w", err)
 			}
-			rec, err = unmarshalRecordBody(plain)
+			rec, err = unmarshalRecordBody(plain, true)
 			clear(plain)
+			putBuffer(plainBuf)
 			if err != nil {
 				return goodBytes, err
 			}
 		} else {
-			rec, err = unmarshalRecordBody(body)
+			rec, err = unmarshalRecordBody(body, false)
 			if err != nil {
 				return goodBytes, err
 			}

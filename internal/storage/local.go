@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -507,7 +508,13 @@ func (b *LocalBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) 
 		if len(tags) == 0 {
 			obj.Tags = nil
 		} else {
-			cp := make([]Tag, len(tags))
+			var cp []Tag
+			var localTags [8]Tag
+			if len(tags) <= len(localTags) {
+				cp = localTags[:len(tags)]
+			} else {
+				cp = make([]Tag, len(tags))
+			}
 			copy(cp, tags)
 			obj.Tags = cp
 		}
@@ -651,14 +658,13 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	}
 
 	if b.dataWAL != nil && !b.replayingDataWAL {
-		cp := append([]byte(nil), data...)
 		if _, err := b.dataWAL.Append(ctx, datawal.Record{
 			Op:      datawal.OpObjectWriteAt,
 			Bucket:  bucket,
 			Key:     key,
 			Offset:  int64(offset),
-			Size:    int64(len(cp)),
-			Payload: cp,
+			Size:    int64(len(data)),
+			Payload: data,
 		}); err != nil {
 			return nil, err
 		}
@@ -745,7 +751,8 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		etag = InternalETag(data)
 	} else {
 		xh := GetXXH3Hasher()
-		buf := make([]byte, 64*1024)
+		buf := get64KBBuffer()
+		defer put64KBBuffer(buf)
 		var off int64
 		for off < size {
 			n, rerr := f.ReadAt(buf, off)
@@ -872,7 +879,13 @@ func (b *LocalBackend) rewriteSegmentedObject(ctx context.Context, bucket, key s
 		return nil, err
 	}
 	if len(obj.Tags) > 0 {
-		tags := make([]Tag, len(obj.Tags))
+		var tags []Tag
+		var localTags [8]Tag
+		if len(obj.Tags) <= len(localTags) {
+			tags = localTags[:len(obj.Tags)]
+		} else {
+			tags = make([]Tag, len(obj.Tags))
+		}
 		copy(tags, obj.Tags)
 		next.Tags = tags
 		if err := b.PutObjectRecord(ctx, bucket, key, next); err != nil {
@@ -1453,7 +1466,9 @@ func copyFile(dstPath, srcPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.CopyBuffer(dst, src, make([]byte, 64*1024)); err != nil {
+	buf := get64KBBuffer()
+	defer put64KBBuffer(buf)
+	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
 		dst.Close()
 		os.Remove(dstPath)
 		return err
@@ -1642,4 +1657,21 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 		count++
 	}
 	return count, stale, nil
+}
+
+var local64KBPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
+func get64KBBuffer() []byte {
+	return *local64KBPool.Get().(*[]byte)
+}
+
+func put64KBBuffer(b []byte) {
+	if len(b) == 64*1024 && cap(b) >= 64*1024 {
+		local64KBPool.Put(&b)
+	}
 }

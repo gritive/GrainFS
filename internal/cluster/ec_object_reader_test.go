@@ -165,7 +165,7 @@ func (c *fakeECObjectShardCache) Stats() shardcache.Stats {
 
 // buildFakeShards encodes data with the given ECConfig and stores each shard
 // (with header) in the fetcher's localShards map under bucket/shardKey.
-func buildFakeShards(t *testing.T, fetcher *fakeECObjectShardFetcher, bucket, shardKey string, cfg ECConfig, data []byte) {
+func buildFakeShards(t testing.TB, fetcher *fakeECObjectShardFetcher, bucket, shardKey string, cfg ECConfig, data []byte) {
 	t.Helper()
 	shards, err := ECSplit(cfg, data)
 	require.NoError(t, err)
@@ -384,7 +384,7 @@ func TestECObjectReader_OpenObject_AllLocal(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
-func TestECObjectReader_OpenObject_PoolsMultipartSizedObject(t *testing.T) {
+func TestECObjectReader_OpenObject_StreamsMultipartSizedObject(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
 	data := bytes.Repeat([]byte("x"), 5<<20)
 	fetcher := &fakeECObjectShardFetcher{}
@@ -401,8 +401,33 @@ func TestECObjectReader_OpenObject_PoolsMultipartSizedObject(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
-	require.Greater(t, fetcher.readShardCalls, 0)
-	require.Zero(t, fetcher.readShardStreamCalls)
+	require.Zero(t, fetcher.readShardCalls)
+	require.Greater(t, fetcher.readShardStreamCalls, 0)
+}
+
+func BenchmarkECObjectReaderOpenObject5MiB(b *testing.B) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	data := bytes.Repeat([]byte("x"), 5<<20)
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(b, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(data)))
+		require.NoError(b, err)
+		if _, err := io.Copy(io.Discard, rc); err != nil {
+			_ = rc.Close()
+			require.NoError(b, err)
+		}
+		require.NoError(b, rc.Close())
+	}
 }
 
 func TestECObjectReader_OpenObject_NilShardService_ReturnsError(t *testing.T) {

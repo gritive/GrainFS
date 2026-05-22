@@ -70,10 +70,17 @@ func SeedInitialShardGroups(
 	return nil
 }
 
-// SeedShardGroupVoters returns the voter list for a freshly-seeded shard
-// group. group-0 receives the full cluster peer set so the legacy single-
-// backend path keeps working; groups 1..N-1 are sampled via PickVoters so
-// replication factor stays at 3 regardless of cluster size.
+// SeedShardGroupVoters returns the voter / placement-slot list for a
+// freshly-seeded shard group. group-0 receives the full cluster peer set so
+// the legacy single-backend path keeps working; groups 1..N-1 are sampled via
+// PickVoters.
+//
+// Single-node multi-slot: when only one cluster peer exists (single-node
+// deployment) and replicationFactor > 1 (multi-drive EC width), the single
+// peer is replicated to fill the slot list. The EC pipeline then produces
+// replicationFactor shards and ShardService routes shardIdx across the local
+// drives, while instantiateLocalGroup filters duplicated self entries so the
+// per-group raft still starts as a single-voter quorum.
 func SeedShardGroupVoters(
 	selfNodeID string,
 	selfAddr string,
@@ -83,6 +90,13 @@ func SeedShardGroupVoters(
 	replicationFactor int,
 ) []string {
 	clusterPeers := seedShardGroupPeerIDs(selfNodeID, selfAddr, peers, nodes)
+	if len(clusterPeers) == 1 && replicationFactor > 1 {
+		out := make([]string, replicationFactor)
+		for i := range out {
+			out[i] = clusterPeers[0]
+		}
+		return out
+	}
 	if groupID == "group-0" {
 		return clusterPeers
 	}

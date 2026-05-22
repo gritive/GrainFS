@@ -23,7 +23,7 @@ BENCH_DIR_PROVIDED=0
 if [[ -n "${BENCH_DIR:-}" ]]; then
   BENCH_DIR_PROVIDED=1
 else
-  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"
+  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gfsb.XXXXXX")"
 fi
 BUCKET="${BUCKET:-bench}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
@@ -261,21 +261,47 @@ start_grainfs_single() {
   fi
   bench_require_binary "$BINARY"
 
-  local data_dir="$BENCH_DIR/grainfs-single"
+  local drives="${GRAINFS_SINGLE_DRIVES:-1}"
+  if [[ ! "$drives" =~ ^[0-9]+$ || "$drives" -lt 1 ]]; then
+    echo "grainfs-single: GRAINFS_SINGLE_DRIVES must be >= 1; got $drives" >&2
+    return 1
+  fi
+  local data_root="$BENCH_DIR/grainfs-single"
+  local data_dir
+  local data_arg
   local port
   local extra=()
   port="$(bench_free_port)"
-  mkdir -p "$data_dir"
-  register_target_data_dir "$data_dir"
-  BENCH_ENCRYPTION_KEY_FILE="$data_dir/encryption.key"
+  if [[ "$drives" -eq 1 ]]; then
+    data_dir="$data_root"
+    mkdir -p "$data_dir"
+    register_target_data_dir "$data_dir"
+    data_arg="$data_dir"
+  else
+    local idx
+    local paths=()
+    mkdir -p "$data_root"
+    for idx in $(seq 1 "$drives"); do
+      mkdir -p "$data_root/d${idx}"
+      register_target_data_dir "$data_root/d${idx}"
+      paths+=("$data_root/d${idx}")
+    done
+    data_dir="${paths[0]}"
+    data_arg="$(IFS=','; echo "${paths[*]}")"
+  fi
+  BENCH_ENCRYPTION_KEY_FILE="$data_root/encryption.key"
   export BENCH_ENCRYPTION_KEY_FILE
   bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
   if [[ "$BENCH_PPROF" == "1" ]]; then
     GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
     extra+=(--pprof-port "$PPROF_BASE_PORT")
   fi
+  if [[ -n "${GRAINFS_SINGLE_EXTRA_FLAGS:-}" ]]; then
+    read -r -a grainfs_single_extra_flags <<<"$GRAINFS_SINGLE_EXTRA_FLAGS"
+    extra+=("${grainfs_single_extra_flags[@]}")
+  fi
   "$BINARY" serve \
-    --data "$data_dir" \
+    --data "$data_arg" \
     --port "$port" \
     --cluster-key "bench-s3-compat-key" \
     $(bench_encryption_args) \
@@ -420,21 +446,50 @@ start_minio() {
     return 1
   fi
 
+  local drives="${MINIO_SINGLE_DRIVES:-1}"
+  if [[ ! "$drives" =~ ^[0-9]+$ || "$drives" -lt 1 ]]; then
+    echo "minio: MINIO_SINGLE_DRIVES must be >= 1; got $drives" >&2
+    return 1
+  fi
   local data_dir="$BENCH_DIR/minio"
+  local volume_args=()
   local port console_port
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
-  mkdir -p "$data_dir"
-  register_target_data_dir "$data_dir"
+  if [[ "$drives" -eq 1 ]]; then
+    mkdir -p "$data_dir"
+    register_target_data_dir "$data_dir"
+    volume_args+=("$data_dir")
+  else
+    local idx
+    mkdir -p "$data_dir"
+    for idx in $(seq 1 "$drives"); do
+      mkdir -p "$data_dir/d${idx}"
+      register_target_data_dir "$data_dir/d${idx}"
+    done
+    volume_args+=("$data_dir/d{1...${drives}}")
+  fi
 
-  MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
-  MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
-  "$MINIO_BIN" server "$data_dir" \
+  local env_args=(
+    "MINIO_ROOT_USER=$MINIO_ACCESS_KEY"
+    "MINIO_ROOT_PASSWORD=$MINIO_SECRET_KEY"
+  )
+  if [[ "$drives" -gt 1 && -z "${MINIO_CI_CD:-}" ]]; then
+    env_args+=("MINIO_CI_CD=1")
+    echo "  minio local multi-drive uses MINIO_CI_CD=1 for synthetic same-filesystem drives"
+  fi
+  env "${env_args[@]}" "$MINIO_BIN" server "${volume_args[@]}" \
     --address "127.0.0.1:$port" \
     --console-address "127.0.0.1:$console_port" \
     >"$PROFILE_ROOT/minio.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "minio S3" 180 0.2 >&2
+  echo "  waiting for minio signed write readiness..."
+  bench_wait_s3_signed_write_ready "http://127.0.0.1:$port" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "warp-minio-ready" "${MINIO_WRITE_READY_ATTEMPTS:-120}" "${MINIO_WRITE_READY_SLEEP:-0.5}" >&2 || {
+    echo "  minio signed write readiness failed; aborting" >&2
+    return 1
+  }
+  echo "  minio signed write-ready"
   set_start_info "http://127.0.0.1:$port" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"
 }
 
@@ -536,24 +591,53 @@ start_rustfs() {
     return 1
   fi
 
+  local drives="${RUSTFS_SINGLE_DRIVES:-1}"
+  if [[ ! "$drives" =~ ^[0-9]+$ || "$drives" -lt 1 ]]; then
+    echo "rustfs: RUSTFS_SINGLE_DRIVES must be >= 1; got $drives" >&2
+    return 1
+  fi
   local data_dir="$BENCH_DIR/rustfs"
+  local volume_args=()
   local port console_port
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
-  mkdir -p "$data_dir"
-  register_target_data_dir "$data_dir"
+  if [[ "$drives" -eq 1 ]]; then
+    mkdir -p "$data_dir"
+    register_target_data_dir "$data_dir"
+    volume_args+=("$data_dir")
+  else
+    local idx
+    mkdir -p "$data_dir"
+    for idx in $(seq 1 "$drives"); do
+      mkdir -p "$data_dir/d${idx}"
+      register_target_data_dir "$data_dir/d${idx}"
+      volume_args+=("$data_dir/d${idx}")
+    done
+  fi
 
-  RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY" \
-  RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY" \
-  RUSTFS_REGION="us-east-1" \
-  "$RUSTFS_BIN" server \
+  local env_args=(
+    "RUSTFS_ACCESS_KEY=$RUSTFS_ACCESS_KEY"
+    "RUSTFS_SECRET_KEY=$RUSTFS_SECRET_KEY"
+    "RUSTFS_REGION=us-east-1"
+  )
+  if [[ "$drives" -gt 1 && -z "${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-}" ]]; then
+    env_args+=("RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true")
+    echo "  rustfs local multi-drive uses RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true for synthetic same-filesystem drives"
+  fi
+  env "${env_args[@]}" "$RUSTFS_BIN" server \
     --address "127.0.0.1:$port" \
     --console-enable \
     --console-address "127.0.0.1:$console_port" \
-    "$data_dir" \
+    "${volume_args[@]}" \
     >"$PROFILE_ROOT/rustfs.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "rustfs S3" 180 0.2 >&2
+  echo "  waiting for rustfs signed write readiness..."
+  bench_wait_s3_signed_write_ready "http://127.0.0.1:$port" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "warp-rustfs-ready" "${RUSTFS_WRITE_READY_ATTEMPTS:-120}" "${RUSTFS_WRITE_READY_SLEEP:-0.5}" >&2 || {
+    echo "  rustfs signed write readiness failed; aborting" >&2
+    return 1
+  }
+  echo "  rustfs signed write-ready"
   set_start_info "http://127.0.0.1:$port" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "local"
 }
 
@@ -926,6 +1010,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     minio)
       if ! start_minio; then
         echo "minio: skipped; set MINIO_BIN or MINIO_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        stop_target_backends "$target_pid_start"
         continue
       fi
       ;;
@@ -939,6 +1024,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     rustfs)
       if ! start_rustfs; then
         echo "rustfs: skipped; set RUSTFS_BIN or RUSTFS_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        stop_target_backends "$target_pid_start"
         continue
       fi
       ;;

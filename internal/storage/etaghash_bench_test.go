@@ -1,12 +1,17 @@
 package storage_test
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
+	"io"
+	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/zeebo/xxh3"
 )
 
@@ -39,6 +44,44 @@ func BenchmarkETag_XXH3(b *testing.B) {
 				var buf [8]byte
 				binary.BigEndian.PutUint64(buf[:], h)
 				_ = hex.EncodeToString(buf[:])
+			}
+		})
+	}
+}
+
+func BenchmarkStreamingMD5Hasher(b *testing.B) {
+	data := bytes.Repeat([]byte("x"), 5*1024*1024)
+	md5Pool := sync.Pool{New: func() any { return md5.New() }}
+
+	for _, tc := range []struct {
+		name string
+		hash func() (hash.Hash, func(hash.Hash))
+	}{
+		{
+			name: "new",
+			hash: func() (hash.Hash, func(hash.Hash)) {
+				return md5.New(), func(hash.Hash) {}
+			},
+		},
+		{
+			name: "pooled",
+			hash: func() (hash.Hash, func(hash.Hash)) {
+				h := md5Pool.Get().(hash.Hash)
+				h.Reset()
+				return h, func(h hash.Hash) { md5Pool.Put(h) }
+			},
+		},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				h, release := tc.hash()
+				_, err := io.Copy(h, bytes.NewReader(data))
+				require.NoError(b, err)
+				_ = h.Sum(nil)
+				release(h)
 			}
 		})
 	}

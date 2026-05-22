@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,11 +11,20 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
+const putObjectStreamingThresholdBytes = 8 << 20
+
 func putObjectContentType(c *app.RequestContext) string {
 	if contentType := string(c.GetHeader("Content-Type")); contentType != "" {
 		return contentType
 	}
 	return "application/octet-stream"
+}
+
+func putObjectShouldStream(c *app.RequestContext) bool {
+	contentLength := c.Request.Header.ContentLength()
+	return c.Request.IsBodyStream() &&
+		contentLength >= putObjectStreamingThresholdBytes &&
+		!isAWSChunkedPayload(c)
 }
 
 func putObjectBody(c *app.RequestContext) ([]byte, error) {
@@ -111,6 +121,38 @@ func (r *putObjectBodyReader) ForwardBodyBytes() []byte {
 		return nil
 	}
 	return r.body[r.off:]
+}
+
+type exactLengthReader struct {
+	r         io.Reader
+	remain    int64
+	shortRead bool
+}
+
+func newExactLengthReader(r io.Reader, n int64) *exactLengthReader {
+	return &exactLengthReader{r: r, remain: n}
+}
+
+func (r *exactLengthReader) Read(p []byte) (int, error) {
+	if r.shortRead {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if r.remain == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remain {
+		p = p[:int(r.remain)]
+	}
+	n, err := r.r.Read(p)
+	r.remain -= int64(n)
+	if errors.Is(err, io.EOF) && r.remain > 0 {
+		r.shortRead = true
+		return n, io.ErrUnexpectedEOF
+	}
+	if r.remain == 0 && errors.Is(err, io.EOF) {
+		return n, nil
+	}
+	return n, err
 }
 
 func putObjectACL(c *app.RequestContext) *uint8 {

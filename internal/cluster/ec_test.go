@@ -35,8 +35,9 @@ func TestECConfig_IsActive(t *testing.T) {
 	}
 }
 
-func TestECPooledReadThresholdIncludesMultipartPartFloor(t *testing.T) {
-	require.GreaterOrEqual(t, maxECPooledReadObjectSize, 5<<20)
+func TestECPooledReadThresholdStreamsMultipartPartFloor(t *testing.T) {
+	require.Less(t, maxECPooledReadObjectSize, 5<<20)
+	require.GreaterOrEqual(t, maxECPooledReadObjectSize, 4<<20)
 }
 
 func TestAutoECConfigForClusterSize(t *testing.T) {

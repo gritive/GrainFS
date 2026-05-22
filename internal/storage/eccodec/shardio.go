@@ -179,6 +179,9 @@ func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	if err != nil {
 		return err
 	}
+	if closer, ok := er.(io.Closer); ok {
+		defer closer.Close()
+	}
 	if _, err := io.Copy(w, er); err != nil {
 		return fmt.Errorf("write decrypted shard chunk: %w", err)
 	}
@@ -383,12 +386,18 @@ type encryptedShardReader struct {
 	noncePrefix [encryptedNoncePrefixLen]byte
 	chunkIdx    uint32
 	plain       []byte
+	plainPtr    *[]byte
+	cipherPtr   *[]byte
 	plainBuf    []byte
 	cipherBuf   []byte
 	done        bool
+	closed      bool
 }
 
 func (r *encryptedShardReader) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, fmt.Errorf("encrypted shard reader is closed")
+	}
 	for len(r.plain) == 0 && !r.done {
 		if err := r.loadChunk(); err != nil {
 			return 0, err
@@ -400,6 +409,30 @@ func (r *encryptedShardReader) Read(p []byte) (int, error) {
 	n := copy(p, r.plain)
 	r.plain = r.plain[n:]
 	return n, nil
+}
+
+func (r *encryptedShardReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	r.plain = nil
+	if r.plainPtr != nil {
+		if cap(r.plainBuf) > 0 {
+			clear(r.plainBuf[:cap(r.plainBuf)])
+		}
+		*r.plainPtr = r.plainBuf[:0]
+		encryptedPlainChunkPool.Put(r.plainPtr)
+		r.plainPtr = nil
+		r.plainBuf = nil
+	}
+	if r.cipherPtr != nil {
+		*r.cipherPtr = r.cipherBuf[:0]
+		encryptedCipherChunkPool.Put(r.cipherPtr)
+		r.cipherPtr = nil
+		r.cipherBuf = nil
+	}
+	return nil
 }
 
 func (r *encryptedShardReader) loadChunk() error {
@@ -420,6 +453,10 @@ func (r *encryptedShardReader) loadChunk() error {
 		return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", r.chunkIdx, cipherLen, plainLen)
 	}
 
+	if r.cipherPtr == nil {
+		r.cipherPtr = encryptedCipherChunkPool.Get().(*[]byte)
+		r.cipherBuf = *r.cipherPtr
+	}
 	if cap(r.cipherBuf) < int(cipherLen) {
 		r.cipherBuf = make([]byte, cipherLen)
 	}
@@ -429,8 +466,12 @@ func (r *encryptedShardReader) loadChunk() error {
 	}
 	nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
 	aad := encryptedChunkAAD(r.aadBase, r.chunkIdx)
+	if r.plainPtr == nil {
+		r.plainPtr = encryptedPlainChunkPool.Get().(*[]byte)
+		r.plainBuf = *r.plainPtr
+	}
 	if cap(r.plainBuf) < int(plainLen) {
-		r.plainBuf = make([]byte, 0, plainLen)
+		r.plainBuf = make([]byte, plainLen)
 	}
 	plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
 	if err != nil {
@@ -638,7 +679,14 @@ func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) 
 }
 
 func encryptedChunkAAD(base []byte, chunkIdx uint32) []byte {
-	aad := make([]byte, 0, len(encryptedShardMagic)+len(base)+4)
+	size := len(encryptedShardMagic) + len(base) + 4
+	var aad []byte
+	var localAAD [256]byte
+	if size <= len(localAAD) {
+		aad = localAAD[:0]
+	} else {
+		aad = make([]byte, 0, size)
+	}
 	aad = append(aad, encryptedShardMagic...)
 	aad = append(aad, base...)
 	var idx [4]byte

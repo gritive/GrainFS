@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPutObjectBodyReader_UsesStreamingRequestBody(t *testing.T) {
@@ -15,20 +16,12 @@ func TestPutObjectBodyReader_UsesStreamingRequestBody(t *testing.T) {
 	c.Request.SetBodyStream(body, len(payload))
 
 	r, err := putObjectPayloadReader(c)
-	if err != nil {
-		t.Fatalf("putObjectPayloadReader: %v", err)
-	}
-	if body.reads != 0 {
-		t.Fatalf("putObjectPayloadReader read streaming body during setup %d times", body.reads)
-	}
+	require.NoError(t, err)
+	require.Zero(t, body.reads, "putObjectPayloadReader should not read streaming body during setup")
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stream: %v", err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("body: got %q, want %q", got, payload)
-	}
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
 }
 
 func TestPutObjectBodyReader_DecodesAWSChunkedStreamingBody(t *testing.T) {
@@ -39,18 +32,33 @@ func TestPutObjectBodyReader_DecodesAWSChunkedStreamingBody(t *testing.T) {
 	c.Request.Header.Set("Content-Encoding", "aws-chunked")
 
 	r, err := putObjectPayloadReader(c)
-	if err != nil {
-		t.Fatalf("putObjectPayloadReader: %v", err)
-	}
-	if body.reads != 0 {
-		t.Fatalf("putObjectPayloadReader read streaming body during setup %d times", body.reads)
-	}
+	require.NoError(t, err)
+	require.Zero(t, body.reads, "putObjectPayloadReader should not read streaming body during setup")
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stream: %v", err)
-	}
-	if string(got) != "hello world" {
-		t.Fatalf("body: got %q, want %q", got, "hello world")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "hello world", string(got))
+}
+
+func TestPutObjectShouldStreamLargeNonChunkedBody(t *testing.T) {
+	c := app.NewContext(0)
+	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+
+	require.True(t, putObjectShouldStream(c))
+}
+
+func TestPutObjectShouldNotStreamAWSChunkedBody(t *testing.T) {
+	c := app.NewContext(0)
+	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+	c.Request.Header.Set("Content-Encoding", "aws-chunked")
+
+	require.False(t, putObjectShouldStream(c))
+}
+
+func TestExactLengthReaderReturnsUnexpectedEOFOnShortBody(t *testing.T) {
+	r := newExactLengthReader(bytes.NewReader([]byte("abc")), 5)
+
+	got, err := io.ReadAll(r)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.Equal(t, []byte("abc"), got)
 }

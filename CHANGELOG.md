@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.324.0] - 2026-05-22
+
+### Added
+
+- **Single-node multi-drive EC activation.** Configuring a single GrainFS node with N data drives now actually stripes data across all N drives. Before, the EC pipeline saw `len(peers)=1` and collapsed to 1+0, dropping every shard on `dataDirs[0]`; a 4-drive single-node deployment was effectively a 1-drive deployment with 3 empty disks. `pickVoters` and `SeedShardGroupVoters` now fill rf placement slots by repeating the lone peer for single-node deployments, so a 4-drive single node runs the configured 2+2 stripe end-to-end and `shardIdx % drive_count` distributes shards.
+- **Async prefetch reader for multi-shard EC reads.** New `internal/cluster/async_prefetch_reader.go` wraps each EC data shard reader with a background goroutine that fills a bounded chunk channel. While `io.MultiReader` drains the head shard, the tail shards prefetch from disk + AES-GCM decrypt in parallel. Benchmark: 16 MiB EC 4+2 GET 5670 → 9651 MiB/s (1.70x); 64 MiB 5376 → 5965 MiB/s (1.11x). Single-shard reads (1+0 EC) skip the wrapper to avoid goroutine overhead.
+- **`GRAINFS_SINGLE_DRIVES` / `RUSTFS_SINGLE_DRIVES` in the S3 compatibility benchmark harness.** Mirrors the existing `MINIO_SINGLE_DRIVES` env so all three single-node backends can be benchmarked at matching drive counts. RustFS multi-drive auto-enables `RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true` for synthetic same-filesystem drives, the same shape as MinIO's `MINIO_CI_CD=1`.
+
+### Changed
+
+- **Size-aware data WAL bypass for shard payloads ≥1 MiB.** PUT throughput was being dominated by `WAL.Append + WAL.Flush + on-disk write` — a 2x write amplification that killed large-object PUT. The WAL now keeps the inline-payload path for shards under `walPayloadInlineThreshold = 1 MiB` (small writes amortize one fsync well) and bypasses entirely for larger shards, letting the shard writer self-sync via `f.Sync()` before close+rename. Benchmark: 5 MiB warp PUT 404 → 677 MiB/s (1.68x); 64 KiB throughput preserved (691 vs 666 MiB/s) with 110 MiB RSS reduction.
+- **WAL and flatbuffers hot paths now use pooled buffers and stack-allocated offset arrays.** `internal/storage/datawal/wal.go`, `internal/storage/wal/wal.go`, and `internal/storage/codec.go` switched the per-call `make()` patterns to `sync.Pool`-backed 256 KiB buffers and stack arrays (16–32 entries) with a heap fallback. New `BenchmarkEncodeRecord` / `BenchmarkDecodeRecord` lock in the allocation count so future changes can spot regressions.
+- **RustFS bench startup waits for signed-write readiness before warp runs.** Mirrors the existing MinIO check. Closes the race where warp's PUT preparation hit RustFS before the ecstore finished initializing volumes and produced "volume not found" errors with empty benchdata.
+
+### Fixed
+
+- **Preflight no longer mkdir's the raw `--data` comma list as a literal path.** When `--data /path/d1,/path/d2,/path/d3,/path/d4` is passed, `opts.DataDir` holds the raw string until `optionsToConfig` normalises it. Preflight's `os.MkdirAll(opts.DataDir)` ran before that and created a nonsensical nested tree (`/path/d1,/tmp/.../d2,/.../d3,/.../d4`). Preflight now reads `opts.DataDirs[0]` when DataDirs is populated.
+
 ## [0.0.323.0] - 2026-05-22
 
 ### Added

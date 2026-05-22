@@ -63,6 +63,20 @@ func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 	}
 }
 
+func BenchmarkPutObjectSingleLocal5MiB(b *testing.B) {
+	bk := newTestDistributedBackend(b)
+	require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+
+	payload := bytes.Repeat([]byte("x"), 5<<20)
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := bk.PutObject(context.Background(), "bench", "key", bytes.NewReader(payload), "application/octet-stream")
+		require.NoError(b, err)
+	}
+}
+
 // BenchmarkGetObjectEC measures EC read latency (sequential vs k-of-n parallel after Phase 1).
 func BenchmarkGetObjectEC(b *testing.B) {
 	cases := []struct {
