@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.319.0] - 2026-05-22
+
+### Breaking
+
+- **HRW placement hash를 SHA-256에서 xxh3로 교체.** Same `(key, node)`가
+  다른 score로 매핑되므로 v0.0.318.0에서 sha256으로 저장된 객체 placement는
+  v0.0.319.0에서 다른 노드로 풀린다 → upgrade 시 `--data` 디렉터리 wipe 필요.
+  v0.0.318.0 자체가 fresh-cluster 가정이라 실용 영향은 미미.
+
+### Performance
+
+- `hrwUniform`이 zero-alloc hot path로 전환 (stack `[256]byte` buf + `xxh3.Hash`).
+  `PlaceShards` 호출당 alloc이 `N+1`개에서 `1`개(out slice 자체)로 감소.
+- Bench (Apple M3 / `-benchtime=15s -count=3` median):
+  | Case              | sha256 ns/op | xxh3 ns/op | speedup | sha256 allocs → xxh3 |
+  |-------------------|--------------|------------|---------|----------------------|
+  | Nil N=3  k+m=2    |          281 |         79 |    3.6× |               4 → 1 |
+  | Nil N=6  k+m=2    |          501 |        131 |    3.8× |               7 → 1 |
+  | Nil N=12 k+m=2    |         1066 |        288 |    3.7× |              13 → 1 |
+  | Nil N=24 k+m=2    |         2170 |        682 |    3.2× |              25 → 1 |
+  | Ones N=3          |          322 |        145 |    2.2× |               4 → 1 |
+  | Ones N=24         |         2742 |        938 |    2.9× |              25 → 1 |
+- `zeebo/xxh3` 의존성은 이미 `internal/storage/{checksum,etaghash}.go`에서
+  사용 중이라 신규 의존성 추가 없음.
+
 ## [0.0.318.0] - 2026-05-22
 
 ### Breaking
