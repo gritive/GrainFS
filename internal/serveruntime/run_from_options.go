@@ -88,8 +88,17 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 
 	// 7. Preflight.
 	addr := fmt.Sprintf(":%d", opts.Port)
+	// opts.DataDir is the raw --data flag (may be a comma-separated multi-drive
+	// list); preflight wants a single concrete path, so use the first drive
+	// when DataDirs is populated. Skipping this lets MkdirAll inside
+	// checkDataDir interpret the comma string literally and create a
+	// nonsensical nested tree like "/path/d1,/path/d2,/...".
+	preflightDataDir := opts.DataDir
+	if len(opts.DataDirs) > 0 {
+		preflightDataDir = opts.DataDirs[0]
+	}
 	if err := server.RunSystemPreflight(server.PreflightConfig{
-		DataDir:  opts.DataDir,
+		DataDir:  preflightDataDir,
 		HTTPAddr: addr,
 	}); err != nil {
 		return err
