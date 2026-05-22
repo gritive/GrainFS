@@ -1441,27 +1441,6 @@ func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.SetRingCmdEnd(b)), nil
 }
 
-// decodeSetRingCmd deserializes a SetRingCmd from Raft log data.
-func decodeSetRingCmd(data []byte) (SetRingCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetRingCmd {
-		return clusterpb.GetRootAsSetRingCmd(d, 0)
-	})
-	if err != nil {
-		return SetRingCmd{}, err
-	}
-	vnodes := make([]virtualNode, t.VnodesLength())
-	for i := 0; i < t.VnodesLength(); i++ {
-		var vn clusterpb.VNodeEntry
-		t.Vnodes(&vn, i)
-		vnodes[i] = virtualNode{Token: vn.Token(), NodeID: string(vn.NodeId())}
-	}
-	return SetRingCmd{
-		Version:  t.Version(),
-		VNodes:   vnodes,
-		VPerNode: int(t.VperNode()),
-	}, nil
-}
-
 // --- Payload encoding dispatch ---
 
 func encodePayload(cmdType CommandType, payload any) ([]byte, error) {

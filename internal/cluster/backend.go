@@ -2090,7 +2090,7 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 	return ok
 }
 
-// putObjectEC is the Phase 18 Cluster EC path: Reed-Solomon split into
+// putObjectECData is the Phase 18 Cluster EC path: Reed-Solomon split into
 // cfg.NumShards() shards, fan-out each to its placed node (self or peer),
 // then commit metadata through Raft.
 //
@@ -2098,10 +2098,6 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 // Placement is derived deterministically via PlaceShards (HRW).
 // ECData/ECParity + NodeIDs are stored in object metadata so reads can
 // reconstruct shards without a separate Raft record.
-func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
-	return b.putObjectECData(ctx, bucket, key, versionID, data, contentType, nil, "")
-}
-
 func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, versionID string, data []byte, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
