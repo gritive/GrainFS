@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -97,4 +98,27 @@ func TestIngestActor_ETagMD5(t *testing.T) {
 	}
 	<-done
 	require.Equal(t, want, gotETag)
+}
+
+func TestIngestActor_ContextCancel(t *testing.T) {
+	const stripe = 1 << 20
+	body := bytes.Repeat([]byte{0xAA}, 16*stripe)
+
+	out := make(chan StripePlaintext) // unbuffered: blocks on first send
+	a := &IngestActor{out: out, stripeBytes: stripe}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := a.Run(ctx, 1, "bucket", bytes.NewReader(body))
+		errCh <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest actor did not honor ctx cancellation")
+	}
 }
