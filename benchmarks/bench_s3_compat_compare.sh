@@ -261,13 +261,35 @@ start_grainfs_single() {
   fi
   bench_require_binary "$BINARY"
 
-  local data_dir="$BENCH_DIR/grainfs-single"
+  local drives="${GRAINFS_SINGLE_DRIVES:-1}"
+  if [[ ! "$drives" =~ ^[0-9]+$ || "$drives" -lt 1 ]]; then
+    echo "grainfs-single: GRAINFS_SINGLE_DRIVES must be >= 1; got $drives" >&2
+    return 1
+  fi
+  local data_root="$BENCH_DIR/grainfs-single"
+  local data_dir
+  local data_arg
   local port
   local extra=()
   port="$(bench_free_port)"
-  mkdir -p "$data_dir"
-  register_target_data_dir "$data_dir"
-  BENCH_ENCRYPTION_KEY_FILE="$data_dir/encryption.key"
+  if [[ "$drives" -eq 1 ]]; then
+    data_dir="$data_root"
+    mkdir -p "$data_dir"
+    register_target_data_dir "$data_dir"
+    data_arg="$data_dir"
+  else
+    local idx
+    local paths=()
+    mkdir -p "$data_root"
+    for idx in $(seq 1 "$drives"); do
+      mkdir -p "$data_root/d${idx}"
+      register_target_data_dir "$data_root/d${idx}"
+      paths+=("$data_root/d${idx}")
+    done
+    data_dir="${paths[0]}"
+    data_arg="$(IFS=','; echo "${paths[*]}")"
+  fi
+  BENCH_ENCRYPTION_KEY_FILE="$data_root/encryption.key"
   export BENCH_ENCRYPTION_KEY_FILE
   bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
   if [[ "$BENCH_PPROF" == "1" ]]; then
@@ -279,7 +301,7 @@ start_grainfs_single() {
     extra+=("${grainfs_single_extra_flags[@]}")
   fi
   "$BINARY" serve \
-    --data "$data_dir" \
+    --data "$data_arg" \
     --port "$port" \
     --cluster-key "bench-s3-compat-key" \
     $(bench_encryption_args) \
