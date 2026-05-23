@@ -10,19 +10,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func (s *Server) putObjectWithUserMetadata(
-	ctx context.Context,
-	bucket, key string,
-	body io.Reader,
-	sizeHint *int64,
-	contentType string,
-	acl *uint8,
-	userMetadata map[string]string,
-	systemMetadata storage.ObjectSystemMetadata,
-) (*storage.PutObjectResult, error) {
-	return s.putObjectWithUserMetadataAndMD5(ctx, bucket, key, body, sizeHint, contentType, acl, userMetadata, systemMetadata, "")
-}
-
 func (s *Server) putObjectWithUserMetadataAndMD5(
 	ctx context.Context,
 	bucket, key string,
