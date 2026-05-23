@@ -106,13 +106,20 @@ func (d *DriveActor) handle(chunk EncryptedShardChunk) {
 // lazily opening the tmp file on the first chunk. Returns nil after
 // reporting a failure if the PUT was not registered or the file
 // could not be created.
+//
+// The filesystem syscalls (mkdir + open + fcntl) run OUTSIDE the
+// mutex so concurrent registerPut/dropPending calls from
+// Pipeline.Put goroutines don't queue behind them. With 32 concurrent
+// warp PUTs, holding the mutex across these syscalls dominated the
+// mutex profile (94% of contention delay).
 func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if s := d.pending[chunk.PutID]; s != nil {
+		d.mu.Unlock()
 		return s
 	}
 	entry, ok := d.registry[chunk.PutID]
+	d.mu.Unlock()
 	if !ok {
 		d.commitCh <- ShardWriteResult{
 			PutID:    chunk.PutID,
@@ -151,7 +158,9 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 		shardKey:  entry.shardKey,
 		shardIdx:  entry.shardIdx,
 	}
+	d.mu.Lock()
 	d.pending[chunk.PutID] = s
+	d.mu.Unlock()
 	return s
 }
 
