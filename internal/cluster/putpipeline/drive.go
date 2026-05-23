@@ -12,10 +12,12 @@ import (
 )
 
 // shardWriteBufSize coalesces encrypted-chunk writes (≈ 512 KiB per
-// stripe) into larger kernel write syscalls. Tuned so APFS sees few
-// large transactions rather than one syscall per stripe — iostat
-// confirms the disk-side KB/t roughly tracks this buffer size.
-const shardWriteBufSize = 4 << 20
+// stripe) into larger kernel write syscalls. With 32 concurrent PUTs
+// holding a buf each per drive (4 drives × 32 = 128 buffers), every
+// extra MiB here costs ~128 MiB of steady-state RSS. 1 MiB balances
+// coalescing (each chunk hit during PUT is at most one syscall) with
+// memory; iostat KB/t no longer tracks buf size once chunks are large.
+const shardWriteBufSize = 1 << 20
 
 // DriveActor owns shard writes for one local data directory. One
 // long-lived goroutine per drive.
