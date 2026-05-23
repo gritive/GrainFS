@@ -85,9 +85,9 @@ func TestApplyTxnBatchDeterminism(t *testing.T) {
 
 	// Batch groupings. Each must sum to n. nil entry == one transaction per cmd.
 	groupings := [][]int{
-		nil,        // unbatched (reference)
+		nil, // unbatched (reference)
 		{2, 2, 2, 2},
-		{n},        // single batch — exercises iterator pending writes
+		{n}, // single batch — exercises iterator pending writes
 		{1, 3, 1, 3},
 	}
 
@@ -219,4 +219,61 @@ func TestApplyBatch_ErrTxnTooBigFallback(t *testing.T) {
 	}
 	require.Equal(t, dumpFSMState(t, refFSM), dumpFSMState(t, fsm),
 		"every entry past the overflow point must be applied")
+}
+
+// snapshotBarrierFakeNode is a RaftNode stub for the snapshot-barrier test. It
+// embeds RaftNode so unimplemented methods panic on the nil interface; only the
+// methods the test path exercises (Configuration) need real implementations.
+type snapshotBarrierFakeNode struct {
+	RaftNode
+}
+
+func (snapshotBarrierFakeNode) Configuration() raft.Configuration {
+	return raft.Configuration{}
+}
+
+func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
+	enc := func(ct CommandType, p any) []byte {
+		out, err := EncodeCommand(ct, p)
+		require.NoError(t, err)
+		return out
+	}
+
+	// Source FSM with one bucket -> snapshot bytes.
+	src := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	require.NoError(t, src.Apply(enc(CmdCreateBucket, CreateBucketCmd{Bucket: "from-snap"})))
+	snapBytes, err := src.Snapshot()
+	require.NoError(t, err)
+
+	// Target FSM + backend. Feed: command, command, snapshot, command.
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	b := &DistributedBackend{db: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}, registry: NewRegistry()}
+	a := &applyActor{db: fsm.db, fsm: fsm}
+
+	c1 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "pre1"})
+	c2 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "pre2"})
+	c3 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "post"})
+
+	ch := make(chan raft.LogEntry, 8)
+	ch <- raft.LogEntry{Index: 2, Term: 1, Type: raft.LogEntryCommand, Command: c2}
+	ch <- raft.LogEntry{Index: 3, Term: 1, Type: raft.LogEntrySnapshot, Command: snapBytes}
+	ch <- raft.LogEntry{Index: 4, Term: 1, Type: raft.LogEntryCommand, Command: c3}
+
+	first := raft.LogEntry{Index: 1, Term: 1, Type: raft.LogEntryCommand, Command: c1}
+	require.True(t, a.collect(b, first, ch))
+
+	// Drain the post-snapshot command.
+	e4 := <-ch
+	require.True(t, a.collect(b, e4, ch))
+
+	state := dumpFSMState(t, fsm)
+	require.Contains(t, state, string(fsm.keys.BucketKey("from-snap")),
+		"snapshot must restore from-snap bucket")
+	require.NotContains(t, state, string(fsm.keys.BucketKey("pre1")),
+		"pre-snapshot state must be wiped by Restore")
+	require.NotContains(t, state, string(fsm.keys.BucketKey("pre2")),
+		"pre-snapshot state must be wiped by Restore")
+	require.Contains(t, state, string(fsm.keys.BucketKey("post")),
+		"post-snapshot command must be applied")
+	require.Equal(t, uint64(4), b.lastApplied.Load())
 }

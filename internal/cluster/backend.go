@@ -697,52 +697,11 @@ func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
 }
 
 // RunApplyLoop consumes committed entries from the Raft node and applies them to the FSM.
-// This must run in a goroutine.
+// This must run in a goroutine. Delegates to applyActor, which opportunistically
+// batches command entries into a single BadgerDB transaction per commit.
 func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
-	for {
-		select {
-		case <-stop:
-			return
-		case req := <-b.snapRequests:
-			b.completeRaftSnapshotRequest(req)
-		case entry, ok := <-b.node.ApplyCh():
-			if !ok {
-				// ApplyCh closed (Raft node stopped). Exit cleanly so the
-				// loop does not spin on zero-value reads. Closing surfaces
-				// from the v2 adapter when the underlying actor terminates.
-				b.logger.Debug().Msg("apply loop: ApplyCh closed; exiting")
-				return
-			}
-			switch entry.Type {
-			case raft.LogEntryCommand:
-				applyErr := b.fsm.Apply(entry.Command)
-				// Record apply result BEFORE lastApplied.Store so propose
-				// loop sees ApplyError(idx) set by the time it observes
-				// lastApplied >= idx (race-free linearization).
-				b.recordApplyResult(entry.Index, applyErr)
-				if applyErr != nil {
-					b.logger.Error().Uint64("index", entry.Index).Err(applyErr).Msg("fsm apply error")
-				}
-				// Notify cache invalidators and legacy metrics callback.
-				b.notifyOnApply(entry.Command)
-			case raft.LogEntrySnapshot:
-				meta := raft.SnapshotMeta{
-					Index:         entry.Index,
-					Term:          entry.Term,
-					Servers:       b.node.Configuration().Servers,
-					FormatVersion: raft.FSMSnapshotFormatVersion,
-				}
-				if err := b.fsm.Restore(meta, entry.Command); err != nil {
-					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm restore snapshot error")
-				}
-			default:
-				continue
-			}
-			b.lastApplied.Store(entry.Index)
-			b.lastAppliedTerm.Store(entry.Term)
-
-		}
-	}
+	a := &applyActor{db: b.db, fsm: b.fsm}
+	a.run(b, stop)
 }
 
 // notifyOnApply extracts bucket/key from a committed command and invalidates caches.
