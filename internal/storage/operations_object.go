@@ -102,7 +102,13 @@ func (o *Operations) PutObjectWithRequestResult(ctx context.Context, req PutObje
 }
 
 func (o *Operations) putObjectWithRequest(ctx context.Context, req PutObjectRequest) (*Object, error) {
-	if req.ACL == nil && req.SystemMetadata.empty() {
+	// SizeHint must reach RequestPutter-aware backends (e.g. the actor
+	// pipeline gate in cluster.DistributedBackend) — falling through to
+	// PutObjectWithUserMetadata silently strips it. Only the no-ACL/
+	// no-SSE branch gets the new behavior; the PutObjectWithACL path
+	// stays unchanged because ACL plumbing through PutObjectWithRequest
+	// has different semantics than the dedicated ACL setter.
+	if req.SizeHint == nil && req.ACL == nil && req.SystemMetadata.empty() {
 		return o.PutObjectWithUserMetadata(ctx, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
 	}
 	if req.ACL != nil && req.SystemMetadata.empty() && len(req.UserMetadata) == 0 {

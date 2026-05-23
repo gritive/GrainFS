@@ -90,6 +90,34 @@ set_start_info() {
   START_MODE="$4"
 }
 
+# warp_obj_size_bytes parses warp object-size strings (64KiB, 5MiB, 10MiB,
+# 1024, etc.) into bytes. Returns 0 on unparseable input so callers can
+# treat it as "unknown size, skip size-aware logic".
+warp_obj_size_bytes() {
+  local s="$1"
+  [[ -z "$s" ]] && { echo 0; return; }
+  local num unit
+  if [[ "$s" =~ ^([0-9]+)([KMGT]i?B|[KMGT]|B)?$ ]]; then
+    num="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+  else
+    echo 0
+    return
+  fi
+  case "$unit" in
+    ""|B)    echo "$num" ;;
+    K|KiB)   echo $((num * 1024)) ;;
+    KB)      echo $((num * 1000)) ;;
+    M|MiB)   echo $((num * 1024 * 1024)) ;;
+    MB)      echo $((num * 1000 * 1000)) ;;
+    G|GiB)   echo $((num * 1024 * 1024 * 1024)) ;;
+    GB)      echo $((num * 1000 * 1000 * 1000)) ;;
+    T|TiB)   echo $((num * 1024 * 1024 * 1024 * 1024)) ;;
+    TB)      echo $((num * 1000 * 1000 * 1000 * 1000)) ;;
+    *)       echo 0 ;;
+  esac
+}
+
 capture_cluster_status_snapshot() {
   local target="$1"
   local label="$2"
@@ -478,6 +506,20 @@ start_minio() {
     env_args+=("MINIO_CI_CD=1")
     echo "  minio local multi-drive uses MINIO_CI_CD=1 for synthetic same-filesystem drives"
   fi
+  if [[ "${BENCH_ENCRYPTION:-0}" == "1" ]]; then
+    # Inline KMS master key (no KES required): MINIO_KMS_SECRET_KEY pairs a
+    # name with a base64-encoded 32-byte key, and MINIO_KMS_AUTO_ENCRYPTION
+    # forces SSE-S3 on every PUT so the comparison matches GrainFS's
+    # always-on at-rest encryption. Key is freshly generated per run; not
+    # an issue because data directories are wiped between bench runs.
+    local kms_key
+    kms_key=$(openssl rand -base64 32 | tr -d '\n')
+    env_args+=(
+      "MINIO_KMS_SECRET_KEY=warp-bench:${kms_key}"
+      "MINIO_KMS_AUTO_ENCRYPTION=on"
+    )
+    echo "  minio SSE-S3 auto-encryption enabled (BENCH_ENCRYPTION=1)"
+  fi
   env "${env_args[@]}" "$MINIO_BIN" server "${volume_args[@]}" \
     --address "127.0.0.1:$port" \
     --console-address "127.0.0.1:$console_port" \
@@ -624,10 +666,25 @@ start_rustfs() {
     env_args+=("RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true")
     echo "  rustfs local multi-drive uses RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true for synthetic same-filesystem drives"
   fi
+  local rustfs_extra_args=()
+  if [[ "${BENCH_ENCRYPTION:-0}" == "1" ]]; then
+    # RustFS local KMS backend: create a bench-scoped key directory and a
+    # default key id. Matches GrainFS / MinIO at-rest encryption parity.
+    local kms_dir="$data_dir/.kms"
+    mkdir -p "$kms_dir"
+    rustfs_extra_args+=(
+      "--kms-enable"
+      "--kms-backend" "local"
+      "--kms-key-dir" "$kms_dir"
+      "--kms-default-key-id" "warp-bench"
+    )
+    echo "  rustfs KMS encryption enabled (BENCH_ENCRYPTION=1, local backend)"
+  fi
   env "${env_args[@]}" "$RUSTFS_BIN" server \
     --address "127.0.0.1:$port" \
     --console-enable \
     --console-address "127.0.0.1:$console_port" \
+    "${rustfs_extra_args[@]}" \
     "${volume_args[@]}" \
     >"$PROFILE_ROOT/rustfs.log" 2>&1 &
   PIDS+=($!)
@@ -789,6 +846,26 @@ run_warp_case() {
     if (( objects < need )); then
       objects="$need"
     fi
+    # Object-size aware pre-upload cap. The 16× floor was tuned for 64KiB
+    # objects (~3 GiB pre-upload); at 5 MiB it explodes to ~256 GiB per
+    # target and fills the disk before delete even starts. Cap per-target
+    # pre-upload bytes at WARP_DELETE_MAX_PREUPLOAD_BYTES (default 10 GiB).
+    local obj_bytes
+    obj_bytes=$(warp_obj_size_bytes "$WARP_OBJ_SIZE")
+    if (( obj_bytes > 0 )); then
+      local max_bytes="${WARP_DELETE_MAX_PREUPLOAD_BYTES:-10737418240}"
+      local cap=$(( max_bytes / obj_bytes ))
+      # Keep at least one full delete batch so warp does not abort with
+      # "too few objects"; if the cap is below that, fall back to the batch
+      # size and let the user override via WARP_DELETE_MAX_PREUPLOAD_BYTES.
+      if (( cap < WARP_DELETE_BATCH )); then
+        cap="$WARP_DELETE_BATCH"
+      fi
+      if (( objects > cap )); then
+        echo "  warp delete: capping --objects $objects → $cap (pre-upload ~$((obj_bytes * cap / 1024 / 1024)) MiB; obj_size=$WARP_OBJ_SIZE, max=$((max_bytes / 1024 / 1024 / 1024)) GiB)"
+        objects="$cap"
+      fi
+    fi
   fi
   case "$op" in
     get|delete|list|stat|versioned|retention|mixed)
@@ -800,6 +877,9 @@ run_warp_case() {
   fi
   if [[ "$WARP_NOCLEAR" == "1" ]]; then
     args+=(--noclear)
+  fi
+  if [[ "${BENCH_WARP_MD5:-0}" == "1" ]]; then
+    args+=(--md5)
   fi
   capture_cluster_status_snapshot "$target" "$op-before" "$base_url"
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then

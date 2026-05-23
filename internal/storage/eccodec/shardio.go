@@ -174,6 +174,174 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	}
 }
 
+// EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC2
+// on-disk format. Bytes passed to Write are buffered until chunkSize is
+// reached, then emitted as a single encrypted chunk (8-byte chunk header +
+// AEAD-sealed payload). Close flushes any pending bytes as a final partial
+// chunk. The result is byte-for-byte identical to feeding the same data
+// through EncodeEncryptedShard with the same chunkSize and AAD, so callers
+// can rename a fully-written file straight into a final shard location
+// without re-encoding.
+//
+// Single-use: NOT safe for concurrent Write calls. Always call Close before
+// reading the underlying writer.
+type EncryptedShardChunkedWriter struct {
+	w           io.Writer
+	enc         *encrypt.Encryptor
+	aadBase     []byte
+	chunkSize   int
+	noncePrefix [encryptedNoncePrefixLen]byte
+	headerSent  bool
+	chunkIdx    uint32
+	plainBuf    []byte // pending plaintext, len ≤ chunkSize
+	plainPtr    *[]byte
+	cipherBuf   []byte // reused cipher scratch
+	cipherPtr   *[]byte
+	closed      bool
+}
+
+// NewEncryptedShardChunkedWriter constructs a streaming writer that produces
+// the same on-disk format as EncodeEncryptedShard. The nonce prefix is
+// generated lazily so each constructor call yields a fresh stream.
+func NewEncryptedShardChunkedWriter(w io.Writer, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) (*EncryptedShardChunkedWriter, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypted shard chunked writer requires encryptor")
+	}
+	if chunkSize <= 0 {
+		chunkSize = DefaultEncryptedChunkSize
+	}
+	if chunkSize > maxEncryptedChunkSize {
+		return nil, fmt.Errorf("encrypted shard chunk size too large: %d", chunkSize)
+	}
+	out := &EncryptedShardChunkedWriter{
+		w:         w,
+		enc:       enc,
+		aadBase:   append([]byte(nil), aadBase...),
+		chunkSize: chunkSize,
+	}
+	if _, err := io.ReadFull(rand.Reader, out.noncePrefix[:]); err != nil {
+		return nil, fmt.Errorf("generate nonce prefix: %w", err)
+	}
+	out.plainPtr = encryptedPlainChunkPool.Get().(*[]byte)
+	plain := *out.plainPtr
+	if cap(plain) < chunkSize {
+		plain = make([]byte, 0, chunkSize)
+	}
+	out.plainBuf = plain[:0]
+	out.cipherPtr = encryptedCipherChunkPool.Get().(*[]byte)
+	cipher := *out.cipherPtr
+	if cap(cipher) < chunkSize+enc.AEADOverhead() {
+		cipher = make([]byte, 0, chunkSize+enc.AEADOverhead())
+	}
+	out.cipherBuf = cipher[:0]
+	return out, nil
+}
+
+// Write appends p to the chunk buffer, emitting full chunks as the buffer
+// fills. Partial last chunks are emitted by Close.
+func (w *EncryptedShardChunkedWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, fmt.Errorf("encrypted shard chunked writer: write after close")
+	}
+	if !w.headerSent {
+		if err := w.emitHeader(); err != nil {
+			return 0, err
+		}
+		w.headerSent = true
+	}
+	written := 0
+	for len(p) > 0 {
+		room := w.chunkSize - len(w.plainBuf)
+		take := room
+		if take > len(p) {
+			take = len(p)
+		}
+		w.plainBuf = append(w.plainBuf, p[:take]...)
+		p = p[take:]
+		written += take
+		if len(w.plainBuf) == w.chunkSize {
+			if err := w.emitChunk(); err != nil {
+				return written, err
+			}
+		}
+	}
+	return written, nil
+}
+
+// Close flushes any pending partial chunk and releases pooled buffers.
+// Returns nil on second call so defer-Close patterns are safe.
+func (w *EncryptedShardChunkedWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	defer w.releasePools()
+	if !w.headerSent {
+		if err := w.emitHeader(); err != nil {
+			return err
+		}
+		w.headerSent = true
+	}
+	if len(w.plainBuf) > 0 {
+		if err := w.emitChunk(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *EncryptedShardChunkedWriter) emitHeader() error {
+	var header [encryptedHeaderLen]byte
+	copy(header[:], encryptedShardMagic)
+	binary.LittleEndian.PutUint32(header[len(encryptedShardMagic):], uint32(w.chunkSize))
+	copy(header[len(encryptedShardMagic)+4:], w.noncePrefix[:])
+	if _, err := w.w.Write(header[:]); err != nil {
+		return fmt.Errorf("write encrypted shard header: %w", err)
+	}
+	return nil
+}
+
+func (w *EncryptedShardChunkedWriter) emitChunk() error {
+	nonce := encryptedChunkNonce(w.noncePrefix, w.chunkIdx)
+	aad := encryptedChunkAAD(w.aadBase, w.chunkIdx)
+	ciphertext, err := w.enc.SealWithNonceAAD(w.cipherBuf[:0], nonce[:], w.plainBuf, aad)
+	if err != nil {
+		return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
+	}
+	w.cipherBuf = ciphertext
+	var chunkHeader [encryptedChunkHeaderLen]byte
+	binary.LittleEndian.PutUint32(chunkHeader[:4], uint32(len(w.plainBuf)))
+	binary.LittleEndian.PutUint32(chunkHeader[4:], uint32(len(ciphertext)))
+	if _, err := w.w.Write(chunkHeader[:]); err != nil {
+		return fmt.Errorf("write shard chunk header: %w", err)
+	}
+	if _, err := w.w.Write(ciphertext); err != nil {
+		return fmt.Errorf("write shard chunk: %w", err)
+	}
+	w.chunkIdx++
+	if w.chunkIdx == 0 {
+		return fmt.Errorf("encrypted shard has too many chunks")
+	}
+	w.plainBuf = w.plainBuf[:0]
+	return nil
+}
+
+func (w *EncryptedShardChunkedWriter) releasePools() {
+	if w.plainPtr != nil {
+		clear(w.plainBuf[:cap(w.plainBuf)])
+		*w.plainPtr = w.plainBuf[:0]
+		encryptedPlainChunkPool.Put(w.plainPtr)
+		w.plainPtr = nil
+		w.plainBuf = nil
+	}
+	if w.cipherPtr != nil {
+		*w.cipherPtr = w.cipherBuf[:0]
+		encryptedCipherChunkPool.Put(w.cipherPtr)
+		w.cipherPtr = nil
+		w.cipherBuf = nil
+	}
+}
+
 func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadBase []byte) error {
 	er, err := NewEncryptedShardReader(r, enc, aadBase)
 	if err != nil {

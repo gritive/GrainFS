@@ -10,7 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func (s *Server) putObjectWithUserMetadata(
+func (s *Server) putObjectWithUserMetadataAndMD5(
 	ctx context.Context,
 	bucket, key string,
 	body io.Reader,
@@ -19,6 +19,7 @@ func (s *Server) putObjectWithUserMetadata(
 	acl *uint8,
 	userMetadata map[string]string,
 	systemMetadata storage.ObjectSystemMetadata,
+	contentMD5Hex string,
 ) (*storage.PutObjectResult, error) {
 	var (
 		result *storage.PutObjectResult
@@ -34,6 +35,7 @@ func (s *Server) putObjectWithUserMetadata(
 		ACL:            acl,
 		UserMetadata:   userMetadata,
 		SystemMetadata: systemMetadata,
+		ContentMD5Hex:  contentMD5Hex,
 	})
 	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutBackend, backendStart, cluster.PutTraceStageFields{})
 	if err != nil {

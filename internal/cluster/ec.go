@@ -167,6 +167,32 @@ func ecSplitBodies(cfg ECConfig, data []byte) ([][]byte, error) {
 	return shards, nil
 }
 
+// ECSplitWithEncode is the exported wrapper for callers outside the
+// cluster package (the putpipeline actors). It returns k+m shards in
+// the same format as ECSplit: each shard is prefixed with an 8-byte
+// big-endian original-size header so the EC reader (ecReconstructStreamBodies)
+// can recover the exact byte count after decryption.
+func ECSplitWithEncode(cfg ECConfig, data []byte) ([][]byte, error) {
+	return ECSplit(cfg, data)
+}
+
+// ECSplitRaw is the header-less variant: returns k+m shard byte slices
+// WITHOUT the 8-byte size header. The actor pipeline calls this per
+// stripe because each shard file's size header is written ONCE per
+// object (at the head of each shard's chunked writer in
+// CPUPool.registerPut) using the full body size — not per-stripe.
+func ECSplitRaw(cfg ECConfig, data []byte) ([][]byte, error) {
+	return ecSplitBodies(cfg, data)
+}
+
+// ShardHeader returns the 8-byte big-endian length header that prefixes
+// every shard's plaintext stream. CPUPool writes this once per shard at
+// PUT start so the reader recovers the exact body size regardless of
+// how many stripes the writer fed through.
+func ShardHeader(origSize int64) [shardHeaderSize]byte {
+	return encodeShardHeader(origSize)
+}
+
 // ECReconstruct assembles the original data from at least k of k+m shards.
 // Missing shards are represented by nil entries. Returns the original bytes.
 func ECReconstruct(cfg ECConfig, shards [][]byte) ([]byte, error) {

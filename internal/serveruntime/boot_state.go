@@ -11,6 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -144,6 +145,7 @@ type bootState struct {
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
+	putPipeline      *putpipeline.Pipeline
 	shardCache       *shardcache.Cache
 	effectiveEC      cluster.ECConfig
 	stopApply        chan struct{}

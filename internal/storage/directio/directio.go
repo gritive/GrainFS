@@ -46,6 +46,21 @@ func OpenFile(path string, flag int, mode os.FileMode) (*os.File, error) {
 // need to call PageSize directly.
 func PageSize() int { return pageSize }
 
+// ApplyNoCacheHint asks the kernel to bypass the page cache for the given
+// open file, without touching the open flags. On macOS this issues
+// fcntl(F_NOCACHE), giving the same page-cache-bypass effect as
+// directio.OpenFile but without imposing the alignment rules that O_DIRECT
+// would on Linux. Useful for write paths that emit many small unaligned
+// chunks (the encrypted EC shard chunked writer is the motivating case —
+// O_DIRECT would EINVAL on its 1 MiB-plus-tag writes, but F_NOCACHE works).
+//
+// On Linux and unsupported platforms this is a no-op that returns nil; the
+// file goes through the page cache as usual. Callers wanting Linux O_DIRECT
+// must use OpenFile + AlignedCopy instead.
+func ApplyNoCacheHint(f *os.File) error {
+	return applyNoCacheHint(f)
+}
+
 // AlignedCopy returns a buffer suitable for a direct-I/O write of data on
 // this platform.
 //

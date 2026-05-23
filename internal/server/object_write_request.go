@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,22 @@ import (
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
+
+// putObjectContentMD5Hex decodes the client-supplied Content-MD5 header
+// (base64-encoded per RFC 1864) to hex so the actor PUT pipeline can use
+// it as the object ETag without recomputing MD5. Returns "" if the
+// header is absent or malformed; the pipeline falls back to recompute.
+func putObjectContentMD5Hex(c *app.RequestContext) string {
+	raw := string(c.GetHeader("Content-MD5"))
+	if raw == "" {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(decoded) != 16 {
+		return ""
+	}
+	return hex.EncodeToString(decoded)
+}
 
 const putObjectStreamingThresholdBytes = 8 << 20
 

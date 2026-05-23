@@ -17,6 +17,13 @@ func openDirect(path string, flag int, mode os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flag|syscall.O_DIRECT, mode)
 }
 
+// applyNoCacheHint is a no-op on Linux. Linux's O_DIRECT must be set at
+// open time (it's an open flag, not an fcntl), and it imposes alignment
+// rules the chunked-write callsites can't satisfy. Linux callers that need
+// page-cache bypass must use OpenFile + AlignedCopy — there's no
+// equivalent for an already-open buffered fd.
+func applyNoCacheHint(_ *os.File) error { return nil }
+
 // alignedCopyImpl returns a 4096-aligned buffer of the smallest length that
 // is a multiple of 4096 and at least len(data) bytes, with data copied into
 // the head and zeros filling the tail.

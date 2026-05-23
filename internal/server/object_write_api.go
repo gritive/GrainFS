@@ -120,6 +120,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 			return
 		}
 		bodyBytes = int64(len(rawBody))
+		sizeHint = &bodyBytes
 		body = bytes.NewReader(rawBody)
 	}
 	userMetadata := copyUserMetadata(c)
@@ -127,7 +128,8 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		Bytes: bodyBytes,
 	})
 
-	result, putErr := s.putObjectWithUserMetadata(ctx, bucket, key, body, sizeHint, contentType, putObjectACL(c), userMetadata, systemMetadata)
+	contentMD5Hex := putObjectContentMD5Hex(c)
+	result, putErr := s.putObjectWithUserMetadataAndMD5(ctx, bucket, key, body, sizeHint, contentType, putObjectACL(c), userMetadata, systemMetadata, contentMD5Hex)
 	if putErr != nil {
 		mapError(c, putErr)
 		return
