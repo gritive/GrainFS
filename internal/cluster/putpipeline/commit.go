@@ -14,6 +14,7 @@ type CommitCoord struct {
 	metaBatchCh chan<- MetadataRecord
 	waiters     map[uint64]*putWaiter
 	mu          sync.Mutex
+	wal         ShardWALAppender // optional; when set, called once per PUT before final-done
 }
 
 func (c *CommitCoord) registerPut(putID uint64, w *putWaiter) {
@@ -73,6 +74,35 @@ func (c *CommitCoord) handle(res ShardWriteResult) {
 
 	if w.shardsOK+w.shardsFailed >= w.shardsTotal {
 		if w.dataShardsOK >= w.cfg.DataShards {
+			// WAL-only fsync (commit b508c73d contract): pay one fsync
+			// for the whole PUT inside the WAL, in place of N per-shard
+			// fsyncs in DriveActor. The on-disk rename has already
+			// happened by the time a ShardWriteResult arrives, so any
+			// shard the WAL covers also has its file in place.
+			if c.wal != nil {
+				records := make([]ShardWALRecord, 0, len(w.metadata.ShardSizes))
+				for i, sz := range w.metadata.ShardSizes {
+					if sz <= 0 {
+						continue
+					}
+					records = append(records, ShardWALRecord{
+						Bucket:   w.metadata.Bucket,
+						Key:      w.metadata.Key,
+						ShardIdx: i,
+						Size:     sz,
+					})
+				}
+				if len(records) > 0 {
+					if _, err := c.wal.AppendBatch(context.Background(), records); err != nil {
+						w.finalDone <- fmt.Errorf(
+							"put %d: wal append batch: %w", res.PutID, err)
+						c.mu.Lock()
+						delete(c.waiters, res.PutID)
+						c.mu.Unlock()
+						return
+					}
+				}
+			}
 			c.metaBatchCh <- w.metadata
 			w.finalDone <- nil
 		} else {

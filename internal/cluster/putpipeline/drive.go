@@ -21,6 +21,11 @@ type DriveActor struct {
 	mu       sync.Mutex // guards pending + registry
 	registry map[uint64]registryEntry
 
+	// skipFsync defers durability to the WAL fsync paid once per PUT
+	// in CommitCoord. When true, finalize() does close + rename only.
+	// Set by Pipeline.New when Config.WAL != nil.
+	skipFsync bool
+
 	// panicOnPut is a test-only seam: when non-zero, handle() panics on
 	// the first chunk whose PutID matches, to exercise recover().
 	panicOnPut uint64
@@ -141,11 +146,14 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 	return s
 }
 
-// finalize fsyncs + renames the completed shard and reports success.
+// finalize fsyncs (when no WAL is wired) + renames the completed
+// shard and reports success.
 func (d *DriveActor) finalize(chunk EncryptedShardChunk, state *shardWriteState) {
-	if err := state.f.Sync(); err != nil {
-		d.failChunk(chunk, state, fmt.Errorf("fsync shard: %w", err))
-		return
+	if !d.skipFsync {
+		if err := state.f.Sync(); err != nil {
+			d.failChunk(chunk, state, fmt.Errorf("fsync shard: %w", err))
+			return
+		}
 	}
 	if err := state.f.Close(); err != nil {
 		d.failChunk(chunk, state, fmt.Errorf("close shard: %w", err))

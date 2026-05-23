@@ -25,6 +25,26 @@ type Config struct {
 	BatchSize    int           // metadata batch size; defaults to 32 if 0
 	FlushAfter   time.Duration // metadata flush deadline; defaults to 5 ms if 0
 	BadgerDB     *badger.DB    // metadata sink; nil = no-op flush (tests)
+	WAL          ShardWALAppender
+}
+
+// ShardWALAppender lets CommitCoord record the per-PUT shard layout in
+// the data WAL with one fsync after all shards have hit disk, in place
+// of N per-shard fsyncs inside DriveActor. When nil, DriveActor falls
+// back to its own per-shard fsync for durability.
+type ShardWALAppender interface {
+	AppendBatch(ctx context.Context, records []ShardWALRecord) (covered bool, err error)
+}
+
+// ShardWALRecord is the per-shard metadata entry the pipeline emits to
+// the WAL. The data WAL recovery path uses (Bucket, Key, ShardIdx,
+// Size) to verify the on-disk shard file matches; missing files are
+// rebuilt lazily through EC reconstruction at read time.
+type ShardWALRecord struct {
+	Bucket   string
+	Key      string // ecObjectShardKey(key, versionID) form
+	ShardIdx int
+	Size     int64
 }
 
 // Pipeline owns the long-lived actors and dispatches PUT requests.
@@ -71,15 +91,22 @@ func New(cfg Config) *Pipeline {
 	p.stripeCh = make(chan StripePlaintext, cfg.ChannelDepth)
 	p.commitIn = make(chan ShardWriteResult, cfg.ChannelDepth)
 	p.metaIn = make(chan MetadataRecord, cfg.ChannelDepth)
+	// WAL-only fsync contract (commit b508c73d): when a WAL appender is
+	// wired, DriveActor skips its per-shard fsync and CommitCoord pays
+	// one WAL fsync per PUT after every shard has hit disk. Without a
+	// WAL, DriveActor falls back to per-shard fsync for durability.
+	skipDriveFsync := cfg.WAL != nil
+
 	p.driveIns = make([]chan EncryptedShardChunk, len(cfg.DataDirs))
 	p.drives = make([]*DriveActor, len(cfg.DataDirs))
 	for i := range cfg.DataDirs {
 		p.driveIns[i] = make(chan EncryptedShardChunk, cfg.ChannelDepth)
 		p.drives[i] = &DriveActor{
-			in:       p.driveIns[i],
-			dataDir:  cfg.DataDirs[i],
-			commitCh: p.commitIn,
-			pending:  make(map[uint64]*shardWriteState),
+			in:        p.driveIns[i],
+			dataDir:   cfg.DataDirs[i],
+			commitCh:  p.commitIn,
+			pending:   make(map[uint64]*shardWriteState),
+			skipFsync: skipDriveFsync,
 		}
 	}
 	p.cpu = &CPUPool{
@@ -92,6 +119,7 @@ func New(cfg Config) *Pipeline {
 		in:          p.commitIn,
 		metaBatchCh: p.metaIn,
 		waiters:     make(map[uint64]*putWaiter),
+		wal:         cfg.WAL,
 	}
 	p.metaBatcher = &MetadataBatcher{
 		in:         p.metaIn,

@@ -1095,6 +1095,53 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 	return false, nil
 }
 
+// ShardMetadataWALRecord describes one shard's WAL metadata-only entry
+// for AppendShardMetadataBatch. Payload is never inlined — the on-disk
+// shard file is the source of truth. EC reconstruction lazily rebuilds
+// missing files at read time via the metadata-only materializer path.
+type ShardMetadataWALRecord struct {
+	Bucket   string
+	Key      string // ecObjectShardKey(key, versionID) form
+	ShardIdx int
+	Size     int64
+}
+
+// AppendShardMetadataBatch records N shard metadata-only entries in the
+// data WAL with exactly one Flush. The put actor pipeline calls this
+// after every shard has hit disk (rename done) and before signalling
+// completion, so a 4-shard EC object pays 1 WAL fsync instead of N
+// per-shard fsyncs. No-op (returns nil) when no WAL is wired or replay
+// is in progress; callers MUST fsync the shard files themselves in that
+// case (returns a sentinel so they can branch).
+//
+// On Append failure mid-batch the partially-committed WAL is left as-is
+// — the records on disk are a superset of what we acknowledge, which is
+// safe (recovery skips records whose shard files were never written).
+func (s *ShardService) AppendShardMetadataBatch(ctx context.Context, records []ShardMetadataWALRecord) (walCovered bool, err error) {
+	if s.dataWAL == nil || s.replayingDataWAL.Load() {
+		return false, nil
+	}
+	for _, r := range records {
+		rec := datawal.Record{
+			Op:     datawal.OpShardPut,
+			Bucket: r.Bucket,
+			Key:    r.Key,
+			Target: strconv.Itoa(r.ShardIdx),
+			Size:   r.Size,
+		}
+		// Metadata-only: rec.Payload stays nil. The pipeline's shard
+		// chunks are large by construction (chunk size >> inline
+		// threshold), so we never inline.
+		if _, err := s.dataWAL.Append(ctx, rec); err != nil {
+			return false, fmt.Errorf("data wal append shard batch: %w", err)
+		}
+	}
+	if err := s.dataWAL.Flush(); err != nil {
+		return false, fmt.Errorf("data wal flush shard batch: %w", err)
+	}
+	return true, nil
+}
+
 // RecoverDataWAL replays missing shard files from the data WAL. Safe to call
 // when no WAL is wired (no-op). Existing shard files matching the record size
 // are skipped via HasReplacement.

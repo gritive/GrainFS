@@ -347,6 +347,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			DataDirs:  state.shardSvc.DataDirs(),
 			Encryptor: state.cfg.Encryptor,
 			ECConfig:  state.effectiveEC,
+			WAL:       shardServiceWALAdapter{s: state.shardSvc},
 		})
 		state.putPipeline = pipeline
 		distBackend.SetPutPipeline(pipeline)
@@ -523,4 +524,24 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
 	return nil
+}
+
+// shardServiceWALAdapter exposes ShardService.AppendShardMetadataBatch
+// as putpipeline.ShardWALAppender so the actor pipeline can pay one
+// fsync per PUT inside the WAL in place of N per-shard fsyncs.
+type shardServiceWALAdapter struct {
+	s *cluster.ShardService
+}
+
+func (a shardServiceWALAdapter) AppendBatch(ctx context.Context, records []putpipeline.ShardWALRecord) (bool, error) {
+	converted := make([]cluster.ShardMetadataWALRecord, len(records))
+	for i, r := range records {
+		converted[i] = cluster.ShardMetadataWALRecord{
+			Bucket:   r.Bucket,
+			Key:      r.Key,
+			ShardIdx: r.ShardIdx,
+			Size:     r.Size,
+		}
+	}
+	return a.s.AppendShardMetadataBatch(ctx, converted)
 }
