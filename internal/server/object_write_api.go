@@ -120,6 +120,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 			return
 		}
 		bodyBytes = int64(len(rawBody))
+		sizeHint = &bodyBytes
 		body = bytes.NewReader(rawBody)
 	}
 	userMetadata := copyUserMetadata(c)
