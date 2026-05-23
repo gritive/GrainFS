@@ -878,6 +878,9 @@ run_warp_case() {
   if [[ "$WARP_NOCLEAR" == "1" ]]; then
     args+=(--noclear)
   fi
+  if [[ "${BENCH_WARP_MD5:-0}" == "1" ]]; then
+    args+=(--md5)
+  fi
   capture_cluster_status_snapshot "$target" "$op-before" "$base_url"
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then
     RUN_FAILURES=1
