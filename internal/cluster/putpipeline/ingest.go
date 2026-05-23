@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 )
@@ -13,10 +14,13 @@ import (
 // IngestActor reads an HTTP body into stripe-sized chunks and pushes
 // them onto its out channel. One IngestActor goroutine per PUT.
 //
-// When precomputedETag is non-empty, the actor skips MD5 hashing and
-// returns it as the final ETag. This is wired from clients that supply
-// Content-MD5 in their PUT request, which avoids the per-PUT MD5
-// recompute that otherwise dominates large-object CPU.
+// MD5 is always computed for external buckets to satisfy the AWS S3
+// contract that a single-PUT ETag equals MD5(body). When precomputedETag
+// is non-empty (client supplied Content-MD5), the actor verifies the
+// computed MD5 matches and rejects on mismatch (S3 BadDigest semantics).
+// MD5 runs in a sidecar goroutine so it overlaps with the pipeline's
+// EC + encrypt + write stages instead of sitting on the read loop's
+// critical path.
 type IngestActor struct {
 	out             chan<- StripePlaintext
 	stripeBytes     int
@@ -24,6 +28,10 @@ type IngestActor struct {
 }
 
 var errInvalidStripeBytes = errors.New("ingest actor: stripeBytes must be > 0")
+
+// ErrContentMD5Mismatch is returned when the body's actual MD5 doesn't
+// match the client-supplied Content-MD5. Maps to S3 400 BadDigest.
+var ErrContentMD5Mismatch = errors.New("ingest actor: Content-MD5 mismatch")
 
 // Run executes the ingest loop for one PUT. Returns the final ETag
 // (MD5 hex for external buckets, empty for internal/unnamed), total
@@ -33,18 +41,34 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 	if a.stripeBytes <= 0 {
 		return "", 0, errInvalidStripeBytes
 	}
-	var h hash.Hash
-	if a.precomputedETag == "" {
-		h = newHashForBucket(bucket)
-	}
-	var src io.Reader = body
+	h := newHashForBucket(bucket)
+
+	// Sidecar MD5 goroutine. Drains md5In and computes MD5; the result
+	// arrives on md5Out when md5In is closed. Keeps md5.Write off the
+	// read loop's critical path so the pipeline can advance while
+	// hashing happens in parallel.
+	var md5In chan []byte
+	md5Out := make(chan string, 1)
 	if h != nil {
-		src = io.TeeReader(body, h)
+		md5In = make(chan []byte, 8)
+		go func() {
+			for chunk := range md5In {
+				_, _ = h.Write(chunk)
+			}
+			md5Out <- hex.EncodeToString(h.Sum(nil))
+		}()
 	}
+	cleanup := func() {
+		if md5In != nil {
+			close(md5In)
+			<-md5Out
+		}
+	}
+
 	// Wrap in bufio so we can peek one byte after a full read to detect
 	// whether the stream is exhausted (handles exact-multiple body sizes
 	// where io.ReadFull returns (stripeBytes, nil) on the last stripe).
-	br := bufio.NewReaderSize(src, 4096)
+	br := bufio.NewReaderSize(body, 4096)
 
 	stripeIdx := uint32(0)
 	for {
@@ -69,6 +93,13 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 				buf[i] = 0
 			}
 		}
+		if md5In != nil {
+			// Send the read bytes (excluding zero padding) to MD5
+			// goroutine. The stripe buffer remains owned by downstream
+			// (CPUPool); MD5 reads from the same backing array but the
+			// pipeline never mutates it before reaching DriveActor.
+			md5In <- buf[:n]
+		}
 		s := StripePlaintext{
 			PutID:     putID,
 			StripeIdx: stripeIdx,
@@ -78,6 +109,7 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 		}
 		select {
 		case <-ctx.Done():
+			cleanup()
 			return "", total, ctx.Err()
 		case a.out <- s:
 		}
@@ -87,13 +119,18 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 			break
 		}
 		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			cleanup()
 			return "", total, readErr
 		}
 	}
-	if h != nil {
-		etag = hex.EncodeToString(h.Sum(nil))
-	} else if a.precomputedETag != "" {
-		etag = a.precomputedETag
+	if md5In != nil {
+		close(md5In)
+		etag = <-md5Out
+	}
+	// If the client supplied a Content-MD5, verify the body's actual
+	// MD5 matches. Mismatch = S3 BadDigest.
+	if a.precomputedETag != "" && etag != "" && etag != a.precomputedETag {
+		return "", total, fmt.Errorf("%w: client supplied %s, body computed %s", ErrContentMD5Mismatch, a.precomputedETag, etag)
 	}
 	return etag, total, nil
 }

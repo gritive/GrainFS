@@ -100,10 +100,11 @@ func TestIngestActor_ETagMD5(t *testing.T) {
 	require.Equal(t, want, gotETag)
 }
 
-func TestIngestActor_PrecomputedETagSkipsMD5(t *testing.T) {
+func TestIngestActor_PrecomputedETagMatches(t *testing.T) {
 	const stripe = 1 << 20
 	body := bytes.Repeat([]byte{0xCC}, 3*stripe)
-	const precomputed = "deadbeefcafebabe1234567890abcdef"
+	sum := md5.Sum(body)
+	precomputed := hex.EncodeToString(sum[:])
 
 	out := make(chan StripePlaintext, 8)
 	a := &IngestActor{
@@ -123,7 +124,31 @@ func TestIngestActor_PrecomputedETagSkipsMD5(t *testing.T) {
 	for range out {
 	}
 	<-done
-	require.Equal(t, precomputed, gotETag, "should return precomputed etag without recomputing MD5")
+	require.Equal(t, precomputed, gotETag, "matching precomputed Content-MD5 should be returned as ETag")
+}
+
+func TestIngestActor_PrecomputedETagMismatchRejects(t *testing.T) {
+	const stripe = 1 << 20
+	body := bytes.Repeat([]byte{0xCC}, 3*stripe)
+	const wrongPrecomputed = "deadbeefcafebabe1234567890abcdef"
+
+	out := make(chan StripePlaintext, 8)
+	a := &IngestActor{
+		out:             out,
+		stripeBytes:     stripe,
+		precomputedETag: wrongPrecomputed,
+	}
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		_, _, runErr = a.Run(context.Background(), 1, "external", bytes.NewReader(body))
+		close(out)
+		close(done)
+	}()
+	for range out {
+	}
+	<-done
+	require.ErrorIs(t, runErr, ErrContentMD5Mismatch, "wrong client Content-MD5 should reject as BadDigest")
 }
 
 func TestIngestActor_ContextCancel(t *testing.T) {
