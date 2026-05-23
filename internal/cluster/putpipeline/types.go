@@ -1,7 +1,6 @@
 package putpipeline
 
 import (
-	"bufio"
 	"io"
 	"os"
 
@@ -58,9 +57,12 @@ type MetadataRecord struct {
 }
 
 // shardWriteState lives inside DriveActor: per-PUT tmp file + bookkeeping.
+// Writes go straight to f without a bufio.Writer — encrypted chunks already
+// arrive at ~1 MiB granularity, so an extra user-space buffer only adds a
+// memcpy hop without amortizing syscalls further. Removing it cut the
+// per-chunk runtime.memmove dominator from the PUT CPU profile.
 type shardWriteState struct {
 	f            *os.File
-	bw           *bufio.Writer // user-space buffer; coalesces small encrypted chunks into large kernel writes
 	finalPath    string
 	tmpPath      string
 	bucket       string

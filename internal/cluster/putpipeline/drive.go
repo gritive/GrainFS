@@ -1,7 +1,6 @@
 package putpipeline
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -10,14 +9,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/storage/directio"
 )
-
-// shardWriteBufSize coalesces encrypted-chunk writes (≈ 512 KiB per
-// stripe) into larger kernel write syscalls. With 32 concurrent PUTs
-// holding a buf each per drive (4 drives × 32 = 128 buffers), every
-// extra MiB here costs ~128 MiB of steady-state RSS. 1 MiB balances
-// coalescing (each chunk hit during PUT is at most one syscall) with
-// memory; iostat KB/t no longer tracks buf size once chunks are large.
-const shardWriteBufSize = 1 << 20
 
 // DriveActor owns shard writes for one local data directory. One
 // long-lived goroutine per drive.
@@ -92,7 +83,7 @@ func (d *DriveActor) handle(chunk EncryptedShardChunk) {
 		return // error already reported via commitCh
 	}
 
-	n, err := state.bw.Write(chunk.Ciphertext)
+	n, err := state.f.Write(chunk.Ciphertext)
 	if err != nil {
 		d.failChunk(chunk, state, fmt.Errorf("write shard chunk: %w", err))
 		return
@@ -153,7 +144,6 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 	_ = directio.ApplyNoCacheHint(f)
 	s := &shardWriteState{
 		f:         f,
-		bw:        bufio.NewWriterSize(f, shardWriteBufSize),
 		finalPath: finalPath,
 		tmpPath:   tmpPath,
 		bucket:    entry.bucket,
@@ -166,13 +156,9 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 	return s
 }
 
-// finalize flushes the user-space buffer, fsyncs (when no WAL is
-// wired) + renames the completed shard and reports success.
+// finalize fsyncs (when no WAL is wired) + renames the completed
+// shard and reports success.
 func (d *DriveActor) finalize(chunk EncryptedShardChunk, state *shardWriteState) {
-	if err := state.bw.Flush(); err != nil {
-		d.failChunk(chunk, state, fmt.Errorf("flush shard buffer: %w", err))
-		return
-	}
 	if !d.skipFsync {
 		if err := state.f.Sync(); err != nil {
 			d.failChunk(chunk, state, fmt.Errorf("fsync shard: %w", err))
