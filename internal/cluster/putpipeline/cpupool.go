@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -51,7 +52,10 @@ type seqGate struct {
 	nextStripe uint32
 }
 
-func (p *CPUPool) registerPut(putID uint64, shardChans []chan<- EncryptedShardChunk) {
+// registerPut sets up per-shard chunked writers for one PUT.
+// bucket and shardKey are used to derive the AAD so that shards are
+// readable by the legacy ShardService reader (AAD = bucket+"/"+shardKey+"/"+shardIdx).
+func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, shardChans []chan<- EncryptedShardChunk) {
 	p.mu.Lock()
 	p.outByPut[putID] = shardChans
 	p.mu.Unlock()
@@ -60,7 +64,7 @@ func (p *CPUPool) registerPut(putID uint64, shardChans []chan<- EncryptedShardCh
 	encoders := make([]*shardEncoder, n)
 	for i := 0; i < n; i++ {
 		buf := new(bytes.Buffer)
-		aad := []byte(fmt.Sprintf("put/%d/shard/%d", putID, i))
+		aad := []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
 		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, aad, eccodec.DefaultEncryptedChunkSize)
 		if err != nil {
 			// NewEncryptedShardChunkedWriter only fails on a nil
@@ -157,8 +161,17 @@ func (p *CPUPool) workerLoop(ctx context.Context) {
 // processStripe runs concurrently across workers and does only the EC
 // split: it produces k+m plaintext shard byte slices. Encryption is
 // deferred to dispatch so it runs serialized per PUT.
+//
+// IngestActor zero-pads the last stripe to stripeBytes for Reed-Solomon
+// alignment. We trim the padding before EC split so the embedded shard
+// header records the real byte count — the EC reader uses that header to
+// limit the reconstructed stream to the correct length.
 func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) error {
-	shards, err := cluster.ECSplitWithEncode(p.ecCfg, stripe.Data)
+	data := stripe.Data
+	if stripe.Padding > 0 && int(stripe.Padding) < len(data) {
+		data = data[:len(data)-int(stripe.Padding)]
+	}
+	shards, err := cluster.ECSplitWithEncode(p.ecCfg, data)
 	if err != nil {
 		return fmt.Errorf("cpu pool ec split: %w", err)
 	}

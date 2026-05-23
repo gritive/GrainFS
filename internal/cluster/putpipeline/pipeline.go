@@ -134,7 +134,7 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		// arrives on the DriveActor's channel.
 		p.drives[driveIdx].registerPut(putID, req.Bucket, req.Key, i)
 	}
-	p.cpu.registerPut(putID, shardChans)
+	p.cpu.registerPut(putID, req.Bucket, req.Key, shardChans)
 	defer p.cpu.unregisterPut(putID)
 
 	earlyAck := make(chan error, 1)
@@ -202,6 +202,23 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		}
 	}()
 	return obj, nil
+}
+
+// PutShard implements cluster.PutPipelineRunner. shardKey is the
+// ecObjectShardKey(key, versionID) form that the DriveActor writes
+// under and that the legacy ShardService reader expects. The returned
+// *storage.Object has Key set to shardKey (not the logical key); the
+// caller overwrites it and fills in VersionID before Raft propose.
+func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error) {
+	return p.Put(ctx, PutRequest{
+		Bucket:      req.Bucket,
+		Key:         shardKey,
+		Body:        req.Body,
+		SizeHint:    req.SizeHint,
+		ContentType: req.ContentType,
+		UserMeta:    req.UserMetadata,
+		System:      req.SystemMetadata,
+	})
 }
 
 // Shutdown cancels all actor goroutines and waits for them to drain.

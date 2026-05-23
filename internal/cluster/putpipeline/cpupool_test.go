@@ -29,7 +29,7 @@ func TestCPUPool_RegisterAndDispatch_OneShardPerChannel(t *testing.T) {
 	for i := range shardChans {
 		sends[i] = shardChans[i]
 	}
-	pool.registerPut(1, sends)
+	pool.registerPut(1, "testbucket", "testkey", sends)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -70,7 +70,7 @@ func TestCPUPool_OrderedPerShard_FiveStripes(t *testing.T) {
 		shardChans[i] = make(chan EncryptedShardChunk, 8)
 		sends[i] = shardChans[i]
 	}
-	pool.registerPut(7, sends)
+	pool.registerPut(7, "testbucket", "testkey", sends)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -113,7 +113,7 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
 		shardChans[i] = make(chan EncryptedShardChunk, 16)
 		sends[i] = shardChans[i]
 	}
-	pool.registerPut(11, sends)
+	pool.registerPut(11, "testbucket", "testobj/v1", sends)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -149,7 +149,7 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
 				t.Fatalf("shard %d missing chunk for stripe %d", shard, got)
 			}
 		}
-		aad := []byte(fmt.Sprintf("put/%d/shard/%d", 11, shard))
+		aad := []byte(fmt.Sprintf("testbucket/testobj/v1/%d", shard))
 		var plain bytes.Buffer
 		err := eccodec.DecodeEncryptedShard(&plain, bytes.NewReader(concatenated), enc, aad)
 		require.NoError(t, err, "shard %d: concatenated chunks are not one valid GFSENC2 stream", shard)

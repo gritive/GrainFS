@@ -167,11 +167,13 @@ func ecSplitBodies(cfg ECConfig, data []byte) ([][]byte, error) {
 	return shards, nil
 }
 
-// ECSplitWithEncode is the exported wrapper around ecSplitBodies for
-// callers outside the cluster package (the putpipeline actors). It
-// returns k+m shards: the data shards followed by the parity shards.
+// ECSplitWithEncode is the exported wrapper for callers outside the
+// cluster package (the putpipeline actors). It returns k+m shards in
+// the same format as ECSplit: each shard is prefixed with an 8-byte
+// big-endian original-size header so the EC reader (ecReconstructStreamBodies)
+// can recover the exact byte count after decryption.
 func ECSplitWithEncode(cfg ECConfig, data []byte) ([][]byte, error) {
-	return ecSplitBodies(cfg, data)
+	return ECSplit(cfg, data)
 }
 
 // ECReconstruct assembles the original data from at least k of k+m shards.

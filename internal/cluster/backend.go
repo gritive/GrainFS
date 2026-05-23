@@ -101,6 +101,15 @@ type BucketAssigner interface {
 	ProposeBucketAssignment(ctx context.Context, bucket, groupID string) error
 }
 
+// PutPipelineRunner is implemented by putpipeline.Pipeline. The interface
+// breaks the import cycle: cluster → putpipeline → cluster.
+// PutShard encrypts and writes shards for shardKey, returning a partially
+// populated *storage.Object (Key=shardKey, Size, ETag, LastModified set).
+// The caller is responsible for proposing the Raft metadata commit.
+type PutPipelineRunner interface {
+	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error)
+}
+
 // DistributedBackend implements storage.Backend with Raft-replicated metadata
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
@@ -185,6 +194,11 @@ type DistributedBackend struct {
 
 	// scrubOrphanAge is the age gate for WalkOrphanSegments. Set via SetScrubOrphanAge.
 	scrubOrphanAge time.Duration
+
+	// putPipeline is the optional single-node EC PUT actor pipeline.
+	// When non-nil, PutObjectWithRequest dispatches eligible PUTs to it;
+	// other PUTs fall through to the legacy spool/EC writer path.
+	putPipeline PutPipelineRunner
 }
 
 type backendTopology struct {
@@ -376,6 +390,13 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	b.peerHealth = topology.peerHealth
 	b.topologySnapshot.Store(topology)
 	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
+}
+
+// SetPutPipeline injects the single-node EC PUT actor pipeline.
+// When non-nil, PutObjectWithRequest dispatches to it for eligible
+// PUTs; other PUTs fall through to the legacy spool/EC writer path.
+func (b *DistributedBackend) SetPutPipeline(p PutPipelineRunner) {
+	b.putPipeline = p
 }
 
 // SetClusterNodes refreshes the configured placement node set without
@@ -1566,6 +1587,84 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		return nil, objectQuarantinedError(bucket, key, q)
 	}
 	observePutStage("distributed", "quarantine_check", stageStart)
+
+	if b.putPipeline != nil && b.shardSvc != nil && b.shardSvc.encryptor != nil && !storage.IsInternalBucket(bucket) {
+		liveNodes := b.effectivePlacementNodes()
+		effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
+		if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
+			effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
+		}
+		placement := selectECPlacementWeighted(effectiveCfg, liveNodes, ecObjectShardKey(key, ""), b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
+		if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+			effectiveCfg = cfg
+			placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+		}
+		selfID := b.currentSelfAddr()
+		// Actor-eligible: all shards local and EC config is non-zero.
+		allLocal := effectiveCfg.NumShards() > 0
+		for _, p := range placement {
+			if p != selfID {
+				allLocal = false
+				break
+			}
+		}
+		if allLocal {
+			versionID := newVersionID()
+			shardKey := ecObjectShardKey(key, versionID)
+			obj, err := b.putPipeline.PutShard(ctx, shardKey, storage.PutObjectRequest{
+				Bucket:         bucket,
+				Key:            shardKey,
+				Body:           r,
+				SizeHint:       req.SizeHint,
+				ContentType:    contentType,
+				UserMetadata:   userMetadata,
+				SystemMetadata: req.SystemMetadata,
+			})
+			if err != nil {
+				return nil, err
+			}
+			placementGroupID, ok := PlacementGroupFromContext(ctx)
+			if !ok {
+				placementGroupID = "group-0"
+			}
+			nodeIDs := make([]string, effectiveCfg.NumShards())
+			for i := range nodeIDs {
+				nodeIDs[i] = selfID
+			}
+			if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+				Bucket:           bucket,
+				Key:              key,
+				Size:             obj.Size,
+				ContentType:      contentType,
+				ETag:             obj.ETag,
+				ModTime:          obj.LastModified,
+				VersionID:        versionID,
+				PlacementGroupID: placementGroupID,
+				ECData:           uint8(effectiveCfg.DataShards),
+				ECParity:         uint8(effectiveCfg.ParityShards),
+				NodeIDs:          nodeIDs,
+				UserMetadata:     cloneStringMap(userMetadata),
+				SSEAlgorithm:     sseAlgorithm,
+			}); merr != nil {
+				go b.deleteShardsAsync(bucket, nodeIDs, shardKey)
+				return nil, merr
+			}
+			return &storage.Object{
+				Key:              key,
+				Size:             obj.Size,
+				ContentType:      contentType,
+				ETag:             obj.ETag,
+				LastModified:     obj.LastModified,
+				VersionID:        versionID,
+				UserMetadata:     cloneStringMap(userMetadata),
+				SSEAlgorithm:     sseAlgorithm,
+				PlacementGroupID: placementGroupID,
+				ECData:           uint8(effectiveCfg.DataShards),
+				ECParity:         uint8(effectiveCfg.ParityShards),
+				NodeIDs:          cloneStringSlice(nodeIDs),
+			}, nil
+		}
+	}
 
 	versionID := newVersionID()
 	if b.currentECConfig().NumShards() != 0 && b.shardSvc != nil {
