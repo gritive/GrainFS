@@ -29,8 +29,11 @@ var ciphertextBufPool = sync.Pool{
 
 // ciphertextMaxPooled bounds the capacity we'll retain across PUTs.
 // Anything bigger goes straight to the GC so we don't keep huge
-// outliers (e.g. abnormal stripe sizes) pinned in the pool.
-const ciphertextMaxPooled = 16 << 20
+// outliers (e.g. abnormal stripe sizes) pinned in the pool. Sized to
+// the encrypted chunk size (1 MiB + ~32 B AEAD tag) — normal traffic
+// never exceeds this, and capping it prevents one-off large stripes
+// from pinning a much larger buffer in the pool forever.
+const ciphertextMaxPooled = (1 << 20) + 256
 
 func getCiphertextBuf(size int) []byte {
 	bp := ciphertextBufPool.Get().(*[]byte)
