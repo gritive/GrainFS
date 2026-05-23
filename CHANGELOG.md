@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.327.0] - 2026-05-23
+
+### Changed
+
+- **FSM apply path batches committed Raft entries into one BadgerDB transaction.** Previously every committed entry paid its own per-transaction commit overhead (oracle bookkeeping, conflict detection, WAL finish-marker framing, writeCh round-trip). The apply loop now opportunistically drains already-available entries from the apply channel into a single shared transaction and commits them in one shot. Measured ~2× speedup on metadata apply throughput (5759 → 2754 ns/op median at batch sizes 4-16 on Apple M3) with 2.4× fewer allocations per entry. No protocol, API, or durability change — Raft log remains the durable WAL. The new `grainfs_apply_batch_size` histogram and `grainfs_apply_batch_commit_fallback_total` counter expose batch-size distribution and rare-path observability. `GRAINFS_RAFT_APPLY_BATCH_MAX=1` disables batching at process start for bench isolation.
+
 ## [0.0.326.0] - 2026-05-22
 
 ### Changed
