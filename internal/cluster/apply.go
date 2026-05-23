@@ -89,8 +89,10 @@ func NewFSM(db *badger.DB, keys *stateKeyspace) *FSM {
 	return &FSM{db: db, keys: keys}
 }
 
-// Apply processes a committed command and updates the metadata store.
-func (f *FSM) Apply(raw []byte) error {
+// ApplyTxn decodes a committed command and applies it to the supplied
+// transaction. The caller owns the transaction lifecycle (commit/discard);
+// this lets the apply actor batch many entries into one transaction.
+func (f *FSM) ApplyTxn(txn *badger.Txn, raw []byte) error {
 	cmd, err := DecodeCommand(raw)
 	if err != nil {
 		return fmt.Errorf("decode command: %w", err)
@@ -100,27 +102,27 @@ func (f *FSM) Apply(raw []byte) error {
 	case CmdNoOp:
 		return nil
 	case CmdCreateBucket:
-		return f.applyCreateBucket(cmd.Data)
+		return f.applyCreateBucket(txn, cmd.Data)
 	case CmdDeleteBucket:
-		return f.applyDeleteBucket(cmd.Data)
+		return f.applyDeleteBucket(txn, cmd.Data)
 	case CmdPutObjectMeta:
-		return f.applyPutObjectMeta(cmd.Data)
+		return f.applyPutObjectMeta(txn, cmd.Data)
 	case CmdDeleteObject:
-		return f.applyDeleteObject(cmd.Data)
+		return f.applyDeleteObject(txn, cmd.Data)
 	case CmdCreateMultipartUpload:
-		return f.applyCreateMultipartUpload(cmd.Data)
+		return f.applyCreateMultipartUpload(txn, cmd.Data)
 	case CmdCompleteMultipart:
-		return f.applyCompleteMultipart(cmd.Data)
+		return f.applyCompleteMultipart(txn, cmd.Data)
 	case CmdAbortMultipart:
-		return f.applyAbortMultipart(cmd.Data)
+		return f.applyAbortMultipart(txn, cmd.Data)
 	case CmdSetBucketPolicy:
-		return f.applySetBucketPolicy(cmd.Data)
+		return f.applySetBucketPolicy(txn, cmd.Data)
 	case CmdDeleteBucketPolicy:
-		return f.applyDeleteBucketPolicy(cmd.Data)
+		return f.applyDeleteBucketPolicy(txn, cmd.Data)
 	case CmdMigrateShard:
-		return f.applyMigrateShard(cmd.Data)
+		return f.applyMigrateShard(txn, cmd.Data)
 	case CmdMigrationDone:
-		return f.applyMigrationDone(cmd.Data)
+		return f.applyMigrationDone(txn, cmd.Data)
 	case CmdPutShardPlacement:
 		// No-op: shard placement is now derived deterministically from the ring.
 		// Old log entries are replayed harmlessly.
@@ -129,28 +131,36 @@ func (f *FSM) Apply(raw []byte) error {
 		// No-op: see CmdPutShardPlacement.
 		return nil
 	case CmdSetRing:
-		return f.applySetRing(cmd.Data)
+		return f.applySetRing(txn, cmd.Data)
 	case CmdDeleteObjectVersion:
-		return f.applyDeleteObjectVersion(cmd.Data)
+		return f.applyDeleteObjectVersion(txn, cmd.Data)
 	case CmdSetBucketVersioning:
-		return f.applySetBucketVersioning(cmd.Data)
+		return f.applySetBucketVersioning(txn, cmd.Data)
 	case CmdSetObjectACL:
-		return f.applySetObjectACL(cmd.Data)
+		return f.applySetObjectACL(txn, cmd.Data)
 	case CmdSetObjectTags:
-		return f.applySetObjectTags(cmd.Data)
+		return f.applySetObjectTags(txn, cmd.Data)
 	case CmdAppendObject:
-		return f.applyAppendObjectFromCmd(cmd.Data)
+		return f.applyAppendObjectFromCmd(txn, cmd.Data)
 	case CmdCoalesceSegments:
-		return f.applyCoalesceSegmentsFromCmd(cmd.Data)
+		return f.applyCoalesceSegmentsFromCmd(txn, cmd.Data)
 	case CmdPutObjectQuarantine:
-		return f.applyPutObjectQuarantine(cmd.Data)
+		return f.applyPutObjectQuarantine(txn, cmd.Data)
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
 	}
 }
 
-func (f *FSM) applyPutObjectQuarantine(data []byte) error {
+// Apply processes a committed command in its own transaction. Retained for
+// offline replay (migrate.go) and tests; the apply actor uses ApplyTxn directly.
+func (f *FSM) Apply(raw []byte) error {
+	return f.db.Update(func(txn *badger.Txn) error {
+		return f.ApplyTxn(txn, raw)
+	})
+}
+
+func (f *FSM) applyPutObjectQuarantine(txn *badger.Txn, data []byte) error {
 	c, err := decodePutObjectQuarantineCmd(data)
 	if err != nil {
 		return err
@@ -162,9 +172,7 @@ func (f *FSM) applyPutObjectQuarantine(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(f.keys.QuarantineKey(c.Bucket, c.Key, c.VersionID), value)
-	})
+	return txn.Set(f.keys.QuarantineKey(c.Bucket, c.Key, c.VersionID), value)
 }
 
 // Badger key builders. Production code uses the FSM's KeySpace; these
@@ -215,7 +223,7 @@ func shardPlacementKey(bucket, key string) []byte {
 // Used by callers to distinguish a real object version from a delete marker.
 const deleteMarkerETag = "DEL"
 
-func (f *FSM) applyCreateBucket(data []byte) error {
+func (f *FSM) applyCreateBucket(txn *badger.Txn, data []byte) error {
 	c, err := decodeCreateBucketCmd(data)
 	if err != nil {
 		return err
@@ -223,12 +231,10 @@ func (f *FSM) applyCreateBucket(data []byte) error {
 	if !c.BypassReserved && reservedname.IsReservedBucketName(c.Bucket) {
 		return fmt.Errorf("bucket name %q is reserved and cannot be created via public API", c.Bucket)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(f.keys.BucketKey(c.Bucket), []byte(`{}`))
-	})
+	return txn.Set(f.keys.BucketKey(c.Bucket), []byte(`{}`))
 }
 
-func (f *FSM) applyDeleteBucket(data []byte) error {
+func (f *FSM) applyDeleteBucket(txn *badger.Txn, data []byte) error {
 	c, err := decodeDeleteBucketCmd(data)
 	if err != nil {
 		return err
@@ -236,12 +242,10 @@ func (f *FSM) applyDeleteBucket(data []byte) error {
 	if reservedname.IsReservedBucketName(c.Bucket) {
 		return fmt.Errorf("bucket name %q is reserved and cannot be deleted via public API", c.Bucket)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(f.keys.BucketKey(c.Bucket))
-	})
+	return txn.Delete(f.keys.BucketKey(c.Bucket))
 }
 
-func (f *FSM) applyPutObjectMeta(data []byte) error {
+func (f *FSM) applyPutObjectMeta(txn *badger.Txn, data []byte) error {
 	c, err := decodePutObjectMetaCmd(data)
 	if err != nil {
 		return err
@@ -269,65 +273,60 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
-	if err := f.db.Update(func(txn *badger.Txn) error {
-		if c.ExpectedETag != "" {
-			item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key))
-			if gerr != nil {
-				return fmt.Errorf("put object meta CAS: read current meta: %w", gerr)
-			}
-			if err := item.Value(func(val []byte) error {
-				current, derr := unmarshalObjectMeta(val)
-				if derr != nil {
-					return fmt.Errorf("put object meta CAS: decode current meta: %w", derr)
-				}
-				if current.ETag != c.ExpectedETag {
-					return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
-						c.Bucket, c.Key, current.ETag, c.ExpectedETag)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
+	if c.ExpectedETag != "" {
+		item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key))
+		if gerr != nil {
+			return fmt.Errorf("put object meta CAS: read current meta: %w", gerr)
 		}
-		// Versioned entries are only written when a VersionID is supplied. Legacy
-		// replay (empty VersionID) gets the single legacy key only.
-		if c.VersionID != "" {
-			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
-				return err
+		if err := item.Value(func(val []byte) error {
+			current, derr := unmarshalObjectMeta(val)
+			if derr != nil {
+				return fmt.Errorf("put object meta CAS: decode current meta: %w", derr)
 			}
-			if c.PreserveLatest {
-				return nil
-			}
-		}
-		if c.IsDeleteMarker {
-			if c.VersionID != "" {
-				if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-					return err
-				}
-			}
-			if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
-				return err
+			if current.ETag != c.ExpectedETag {
+				return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
+					c.Bucket, c.Key, current.ETag, c.ExpectedETag)
 			}
 			return nil
-		}
-		// Dual-write: keep the legacy latest-only key in sync during the transition
-		// so readers that haven't been ported yet still see the object.
-		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), meta); err != nil {
+		}); err != nil {
 			return err
 		}
+	}
+	// Versioned entries are only written when a VersionID is supplied. Legacy
+	// replay (empty VersionID) gets the single legacy key only.
+	if c.VersionID != "" {
+		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
+			return err
+		}
+		if c.PreserveLatest {
+			return nil
+		}
+	}
+	if c.IsDeleteMarker {
 		if c.VersionID != "" {
 			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
 				return err
 			}
 		}
+		if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
 		return nil
-	}); err != nil {
+	}
+	// Dual-write: keep the legacy latest-only key in sync during the transition
+	// so readers that haven't been ported yet still see the object.
+	if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), meta); err != nil {
 		return err
+	}
+	if c.VersionID != "" {
+		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (f *FSM) applyDeleteObject(data []byte) error {
+func (f *FSM) applyDeleteObject(txn *badger.Txn, data []byte) error {
 	c, err := decodeDeleteObjectCmd(data)
 	if err != nil {
 		return err
@@ -336,24 +335,19 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 	// proposer). Treat it as a hard delete of the legacy latest-only records —
 	// preserves prior semantics for pre-versioning log replay.
 	if c.VersionID == "" {
-		if err := f.db.Update(func(txn *badger.Txn) error {
-			// Validate (decrypt) the meta before deleting; surfaces corruption errors.
-			if item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key)); gerr == nil {
-				if verr := item.Value(func(raw []byte) error {
-					_, err := f.openValue(item.Key(), raw)
-					return err
-				}); verr != nil {
-					return verr
-				}
-			}
-			if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+		// Validate (decrypt) the meta before deleting; surfaces corruption errors.
+		if item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key)); gerr == nil {
+			if verr := item.Value(func(raw []byte) error {
+				_, err := f.openValue(item.Key(), raw)
 				return err
+			}); verr != nil {
+				return verr
 			}
-			if err := txn.Delete(f.keys.ShardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
-				return err
-			}
-			return nil
-		}); err != nil {
+		}
+		if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err := txn.Delete(f.keys.ShardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 			return err
 		}
 		return nil
@@ -372,45 +366,43 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("marshal delete marker: %w", err)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		// Read the current latest versionID before overwriting it, so we can
-		// delete the versioned placement record that was stored under
-		// shardPlacementKey(bucket, key+"/"+prevVersionID).
-		prevVersionID := ""
-		if latItem, gerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key)); gerr == nil {
-			_ = latItem.Value(func(v []byte) error { prevVersionID = string(v); return nil })
-		}
+	// Read the current latest versionID before overwriting it, so we can
+	// delete the versioned placement record that was stored under
+	// shardPlacementKey(bucket, key+"/"+prevVersionID).
+	prevVersionID := ""
+	if latItem, gerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key)); gerr == nil {
+		_ = latItem.Value(func(v []byte) error { prevVersionID = string(v); return nil })
+	}
 
-		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
+	if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
+		return err
+	}
+	if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+		return err
+	}
+	// Legacy latest-only key is removed so HeadObject returns 404 while prior
+	// versions remain queryable via GetObjectVersion.
+	if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+		return err
+	}
+	// Remove the versioned placement record for the previous latest version.
+	// Bare-key placement (legacy pre-versioned objects) is also cleaned up.
+	if prevVersionID != "" {
+		placementKey := f.keys.ShardPlacementKey(c.Bucket, c.Key+"/"+prevVersionID)
+		if err := txn.Delete(placementKey); err != nil && err != badger.ErrKeyNotFound {
 			return err
 		}
-		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-			return err
-		}
-		// Legacy latest-only key is removed so HeadObject returns 404 while prior
-		// versions remain queryable via GetObjectVersion.
-		if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		// Remove the versioned placement record for the previous latest version.
-		// Bare-key placement (legacy pre-versioned objects) is also cleaned up.
-		if prevVersionID != "" {
-			placementKey := f.keys.ShardPlacementKey(c.Bucket, c.Key+"/"+prevVersionID)
-			if err := txn.Delete(placementKey); err != nil && err != badger.ErrKeyNotFound {
-				return err
-			}
-		}
-		if err := txn.Delete(f.keys.ShardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		return nil
-	})
+	}
+	if err := txn.Delete(f.keys.ShardPlacementKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
+		return err
+	}
+	return nil
 }
 
 // applyDeleteObjectVersion hard-deletes one specific version and, if it was the
 // latest, recomputes the latest pointer from the remaining versions (ULIDs sort
 // lexicographically by time, so the max-sorted key wins).
-func (f *FSM) applyDeleteObjectVersion(data []byte) error {
+func (f *FSM) applyDeleteObjectVersion(txn *badger.Txn, data []byte) error {
 	c, err := decodeDeleteObjectVersionCmd(data)
 	if err != nil {
 		return err
@@ -418,66 +410,61 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 	metaKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
 	latKey := f.keys.LatestKey(c.Bucket, c.Key)
 
-	if err := f.db.Update(func(txn *badger.Txn) error {
-		if _, gerr := txn.Get(metaKey); gerr == badger.ErrKeyNotFound {
-			return nil // idempotent
-		} else if gerr != nil {
-			return gerr
-		}
-		if derr := txn.Delete(metaKey); derr != nil {
-			return derr
-		}
-		// Remove the versioned placement record stored under key+"/"+versionID.
-		placementKey := f.keys.ShardPlacementKey(c.Bucket, c.Key+"/"+c.VersionID)
-		if derr := txn.Delete(placementKey); derr != nil && derr != badger.ErrKeyNotFound {
-			return derr
-		}
+	if _, gerr := txn.Get(metaKey); gerr == badger.ErrKeyNotFound {
+		return nil // idempotent
+	} else if gerr != nil {
+		return gerr
+	}
+	if derr := txn.Delete(metaKey); derr != nil {
+		return derr
+	}
+	// Remove the versioned placement record stored under key+"/"+versionID.
+	placementKey := f.keys.ShardPlacementKey(c.Bucket, c.Key+"/"+c.VersionID)
+	if derr := txn.Delete(placementKey); derr != nil && derr != badger.ErrKeyNotFound {
+		return derr
+	}
 
-		// If the deleted version was the latest, find the new latest by scanning
-		// remaining versioned keys and picking the max (ULID sorts by time ASC).
-		if latItem, gerr := txn.Get(latKey); gerr == nil {
-			var current string
-			_ = latItem.Value(func(v []byte) error { current = string(v); return nil })
-			if current == c.VersionID {
-				newLatest := ""
-				rawPrefix := []byte("obj:" + c.Bucket + "/" + c.Key + "/")
-				if serr := f.keys.scanGroupPrefix(txn, rawPrefix, func(raw []byte, _ *badger.Item) error {
-					vid := string(raw[len(rawPrefix):])
-					if vid == "" || vid == c.VersionID {
-						return nil
-					}
-					if vid > newLatest {
-						newLatest = vid
-					}
+	// If the deleted version was the latest, find the new latest by scanning
+	// remaining versioned keys and picking the max (ULID sorts by time ASC).
+	if latItem, gerr := txn.Get(latKey); gerr == nil {
+		var current string
+		_ = latItem.Value(func(v []byte) error { current = string(v); return nil })
+		if current == c.VersionID {
+			newLatest := ""
+			rawPrefix := []byte("obj:" + c.Bucket + "/" + c.Key + "/")
+			if serr := f.keys.scanGroupPrefix(txn, rawPrefix, func(raw []byte, _ *badger.Item) error {
+				vid := string(raw[len(rawPrefix):])
+				if vid == "" || vid == c.VersionID {
 					return nil
-				}); serr != nil {
-					return serr
 				}
-				if newLatest == "" {
-					if derr := txn.Delete(latKey); derr != nil && derr != badger.ErrKeyNotFound {
-						return derr
-					}
-					// No versions left — drop legacy latest-only key as well.
-					if derr := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); derr != nil && derr != badger.ErrKeyNotFound {
-						return derr
-					}
-				} else {
-					if derr := txn.Set(latKey, []byte(newLatest)); derr != nil {
-						return derr
-					}
+				if vid > newLatest {
+					newLatest = vid
+				}
+				return nil
+			}); serr != nil {
+				return serr
+			}
+			if newLatest == "" {
+				if derr := txn.Delete(latKey); derr != nil && derr != badger.ErrKeyNotFound {
+					return derr
+				}
+				// No versions left — drop legacy latest-only key as well.
+				if derr := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); derr != nil && derr != badger.ErrKeyNotFound {
+					return derr
+				}
+			} else {
+				if derr := txn.Set(latKey, []byte(newLatest)); derr != nil {
+					return derr
 				}
 			}
-		} else if gerr != badger.ErrKeyNotFound {
-			return gerr
 		}
-		return nil
-	}); err != nil {
-		return err
+	} else if gerr != badger.ErrKeyNotFound {
+		return gerr
 	}
 	return nil
 }
 
-func (f *FSM) applyCreateMultipartUpload(data []byte) error {
+func (f *FSM) applyCreateMultipartUpload(txn *badger.Txn, data []byte) error {
 	c, err := decodeCreateMultipartUploadCmd(data)
 	if err != nil {
 		return err
@@ -493,12 +480,10 @@ func (f *FSM) applyCreateMultipartUpload(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("marshal multipart meta: %w", err)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		return f.setValue(txn, f.keys.MultipartKey(c.UploadID), meta)
-	})
+	return f.setValue(txn, f.keys.MultipartKey(c.UploadID), meta)
 }
 
-func (f *FSM) applyCompleteMultipart(data []byte) error {
+func (f *FSM) applyCompleteMultipart(txn *badger.Txn, data []byte) error {
 	c, err := decodeCompleteMultipartCmd(data)
 	if err != nil {
 		return err
@@ -520,203 +505,121 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
-	if err := f.db.Update(func(txn *badger.Txn) error {
-		mpuKey := f.keys.MultipartKey(c.UploadID)
-		item, err := txn.Get(mpuKey)
-		if err == badger.ErrKeyNotFound {
-			return storage.ErrUploadNotFound
-		}
-		if err != nil {
-			return err
-		}
-		raw, err := f.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		mpu, err := unmarshalClusterMultipartMeta(raw)
-		if err != nil {
-			return err
-		}
-		if mpu.Bucket != c.Bucket || mpu.Key != c.Key {
-			return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
-		}
-
-		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
-		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
-			return err
-		}
-		if c.VersionID != "" {
-			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
-				return err
-			}
-			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-				return err
-			}
-		}
-		return txn.Delete(mpuKey)
-	}); err != nil {
+	mpuKey := f.keys.MultipartKey(c.UploadID)
+	item, err := txn.Get(mpuKey)
+	if err == badger.ErrKeyNotFound {
+		return storage.ErrUploadNotFound
+	}
+	if err != nil {
 		return err
 	}
-	return nil
+	raw, err := f.itemValueCopy(item)
+	if err != nil {
+		return err
+	}
+	mpu, err := unmarshalClusterMultipartMeta(raw)
+	if err != nil {
+		return err
+	}
+	if mpu.Bucket != c.Bucket || mpu.Key != c.Key {
+		return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
+	}
+
+	// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
+	if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
+		return err
+	}
+	if c.VersionID != "" {
+		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
+			return err
+		}
+		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+			return err
+		}
+	}
+	return txn.Delete(mpuKey)
 }
 
-func (f *FSM) applyAbortMultipart(data []byte) error {
+func (f *FSM) applyAbortMultipart(txn *badger.Txn, data []byte) error {
 	c, err := decodeAbortMultipartCmd(data)
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		err := txn.Delete(f.keys.MultipartKey(c.UploadID))
-		if err == badger.ErrKeyNotFound {
-			return nil
-		}
-		return err
-	})
+	err = txn.Delete(f.keys.MultipartKey(c.UploadID))
+	if err == badger.ErrKeyNotFound {
+		return nil
+	}
+	return err
 }
 
-func (f *FSM) applySetBucketPolicy(data []byte) error {
+func (f *FSM) applySetBucketPolicy(txn *badger.Txn, data []byte) error {
 	c, err := decodeSetBucketPolicyCmd(data)
 	if err != nil {
 		return err
 	}
 	policyJSON := append([]byte(nil), c.PolicyJSON...)
-	return f.db.Update(func(txn *badger.Txn) error {
-		return f.setValue(txn, f.keys.BucketPolicyKey(c.Bucket), policyJSON)
-	})
+	return f.setValue(txn, f.keys.BucketPolicyKey(c.Bucket), policyJSON)
 }
 
-func (f *FSM) applyDeleteBucketPolicy(data []byte) error {
+func (f *FSM) applyDeleteBucketPolicy(txn *badger.Txn, data []byte) error {
 	c, err := decodeDeleteBucketPolicyCmd(data)
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		err := txn.Delete(f.keys.BucketPolicyKey(c.Bucket))
-		if err == badger.ErrKeyNotFound {
-			return nil
-		}
-		return err
-	})
+	err = txn.Delete(f.keys.BucketPolicyKey(c.Bucket))
+	if err == badger.ErrKeyNotFound {
+		return nil
+	}
+	return err
 }
 
-func (f *FSM) applySetBucketVersioning(data []byte) error {
+func (f *FSM) applySetBucketVersioning(txn *badger.Txn, data []byte) error {
 	c, err := decodeSetBucketVersioningCmd(data)
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		if _, err := txn.Get(f.keys.BucketKey(c.Bucket)); err == badger.ErrKeyNotFound {
-			return storage.ErrBucketNotFound
-		} else if err != nil {
-			return err
-		}
-		return txn.Set(f.keys.BucketVerKey(c.Bucket), []byte(c.State))
-	})
+	if _, err := txn.Get(f.keys.BucketKey(c.Bucket)); err == badger.ErrKeyNotFound {
+		return storage.ErrBucketNotFound
+	} else if err != nil {
+		return err
+	}
+	return txn.Set(f.keys.BucketVerKey(c.Bucket), []byte(c.State))
 }
 
-func (f *FSM) applySetObjectACL(data []byte) error {
+func (f *FSM) applySetObjectACL(txn *badger.Txn, data []byte) error {
 	c, err := decodeSetObjectACLCmd(data)
 	if err != nil {
 		return err
 	}
 	legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
-	return f.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(legacyKey)
-		if err == badger.ErrKeyNotFound {
-			return storage.ErrObjectNotFound
-		}
-		if err != nil {
-			return err
-		}
-		return item.Value(func(raw []byte) error {
-			val, err := f.openValue(item.Key(), raw)
-			if err != nil {
-				return err
-			}
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			m.ACL = c.ACL
-			newVal, merr := marshalObjectMeta(m)
-			if merr != nil {
-				return merr
-			}
-			if err := f.setValue(txn, legacyKey, newVal); err != nil {
-				return err
-			}
-			// Also update the versioned record if this bucket has versioning enabled.
-			latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-			if lerr != nil {
-				return nil //nolint:nilerr // no versioned key, nothing more to do
-			}
-			var versionID string
-			_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
-			if versionID == "" {
-				return nil
-			}
-			vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
-			vItem, verr := txn.Get(vKey)
-			if verr != nil {
-				return nil //nolint:nilerr // versioned record missing, skip
-			}
-			return vItem.Value(func(raw []byte) error {
-				vval, err := f.openValue(vItem.Key(), raw)
-				if err != nil {
-					return err
-				}
-				vm, merr := unmarshalObjectMeta(vval)
-				if merr != nil {
-					return merr
-				}
-				vm.ACL = c.ACL
-				vNewVal, merr := marshalObjectMeta(vm)
-				if merr != nil {
-					return merr
-				}
-				return f.setValue(txn, vKey, vNewVal)
-			})
-		})
-	})
-}
-
-func (f *FSM) applySetObjectTags(data []byte) error {
-	c, err := decodeSetObjectTagsCmd(data)
+	item, err := txn.Get(legacyKey)
+	if err == badger.ErrKeyNotFound {
+		return storage.ErrObjectNotFound
+	}
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		if c.VersionID != "" {
-			vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
-			if err := mutateVersionTags(f, txn, vKey, c.Tags); err != nil {
-				return err
-			}
-			latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-			if lerr != nil {
-				return nil //nolint:nilerr // no latest marker, so no legacy-current mirror to update
-			}
-			var latest string
-			if err := latItem.Value(func(v []byte) error {
-				latest = string(v)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if latest != c.VersionID {
-				return nil
-			}
-			return mutateVersionTags(f, txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), c.Tags)
-		}
-		// VersionID == "" → mutate legacy (current) record, and if LatestKey
-		// exists also dual-write the latest versioned record.
-		legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
-		if err := mutateVersionTags(f, txn, legacyKey, c.Tags); err != nil {
+	return item.Value(func(raw []byte) error {
+		val, err := f.openValue(item.Key(), raw)
+		if err != nil {
 			return err
 		}
-		// Best-effort dual-write to latest versioned record (mirrors SetObjectACL semantics).
+		m, merr := unmarshalObjectMeta(val)
+		if merr != nil {
+			return merr
+		}
+		m.ACL = c.ACL
+		newVal, merr := marshalObjectMeta(m)
+		if merr != nil {
+			return merr
+		}
+		if err := f.setValue(txn, legacyKey, newVal); err != nil {
+			return err
+		}
+		// Also update the versioned record if this bucket has versioning enabled.
 		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
 		if lerr != nil {
-			return nil //nolint:nilerr // no versioning, nothing more to do
+			return nil //nolint:nilerr // no versioned key, nothing more to do
 		}
 		var versionID string
 		_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
@@ -724,8 +627,73 @@ func (f *FSM) applySetObjectTags(data []byte) error {
 			return nil
 		}
 		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
-		return mutateVersionTags(f, txn, vKey, c.Tags)
+		vItem, verr := txn.Get(vKey)
+		if verr != nil {
+			return nil //nolint:nilerr // versioned record missing, skip
+		}
+		return vItem.Value(func(raw []byte) error {
+			vval, err := f.openValue(vItem.Key(), raw)
+			if err != nil {
+				return err
+			}
+			vm, merr := unmarshalObjectMeta(vval)
+			if merr != nil {
+				return merr
+			}
+			vm.ACL = c.ACL
+			vNewVal, merr := marshalObjectMeta(vm)
+			if merr != nil {
+				return merr
+			}
+			return f.setValue(txn, vKey, vNewVal)
+		})
 	})
+}
+
+func (f *FSM) applySetObjectTags(txn *badger.Txn, data []byte) error {
+	c, err := decodeSetObjectTagsCmd(data)
+	if err != nil {
+		return err
+	}
+	if c.VersionID != "" {
+		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
+		if err := mutateVersionTags(f, txn, vKey, c.Tags); err != nil {
+			return err
+		}
+		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
+		if lerr != nil {
+			return nil //nolint:nilerr // no latest marker, so no legacy-current mirror to update
+		}
+		var latest string
+		if err := latItem.Value(func(v []byte) error {
+			latest = string(v)
+			return nil
+		}); err != nil {
+			return err
+		}
+		if latest != c.VersionID {
+			return nil
+		}
+		return mutateVersionTags(f, txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), c.Tags)
+	}
+	// VersionID == "" → mutate legacy (current) record, and if LatestKey
+	// exists also dual-write the latest versioned record.
+	legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
+	if err := mutateVersionTags(f, txn, legacyKey, c.Tags); err != nil {
+		return err
+	}
+	// Best-effort dual-write to latest versioned record (mirrors SetObjectACL semantics).
+	latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
+	if lerr != nil {
+		return nil //nolint:nilerr // no versioning, nothing more to do
+	}
+	var versionID string
+	_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
+	if versionID == "" {
+		return nil
+	}
+	vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
+	return mutateVersionTags(f, txn, vKey, c.Tags)
 }
 
 // mutateVersionTags reads the objectMeta at key, replaces .Tags, writes back.
@@ -772,7 +740,7 @@ func mutateVersionTags(f *FSM, txn *badger.Txn, key []byte, tags []storage.Tag) 
 // When cmd.VersionID is empty (legacy Raft replay or direct apply-test
 // fixtures), only the legacy ObjectMetaKey is written to preserve prior
 // semantics.
-func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
+func (f *FSM) applyAppendObjectFromCmd(txn *badger.Txn, data []byte) error {
 	cmd, err := decodeAppendObjectCmd(data)
 	if err != nil {
 		return fmt.Errorf("decode AppendObjectCmd: %w", err)
@@ -785,157 +753,155 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 		modifiedUnixSec = time.Now().Unix()
 	}
 
-	return f.db.Update(func(txn *badger.Txn) error {
-		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+	metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
 
-		// Read existing objectMeta (if any).
-		var existing *objectMeta
-		item, gerr := txn.Get(metaKey)
-		if gerr == nil {
+	// Read existing objectMeta (if any).
+	var existing *objectMeta
+	item, gerr := txn.Get(metaKey)
+	if gerr == nil {
+		if err := item.Value(func(raw []byte) error {
+			v, oerr := f.openValue(item.Key(), raw)
+			if oerr != nil {
+				return oerr
+			}
+			m, derr := unmarshalObjectMeta(v)
+			if derr != nil {
+				return fmt.Errorf("unmarshal existing objectMeta: %w", derr)
+			}
+			existing = &m
+			return nil
+		}); err != nil {
+			return err
+		}
+	} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
+		return fmt.Errorf("get existing objectMeta: %w", gerr)
+	}
+
+	// Placement check: cmd captured PG at propose time; reject if the
+	// existing object's PG has moved since (rebalance window).
+	if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
+		cmd.PlacementGroupID != existing.PlacementGroupID {
+		return ErrStalePlacement
+	}
+
+	// TODO(Phase 2): Phase 1 dropped SegmentRef.ETag. Cluster still
+	// receives a hex-encoded MD5 in cmd.SegmentETag; stash it in
+	// Checksum so the FB segment vector keeps the digest. Phase 2 will
+	// migrate cluster to xxhash3 like the storage layer.
+	segDigest, _ := hex.DecodeString(cmd.SegmentETag)
+	seg := storage.SegmentRef{
+		BlobID:   cmd.BlobID,
+		Size:     cmd.SegmentSize,
+		Checksum: segDigest,
+	}
+
+	// Idempotency: same BlobID already applied (Raft replay) → no-op.
+	if existing != nil {
+		for _, s := range existing.Segments {
+			if s.BlobID == cmd.BlobID {
+				return nil
+			}
+		}
+	}
+
+	existingVersionID := ""
+	if existing != nil {
+		if item, err := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); err == nil {
 			if err := item.Value(func(raw []byte) error {
-				v, oerr := f.openValue(item.Key(), raw)
-				if oerr != nil {
-					return oerr
+				if string(raw) != deleteMarkerETag {
+					existingVersionID = string(raw)
 				}
-				m, derr := unmarshalObjectMeta(v)
-				if derr != nil {
-					return fmt.Errorf("unmarshal existing objectMeta: %w", derr)
-				}
-				existing = &m
 				return nil
 			}); err != nil {
 				return err
 			}
-		} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
-			return fmt.Errorf("get existing objectMeta: %w", gerr)
+		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			return fmt.Errorf("get latest version: %w", err)
 		}
+	}
 
-		// Placement check: cmd captured PG at propose time; reject if the
-		// existing object's PG has moved since (rebalance window).
-		if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
-			cmd.PlacementGroupID != existing.PlacementGroupID {
-			return ErrStalePlacement
+	var updated objectMeta
+	if existing == nil {
+		if cmd.ExpectedOffset != 0 {
+			return storage.ErrAppendOffsetMismatch
 		}
+		// TODO(Task 3.1 / Phase 2): wire AppendCallMD5s on the cluster side
+		// so Object.ETag composes from per-call MD5 digests instead of from
+		// the segment vector. For now reuse segDigest as the single-call
+		// digest to preserve appendable-ETag semantics on first call.
+		updated = objectMeta{
+			Key:              cmd.Key,
+			Size:             seg.Size,
+			ContentType:      "application/octet-stream",
+			ETag:             storage.CompositeETag([][]byte{segDigest}),
+			LastModified:     modifiedUnixSec,
+			PlacementGroupID: cmd.PlacementGroupID,
+			Segments:         []storage.SegmentRef{seg},
+			IsAppendable:     true,
+		}
+	} else {
+		if existing.Size != cmd.ExpectedOffset {
+			return storage.ErrAppendOffsetMismatch
+		}
+		if len(existing.Segments) >= storage.MaxAppendSegments {
+			return storage.ErrAppendCapExceeded
+		}
+		// Size cap (design 2026-05-19 § Follow-up 2): deterministic, FSM-side
+		// authoritative. Coordinator pre-check may have passed (stale HeadObject),
+		// but the Raft entry sees the freshest committed state. Pre-check
+		// tolerance contract: false-positive (accept what we reject) is fine —
+		// caller retries are idempotent on BlobID; false-negative (reject what we
+		// would have accepted) is FORBIDDEN because the FSM is the single source
+		// of truth.
+		//
+		// On reject, the segment blob already written by the coordinator becomes
+		// an orphan. Best-effort cleanup; full scrubber sweep is a follow-up
+		// (TODOS.md "Scrubber orphan sweep production wiring [P1]").
+		if coalesceCfg.SizeCapBytes > 0 &&
+			existing.Size+seg.Size > coalesceCfg.SizeCapBytes {
+			metrics.AppendSizeCapRejectedTotal.Inc()
+			return storage.ErrAppendObjectTooLarge
+		}
+		segs := append(existing.Segments, seg)
+		updated = *existing
+		if !updated.IsAppendable {
+			updated.IsAppendable = true
+			if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
+				updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, existingVersionID, existing)}
+			}
+		}
+		updated.Segments = segs
+		updated.Size = existing.Size + seg.Size
+		// TODO(Task 3.1 / Phase 2): once cluster persists AppendCallMD5s,
+		// recompute Object.ETag from those per-call digests. For now,
+		// rebuild from the per-segment digests in Checksum to preserve
+		// the legacy "ETag changes per append" wire semantic.
+		callDigests := make([][]byte, 0, len(segs))
+		for _, s := range segs {
+			if len(s.Checksum) > 0 {
+				callDigests = append(callDigests, s.Checksum)
+			}
+		}
+		updated.ETag = storage.CompositeETag(callDigests)
+		updated.LastModified = modifiedUnixSec
+	}
 
-		// TODO(Phase 2): Phase 1 dropped SegmentRef.ETag. Cluster still
-		// receives a hex-encoded MD5 in cmd.SegmentETag; stash it in
-		// Checksum so the FB segment vector keeps the digest. Phase 2 will
-		// migrate cluster to xxhash3 like the storage layer.
-		segDigest, _ := hex.DecodeString(cmd.SegmentETag)
-		seg := storage.SegmentRef{
-			BlobID:   cmd.BlobID,
-			Size:     cmd.SegmentSize,
-			Checksum: segDigest,
+	out, err := marshalObjectMeta(updated)
+	if err != nil {
+		return fmt.Errorf("marshal updated objectMeta: %w", err)
+	}
+	// Dual-write: versioned key + latest pointer (when VersionID supplied)
+	// alongside the legacy ObjectMetaKey, matching applyPutObjectMeta so
+	// HeadObject returns a populated obj.VersionID.
+	if cmd.VersionID != "" {
+		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
+			return err
 		}
-
-		// Idempotency: same BlobID already applied (Raft replay) → no-op.
-		if existing != nil {
-			for _, s := range existing.Segments {
-				if s.BlobID == cmd.BlobID {
-					return nil
-				}
-			}
+		if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
+			return err
 		}
-
-		existingVersionID := ""
-		if existing != nil {
-			if item, err := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); err == nil {
-				if err := item.Value(func(raw []byte) error {
-					if string(raw) != deleteMarkerETag {
-						existingVersionID = string(raw)
-					}
-					return nil
-				}); err != nil {
-					return err
-				}
-			} else if !errors.Is(err, badger.ErrKeyNotFound) {
-				return fmt.Errorf("get latest version: %w", err)
-			}
-		}
-
-		var updated objectMeta
-		if existing == nil {
-			if cmd.ExpectedOffset != 0 {
-				return storage.ErrAppendOffsetMismatch
-			}
-			// TODO(Task 3.1 / Phase 2): wire AppendCallMD5s on the cluster side
-			// so Object.ETag composes from per-call MD5 digests instead of from
-			// the segment vector. For now reuse segDigest as the single-call
-			// digest to preserve appendable-ETag semantics on first call.
-			updated = objectMeta{
-				Key:              cmd.Key,
-				Size:             seg.Size,
-				ContentType:      "application/octet-stream",
-				ETag:             storage.CompositeETag([][]byte{segDigest}),
-				LastModified:     modifiedUnixSec,
-				PlacementGroupID: cmd.PlacementGroupID,
-				Segments:         []storage.SegmentRef{seg},
-				IsAppendable:     true,
-			}
-		} else {
-			if existing.Size != cmd.ExpectedOffset {
-				return storage.ErrAppendOffsetMismatch
-			}
-			if len(existing.Segments) >= storage.MaxAppendSegments {
-				return storage.ErrAppendCapExceeded
-			}
-			// Size cap (design 2026-05-19 § Follow-up 2): deterministic, FSM-side
-			// authoritative. Coordinator pre-check may have passed (stale HeadObject),
-			// but the Raft entry sees the freshest committed state. Pre-check
-			// tolerance contract: false-positive (accept what we reject) is fine —
-			// caller retries are idempotent on BlobID; false-negative (reject what we
-			// would have accepted) is FORBIDDEN because the FSM is the single source
-			// of truth.
-			//
-			// On reject, the segment blob already written by the coordinator becomes
-			// an orphan. Best-effort cleanup; full scrubber sweep is a follow-up
-			// (TODOS.md "Scrubber orphan sweep production wiring [P1]").
-			if coalesceCfg.SizeCapBytes > 0 &&
-				existing.Size+seg.Size > coalesceCfg.SizeCapBytes {
-				metrics.AppendSizeCapRejectedTotal.Inc()
-				return storage.ErrAppendObjectTooLarge
-			}
-			segs := append(existing.Segments, seg)
-			updated = *existing
-			if !updated.IsAppendable {
-				updated.IsAppendable = true
-				if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
-					updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, existingVersionID, existing)}
-				}
-			}
-			updated.Segments = segs
-			updated.Size = existing.Size + seg.Size
-			// TODO(Task 3.1 / Phase 2): once cluster persists AppendCallMD5s,
-			// recompute Object.ETag from those per-call digests. For now,
-			// rebuild from the per-segment digests in Checksum to preserve
-			// the legacy "ETag changes per append" wire semantic.
-			callDigests := make([][]byte, 0, len(segs))
-			for _, s := range segs {
-				if len(s.Checksum) > 0 {
-					callDigests = append(callDigests, s.Checksum)
-				}
-			}
-			updated.ETag = storage.CompositeETag(callDigests)
-			updated.LastModified = modifiedUnixSec
-		}
-
-		out, err := marshalObjectMeta(updated)
-		if err != nil {
-			return fmt.Errorf("marshal updated objectMeta: %w", err)
-		}
-		// Dual-write: versioned key + latest pointer (when VersionID supplied)
-		// alongside the legacy ObjectMetaKey, matching applyPutObjectMeta so
-		// HeadObject returns a populated obj.VersionID.
-		if cmd.VersionID != "" {
-			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
-				return err
-			}
-			if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
-				return err
-			}
-		}
-		return f.setValue(txn, metaKey, out)
-	})
+	}
+	return f.setValue(txn, metaKey, out)
 }
 
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
@@ -966,7 +932,7 @@ func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) Coalesc
 //     apply is preserved).
 //   - Size/ETag of objectMeta are NOT modified: a coalesce is metadata
 //     reorganization, not a content change.
-func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
+func (f *FSM) applyCoalesceSegmentsFromCmd(txn *badger.Txn, data []byte) error {
 	cmd, err := decodeCoalesceSegmentsCmd(data)
 	if err != nil {
 		return fmt.Errorf("decode CoalesceSegmentsCmd: %w", err)
@@ -974,99 +940,98 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
 	if cmd.CoalescedID == "" || cmd.ShardKey == "" {
 		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		legacyKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
 
-		// Resolve the canonical metaKey: prefer the latest-version pointer (set
-		// by applyAppendObject's dual-write). Falls back to legacy key when no
-		// pointer exists (test fixtures / legacy replay).
-		metaKey := legacyKey
-		versionID := ""
-		if latItem, lerr := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); lerr == nil {
-			_ = latItem.Value(func(v []byte) error {
-				versionID = string(v)
-				return nil
-			})
-			if versionID != "" {
-				metaKey = f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, versionID)
-			}
-		} else if !errors.Is(lerr, badger.ErrKeyNotFound) {
-			return fmt.Errorf("get latest pointer: %w", lerr)
-		}
+	legacyKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
 
-		item, gerr := txn.Get(metaKey)
-		if gerr != nil {
-			if errors.Is(gerr, badger.ErrKeyNotFound) {
-				return nil // object deleted concurrently — drop silently
-			}
-			return fmt.Errorf("get objectMeta: %w", gerr)
-		}
-		var existing objectMeta
-		if err := item.Value(func(raw []byte) error {
-			v, oerr := f.openValue(item.Key(), raw)
-			if oerr != nil {
-				return oerr
-			}
-			m, derr := unmarshalObjectMeta(v)
-			if derr != nil {
-				return fmt.Errorf("unmarshal: %w", derr)
-			}
-			existing = m
+	// Resolve the canonical metaKey: prefer the latest-version pointer (set
+	// by applyAppendObject's dual-write). Falls back to legacy key when no
+	// pointer exists (test fixtures / legacy replay).
+	metaKey := legacyKey
+	versionID := ""
+	if latItem, lerr := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); lerr == nil {
+		_ = latItem.Value(func(v []byte) error {
+			versionID = string(v)
 			return nil
-		}); err != nil {
+		})
+		if versionID != "" {
+			metaKey = f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, versionID)
+		}
+	} else if !errors.Is(lerr, badger.ErrKeyNotFound) {
+		return fmt.Errorf("get latest pointer: %w", lerr)
+	}
+
+	item, gerr := txn.Get(metaKey)
+	if gerr != nil {
+		if errors.Is(gerr, badger.ErrKeyNotFound) {
+			return nil // object deleted concurrently — drop silently
+		}
+		return fmt.Errorf("get objectMeta: %w", gerr)
+	}
+	var existing objectMeta
+	if err := item.Value(func(raw []byte) error {
+		v, oerr := f.openValue(item.Key(), raw)
+		if oerr != nil {
+			return oerr
+		}
+		m, derr := unmarshalObjectMeta(v)
+		if derr != nil {
+			return fmt.Errorf("unmarshal: %w", derr)
+		}
+		existing = m
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	// Idempotency: same CoalescedID already applied → no-op.
+	for _, c := range existing.Coalesced {
+		if c.CoalescedID == cmd.CoalescedID {
+			return nil
+		}
+	}
+
+	// Cap depth — stall coalesce when the chain grows unbounded.
+	if len(existing.Coalesced) >= MaxCoalescedEntries {
+		metrics.AppendCoalescedEntriesAtCap.Inc()
+		return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
+	}
+
+	// Remove consumed segments by exact BlobID match.
+	consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
+	for _, id := range cmd.ConsumedSegmentIDs {
+		consumed[id] = true
+	}
+	kept := existing.Segments[:0]
+	for _, s := range existing.Segments {
+		if !consumed[s.BlobID] {
+			kept = append(kept, s)
+		}
+	}
+	existing.Segments = kept
+	existing.Coalesced = append(existing.Coalesced, CoalescedShardRef{
+		CoalescedID: cmd.CoalescedID,
+		Size:        cmd.Size,
+		ETag:        cmd.ETag,
+		ShardKey:    cmd.ShardKey,
+		Version:     1,
+		ECData:      cmd.ECData,
+		ECParity:    cmd.ECParity,
+		NodeIDs:     append([]string(nil), cmd.Placement...),
+	})
+	out, err := marshalObjectMeta(existing)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	// Dual-write parallel to applyAppendObject: keep legacy key in sync
+	// with the versioned key so any code path that reads either sees the
+	// post-coalesce state.
+	if versionID != "" {
+		if err := f.setValue(txn, metaKey, out); err != nil {
 			return err
 		}
-
-		// Idempotency: same CoalescedID already applied → no-op.
-		for _, c := range existing.Coalesced {
-			if c.CoalescedID == cmd.CoalescedID {
-				return nil
-			}
-		}
-
-		// Cap depth — stall coalesce when the chain grows unbounded.
-		if len(existing.Coalesced) >= MaxCoalescedEntries {
-			metrics.AppendCoalescedEntriesAtCap.Inc()
-			return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
-		}
-
-		// Remove consumed segments by exact BlobID match.
-		consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
-		for _, id := range cmd.ConsumedSegmentIDs {
-			consumed[id] = true
-		}
-		kept := existing.Segments[:0]
-		for _, s := range existing.Segments {
-			if !consumed[s.BlobID] {
-				kept = append(kept, s)
-			}
-		}
-		existing.Segments = kept
-		existing.Coalesced = append(existing.Coalesced, CoalescedShardRef{
-			CoalescedID: cmd.CoalescedID,
-			Size:        cmd.Size,
-			ETag:        cmd.ETag,
-			ShardKey:    cmd.ShardKey,
-			Version:     1,
-			ECData:      cmd.ECData,
-			ECParity:    cmd.ECParity,
-			NodeIDs:     append([]string(nil), cmd.Placement...),
-		})
-		out, err := marshalObjectMeta(existing)
-		if err != nil {
-			return fmt.Errorf("marshal: %w", err)
-		}
-		// Dual-write parallel to applyAppendObject: keep legacy key in sync
-		// with the versioned key so any code path that reads either sees the
-		// post-coalesce state.
-		if versionID != "" {
-			if err := f.setValue(txn, metaKey, out); err != nil {
-				return err
-			}
-			return f.setValue(txn, legacyKey, out)
-		}
 		return f.setValue(txn, legacyKey, out)
-	})
+	}
+	return f.setValue(txn, legacyKey, out)
 }
 
 // pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.
@@ -1076,15 +1041,14 @@ func pendingMigrationKey(bucket, key, versionID string) []byte {
 	return []byte("pending-migration:" + bucket + "/" + key + "/" + versionID)
 }
 
-// persistPendingMigration writes a migration task to BadgerDB so it survives a crash.
-func (f *FSM) persistPendingMigration(task MigrationTask) error {
+// persistPendingMigration writes a migration task to the supplied transaction
+// so it survives a crash. Shares the apply actor's batch transaction.
+func (f *FSM) persistPendingMigration(txn *badger.Txn, task MigrationTask) error {
 	val, err := encodeMigrateShardCmd(MigrateShardFSMCmd(task))
 	if err != nil {
 		return fmt.Errorf("fsm: marshal pending migration: %w", err)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(f.keys.PendingMigrationKey(task.Bucket, task.Key, task.VersionID), val)
-	})
+	return txn.Set(f.keys.PendingMigrationKey(task.Bucket, task.Key, task.VersionID), val)
 }
 
 // RecoverPending reads all pending-migration keys from BadgerDB and enqueues them
@@ -1118,7 +1082,7 @@ func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error
 	})
 }
 
-func (f *FSM) applyMigrateShard(data []byte) error {
+func (f *FSM) applyMigrateShard(txn *badger.Txn, data []byte) error {
 	cmd, err := decodeMigrateShardCmd(data)
 	if err != nil {
 		return fmt.Errorf("decode MigrateShardCmd: %w", err)
@@ -1136,7 +1100,7 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 		case ch <- task:
 		default:
 			// Channel full: persist to BadgerDB so the task survives a crash.
-			if err := f.persistPendingMigration(task); err != nil {
+			if err := f.persistPendingMigration(txn, task); err != nil {
 				log.Error().Str("bucket", task.Bucket).Str("key", task.Key).Err(err).Msg("fsm: migration queue full and persist failed — task lost")
 			} else {
 				log.Warn().Str("bucket", task.Bucket).Str("key", task.Key).Msg("fsm: migration queue full, persisted to BadgerDB")
@@ -1146,20 +1110,15 @@ func (f *FSM) applyMigrateShard(data []byte) error {
 	return nil
 }
 
-func (f *FSM) applyMigrationDone(data []byte) error {
+func (f *FSM) applyMigrationDone(txn *badger.Txn, data []byte) error {
 	cmd, err := decodeMigrationDoneCmd(data)
 	if err != nil {
 		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
 	}
-	// Clean up any persisted pending-migration entry for this task.
-	if err := f.db.Update(func(txn *badger.Txn) error {
-		err := txn.Delete(f.keys.PendingMigrationKey(cmd.Bucket, cmd.Key, cmd.VersionID))
-		if err == badger.ErrKeyNotFound {
-			return nil
-		}
-		return err
-	}); err != nil {
-		log.Warn().Str("bucket", cmd.Bucket).Str("key", cmd.Key).Err(err).Msg("fsm: delete pending-migration key failed")
+	// Clean up any persisted pending-migration entry for this task using the
+	// shared batch transaction.
+	if derr := txn.Delete(f.keys.PendingMigrationKey(cmd.Bucket, cmd.Key, cmd.VersionID)); derr != nil && derr != badger.ErrKeyNotFound {
+		log.Warn().Str("bucket", cmd.Bucket).Str("key", cmd.Key).Err(derr).Msg("fsm: delete pending-migration key failed")
 	}
 	f.mu.RLock()
 	notifier := f.commitNotifier
@@ -1266,4 +1225,4 @@ func (f *FSM) Restore(meta raft.SnapshotMeta, data []byte) error {
 
 // applySetRing is a no-op stub; ring-based placement has been removed.
 // The switch case and this function will be deleted in Task 7 along with ring.go.
-func (f *FSM) applySetRing(_ []byte) error { return nil }
+func (f *FSM) applySetRing(_ *badger.Txn, _ []byte) error { return nil }

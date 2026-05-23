@@ -73,7 +73,7 @@ func TestApplyCoalesceSegmentsHappyPath(t *testing.T) {
 	}
 	raw, err := encodeCoalesceSegmentsCmd(cmd)
 	require.NoError(t, err)
-	require.NoError(t, f.applyCoalesceSegmentsFromCmd(raw))
+	require.NoError(t, f.db.Update(func(txn *badger.Txn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
 
 	got := coalesceReadMeta(t, f, "b", "k")
 	if len(got.Coalesced) != 1 || got.Coalesced[0].CoalescedID != "c1" {
@@ -103,7 +103,7 @@ func TestApplyCoalesceSegmentsIdempotentReplay(t *testing.T) {
 	}
 	raw, err := encodeCoalesceSegmentsCmd(cmd)
 	require.NoError(t, err)
-	require.NoError(t, f.applyCoalesceSegmentsFromCmd(raw))
+	require.NoError(t, f.db.Update(func(txn *badger.Txn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
 
 	got := coalesceReadMeta(t, f, "b", "k")
 	if len(got.Coalesced) != 1 {
@@ -131,7 +131,7 @@ func TestApplyCoalesceSegmentsRaceAppendPreserved(t *testing.T) {
 	}
 	raw, err := encodeCoalesceSegmentsCmd(cmd)
 	require.NoError(t, err)
-	require.NoError(t, f.applyCoalesceSegmentsFromCmd(raw))
+	require.NoError(t, f.db.Update(func(txn *badger.Txn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
 
 	got := coalesceReadMeta(t, f, "b", "k")
 	if len(got.Segments) != 1 || got.Segments[0].BlobID != "s3" {
