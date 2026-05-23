@@ -121,6 +121,14 @@ func New(cfg Config) *Pipeline {
 		waiters:     make(map[uint64]*putWaiter),
 		wal:         cfg.WAL,
 	}
+	if cfg.WAL != nil {
+		// walIn carries one item per finalized PUT. Size it so the
+		// flusher rarely back-pressures CommitCoord: group commit
+		// batches up to walFlushMaxBatch, so a depth of 2× batch size
+		// covers the case where a new batch lands while the previous
+		// one is mid-fsync.
+		p.commit.walIn = make(chan walFlushItem, walFlushMaxBatch*2)
+	}
 	p.metaBatcher = &MetadataBatcher{
 		in:         p.metaIn,
 		db:         cfg.BadgerDB,
@@ -128,10 +136,17 @@ func New(cfg Config) *Pipeline {
 		flushAfter: cfg.FlushAfter,
 	}
 
-	p.wg.Add(3 + len(p.drives))
+	extraGoroutines := 3
+	if cfg.WAL != nil {
+		extraGoroutines++
+	}
+	p.wg.Add(extraGoroutines + len(p.drives))
 	go func() { defer p.wg.Done(); p.cpu.Run(p.ctx) }()
 	go func() { defer p.wg.Done(); p.commit.Run(p.ctx) }()
 	go func() { defer p.wg.Done(); p.metaBatcher.Run(p.ctx) }()
+	if cfg.WAL != nil {
+		go func() { defer p.wg.Done(); p.commit.walFlusher(p.ctx) }()
+	}
 	for _, d := range p.drives {
 		d := d
 		go func() { defer p.wg.Done(); d.Run(p.ctx) }()
