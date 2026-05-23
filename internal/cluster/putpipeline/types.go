@@ -1,6 +1,7 @@
 package putpipeline
 
 import (
+	"bufio"
 	"io"
 	"os"
 
@@ -59,6 +60,7 @@ type MetadataRecord struct {
 // shardWriteState lives inside DriveActor: per-PUT tmp file + bookkeeping.
 type shardWriteState struct {
 	f            *os.File
+	bw           *bufio.Writer // user-space buffer; coalesces small encrypted chunks into large kernel writes
 	finalPath    string
 	tmpPath      string
 	bucket       string
