@@ -55,13 +55,18 @@ type seqGate struct {
 // registerPut sets up per-shard chunked writers for one PUT.
 // bucket and shardKey are used to derive the AAD so that shards are
 // readable by the legacy ShardService reader (AAD = bucket+"/"+shardKey+"/"+shardIdx).
-func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, shardChans []chan<- EncryptedShardChunk) {
+// totalSize is the full body length (from Content-Length / SizeHint); it
+// is written once at the start of every shard's plaintext stream as the
+// 8-byte shard size header so the EC reader knows the exact byte count
+// across all stripes. Per-stripe ECSplitRaw never re-emits the header.
+func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize int64, shardChans []chan<- EncryptedShardChunk) {
 	p.mu.Lock()
 	p.outByPut[putID] = shardChans
 	p.mu.Unlock()
 
 	n := p.ecCfg.NumShards()
 	encoders := make([]*shardEncoder, n)
+	header := cluster.ShardHeader(totalSize)
 	for i := 0; i < n; i++ {
 		buf := new(bytes.Buffer)
 		aad := []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
@@ -71,6 +76,9 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, shardChans 
 			// encryptor or an out-of-range chunk size, both of which
 			// are pipeline-construction bugs, not runtime conditions.
 			panic(fmt.Sprintf("cpu pool: build shard encoder %d for put %d: %v", i, putID, err))
+		}
+		if _, err := w.Write(header[:]); err != nil {
+			panic(fmt.Sprintf("cpu pool: write shard header %d for put %d: %v", i, putID, err))
 		}
 		encoders[i] = &shardEncoder{w: w, buf: buf}
 	}
@@ -159,19 +167,23 @@ func (p *CPUPool) workerLoop(ctx context.Context) {
 }
 
 // processStripe runs concurrently across workers and does only the EC
-// split: it produces k+m plaintext shard byte slices. Encryption is
-// deferred to dispatch so it runs serialized per PUT.
+// split: it produces k+m raw plaintext shard byte slices. Encryption
+// is deferred to dispatch so it runs serialized per PUT.
 //
 // IngestActor zero-pads the last stripe to stripeBytes for Reed-Solomon
-// alignment. We trim the padding before EC split so the embedded shard
-// header records the real byte count — the EC reader uses that header to
-// limit the reconstructed stream to the correct length.
+// alignment. We trim the padding before EC split so each shard receives
+// only real bytes — the per-PUT shard header (written once in
+// registerPut with the full body size) tells the reader where to stop.
+// Using ECSplitRaw (no per-stripe size header) instead of
+// ECSplitWithEncode avoids re-emitting an 8-byte header at the start of
+// every stripe's shard bytes, which would otherwise truncate the
+// reconstructed object to the first stripe's size.
 func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) error {
 	data := stripe.Data
 	if stripe.Padding > 0 && int(stripe.Padding) < len(data) {
 		data = data[:len(data)-int(stripe.Padding)]
 	}
-	shards, err := cluster.ECSplitWithEncode(p.ecCfg, data)
+	shards, err := cluster.ECSplitRaw(p.ecCfg, data)
 	if err != nil {
 		return fmt.Errorf("cpu pool ec split: %w", err)
 	}

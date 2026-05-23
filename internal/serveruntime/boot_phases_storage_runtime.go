@@ -307,6 +307,14 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	}
 	gb.SetCoalesceConfig(state.coalesceCfg)
 	gb.SetShardGroupSource(state.metaRaft.FSM())
+	// Inject the actor pipeline (constructed once at boot in
+	// bootOwnedGroupsAndEC) into every group's DistributedBackend so
+	// PUTs routed to non-group-0 groups also dispatch through the
+	// pipeline. The pipeline owns long-lived actor goroutines shared
+	// across groups.
+	if state.putPipeline != nil {
+		gb.SetPutPipeline(state.putPipeline)
+	}
 	return gb, nil
 }
 
@@ -327,6 +335,27 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	state.shardCache = shardcache.New(state.cfg.ShardCacheSize)
 	distBackend.SetShardCache(state.shardCache)
 	log.Info().Int64("bytes", state.cfg.ShardCacheSize).Msg("ec shard cache configured")
+
+	// Wire the single-node PUT actor pipeline BEFORE the ownedGroups loop
+	// instantiates additional groups — instantiateGroupWithConfig picks
+	// state.putPipeline up from here and injects it on every group's
+	// DistributedBackend (groups are created later for non-group-0
+	// placements). The pipeline owns long-lived actor goroutines shared
+	// across all groups.
+	if state.cfg.Encryptor != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
+		pipeline := putpipeline.New(putpipeline.Config{
+			DataDirs:  state.shardSvc.DataDirs(),
+			Encryptor: state.cfg.Encryptor,
+			ECConfig:  state.effectiveEC,
+		})
+		state.putPipeline = pipeline
+		distBackend.SetPutPipeline(pipeline)
+		log.Info().
+			Int("drives", len(state.shardSvc.DataDirs())).
+			Int("k", state.effectiveEC.DataShards).
+			Int("m", state.effectiveEC.ParityShards).
+			Msg("put actor pipeline wired")
+	}
 
 	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
@@ -493,23 +522,5 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		Bool("active", state.effectiveEC.IsActive(len(allNodes))).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
-	// Wire the single-node PUT actor pipeline now that the effective EC
-	// config + encryptor + data dirs are known. PutObjectWithRequest
-	// dispatches eligible PUTs (encrypted, all-local placement, non-
-	// multipart, external bucket) through the pipeline; everything else
-	// falls through to the legacy spool/EC writer path.
-	if state.cfg.Encryptor != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
-		pipeline := putpipeline.New(putpipeline.Config{
-			DataDirs:  state.shardSvc.DataDirs(),
-			Encryptor: state.cfg.Encryptor,
-			ECConfig:  state.effectiveEC,
-		})
-		distBackend.SetPutPipeline(pipeline)
-		log.Info().
-			Int("drives", len(state.shardSvc.DataDirs())).
-			Int("k", state.effectiveEC.DataShards).
-			Int("m", state.effectiveEC.ParityShards).
-			Msg("put actor pipeline wired")
-	}
 	return nil
 }

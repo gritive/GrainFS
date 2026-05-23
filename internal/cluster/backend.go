@@ -1588,7 +1588,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	}
 	observePutStage("distributed", "quarantine_check", stageStart)
 
-	if b.putPipeline != nil && b.shardSvc != nil && b.shardSvc.encryptor != nil && !storage.IsInternalBucket(bucket) {
+	if b.putPipeline != nil && b.shardSvc != nil && b.shardSvc.encryptor != nil && !storage.IsInternalBucket(bucket) && req.SizeHint != nil {
 		liveNodes := b.effectivePlacementNodes()
 		effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 		if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {

@@ -51,10 +51,12 @@ func TestDistributedBackend_PutPipelineRoundTrip(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
 
 	payload := []byte("hello from the actor pipeline")
+	size := int64(len(payload))
 	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
 		Bucket:      "bucket",
 		Key:         "actor.txt",
 		Body:        bytes.NewReader(payload),
+		SizeHint:    &size,
 		ContentType: "text/plain",
 	})
 	require.NoError(t, err)

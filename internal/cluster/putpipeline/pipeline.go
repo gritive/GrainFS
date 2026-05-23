@@ -115,10 +115,21 @@ func New(cfg Config) *Pipeline {
 // Put dispatches one PUT through the pipeline. Blocks until K data-shard
 // quorum is satisfied (early-ack). Parity shards and metadata commit
 // complete in the background.
+//
+// req.SizeHint MUST be non-nil — the per-PUT shard header is written
+// once at registerPut using this size so the EC reader knows where to
+// stop after concatenating all stripes. Without it, multi-stripe PUTs
+// would either need pre-buffering (memory pressure) or post-write
+// patching (rewrites the shard file). Warp / S3 PUTs carry
+// Content-Length, which the storage layer maps to SizeHint.
 func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, error) {
 	if p.cfg.ECConfig.NumShards() == 0 {
 		return nil, fmt.Errorf("pipeline: zero-shard EC config")
 	}
+	if req.SizeHint == nil {
+		return nil, fmt.Errorf("pipeline: SizeHint required (the per-PUT shard header is written upfront)")
+	}
+	totalSize := *req.SizeHint
 	putID := p.nextPutID.Add(1)
 
 	// Map each shard index to its target drive (round-robin by index).
@@ -134,7 +145,7 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		// arrives on the DriveActor's channel.
 		p.drives[driveIdx].registerPut(putID, req.Bucket, req.Key, i)
 	}
-	p.cpu.registerPut(putID, req.Bucket, req.Key, shardChans)
+	p.cpu.registerPut(putID, req.Bucket, req.Key, totalSize, shardChans)
 	defer p.cpu.unregisterPut(putID)
 
 	earlyAck := make(chan error, 1)

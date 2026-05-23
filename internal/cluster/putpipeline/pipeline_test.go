@@ -36,10 +36,12 @@ func TestPipeline_Put_5MiB_RoundTrip(t *testing.T) {
 	wantSum := md5.Sum(body)
 	wantETag := hex.EncodeToString(wantSum[:])
 
+	size := int64(len(body))
 	obj, err := p.Put(context.Background(), PutRequest{
-		Bucket: "external",
-		Key:    "obj1",
-		Body:   bytes.NewReader(body),
+		Bucket:   "external",
+		Key:      "obj1",
+		Body:     bytes.NewReader(body),
+		SizeHint: &size,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, obj)
