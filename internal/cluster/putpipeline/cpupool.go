@@ -12,58 +12,57 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
-// CPUPool runs worker goroutines that EC-split incoming stripes and
-// AES-GCM-seal each shard into GFSENC2 format.
+// CPUPool runs worker goroutines that EC-split incoming stripes. Each
+// PUT owns a dedicated dispatcher goroutine that reorders the workers'
+// outputs by StripeIdx, encrypts them through the per-shard chunked
+// writer, and forwards EncryptedShardChunk on each shard channel.
 //
-// EC split runs in parallel across workers. Encryption runs inside
-// dispatch, which the per-PUT seqGate already serializes, so each
-// shard's chunked writer is fed strictly in stripe order. The result
-// is that all chunks for one (PutID, ShardIdx), concatenated in stripe
-// order, form exactly one valid GFSENC2 stream.
+// EC split runs in parallel across workers; encryption + chunked-writer
+// Write + shard send run serially inside the per-PUT dispatcher. No
+// shared seqGate, no broadcast wakeups.
 type CPUPool struct {
-	in       chan StripePlaintext
-	enc      *encrypt.Encryptor
-	ecCfg    cluster.ECConfig
-	workers  int
-	outByPut map[uint64][]chan<- EncryptedShardChunk // protected by mu
-	mu       sync.RWMutex
+	in      chan StripePlaintext
+	enc     *encrypt.Encryptor
+	ecCfg   cluster.ECConfig
+	workers int
 
-	seqMu sync.Mutex
-	seq   map[uint64]*seqGate
-
-	encMu    sync.Mutex
-	encByPut map[uint64][]*shardEncoder
+	puts       sync.Map // key: uint64 putID, val: *putDispatchState
+	dispatchWG sync.WaitGroup
 }
 
 // shardEncoder bundles the single long-lived chunked writer for one
-// (PutID, shardIdx) with the buffer it emits into. dispatch drains buf
-// after every stripe; the writer itself spans the whole PUT.
+// (PutID, shardIdx) with the buffer it emits into. The per-PUT
+// dispatcher owns the slice for its lifetime; no locking needed.
 type shardEncoder struct {
 	w   *eccodec.EncryptedShardChunkedWriter
 	buf *bytes.Buffer
 }
 
-// seqGate serializes chunk dispatch per PUT so each shard channel sees
-// stripes in ascending StripeIdx order even though workers process
-// stripes concurrently.
-type seqGate struct {
-	lock       sync.Mutex
-	cond       *sync.Cond
-	nextStripe uint32
+// putDispatchState is per-PUT state. It is owned by the dispatcher
+// goroutine; workers only push split results into inbox.
+type putDispatchState struct {
+	encoders   []*shardEncoder
+	shardChans []chan<- EncryptedShardChunk
+	inbox      chan dispatchMsg
 }
 
-// registerPut sets up per-shard chunked writers for one PUT.
-// bucket and shardKey are used to derive the AAD so that shards are
-// readable by the legacy ShardService reader (AAD = bucket+"/"+shardKey+"/"+shardIdx).
-// totalSize is the full body length (from Content-Length / SizeHint); it
-// is written once at the start of every shard's plaintext stream as the
-// 8-byte shard size header so the EC reader knows the exact byte count
-// across all stripes. Per-stripe ECSplitRaw never re-emits the header.
-func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize int64, shardChans []chan<- EncryptedShardChunk) {
-	p.mu.Lock()
-	p.outByPut[putID] = shardChans
-	p.mu.Unlock()
+// dispatchMsg carries the result of EC split from a worker to the
+// per-PUT dispatcher. The dispatcher reorders by stripeIdx.
+type dispatchMsg struct {
+	stripeIdx uint32
+	shards    [][]byte
+	padding   uint32
+	lastInPut bool
+}
 
+// registerPut sets up per-shard chunked writers + the dispatcher
+// goroutine for one PUT. bucket and shardKey are used to derive the
+// AAD so that shards are readable by the legacy ShardService reader
+// (AAD = bucket+"/"+shardKey+"/"+shardIdx). totalSize is written once
+// at the start of every shard's plaintext stream as the 8-byte shard
+// size header so the EC reader knows the exact byte count across all
+// stripes. Per-stripe ECSplitRaw never re-emits the header.
+func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize int64, shardChans []chan<- EncryptedShardChunk) {
 	n := p.ecCfg.NumShards()
 	encoders := make([]*shardEncoder, n)
 	header := cluster.ShardHeader(totalSize)
@@ -72,9 +71,6 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 		aad := []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
 		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, aad, eccodec.DefaultEncryptedChunkSize)
 		if err != nil {
-			// NewEncryptedShardChunkedWriter only fails on a nil
-			// encryptor or an out-of-range chunk size, both of which
-			// are pipeline-construction bugs, not runtime conditions.
 			panic(fmt.Sprintf("cpu pool: build shard encoder %d for put %d: %v", i, putID, err))
 		}
 		if _, err := w.Write(header[:]); err != nil {
@@ -82,56 +78,40 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 		}
 		encoders[i] = &shardEncoder{w: w, buf: buf}
 	}
-	p.encMu.Lock()
-	if p.encByPut == nil {
-		p.encByPut = make(map[uint64][]*shardEncoder)
+
+	inboxCap := p.workers
+	if inboxCap < 4 {
+		inboxCap = 4
 	}
-	p.encByPut[putID] = encoders
-	p.encMu.Unlock()
+	ps := &putDispatchState{
+		encoders:   encoders,
+		shardChans: shardChans,
+		inbox:      make(chan dispatchMsg, inboxCap),
+	}
+	p.puts.Store(putID, ps)
+
+	p.dispatchWG.Add(1)
+	go p.runDispatcher(putID, ps)
 }
 
 func (p *CPUPool) unregisterPut(putID uint64) {
-	p.mu.Lock()
-	delete(p.outByPut, putID)
-	p.mu.Unlock()
-	p.seqMu.Lock()
-	delete(p.seq, putID)
-	p.seqMu.Unlock()
-	p.encMu.Lock()
-	delete(p.encByPut, putID)
-	p.encMu.Unlock()
+	v, ok := p.puts.LoadAndDelete(putID)
+	if !ok {
+		return
+	}
+	ps := v.(*putDispatchState)
+	close(ps.inbox)
+	// runDispatcher drains and exits; no need to wait here because
+	// Pipeline.Put has already received earlyAck (drives wrote K shards),
+	// which means every stripe passed through the dispatcher already.
 }
 
-func (p *CPUPool) shardEncoders(putID uint64) ([]*shardEncoder, bool) {
-	p.encMu.Lock()
-	defer p.encMu.Unlock()
-	encoders, ok := p.encByPut[putID]
-	return encoders, ok
-}
-
-func (p *CPUPool) shardChan(putID uint64, shardIdx int) (chan<- EncryptedShardChunk, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	chans, ok := p.outByPut[putID]
-	if !ok || shardIdx >= len(chans) {
+func (p *CPUPool) loadPut(putID uint64) (*putDispatchState, bool) {
+	v, ok := p.puts.Load(putID)
+	if !ok {
 		return nil, false
 	}
-	return chans[shardIdx], true
-}
-
-func (p *CPUPool) acquireSeq(putID uint64) *seqGate {
-	p.seqMu.Lock()
-	defer p.seqMu.Unlock()
-	if p.seq == nil {
-		p.seq = make(map[uint64]*seqGate)
-	}
-	g, ok := p.seq[putID]
-	if !ok {
-		g = &seqGate{}
-		g.cond = sync.NewCond(&g.lock)
-		p.seq[putID] = g
-	}
-	return g
+	return v.(*putDispatchState), true
 }
 
 // Run launches worker goroutines until ctx is done.
@@ -145,6 +125,10 @@ func (p *CPUPool) Run(ctx context.Context) {
 		}()
 	}
 	wg.Wait()
+	// Wait for any per-PUT dispatcher goroutines that are still
+	// draining their inbox (unregisterPut closes the inbox; the
+	// dispatcher drains then exits).
+	p.dispatchWG.Wait()
 }
 
 func (p *CPUPool) workerLoop(ctx context.Context) {
@@ -157,9 +141,6 @@ func (p *CPUPool) workerLoop(ctx context.Context) {
 				return
 			}
 			if err := p.processStripe(ctx, stripe); err != nil {
-				// Phase 4 wires a failure path to CommitCoord. For now
-				// the error is dropped; CommitCoord will time out the
-				// PUT when shard results never arrive.
 				_ = err
 			}
 		}
@@ -167,17 +148,11 @@ func (p *CPUPool) workerLoop(ctx context.Context) {
 }
 
 // processStripe runs concurrently across workers and does only the EC
-// split: it produces k+m raw plaintext shard byte slices. Encryption
-// is deferred to dispatch so it runs serialized per PUT.
+// split. The split result is forwarded to the PUT's dispatcher inbox.
 //
 // IngestActor zero-pads the last stripe to stripeBytes for Reed-Solomon
 // alignment. We trim the padding before EC split so each shard receives
-// only real bytes — the per-PUT shard header (written once in
-// registerPut with the full body size) tells the reader where to stop.
-// Using ECSplitRaw (no per-stripe size header) instead of
-// ECSplitWithEncode avoids re-emitting an 8-byte header at the start of
-// every stripe's shard bytes, which would otherwise truncate the
-// reconstructed object to the first stripe's size.
+// only real bytes — the per-PUT shard header tells the reader where to stop.
 func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) error {
 	data := stripe.Data
 	if stripe.Padding > 0 && int(stripe.Padding) < len(data) {
@@ -187,66 +162,85 @@ func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) err
 	if err != nil {
 		return fmt.Errorf("cpu pool ec split: %w", err)
 	}
-	return p.dispatch(ctx, stripe, shards)
+
+	ps, ok := p.loadPut(stripe.PutID)
+	if !ok {
+		return nil
+	}
+	msg := dispatchMsg{
+		stripeIdx: stripe.StripeIdx,
+		shards:    shards,
+		padding:   stripe.Padding,
+		lastInPut: stripe.LastInPut,
+	}
+	select {
+	case ps.inbox <- msg:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
 }
 
-// dispatch encrypts and sends a stripe's shards to the per-shard
-// channels, holding the PUT's seqGate so each shard's chunked writer is
-// fed in StripeIdx order and chunks land in order on every channel.
+// runDispatcher reorders incoming dispatchMsgs by stripeIdx, writes the
+// shards through each shard's long-lived chunked writer (in order),
+// then forwards each shard's encrypted ciphertext to its shardChan.
 //
-// Because the seqGate admits exactly one stripe per PUT at a time, the
-// long-lived chunked writers need no extra locking: every Write/Close
-// across the whole PUT happens here, strictly in stripe order.
-func (p *CPUPool) dispatch(ctx context.Context, stripe StripePlaintext, shards [][]byte) error {
-	seq := p.acquireSeq(stripe.PutID)
-	seq.lock.Lock()
-	defer seq.lock.Unlock()
-	for seq.nextStripe != stripe.StripeIdx {
-		seq.cond.Wait()
-	}
-	defer func() {
-		seq.nextStripe++
-		seq.cond.Broadcast()
-	}()
+// The dispatcher exits when its inbox is closed (unregisterPut) AND
+// the pending map is empty.
+func (p *CPUPool) runDispatcher(putID uint64, ps *putDispatchState) {
+	defer p.dispatchWG.Done()
 
-	encoders, ok := p.shardEncoders(stripe.PutID)
-	if !ok {
-		return fmt.Errorf("cpu pool: no shard encoders for put %d", stripe.PutID)
+	var expected uint32
+	pending := make(map[uint32]dispatchMsg)
+	for msg := range ps.inbox {
+		pending[msg.stripeIdx] = msg
+		for {
+			cur, ok := pending[expected]
+			if !ok {
+				break
+			}
+			delete(pending, expected)
+			if err := p.deliverStripe(putID, ps, cur); err != nil {
+				_ = err
+			}
+			expected++
+		}
 	}
-	for i, shard := range shards {
-		if i >= len(encoders) {
+}
+
+// deliverStripe writes one stripe's shards through each shard's chunked
+// writer, drains the writer's buffer for each shard, and sends the
+// resulting EncryptedShardChunk on the shard's channel. Called by the
+// per-PUT dispatcher in strict stripeIdx order, so the chunked writer
+// state is consistent without any external locking.
+func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatchMsg) error {
+	for i, shard := range msg.shards {
+		if i >= len(ps.encoders) {
 			break
 		}
-		enc := encoders[i]
+		enc := ps.encoders[i]
 		if _, err := enc.w.Write(shard); err != nil {
-			return fmt.Errorf("cpu pool: encrypt put %d shard %d: %w", stripe.PutID, i, err)
+			return fmt.Errorf("cpu pool: encrypt put %d shard %d: %w", putID, i, err)
 		}
-		if stripe.LastInPut {
+		if msg.lastInPut {
 			if err := enc.w.Close(); err != nil {
-				return fmt.Errorf("cpu pool: close put %d shard %d: %w", stripe.PutID, i, err)
+				return fmt.Errorf("cpu pool: close put %d shard %d: %w", putID, i, err)
 			}
 		}
-		// buf.Bytes() aliases the buffer's backing array; copy out
-		// before Reset so the next stripe cannot corrupt this chunk.
 		ciphertext := make([]byte, enc.buf.Len())
 		copy(ciphertext, enc.buf.Bytes())
 		enc.buf.Reset()
 
-		out, ok := p.shardChan(stripe.PutID, i)
-		if !ok {
+		if i >= len(ps.shardChans) {
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case out <- EncryptedShardChunk{
-			PutID:      stripe.PutID,
-			StripeIdx:  stripe.StripeIdx,
+		ps.shardChans[i] <- EncryptedShardChunk{
+			PutID:      putID,
+			StripeIdx:  msg.stripeIdx,
 			ShardIdx:   i,
 			Ciphertext: ciphertext,
-			Padding:    stripe.Padding,
-			LastInPut:  stripe.LastInPut,
-		}:
+			Padding:    msg.padding,
+			LastInPut:  msg.lastInPut,
 		}
 	}
 	return nil

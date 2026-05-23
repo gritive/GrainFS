@@ -83,11 +83,10 @@ func New(cfg Config) *Pipeline {
 		}
 	}
 	p.cpu = &CPUPool{
-		in:       p.stripeCh,
-		enc:      cfg.Encryptor,
-		ecCfg:    cfg.ECConfig,
-		workers:  runtime.GOMAXPROCS(0),
-		outByPut: make(map[uint64][]chan<- EncryptedShardChunk),
+		in:      p.stripeCh,
+		enc:     cfg.Encryptor,
+		ecCfg:   cfg.ECConfig,
+		workers: runtime.GOMAXPROCS(0),
 	}
 	p.commit = &CommitCoord{
 		in:          p.commitIn,

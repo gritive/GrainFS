@@ -15,11 +15,10 @@ import (
 func TestCPUPool_RegisterAndDispatch_OneShardPerChannel(t *testing.T) {
 	in := make(chan StripePlaintext, 4)
 	pool := &CPUPool{
-		in:       in,
-		enc:      testEncryptor(t),
-		ecCfg:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
-		workers:  2,
-		outByPut: make(map[uint64][]chan<- EncryptedShardChunk),
+		in:      in,
+		enc:     testEncryptor(t),
+		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
+		workers: 2,
 	}
 	shardChans := make([]chan EncryptedShardChunk, 4)
 	for i := range shardChans {
@@ -58,11 +57,10 @@ func TestCPUPool_OrderedPerShard_FiveStripes(t *testing.T) {
 	const stripe = 1 << 20
 	in := make(chan StripePlaintext, 8)
 	pool := &CPUPool{
-		in:       in,
-		enc:      testEncryptor(t),
-		ecCfg:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
-		workers:  4,
-		outByPut: make(map[uint64][]chan<- EncryptedShardChunk),
+		in:      in,
+		enc:     testEncryptor(t),
+		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
+		workers: 4,
 	}
 	shardChans := make([]chan EncryptedShardChunk, 4)
 	sends := make([]chan<- EncryptedShardChunk, 4)
@@ -101,11 +99,10 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
 	enc := testEncryptor(t)
 	in := make(chan StripePlaintext, 8)
 	pool := &CPUPool{
-		in:       in,
-		enc:      enc,
-		ecCfg:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
-		workers:  4,
-		outByPut: make(map[uint64][]chan<- EncryptedShardChunk),
+		in:      in,
+		enc:     enc,
+		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
+		workers: 4,
 	}
 	shardChans := make([]chan EncryptedShardChunk, 4)
 	sends := make([]chan<- EncryptedShardChunk, 4)

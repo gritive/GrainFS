@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testEncryptor(t *testing.T) *encrypt.Encryptor {
+func testEncryptor(t testing.TB) *encrypt.Encryptor {
 	t.Helper()
 	key := make([]byte, 32)
 	for i := range key {
