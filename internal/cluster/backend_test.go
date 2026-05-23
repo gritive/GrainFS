@@ -1473,4 +1473,3 @@ func TestNewECObjectReader_BLFlag(t *testing.T) {
 		require.Nil(t, r.bl, "bl must NOT be injected when BoundedLoadsEnabled=false")
 	})
 }
-

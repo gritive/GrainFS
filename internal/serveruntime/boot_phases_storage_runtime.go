@@ -12,6 +12,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -491,5 +492,24 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		Int("effective_m", state.effectiveEC.ParityShards).
 		Bool("active", state.effectiveEC.IsActive(len(allNodes))).
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
+
+	// Wire the single-node PUT actor pipeline now that the effective EC
+	// config + encryptor + data dirs are known. PutObjectWithRequest
+	// dispatches eligible PUTs (encrypted, all-local placement, non-
+	// multipart, external bucket) through the pipeline; everything else
+	// falls through to the legacy spool/EC writer path.
+	if state.cfg.Encryptor != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
+		pipeline := putpipeline.New(putpipeline.Config{
+			DataDirs:  state.shardSvc.DataDirs(),
+			Encryptor: state.cfg.Encryptor,
+			ECConfig:  state.effectiveEC,
+		})
+		distBackend.SetPutPipeline(pipeline)
+		log.Info().
+			Int("drives", len(state.shardSvc.DataDirs())).
+			Int("k", state.effectiveEC.DataShards).
+			Int("m", state.effectiveEC.ParityShards).
+			Msg("put actor pipeline wired")
+	}
 	return nil
 }
