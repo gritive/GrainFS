@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"errors"
+	"os"
+	"strconv"
 
 	"github.com/dgraph-io/badger/v4"
 
@@ -21,6 +23,30 @@ const maxApplyBatchBytes = 64 << 10
 
 // commitApplyTxn is the batch-commit seam. Tests override it to inject failures.
 var commitApplyTxn = func(txn *badger.Txn) error { return txn.Commit() }
+
+// applyBatchMax parses a GRAINFS_RAFT_APPLY_BATCH_MAX value into an entry cap
+// in [1, maxApplyBatchEntries]. Empty or invalid -> maxApplyBatchEntries.
+// 0 is treated as 1 (batching disabled).
+func applyBatchMax(v string) int {
+	if v == "" {
+		return maxApplyBatchEntries
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return maxApplyBatchEntries
+	}
+	if n == 0 {
+		return 1
+	}
+	if n > maxApplyBatchEntries {
+		return maxApplyBatchEntries
+	}
+	return n
+}
+
+// applyBatchEntriesCap is resolved once at process start. Tests / bench
+// isolation set GRAINFS_RAFT_APPLY_BATCH_MAX=1 to disable batching.
+var applyBatchEntriesCap = applyBatchMax(os.Getenv("GRAINFS_RAFT_APPLY_BATCH_MAX"))
 
 // applyActor owns the FSM apply loop. It drains committed Raft entries, applies
 // each batch to a single BadgerDB transaction, and emits per-entry results.
@@ -114,7 +140,7 @@ func (a *applyActor) collect(b *DistributedBackend, first raft.LogEntry, applyCh
 
 	// Opportunistic non-blocking drain of already-available command entries.
 	drained := true
-	for drained && len(a.batch) < maxApplyBatchEntries && batchBytes < maxApplyBatchBytes {
+	for drained && len(a.batch) < applyBatchEntriesCap && batchBytes < maxApplyBatchBytes {
 		select {
 		case e, ok := <-applyCh:
 			if !ok {

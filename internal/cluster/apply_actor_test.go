@@ -233,6 +233,12 @@ func (snapshotBarrierFakeNode) Configuration() raft.Configuration {
 }
 
 func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
+	// This test exercises the drain loop's snapshot barrier; force batching on
+	// regardless of GRAINFS_RAFT_APPLY_BATCH_MAX.
+	origCap := applyBatchEntriesCap
+	applyBatchEntriesCap = maxApplyBatchEntries
+	defer func() { applyBatchEntriesCap = origCap }()
+
 	enc := func(ct CommandType, p any) []byte {
 		out, err := EncodeCommand(ct, p)
 		require.NoError(t, err)
@@ -276,4 +282,13 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	require.Contains(t, state, string(fsm.keys.BucketKey("post")),
 		"post-snapshot command must be applied")
 	require.Equal(t, uint64(4), b.lastApplied.Load())
+}
+
+func TestApplyBatchMaxEnvOverride(t *testing.T) {
+	require.Equal(t, 64, applyBatchMax(""))
+	require.Equal(t, 1, applyBatchMax("1"))
+	require.Equal(t, 1, applyBatchMax("0")) // 0 disables batching -> cap 1
+	require.Equal(t, 8, applyBatchMax("8"))
+	require.Equal(t, 64, applyBatchMax("garbage"))
+	require.Equal(t, 64, applyBatchMax("999")) // clamped to maxApplyBatchEntries
 }
