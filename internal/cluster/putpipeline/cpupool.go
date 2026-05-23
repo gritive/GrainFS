@@ -12,6 +12,44 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
+// ciphertextBufPool recycles the per-stripe ciphertext slices that
+// flow from CPUPool.deliverStripe to DriveActor.handle. Without it,
+// every (stripe, shard) pair allocated a fresh slice ≈ stripe/k bytes
+// + AEAD overhead — about 32% of all PUT-path allocations on warp.
+//
+// Ownership: deliverStripe acquires via getCiphertextBuf and stamps
+// the slice into EncryptedShardChunk.Ciphertext; DriveActor.handle
+// returns it via putCiphertextBuf on every exit path (defer).
+var ciphertextBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1<<20) // 1 MiB initial; grows on demand
+		return &b
+	},
+}
+
+// ciphertextMaxPooled bounds the capacity we'll retain across PUTs.
+// Anything bigger goes straight to the GC so we don't keep huge
+// outliers (e.g. abnormal stripe sizes) pinned in the pool.
+const ciphertextMaxPooled = 16 << 20
+
+func getCiphertextBuf(size int) []byte {
+	bp := ciphertextBufPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) >= size {
+		return b[:size]
+	}
+	// Pool's slice too small; let it go and allocate fresh.
+	return make([]byte, size)
+}
+
+func putCiphertextBuf(b []byte) {
+	if b == nil || cap(b) > ciphertextMaxPooled {
+		return
+	}
+	b = b[:0]
+	ciphertextBufPool.Put(&b)
+}
+
 // CPUPool runs worker goroutines that EC-split incoming stripes. Each
 // PUT owns a dedicated dispatcher goroutine that reorders the workers'
 // outputs by StripeIdx, encrypts them through the per-shard chunked
@@ -227,7 +265,7 @@ func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatch
 				return fmt.Errorf("cpu pool: close put %d shard %d: %w", putID, i, err)
 			}
 		}
-		ciphertext := make([]byte, enc.buf.Len())
+		ciphertext := getCiphertextBuf(enc.buf.Len())
 		copy(ciphertext, enc.buf.Bytes())
 		enc.buf.Reset()
 

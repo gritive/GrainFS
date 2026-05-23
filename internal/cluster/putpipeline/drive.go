@@ -73,6 +73,7 @@ func (d *DriveActor) Run(ctx context.Context) {
 }
 
 func (d *DriveActor) handle(chunk EncryptedShardChunk) {
+	defer putCiphertextBuf(chunk.Ciphertext)
 	defer func() {
 		if r := recover(); r != nil {
 			d.failPanic(chunk, r)
