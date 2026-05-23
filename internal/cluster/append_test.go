@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
+
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -45,7 +47,7 @@ func TestAppendObjectFSMApplyIdempotent(t *testing.T) {
 	}
 
 	// First apply — creates appendable objectMeta with 1 segment.
-	if err := b.fsm.applyAppendObjectFromCmd(data); err != nil {
+	if err := b.fsm.db.Update(func(txn *badger.Txn) error { return b.fsm.applyAppendObjectFromCmd(txn, data) }); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
@@ -64,7 +66,7 @@ func TestAppendObjectFSMApplyIdempotent(t *testing.T) {
 	}
 
 	// Re-apply same BlobID → must be idempotent no-op.
-	if err := b.fsm.applyAppendObjectFromCmd(data); err != nil {
+	if err := b.fsm.db.Update(func(txn *badger.Txn) error { return b.fsm.applyAppendObjectFromCmd(txn, data) }); err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
 
@@ -252,7 +254,7 @@ func TestAppendObjectFSMApplyUsesCommandModifiedTime(t *testing.T) {
 		t.Fatalf("encode AppendObjectCmd: %v", err)
 	}
 
-	if err := b.fsm.applyAppendObjectFromCmd(data); err != nil {
+	if err := b.fsm.db.Update(func(txn *badger.Txn) error { return b.fsm.applyAppendObjectFromCmd(txn, data) }); err != nil {
 		t.Fatalf("applyAppendObjectFromCmd: %v", err)
 	}
 

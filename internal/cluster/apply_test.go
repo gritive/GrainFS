@@ -717,7 +717,7 @@ func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
 
 	// Manually write a pending-migration key to simulate a crash after persistence
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
-	require.NoError(t, fsm.persistPendingMigration(task))
+	require.NoError(t, fsm.db.Update(func(txn *badger.Txn) error { return fsm.persistPendingMigration(txn, task) }))
 
 	ch := make(chan MigrationTask, 10)
 	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
@@ -740,7 +740,7 @@ func TestFSM_MigrationDone_DeletesPendingKey(t *testing.T) {
 
 	// Pre-write a pending-migration entry
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
-	require.NoError(t, fsm.persistPendingMigration(task))
+	require.NoError(t, fsm.db.Update(func(txn *badger.Txn) error { return fsm.persistPendingMigration(txn, task) }))
 
 	// Apply CmdMigrationDone — should clean up the key
 	data, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
