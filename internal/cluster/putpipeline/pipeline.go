@@ -212,7 +212,11 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		err   error
 	}
 	ingestCh := make(chan ingestResult, 1)
-	ingest := &IngestActor{out: p.stripeCh, stripeBytes: p.cfg.StripeBytes}
+	ingest := &IngestActor{
+		out:             p.stripeCh,
+		stripeBytes:     p.cfg.StripeBytes,
+		precomputedETag: req.PrecomputedETag,
+	}
 	go func() {
 		etag, total, err := ingest.Run(ctx, putID, req.Bucket, req.Body)
 		ingestCh <- ingestResult{etag: etag, total: total, err: err}
@@ -264,13 +268,14 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 // caller overwrites it and fills in VersionID before Raft propose.
 func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error) {
 	return p.Put(ctx, PutRequest{
-		Bucket:      req.Bucket,
-		Key:         shardKey,
-		Body:        req.Body,
-		SizeHint:    req.SizeHint,
-		ContentType: req.ContentType,
-		UserMeta:    req.UserMetadata,
-		System:      req.SystemMetadata,
+		Bucket:          req.Bucket,
+		Key:             shardKey,
+		Body:            req.Body,
+		SizeHint:        req.SizeHint,
+		ContentType:     req.ContentType,
+		UserMeta:        req.UserMetadata,
+		System:          req.SystemMetadata,
+		PrecomputedETag: req.ContentMD5Hex,
 	})
 }
 

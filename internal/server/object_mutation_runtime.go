@@ -20,6 +20,20 @@ func (s *Server) putObjectWithUserMetadata(
 	userMetadata map[string]string,
 	systemMetadata storage.ObjectSystemMetadata,
 ) (*storage.PutObjectResult, error) {
+	return s.putObjectWithUserMetadataAndMD5(ctx, bucket, key, body, sizeHint, contentType, acl, userMetadata, systemMetadata, "")
+}
+
+func (s *Server) putObjectWithUserMetadataAndMD5(
+	ctx context.Context,
+	bucket, key string,
+	body io.Reader,
+	sizeHint *int64,
+	contentType string,
+	acl *uint8,
+	userMetadata map[string]string,
+	systemMetadata storage.ObjectSystemMetadata,
+	contentMD5Hex string,
+) (*storage.PutObjectResult, error) {
 	var (
 		result *storage.PutObjectResult
 		err    error
@@ -34,6 +48,7 @@ func (s *Server) putObjectWithUserMetadata(
 		ACL:            acl,
 		UserMetadata:   userMetadata,
 		SystemMetadata: systemMetadata,
+		ContentMD5Hex:  contentMD5Hex,
 	})
 	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutBackend, backendStart, cluster.PutTraceStageFields{})
 	if err != nil {

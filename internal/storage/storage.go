@@ -124,6 +124,11 @@ type PutObjectRequest struct {
 	ACL            *uint8
 	UserMetadata   map[string]string
 	SystemMetadata ObjectSystemMetadata
+	// ContentMD5Hex is the hex-encoded MD5 of Body, supplied by clients
+	// via the Content-MD5 header. When set, the actor PUT pipeline uses
+	// it directly as the object ETag and skips recomputing MD5 from Body
+	// — the dominant CPU cost for large PUTs.
+	ContentMD5Hex string
 }
 
 // RequestPutter is an optional interface for backends that can persist full

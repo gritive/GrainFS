@@ -100,6 +100,32 @@ func TestIngestActor_ETagMD5(t *testing.T) {
 	require.Equal(t, want, gotETag)
 }
 
+func TestIngestActor_PrecomputedETagSkipsMD5(t *testing.T) {
+	const stripe = 1 << 20
+	body := bytes.Repeat([]byte{0xCC}, 3*stripe)
+	const precomputed = "deadbeefcafebabe1234567890abcdef"
+
+	out := make(chan StripePlaintext, 8)
+	a := &IngestActor{
+		out:             out,
+		stripeBytes:     stripe,
+		precomputedETag: precomputed,
+	}
+	var gotETag string
+	done := make(chan struct{})
+	go func() {
+		var err error
+		gotETag, _, err = a.Run(context.Background(), 1, "external", bytes.NewReader(body))
+		require.NoError(t, err)
+		close(out)
+		close(done)
+	}()
+	for range out {
+	}
+	<-done
+	require.Equal(t, precomputed, gotETag, "should return precomputed etag without recomputing MD5")
+}
+
 func TestIngestActor_ContextCancel(t *testing.T) {
 	const stripe = 1 << 20
 	body := bytes.Repeat([]byte{0xAA}, 16*stripe)

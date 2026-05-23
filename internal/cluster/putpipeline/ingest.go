@@ -12,9 +12,15 @@ import (
 
 // IngestActor reads an HTTP body into stripe-sized chunks and pushes
 // them onto its out channel. One IngestActor goroutine per PUT.
+//
+// When precomputedETag is non-empty, the actor skips MD5 hashing and
+// returns it as the final ETag. This is wired from clients that supply
+// Content-MD5 in their PUT request, which avoids the per-PUT MD5
+// recompute that otherwise dominates large-object CPU.
 type IngestActor struct {
-	out         chan<- StripePlaintext
-	stripeBytes int
+	out             chan<- StripePlaintext
+	stripeBytes     int
+	precomputedETag string
 }
 
 var errInvalidStripeBytes = errors.New("ingest actor: stripeBytes must be > 0")
@@ -27,7 +33,10 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 	if a.stripeBytes <= 0 {
 		return "", 0, errInvalidStripeBytes
 	}
-	h := newHashForBucket(bucket)
+	var h hash.Hash
+	if a.precomputedETag == "" {
+		h = newHashForBucket(bucket)
+	}
 	var src io.Reader = body
 	if h != nil {
 		src = io.TeeReader(body, h)
@@ -83,6 +92,8 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 	}
 	if h != nil {
 		etag = hex.EncodeToString(h.Sum(nil))
+	} else if a.precomputedETag != "" {
+		etag = a.precomputedETag
 	}
 	return etag, total, nil
 }

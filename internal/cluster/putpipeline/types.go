@@ -93,4 +93,8 @@ type PutRequest struct {
 	ContentType string
 	UserMeta    map[string]string
 	System      storage.ObjectSystemMetadata
+	// PrecomputedETag, when non-empty, is the ETag the pipeline should
+	// return without computing MD5 over Body. Wired from
+	// PutObjectRequest.ContentMD5Hex (client-supplied Content-MD5).
+	PrecomputedETag string
 }

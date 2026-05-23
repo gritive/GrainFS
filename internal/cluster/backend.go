@@ -1619,6 +1619,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				ContentType:    contentType,
 				UserMetadata:   userMetadata,
 				SystemMetadata: req.SystemMetadata,
+				ContentMD5Hex:  req.ContentMD5Hex,
 			})
 			if err != nil {
 				return nil, err
