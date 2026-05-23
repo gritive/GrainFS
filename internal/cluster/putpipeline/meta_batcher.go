@@ -10,32 +10,93 @@ import (
 
 // MetadataBatcher accumulates MetadataRecord values and commits them
 // to Badger in batches sized by count or time, whichever fires first.
+// One long-lived goroutine per server.
 type MetadataBatcher struct {
 	in         chan MetadataRecord
 	db         *badger.DB
 	batchSize  int
 	flushAfter time.Duration
-	pending    sync.Map // string (bucket/key/versionID) -> MetadataRecord
+	pending    sync.Map // pendingKey -> MetadataRecord
+
+	// flushFn is overridable for tests; nil means use m.flush.
+	flushFn func([]MetadataRecord)
 }
 
-// PeekPending returns a MetadataRecord that's been queued but not yet
-// committed, or false if the key isn't queued. GET reads consult this
-// before hitting Badger to preserve read-after-write semantics.
+type pendingKey struct{ Bucket, Key, VersionID string }
+
+// PeekPending returns a MetadataRecord queued but not yet committed to
+// Badger, or false if the key is not queued. GET reads consult this
+// before hitting Badger so read-after-write semantics hold while the
+// batch is in flight.
 func (m *MetadataBatcher) PeekPending(bucket, key, versionID string) (MetadataRecord, bool) {
-	// TODO Phase 4
-	_ = bucket
-	_ = key
-	_ = versionID
-	_ = &m.pending
-	return MetadataRecord{}, false
+	v, ok := m.pending.Load(pendingKey{Bucket: bucket, Key: key, VersionID: versionID})
+	if !ok {
+		return MetadataRecord{}, false
+	}
+	return v.(MetadataRecord), true
 }
 
-// Run consumes MetadataRecord values until ctx is done.
+// Run consumes MetadataRecord values until ctx is done, flushing in
+// batches by count or by time.
 func (m *MetadataBatcher) Run(ctx context.Context) {
-	// TODO Phase 4 — Phase 1 references silence unused-field lint.
-	_ = ctx
-	_ = m.in
-	_ = m.db
-	_ = m.batchSize
-	_ = m.flushAfter
+	flush := m.flushFn
+	if flush == nil {
+		flush = m.flush
+	}
+	buf := make([]MetadataRecord, 0, m.batchSize)
+	timer := time.NewTimer(m.flushAfter)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if len(buf) > 0 {
+				flush(buf)
+			}
+			return
+		case rec, ok := <-m.in:
+			if !ok {
+				if len(buf) > 0 {
+					flush(buf)
+				}
+				return
+			}
+			m.pending.Store(
+				pendingKey{Bucket: rec.Bucket, Key: rec.Key, VersionID: rec.VersionID},
+				rec,
+			)
+			buf = append(buf, rec)
+			if len(buf) >= m.batchSize {
+				flush(buf)
+				buf = buf[:0]
+				resetTimer(timer, m.flushAfter)
+			}
+		case <-timer.C:
+			if len(buf) > 0 {
+				flush(buf)
+				buf = buf[:0]
+			}
+			timer.Reset(m.flushAfter)
+		}
+	}
+}
+
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
+}
+
+// flush commits a batch to Badger. Phase 5 wires the real Badger txn;
+// here (db == nil in unit tests) it is a no-op, leaving the pending
+// entries visible to PeekPending, which is what
+// TestMetadataBatcher_PendingVisibleBeforeCommit validates.
+func (m *MetadataBatcher) flush(buf []MetadataRecord) {
+	if m.db == nil {
+		return
+	}
+	// Phase 5: real Badger Update txn + pending.Delete on success.
 }
