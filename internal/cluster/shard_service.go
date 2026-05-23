@@ -162,87 +162,6 @@ func (s *ShardService) DataDirs() []string {
 	return s.dataDirs
 }
 
-// localDataDirs returns the active shard data directories for the EC writer's
-// C-optimisation hook.
-func (s *ShardService) localDataDirs() []string {
-	if s == nil {
-		return nil
-	}
-	return s.dataDirs
-}
-
-// hasDataWAL satisfies ecObjectShardStore: the C-path uses this to decide
-// whether the WAL batch fsync covers durability (in which case per-shard
-// fsync can be skipped).
-func (s *ShardService) hasDataWAL() bool {
-	if s == nil {
-		return false
-	}
-	return s.dataWAL != nil
-}
-
-// importLocalShardFromPath promotes a fully-written shard payload at srcPath
-// (already in the final on-disk format with the matching AAD for bucket /
-// shardKey / shardIdx) into the canonical shard slot. The source MUST live on
-// the same filesystem as the destination drive (the writer caller is
-// responsible for placing the spool file on dataDirs[shardIdx % len]).
-//
-// requireFsync gates the durability fsync: callers pass true for shards that
-// must survive a host crash on their own (data shards in an EC-aware policy),
-// and false when EC reconstruction is allowed to rebuild a lost shard from
-// surviving peers (parity shards, or any shard when EC has enough redundancy).
-// fsync is the dominant cost on macOS APFS (~50% of PUT time at 5 MiB EC 2+2),
-// so skipping it for parity shards gives a large throughput win without
-// breaking crash-recovery guarantees: a 2+2 stripe survives loss of up to 2
-// shards, and EC reconstruction is invoked on read when CRC detects torn
-// content.
-//
-// The operation is two steps: rename srcPath → finalPath.tmp, fsync the file
-// (if requireFsync), then rename .tmp → finalPath. The two-step pattern
-// mirrors writeBuffered's atomic-rename recipe and survives a crash between
-// rename and fsync because the .tmp file is removed on cleanup paths.
-func (s *ShardService) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string, requireFsync bool) error {
-	dir := s.getShardDir(bucket, key, shardIdx)
-	if err := s.ensureShardDir(dir); err != nil {
-		return fmt.Errorf("import shard mkdir %s: %w", dir, err)
-	}
-	finalPath := s.getShardPath(bucket, key, shardIdx)
-
-	// If fsync is not required, perform a single direct rename to eliminate
-	// metadata write overhead on macOS APFS.
-	if !requireFsync {
-		if err := os.Rename(srcPath, finalPath); err != nil {
-			return fmt.Errorf("import shard rename direct %s → %s: %w", srcPath, finalPath, err)
-		}
-		return nil
-	}
-
-	tmpPath := fmt.Sprintf("%s.%d.%d.import.tmp", finalPath, os.Getpid(), time.Now().UnixNano())
-	if err := os.Rename(srcPath, tmpPath); err != nil {
-		return fmt.Errorf("import shard rename %s → %s: %w", srcPath, tmpPath, err)
-	}
-	f, err := os.OpenFile(tmpPath, os.O_RDONLY, 0)
-	if err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard reopen for fsync: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard fsync: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard close: %w", err)
-	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("import shard finalize rename: %w", err)
-	}
-	_ = ctx // import is synchronous; ctx reserved for future cancellation
-	return nil
-}
-
 func (s *ShardService) getShardPath(bucket, key string, shardIdx int) string {
 	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
 	return filepath.Join(targetDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
@@ -1174,41 +1093,6 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 		return false, fmt.Errorf("data wal flush shard: %w", err)
 	}
 	return false, nil
-}
-
-// appendShardMetadataWALBatch logs one OpShardPut metadata-only record per
-// shard then flushes once, so the C-path rename batch pays a single fsync
-// for all shards in an object instead of one per shard. Used by the EC
-// object writer when spoolECShardsToFinal lined up multiple shards on
-// their target drives and the writer is about to rename them into place.
-// Mirrors appendShardDataWAL's semantics for the >= walPayloadInlineThreshold
-// branch: the WAL records what the on-disk state SHOULD be; lost shards are
-// detected at read time and rebuilt by EC reconstruction.
-func (s *ShardService) appendShardMetadataWALBatch(ctx context.Context, bucket string, key string, shards []shardMetaWALEntry) error {
-	if s.dataWAL == nil || s.replayingDataWAL.Load() {
-		return nil
-	}
-	for _, m := range shards {
-		rec := datawal.Record{
-			Op:     datawal.OpShardPut,
-			Bucket: bucket,
-			Key:    key,
-			Target: strconv.Itoa(m.shardIdx),
-			Size:   m.size,
-		}
-		if _, err := s.dataWAL.Append(ctx, rec); err != nil {
-			return fmt.Errorf("data wal append shard metadata: %w", err)
-		}
-	}
-	if err := s.dataWAL.Flush(); err != nil {
-		return fmt.Errorf("data wal flush shard metadata batch: %w", err)
-	}
-	return nil
-}
-
-type shardMetaWALEntry struct {
-	shardIdx int
-	size     int64
 }
 
 // RecoverDataWAL replays missing shard files from the data WAL. Safe to call

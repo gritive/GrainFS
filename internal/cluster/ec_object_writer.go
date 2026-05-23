@@ -23,27 +23,6 @@ type ecObjectShardStore interface {
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
 	DeleteLocalShards(bucket, key string) error
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
-	// localDataDirs returns the shard service's local drive roots so the C
-	// optimisation in writeSpooledShards can pick a per-drive spool path.
-	// Returns an empty slice for shard services that don't expose drives.
-	localDataDirs() []string
-	// importLocalShardFromPath atomically promotes a fully-written shard
-	// payload (final on-disk format) at srcPath into the canonical shard
-	// slot for (bucket, key, shardIdx). Used by the C rename-instead-of-copy
-	// path in writeShardReadersWithSize. requireFsync controls per-shard
-	// durability: pass true for shards whose loss the cluster cannot tolerate
-	// (data shards in EC-aware mode), false when an earlier WAL fsync already
-	// covers the shard (the C-path WAL metadata batch).
-	importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string, requireFsync bool) error
-	// appendShardMetadataWALBatch records one OpShardPut metadata-only entry
-	// per shard and fsyncs the WAL exactly once. Used immediately before the
-	// C-path renames so a single WAL fsync covers durability for the entire
-	// object — recovery verifies each shard's presence and defers
-	// missing-shard reconstruction to read time / scrubber.
-	appendShardMetadataWALBatch(ctx context.Context, bucket, key string, shards []shardMetaWALEntry) error
-	// hasDataWAL reports whether a data WAL is wired. When false the C-path
-	// must still fsync each data shard for crash safety (legacy fallback).
-	hasDataWAL() bool
 }
 
 type ecObjectSizedShardStore interface {
@@ -198,7 +177,7 @@ func (w ecObjectWriter) writeShardReaders(
 	openShard func(idx int) (io.Reader, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
-	return w.writeShardReadersWithSize(ctx, plan, sp, openShard, nil, metricPath, nil)
+	return w.writeShardReadersWithSize(ctx, plan, sp, openShard, nil, metricPath)
 }
 
 func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWritePlan, sp *spooledObject) (ecObjectWriteResult, error) {
@@ -241,7 +220,7 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 			return 0, fmt.Errorf("ec memory shard %d out of range", idx)
 		}
 		return int64(len(shards[idx])), nil
-	}, "ec_memory", nil)
+	}, "ec_memory")
 }
 
 func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
@@ -266,29 +245,12 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 			return 0, fmt.Errorf("ec data shard %d out of range", idx)
 		}
 		return int64(shardHeaderSize + len(shards[idx])), nil
-	}, "ec", nil)
+	}, "ec")
 }
 
 func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {
 	stageStart := time.Now()
-	// Prefer the C-optimized per-drive spool that bakes in the final shard
-	// AAD so writeShardReadersWithSize can rename-instead-of-copy on local
-	// shards. Requires an encryptor (the at-rest-encryption default) and a
-	// local ShardService that exposes its data drives. Cluster fan-out and
-	// plaintext deployments still take the legacy single-dir spool path.
-	var (
-		shards *spooledECShards
-		err    error
-	)
-	if sp != nil && sp.encrypted && sp.encryptor != nil && w.shards != nil {
-		if drives := w.shards.localDataDirs(); len(drives) > 0 {
-			shardKey := ecObjectSegmentShardKey(plan)
-			shards, err = spoolECShardsToFinal(ctx, plan.Config, drives, plan.Bucket, shardKey, sp)
-		}
-	}
-	if shards == nil {
-		shards, err = spoolECShards(ctx, plan.Config, spoolDir, sp)
-	}
+	shards, err := spoolECShards(ctx, plan.Config, spoolDir, sp)
 	if err != nil {
 		return ecObjectWriteResult{}, err
 	}
@@ -297,7 +259,7 @@ func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWri
 
 	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
 		return shards.OpenShard(idx)
-	}, shards.ShardSize, "ec", shards)
+	}, shards.ShardSize, "ec")
 }
 
 func (w ecObjectWriter) writeShardReadersWithSize(
@@ -307,7 +269,6 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
-	spooled *spooledECShards,
 ) (ecObjectWriteResult, error) {
 	shardKey := ecObjectSegmentShardKey(plan)
 	written := make(chan string, len(plan.Placement))
@@ -323,37 +284,6 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 		}
 	}
 
-	// C-path WAL batch: when the spool prepared every local shard in final
-	// format AND a data WAL is wired, record all shards' metadata in ONE WAL
-	// flush. After this single fsync, the per-shard rename loop can skip
-	// fsync entirely — recovery uses the WAL records to verify the on-disk
-	// state and defers missing-shard reconstruction to read time. Matches
-	// the original "fsync only in data WAL" design intent that
-	// size-aware WAL bypass had unintentionally regressed.
-	walCoversCPath := false
-	if spooled != nil && spooled.finalFormat && w.shards.hasDataWAL() {
-		var meta []shardMetaWALEntry
-		for i, node := range plan.Placement {
-			if node != w.selfID || i >= len(spooled.paths) || spooled.paths[i] == "" {
-				continue
-			}
-			if shardSize == nil {
-				continue
-			}
-			size, err := shardSize(i)
-			if err != nil {
-				continue
-			}
-			meta = append(meta, shardMetaWALEntry{shardIdx: i, size: size})
-		}
-		if len(meta) > 0 {
-			if err := w.shards.appendShardMetadataWALBatch(ctx, plan.Bucket, shardKey, meta); err != nil {
-				return ecObjectWriteResult{}, fmt.Errorf("data wal metadata batch: %w", err)
-			}
-			walCoversCPath = true
-		}
-	}
-
 	stageStart := time.Now()
 	g, gctx := errgroup.WithContext(ctx)
 	for i, node := range plan.Placement {
@@ -362,47 +292,6 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 			shardStageStart := time.Now()
 			var werr error
 			if node == w.selfID {
-				// C optimisation: when the spool wrote shard i to its target
-				// drive in the final shard format under the final AAD, the
-				// shard service can just rename the spool file into the
-				// canonical slot. Skips an entire decrypt + re-encrypt + 2nd
-				// disk write per shard.
-				if spooled != nil && spooled.finalFormat && i < len(spooled.paths) && spooled.paths[i] != "" {
-					srcPath := spooled.paths[i]
-					// Durability layering:
-					//   - walCoversCPath=true: the batched WAL flush above
-					//     already made the metadata durable. We can skip the
-					//     per-shard fsync entirely; on crash, the WAL replay
-					//     points at missing shards and EC reconstruction
-					//     rebuilds them from surviving peers at read time.
-					//   - walCoversCPath=false (no WAL wired): no fsync
-					//     coverage exists, so each data shard must fsync
-					//     itself. Parity still skips fsync — EC reconstruct
-					//     from data shards still works.
-					shardRequireFsync := false
-					if !walCoversCPath {
-						shardRequireFsync = i < plan.Config.DataShards
-					}
-					werr = w.shards.importLocalShardFromPath(gctx, plan.Bucket, shardKey, i, srcPath, shardRequireFsync)
-					if werr == nil {
-						// Tell the spooled set we transferred ownership of
-						// this path so Cleanup() doesn't try to delete the
-						// (now-renamed-away) file.
-						spooled.paths[i] = ""
-					}
-					observePutStage("ec_write_shard", "local_rename", shardStageStart)
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteLocal, shardStageStart, PutTraceStageFields{
-						ShardIndex:       i,
-						ShardTarget:      node,
-						ShardTargetClass: "local",
-						Error:            putTraceErrorString(werr),
-					})
-					if werr != nil {
-						return &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}
-					}
-					written <- node
-					return nil
-				}
 				body, err := openShard(i)
 				if err != nil {
 					return fmt.Errorf("open ec shard %d: %w", i, err)

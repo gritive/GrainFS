@@ -7,7 +7,6 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -386,27 +385,6 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, sha
 func (f *fakeECObjectWriterShards) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
 	return f.WriteLocalShardStream(bucket, key, shardIdx, body)
 }
-
-// localDataDirs returns nil so the test fake exercises the legacy spool path
-// in writeSpooledShards (the C optimisation only kicks in when the shard
-// service exposes drive roots).
-func (f *fakeECObjectWriterShards) localDataDirs() []string { return nil }
-
-// importLocalShardFromPath is unreachable for the fake because localDataDirs
-// returns nil; surface a sentinel error to catch wiring regressions.
-func (f *fakeECObjectWriterShards) importLocalShardFromPath(ctx context.Context, bucket, key string, shardIdx int, srcPath string, requireFsync bool) error {
-	return fmt.Errorf("fakeECObjectWriterShards.importLocalShardFromPath called but C optimisation is disabled in tests")
-}
-
-// appendShardMetadataWALBatch is a no-op for the fake — the C-path test
-// suite never hits this method because localDataDirs returns nil.
-func (f *fakeECObjectWriterShards) appendShardMetadataWALBatch(ctx context.Context, bucket, key string, shards []shardMetaWALEntry) error {
-	return nil
-}
-
-// hasDataWAL returns false so the C-path falls back to per-shard fsync in
-// the fake (matching the legacy test fixture's behaviour).
-func (f *fakeECObjectWriterShards) hasDataWAL() bool { return false }
 
 func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
 	f.mu.Lock()
