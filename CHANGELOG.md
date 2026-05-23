@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.328.0] - 2026-05-24
+
+### Changed
+
+- **PUT pipeline `DriveActor` no longer holds its mutex across filesystem syscalls.** First-chunk handling used to acquire the actor's mutex and then run `MkdirAll` + `OpenFile` + `ApplyNoCacheHint` while holding it. Concurrent `registerPut` / `dropPending` calls from other PUTs queued behind those syscalls. The split keeps the lock short and lets the actor scale with concurrent PUTs.
+- **PUT pipeline `DriveActor` writes encrypted chunks straight to the file.** The intermediate `bufio.Writer` per shard was buffering chunks that already arrived at ~1 MiB granularity, adding a memcpy hop without coalescing further work. Removing it frees per-PUT memory and lets each chunk reach the kernel sooner.
+
+### Added
+
+- **`Content-MD5` from a client request is honored as the object ETag when it matches the body.** When the header is present the pipeline still hashes the body (in parallel with EC + encrypt + write), verifies the result, and returns `BadDigest` on mismatch — the standard S3 contract. Clients that send a correct `Content-MD5` get the header value back as the ETag without an extra recompute; clients that don't send the header get the computed MD5 as before.
+- **`BENCH_WARP_MD5=1` opt-in for the bench harness** so `bench_s3_compat_compare.sh` forwards `--md5` to warp. Useful for apples-to-apples comparisons across backends that benefit differently from client-side MD5.
+
 ## [0.0.327.0] - 2026-05-23
 
 ### Changed
