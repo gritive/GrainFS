@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
@@ -37,7 +38,7 @@ type shardPackLocation struct {
 type shardPackStore struct {
 	dir       string
 	maxSize   int64
-	mu        sync.Mutex
+	indexMu   sync.RWMutex
 	active    *os.File
 	activeID  uint64
 	activeOff int64
@@ -50,6 +51,13 @@ type shardPackStore struct {
 	// pack blob is appended. RecoverDataWAL passes nil to avoid recursion
 	// when materializing replayed records back into the pack.
 	dataWAL DataWALAppender
+
+	// Actor mailbox. nil cmdCh = recovery / nil-WAL store (actor not started);
+	// callers fall through to the direct appendDirect path.
+	cmdCh      chan packCmd
+	stopCh     chan struct{}
+	closeAckCh chan error
+	closed     atomic.Bool
 }
 
 func newShardPackStore(dir string, dwal DataWALAppender) (*shardPackStore, error) {
@@ -69,6 +77,12 @@ func newShardPackStore(dir string, dwal DataWALAppender) (*shardPackStore, error
 	if err := s.rotate(); err != nil {
 		return nil, err
 	}
+	if dwal != nil {
+		s.cmdCh = make(chan packCmd, maxShardPackBatch)
+		s.stopCh = make(chan struct{})
+		s.closeAckCh = make(chan error, 1)
+		go newShardPackActor(s).run()
+	}
 	return s, nil
 }
 
@@ -81,34 +95,68 @@ func shardPackPrefix(bucket, key string) string {
 }
 
 func (s *shardPackStore) put(bucket, key string, shardIdx int, data []byte) error {
-	return s.append(shardPackFlagPut, shardPackKey(bucket, key, shardIdx), data)
+	return s.enqueue(shardPackFlagPut, shardPackKey(bucket, key, shardIdx), data)
 }
 
 func (s *shardPackStore) deleteKey(bucket, key string) error {
-	return s.append(shardPackFlagDel, shardPackPrefix(bucket, key), nil)
+	return s.enqueue(shardPackFlagDel, shardPackPrefix(bucket, key), nil)
+}
+
+// enqueue routes a write through the actor mailbox (post-recovery, dataWAL != nil)
+// or falls back to the in-line append path (recovery stores with nil dataWAL).
+func (s *shardPackStore) enqueue(flag byte, key string, data []byte) error {
+	if s.cmdCh == nil {
+		// No actor: nil-WAL store used during RecoverDataWAL replay. Direct path.
+		return s.appendDirect(flag, key, data)
+	}
+	if s.closed.Load() {
+		return ErrShardPackClosed
+	}
+	ack := make(chan error, 1)
+	select {
+	case s.cmdCh <- packCmd{flag: flag, key: key, data: data, ack: ack}:
+	case <-s.stopCh:
+		return ErrShardPackClosed
+	}
+	return <-ack
 }
 
 func (s *shardPackStore) get(bucket, key string, shardIdx int) ([]byte, bool, error) {
 	pkey := shardPackKey(bucket, key, shardIdx)
-	s.mu.Lock()
+
+	// Look up the index under RLock. readFiles is also read here; it is only
+	// written under WLock (below). The actor never writes readFiles, so RLock
+	// suffices for the cached-handle fast path.
+	s.indexMu.RLock()
 	loc, ok := s.index[pkey]
-	f := s.readFiles[loc.blobID]
-	if ok && f == nil && s.activeID == loc.blobID {
-		f = s.active
+	var f *os.File
+	if ok {
+		f = s.readFiles[loc.blobID]
 	}
-	if ok && f == nil {
-		var err error
-		f, err = os.Open(s.blobPath(loc.blobID))
-		if err != nil {
-			s.mu.Unlock()
-			return nil, true, err
-		}
-		s.readFiles[loc.blobID] = f
-	}
-	s.mu.Unlock()
+	s.indexMu.RUnlock()
+
 	if !ok {
 		return nil, false, nil
 	}
+
+	// Slow path: blob handle not cached yet. Upgrade to WLock so only one
+	// goroutine opens and caches a handle for this blobID.
+	if f == nil {
+		s.indexMu.Lock()
+		// Re-check under WLock (another goroutine may have opened it already).
+		f = s.readFiles[loc.blobID]
+		if f == nil {
+			var err error
+			f, err = os.Open(s.blobPath(loc.blobID))
+			if err != nil {
+				s.indexMu.Unlock()
+				return nil, true, err
+			}
+			s.readFiles[loc.blobID] = f
+		}
+		s.indexMu.Unlock()
+	}
+
 	data := make([]byte, loc.length)
 	if _, err := f.ReadAt(data, loc.offset); err != nil {
 		return nil, true, err
@@ -116,9 +164,12 @@ func (s *shardPackStore) get(bucket, key string, shardIdx int) ([]byte, bool, er
 	return data, true, nil
 }
 
-func (s *shardPackStore) append(flag byte, key string, data []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// appendDirect is the in-line write path used by recovery (nil-WAL stores).
+// Runtime callers go through the actor via enqueue. Holds indexMu for the
+// duration: acceptable because no concurrent writers exist in recovery mode.
+func (s *shardPackStore) appendDirect(flag byte, key string, data []byte) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 
 	s.scratch = appendShardPackRecord(s.scratch[:0], flag, key, data)
 	record := s.scratch
@@ -188,7 +239,7 @@ func appendShardPackRecord(dst []byte, flag byte, key string, data []byte) []byt
 
 func (s *shardPackStore) rotate() error {
 	// Per-rotation fsync of the closing blob is intentionally omitted: the data
-	// WAL owns durability for every pack record (see append above), so a
+	// WAL owns durability for every pack record (see appendDirect above), so a
 	// crash-then-replay rebuilds the rotated blob from WAL records. The dir
 	// sync after open keeps the new blob's directory entry durable.
 	if s.active != nil {
@@ -212,10 +263,22 @@ func (s *shardPackStore) rotate() error {
 // Used by RecoverDataWAL to drop the pre-recovery state before replaying
 // records onto a freshly-opened store.
 func (s *shardPackStore) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Stop the actor first: fast-path reject new enqueues, signal stop, wait
+	// for drain + commit completion. Skip when no actor (nil-WAL recovery store).
+	if s.cmdCh != nil {
+		if !s.closed.Swap(true) {
+			close(s.stopCh)
+			<-s.closeAckCh
+		}
+	}
+
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	var firstErr error
 	if s.active != nil {
+		if err := s.active.Sync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		if err := s.active.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -232,11 +295,11 @@ func (s *shardPackStore) Close() error {
 
 // appendRawRecord replays a WAL-captured pack record back onto the on-disk
 // pack blob and rebuilds the in-memory index. The record bytes are exactly
-// what append wrote in the original (pre-crash) call, so scanRecord parses
-// them with the same CRC envelope used by scanFile.
+// what appendDirect wrote in the original (pre-crash) call, so scanRecord
+// parses them with the same CRC envelope used by scanFile.
 func (s *shardPackStore) appendRawRecord(record []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	if len(record) < 9+4 {
 		return fmt.Errorf("shard pack: replay record too short: %d", len(record))
 	}
