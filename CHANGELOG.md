@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.329.0] - 2026-05-24
+
+### Changed
+
+- **Shard-pack writes scale with concurrent PUTs.** `shardPackStore` used to hold a single `sync.Mutex` across WAL append, fsync, and pack-blob write — so each concurrent caller paid a full fsync round-trip in series. A new single-writer actor goroutine now batches multiple shard records into one fsync per commit while the WAL's existing group-commit handles the rest. Measured warp PUT throughput rose from 6.82 → 29.76 MiB/s on a 4-node cluster (16 concurrent, 64 KiB objects) — a **4.36× gain**. Mutex contention on the shard-pack path dropped from 100% to ~0%; new top consumers are BadgerDB memtable flush and raw disk I/O. The `grainfs_shardpack_batch_size` histogram and `grainfs_shardpack_batch_aborts_total{reason}` counter expose batch-size distribution and rare-path observability. `GRAINFS_SHARDPACK_BATCH_MAX=1` disables batching at process start for bench isolation.
+
 ## [0.0.328.0] - 2026-05-24
 
 ### Changed
