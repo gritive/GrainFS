@@ -84,6 +84,9 @@ func getDispatcherWithClient(backend storage.Backend, state *StateManager, serve
 	d.minorVer = 0
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
+	if server != nil {
+		d.writeBuffer = server.writeBuffer
+	}
 	return d
 }
 
@@ -95,6 +98,7 @@ func putDispatcher(d *Dispatcher) {
 	d.hinter = nil
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
+	d.writeBuffer = nil
 	dispatcherPool.Put(d)
 }
 
@@ -256,6 +260,7 @@ type Dispatcher struct {
 	minorVer         uint32
 	replayFull       []byte     // non-nil when a SEQUENCE cache hit provides the full COMPOUND response
 	pendingCacheSlot *SlotEntry // non-nil when cacheThis=1; filled after full response is encoded
+	writeBuffer      *writeBuffer
 }
 
 const (

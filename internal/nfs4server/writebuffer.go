@@ -58,6 +58,24 @@ func newWriteBuffer(dir string, backend writeBufferBackend) *writeBuffer {
 	}
 }
 
+// NewWriteBuffer is the exported constructor used by serveruntime to build
+// the buffer before passing it to the server via WithWriteBuffer.
+func NewWriteBuffer(dir string, backend writeBufferBackend) *writeBuffer {
+	return newWriteBuffer(dir, backend)
+}
+
+// SetIdleTimeout overrides the default 30s idle flush timeout. Call before
+// passing the buffer to Run.
+func (wb *writeBuffer) SetIdleTimeout(d time.Duration) {
+	wb.idleTimeout = d
+}
+
+// SetRecoveryRetryDelay overrides the default 1s recovery retry delay.
+// Useful for tests or operators tuning startup behavior.
+func (wb *writeBuffer) SetRecoveryRetryDelay(d time.Duration) {
+	wb.recoveryRetryDelay = d
+}
+
 func (wb *writeBuffer) entryKey(bucket, key string) string {
 	return bucket + "/" + key
 }

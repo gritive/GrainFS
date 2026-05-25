@@ -47,6 +47,10 @@ type Server struct {
 	// allow/deny decision with a populated audit.S3Event (Source="nfs4").
 	// nil = no audit emit (backward compat, tests without audit wired).
 	auditHook func(audit.S3Event)
+
+	// writeBuffer is the optional write coalescing buffer (dataWAL stream).
+	// nil = default RMW path (unbuffered writes).
+	writeBuffer *writeBuffer
 }
 
 // ConfigReader is the small slice of the config store that the NFS server
@@ -90,6 +94,12 @@ func WithConfigReader(c ConfigReader) ServerOption {
 // nil keeps the previous behaviour (no audit emit).
 func WithAuditHook(hook func(audit.S3Event)) ServerOption {
 	return func(srv *Server) { srv.auditHook = hook }
+}
+
+// WithWriteBuffer wires a write coalescing buffer into the NFS server.
+// nil leaves the server in the default RMW path (unbuffered writes).
+func WithWriteBuffer(wb *writeBuffer) ServerOption {
+	return func(srv *Server) { srv.writeBuffer = wb }
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
