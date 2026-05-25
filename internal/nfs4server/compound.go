@@ -1261,7 +1261,21 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	release := d.state.LockPath(objectLockKey(bucket, key))
 	defer release()
 
-	if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
+	if d.writeBuffer != nil {
+		// WriteBuffer is the source of truth for this key while wired —
+		// it must preempt both the WriteAt fast path and the RMW fallback
+		// so concurrent reads/truncates see consistent state and coalescing
+		// applies regardless of backend capabilities (plan §D8).
+		existingContentType := "application/octet-stream"
+		if obj, herr := d.backend.HeadObject(context.Background(), bucket, key); herr == nil {
+			if obj.ContentType != "" {
+				existingContentType = obj.ContentType
+			}
+		}
+		if err = d.writeBuffer.Write(context.Background(), bucket, key, offset, writeData, existingContentType); err != nil {
+			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+		}
+	} else if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
 		if _, err = wa.WriteAt(context.Background(), bucket, key, offset, writeData); err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1289,11 +1303,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		br := bytesReaderPool.Get()
 		defer bytesReaderPool.Put(br)
 
-		if d.writeBuffer != nil {
-			if err = d.writeBuffer.Write(context.Background(), bucket, key, offset, writeData, existingContentType); err != nil {
-				return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
-			}
-		} else if offset == 0 && end >= existingSize {
+		if offset == 0 && end >= existingSize {
 			br.Reset(writeData)
 			_, err = d.backend.PutObject(context.Background(), bucket, key, br, existingContentType)
 		} else {
