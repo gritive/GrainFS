@@ -1120,6 +1120,16 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	count := binary.BigEndian.Uint32(data[24:28])
 
 	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.writeBuffer != nil {
+		data, hit, err := d.writeBuffer.Read(context.Background(), bucket, key, offset, count)
+		if err != nil {
+			return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
+		}
+		if hit {
+			eof := uint64(len(data)) < uint64(count)
+			return OpResult{OpCode: OpRead, Status: NFS4_OK, readData: data, readEOF: eof}
+		}
+	}
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
 	if ra, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
 		var buf []byte
