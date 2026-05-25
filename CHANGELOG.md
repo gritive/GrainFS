@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.332.0] - 2026-05-26
+
+### Changed
+
+- **Server startup now runs through an explicit boot runtime phase plan.** `Run` delegates the ordered startup sequence to a named phase runner, and the data-plane Raft node setup is now a regular boot phase between transport and meta-Raft wiring. Tests lock the critical ordering so future startup changes have one contract to update.
+
+### Fixed
+
+- **`make test-unit` no longer runs the Colima cluster fixture smoke test.** The unit lane excludes `tests/colimafixture`, keeping the host-cluster boot fixture in the Colima-oriented test lane instead of requiring a prebuilt `bin/grainfs` during unit verification.
+
 ## [0.0.331.0] - 2026-05-26
 
 ### Changed
