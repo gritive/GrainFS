@@ -49,7 +49,7 @@ Flags:
       --goroutine-recovery-window duration                  minimum time below warn threshold before transitioning to ok (default 1m0s)
       --goroutine-warn int                                  goroutine count that triggers warn-level alert (transition-only firing) (default 5000)
       --goroutine-watch-enabled                             enable predictive goroutine count warnings (default true)
-      --heal-receipt-enabled                                enable HealReceipt audit API (Phase 16 Slice 2) (default true)
+      --heal-receipt-enabled                                enable HealReceipt audit API (default true)
       --heal-receipt-gossip-interval duration               how often this node gossips its recent receipt IDs to peers (default 5s)
       --heal-receipt-psk string                             PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)
       --heal-receipt-retention duration                     HealReceipt retention window (older entries are GC'd) (default 720h0m0s)

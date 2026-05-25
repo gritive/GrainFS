@@ -275,9 +275,9 @@ Each must have explicit test coverage before merge:
 | `TestE2E_AutoMigration_PerGroupToShared` | e2e | start with old layout dir, verify migration + correctness |
 | `TestE2E_ClusterPerf_All` (existing harness) | perf | idle goroutines/CPU drop to target |
 
-## Phases
+## Implementation Milestones
 
-| Phase | Scope | Estimate |
+| Milestone | Scope | Estimate |
 |---|---|---|
 | P1 | Design review, finalize key encoding + interface | 0.5d |
 | P2 | `NamespacedLogStore` + `BadgerLogStore` shared mode + unit tests | 1d |
@@ -785,7 +785,7 @@ E2E:
 | `TestE2E_ClusterPerf_SharedFSM_LoadN8` | parity with P0b matrix; no regression on the established win |
 | `TestE2E_ClusterPerf_SharedFSM_LoadN32` | the C2 boot-ceiling lift; cluster forms leader and serves PUTs at N=32 with <1% error rate |
 
-### Phase ordering
+### Sequencing
 
 This is C2 P3, sequenced AFTER P0b measurement confirms the shared-log
 direction works. If P0b shows shared-log alone unblocks load-N32 boot
@@ -995,10 +995,10 @@ When the sweep is done, fill in this table:
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)
 - Codex review of this design: see PR review thread linked from #128
-- TODOS Phase 19 entry: "BadgerDB instance consolidation" (deferred from C1)
+- TODOS entry: "BadgerDB instance consolidation" (deferred from C1)
 - P0a plan + measurements: this section + `tests/e2e/cluster_perf_profile_test.go` matrix
 
 ---
 
 **Decision needed**: approve scope and target metrics, then assign owner +
-phase ordering. Do not start P2 implementation before P1 design review.
+implementation order. Do not start P2 implementation before P1 design review.

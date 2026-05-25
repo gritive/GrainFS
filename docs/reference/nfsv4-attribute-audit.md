@@ -11,7 +11,7 @@ attribute is not in `supported_attrs` or not returned.
 
 SETATTR uses its own writable-status legend below.
 
-Last audit: 2026-05-14, NFS multi-export Phase 6.
+Last audit: 2026-05-14, NFS multi-export workstream.
 
 ## REQUIRED Attributes
 

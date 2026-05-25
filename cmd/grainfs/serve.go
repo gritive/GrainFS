@@ -76,31 +76,31 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration("vlog-smoke-defer", 60*time.Second, "delay before vlog registry startup smoke runs")
 	cmd.Flags().Int64("badger-value-threshold", 0, "force BadgerDB ValueThreshold (bytes) so values above this size spill to vlog; 0 keeps GrainFS small-store default. Test-only.")
 	_ = cmd.Flags().MarkHidden("badger-value-threshold")
-	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
-	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
+	// Direct I/O on local shard writes bypasses the kernel page cache (Linux
+	// O_DIRECT, macOS F_NOCACHE). On by default — the bench
 	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
 	// shards, 40% on 4MB, neutral on 16MB. Filesystems that reject O_DIRECT
 	// (some overlayfs/tmpfs) fall back to the buffered path automatically;
 	// pass --direct-io=false to force buffered everywhere.
 	cmd.Flags().Bool("direct-io", true, "bypass page cache on local EC shard writes (Linux O_DIRECT / macOS F_NOCACHE)")
 	_ = cmd.Flags().MarkHidden("direct-io")
-	// Phase 2 #3 evaluation flag: when on, every volume-block and EC-shard
-	// read is fed to the read-amplification simulator at three cache sizes
-	// (16/64/256 MB equivalent) per path. Hit/miss counters appear at
-	// /metrics under grainfs_readamp_*. Off by default — production pays
-	// only an atomic.Bool load per read when this is unset.
+	// When on, every volume-block and EC-shard read is fed to the
+	// read-amplification simulator at three cache sizes (16/64/256 MB
+	// equivalent) per path. Hit/miss counters appear at /metrics under
+	// grainfs_readamp_*. Off by default — production pays only an atomic.Bool
+	// load per read when this is unset.
 	cmd.Flags().Bool("measure-read-amp", false, "enable read-amplification simulator (informs Unified Buffer Cache decision)")
-	// Phase 2 #3 implementation: in-memory block cache for volume.ReadAt.
-	// Default 64 MB matches the simulator's measured "knee" — workloads with
-	// temporal locality saturate around that budget. Set 0 to disable.
+	// In-memory block cache for volume.ReadAt. Default 64 MB matches the
+	// simulator's measured "knee" — workloads with temporal locality saturate
+	// around that budget. Set 0 to disable.
 	cmd.Flags().Int64("block-cache-size", 64*1024*1024, "volume block cache capacity in bytes (0 disables)")
-	// EC shard cache (Phase 2 #3 follow-up). Sits in front of getObjectEC's
-	// per-shard fan-out. Default 1 GiB keeps repeated multipart range reads
-	// resident in 4-node cluster runs without the RSS jump seen at 2 GiB.
-	// Set 0 to disable when running --measure-read-amp baselines.
+	// EC shard cache sits in front of getObjectEC's per-shard fan-out. Default
+	// 1 GiB keeps repeated multipart range reads resident in 4-node cluster
+	// runs without the RSS jump seen at 2 GiB. Set 0 to disable when running
+	// --measure-read-amp baselines.
 	cmd.Flags().Int64("shard-cache-size", 1024*1024*1024, "EC shard cache capacity in bytes (0 disables)")
-	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
-	cmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
+	// HealReceipt API + gossip.
+	cmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API")
 	cmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
 	cmd.Flags().Duration("heal-receipt-retention", 30*24*time.Hour, "HealReceipt retention window (older entries are GC'd)")
 	cmd.Flags().Duration("heal-receipt-gossip-interval", 5*time.Second, "how often this node gossips its recent receipt IDs to peers")

@@ -78,13 +78,26 @@ The node restarted without its KEK file. The KEK is needed to unwrap the FSM-sto
 scp nodeA:<data>/kek.key <data>/kek.key
 chmod 0600 <data>/kek.key
 
-# Option B: decommission and rejoin
+# Option B: decommission and rejoin before starting the replacement node
 rm -rf <data>
-grainfs serve --data <data> ...
-grainfs cluster join <healthy-peer>
+mkdir -p <data>
+scp nodeA:<data>/kek.key <data>/kek.key
+chmod 0600 <data>/kek.key
+grainfs cluster join <healthy-peer>:7001 \
+  --data <data> \
+  --node-id <replacement-node-id> \
+  --bind-addr <replacement-node>:7001 \
+  --cluster-key "$CLUSTER_KEY"
+grainfs serve \
+  --data <data> \
+  --node-id <replacement-node-id> \
+  --raft-addr <replacement-node>:7001 \
+  --cluster-key "$CLUSTER_KEY"
 ```
 
-(Don't forget to `scp kek.key` BEFORE running `cluster join` on Option B.)
+`grainfs cluster join` is the offline bootstrap path for a not-yet-running
+node. If the node is already running and has an admin socket, use
+`grainfs join <healthy-peer>:7001 --endpoint <data>/admin.sock` instead.
 
 ## "KEK does not decrypt FSM DEK"
 

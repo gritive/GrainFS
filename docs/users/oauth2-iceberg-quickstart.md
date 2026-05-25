@@ -1,6 +1,8 @@
 # OAuth2 Iceberg Quickstart
 
-This guide is for clusters where `iam.anon-enabled=false` (Phase 2+). Phase 0 clusters serve the catalog without auth.
+This guide is for clusters where S3 auth is enabled
+(`iam.anon-enabled=false`). Fresh anonymous clusters serve the catalog without
+auth.
 
 ## 1. Get the config bundle
 

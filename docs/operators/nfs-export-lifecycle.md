@@ -3,6 +3,7 @@
 `GrainFS` exports S3 buckets over NFSv4 only after an explicit registration:
 
 ```bash
+export GRAINFS_ADMIN_SOCKET=<data>/admin.sock
 grainfs bucket create mydata
 grainfs nfs export add mydata
 ```

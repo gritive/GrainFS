@@ -10,7 +10,7 @@ import (
 func statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show cluster/phase/iam/encryption/tls/audit/jwt status",
+		Short: "Show cluster/iam/encryption/tls/audit/jwt status",
 		Example: `  grainfs status
   grainfs status --json`,
 		RunE: func(c *cobra.Command, _ []string) error {

@@ -66,7 +66,7 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 
 			// Initial status: must be steady.
 			st := runRotateKeyCLI(t, dir, "status")
-			gomega.Expect(st.Phase).To(gomega.Equal(1), "initial phase should be steady, got %d", st.Phase)
+			gomega.Expect(st.State).To(gomega.Equal("steady"), "initial state should be steady, got %s", st.State)
 
 			// Begin rotation with --generate so the test doesn't hardcode a key.
 			beginOut := runRotateKeyCLIBeginGenerate(t, dir)
@@ -75,18 +75,18 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 			gomega.Expect(beginOut.NewSPKI).NotTo(gomega.BeEmpty())
 			gomega.Expect(beginOut.NewSPKI).NotTo(gomega.Equal(beginOut.OldSPKI), "OLD and NEW SPKI must differ")
 
-			// Poll until steady-on-NEW (phase=1, OldSPKI = previous NEW). Auto-progress
+			// Poll until steady-on-NEW (state=steady, OldSPKI = previous NEW). Auto-progress
 			// is RotationPhaseGrace=5s per transition; allow 30s slack.
 			deadline := time.Now().Add(45 * time.Second)
 			var final rotationCLIResp
 			for time.Now().Before(deadline) {
 				final = runRotateKeyCLI(t, dir, "status")
-				if final.Phase == 1 && final.OldSPKI == beginOut.NewSPKI {
+				if final.State == "steady" && final.OldSPKI == beginOut.NewSPKI {
 					break
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-			gomega.Expect(final.Phase).To(gomega.Equal(1), "expected steady after auto-progress; got phase=%d (rotation_id=%s)", final.Phase, final.RotationID)
+			gomega.Expect(final.State).To(gomega.Equal("steady"), "expected steady after auto-progress; got state=%s (rotation_id=%s)", final.State, final.RotationID)
 			gomega.Expect(final.OldSPKI).To(gomega.Equal(beginOut.NewSPKI), "active SPKI should now be NEW")
 
 			// Verify keystore on disk reflects the rotation.
@@ -145,7 +145,7 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 			waitSocketReady(t, filepath.Join(dir, "rotate.sock"), 10*time.Second)
 
 			st := runRotateKeyCLI(t, dir, "status")
-			gomega.Expect(st.Phase).To(gomega.Equal(1), "solo node should report steady")
+			gomega.Expect(st.State).To(gomega.Equal("steady"), "solo node should report steady")
 			gomega.Expect(st.RotationID).To(gomega.BeEmpty(), "no in-flight rotation")
 		})
 	})
@@ -154,7 +154,7 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 // rotationCLIResp mirrors the CLI's rotationSocketResponse but lives here to
 // avoid importing internal cmd packages.
 type rotationCLIResp struct {
-	Phase      int    `json:"phase"`
+	State      string `json:"state"`
 	RotationID string `json:"rotation_id,omitempty"`
 	OldSPKI    string `json:"old_spki,omitempty"`
 	NewSPKI    string `json:"new_spki,omitempty"`
@@ -215,11 +215,11 @@ func runRotateKeyCLIBeginGenerate(t testing.TB, dataDir string) rotationCLIResp 
 	// Expected shape:
 	//   Generated new PSK: <hex>
 	//   Save this securely...
-	//   Rotation started: phase=2 rotation_id=<hex>
+	//   Rotation started: state=begun rotation_id=<hex>
 	//     OLD SPKI: <hex>
 	//     NEW SPKI: <hex>
 	//   Cluster will auto-progress...
-	resp := rotationCLIResp{Phase: 2}
+	resp := rotationCLIResp{State: "begun"}
 	for _, line := range strings.Split(out, "\n") {
 		switch {
 		case strings.HasPrefix(line, "Rotation started: "):

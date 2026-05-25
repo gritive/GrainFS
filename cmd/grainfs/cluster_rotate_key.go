@@ -33,17 +33,17 @@ distinct from admin.sock so PSK-bearing operations stay owner-only.
 Workflow (online rolling, zero-downtime):
   1. Generate or supply a new 32-byte PSK (64 hex chars).
   2. Run 'cluster rotate-key begin --new-key=...' on the meta-raft leader.
-  3. The cluster auto-progresses through phases:
-       phase 1 → 2 (begin):    accept set = [OLD, NEW], present OLD
-       phase 2 → 3 (switch):   accept = [OLD, NEW], present NEW (after grace)
-       phase 3 → steady:       accept = [NEW], OLD demoted to previous.key
+  3. The cluster auto-progresses through rotation states:
+       begun:    accept set = [OLD, NEW], present OLD
+       switched: accept = [OLD, NEW], present NEW (after grace)
+       steady:   accept = [NEW], OLD demoted to previous.key
   4. Operator must distribute the same new PSK to all peers' --cluster-key
      environment / config so future restarts pick it up. Workers consume
      keys.d/next.key from disk during rotation.
 
 Failures roll back automatically:
-  - phase 2 abort: revert to OLD
-  - phase 3 abort: forward-roll to NEW (D18; some peers already present NEW)
+  - abort while begun: revert to OLD
+  - abort while switched: forward-roll to NEW (D18; some peers already present NEW)
   - global timeout (30 min): auto-abort`,
 	}
 	c.AddCommand(clusterRotateKeyBegin(), clusterRotateKeyStatus(), clusterRotateKeyAbort())
@@ -95,7 +95,7 @@ func clusterRotateKeyBegin() *cobra.Command {
 			if resp.Error != "" {
 				return fmt.Errorf("server: %s", resp.Error)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Rotation started: phase=%d rotation_id=%s\n", resp.Phase, resp.RotationID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Rotation started: state=%s rotation_id=%s\n", resp.State, resp.RotationID)
 			fmt.Fprintf(cmd.OutOrStdout(), "  OLD SPKI: %s\n", resp.OldSPKI)
 			fmt.Fprintf(cmd.OutOrStdout(), "  NEW SPKI: %s\n", resp.NewSPKI)
 			fmt.Fprintln(cmd.OutOrStdout(), "  Cluster will auto-progress. Watch with 'cluster rotate-key status'.")
@@ -123,7 +123,7 @@ func clusterRotateKeyStatus() *cobra.Command {
 			if resp.Error != "" {
 				return fmt.Errorf("server: %s", resp.Error)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "phase: %s (%d)\n", clusteradmin.RotateKeyPhaseLabel(resp.Phase), resp.Phase)
+			fmt.Fprintf(cmd.OutOrStdout(), "state: %s\n", resp.State)
 			if resp.RotationID != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "rotation_id: %s\n", resp.RotationID)
 			}
@@ -156,7 +156,7 @@ func clusterRotateKeyAbort() *cobra.Command {
 			if resp.Error != "" {
 				return fmt.Errorf("server: %s", resp.Error)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Rotation aborted. Phase now: %s (%d)\n", clusteradmin.RotateKeyPhaseLabel(resp.Phase), resp.Phase)
+			fmt.Fprintf(cmd.OutOrStdout(), "Rotation aborted. State now: %s\n", resp.State)
 			return nil
 		},
 	}

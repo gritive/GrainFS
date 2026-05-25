@@ -159,9 +159,9 @@ func RenderClusterConfigDiff(w io.Writer, resp *ClusterConfigResponse) error {
 	return tw.Flush()
 }
 
-// RotateKeyPhaseLabel maps a rotate-key Phase integer to its human label.
+// RotateKeyStateLabel maps a rotate-key state integer to its human label.
 // 1=steady, 2=begun, 3=switched; anything else is rendered as "unknown".
-func RotateKeyPhaseLabel(p int) string {
+func RotateKeyStateLabel(p int) string {
 	switch p {
 	case 1:
 		return "steady"

@@ -10,7 +10,7 @@ import (
 // admin client to share dial / dispatch helpers but talks to a separate
 // UDS endpoint (<data-dir>/rotate.sock).
 type RotationStatus struct {
-	Phase      int    `json:"phase"`
+	State      string `json:"state"`
 	RotationID string `json:"rotation_id,omitempty"`
 	OldSPKI    string `json:"old_spki,omitempty"`
 	NewSPKI    string `json:"new_spki,omitempty"`

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.336.0] - 2026-05-26
+
+### Changed
+
+- **Quick Start and developer run commands now include the required cluster key.** The README and `make run` path generate or pass `--cluster-key` so a fresh local server starts with the current CLI contract.
+- **Cluster join examples now distinguish offline bootstrap from runtime join.** Production deployment and auth troubleshooting docs copy the KEK into the same data directory used by `grainfs cluster join`, preserve mode `0600`, and show the follow-up `serve` command with matching node identity and Raft address.
+- **Current docs and operator-facing status output no longer describe deployment as numbered phases.** The production cluster deployment guide replaces the lifecycle walkthrough, the status endpoint drops the derived `phase` field, and rotate-key reports `state`.
+- **Admin workflows now point at the local admin socket.** README, NFS, NBD, auth, Iceberg, and runbook examples use `<data>/admin.sock` or `GRAINFS_ADMIN_SOCKET` where mutating admin commands require the Unix socket.
+
+### Fixed
+
+- **Stale CLI examples were refreshed.** Documentation now uses current IAM policy attachment, bucket creation, bucket upstream, and append forward-buffer flag names instead of removed grant/upstream/append flag shapes.
+
 ## [0.0.335.0] - 2026-05-26
 
 ### Changed

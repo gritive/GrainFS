@@ -37,9 +37,9 @@ configuration. Operators register them through the bucket CLI:
 ```bash
 grainfs bucket upstream put <bucket> \
   --endpoint <data-dir>/admin.sock \
-  --upstream-url http://source.example:9000 \
+  --endpoint-url http://source.example:9000 \
   --access-key <access-key> \
-  --secret-key-stdin
+  --secret-key <secret-key>
 ```
 
 The bucket surface reflects the ownership model: operators attach upstream

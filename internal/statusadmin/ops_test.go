@@ -25,7 +25,6 @@ func sampleReport() adminapi.StatusReport {
 			NodeID:      "node-1",
 			ClusterSize: 1,
 		},
-		Phase: 2,
 		IAM: adminapi.IAMStatus{
 			SACount: 3,
 		},
@@ -77,7 +76,6 @@ func TestRunGetStatus_TableOutput(t *testing.T) {
 	checks := []string{
 		"node-1",              // cluster.node_id
 		"1",                   // cluster_size
-		"phase:",              // phase label
 		"sa_count:",           // iam.sa_count label
 		"encryption_enabled:", // encryption label
 		"tls_cert_present:",   // tls label
@@ -119,10 +117,15 @@ func TestRunGetStatus_JSONOut(t *testing.T) {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out.String())
 	}
 
-	topLevel := []string{"cluster", "phase", "iam", "encryption", "tls", "trusted_proxy", "audit", "jwt_keys", "banner"}
+	topLevel := []string{"cluster", "iam", "encryption", "tls", "trusted_proxy", "audit", "jwt_keys", "banner"}
 	for _, key := range topLevel {
 		if _, ok := got[key]; !ok {
 			t.Errorf("JSON output missing top-level key %q", key)
+		}
+	}
+	for _, key := range []string{"phase", "mode"} {
+		if _, ok := got[key]; ok {
+			t.Errorf("JSON output should not contain top-level key %q", key)
 		}
 	}
 }
