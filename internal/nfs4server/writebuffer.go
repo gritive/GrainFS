@@ -182,6 +182,60 @@ func (wb *writeBuffer) Read(ctx context.Context, bucket, key string, offset uint
 	return buf[:n], true, nil
 }
 
+// lenFile satisfies interface { Len() int } so dataWAL AppendReader takes
+// the sized fast path (one make+ReadFull, no bytes.Buffer doubling). The
+// underlying *os.File is the actual io.Reader; Len() reports the on-disk
+// size captured at the time of Flush.
+type lenFile struct {
+	*os.File
+	size int
+}
+
+func (lf *lenFile) Len() int { return lf.size }
+
+// Flush uploads the buffered object to backend via PutObject and removes the
+// entry. The entry stays visible to concurrent readers throughout PutObject
+// (D10) — we use Load + mu.Lock + Delete-on-success, not LoadAndDelete.
+// On PutObject failure the entry is preserved so the next flush attempt
+// retries; readers continue to hit the buffer in the meantime.
+func (wb *writeBuffer) Flush(ctx context.Context, bucket, key string) error {
+	k := wb.entryKey(bucket, key)
+	v, ok := wb.entries.Load(k)
+	if !ok {
+		return nil
+	}
+	entry := v.(*writeBufferEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.materialized {
+		// Entry created but no write reached materialize — nothing to flush.
+		wb.entries.Delete(k)
+		_ = os.Remove(entry.dataPath) // may not exist; ignore
+		_ = os.Remove(entry.metaPath)
+		return nil
+	}
+	f, err := os.Open(entry.dataPath)
+	if err != nil {
+		return fmt.Errorf("writebuffer open for flush: %w", err)
+	}
+	fi, statErr := f.Stat()
+	if statErr != nil {
+		f.Close()
+		return fmt.Errorf("writebuffer stat for flush: %w", statErr)
+	}
+	body := &lenFile{File: f, size: int(fi.Size())}
+	_, putErr := wb.backend.PutObject(ctx, entry.bucket, entry.key, body, entry.contentType)
+	f.Close()
+	if putErr != nil {
+		// Leave entry in place; READ keeps hitting the buffer; next flush retries.
+		return fmt.Errorf("writebuffer putobject: %w", putErr)
+	}
+	wb.entries.Delete(k)
+	_ = os.Remove(entry.dataPath)
+	_ = os.Remove(entry.metaPath)
+	return nil
+}
+
 func (wb *writeBuffer) writeMetaLocked(entry *writeBufferEntry) error {
 	meta := struct {
 		Bucket      string `json:"bucket"`

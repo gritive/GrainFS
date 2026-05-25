@@ -124,3 +124,24 @@ func TestWriteBuffer_ReadColdMiss(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, hit, "Read on never-buffered key must be a miss")
 }
+
+func TestWriteBuffer_FlushSendsPutObject(t *testing.T) {
+	dir := t.TempDir()
+	be := &fakeBackend{}
+	wb := newWriteBuffer(dir, be)
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("payload"), "text/plain"))
+	require.NoError(t, wb.Flush(context.Background(), "bkt", "key"))
+
+	require.Equal(t, 1, be.PutCalls, "PutObject should be called exactly once on flush")
+	require.Equal(t, []byte("payload"), be.LastPutBody)
+
+	// Buffer file removed after flush.
+	entries, _ := os.ReadDir(dir)
+	require.Empty(t, entries, "buffer dir should be empty after flush")
+}
+
+func TestWriteBuffer_FlushNoOpForUnknownKey(t *testing.T) {
+	dir := t.TempDir()
+	wb := newWriteBuffer(dir, &fakeBackend{})
+	require.NoError(t, wb.Flush(context.Background(), "bkt", "missing"))
+}
