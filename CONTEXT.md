@@ -245,6 +245,28 @@ normalizes shard group peers should preserve whether a peer came from legacy
 address resolution or remained unresolved so observe paths and mutation guards
 can make different decisions.
 
+### Boot Runtime Phase Plan
+
+The boot runtime phase plan is the `serveruntime.Run` startup contract. It owns
+the ordered list of boot phases, the small dependency injection surface needed
+by those phases, and the critical ordering invariants that keep startup
+race-free.
+
+Individual boot phase functions still own their concrete wiring work. The plan
+owns sequencing: config and storage open before transport, transport before the
+data-plane Raft node, data-plane Raft before meta-Raft wiring, meta-Raft start
+before storage runtime, HTTP/admin construction before TLS posture checks, and
+node services before join-pending cleanup.
+
+The data-plane Raft node setup is a boot phase, not inline `Run` glue. In join
+mode, the phase treats `state.peers` as a join target transport address rather
+than a voter-ID list, so the local node starts as solo `{selfID}` and waits for
+leader-side promotion.
+
+`Run` remains the lifecycle shell: it creates and cleans up `bootState`, invokes
+the phase plan, then blocks on the shutdown drain. New startup wiring should
+enter through the phase plan so phase ordering stays visible and testable.
+
 ### Cluster Peer Liveness Snapshot
 
 The cluster peer liveness snapshot is the operator-facing view of cluster peer
