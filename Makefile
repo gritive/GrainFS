@@ -40,7 +40,7 @@ build-pgo: $(GO_SRC) $(FBS_STAMPS)
 
 fbs: $(FBS_STAMPS)
 
-UNIT_PKGS := $(shell go list ./... | grep -v '/tests/e2e')
+UNIT_PKGS := $(shell go list ./... | grep -v '/tests/e2e' | grep -v '/tests/colimafixture')
 
 test: test-unit test-colima
 
