@@ -15,6 +15,9 @@ func TestBucketForwardOpSpecsCoverBucketOps(t *testing.T) {
 		raftpb.ForwardOpGetObject,
 		raftpb.ForwardOpHeadObject,
 		raftpb.ForwardOpDeleteObject,
+		raftpb.ForwardOpSetObjectACL,
+		raftpb.ForwardOpSetObjectTags,
+		raftpb.ForwardOpGetObjectTags,
 		raftpb.ForwardOpListObjects,
 		raftpb.ForwardOpWalkObjects,
 		raftpb.ForwardOpCreateMultipartUpload,
@@ -28,7 +31,9 @@ func TestBucketForwardOpSpecsCoverBucketOps(t *testing.T) {
 		raftpb.ForwardOpListObjectVersions,
 		raftpb.ForwardOpReadAt,
 		raftpb.ForwardOpHeadObjectVersion,
+		raftpb.ForwardOpAppendObject,
 	}
+	require.Len(t, bucketForwardOpSpecs, len(bucketOps))
 	for _, op := range bucketOps {
 		spec, ok := lookupBucketForwardOpSpec(op)
 		require.True(t, ok, "missing bucket forward op spec for %s", op)
@@ -54,10 +59,14 @@ func TestBucketForwardOpSpecsClassifyTransportKind(t *testing.T) {
 	assertKind(raftpb.ForwardOpReadAt, forwardReadStream, false)
 	assertKind(raftpb.ForwardOpPutObject, forwardBodyStream, true)
 	assertKind(raftpb.ForwardOpUploadPart, forwardBodyStream, true)
+	assertKind(raftpb.ForwardOpAppendObject, forwardBodyStream, true)
 
 	for _, op := range []raftpb.ForwardOp{
 		raftpb.ForwardOpHeadObject,
 		raftpb.ForwardOpDeleteObject,
+		raftpb.ForwardOpSetObjectACL,
+		raftpb.ForwardOpSetObjectTags,
+		raftpb.ForwardOpGetObjectTags,
 		raftpb.ForwardOpListObjects,
 		raftpb.ForwardOpWalkObjects,
 		raftpb.ForwardOpCreateMultipartUpload,
@@ -72,6 +81,29 @@ func TestBucketForwardOpSpecsClassifyTransportKind(t *testing.T) {
 		spec, ok := lookupBucketForwardOpSpec(op)
 		require.True(t, ok, "missing spec for %s", op)
 		require.Equal(t, forwardFrameOnly, spec.transport, "wrong transport for %s", op)
+	}
+}
+
+func TestBucketForwardOpSpecsInstallReceiverHandlers(t *testing.T) {
+	for op, spec := range bucketForwardOpSpecs {
+		switch spec.transport {
+		case forwardFrameOnly:
+			require.NotNil(t, spec.handleFrame, "frame-only op %s must install frame handler", op)
+			require.Nil(t, spec.handleBody, "frame-only op %s must not install body handler", op)
+			require.Nil(t, spec.handleRead, "frame-only op %s must not install read handler", op)
+		case forwardBodyStream:
+			require.NotNil(t, spec.handleBody, "body-stream op %s must install body handler", op)
+			require.Nil(t, spec.handleRead, "body-stream op %s must not install read handler", op)
+			if op != raftpb.ForwardOpAppendObject {
+				require.NotNil(t, spec.handleFrame, "body-stream op %s must keep legacy frame handler", op)
+			}
+		case forwardReadStream:
+			require.NotNil(t, spec.handleFrame, "read-stream op %s must keep legacy frame handler", op)
+			require.Nil(t, spec.handleBody, "read-stream op %s must not install body handler", op)
+			require.NotNil(t, spec.handleRead, "read-stream op %s must install read handler", op)
+		default:
+			t.Fatalf("unknown transport kind %d for %s", spec.transport, op)
+		}
 	}
 }
 
