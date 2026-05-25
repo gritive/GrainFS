@@ -39,6 +39,22 @@ func TestPlanObjectWritePlacement_UsesFullGroupPlan(t *testing.T) {
 	require.Equal(t, []string{"n1", "n2", "n3"}, plan.NodeIDs)
 }
 
+func TestPlanObjectWritePlacement_UsesFallbackPlacementWithoutFullGroup(t *testing.T) {
+	liveNodes := []string{"n1", "n2", "n3"}
+	plan, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:        "put_object",
+		PlacementGroupID: "group-1",
+		LiveNodes:        liveNodes,
+		CurrentECConfig:  ECConfig{DataShards: 2, ParityShards: 1},
+		ShardKey:         "k/v1",
+	})
+	require.NoError(t, err)
+	require.False(t, plan.TopologyWrite)
+	require.Equal(t, "group-1", plan.PlacementGroupID)
+	require.Equal(t, ECConfig{DataShards: 2, ParityShards: 1}, plan.Config)
+	require.Equal(t, PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
+}
+
 func TestPlanObjectWritePlacement_RejectsUnhealthyTopologyTarget(t *testing.T) {
 	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
 	_, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
