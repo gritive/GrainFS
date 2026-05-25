@@ -146,6 +146,42 @@ func (wb *writeBuffer) materializeLocked(ctx context.Context, entry *writeBuffer
 	return nil
 }
 
+// Read returns (data, hit, err). hit=false means caller should fall back to backend.
+//
+// Concurrency: holds the entry mutex only through state check + os.Open.
+// The pread syscall runs without the mutex — a concurrent Flush (which holds
+// the mutex through PutObject) cannot block reads. The open *os.File pins the
+// inode, so if Flush completes and removes the path before our ReadAt, we
+// still read the original data.
+func (wb *writeBuffer) Read(ctx context.Context, bucket, key string, offset uint64, length uint32) ([]byte, bool, error) {
+	k := wb.entryKey(bucket, key)
+	v, ok := wb.entries.Load(k)
+	if !ok {
+		return nil, false, nil
+	}
+	entry := v.(*writeBufferEntry)
+	entry.mu.Lock()
+	if !entry.materialized {
+		entry.mu.Unlock()
+		return nil, false, nil
+	}
+	f, err := os.Open(entry.dataPath)
+	if err != nil {
+		entry.mu.Unlock()
+		return nil, false, fmt.Errorf("writebuffer open for read: %w", err)
+	}
+	entry.lastTouch = time.Now()
+	entry.mu.Unlock()
+	defer f.Close()
+
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, int64(offset))
+	if err != nil && err != io.EOF {
+		return nil, false, fmt.Errorf("writebuffer pread: %w", err)
+	}
+	return buf[:n], true, nil
+}
+
 func (wb *writeBuffer) writeMetaLocked(entry *writeBufferEntry) error {
 	meta := struct {
 		Bucket      string `json:"bucket"`

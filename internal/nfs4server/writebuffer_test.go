@@ -106,3 +106,21 @@ func (transientErrBackend) GetObject(context.Context, string, string) (io.ReadCl
 func (transientErrBackend) PutObject(context.Context, string, string, io.Reader, string) (*storage.Object, error) {
 	return nil, fmt.Errorf("transient: cluster not ready")
 }
+
+func TestWriteBuffer_ReadAfterWrite(t *testing.T) {
+	dir := t.TempDir()
+	wb := newWriteBuffer(dir, &fakeBackend{})
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("hello world"), "text/plain"))
+	got, hit, err := wb.Read(context.Background(), "bkt", "key", 6, 5)
+	require.NoError(t, err)
+	require.True(t, hit, "Read on buffered key must be a hit")
+	require.Equal(t, []byte("world"), got)
+}
+
+func TestWriteBuffer_ReadColdMiss(t *testing.T) {
+	dir := t.TempDir()
+	wb := newWriteBuffer(dir, &fakeBackend{})
+	_, hit, err := wb.Read(context.Background(), "bkt", "cold-key", 0, 5)
+	require.NoError(t, err)
+	require.False(t, hit, "Read on never-buffered key must be a miss")
+}
