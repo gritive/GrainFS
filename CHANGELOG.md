@@ -7,6 +7,10 @@
 - **Forward receiver bucket operation dispatch now lives in the forward operation registry.** Data-group forwarding no longer keeps separate frame/body/read switch tables in `ForwardReceiver`; each bucket operation declares its receiver handler beside its transport shape, so adding forwarded object operations has one contract to update.
 - **Forward operation registry tests now cover handler installation.** ACL, tagging, append-object, and read/body/frame handler coverage guard against registry drift as bucket operations are added.
 
+### Fixed
+
+- **Unit test gate passes again for benchmark and serveruntime packages.** The S3 compatibility benchmark harness is back to unique `grainfs-s3-compat-compare.*` temp directories and no longer accepts arbitrary single-node serve flags; serveruntime boot-phase tests now mirror production's single data root in `DataDirs` so dynamic EC resolves the single-node 1+0 profile.
+
 ## [0.0.329.0] - 2026-05-24
 
 ### Changed
