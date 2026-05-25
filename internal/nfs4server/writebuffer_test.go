@@ -214,6 +214,44 @@ func TestWriteBuffer_ReadAfterFlushReturnsMissNotError(t *testing.T) {
 	require.False(t, hit, "post-flush Read must miss without error (caller falls back to backend)")
 }
 
+func TestWriteBuffer_RecoverReplaysLeftovers(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate a crash by manually creating leftover buffer + meta files.
+	name := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("recovered"), 0o600))
+	meta := `{"bucket":"bkt","key":"k","content_type":"text/plain"}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name+".meta"), []byte(meta), 0o600))
+
+	be := &fakeBackend{}
+	wb := newWriteBuffer(dir, be)
+	require.NoError(t, wb.Recover(context.Background()))
+
+	require.Equal(t, 1, be.PutCalls)
+	require.Equal(t, []byte("recovered"), be.LastPutBody)
+	entries, _ := os.ReadDir(dir)
+	require.Empty(t, entries, "recovered files removed")
+}
+
+func TestWriteBuffer_RecoverQuarantinesOnPutFailure(t *testing.T) {
+	dir := t.TempDir()
+	name := "deadbeef0000000000000000000000000000feed"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("recovered"), 0o600))
+	meta := `{"bucket":"bkt","key":"k","content_type":"text/plain"}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name+".meta"), []byte(meta), 0o600))
+
+	be := &fakeBackend{PutFail: true}
+	wb := newWriteBuffer(dir, be)
+	wb.recoveryRetryDelay = time.Millisecond // keep test fast (~3ms total instead of 3s)
+	require.NoError(t, wb.Recover(context.Background()))
+
+	// Original files must be renamed, NOT deleted, so the operator sees them.
+	entries, _ := os.ReadDir(dir)
+	require.Len(t, entries, 2)
+	for _, e := range entries {
+		require.Contains(t, e.Name(), ".failed.")
+	}
+}
+
 func TestWriteBuffer_IdleFlush(t *testing.T) {
 	dir := t.TempDir()
 	be := &fakeBackend{}

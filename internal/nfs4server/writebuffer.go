@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -340,4 +341,93 @@ func (wb *writeBuffer) writeMetaLocked(entry *writeBufferEntry) error {
 		return fmt.Errorf("writebuffer marshal meta: %w", err)
 	}
 	return os.WriteFile(entry.metaPath, append(b, '\n'), 0o600)
+}
+
+// Recover replays leftover buffer files from a previous run. Called once
+// at server startup, before Run. For each data file with a valid .meta
+// sidecar, attempts PutObject (3 retries × recoveryRetryDelay). On
+// permanent failure, quarantines the pair so a fresh post-restart Write
+// for the same key cannot collide on the same sha1 path.
+func (wb *writeBuffer) Recover(ctx context.Context) error {
+	entries, err := os.ReadDir(wb.dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("writebuffer scan: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ext := filepath.Ext(name)
+		if ext == ".meta" || strings.Contains(name, ".failed.") {
+			continue
+		}
+		metaPath := filepath.Join(wb.dir, name+".meta")
+		mb, err := os.ReadFile(metaPath)
+		if err != nil {
+			// Orphan data file with no meta — quarantine so normal writes don't
+			// collide on the same sha1 name.
+			wb.quarantine(name, "orphan-no-meta")
+			continue
+		}
+		var meta struct {
+			Bucket      string `json:"bucket"`
+			Key         string `json:"key"`
+			ContentType string `json:"content_type"`
+		}
+		if err := json.Unmarshal(mb, &meta); err != nil {
+			wb.quarantine(name, "meta-decode-error")
+			continue
+		}
+		dataPath := filepath.Join(wb.dir, name)
+		f, err := os.Open(dataPath)
+		if err != nil {
+			wb.quarantine(name, "open-error")
+			continue
+		}
+		fi, statErr := f.Stat()
+		if statErr != nil {
+			f.Close()
+			wb.quarantine(name, "stat-error")
+			continue
+		}
+		body := &lenFile{File: f, size: int(fi.Size())}
+		// Retry transient backend failures (cluster may still be joining at startup).
+		// 3 attempts × wb.recoveryRetryDelay.
+		var putErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				if _, sErr := f.Seek(0, io.SeekStart); sErr != nil {
+					putErr = sErr
+					break
+				}
+				time.Sleep(wb.recoveryRetryDelay)
+			}
+			_, putErr = wb.backend.PutObject(ctx, meta.Bucket, meta.Key, body, meta.ContentType)
+			if putErr == nil {
+				break
+			}
+		}
+		f.Close()
+		if putErr != nil {
+			// Critical: a normal write for the same (bucket, key) would derive
+			// the same sha1 name and silently overwrite this file's leftover
+			// state. Quarantine it so the operator notices and replays manually.
+			wb.quarantine(name, "putobject-failed")
+			continue
+		}
+		_ = os.Remove(dataPath)
+		_ = os.Remove(metaPath)
+	}
+	return nil
+}
+
+func (wb *writeBuffer) quarantine(name, reason string) {
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	suffix := fmt.Sprintf(".failed.%s.%s", reason, stamp)
+	_ = os.Rename(filepath.Join(wb.dir, name), filepath.Join(wb.dir, name+suffix))
+	_ = os.Rename(filepath.Join(wb.dir, name+".meta"), filepath.Join(wb.dir, name+".meta"+suffix))
 }
