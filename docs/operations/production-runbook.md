@@ -950,4 +950,4 @@ cp server.key <data>/tls/key.pem
 grainfs config set trusted-proxy.cidr 10.0.0.0/8 --endpoint <data>/admin.sock
 ```
 
-See also: `docs/operators/cluster-lifecycle.md` (FU#3 TLS posture details).
+See also: `docs/operations/cluster-lifecycle.md` (FU#3 TLS posture details).

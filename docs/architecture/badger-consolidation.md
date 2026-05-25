@@ -304,7 +304,7 @@ Each must have explicit test coverage before merge:
    May require tuning `NumCompactors` back up for the shared state DB.
 
 3. **Backup/restore semantics**: the existing recover-cluster workflow
-   (`docs/operators/recover-cluster.md`) operates on per-group dirs. Will need updating
+   (`docs/operations/recover-cluster.md`) operates on per-group dirs. Will need updating
    for shared layout — likely simpler (one snapshot per node covers everything).
 
 4. **fdatasync amortization**: with shared raft-log DB, all groups' AppendEntries
@@ -958,7 +958,7 @@ explicitly out of scope.
 
 **Lifecycle keys (`lifecycle:{bucket}`, meta-Raft-replicated, process-global)** now live in the shared FSM DB unprefixed (previously in the meta DB — `state.distBackend.FSMDB()` switched DBs). No key collision (a group prefix is `4-byte-len||groupID`; the first 4 bytes can't be `"life"`). Pre-1.0, no existing lifecycle data, so no migration was needed.
 
-**`grainfs recover-cluster`** now requires the source data dir's last FSM snapshot to be `format_version == 2` (a binary including these P3 changes); pre-P3 snapshots are rejected with `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. See `docs/operators/recover-cluster.md`.
+**`grainfs recover-cluster`** now requires the source data dir's last FSM snapshot to be `format_version == 2` (a binary including these P3 changes); pre-P3 snapshots are rejected with `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. See `docs/operations/recover-cluster.md`.
 
 #### Perf matrix sweep — DEFERRED to a quiet-host run
 

@@ -797,7 +797,7 @@ R+H Coalescer race fix already shipped in PR-A (#140 / v0.0.18.1). This PR proce
 | Mixed-version cluster: post-meta-mux sender ↔ v0.0.17 receiver | Treat unknown-group response as a fallback trigger (#6) |
 | Mux conn disconnects near meta election | Keep the mux attempt budget shorter than the heartbeat window |
 | Group raft regresses after Coalescer race fix | ✅ R+H unit/e2e tests and `FastReplyBeforeRegister` all passed in PR-A |
-| `__meta__` reserved prefix conflicts with external operations tooling group-name policy | Update docs/operators/runbook.md and add a user-facing ROADMAP note |
+| `__meta__` reserved prefix conflicts with external operations tooling group-name policy | Update docs/operations/production-runbook.md and add a user-facing ROADMAP note |
 
 ### NOT in scope (excluded from the meta-mux PR)
 

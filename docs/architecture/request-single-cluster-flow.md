@@ -5,8 +5,7 @@
 actor pattern은 모든 요청 path가 아니라 cluster executor 내부의 상태 소유와
 실패 처리에 집중 적용한다.
 
-Planning artifacts under `docs/superpowers/` are local-only working notes.
-이 문서가 구현 source of truth다.
+이 문서가 공개 아키텍처 source of truth다. 내부 planning artifacts는 고객 문서에 포함하지 않는다.
 
 ```text
 서버 시작
@@ -417,7 +416,7 @@ Synthesized from /plan-eng-review findings.
   canonical and avoid duplicate actor design sources.
   - Surfaced by: Code Quality — two docs had diverging flow details.
   - Files: `docs/architecture/request-single-cluster-flow.md`,
-    `docs/superpowers/specs/2026-05-15-actor-execution-strategy-design.md`
+    internal planning notes outside the public documentation set.
   - Verify: manual doc review.
 - [x] **T6 (P1, human: ~2h / CC: ~20min)** — Tests — Add concrete
   regression/contract tests for scrub migration.

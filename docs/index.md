@@ -1,68 +1,112 @@
-# `GrainFS` Documentation
+# GrainFS Documentation
 
-Start from the role that matches the work in front of you. The README stays
-short; this index keeps the detailed docs reachable without turning the README
-into a file list.
+GrainFS is a single-binary storage server that exposes one storage layer through S3, NFSv4, 9P, NBD, and Iceberg REST Catalog interfaces.
 
-## Users
+Use this index by task. Internal planning artifacts, ADR drafts, and agent work logs are not part of the customer documentation set.
 
-Use these when you are integrating `GrainFS` with clients, protocols, or table
-workflows.
+## Start here
 
-| Need | Document | Type |
-| --- | --- | --- |
-| Run `GrainFS` locally and use common commands | [User guide](users/guide.md) | Tutorial / how-to |
-| Use DuckDB with the Iceberg REST Catalog | [Iceberg DuckDB guide](users/iceberg-duckdb.md) | How-to |
-| Query S3 audit data as an Iceberg table | [Audit Iceberg guide](users/audit-iceberg.md) | How-to / explanation |
-| Check S3 compatibility before choosing a client feature | [S3 compatibility](reference/s3-compatibility.md) | Reference |
-| Check file protocol behavior | [NFSv4 compatibility](reference/nfs-compatibility.md), [9P compatibility](reference/9p-compatibility.md) | Reference |
-| Check block protocol behavior | [NBD compatibility](reference/nbd-compatibility.md) | Reference |
-| Check Iceberg client support | [Iceberg compatibility](reference/iceberg-compatibility.md) | Reference |
+| Need | Document |
+| --- | --- |
+| Run GrainFS locally and write the first object | [Quickstart](start-here/quickstart.md) |
+| Install or build the binary | [Install](start-here/install.md) |
+| Put and list an object with the AWS CLI | [First S3 object](start-here/first-s3-object.md) |
+| Mount a bucket with NFSv4 | [First NFS mount](start-here/first-nfs-mount.md) |
+| Query Iceberg metadata with DuckDB | [First Iceberg query](start-here/first-iceberg-query.md) |
 
-## Operators
+## Understand GrainFS
 
-Use these when you are deploying, monitoring, recovering, or running drills.
+| Need | Document |
+| --- | --- |
+| Product overview and mental model | [Concepts overview](concepts/overview.md) |
+| Buckets, object keys, paths, and volumes | [Namespace and buckets](concepts/namespace-and-buckets.md) |
+| How S3, NFSv4, 9P, NBD, and Iceberg share one backend | [Same data, multiple protocols](concepts/same-data-multiple-protocols.md) |
+| Admin socket, service accounts, access keys, and mount identities | [Identity and admin socket](concepts/identity-and-admin-socket.md) |
+| Phase 0 to Phase 3 lifecycle | [Cluster phases](concepts/cluster-phases.md) |
+| Placement, Raft, erasure coding, and shard integrity | [Durability and placement](concepts/durability-and-placement.md) |
+| What a compatibility claim means | [Consistency and compatibility](concepts/consistency-and-compatibility.md) |
+| Network and authentication boundaries | [Security boundaries](concepts/security-boundaries.md) |
 
-| Need | Document | Type |
-| --- | --- | --- |
-| Deploy and operate a production node or cluster | [Production runbook](operators/runbook.md) | How-to / runbook |
-| Plan disaster recovery | [Disaster recovery](operators/disaster-recovery.md) | How-to |
-| Recover a cluster offline | [Cluster recovery](operators/recover-cluster.md) | How-to |
-| Track service objectives | [SLI/SLO](operators/sli-slo.md) | Reference |
-| Operate NFS exports | [NFS export lifecycle](operators/nfs-export-lifecycle.md), [NFS debug](operators/nfs-debug.md) | How-to |
-| Operate the balancer | [Balancer operations](operators/balancer.md) | How-to |
-| Roll back managed Badger paths | [Badger managed-mode rollback](operators/badger-managed-mode-rollback.md) | How-to |
+## Tutorials
+
+| Goal | Tutorial |
+| --- | --- |
+| Learn the local single-node workflow | [Local single-node tutorial](tutorials/local-single-node.md) |
+| Use S3 with the AWS CLI | [AWS CLI S3 tutorial](tutorials/aws-cli-s3.md) |
+| Mount buckets with NFSv4 and 9P | [NFS and 9P mounts](tutorials/nfs-and-9p-mounts.md) |
+| Create and attach an NBD volume | [NBD volume tutorial](tutorials/nbd-volume.md) |
+| Use DuckDB with the Iceberg REST Catalog | [DuckDB Iceberg tutorial](tutorials/duckdb-iceberg.md) |
+| Bring up a small cluster | [Three-node cluster tutorial](tutorials/three-node-cluster.md) |
+
+## How-to guides
+
+| Task area | Documents |
+| --- | --- |
+| Buckets | [Create and manage buckets](how-to/buckets/create-and-manage-buckets.md), [Configure an upstream](how-to/buckets/configure-upstream.md), [Migrate and cut over](how-to/buckets/migrate-and-cutover.md) |
+| IAM | [Bootstrap a service account](how-to/iam/bootstrap-service-account.md), [Import AWS IAM policy JSON](how-to/iam/import-aws-policy.md), [Rotate keys](how-to/iam/rotate-keys.md) |
+| Protocols | [Export an NFS bucket](how-to/protocols/export-nfs-bucket.md), [Mount 9P](how-to/protocols/mount-9p.md), [Create an NBD volume](how-to/protocols/create-nbd-volume.md) |
+| Iceberg | [Configure OAuth2 Iceberg](how-to/iceberg/configure-oauth2-iceberg.md), [Query audit data as Iceberg](how-to/iceberg/query-audit-table.md) |
+| Operations tasks | [Run doctor](how-to/operations/run-doctor.md), [Inspect status and dashboard](how-to/operations/inspect-status-dashboard.md), [Run benchmarks](how-to/operations/run-benchmarks.md) |
+
+## Operations
+
+| Need | Document |
+| --- | --- |
+| Operate production GrainFS | [Production runbook](operations/production-runbook.md) |
+| Check a deployment before exposing it | [Deployment checklist](operations/deployment-checklist.md) |
+| Move through Phase 0, 1, 2, and 3 | [Cluster lifecycle](operations/cluster-lifecycle.md) |
+| Monitor service health | [Monitoring and SLO](operations/monitoring-and-slo.md) |
+| Handle incidents | [Incidents](operations/incidents.md) |
+| Plan disaster recovery | [Disaster recovery](operations/disaster-recovery.md) |
+| Recover a cluster offline | [Recover cluster](operations/recover-cluster.md) |
+| Upgrade safely | [Rolling upgrade](operations/rolling-upgrade.md) |
+| Operate the balancer | [Balancer](operations/balancer.md) |
+| Roll back Badger managed mode | [Badger rollback](operations/badger-rollback.md) |
+| Debug auth | [Troubleshooting auth](operations/troubleshooting-auth.md) |
+| Debug NFS | [Troubleshooting NFS](operations/troubleshooting-nfs.md) |
+| Debug slow workloads | [Troubleshooting performance](operations/troubleshooting-performance.md) |
 
 ## Reference
 
-Use these when you need exact behavior, test-backed support claims, or benchmark
-rules.
+| Need | Document |
+| --- | --- |
+| CLI command surface | [CLI reference](reference/cli.md) |
+| `grainfs serve` flags | [Serve flags](reference/serve-flags.md) |
+| Runtime configuration keys | [Config reference](reference/config.md) |
+| Admin API surface | [Admin API reference](reference/admin-api.md) |
+| Prometheus metrics | [Metrics reference](reference/metrics.md) |
+| S3 support | [S3 compatibility](reference/s3-compatibility.md) |
+| NFSv4 support | [NFSv4 compatibility](reference/nfs-compatibility.md), [NFSv4 attribute audit](reference/nfsv4-attribute-audit.md) |
+| 9P support | [9P compatibility](reference/9p-compatibility.md) |
+| NBD support | [NBD compatibility](reference/nbd-compatibility.md) |
+| Iceberg support | [Iceberg compatibility](reference/iceberg-compatibility.md) |
+| Rolling upgrade policy | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
+| Benchmarks and methodology | [Benchmarks](reference/benchmarks.md) |
+| Terms | [Glossary](reference/glossary.md) |
+
+## Architecture
 
 | Need | Document |
 | --- | --- |
-| S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
-| NFSv4 compatibility and attribute audit | [NFSv4 compatibility](reference/nfs-compatibility.md), [NFSv4 attribute audit](reference/nfsv4-attribute-audit.md) |
-| 9P compatibility | [9P compatibility](reference/9p-compatibility.md) |
-| NBD compatibility | [NBD compatibility](reference/nbd-compatibility.md) |
-| Iceberg REST Catalog compatibility | [Iceberg compatibility](reference/iceberg-compatibility.md) |
-| Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
-| Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
-| Iceberg request trace | [Iceberg DuckDB request trace](reference/iceberg-duckdb-request-trace.md) |
-| Transport versioning | [Transport mux versioning](reference/transport-mux-versioning.md) |
-| Upgrade finalization design | [Upgrade finalize machinery](reference/upgrade-finalize-machinery-design.md) |
-
-## Explanation
-
-Use these when you need the design rationale behind the system.
-
-| Need | Document |
-| --- | --- |
+| System map | [Architecture overview](architecture/overview.md) |
 | Protocol layering | [Protocol layering](architecture/protocol-layering.md) |
+| Single-node and cluster request flow | [Request execution actor flow](architecture/request-single-cluster-flow.md) |
 | Admin, identity, and bucket configuration | [Admin and identity architecture](architecture/admin-identity-and-bucket-config.md) |
-| BadgerDB consolidation history | [BadgerDB consolidation](architecture/badger-consolidation.md) |
-| Single/cluster request execution | [Request execution actor flow](architecture/request-single-cluster-flow.md) |
 | Durability and object placement | [Durability and placement](architecture/durability-and-placement.md) |
 | Storage operation boundaries | [Storage operations facade](architecture/storage-operations-facade.md) |
 | Cache invalidation | [Cache invalidation flow](architecture/cache-invalidation-flow.md) |
-| NFS client testing approach | [NFS client spike](architecture/nfs-client-spike.md) |
-| Raft RPC stream multiplexing | [QUIC stream multiplexing](architecture/quic-stream-multiplex.md) |
+| QUIC stream multiplexing | [QUIC stream multiplexing](architecture/quic-stream-multiplex.md) |
+| Scrubber actor model | [Scrubber director actor](architecture/scrubber-director-actor.md) |
+| BadgerDB consolidation | [BadgerDB consolidation](architecture/badger-consolidation.md) |
+| Upgrade finalization | [Upgrade finalize machinery](architecture/upgrade-finalize-machinery.md) |
+
+## Development
+
+| Need | Document |
+| --- | --- |
+| Build and test GrainFS | [Build and test](development/build-and-test.md) |
+| Understand repository layout | [Repository layout](development/repository-layout.md) |
+| Add CLI commands without bloating `cmd/` | [Adding CLI commands](development/adding-cli-commands.md) |
+| Make or update compatibility claims | [Compatibility claims](development/compatibility-claims.md) |
+| Regenerate FlatBuffers bindings | [FlatBuffers](development/flatbuffers.md) |
+| Prepare releases | [Release process](development/release-process.md) |

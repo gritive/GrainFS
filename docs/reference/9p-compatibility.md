@@ -45,6 +45,6 @@ coverage. Unit-test-only coverage is not enough.
 
 ## Related
 
-- [User guide](../users/guide.md#9p)
+- [User guide](../tutorials/local-single-node.md#9p)
 - [Benchmark methodology](benchmarks.md)
 - [NFSv4 compatibility](nfs-compatibility.md)

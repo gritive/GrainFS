@@ -150,8 +150,8 @@ grainfs nfs export update mydata --rw
 grainfs nfs debug mydata --json
 ```
 
-See `../reference/nfs-compatibility.md`, `../operators/nfs-debug.md`, and
-`../operators/nfs-export-lifecycle.md`.
+See `../reference/nfs-compatibility.md`, `../operations/troubleshooting-nfs.md`, and
+`../how-to/protocols/export-nfs-bucket.md`.
 
 ## NBD
 
@@ -234,7 +234,7 @@ Update cluster-wide policy values:
 grainfs cluster config --help
 ```
 
-See `../operators/runbook.md` for production procedures.
+See `../operations/production-runbook.md` for production procedures.
 
 ## Recovery
 
@@ -263,7 +263,7 @@ grainfs recover cluster verify \
 ```
 
 `recover --auto` is intentionally non-mutating and fails closed. See
-`docs/operators/recover-cluster.md`.
+`docs/operations/recover-cluster.md`.
 
 ## Operations APIs
 
