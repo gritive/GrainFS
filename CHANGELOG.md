@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.333.0] - 2026-05-26
+
+### Changed
+
+- **Cluster object forwarding now runs through a dedicated forward runtime.** `ClusterCoordinator` keeps routing and local execution decisions while read streams, frame mutations, body-stream PUT/upload-part forwarding, multipart operations, tags/ACL forwarding, and append forwarding share one forwarding module with focused coverage.
+
+### Fixed
+
+- **`make test-unit` no longer runs the Colima cluster fixture.** The Colima fixture requires a built `bin/grainfs` binary and belongs in the smoke/e2e lane, so the unit package list now excludes `tests/colimafixture`.
+
 ## [0.0.331.0] - 2026-05-26
 
 ### Changed
