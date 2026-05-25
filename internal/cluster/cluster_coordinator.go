@@ -270,6 +270,17 @@ func (c *ClusterCoordinator) runtimeState() clusterCoordinatorRuntime {
 	}
 }
 
+func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
+	return forwardRuntime{
+		sender:      c.forward,
+		meta:        c.meta,
+		addr:        c.addr,
+		selfID:      c.selfID,
+		selfAliases: c.selfAliases,
+		maxBody:     c.maxBody,
+	}
+}
+
 // routeReadOrBucket picks RouteObjectRead when an object index is configured
 // (production wiring), and falls back to RouteBucket when not (test wiring
 // without an objectIndexProposer / objectIndexSource). Preserves the legacy
@@ -921,32 +932,8 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
 		return nil, nil, storage.ErrObjectNotFound
 	}
-	if c.forward == nil {
-		return nil, nil, ErrCoordinatorNoRouter
-	}
 	args := buildGetObjectArgs(bucket, key)
-	peers := c.forwardPeersForTarget(target)
-	if c.forward.readDialer != nil {
-		return c.forwardReadObject(ctx, peers, target.GroupID, raftpb.ForwardOpGetObject, args)
-	}
-	reply, err := c.forward.Send(ctx, peers, target.GroupID, raftpb.ForwardOpGetObject, args)
-	if err != nil {
-		return nil, nil, err
-	}
-	obj, err := objectFromReply(reply)
-	if err != nil {
-		return nil, nil, err
-	}
-	fr := raftpb.GetRootAsForwardReply(reply, 0)
-	body := fr.ReadBodyBytes()
-	// Reply buffer is reused by ForwardSender — copy the body bytes into a
-	// caller-owned slice before wrapping. obj already deep-copies via accessors.
-	bodyCopy := make([]byte, len(body))
-	copy(bodyCopy, body)
-	if obj.Size != int64(len(bodyCopy)) {
-		return nil, nil, ErrForwardBodySizeMismatch
-	}
-	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
+	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
 }
 
 func (c *ClusterCoordinator) GetObjectVersion(
@@ -994,68 +981,8 @@ func (c *ClusterCoordinator) GetObjectVersion(
 			Str("indexed_version", entry.VersionID).
 			Msg("local object version read is behind object index; forwarding to placement group")
 	}
-	if c.forward == nil {
-		return nil, nil, ErrCoordinatorNoRouter
-	}
 	args := buildGetObjectVersionArgs(bucket, key, versionID)
-	peers := c.forwardPeersForTarget(target)
-	if c.forward.readDialer != nil {
-		return c.forwardReadObject(ctx, peers, target.GroupID, raftpb.ForwardOpGetObjectVersion, args)
-	}
-	reply, err := c.forward.Send(ctx, peers, target.GroupID, raftpb.ForwardOpGetObjectVersion, args)
-	if err != nil {
-		return nil, nil, err
-	}
-	obj, err := objectFromReply(reply)
-	if err != nil {
-		return nil, nil, err
-	}
-	fr := raftpb.GetRootAsForwardReply(reply, 0)
-	body := fr.ReadBodyBytes()
-	bodyCopy := make([]byte, len(body))
-	copy(bodyCopy, body)
-	if obj.Size != int64(len(bodyCopy)) {
-		return nil, nil, ErrForwardBodySizeMismatch
-	}
-	return io.NopCloser(bytes.NewReader(bodyCopy)), obj, nil
-}
-
-func (c *ClusterCoordinator) forwardReadObject(
-	ctx context.Context,
-	peers []string,
-	groupID string,
-	op raftpb.ForwardOp,
-	args []byte,
-) (io.ReadCloser, *storage.Object, error) {
-	reply, body, err := c.forward.SendReadStream(ctx, peers, groupID, op, args)
-	if err != nil {
-		return nil, nil, err
-	}
-	obj, err := objectFromReply(reply)
-	if err != nil {
-		if body != nil {
-			_ = body.Close()
-		}
-		return nil, nil, err
-	}
-	return &forwardReadValidator{rc: body, want: obj.Size}, obj, nil
-}
-
-func (c *ClusterCoordinator) forwardPeersForTarget(target RouteTarget) []string {
-	if len(target.Peers) > 0 || c.meta == nil {
-		return target.Peers
-	}
-	group, ok := c.meta.ShardGroup(target.GroupID)
-	if !ok {
-		return target.Peers
-	}
-	peers := NewShardGroupPeerSet(group).ForwardOrder(c.selfID, c.selfAliases...)
-	if c.addr != nil {
-		if resolved, err := ResolveNodeAddresses(c.addr, peers); err == nil {
-			return resolved
-		}
-	}
-	return peers
+	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
 }
 
 func (c *ClusterCoordinator) getObjectLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry) (io.ReadCloser, *storage.Object, bool, error) {
@@ -1092,34 +1019,6 @@ func (c *ClusterCoordinator) getObjectLocalCurrentFollower(ctx context.Context, 
 		return nil, nil, false, nil
 	}
 	return rc, obj, true, nil
-}
-
-type forwardReadValidator struct {
-	rc   io.ReadCloser
-	want int64
-	got  int64
-}
-
-func (r *forwardReadValidator) Read(p []byte) (int, error) {
-	if r.got >= r.want {
-		return 0, io.EOF
-	}
-	if remaining := r.want - r.got; int64(len(p)) > remaining {
-		p = p[:remaining]
-	}
-	n, err := r.rc.Read(p)
-	r.got += int64(n)
-	if r.got == r.want {
-		return n, nil
-	}
-	if err == io.EOF {
-		return n, ErrForwardBodySizeMismatch
-	}
-	return n, err
-}
-
-func (r *forwardReadValidator) Close() error {
-	return r.rc.Close()
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
@@ -1953,23 +1852,7 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	}
 
 	args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
-	if int64(len(buf)) <= c.maxBody {
-		reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpReadAt, args)
-		if err != nil {
-			return 0, err
-		}
-		return readAtReplyInto(reply, buf)
-	}
-
-	reply, body, err := c.forward.SendReadStream(ctx, target.Peers, target.GroupID, raftpb.ForwardOpReadAt, args)
-	if err != nil {
-		return 0, err
-	}
-	defer body.Close()
-	if err := parseReplyStatus(reply); err != nil {
-		return 0, err
-	}
-	return io.ReadFull(body, buf)
+	return c.forwardRuntime().readAt(ctx, target, args, buf)
 }
 
 func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
