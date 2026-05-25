@@ -1447,66 +1447,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 	if len(userMetadata) > 0 || req.ACL != nil {
 		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-
-	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
-		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm)
-		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
-			Bucket:      bucket,
-			Key:         key,
-			GroupID:     target.GroupID,
-			Ingress:     PutTraceIngressForwardedNonLeader,
-			SizeClass:   PutTraceSizeLarge,
-			ForwardMode: PutTraceForwardStream,
-		})
-		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
-		resolveStart := time.Now()
-		peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
-		ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
-		reply, err := c.forward.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, r)
-		if err != nil {
-			return nil, topologyForwardWriteError(group, err)
-		}
-		obj, err := objectFromReply(reply)
-		if err != nil {
-			logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpPutObject, reply)
-			return nil, err
-		}
-		return obj, nil
-	}
-
-	body, err := readBoundedBody(r, c.maxBody)
-	if err != nil {
-		return nil, err
-	}
-	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm)
-	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
-		Bucket:      bucket,
-		Key:         key,
-		GroupID:     target.GroupID,
-		Ingress:     PutTraceIngressForwardedNonLeader,
-		SizeClass:   putTraceSizeClass(int64(len(body)), c.maxBody),
-		ForwardMode: PutTraceForwardFrame,
-	})
-	ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
-	resolveStart := time.Now()
-	peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
-	ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
-	reply, err := c.forward.Send(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args)
-	if err != nil {
-		return nil, topologyForwardWriteError(group, err)
-	}
-	obj, err := objectFromReply(reply)
-	if err != nil {
-		logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpPutObject, reply)
-		return nil, err
-	}
-	if obj.Size != int64(len(body)) {
-		return nil, ErrForwardBodySizeMismatch
-	}
-	return obj, nil
+	return c.forwardRuntime().putObject(ctx, target, group, req, routeStart)
 }
 
 func (c *ClusterCoordinator) PutObjectWithUserMetadataResult(
@@ -1929,38 +1870,7 @@ func (c *ClusterCoordinator) UploadPart(
 	} else if gb != nil {
 		return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-
-	if c.forward.streamDialer != nil && shouldStreamUploadPartForward(r, c.maxBody) {
-		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
-		streamCtx := ctx
-		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
-		reply, err := c.forward.SendStream(streamCtx, peers, target.GroupID, raftpb.ForwardOpUploadPart, args, r)
-		if err != nil {
-			return nil, err
-		}
-		return partFromReply(reply)
-	}
-
-	body, err := forwardBodyBytes(r, c.maxBody)
-	if err != nil {
-		return nil, err
-	}
-	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
-	if err != nil {
-		return nil, err
-	}
-	part, err := partFromReply(reply)
-	if err != nil {
-		return nil, err
-	}
-	if part.Size != int64(len(body)) {
-		return nil, ErrForwardBodySizeMismatch
-	}
-	return part, nil
+	return c.forwardRuntime().uploadPart(ctx, target, bucket, key, uploadID, partNumber, r)
 }
 
 type forwardBodyBytesProvider interface {

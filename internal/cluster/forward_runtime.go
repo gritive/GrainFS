@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -115,6 +116,116 @@ func (r forwardRuntime) deleteObject(ctx context.Context, target RouteTarget, ar
 		return "", parseReplyStatus(reply)
 	}
 	return "", err
+}
+
+func (r forwardRuntime) putObject(
+	ctx context.Context,
+	target RouteTarget,
+	group ShardGroupEntry,
+	req storage.PutObjectRequest,
+	routeStart time.Time,
+) (*storage.Object, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	bucket, key := req.Bucket, req.Key
+	bodyReader := req.Body
+	contentType := req.ContentType
+	if r.sender.streamDialer != nil && forwardBodyExceedsSingleFrameCap(bodyReader, r.maxBody) {
+		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm)
+		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
+			Bucket:      bucket,
+			Key:         key,
+			GroupID:     target.GroupID,
+			Ingress:     PutTraceIngressForwardedNonLeader,
+			SizeClass:   PutTraceSizeLarge,
+			ForwardMode: PutTraceForwardStream,
+		})
+		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
+		resolveStart := time.Now()
+		peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+		ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
+		reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, bodyReader)
+		if err != nil {
+			return nil, topologyForwardWriteError(group, err)
+		}
+		obj, err := objectFromReply(reply)
+		if err != nil {
+			logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpPutObject, reply)
+			return nil, err
+		}
+		return obj, nil
+	}
+
+	body, err := readBoundedBody(bodyReader, r.maxBody)
+	if err != nil {
+		return nil, err
+	}
+	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm)
+	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		GroupID:     target.GroupID,
+		Ingress:     PutTraceIngressForwardedNonLeader,
+		SizeClass:   putTraceSizeClass(int64(len(body)), r.maxBody),
+		ForwardMode: PutTraceForwardFrame,
+	})
+	ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
+	resolveStart := time.Now()
+	peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+	ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
+	reply, err := r.sender.Send(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args)
+	if err != nil {
+		return nil, topologyForwardWriteError(group, err)
+	}
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpPutObject, reply)
+		return nil, err
+	}
+	if obj.Size != int64(len(body)) {
+		return nil, ErrForwardBodySizeMismatch
+	}
+	return obj, nil
+}
+
+func (r forwardRuntime) uploadPart(
+	ctx context.Context,
+	target RouteTarget,
+	bucket, key, uploadID string,
+	partNumber int,
+	bodyReader io.Reader,
+) (*storage.Part, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	if r.sender.streamDialer != nil && shouldStreamUploadPartForward(bodyReader, r.maxBody) {
+		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
+		peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+		reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpUploadPart, args, bodyReader)
+		if err != nil {
+			return nil, err
+		}
+		return partFromReply(reply)
+	}
+
+	body, err := forwardBodyBytes(bodyReader, r.maxBody)
+	if err != nil {
+		return nil, err
+	}
+	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
+	if err != nil {
+		return nil, err
+	}
+	part, err := partFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	if part.Size != int64(len(body)) {
+		return nil, ErrForwardBodySizeMismatch
+	}
+	return part, nil
 }
 
 func (r forwardRuntime) peersForTarget(target RouteTarget) []string {

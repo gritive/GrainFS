@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -57,4 +58,27 @@ func TestForwardRuntimeMutateFrameSendsStatusOnlyMutation(t *testing.T) {
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpSetObjectACL, d.calls[0].op)
 	require.Equal(t, "g1", d.calls[0].gid)
+}
+
+func TestForwardRuntimePutObjectFrameRejectsSizeMismatch(t *testing.T) {
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: 99, ETag: "etag", ContentType: "text/plain"},
+		"bk",
+	)
+
+	rt := forwardRuntime{sender: NewForwardSender(d.dial), maxBody: DefaultMaxForwardBodyBytes}
+	_, err := rt.putObject(
+		context.Background(),
+		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
+		ShardGroupEntry{ID: "g1"},
+		storage.PutObjectRequest{
+			Bucket:      "bk",
+			Key:         "k",
+			Body:        bytes.NewReader([]byte("small")),
+			ContentType: "text/plain",
+		},
+		time.Now(),
+	)
+	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
