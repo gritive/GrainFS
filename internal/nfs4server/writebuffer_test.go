@@ -157,3 +157,16 @@ func TestWriteBuffer_DiscardSkipsPutObject(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	require.Empty(t, entries, "buffer dir empty after discard")
 }
+
+func TestWriteBuffer_ReadAfterFlushReturnsMissNotError(t *testing.T) {
+	dir := t.TempDir()
+	be := &fakeBackend{}
+	wb := newWriteBuffer(dir, be)
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("payload"), "text/plain"))
+	require.NoError(t, wb.Flush(context.Background(), "bkt", "key"))
+
+	// After flush the entry is gone from the map — Read returns a clean miss.
+	_, hit, err := wb.Read(context.Background(), "bkt", "key", 0, 7)
+	require.NoError(t, err)
+	require.False(t, hit, "post-flush Read must miss without error (caller falls back to backend)")
+}

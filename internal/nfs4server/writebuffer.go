@@ -168,6 +168,12 @@ func (wb *writeBuffer) Read(ctx context.Context, bucket, key string, offset uint
 	f, err := os.Open(entry.dataPath)
 	if err != nil {
 		entry.mu.Unlock()
+		if errors.Is(err, os.ErrNotExist) {
+			// Concurrent Flush removed the file after we found the entry in
+			// the map but before we could open it. Backend now has the flushed
+			// data; treat as a miss so the caller falls back to backend.GetObject.
+			return nil, false, nil
+		}
 		return nil, false, fmt.Errorf("writebuffer open for read: %w", err)
 	}
 	entry.lastTouch = time.Now()
