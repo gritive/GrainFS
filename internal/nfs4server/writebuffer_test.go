@@ -145,3 +145,15 @@ func TestWriteBuffer_FlushNoOpForUnknownKey(t *testing.T) {
 	wb := newWriteBuffer(dir, &fakeBackend{})
 	require.NoError(t, wb.Flush(context.Background(), "bkt", "missing"))
 }
+
+func TestWriteBuffer_DiscardSkipsPutObject(t *testing.T) {
+	dir := t.TempDir()
+	be := &fakeBackend{}
+	wb := newWriteBuffer(dir, be)
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("payload"), "text/plain"))
+	require.NoError(t, wb.Discard(context.Background(), "bkt", "key"))
+
+	require.Equal(t, 0, be.PutCalls, "Discard must not call PutObject")
+	entries, _ := os.ReadDir(dir)
+	require.Empty(t, entries, "buffer dir empty after discard")
+}

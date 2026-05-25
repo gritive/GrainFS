@@ -236,6 +236,30 @@ func (wb *writeBuffer) Flush(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
+// Discard drops the in-memory entry and on-disk files without calling PutObject.
+// Used when an upstream op (SETATTR truncate, explicit invalidate) semantically
+// subsumes pending buffer state.
+//
+// Note: must mirror Flush's lifecycle order — take the entry mutex BEFORE
+// removing the map entry. If we LoadAndDelete first then Lock, a concurrent
+// Write can race in via getOrCreate, create a new entry pointing to the same
+// sha1 dataPath, and run materialize → os.Create on the same file that Discard
+// is about to remove.
+func (wb *writeBuffer) Discard(_ context.Context, bucket, key string) error {
+	k := wb.entryKey(bucket, key)
+	v, ok := wb.entries.Load(k)
+	if !ok {
+		return nil
+	}
+	entry := v.(*writeBufferEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	wb.entries.Delete(k)
+	_ = os.Remove(entry.dataPath)
+	_ = os.Remove(entry.metaPath)
+	return nil
+}
+
 func (wb *writeBuffer) writeMetaLocked(entry *writeBufferEntry) error {
 	meta := struct {
 		Bucket      string `json:"bucket"`
