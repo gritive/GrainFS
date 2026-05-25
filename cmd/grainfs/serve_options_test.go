@@ -33,6 +33,8 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--append-size-cap-bytes", "67108864",
 		"--encryption-key-file", "/tmp/sentinel.key",
 		"--nfs4-port", "12049",
+		"--nfs-write-buffer-dir", "/tmp/nfs-writebuf",
+		"--nfs-write-buffer-idle", "15s",
 		"--nbd-port", "20809",
 		"--9p-bind", "127.0.0.99",
 		"--9p-port", "1564",
@@ -125,6 +127,8 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 
 	// Protocols.
 	require.Equal(t, 12049, opts.NFS4Port)
+	require.Equal(t, "/tmp/nfs-writebuf", opts.NFSWriteBufferDir)
+	require.Equal(t, "15s", opts.NFSWriteBufferIdle.String())
 	require.Equal(t, 20809, opts.NBDPort)
 	require.Equal(t, "127.0.0.99", opts.P9Bind)
 	require.Equal(t, 1564, opts.P9Port)
