@@ -228,6 +228,92 @@ func (r forwardRuntime) uploadPart(
 	return part, nil
 }
 
+func (r forwardRuntime) headObject(
+	ctx context.Context,
+	target RouteTarget,
+	op raftpb.ForwardOp,
+	args []byte,
+	bucket, key string,
+) (*storage.Object, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, op, args)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		logForwardReplyDecodeError(err, bucket, key, target.GroupID, op, reply)
+	}
+	return obj, err
+}
+
+func (r forwardRuntime) listObjects(ctx context.Context, target RouteTarget, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error) {
+	if r.sender == nil {
+		return nil, false, ErrCoordinatorNoRouter
+	}
+	args := buildListObjectsArgs(bucket, prefix, marker, int32(maxKeys))
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjects, args)
+	if err != nil {
+		return nil, false, err
+	}
+	objs, err := objectsFromReply(reply)
+	if err != nil {
+		return nil, false, err
+	}
+	more := maxKeys > 0 && len(objs) > maxKeys
+	if more {
+		objs = objs[:maxKeys]
+	}
+	return objs, more, nil
+}
+
+func (r forwardRuntime) listObjectVersions(ctx context.Context, target RouteTarget, bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys))
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjectVersions, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectVersionsFromReply(reply)
+}
+
+func (r forwardRuntime) walkObjects(ctx context.Context, target RouteTarget, bucket, prefix string, fn func(*storage.Object) error) error {
+	if r.sender == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildWalkObjectsArgs(bucket, prefix)
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpWalkObjects, args)
+	if err != nil {
+		return err
+	}
+	objs, err := objectsFromReply(reply)
+	if err != nil {
+		return err
+	}
+	for _, o := range objs {
+		if err := fn(o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r forwardRuntime) getObjectTags(ctx context.Context, target RouteTarget, bucket, key, versionID string) ([]storage.Tag, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildGetObjectTagsArgs(bucket, key, versionID)
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObjectTags, args)
+	if err != nil {
+		return nil, err
+	}
+	return tagsFromReply(reply)
+}
+
 func (r forwardRuntime) peersForTarget(target RouteTarget) []string {
 	if len(target.Peers) > 0 || r.meta == nil {
 		return target.Peers

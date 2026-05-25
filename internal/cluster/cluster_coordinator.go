@@ -1042,19 +1042,8 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
 		return nil, storage.ErrObjectNotFound
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
 	args := buildHeadObjectArgs(bucket, key)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpHeadObject, args)
-	if err != nil {
-		return nil, err
-	}
-	obj, err := objectFromReply(reply)
-	if err != nil {
-		logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpHeadObject, reply)
-	}
-	return obj, err
+	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
 }
 
 func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
@@ -1068,15 +1057,8 @@ func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*
 	} else if gb != nil {
 		return gb.HeadObjectVersion(bucket, key, versionID)
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
 	args := buildHeadObjectVersionArgs(bucket, key, versionID)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpHeadObjectVersion, args)
-	if err != nil {
-		return nil, err
-	}
-	return objectFromReply(reply)
+	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
 }
 
 func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key string) error {
@@ -1179,23 +1161,7 @@ func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix
 	} else if gb != nil {
 		return gb.ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
 	}
-	if c.forward == nil {
-		return nil, false, ErrCoordinatorNoRouter
-	}
-	args := buildListObjectsArgs(bucket, prefix, marker, int32(maxKeys))
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjects, args)
-	if err != nil {
-		return nil, false, err
-	}
-	objs, err := objectsFromReply(reply)
-	if err != nil {
-		return nil, false, err
-	}
-	more := maxKeys > 0 && len(objs) > maxKeys
-	if more {
-		objs = objs[:maxKeys]
-	}
-	return objs, more, nil
+	return c.forwardRuntime().listObjects(ctx, target, bucket, prefix, marker, maxKeys)
 }
 
 func (c *ClusterCoordinator) ListObjectVersions(
@@ -1228,15 +1194,7 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	} else if gb != nil {
 		return gb.ListObjectVersions(bucket, prefix, maxKeys)
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys))
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjectVersions, args)
-	if err != nil {
-		return nil, err
-	}
-	return objectVersionsFromReply(reply)
+	return c.forwardRuntime().listObjectVersions(ctx, target, bucket, prefix, maxKeys)
 }
 
 // WalkObjects buffers ALL matching objects on the server and returns them in
@@ -1264,24 +1222,7 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 	} else if gb != nil {
 		return gb.WalkObjects(ctx, bucket, prefix, fn)
 	}
-	if c.forward == nil {
-		return ErrCoordinatorNoRouter
-	}
-	args := buildWalkObjectsArgs(bucket, prefix)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpWalkObjects, args)
-	if err != nil {
-		return err
-	}
-	objs, err := objectsFromReply(reply)
-	if err != nil {
-		return err
-	}
-	for _, o := range objs {
-		if err := fn(o); err != nil {
-			return err
-		}
-	}
-	return nil
+	return c.forwardRuntime().walkObjects(ctx, target, bucket, prefix, fn)
 }
 
 func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
@@ -1630,15 +1571,7 @@ func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]sto
 	} else if gb != nil {
 		return gb.GetObjectTags(bucket, key, versionID)
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-	args := buildGetObjectTagsArgs(bucket, key, versionID)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObjectTags, args)
-	if err != nil {
-		return nil, err
-	}
-	return tagsFromReply(reply)
+	return c.forwardRuntime().getObjectTags(ctx, target, bucket, key, versionID)
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as

@@ -82,3 +82,25 @@ func TestForwardRuntimePutObjectFrameRejectsSizeMismatch(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
+
+func TestForwardRuntimeHeadObjectDecodesFrameReply(t *testing.T) {
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	d.replyByOp[raftpb.ForwardOpHeadObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: 7, ETag: "etag", ContentType: "text/plain"},
+		"bk",
+	)
+
+	rt := forwardRuntime{sender: NewForwardSender(d.dial)}
+	obj, err := rt.headObject(
+		context.Background(),
+		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
+		raftpb.ForwardOpHeadObject,
+		buildHeadObjectArgs("bk", "k"),
+		"bk",
+		"k",
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(7), obj.Size)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+}
