@@ -637,24 +637,6 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 	}
 }
 
-// SetOnShardGroupAdded registers a callback fired after each PutShardGroup is applied.
-// The callback fires on every applied entry (including idempotent overwrites with
-// identical PeerIDs) — caller must dedupe if needed.
-// Must not block. Set before Start() to avoid races with the apply loop.
-func (f *MetaFSM) SetOnShardGroupAdded(fn func(ShardGroupEntry)) {
-	f.mu.Lock()
-	f.onShardGroupAdded = fn
-	f.mu.Unlock()
-}
-
-// SetOnBucketAssigned registers a callback fired after each PutBucketAssignment is applied.
-// Must be called before MetaRaft.Start() to avoid a data race with the apply loop.
-func (f *MetaFSM) SetOnBucketAssigned(fn func(bucket, groupID string)) {
-	f.mu.Lock()
-	f.onBucketAssigned = fn
-	f.mu.Unlock()
-}
-
 func (f *MetaFSM) SetOnIcebergApplyResult(fn func(requestID string, err error)) {
 	f.mu.Lock()
 	f.onIcebergResult = fn
@@ -1359,30 +1341,6 @@ func encodeMetaCmd(cmdType MetaCmdType, payload []byte) ([]byte, error) {
 	return fbFinish(b, clusterpb.MetaCmdEnd(b)), nil
 }
 
-func encodeMetaAddNodeCmd(node MetaNodeEntry) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	idOff := b.CreateString(node.ID)
-	addrOff := b.CreateString(node.Address)
-	clusterpb.MetaNodeEntryStart(b)
-	clusterpb.MetaNodeEntryAddId(b, idOff)
-	clusterpb.MetaNodeEntryAddAddress(b, addrOff)
-	clusterpb.MetaNodeEntryAddRole(b, node.Role)
-	nodeOff := clusterpb.MetaNodeEntryEnd(b)
-
-	clusterpb.MetaAddNodeCmdStart(b)
-	clusterpb.MetaAddNodeCmdAddNode(b, nodeOff)
-	return fbFinish(b, clusterpb.MetaAddNodeCmdEnd(b)), nil
-}
-
-//nolint:unused // package tests pin meta-FSM command compatibility.
-func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	idOff := b.CreateString(nodeID)
-	clusterpb.MetaRemoveNodeCmdStart(b)
-	clusterpb.MetaRemoveNodeCmdAddNodeId(b, idOff)
-	return fbFinish(b, clusterpb.MetaRemoveNodeCmdEnd(b)), nil
-}
-
 //nolint:unused // referenced by meta_fsm_capability_test.go.
 func buildMetaCapabilityActivatePayload(capability string) []byte {
 	b := flatbuffers.NewBuilder(128)
@@ -1391,30 +1349,6 @@ func buildMetaCapabilityActivatePayload(capability string) []byte {
 	clusterpb.MetaCapabilityActivateCmdAddCapability(b, capOff)
 	root := clusterpb.MetaCapabilityActivateCmdEnd(b)
 	return fbFinish(b, root)
-}
-
-func encodeMetaPutShardGroupCmd(sg ShardGroupEntry) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-
-	idOff := b.CreateString(sg.ID)
-	peerOffs := make([]flatbuffers.UOffsetT, len(sg.PeerIDs))
-	for i := len(sg.PeerIDs) - 1; i >= 0; i-- {
-		peerOffs[i] = b.CreateString(sg.PeerIDs[i])
-	}
-	clusterpb.ShardGroupEntryStartPeerIdsVector(b, len(peerOffs))
-	for i := len(peerOffs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(peerOffs[i])
-	}
-	peerVec := b.EndVector(len(peerOffs))
-
-	clusterpb.ShardGroupEntryStart(b)
-	clusterpb.ShardGroupEntryAddId(b, idOff)
-	clusterpb.ShardGroupEntryAddPeerIds(b, peerVec)
-	sgOff := clusterpb.ShardGroupEntryEnd(b)
-
-	clusterpb.MetaPutShardGroupCmdStart(b)
-	clusterpb.MetaPutShardGroupCmdAddGroup(b, sgOff)
-	return fbFinish(b, clusterpb.MetaPutShardGroupCmdEnd(b)), nil
 }
 
 func cloneStringSlice(in []string) []string {
