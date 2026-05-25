@@ -266,6 +266,69 @@ func (wb *writeBuffer) Discard(_ context.Context, bucket, key string) error {
 	return nil
 }
 
+// Run is the background flusher. Periodically (every idleTimeout/2) walks
+// entries and flushes ones whose lastTouch is older than idleTimeout. On
+// ctx.Done() it drains all outstanding entries before returning, so server
+// shutdown doesn't strand ACK'd writes in local files.
+func (wb *writeBuffer) Run(ctx context.Context) {
+	tick := time.NewTicker(wb.idleTimeout / 2)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			wb.flushAll(context.Background())
+			return
+		case <-tick.C:
+			wb.flushIdle(ctx)
+		}
+	}
+}
+
+func (wb *writeBuffer) flushIdle(ctx context.Context) {
+	now := time.Now()
+	var stale []string
+	wb.entries.Range(func(k, v any) bool {
+		entry := v.(*writeBufferEntry)
+		entry.mu.Lock()
+		if now.Sub(entry.lastTouch) >= wb.idleTimeout {
+			stale = append(stale, k.(string))
+		}
+		entry.mu.Unlock()
+		return true
+	})
+	for _, k := range stale {
+		bucket, key, ok := splitEntryKey(k)
+		if !ok {
+			continue
+		}
+		_ = wb.Flush(ctx, bucket, key)
+	}
+}
+
+func (wb *writeBuffer) flushAll(ctx context.Context) {
+	var all []string
+	wb.entries.Range(func(k, _ any) bool {
+		all = append(all, k.(string))
+		return true
+	})
+	for _, k := range all {
+		bucket, key, ok := splitEntryKey(k)
+		if !ok {
+			continue
+		}
+		_ = wb.Flush(ctx, bucket, key)
+	}
+}
+
+func splitEntryKey(k string) (bucket, key string, ok bool) {
+	for i := 0; i < len(k); i++ {
+		if k[i] == '/' {
+			return k[:i], k[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
 func (wb *writeBuffer) writeMetaLocked(entry *writeBufferEntry) error {
 	meta := struct {
 		Bucket      string `json:"bucket"`

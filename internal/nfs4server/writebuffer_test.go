@@ -213,3 +213,20 @@ func TestWriteBuffer_ReadAfterFlushReturnsMissNotError(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, hit, "post-flush Read must miss without error (caller falls back to backend)")
 }
+
+func TestWriteBuffer_IdleFlush(t *testing.T) {
+	dir := t.TempDir()
+	be := &fakeBackend{}
+	wb := newWriteBuffer(dir, be)
+	wb.idleTimeout = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go wb.Run(ctx)
+
+	require.NoError(t, wb.Write(ctx, "bkt", "key", 0, []byte("data"), "text/plain"))
+	require.Eventually(t, func() bool {
+		be.mu.Lock()
+		defer be.mu.Unlock()
+		return be.PutCalls == 1
+	}, 2*time.Second, 20*time.Millisecond, "idle flush should fire within ~2× idleTimeout")
+}
