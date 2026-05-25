@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.335.0] - 2026-05-26
+
+### Changed
+
+- **Cluster multipart coordination now runs through a dedicated runtime.** Create, upload-part, complete, and abort keep the same routing behavior while bucket checks, placement routing, local execution, and forwarding live in one focused coordinator module.
+
+### Fixed
+
+- **Cluster object ACL and tag mutations now trust the object index on local leaders.** Local data-group leaders no longer rerun a stale local `HeadObject` pre-check after the coordinator has resolved the object through the cluster index, avoiding false not-found failures while data-Raft apply catches up.
+- **Object mutation apply-lag regression tests now wait for the Raft proposal directly.** The ACL/tag tests no longer rely on a fixed timer before releasing apply, making the race coverage deterministic.
+
 ## [0.0.333.0] - 2026-05-26
 
 ### Changed
