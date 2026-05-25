@@ -104,3 +104,22 @@ func TestForwardRuntimeHeadObjectDecodesFrameReply(t *testing.T) {
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
 }
+
+func TestForwardRuntimeCreateMultipartUploadDecodesFrameReply(t *testing.T) {
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
+
+	rt := forwardRuntime{sender: NewForwardSender(d.dial)}
+	upload, err := rt.createMultipartUpload(
+		context.Background(),
+		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
+		"bk",
+		"k",
+		"text/plain",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "upload-1", upload.UploadID)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+}

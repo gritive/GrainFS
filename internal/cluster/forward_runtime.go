@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -312,6 +313,67 @@ func (r forwardRuntime) getObjectTags(ctx context.Context, target RouteTarget, b
 		return nil, err
 	}
 	return tagsFromReply(reply)
+}
+
+func (r forwardRuntime) createMultipartUpload(
+	ctx context.Context,
+	target RouteTarget,
+	bucket, key, contentType string,
+	tags []storage.Tag,
+) (*storage.MultipartUpload, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildCreateMultipartUploadArgs(bucket, key, contentType, tags)
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
+	if err != nil {
+		return nil, err
+	}
+	return uploadFromReply(reply)
+}
+
+func (r forwardRuntime) completeMultipartUpload(ctx context.Context, target RouteTarget, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts)
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCompleteMultipartUpload, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectFromReply(reply)
+}
+
+func (r forwardRuntime) abortMultipartUpload(ctx context.Context, target RouteTarget, bucket, key, uploadID string) error {
+	if r.sender == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildAbortMultipartUploadArgs(bucket, key, uploadID)
+	return r.mutateFrame(ctx, target, raftpb.ForwardOpAbortMultipartUpload, args)
+}
+
+func (r forwardRuntime) listMultipartUploads(ctx context.Context, target RouteTarget, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	if r.sender == nil {
+		return nil, rejectIncompleteMultipartListing(compat.OperationListMultipartUploads)
+	}
+	args := buildListMultipartUploadsArgs(bucket, prefix, int32(maxUploads))
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListMultipartUploads, args)
+	if err != nil {
+		return nil, err
+	}
+	return multipartUploadsFromReply(reply)
+}
+
+func (r forwardRuntime) listParts(ctx context.Context, target RouteTarget, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	if r.sender == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildListPartsArgs(bucket, key, uploadID, int32(maxParts))
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListParts, args)
+	if err != nil {
+		return nil, err
+	}
+	return partsFromReply(reply)
 }
 
 func (r forwardRuntime) peersForTarget(target RouteTarget) []string {

@@ -1242,15 +1242,7 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	} else if gb != nil {
 		return gb.CreateMultipartUpload(ctx, bucket, key, contentType)
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-	args := buildCreateMultipartUploadArgs(bucket, key, contentType, nil)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
-	if err != nil {
-		return nil, err
-	}
-	return uploadFromReply(reply)
+	return c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, nil)
 }
 
 // CreateMultipartUploadWithTags routes to the resolved data group, mirroring
@@ -1276,15 +1268,7 @@ func (c *ClusterCoordinator) CreateMultipartUploadWithTags(ctx context.Context, 
 	} else if gb != nil {
 		return gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
 	}
-	if c.forward == nil {
-		return "", ErrCoordinatorNoRouter
-	}
-	args := buildCreateMultipartUploadArgs(bucket, key, contentType, tags)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
-	if err != nil {
-		return "", err
-	}
-	upload, err := uploadFromReply(reply)
+	upload, err := c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, tags)
 	if err != nil {
 		return "", err
 	}
@@ -1311,15 +1295,7 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 		}
 		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 	}
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCompleteMultipartUpload, args)
-	if err != nil {
-		return nil, err
-	}
-	obj, err := objectFromReply(reply)
+	obj, err := c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, uploadID, parts)
 	if err != nil {
 		return nil, err
 	}
@@ -2057,15 +2033,7 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 	} else if gb != nil {
 		return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
 	}
-	if c.forward == nil {
-		return ErrCoordinatorNoRouter
-	}
-	args := buildAbortMultipartUploadArgs(bucket, key, uploadID)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpAbortMultipartUpload, args)
-	if err != nil {
-		return err
-	}
-	return parseReplyStatus(reply)
+	return c.forwardRuntime().abortMultipartUpload(ctx, target, bucket, key, uploadID)
 }
 
 // ListMultipartUploads scans local data-group backends and forwards to owners
@@ -2124,12 +2092,7 @@ func (c *ClusterCoordinator) forwardListMultipartUploads(ctx context.Context, gr
 	if err := c.requireMultipartListingPeerCapability(compat.OperationListMultipartUploads, target.Peers); err != nil {
 		return nil, err
 	}
-	args := buildListMultipartUploadsArgs(bucket, prefix, 0)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListMultipartUploads, args)
-	if err != nil {
-		return nil, err
-	}
-	return multipartUploadsFromReply(reply)
+	return c.forwardRuntime().listMultipartUploads(ctx, target, bucket, prefix, 0)
 }
 
 // ListParts routes by (bucket, key): local group backend first; otherwise the
@@ -2151,12 +2114,7 @@ func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadI
 	if err := c.requireMultipartListingPeerCapability(compat.OperationListParts, target.Peers); err != nil {
 		return nil, err
 	}
-	args := buildListPartsArgs(bucket, key, uploadID, int32(maxParts))
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListParts, args)
-	if err != nil {
-		return nil, err
-	}
-	return partsFromReply(reply)
+	return c.forwardRuntime().listParts(ctx, target, bucket, key, uploadID, maxParts)
 }
 
 func (c *ClusterCoordinator) requireMultipartListingPeerCapability(op compat.Operation, peers []string) error {
