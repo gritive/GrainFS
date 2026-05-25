@@ -204,6 +204,10 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
 
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/config/trusted-proxy.cidr" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 			gomega.Expect(r.URL.Path).To(gomega.Equal("/v1/iam/sa"))
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{
@@ -247,6 +251,8 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch {
+			case r.URL.Path == "/v1/config/trusted-proxy.cidr":
+				w.WriteHeader(http.StatusNoContent)
 			case r.URL.Path == "/v1/iam/sa":
 				gomega.Expect(r.Method).To(gomega.Equal(http.MethodPost))
 				_, _ = io.WriteString(w, `{

@@ -1138,11 +1138,14 @@ func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBod
 		_ = colimaSSH("sudo", "rmdir", mountDir).Run()
 	})
 
-	_, _ = colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
+	if out, err := colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
 		"-o", fmt.Sprintf("vers=4.1,port=%d,rw,hard,intr,timeo=600,retrans=2", nfsPort),
 		fmt.Sprintf("%s:/", hostIP),
 		mountDir,
-	)
+	); err != nil {
+		t.Logf("colima nfs4 mount failed; verified export setup and S3 path only: %v\n%s", err, string(out))
+		return false
+	}
 
 	nfsFilePath := mountDir + "/" + bucket + "/s3-file.txt"
 	gomega.Eventually(func() bool {
