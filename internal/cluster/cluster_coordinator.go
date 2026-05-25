@@ -1226,23 +1226,7 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 }
 
 func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
-	if err := c.requireObjectBucket(ctx, bucket); err != nil {
-		return nil, err
-	}
-	target, group, err := c.routeWriteOrBucket(bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	ctx = contextWithObjectWritePlacement(ctx, group)
-	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, c.multipartListingCapabilityPeers(target, group)); err != nil {
-		return nil, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.CreateMultipartUpload(ctx, bucket, key, contentType)
-	}
-	return c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, nil)
+	return c.multipartRuntime().createMultipartUpload(ctx, bucket, key, contentType)
 }
 
 // CreateMultipartUploadWithTags routes to the resolved data group, mirroring
@@ -1252,54 +1236,11 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 // remote the tags ride along in CreateMultipartUploadArgs.tags so the receiver
 // dispatches to GroupBackend.CreateMultipartUploadWithTags.
 func (c *ClusterCoordinator) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
-	if err := c.requireObjectBucket(ctx, bucket); err != nil {
-		return "", err
-	}
-	target, group, err := c.routeWriteOrBucket(bucket, key)
-	if err != nil {
-		return "", err
-	}
-	ctx = contextWithObjectWritePlacement(ctx, group)
-	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, c.multipartListingCapabilityPeers(target, group)); err != nil {
-		return "", err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-		return "", err
-	} else if gb != nil {
-		return gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
-	}
-	upload, err := c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, tags)
-	if err != nil {
-		return "", err
-	}
-	return upload.UploadID, nil
+	return c.multipartRuntime().createMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
 }
 
 func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
-	if err := c.requireObjectBucket(ctx, bucket); err != nil {
-		return nil, err
-	}
-	target, group, err := c.routeWriteOrBucket(bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	if c.indexWriter != nil {
-		ctx = contextWithObjectWritePlacement(ctx, group)
-	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		obj, err := gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
-		if err != nil {
-			return nil, err
-		}
-		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
-	}
-	obj, err := c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, uploadID, parts)
-	if err != nil {
-		return nil, err
-	}
-	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+	return c.multipartRuntime().completeMultipartUpload(ctx, bucket, key, uploadID, parts)
 }
 
 func (c *ClusterCoordinator) PutObject(
@@ -1780,22 +1721,7 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 func (c *ClusterCoordinator) UploadPart(
 	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader,
 ) (*storage.Part, error) {
-	if err := c.requireObjectBucket(ctx, bucket); err != nil {
-		return nil, err
-	}
-	target, _, err := c.routeWriteOrBucket(bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
-	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
-	}
-	return c.forwardRuntime().uploadPart(ctx, target, bucket, key, uploadID, partNumber, r)
+	return c.multipartRuntime().uploadPart(ctx, bucket, key, uploadID, partNumber, r)
 }
 
 type forwardBodyBytesProvider interface {
@@ -2008,22 +1934,7 @@ func shouldStreamUploadPartForward(r io.Reader, maxBody int64) bool {
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
-	if err := c.requireObjectBucket(ctx, bucket); err != nil {
-		return err
-	}
-	target, _, err := c.routeWriteOrBucket(bucket, key)
-	if err != nil {
-		return err
-	}
-	if c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
-	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-		return err
-	} else if gb != nil {
-		return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
-	}
-	return c.forwardRuntime().abortMultipartUpload(ctx, target, bucket, key, uploadID)
+	return c.multipartRuntime().abortMultipartUpload(ctx, bucket, key, uploadID)
 }
 
 // ListMultipartUploads scans local data-group backends and forwards to owners
