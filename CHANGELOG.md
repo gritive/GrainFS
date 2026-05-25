@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.334.0] - 2026-05-26
+
+### Fixed
+
+- **Single-node `grainfs serve` now correctly reports `mode=local`.** The
+  status response on `/v1/cluster/status` was returning `mode=cluster`
+  for single-node bringups because `Server.cluster` is always wired by
+  the boot pipeline. The single-node case is now detected by peer-count
+  (`len(info.Peers()) > 0`), so a fresh `grainfs serve --data X
+  --port N` correctly identifies itself.
+
 ## [0.0.333.0] - 2026-05-26
 
 ### Changed
