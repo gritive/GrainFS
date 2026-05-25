@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -156,6 +157,48 @@ func TestWriteBuffer_DiscardSkipsPutObject(t *testing.T) {
 	require.Equal(t, 0, be.PutCalls, "Discard must not call PutObject")
 	entries, _ := os.ReadDir(dir)
 	require.Empty(t, entries, "buffer dir empty after discard")
+}
+
+func TestWriteBuffer_ReadDuringFlushIsConsistent(t *testing.T) {
+	dir := t.TempDir()
+	// slow PutObject so Read can race in mid-flush.
+	be := &slowPutBackend{delay: 100 * time.Millisecond}
+	wb := newWriteBuffer(dir, be)
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("buffered"), "text/plain"))
+
+	flushDone := make(chan struct{})
+	go func() {
+		require.NoError(t, wb.Flush(context.Background(), "bkt", "key"))
+		close(flushDone)
+	}()
+
+	// Read during the slow PutObject window. Must not error regardless of
+	// race outcome — either we hit the buffer (Flush hasn't released yet)
+	// or we miss cleanly (Flush completed; caller falls back to backend).
+	time.Sleep(20 * time.Millisecond)
+	got, hit, err := wb.Read(context.Background(), "bkt", "key", 0, 8)
+	require.NoError(t, err, "Read during flush must not error")
+	if hit {
+		require.Equal(t, []byte("buffered"), got, "buffer hit must return the buffered bytes")
+	}
+	<-flushDone
+
+	// After flush, the backend holds the just-flushed data. This is the
+	// real correctness guarantee: data eventually reaches the backend with
+	// no path that loses bytes or returns errors.
+	require.Equal(t, []byte("buffered"), be.LastPutBody)
+}
+
+// slowPutBackend embeds fakeBackend and delays PutObject so a concurrent
+// Read can race in mid-flush.
+type slowPutBackend struct {
+	fakeBackend
+	delay time.Duration
+}
+
+func (s *slowPutBackend) PutObject(ctx context.Context, bucket, key string, body io.Reader, ct string) (*storage.Object, error) {
+	time.Sleep(s.delay)
+	return s.fakeBackend.PutObject(ctx, bucket, key, body, ct)
 }
 
 func TestWriteBuffer_ReadAfterFlushReturnsMissNotError(t *testing.T) {
