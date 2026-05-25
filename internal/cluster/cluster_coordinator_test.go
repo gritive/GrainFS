@@ -141,6 +141,7 @@ func TestClusterCoordinatorSetObjectACLTrustsObjectIndexBeforeLocalApply(t *test
 	base := &fakeBackend{}
 	gb := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
+	require.Eventually(t, func() bool { return gb.Node().IsLeader() }, time.Second, time.Millisecond)
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
@@ -162,11 +163,7 @@ func TestClusterCoordinatorSetObjectACLTrustsObjectIndexBeforeLocalApply(t *test
 		errCh <- c.SetObjectACL("bk-acl", "k", 7)
 	}()
 
-	select {
-	case err := <-errCh:
-		require.Failf(t, "SetObjectACL returned before local object apply", "err=%v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
+	requireMutationProposedBeforeApply(t, gb, errCh, "SetObjectACL")
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "k",
 		Size:         4,
@@ -190,6 +187,7 @@ func TestClusterCoordinatorSetObjectTagsTrustsObjectIndexBeforeLocalApply(t *tes
 	base := &fakeBackend{}
 	gb := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
+	require.Eventually(t, func() bool { return gb.Node().IsLeader() }, time.Second, time.Millisecond)
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
@@ -211,11 +209,7 @@ func TestClusterCoordinatorSetObjectTagsTrustsObjectIndexBeforeLocalApply(t *tes
 		errCh <- c.SetObjectTags("bk-tags", "k", "", []storage.Tag{{Key: "env", Value: "test"}})
 	}()
 
-	select {
-	case err := <-errCh:
-		require.Failf(t, "SetObjectTags returned before local object apply", "err=%v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
+	requireMutationProposedBeforeApply(t, gb, errCh, "SetObjectTags")
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "k",
 		Size:         4,
@@ -233,6 +227,25 @@ func TestClusterCoordinatorSetObjectTagsTrustsObjectIndexBeforeLocalApply(t *tes
 	t.Cleanup(func() { close(stopApply) })
 
 	require.NoError(t, <-errCh)
+}
+
+func requireMutationProposedBeforeApply(t *testing.T, gb *GroupBackend, errCh <-chan error, op string) {
+	t.Helper()
+	initialCommit := gb.Node().CommittedIndex()
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-errCh:
+			require.Failf(t, op+" returned before local object apply", "err=%v", err)
+			return false
+		default:
+		}
+		return gb.Node().CommittedIndex() > initialCommit
+	}, time.Second, time.Millisecond)
+	select {
+	case err := <-errCh:
+		require.Failf(t, op+" returned before local object apply", "err=%v", err)
+	default:
+	}
 }
 
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
