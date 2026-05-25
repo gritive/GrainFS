@@ -68,7 +68,7 @@ func TestRenderPeersTable(t *testing.T) {
 	assert.Contains(t, out, "down")
 }
 
-func TestRotateKeyPhaseLabel(t *testing.T) {
+func TestRotateKeyStateLabel(t *testing.T) {
 	cases := []struct {
 		phase int
 		want  string
@@ -80,7 +80,7 @@ func TestRotateKeyPhaseLabel(t *testing.T) {
 		{99, "unknown"},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, RotateKeyPhaseLabel(tc.phase), "phase=%d", tc.phase)
+		assert.Equal(t, tc.want, RotateKeyStateLabel(tc.phase), "state=%d", tc.phase)
 	}
 }
 

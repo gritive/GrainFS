@@ -26,10 +26,10 @@ BalancerProposer -> evaluates disk skew every 30 seconds
   imbalance > 20% -> proposes CmdMigrateShard through Raft
   imbalance < 5%  -> stops proposing migrations
 FSM.applyMigrateShard -> MigrationExecutor.Execute()
-  Phase 1: copy shards from source to destination
-  Phase 2: propose CmdMigrationDone through Raft
-  Phase 3: wait for FSM commit through NotifyCommit
-  Phase 4: delete the source shard
+  Step 1: copy shards from source to destination
+  Step 2: propose CmdMigrationDone through Raft
+  Step 3: wait for FSM commit through NotifyCommit
+  Step 4: delete the source shard
 ```
 
 If the migration channel is full, `GrainFS` persists the task under the BadgerDB
@@ -48,7 +48,7 @@ If the migration channel is full, `GrainFS` persists the task under the BadgerDB
 | `--balancer-warmup-timeout` | `60s` | Grace period after node start to avoid false migrations during join or recovery. |
 | `--balancer-cb-threshold` | `0.90` | Disk usage fraction above which a node is excluded as a migration target. |
 | `--balancer-migration-max-retries` | `3` | Maximum shard-write retries. Uses exponential backoff with +/-20% jitter; `ErrPermanent` fails immediately. |
-| `--balancer-migration-pending-ttl` | `5m` | TTL for stale pending migrations. Extended once after Phase 2, then cancelled on the second expiry. |
+| `--balancer-migration-pending-ttl` | `5m` | TTL for stale pending migrations. Extended once after the Raft completion proposal, then cancelled on the second expiry. |
 
 Conservative production example:
 

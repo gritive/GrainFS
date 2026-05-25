@@ -57,8 +57,8 @@ Create a normal service account and grant bucket access:
 
 ```bash
 grainfs iam sa create alice --description "data team"
-grainfs iam grant put <sa_id> mybucket Write
-grainfs iam grant list --sa <sa_id>
+grainfs iam policy attach readwrite --sa <sa_id> --i-know
+grainfs iam bucket create mybucket --attach-sa <sa_id> --attach-policy readwrite
 ```
 
 Rotate an access key with a client rollover window:
@@ -83,7 +83,7 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://mybucket/file.txt
 
 AppendObject (S3 Express semantics) lets you grow an object incrementally without
 multipart upload. Each write supplies the expected current size via
-`x-amz-write-offset-bytes`; the server stitches segments + EC-coalesced blobs on
+`x-amz-write-offset-bytes`; the server stitches segments and EC-coalesced blobs on
 read. Use it for log streams, telemetry, or any append-only workload:
 
 ```bash
@@ -101,7 +101,7 @@ curl -X PUT "http://localhost:9000/mybucket/log.bin" \
 ```
 
 Per-request body cap defaults to 64 MiB; per-object size cap defaults to 5 TiB.
-Tune via `--cluster-append-forward-buffer-max-per-request-bytes` and
+Tune via `--cluster-append-forward-buffer-max-per-request` and
 `--append-size-cap-bytes`. Saturation of the forward buffer surfaces as HTTP
 `503 SlowDown` with `Retry-After: 1` — retry with exponential backoff.
 
@@ -109,9 +109,9 @@ Configure per-bucket pull-through upstreams through the admin surface:
 
 ```bash
 grainfs bucket upstream put legacy-data \
-  --upstream-url http://upstream-minio:9000 \
+  --endpoint-url http://upstream-minio:9000 \
   --access-key legacy-ak \
-  --secret-key-stdin <<<"legacy-sk"
+  --secret-key legacy-sk
 
 grainfs bucket upstream get legacy-data
 grainfs bucket upstream delete legacy-data

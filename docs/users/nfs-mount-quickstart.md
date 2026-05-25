@@ -2,12 +2,13 @@
 
 GrainFS exposes the same data via S3, NFSv4, and 9P. Mount once, read/write either way.
 
-## Phase 0 — Anonymous mount on the default bucket
+## Anonymous mount on the default bucket
 
 Start GrainFS and register the default bucket as an NFS export:
 
 ```bash
-./grainfs serve --data ./tmp --port 9000 &
+CLUSTER_KEY=$(openssl rand -hex 32)
+./grainfs serve --data ./tmp --port 9000 --cluster-key "$CLUSTER_KEY" &
 
 # Register the export (bucket creation is automatic on first S3 write,
 # but NFS requires an explicit export registration).
@@ -33,14 +34,14 @@ ls /mnt/data                                                      # via NFS/9P
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/  # via S3
 ```
 
-> Phase 0 anonymous mount works only when `iam.anon-enabled=true` (the default
+> Anonymous mount works only when `iam.anon-enabled=true` (the default
 > for a fresh cluster). The bucket must also be registered as an export;
 > S3 bucket creation alone does not expose the bucket over NFS or 9P.
 
-## Phase 2 — Authenticated mount with a Mount SA
+## Authenticated mount with a Mount SA
 
-Phase 2 is active after you bootstrap the first admin SA (`grainfs iam sa create`).
-Mounts require a Mount SA with an attached policy.
+S3 auth is active after you bootstrap the first admin SA
+(`grainfs iam sa create`). Mounts require a Mount SA with an attached policy.
 
 ### 1. Create a Mount SA
 

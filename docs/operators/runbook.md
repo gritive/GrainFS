@@ -129,6 +129,7 @@ If `reason="legacy_no_crc"` is non-zero, scrub can read the shard bytes but cann
 Use explicit exports for every bucket mounted through NFSv4:
 
 ```bash
+export GRAINFS_ADMIN_SOCKET=<data>/admin.sock
 grainfs nfs export list
 grainfs nfs export add <bucket>
 grainfs nfs debug <bucket>
@@ -302,9 +303,9 @@ v0.0.123.0; the IAM-managed approach replaces them.
 # Register the upstream for bucket "legacy-data".
 grainfs bucket upstream put legacy-data \
   --endpoint /grainfs/data/admin.sock \
-  --upstream-url http://upstream-minio:9000 \
+  --endpoint-url http://upstream-minio:9000 \
   --access-key legacy-ak \
-  --secret-key-stdin <<<"legacy-sk"
+  --secret-key legacy-sk
 
 grainfs bucket upstream get legacy-data --endpoint /grainfs/data/admin.sock
 grainfs bucket upstream list --endpoint /grainfs/data/admin.sock
@@ -560,7 +561,7 @@ chronic saturation means the pool is undersized for the workload.
 **Fix:**
 - Increase pool: `--cluster-append-forward-buffer-total-bytes` (default 512 MiB).
 - If individual requests are large, raise per-request cap:
-  `--cluster-append-forward-buffer-max-per-request-bytes` (default 64 MiB).
+  `--cluster-append-forward-buffer-max-per-request` (default 64 MiB).
 - If clients want bigger objects, raise per-object cap:
   `--append-size-cap-bytes` (default 5 TiB).
 - Calibrate with `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
@@ -814,7 +815,7 @@ leader with:
    ```
    The output includes `rotation_id`, `OLD SPKI`, and `NEW SPKI`. The CLI
    returns after submitting the request; the cluster advances in the background
-   through phases 1, 2, 3, and then steady state.
+   through rotation states and then returns to steady state.
 
    **If a follower is missing `next.key` or has an SPKI mismatch during rotation,
    that follower cannot swap transport identity.** It loses connectivity to the
@@ -824,13 +825,13 @@ leader with:
    ```
    ./grainfs cluster rotate-key status --endpoint=/path/to/data/rotate.sock
    ```
-   - phase=2 (begun): workers add NEW to the accept set, while nodes still present OLD.
-   - phase=3 (switched): nodes present NEW, while workers still accept OLD.
-   - phase=1 (steady): nodes present NEW, and `GrainFS` keeps OLD in `keys.d/previous.key`.
+   - `state=begun`: workers add NEW to the accept set, while nodes still present OLD.
+   - `state=switched`: nodes present NEW, while workers still accept OLD.
+   - `state=steady`: nodes present NEW, and `GrainFS` keeps OLD in `keys.d/previous.key`.
 
-   A five-second grace period between phases gives workers time to complete disk
-   I/O and swap transport identity. A healthy rotation usually finishes in about
-   10 to 15 seconds.
+   A five-second grace period between state changes gives workers time to
+   complete disk I/O and swap transport identity. A healthy rotation usually
+   finishes in about 10 to 15 seconds.
 
 5. **Update persistent configuration on every node** so the new key survives the
    next restart. Update environment variables, systemd units, or the
@@ -841,7 +842,7 @@ leader with:
 6. **Verify**: use `grainfs cluster --endpoint <data-dir>/admin.sock status` to
    confirm all peers are healthy, then use
    `grainfs cluster rotate-key status --endpoint <data-dir>/rotate.sock` to
-   confirm `phase=1` (steady).
+  confirm `state=steady`.
 
 ### Failure handling during rotation
 
@@ -849,15 +850,15 @@ leader with:
   ```
   ./grainfs cluster rotate-key abort --reason=<reason> --endpoint=/path/to/data/rotate.sock
   ```
-  - Abort in phase 2: roll back to OLD and discard NEW.
-  - Abort in phase 3: forward-roll to NEW because some peers may already present
-    NEW, making revert unsafe (D18).
+  - If status shows `state=begun`: roll back to OLD and discard NEW.
+  - If status shows `state=switched`: forward-roll to NEW because some peers may
+    already present NEW, making revert unsafe (D18).
 
 - **Global timeout**: if rotation exceeds 30 minutes, the leader automatically
   issues an abort.
 
 - **Down peer**: if a node stops responding during rotation, Raft commit does
-  not progress and the phase stalls. Recover the node or remove it from the
+  not progress and the rotation stalls. Recover the node or remove it from the
   cluster, then resume.
 
 ### Offline fallback (all nodes older than v0.0.39)
@@ -929,10 +930,10 @@ grainfs audit query "
 " --endpoint <data>/admin.sock
 ```
 
-### TLS posture gate (Phase 2)
+### TLS posture gate for authenticated clusters
 
-When `iam.anon-enabled=false` (Phase 2), GrainFS refuses to start NFS/9P
-listeners unless at least one of the following is true:
+When S3 auth is enabled (`iam.anon-enabled=false`), GrainFS refuses to start
+NFS/9P listeners unless at least one of the following is true:
 
 - A TLS certificate is on disk (`<data>/tls/cert.pem`), or
 - `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
@@ -950,4 +951,4 @@ cp server.key <data>/tls/key.pem
 grainfs config set trusted-proxy.cidr 10.0.0.0/8 --endpoint <data>/admin.sock
 ```
 
-See also: `docs/operators/cluster-lifecycle.md` (FU#3 TLS posture details).
+See also: `docs/operators/deploy-production-cluster.md` for TLS posture details.

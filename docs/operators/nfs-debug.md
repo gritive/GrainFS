@@ -5,6 +5,7 @@ stale handles, or operators need to verify the admin registry and backend bucket
 agree.
 
 ```bash
+export GRAINFS_ADMIN_SOCKET=<data>/admin.sock
 grainfs nfs debug mydata
 grainfs nfs debug mydata --json
 ```

@@ -114,14 +114,11 @@ func (a *StatusAdapter) Report() adminapi.StatusReport {
 		}
 	}
 
-	phase := derivePhase(saCount, clusterSize, tlsCertPresent)
-
 	return adminapi.StatusReport{
 		Cluster: adminapi.ClusterStatus{
 			NodeID:      a.nodeID,
 			ClusterSize: clusterSize,
 		},
-		Phase: phase,
 		IAM: adminapi.IAMStatus{
 			SACount: saCount,
 		},
@@ -141,25 +138,5 @@ func (a *StatusAdapter) Report() adminapi.StatusReport {
 			PreviousKID: previousKID,
 		},
 		Banner: banner,
-	}
-}
-
-// derivePhase maps IAM bootstrap state, cluster size, and TLS cert presence
-// to a readiness phase number.
-//
-//	Phase 0: sa_count==0 && cluster_size==1  (single-node, no IAM bootstrap)
-//	Phase 1: sa_count==0 && cluster_size>1   (cluster, no IAM bootstrap)
-//	Phase 2: sa_count>=1 && !tls.cert_present (IAM bootstrapped, TLS not configured)
-//	Phase 3: sa_count>=1 && tls.cert_present  (production-ready)
-func derivePhase(saCount, clusterSize int, tlsCertPresent bool) int {
-	switch {
-	case saCount == 0 && clusterSize == 1:
-		return 0
-	case saCount == 0 && clusterSize > 1:
-		return 1
-	case saCount >= 1 && !tlsCertPresent:
-		return 2
-	default:
-		return 3
 	}
 }

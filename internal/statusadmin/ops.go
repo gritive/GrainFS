@@ -48,7 +48,6 @@ func renderStatus(w io.Writer, report adminapi.StatusReport, asJSON bool) error 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "node_id:\t%s\n", report.Cluster.NodeID)
 	fmt.Fprintf(tw, "cluster_size:\t%d\n", report.Cluster.ClusterSize)
-	fmt.Fprintf(tw, "phase:\t%d\n", report.Phase)
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "sa_count:\t%d\n", report.IAM.SACount)
 	fmt.Fprintf(tw, "banner:\t%v\n", report.Banner)

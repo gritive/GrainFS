@@ -236,11 +236,11 @@ POST /v1/transactions/commit
 Important correction to the design:
 
 - DuckDB 1.5.2 sends table creation through `POST /v1/transactions/commit` after `POST /v1/namespaces/{namespace}/tables`.
-- `GrainFS` Phase 1 must implement `POST /v1/transactions/commit`; a table-specific commit endpoint alone is not enough.
+- `GrainFS` must include `POST /v1/transactions/commit` in the initial DuckDB-compatible catalog surface; a table-specific commit endpoint alone is not enough.
 
 ## Implementation Implications
 
-Minimum Phase 1 catalog routes for DuckDB attach/show/create:
+Minimum catalog routes for DuckDB attach/show/create:
 
 ```text
 GET  /iceberg/v1/config
@@ -262,5 +262,5 @@ Error responses must be Iceberg JSON errors. S3 XML error helpers must not be re
 An instrumented mock REST Catalog captured DuckDB's catalog request sequence.
 The trace did not complete `INSERT` or `SELECT` against real table data because
 that requires a real S3 warehouse endpoint, valid Iceberg metadata files, and
-Parquet data files. Phase 2 e2e tests cover those requirements after Phase 1
-implements the catalog contract.
+Parquet data files. Follow-up e2e tests cover those requirements after the
+catalog contract is implemented.

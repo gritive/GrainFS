@@ -10,10 +10,13 @@ It exposes object, file, and block interfaces over one storage layer:
 - **Block storage:** NBD for Linux clients
 - **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows
 
-## Quick Start (30 seconds)
+## Quick Start (2-5 minutes)
 
 ```bash
-./grainfs serve --data ./tmp --port 9000
+DATA_DIR=./tmp
+make bin/grainfs
+CLUSTER_KEY=$(openssl rand -hex 32)
+./bin/grainfs serve --data "$DATA_DIR" --port 9000 --cluster-key "$CLUSTER_KEY"
 ```
 
 In another terminal:
@@ -22,49 +25,65 @@ In another terminal:
 echo "hello grainfs" > file.txt
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 cp file.txt s3://default/
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/
-
-# NFS mount (Linux) — register the export first, then mount.
-grainfs nfs export add default --endpoint ./tmp/admin.sock
-sudo mount -t nfs4 -o nolock,nfsvers=4.0 localhost:/default /mnt/data
 ```
 
-That's it. You have a working S3 + Iceberg server. Files written via NFS appear
-in S3 and vice versa. See [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md)
-for 9P mounts, authenticated Mount SAs, and read-only exports.
+Expected output:
 
-> ⚠ **Phase 0 anonymous mode**: any client on this port can read/write `s3://default`. To require authentication, run `grainfs iam sa create <name>` — this flips the cluster to Phase 2. See [`docs/operators/cluster-lifecycle.md`](docs/operators/cluster-lifecycle.md).
+```text
+upload: ./file.txt to s3://default/file.txt
+... file.txt
+```
+
+That's it. You have a working local S3 server. To verify the same data through
+NFS on Linux, continue with [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
+That guide also covers 9P mounts, authenticated Mount SAs, and read-only exports.
+
+> ⚠ **Anonymous local mode**: any client on this port can read/write `s3://default`. To require authentication, create the first service account through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
 ### Optional: cluster / production setup
 
 <details>
-<summary>Cluster (Phase 1)</summary>
+<summary>Cluster</summary>
 
-`scp` `./tmp/kek.key` from node A to node B, then `./grainfs cluster join <nodeA>:9000`.
+`scp` `./tmp/kek.key` from node A to node B, then run on node B:
+
+```bash
+DATA_DIR=./dataB
+mkdir -p "$DATA_DIR"
+scp <nodeA>:<nodeA-data-dir>/kek.key "$DATA_DIR/kek.key"
+chmod 0600 "$DATA_DIR/kek.key"
+./bin/grainfs cluster join <nodeA>:7001 \
+  --data "$DATA_DIR" \
+  --node-id node-b \
+  --bind-addr <nodeB>:7001 \
+  --cluster-key "$CLUSTER_KEY"
+```
 </details>
 
 <details>
-<summary>Auth + Iceberg (Phase 2)</summary>
+<summary>Auth + Iceberg</summary>
 
 ```bash
-grainfs iam sa create admin
-grainfs iam policy attach --sa <id> --policy readwrite --i-know
-grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite
+DATA_DIR=./tmp
+./bin/grainfs iam sa create admin --endpoint "$DATA_DIR/admin.sock"
+./bin/grainfs iam policy attach readwrite --sa <id> --endpoint "$DATA_DIR/admin.sock" --i-know
+./bin/grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite --endpoint "$DATA_DIR/admin.sock"
 ```
 
 For Iceberg client config (DuckDB / Trino / Spark / PyIceberg / warp):
 
 ```bash
-grainfs iceberg config --warehouse analytics --sa <id>
+./bin/grainfs iceberg config --warehouse analytics --sa <id> --endpoint "$DATA_DIR/admin.sock"
 ```
 
 See [`docs/users/oauth2-iceberg-quickstart.md`](docs/users/oauth2-iceberg-quickstart.md).
 </details>
 
 <details>
-<summary>Production (Phase 3)</summary>
+<summary>Production hardening</summary>
 
 TLS / encryption-key / audit / proxy-trust — all hot-applyable via `config set`.
-See [`docs/operators/cluster-lifecycle.md`](docs/operators/cluster-lifecycle.md).
+See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 </details>
 
 ## What It Supports
@@ -121,12 +140,12 @@ firewall-restricted addresses.
 
 | Workflow | Command or entry point |
 | --- | --- |
-| Create/list service accounts and grants | `grainfs iam --endpoint <data>/admin.sock ...` |
+| Create/list service accounts, keys, and policies | `grainfs iam --endpoint <data>/admin.sock ...` |
 | Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
-| Export a bucket over NFSv4 | `grainfs nfs export add <bucket>` |
-| Create an NBD volume | `grainfs volume create <name> --size 10Gi` |
+| Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |
+| Create an NBD volume | `grainfs volume create <name> --size 10Gi --endpoint <data>/admin.sock` |
 | Run recovery planning | `grainfs recover cluster plan --source-data <dir> --target-data <dir>` |
 | Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
 | Check incidents | `curl http://localhost:9000/api/incidents` |

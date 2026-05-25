@@ -43,7 +43,7 @@ type RotationAbortRequest struct {
 // code is 200 in all cases (matches the line-delimited socket's prior
 // contract — clients branch on Error string).
 type RotationStatusResponse struct {
-	Phase      int    `json:"phase"`
+	State      string `json:"state"`
 	RotationID string `json:"rotation_id,omitempty"`
 	OldSPKI    string `json:"old_spki,omitempty"`
 	NewSPKI    string `json:"new_spki,omitempty"`
@@ -119,7 +119,7 @@ func registerRotationRoutes(h *hzserver.Hertz, dataDir string, metaRaft *cluster
 
 func rotationStatusResp(metaRaft *cluster.MetaRaft) RotationStatusResponse {
 	st := metaRaft.RotationState()
-	out := RotationStatusResponse{Phase: st.Phase}
+	out := RotationStatusResponse{State: rotationStateLabel(st.Phase)}
 	if st.RotationID != ([16]byte{}) {
 		out.RotationID = hex.EncodeToString(st.RotationID[:])
 	}
@@ -137,7 +137,7 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 		return RotationStatusResponse{Error: "rotate-key begin must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
 	}
 	if st := metaRaft.RotationState(); st.Phase != cluster.PhaseSteady {
-		return RotationStatusResponse{Error: fmt.Sprintf("rotation already in progress (rotation_id=%x, phase=%d); abort first", st.RotationID, st.Phase)}
+		return RotationStatusResponse{Error: fmt.Sprintf("rotation already in progress (rotation_id=%x, state=%s); abort first", st.RotationID, rotationStateLabel(st.Phase))}
 	}
 	if len(newKey) != 64 {
 		return RotationStatusResponse{Error: fmt.Sprintf("new_key must be 64 hex chars (32 bytes), got %d", len(newKey))}
@@ -172,7 +172,7 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 	}
 	st := metaRaft.RotationState()
 	return RotationStatusResponse{
-		Phase:      st.Phase,
+		State:      rotationStateLabel(st.Phase),
 		RotationID: hex.EncodeToString(cmd.RotationID[:]),
 		OldSPKI:    hex.EncodeToString(st.OldSPKI[:]),
 		NewSPKI:    hex.EncodeToString(newSPKI[:]),
@@ -197,5 +197,18 @@ func rotationAbort(ctx context.Context, reason string, metaRaft *cluster.MetaRaf
 		return RotationStatusResponse{Error: fmt.Sprintf("ProposeRotateKeyAbort: %v", err)}
 	}
 	final := metaRaft.RotationState()
-	return RotationStatusResponse{Phase: final.Phase}
+	return RotationStatusResponse{State: rotationStateLabel(final.Phase)}
+}
+
+func rotationStateLabel(p int) string {
+	switch p {
+	case cluster.PhaseSteady:
+		return "steady"
+	case cluster.PhaseBegun:
+		return "begun"
+	case cluster.PhaseSwitched:
+		return "switched"
+	default:
+		return "unknown"
+	}
 }

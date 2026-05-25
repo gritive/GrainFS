@@ -493,20 +493,20 @@ metaRaftSender := raft.NewMetaTransportQUIC(quicTransport, quicMux, ...)
 
 ## Migration
 
-### Phase 1: code (default off)
+### Rollout step 1: code (default off)
 - Add `internal/raft/raft_conn.go` and `heartbeat_coalescer.go`.
 - Add ALPN routing and the `muxConns` registry to `internal/transport/quic.go`.
 - Add mux/legacy branches to `group_transport_quic.go` and `meta_transport_quic.go`.
 - Advertise both ALPNs. Servers accept both, and clients try mux first.
 - Keep `--quic-mux=false` as the default for the existing path.
 
-### Phase 2: opt-in measurement
+### Rollout step 2: opt-in measurement
 - `--quic-mux=true` e2e + perf
 - **Gate**: idle-N8 CPU drops by **40% or more**, measured by combined `runtime.kevent` + `recvmsg`.
 - Reconsider the design if it misses the gate.
 
-### Phase 3: default on (after one release)
-### Phase 4: remove legacy ALPN/code (after the deprecation period)
+### Rollout step 3: default on (after one release)
+### Rollout step 4: remove legacy ALPN/code (after the deprecation period)
 
 ## Test Plan
 
@@ -589,7 +589,7 @@ Add a `--quic-mux=true` variant to the existing `cluster_perf_profile_test.go`.
 | 3 | Coalescer flush window | **2ms** (1% of the 200ms heartbeat) |
 | 4 | Snapshot bypass enforce | **unit test (static parse + e2e counter)** |
 | 5 | nextID/pending location | **RaftConn (conn-level)** |
-| 6 | Cross-version migration | **ALPN dual-advertise from Phase 1** |
+| 6 | Cross-version migration | **ALPN dual-advertise from rollout step 1** |
 | 7 | Entries-bearing AE | **callDirect (coalescer bypass)** |
 
 ## Risks (v3)
