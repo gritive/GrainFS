@@ -296,28 +296,33 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 				if err != nil {
 					return fmt.Errorf("open ec shard %d: %w", i, err)
 				}
+				size, knownSize := int64(-1), false
 				if shardSize != nil {
-					if size, sizeErr := shardSize(i); sizeErr == nil && size <= ecShardBufferedLimit {
-						data := make([]byte, size)
-						_, werr = io.ReadFull(body, data)
-						if closer, ok := body.(io.Closer); ok {
-							if closeErr := closer.Close(); werr == nil && closeErr != nil {
-								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
-							}
+					if sz, sizeErr := shardSize(i); sizeErr == nil {
+						size, knownSize = sz, true
+					}
+				}
+				if knownSize && size <= ecShardBufferedLimit {
+					data := make([]byte, size)
+					_, werr = io.ReadFull(body, data)
+					if closer, ok := body.(io.Closer); ok {
+						if closeErr := closer.Close(); werr == nil && closeErr != nil {
+							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
 						}
-						if werr == nil {
-							werr = w.shards.WriteLocalShardContext(gctx, plan.Bucket, shardKey, i, data)
+					}
+					if werr == nil {
+						werr = w.shards.WriteLocalShardContext(gctx, plan.Bucket, shardKey, i, data)
+					}
+				} else {
+					if knownSize {
+						if sized, ok := w.shards.(ecObjectSizedShardStore); ok {
+							werr = sized.WriteLocalShardStreamSizedContext(gctx, plan.Bucket, shardKey, i, body, size)
+						} else {
+							werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
 						}
 					} else {
 						werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
-						if closer, ok := body.(io.Closer); ok {
-							if closeErr := closer.Close(); werr == nil && closeErr != nil {
-								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
-							}
-						}
 					}
-				} else {
-					werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
 					if closer, ok := body.(io.Closer); ok {
 						if closeErr := closer.Close(); werr == nil && closeErr != nil {
 							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
