@@ -1818,8 +1818,9 @@ func readBoundedBody(r io.Reader, maxBody int64) ([]byte, error) {
 //     and then commits ObjectIndex on the meta-Raft so the cluster view is
 //     consistent with the data plane.
 //   - forward path: streams the body to the owner via ForwardSender.SendStream
-//     using AppendObjectForwardArgs; the receiver does the propose + commits
-//     ObjectIndex itself (handleAppendObjectStream) so we don't double-commit.
+//     using AppendObjectForwardArgs; the receiver proposes the data append and
+//     commits ObjectIndex. The ingress node then re-proposes the same index
+//     entry so its local meta-FSM observes read-your-writes promptly.
 //
 // Stale placement retry: the FSM-level ErrStalePlacement signal (see apply.go)
 // is observable on the local-exec branch only because forward replies carry
