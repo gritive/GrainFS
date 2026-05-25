@@ -40,7 +40,7 @@ build-pgo: $(GO_SRC) $(FBS_STAMPS)
 
 fbs: $(FBS_STAMPS)
 
-UNIT_PKGS := $(shell go list ./... | grep -v '/tests/e2e' | grep -v '/tests/colimafixture')
+UNIT_PKGS := $(shell go list ./... | grep -v '/tests/e2e')
 
 test: test-unit test-colima
 
@@ -76,6 +76,9 @@ test-e2e-iceberg: bin/$(BINARY)
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
+
+test-lifecycle: bin/$(BINARY)
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -tags=lifecycle -timeout 15m -v ./tests/lifecycle/...
 
 test-pynfs-colima:
 	@echo "Running pynfs conformance in Colima VM (advisory)"

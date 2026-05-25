@@ -2,6 +2,26 @@
 
 GrainFS uses **progressive application**: the binary is the same across phases; FSM state determines what's enforced.
 
+## How to run these blocks yourself
+
+The bash blocks below contain literal `${VAR}` placeholders (not
+`<your-token>`). To run them in your own shell, export the variables
+first and pipe through `envsubst`:
+
+```bash
+export GRAINFS_DATA=./tmp
+export GRAINFS_PORT=9000
+# then, for any block you want to run:
+envsubst <<'EOF' | bash
+./grainfs serve --data ${GRAINFS_DATA} --port ${GRAINFS_PORT}
+EOF
+```
+
+The lifecycle test suite (`tests/lifecycle/`) parses blocks tagged with
+`<!-- lifecycle-test:phase=N -->` and runs them the same way. A
+mismatched env var name in your shell and the docs means the test
+suite breaks loudly — the docs and the tests stay in lock-step.
+
 ## Phase 0 — single node, anonymous
 
 ```bash
@@ -14,28 +34,32 @@ GrainFS uses **progressive application**: the binary is the same across phases; 
 
 Verify (TTHW ~30s):
 
+<!-- lifecycle-test:phase=0 -->
 ```bash
-aws --no-sign-request --endpoint-url http://localhost:9000 s3 cp file.txt s3://default/
+echo "lifecycle sentinel" > ${GRAINFS_DATA}/lifecycle-sentinel.txt
+aws --no-sign-request --endpoint-url http://localhost:${GRAINFS_PORT} s3 cp ${GRAINFS_DATA}/lifecycle-sentinel.txt s3://default/
 ```
 
 ## Phase 1 — cluster
 
 On each new node:
 
+<!-- lifecycle-test:phase=1 -->
 ```bash
-scp nodeA:/path/to/dataA/kek.key /path/to/dataB/kek.key
-./grainfs serve --data ./dataB --port 9000 &
-./grainfs cluster join nodeA:9000 --endpoint ./dataB/admin.sock
+scp ${GRAINFS_NODE_A}:${GRAINFS_DATA_A}/kek.key ${GRAINFS_DATA_B}/kek.key
+./grainfs serve --data ${GRAINFS_DATA_B} --port ${GRAINFS_PORT_B} &
+./grainfs cluster join ${GRAINFS_NODE_A}:${GRAINFS_PORT_A} --endpoint ${GRAINFS_DATA_B}/admin.sock
 ```
 
 The KEK is the cluster's shared identity secret. The join handshake (HMAC-SHA256 challenge-response on a 32B nonce) verifies KEK possession. Nodes with a different KEK are refused with 403.
 
 ## Phase 2 — identity + auth
 
+<!-- lifecycle-test:phase=2 -->
 ```bash
-grainfs iam sa create admin
-grainfs iam policy attach --sa <id> --policy readwrite --i-know
-grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite
+grainfs --json iam sa create ${GRAINFS_SA_NAME}
+grainfs iam policy attach --sa ${GRAINFS_SA_ID} --policy readwrite --i-know
+grainfs iam bucket create ${GRAINFS_BUCKET} --attach-sa ${GRAINFS_SA_ID} --attach-policy readwrite
 ```
 
 Side effects of the first `iam sa create`:
