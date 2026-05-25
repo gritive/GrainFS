@@ -1500,13 +1500,21 @@ func (c *ClusterCoordinator) PutObjectWithACL(
 
 func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, _, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
 	if err != nil {
 		return err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
+		if indexed {
+			type proposer interface {
+				SetObjectACLPropose(bucket, key string, acl uint8) error
+			}
+			if p, ok := any(gb).(proposer); ok {
+				return p.SetObjectACLPropose(bucket, key, acl)
+			}
+		}
 		return gb.SetObjectACL(bucket, key, acl)
 	}
 	args := buildSetObjectACLArgs(bucket, key, acl)
@@ -1518,13 +1526,21 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 // forwards to the owning peer via ForwardOpSetObjectTags. Mirrors SetObjectACL.
 func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, _, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
 	if err != nil {
 		return err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
+		if indexed {
+			type proposer interface {
+				SetObjectTagsPropose(bucket, key, versionID string, tags []storage.Tag) error
+			}
+			if p, ok := any(gb).(proposer); ok {
+				return p.SetObjectTagsPropose(bucket, key, versionID, tags)
+			}
+		}
 		return gb.SetObjectTags(bucket, key, versionID, tags)
 	}
 	args := buildSetObjectTagsArgs(bucket, key, versionID, tags)

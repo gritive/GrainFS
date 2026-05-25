@@ -1458,6 +1458,14 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	if _, err := b.HeadObject(ctx, bucket, key); err != nil {
 		return err
 	}
+	return b.SetObjectACLPropose(bucket, key, acl)
+}
+
+// SetObjectACLPropose is the coordinator-facing entrypoint: it skips the
+// local object-existence pre-check after the coordinator has already resolved
+// the object through the cluster-wide object index.
+func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) error {
+	ctx := context.Background()
 	return b.propose(ctx, CmdSetObjectACL, SetObjectACLCmd{
 		Bucket: bucket,
 		Key:    key,
@@ -1476,6 +1484,14 @@ func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags [
 	if _, err := b.HeadObject(ctx, bucket, key); err != nil {
 		return err
 	}
+	return b.SetObjectTagsPropose(bucket, key, versionID, tags)
+}
+
+// SetObjectTagsPropose is the coordinator-facing entrypoint: it skips the
+// local object-existence pre-check after the coordinator has already resolved
+// the object through the cluster-wide object index.
+func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string, tags []storage.Tag) error {
+	ctx := context.Background()
 	return b.propose(ctx, CmdSetObjectTags, SetObjectTagsCmd{
 		Bucket:    bucket,
 		Key:       key,

@@ -137,6 +137,104 @@ func TestClusterCoordinatorBucketPolicyPassesClusterAwareHeadBucket(t *testing.T
 	require.Contains(t, base.calls, "DeleteBucketPolicy:bk-pol")
 }
 
+func TestClusterCoordinatorSetObjectACLTrustsObjectIndexBeforeLocalApply(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb.Node().Start()
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk-acl", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk-acl/k": {Bucket: "bk-acl", Key: "k", PlacementGroupID: "g1", Size: 4, VersionID: "v1"},
+		},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.SetObjectACL("bk-acl", "k", 7)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Failf(t, "SetObjectACL returned before local object apply", "err=%v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         4,
+		ContentType:  "text/plain",
+		ETag:         "etag",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(objectMetaKey("bk-acl", "k"), metaBytes)
+	}))
+
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+
+	require.NoError(t, <-errCh)
+}
+
+func TestClusterCoordinatorSetObjectTagsTrustsObjectIndexBeforeLocalApply(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb.Node().Start()
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk-tags", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk-tags/k": {Bucket: "bk-tags", Key: "k", PlacementGroupID: "g1", Size: 4, VersionID: "v1"},
+		},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.SetObjectTags("bk-tags", "k", "", []storage.Tag{{Key: "env", Value: "test"}})
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Failf(t, "SetObjectTags returned before local object apply", "err=%v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         4,
+		ContentType:  "text/plain",
+		ETag:         "etag",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(objectMetaKey("bk-tags", "k"), metaBytes)
+	}))
+
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+
+	require.NoError(t, <-errCh)
+}
+
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
 	c := NewClusterCoordinator(nil, nil, nil, nil, "node-a").WithSelfPeerAlias("127.0.0.1:9001")
 
