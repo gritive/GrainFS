@@ -1577,6 +1577,11 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		release := d.state.LockPath(objectLockKey(bucket, key))
 		defer release()
 		if tr, ok := truncatableBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
+			if d.writeBuffer != nil {
+				if err := d.writeBuffer.Discard(context.Background(), bucket, key); err != nil {
+					return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+				}
+			}
 			if err := tr.Truncate(context.Background(), bucket, key, int64(size)); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
