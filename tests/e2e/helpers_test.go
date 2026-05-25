@@ -58,6 +58,14 @@ func TestMain(m *testing.M) {
 		binary = "../../bin/grainfs"
 	}
 
+	// Pre-sweep: a previous run that crashed or was SIGKILL'd may have left
+	// grainfs child processes and tmp dirs behind. Setpgid covers child trees
+	// when terminateProcess runs, but DeferCleanup never fires when the test
+	// binary itself dies (macOS lacks Pdeathsig). Sweep here so this run
+	// starts from a clean slate and ports/data dirs don't collide.
+	sweepStaleE2EServers(binary, "pre-sweep")
+	sweepStaleE2EDirs()
+
 	port := freePort()
 	dir, err := os.MkdirTemp("", "grainfs-e2e-go-")
 	if err != nil {
@@ -194,7 +202,84 @@ func TestMain(m *testing.M) {
 			code = 1
 		}
 	}
+	// Post-sweep: cluster/mr fixtures or individual specs may have skipped
+	// their DeferCleanup (panic, timeout, BLOCKED). Catch the leftovers here
+	// so the next run isn't polluted. Also clears the e2e tmp dirs that
+	// terminateProcess can't reach when its parent fixture didn't fire.
+	sweepStaleE2EServers(binary, "post-sweep")
+	sweepStaleE2EDirs()
 	os.Exit(code)
+}
+
+// sweepStaleE2EServers kills grainfs processes spawned from THIS test binary
+// (matched by absolute binary path + "serve" argv). Foreign grainfs running
+// from other worktrees are not touched. SIGTERM with 500ms grace then SIGKILL.
+// "phase" is "pre-sweep" or "post-sweep" — used in the warning print so users
+// see whether the leak came from a previous run or from the current run.
+func sweepStaleE2EServers(binary, phase string) {
+	abs, err := filepath.Abs(binary)
+	if err != nil {
+		return
+	}
+	pattern := abs + " serve"
+	pids := pgrepFull(pattern)
+	pids = filterOut(pids, os.Getpid())
+	if len(pids) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "e2e %s: %d stale grainfs process(es) — SIGTERM\n", phase, len(pids))
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	time.Sleep(500 * time.Millisecond)
+	remain := filterOut(pgrepFull(pattern), os.Getpid())
+	if len(remain) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "e2e %s: %d still alive after SIGTERM — SIGKILL\n", phase, len(remain))
+	for _, pid := range remain {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+// sweepStaleE2EDirs removes tmp dirs from previous e2e runs. The naming
+// conventions are stable across cluster_harness_test.go (/tmp/ge-*) and
+// helpers_test.go ($TMPDIR/grainfs-e2e-*).
+func sweepStaleE2EDirs() {
+	patterns := []string{
+		"/tmp/ge-*",
+		filepath.Join(os.TempDir(), "grainfs-e2e-*"),
+	}
+	for _, p := range patterns {
+		matches, _ := filepath.Glob(p)
+		for _, m := range matches {
+			_ = os.RemoveAll(m)
+		}
+	}
+}
+
+func pgrepFull(pattern string) []int {
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
+	if err != nil {
+		return nil // pgrep exit 1 = no matches; treat any error as empty
+	}
+	var pids []int
+	for _, s := range strings.Fields(string(out)) {
+		if pid, err := strconv.Atoi(s); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+func filterOut(pids []int, exclude int) []int {
+	out := pids[:0]
+	for _, pid := range pids {
+		if pid != exclude {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 var _ = ginkgo.Describe("E2E helper utilities", func() {
