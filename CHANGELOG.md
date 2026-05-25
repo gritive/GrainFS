@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.337.0] - 2026-05-26
+
+### Changed
+
+- **Meta-Raft command handling is now split by command family.** IAM and policy updates, placement and object-index updates, snapshot trailers, capability/config/migration commands, Iceberg catalog commands, rotation commands, export lifecycle commands, scrub triggers, FSM wiring, and snapshot restore now live in focused files instead of one large `meta_fsm.go` implementation, keeping the same apply behavior while making future command-family changes easier to audit.
+- **Project vocabulary now names the Meta-Raft Command Family boundary.** `CONTEXT.md` documents the grouping used by meta-Raft commands so future architecture work can refer to the same split consistently.
+
 ## [0.0.336.0] - 2026-05-26
 
 ### Changed

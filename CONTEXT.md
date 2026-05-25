@@ -2,6 +2,23 @@
 
 ## Domain Vocabulary
 
+### Meta-Raft Command Family
+
+A Meta-Raft command family is a set of metadata commands that share one
+deterministic apply path, snapshot payload, restore behavior, and post-commit
+side-effect policy inside `internal/cluster.MetaFSM`.
+
+The MetaFSM remains the single Raft apply module: command families do not
+create public extension seams, register dynamic handlers, or move ordering
+decisions out of the FSM apply loop. Their purpose is locality inside the
+implementation. A family may live in its own `meta_fsm_*` files when that keeps
+the command decoder, apply methods, snapshot trailer, and focused tests near
+each other while preserving the same external MetaFSM interface.
+
+Examples include cluster placement/object-index commands, IAM policy-store
+commands, cluster config commands, DEK/JWT key material commands, NFS export
+commands, lifecycle commands, migration commands, and Iceberg catalog commands.
+
 ### Storage Operations Facade
 
 The storage operations facade is the module that upper layers use for meaningful
