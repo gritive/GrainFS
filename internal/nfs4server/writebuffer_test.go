@@ -79,3 +79,30 @@ func (f *fakeBackend) PutObject(_ context.Context, bucket, key string, body io.R
 	f.GetReturns[bucket+"/"+key] = append([]byte(nil), buf...)
 	return &storage.Object{Size: int64(len(buf))}, nil
 }
+
+func TestWriteBuffer_TransientBackendErrorFailsWrite(t *testing.T) {
+	dir := t.TempDir()
+	be := &transientErrBackend{}
+	wb := newWriteBuffer(dir, be)
+	err := wb.Write(context.Background(), "bkt", "key", 0, []byte("hello"), "text/plain")
+	require.Error(t, err, "transient backend error must fail Write, not silently start with empty buffer")
+	require.NotErrorIs(t, err, storage.ErrObjectNotFound, "must propagate the original transient error, not collapse to NotFound")
+	// Buffer file must NOT have been created (would cause data loss on next flush).
+	entries, _ := os.ReadDir(dir)
+	require.Empty(t, entries, "no buffer file should exist when materialize failed")
+}
+
+// transientErrBackend returns a non-NotFound error from GetObject (simulating
+// cluster joining, network blip). HeadObject + PutObject are unused for this
+// test but defined so the small interface is satisfied.
+type transientErrBackend struct{}
+
+func (transientErrBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return nil, fmt.Errorf("transient: cluster not ready")
+}
+func (transientErrBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	return nil, nil, fmt.Errorf("transient: cluster not ready")
+}
+func (transientErrBackend) PutObject(context.Context, string, string, io.Reader, string) (*storage.Object, error) {
+	return nil, fmt.Errorf("transient: cluster not ready")
+}

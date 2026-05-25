@@ -96,10 +96,10 @@ func (wb *writeBuffer) Write(ctx context.Context, bucket, key string, offset uin
 		if err := wb.materializeLocked(ctx, entry); err != nil {
 			return err
 		}
-		entry.materialized = true
 		if err := wb.writeMetaLocked(entry); err != nil {
 			return err
 		}
+		entry.materialized = true
 	}
 
 	f, err := os.OpenFile(entry.dataPath, os.O_RDWR|os.O_CREATE, 0o600)
@@ -154,7 +154,7 @@ func (wb *writeBuffer) writeMetaLocked(entry *writeBufferEntry) error {
 	}{entry.bucket, entry.key, entry.contentType}
 	b, err := json.Marshal(meta)
 	if err != nil {
-		return err
+		return fmt.Errorf("writebuffer marshal meta: %w", err)
 	}
 	return os.WriteFile(entry.metaPath, append(b, '\n'), 0o600)
 }
