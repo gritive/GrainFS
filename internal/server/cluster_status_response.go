@@ -14,8 +14,10 @@ func buildClusterStatus(info ClusterInfo, degraded bool, bucket string) adminapi
 	if info == nil {
 		return status
 	}
+	if len(info.Peers()) > 0 {
+		status.Mode = "cluster"
+	}
 
-	status.Mode = "cluster"
 	status.NodeID = info.NodeID()
 	status.State = info.State()
 	status.Term = info.Term()
