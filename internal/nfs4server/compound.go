@@ -1279,7 +1279,11 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		br := bytesReaderPool.Get()
 		defer bytesReaderPool.Put(br)
 
-		if offset == 0 && end >= existingSize {
+		if d.writeBuffer != nil {
+			if err = d.writeBuffer.Write(context.Background(), bucket, key, offset, writeData, existingContentType); err != nil {
+				return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+			}
+		} else if offset == 0 && end >= existingSize {
 			br.Reset(writeData)
 			_, err = d.backend.PutObject(context.Background(), bucket, key, br, existingContentType)
 		} else {
