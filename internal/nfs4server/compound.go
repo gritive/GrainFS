@@ -1672,6 +1672,11 @@ func (d *Dispatcher) opCommit() OpResult {
 		return OpResult{OpCode: OpCommit, Status: NFS4ERR_NOFILEHANDLE}
 	}
 	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.writeBuffer != nil {
+		if err := d.writeBuffer.Flush(context.Background(), bucket, key); err != nil {
+			return OpResult{OpCode: OpCommit, Status: NFS4ERR_IO}
+		}
+	}
 	if s, ok := d.backend.(storage.Syncable); ok {
 		if err := s.Sync(bucket, key); err != nil {
 			return OpResult{OpCode: OpCommit, Status: NFS4ERR_IO}
