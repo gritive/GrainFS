@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.331.0] - 2026-05-26
+
+### Changed
+
+- **Forward receiver bucket operation dispatch now lives in the forward operation registry.** Data-group forwarding no longer keeps separate frame/body/read switch tables in `ForwardReceiver`; each bucket operation declares its receiver handler beside its transport shape, so adding forwarded object operations has one contract to update.
+- **Forward operation registry tests now cover handler installation.** ACL, tagging, append-object, and read/body/frame handler coverage guard against registry drift as bucket operations are added.
+
 ## [0.0.329.0] - 2026-05-24
 
 ### Changed
