@@ -41,3 +41,20 @@ func TestForwardRuntimeReadObjectUsesReadStream(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
 	require.Equal(t, "g1", d.readCalls[0].gid)
 }
+
+func TestForwardRuntimeMutateFrameSendsStatusOnlyMutation(t *testing.T) {
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	d.replyByOp[raftpb.ForwardOpSetObjectACL] = buildOKReply()
+
+	rt := forwardRuntime{sender: NewForwardSender(d.dial)}
+	err := rt.mutateFrame(
+		context.Background(),
+		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
+		raftpb.ForwardOpSetObjectACL,
+		buildSetObjectACLArgs("bk", "k", 7),
+	)
+	require.NoError(t, err)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpSetObjectACL, d.calls[0].op)
+	require.Equal(t, "g1", d.calls[0].gid)
+}

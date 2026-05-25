@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -85,6 +86,35 @@ func (r forwardRuntime) readAt(ctx context.Context, target RouteTarget, args []b
 		return 0, err
 	}
 	return io.ReadFull(body, buf)
+}
+
+func (r forwardRuntime) mutateFrame(ctx context.Context, target RouteTarget, op raftpb.ForwardOp, args []byte) error {
+	if r.sender == nil {
+		return ErrCoordinatorNoRouter
+	}
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, op, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
+}
+
+func (r forwardRuntime) deleteObject(ctx context.Context, target RouteTarget, args []byte) (string, error) {
+	if r.sender == nil {
+		return "", ErrCoordinatorNoRouter
+	}
+	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObject, args)
+	if err != nil {
+		return "", err
+	}
+	obj, err := objectFromReply(reply)
+	if err == nil {
+		return obj.VersionID, nil
+	}
+	if errors.Is(err, errInternalReply) {
+		return "", parseReplyStatus(reply)
+	}
+	return "", err
 }
 
 func (r forwardRuntime) peersForTarget(target RouteTarget) []string {

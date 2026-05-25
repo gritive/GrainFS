@@ -1122,22 +1122,8 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 		}
 		return markerID, nil
 	}
-	if c.forward == nil {
-		return "", ErrCoordinatorNoRouter
-	}
 	args := buildDeleteObjectArgs(bucket, key)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObject, args)
-	if err != nil {
-		return "", err
-	}
-	obj, err := objectFromReply(reply)
-	if err == nil {
-		return obj.VersionID, nil
-	}
-	if errors.Is(err, errInternalReply) {
-		return "", parseReplyStatus(reply)
-	}
-	return "", err
+	return c.forwardRuntime().deleteObject(ctx, target, args)
 }
 
 func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) error {
@@ -1157,15 +1143,8 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 		}
 		return nil
 	}
-	if c.forward == nil {
-		return ErrCoordinatorNoRouter
-	}
 	args := buildDeleteObjectVersionArgs(bucket, key, versionID)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObjectVersion, args)
-	if err != nil {
-		return err
-	}
-	return parseReplyStatus(reply)
+	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpDeleteObjectVersion, args)
 }
 
 func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -1672,15 +1651,8 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 	} else if gb != nil {
 		return gb.SetObjectACL(bucket, key, acl)
 	}
-	if c.forward == nil {
-		return ErrCoordinatorNoRouter
-	}
 	args := buildSetObjectACLArgs(bucket, key, acl)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpSetObjectACL, args)
-	if err != nil {
-		return err
-	}
-	return parseReplyStatus(reply)
+	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectACL, args)
 }
 
 // SetObjectTags satisfies storage.ObjectTagsSetter. Routes the tag write
@@ -1697,15 +1669,8 @@ func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags [
 	} else if gb != nil {
 		return gb.SetObjectTags(bucket, key, versionID, tags)
 	}
-	if c.forward == nil {
-		return ErrCoordinatorNoRouter
-	}
 	args := buildSetObjectTagsArgs(bucket, key, versionID, tags)
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpSetObjectTags, args)
-	if err != nil {
-		return err
-	}
-	return parseReplyStatus(reply)
+	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectTags, args)
 }
 
 // GetObjectTags satisfies storage.ObjectTagsGetter. Routes the tag read to
