@@ -24,8 +24,10 @@ import (
 // fires node.Start() in production; tests rely on the cleanup stack to Stop it.
 func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
+	dataDir := t.TempDir()
 	state := newBootState(Config{
-		DataDir:    t.TempDir(),
+		DataDir:    dataDir,
+		DataDirs:   []string{dataDir},
 		NodeID:     "n1",
 		ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 		Encryptor:  newTestEncryptor(t),

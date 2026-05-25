@@ -212,7 +212,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	if op == raftpb.ForwardOpScrubSessionStat {
 		return r.handleScrubSessionStat(fbsArgs)
 	}
-	if _, ok := lookupBucketForwardOpSpec(op); !ok {
+	spec, ok := lookupBucketForwardOpSpec(op)
+	if !ok {
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
 
@@ -233,50 +234,10 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	}
 	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: dispatch leader")
 
-	switch op {
-	case raftpb.ForwardOpPutObject:
-		return r.handlePutObject(dg, fbsArgs)
-	case raftpb.ForwardOpGetObject:
-		return r.handleGetObject(dg, fbsArgs)
-	case raftpb.ForwardOpReadAt:
-		return r.handleReadAt(dg, fbsArgs)
-	case raftpb.ForwardOpHeadObject:
-		return r.handleHeadObject(dg, fbsArgs)
-	case raftpb.ForwardOpDeleteObject:
-		return r.handleDeleteObject(dg, fbsArgs)
-	case raftpb.ForwardOpSetObjectACL:
-		return r.handleSetObjectACL(dg, fbsArgs)
-	case raftpb.ForwardOpSetObjectTags:
-		return r.handleSetObjectTags(dg, fbsArgs)
-	case raftpb.ForwardOpGetObjectTags:
-		return r.handleGetObjectTags(dg, fbsArgs)
-	case raftpb.ForwardOpListObjects:
-		return r.handleListObjects(dg, fbsArgs)
-	case raftpb.ForwardOpWalkObjects:
-		return r.handleWalkObjects(dg, fbsArgs)
-	case raftpb.ForwardOpCreateMultipartUpload:
-		return r.handleCreateMultipartUpload(dg, fbsArgs)
-	case raftpb.ForwardOpUploadPart:
-		return r.handleUploadPart(dg, fbsArgs)
-	case raftpb.ForwardOpCompleteMultipartUpload:
-		return r.handleCompleteMultipartUpload(dg, fbsArgs)
-	case raftpb.ForwardOpAbortMultipartUpload:
-		return r.handleAbortMultipartUpload(dg, fbsArgs)
-	case raftpb.ForwardOpListMultipartUploads:
-		return r.handleListMultipartUploads(dg, fbsArgs)
-	case raftpb.ForwardOpListParts:
-		return r.handleListParts(dg, fbsArgs)
-	case raftpb.ForwardOpGetObjectVersion:
-		return r.handleGetObjectVersion(dg, fbsArgs)
-	case raftpb.ForwardOpDeleteObjectVersion:
-		return r.handleDeleteObjectVersion(dg, fbsArgs)
-	case raftpb.ForwardOpListObjectVersions:
-		return r.handleListObjectVersions(dg, fbsArgs)
-	case raftpb.ForwardOpHeadObjectVersion:
-		return r.handleHeadObjectVersion(dg, fbsArgs)
-	default:
+	if spec.handleFrame == nil {
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
+	return spec.handleFrame(r, dg, fbsArgs)
 }
 
 // HandleBody implements streamed-body forwarding for PutObject and UploadPart.
@@ -316,17 +277,11 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 	}
 	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: dispatch leader")
 
-	switch op {
-	case raftpb.ForwardOpPutObject:
-		return r.handlePutObjectStream(dg, fbsArgs, body)
-	case raftpb.ForwardOpUploadPart:
-		return r.handleUploadPartStream(dg, fbsArgs, body)
-	case raftpb.ForwardOpAppendObject:
-		return r.handleAppendObjectStream(dg, fbsArgs, body)
-	default:
+	if spec.handleBody == nil {
 		drainForwardBody(body)
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
+	return spec.handleBody(r, dg, fbsArgs, body)
 }
 
 // HandleRead implements streamed-response forwarding for GetObject and
@@ -356,16 +311,10 @@ func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message
 		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
 	}
 
-	switch op {
-	case raftpb.ForwardOpGetObject:
-		return r.handleGetObjectRead(dg, fbsArgs)
-	case raftpb.ForwardOpGetObjectVersion:
-		return r.handleGetObjectVersionRead(dg, fbsArgs)
-	case raftpb.ForwardOpReadAt:
-		return r.handleReadAtRead(dg, fbsArgs)
-	default:
+	if spec.handleRead == nil {
 		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
+	return spec.handleRead(r, dg, fbsArgs)
 }
 
 func drainForwardBody(body io.Reader) {
