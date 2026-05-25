@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.338.0] - 2026-05-26
+
+### Changed
+
+- **Object write placement planning now lives in a focused cluster module.** Spooled EC PUTs share one plan for placement group identity, effective EC profile selection, weighted fallback target choice, topology target order, and peer-health admission before shard writes.
+- **Project vocabulary now names the Object Write Placement Plan boundary.** `CONTEXT.md` documents that routing chooses the owning data group while the placement plan decides whether that group can execute the EC write and which node IDs it will use.
+
 ## [0.0.337.0] - 2026-05-26
 
 ### Changed
