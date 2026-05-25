@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,4 +123,30 @@ func TestForwardRuntimeCreateMultipartUploadDecodesFrameReply(t *testing.T) {
 	require.Equal(t, "upload-1", upload.UploadID)
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+}
+
+func TestForwardRuntimeAppendObjectStreamsBody(t *testing.T) {
+	d := &recordingDialer{streamReplyBy: map[raftpb.ForwardOp][]byte{}}
+	d.streamReplyBy[raftpb.ForwardOpAppendObject] = buildObjectReply(&storage.Object{
+		Key:       "k",
+		Size:      8,
+		VersionID: "v1",
+		ETag:      "etag-v1",
+	}, "bk")
+
+	rt := forwardRuntime{sender: NewForwardSender(d.dial).WithStreamDialer(d.stream), maxBody: DefaultMaxForwardBodyBytes}
+	obj, err := rt.appendObject(
+		context.Background(),
+		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
+		ShardGroupEntry{ID: "g1"},
+		"bk",
+		"k",
+		5,
+		strings.NewReader("abc"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(8), obj.Size)
+	require.Len(t, d.streamCalls, 1)
+	require.Equal(t, raftpb.ForwardOpAppendObject, d.streamCalls[0].op)
+	require.Equal(t, []byte("abc"), d.streamCalls[0].rawly)
 }

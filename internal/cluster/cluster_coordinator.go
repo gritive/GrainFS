@@ -15,7 +15,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -278,6 +277,7 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 		selfID:      c.selfID,
 		selfAliases: c.selfAliases,
 		maxBody:     c.maxBody,
+		appendBuf:   c.appendForwardBuffer,
 	}
 }
 
@@ -1856,34 +1856,7 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 		return obj, nil
 	}
 
-	// Forward branch — buffer the body under c.maxBody before acquiring the
-	// semaphore so the reservation size is exact. Buffering here mirrors what
-	// appendObjectLocalWithRetry does on the local-exec branch.
-	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-	if c.forward.streamDialer == nil {
-		return nil, ErrCoordinatorNoRouter
-	}
-	forwardBody, err := readBoundedBody(r, c.maxBody)
-	if err != nil {
-		return nil, err
-	}
-	bodyLen := int64(len(forwardBody))
-	if c.appendForwardBuffer != nil {
-		if err := c.appendForwardBuffer.Acquire(ctx, bodyLen); err != nil {
-			metrics.AppendForwardBufferRejectedTotal.Inc()
-			return nil, err
-		}
-		defer c.appendForwardBuffer.Release(bodyLen)
-	}
-	args := buildAppendObjectForwardArgs(bucket, key, expectedOffset)
-	peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
-	reply, err := c.forward.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bytes.NewReader(forwardBody))
-	if err != nil {
-		return nil, topologyForwardWriteError(group, err)
-	}
-	obj, err := objectFromReply(reply)
+	obj, err := c.forwardRuntime().appendObject(ctx, target, group, bucket, key, expectedOffset, r)
 	if err != nil {
 		return nil, err
 	}

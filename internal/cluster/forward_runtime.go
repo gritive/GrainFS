@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -19,6 +20,7 @@ type forwardRuntime struct {
 	selfID      string
 	selfAliases []string
 	maxBody     int64
+	appendBuf   *appendForwardBuffer
 }
 
 func (r forwardRuntime) readObject(
@@ -374,6 +376,42 @@ func (r forwardRuntime) listParts(ctx context.Context, target RouteTarget, bucke
 		return nil, err
 	}
 	return partsFromReply(reply)
+}
+
+func (r forwardRuntime) appendObject(
+	ctx context.Context,
+	target RouteTarget,
+	group ShardGroupEntry,
+	bucket, key string,
+	expectedOffset int64,
+	bodyReader io.Reader,
+) (*storage.Object, error) {
+	if r.sender == nil || r.sender.streamDialer == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	forwardBody, err := readBoundedBody(bodyReader, r.maxBody)
+	if err != nil {
+		return nil, err
+	}
+	bodyLen := int64(len(forwardBody))
+	if r.appendBuf != nil {
+		if err := r.appendBuf.Acquire(ctx, bodyLen); err != nil {
+			metrics.AppendForwardBufferRejectedTotal.Inc()
+			return nil, err
+		}
+		defer r.appendBuf.Release(bodyLen)
+	}
+	args := buildAppendObjectForwardArgs(bucket, key, expectedOffset)
+	peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+	reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bytes.NewReader(forwardBody))
+	if err != nil {
+		return nil, topologyForwardWriteError(group, err)
+	}
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 func (r forwardRuntime) peersForTarget(target RouteTarget) []string {
