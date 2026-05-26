@@ -2239,25 +2239,65 @@ func selectECPlacementWeighted(
 	weightedEnabled bool,
 	blEnabled bool,
 ) []string {
-	if !weightedEnabled || store == nil {
+	return selectECPlacementFromNodeStates(
+		cfg,
+		liveNodes,
+		shardKey,
+		objectWritePlacementNodeStatesFromRuntime(liveNodes, store, bl),
+		weightedEnabled,
+		blEnabled,
+	)
+}
+
+func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore, bl *BoundedLoads) []ObjectWritePlacementNodeState {
+	if store == nil {
+		return nil
+	}
+	states := make([]ObjectWritePlacementNodeState, 0, len(liveNodes))
+	for _, nodeID := range liveNodes {
+		state := ObjectWritePlacementNodeState{NodeID: nodeID}
+		if ns, ok := store.Get(nodeID); ok {
+			state.DiskAvailBytes = ns.DiskAvailBytes
+		}
+		if bl != nil && bl.IsHot(nodeID) {
+			state.Hot = true
+		}
+		states = append(states, state)
+	}
+	return states
+}
+
+func selectECPlacementFromNodeStates(
+	cfg ECConfig,
+	liveNodes []string,
+	shardKey string,
+	nodeStates []ObjectWritePlacementNodeState,
+	weightedEnabled bool,
+	blEnabled bool,
+) []string {
+	if !weightedEnabled || len(nodeStates) == 0 {
 		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+	}
+	stateByNode := make(map[string]ObjectWritePlacementNodeState, len(nodeStates))
+	for _, state := range nodeStates {
+		stateByNode[state.NodeID] = state
 	}
 	weights := make([]float64, len(liveNodes))
 	skipReason := make([]string, len(liveNodes))
 	active := 0
 	for i, nodeID := range liveNodes {
-		ns, ok := store.Get(nodeID)
-		if !ok || ns.DiskAvailBytes == 0 {
+		state, ok := stateByNode[nodeID]
+		if !ok || state.DiskAvailBytes == 0 {
 			weights[i] = 0
 			skipReason[i] = "stale"
 			continue
 		}
-		if blEnabled && bl != nil && bl.IsHot(nodeID) {
+		if blEnabled && state.Hot {
 			weights[i] = 0
 			skipReason[i] = "bl_hot"
 			continue
 		}
-		weights[i] = float64(ns.DiskAvailBytes)
+		weights[i] = float64(state.DiskAvailBytes)
 		active++
 	}
 
@@ -2272,9 +2312,9 @@ func selectECPlacementWeighted(
 	if active < cfg.NumShards() {
 		for i := range weights {
 			if skipReason[i] == "bl_hot" {
-				ns, ok := store.Get(liveNodes[i])
-				if ok && ns.DiskAvailBytes > 0 {
-					weights[i] = float64(ns.DiskAvailBytes)
+				state := stateByNode[liveNodes[i]]
+				if state.DiskAvailBytes > 0 {
+					weights[i] = float64(state.DiskAvailBytes)
 					skipReason[i] = ""
 					active++
 				}

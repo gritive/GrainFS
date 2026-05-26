@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -53,6 +54,35 @@ func TestPlanObjectWritePlacement_UsesFallbackPlacementWithoutFullGroup(t *testi
 	require.Equal(t, "group-1", plan.PlacementGroupID)
 	require.Equal(t, ECConfig{DataShards: 2, ParityShards: 1}, plan.Config)
 	require.Equal(t, PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
+}
+
+func TestPlanObjectWritePlacement_UsesNodeStateSnapshotForWeightedFallback(t *testing.T) {
+	liveNodes := []string{"n1", "n2", "n3", "n4"}
+	count := make(map[string]int)
+	for i := 0; i < 1000; i++ {
+		plan, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+			Operation:        "put_object",
+			PlacementGroupID: "group-1",
+			LiveNodes:        liveNodes,
+			CurrentECConfig:  ECConfig{DataShards: 2, ParityShards: 1},
+			ShardKey:         fmt.Sprintf("k/%d", i),
+			NodeStates: []ObjectWritePlacementNodeState{
+				{NodeID: "n1", DiskAvailBytes: 4_000_000_000_000},
+				{NodeID: "n2", DiskAvailBytes: 1_000_000_000_000},
+				{NodeID: "n3", DiskAvailBytes: 1_000_000_000_000},
+				{NodeID: "n4", DiskAvailBytes: 1_000_000_000_000},
+			},
+			WeightedHRWEnabled: true,
+		})
+		require.NoError(t, err)
+		for _, nodeID := range plan.NodeIDs {
+			count[nodeID]++
+		}
+	}
+	require.Greater(t, count["n1"], 900)
+	for _, nodeID := range []string{"n2", "n3", "n4"} {
+		require.Greater(t, count["n1"], count[nodeID])
+	}
 }
 
 func TestPlanObjectWritePlacement_RejectsInvalidFullGroupPlan(t *testing.T) {

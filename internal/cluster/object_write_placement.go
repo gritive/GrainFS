@@ -13,13 +13,18 @@ type ObjectWritePlacementInput struct {
 	CurrentECConfig     ECConfig
 	BypassBucketCheck   bool
 	ShardKey            string
-	NodeStatsStore      *NodeStatsStore
-	BoundedLoads        *BoundedLoads
+	NodeStates          []ObjectWritePlacementNodeState
 	WeightedHRWEnabled  bool
 	BoundedLoadsEnabled bool
 	PeerHealth          []PeerHealthEntry
 	HasPeerHealth       bool
 	SelfID              string
+}
+
+type ObjectWritePlacementNodeState struct {
+	NodeID         string
+	DiskAvailBytes uint64
+	Hot            bool
 }
 
 type ObjectWritePlacementPlan struct {
@@ -53,12 +58,11 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 		return ObjectWritePlacementPlan{}, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
 	}
 
-	placement := selectECPlacementWeighted(
+	placement := selectECPlacementFromNodeStates(
 		effectiveCfg,
 		liveNodes,
 		in.ShardKey,
-		in.NodeStatsStore,
-		in.BoundedLoads,
+		in.NodeStates,
 		in.WeightedHRWEnabled,
 		in.BoundedLoadsEnabled,
 	)
@@ -112,8 +116,7 @@ func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, opera
 		CurrentECConfig:     b.currentECConfig(),
 		BypassBucketCheck:   b.bypassBucketCheck,
 		ShardKey:            shardKey,
-		NodeStatsStore:      b.nodeStatsStore,
-		BoundedLoads:        b.bl,
+		NodeStates:          objectWritePlacementNodeStatesFromRuntime(liveNodes, b.nodeStatsStore, b.bl),
 		WeightedHRWEnabled:  b.clusterCfg.WeightedHRWEnabled(),
 		BoundedLoadsEnabled: b.clusterCfg.BoundedLoadsEnabled(),
 		PeerHealth:          peerHealth,
