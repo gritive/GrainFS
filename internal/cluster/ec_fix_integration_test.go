@@ -36,7 +36,7 @@ var _ = Describe("EC compatibility integration", func() {
 	configureEC := func(dataShards, parityShards int) {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: dataShards, ParityShards: parityShards})
-		svc := NewShardService(b.root, nil)
+		svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
 		nodes := make([]string, dataShards+parityShards)
 		for i := range nodes {
 			nodes[i] = b.selfAddr
@@ -45,7 +45,7 @@ var _ = Describe("EC compatibility integration", func() {
 	}
 
 	It("stores the first shard service node as selfAddr", func() {
-		svc := NewShardService(b.root, nil)
+		svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
 		allNodes := []string{"addr-self:9001", "addr-peer1:9001", "addr-peer2:9001"}
 
 		b.SetShardService(svc, allNodes)
@@ -55,14 +55,14 @@ var _ = Describe("EC compatibility integration", func() {
 	})
 
 	It("allows duplicate-self topology for internal writes", func() {
-		svc := NewShardService(b.root, nil)
+		svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
 		b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr})
 
 		Expect(b.PreferWriteAt("__grainfs_volumes")).To(BeTrue())
 	})
 
 	It("rejects distinct-peer topology for internal writes", func() {
-		svc := NewShardService(b.root, nil)
+		svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
 		b.SetShardService(svc, []string{b.selfAddr, "peer-1", "peer-2"})
 
 		Expect(b.PreferWriteAt("__grainfs_volumes")).To(BeFalse())
@@ -71,7 +71,7 @@ var _ = Describe("EC compatibility integration", func() {
 	It("rejects encrypted shard storage for internal writes", func() {
 		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x44}, 32))
 		Expect(err).NotTo(HaveOccurred())
-		svc := NewShardService(b.root, nil, WithEncryptor(enc))
+		svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
 		b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr})
 
 		Expect(b.PreferWriteAt("__grainfs_volumes")).To(BeFalse())
@@ -81,7 +81,7 @@ var _ = Describe("EC compatibility integration", func() {
 	})
 
 	It("keeps selfAddr different from the Raft node ID", func() {
-		svc := NewShardService(b.root, nil)
+		svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
 		b.SetShardService(svc, []string{"addr-self:9001", "addr-peer1:9001"})
 
 		Expect(b.RaftNodeID()).To(Equal("test-node"))

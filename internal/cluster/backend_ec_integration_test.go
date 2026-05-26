@@ -31,7 +31,7 @@ var _ = Describe("Backend EC object integration", func() {
 			nodes[i] = b.selfAddr
 		}
 		b.SetECConfig(cfg)
-		b.SetShardService(NewShardService(b.root, nil), nodes)
+		b.SetShardService(NewShardService(b.root, nil, withTestWAL(GinkgoT())), nodes)
 	}
 
 	It("spools large parity EC shard encoding to disk", func() {

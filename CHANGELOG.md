@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.344.0] - 2026-05-26
+
+### Changed
+
+- **Cluster shard writes now require a data WAL for durability.** The shard write path no longer silently falls back to a per-shard `fsync` when no WAL is wired — it returns an error instead. The data WAL (always wired in production) owns shard durability, and the per-shard fsync fallback survives only during WAL replay, where the WAL cannot be re-appended. No operational change: production already wires the data WAL on boot.
+
 ## [0.0.343.0] - 2026-05-26
 
 ### Removed

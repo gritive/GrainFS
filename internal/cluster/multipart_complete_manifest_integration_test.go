@@ -166,7 +166,7 @@ var _ = Describe("Multipart complete manifest integration", func() {
 
 	It("returns plaintext from encrypted part storage", func() {
 		enc := testMultipartEncryptor()
-		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc)), []string{b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), []string{b.selfAddr})
 		up := createUpload()
 		p1Body := testMultipartMinPartBody
 		p2Body := []byte("tail")

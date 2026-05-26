@@ -24,7 +24,7 @@ import (
 func TestShardService_LocalWriteAndRead(t *testing.T) {
 	dir := t.TempDir()
 	tr := transport.MustNewQUICTransport("test-cluster-psk")
-	svc := NewShardService(dir, tr)
+	svc := NewShardService(dir, tr, withTestWAL(t))
 
 	// Verify shards directory created
 	_, err := os.Stat(filepath.Join(dir, "shards"))
@@ -54,7 +54,7 @@ func TestShardService_Encryption(t *testing.T) {
 
 	dir := t.TempDir()
 	tr := transport.MustNewQUICTransport("test-cluster-psk")
-	svc := NewShardService(dir, tr, WithEncryptor(enc))
+	svc := NewShardService(dir, tr, WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	plaintext := []byte("secret shard data")
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -77,7 +77,7 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	plaintext := bytes.Repeat([]byte("secret shard data"), 8192)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -102,6 +102,7 @@ func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithEncryptor(enc),
 		WithShardPackThreshold(1024),
+		withTestWALEnc(t, enc),
 	)
 
 	plaintext := []byte("secret shard data")
@@ -143,6 +144,7 @@ func TestShardService_SharedPackWriteLocalShardStream(t *testing.T) {
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithEncryptor(enc),
 		WithShardPackThreshold(1024),
+		withTestWALEnc(t, enc),
 	)
 
 	plaintext := []byte("streamed shard data")
@@ -167,10 +169,14 @@ func TestShardService_WriteLocalShardStreamSizedContextBypassesPackForLargeShard
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithEncryptor(enc),
 		WithShardPackThreshold(1024),
+		withTestWALEnc(t, enc),
 	)
 
-	plaintext := []byte("streamed shard data")
-	require.NoError(t, svc.WriteLocalShardStreamSizedContext(context.Background(), "bkt", "obj/v1", 0, bytes.NewReader(plaintext), 1024))
+	// declared size must match the actual stream length; the WAL write path
+	// reads exactly streamSize bytes. Use a >= packThreshold payload so the
+	// large-shard pack bypass is still exercised.
+	plaintext := bytes.Repeat([]byte("x"), 1024)
+	require.NoError(t, svc.WriteLocalShardStreamSizedContext(context.Background(), "bkt", "obj/v1", 0, bytes.NewReader(plaintext), int64(len(plaintext))))
 
 	_, err = os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
 	require.NoError(t, err)
@@ -186,6 +192,7 @@ func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
 		dir,
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithShardPackThreshold(1024),
+		withTestWAL(t),
 	)
 
 	require.NotNil(t, svc.shardPack)
@@ -197,6 +204,7 @@ func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
 		dir,
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithShardPackThreshold(1024),
+		withTestWAL(t),
 	)
 
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
@@ -213,6 +221,7 @@ func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
 		dir,
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithShardPackThreshold(1024),
+		withTestWAL(t),
 	)
 
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
@@ -229,6 +238,7 @@ func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
 		dir,
 		transport.MustNewQUICTransport("test-cluster-psk"),
 		WithShardPackThreshold(1024),
+		withTestWAL(t),
 	)
 	require.NotNil(t, restarted.shardPack)
 	_, ok := restarted.shardPack.index[shardPackKey("bkt", "obj/v1", 0)]
@@ -264,7 +274,7 @@ func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
 
 func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 
 	plaintext := bytes.Repeat([]byte("plain shard data"), 8192)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -286,7 +296,7 @@ func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 
 func TestShardService_ReadLocalShardAt_EncodedShard(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 
 	plaintext := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -304,7 +314,7 @@ func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 192*1024)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -321,7 +331,7 @@ func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
 func TestShardService_NoEncryption(t *testing.T) {
 	dir := t.TempDir()
 	tr := transport.MustNewQUICTransport("test-cluster-psk")
-	svc := NewShardService(dir, tr)
+	svc := NewShardService(dir, tr, withTestWAL(t))
 
 	plaintext := []byte("plain shard data")
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -337,7 +347,7 @@ func TestShardService_NoEncryption(t *testing.T) {
 
 func TestShardService_DirectIOWriterSuccess(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO())
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO(), withTestWAL(t))
 
 	payload := []byte("direct writer payload")
 	directCalls := 0
@@ -360,7 +370,7 @@ func TestShardService_DirectIOWriterSuccess(t *testing.T) {
 
 func TestShardService_DirectIOUnsupportedFallsBackToBuffered(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO())
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO(), withTestWAL(t))
 
 	payload := []byte("fallback payload")
 	svc.directWriter = func(path string, got []byte) error {
@@ -377,7 +387,7 @@ func TestShardService_DirectIOUnsupportedFallsBackToBuffered(t *testing.T) {
 
 func TestShardService_DirectIONonUnsupportedErrorDoesNotFallback(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO())
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO(), withTestWAL(t))
 
 	payload := []byte("should not be written")
 	svc.directWriter = func(path string, got []byte) error {
@@ -411,7 +421,7 @@ func TestIsUnsupportedDirectIO(t *testing.T) {
 
 func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 
 	_, err := svc.ReadLocalShard("bkt", "no-such-obj", 0)
 	require.Error(t, err)
@@ -424,7 +434,7 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	// Write garbage bytes that look like valid data but aren't valid ciphertext
 	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
@@ -442,11 +452,11 @@ func TestShardService_WithEncryptorReadsLegacyCRCShard(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	legacy := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	legacy := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 	plaintext := []byte("legacy crc shard data")
 	require.NoError(t, legacy.WriteLocalShard("bkt", "obj", 0, plaintext))
 
-	upgraded := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	upgraded := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 	got, err := upgraded.ReadLocalShard("bkt", "obj", 0)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
@@ -460,7 +470,7 @@ func TestShardService_WithEncryptorReadsLegacyCRCShard(t *testing.T) {
 
 func TestShardService_WithEncryptorNil(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(nil))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(nil), withTestWAL(t))
 
 	plaintext := []byte("plain data with nil encryptor")
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -474,7 +484,7 @@ func TestShardService_ResolvePeerAddress(t *testing.T) {
 	dir := t.TempDir()
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithNodeAddressBook(f))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithNodeAddressBook(f), withTestWAL(t))
 
 	addr, err := svc.resolvePeerAddress("node-a")
 	require.NoError(t, err)
@@ -510,8 +520,8 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1))
-	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2))
+	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1), withTestWALEnc(t, enc1))
+	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2), withTestWALEnc(t, enc2))
 	tr2.SetStreamHandler(svc2.HandleRPC())
 
 	plaintext := []byte("encrypted rpc shard")
@@ -556,8 +566,8 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1))
-	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2))
+	svc1 := NewShardService(dir1, tr1, WithEncryptor(enc1), withTestWALEnc(t, enc1))
+	svc2 := NewShardService(dir2, tr2, WithEncryptor(enc2), withTestWALEnc(t, enc2))
 	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
 	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
 
@@ -591,8 +601,8 @@ func TestShardService_ReadShardRangeStream_EncodedShard(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1)
-	svc2 := NewShardService(dir2, tr2)
+	svc1 := NewShardService(dir1, tr1, withTestWAL(t))
+	svc2 := NewShardService(dir2, tr2, withTestWAL(t))
 	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
 	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
 
@@ -621,8 +631,8 @@ func TestShardService_ReadShardRange_EncodedShard(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1)
-	svc2 := NewShardService(dir2, tr2)
+	svc1 := NewShardService(dir1, tr1, withTestWAL(t))
+	svc2 := NewShardService(dir2, tr2, withTestWAL(t))
 	tr2.SetStreamHandler(svc2.HandleRPC())
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 1024)
@@ -646,8 +656,8 @@ func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1)
-	svc2 := NewShardService(dir2, tr2)
+	svc1 := NewShardService(dir1, tr1, withTestWAL(t))
+	svc2 := NewShardService(dir2, tr2, withTestWAL(t))
 	tr2.SetStreamHandler(svc2.HandleRPC())
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 4096)
@@ -675,8 +685,8 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 
-	svc1 := NewShardService(dir1, tr1)
-	svc2 := NewShardService(dir2, tr2)
+	svc1 := NewShardService(dir1, tr1, withTestWAL(t))
+	svc2 := NewShardService(dir2, tr2, withTestWAL(t))
 
 	// Set tr2's stream handler to svc2's handler (simulating node2's shard server)
 	tr2.SetStreamHandler(svc2.HandleRPC())
@@ -722,8 +732,8 @@ func TestShardService_WriteShardRecordsRemoteTraceBreakdown(t *testing.T) {
 	defer tr2.Close()
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
-	svc1 := NewShardService(t.TempDir(), tr1)
-	svc2 := NewShardService(t.TempDir(), tr2)
+	svc1 := NewShardService(t.TempDir(), tr1, withTestWAL(t))
+	svc2 := NewShardService(t.TempDir(), tr2, withTestWAL(t))
 	tr2.SetStreamHandler(svc2.HandleRPC())
 
 	traceCtx := ContextWithPutTrace(ctx, PutTraceRequest{
@@ -763,7 +773,7 @@ func TestShardService_WriteLocalShardContextRecordsTraceBreakdown(t *testing.T) 
 	reloadPutTraceSinkForTest()
 	t.Cleanup(reloadPutTraceSinkForTest)
 
-	svc := NewShardService(t.TempDir(), transport.MustNewQUICTransport("test-cluster-psk"))
+	svc := NewShardService(t.TempDir(), transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 	err := svc.WriteLocalShardContext(ctx, "mybucket", "mykey", 0, []byte("local-shard"))
 	require.NoError(t, err)
 
@@ -810,7 +820,7 @@ func requireShardServiceTraceStage(t *testing.T, events []PutTraceEvent, stage P
 //     is made non-writable to force an error before rename).
 func TestWriteLocalShard_Atomic(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 
 	data := []byte("atomic-shard-payload")
 	require.NoError(t, svc.WriteLocalShard("bkt", "key/v1", 0, data))
@@ -840,7 +850,7 @@ func TestWriteLocalShard_OverwritePreservesOriginalOnError(t *testing.T) {
 		t.Skip("root bypasses permission checks")
 	}
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 
 	original := []byte("original-safe-content")
 	require.NoError(t, svc.WriteLocalShard("bkt", "key", 0, original))
@@ -870,7 +880,7 @@ func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	data := []byte("secret shard payload")
 	require.NoError(t, svc.WriteLocalShard("mybucket", "obj/v1", 2, data))
@@ -893,7 +903,7 @@ func TestWriteLocalShardStream_EncryptedUsesChunkedEnvelope(t *testing.T) {
 	require.NoError(t, err)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	data := bytes.Repeat([]byte("stream-secret-"), 8192)
 	require.NoError(t, svc.WriteLocalShardStream("b", "k", 1, bytes.NewReader(data)))
@@ -913,8 +923,8 @@ func TestReadLocalShard_DowngradeDetection(t *testing.T) {
 	enc, _ := encrypt.NewEncryptor(key)
 
 	dir := t.TempDir()
-	svcEncrypted := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
-	svcPlain := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	svcEncrypted := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
+	svcPlain := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
 
 	// Write with encryption.
 	require.NoError(t, svcEncrypted.WriteLocalShard("b", "k", 0, []byte("secret")))
@@ -930,7 +940,7 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	enc, _ := encrypt.NewEncryptor(key)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	data := []byte("payload")
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, data))

@@ -116,6 +116,17 @@ func WithDataWAL(w DataWALAppender) ShardServiceOption {
 // after construction.
 func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
 
+// Close releases resources owned by the ShardService — currently the shard-pack
+// actor goroutine, which is spawned only when a data WAL is wired. The data WAL
+// itself is owned by the caller (WithDataWAL) and is not closed here. Safe to
+// call when no shard-pack store is active.
+func (s *ShardService) Close() error {
+	if s.shardPack != nil {
+		return s.shardPack.Close()
+	}
+	return nil
+}
+
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
 	return NewMultiRootShardService([]string{dataDir}, tr, opts...)
@@ -963,10 +974,10 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardTargetClass: "local",
 	})
 
-	// EncSync owns shard-file durability whenever the WAL did NOT inline the
-	// payload (no WAL wired, or payload exceeded walPayloadInlineThreshold).
-	// When the WAL inlined the payload, the WAL's own Flush already covers
-	// durability and we skip this fsync to avoid a redundant syscall.
+	// EncSync owns shard-file durability only during WAL replay (requireFsync),
+	// when the WAL cannot be re-appended. On the normal write path the WAL —
+	// inline payload for small shards, metadata-only record for large ones —
+	// already covers durability via its Flush, so we skip this fsync.
 	encSyncStart := time.Now()
 	if requireFsync {
 		if err := f.Sync(); err != nil {
@@ -1089,12 +1100,13 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 const walPayloadInlineThreshold = 1 << 20
 
 // appendShardDataWAL logs an OpShardPut record for the encoded shard payload
-// before any file mutation. Returns requireFsync = false in all cases where
-// WAL coverage exists (small inline-payload records, or large metadata-only
-// records), so callers should skip the per-shard fsync — durability comes
-// from the WAL's single Flush. Returns requireFsync = true only when no WAL
-// is wired or replay is in progress (in which case the caller MUST fsync the
-// shard file itself).
+// before any file mutation. WAL is mandatory on the write path: a nil WAL is
+// rejected with an error rather than falling back to a per-shard fsync.
+// Returns requireFsync = false in all normal cases (small inline-payload
+// records, or large metadata-only records), so callers skip the per-shard
+// fsync — durability comes from the WAL's single Flush. Returns
+// requireFsync = true only during WAL replay, when the WAL cannot be
+// re-appended and the caller MUST fsync the shard file itself.
 //
 // For small payloads (< walPayloadInlineThreshold) the WAL stores the full
 // encoded shard so RecoverDataWAL can rebuild a missing file byte-for-byte.
@@ -1104,7 +1116,10 @@ const walPayloadInlineThreshold = 1 << 20
 // page cache loss on crash before the rename hit disk) EC reconstruction
 // rebuilds it from surviving peers at read time.
 func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) (requireFsync bool, err error) {
-	if s.dataWAL == nil || s.replayingDataWAL.Load() {
+	if s.dataWAL == nil {
+		return false, fmt.Errorf("appendShardDataWAL: shard write requires a data WAL (WAL is mandatory)")
+	}
+	if s.replayingDataWAL.Load() {
 		return true, nil
 	}
 	rec := datawal.Record{
@@ -1143,15 +1158,18 @@ type ShardMetadataWALRecord struct {
 // data WAL with exactly one Flush. The put actor pipeline calls this
 // after every shard has hit disk (rename done) and before signalling
 // completion, so a 4-shard EC object pays 1 WAL fsync instead of N
-// per-shard fsyncs. No-op (returns nil) when no WAL is wired or replay
-// is in progress; callers MUST fsync the shard files themselves in that
-// case (returns a sentinel so they can branch).
+// per-shard fsyncs. WAL is mandatory: a nil WAL returns an error. During
+// replay it returns walCovered=false (the WAL cannot be re-appended), so the
+// caller MUST fsync the shard files themselves in that case.
 //
 // On Append failure mid-batch the partially-committed WAL is left as-is
 // — the records on disk are a superset of what we acknowledge, which is
 // safe (recovery skips records whose shard files were never written).
 func (s *ShardService) AppendShardMetadataBatch(ctx context.Context, records []ShardMetadataWALRecord) (walCovered bool, err error) {
-	if s.dataWAL == nil || s.replayingDataWAL.Load() {
+	if s.dataWAL == nil {
+		return false, fmt.Errorf("AppendShardMetadataBatch: shard write requires a data WAL (WAL is mandatory)")
+	}
+	if s.replayingDataWAL.Load() {
 		return false, nil
 	}
 	for _, r := range records {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 type singletonBackendTestTB interface {
@@ -73,7 +74,12 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	}
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	svc := NewShardService(backend.root, nil)
+	dwal, err := datawal.Open(backend.root+"/datawal", nil)
+	if err != nil {
+		t.Fatalf("open data wal: %v", err)
+	}
+	t.Cleanup(func() { _ = dwal.Close() })
+	svc := NewShardService(backend.root, nil, WithDataWAL(dwal))
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})
@@ -86,6 +92,9 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 		}
 		if backend.coalesce != nil {
 			backend.coalesce.Stop()
+		}
+		if backend.shardSvc != nil {
+			_ = backend.shardSvc.Close()
 		}
 		close(stopApply)
 		node.Close()
