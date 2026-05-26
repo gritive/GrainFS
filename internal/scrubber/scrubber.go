@@ -172,8 +172,6 @@ type BackgroundScrubber struct {
 	// Replication-source registry. EC scrub keeps using the legacy runOnce
 	// path above; replication sources (volume blocks today, future internal
 	// buckets tomorrow) ride the same interval ticker via SourceRunOnce.
-	// Live vs full scope is a property of the BlockSource implementation;
-	// the scrubber asks for ScopeFull and lets the source decide.
 	sources   map[string]BlockSource
 	verifiers map[string]BlockVerifier
 }
@@ -319,18 +317,18 @@ func (s *BackgroundScrubber) sourceTickerLoop(ctx context.Context, d time.Durati
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.SourceRunOnce(ctx, ScopeFull)
+			s.SourceRunOnce(ctx)
 		}
 	}
 }
 
-// SourceRunOnce iterates every registered replication source at the given
-// scope. Public for direct invocation by Director (CLI trigger path) and for
-// tests. EC verification is independent — see runOnce.
-func (s *BackgroundScrubber) SourceRunOnce(ctx context.Context, scope ScrubScope) {
+// SourceRunOnce iterates every registered replication source. Public for
+// direct invocation by Director (CLI trigger path) and for tests. EC
+// verification is independent — see runOnce.
+func (s *BackgroundScrubber) SourceRunOnce(ctx context.Context) {
 	for name, src := range s.sources {
 		ver := s.verifiers[name]
-		ch, err := src.Iter(ctx, scope, "", "")
+		ch, err := src.Iter(ctx, "", "")
 		if err != nil {
 			log.Warn().Str("source", name).Err(err).Msg("scrub: source iter failed")
 			continue

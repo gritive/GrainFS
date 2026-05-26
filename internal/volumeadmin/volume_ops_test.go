@@ -46,7 +46,7 @@ func TestRunList_Table(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "GET", path: "/v1/volumes",
 		body: ListVolumesResp{Volumes: []VolumeInfo{
-			{Name: "v1", Size: 1 << 30, AllocatedBytes: 1 << 20, SnapshotCount: 2, Health: "ok"},
+			{Name: "v1", Size: 1 << 30, AllocatedBytes: 1 << 20, Health: "ok"},
 		}},
 	}})
 	defer srv.Close()
@@ -143,7 +143,7 @@ func TestRunStat(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "GET", path: "/v1/volumes/v1/stat",
 		body: VolumeStatResp{
-			Volume:          VolumeInfo{Name: "v1", Size: 1 << 30, AllocatedBytes: 100, SnapshotCount: 3, Health: "ok"},
+			Volume:          VolumeInfo{Name: "v1", Size: 1 << 30, AllocatedBytes: 100, Health: "ok"},
 			RecentIncidents: []map[string]any{{"id": "i-1"}, {"id": "i-2"}},
 		},
 	}})
@@ -152,7 +152,7 @@ func TestRunStat(t *testing.T) {
 	if err := RunStat(context.Background(), StatOptions{BaseOptions: base, Name: "v1"}); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	for _, want := range []string{"volume:", "snapshots:", "recent incidents: 2"} {
+	for _, want := range []string{"volume:", "recent incidents: 2"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
 		}
@@ -171,32 +171,6 @@ func TestRunDelete_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `deleted "v1"`) {
 		t.Errorf("unexpected:\n%s", out.String())
-	}
-}
-
-func TestRunDelete_ConflictPrintsBlockToStderr(t *testing.T) {
-	srv := newFakeServer(t, []fakeRoute{{
-		method: "DELETE", path: "/v1/volumes/v1",
-		status: 409, errResp: &Error{
-			Code: "conflict", Message: "v1 has 3 snapshots; refused without --force",
-			Details: json.RawMessage(`{
-				"snapshot_count": 3,
-				"recent": [{"id":"snap-1","created_at":"t","block_count":1}],
-				"cascade_command": "grainfs volume delete v1 --force",
-				"list_command": "grainfs volume snapshot list v1"
-			}`),
-		},
-	}})
-	defer srv.Close()
-	base, _, errBuf := optsForServer(srv)
-	err := RunDelete(context.Background(), DeleteOptions{BaseOptions: base, Name: "v1"})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	for _, want := range []string{"refused without --force", "Recent snapshots:", "snap-1", "Cascade:", "Or list:"} {
-		if !strings.Contains(errBuf.String(), want) {
-			t.Errorf("stderr missing %q:\n%s", want, errBuf.String())
-		}
 	}
 }
 
@@ -241,7 +215,7 @@ func TestRunResize_UnsupportedShrink_PrintsHint(t *testing.T) {
 		method: "POST", path: "/v1/volumes/v1/resize",
 		status: 422, errResp: &Error{
 			Code: "unsupported", Message: "shrink not supported",
-			Details: json.RawMessage(`{"hint":"clone","clone_command":"grainfs volume clone v1 <new>"}`),
+			Details: json.RawMessage(`{"hint":"create a smaller new volume and copy the data instead"}`),
 		},
 	}})
 	defer srv.Close()
@@ -250,7 +224,7 @@ func TestRunResize_UnsupportedShrink_PrintsHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"shrink not supported", "Hint:", "Try:"} {
+	for _, want := range []string{"shrink not supported", "Hint:"} {
 		if !strings.Contains(errBuf.String(), want) {
 			t.Errorf("stderr missing %q:\n%s", want, errBuf.String())
 		}
@@ -268,34 +242,6 @@ func TestRunRecalculate_Fixed(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	if !strings.Contains(out.String(), "fixed") {
-		t.Errorf("unexpected:\n%s", out.String())
-	}
-}
-
-func TestRunClone(t *testing.T) {
-	srv := newFakeServer(t, []fakeRoute{{
-		method: "POST", path: "/v1/volumes/clone",
-	}})
-	defer srv.Close()
-	base, out, _ := optsForServer(srv)
-	if err := RunClone(context.Background(), CloneOptions{BaseOptions: base, Src: "v1", Dst: "v2"}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !strings.Contains(out.String(), `"v1" → "v2"`) {
-		t.Errorf("unexpected:\n%s", out.String())
-	}
-}
-
-func TestRunRollback(t *testing.T) {
-	srv := newFakeServer(t, []fakeRoute{{
-		method: "POST", path: "/v1/volumes/v1/snapshots/snap-1/rollback",
-	}})
-	defer srv.Close()
-	base, out, _ := optsForServer(srv)
-	if err := RunRollback(context.Background(), RollbackOptions{BaseOptions: base, Name: "v1", SnapshotID: "snap-1"}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !strings.Contains(out.String(), "rolled back") {
 		t.Errorf("unexpected:\n%s", out.String())
 	}
 }

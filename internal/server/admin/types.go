@@ -66,7 +66,6 @@ func toVolumeInfo(v *volume.Volume) VolumeInfo {
 		BlockSize:       v.BlockSize,
 		AllocatedBlocks: v.AllocatedBlocks,
 		AllocatedBytes:  v.AllocatedBytes(),
-		SnapshotCount:   v.SnapshotCount,
 		Health:          "ok",
 		HealthReasons:   []string{},
 	}

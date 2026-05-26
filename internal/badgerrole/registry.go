@@ -55,12 +55,6 @@ func DefaultRegistry() Registry {
 			SourceContract: SourceContractNone, ReadOnlyEligible: false,
 			QuarantineEligible: false, FeatureFlag: "heal-receipt", MaxProbeConcurrency: 1,
 		},
-		RoleDedup: {
-			Role: RoleDedup, DisplayName: "dedup index", RelativePath: "dedup",
-			OptionsKind: OptionsSmall, Criticality: CriticalityOptional,
-			SourceContract: SourceContractNone, ReadOnlyEligible: false,
-			QuarantineEligible: false, FeatureFlag: "dedup", MaxProbeConcurrency: 1,
-		},
 		RoleVolumeCatalog: {
 			Role: RoleVolumeCatalog, DisplayName: "volume catalog", RelativePath: "volume-catalog",
 			OptionsKind: OptionsSmall, Criticality: CriticalityReadOnly,

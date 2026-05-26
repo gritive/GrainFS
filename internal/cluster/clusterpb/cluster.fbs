@@ -815,7 +815,6 @@ table MetaScrubTriggerCmd {
   session_id:string;
   bucket:string;
   key_prefix:string;
-  scope:int;                    // 0 = full, 1 = live (matches scrubber.ScrubScope)
   dry_run:bool;
   requested_at:long;            // unix seconds
   originator_node_id:string;

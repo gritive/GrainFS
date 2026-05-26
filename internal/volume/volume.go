@@ -1,23 +1,19 @@
 package volume
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume/dedup"
 	"github.com/rs/zerolog/log"
 )
 
@@ -67,7 +63,6 @@ type Volume struct {
 	Size            int64
 	BlockSize       int
 	AllocatedBlocks int64 // -1=untracked, 0=empty, >0=block count
-	SnapshotCount   int32 // 0=no snapshots; >0 means live_map is active
 }
 
 // AllocatedBytes returns the number of bytes allocated in backing storage.
@@ -85,9 +80,6 @@ type ManagerOptions struct {
 	// 0 means unlimited (default).
 	PoolQuota int64
 
-	// DedupIndex enables block-level deduplication. nil disables dedup.
-	DedupIndex dedup.DedupIndex
-
 	// BlockCache, if non-nil, sits in front of backend.GetObject on
 	// the ReadAt path. Hits skip the storage backend entirely; misses
 	// populate the cache so subsequent reads of the same physical
@@ -96,24 +88,14 @@ type ManagerOptions struct {
 	BlockCache *blockcache.Cache
 }
 
-// SnapshotInfo describes a point-in-time snapshot of a volume.
-type SnapshotInfo struct {
-	ID         string
-	CreatedAt  time.Time
-	BlockCount int64 // number of allocated blocks at snapshot creation time
-}
-
 // Manager manages volumes on top of a storage.Backend.
 type Manager struct {
-	backend   storage.Backend
-	mu        sync.Mutex                  // mutation mutex: protects volume metadata cache, live_map RMW, and ReadAt/WriteAt block-object consistency. Splitting this requires per-volume/per-block immutable versions or transactions.
-	volumes   map[string]*Volume          // 인메모리 캐시
-	liveMaps  map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
-	dedup     dedup.DedupIndex            // nil = dedup 비활성화
-	blocks    *blockcache.Cache           // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
-	opts      ManagerOptions
-	blkPool   *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
-	snapStore SnapshotStore
+	backend storage.Backend
+	mu      sync.Mutex         // mutation mutex: protects volume metadata cache and ReadAt/WriteAt block-object consistency. Splitting this requires per-volume/per-block immutable versions or transactions.
+	volumes map[string]*Volume // 인메모리 캐시
+	blocks  *blockcache.Cache  // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
+	opts    ManagerOptions
+	blkPool *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
 }
 
 // NewManager creates a new volume manager.
@@ -123,21 +105,13 @@ func NewManager(backend storage.Backend) *Manager {
 
 // NewManagerWithOptions creates a new volume manager with the given options.
 func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manager {
-	m := &Manager{
-		backend:  backend,
-		volumes:  make(map[string]*Volume),
-		liveMaps: make(map[string]map[int64]string),
-		dedup:    opts.DedupIndex,
-		blocks:   opts.BlockCache,
-		opts:     opts,
-		blkPool:  pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
+	return &Manager{
+		backend: backend,
+		volumes: make(map[string]*Volume),
+		blocks:  opts.BlockCache,
+		opts:    opts,
+		blkPool: pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
 	}
-	if opts.DedupIndex != nil {
-		m.snapStore = newBadgerSnapshotStore(m, opts.DedupIndex)
-	} else {
-		m.snapStore = newS3SnapshotStore(m)
-	}
-	return m
 }
 
 // getBlkBuf returns a zeroed block buffer from the pool, or allocates one for non-default sizes.
@@ -160,7 +134,6 @@ func (m *Manager) putBlkBuf(b []byte) {
 func (m *Manager) newBlockIOEngine() blockIOEngine {
 	engine := blockIOEngine{
 		objects:   backendBlockObjectStore{backend: m.backend},
-		dedup:     m.dedup,
 		meter:     defaultBlockReadMeter{},
 		getBlkBuf: m.getBlkBuf,
 		putBlkBuf: m.putBlkBuf,
@@ -181,15 +154,7 @@ func (m *Manager) currentAllocatedBytesUnlocked() int64 {
 	return total
 }
 
-func (m *Manager) applyBlockIOResultUnlocked(name string, vol *Volume, result blockIOResult, liveMap map[int64]string, strictLiveMap, strictMetadata, trackUntracked bool) error {
-	if result.LiveMapDirty {
-		if err := m.persistLiveMapUnlocked(name, liveMap); err != nil {
-			if strictLiveMap {
-				return fmt.Errorf("persist live_map: %w", err)
-			}
-		}
-	}
-
+func (m *Manager) applyBlockIOResultUnlocked(name string, vol *Volume, result blockIOResult, strictMetadata, trackUntracked bool) error {
 	if result.AllocationBytesDelta != 0 {
 		if vol.AllocatedBlocks < 0 {
 			if !trackUntracked {
@@ -328,56 +293,22 @@ func (m *Manager) Delete(name string) error {
 	return m.deleteUnlocked(name)
 }
 
-// DeleteWithSnapshots deletes the volume and all its snapshots atomically under
-// a single mutex acquisition. Used by `grainfs volume delete --force`. Use Delete
-// when no snapshots are expected; this returns the same error as Delete if the
-// volume has no snapshots.
-func (m *Manager) DeleteWithSnapshots(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, err := m.getVolUnlocked(name); err != nil {
-		return err
-	}
-	snaps, err := m.listSnapshotsUnlocked(name)
-	if err != nil {
-		return fmt.Errorf("list snapshots: %w", err)
-	}
-	for _, s := range snaps {
-		if err := m.deleteSnapshotUnlocked(name, s.ID); err != nil {
-			return fmt.Errorf("delete snapshot %s: %w", s.ID, err)
-		}
-	}
-	return m.deleteUnlocked(name)
-}
-
 func (m *Manager) deleteUnlocked(name string) error {
 	// Verify volume exists
 	if _, _, err := m.backend.GetObject(context.Background(), volumeBucketName, metaKey(name)); err != nil {
 		return fmt.Errorf("volume %q: %w", name, ErrNotFound)
 	}
 
-	// Delete all block objects, respecting dedup refcounts.
-	if m.dedup != nil {
-		toDelete, err := m.dedup.DeleteVolume(name)
-		if err != nil {
-			return fmt.Errorf("dedup delete volume: %w", err)
-		}
-		for _, key := range toDelete {
-			m.backend.DeleteObject(context.Background(), volumeBucketName, key) //nolint:errcheck
-		}
-	} else {
-		_ = m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
-			_ = m.backend.DeleteObject(context.Background(), volumeBucketName, obj.Key)
-			return nil
-		})
-	}
+	// Delete all block objects.
+	_ = m.backend.WalkObjects(context.Background(), volumeBucketName, blockPrefix(name), func(obj *storage.Object) error {
+		_ = m.backend.DeleteObject(context.Background(), volumeBucketName, obj.Key)
+		return nil
+	})
 
 	if err := m.backend.DeleteObject(context.Background(), volumeBucketName, metaKey(name)); err != nil {
 		return err
 	}
 	delete(m.volumes, name)
-	delete(m.liveMaps, name)
 	return nil
 }
 
@@ -434,12 +365,7 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 
-	liveMap, err := m.getLiveMapUnlocked(name)
-	if err != nil {
-		return 0, fmt.Errorf("load live_map: %w", err)
-	}
-
-	result, err := m.newBlockIOEngine().read(name, vol, p, off, liveMap)
+	result, err := m.newBlockIOEngine().read(name, vol, p, off)
 	return result.Bytes, err
 }
 
@@ -463,19 +389,11 @@ func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
 		return 0, fmt.Errorf("offset %d out of range [0, %d)", off, vol.Size)
 	}
 
-	var liveMap map[int64]string
-	if m.dedup == nil {
-		liveMap, err = m.getLiveMapUnlocked(name)
-		if err != nil {
-			return 0, fmt.Errorf("load live_map: %w", err)
-		}
-	}
-
-	result, err := m.newBlockIOEngine().write(name, vol, p, off, liveMap, m.currentAllocatedBytesUnlocked(), m.opts.PoolQuota)
+	result, err := m.newBlockIOEngine().write(name, vol, p, off, m.currentAllocatedBytesUnlocked(), m.opts.PoolQuota)
 	if err != nil {
 		return result.Bytes, err
 	}
-	if err := m.applyBlockIOResultUnlocked(name, vol, result, liveMap, true, false, true); err != nil {
+	if err := m.applyBlockIOResultUnlocked(name, vol, result, false, true); err != nil {
 		return result.Bytes, err
 	}
 	return result.Bytes, nil
@@ -518,22 +436,16 @@ func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() er
 		return nil, 0, fmt.Errorf("offset %d out of range [0, %d)", off, vol.Size)
 	}
 
-	// Async path only supports the non-dedup, non-CoW fallback.
-	if m.dedup != nil || vol.SnapshotCount > 0 || m.opts.PoolQuota > 0 {
+	// Async path only supports the no-quota fallback.
+	if m.opts.PoolQuota > 0 {
 		m.mu.Unlock()
 		n, err := m.WriteAt(name, p, off)
 		return nil, n, err
 	}
 
-	liveMap, err := m.getLiveMapUnlocked(name)
-	if err != nil {
-		m.mu.Unlock()
-		return nil, 0, fmt.Errorf("load live_map: %w", err)
-	}
-
 	engine := m.newBlockIOEngine()
 	engine.deferred = ap
-	result, err := engine.writeDeferred(name, vol, p, off, liveMap)
+	result, err := engine.writeDeferred(name, vol, p, off)
 	if err != nil {
 		m.mu.Unlock()
 		return nil, result.Bytes, err
@@ -568,16 +480,11 @@ func (m *Manager) Discard(name string, off, length int64) error {
 		return err
 	}
 
-	liveMap, err := m.getLiveMapUnlocked(name)
-	if err != nil {
-		return fmt.Errorf("load live_map: %w", err)
-	}
-
-	result, err := m.newBlockIOEngine().discard(name, vol, off, length, liveMap)
+	result, err := m.newBlockIOEngine().discard(name, vol, off, length)
 	if err != nil {
 		return err
 	}
-	return m.applyBlockIOResultUnlocked(name, vol, result, liveMap, false, true, false)
+	return m.applyBlockIOResultUnlocked(name, vol, result, true, false)
 }
 
 // RecordFreedBytes decrements AllocatedBlocks by the equivalent number of blocks for freed bytes.
@@ -688,285 +595,4 @@ func blockPrefix(name string) string {
 func (m *Manager) ensureBucket() error {
 	_ = m.backend.CreateBucket(context.Background(), volumeBucketName)
 	return m.backend.HeadBucket(context.Background(), volumeBucketName)
-}
-
-// --- live_map helpers ---
-
-func liveMapKey(name string) string {
-	return metaPrefix + name + "/live_map"
-}
-
-func snapPrefix(name string) string {
-	return metaPrefix + name + "/snaps/"
-}
-
-func snapMapKey(name, snapID string) string {
-	return metaPrefix + name + "/snaps/" + snapID + "/map"
-}
-
-func snapMetaKey(name, snapID string) string {
-	return metaPrefix + name + "/snaps/" + snapID + "/meta"
-}
-
-func snapBlockKey(name, snapID string, blkNum int64) string {
-	return fmt.Sprintf("%s%s/snaps/%s/blk_%012d", metaPrefix, name, snapID, blkNum)
-}
-
-// cowBlockKey returns a new versioned physical key for CoW writes.
-func cowBlockKey(name string, blkNum int64) string {
-	return fmt.Sprintf("%s%s/blk_%012d_v%s", metaPrefix, name, blkNum, uuid.Must(uuid.NewV7()).String())
-}
-
-// physicalKey resolves the physical object key for a logical block.
-// If liveMap is nil or has no entry for blkNum, the default key is returned.
-func physicalKey(name string, blkNum int64, liveMap map[int64]string) string {
-	if liveMap != nil {
-		if key, ok := liveMap[blkNum]; ok && key != "" {
-			return key
-		}
-	}
-	return blockKey(name, blkNum)
-}
-
-// getLiveMapUnlocked loads (or returns cached) the live_map for a volume.
-// Returns nil when the volume has no snapshots, or when dedup is active (block
-// mappings live in BadgerDB instead of the S3 live_map).
-// Caller must hold m.mu.
-func (m *Manager) getLiveMapUnlocked(name string) (map[int64]string, error) {
-	if lm, ok := m.liveMaps[name]; ok {
-		return lm, nil // nil cached entry = no live_map for this volume
-	}
-	vol, err := m.getVolUnlocked(name)
-	if err != nil {
-		return nil, err
-	}
-	// Dedup-aware: live block→canonical mappings are in BadgerDB; the S3
-	// live_map file is not used. badgerSnapshotStore handles snapshot maps
-	// directly via the DedupIndex.
-	if m.dedup != nil {
-		m.liveMaps[name] = nil
-		return nil, nil
-	}
-	if vol.SnapshotCount == 0 {
-		m.liveMaps[name] = nil
-		return nil, nil
-	}
-	rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, liveMapKey(name))
-	if err != nil {
-		// No live_map object yet (fresh volume or fresh snapshot)
-		lm := make(map[int64]string)
-		m.liveMaps[name] = lm
-		return lm, nil
-	}
-	defer rc.Close()
-	lm, err := parseLiveMap(rc)
-	if err != nil {
-		return nil, fmt.Errorf("parse live_map: %w", err)
-	}
-	m.liveMaps[name] = lm
-	return lm, nil
-}
-
-// persistLiveMapUnlocked writes the live_map to storage. Caller must hold m.mu.
-func (m *Manager) persistLiveMapUnlocked(name string, lm map[int64]string) error {
-	var buf bytes.Buffer
-	if err := serializeLiveMap(lm, &buf); err != nil {
-		return err
-	}
-	_, err := m.backend.PutObject(context.Background(), volumeBucketName, liveMapKey(name), &buf, "text/plain")
-	return err
-}
-
-// parseLiveMap reads tab-separated "{blkNum}\t{physicalKey}\n" lines.
-func parseLiveMap(r io.Reader) (map[int64]string, error) {
-	lm := make(map[int64]string)
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid live_map line: %q", line)
-		}
-		blkNum, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid block number in live_map: %q", parts[0])
-		}
-		lm[blkNum] = parts[1]
-	}
-	return lm, scanner.Err()
-}
-
-// serializeLiveMap writes the live_map in tab-separated format.
-func serializeLiveMap(lm map[int64]string, w io.Writer) error {
-	bw := bufio.NewWriter(w)
-	for blkNum, key := range lm {
-		if _, err := fmt.Fprintf(bw, "%d\t%s\n", blkNum, key); err != nil {
-			return err
-		}
-	}
-	return bw.Flush()
-}
-
-// snapshotMetaJSON is the JSON representation of snapshot metadata.
-type snapshotMetaJSON struct {
-	ID         string    `json:"id"`
-	CreatedAt  time.Time `json:"created_at"`
-	BlockCount int64     `json:"block_count"`
-}
-
-// --- Snapshot API ---
-
-// CreateSnapshot creates a point-in-time snapshot of the named volume.
-func (m *Manager) CreateSnapshot(name string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	vol, err := m.getVolUnlocked(name)
-	if err != nil {
-		return "", err
-	}
-	snapID, err := m.snapStore.CreateSnapshot(context.Background(), vol)
-	if err != nil {
-		return "", err
-	}
-	vol.SnapshotCount++
-	data, err := marshalVolume(vol)
-	if err != nil {
-		return "", fmt.Errorf("marshal volume: %w", err)
-	}
-	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf"); err != nil {
-		return "", fmt.Errorf("persist volume meta: %w", err)
-	}
-	return snapID, nil
-}
-
-// ListSnapshots returns all snapshots for the named volume.
-func (m *Manager) ListSnapshots(name string) ([]SnapshotInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, err := m.getVolUnlocked(name); err != nil {
-		return nil, err
-	}
-	return m.snapStore.ListSnapshots(context.Background(), name)
-}
-
-func (m *Manager) listSnapshotsUnlocked(name string) ([]SnapshotInfo, error) {
-	if _, err := m.getVolUnlocked(name); err != nil {
-		return nil, err
-	}
-	return m.snapStore.ListSnapshots(context.Background(), name)
-}
-
-// DeleteSnapshot removes a snapshot and frees its block objects.
-func (m *Manager) DeleteSnapshot(name, snapID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.deleteSnapshotUnlocked(name, snapID)
-}
-
-func (m *Manager) deleteSnapshotUnlocked(name, snapID string) error {
-	vol, err := m.getVolUnlocked(name)
-	if err != nil {
-		return err
-	}
-	if err := m.snapStore.DeleteSnapshot(context.Background(), vol, snapID); err != nil {
-		return err
-	}
-	if vol.SnapshotCount > 0 {
-		vol.SnapshotCount--
-	}
-	if vol.SnapshotCount == 0 {
-		m.backend.DeleteObject(context.Background(), volumeBucketName, liveMapKey(name)) //nolint:errcheck
-		delete(m.liveMaps, name)
-	}
-	data, err := marshalVolume(vol)
-	if err != nil {
-		return fmt.Errorf("marshal volume: %w", err)
-	}
-	_, err = m.backend.PutObject(context.Background(), volumeBucketName, metaKey(name), bytes.NewReader(data), "application/protobuf")
-	return err
-}
-
-// Rollback restores the volume's block state to the given snapshot.
-func (m *Manager) Rollback(name, snapID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	vol, err := m.getVolUnlocked(name)
-	if err != nil {
-		return err
-	}
-	return m.snapStore.Rollback(context.Background(), vol, snapID)
-}
-
-// Clone creates a new volume that initially shares blocks with the source volume.
-func (m *Manager) Clone(srcName, dstName string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	srcVol, err := m.getVolUnlocked(srcName)
-	if err != nil {
-		return fmt.Errorf("source volume: %w", err)
-	}
-	dstVol, err := m.snapStore.Clone(context.Background(), srcVol, dstName)
-	if err != nil {
-		return err
-	}
-	data, err := marshalVolume(dstVol)
-	if err != nil {
-		return fmt.Errorf("marshal dst volume: %w", err)
-	}
-	if _, err := m.backend.PutObject(context.Background(), volumeBucketName, metaKey(dstName), bytes.NewReader(data), "application/protobuf"); err != nil {
-		return fmt.Errorf("store dst volume meta: %w", err)
-	}
-	m.volumes[dstName] = dstVol
-	m.liveMaps[dstName] = nil
-	return nil
-}
-
-// RecoverOnBoot must be invoked once after the Manager and DedupIndex are
-// constructed, before serving traffic. Wires through to the SnapshotStore so
-// in-progress snapshots, stuck rollbacks, and stuck clones from a prior crash
-// are reconciled.
-func (m *Manager) RecoverOnBoot(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.snapStore.RecoverOnBoot(ctx)
-}
-
-// copyObjectFallback copies by reading source and writing to destination.
-func (m *Manager) copyObjectFallback(srcBucket, srcKey, dstBucket, dstKey string) error {
-	rc, obj, err := m.backend.GetObject(context.Background(), srcBucket, srcKey)
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-	ct := "application/octet-stream"
-	if obj != nil && obj.ContentType != "" {
-		ct = obj.ContentType
-	}
-	_, err = m.backend.PutObject(context.Background(), dstBucket, dstKey, rc, ct)
-	return err
-}
-
-// parseBlockNum extracts the block number from a block key like "__vol/name/blk_000000000042".
-// Returns (blkNum, true) on success, (0, false) if not a block key.
-func parseBlockNum(key string) (int64, bool) {
-	// Find the last "/blk_" segment
-	idx := strings.LastIndex(key, "/blk_")
-	if idx < 0 {
-		return 0, false
-	}
-	suffix := key[idx+5:] // after "/blk_"
-	// Take the first 12 digits (zero-padded block number); ignore version suffix
-	numStr := suffix
-	if len(numStr) > 12 {
-		numStr = numStr[:12]
-	}
-	n, err := strconv.ParseInt(numStr, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return n, true
 }

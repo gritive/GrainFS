@@ -122,7 +122,6 @@ func (a *ScrubProposerAdapter) Propose(ctx context.Context, req scrubber.Trigger
 		SessionID:        uuid.NewString(),
 		Bucket:           req.Bucket,
 		KeyPrefix:        req.KeyPrefix,
-		Scope:            req.Scope,
 		DryRun:           req.DryRun,
 		RequestedAt:      time.Now().Unix(),
 		OriginatorNodeID: a.nodeID,
@@ -149,14 +148,9 @@ func (a *ScrubExecutionBackend) TriggerScrub(ctx context.Context, op execution.O
 	if err := op.Scrub.Validate(); err != nil {
 		return execution.ScrubResult{}, err
 	}
-	scope := scrubber.ScopeFull
-	if op.Scrub.Scope == execution.ScrubScopeLive {
-		scope = scrubber.ScopeLive
-	}
 	entry, created, err := a.proposer.Propose(ctx, scrubber.TriggerReq{
 		Bucket:    op.Scrub.Bucket,
 		KeyPrefix: op.Scrub.KeyPrefix,
-		Scope:     scope,
 		DryRun:    op.Scrub.DryRun,
 	})
 	if err != nil {
@@ -185,14 +179,9 @@ func (a *ScrubAggregatorAdapter) Peers(ctx context.Context, sessionID string) ([
 	}
 	infos := make([]admin.ScrubJobInfo, 0, len(stats))
 	for _, s := range stats {
-		scope := "full"
-		if s.Scope == int32(scrubber.ScopeLive) {
-			scope = "live"
-		}
 		infos = append(infos, admin.ScrubJobInfo{
 			Bucket:       s.Bucket,
 			KeyPrefix:    s.KeyPrefix,
-			Scope:        scope,
 			DryRun:       s.DryRun,
 			Status:       s.Status,
 			StartedAt:    s.StartedAt,

@@ -34,19 +34,19 @@ func TestBlockIOReadCacheHitRecordsMeterAndAvoidsStore(t *testing.T) {
 	meter := &fakeBlockReadMeter{}
 	cached := bytes.Repeat([]byte("x"), DefaultBlockSize)
 	copy(cached, []byte("abcd"))
-	cache.puts["phys-0"] = cached
+	key := blockKey("vol", 0)
+	cache.puts[key] = cached
 
 	engine := testBlockIOEngine(store, cache, meter)
 	vol := &Volume{Name: "vol", Size: int64(DefaultBlockSize), BlockSize: DefaultBlockSize}
-	liveMap := map[int64]string{0: "phys-0"}
 	dst := make([]byte, 3)
 
-	result, err := engine.read("vol", vol, dst, 1, liveMap)
+	result, err := engine.read("vol", vol, dst, 1)
 	require.NoError(t, err)
 	require.Equal(t, 3, result.Bytes)
 	require.Equal(t, []byte("bcd"), dst)
 	require.Empty(t, store.gets)
-	require.Equal(t, []string{"phys-0"}, meter.keys)
+	require.Equal(t, []string{key}, meter.keys)
 }
 
 func TestBackendBlockObjectStoreReadAtErrorFallsBackToGetObject(t *testing.T) {
@@ -77,31 +77,28 @@ func TestBlockIOWriteFullBlockSelectsDirectKeyAndReportsAllocation(t *testing.T)
 	vol := &Volume{Name: "vol", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
 	src := bytes.Repeat([]byte("a"), DefaultBlockSize)
 
-	result, err := engine.write("vol", vol, src, 0, nil, 0, 0)
+	result, err := engine.write("vol", vol, src, 0, 0, 0)
 	require.NoError(t, err)
 	require.Equal(t, DefaultBlockSize, result.Bytes)
 	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
-	require.False(t, result.LiveMapDirty)
 	require.Equal(t, src, store.objects[blockKey("vol", 0)])
 	require.Equal(t, []string{blockKey("vol", 0)}, result.InvalidatedKeys)
 	require.Equal(t, []string{blockKey("vol", 0)}, cache.invalidations)
 }
 
-func TestBlockIODiscardDeletesLiveMapBlockAndReportsFreedBytes(t *testing.T) {
+func TestBlockIODiscardDeletesBlockAndReportsFreedBytes(t *testing.T) {
 	store := newFakeBlockStore()
-	store.objects["cow-key"] = bytes.Repeat([]byte("z"), DefaultBlockSize)
+	key := blockKey("vol", 1)
+	store.objects[key] = bytes.Repeat([]byte("z"), DefaultBlockSize)
 	cache := newFakeBlockCache()
 	engine := testBlockIOEngine(store, cache, &fakeBlockReadMeter{})
 	vol := &Volume{Name: "vol", Size: int64(DefaultBlockSize * 3), BlockSize: DefaultBlockSize}
-	liveMap := map[int64]string{1: "cow-key"}
 
-	result, err := engine.discard("vol", vol, int64(DefaultBlockSize), int64(DefaultBlockSize), liveMap)
+	result, err := engine.discard("vol", vol, int64(DefaultBlockSize), int64(DefaultBlockSize))
 	require.NoError(t, err)
 	require.Equal(t, -int64(DefaultBlockSize), result.AllocationBytesDelta)
-	require.True(t, result.LiveMapDirty)
-	require.NotContains(t, liveMap, int64(1))
-	require.NotContains(t, store.objects, "cow-key")
-	require.Equal(t, []string{"cow-key"}, cache.invalidations)
+	require.NotContains(t, store.objects, key)
+	require.Equal(t, []string{key}, cache.invalidations)
 }
 
 func testBlockIOEngine(store *fakeBlockStore, cache blockCache, meter blockReadMeter) blockIOEngine {

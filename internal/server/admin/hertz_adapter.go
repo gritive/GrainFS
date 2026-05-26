@@ -52,25 +52,7 @@ func wrapBody[Req any, Resp any](d *Deps, fn func(context.Context, *Deps, Req) (
 	}
 }
 
-func wrapBodyNoOut[Req any](d *Deps, fn func(context.Context, *Deps, Req) error) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		var req Req
-		body := c.Request.Body()
-		if len(body) > 0 {
-			if err := json.Unmarshal(body, &req); err != nil {
-				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
-				return
-			}
-		}
-		if err := fn(ctx, d, req); err != nil {
-			writeError(c, err)
-			return
-		}
-		c.SetStatusCode(consts.StatusCreated)
-	}
-}
-
-// wrapBodyNoOut204 is like wrapBodyNoOut but returns 204 No Content on success.
+// wrapBodyNoOut204 returns 204 No Content on success.
 // Use for idempotent upsert routes (PUT) where creating vs. updating is not
 // distinguishable at the transport layer.
 func wrapBodyNoOut204[Req any](d *Deps, fn func(context.Context, *Deps, Req) error) app.HandlerFunc {

@@ -2,17 +2,13 @@ package volume
 
 import (
 	"context"
-	"fmt"
-
-	"github.com/google/uuid"
 )
 
 // blockIOPlanner computes a per-call write plan without performing any mutations.
-// It performs read-only I/O (HeadObject, dedup.ReadBlock) to determine the
-// action kind and key layout for each block, then validates pool quota.
+// It performs read-only I/O (HeadObject) to determine the key layout for each
+// block, then validates pool quota.
 type blockIOPlanner struct {
 	objects blockObjectStore
-	dedup   blockDedupIndex
 }
 
 // planWrite builds a []BlockAction for a WriteAt call.
@@ -24,12 +20,10 @@ func (pl blockIOPlanner) planWrite(
 	vol *Volume,
 	p []byte,
 	off int64,
-	liveMap map[int64]string,
 	currentAllocatedBytes, poolQuota int64,
 	asyncEligible bool,
 ) ([]BlockAction, error) {
 	bs := int64(vol.BlockSize)
-	useCow := pl.dedup == nil && vol.SnapshotCount > 0
 
 	actions := make([]BlockAction, 0, (int64(len(p))+bs-1)/bs)
 	newBlocks := int64(0)
@@ -49,57 +43,25 @@ func (pl blockIOPlanner) planWrite(
 		}
 
 		isFullBlk := blkOff == 0 && canWrite == int(bs)
+		key := blockKey(name, blkNum)
 		action := BlockAction{
+			Kind:      ActionDirect,
 			BlkNum:    blkNum,
 			BlkOff:    blkOff,
 			DataStart: written,
 			CanWrite:  canWrite,
+			Key:       key,
+			OldKey:    key,
+			Async:     asyncEligible,
 		}
-
-		switch {
-		case pl.dedup != nil:
-			canonical, found, err := pl.dedup.ReadBlock(name, blkNum)
-			if err != nil {
-				return nil, fmt.Errorf("dedup read block %d: %w", blkNum, err)
-			}
-			action.Kind = ActionDedup
-			action.Key = fmt.Sprintf("%s%s/blk_%012d_v%s", metaPrefix, name, blkNum, uuid.Must(uuid.NewV7()).String())
-			if found {
-				action.OldKey = canonical
-			} else {
-				action.IsNew = true
+		if isFullBlk || poolQuota > 0 {
+			_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, key)
+			action.IsNew = headErr != nil
+			if action.IsNew {
 				newBlocks++
 			}
-
-		case useCow:
-			oldKey := physicalKey(name, blkNum, liveMap)
-			action.Kind = ActionCow
-			action.Key = cowBlockKey(name, blkNum)
-			action.OldKey = oldKey
-			if isFullBlk || poolQuota > 0 {
-				_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, oldKey)
-				action.IsNew = headErr != nil
-				if action.IsNew {
-					newBlocks++
-				}
-			}
-			// partial without quota: executor determines IsNew via GetObject
-
-		default: // ActionDirect
-			key := blockKey(name, blkNum)
-			action.Kind = ActionDirect
-			action.Key = key
-			action.OldKey = key
-			action.Async = asyncEligible
-			if isFullBlk || poolQuota > 0 {
-				_, headErr := pl.objects.HeadObject(context.Background(), volumeBucketName, key)
-				action.IsNew = headErr != nil
-				if action.IsNew {
-					newBlocks++
-				}
-			}
-			// partial without quota: executor determines IsNew via GetObject
 		}
+		// partial without quota: executor determines IsNew via GetObject
 
 		actions = append(actions, action)
 		written += canWrite

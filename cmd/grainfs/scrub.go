@@ -12,7 +12,6 @@ import (
 type scrubBucketReq struct {
 	Bucket    string `json:"bucket"`
 	KeyPrefix string `json:"key_prefix,omitempty"`
-	Scope     string `json:"scope,omitempty"`
 	DryRun    bool   `json:"dry_run,omitempty"`
 }
 
@@ -29,7 +28,6 @@ func newScrubCmd() *cobra.Command {
 		RunE: runBucketScrub,
 	}
 	cmd.Flags().String("prefix", "", "narrow walk to keys starting with this prefix")
-	cmd.Flags().String("scope", "full", "scope: full | live")
 	cmd.Flags().Bool("dry-run", false, "observe only, no repair")
 	cmd.Flags().Bool("detach", false, "don't follow, return immediately")
 	registerAdminEndpointFlag(cmd)
@@ -44,14 +42,13 @@ func runBucketScrub(cmd *cobra.Command, args []string) error {
 	}
 	bucket := args[0]
 	prefix, _ := cmd.Flags().GetString("prefix")
-	scope, _ := cmd.Flags().GetString("scope")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	detach, _ := cmd.Flags().GetBool("detach")
 
 	ctx, cancel := applyAdminTimeout(cmd.Context(), cmd)
 	defer cancel()
 
-	body := scrubBucketReq{Bucket: bucket, KeyPrefix: prefix, Scope: scope, DryRun: dryRun}
+	body := scrubBucketReq{Bucket: bucket, KeyPrefix: prefix, DryRun: dryRun}
 	var resp volumeadmin.ScrubTriggerResp
 	if err := c.Post(ctx, "/v1/scrub", body, &resp); err != nil {
 		return err
@@ -63,8 +60,8 @@ func runBucketScrub(cmd *cobra.Command, args []string) error {
 	if resp.Created {
 		created = "created"
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Triggered scrub: bucket=%s session=%s scope=%s dry_run=%t (%s)\n",
-		bucket, resp.SessionID, scope, dryRun, created)
+	fmt.Fprintf(cmd.OutOrStdout(), "Triggered scrub: bucket=%s session=%s dry_run=%t (%s)\n",
+		bucket, resp.SessionID, dryRun, created)
 	if detach {
 		return nil
 	}

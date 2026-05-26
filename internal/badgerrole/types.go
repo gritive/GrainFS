@@ -12,7 +12,6 @@ const (
 	RoleGroupState    Role = "group_state"
 	RoleGroupRaftLog  Role = "group_raft_log"
 	RoleReceipts      Role = "receipts"
-	RoleDedup         Role = "dedup"
 	RoleVolumeCatalog Role = "volume_catalog"
 	RoleIncidentState Role = "incident_state"
 )

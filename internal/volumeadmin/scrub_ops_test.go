@@ -20,7 +20,7 @@ func TestRunScrub_DetachPrintsTriggeredAndExits(t *testing.T) {
 	defer srv.Close()
 	base, out, _ := optsForServer(srv)
 	err := RunScrub(context.Background(), ScrubOptions{
-		BaseOptions: base, Name: "v1", Scope: "full", Detach: true,
+		BaseOptions: base, Name: "v1", Detach: true,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -78,7 +78,7 @@ func TestRunScrub_FollowReachesDone(t *testing.T) {
 
 	base, out, _ := optsForServer(srv)
 	err := RunScrub(context.Background(), ScrubOptions{
-		BaseOptions: base, Name: "v1", Scope: "full",
+		BaseOptions: base, Name: "v1",
 		PollInterval: 5 * time.Millisecond,
 	})
 	if err != nil {
@@ -111,7 +111,7 @@ func TestRunScrub_FollowGracefulOnContextCancel(t *testing.T) {
 		cancel()
 	}()
 	err := RunScrub(ctx, ScrubOptions{
-		BaseOptions: base, Name: "v1", Scope: "full",
+		BaseOptions: base, Name: "v1",
 		PollInterval: 5 * time.Millisecond,
 	})
 	if err != nil {
@@ -154,7 +154,7 @@ func TestRunScrubStatus_ShowsPartialPeerFailures(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "GET", path: "/v1/scrub/jobs/sess-1",
 		body: ScrubJobInfo{
-			SessionID: "sess-1", Status: "running", Scope: "full",
+			SessionID: "sess-1", Status: "running",
 			Checked: 10, Partial: true, PeerFailures: []string{"n2"},
 		},
 	}})
@@ -189,7 +189,7 @@ func TestRunScrubList_Table(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "GET", path: "/v1/scrub/jobs",
 		body: ListScrubJobsResp{Jobs: []ScrubJobInfo{
-			{SessionID: "sess-1", Status: "running", Scope: "full", Checked: 10, Detected: 1, Repaired: 0},
+			{SessionID: "sess-1", Status: "running", Checked: 10, Detected: 1, Repaired: 0},
 		}},
 	}})
 	defer srv.Close()

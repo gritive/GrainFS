@@ -9,10 +9,8 @@ import (
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
-// ScrubVolume triggers a scrub session over the named volume's blocks. Default
-// scope is "full" (every block including snapshot-only); pass "live" to limit
-// to currently-live blocks. Idempotent — repeating the same request returns
-// the existing session id.
+// ScrubVolume triggers a scrub session over the named volume's blocks.
+// Idempotent — repeating the same request returns the existing session id.
 func ScrubVolume(ctx context.Context, d *Deps, req ScrubVolumeReq) (ScrubVolumeResp, error) {
 	if d.Director == nil {
 		return ScrubVolumeResp{}, NewInternal("scrub director not configured")
@@ -20,14 +18,9 @@ func ScrubVolume(ctx context.Context, d *Deps, req ScrubVolumeReq) (ScrubVolumeR
 	if req.Name == "" {
 		return ScrubVolumeResp{}, NewInvalid("name required")
 	}
-	scope, err := parseScrubScope(req.Scope)
-	if err != nil {
-		return ScrubVolumeResp{}, err
-	}
 	id, created := d.Director.Trigger(scrubber.TriggerReq{
 		Bucket:    volume.VolumeBucketName,
 		KeyPrefix: volume.BlockKeyPrefix(req.Name),
-		Scope:     scope,
 		DryRun:    req.DryRun,
 	})
 	if id == "" {
@@ -56,22 +49,13 @@ func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error)
 	if req.Bucket == "" {
 		return ScrubResp{}, NewInvalid("bucket required")
 	}
-	scope, err := parseScrubScope(req.Scope)
-	if err != nil {
-		return ScrubResp{}, err
-	}
 	if d.Execution != nil {
-		execScope := execution.ScrubScopeFull
-		if scope == scrubber.ScopeLive {
-			execScope = execution.ScrubScopeLive
-		}
 		// Scrub keeps its existing session_id contract; Operation.ID stays zero here.
 		plan, err := (execution.Planner{ClusterAvailable: true}).Plan(execution.Operation{
 			Kind: execution.OperationScrub,
 			Scrub: execution.ScrubOperation{
 				Bucket:    req.Bucket,
 				KeyPrefix: req.KeyPrefix,
-				Scope:     execScope,
 				DryRun:    req.DryRun,
 			},
 		})
@@ -88,7 +72,7 @@ func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error)
 		return ScrubResp{}, NewInternal("scrub proposer not configured")
 	}
 	entry, created, err := d.ScrubProposer.Propose(ctx, scrubber.TriggerReq{
-		Bucket: req.Bucket, KeyPrefix: req.KeyPrefix, Scope: scope, DryRun: req.DryRun,
+		Bucket: req.Bucket, KeyPrefix: req.KeyPrefix, DryRun: req.DryRun,
 	})
 	if err != nil {
 		return ScrubResp{}, NewInternal("propose scrub: " + err.Error())

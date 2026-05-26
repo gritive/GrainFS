@@ -69,20 +69,8 @@ func (rcv *ScrubSessionStatReply) KeyPrefix() []byte {
 	return nil
 }
 
-func (rcv *ScrubSessionStatReply) Scope() int32 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
-	if o != 0 {
-		return rcv._tab.GetInt32(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *ScrubSessionStatReply) MutateScope(n int32) bool {
-	return rcv._tab.MutateInt32Slot(10, n)
-}
-
 func (rcv *ScrubSessionStatReply) DryRun() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -90,11 +78,11 @@ func (rcv *ScrubSessionStatReply) DryRun() bool {
 }
 
 func (rcv *ScrubSessionStatReply) MutateDryRun(n bool) bool {
-	return rcv._tab.MutateBoolSlot(12, n)
+	return rcv._tab.MutateBoolSlot(10, n)
 }
 
 func (rcv *ScrubSessionStatReply) Status() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -102,7 +90,7 @@ func (rcv *ScrubSessionStatReply) Status() []byte {
 }
 
 func (rcv *ScrubSessionStatReply) StartedAt() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -110,11 +98,11 @@ func (rcv *ScrubSessionStatReply) StartedAt() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateStartedAt(n int64) bool {
-	return rcv._tab.MutateInt64Slot(16, n)
+	return rcv._tab.MutateInt64Slot(14, n)
 }
 
 func (rcv *ScrubSessionStatReply) DoneAt() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -122,11 +110,11 @@ func (rcv *ScrubSessionStatReply) DoneAt() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateDoneAt(n int64) bool {
-	return rcv._tab.MutateInt64Slot(18, n)
+	return rcv._tab.MutateInt64Slot(16, n)
 }
 
 func (rcv *ScrubSessionStatReply) Checked() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -134,11 +122,11 @@ func (rcv *ScrubSessionStatReply) Checked() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateChecked(n int64) bool {
-	return rcv._tab.MutateInt64Slot(20, n)
+	return rcv._tab.MutateInt64Slot(18, n)
 }
 
 func (rcv *ScrubSessionStatReply) Healthy() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -146,11 +134,11 @@ func (rcv *ScrubSessionStatReply) Healthy() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateHealthy(n int64) bool {
-	return rcv._tab.MutateInt64Slot(22, n)
+	return rcv._tab.MutateInt64Slot(20, n)
 }
 
 func (rcv *ScrubSessionStatReply) Detected() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -158,11 +146,11 @@ func (rcv *ScrubSessionStatReply) Detected() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateDetected(n int64) bool {
-	return rcv._tab.MutateInt64Slot(24, n)
+	return rcv._tab.MutateInt64Slot(22, n)
 }
 
 func (rcv *ScrubSessionStatReply) Repaired() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -170,11 +158,11 @@ func (rcv *ScrubSessionStatReply) Repaired() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateRepaired(n int64) bool {
-	return rcv._tab.MutateInt64Slot(26, n)
+	return rcv._tab.MutateInt64Slot(24, n)
 }
 
 func (rcv *ScrubSessionStatReply) Unrepairable() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -182,11 +170,11 @@ func (rcv *ScrubSessionStatReply) Unrepairable() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateUnrepairable(n int64) bool {
-	return rcv._tab.MutateInt64Slot(28, n)
+	return rcv._tab.MutateInt64Slot(26, n)
 }
 
 func (rcv *ScrubSessionStatReply) Skipped() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -194,11 +182,11 @@ func (rcv *ScrubSessionStatReply) Skipped() int64 {
 }
 
 func (rcv *ScrubSessionStatReply) MutateSkipped(n int64) bool {
-	return rcv._tab.MutateInt64Slot(30, n)
+	return rcv._tab.MutateInt64Slot(28, n)
 }
 
 func (rcv *ScrubSessionStatReply) OwnedHere() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -206,11 +194,11 @@ func (rcv *ScrubSessionStatReply) OwnedHere() bool {
 }
 
 func (rcv *ScrubSessionStatReply) MutateOwnedHere(n bool) bool {
-	return rcv._tab.MutateBoolSlot(32, n)
+	return rcv._tab.MutateBoolSlot(30, n)
 }
 
 func ScrubSessionStatReplyStart(builder *flatbuffers.Builder) {
-	builder.StartObject(15)
+	builder.StartObject(14)
 }
 func ScrubSessionStatReplyAddFound(builder *flatbuffers.Builder, found bool) {
 	builder.PrependBoolSlot(0, found, false)
@@ -221,41 +209,38 @@ func ScrubSessionStatReplyAddBucket(builder *flatbuffers.Builder, bucket flatbuf
 func ScrubSessionStatReplyAddKeyPrefix(builder *flatbuffers.Builder, keyPrefix flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(keyPrefix), 0)
 }
-func ScrubSessionStatReplyAddScope(builder *flatbuffers.Builder, scope int32) {
-	builder.PrependInt32Slot(3, scope, 0)
-}
 func ScrubSessionStatReplyAddDryRun(builder *flatbuffers.Builder, dryRun bool) {
-	builder.PrependBoolSlot(4, dryRun, false)
+	builder.PrependBoolSlot(3, dryRun, false)
 }
 func ScrubSessionStatReplyAddStatus(builder *flatbuffers.Builder, status flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(status), 0)
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(status), 0)
 }
 func ScrubSessionStatReplyAddStartedAt(builder *flatbuffers.Builder, startedAt int64) {
-	builder.PrependInt64Slot(6, startedAt, 0)
+	builder.PrependInt64Slot(5, startedAt, 0)
 }
 func ScrubSessionStatReplyAddDoneAt(builder *flatbuffers.Builder, doneAt int64) {
-	builder.PrependInt64Slot(7, doneAt, 0)
+	builder.PrependInt64Slot(6, doneAt, 0)
 }
 func ScrubSessionStatReplyAddChecked(builder *flatbuffers.Builder, checked int64) {
-	builder.PrependInt64Slot(8, checked, 0)
+	builder.PrependInt64Slot(7, checked, 0)
 }
 func ScrubSessionStatReplyAddHealthy(builder *flatbuffers.Builder, healthy int64) {
-	builder.PrependInt64Slot(9, healthy, 0)
+	builder.PrependInt64Slot(8, healthy, 0)
 }
 func ScrubSessionStatReplyAddDetected(builder *flatbuffers.Builder, detected int64) {
-	builder.PrependInt64Slot(10, detected, 0)
+	builder.PrependInt64Slot(9, detected, 0)
 }
 func ScrubSessionStatReplyAddRepaired(builder *flatbuffers.Builder, repaired int64) {
-	builder.PrependInt64Slot(11, repaired, 0)
+	builder.PrependInt64Slot(10, repaired, 0)
 }
 func ScrubSessionStatReplyAddUnrepairable(builder *flatbuffers.Builder, unrepairable int64) {
-	builder.PrependInt64Slot(12, unrepairable, 0)
+	builder.PrependInt64Slot(11, unrepairable, 0)
 }
 func ScrubSessionStatReplyAddSkipped(builder *flatbuffers.Builder, skipped int64) {
-	builder.PrependInt64Slot(13, skipped, 0)
+	builder.PrependInt64Slot(12, skipped, 0)
 }
 func ScrubSessionStatReplyAddOwnedHere(builder *flatbuffers.Builder, ownedHere bool) {
-	builder.PrependBoolSlot(14, ownedHere, false)
+	builder.PrependBoolSlot(13, ownedHere, false)
 }
 func ScrubSessionStatReplyEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

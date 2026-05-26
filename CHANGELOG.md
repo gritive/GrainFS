@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.346.0] - 2026-05-26
+
+### Removed
+
+- **Volume deduplication, snapshot, clone, rollback, and copy-on-write.** NBD
+  volumes are now plain block devices (read/write/discard, direct in-place block
+  overwrite). The `volume snapshot`/`volume clone`/`volume rollback` CLI commands,
+  the `volume delete --force` cascade flag, and their admin API endpoints are
+  removed. Volumes written by prior versions with deduplication or snapshots are
+  not readable after upgrade (pre-1.0, no migration). This subsystem will be
+  redesigned later. **Breaking:** operators who scripted `grainfs volume snapshot`,
+  `grainfs volume clone`, `grainfs volume rollback`, or `grainfs volume delete --force`
+  will get an unknown-command/unknown-flag error.
+- **Scrub `--scope full|live` flag.** Both block sources always walked the same
+  index regardless of scope (the `live` distinction depended on the volume
+  live-map that this release removes), so the flag was inert. `grainfs scrub`
+  and `grainfs volume scrub` no longer accept `--scope`; the scrub session's
+  `scope` field is dropped from the admin API and the cluster scrub-trigger /
+  stat wire format. **Breaking:** scripts passing `--scope` get an unknown-flag
+  error. **Rolling-upgrade note:** a scrub triggered during an upgrade that
+  crosses this version cannot aggregate in-flight session stats across
+  mixed-version peers — trigger operator scrubs after the upgrade completes.
+
 ## [0.0.345.1] - 2026-05-26
 
 ### Fixed

@@ -19,7 +19,7 @@ func RunScrub(ctx context.Context, opts ScrubOptions) error {
 	defer cancel()
 
 	resp, err := c.TriggerScrub(ctx, ScrubTriggerReq{
-		Name: opts.Name, Scope: opts.Scope, DryRun: opts.DryRun,
+		Name: opts.Name, DryRun: opts.DryRun,
 	})
 	if err != nil {
 		return err
@@ -32,8 +32,8 @@ func RunScrub(ctx context.Context, opts ScrubOptions) error {
 		created = "created"
 	}
 	fmt.Fprintf(stdout(opts.BaseOptions),
-		"Triggered scrub: session=%s scope=%s dry_run=%t (%s)\n",
-		resp.SessionID, opts.Scope, opts.DryRun, created)
+		"Triggered scrub: session=%s dry_run=%t (%s)\n",
+		resp.SessionID, opts.DryRun, created)
 	if opts.Detach {
 		return nil
 	}

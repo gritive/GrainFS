@@ -99,28 +99,15 @@ func TestRegisterUIDoesNotExposeDestructiveVolumeRoutes(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.Manager.WriteAt("ui-vol", []byte("x"), 0)
 	require.NoError(t, err)
-	snapID, err := d.Manager.CreateSnapshot("ui-vol")
-	require.NoError(t, err)
 	admin.RegisterUI(h, d)
 	start()
 
-	resp := doRouteTestRequest(t, http.MethodDelete, base+"/ui/api/volumes/ui-vol/snapshots/"+snapID, nil)
-	resp.Body.Close()
-	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
-
-	resp = doRouteTestRequest(t, http.MethodPost, base+"/ui/api/volumes/ui-vol/snapshots/"+snapID+"/rollback", nil)
-	resp.Body.Close()
-	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
-
-	resp = doRouteTestRequest(t, http.MethodDelete, base+"/ui/api/volumes/ui-vol?force=true", nil)
+	resp := doRouteTestRequest(t, http.MethodDelete, base+"/ui/api/volumes/ui-vol", nil)
 	resp.Body.Close()
 	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
 
 	_, err = d.Manager.Get("ui-vol")
 	require.NoError(t, err)
-	snaps, err := d.Manager.ListSnapshots("ui-vol")
-	require.NoError(t, err)
-	require.Len(t, snaps, 1)
 }
 
 func TestBucketPolicyRoute_InvalidStoredPolicyDoesNotPanic(t *testing.T) {

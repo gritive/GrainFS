@@ -96,7 +96,7 @@ func (c triggerCmd) apply(env *directorEnv) {
 		c.reply <- triggerReply{sessionID: existing, created: false}
 		return
 	}
-	sess := newLiveSession(uuid.NewString(), c.req.Bucket, c.req.KeyPrefix, c.req.Scope, c.req.DryRun, time.Now())
+	sess := newLiveSession(uuid.NewString(), c.req.Bucket, c.req.KeyPrefix, c.req.DryRun, time.Now())
 	env.sessions[sess.id] = sess
 	env.dedup[dk] = sess.id
 
@@ -120,9 +120,9 @@ func (c applyFromFSMCmd) apply(env *directorEnv) {
 	if c.entry.RequestedAt != 0 {
 		startedAt = time.Unix(c.entry.RequestedAt, 0)
 	}
-	sess := newLiveSession(c.entry.SessionID, c.entry.Bucket, c.entry.KeyPrefix, c.entry.Scope, c.entry.DryRun, startedAt)
+	sess := newLiveSession(c.entry.SessionID, c.entry.Bucket, c.entry.KeyPrefix, c.entry.DryRun, startedAt)
 	env.sessions[sess.id] = sess
-	dk := dedupKey(TriggerReq{Bucket: c.entry.Bucket, KeyPrefix: c.entry.KeyPrefix, Scope: c.entry.Scope, DryRun: c.entry.DryRun})
+	dk := dedupKey(TriggerReq{Bucket: c.entry.Bucket, KeyPrefix: c.entry.KeyPrefix, DryRun: c.entry.DryRun})
 	if _, ok := env.dedup[dk]; !ok {
 		env.dedup[dk] = sess.id
 	}
@@ -156,7 +156,6 @@ func (c lookupDedupCmd) apply(env *directorEnv) {
 			SessionID: sess.id,
 			Bucket:    sess.bucket,
 			KeyPrefix: sess.keyPrefix,
-			Scope:     sess.scope,
 			DryRun:    sess.dryRun,
 		},
 		ok: true,
@@ -209,7 +208,6 @@ type Session struct {
 	ID        string
 	Bucket    string
 	KeyPrefix string
-	Scope     ScrubScope
 	DryRun    bool
 	StartedAt time.Time
 	DoneAt    time.Time
@@ -233,7 +231,6 @@ type liveSession struct {
 	id        string
 	bucket    string
 	keyPrefix string
-	scope     ScrubScope
 	dryRun    bool
 	startedAt time.Time
 	doneAt    atomic.Int64 // unix nanos; 0 = not done
@@ -252,7 +249,6 @@ func (s *liveSession) snapshot() Session {
 		ID:        s.id,
 		Bucket:    s.bucket,
 		KeyPrefix: s.keyPrefix,
-		Scope:     s.scope,
 		DryRun:    s.dryRun,
 		StartedAt: s.startedAt,
 		Stats: SessionStats{
@@ -276,7 +272,6 @@ func (s *liveSession) snapshot() Session {
 type TriggerReq struct {
 	Bucket    string
 	KeyPrefix string
-	Scope     ScrubScope
 	DryRun    bool
 }
 
@@ -284,7 +279,6 @@ type ScrubTriggerEntry struct {
 	SessionID        string
 	Bucket           string
 	KeyPrefix        string
-	Scope            ScrubScope
 	DryRun           bool
 	RequestedAt      int64
 	OriginatorNodeID string
@@ -354,12 +348,11 @@ func (d *Director) Trigger(req TriggerReq) (string, bool) {
 	return r.sessionID, r.created
 }
 
-func newLiveSession(id, bucket, keyPrefix string, scope ScrubScope, dryRun bool, startedAt time.Time) *liveSession {
+func newLiveSession(id, bucket, keyPrefix string, dryRun bool, startedAt time.Time) *liveSession {
 	s := &liveSession{
 		id:        id,
 		bucket:    bucket,
 		keyPrefix: keyPrefix,
-		scope:     scope,
 		dryRun:    dryRun,
 		startedAt: startedAt,
 	}
@@ -449,7 +442,7 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockS
 		d.markDone(sess)
 		return
 	}
-	ch, err := src.Iter(ctx, sess.scope, sess.bucket, sess.keyPrefix)
+	ch, err := src.Iter(ctx, sess.bucket, sess.keyPrefix)
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub director: source iter failed")
 		d.markDone(sess)
@@ -592,5 +585,5 @@ func (d *Director) CancelSession(id string) error {
 }
 
 func dedupKey(r TriggerReq) string {
-	return fmt.Sprintf("%s\x00%s\x00%d\x00%t", r.Bucket, r.KeyPrefix, r.Scope, r.DryRun)
+	return fmt.Sprintf("%s\x00%s\x00%t", r.Bucket, r.KeyPrefix, r.DryRun)
 }

@@ -18,9 +18,6 @@ type DeleteResp = adminapi.DeleteResp
 type ResizeReq = adminapi.ResizeReq
 type ResizeResp = adminapi.ResizeResp
 type RecalculateResp = adminapi.RecalculateResp
-type CloneReq = adminapi.CloneReq
-type SnapshotInfo = adminapi.SnapshotInfo
-type SnapshotCreateResp = adminapi.CreateSnapshotResp
 type WriteAtReq = adminapi.WriteAtVolumeReq
 type WriteAtResp = adminapi.WriteAtVolumeResp
 type ReadAtReq = adminapi.ReadAtVolumeReq
@@ -68,8 +65,7 @@ type StatOptions struct {
 // DeleteOptions configures RunDelete.
 type DeleteOptions struct {
 	BaseOptions
-	Name  string
-	Force bool
+	Name string
 }
 
 // ResizeOptions configures RunResize.
@@ -83,20 +79,6 @@ type ResizeOptions struct {
 type RecalculateOptions struct {
 	BaseOptions
 	Name string
-}
-
-// CloneOptions configures RunClone.
-type CloneOptions struct {
-	BaseOptions
-	Src string
-	Dst string
-}
-
-// RollbackOptions configures RunRollback.
-type RollbackOptions struct {
-	BaseOptions
-	Name       string
-	SnapshotID string
 }
 
 // WriteAtOptions configures RunWriteAt.
@@ -115,30 +97,10 @@ type ReadAtOptions struct {
 	Length int64
 }
 
-// SnapshotCreateOptions configures RunSnapshotCreate.
-type SnapshotCreateOptions struct {
-	BaseOptions
-	Volume string
-}
-
-// SnapshotListOptions configures RunSnapshotList.
-type SnapshotListOptions struct {
-	BaseOptions
-	Volume string
-}
-
-// SnapshotDeleteOptions configures RunSnapshotDelete.
-type SnapshotDeleteOptions struct {
-	BaseOptions
-	Volume     string
-	SnapshotID string
-}
-
 // ScrubOptions configures RunScrub.
 type ScrubOptions struct {
 	BaseOptions
 	Name   string
-	Scope  string
 	DryRun bool
 	Detach bool
 

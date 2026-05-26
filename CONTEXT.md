@@ -571,11 +571,12 @@ Volume block I/O is the volume-layer path that turns logical byte-range reads,
 writes, deferred writes, and discards into physical block object reads, writes,
 cache invalidations, and allocation-accounting changes.
 
-The first deepening scope owns block I/O planning, block merge rules, dedup and
-direct-block write selection, block cache read/write behavior, pool quota
-checks, and `AllocatedBlocks` accounting. Snapshot, clone, and rollback remain
-separate callers for the first slice, though they may reuse the same result
-shape later.
+Every logical block maps to a fixed `blockKey(vol, blkNum)` and is overwritten
+in place (the single `ActionDirect` strategy). Block I/O owns block I/O
+planning, partial-block merge rules, block cache read/write behavior, pool
+quota checks, and `AllocatedBlocks` accounting. Volume deduplication, snapshot,
+clone, rollback, and copy-on-write were removed (pre-1.0); volumes are plain
+block devices and the subsystem will be redesigned later.
 
 ### Alerts Webhook Dispatcher
 

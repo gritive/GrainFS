@@ -2,12 +2,10 @@ package volume
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume/dedup"
 )
 
 type blockObjectStore interface {
@@ -70,12 +68,6 @@ func (s backendBlockObjectStore) WriteAt(ctx context.Context, bucket, key string
 	return obj, true, err
 }
 
-type blockDedupIndex interface {
-	WriteBlock(vol string, blkNum int64, hash [32]byte, newKey string) (dedup.WriteResult, error)
-	ReadBlock(vol string, blkNum int64) (canonical string, found bool, err error)
-	FreeBlock(vol string, blkNum int64) (objectKey string, shouldDelete bool, err error)
-}
-
 type blockCache interface {
 	Get(key string) ([]byte, bool)
 	Put(key string, data []byte)
@@ -98,7 +90,6 @@ type blockDeferredWriter interface {
 
 type blockIOEngine struct {
 	objects   blockObjectStore
-	dedup     blockDedupIndex
 	cache     blockCache
 	meter     blockReadMeter
 	deferred  blockDeferredWriter
@@ -110,11 +101,10 @@ type blockIOResult struct {
 	Bytes                int
 	AllocationBytesDelta int64
 	InvalidatedKeys      []string
-	LiveMapDirty         bool
 	CommitFns            []func() error
 }
 
-func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string) (blockIOResult, error) {
+func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64) (blockIOResult, error) {
 	bs := int64(vol.BlockSize)
 	var result blockIOResult
 
@@ -123,16 +113,7 @@ func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveM
 		blkNum := pos / bs
 		blkOff := pos % bs
 
-		var phyKey string
-		if e.dedup != nil {
-			var err error
-			phyKey, _, err = e.dedup.ReadBlock(name, blkNum)
-			if err != nil {
-				return result, fmt.Errorf("dedup read block %d: %w", blkNum, err)
-			}
-		} else {
-			phyKey = physicalKey(name, blkNum, liveMap)
-		}
+		phyKey := blockKey(name, blkNum)
 
 		e.meter.RecordVolumeBlock(phyKey)
 
@@ -159,7 +140,7 @@ func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveM
 			}
 		}
 
-		if e.dedup == nil && e.cache == nil && e.objects.PreferReadAt(volumeBucketName) {
+		if e.cache == nil && e.objects.PreferReadAt(volumeBucketName) {
 			dst := p[result.Bytes : result.Bytes+canRead]
 			if n, ok := e.objects.ReadAt(context.Background(), volumeBucketName, phyKey, blkOff, dst); ok {
 				if n < canRead {
@@ -190,27 +171,27 @@ func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveM
 	return result, nil
 }
 
-func (e blockIOEngine) write(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string, currentAllocatedBytes, poolQuota int64) (blockIOResult, error) {
-	pl := blockIOPlanner{objects: e.objects, dedup: e.dedup}
-	ex := blockIOExecutor{objects: e.objects, dedup: e.dedup, cache: e.cache, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
-	actions, err := pl.planWrite(name, vol, p, off, liveMap, currentAllocatedBytes, poolQuota, false)
+func (e blockIOEngine) write(name string, vol *Volume, p []byte, off int64, currentAllocatedBytes, poolQuota int64) (blockIOResult, error) {
+	pl := blockIOPlanner{objects: e.objects}
+	ex := blockIOExecutor{objects: e.objects, cache: e.cache, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
+	actions, err := pl.planWrite(name, vol, p, off, currentAllocatedBytes, poolQuota, false)
 	if err != nil {
 		return blockIOResult{}, err
 	}
-	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
+	return ex.executeWrite(context.Background(), name, vol, p, actions)
 }
 
-func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string) (blockIOResult, error) {
-	pl := blockIOPlanner{objects: e.objects, dedup: e.dedup}
-	ex := blockIOExecutor{objects: e.objects, dedup: e.dedup, cache: e.cache, deferred: e.deferred, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
-	actions, err := pl.planWrite(name, vol, p, off, liveMap, 0, 0, true)
+func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int64) (blockIOResult, error) {
+	pl := blockIOPlanner{objects: e.objects}
+	ex := blockIOExecutor{objects: e.objects, cache: e.cache, deferred: e.deferred, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
+	actions, err := pl.planWrite(name, vol, p, off, 0, 0, true)
 	if err != nil {
 		return blockIOResult{}, err
 	}
-	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
+	return ex.executeWrite(context.Background(), name, vol, p, actions)
 }
 
-func (e blockIOEngine) discard(name string, vol *Volume, off, length int64, liveMap map[int64]string) (blockIOResult, error) {
+func (e blockIOEngine) discard(name string, vol *Volume, off, length int64) (blockIOResult, error) {
 	bs := int64(vol.BlockSize)
 	firstBlock := (off + bs - 1) / bs
 	lastBlock := (off+length)/bs - 1
@@ -222,26 +203,10 @@ func (e blockIOEngine) discard(name string, vol *Volume, off, length int64, live
 	var result blockIOResult
 	var freed int64
 	for blkNum := firstBlock; blkNum <= lastBlock; blkNum++ {
-		if e.dedup != nil {
-			objectKey, shouldDelete, freeErr := e.dedup.FreeBlock(name, blkNum)
-			if freeErr != nil {
-				return result, fmt.Errorf("dedup free block %d: %w", blkNum, freeErr)
-			}
-			result.InvalidatedKeys = append(result.InvalidatedKeys, objectKey)
-			if shouldDelete {
-				freed++
-				e.objects.DeleteObject(context.Background(), volumeBucketName, objectKey) //nolint:errcheck
-			}
-		} else {
-			key := physicalKey(name, blkNum, liveMap)
-			result.InvalidatedKeys = append(result.InvalidatedKeys, key)
-			if err := e.objects.DeleteObject(context.Background(), volumeBucketName, key); err == nil {
-				freed++
-				if liveMap != nil {
-					delete(liveMap, blkNum)
-					result.LiveMapDirty = true
-				}
-			}
+		key := blockKey(name, blkNum)
+		result.InvalidatedKeys = append(result.InvalidatedKeys, key)
+		if err := e.objects.DeleteObject(context.Background(), volumeBucketName, key); err == nil {
+			freed++
 		}
 	}
 

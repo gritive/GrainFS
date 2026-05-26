@@ -18,14 +18,10 @@ const (
 	routePathVolumeStat        = "/volumes/:name/stat"
 	routePathVolumeResize      = "/volumes/:name/resize"
 	routePathVolumeRecalculate = "/volumes/:name/recalculate"
-	routePathVolumeClone       = "/volumes/clone"
 	routePathVolumeWriteAt     = "/volumes/:name/write-at"
 	routePathVolumeReadAt      = "/volumes/:name/read-at"
 
-	routePathVolumeSnapshots        = "/volumes/:name/snapshots"
-	routePathVolumeSnapshot         = "/volumes/:name/snapshots/:snap"
-	routePathVolumeSnapshotRollback = "/volumes/:name/snapshots/:snap/rollback"
-	routePathVolumeScrub            = "/volumes/:name/scrub"
+	routePathVolumeScrub = "/volumes/:name/scrub"
 
 	routePathScrub           = "/scrub"
 	routePathScrubJobs       = "/scrub/jobs"

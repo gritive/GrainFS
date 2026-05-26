@@ -2,19 +2,6 @@ package scrubber
 
 import "context"
 
-// ScrubScope selects which blocks Iter emits.
-type ScrubScope int
-
-const (
-	// ScopeFull iterates every block under the source's domain (e.g. all
-	// blocks of a volume including those referenced only by snapshots).
-	ScopeFull ScrubScope = iota
-	// ScopeLive iterates only the blocks reachable via the live mapping
-	// (lat: index for EC; live_map for volumes). Cheaper, used by the
-	// background scheduler's hot-path ticker.
-	ScopeLive
-)
-
 // Block is the unit of work flowing through the scrub loop.
 type Block struct {
 	Bucket       string
@@ -48,7 +35,7 @@ func (s BlockStatus) IsHealthy() bool { return s.Healthy }
 // canceling so the producer goroutine can exit cleanly.
 type BlockSource interface {
 	Name() string
-	Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error)
+	Iter(ctx context.Context, bucket, keyPrefix string) (<-chan Block, error)
 }
 
 // BlockVerifier checks a Block's local copy and (optionally) repairs it.

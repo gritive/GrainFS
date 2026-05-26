@@ -11,12 +11,12 @@ import (
 
 func TestQuarantineRoleRenamesDirectoryAndWritesManifest(t *testing.T) {
 	root := t.TempDir()
-	active := filepath.Join(root, "dedup")
+	active := filepath.Join(root, "receipts")
 	require.NoError(t, os.MkdirAll(active, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(active, "MANIFEST"), []byte("bad"), 0o644))
 
 	result, err := QuarantineRole(QuarantineRequest{
-		Role:   RoleDedup,
+		Role:   RoleReceipts,
 		Path:   active,
 		Reason: "operator approved quarantine",
 	})
@@ -28,6 +28,6 @@ func TestQuarantineRoleRenamesDirectoryAndWritesManifest(t *testing.T) {
 }
 
 func TestQuarantineRoleRejectsEmptyPath(t *testing.T) {
-	_, err := QuarantineRole(QuarantineRequest{Role: RoleDedup})
+	_, err := QuarantineRole(QuarantineRequest{Role: RoleReceipts})
 	require.ErrorContains(t, err, "path required")
 }

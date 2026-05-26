@@ -66,7 +66,6 @@ func (f *MetaFSM) applyScrubTrigger(data []byte) error {
 		SessionID:        string(c.SessionId()),
 		Bucket:           string(c.Bucket()),
 		KeyPrefix:        string(c.KeyPrefix()),
-		Scope:            scrubber.ScrubScope(c.Scope()),
 		DryRun:           c.DryRun(),
 		RequestedAt:      c.RequestedAt(),
 		OriginatorNodeID: string(c.OriginatorNodeId()),
@@ -84,7 +83,6 @@ func encodeMetaScrubTriggerCmd(entry scrubber.ScrubTriggerEntry) ([]byte, error)
 	clusterpb.MetaScrubTriggerCmdAddSessionId(b, sidOff)
 	clusterpb.MetaScrubTriggerCmdAddBucket(b, bktOff)
 	clusterpb.MetaScrubTriggerCmdAddKeyPrefix(b, pfxOff)
-	clusterpb.MetaScrubTriggerCmdAddScope(b, int32(entry.Scope))
 	clusterpb.MetaScrubTriggerCmdAddDryRun(b, entry.DryRun)
 	clusterpb.MetaScrubTriggerCmdAddRequestedAt(b, entry.RequestedAt)
 	clusterpb.MetaScrubTriggerCmdAddOriginatorNodeId(b, nodeOff)

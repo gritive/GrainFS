@@ -79,7 +79,7 @@ func runECScrubTriggerFlowsThroughCluster(t testing.TB, c *e2eCluster) {
 
 	time.Sleep(2 * time.Second)
 
-	body, _ := json.Marshal(map[string]any{"bucket": bucket, "scope": "full"})
+	body, _ := json.Marshal(map[string]any{"bucket": bucket})
 	var httpCli *http.Client
 	var resp *http.Response
 	gomega.Eventually(func() bool {
@@ -123,8 +123,8 @@ func runECScrubTriggerFlowsThroughCluster(t testing.TB, c *e2eCluster) {
 	ginkgo.DeferCleanup(r.Body.Close)
 	var info map[string]any
 	gomega.Expect(json.NewDecoder(r.Body).Decode(&info)).To(gomega.Succeed())
-	t.Logf("session %s: bucket=%v scope=%v status=%v checked=%v detected=%v repaired=%v partial=%v",
-		sessionID, info["bucket"], info["scope"], info["status"],
+	t.Logf("session %s: bucket=%v status=%v checked=%v detected=%v repaired=%v partial=%v",
+		sessionID, info["bucket"], info["status"],
 		info["checked"], info["detected"], info["repaired"], info["partial"])
 
 	checked, ok := info["checked"].(float64)
@@ -140,7 +140,7 @@ func runECScrubTriggerDedupHitReturnsExistingSession(t testing.TB, c *e2eCluster
 	// Use a distinct bucket so dedup short-circuit is not satisfied by the
 	// session from FlowsThroughCluster running first on this fixture.
 	httpCli := adminUnixHTTPClient(filepath.Join(c.dataDirs[0], "admin.sock"))
-	body, _ := json.Marshal(map[string]any{"bucket": "dedup-bk", "scope": "full"})
+	body, _ := json.Marshal(map[string]any{"bucket": "dedup-bk"})
 
 	first, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())

@@ -11,7 +11,7 @@ import (
 func TestVlogProvider_Snapshot_SumsAllRegisteredCategories(t *testing.T) {
 	root := t.TempDir()
 	r := NewRegistry()
-	for _, cat := range []Category{DBCategoryMeta, DBCategoryDedup} {
+	for _, cat := range []Category{DBCategoryMeta, DBCategoryReceipts} {
 		dir := filepath.Join(root, string(cat))
 		db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
 		if err != nil {
@@ -31,8 +31,8 @@ func TestVlogProvider_Snapshot_SumsAllRegisteredCategories(t *testing.T) {
 	if _, ok := s.Categories[DBCategoryMeta]; !ok {
 		t.Fatalf("Categories missing meta: %v", s.Categories)
 	}
-	if _, ok := s.Categories[DBCategoryDedup]; !ok {
-		t.Fatalf("Categories missing dedup: %v", s.Categories)
+	if _, ok := s.Categories[DBCategoryReceipts]; !ok {
+		t.Fatalf("Categories missing receipts: %v", s.Categories)
 	}
 }
 

@@ -998,7 +998,6 @@ func buildScrubSessionStatReply(found bool, sess scrubber.Session) *transport.Me
 	raftpb.ScrubSessionStatReplyAddFound(b, found)
 	raftpb.ScrubSessionStatReplyAddBucket(b, bktOff)
 	raftpb.ScrubSessionStatReplyAddKeyPrefix(b, pfxOff)
-	raftpb.ScrubSessionStatReplyAddScope(b, int32(sess.Scope))
 	raftpb.ScrubSessionStatReplyAddDryRun(b, sess.DryRun)
 	raftpb.ScrubSessionStatReplyAddStatus(b, statusOff)
 	raftpb.ScrubSessionStatReplyAddStartedAt(b, sess.StartedAt.Unix())

@@ -71,21 +71,12 @@ func GetVolume(ctx context.Context, d *Deps, name string) (VolumeInfo, error) {
 
 type DeleteResp = adminapi.DeleteResp
 
-// DeleteVolume removes a volume. With force=false, refuses if snapshots exist
-// and returns a conflict containing up to 3 recent snapshots and the cascade
-// command (DX4). With force=true, cascades through DeleteWithSnapshots.
-func DeleteVolume(ctx context.Context, d *Deps, name string, force bool) (DeleteResp, error) {
-	snaps, err := d.Manager.ListSnapshots(name)
-	if errors.Is(err, volume.ErrNotFound) {
-		return DeleteResp{}, NewNotFound(fmt.Sprintf("volume %q not found", name))
-	}
-	if err != nil {
-		return DeleteResp{}, NewInternal(err.Error())
-	}
-	if len(snaps) > 0 && !force {
-		return DeleteResp{}, volumeDeleteSnapshotConflict(name, snaps)
-	}
-	if err := deleteVolumeData(d, name, force); err != nil {
+// DeleteVolume removes a volume.
+func DeleteVolume(ctx context.Context, d *Deps, name string) (DeleteResp, error) {
+	if err := d.Manager.Delete(name); err != nil {
+		if errors.Is(err, volume.ErrNotFound) {
+			return DeleteResp{}, NewNotFound(fmt.Sprintf("volume %q not found", name))
+		}
 		return DeleteResp{}, NewInternal(err.Error())
 	}
 	return DeleteResp{Deleted: true}, nil
@@ -94,8 +85,8 @@ func DeleteVolume(ctx context.Context, d *Deps, name string, force bool) (Delete
 type ResizeReq = adminapi.ResizeReq
 type ResizeResp = adminapi.ResizeResp
 
-// ResizeVolume grows a volume. Shrink returns "unsupported" with a hint to clone
-// to a smaller new volume. Equal size is a no-op (changed=false).
+// ResizeVolume grows a volume. Shrink returns "unsupported" with a hint to
+// create a smaller new volume instead. Equal size is a no-op (changed=false).
 func ResizeVolume(ctx context.Context, d *Deps, name string, req ResizeReq) (ResizeResp, error) {
 	v, err := d.Manager.Get(name)
 	if errors.Is(err, volume.ErrNotFound) {
@@ -110,10 +101,9 @@ func ResizeVolume(ctx context.Context, d *Deps, name string, req ResizeReq) (Res
 			return ResizeResp{}, NewUnsupported(
 				fmt.Sprintf("volume %q shrink not supported (current=%d, requested=%d)", name, old, req.Size),
 				map[string]any{
-					"current_size":  old,
-					"requested":     req.Size,
-					"hint":          "clone to a smaller new volume instead",
-					"clone_command": fmt.Sprintf("grainfs volume clone %s <new>", name),
+					"current_size": old,
+					"requested":    req.Size,
+					"hint":         "create a smaller new volume and copy the data instead",
 				},
 			)
 		}

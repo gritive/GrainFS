@@ -3,15 +3,10 @@ package admin
 import "github.com/gritive/GrainFS/internal/scrubber"
 
 func sessionToInfo(s scrubber.Session) ScrubJobInfo {
-	scope := "full"
-	if s.Scope == scrubber.ScopeLive {
-		scope = "live"
-	}
 	info := ScrubJobInfo{
 		SessionID:    s.ID,
 		Bucket:       s.Bucket,
 		KeyPrefix:    s.KeyPrefix,
-		Scope:        scope,
 		DryRun:       s.DryRun,
 		Status:       s.Status,
 		StartedAt:    s.StartedAt.Unix(),

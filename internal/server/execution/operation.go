@@ -6,13 +6,6 @@ type OperationKind string
 
 const OperationScrub OperationKind = "scrub"
 
-type ScrubScope string
-
-const (
-	ScrubScopeFull ScrubScope = "full"
-	ScrubScopeLive ScrubScope = "live"
-)
-
 type Operation struct {
 	ID    string
 	Kind  OperationKind
@@ -22,7 +15,6 @@ type Operation struct {
 type ScrubOperation struct {
 	Bucket    string
 	KeyPrefix string
-	Scope     ScrubScope
 	DryRun    bool
 }
 
@@ -45,10 +37,5 @@ func (o ScrubOperation) Validate() error {
 	if o.Bucket == "" {
 		return NewError(CodeInvalid, ErrInvalidOperation)
 	}
-	switch o.Scope {
-	case "", ScrubScopeFull, ScrubScopeLive:
-		return nil
-	default:
-		return NewError(CodeInvalid, ErrInvalidOperation)
-	}
+	return nil
 }

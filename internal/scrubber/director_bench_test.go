@@ -28,7 +28,7 @@ func benchSetup(b *testing.B) *Director {
 // dedup map lookup만 거치므로 controller round-trip의 순수 비용.
 func BenchmarkDirector_Trigger_Dedup(b *testing.B) {
 	d := benchSetup(b)
-	req := TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull}
+	req := TriggerReq{Bucket: "b1", KeyPrefix: "p"}
 	// 1회 trigger로 dedup entry 등록 — 이후 모든 호출은 dedup hit.
 	d.Trigger(req)
 	b.ResetTimer()
@@ -41,8 +41,8 @@ func BenchmarkDirector_Trigger_Dedup(b *testing.B) {
 // 가장 빈번할 가능성이 있는 admin-side 경로.
 func BenchmarkDirector_LookupDedup(b *testing.B) {
 	d := benchSetup(b)
-	d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
-	req := TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull}
+	d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p"})
+	req := TriggerReq{Bucket: "b1", KeyPrefix: "p"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = d.LookupDedup(req)
@@ -58,7 +58,6 @@ func BenchmarkDirector_ApplyFromFSM_NonBlocking(b *testing.B) {
 		SessionID: "sess",
 		Bucket:    "b1",
 		KeyPrefix: "p",
-		Scope:     ScopeFull,
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -69,7 +68,7 @@ func BenchmarkDirector_ApplyFromFSM_NonBlocking(b *testing.B) {
 // BenchmarkDirector_GetSession: admin 단일 조회 — controller round-trip.
 func BenchmarkDirector_GetSession(b *testing.B) {
 	d := benchSetup(b)
-	id, _ := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
+	id, _ := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p"})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = d.GetSession(id)

@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestOptionalRoleDisabledRecognizesIncidentAPI(t *testing.T) {
@@ -23,21 +22,6 @@ func TestOptionalRoleDisabledRecognizesIncidentAPI(t *testing.T) {
 
 	require.True(t, ok)
 	require.Equal(t, "incident-api", feature)
-}
-
-func TestBuildVolumeManagerDisablesDedupWhenOptionalRoleCannotOpen(t *testing.T) {
-	dataFile := filepath.Join(t.TempDir(), "not-a-directory")
-	require.NoError(t, os.WriteFile(dataFile, []byte("x"), 0o644))
-	backend, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	defer backend.Close()
-
-	mgr, cache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{}, dataFile, backend)
-
-	require.NoError(t, err)
-	require.NotNil(t, mgr)
-	require.NotNil(t, cache)
-	require.Nil(t, dedupDB)
 }
 
 func TestSetupClusterReceiptDisablesOptionalRoleWhenDBCannotOpen(t *testing.T) {

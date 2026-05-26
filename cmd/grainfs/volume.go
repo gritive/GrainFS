@@ -70,15 +70,11 @@ var volumeStatCmd = &cobra.Command{
 }
 
 var volumeDeleteCmd = &cobra.Command{
-	Use:   "delete <name>",
-	Short: "Delete a volume (refuses if snapshots exist; --force cascades)",
-	Args:  cobra.ExactArgs(1),
-	Example: `  # Delete a volume that has no snapshots
-  grainfs volume delete v1
-
-  # Cascade-delete the volume and all its snapshots
-  grainfs volume delete v1 --force`,
-	RunE: runVolumeDelete,
+	Use:     "delete <name>",
+	Short:   "Delete a volume",
+	Args:    cobra.ExactArgs(1),
+	Example: `  grainfs volume delete v1`,
+	RunE:    runVolumeDelete,
 }
 
 var volumeResizeCmd = &cobra.Command{
@@ -98,22 +94,6 @@ var volumeRecalculateCmd = &cobra.Command{
 	RunE:    runVolumeRecalculate,
 }
 
-var volumeCloneCmd = &cobra.Command{
-	Use:     "clone <src> <dst>",
-	Short:   "Clone a volume (fast, block-sharing copy)",
-	Args:    cobra.ExactArgs(2),
-	Example: `  grainfs volume clone v1 v1-copy`,
-	RunE:    runVolumeClone,
-}
-
-var volumeRollbackCmd = &cobra.Command{
-	Use:     "rollback <volume> <snap_id>",
-	Short:   "Rollback a volume to a snapshot",
-	Args:    cobra.ExactArgs(2),
-	Example: `  grainfs volume rollback v1 0192e8a4-...`,
-	RunE:    runVolumeRollback,
-}
-
 var volumeWriteAtCmd = &cobra.Command{
 	Use:     "write-at <name>",
 	Short:   "Write bytes at a volume offset (debug/test helper)",
@@ -130,35 +110,6 @@ var volumeReadAtCmd = &cobra.Command{
 	RunE:    runVolumeReadAt,
 }
 
-var snapshotCmd = &cobra.Command{
-	Use:   "snapshot",
-	Short: "Volume snapshot management",
-}
-
-var snapshotCreateCmd = &cobra.Command{
-	Use:     "create <volume>",
-	Short:   "Create a snapshot of a volume",
-	Args:    cobra.ExactArgs(1),
-	Example: `  grainfs volume snapshot create v1`,
-	RunE:    runSnapshotCreate,
-}
-
-var snapshotListCmd = &cobra.Command{
-	Use:     "list <volume>",
-	Short:   "List snapshots for a volume",
-	Args:    cobra.ExactArgs(1),
-	Example: `  grainfs volume snapshot list v1`,
-	RunE:    runSnapshotList,
-}
-
-var snapshotDeleteCmd = &cobra.Command{
-	Use:     "delete <volume> <snap_id>",
-	Short:   "Delete a snapshot",
-	Args:    cobra.ExactArgs(2),
-	Example: `  grainfs volume snapshot delete v1 0192e8a4-...`,
-	RunE:    runSnapshotDelete,
-}
-
 var volumeScrubCmd = &cobra.Command{
 	Use:   "scrub <name>",
 	Short: "Scrub a volume — detect and repair silent corruption",
@@ -166,13 +117,11 @@ var volumeScrubCmd = &cobra.Command{
 and comparing its MD5 against the stored ETag. Corrupt or missing blocks
 are repaired by pulling a healthy peer replica.
 
-Default scope is full (every block including snapshot-only). Use --scope=live
-to limit to currently-live blocks. --dry-run records detection without
-repair. --detach returns immediately after triggering instead of following
-session progress.`,
+--dry-run records detection without repair. --detach returns immediately
+after triggering instead of following session progress.`,
 	Example: `  grainfs volume scrub myvol
   grainfs volume scrub myvol --dry-run
-  grainfs volume scrub myvol --scope=live --detach`,
+  grainfs volume scrub myvol --detach`,
 	Args: cobra.ExactArgs(1),
 	RunE: runVolumeScrub,
 }
@@ -209,22 +158,19 @@ func init() {
 
 	volumeCreateCmd.Flags().String("size", "", `volume size — binary "1Gi"/"100Mi" (1024^n) or decimal "1GB"/"100MB" (1000^n); bare "1G"/"1M" rejected as ambiguous`)
 	volumeResizeCmd.Flags().String("size", "", `new size (must be >= current); same units as create`)
-	volumeDeleteCmd.Flags().Bool("force", false, "cascade-delete all snapshots")
 	volumeWriteAtCmd.Flags().Int64("offset", 0, "byte offset")
 	volumeWriteAtCmd.Flags().String("content", "", "bytes to write (string)")
 	volumeReadAtCmd.Flags().Int64("offset", 0, "byte offset")
 	volumeReadAtCmd.Flags().Int64("length", 0, "bytes to read (1..64MiB)")
-	volumeScrubCmd.Flags().String("scope", "full", "scrub scope: full (snapshot chain) or live")
 	volumeScrubCmd.Flags().Bool("dry-run", false, "detect-only, do not repair")
 	volumeScrubCmd.Flags().Bool("detach", false, "trigger and exit; do not follow session progress")
 
-	snapshotCmd.AddCommand(snapshotCreateCmd, snapshotListCmd, snapshotDeleteCmd)
 	volumeScrubCmd.AddCommand(volumeScrubStatusCmd, volumeScrubListCmd, volumeScrubCancelCmd)
 	volumeCmd.AddCommand(
 		volumeListCmd, volumeCreateCmd, volumeInfoCmd, volumeStatCmd,
 		volumeDeleteCmd, volumeResizeCmd, volumeRecalculateCmd,
-		volumeCloneCmd, volumeRollbackCmd, volumeWriteAtCmd, volumeReadAtCmd,
-		volumeScrubCmd, snapshotCmd,
+		volumeWriteAtCmd, volumeReadAtCmd,
+		volumeScrubCmd,
 	)
 	rootCmd.AddCommand(volumeCmd)
 }
@@ -286,11 +232,9 @@ func runVolumeStat(cmd *cobra.Command, args []string) error {
 }
 
 func runVolumeDelete(cmd *cobra.Command, args []string) error {
-	force, _ := cmd.Flags().GetBool("force")
 	return volumeadmin.RunDelete(cmd.Context(), volumeadmin.DeleteOptions{
 		BaseOptions: baseOptionsFromCmd(cmd),
 		Name:        args[0],
-		Force:       force,
 	})
 }
 
@@ -317,22 +261,6 @@ func runVolumeRecalculate(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runVolumeClone(cmd *cobra.Command, args []string) error {
-	return volumeadmin.RunClone(cmd.Context(), volumeadmin.CloneOptions{
-		BaseOptions: baseOptionsFromCmd(cmd),
-		Src:         args[0],
-		Dst:         args[1],
-	})
-}
-
-func runVolumeRollback(cmd *cobra.Command, args []string) error {
-	return volumeadmin.RunRollback(cmd.Context(), volumeadmin.RollbackOptions{
-		BaseOptions: baseOptionsFromCmd(cmd),
-		Name:        args[0],
-		SnapshotID:  args[1],
-	})
-}
-
 func runVolumeWriteAt(cmd *cobra.Command, args []string) error {
 	offset, _ := cmd.Flags().GetInt64("offset")
 	content, _ := cmd.Flags().GetString("content")
@@ -355,36 +283,12 @@ func runVolumeReadAt(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runSnapshotCreate(cmd *cobra.Command, args []string) error {
-	return volumeadmin.RunSnapshotCreate(cmd.Context(), volumeadmin.SnapshotCreateOptions{
-		BaseOptions: baseOptionsFromCmd(cmd),
-		Volume:      args[0],
-	})
-}
-
-func runSnapshotList(cmd *cobra.Command, args []string) error {
-	return volumeadmin.RunSnapshotList(cmd.Context(), volumeadmin.SnapshotListOptions{
-		BaseOptions: baseOptionsFromCmd(cmd),
-		Volume:      args[0],
-	})
-}
-
-func runSnapshotDelete(cmd *cobra.Command, args []string) error {
-	return volumeadmin.RunSnapshotDelete(cmd.Context(), volumeadmin.SnapshotDeleteOptions{
-		BaseOptions: baseOptionsFromCmd(cmd),
-		Volume:      args[0],
-		SnapshotID:  args[1],
-	})
-}
-
 func runVolumeScrub(cmd *cobra.Command, args []string) error {
-	scope, _ := cmd.Flags().GetString("scope")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	detach, _ := cmd.Flags().GetBool("detach")
 	return volumeadmin.RunScrub(cmd.Context(), volumeadmin.ScrubOptions{
 		BaseOptions: baseOptionsFromCmd(cmd),
 		Name:        args[0],
-		Scope:       scope,
 		DryRun:      dryRun,
 		Detach:      detach,
 	})
