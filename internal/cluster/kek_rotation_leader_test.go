@@ -727,3 +727,77 @@ func TestLeaderProposeKEKPrune_RejectsMissingProbeResponses(t *testing.T) {
 		t.Errorf("expected missing-response reject, got: %v", err)
 	}
 }
+
+// --- Task 11: ProposeKEKRetire tests --------------------------------------
+
+// prepareLeaderForRetire seeds two KEK versions (0 + 1) with v=1 active, leaving
+// v=0 in the implicit "active" lifecycle state (no kek_status entry) so it can
+// be retired. Returns the version to retire (0).
+func prepareLeaderForRetire(t *testing.T) (*leaderTestFixture, uint32) {
+	t.Helper()
+	fx := newLeaderTestFixture(t, leaderFixtureOpts{})
+
+	dir := t.TempDir()
+	store, err := encrypt.LoadOrInitKEKStoreDir(dir)
+	if err != nil {
+		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
+	}
+	k1 := bytes.Repeat([]byte{0xB1}, encrypt.KEKSize)
+	if err := store.AddAndPersist(dir, 1, k1); err != nil {
+		t.Fatalf("AddAndPersist v=1: %v", err)
+	}
+	if err := store.SetActiveVersion(1); err != nil {
+		t.Fatalf("SetActiveVersion(1): %v", err)
+	}
+	fx.fsm.SetKEKStore(store)
+	fx.fsm.SetKEKDir(dir)
+	fx.fsm.SetActiveKEKVersion(1)
+	return fx, 0
+}
+
+func TestLeaderProposeKEKRetire_HappyPath(t *testing.T) {
+	fx, version := prepareLeaderForRetire(t)
+	confirm := "delete-permanently-0"
+	if err := fx.leader.ProposeKEKRetire(version, confirm, "admin@uds"); err != nil {
+		t.Fatalf("ProposeKEKRetire: %v", err)
+	}
+	_, status, _, ok := fx.fsm.LookupKEKStatus(version)
+	if !ok || status != KEKLifecycleRetiring {
+		t.Errorf("kek_status[%d] = %v ok=%v, want Retiring", version, status, ok)
+	}
+}
+
+func TestLeaderProposeKEKRetire_RejectsWhenNotLeader(t *testing.T) {
+	fx, version := prepareLeaderForRetire(t)
+	fx.leader.ClearEpoch()
+	err := fx.leader.ProposeKEKRetire(version, "delete-permanently-0", "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "not leader") {
+		t.Errorf("expected not-leader reject, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKRetire_RejectsBadConfirm(t *testing.T) {
+	fx, version := prepareLeaderForRetire(t)
+	err := fx.leader.ProposeKEKRetire(version, "delete-permanently-99", "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "confirm") {
+		t.Errorf("expected confirm-mismatch reject, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKRetire_RejectsActiveVersion(t *testing.T) {
+	fx, _ := prepareLeaderForRetire(t)
+	// Active is 1; retiring it is forbidden by FSM Apply. Pre-check rejects.
+	err := fx.leader.ProposeKEKRetire(1, "delete-permanently-1", "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "active") {
+		t.Errorf("expected active-version reject, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKRetire_RejectsAlreadyRetiring(t *testing.T) {
+	fx, version := prepareLeaderForRetire(t)
+	fx.fsm.SetKEKStatus(version, KEKLifecycleRetiring, 100)
+	err := fx.leader.ProposeKEKRetire(version, "delete-permanently-0", "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "already") {
+		t.Errorf("expected already-retiring reject, got: %v", err)
+	}
+}

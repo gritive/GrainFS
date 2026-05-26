@@ -115,6 +115,14 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				proposer := &cluster.ClusterConfigProposer{Propose: state.metaRaft.Propose}
 				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), proposer, state.cfg.Encryptor)
 
+				// KEK envelope admin endpoints (Task 11). Routes register
+				// unconditionally so operators always see a well-formed 503
+				// "kek admin disabled" when the leader/gate aren't wired,
+				// instead of a generic 404. state.kekRotationLeader is nil
+				// until the production wiring lands (Phase B Task 11 step 2),
+				// at which point the handler proxies through to the leader.
+				RegisterEncryptionKEKRoutes(h, state.kekRotationLeader, state.capabilityGate, state.metaRaft.FSM())
+
 				joinH := &JoinHandler{
 					dataDir:     cfg.DataDir,
 					raftAddr:    state.raftAddr,
