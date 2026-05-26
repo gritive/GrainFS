@@ -72,7 +72,9 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 					// Tags copied (not aliased) — meta's backing bytes are reused
 					// by badger once the View tx returns. Mirror of LocalBackend
 					// fix in b64521bf so snapshot Tags survive ListAllObjects.
-					Tags: append([]storage.Tag(nil), meta.Tags...),
+					Tags:      append([]storage.Tag(nil), meta.Tags...),
+					Segments:  append([]storage.SegmentRef(nil), meta.Segments...),
+					Coalesced: coalescedRefsFromMeta(meta.Coalesced),
 				})
 				return nil
 			})
@@ -315,6 +317,19 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 // this node's local storage (N× versioned path, legacy unversioned path, or
 // first EC shard). When versionID is empty (e.g. from WAL replay that doesn't
 // record versionIDs), resolve the current latest pointer from the FSM.
+// coalescedRefsFromMeta maps cluster CoalescedShardRef → storage.CoalescedRef,
+// carrying the coalesced-blob chunk identifier (the field ChunkLocators reads).
+func coalescedRefsFromMeta(in []CoalescedShardRef) []storage.CoalescedRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]storage.CoalescedRef, len(in))
+	for i, c := range in {
+		out[i] = storage.CoalescedRef{CoalescedID: c.CoalescedID}
+	}
+	return out
+}
+
 func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 	if versionID == "" {
 		// Resolve versionID from the lat: pointer so WAL-replayed objects
