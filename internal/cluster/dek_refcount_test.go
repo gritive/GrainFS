@@ -176,7 +176,7 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 	// Re-encode DKVS without ref_counts (nil → pre-Task-12 format).
 	versions := keeper.Versions()
 	active, _ := keeper.Active()
-	legacyDEKPayload, err := encodeMetaDEKVersionSnapshot(versions, active, nil)
+	legacyDEKPayload, err := encodeMetaDEKVersionSnapshot(versions, active, nil, 0)
 	if err != nil {
 		t.Fatalf("encodeMetaDEKVersionSnapshot (legacy): %v", err)
 	}
