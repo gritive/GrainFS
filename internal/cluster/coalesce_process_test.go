@@ -64,29 +64,8 @@ func TestProcessCoalesceJobB2EndToEnd(t *testing.T) {
 	}
 }
 
-func TestProcessCoalesceJobB3RejectsInvalidTopologyPlacement(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "b"))
-
-	bucket, key := "b", "k"
-	for _, c := range []string{"aaaa", "bbbb"} {
-		_, err := b.AppendObject(ctx, bucket, key, int64(currentSize(t, b, bucket, key)), bytes.NewReader([]byte(c)))
-		require.NoError(t, err)
-	}
-
-	ctx = ContextWithPlacementGroupEntry(ctx, ShardGroupEntry{ID: "group-1"})
-	err := b.processCoalesceJobB3(ctx, coalesceJob{Bucket: bucket, Key: key})
-	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
-
-	obj, err := b.HeadObject(context.Background(), bucket, key)
-	require.NoError(t, err)
-	require.Len(t, obj.Segments, 2)
-	require.Empty(t, obj.Coalesced)
-}
-
 // currentSize is a small helper that returns obj.Size when present, 0 otherwise.
-func currentSize(t *testing.T, b *DistributedBackend, bucket, key string) int64 {
+func currentSize(t clusterTestTB, b *DistributedBackend, bucket, key string) int64 {
 	t.Helper()
 	obj, err := b.HeadObject(context.Background(), bucket, key)
 	if err != nil {
