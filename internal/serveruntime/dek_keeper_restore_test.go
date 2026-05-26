@@ -54,6 +54,19 @@ func writeKEKFile(t *testing.T, dir string, kek []byte) string {
 	return path
 }
 
+// writeClusterID stages cluster.id under dataDir, simulating an operator
+// scp'ing it from a healthy peer alongside the active KEK. Join-mode
+// wiring uses strict LoadClusterID, so this file must be present for
+// wireDEKKeeper to succeed.
+func writeClusterID(t *testing.T, dir string, id []byte) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.Len(t, id, 16)
+	path := filepath.Join(dir, "cluster.id")
+	require.NoError(t, os.WriteFile(path, id, 0o600))
+	return path
+}
+
 // TestStartup_RefusesWhenKEKMissing covers F#21: the FSM holds wrapped DEKs
 // (because the snapshot trailer carried them) but the node's kek.key file is
 // gone. The runtime must refuse to start with an explicit remediation message

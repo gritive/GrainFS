@@ -59,7 +59,7 @@ func PerformOfflineJoin(ctx context.Context, opts OfflineJoinOptions) error {
 	if err != nil {
 		return fmt.Errorf("offline-join: load keystore %s: %w", keysDir, err)
 	}
-	clusterID, err := nc.LoadOrInitClusterID()
+	clusterID, err := nc.LoadClusterID()
 	if err != nil {
 		return fmt.Errorf("offline-join: cluster.id: %w", err)
 	}

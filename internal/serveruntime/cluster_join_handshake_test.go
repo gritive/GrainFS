@@ -76,6 +76,9 @@ func TestB3_WireDEKKeeper_JoinModeAcceptsStagedKEK(t *testing.T) {
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
 	writeKEKFile(t, dataDir, kek)
+	// Stage cluster.id alongside the KEK (operator scp's both from a
+	// healthy peer). LoadClusterID is strict in join mode.
+	writeClusterID(t, dataDir, bytes.Repeat([]byte{0xAB}, 16))
 
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.dekKeeper, "keeper must be installed")
@@ -88,6 +91,38 @@ func TestB3_WireDEKKeeper_JoinModeAcceptsStagedKEK(t *testing.T) {
 		}
 	}()
 	require.Equal(t, kek, gotKEK, "kekStore.ActiveKEK() must hold the loaded KEK bytes")
+}
+
+// TestWireDEKKeeper_JoinModeRefusesMissingClusterID covers C-F3: when a
+// joiner has staged the KEK but forgot cluster.id, wireDEKKeeper MUST
+// surface a clear "cluster.id not found" error rather than silently
+// auto-generating a fresh UUID that fails the handshake later as a
+// confusing KEK mismatch.
+func TestWireDEKKeeper_JoinModeRefusesMissingClusterID(t *testing.T) {
+	dataDir := t.TempDir()
+	state := &bootState{
+		cfg:      Config{DataDir: dataDir},
+		joinMode: true,
+		peers:    []string{"127.0.0.1:7001"},
+	}
+	fsm := cluster.NewMetaFSM()
+
+	// Stage KEK but DELIBERATELY no cluster.id.
+	kek := make([]byte, encrypt.KEKSize)
+	_, err := rand.Read(kek)
+	require.NoError(t, err)
+	writeKEKFile(t, dataDir, kek)
+
+	err = wireDEKKeeper(state, fsm)
+	require.Error(t, err, "join-mode with missing cluster.id must refuse startup")
+	assert.Contains(t, err.Error(), "cluster.id",
+		"error must mention cluster.id, not surface a confusing KEK mismatch")
+	assert.Nil(t, state.dekKeeper, "no keeper installed when refusal fires")
+	assert.Nil(t, state.handshakeVerifier, "no verifier installed when refusal fires")
+
+	// cluster.id must NOT have been auto-generated.
+	_, statErr := os.Stat(filepath.Join(dataDir, "cluster.id"))
+	require.True(t, os.IsNotExist(statErr), "wireDEKKeeper must NOT auto-generate cluster.id in join mode")
 }
 
 // TestB3_WireDEKKeeper_StandaloneModeAutoGenerates documents the

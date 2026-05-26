@@ -14,6 +14,12 @@ import (
 // cluster identity (UUID v7 raw bytes).
 const ClusterIDFile = "cluster.id"
 
+// ErrClusterIDMissing indicates the cluster.id file is absent on a node
+// that is joining an existing cluster (where it MUST be copied from a
+// healthy peer, not auto-generated). Distinct from a first-boot init
+// path which uses LoadOrInitClusterID.
+var ErrClusterIDMissing = errors.New("cluster.id not found")
+
 type NodeConfig struct {
 	dataDir string
 }
@@ -113,8 +119,46 @@ func (n *NodeConfig) LoadOrInitClusterID() ([]byte, error) {
 		os.Remove(tmp)
 		return nil, fmt.Errorf("nodeconfig: rename %s: %w", path, err)
 	}
+	if err := fsyncDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("nodeconfig: durability fsync after rename %s: %w", path, err)
+	}
 	// Defensive copy so caller cannot mutate the underlying uuid bytes.
 	out := make([]byte, 16)
 	copy(out, raw)
 	return out, nil
+}
+
+// LoadClusterID loads cluster.id from disk WITHOUT auto-generating.
+// Returns ErrClusterIDMissing if the file is absent. Used by join paths
+// where a missing cluster.id should be a clear operator error ("scp
+// cluster.id from a healthy peer") rather than silently fabricating a
+// fresh identity that fails the handshake later.
+func (n *NodeConfig) LoadClusterID() ([]byte, error) {
+	path := filepath.Join(n.dataDir, ClusterIDFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s — copy from a healthy peer alongside the active KEK", ErrClusterIDMissing, path)
+		}
+		return nil, fmt.Errorf("nodeconfig: read %s: %w", path, err)
+	}
+	if len(data) != 16 {
+		return nil, fmt.Errorf("nodeconfig: %s has %d bytes, want 16", path, len(data))
+	}
+	return data, nil
+}
+
+// fsyncDir opens the directory at path and fsyncs it, ensuring that any
+// preceding rename into that directory is durable across crashes. POSIX
+// requires this for the rename to survive a power loss.
+func fsyncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open dir %q for fsync: %w", path, err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("fsync dir %q: %w", path, err)
+	}
+	return nil
 }

@@ -64,7 +64,7 @@ func NewDEKKeeper(kek []byte) (*DEKKeeper, error) {
 		return nil, err
 	}
 	return &DEKKeeper{
-		kek:    kek,
+		kek:    append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
 		active: 0,
 		wrap:   map[uint32][]byte{0: wrapped},
 		aead:   map[uint32]cipher.AEAD{0: aead},
@@ -313,7 +313,12 @@ func LoadFromFSM(kek []byte, versions map[uint32][]byte) (*DEKKeeper, error) {
 		}
 		aead[g] = a
 	}
-	return &DEKKeeper{kek: kek, active: active, wrap: wrap, aead: aead}, nil
+	return &DEKKeeper{
+		kek:    append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
+		active: active,
+		wrap:   wrap,
+		aead:   aead,
+	}, nil
 }
 
 // newAEAD builds an AES-256-GCM AEAD from a 32-byte key.

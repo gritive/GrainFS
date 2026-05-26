@@ -326,5 +326,23 @@ func writeKEKFileAtomic(path string, kek []byte) error {
 		os.Remove(tmp)
 		return fmt.Errorf("rename %q -> %q: %w", tmp, path, err)
 	}
+	if err := fsyncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("durability fsync after rename %q: %w", path, err)
+	}
+	return nil
+}
+
+// fsyncDir opens the directory at path and fsyncs it, ensuring that any
+// preceding rename into that directory is durable across crashes. POSIX
+// requires this for the rename to survive a power loss.
+func fsyncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open dir %q for fsync: %w", path, err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("fsync dir %q: %w", path, err)
+	}
 	return nil
 }

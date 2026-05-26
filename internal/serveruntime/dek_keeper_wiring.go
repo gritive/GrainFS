@@ -75,7 +75,12 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
 	}
 
-	clusterID, err := cfg.LoadOrInitClusterID()
+	var clusterID []byte
+	if state.joinMode || len(state.peers) > 0 {
+		clusterID, err = cfg.LoadClusterID()
+	} else {
+		clusterID, err = cfg.LoadOrInitClusterID()
+	}
 	if err != nil {
 		return fmt.Errorf("wireDEKKeeper: cluster.id: %w", err)
 	}

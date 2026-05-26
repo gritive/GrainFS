@@ -2,6 +2,7 @@ package nodeconfig
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,5 +71,34 @@ func TestLoadOrInitClusterID_RejectsWrongSize(t *testing.T) {
 	nc := New(dir)
 	if _, err := nc.LoadOrInitClusterID(); err == nil {
 		t.Errorf("LoadOrInitClusterID accepted a 3-byte cluster.id")
+	}
+}
+
+func TestNodeConfig_LoadClusterID_RefuseMissing(t *testing.T) {
+	dir := t.TempDir()
+	nc := New(dir)
+	_, err := nc.LoadClusterID()
+	if err == nil {
+		t.Fatal("LoadClusterID accepted missing file")
+	}
+	if !errors.Is(err, ErrClusterIDMissing) {
+		t.Errorf("expected ErrClusterIDMissing, got %v", err)
+	}
+}
+
+func TestNodeConfig_LoadClusterID_ReadExisting(t *testing.T) {
+	dir := t.TempDir()
+	nc := New(dir)
+	// Init first, then strict-load
+	id, err := nc.LoadOrInitClusterID()
+	if err != nil {
+		t.Fatalf("LoadOrInitClusterID: %v", err)
+	}
+	got, err := nc.LoadClusterID()
+	if err != nil {
+		t.Fatalf("LoadClusterID after init: %v", err)
+	}
+	if !bytes.Equal(id, got) {
+		t.Errorf("LoadClusterID returned different bytes than init")
 	}
 }
