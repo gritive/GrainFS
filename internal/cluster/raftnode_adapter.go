@@ -73,6 +73,7 @@ func (a *raftNodeAdapter) Term() uint64           { return a.n.Term() }
 func (a *raftNodeAdapter) IsLeader() bool         { return a.n.IsLeader() }
 func (a *raftNodeAdapter) LeaderID() string       { return a.n.LeaderID() }
 func (a *raftNodeAdapter) CommittedIndex() uint64 { return a.n.CommittedIndex() }
+func (a *raftNodeAdapter) LastLogIndex() uint64   { return a.n.LastLogIndex() }
 
 // --- Configuration ---
 

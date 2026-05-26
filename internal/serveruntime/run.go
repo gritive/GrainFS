@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -231,9 +232,27 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// Phase D Task 7: refuse to boot if the replayed raft log contained a
-	// legacy type-48 DEKRotate (pre-Phase-D). Live-log path guard: snapshot
+	// legacy type-48 DEKRotate (pre-Phase-D). Live-log path guard; snapshot
 	// path is covered by LoadFromFSM AAD-unwrap failing during Restore.
+	//
+	// REPLAY-ORDERING BARRIER: applyDEKRotate sets legacyDEKRotateSeen during
+	// the apply loop, which runs ASYNC after MetaRaft.Start() returns. On a
+	// restart, CommittedIndex starts at the snapshot floor and post-snapshot
+	// type-48 entries are not re-applied until the becomeLeader no-op (single
+	// voter) or an AppendEntries LeaderCommit (follower) advances commit to the
+	// log tail. So we must drain the apply loop up to the DURABLE last-log
+	// index (NOT CommittedIndex, which is volatile) before reading the flag —
+	// otherwise the guard would pass silently on an un-replayed legacy log.
+	// Bounded: a genuinely stuck apply fails loud rather than booting divergent.
 	if state.metaRaft != nil {
+		if lastLog := state.metaRaft.Node().LastLogIndex(); lastLog > 0 {
+			drainCtx, drainCancel := context.WithTimeout(ctx, 10*time.Second)
+			err := state.metaRaft.WaitApplied(drainCtx, lastLog)
+			drainCancel()
+			if err != nil {
+				return fmt.Errorf("greenfield DEK boundary: wait for log drain: %w", err)
+			}
+		}
 		if err := state.metaRaft.FSM().CheckGreenfieldDEKBoundary(); err != nil {
 			return fmt.Errorf("greenfield DEK boundary: %w", err)
 		}

@@ -23,6 +23,12 @@ type RaftNode interface {
 	LeaderID() string
 	CommittedIndex() uint64
 
+	// LastLogIndex returns the durable last-log index (log tail), independent
+	// of commitIndex. Used at boot to drain the apply loop up to the persisted
+	// log tail before reading replay-dependent FSM state (e.g. the greenfield
+	// DEK boundary flag set during type-48 replay).
+	LastLogIndex() uint64
+
 	// Cluster membership (read-only view).
 	Configuration() raft.Configuration
 
