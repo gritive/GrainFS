@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/incident"
 )
@@ -46,6 +47,67 @@ func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID 
 	}
 	facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactIsolated, Action: incident.ActionIsolateObject, At: time.Now().UTC()})
 	return recordIncident(context.Background(), b.incidentRecorder, facts)
+}
+
+// QuarantineCorruptShardLocalAtShardKey quarantines the parent object of a corrupt
+// segment/coalesced shard, using the version the scan observed (NOT "latest now").
+// If that exact version no longer exists (deleted/replaced between scan and callback),
+// it logs and returns without quarantining — never marks a different (clean) version.
+func (b *DistributedBackend) QuarantineCorruptShardLocalAtShardKey(bucket, objectKey, versionID, shardKey string, shardIdx int, reason string) error {
+	// Verify the exact (bucket, objectKey, versionID) object-version meta still exists.
+	exists, err := b.objectVersionMetaExists(bucket, objectKey, versionID)
+	if err != nil {
+		return fmt.Errorf("QuarantineCorruptShardLocalAtShardKey: existence check: %w", err)
+	}
+	if !exists {
+		log.Warn().
+			Str("bucket", bucket).
+			Str("key", objectKey).
+			Str("version_id", versionID).
+			Str("shard_key", shardKey).
+			Msg("quarantine: object-version no longer exists (scan/callback race); skipping quarantine")
+		return nil
+	}
+
+	now := time.Now().UTC()
+	cid := incidentID(bucket, objectKey, versionID, shardIdx, now)
+	scope := incident.Scope{
+		Kind:      incident.ScopeObject,
+		Bucket:    bucket,
+		Key:       objectKey,
+		VersionID: versionID,
+		ShardID:   shardIdx,
+		NodeID:    b.NodeID(),
+	}
+	facts := []incident.Fact{
+		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseCorruptShard, Scope: scope, Message: "shard_key=" + shardKey, At: now},
+		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionIsolateObject, At: now.Add(time.Millisecond)},
+	}
+	if err := b.QuarantineObject(context.Background(), bucket, objectKey, versionID, string(incident.CauseCorruptShard), reason); err != nil {
+		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactActionFailed, Action: incident.ActionIsolateObject, ErrorCode: "quarantine_failed", At: time.Now().UTC()})
+		_ = recordIncident(context.Background(), b.incidentRecorder, facts)
+		return err
+	}
+	facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactIsolated, Action: incident.ActionIsolateObject, At: time.Now().UTC()})
+	return recordIncident(context.Background(), b.incidentRecorder, facts)
+}
+
+// objectVersionMetaExists reports whether an exact (bucket, key, versionID)
+// object-version metadata key exists in the FSM store.
+func (b *DistributedBackend) objectVersionMetaExists(bucket, key, versionID string) (bool, error) {
+	var exists bool
+	err := b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
+		if err == nil {
+			exists = true
+			return nil
+		}
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	})
+	return exists, err
 }
 
 func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, PutObjectQuarantineCmd, error) {
