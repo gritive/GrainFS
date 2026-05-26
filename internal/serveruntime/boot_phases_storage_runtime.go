@@ -113,6 +113,11 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithNodeAddressBook(state.metaRaft.FSM()))
 	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.quicTransport, shardSvcOpts...)
+	// Stop the shard-pack actor goroutine (spawned when a WAL is wired) on
+	// shutdown. Registered after the data WAL cleanup so the LIFO cleanup stack
+	// closes the shard service first — the actor must not write into a WAL that
+	// has already been closed.
+	state.AddCleanup(func() { _ = state.shardSvc.Close() })
 
 	// Replay the data WAL into the shard service before bootStreamRouter
 	// registers QUIC handlers; this keeps peers from observing partially-
