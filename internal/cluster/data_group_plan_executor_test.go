@@ -41,6 +41,7 @@ func (f *fakeRaftNode) IsLeader() bool {
 	return f.isLeader
 }
 func (f *fakeRaftNode) CommittedIndex() uint64 { return f.committed }
+func (f *fakeRaftNode) LastLogIndex() uint64   { return f.committed }
 func (f *fakeRaftNode) TransferLeadership() error {
 	if f.transferFn != nil {
 		return f.transferFn()
