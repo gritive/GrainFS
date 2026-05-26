@@ -26,7 +26,6 @@ Use these when you are deploying, monitoring, recovering, or running drills.
 | Need | Document | Type |
 | --- | --- | --- |
 | Deploy and operate a production node or cluster | [Production runbook](operators/runbook.md) | How-to / runbook |
-| Plan disaster recovery | [Disaster recovery](operators/disaster-recovery.md) | How-to |
 | Track service objectives | [SLI/SLO](operators/sli-slo.md) | Reference |
 | Operate NFS exports | [NFS export lifecycle](operators/nfs-export-lifecycle.md), [NFS debug](operators/nfs-debug.md) | How-to |
 | Operate the balancer | [Balancer operations](operators/balancer.md) | How-to |
