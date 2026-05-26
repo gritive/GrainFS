@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.345.0] - 2026-05-26
+
+### Fixed
+
+- **Single-node deployments now fsync large objects to disk on write.** On a single-node setup (no erasure-coding parity, no peers), a large shard write previously trusted the data WAL's metadata-only record and relied on EC reconstruction to rebuild the shard file after a crash — but with no parity and no peers there is nothing to reconstruct from, so a page-cache-lost shard could be unrecoverable. Large shard writes on no-redundancy deployments now fsync the shard file directly. Replicated/EC deployments are unchanged.
+- **Shard-pack background worker no longer leaks past shutdown.** The shard service spawns a shard-pack actor goroutine when a data WAL is wired, but shutdown never stopped it. It is now closed during shutdown (after the data WAL it writes into), so the process exits cleanly.
+
 ## [0.0.344.0] - 2026-05-26
 
 ### Changed
