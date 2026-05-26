@@ -47,7 +47,7 @@ var _ = ginkgo.Describe("TLS hot swap", func() {
 func runTLSHotSwapCase(t testing.TB) {
 	dataDir, err := os.MkdirTemp("", "grainfs-tls-hotswap-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dataDir)
+	ginkgo.DeferCleanup(removeE2EDir, dataDir)
 
 	certDir := t.TempDir()
 	certPath := filepath.Join(certDir, "cert.pem")

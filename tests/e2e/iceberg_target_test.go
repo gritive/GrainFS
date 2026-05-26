@@ -211,10 +211,15 @@ func newSingleNodeIcebergTarget(t testing.TB) *icebergTarget {
 	return tgt
 }
 
-// newSharedClusterIcebergTarget reuses the shared mrCluster fixture.
+// newSharedClusterIcebergTarget starts a cluster owned by the caller's
+// Ginkgo context/spec cleanup.
 func newSharedClusterIcebergTarget(t testing.TB) *icebergTarget {
 	t.Helper()
-	c := getOrInitSharedMRCluster(t)
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNBD:    true,
+		FastBootstrap: true,
+	})
+	c.nodeCount = 3
 	tgt := &icebergTarget{
 		name:      "cluster3",
 		endpoint:  func(i int) string { return c.httpURLs[i%c.nodeCount] },

@@ -3,6 +3,8 @@ package cluster
 import (
 	"context"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // coalesceJob identifies one appendable object to evaluate / coalesce.
@@ -90,7 +92,9 @@ func (w *coalesceWorker) loop(ctx context.Context) {
 			delete(w.pending, j)
 			w.inflight[j] = true
 			w.mu.Unlock()
-			_ = w.fn(ctx, j) // errors handled by fn (logged + metrics)
+			if err := w.fn(ctx, j); err != nil {
+				log.Warn().Err(err).Str("bucket", j.Bucket).Str("key", j.Key).Msg("coalesce worker: job failed")
+			}
 			w.mu.Lock()
 			delete(w.inflight, j)
 			w.mu.Unlock()

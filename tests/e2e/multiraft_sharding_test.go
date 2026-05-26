@@ -358,6 +358,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	}
 	args = append(args, c.extraArgs...)
 	cmd := exec.Command(binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
@@ -370,30 +371,14 @@ func (c *mrCluster) Stop() {
 	}
 	c.stopped = true
 	for _, p := range c.procs {
-		if p != nil && p.Process != nil {
-			_ = p.Process.Signal(syscall.SIGTERM)
-		}
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for _, p := range c.procs {
-		if p == nil || p.Process == nil {
-			continue
-		}
-		done := make(chan error, 1)
-		go func(p *exec.Cmd) { done <- p.Wait() }(p)
-		select {
-		case <-done:
-		case <-time.After(time.Until(deadline)):
-			_ = p.Process.Kill()
-			<-done
-		}
+		terminateProcess(p)
 	}
 	for _, d := range c.dataDirs {
 		if c.t.Failed() && keepE2EArtifacts() {
 			c.t.Logf("multi-raft data dir saved to %s", d)
 			continue
 		}
-		_ = os.RemoveAll(d)
+		_ = removeE2EDir(d)
 	}
 }
 

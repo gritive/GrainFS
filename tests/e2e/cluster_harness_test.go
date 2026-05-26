@@ -75,16 +75,12 @@ type e2eCluster struct {
 
 func startE2ECluster(t testing.TB, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
-	c := startE2EClusterNoCleanup(t, opts)
+	c := startE2EClusterRaw(t, opts)
 	ginkgo.DeferCleanup(c.Stop)
 	return c
 }
 
-// startE2EClusterNoCleanup is identical to startE2ECluster except it does NOT
-// register t.Cleanup(c.Stop). Intended for process-global shared fixtures
-// whose lifetime is managed by TestMain teardown. The caller is responsible
-// for calling c.Stop() exactly once.
-func startE2EClusterNoCleanup(t testing.TB, opts e2eClusterOptions) *e2eCluster {
+func startE2EClusterRaw(t testing.TB, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
 	opts = normalizeE2EClusterOptions(opts)
 	var lastErr error
@@ -342,6 +338,9 @@ func adminCreateBucketWithPolicyAttachAny(dataDirs []string, saID, bucket string
 			}
 			if err := tryAdminCreateBucketWithPolicyAttach(sock, bucket, saID, "bucket-admin"); err != nil {
 				lastErr = err
+				if isAdminBucketAlreadyExists(err) {
+					return err
+				}
 				continue
 			}
 			return nil
@@ -349,6 +348,15 @@ func adminCreateBucketWithPolicyAttachAny(dataDirs []string, saID, bucket string
 		time.Sleep(200 * time.Millisecond)
 	}
 	return lastErr
+}
+
+func isAdminBucketAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "BucketAlreadyOwnedByYou") ||
+		strings.Contains(msg, "bucket already exists")
 }
 
 func waitForAdminBucketWritable(
@@ -524,7 +532,7 @@ func (c *e2eCluster) Stop() {
 		terminateProcess(p)
 	}
 	for _, dir := range c.dataDirs {
-		_ = os.RemoveAll(dir)
+		_ = removeE2EDir(dir)
 	}
 }
 
@@ -549,7 +557,7 @@ func (c *e2eCluster) AwaitWriteFromNonOwner(bucket, key string, deadline time.Du
 	// Ensure probe bucket exists (idempotent).
 	c.GrantAdminOnBuckets(bucket)
 	ctx := context.Background()
-	if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucket, 60*time.Second); err != nil {
+	if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucket, 60*time.Second); err != nil && !isAdminBucketAlreadyExists(err) {
 		return fmt.Errorf("create probe bucket %s: %w", bucket, err)
 	}
 

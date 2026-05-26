@@ -81,7 +81,7 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 			d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-receipt-e2e-%d-*", i))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			dataDirs[i] = d
-			ginkgo.DeferCleanup(os.RemoveAll, d)
+			ginkgo.DeferCleanup(removeE2EDir, d)
 		}
 		sockA = filepath.Join(dataDirs[0], "admin.sock")
 		encKeyFile := makeSharedEncryptionKeyFile(t)

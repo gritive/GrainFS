@@ -21,23 +21,18 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
 
 var (
-	testServerURL     string
-	testServerDataDir string
-	testServerNFSPort int
-	testServerNBDPort int
-	testAccessKey     string
-	testSecretKey     string
-	testSAID          string
-	testWildcardAdmin bool
-	testS3Client      *s3.Client
-	freePortCursor    uint32 = initialFreePortCursor()
+	freePortCursor   uint32 = initialFreePortCursor()
+	e2eS3HTTPClient         = &http.Client{Transport: e2ePooledHTTPTransport()}
+	e2eRawHTTPClient        = &http.Client{
+		Transport: e2ePooledHTTPTransport(),
+		Timeout:   10 * time.Second,
+	}
 )
 
 type e2ePortLease struct {
@@ -53,237 +48,12 @@ func initialFreePortCursor() uint32 {
 }
 
 func TestMain(m *testing.M) {
-	binary := os.Getenv("GRAINFS_BINARY")
-	if binary == "" {
-		binary = "../../bin/grainfs"
-	}
-
-	// Pre-sweep: a previous run that crashed or was SIGKILL'd may have left
-	// grainfs child processes and tmp dirs behind. Setpgid covers child trees
-	// when terminateProcess runs, but DeferCleanup never fires when the test
-	// binary itself dies (macOS lacks Pdeathsig). Sweep here so this run
-	// starts from a clean slate and ports/data dirs don't collide.
-	sweepStaleE2EServers(binary, "pre-sweep")
-	sweepStaleE2EDirs()
-
-	port := freePort()
-	dir, err := os.MkdirTemp("", "grainfs-e2e-go-")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mkdtemp: %v\n", err)
-		os.Exit(1)
-	}
-	cleanupDataDir := func() error {
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("cleanup data dir %s: %w", dir, err)
-		}
-		return nil
-	}
-	testServerDataDir = dir
-
-	testServerNFSPort = freePort()
-	testServerNBDPort = freePort()
-	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", testServerNFSPort),
-		"--nbd-port", fmt.Sprintf("%d", testServerNBDPort),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		// FILE_SYNC ack means Linux NFS clients skip COMMIT on fdatasync;
-		// shrink the idle flush so e2e tests see backend state within a
-		// few seconds instead of the 30s production default.
-		"--nfs-write-buffer-idle", "1s",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}
-
-	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
-	// CPU profile is collected concurrently with the test run (25s window).
-	// All profiles are saved to /tmp/grainfs-e2e-*.out after tests complete.
-	var pprofPort int
-	if os.Getenv("GRAINFS_PPROF") == "1" {
-		pprofPort = freePort()
-		args = append(args, "--pprof-port", fmt.Sprintf("%d", pprofPort))
-	}
-
-	cmd := exec.Command(binary, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "start server: %v\n", err)
-		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
-			fmt.Fprintln(os.Stderr, cleanupErr)
-		}
-		os.Exit(1)
-	}
-
-	testServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-	if err := waitForPortM(port, 30*time.Second); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		terminateProcess(cmd)
-		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
-			fmt.Fprintln(os.Stderr, cleanupErr)
-		}
-		os.Exit(1)
-	}
-
-	// Bootstrap admin SA via UDS (replaces legacy --access-key/--secret-key
-	// flags). Stash the resulting creds in package-level vars so newS3Client
-	// and other helpers can sign with them.
-	admin, err := bootstrapAdminResultViaUDSForTestMain(dir, 30*time.Second)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bootstrap admin SA: %v\n", err)
-		terminateProcess(cmd)
-		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
-			fmt.Fprintln(os.Stderr, cleanupErr)
-		}
-		os.Exit(1)
-	}
-	testAccessKey = admin.AccessKey
-	testSecretKey = admin.SecretKey
-	testSAID = admin.SAID
-	testWildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
-	if !testWildcardAdmin && testSAID != "" {
-		if err := grantAdminOnBucketViaUDSForTestMain(dir, testSAID, "default", 30*time.Second); err != nil {
-			fmt.Fprintf(os.Stderr, "grant default bucket to bootstrap SA: %v\n", err)
-			terminateProcess(cmd)
-			if cleanupErr := cleanupDataDir(); cleanupErr != nil {
-				fmt.Fprintln(os.Stderr, cleanupErr)
-			}
-			os.Exit(1)
-		}
-	}
-
-	// Disable auto-snapshot for deterministic e2e behavior. Tests that need
-	// the auto-snapshot loop (e.g. auto_snapshot_test.go) PATCH it back to a
-	// non-zero interval explicitly via patchSnapshotInterval.
-	if err := patchSnapshotIntervalM(dir, "0s"); err != nil {
-		fmt.Fprintf(os.Stderr, "disable auto-snapshot: %v\n", err)
-		terminateProcess(cmd)
-		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
-			fmt.Fprintln(os.Stderr, cleanupErr)
-		}
-		os.Exit(1)
-	}
-
-	testS3Client = newS3Client(testServerURL)
-
-	// Verify SigV4 verifier has the new key wired in.
-	if err := waitForIAMReady(testS3Client, 30*time.Second); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		terminateProcess(cmd)
-		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
-			fmt.Fprintln(os.Stderr, cleanupErr)
-		}
-		os.Exit(1)
-	}
-
-	// Start CPU profile concurrently so it captures actual test load.
-	var cpuProfileDone <-chan struct{}
-	if pprofPort > 0 {
-		done := make(chan struct{})
-		cpuProfileDone = done
-		go func() {
-			defer close(done)
-			url := fmt.Sprintf("http://127.0.0.1:%d/debug/pprof/profile?seconds=25", pprofPort)
-			if err := fetchProfile(url, "/tmp/grainfs-e2e-cpu.out"); err != nil {
-				fmt.Fprintf(os.Stderr, "cpu profile: %v\n", err)
-				return
-			}
-			fmt.Fprintf(os.Stderr, "pprof saved: /tmp/grainfs-e2e-cpu.out\n")
-		}()
-	}
-
 	code := m.Run()
-
-	if pprofPort > 0 {
-		<-cpuProfileDone // wait for CPU profile to complete before killing server
-		dumpE2EProfiles(pprofPort)
-	}
-
-	stopSharedCluster()
-	stopSharedMRCluster()
-	terminateProcess(cmd)
-	if err := cleanupDataDir(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		if code == 0 {
-			code = 1
-		}
-	}
-	// Post-sweep: cluster/mr fixtures or individual specs may have skipped
-	// their DeferCleanup (panic, timeout, BLOCKED). Catch the leftovers here
-	// so the next run isn't polluted. Also clears the e2e tmp dirs that
-	// terminateProcess can't reach when its parent fixture didn't fire.
-	sweepStaleE2EServers(binary, "post-sweep")
-	sweepStaleE2EDirs()
 	os.Exit(code)
 }
 
-// sweepStaleE2EServers kills grainfs processes spawned from THIS test binary
-// (matched by absolute binary path + "serve" argv). Foreign grainfs running
-// from other worktrees are not touched. SIGTERM with 500ms grace then SIGKILL.
-// "phase" is "pre-sweep" or "post-sweep" — used in the warning print so users
-// see whether the leak came from a previous run or from the current run.
-func sweepStaleE2EServers(binary, phase string) {
-	abs, err := filepath.Abs(binary)
-	if err != nil {
-		return
-	}
-	pattern := abs + " serve"
-	pids := pgrepFull(pattern)
-	pids = filterOut(pids, os.Getpid())
-	if len(pids) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "e2e %s: %d stale grainfs process(es) — SIGTERM\n", phase, len(pids))
-	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-	}
-	time.Sleep(500 * time.Millisecond)
-	remain := filterOut(pgrepFull(pattern), os.Getpid())
-	if len(remain) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "e2e %s: %d still alive after SIGTERM — SIGKILL\n", phase, len(remain))
-	for _, pid := range remain {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-}
-
-// sweepStaleE2EDirs removes tmp dirs from previous e2e runs. The naming
-// conventions are stable across cluster_harness_test.go (/tmp/ge-*) and
-// helpers_test.go ($TMPDIR/grainfs-e2e-*).
-func sweepStaleE2EDirs() {
-	patterns := []string{
-		"/tmp/ge-*",
-		filepath.Join(os.TempDir(), "grainfs-e2e-*"),
-	}
-	for _, p := range patterns {
-		matches, _ := filepath.Glob(p)
-		for _, m := range matches {
-			_ = os.RemoveAll(m)
-		}
-	}
-}
-
-func pgrepFull(pattern string) []int {
-	out, err := exec.Command("pgrep", "-f", pattern).Output()
-	if err != nil {
-		return nil // pgrep exit 1 = no matches; treat any error as empty
-	}
-	var pids []int
-	for _, s := range strings.Fields(string(out)) {
-		if pid, err := strconv.Atoi(s); err == nil {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
-}
-
-func filterOut(pids []int, exclude int) []int {
-	out := pids[:0]
-	for _, pid := range pids {
-		if pid != exclude {
-			out = append(out, pid)
-		}
-	}
-	return out
+func removeE2EDir(path string) error {
+	return os.RemoveAll(path)
 }
 
 var _ = ginkgo.Describe("E2E helper utilities", func() {
@@ -387,14 +157,13 @@ func fetchProfile(url, dest string) error {
 	return os.WriteFile(dest, data, 0o644)
 }
 
-func newS3Client(endpoint string) *s3.Client {
-	return s3.New(s3.Options{
-		BaseEndpoint: aws.String(endpoint),
-		Region:       "us-east-1",
-		Credentials:  credentials.NewStaticCredentialsProvider(testAccessKey, testSecretKey, ""),
-		UsePathStyle: true,
-		HTTPClient:   e2eNoKeepAliveHTTPClient(0),
-	})
+func e2ePooledHTTPTransport() *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 16,
+		MaxConnsPerHost:     64,
+		IdleConnTimeout:     30 * time.Second,
+	}
 }
 
 func e2eNoKeepAliveHTTPClient(timeout time.Duration) *http.Client {
@@ -767,7 +536,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-e2e-isolated-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = removeE2EDir(dir) })
 
 	port := freePort()
 	cmd := exec.Command(getBinary(), "serve",
@@ -919,31 +688,6 @@ func terminateProcess(cmd *exec.Cmd) {
 		}
 		<-done // wait for the reaper goroutine to finish after SIGKILL takes effect
 	}
-}
-
-// createBucket creates a bucket for testing and returns a cleanup function.
-func createBucket(t testing.TB, name string) {
-	t.Helper()
-	ctx := context.Background()
-	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{testServerDataDir}, testSAID, name, testS3Client)
-
-	t.Cleanup(func() {
-		// delete all objects first
-		out, _ := testS3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket: aws.String(name),
-		})
-		if out != nil {
-			for _, obj := range out.Contents {
-				testS3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket: aws.String(name),
-					Key:    obj.Key,
-				})
-			}
-		}
-		testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-			Bucket: aws.String(name),
-		})
-	})
 }
 
 // postJSON POSTs body as JSON to url and returns the response.

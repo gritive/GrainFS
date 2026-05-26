@@ -20,14 +20,14 @@ var _ = ginkgo.Describe("Bucket upstream", ginkgo.Label("bucket"), func() {
 })
 
 func describeBucketUpstreamContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var (
 			tgt    s3Target
 			binary string
 			sock   string
 		)
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 			binary = getBinary()
 			sock = tgt.adminSockPath()

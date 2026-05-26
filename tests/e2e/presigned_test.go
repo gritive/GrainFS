@@ -5,7 +5,7 @@
 // prefixed with tgt.name to avoid collisions.
 //
 // TestMetrics_Endpoint and TestDashboard_Serves are not S3-op tests and stay
-// out of the target-table — they continue to use the shared server.
+// out of the target-table.
 package e2e
 
 import (
@@ -202,7 +202,7 @@ func startAuthServer(t testing.TB) authServer {
 	cleanup := func() {
 		cmd.Process.Kill()
 		cmd.Wait()
-		os.RemoveAll(dir)
+		removeE2EDir(dir)
 	}
 
 	return authServer{

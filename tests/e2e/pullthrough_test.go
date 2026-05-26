@@ -82,7 +82,7 @@ func startPullthroughUpstream(t testing.TB) *pullthroughUpstream {
 
 	dir, err := os.MkdirTemp("", "grainfs-pullthrough-upstream-")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dir)
+	ginkgo.DeferCleanup(removeE2EDir, dir)
 
 	port := freePort()
 	cmd := exec.Command(getBinary(), "serve",

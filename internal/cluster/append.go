@@ -128,7 +128,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		return nil, err
 	}
 
-	obj := appendObjectResult(existing, key, versionID, seg, modifiedUnixSec)
+	obj := appendObjectResult(existing, key, versionID, pgID, seg, modifiedUnixSec)
 	if obj != nil && obj.IsAppendable {
 		b.maybeTriggerCoalesce(bucket, key, obj.Segments)
 	}
@@ -139,34 +139,36 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	return obj, nil
 }
 
-func appendObjectResult(existing *storage.Object, key, versionID string, seg storage.SegmentRef, modifiedUnixSec int64) *storage.Object {
+func appendObjectResult(existing *storage.Object, key, versionID, placementGroupID string, seg storage.SegmentRef, modifiedUnixSec int64) *storage.Object {
 	if existing == nil {
 		return &storage.Object{
-			Key:          key,
-			Size:         seg.Size,
-			ContentType:  "application/octet-stream",
-			ETag:         storage.CompositeETag([][]byte{seg.Checksum}),
-			LastModified: modifiedUnixSec,
-			VersionID:    versionID,
-			Segments:     []storage.SegmentRef{cloneSegmentRef(seg)},
-			IsAppendable: true,
+			Key:              key,
+			Size:             seg.Size,
+			ContentType:      "application/octet-stream",
+			ETag:             storage.CompositeETag([][]byte{seg.Checksum}),
+			LastModified:     modifiedUnixSec,
+			VersionID:        versionID,
+			PlacementGroupID: placementGroupID,
+			Segments:         []storage.SegmentRef{cloneSegmentRef(seg)},
+			IsAppendable:     true,
 		}
 	}
 
 	obj := &storage.Object{
-		Key:            existing.Key,
-		Size:           existing.Size + seg.Size,
-		ContentType:    existing.ContentType,
-		LastModified:   modifiedUnixSec,
-		VersionID:      versionID,
-		ACL:            existing.ACL,
-		UserMetadata:   cloneStringMap(existing.UserMetadata),
-		SSEAlgorithm:   existing.SSEAlgorithm,
-		Coalesced:      cloneStorageCoalescedRefs(existing.Coalesced),
-		IsAppendable:   true,
-		Parts:          cloneMultipartPartEntries(existing.Parts),
-		Tags:           append([]storage.Tag(nil), existing.Tags...),
-		AppendCallMD5s: nil,
+		Key:              existing.Key,
+		Size:             existing.Size + seg.Size,
+		ContentType:      existing.ContentType,
+		LastModified:     modifiedUnixSec,
+		VersionID:        versionID,
+		ACL:              existing.ACL,
+		UserMetadata:     cloneStringMap(existing.UserMetadata),
+		SSEAlgorithm:     existing.SSEAlgorithm,
+		PlacementGroupID: placementGroupID,
+		Coalesced:        cloneStorageCoalescedRefs(existing.Coalesced),
+		IsAppendable:     true,
+		Parts:            cloneMultipartPartEntries(existing.Parts),
+		Tags:             append([]storage.Tag(nil), existing.Tags...),
+		AppendCallMD5s:   nil,
 	}
 	if obj.Key == "" {
 		obj.Key = key

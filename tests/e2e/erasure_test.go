@@ -25,14 +25,14 @@ var _ = ginkgo.Describe("EC objects", ginkgo.Label("bucket"), func() {
 })
 
 func describeECObjectsContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var (
 			ctx context.Context
 			tgt s3Target
 			cli *s3.Client
 		)
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			t := ginkgo.GinkgoTB()
 			ctx = context.Background()
 			tgt = factory()

@@ -21,7 +21,7 @@ func startEncryptionServer(t testing.TB) (*s3.Client, string, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-enc-e2e-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dir)
+	ginkgo.DeferCleanup(removeE2EDir, dir)
 
 	keyFile := filepath.Join(dir, "encryption.key")
 	key := make([]byte, 32)

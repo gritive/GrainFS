@@ -18,7 +18,7 @@ var _ = ginkgo.Describe("Jepsen raft cluster", func() {
 
 		dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ginkgo.DeferCleanup(os.RemoveAll, dir)
+		ginkgo.DeferCleanup(removeE2EDir, dir)
 
 		binary := getBinary()
 		port := freePort()

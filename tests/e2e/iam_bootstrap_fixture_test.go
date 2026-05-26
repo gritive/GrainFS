@@ -21,7 +21,7 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 
 	dir, err := os.MkdirTemp("", "grainfs-e2e-bootstrap-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
-	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
+	ginkgo.DeferCleanup(func() { _ = removeE2EDir(dir) })
 
 	port = freePort()
 	cmd := exec.Command(getBinary(), "serve",

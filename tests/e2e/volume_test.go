@@ -171,7 +171,7 @@ func requireVolumePresentEventually(t testing.TB, dataDir, name string) volumeRe
 
 // uniqueVolName produces a per-test volume name from the target name + case
 // label + nanosecond timestamp so cluster reruns and parallel cluster tests
-// can't collide on the shared "default" volume namespace.
+// can't collide on the default volume namespace.
 func uniqueVolName(tgt s3Target, caseLabel string) string {
 	return fmt.Sprintf("vol-%s-%s-%d", tgt.name, caseLabel, time.Now().UnixNano())
 }
@@ -186,10 +186,10 @@ var _ = ginkgo.Describe("Volumes", func() {
 })
 
 func describeVolumeContext(name string, factory func(testing.TB) s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory(ginkgo.GinkgoTB())
 		})
 

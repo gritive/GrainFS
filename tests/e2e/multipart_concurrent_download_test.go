@@ -24,7 +24,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -348,7 +347,7 @@ func removeClusterMultipartUploadDirs(t testing.TB, tgt s3Target, uploadID strin
 	matches := findClusterMultipartUploadDirs(t, tgt, uploadID)
 	var removed []string
 	for _, match := range matches {
-		gomega.Expect(os.RemoveAll(match)).To(gomega.Succeed())
+		gomega.Expect(removeE2EDir(match)).To(gomega.Succeed())
 		removed = append(removed, match)
 	}
 	return removed

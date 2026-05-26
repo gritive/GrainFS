@@ -27,7 +27,7 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			// --- Source GrainFS ---
 			srcDir, err := os.MkdirTemp("", "grainfs-migrate-src-*")
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			ginkgo.DeferCleanup(os.RemoveAll, srcDir)
+			ginkgo.DeferCleanup(removeE2EDir, srcDir)
 
 			srcPort := freePort()
 			srcCmd := exec.Command(binary, "serve",
@@ -67,7 +67,7 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			// --- Destination GrainFS ---
 			dstDir, err := os.MkdirTemp("", "grainfs-migrate-dst-*")
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			ginkgo.DeferCleanup(os.RemoveAll, dstDir)
+			ginkgo.DeferCleanup(removeE2EDir, dstDir)
 
 			dstPort := freePort()
 			dstCmd := exec.Command(binary, "serve",

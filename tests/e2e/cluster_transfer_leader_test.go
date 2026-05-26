@@ -86,8 +86,9 @@ var _ = ginkgo.Describe("Cluster transfer leader", func() {
 
 	ginkgo.Context("SingleNodeNoPeers", func() {
 		ginkgo.It("rejects transfer-leader without peers", func() {
+			tgt := newSingleNodeS3Target()
 			binary := getBinary()
-			sock := filepath.Join(testServerDataDir, "admin.sock")
+			sock := tgt.adminSockPath()
 
 			cmd := exec.Command(binary, "cluster",
 				"--endpoint", sock,

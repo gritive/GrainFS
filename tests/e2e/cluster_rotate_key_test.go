@@ -248,7 +248,7 @@ func shortTempDir(t testing.TB) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = removeE2EDir(dir) })
 	return dir
 }
 

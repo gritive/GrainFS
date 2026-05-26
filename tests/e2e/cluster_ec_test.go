@@ -59,7 +59,7 @@ func runClusterECPutGet5Node(t testing.TB) {
 		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-cluster-ec-%d-*", i))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		dataDirs[i] = d
-		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(d) })
+		ginkgo.DeferCleanup(func() { _ = removeE2EDir(d) })
 	}
 	encKeyFile := makeSharedEncryptionKeyFile(t)
 
@@ -410,7 +410,7 @@ func runClusterECTopologyChange(t testing.TB) {
 		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-topo-%d-*", i))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		dataDirs[i] = d
-		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(d) })
+		ginkgo.DeferCleanup(func() { _ = removeE2EDir(d) })
 	}
 	encKeyFile := makeSharedEncryptionKeyFile(t)
 
@@ -646,7 +646,7 @@ func ecS3Client(endpoint, ak, sk string) *s3.Client {
 		Credentials:      staticCreds{ak: ak, sk: sk},
 		UsePathStyle:     true,
 		RetryMaxAttempts: 1,
-		HTTPClient:       e2eNoKeepAliveHTTPClient(0),
+		HTTPClient:       e2eS3HTTPClient,
 	})
 }
 

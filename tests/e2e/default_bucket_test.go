@@ -11,10 +11,11 @@ import (
 
 var _ = ginkgo.Describe("Default bucket", ginkgo.Label("bucket"), func() {
 	ginkgo.It("exists on single-node startup", func() {
+		tgt := newSingleNodeS3Target()
 		ctx := context.Background()
 
 		// The "default" bucket should exist immediately after server startup
-		out, err := testS3Client.ListBuckets(ctx, &s3.ListBucketsInput{})
+		out, err := tgt.pickNode(0).ListBuckets(ctx, &s3.ListBucketsInput{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		found := false
@@ -27,7 +28,7 @@ var _ = ginkgo.Describe("Default bucket", ginkgo.Label("bucket"), func() {
 		gomega.Expect(found).To(gomega.BeTrue())
 
 		// Verify we can use the default bucket immediately.
-		_, err = testS3Client.HeadBucket(ctx, &s3.HeadBucketInput{
+		_, err = tgt.pickNode(0).HeadBucket(ctx, &s3.HeadBucketInput{
 			Bucket: aws.String("default"),
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

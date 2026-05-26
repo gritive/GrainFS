@@ -47,8 +47,8 @@ func vfsStatCall(t testing.TB, endpoint string, req map[string]string, resp *vfs
 
 // Cross-protocol specs exercise S3 ↔ VFS coherency: an S3 PUT must be
 // observable via the admin /admin/debug/vfs/stat probe, and an S3 DELETE
-// must make the VFS view disappear. Shared single + shared cluster fixtures
-// — each sub-test scopes itself with a uniqueBucket.
+// must make the VFS view disappear. Each sub-test scopes itself with a
+// uniqueBucket.
 var _ = ginkgo.Describe("Cross protocol VFS coherency", func() {
 	describeCrossProtocolContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
@@ -60,14 +60,14 @@ var _ = ginkgo.Describe("Cross protocol VFS coherency", func() {
 })
 
 func describeCrossProtocolContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var (
 			tgt      s3Target
 			cli      *s3.Client
 			endpoint string
 		)
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 			cli = tgt.pickNode(0)
 			endpoint = tgt.endpoint(0)
