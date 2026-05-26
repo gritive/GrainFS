@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -444,7 +443,9 @@ func (b *blockedRaftSubmitter) Propose(ctx context.Context, _ MetaCmdType, _ []b
 	case <-b.block:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("KEKRotate: not leader: %w", ctx.Err())
+		// Return the raw context error. ProposeKEKRotate's post-Propose path
+		// detects epochCtx==nil and surfaces "not leader" to callers.
+		return ctx.Err()
 	}
 }
 
