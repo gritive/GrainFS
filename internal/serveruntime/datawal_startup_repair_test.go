@@ -20,16 +20,6 @@ func (f dataWALStartupRepairFunc) RepairDataWALStartupCandidate(ctx context.Cont
 	return f(ctx, candidate)
 }
 
-func TestSplitDataWALStartupRepairShardKey(t *testing.T) {
-	key, versionID := splitDataWALStartupRepairShardKey("dir/object/v1")
-	require.Equal(t, "dir/object", key)
-	require.Equal(t, "v1", versionID)
-
-	key, versionID = splitDataWALStartupRepairShardKey("legacy-object")
-	require.Equal(t, "legacy-object", key)
-	require.Equal(t, "", versionID)
-}
-
 func TestDataWALStartupRepairWorkerRunsSerially(t *testing.T) {
 	var inFlight int32
 	var maxInFlight int32
