@@ -89,6 +89,9 @@ into the shared storage and cluster layers.
 - NFS stat/readdir cache.
 - Packed blob format for small objects.
 - Benchmark suites for S3, NFS, NBD, 9P, Iceberg, and FUSE-over-S3 clients.
+- NFS write coalescing buffer (single-node) — per-key local file absorbs
+  consecutive WRITE ops and flushes once on COMMIT / SETATTR truncate /
+  idle / shutdown. Sequential write throughput ~7× on bench-nfs streaming.
 
 ## Active Roadmap
 

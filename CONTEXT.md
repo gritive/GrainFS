@@ -662,3 +662,28 @@ See `docs/adr/0013-lifecycle-service-lock-free-publication.md` for the
 follow-up closure of ADR 0012's reservation. ADR 0012 and ADR 0013
 together establish the **lock-free publication pattern** for leader-only
 executor services in this codebase.
+
+### NFS Write Coalescing Buffer
+
+Per-(bucket, key) local file under `<data>/nfs-writebuf/` owned by
+`internal/nfs4server.writeBuffer`. NFS WRITE / READ / COMMIT / SETATTR-truncate
+ops route through this buffer when wired; the buffer is the source of
+truth for the key while it holds dirty data. Flush triggers are NFS
+COMMIT, SETATTR truncate (discard semantics — pending writes are
+dropped, not flushed), idle timeout (`--nfs-write-buffer-idle`, default
+30s), and shutdown drain. On startup `Recover` scans the buffer dir and
+re-uploads leftover files; permanent failures are quarantined as
+`<sha1>.failed.<reason>.<timestamp>` so the next run's writes cannot
+collide on the same sha1-derived path. The buffer is per-node; cluster
+mode does not coordinate buffers across nodes (single-NFS-mount-point
+usage is supported, multi-mount same-key writes are best-effort —
+operators pin clients to one node, or disable via
+`--nfs-write-buffer-idle=0`).
+
+The purpose is twofold: collapse the per-WRITE-op Read-Modify-Write that
+backends without the WriteAt fast path otherwise pay, and serve NFS READ
+from the buffer file (via `opGetAttr` reporting the buffered file size
+and `opRead` probing the buffer before the backend) so POSIX
+read-after-write holds before the backend flush completes. Operators
+should size `<data>/` for `max(concurrent NFS objects) × max(object size)`
+under the idle timeout window; see `docs/operators/runbook.md#nfs-write-buffer`.
