@@ -789,12 +789,6 @@ func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encr
 	return writeEncryptedShardStreamAtomic(path, r, enc, aadBase, chunkSize, true)
 }
 
-// WriteEncryptedShardStreamAtomicExistingDir is WriteEncryptedShardStreamAtomic
-// for callers that already ensured filepath.Dir(path) exists.
-func WriteEncryptedShardStreamAtomicExistingDir(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
-	return writeEncryptedShardStreamAtomic(path, r, enc, aadBase, chunkSize, false)
-}
-
 func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int, mkdir bool) error {
 	stageStart := time.Now()
 	if mkdir {
@@ -1071,12 +1065,6 @@ func WriteShardAtomic(path string, data []byte) error {
 // full payload in memory.
 func WriteShardStreamAtomic(path string, r io.Reader) error {
 	return writeShardStreamAtomic(path, r, true)
-}
-
-// WriteShardStreamAtomicExistingDir is WriteShardStreamAtomic for callers that
-// already ensured filepath.Dir(path) exists.
-func WriteShardStreamAtomicExistingDir(path string, r io.Reader) error {
-	return writeShardStreamAtomic(path, r, false)
 }
 
 func writeShardStreamAtomic(path string, r io.Reader, mkdir bool) error {

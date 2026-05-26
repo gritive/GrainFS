@@ -72,6 +72,12 @@ type ShardService struct {
 	// records. Atomic because shard writes fan out across goroutines (e.g. EC
 	// writer) and may consult it concurrently with boot recovery in tests.
 	replayingDataWAL atomic.Bool
+	// noRedundancy, when set, reports whether the deployment has no EC parity
+	// and no peers (single-node 1+0). In that case a large metadata-only WAL
+	// record cannot be recovered via EC reconstruction, so the shard file must
+	// be fsynced directly. Read live so a later EC reconfig is reflected. Nil
+	// (legacy callers / tests) never forces a direct fsync.
+	noRedundancy func() bool
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -109,6 +115,15 @@ func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 // replays the log on boot to restore any missing shard files.
 func WithDataWAL(w DataWALAppender) ShardServiceOption {
 	return func(s *ShardService) { s.dataWAL = w }
+}
+
+// WithNoRedundancy wires a provider reporting whether the deployment has no EC
+// redundancy (ParityShards==0, single-node 1+0). When it returns true, a large
+// metadata-only shard write is fsynced directly because EC reconstruction
+// cannot rebuild a page-cache-lost shard with no parity and no peers. The
+// provider is read live, so a later EC reconfig is honored.
+func WithNoRedundancy(fn func() bool) ShardServiceOption {
+	return func(s *ShardService) { s.noRedundancy = fn }
 }
 
 // HasDataWAL reports whether a data WAL is wired. Used by Task 7 boot wiring
@@ -1129,7 +1144,8 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 		Target: strconv.Itoa(shardIdx),
 		Size:   int64(len(payload)),
 	}
-	if len(payload) < walPayloadInlineThreshold {
+	inlined := len(payload) < walPayloadInlineThreshold
+	if inlined {
 		// Small payload: inline so replay can rebuild the file.
 		rec.Payload = payload
 	}
@@ -1139,6 +1155,12 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 	}
 	if err := s.dataWAL.Flush(); err != nil {
 		return false, fmt.Errorf("data wal flush shard: %w", err)
+	}
+	// A large (metadata-only) record relies on EC reconstruction to rebuild a
+	// lost shard file. With no redundancy (ParityShards==0, no peers) there is
+	// nothing to reconstruct from, so the shard file must be fsynced directly.
+	if !inlined && s.noRedundancy != nil && s.noRedundancy() {
+		return true, nil
 	}
 	return false, nil
 }
@@ -1329,130 +1351,34 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 }
 
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
-	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, -1, true)
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, -1)
 }
 
 func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
-	allowPack := true
-	if s.shardPack != nil && s.packThreshold > 0 && streamSize >= int64(s.packThreshold) {
-		allowPack = false
-	}
-	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, streamSize, allowPack)
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, streamSize)
 }
 
-func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64, allowPack bool) error {
-	// When a data WAL is wired we cannot stream directly to disk: the WAL must
-	// observe the full payload before any file mutation so recovery can replay
-	// it. Buffer the body (bounded by datawal.MaxPayloadBytes minus the
-	// encryption envelope overhead) and route through writeLocalShard so the
-	// encoded/encrypted bytes hit the WAL once.
+func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
+	// WAL is mandatory on the stream write path: the WAL must observe the full
+	// payload before any file mutation so recovery can replay it. A nil WAL is
+	// rejected rather than silently writing a shard the WAL never covered.
+	// Buffer the body (bounded by datawal.MaxPayloadBytes minus the encryption
+	// envelope overhead) and route through writeLocalShard, which logs the
+	// encoded/encrypted bytes through the WAL once and then decides pack vs file
+	// by size.
 	//
-	// The 64 MiB ceiling is intentional for this first wiring: data WAL records
-	// are size-bounded. Lifting it requires extending datawal.AppendReader to
-	// stream payload chunks across multiple WAL segment writes; until then,
-	// callers see the same effective shard stream cap as before WAL wiring.
-	if s.dataWAL != nil && !s.replayingDataWAL.Load() {
-		rawCap := maxRawShardPayloadForWAL(s.encryptor != nil)
-		data, err := readShardPayload(body, rawCap, streamSize, s.encryptor != nil)
-		if err != nil {
-			return err
-		}
-		return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
+	// The 64 MiB ceiling is intentional: data WAL records are size-bounded.
+	// Lifting it requires extending datawal.AppendReader to stream payload
+	// chunks across multiple WAL segment writes.
+	if s.dataWAL == nil {
+		return fmt.Errorf("writeLocalShardStreamContext: stream shard write requires a data WAL (WAL is mandatory)")
 	}
-	if allowPack && s.shardPack != nil && s.packThreshold > 0 {
-		packed, handled, err := s.tryWriteLocalShardStreamPack(ctx, bucket, key, shardIdx, body)
-		if err != nil {
-			return err
-		}
-		if handled {
-			return nil
-		}
-		body = packed
-	}
-	dir := s.getShardDir(bucket, key, shardIdx)
-	mkdirStart := time.Now()
-	if err := s.ensureShardDir(dir); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return fmt.Errorf("create shard dir: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	fileStart := time.Now()
-	if s.encryptor != nil {
-		aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
-		if err := eccodec.WriteEncryptedShardStreamAtomicExistingDir(path, body, s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return err
-		}
-	} else {
-		if err := eccodec.WriteShardStreamAtomicExistingDir(path, body); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return err
-		}
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	// The streaming atomic writers already fsync the parent directory after
-	// rename, so there is no second ShardService-level directory sync here.
-	return nil
-}
-
-func (s *ShardService) tryWriteLocalShardStreamPack(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) (io.Reader, bool, error) {
-	var plain bytes.Buffer
-	limited := &io.LimitedReader{R: body, N: int64(s.packThreshold)}
-	_, err := plain.ReadFrom(limited)
+	rawCap := maxRawShardPayloadForWAL(s.encryptor != nil)
+	data, err := readShardPayload(body, rawCap, streamSize, s.encryptor != nil)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
-	if limited.N == 0 {
-		return io.MultiReader(bytes.NewReader(plain.Bytes()), body), false, nil
-	}
-	if plain.Len() >= s.packThreshold {
-		return bytes.NewReader(plain.Bytes()), false, nil
-	}
-
-	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
-	var payload []byte
-	if s.encryptor != nil {
-		var encoded bytes.Buffer
-		if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(plain.Bytes()), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
-			return nil, false, err
-		}
-		payload = encoded.Bytes()
-	} else {
-		payload = eccodec.EncodeShard(plain.Bytes())
-	}
-	fileStart := time.Now()
-	if err := s.shardPack.put(bucket, key, shardIdx, payload); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return nil, false, err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	return nil, true, nil
+	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
 }
 
 func (s *ShardService) ensureShardDir(dir string) error {

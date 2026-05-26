@@ -11,6 +11,8 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
+
+	"go.uber.org/goleak"
 )
 
 // storagePhasePrereqs runs every prior boot phase (config, storage open,
@@ -124,6 +126,26 @@ func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 // Mirrors the PR 4 ordering test pattern: if a refactor accidentally re-orders
 // the storage phases, the test catches it. It also preserves the individual
 // phase population checks without paying for separate full boot prerequisites.
+// TestBootShardService_ClosesShardPackActorOnShutdown asserts the boot path
+// registers a cleanup that closes the shard service on shutdown. With a shard
+// pack store wired (WAL present), the shard-pack actor goroutine spawns; if no
+// cleanup closes it, it leaks past shutdown.
+func TestBootShardService_ClosesShardPackActorOnShutdown(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
+	// Enable the shard-pack store so the WAL-wired shard-pack actor goroutine spawns.
+	state.cfg.ShardPackThreshold = 1024
+	baseline := goleak.IgnoreCurrent()
+
+	require.NoError(t, bootShardService(ctx, state))
+	require.NotNil(t, state.shardSvc)
+
+	// Production shutdown runs the cleanup stack — it must close the shard
+	// service so the shard-pack actor goroutine is stopped.
+	state.Cleanup()
+
+	goleak.VerifyNone(t, baseline)
+}
+
 func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
 
