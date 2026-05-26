@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -33,6 +34,13 @@ import (
 func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	cfg := nodeconfig.New(state.cfg.DataDir)
 	keysDir := cfg.KEKDir()
+
+	// Disk-space pre-flight: refuse boot if the keystore filesystem
+	// can't fit a rotation. Probes the parent so we don't fail when the
+	// keys/ subdir doesn't exist yet on first boot.
+	if err := CheckKeystoreDiskSpace(filepath.Dir(keysDir), MinKeystoreFreeBytes); err != nil {
+		return fmt.Errorf("wireDEKKeeper: %w", err)
+	}
 
 	if state.joinMode || len(state.peers) > 0 {
 		if empty, err := encrypt.KeysDirIsEmpty(keysDir); err != nil {
