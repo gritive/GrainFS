@@ -564,11 +564,11 @@ var (
 	// DataWALStartupRepairSkips reason label values:
 	//   no_group              — bucket has no data group assignment
 	//   no_backend            — data group has no distributed backend
-	//   unsupported_shardkey  — segment or coalesced shard key form (placement in segment metadata, not yet supported)
 	//   invalid_shard_key     — shard key is empty or shard index is negative
-	//   placement_corrupt     — LookupObjectPlacement returned an error or inconsistent node count
+	//   placement_corrupt     — placement resolution errored or returned an inconsistent node count
+	//   placement_scan_capped — segment/coalesced placement scan hit its cap before resolving
 	//   not_local_owner       — this node does not own the shard
-	//   stale                 — placement record has no nodes (object version deleted)
+	//   stale                 — placement record has no nodes (object version deleted / shard ref missing)
 	DataWALStartupRepairSkips = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_datawal_startup_repair_skips_total",
 		Help: "Startup data WAL EC shard repair candidates skipped before repair.",

@@ -30,13 +30,6 @@ func TestSplitDataWALStartupRepairShardKey(t *testing.T) {
 	require.Equal(t, "", versionID)
 }
 
-func TestIsUnsupportedStartupRepairShardKey(t *testing.T) {
-	require.True(t, isUnsupportedStartupRepairShardKey("dir/obj/segments/blob-123"))
-	require.True(t, isUnsupportedStartupRepairShardKey("dir/obj/coalesced/c-456"))
-	require.False(t, isUnsupportedStartupRepairShardKey("dir/obj/v1"))
-	require.False(t, isUnsupportedStartupRepairShardKey("legacy-object"))
-}
-
 func TestDataWALStartupRepairWorkerRunsSerially(t *testing.T) {
 	var inFlight int32
 	var maxInFlight int32
@@ -171,20 +164,18 @@ func TestClassifyDataWALStartupRepairPlacement(t *testing.T) {
 		objectKey string
 		shardIdx  int
 		rec       cluster.PlacementRecord
-		lookupErr error
 		wantSkip  string
 	}{
-		{"invalid empty key", "", 0, okRec, nil, "invalid_shard_key"},
-		{"invalid negative idx", "obj", -1, okRec, nil, "invalid_shard_key"},
-		{"placement corrupt on lookup error", "obj", 0, cluster.PlacementRecord{}, assertErr("boom"), "placement_corrupt"},
-		{"stale empty nodes", "obj", 0, cluster.PlacementRecord{}, nil, "stale"},
-		{"placement corrupt node count mismatch", "obj", 0, cluster.PlacementRecord{K: 2, M: 1, Nodes: []string{self, "n1"}}, nil, "placement_corrupt"},
-		{"not local owner", "obj", 1, okRec, nil, "not_local_owner"},
-		{"owned proceeds", "obj", 0, okRec, nil, ""},
+		{"invalid empty key", "", 0, okRec, "invalid_shard_key"},
+		{"invalid negative idx", "obj", -1, okRec, "invalid_shard_key"},
+		{"stale empty nodes", "obj", 0, cluster.PlacementRecord{}, "stale"},
+		{"placement corrupt node count mismatch", "obj", 0, cluster.PlacementRecord{K: 2, M: 1, Nodes: []string{self, "n1"}}, "placement_corrupt"},
+		{"not local owner", "obj", 1, okRec, "not_local_owner"},
+		{"owned proceeds", "obj", 0, okRec, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			skip := classifyDataWALStartupRepairPlacement(tc.objectKey, tc.shardIdx, tc.rec, cfg, tc.lookupErr, self)
+			skip := classifyDataWALStartupRepairPlacement(tc.objectKey, tc.shardIdx, tc.rec, cfg, self)
 			require.Equal(t, tc.wantSkip, skip)
 		})
 	}

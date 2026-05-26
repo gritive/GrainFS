@@ -2985,23 +2985,39 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 	if lookupErr != nil {
 		return fmt.Errorf("lookup shard placement: %w", lookupErr)
 	}
-	ecRec := resolved.Record
-	shardKey := resolved.ShardKey
-	recCfg := ecRec.ECConfigOrFallback(b.currentECConfig())
-	if shardIdx < 0 || shardIdx >= len(ecRec.Nodes) {
-		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(ecRec.Nodes))
+	return b.reconstructShardAtKey(ctx, bucket, resolved.ShardKey, resolved.Record, shardIdx)
+}
+
+// RepairShardAtShardKey reconstructs the local shardIdx shard for an arbitrary
+// physical shard key (object-version, segment, or coalesced) given its already-resolved
+// EC placement. Used by startup data WAL repair for segment/coalesced shards.
+func (b *DistributedBackend) RepairShardAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, shardIdx int) error {
+	if b.shardSvc == nil {
+		return fmt.Errorf("shard service not configured")
 	}
-	if len(ecRec.Nodes) != recCfg.NumShards() {
-		return fmt.Errorf("placement length %d != k+m %d", len(ecRec.Nodes), recCfg.NumShards())
+	return b.reconstructShardAtKey(ctx, bucket, shardKey, rec, shardIdx)
+}
+
+// reconstructShardAtKey reads survivors from rec.Nodes at shardKey, EC-reconstructs
+// the stripe, and writes the local shardIdx shard. Shared by RepairShard and
+// RepairShardAtShardKey.
+// Callers must ensure b.shardSvc != nil.
+func (b *DistributedBackend) reconstructShardAtKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, shardIdx int) error {
+	recCfg := rec.ECConfigOrFallback(b.currentECConfig())
+	if shardIdx < 0 || shardIdx >= len(rec.Nodes) {
+		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(rec.Nodes))
+	}
+	if len(rec.Nodes) != recCfg.NumShards() {
+		return fmt.Errorf("placement length %d != k+m %d", len(rec.Nodes), recCfg.NumShards())
 	}
 
 	selfID := b.currentSelfAddr()
-	shards := make([][]byte, len(ecRec.Nodes))
+	shards := make([][]byte, len(rec.Nodes))
 	available := 0
 
 	// Pull every OTHER shard. We intentionally skip shardIdx to avoid pulling
 	// the corrupt/missing copy into the reconstruction.
-	for i, node := range ecRec.Nodes {
+	for i, node := range rec.Nodes {
 		if i == shardIdx {
 			continue
 		}
@@ -3019,7 +3035,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 	}
 	if available < recCfg.DataShards {
 		return fmt.Errorf("repair: only %d/%d other shards readable, need %d",
-			available, len(ecRec.Nodes)-1, recCfg.DataShards)
+			available, len(rec.Nodes)-1, recCfg.DataShards)
 	}
 
 	// ECReconstruct rebuilds the whole object; we then re-split to get the
@@ -3034,7 +3050,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 	}
 
 	// Write just the missing shard back to its placement node.
-	target := ecRec.Nodes[shardIdx]
+	target := rec.Nodes[shardIdx]
 	var werr error
 	if target == selfID {
 		werr = b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
