@@ -6,7 +6,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -219,9 +218,48 @@ type MuxConnHandler func(ctx context.Context, conn *quic.Conn)
 // pointer indefinitely. The transport reads the active snapshot per
 // handshake via QUICTransport.identity.Load().
 type IdentitySnapshot struct {
-	AcceptSPKIs [][32]byte      // 1 entry steady, 2 during rotation phase 2/3
+	AcceptSPKIs [][32]byte      // 1 entry steady, 2 during rotation phase 2/3 (kept for back-compat/debug)
 	PresentCert tls.Certificate // active cert this node presents
 	PresentSPKI [32]byte        // SHA256 of PresentCert.RawSubjectPublicKeyInfo
+
+	acceptSet map[[32]byte]struct{} // O(1) lookup derived from AcceptSPKIs
+}
+
+// NewIdentitySnapshot builds a snapshot with the O(1) accept set precomputed.
+// Callers MUST construct via this so acceptSet is populated; a literal with a
+// nil acceptSet accepts nothing.
+func NewIdentitySnapshot(accept [][32]byte, present tls.Certificate, presentSPKI [32]byte) *IdentitySnapshot {
+	set := make(map[[32]byte]struct{}, len(accept))
+	for _, s := range accept {
+		set[s] = struct{}{}
+	}
+	return &IdentitySnapshot{
+		AcceptSPKIs: accept,
+		PresentCert: present,
+		PresentSPKI: presentSPKI,
+		acceptSet:   set,
+	}
+}
+
+// Accepts reports whether spki is in the accept set (O(1) map lookup).
+// SPKI is sha256 of the peer's RawSubjectPublicKeyInfo — a public value sent
+// in cleartext during the TLS handshake — so map-lookup timing reveals nothing
+// not already visible on the wire; constant-time comparison is unnecessary here.
+func (s *IdentitySnapshot) Accepts(spki [32]byte) bool {
+	if s.acceptSet != nil {
+		_, ok := s.acceptSet[spki]
+		return ok
+	}
+	// Defensive fallback: a snapshot built via a raw struct literal (not
+	// NewIdentitySnapshot) has a nil acceptSet. Scan AcceptSPKIs directly so it
+	// still verifies correctly (O(N), misuse path only) rather than silently
+	// accepting nothing.
+	for _, a := range s.AcceptSPKIs {
+		if a == spki {
+			return true
+		}
+	}
+	return false
 }
 
 // QUICTransport implements Transport using QUIC for node-to-node communication.
@@ -277,11 +315,7 @@ func NewQUICTransport(psk string) (*QUICTransport, error) {
 		identityCert: cert,
 		expectedSPKI: spki,
 	}
-	t.identity.Store(&IdentitySnapshot{
-		AcceptSPKIs: [][32]byte{spki},
-		PresentCert: cert,
-		PresentSPKI: spki,
-	})
+	t.identity.Store(NewIdentitySnapshot([][32]byte{spki}, cert, spki))
 	return t, nil
 }
 
@@ -379,10 +413,23 @@ func (t *QUICTransport) SetMuxConnHandler(h MuxConnHandler) {
 // the cluster identity cert; both verify the peer's cert SPKI matches the
 // expected cluster identity.
 func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
-	tlsConf := t.buildServerTLSConfig()
-	t.tlsConfig = tlsConf
+	// Use GetConfigForClient so each inbound TLS handshake reads the live
+	// IdentitySnapshot via buildServerTLSConfig(). Without this, a post-Listen
+	// SwapIdentity (identity/cert or accept-set change) would leave the listener
+	// serving a stale PresentCert and a stale VerifyPeerCertificate closure; the
+	// swap must take effect on new inbound handshakes without a restart.
+	base := &tls.Config{
+		// Authoritative per-handshake config comes from GetConfigForClient below;
+		// these are kept for ALPN setup / fallback and must stay in sync with buildServerTLSConfig.
+		ClientAuth: tls.RequireAnyClientCert,
+		NextProtos: []string{t.muxALPN(), t.pskALPN()},
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return t.buildServerTLSConfig(), nil
+		},
+	}
+	t.tlsConfig = base
 
-	listener, err := quic.ListenAddr(addr, tlsConf, defaultQUICConfig())
+	listener, err := quic.ListenAddr(addr, base, defaultQUICConfig())
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -411,7 +458,16 @@ func (t *QUICTransport) acceptLoop() {
 		// rotation (rotation-spec phase 2/3).
 		state := conn.ConnectionState()
 		snap := t.identity.Load()
-		if err := verifyPeerSPKIs(state.TLS.PeerCertificates, snap.AcceptSPKIs); err != nil {
+		var acceptErr error
+		if len(state.TLS.PeerCertificates) == 0 {
+			acceptErr = errors.New("no peer cert presented")
+		} else {
+			peerSPKI := sha256.Sum256(state.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			if !snap.Accepts(peerSPKI) {
+				acceptErr = errors.New("peer cert SPKI does not match any accepted cluster identity")
+			}
+		}
+		if err := acceptErr; err != nil {
 			// Log details locally; send generic reason on the wire so an
 			// attacker can't distinguish "no auth set up" from "wrong key".
 			log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("peer cert rejected")
@@ -457,26 +513,9 @@ func (t *QUICTransport) acceptLoop() {
 	}
 }
 
-// verifyPeerSPKIs is the multi-SPKI form used during rotation phases 2/3.
-// Accepts the peer if its leaf cert SPKI matches ANY entry in `accepted`.
-// Constant-time per entry; total cost O(n) for n accepted SPKIs (typically 1-2).
-func verifyPeerSPKIs(certs []*x509.Certificate, accepted [][32]byte) error {
-	if len(certs) == 0 {
-		return errors.New("no peer cert presented")
-	}
-	spki := sha256.Sum256(certs[0].RawSubjectPublicKeyInfo)
-	for _, a := range accepted {
-		if subtle.ConstantTimeCompare(spki[:], a[:]) == 1 {
-			return nil
-		}
-	}
-	return errors.New("peer cert SPKI does not match any accepted cluster identity")
-}
-
-// pinAnyAcceptedSPKI returns a VerifyPeerCertificate callback that accepts any
-// peer cert whose SPKI hash matches one of the accepted SPKIs. Closures over
-// the slice; callers should treat the slice as immutable after passing it in.
-func pinAnyAcceptedSPKI(accepted [][32]byte) func([][]byte, [][]*x509.Certificate) error {
+// pinAcceptedSPKI returns a VerifyPeerCertificate callback that accepts any
+// peer cert whose SPKI hash is in snap's accept set (O(1) map lookup).
+func pinAcceptedSPKI(snap *IdentitySnapshot) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("no peer cert presented")
@@ -486,12 +525,10 @@ func pinAnyAcceptedSPKI(accepted [][32]byte) func([][]byte, [][]*x509.Certificat
 			return fmt.Errorf("parse peer cert: %w", err)
 		}
 		spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-		for _, a := range accepted {
-			if subtle.ConstantTimeCompare(spki[:], a[:]) == 1 {
-				return nil
-			}
+		if !snap.Accepts(spki) {
+			return errors.New("peer cert SPKI does not match any accepted cluster identity")
 		}
-		return errors.New("peer cert SPKI does not match any accepted cluster identity")
+		return nil
 	}
 }
 
@@ -1396,7 +1433,7 @@ func (t *QUICTransport) buildClientTLSConfig() *tls.Config {
 		InsecureSkipVerify:    true, // quic-go requires; real check is VerifyPeerCertificate
 		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
 		Certificates:          []tls.Certificate{snap.PresentCert},
-		VerifyPeerCertificate: pinAnyAcceptedSPKI(snap.AcceptSPKIs),
+		VerifyPeerCertificate: pinAcceptedSPKI(snap),
 	}
 }
 
@@ -1411,6 +1448,6 @@ func (t *QUICTransport) buildServerTLSConfig() *tls.Config {
 		Certificates:          []tls.Certificate{snap.PresentCert},
 		ClientAuth:            tls.RequireAnyClientCert,
 		NextProtos:            []string{t.muxALPN(), t.pskALPN()},
-		VerifyPeerCertificate: pinAnyAcceptedSPKI(snap.AcceptSPKIs),
+		VerifyPeerCertificate: pinAcceptedSPKI(snap),
 	}
 }

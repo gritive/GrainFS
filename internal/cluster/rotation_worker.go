@@ -80,11 +80,7 @@ func (w *RotationWorker) applyBegun(st RotationState) RotationApplyRecord {
 		return RotationApplyRecord{RotationID: st.RotationID, Phase: -1,
 			Error: fmt.Sprintf("derive current identity: %v", err)}
 	}
-	w.tr.SwapIdentity(&transport.IdentitySnapshot{
-		AcceptSPKIs: [][32]byte{st.OldSPKI, st.NewSPKI},
-		PresentCert: curCert, // still present OLD in phase 2
-		PresentSPKI: st.OldSPKI,
-	})
+	w.tr.SwapIdentity(transport.NewIdentitySnapshot([][32]byte{st.OldSPKI, st.NewSPKI}, curCert, st.OldSPKI))
 	return RotationApplyRecord{RotationID: st.RotationID, Phase: PhaseBegun}
 }
 
@@ -100,11 +96,7 @@ func (w *RotationWorker) applySwitched(st RotationState) RotationApplyRecord {
 		return RotationApplyRecord{RotationID: st.RotationID, Phase: -1,
 			Error: fmt.Sprintf("derive new identity (switch): %v", err)}
 	}
-	w.tr.SwapIdentity(&transport.IdentitySnapshot{
-		AcceptSPKIs: [][32]byte{st.OldSPKI, st.NewSPKI},
-		PresentCert: newCert, // now PRESENT NEW
-		PresentSPKI: st.NewSPKI,
-	})
+	w.tr.SwapIdentity(transport.NewIdentitySnapshot([][32]byte{st.OldSPKI, st.NewSPKI}, newCert, st.NewSPKI))
 	return RotationApplyRecord{RotationID: st.RotationID, Phase: PhaseSwitched}
 }
 
@@ -143,11 +135,7 @@ func (w *RotationWorker) applySteady(st RotationState) RotationApplyRecord {
 	}
 	// Phase-2 abort path: next.key still exists and must be deleted.
 	_ = w.ks.DeleteNext()
-	w.tr.SwapIdentity(&transport.IdentitySnapshot{
-		AcceptSPKIs: [][32]byte{curSPKI},
-		PresentCert: curCert,
-		PresentSPKI: curSPKI,
-	})
+	w.tr.SwapIdentity(transport.NewIdentitySnapshot([][32]byte{curSPKI}, curCert, curSPKI))
 	// previous.key grace timer is scheduled by the meta-raft layer (which has
 	// access to a real clock and goroutine pool); the worker just leaves the
 	// file in place.
