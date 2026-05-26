@@ -43,10 +43,9 @@ func TestScrubJobInfoJSONRoundTrip(t *testing.T) {
 	require.Len(t, out.PeerFailures, 1)
 }
 
-func TestVolumeAndSnapshotJSONShape(t *testing.T) {
+func TestVolumeJSONShape(t *testing.T) {
 	payload := struct {
-		Volume   VolumeInfo   `json:"volume"`
-		Snapshot SnapshotInfo `json:"snapshot"`
+		Volume VolumeInfo `json:"volume"`
 	}{
 		Volume: VolumeInfo{
 			Name:            "v1",
@@ -54,28 +53,19 @@ func TestVolumeAndSnapshotJSONShape(t *testing.T) {
 			BlockSize:       4096,
 			AllocatedBlocks: 2,
 			AllocatedBytes:  8192,
-			SnapshotCount:   1,
 			Health:          "ok",
 			HealthReasons:   []string{},
 		},
-		Snapshot: SnapshotInfo{ID: "snap-1", CreatedAt: "2026-01-01T00:00:00Z", BlockCount: 2},
 	}
 	buf, err := json.Marshal(payload)
 	require.NoError(t, err)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(buf, &fields))
 	require.IsType(t, map[string]any{}, fields["volume"])
-	require.IsType(t, map[string]any{}, fields["snapshot"])
 	volume := fields["volume"].(map[string]any)
-	snapshot := fields["snapshot"].(map[string]any)
-	for _, key := range []string{"block_size", "allocated_blocks", "allocated_bytes", "snapshot_count", "health_reasons"} {
+	for _, key := range []string{"block_size", "allocated_blocks", "allocated_bytes", "health_reasons"} {
 		if _, ok := volume[key]; !ok {
 			require.Failf(t, "missing volume JSON key", "missing volume JSON key %q in %s", key, buf)
-		}
-	}
-	for _, key := range []string{"created_at", "block_count"} {
-		if _, ok := snapshot[key]; !ok {
-			require.Failf(t, "missing snapshot JSON key", "missing snapshot JSON key %q in %s", key, buf)
 		}
 	}
 }

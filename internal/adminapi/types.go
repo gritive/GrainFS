@@ -281,7 +281,6 @@ type VolumeInfo struct {
 	BlockSize       int      `json:"block_size"`
 	AllocatedBlocks int64    `json:"allocated_blocks"`
 	AllocatedBytes  int64    `json:"allocated_bytes"`
-	SnapshotCount   int32    `json:"snapshot_count"`
 	Health          string   `json:"health"`
 	HealthReasons   []string `json:"health_reasons"`
 }
@@ -327,25 +326,6 @@ type RecalculateResp struct {
 	Before int64  `json:"before"`
 	After  int64  `json:"after"`
 	Fixed  bool   `json:"fixed"`
-}
-
-// CloneReq is the body for POST /v1/volumes/clone.
-type CloneReq struct {
-	Src string `json:"src"`
-	Dst string `json:"dst"`
-}
-
-// SnapshotInfo is one entry in the snapshot list response.
-type SnapshotInfo struct {
-	ID         string `json:"id"`
-	CreatedAt  string `json:"created_at"`
-	BlockCount int64  `json:"block_count"`
-}
-
-// CreateSnapshotResp is the response of POST /v1/volumes/<name>/snapshots.
-type CreateSnapshotResp struct {
-	ID         string `json:"id"`
-	BlockCount int64  `json:"block_count"`
 }
 
 // --- Cluster wire types ---
