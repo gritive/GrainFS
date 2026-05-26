@@ -107,6 +107,9 @@ const (
 	MetaCmdTypeKEKRotate = clusterpb.MetaCmdTypeKEKRotate
 	MetaCmdTypeKEKRetire = clusterpb.MetaCmdTypeKEKRetire
 	MetaCmdTypeKEKPrune  = clusterpb.MetaCmdTypeKEKPrune
+	// zero-CA invite registry (slots 73-74; 69-72 are kek-envelope-phase-b)
+	MetaCmdTypeInviteMint    = clusterpb.MetaCmdTypeInviteMint
+	MetaCmdTypeInviteConsume = clusterpb.MetaCmdTypeInviteConsume
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -260,6 +263,9 @@ type MetaFSM struct {
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
 	onRotationApplied func(RotationState) // 매 phase 변경 commit 후 호출; nil 이면 no-op
+
+	// zero-CA invite registry — deterministic single-use + TTL token store.
+	invites *inviteFSM
 
 	// IAM sub-FSM — wired after construction via SetIAM (Phase 1). iamStore is
 	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
@@ -614,6 +620,7 @@ func NewMetaFSM() *MetaFSM {
 		icebergNamespaces: make(map[string]map[string]IcebergNamespaceEntry),
 		icebergTables:     make(map[string]map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
+		invites:           newInviteFSM(),
 		iamStore:          iam.NewStore(),
 		activeFeatures:    compat.NewActiveFeatures(),
 		clusterCfg:        NewClusterConfig(),
@@ -710,6 +717,10 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyRotateKeyDrop(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRotateKeyAbort:
 		return f.applyRotateKeyAbort(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeInviteMint:
+		return f.applyInviteMint(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeInviteConsume:
+		return f.applyInviteConsume(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeScrubTrigger:
 		return f.applyScrubTrigger(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeIAMSACreate:
