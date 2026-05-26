@@ -197,7 +197,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 
 	if state.joinMode {
-		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr, state.kek); err != nil {
+		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr, state.kekStore, state.handshakeVerifier.ClusterID()); err != nil {
 			return err
 		}
 		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {

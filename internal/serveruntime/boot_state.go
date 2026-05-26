@@ -104,6 +104,12 @@ type bootState struct {
 	// handshake, MetaChallengeReceiver) can share the same key without
 	// re-reading kek.key from disk. Set by wireDEKKeeper.
 	kek []byte
+	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
+	// A holds a single version (0). Later phases use it for rotation,
+	// prune, and join keystore catch-up. Receivers reach the active version
+	// + cluster_id via state.handshakeVerifier rather than reading the
+	// store directly.
+	kekStore *encrypt.KEKStore
 	// handshakeVerifier gates cluster-join admission via HMAC-SHA256 challenge-
 	// response. The SAME instance must be wired into both MetaJoinReceiver and
 	// MetaChallengeReceiver so the issued-nonce map is shared. Set by

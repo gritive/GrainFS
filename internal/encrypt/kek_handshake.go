@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"sync"
 	"time"
 )
@@ -91,6 +92,25 @@ func NewHandshakeVerifierWithTTL(store *KEKStore, clusterID []byte, ttl time.Dur
 		issued:    make(map[string]issuedNonce),
 		used:      make(map[string]time.Time),
 	}
+}
+
+// Store returns a read-only reference to the verifier's KEKStore. Callers
+// (e.g. challenge receivers) use this to look up the active version
+// without keeping a separate KEKStore reference. Mutating the store via
+// this reference is OK for legitimate keystore management (Add/Delete);
+// the verifier holds the same pointer.
+func (v *HandshakeVerifier) Store() *KEKStore {
+	return v.store
+}
+
+// ClusterID returns a copy of the cluster_id this verifier is bound to.
+// Used by join-side receivers to reconstruct the JoinTranscript from
+// the on-wire JoinRequest without threading cluster_id through extra
+// fields.
+func (v *HandshakeVerifier) ClusterID() []byte {
+	out := make([]byte, len(v.clusterID))
+	copy(out, v.clusterID)
+	return out
 }
 
 // IssueChallenge generates a fresh 32-byte nonce bound to the given KEK
@@ -205,7 +225,7 @@ func computeMACFromKEK(kek []byte, t JoinTranscript) ([]byte, error) {
 	return m.Sum(nil), nil
 }
 
-func writeLenPrefixed(m interface{ Write([]byte) (int, error) }, b []byte) {
+func writeLenPrefixed(m hash.Hash, b []byte) {
 	var buf [2]byte
 	binary.BigEndian.PutUint16(buf[:], uint16(len(b)))
 	m.Write(buf[:])

@@ -43,9 +43,13 @@ func fsmWithWrappedDEKs(t *testing.T, kek []byte) *cluster.MetaFSM {
 	return dst
 }
 
+// writeKEKFile stages keys/0.key under dataDir using the new KEKStore
+// disk layout. Returns the path written.
 func writeKEKFile(t *testing.T, dir string, kek []byte) string {
 	t.Helper()
-	path := filepath.Join(dir, "kek.key")
+	keysDir := filepath.Join(dir, "keys")
+	require.NoError(t, os.MkdirAll(keysDir, 0o700))
+	path := filepath.Join(keysDir, "0.key")
 	require.NoError(t, os.WriteFile(path, kek, 0o600))
 	return path
 }

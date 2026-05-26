@@ -1,82 +1,116 @@
 package serveruntime
 
 import (
-	"errors"
 	"fmt"
+	"os"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 )
 
-// wireDEKKeeper reads the node KEK source from nodeconfig, loads (or generates)
-// the 32-byte KEK, constructs the cluster DEK Keeper + the shared
-// HandshakeVerifier, injects the keeper into the FSM, and registers the DEK
-// post-commit hook.
+// wireDEKKeeper loads the cluster KEKStore (keys/<V>.key under dataDir),
+// constructs a DEK Keeper from the active KEK, builds the shared
+// HandshakeVerifier bound to the persisted cluster.id, and injects the
+// keeper into the FSM + registers the DEK post-commit hook.
 //
 // KEK load mode (§7 B3 / F#21):
 //
-//   - First-cluster-init mode (NOT joining, NO peers): LoadOrGenerateKEK is
-//     correct — this is the very first node bootstrapping its own KEK.
+//   - First-cluster-init mode (NOT joining, NO peers): an empty keys/
+//     directory triggers auto-generation of KEK v0 by
+//     LoadOrInitKEKStoreDir. This is the very first node bootstrapping
+//     its own KEK.
 //
-//   - Join mode (`--join-pending` OR peers configured): strict LoadKEK. If
-//     kek.key is missing, return a remediation error rather than silently
-//     auto-generating a fresh KEK that would never decrypt the cluster's
-//     wrapped DEKs. wireDEKKeeper runs BEFORE Restore, so the post-Restore
-//     guard in rebuildDEKKeeperFromRestore (which only fires when the
-//     snapshot trailer carries DEKs) cannot catch first-time joiners.
+//   - Join mode (`--join-pending` OR peers configured): we refuse to
+//     auto-generate. A joining node MUST already hold the cluster's KEK
+//     before serve can start — auto-generating a fresh random KEK here
+//     would produce a node whose KEK never decrypts the cluster's
+//     FSM-wrapped DEKs. The pre-flight checks keys/ contents BEFORE
+//     calling LoadOrInitKEKStoreDir.
 //
-// Extracted from bootMetaRaftWiring so the wiring path is directly testable
-// without standing up a full raft+badger fixture. LoadOrGenerateKEK enforces
-// the file:// scheme and returns ErrUnsupportedKEKSource for kms:// (deferred
-// to Phase 3) — the error path here surfaces that to the operator.
-//
-// proposer and scrubberKick are passed nil; the §6 audit lane will replace
-// them when the rewrap scrubber lands. WireDEKPostCommit's dispatch handles
-// both nils safely (DEKRotate still mints a new generation; the scrubber and
-// version-prune propagation just don't fire).
+// cluster.id (Phase A): generated as UUID v7 on first boot, persisted to
+// <dataDir>/cluster.id, and loaded on subsequent boots. Joiners receive
+// the file out-of-band (operator scp's it alongside the active KEK).
 func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
-	dekSrc := nodeconfig.New(state.cfg.DataDir).KEKSource()
-	kek, err := loadKEKForBoot(state, dekSrc)
-	if err != nil {
-		return err
+	cfg := nodeconfig.New(state.cfg.DataDir)
+	keysDir := cfg.KEKDir()
+
+	if state.joinMode || len(state.peers) > 0 {
+		if empty, err := keysDirIsEmpty(keysDir); err != nil {
+			return fmt.Errorf("wireDEKKeeper: stat keys dir %s: %w", keysDir, err)
+		} else if empty {
+			return fmt.Errorf("KEK not found at %s and this node is configured to join an existing cluster. "+
+				"A joining node MUST already hold the cluster's KEK before serve can start — "+
+				"auto-generating a fresh KEK here would produce a node whose KEK never decrypts "+
+				"the cluster's FSM-wrapped DEKs. Options: "+
+				"(a) restore the cluster KEK by scp from any healthy peer "+
+				"(the KEK files are identical on every cluster node), "+
+				"(b) use `grainfs cluster join <peer>` from the joining node to complete the "+
+				"offline-bootstrap handshake (still requires the KEK in place locally), "+
+				"(c) decommission this node and rejoin from scratch (loses local raft state).",
+				keysDir)
+		}
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+
+	store, err := encrypt.LoadOrInitKEKStoreDir(keysDir)
 	if err != nil {
-		return fmt.Errorf("init DEK keeper: %w", err)
+		return fmt.Errorf("wireDEKKeeper: load keystore %s: %w", keysDir, err)
 	}
+
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: active KEK: %w", err)
+	}
+	defer zeroizeKEKCopy(activeKEK)
+
+	keeper, err := encrypt.NewDEKKeeper(activeKEK)
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
+	}
+
+	clusterID, err := cfg.LoadOrInitClusterID()
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: cluster.id: %w", err)
+	}
+
 	fsm.SetDEKKeeper(keeper)
 	state.dekKeeper = keeper
-	state.kek = kek
-	state.handshakeVerifier = encrypt.NewHandshakeVerifier(kek)
+	state.kekStore = store
+	// state.kek retained for downstream callers (PerformMetaJoin, restore
+	// path) that still read raw bytes. Holds a fresh copy because
+	// activeKEK is zeroed by defer.
+	state.kek = append([]byte(nil), activeKEK...)
+	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
 	WireDEKPostCommit(fsm, nil /* proposer (§6) */, keeper, nil /* scrubberKick (§6) */)
 	return nil
 }
 
-// loadKEKForBoot dispatches KEK loading by boot mode. See wireDEKKeeper.
-func loadKEKForBoot(state *bootState, dekSrc string) ([]byte, error) {
-	if state.joinMode || len(state.peers) > 0 {
-		kek, err := encrypt.LoadKEK(dekSrc)
-		if err != nil {
-			if errors.Is(err, encrypt.ErrKEKNotFound) {
-				return nil, fmt.Errorf("KEK not found at %s and this node is configured to join an existing cluster. "+
-					"A joining node MUST already hold the cluster's KEK before serve can start — "+
-					"auto-generating a fresh KEK here would produce a node whose KEK never decrypts "+
-					"the cluster's FSM-wrapped DEKs. Options: "+
-					"(a) restore kek.key from backup or scp from any healthy peer "+
-					"(the KEK is identical on every cluster node), "+
-					"(b) use `grainfs cluster join <peer>` from the joining node to complete the "+
-					"offline-bootstrap handshake (still requires the KEK in place locally), "+
-					"(c) decommission this node and rejoin from scratch (loses local raft state). "+
-					"Underlying error: %w", dekSrc, err)
-			}
-			return nil, fmt.Errorf("load KEK from %s: %w", dekSrc, err)
-		}
-		return kek, nil
-	}
-	kek, err := encrypt.LoadOrGenerateKEK(dekSrc)
+// keysDirIsEmpty returns true when keysDir is absent or contains no
+// `<V>.key` files. Other files (operator notes, dotfiles) are ignored —
+// matches LoadOrInitKEKStoreDir's parseKeyFilename gate.
+func keysDirIsEmpty(keysDir string) (bool, error) {
+	entries, err := os.ReadDir(keysDir)
 	if err != nil {
-		return nil, fmt.Errorf("load KEK from %s: %w", dekSrc, err)
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, err
 	}
-	return kek, nil
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// crude check: any *.key file present counts as non-empty.
+		if len(name) > 4 && name[len(name)-4:] == ".key" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func zeroizeKEKCopy(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }

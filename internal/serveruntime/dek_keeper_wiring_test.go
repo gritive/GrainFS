@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,8 +15,8 @@ import (
 // TestDEKKeeperWiring verifies that the API contract exercised by the
 // production boot path (C2) holds:
 //
-//   - LoadOrGenerateKEK generates a fresh KEK when the file is absent.
-//   - NewDEKKeeper succeeds with that KEK.
+//   - LoadOrInitKEKStoreDir generates a fresh KEK v0 when keys/ is empty.
+//   - NewDEKKeeper succeeds with the active KEK.
 //   - SetDEKKeeper injects the keeper into a MetaFSM without error.
 //
 // This does not spin up meta-raft; the test covers the wiring surface so a
@@ -23,10 +24,13 @@ import (
 // fixture.
 func TestDEKKeeperWiring(t *testing.T) {
 	dir := t.TempDir()
-	src := "file://" + filepath.Join(dir, "kek.key")
+	keysDir := filepath.Join(dir, "keys")
 
-	kek, err := encrypt.LoadOrGenerateKEK(src)
-	require.NoError(t, err, "LoadOrGenerateKEK should succeed on first call (generates key)")
+	store, err := encrypt.LoadOrInitKEKStoreDir(keysDir)
+	require.NoError(t, err, "LoadOrInitKEKStoreDir should succeed on first call (generates v0)")
+
+	kek, err := store.ActiveKEK()
+	require.NoError(t, err)
 	require.Len(t, kek, encrypt.KEKSize, "KEK must be %d bytes", encrypt.KEKSize)
 
 	keeper, err := encrypt.NewDEKKeeper(kek)
@@ -34,7 +38,6 @@ func TestDEKKeeperWiring(t *testing.T) {
 	require.NotNil(t, keeper)
 
 	fsm := cluster.NewMetaFSM()
-	// SetDEKKeeper must not panic; a second call with the same keeper is also safe.
 	fsm.SetDEKKeeper(keeper)
 
 	gen, wrapped := keeper.Active()
@@ -42,37 +45,36 @@ func TestDEKKeeperWiring(t *testing.T) {
 	assert.NotEmpty(t, wrapped, "wrapped DEK must not be empty")
 }
 
-// TestDEKKeeperWiring_LoadIdempotent verifies that a second LoadOrGenerateKEK
-// call on an existing file returns the same 32-byte key (no overwrite).
+// TestDEKKeeperWiring_LoadIdempotent verifies that a second
+// LoadOrInitKEKStoreDir call on an existing keys/ directory returns the
+// same active KEK bytes (no overwrite).
 func TestDEKKeeperWiring_LoadIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	src := "file://" + filepath.Join(dir, "kek.key")
+	keysDir := filepath.Join(dir, "keys")
 
-	kek1, err := encrypt.LoadOrGenerateKEK(src)
+	store1, err := encrypt.LoadOrInitKEKStoreDir(keysDir)
+	require.NoError(t, err)
+	kek1, err := store1.ActiveKEK()
 	require.NoError(t, err)
 
-	kek2, err := encrypt.LoadOrGenerateKEK(src)
+	store2, err := encrypt.LoadOrInitKEKStoreDir(keysDir)
+	require.NoError(t, err)
+	kek2, err := store2.ActiveKEK()
 	require.NoError(t, err)
 
 	assert.Equal(t, kek1, kek2, "second load must return identical KEK bytes")
 }
 
 // TestWireDEKKeeper_InjectsAndRegistersHook drives the production
-// `wireDEKKeeper` function directly. This is the gap a previous review
-// caught: removing both `metaRaft.FSM().SetDEKKeeper(...)` and
-// `WireDEKPostCommit(...)` from bootMetaRaftWiring would have left the
-// FSM's dek_keeper field nil at runtime, but the prior TestDEKKeeperWiring
-// only exercised the encrypt-package primitives — not the wiring.
+// `wireDEKKeeper` function directly. We assert:
 //
-// We assert:
 //  1. `state.dekKeeper` is non-nil after the call (boot state observable).
-//  2. The FSM applies a DEKRotate cmd successfully and the generation
-//     increments from 0 to 1, proving the keeper is wired into the apply
+//  2. `state.kekStore` is non-nil (loaded from <dataDir>/keys/).
+//  3. `state.handshakeVerifier` is non-nil and carries cluster.id from
+//     <dataDir>/cluster.id.
+//  4. The FSM applies a DEKRotate cmd successfully and the generation
+//     increments from 0 to 1 — proving the keeper is wired into the apply
 //     path (a no-op nil keeper would have stayed at gen 0).
-//  3. The post-commit hook is registered (the rotate apply path runs
-//     the hook; without WireDEKPostCommit the FSM would still rotate but
-//     no hook would fire — we test the registration side directly by
-//     applying DEKRotate and inspecting the keeper state after).
 func TestWireDEKKeeper_InjectsAndRegistersHook(t *testing.T) {
 	dir := t.TempDir()
 	state := &bootState{cfg: Config{DataDir: dir}}
@@ -80,6 +82,13 @@ func TestWireDEKKeeper_InjectsAndRegistersHook(t *testing.T) {
 
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.dekKeeper, "wireDEKKeeper must inject keeper into state for downstream phases")
+	require.NotNil(t, state.kekStore, "wireDEKKeeper must populate state.kekStore")
+	require.NotNil(t, state.handshakeVerifier, "wireDEKKeeper must construct the handshake verifier")
+	require.Equal(t, uint32(0), state.kekStore.ActiveVersion(), "Phase A: active KEK version must be 0")
+
+	// cluster.id was persisted.
+	_, err := os.Stat(filepath.Join(dir, "cluster.id"))
+	require.NoError(t, err, "wireDEKKeeper must persist cluster.id on first boot")
 
 	// Active generation starts at 0 (initial DEK seeded by NewDEKKeeper).
 	gen, _ := state.dekKeeper.Active()

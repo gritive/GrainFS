@@ -83,7 +83,7 @@ func (r *MetaChallengeReceiver) Handle(req *transport.Message) *transport.Messag
 	if _, err := decodeChallengeRequest(req.Payload); err != nil {
 		return challengeMessage(ChallengeReply{Status: JoinStatusError, Message: err.Error()})
 	}
-	nonce, err := r.verifier.IssueChallenge()
+	nonce, err := r.verifier.IssueChallenge(r.verifier.Store().ActiveVersion())
 	if err != nil {
 		return challengeMessage(ChallengeReply{Status: JoinStatusError, Message: err.Error()})
 	}

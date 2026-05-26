@@ -1,7 +1,7 @@
 // §7 — Offline cluster-join handshake tests (pushed down from
 // cmd/grainfs/cluster_join_test.go).
 //
-// Exercise runOfflineJoinHandshake directly with in-process
+// Exercise runOfflineJoinHandshakeV2 directly with in-process
 // MetaChallengeReceiver + MetaJoinReceiver, matching the pattern in
 // meta_join_handshake_test.go. This isolates the handshake state machine
 // (challenge → compute response → join) from KEK loading and QUIC.
@@ -37,12 +37,23 @@ func offlineJoinInProcessSenders(
 	return chalSender, joinSender
 }
 
+func newTestKEKStore(t *testing.T, kek []byte) *encrypt.KEKStore {
+	t.Helper()
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, kek); err != nil {
+		t.Fatalf("seed KEKStore: %v", err)
+	}
+	return store
+}
+
 func TestPerformOfflineJoin_HappyPath(t *testing.T) {
 	kek := make([]byte, encrypt.KEKSize)
 	for i := range kek {
 		kek[i] = byte(i)
 	}
-	verifier := encrypt.NewHandshakeVerifier(kek)
+	clusterID := bytes.Repeat([]byte{0xAB}, 16)
+	leaderStore := newTestKEKStore(t, kek)
+	verifier := encrypt.NewHandshakeVerifier(leaderStore, clusterID)
 
 	coord := &fakeJoinCoordinator{leader: true, leaderID: "node-1", fsm: NewMetaFSM()}
 	chalRcv := NewMetaChallengeReceiver(verifier)
@@ -50,13 +61,15 @@ func TestPerformOfflineJoin_HappyPath(t *testing.T) {
 
 	chalSender, joinSender := offlineJoinInProcessSenders(chalRcv, joinRcv)
 
+	joinerStore := newTestKEKStore(t, kek)
+
 	var buf bytes.Buffer
-	err := runOfflineJoinHandshake(
+	err := runOfflineJoinHandshakeV2(
 		context.Background(),
 		chalSender, joinSender,
 		"peer.example:7001",
 		"node-2", "10.0.0.2:7001",
-		kek, // same KEK as peer
+		joinerStore, clusterID,
 		&buf,
 	)
 	require.NoError(t, err, "happy-path join must exit 0")
@@ -73,7 +86,9 @@ func TestPerformOfflineJoin_WrongKEK_NonZero(t *testing.T) {
 	for i := range joinerKEK {
 		joinerKEK[i] = byte(255 - i) // different KEK
 	}
-	verifier := encrypt.NewHandshakeVerifier(peerKEK)
+	clusterID := bytes.Repeat([]byte{0xAB}, 16)
+	leaderStore := newTestKEKStore(t, peerKEK)
+	verifier := encrypt.NewHandshakeVerifier(leaderStore, clusterID)
 
 	coord := &fakeJoinCoordinator{leader: true, leaderID: "node-1", fsm: NewMetaFSM()}
 	chalRcv := NewMetaChallengeReceiver(verifier)
@@ -81,13 +96,15 @@ func TestPerformOfflineJoin_WrongKEK_NonZero(t *testing.T) {
 
 	chalSender, joinSender := offlineJoinInProcessSenders(chalRcv, joinRcv)
 
+	joinerStore := newTestKEKStore(t, joinerKEK)
+
 	var buf bytes.Buffer
-	err := runOfflineJoinHandshake(
+	err := runOfflineJoinHandshakeV2(
 		context.Background(),
 		chalSender, joinSender,
 		"peer.example:7001",
 		"node-2", "10.0.0.2:7001",
-		joinerKEK, // mismatched KEK
+		joinerStore, clusterID,
 		&buf,
 	)
 	require.Error(t, err, "wrong-KEK join must exit non-zero")

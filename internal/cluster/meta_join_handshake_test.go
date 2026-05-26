@@ -7,6 +7,7 @@
 package cluster
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,32 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// newJoinHandshakeFixtures returns a KEKStore seeded with the given KEK
+// at version 0 and a fixed 16-byte cluster_id, matching the Phase A wiring
+// the production receivers use.
+func newJoinHandshakeFixtures(t *testing.T, kek []byte) (*encrypt.KEKStore, []byte) {
+	t.Helper()
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, kek); err != nil {
+		t.Fatalf("seed KEKStore: %v", err)
+	}
+	clusterID := bytes.Repeat([]byte{0xAB}, 16)
+	return store, clusterID
+}
+
+// joinerTranscript builds the JoinTranscript the joiner-side will sign.
+// Mirrors the Phase A version pin (joiner=0, leader=0).
+func joinerTranscript(clusterID, nonce []byte, nodeID, addr string) encrypt.JoinTranscript {
+	return encrypt.JoinTranscript{
+		ClusterID:           clusterID,
+		Nonce:               nonce,
+		NodeID:              nodeID,
+		Address:             addr,
+		JoinerVersion:       0,
+		LeaderActiveVersion: 0,
+	}
+}
 
 func TestChallengeRequestReply_RoundTrip(t *testing.T) {
 	reqIn := ChallengeRequest{NodeID: "node-2"}
@@ -58,7 +85,8 @@ func TestClusterJoin_E2E_SameKEK(t *testing.T) {
 	for i := range kek {
 		kek[i] = byte(i)
 	}
-	verifier := encrypt.NewHandshakeVerifier(kek)
+	leaderStore, clusterID := newJoinHandshakeFixtures(t, kek)
+	verifier := encrypt.NewHandshakeVerifier(leaderStore, clusterID)
 
 	f := NewMetaFSM()
 	coord := &fakeJoinCoordinator{
@@ -80,8 +108,11 @@ func TestClusterJoin_E2E_SameKEK(t *testing.T) {
 	require.Equal(t, JoinStatusOK, chalReply.Status)
 	require.Len(t, chalReply.Nonce, 32)
 
-	// 2) Joiner computes HMAC(KEK, nonce) under its (matching) KEK.
-	response := encrypt.ComputeHandshakeResponse(kek, chalReply.Nonce)
+	// 2) Joiner computes HMAC(K_active, transcript) under its (matching) KEK.
+	joinerStore, _ := newJoinHandshakeFixtures(t, kek)
+	transcript := joinerTranscript(clusterID, chalReply.Nonce, "node-2", "10.0.0.2:7001")
+	response, err := encrypt.ComputeHandshakeResponse(joinerStore, 0, transcript)
+	require.NoError(t, err)
 
 	// 3) Joiner calls Join with (nonce, response). The leader verifies and
 	// admits — onJoin records the new member.
@@ -113,7 +144,8 @@ func TestClusterJoin_E2E_WrongKEK_403(t *testing.T) {
 	for i := range joinerKEK {
 		joinerKEK[i] = byte(255 - i) // different KEK
 	}
-	verifier := encrypt.NewHandshakeVerifier(leaderKEK)
+	leaderStore, clusterID := newJoinHandshakeFixtures(t, leaderKEK)
+	verifier := encrypt.NewHandshakeVerifier(leaderStore, clusterID)
 
 	f := NewMetaFSM()
 	coord := &fakeJoinCoordinator{
@@ -133,8 +165,13 @@ func TestClusterJoin_E2E_WrongKEK_403(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, JoinStatusOK, chalReply.Status)
 
-	// Joiner computes the HMAC under the WRONG key.
-	badResponse := encrypt.ComputeHandshakeResponse(joinerKEK, chalReply.Nonce)
+	// Joiner computes the HMAC under the WRONG KEK (but signs the same
+	// transcript shape — the MAC will not match the verifier's expected
+	// MAC under leaderKEK).
+	joinerStore, _ := newJoinHandshakeFixtures(t, joinerKEK)
+	transcript := joinerTranscript(clusterID, chalReply.Nonce, "node-2", "10.0.0.2:7001")
+	badResponse, err := encrypt.ComputeHandshakeResponse(joinerStore, 0, transcript)
+	require.NoError(t, err)
 
 	joinReqBytes, err := encodeJoinRequest(JoinRequest{
 		NodeID:            "node-2",
