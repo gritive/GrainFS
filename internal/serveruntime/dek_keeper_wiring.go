@@ -112,6 +112,12 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	state.dekKeeper = keeper
 	state.kekStore = store
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
+	// kekLeaseTracker counts in-flight KEK consumers per version. Phase B has no
+	// runtime acquire sites — Phase D wires them (raft snapshot reader holding
+	// K_old during decrypt + InstallSnapshot receiver). LeaseSnapshot RPC returns
+	// 0 deterministically in Phase B, which is correct: prune-after-retire only
+	// requires lease_count == 0, and there are no consumers to drive it nonzero.
+	state.kekLeaseTracker = encrypt.NewKEKLeaseTracker()
 	WireDEKPostCommit(fsm, nil /* proposer (§6) */, keeper, nil /* scrubberKick (§6) */)
 	return nil
 }
