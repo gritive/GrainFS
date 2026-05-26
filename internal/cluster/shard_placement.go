@@ -12,6 +12,9 @@ import (
 	"errors"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // PlacementRecord holds the shard node list and the EC parameters used when
@@ -63,6 +66,18 @@ type ObjectMetaRef struct {
 //
 // fn returning a non-nil error stops iteration.
 func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
+	return f.iterLatestObjectMetas(func(ref ObjectMetaRef, _ objectMeta) error {
+		return fn(ref)
+	})
+}
+
+// iterLatestObjectMetas runs both the lat: pass and the legacy obj: fallback,
+// reads+decrypts+unmarshals each meta once, applies the delete-marker skip and
+// seen-dedup, and invokes fn with the built ObjectMetaRef AND the full
+// objectMeta. It is the shared core behind IterObjectMetas and
+// IterECShardScanTargets; behavior must stay identical to the public contract
+// documented on IterObjectMetas.
+func (f *FSM) iterLatestObjectMetas(fn func(ref ObjectMetaRef, m objectMeta) error) error {
 	return f.db.View(func(txn *badger.Txn) error {
 		seen := make(map[string]struct{}) // "bucket\x00key" → visited
 
@@ -120,7 +135,7 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 				return nil
 			}
 			seen[bucket+"\x00"+key] = struct{}{}
-			return fn(ref)
+			return fn(ref, m)
 		}); serr != nil {
 			return serr
 		}
@@ -180,8 +195,149 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			ref.NodeIDs = m.NodeIDs
 			ref.PlacementGroupID = m.PlacementGroupID
 			seen[bucket+"\x00"+key] = struct{}{}
-			return fn(ref)
+			return fn(ref, m)
 		})
+	})
+}
+
+// ECShardKind distinguishes the provenance of an EC shard scan target. It is
+// set once at enumeration time and must never be re-derived from ShardKey
+// downstream.
+type ECShardKind int
+
+const (
+	// ECShardObjectVersion is a plain single-blob object-version shard whose
+	// placement lives on the object meta's top-level EC fields.
+	ECShardObjectVersion ECShardKind = iota
+	// ECShardSegment is a chunked/segment shard (`<key>/segments/<blobID>`)
+	// whose placement lives in objectMeta.Segments[].
+	ECShardSegment
+	// ECShardCoalesced is a coalesced shard (`<key>/coalesced/<id>`) whose
+	// placement lives in objectMeta.Coalesced[].
+	ECShardCoalesced
+)
+
+// ECShardScanTarget is one EC shard the placement monitor must verify. Object-
+// version targets carry the raw object EC fields (ECData/ECParity/NodeIDs/
+// PlacementGroupID) and leave ShardKey/Placement empty — the monitor resolves
+// the placement via ResolvePlacement. Segment/coalesced targets carry a fully
+// resolved ShardKey + Placement and leave the raw object fields zero.
+type ECShardScanTarget struct {
+	Kind             ECShardKind
+	Bucket           string
+	ObjectKey        string
+	VersionID        string
+	ShardKey         string
+	ECData, ECParity uint8
+	NodeIDs          []string
+	PlacementGroupID string
+	Placement        PlacementRecord
+}
+
+// IterECShardScanTargets emits one target per EC shard to verify, covering
+// object-version, segment, and coalesced shards. Provenance (Kind) is set here
+// and must never be re-derived from ShardKey downstream.
+//
+// Per object meta:
+//   - An object-version target is emitted ONLY when the object has neither
+//     segments nor coalesced shards (a real key/versionID object-version shard
+//     exists on disk). For chunked/coalesced objects the top-level EC fields are
+//     just a segment-0 mirror with no on-disk object-version shard, so no
+//     object-version target is emitted. No EC validation happens here — the
+//     monitor's ResolvePlacement owns that and skips non-EC objects.
+//   - Each EC segment ref yields an ECShardSegment target; each EC coalesced
+//     ref yields an ECShardCoalesced target. A ref with ECData==0 (owner-local)
+//     is silently skipped; a ref whose NodeIDs length != ECData+ECParity is
+//     malformed and is skipped with a warning + metric.
+//
+// fn returning a non-nil error stops iteration.
+func (f *FSM) IterECShardScanTargets(fn func(ECShardScanTarget) error) error {
+	return f.iterLatestObjectMetas(func(ref ObjectMetaRef, m objectMeta) error {
+		if len(m.Segments) == 0 && len(m.Coalesced) == 0 {
+			return fn(ECShardScanTarget{
+				Kind:             ECShardObjectVersion,
+				Bucket:           ref.Bucket,
+				ObjectKey:        ref.Key,
+				VersionID:        ref.VersionID,
+				ECData:           m.ECData,
+				ECParity:         m.ECParity,
+				NodeIDs:          m.NodeIDs,
+				PlacementGroupID: m.PlacementGroupID,
+			})
+		}
+
+		for i := range m.Segments {
+			seg := m.Segments[i]
+			if seg.ECData == 0 {
+				continue // owner-local segment: no EC shard to verify
+			}
+			if len(seg.NodeIDs) != int(seg.ECData)+int(seg.ECParity) {
+				log.Warn().
+					Str("component", "placement-monitor").
+					Str("bucket", ref.Bucket).
+					Str("key", ref.Key).
+					Str("blob_id", seg.BlobID).
+					Int("ec_data", int(seg.ECData)).
+					Int("ec_parity", int(seg.ECParity)).
+					Int("node_ids", len(seg.NodeIDs)).
+					Msg("placement-monitor: skipping malformed segment EC ref (NodeIDs length mismatch)")
+				metrics.PlacementMonitorInvalidECRef.WithLabelValues("segment").Inc()
+				continue
+			}
+			if err := fn(ECShardScanTarget{
+				Kind:      ECShardSegment,
+				Bucket:    ref.Bucket,
+				ObjectKey: ref.Key,
+				VersionID: ref.VersionID,
+				ShardKey:  ref.Key + "/segments/" + seg.BlobID,
+				Placement: PlacementRecord{
+					Nodes: seg.NodeIDs,
+					K:     int(seg.ECData),
+					M:     int(seg.ECParity),
+				},
+			}); err != nil {
+				return err
+			}
+		}
+
+		for i := range m.Coalesced {
+			cs := m.Coalesced[i]
+			if cs.ECData == 0 {
+				continue // owner-local coalesced blob: no EC shard to verify
+			}
+			if len(cs.NodeIDs) != int(cs.ECData)+int(cs.ECParity) {
+				log.Warn().
+					Str("component", "placement-monitor").
+					Str("bucket", ref.Bucket).
+					Str("key", ref.Key).
+					Str("coalesced_id", cs.CoalescedID).
+					Int("ec_data", int(cs.ECData)).
+					Int("ec_parity", int(cs.ECParity)).
+					Int("node_ids", len(cs.NodeIDs)).
+					Msg("placement-monitor: skipping malformed coalesced EC ref (NodeIDs length mismatch)")
+				metrics.PlacementMonitorInvalidECRef.WithLabelValues("coalesced").Inc()
+				continue
+			}
+			// Asymmetry: the coalesced ShardKey is authoritative (the
+			// pre-populated CoalescedShardRef.ShardKey), whereas the segment
+			// ShardKey above is derived (key+"/segments/"+blobID). Do not
+			// "normalize" the two — coalesced refs carry their own key.
+			if err := fn(ECShardScanTarget{
+				Kind:      ECShardCoalesced,
+				Bucket:    ref.Bucket,
+				ObjectKey: ref.Key,
+				VersionID: ref.VersionID,
+				ShardKey:  cs.ShardKey,
+				Placement: PlacementRecord{
+					Nodes: cs.NodeIDs,
+					K:     int(cs.ECData),
+					M:     int(cs.ECParity),
+				},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

@@ -200,6 +200,14 @@ var (
 		Help: "Total EC shards skipped by scrub because no integrity oracle was available.",
 	}, []string{"reason"})
 
+	// PlacementMonitorInvalidECRef counts EC shard refs the placement monitor
+	// skipped because their NodeIDs length did not match ECData+ECParity. The
+	// "kind" label is "segment" or "coalesced".
+	PlacementMonitorInvalidECRef = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_placement_monitor_invalid_ec_ref_total",
+		Help: "Total EC shard refs skipped by the placement monitor due to a malformed NodeIDs length.",
+	}, []string{"kind"})
+
 	// DiskUsedPct tracks local disk usage percentage per node.
 	DiskUsedPct = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_disk_used_pct",
