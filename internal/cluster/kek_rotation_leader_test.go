@@ -311,3 +311,120 @@ func TestLeaderProposeKEKRotate_ClearEpochCancelsInFlight(t *testing.T) {
 		t.Errorf("expected not-leader reject after ClearEpoch, got: %v", err)
 	}
 }
+
+func TestLeaderProposeKEKRotate_HappyPathRecordsApplied(t *testing.T) {
+	// Strengthens HappyPath: verify the FSM recorded RotationStatusApplied
+	// for the request — this is the signal the leader's status translation
+	// layer relies on to return nil.
+	fx := newLeaderTestFixture(t, leaderFixtureOpts{})
+	if err := fx.leader.ProposeKEKRotate("rotate-now", "admin@uds"); err != nil {
+		t.Fatalf("ProposeKEKRotate: %v", err)
+	}
+	// Scan the ring for the (single) Applied entry.
+	fx.fsm.mu.RLock()
+	defer fx.fsm.mu.RUnlock()
+	if len(fx.fsm.lastRotationRequests) == 0 {
+		t.Fatal("no rotation request status recorded")
+	}
+	last := fx.fsm.lastRotationRequests[len(fx.fsm.lastRotationRequests)-1]
+	if last.status != RotationStatusApplied {
+		t.Errorf("last recorded rotation status = %v, want RotationStatusApplied", last.status)
+	}
+}
+
+func TestLeaderProposeKEKRotate_AcceptsExactlyMinFreeBytes(t *testing.T) {
+	// Threshold boundary: a node reporting exactly MinKeystoreFreeBytes is
+	// accepted (we reject <, not <=).
+	fx := newLeaderTestFixture(t, leaderFixtureOpts{
+		probes: []KEKDiskSpaceResp{
+			{NodeID: "node-edge", FreeBytes: MinKeystoreFreeBytes},
+		},
+	})
+	if err := fx.leader.ProposeKEKRotate("rotate-now", "admin@uds"); err != nil {
+		t.Errorf("expected accept at exact threshold, got: %v", err)
+	}
+}
+
+// --- dryRunValidateKEKRotate direct unit tests ----------------------------
+//
+// These exercise the four reject branches of dryRunValidateKEKRotate
+// independent of the surrounding ProposeKEKRotate pipeline. Each test builds
+// a happy cmd via the FSM-level fixture (which already wires K0 + DEK gen 1),
+// tampers exactly one field, and asserts the precise rejection reason. Guards
+// against silent regression: if any branch starts returning nil, the FSM
+// apply loop on every node would fatal-halt on the first bad rotation.
+
+func buildDryRunCmd(t *testing.T) (*kekRotateTestFixture, KEKRotateCmd, []byte, []byte) {
+	t.Helper()
+	fx := newKEKRotateTestFixture(t)
+	cmd := fx.buildHappyCmd([16]byte{0xDD})
+	return fx, cmd, fx.k0, fx.k1
+}
+
+func TestDryRunValidateKEKRotate_AcceptsHappyCmd(t *testing.T) {
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	if err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew); err != nil {
+		t.Fatalf("dry-run on happy cmd: %v", err)
+	}
+}
+
+func TestDryRunValidateKEKRotate_RejectsWrongNewVersion(t *testing.T) {
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	cmd.NewVersion = 5 // active is 0, want 1
+	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
+	if err == nil || !strings.Contains(err.Error(), "new_version=5") {
+		t.Errorf("expected version-advance reject, got: %v", err)
+	}
+}
+
+func TestDryRunValidateKEKRotate_RejectsWrapSetHashMismatch(t *testing.T) {
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	cmd.WrapSetHash = append([]byte(nil), cmd.WrapSetHash...)
+	cmd.WrapSetHash[0] ^= 0xFF
+	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
+	if err == nil || !strings.Contains(err.Error(), "wrap_set_hash mismatch") {
+		t.Errorf("expected wrap_set_hash mismatch, got: %v", err)
+	}
+}
+
+func TestDryRunValidateKEKRotate_RejectsWrapSetHashWrongLength(t *testing.T) {
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	cmd.WrapSetHash = cmd.WrapSetHash[:30]
+	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
+	if err == nil || !strings.Contains(err.Error(), "wrap_set_hash length") {
+		t.Errorf("expected wrap_set_hash length reject, got: %v", err)
+	}
+}
+
+func TestDryRunValidateKEKRotate_RejectsBadAADUnwrap(t *testing.T) {
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	cmd.WrappedNewKEK = append([]byte(nil), cmd.WrappedNewKEK...)
+	cmd.WrappedNewKEK[len(cmd.WrappedNewKEK)-1] ^= 0xFF
+	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
+	if err == nil || !strings.Contains(err.Error(), "AAD-unwrap K_new") {
+		t.Errorf("expected AAD-unwrap reject, got: %v", err)
+	}
+}
+
+func TestDryRunValidateKEKRotate_RejectsKNewLeaderMismatch(t *testing.T) {
+	// K_new AAD-unwraps cleanly to a 32-byte plaintext, but the leader's
+	// rngKEK returned a different K_new. This protects against an in-process
+	// payload tampering between AESGCMSealWithAAD and dry-run.
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	other := bytes.Repeat([]byte{0x99}, encrypt.KEKSize) // != fx.k1
+	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, other)
+	if err == nil || !strings.Contains(err.Error(), "K_new payload-vs-leader") {
+		t.Errorf("expected K_new mismatch reject, got: %v", err)
+	}
+	_ = plainKnew
+}
+
+func TestDryRunValidateKEKRotate_RejectsBadRewrap(t *testing.T) {
+	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
+	cmd.RewrappedDEKs = []RewrappedDEKEntry{{Gen: 1, Wrapped: append([]byte(nil), cmd.RewrappedDEKs[0].Wrapped...)}}
+	cmd.RewrappedDEKs[0].Wrapped[len(cmd.RewrappedDEKs[0].Wrapped)-1] ^= 0xFF
+	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
+	if err == nil || !strings.Contains(err.Error(), "rewrapped_deks") {
+		t.Errorf("expected rewrapped_deks reject, got: %v", err)
+	}
+}
