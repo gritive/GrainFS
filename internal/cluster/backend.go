@@ -153,6 +153,11 @@ type DistributedBackend struct {
 	bl             *BoundedLoads   // hot-node detection; wired by StartPlacementRuntime
 	clusterCfg     *ClusterConfig  // live policy view; wired by StartPlacementRuntime (defaults until then)
 
+	// frozenSegSrc yields snapshot-frozen segment paths (bucket -> paths) for the
+	// orphan-segment known-set. nil until SetFrozenSegmentPathSource wires the
+	// snapshot Manager at boot. nil => AllFrozenSegmentPaths fails closed.
+	frozenSegSrc func() (map[string][]string, error)
+
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
