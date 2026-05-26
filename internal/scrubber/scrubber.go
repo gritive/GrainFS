@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 const otelTracerName = "grainfs/scrubber"
@@ -95,6 +96,60 @@ type AppendableRecord struct {
 // scrubber can build the known-segment set for orphan sweep.
 type AppendableScannable interface {
 	ScanAppendableObjects(bucket string) (<-chan AppendableRecord, error)
+}
+
+// segmentManifestSource exposes the authoritative chunk-reference sources the
+// orphan-segment sweep must treat as "known": live object versions (all
+// versions, not just appendable) and snapshot-frozen chunks. Packed small
+// objects live inside packblobs (not under <key>_segments/), so the orphan
+// SEGMENT sweep never targets them — intentionally out of this set.
+//
+// No backend satisfies this interface yet (SnapshotFrozenSegmentPaths wiring
+// is Task 10). Until then the type-assert in the sweep loop returns false and
+// behaviour is identical to today (regression-zero).
+type segmentManifestSource interface {
+	// ListAllObjects returns every live object version (with Segments).
+	ListAllObjects() ([]storage.SnapshotObject, error)
+	// SnapshotFrozenSegmentPaths returns segment file paths pinned by live
+	// snapshot descriptors, in "<bucket>/<key>_segments/<blobID>" form.
+	SnapshotFrozenSegmentPaths(bucket string) ([]string, error)
+}
+
+// buildKnownSegments assembles the known-segment set for one bucket from all
+// authoritative manifest sources (spec: known-set must cover live versions +
+// snapshot descriptors, not just appendable objects).
+//
+// Fail-closed: if either source errors the partial set is unsafe to sweep
+// against (a missing entry would make a live chunk look orphaned and get
+// deleted), so the error is returned and the caller MUST skip the sweep for
+// this bucket rather than delete against an incomplete known set.
+//
+// Only o.Segments contributes: coalesced blobs live at "<key>/coalesced/<id>",
+// not under "<key>_segments/", so the orphan-SEGMENT sweep never targets them
+// and they are intentionally excluded from this segment-scoped known set.
+func buildKnownSegments(bucket string, src segmentManifestSource) (map[string]bool, error) {
+	known := make(map[string]bool)
+	objs, err := src.ListAllObjects()
+	if err != nil {
+		return nil, fmt.Errorf("known-set list objects: %w", err)
+	}
+	for i := range objs {
+		o := &objs[i]
+		if o.Bucket != bucket {
+			continue
+		}
+		for _, seg := range o.Segments {
+			known[bucket+"/"+o.Key+"_segments/"+storage.ParseLocator(seg.BlobID).Ref] = true
+		}
+	}
+	paths, err := src.SnapshotFrozenSegmentPaths(bucket)
+	if err != nil {
+		return nil, fmt.Errorf("known-set snapshot paths: %w", err)
+	}
+	for _, p := range paths {
+		known[p] = true
+	}
+	return known, nil
 }
 
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
@@ -546,7 +601,24 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 					}
 				}
 			}
-			segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
+			// Option (A): union with live object versions + snapshot-frozen paths
+			// when the backend satisfies segmentManifestSource. Until Task 10 wires
+			// SnapshotFrozenSegmentPaths into a real backend, no backend will satisfy
+			// the full interface so this block is a no-op (regression-zero).
+			if src, ok := s.backend.(segmentManifestSource); ok {
+				extra, err := buildKnownSegments(bucket, src)
+				if err != nil {
+					// Fail-closed: a partial known set could mark a live chunk
+					// orphaned and delete it. Skip this bucket's segment sweep.
+					log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: known-set build failed, skipping segment sweep")
+					continue
+				}
+				for k, v := range extra {
+					knownSegmentsB[k] = v
+				}
+			}
+			// tombstone source + retention window are wired in serveruntime (Task 10); nil = age-gate only (today's behavior).
+			segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining, nil, 0)
 		}
 	}
 

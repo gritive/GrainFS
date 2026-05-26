@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
@@ -1139,12 +1140,20 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 
 	return b.db.Update(func(txn *badger.Txn) error {
 		mk := b.objectMetaKey(bucket, key)
-		_, err := txn.Get(mk)
-		if err == badger.ErrKeyNotFound {
+		prev, err := b.readObjectInTxn(txn, mk)
+		if errors.Is(err, badger.ErrKeyNotFound) {
 			return nil // S3: delete nonexistent is not an error
 		}
 		if err != nil {
 			return err
+		}
+		store := NewChunkRefStore(txn)
+		m := chunkref.ObjectVersionID(bucket, key, prev.VersionID)
+		now := time.Now()
+		for _, c := range prev.ChunkLocators() {
+			if err := store.RemoveRef(m, chunkref.ChunkID(c), now); err != nil {
+				return err
+			}
 		}
 		return txn.Delete(mk)
 	})

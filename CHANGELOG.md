@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.351.0] - 2026-05-27
+
+### Fixed
+
+- **Cluster snapshots and PITR now preserve object chunk references.** A cluster
+  snapshot previously captured object metadata without the object's segment and
+  coalesced-blob references, so objects restored from a cluster snapshot (or via
+  point-in-time restore) lost the manifest needed to read their data back. Snapshots
+  now carry the full chunk reference list (segments and coalesced blobs) for every
+  object version, so restored objects remain readable. Single-node snapshots were
+  unaffected.
+
 ## [0.0.350.0] - 2026-05-27
 
 ### Added

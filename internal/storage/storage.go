@@ -193,7 +193,11 @@ type SnapshotObject struct {
 	ACL            uint8        `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
 	SSEAlgorithm   string       `json:"sse_algorithm,omitempty"`
 	Segments       []SegmentRef `json:"segments,omitempty"`
-	Tags           []Tag        `json:"tags,omitempty"`
+	// Coalesced records merged segment blobs frozen at snapshot time. Added so
+	// snapshot freeze can pin coalesced chunks; omitempty keeps old snapshot
+	// files backward compatible.
+	Coalesced []CoalescedRef `json:"coalesced,omitempty"`
+	Tags      []Tag          `json:"tags,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.
