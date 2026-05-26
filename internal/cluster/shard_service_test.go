@@ -1072,3 +1072,72 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("encrypted-payload"), got)
 }
+
+func TestDataWALRepairCollector_CoalescesByBucketShardAndIndex(t *testing.T) {
+	collector := NewDataWALRepairCollector()
+
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 10,
+		Reason:       DataWALRepairMissing,
+	})
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 99,
+		Reason:       DataWALRepairSizeMismatch,
+	})
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     3,
+		ExpectedSize: 11,
+		Reason:       DataWALRepairMissing,
+	})
+	// Same ShardIdx as the first entry but a different Bucket: must NOT
+	// coalesce, proving the composite key includes Bucket.
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "other",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 22,
+		Reason:       DataWALRepairMissing,
+	})
+	// Same Bucket and ShardIdx as the first entry but a different ShardKey:
+	// must NOT coalesce, proving the composite key includes ShardKey.
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v2",
+		ShardIdx:     2,
+		ExpectedSize: 33,
+		Reason:       DataWALRepairMissing,
+	})
+
+	got := collector.Candidates()
+	require.Len(t, got, 4)
+	require.Equal(t, DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 99,
+		Reason:       DataWALRepairSizeMismatch,
+	}, got[0])
+	require.Equal(t, 3, got[1].ShardIdx)
+	require.Equal(t, DataWALRepairCandidate{
+		Bucket:       "other",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 22,
+		Reason:       DataWALRepairMissing,
+	}, got[2])
+	require.Equal(t, DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v2",
+		ShardIdx:     2,
+		ExpectedSize: 33,
+		Reason:       DataWALRepairMissing,
+	}, got[3])
+}

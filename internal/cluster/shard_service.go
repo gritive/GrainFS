@@ -68,6 +68,9 @@ type ShardService struct {
 	// dataWAL, when set, receives an OpShardPut record before each local shard
 	// file mutation so that a torn / lost shard file can be replayed on boot.
 	dataWAL DataWALAppender
+	// dataWALRepairSink, when set, receives repair candidates discovered
+	// during startup scanning of metadata-only WAL records.
+	dataWALRepairSink DataWALRepairSink
 	// replayingDataWAL is true only while RecoverDataWAL is materializing
 	// records. Atomic because shard writes fan out across goroutines (e.g. EC
 	// writer) and may consult it concurrently with boot recovery in tests.
@@ -115,6 +118,12 @@ func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 // replays the log on boot to restore any missing shard files.
 func WithDataWAL(w DataWALAppender) ShardServiceOption {
 	return func(s *ShardService) { s.dataWAL = w }
+}
+
+// WithDataWALRepairSink wires a sink that receives repair candidates
+// discovered during startup scanning of metadata-only WAL records.
+func WithDataWALRepairSink(sink DataWALRepairSink) ShardServiceOption {
+	return func(s *ShardService) { s.dataWALRepairSink = sink }
 }
 
 // WithNoRedundancy wires a provider reporting whether the deployment has no EC
@@ -1174,6 +1183,73 @@ type ShardMetadataWALRecord struct {
 	Key      string // ecObjectShardKey(key, versionID) form
 	ShardIdx int
 	Size     int64
+}
+
+// DataWALRepairReason classifies why a shard was nominated for repair.
+type DataWALRepairReason string
+
+const (
+	DataWALRepairMissing      DataWALRepairReason = "missing"
+	DataWALRepairSizeMismatch DataWALRepairReason = "size_mismatch"
+)
+
+// DataWALRepairCandidate describes one shard that needs repair after a
+// metadata-only WAL record is discovered during startup.
+type DataWALRepairCandidate struct {
+	Bucket       string
+	ShardKey     string
+	ShardIdx     int
+	ExpectedSize int64
+	Reason       DataWALRepairReason
+}
+
+// DataWALRepairSink receives repair candidates discovered during data WAL
+// startup scanning. Implementations must be safe for concurrent use.
+type DataWALRepairSink interface {
+	AddDataWALRepairCandidate(DataWALRepairCandidate)
+}
+
+// DataWALRepairCollector accumulates repair candidates, coalescing duplicate
+// (bucket, shardKey, shardIdx) entries so the last write wins. It is safe
+// for concurrent use.
+type DataWALRepairCollector struct {
+	mu      sync.Mutex
+	byKey   map[string]DataWALRepairCandidate
+	ordered []string
+}
+
+// NewDataWALRepairCollector returns a ready-to-use collector.
+func NewDataWALRepairCollector() *DataWALRepairCollector {
+	return &DataWALRepairCollector{byKey: make(map[string]DataWALRepairCandidate)}
+}
+
+// AddDataWALRepairCandidate records a candidate. Duplicate keys are
+// overwritten so the last add wins (e.g. size_mismatch supersedes missing).
+func (c *DataWALRepairCollector) AddDataWALRepairCandidate(candidate DataWALRepairCandidate) {
+	if c == nil {
+		return
+	}
+	key := candidate.Bucket + "\x00" + candidate.ShardKey + "\x00" + strconv.Itoa(candidate.ShardIdx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.byKey[key]; !ok {
+		c.ordered = append(c.ordered, key)
+	}
+	c.byKey[key] = candidate
+}
+
+// Candidates returns all collected candidates in insertion order.
+func (c *DataWALRepairCollector) Candidates() []DataWALRepairCandidate {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]DataWALRepairCandidate, 0, len(c.ordered))
+	for _, key := range c.ordered {
+		out = append(out, c.byKey[key])
+	}
+	return out
 }
 
 // AppendShardMetadataBatch records N shard metadata-only entries in the
