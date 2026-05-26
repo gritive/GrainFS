@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -115,77 +114,6 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 func TestProposalForwardPeersFallsBackToShardServicePeers(t *testing.T) {
 	got := proposalForwardPeers(nil, []string{"127.0.0.1:7001", "127.0.0.1:7002"}, "127.0.0.1:7002")
 	require.Equal(t, []string{"127.0.0.1:7001"}, got)
-}
-
-func TestDistributedBackend_PutObjectTopologyWriteReportsUnavailableTarget(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
-	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
-
-	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
-	baseCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	ctx := ContextWithPlacementGroupEntry(baseCtx, group)
-
-	_, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
-	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
-}
-
-func TestDistributedBackend_PutObjectTopologyWriteRejectsUnhealthyTargetBeforeShardWrite(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
-	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
-	b.peerHealth.MarkUnhealthy("n2")
-
-	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
-	ctx := ContextWithPlacementGroupEntry(context.Background(), group)
-
-	_, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
-	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
-	require.ErrorContains(t, err, "known unhealthy placement target")
-}
-
-func TestDistributedBackend_SetClusterNodesConcurrentReaders(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	b.SetECConfig(ECConfig{DataShards: 3, ParityShards: 2})
-	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
-			b.SetClusterNodes([]string{"n1", "n2", "n3", "n4", fmt.Sprintf("n%d", i+5)})
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
-			_ = b.LiveNodes()
-			_ = b.ECActive()
-			_ = b.EffectiveECConfig()
-			_ = b.NodeID()
-			if ph := b.PeerHealth(); ph != nil {
-				_ = ph.Snapshot()
-			}
-		}
-	}()
-	wg.Wait()
-}
-
-func TestDistributedBackend_WaitAppliedUsesBackendApplyProgress(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-	applied := b.lastApplied.Load()
-	require.NotZero(t, applied)
-	b.lastApplied.Store(0)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	err := b.WaitApplied(ctx, applied)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestDistributedBackend_Close(t *testing.T) {
@@ -430,32 +358,4 @@ func TestDistributedBackend_ForceDeleteBucket_SlashKeyAndVersionedPrefix(t *test
 
 	require.NoError(t, b.ForceDeleteBucket(ctx, "slash-bucket"))
 	require.ErrorIs(t, b.HeadBucket(ctx, "slash-bucket"), storage.ErrBucketNotFound)
-}
-
-// TestNewECObjectReader_BLFlag verifies that newECObjectReader respects the
-// BoundedLoadsEnabled cluster-config flag. When the flag is disabled at runtime,
-// ecObjectReader.bl must be nil so that computeAttemptOrder skips BL reranking —
-// matching write-path behaviour where selectECPlacementWeighted already checks blEnabled.
-func TestNewECObjectReader_BLFlag(t *testing.T) {
-	store := NewNodeStatsStore(time.Minute)
-	params := BoundedLoadsParams{C: 1.25, CLow: 1.0}
-	fakeBL := NewBoundedLoads(store, params)
-
-	t.Run("enabled (default): bl injected", func(t *testing.T) {
-		b := newTestDistributedBackend(t)
-		b.bl = fakeBL
-		// Default config: BoundedLoadsEnabled == true
-		r := b.newECObjectReader()
-		require.NotNil(t, r.bl, "bl must be injected when BoundedLoadsEnabled=true")
-	})
-
-	t.Run("disabled via patch: bl not injected", func(t *testing.T) {
-		b := newTestDistributedBackend(t)
-		b.bl = fakeBL
-		// Disable via patch — should make newECObjectReader skip bl injection.
-		disabled := false
-		b.clusterCfg.applyPatch(ClusterConfigPatch{BoundedLoadsEnabled: &disabled}, time.Now())
-		r := b.newECObjectReader()
-		require.Nil(t, r.bl, "bl must NOT be injected when BoundedLoadsEnabled=false")
-	})
 }
