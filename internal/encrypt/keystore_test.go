@@ -263,3 +263,52 @@ func TestKEKStore_LoadOrInitDir_RejectsLoosePerms(t *testing.T) {
 		t.Fatalf("expected perm error for 0o644 KEK file, got nil")
 	}
 }
+
+func TestKEKStore_ParseKeyFilename_RejectsLeadingZero(t *testing.T) {
+	cases := []struct {
+		in       string
+		expectOK bool
+		expectV  uint32
+	}{
+		{"0.key", true, 0},
+		{"1.key", true, 1},
+		{"42.key", true, 42},
+		{"4294967295.key", true, 4294967295},
+		{"01.key", false, 0},         // leading zero
+		{"007.key", false, 0},        // leading zero
+		{"+1.key", false, 0},         // explicit sign
+		{"4294967296.key", false, 0}, // overflows uint32
+		{"foo.key", false, 0},
+		{".key", false, 0},
+		{"0.key.bak", false, 0},
+	}
+	for _, c := range cases {
+		v, ok := parseKeyFilename(c.in)
+		if ok != c.expectOK {
+			t.Errorf("parseKeyFilename(%q): ok = %v, want %v", c.in, ok, c.expectOK)
+			continue
+		}
+		if ok && v != c.expectV {
+			t.Errorf("parseKeyFilename(%q): v = %d, want %d", c.in, v, c.expectV)
+		}
+	}
+}
+
+func TestKEKStore_AddAndPersist_RefusesExistingDiskVersion(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	s, _ := LoadOrInitKEKStoreDir(keysDir)
+	originalBytes, _ := os.ReadFile(filepath.Join(keysDir, "0.key"))
+	err := s.AddAndPersist(keysDir, 0, bytes.Repeat([]byte{0x99}, KEKSize))
+	if err == nil {
+		t.Fatal("AddAndPersist accepted version 0 (already on disk)")
+	}
+	if !errors.Is(err, ErrKEKVersionDuplicate) {
+		t.Errorf("expected ErrKEKVersionDuplicate, got %v", err)
+	}
+	currentBytes, _ := os.ReadFile(filepath.Join(keysDir, "0.key"))
+	if !bytes.Equal(originalBytes, currentBytes) {
+		t.Errorf("AddAndPersist mutated existing 0.key on failure")
+	}
+	_ = s
+}

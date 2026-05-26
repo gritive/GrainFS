@@ -146,6 +146,10 @@ func parseKeyFilename(name string) (uint32, bool) {
 	if err != nil {
 		return 0, false
 	}
+	// Reject non-canonical forms: leading zeros, "+1", etc.
+	if strconv.FormatUint(v, 10) != stem {
+		return 0, false
+	}
 	return uint32(v), true
 }
 
@@ -162,8 +166,10 @@ func parseKeyFilename(name string) (uint32, bool) {
 func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 	parent := filepath.Dir(keysDir)
 	legacy := filepath.Join(parent, "kek.key")
-	if _, err := os.Stat(legacy); err == nil {
+	if _, err := os.Lstat(legacy); err == nil {
 		return nil, fmt.Errorf("%w: %s", ErrLegacyKEKDetected, legacy)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("KEKStore: stat legacy %q: %w", legacy, err)
 	}
 
 	if err := os.MkdirAll(keysDir, 0o700); err != nil {
@@ -212,15 +218,30 @@ func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 	return s, nil
 }
 
-// AddAndPersist adds a KEK version to the in-memory store AND writes it to
-// disk atomically. Used by KEK rotation Apply in a later phase; exposed
-// in Phase A for testability.
+// AddAndPersist writes a KEK version to disk atomically THEN adds it to
+// the in-memory store. Disk-first is critical: if Add succeeds but the
+// disk write later fails, in-memory state would silently diverge from
+// disk. Pre-flights with Lstat to refuse if the version is already on
+// disk — this prevents the disk-first write from overwriting an existing
+// KEK file with caller-supplied bytes, and prevents the rollback Remove
+// from deleting a pre-existing file we should never have touched.
+// On Add failure (e.g. duplicate in-memory but absent on disk), best-effort
+// remove the file we just wrote.
 func (s *KEKStore) AddAndPersist(keysDir string, version uint32, kek []byte) error {
-	if err := s.Add(version, kek); err != nil {
+	path := filepath.Join(keysDir, strconv.FormatUint(uint64(version), 10)+".key")
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("%w: %d (file %s already exists)", ErrKEKVersionDuplicate, version, path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("KEKStore.AddAndPersist: stat %q: %w", path, err)
+	}
+	if err := writeKEKFileAtomic(path, kek); err != nil {
 		return err
 	}
-	path := filepath.Join(keysDir, strconv.FormatUint(uint64(version), 10)+".key")
-	return writeKEKFileAtomic(path, kek)
+	if err := s.Add(version, kek); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func readKEKFile(path string) ([]byte, error) {
