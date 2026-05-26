@@ -146,6 +146,56 @@ func TestHandshakeVerifier_MismatchBurnsNonce(t *testing.T) {
 	}
 }
 
+func TestHandshakeVerifier_RejectsTamperedJoinerVersion(t *testing.T) {
+	store, clusterID := newTestHandshakeFixtures(t)
+	v := NewHandshakeVerifier(store, clusterID)
+	nonce, _ := v.IssueChallenge(0)
+	good := makeTranscript(clusterID, nonce)
+	mac, _ := ComputeHandshakeResponse(store, 0, good)
+	tampered := good
+	tampered.JoinerVersion = 99
+	if err := v.VerifyResponse(0, tampered, mac); err == nil {
+		t.Errorf("VerifyResponse accepted tampered joiner_version")
+	}
+}
+
+func TestHandshakeVerifier_UsedMapGCsExpiredEntries(t *testing.T) {
+	store, clusterID := newTestHandshakeFixtures(t)
+	// Short TTL so entries expire quickly in test.
+	v := NewHandshakeVerifierWithTTL(store, clusterID, 1*time.Millisecond)
+
+	// Burn a few nonces via successful verifies.
+	for i := 0; i < 5; i++ {
+		nonce, err := v.IssueChallenge(0)
+		if err != nil {
+			t.Fatalf("IssueChallenge %d: %v", i, err)
+		}
+		transcript := makeTranscript(clusterID, nonce)
+		mac, _ := ComputeHandshakeResponse(store, 0, transcript)
+		if err := v.VerifyResponse(0, transcript, mac); err != nil {
+			t.Fatalf("VerifyResponse %d: %v", i, err)
+		}
+	}
+
+	v.mu.Lock()
+	beforeGC := len(v.used)
+	v.mu.Unlock()
+	if beforeGC < 5 {
+		t.Fatalf("expected at least 5 used entries before GC, got %d", beforeGC)
+	}
+
+	// Wait past TTL, then trigger GC via IssueChallenge.
+	time.Sleep(20 * time.Millisecond)
+	_, _ = v.IssueChallenge(0)
+
+	v.mu.Lock()
+	afterGC := len(v.used)
+	v.mu.Unlock()
+	if afterGC != 0 {
+		t.Errorf("expected used map empty after GC past TTL, got %d", afterGC)
+	}
+}
+
 func TestHandshakeVerifier_VersionMismatchAtVerify(t *testing.T) {
 	store := NewKEKStore()
 	_ = store.Add(0, bytes.Repeat([]byte{0x10}, KEKSize))

@@ -64,7 +64,7 @@ type HandshakeVerifier struct {
 
 	mu     sync.Mutex
 	issued map[string]issuedNonce
-	used   map[string]struct{}
+	used   map[string]time.Time // value = burn timestamp
 }
 
 type issuedNonce struct {
@@ -89,7 +89,7 @@ func NewHandshakeVerifierWithTTL(store *KEKStore, clusterID []byte, ttl time.Dur
 		clusterID: append([]byte(nil), clusterID...),
 		ttl:       ttl,
 		issued:    make(map[string]issuedNonce),
-		used:      make(map[string]struct{}),
+		used:      make(map[string]time.Time),
 	}
 }
 
@@ -137,7 +137,9 @@ func (v *HandshakeVerifier) VerifyResponse(version uint32, transcript JoinTransc
 		return ErrHandshakeMismatch
 	}
 	if time.Since(got.at) > v.ttl {
-		delete(v.issued, key)
+		// Do not delete here; gcExpiredLocked will reap on next IssueChallenge.
+		// Caller observes ErrHandshakeExpired on this and subsequent attempts
+		// until TTL grace expires.
 		return ErrHandshakeExpired
 	}
 
@@ -151,11 +153,11 @@ func (v *HandshakeVerifier) VerifyResponse(version uint32, transcript JoinTransc
 	}
 	if !hmac.Equal(mac, expected) {
 		delete(v.issued, key)
-		v.used[key] = struct{}{}
+		v.used[key] = time.Now()
 		return ErrHandshakeMismatch
 	}
 	delete(v.issued, key)
-	v.used[key] = struct{}{}
+	v.used[key] = time.Now()
 	return nil
 }
 
@@ -163,6 +165,11 @@ func (v *HandshakeVerifier) gcExpiredLocked(now time.Time) {
 	for k, e := range v.issued {
 		if now.Sub(e.at) > v.ttl {
 			delete(v.issued, k)
+		}
+	}
+	for k, t := range v.used {
+		if now.Sub(t) > v.ttl {
+			delete(v.used, k)
 		}
 	}
 }
