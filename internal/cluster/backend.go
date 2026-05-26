@@ -2380,12 +2380,8 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 
 func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error, parts []storage.MultipartPartEntry, tags []storage.Tag, multipartUploadID string) (*storage.Object, error) {
 	stageStart := time.Now()
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
-		}
-		placementGroupID = "group-0"
+	if _, ok := PlacementGroupFromContext(ctx); !ok && b.bypassBucketCheck {
+		return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
 	}
 	liveNodes := b.effectivePlacementNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
@@ -2419,7 +2415,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	if err != nil {
 		return nil, err
 	}
-	placementGroupID = placementPlan.PlacementGroupID
+	placementGroupID := placementPlan.PlacementGroupID
 	effectiveCfg = placementPlan.Config
 	placement := placementPlan.NodeIDs
 	observePutStage("ec", "placement", stageStart)
@@ -2489,28 +2485,6 @@ func topologyShardWriteError(group ShardGroupEntry, cfg ECConfig, err error) err
 		Unavailable:   []string{shardErr.node},
 		FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
 	}
-}
-
-func (b *DistributedBackend) checkTopologyPlacementHealth(group ShardGroupEntry, cfg ECConfig, placement []string) error {
-	if b.currentPeerHealth() == nil {
-		return nil
-	}
-	for _, node := range placement {
-		if node == b.currentSelfAddr() {
-			continue
-		}
-		if !b.currentPeerHealth().IsHealthy(node) {
-			return &ErrInsufficientPlacementTargets{
-				Operation:     "put_object",
-				GroupID:       group.ID,
-				Desired:       cfg,
-				Configured:    cloneStringSlice(group.PeerIDs),
-				Unavailable:   []string{node},
-				FailureReason: "known unhealthy placement target",
-			}
-		}
-	}
-	return nil
 }
 
 func (b *DistributedBackend) tryPutObjectECMemoryShards(
