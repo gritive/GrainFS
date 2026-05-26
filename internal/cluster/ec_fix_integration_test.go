@@ -21,8 +21,17 @@ var _ = Describe("EC compatibility integration", func() {
 
 	BeforeEach(func() {
 		if CurrentSpecReport().LeafNodeText == "retrieves EC objects without leaking goroutines after k-of-n succeeds" {
+			// Snapshot goroutines that already exist before this spec builds its
+			// backend. goleak.VerifyNone is process-global, so without a baseline
+			// it also catches quic-go transport goroutines (Transport.listen,
+			// sendQueue.Run, Conn.run) left behind by *other* cluster tests in the
+			// same binary — those lag past goleak's retry budget under load and
+			// made this assertion flaky in multi-package runs. Baselining here keeps
+			// the check scoped to goroutines this spec's EC read path creates.
+			ignoreBaseline := goleak.IgnoreCurrent()
 			GinkgoT().Cleanup(func() {
 				goleak.VerifyNone(GinkgoT(),
+					ignoreBaseline,
 					goleak.IgnoreTopFunction("github.com/onsi/ginkgo/v2/internal.(*Suite).runNode"),
 					goleak.IgnoreTopFunction("github.com/onsi/ginkgo/v2/internal/interrupt_handler.(*InterruptHandler).registerForInterrupts.func2"),
 					goleak.IgnoreTopFunction("github.com/onsi/ginkgo/v2/internal.RegisterForProgressSignal.func1"),
