@@ -187,82 +187,21 @@ func TestGetVolume_NotFound(t *testing.T) {
 	}
 }
 
-func TestDeleteVolume_RefusesWithSnapshots(t *testing.T) {
+func TestDeleteVolume_HappyPath(t *testing.T) {
 	d := newDeps(t)
 	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
 	require.NoError(t, err)
 	_, err = d.Manager.WriteAt("v1", []byte("x"), 0)
 	require.NoError(t, err)
-	_, err = d.Manager.CreateSnapshot("v1")
-	require.NoError(t, err)
 
-	_, err = admin.DeleteVolume(context.Background(), d, "v1", false)
-	var ae *admin.Error
-	if !errors.As(err, &ae) || ae.Code != "conflict" {
-		t.Fatalf("err = %v, want conflict", err)
-	}
-	var det struct {
-		SnapshotCount  int                  `json:"snapshot_count"`
-		CascadeCommand string               `json:"cascade_command"`
-		Recent         []admin.SnapshotInfo `json:"recent"`
-	}
-	require.NoError(t, json.Unmarshal(ae.Details, &det))
-	if det.SnapshotCount != 1 {
-		t.Fatalf("snapshot_count = %d, want 1", det.SnapshotCount)
-	}
-	if det.CascadeCommand != "grainfs volume delete v1 --force" {
-		t.Fatalf("cascade_command = %q", det.CascadeCommand)
-	}
-	require.Len(t, det.Recent, 1)
-	require.NotEmpty(t, det.Recent[0].CreatedAt)
-
-	buf, err := json.Marshal(ae)
-	require.NoError(t, err)
-	require.Contains(t, string(buf), `"created_at"`)
-	require.Contains(t, string(buf), `"block_count"`)
-	require.NotContains(t, string(buf), `"CreatedAt"`)
-	require.NotContains(t, string(buf), `"BlockCount"`)
-}
-
-func TestDeleteVolume_ForceCascades(t *testing.T) {
-	d := newDeps(t)
-	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
-	require.NoError(t, err)
-	_, err = d.Manager.WriteAt("v1", []byte("x"), 0)
-	require.NoError(t, err)
-	_, err = d.Manager.CreateSnapshot("v1")
-	require.NoError(t, err)
-
-	resp, err := admin.DeleteVolume(context.Background(), d, "v1", true)
+	resp, err := admin.DeleteVolume(context.Background(), d, "v1")
 	require.NoError(t, err)
 	if !resp.Deleted {
 		t.Fatal("Deleted = false")
 	}
 	if _, err := d.Manager.Get("v1"); err == nil {
-		t.Fatal("volume still present after force delete")
+		t.Fatal("volume still present after delete")
 	}
-}
-
-func TestListSnapshots_UsesAdminWireShape(t *testing.T) {
-	d := newDeps(t)
-	_, err := admin.CreateVolume(context.Background(), d, admin.CreateVolumeReq{Name: "v1", Size: 1 << 20})
-	require.NoError(t, err)
-	_, err = d.Manager.WriteAt("v1", []byte("x"), 0)
-	require.NoError(t, err)
-	_, err = d.Manager.CreateSnapshot("v1")
-	require.NoError(t, err)
-
-	snaps, err := admin.ListSnapshots(context.Background(), d, "v1")
-	require.NoError(t, err)
-	require.Len(t, snaps, 1)
-	require.NotEmpty(t, snaps[0].CreatedAt)
-
-	buf, err := json.Marshal(snaps)
-	require.NoError(t, err)
-	require.Contains(t, string(buf), `"created_at"`)
-	require.Contains(t, string(buf), `"block_count"`)
-	require.NotContains(t, string(buf), `"CreatedAt"`)
-	require.NotContains(t, string(buf), `"BlockCount"`)
 }
 
 func TestResizeVolume_GrowOK(t *testing.T) {

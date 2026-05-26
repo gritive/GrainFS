@@ -67,14 +67,10 @@ func (c *Client) StatVolume(ctx context.Context, name string) (VolumeStatResp, e
 	return resp, err
 }
 
-// DeleteVolume removes a volume. With force=true snapshots are cascaded.
-func (c *Client) DeleteVolume(ctx context.Context, name string, force bool) (DeleteResp, error) {
-	path := "/v1/volumes/" + url.PathEscape(name)
-	if force {
-		path += "?force=true"
-	}
+// DeleteVolume removes a volume.
+func (c *Client) DeleteVolume(ctx context.Context, name string) (DeleteResp, error) {
 	var resp DeleteResp
-	err := c.Delete(ctx, path, &resp)
+	err := c.Delete(ctx, "/v1/volumes/"+url.PathEscape(name), &resp)
 	return resp, err
 }
 
@@ -92,17 +88,6 @@ func (c *Client) RecalculateVolume(ctx context.Context, name string) (Recalculat
 	return resp, err
 }
 
-// CloneVolume creates a fast block-sharing copy of src as dst.
-func (c *Client) CloneVolume(ctx context.Context, src, dst string) error {
-	return c.Post(ctx, "/v1/volumes/clone", CloneReq{Src: src, Dst: dst}, nil)
-}
-
-// RollbackVolume reverts a volume to one of its snapshots.
-func (c *Client) RollbackVolume(ctx context.Context, name, snapshotID string) error {
-	path := fmt.Sprintf("/v1/volumes/%s/snapshots/%s/rollback", url.PathEscape(name), url.PathEscape(snapshotID))
-	return c.Post(ctx, path, nil, nil)
-}
-
 // WriteAtVolume writes raw bytes at an offset (debug/test helper).
 func (c *Client) WriteAtVolume(ctx context.Context, name string, offset int64, data []byte) (WriteAtResp, error) {
 	var resp WriteAtResp
@@ -117,28 +102,6 @@ func (c *Client) ReadAtVolume(ctx context.Context, name string, offset, length i
 	err := c.Post(ctx, "/v1/volumes/"+url.PathEscape(name)+"/read-at",
 		ReadAtReq{Name: name, Offset: offset, Length: length}, &resp)
 	return resp, err
-}
-
-// --- Snapshot endpoints ---
-
-// CreateSnapshot creates a snapshot of the named volume.
-func (c *Client) CreateSnapshot(ctx context.Context, volume string) (SnapshotCreateResp, error) {
-	var resp SnapshotCreateResp
-	err := c.Post(ctx, "/v1/volumes/"+url.PathEscape(volume)+"/snapshots", nil, &resp)
-	return resp, err
-}
-
-// ListSnapshots returns every snapshot of the named volume.
-func (c *Client) ListSnapshots(ctx context.Context, volume string) ([]SnapshotInfo, error) {
-	var resp []SnapshotInfo
-	err := c.Get(ctx, "/v1/volumes/"+url.PathEscape(volume)+"/snapshots", &resp)
-	return resp, err
-}
-
-// DeleteSnapshot removes one snapshot from a volume.
-func (c *Client) DeleteSnapshot(ctx context.Context, volume, snapshotID string) error {
-	path := fmt.Sprintf("/v1/volumes/%s/snapshots/%s", url.PathEscape(volume), url.PathEscape(snapshotID))
-	return c.Delete(ctx, path, nil)
 }
 
 // --- Scrub endpoints ---

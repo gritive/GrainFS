@@ -115,61 +115,27 @@ func TestClient_GetVolume_NotFound(t *testing.T) {
 	}
 }
 
-func TestClient_DeleteVolume_ForceQuery(t *testing.T) {
-	var seenQuery string
+func TestClient_DeleteVolume(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "DELETE", path: "/v1/volumes/v1",
 		body: DeleteResp{Deleted: true},
-		verify: func(r *http.Request) {
-			seenQuery = r.URL.RawQuery
-		},
 	}})
 	defer srv.Close()
 	c := NewClientForURL(srv.URL)
-	if _, err := c.DeleteVolume(context.Background(), "v1", true); err != nil {
+	resp, err := c.DeleteVolume(context.Background(), "v1")
+	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if seenQuery != "force=true" {
-		t.Errorf("query=%q want force=true", seenQuery)
-	}
-}
-
-func TestClient_DeleteVolume_ConflictReturnsTypedError(t *testing.T) {
-	conflictDetails, _ := json.Marshal(map[string]any{
-		"snapshot_count":  3,
-		"recent":          []map[string]any{{"id": "snap-1", "created_at": "t", "block_count": 1}},
-		"cascade_command": "...",
-		"list_command":    "...",
-	})
-	srv := newFakeServer(t, []fakeRoute{{
-		method: "DELETE", path: "/v1/volumes/v1",
-		status: 409, errResp: &Error{
-			Code: "conflict", Message: "has snapshots",
-			Details: conflictDetails,
-		},
-	}})
-	defer srv.Close()
-	c := NewClientForURL(srv.URL)
-	_, err := c.DeleteVolume(context.Background(), "v1", false)
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *Error, got %v", err)
-	}
-	if e.Code != "conflict" {
-		t.Errorf("code=%q", e.Code)
-	}
-	d := AsDeleteConflict(e)
-	if d == nil || d.SnapshotCount != 3 || len(d.Recent) != 1 {
-		t.Errorf("typed details unexpected: %+v", d)
+	if !resp.Deleted {
+		t.Errorf("expected Deleted=true, got %+v", resp)
 	}
 }
 
 func TestClient_ResizeVolume_UnsupportedShrink(t *testing.T) {
 	unsupportedDetails, _ := json.Marshal(map[string]any{
-		"current_size":  2 << 30,
-		"requested":     1 << 30,
-		"hint":          "clone instead",
-		"clone_command": "grainfs volume clone v1 <new>",
+		"current_size": 2 << 30,
+		"requested":    1 << 30,
+		"hint":         "create a smaller new volume and copy the data instead",
 	})
 	srv := newFakeServer(t, []fakeRoute{{
 		method: "POST", path: "/v1/volumes/v1/resize",
@@ -207,21 +173,6 @@ func TestClient_RecalculateVolume(t *testing.T) {
 	}
 }
 
-func TestClient_CloneAndRollback(t *testing.T) {
-	srv := newFakeServer(t, []fakeRoute{
-		{method: "POST", path: "/v1/volumes/clone"},
-		{method: "POST", path: "/v1/volumes/v1/snapshots/snap-1/rollback"},
-	})
-	defer srv.Close()
-	c := NewClientForURL(srv.URL)
-	if err := c.CloneVolume(context.Background(), "v1", "v1-copy"); err != nil {
-		t.Errorf("clone err: %v", err)
-	}
-	if err := c.RollbackVolume(context.Background(), "v1", "snap-1"); err != nil {
-		t.Errorf("rollback err: %v", err)
-	}
-}
-
 func TestClient_WriteAt_ReadAt(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{
 		{method: "POST", path: "/v1/volumes/v1/write-at", body: WriteAtResp{Bytes: 5}},
@@ -236,27 +187,6 @@ func TestClient_WriteAt_ReadAt(t *testing.T) {
 	r, err := c.ReadAtVolume(context.Background(), "v1", 0, 5)
 	if err != nil || string(r.Data) != "hello" {
 		t.Errorf("read: %q err=%v", r.Data, err)
-	}
-}
-
-func TestClient_Snapshot_CreateListDelete(t *testing.T) {
-	srv := newFakeServer(t, []fakeRoute{
-		{method: "POST", path: "/v1/volumes/v1/snapshots", body: SnapshotCreateResp{ID: "snap-1", BlockCount: 7}},
-		{method: "GET", path: "/v1/volumes/v1/snapshots", body: []SnapshotInfo{{ID: "snap-1", CreatedAt: "t", BlockCount: 7}}},
-		{method: "DELETE", path: "/v1/volumes/v1/snapshots/snap-1"},
-	})
-	defer srv.Close()
-	c := NewClientForURL(srv.URL)
-	cr, err := c.CreateSnapshot(context.Background(), "v1")
-	if err != nil || cr.ID != "snap-1" {
-		t.Errorf("create: %+v err=%v", cr, err)
-	}
-	list, err := c.ListSnapshots(context.Background(), "v1")
-	if err != nil || len(list) != 1 {
-		t.Errorf("list: %+v err=%v", list, err)
-	}
-	if err := c.DeleteSnapshot(context.Background(), "v1", "snap-1"); err != nil {
-		t.Errorf("delete: %v", err)
 	}
 }
 

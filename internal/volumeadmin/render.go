@@ -22,15 +22,15 @@ func printJSON(w io.Writer, v any) error { return PrintJSON(w, v) }
 
 // renderVolumeTable writes the `volume list` table to w.
 func renderVolumeTable(w io.Writer, vols []VolumeInfo, raw bool) {
-	fmt.Fprintf(w, "%-20s  %12s  %12s  %9s  %s\n", "NAME", "SIZE", "ALLOCATED", "SNAPSHOTS", "HEALTH")
+	fmt.Fprintf(w, "%-20s  %12s  %12s  %s\n", "NAME", "SIZE", "ALLOCATED", "HEALTH")
 	if len(vols) == 0 {
 		fmt.Fprintln(w, "(no volumes)")
 		return
 	}
 	for _, v := range vols {
-		fmt.Fprintf(w, "%-20s  %12s  %12s  %9d  %s\n",
+		fmt.Fprintf(w, "%-20s  %12s  %12s  %s\n",
 			v.Name, FormatBytes(v.Size, raw), FormatBytes(v.AllocatedBytes, raw),
-			v.SnapshotCount, FormatVolumeHealth(v.Health))
+			FormatVolumeHealth(v.Health))
 	}
 }
 
@@ -41,7 +41,6 @@ func renderVolumeInfo(w io.Writer, v VolumeInfo, raw bool) {
 	fmt.Fprintf(w, "block_size:       %s\n", FormatBytes(int64(v.BlockSize), raw))
 	fmt.Fprintf(w, "allocated_bytes:  %s\n", FormatBytes(v.AllocatedBytes, raw))
 	fmt.Fprintf(w, "allocated_blocks: %d\n", v.AllocatedBlocks)
-	fmt.Fprintf(w, "snapshot_count:   %d\n", v.SnapshotCount)
 	fmt.Fprintf(w, "health:           %s\n", FormatVolumeHealth(v.Health))
 	if len(v.HealthReasons) > 0 {
 		fmt.Fprintf(w, "health_reasons:   %s\n", strings.Join(v.HealthReasons, ","))
@@ -53,26 +52,12 @@ func renderVolumeStat(w io.Writer, s VolumeStatResp, raw bool) {
 	fmt.Fprintf(w, "volume:           %s\n", s.Volume.Name)
 	fmt.Fprintf(w, "size:             %s\n", FormatBytes(s.Volume.Size, raw))
 	fmt.Fprintf(w, "allocated:        %s\n", FormatBytes(s.Volume.AllocatedBytes, raw))
-	fmt.Fprintf(w, "snapshots:        %d\n", s.Volume.SnapshotCount)
 	fmt.Fprintf(w, "health:           %s\n", FormatVolumeHealth(s.Volume.Health))
 	if len(s.Volume.HealthReasons) > 0 {
 		fmt.Fprintf(w, "health_reasons:   %s\n", strings.Join(s.Volume.HealthReasons, ","))
 	}
 	if len(s.RecentIncidents) > 0 {
 		fmt.Fprintf(w, "recent incidents: %d\n", len(s.RecentIncidents))
-	}
-}
-
-// renderSnapshotTable writes the `volume snapshot list` table.
-func renderSnapshotTable(w io.Writer, snaps []SnapshotInfo) {
-	if len(snaps) == 0 {
-		fmt.Fprintln(w, "no snapshots")
-		return
-	}
-	fmt.Fprintf(w, "%-40s  %-30s  %s\n", "ID", "CREATED AT", "BLOCKS")
-	fmt.Fprintln(w, strings.Repeat("-", 80))
-	for _, s := range snaps {
-		fmt.Fprintf(w, "%-40s  %-30s  %d\n", s.ID, s.CreatedAt, s.BlockCount)
 	}
 }
 

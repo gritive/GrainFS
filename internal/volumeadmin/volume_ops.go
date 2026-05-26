@@ -121,9 +121,7 @@ func RunStat(ctx context.Context, opts StatOptions) error {
 	return nil
 }
 
-// RunDelete runs `grainfs volume delete`. On 409 conflict (no --force,
-// snapshots present) it writes the typed conflict block to Stderr before
-// returning the error so cmd can exit non-zero.
+// RunDelete runs `grainfs volume delete`.
 func RunDelete(ctx context.Context, opts DeleteOptions) error {
 	c, err := clientFor(opts.BaseOptions)
 	if err != nil {
@@ -131,12 +129,7 @@ func RunDelete(ctx context.Context, opts DeleteOptions) error {
 	}
 	ctx, cancel := withTimeout(ctx, opts.BaseOptions)
 	defer cancel()
-	resp, err := c.DeleteVolume(ctx, opts.Name, opts.Force)
-	var e *Error
-	if errors.As(err, &e) && e.Code == "conflict" && !opts.JSONOut {
-		FormatDeleteConflict(stderr(opts.BaseOptions), e)
-		return err
-	}
+	resp, err := c.DeleteVolume(ctx, opts.Name)
 	if err != nil {
 		return err
 	}
@@ -201,40 +194,6 @@ func RunRecalculate(ctx context.Context, opts RecalculateOptions) error {
 	}
 	fmt.Fprintf(stdout(opts.BaseOptions), "recalculated %q: %d → %d (%s)\n",
 		resp.Volume, resp.Before, resp.After, status)
-	return nil
-}
-
-// RunClone runs `grainfs volume clone`.
-func RunClone(ctx context.Context, opts CloneOptions) error {
-	c, err := clientFor(opts.BaseOptions)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := withTimeout(ctx, opts.BaseOptions)
-	defer cancel()
-	if err := c.CloneVolume(ctx, opts.Src, opts.Dst); err != nil {
-		return err
-	}
-	if !opts.JSONOut {
-		fmt.Fprintf(stdout(opts.BaseOptions), "cloned %q → %q\n", opts.Src, opts.Dst)
-	}
-	return nil
-}
-
-// RunRollback runs `grainfs volume rollback`.
-func RunRollback(ctx context.Context, opts RollbackOptions) error {
-	c, err := clientFor(opts.BaseOptions)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := withTimeout(ctx, opts.BaseOptions)
-	defer cancel()
-	if err := c.RollbackVolume(ctx, opts.Name, opts.SnapshotID); err != nil {
-		return err
-	}
-	if !opts.JSONOut {
-		fmt.Fprintf(stdout(opts.BaseOptions), "rolled back %q to snapshot %q\n", opts.Name, opts.SnapshotID)
-	}
 	return nil
 }
 
