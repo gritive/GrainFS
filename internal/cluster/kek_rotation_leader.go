@@ -711,6 +711,112 @@ func (l *KEKRotationLeader) ProposeKEKPrune(version uint32, actor string) error 
 	}
 }
 
+// ProposeKEKRetire runs the leader-side retire pipeline:
+//
+//  1. Confirm token == "delete-permanently-<version>".
+//  2. Epoch guard + bounded 60s timeout.
+//  3. Single-flight via the kek_lifecycle_in_flight mutex.
+//  4. Pre-check: target version is loaded, not active, and not already
+//     Retiring/Pruned (idempotent replay is the FSM's job; the propose path
+//     rejects upstream so the operator sees a clear error).
+//  5. Build MetaKEKRetireCmd (no peer probe, no DEK reseal, no payload cap).
+//  6. Submit via raft and translate the FSM-recorded request status.
+//
+// Returns nil on FSM Applied. Returns ErrKEKRotateAnotherInFlight on concurrent
+// attempt. Other failures surface a wrapped error.
+func (l *KEKRotationLeader) ProposeKEKRetire(version uint32, confirm, actor string) error {
+	expected := fmt.Sprintf("delete-permanently-%d", version)
+	if confirm != expected {
+		return fmt.Errorf("KEKRetire: bad confirm token (got %q, want %q)", confirm, expected)
+	}
+
+	ep := l.epochCtx.Load()
+	if ep == nil {
+		return errors.New("KEKRetire: not leader")
+	}
+
+	ctx, cancel := context.WithTimeout(ep.ctx, 60*time.Second)
+	defer cancel()
+
+	if !l.mu.TryLock() {
+		return ErrKEKRotateAnotherInFlight
+	}
+	defer l.mu.Unlock()
+	if l.onMutexAcquired != nil {
+		l.onMutexAcquired()
+	}
+
+	active := l.fsm.ActiveKEKVersion()
+	if version >= active {
+		return fmt.Errorf("KEKRetire: version %d must be < active %d", version, active)
+	}
+
+	store := l.fsm.KEKStore()
+	if store == nil {
+		return errors.New("KEKRetire: keystore not wired")
+	}
+	if !store.HasVersion(version) {
+		return fmt.Errorf("KEKRetire: version %d not in keystore", version)
+	}
+	if _, status, _, ok := l.fsm.LookupKEKStatus(version); ok {
+		if status == KEKLifecycleRetiring {
+			return fmt.Errorf("KEKRetire: version %d already retiring", version)
+		}
+		if status == KEKLifecyclePruned {
+			return fmt.Errorf("KEKRetire: version %d already pruned", version)
+		}
+	}
+
+	uuidV7, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("KEKRetire: request id: %w", err)
+	}
+	var requestID [16]byte
+	copy(requestID[:], uuidV7[:])
+
+	currentWraps, _ := l.fsm.dekKeeper.VersionsAndActive()
+	cmd := KEKRetireCmd{
+		PayloadVersion:       currentKEKRetirePayloadVersion,
+		Version:              version,
+		Confirm:              confirm,
+		Actor:                actor,
+		RequestID:            requestID,
+		RequestedAtUnixNanos: l.wallClock().UnixNano(),
+		ClusterStateAtPropose: ClusterStateAtPropose{
+			ActiveKEKVersion: active,
+			RetainedKEKCount: uint32(len(store.Versions())),
+			LiveDEKGenCount:  uint32(len(currentWraps)),
+		},
+	}
+
+	payload, err := EncodeMetaKEKRetireCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("KEKRetire: encode: %w", err)
+	}
+
+	if err := l.raft.Propose(ctx, MetaCmdTypeKEKRetire, payload); err != nil {
+		if l.epochCtx.Load() == nil {
+			return errors.New("KEKRetire: not leader (lost leadership mid-retire)")
+		}
+		return fmt.Errorf("KEKRetire: submit: %w", err)
+	}
+
+	st, found := l.fsm.LookupRotationRequestStatus(requestID)
+	if !found {
+		return nil
+	}
+	switch st {
+	case RotationStatusApplied:
+		return nil
+	case RotationStatusStaleNoOp:
+		return errors.New("KEKRetire: stale cluster state (active KEK drifted); retry")
+	case RotationStatusRejected:
+		return errors.New("KEKRetire: rejected by FSM")
+	default:
+		return fmt.Errorf("KEKRetire: unexpected FSM status %d", st)
+	}
+}
+
 // liveDEKGenCount returns the number of live DEK generations or 0 if the
 // keeper is not wired. Helper to keep the audit struct compact.
 func (l *KEKRotationLeader) liveDEKGenCount() int {

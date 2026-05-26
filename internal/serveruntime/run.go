@@ -128,6 +128,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootRotationAndAdminAPI(state); err != nil {
 		return err
 	}
+	// Task 11: KEK rotation leader + peer probe handlers + audit sink. MUST
+	// run before bootMetaRaftStart so SetKEKRotationLeader lands before the
+	// leadership watcher (started by Start) reads it.
+	if err := bootKEKRotationLeader(state); err != nil {
+		return err
+	}
 	// §7 T57: bootMetaRaftStart's preApplyLoop callback handles post-Restore
 	// DEK-keeper reconstruction (F#21 / F#22) atomically between Restore and
 	// the apply-loop launch — see rebuildDEKKeeperFromRestore.
