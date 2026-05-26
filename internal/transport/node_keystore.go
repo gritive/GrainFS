@@ -143,8 +143,12 @@ func LoadNodeKey(dataDir string, kek []byte) (tls.Certificate, [32]byte, error) 
 }
 
 // certFromKey rebuilds a minimal self-signed cert (no SAN) for a loaded key.
-// SAN identity is re-applied by the transport from its known node-id/cluster-id
-// at construction; what must survive restart is the KEY (and thus the SPKI).
+// What must survive restart is the KEY (and thus the SPKI); the reloaded cert
+// is SAN-less today.
+// TODO(phase-2): re-apply the grainfs:// SAN from node config when wiring
+// LoadNodeKey into startup — no caller re-applies it yet, so a reloaded cert
+// currently carries no node identity for logs/audit (D4). Likely changes this
+// signature to take (clusterID, nodeID) or seals a SAN sidecar as AEAD AAD.
 func certFromKey(priv *ecdsa.PrivateKey) (tls.Certificate, [32]byte, error) {
 	now := time.Now().UTC()
 	template := x509.Certificate{
