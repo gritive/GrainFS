@@ -32,6 +32,18 @@ func splitDataWALStartupRepairShardKey(shardKey string) (string, string) {
 	return objectKey, versionID
 }
 
+// isUnsupportedStartupRepairShardKey reports whether a shard key uses the
+// segment ("<key>/segments/<blobID>") or coalesced ("<key>/coalesced/<id>")
+// form. Startup repair cannot yet resolve placement for these (it lives in
+// segment metadata, not object-version metadata), so the worker skips them.
+// A false positive (an object literally named ".../segments/...") only causes
+// a benign skip — the shard stays covered by read-time EC reconstruction.
+// TODO(datawal-startup-repair): resolve segment/coalesced placement and repair
+// these shards (tracked in TODOS.md).
+func isUnsupportedStartupRepairShardKey(shardKey string) bool {
+	return strings.Contains(shardKey, "/segments/") || strings.Contains(shardKey, "/coalesced/")
+}
+
 func classifyDataWALStartupRepairFailure(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "context_canceled"
@@ -74,6 +86,10 @@ func (r dataWALStartupRepairRuntime) RepairDataWALStartupCandidate(ctx context.C
 	if gb == nil || gb.DistributedBackend == nil {
 		metrics.DataWALStartupRepairSkips.WithLabelValues("no_backend").Inc()
 		return dataWALStartupRepairResult{Skipped: "no_backend"}
+	}
+	if isUnsupportedStartupRepairShardKey(candidate.ShardKey) {
+		metrics.DataWALStartupRepairSkips.WithLabelValues("unsupported_shardkey").Inc()
+		return dataWALStartupRepairResult{Skipped: "unsupported_shardkey"}
 	}
 	objectKey, versionID := splitDataWALStartupRepairShardKey(candidate.ShardKey)
 	rec, lookupErr := gb.FSMRef().LookupObjectPlacement(candidate.Bucket, objectKey, versionID)

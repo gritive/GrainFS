@@ -30,6 +30,13 @@ func TestSplitDataWALStartupRepairShardKey(t *testing.T) {
 	require.Equal(t, "", versionID)
 }
 
+func TestIsUnsupportedStartupRepairShardKey(t *testing.T) {
+	require.True(t, isUnsupportedStartupRepairShardKey("dir/obj/segments/blob-123"))
+	require.True(t, isUnsupportedStartupRepairShardKey("dir/obj/coalesced/c-456"))
+	require.False(t, isUnsupportedStartupRepairShardKey("dir/obj/v1"))
+	require.False(t, isUnsupportedStartupRepairShardKey("legacy-object"))
+}
+
 func TestDataWALStartupRepairWorkerRunsSerially(t *testing.T) {
 	var inFlight int32
 	var maxInFlight int32
