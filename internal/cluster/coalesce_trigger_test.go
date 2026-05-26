@@ -37,12 +37,12 @@ func TestEvaluateCoalesceTrigger(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			trig, reason := evaluateCoalesceTrigger(tc.segs, tc.firstAt, now, cfg)
-			if trig != tc.wantTrigg {
-				t.Fatalf("trig = %v, want %v", trig, tc.wantTrigg)
+			plan := planCoalesceTrigger(tc.segs, tc.firstAt, now, cfg)
+			if plan.ShouldEnqueue != tc.wantTrigg {
+				t.Fatalf("trig = %v, want %v", plan.ShouldEnqueue, tc.wantTrigg)
 			}
-			if trig && reason != tc.wantReason {
-				t.Fatalf("reason = %q, want %q", reason, tc.wantReason)
+			if plan.ShouldEnqueue && plan.Reason != tc.wantReason {
+				t.Fatalf("reason = %q, want %q", plan.Reason, tc.wantReason)
 			}
 		})
 	}

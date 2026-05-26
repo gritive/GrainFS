@@ -16,8 +16,7 @@ import (
 )
 
 // S3SSE exercises the SSE-S3 (AES256) S3 surface (PUT/GET/HEAD/COPY)
-// plus the not-implemented branches for SSE-KMS and SSE-C. Shared single +
-// shared cluster fixtures, uniqueBucket per sub-test.
+// plus the not-implemented branches for SSE-KMS and SSE-C.
 var _ = ginkgo.Describe("S3 SSE", ginkgo.Label("s3"), func() {
 	describeS3SSEContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
@@ -28,13 +27,13 @@ var _ = ginkgo.Describe("S3 SSE", ginkgo.Label("s3"), func() {
 })
 
 func describeS3SSEContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var (
 			tgt s3Target
 			cli *s3.Client
 		)
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 			cli = tgt.pickNode(0)
 		})

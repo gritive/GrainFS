@@ -127,6 +127,6 @@ func s3ClientForSA(tgt iamAdminTarget, ak, sk string) *s3.Client {
 		Region:       "us-east-1",
 		Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
 		UsePathStyle: true,
-		HTTPClient:   e2eNoKeepAliveHTTPClient(0),
+		HTTPClient:   e2eS3HTTPClient,
 	})
 }

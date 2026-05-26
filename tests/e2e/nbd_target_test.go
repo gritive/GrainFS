@@ -44,16 +44,14 @@ func (tgt *nbdTarget) uniqueDevice(t testing.TB, caseName string, sizeBytes int6
 	if tgt.cluster != nil {
 		ensureE2ENBDVolume(t, ctx, tgt.cluster, device, sizeBytes)
 	} else {
-		ensureSingleNodeNBDVolume(t, ctx, device, sizeBytes)
+		ensureSingleNodeNBDVolume(t, ctx, tgt.dataDir(0), device, sizeBytes)
 	}
 	return device
 }
 
-// ensureSingleNodeNBDVolume mirrors ensureE2ENBDVolume but uses the single-node
-// fixture's admin socket (testServerDataDir + /admin.sock).
-func ensureSingleNodeNBDVolume(t testing.TB, ctx context.Context, name string, size int64) {
+func ensureSingleNodeNBDVolume(t testing.TB, ctx context.Context, dataDir, name string, size int64) {
 	t.Helper()
-	cli, err := volumeadmin.NewClient(filepath.Join(testServerDataDir, "admin.sock"))
+	cli, err := volumeadmin.NewClient(filepath.Join(dataDir, "admin.sock"))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	_, err = cli.CreateVolume(ctx, volumeadmin.CreateVolumeReq{Name: name, Size: size})
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
@@ -63,11 +61,12 @@ func ensureSingleNodeNBDVolume(t testing.TB, ctx context.Context, name string, s
 
 func newSingleNodeNBDTarget(t testing.TB) *nbdTarget {
 	t.Helper()
+	tgt := newDedicatedSingleNodeS3Target(t, nil)
 	return &nbdTarget{
 		name:       "single",
-		nbdAddr:    func(i int) string { return fmt.Sprintf("127.0.0.1:%d", testServerNBDPort) },
-		s3Endpoint: func(i int) string { return testServerURL },
-		dataDir:    func(i int) string { return testServerDataDir },
+		nbdAddr:    func(i int) string { return fmt.Sprintf("127.0.0.1:%d", tgt.nbdPort) },
+		s3Endpoint: func(i int) string { return tgt.endpoint(i) },
+		dataDir:    func(i int) string { return tgt.dataDir },
 		nodeCount:  1,
 		leaderIdx:  0,
 		isCluster:  false,
@@ -76,7 +75,16 @@ func newSingleNodeNBDTarget(t testing.TB) *nbdTarget {
 
 func newSharedClusterNBDTarget(t testing.TB) *nbdTarget {
 	t.Helper()
-	c := getOrInitSharedCluster(t) // 4-node *e2eCluster, NBD now enabled
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      4,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-NBD-KEY",
+		LogPrefix:  "grainfs-nbd",
+		DisableNFS: true,
+	})
+	for i := range c.procs {
+		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+	}
 	n := len(c.httpURLs)
 	return &nbdTarget{
 		name:       "cluster4",

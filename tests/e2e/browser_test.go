@@ -11,7 +11,8 @@ import (
 
 var _ = ginkgo.Describe("Object browser", func() {
 	ginkgo.It("serves the object browser UI", func() {
-		resp, err := http.Get(testServerURL + "/ui/")
+		tgt := newSingleNodeS3Target()
+		resp, err := http.Get(tgt.endpoint(0) + "/ui/")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
 

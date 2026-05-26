@@ -29,7 +29,7 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-network-partition-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
+	ginkgo.DeferCleanup(func() { _ = removeE2EDir(dir) })
 	binary := getBinary()
 	port := freePort()
 	toxiPort := freePort()

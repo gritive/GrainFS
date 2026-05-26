@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,6 +22,9 @@ func getBinary() string {
 	binary := os.Getenv("GRAINFS_BINARY")
 	if binary == "" {
 		binary = "../../bin/grainfs"
+	}
+	if abs, err := filepath.Abs(binary); err == nil {
+		binary = abs
 	}
 	return binary
 }
@@ -56,7 +60,7 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-e2e-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dir)
+	ginkgo.DeferCleanup(removeE2EDir, dir)
 
 	binary := getBinary()
 
@@ -186,7 +190,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-mp-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dir)
+	ginkgo.DeferCleanup(removeE2EDir, dir)
 
 	binary := getBinary()
 	port := freePort()

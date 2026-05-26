@@ -28,7 +28,7 @@ import (
 // expfmt; substring matching is sufficient here.
 func scrapeMetric(t testing.TB, endpoint, name, labelSubstr string) float64 {
 	t.Helper()
-	resp, err := http.Get(endpoint + "/metrics")
+	resp, err := e2eRawHTTPClient.Get(endpoint + "/metrics")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
@@ -72,9 +72,9 @@ var vlogWatcherArgs = []string{
 // incident emission once observed vlog usage crosses --vlog-warn-ratio.
 // Each branch boots one dedicated fixture with the union of all watcher
 // flags; sub-tests run sequentially on it.
-var _ = ginkgo.Describe("Vlog watcher", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Vlog watcher", func() {
 	registerWatcherTarget := func(name string, newTarget func(testing.TB, []string) s3Target) {
-		ginkgo.Context("Predictive watcher "+name, func() {
+		ginkgo.Context("Predictive watcher "+name, ginkgo.Ordered, func() {
 			var tgt s3Target
 			ginkgo.BeforeAll(func() {
 				tgt = newTarget(ginkgo.GinkgoTB(), vlogWatcherArgs)
@@ -97,7 +97,7 @@ var _ = ginkgo.Describe("Vlog watcher", ginkgo.Ordered, func() {
 			"--badger-gc-interval=500ms",
 			"--vlog-smoke-defer=2s",
 		}
-		ginkgo.Context("GC ticker "+name, func() {
+		ginkgo.Context("GC ticker "+name, ginkgo.Ordered, func() {
 			var tgt s3Target
 			ginkgo.BeforeEach(func() {
 				tgt = newTarget(ginkgo.GinkgoTB(), args)
@@ -112,9 +112,9 @@ var _ = ginkgo.Describe("Vlog watcher", ginkgo.Ordered, func() {
 	registerStrictTarget := func(name string, newTarget func(testing.TB, []string) s3Target) {
 		args := []string{
 			"--strict-vlog-registry=true",
-			"--vlog-smoke-defer=3s",
+			"--vlog-smoke-defer=20s",
 		}
-		ginkgo.Context("Strict registry "+name, func() {
+		ginkgo.Context("Strict registry "+name, ginkgo.Ordered, func() {
 			var tgt s3Target
 			ginkgo.BeforeEach(func() {
 				tgt = newTarget(ginkgo.GinkgoTB(), args)
@@ -192,18 +192,24 @@ func runVlogWatcherSustainedWriteNoStarvation(t testing.TB, tgt s3Target) {
 
 func runVlogWatcherFiresOnLeak(t testing.TB, tgt s3Target) {
 	t.Helper()
-	endpoint := tgt.endpoint(0)
-	cli := tgt.pickNode(0)
+	endpoints := targetEndpoints(tgt)
 	ctx := context.Background()
 
 	gomega.Eventually(func() bool {
-		return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
+		return anyEndpoint(t, endpoints, func(endpoint string) bool {
+			return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
+		})
 	}).WithTimeout(8*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(), "watcher must be running")
 
 	bucket := tgt.uniqueBucket(t, "vlogleak")
 	payload := make([]byte, 4096)
 	_, _ = rand.Read(payload)
-	for i := 0; i < 50; i++ {
+	writeCount := 50
+	if tgt.isCluster {
+		writeCount = 120
+	}
+	for i := 0; i < writeCount; i++ {
+		cli := tgt.pickNode(i)
 		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(fmt.Sprintf("k-%d", i)),
@@ -214,14 +220,38 @@ func runVlogWatcherFiresOnLeak(t testing.TB, tgt s3Target) {
 
 	// Badger's db.Size() metric is refreshed by an internal 1-minute ticker.
 	gomega.Eventually(func() bool {
-		for _, inc := range fetchIncidentsSafe(t, endpoint) {
-			if inc.Cause == "vlog_pressure" {
-				return true
+		return anyEndpoint(t, endpoints, func(endpoint string) bool {
+			for _, inc := range fetchIncidentsSafe(t, endpoint) {
+				if inc.Cause == "vlog_pressure" {
+					return true
+				}
 			}
-		}
-		return false
+			return false
+		})
 	}).WithTimeout(90*time.Second).WithPolling(1*time.Second).Should(gomega.BeTrue(),
 		"watcher must record a vlog_pressure incident once vlog crosses warn ratio")
+}
+
+func targetEndpoints(tgt s3Target) []string {
+	endpoints := make([]string, 0, tgt.nodes)
+	nodes := tgt.nodes
+	if nodes <= 0 {
+		nodes = 1
+	}
+	for i := 0; i < nodes; i++ {
+		endpoints = append(endpoints, tgt.endpoint(i))
+	}
+	return endpoints
+}
+
+func anyEndpoint(t testing.TB, endpoints []string, check func(endpoint string) bool) bool {
+	t.Helper()
+	for _, endpoint := range endpoints {
+		if check(endpoint) {
+			return true
+		}
+	}
+	return false
 }
 
 // GC ticker boots a fixture with a fast GC ticker and asserts that
@@ -259,8 +289,11 @@ func runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(t testing.TB, tgt s
 	t.Helper()
 	endpoint := tgt.endpoint(0)
 	dataDir := filepath.Dir(tgt.adminSockPath())
+	if tgt.cluster != nil && len(tgt.cluster.dataDirs) > 0 {
+		dataDir = tgt.cluster.dataDirs[0]
+	}
 
-	// Plant an unregistered vlog directory before the 3s smoke defer expires.
+	// Plant an unregistered vlog directory before the smoke defer expires.
 	plantDir := filepath.Join(dataDir, "fake-rogue-db")
 	gomega.Expect(os.MkdirAll(plantDir, 0o755)).To(gomega.Succeed())
 	plantFile := filepath.Join(plantDir, "000001.vlog")
@@ -270,7 +303,7 @@ func runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(t testing.TB, tgt s
 	// recorded. We probe by hitting the data-plane HTTP server: when
 	// grainfs has exited the listener is gone and Get returns
 	// "connection refused" within milliseconds.
-	deadline := time.Now().Add(12 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	exited := false
 	incidentRaised := false
 	probe := &http.Client{Timeout: 500 * time.Millisecond}
@@ -301,7 +334,7 @@ func runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(t testing.TB, tgt s
 // the test when the endpoint is briefly unreachable (e.g. process is exiting).
 func fetchIncidentsSafe(t testing.TB, endpoint string) []incidentState {
 	t.Helper()
-	resp, err := http.Get(endpoint + "/api/incidents?limit=50")
+	resp, err := e2eRawHTTPClient.Get(endpoint + "/api/incidents?limit=50")
 	if err != nil {
 		return nil
 	}

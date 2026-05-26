@@ -51,7 +51,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 				d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-degraded-%d-*", i))
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				dataDirs[i] = d
-				ginkgo.DeferCleanup(os.RemoveAll, d)
+				ginkgo.DeferCleanup(removeE2EDir, d)
 			}
 			encKeyFile := makeSharedEncryptionKeyFile(t)
 

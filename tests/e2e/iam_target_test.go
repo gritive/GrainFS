@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -46,26 +47,27 @@ func (tgt iamAdminTarget) iamClient() *iamadmin.Client {
 // package-global single-node grainfs fixture. No server is started — the
 // global fixture from TestMain is reused.
 func newSingleNodeIAMAdminTarget() iamAdminTarget {
+	tgt := newSingleNodeS3Target()
 	return iamAdminTarget{
 		name:  "single",
 		nodes: 1,
 		adminSockPath: func() string {
-			return testServerDataDir + "/admin.sock"
+			return tgt.adminSockPath()
 		},
 		pickNode: func(i int) *s3.Client {
-			return testS3Client
+			return tgt.pickNode(i)
 		},
 		endpoint: func(i int) string {
-			return testServerURL
+			return tgt.endpoint(i)
 		},
 		dataDirs: func() []string {
-			return []string{testServerDataDir}
+			return []string{filepath.Dir(tgt.adminSockPath())}
 		},
-		accessKey: testAccessKey,
-		secretKey: testSecretKey,
+		accessKey: tgt.accessKey,
+		secretKey: tgt.secretKey,
 		uniqueSA: func(t testing.TB, caseName string) (string, string, string) {
 			t.Helper()
-			sock := testServerDataDir + "/admin.sock"
+			sock := tgt.adminSockPath()
 			name := "sa-" + sanitizeForBucket(caseName)
 			out := iamCreateSA(t, sock, name)
 			t.Cleanup(func() {
@@ -76,9 +78,9 @@ func newSingleNodeIAMAdminTarget() iamAdminTarget {
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			t.Helper()
 			name := bucketNameFor("single", t.Name(), caseName)
-			createBucket(t, name)
+			tgt.createBkt(t, name)
 			t.Cleanup(func() {
-				testS3Client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+				tgt.pickNode(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
 		},
@@ -90,7 +92,8 @@ func newSingleNodeIAMAdminTarget() iamAdminTarget {
 // shared 4-node cluster fixture (same fixture as newSharedClusterS3Target).
 func newSharedClusterIAMAdminTarget(t testing.TB) iamAdminTarget {
 	t.Helper()
-	c := getOrInitSharedCluster(t)
+	tgt := newSharedClusterS3Target(t)
+	c := tgt.cluster
 	return iamAdminTarget{
 		name:  "cluster4",
 		nodes: 4,

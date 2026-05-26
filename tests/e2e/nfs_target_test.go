@@ -12,8 +12,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// nfsTarget abstracts an NFS4-capable grainfs fixture. Cluster variant
-// shares the mrCluster fixture with icebergTarget via getOrInitSharedMRCluster.
+// nfsTarget abstracts an NFS4-capable grainfs fixture.
 type nfsTarget struct {
 	name      string
 	nfsAddr   func(i int) string
@@ -29,6 +28,7 @@ type nfsTarget struct {
 	s3Client   func(i int) *s3.Client
 	accessKey  string
 	secretKey  string
+	createBkt  func(testing.TB, string)
 }
 
 // uniqueExport creates a per-case bucket + NFS export and registers cleanup.
@@ -44,7 +44,7 @@ func (tgt *nfsTarget) uniqueExport(t testing.TB, caseName string) (string, uint6
 		tgt.cluster.GrantAdminOnBuckets(bucket)
 		requireMRCreateBucketEventually(t, ctx, tgt.cluster, bucket)
 	} else {
-		createBucket(t, bucket)
+		tgt.createBkt(t, bucket)
 	}
 
 	created := runNfsExportJSONOnDataDir(t, tgt.dataDir(tgt.leaderIdx), "add", bucket)
@@ -59,27 +59,37 @@ func (tgt *nfsTarget) uniqueExport(t testing.TB, caseName string) (string, uint6
 	return bucket, created.Generation
 }
 
-// newSingleNodeNFSTarget reuses the existing single-node fixture from TestMain.
+// newSingleNodeNFSTarget starts a single-node fixture owned by the caller's
+// Ginkgo context/spec cleanup.
 func newSingleNodeNFSTarget(t testing.TB) *nfsTarget {
 	t.Helper()
+	tgt := newDedicatedSingleNodeS3Target(t, []string{
+		"--nfs-write-buffer-idle", "1s",
+	})
 	return &nfsTarget{
 		name:       "single",
-		nfsAddr:    func(i int) string { return fmt.Sprintf("127.0.0.1:%d", testServerNFSPort) },
-		dataDir:    func(i int) string { return testServerDataDir },
+		nfsAddr:    func(i int) string { return fmt.Sprintf("127.0.0.1:%d", tgt.nfsPort) },
+		dataDir:    func(i int) string { return tgt.dataDir },
 		nodeCount:  1,
 		leaderIdx:  0,
-		s3Endpoint: func(i int) string { return testServerURL },
-		s3Client:   func(i int) *s3.Client { return testS3Client },
-		accessKey:  testAccessKey,
-		secretKey:  testSecretKey,
+		s3Endpoint: func(i int) string { return tgt.endpoint(i) },
+		s3Client:   func(i int) *s3.Client { return tgt.pickNode(i) },
+		accessKey:  tgt.accessKey,
+		secretKey:  tgt.secretKey,
+		createBkt:  tgt.createBkt,
 		isCluster:  false,
 	}
 }
 
-// newSharedClusterNFSTarget reuses the shared mrCluster (NFS+iceberg).
+// newSharedClusterNFSTarget starts a cluster owned by the caller's Ginkgo
+// context/spec cleanup.
 func newSharedClusterNFSTarget(t testing.TB) *nfsTarget {
 	t.Helper()
-	c := getOrInitSharedMRCluster(t)
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNBD:    true,
+		FastBootstrap: true,
+	})
+	c.nodeCount = 3
 	return &nfsTarget{
 		name: "cluster3",
 		nfsAddr: func(i int) string {
@@ -94,6 +104,10 @@ func newSharedClusterNFSTarget(t testing.TB) *nfsTarget {
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
+		createBkt: func(t testing.TB, bucket string) {
+			c.GrantAdminOnBuckets(bucket)
+			requireMRCreateBucketEventually(t, context.Background(), c, bucket)
+		},
 		isCluster: true,
 		cluster:   c,
 	}

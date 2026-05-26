@@ -40,10 +40,10 @@ var _ = ginkgo.Describe("Objects", ginkgo.Label("bucket"), func() {
 })
 
 func describeObjectContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 		})
 

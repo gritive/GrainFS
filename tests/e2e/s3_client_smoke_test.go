@@ -17,7 +17,7 @@ import (
 )
 
 // S3ClientSmoke exercises host-safe external S3-compatible clients
-// against both shared single + shared cluster fixtures. FUSE-backed clients
+// against both single-node and cluster fixtures. FUSE-backed clients
 // run from Linux in tests/fuse_s3_colima because macOS host FUSE availability
 // is not a reliable e2e prerequisite.
 var _ = ginkgo.Describe("S3 client smoke", ginkgo.Label("s3"), func() {
@@ -30,10 +30,10 @@ var _ = ginkgo.Describe("S3 client smoke", ginkgo.Label("s3"), func() {
 })
 
 func describeS3ClientSmokeContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 		})
 

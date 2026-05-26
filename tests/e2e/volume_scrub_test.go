@@ -142,7 +142,7 @@ func tempVolumeScrubDir(t testing.TB) string {
 	t.Helper()
 	dataDir, err := os.MkdirTemp("", "grainfs-volume-scrub-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dataDir)
+	ginkgo.DeferCleanup(removeE2EDir, dataDir)
 	return dataDir
 }
 

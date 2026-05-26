@@ -239,7 +239,7 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
 func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 	dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
+	ginkgo.DeferCleanup(func() { _ = removeE2EDir(dir) })
 	sock := filepath.Join(dir, "admin.sock")
 	ln, err := net.Listen("unix", sock)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -569,7 +569,7 @@ func startIAMTestServer(t testing.TB) iamTestServer {
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = removeE2EDir(dir) })
 
 	port := freePort()
 	cmd := exec.Command(getBinary(), "serve",
@@ -637,7 +637,7 @@ func startIAMTestServerWithRestart(t testing.TB) *iamTestServerHandle {
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-restart-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = removeE2EDir(dir) })
 
 	h := &iamTestServerHandle{
 		DataDir:   dir,
@@ -734,7 +734,7 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 		Region:       "us-east-1",
 		Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
 		UsePathStyle: true,
-		HTTPClient:   e2eNoKeepAliveHTTPClient(0),
+		HTTPClient:   e2eS3HTTPClient,
 	})
 }
 

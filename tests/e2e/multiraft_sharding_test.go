@@ -358,6 +358,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	}
 	args = append(args, c.extraArgs...)
 	cmd := exec.Command(binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
@@ -370,30 +371,14 @@ func (c *mrCluster) Stop() {
 	}
 	c.stopped = true
 	for _, p := range c.procs {
-		if p != nil && p.Process != nil {
-			_ = p.Process.Signal(syscall.SIGTERM)
-		}
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for _, p := range c.procs {
-		if p == nil || p.Process == nil {
-			continue
-		}
-		done := make(chan error, 1)
-		go func(p *exec.Cmd) { done <- p.Wait() }(p)
-		select {
-		case <-done:
-		case <-time.After(time.Until(deadline)):
-			_ = p.Process.Kill()
-			<-done
-		}
+		terminateProcess(p)
 	}
 	for _, d := range c.dataDirs {
 		if c.t.Failed() && keepE2EArtifacts() {
 			c.t.Logf("multi-raft data dir saved to %s", d)
 			continue
 		}
-		_ = os.RemoveAll(d)
+		_ = removeE2EDir(d)
 	}
 }
 
@@ -934,8 +919,7 @@ func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 	}
 	gomega.Expect(c.procs[killIdx]).NotTo(gomega.BeNil(), "target process must exist")
 	t.Logf("killing placement target node %d at %s", killIdx, c.httpURLs[killIdx])
-	gomega.Expect(c.procs[killIdx].Process.Signal(syscall.SIGTERM)).To(gomega.Succeed())
-	_ = c.procs[killIdx].Wait()
+	terminateProcess(c.procs[killIdx])
 	c.procs[killIdx] = nil
 
 	readOut, err := ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey).GetObject(ctx, &s3.GetObjectInput{
@@ -1035,6 +1019,12 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 	const nfs4Bucket = "grainfs-nfs4"
 	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, nfs4Bucket, cli)
 	runNfsExportJSONOnDataDir(t, c.dataDirs[0], "add", nfs4Bucket)
+	sock := filepath.Join(c.dataDirs[0], "admin.sock")
+	gomega.Expect(setConfigViaUDS(sock, "iam.anon-enabled", "true")).
+		To(gomega.Succeed(), "re-enable iam.anon-enabled for NFS anon session")
+	ginkgo.DeferCleanup(func() {
+		_ = setConfigViaUDS(sock, "iam.anon-enabled", "false")
+	})
 
 	const s3Body = "written-via-s3"
 	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
@@ -1043,6 +1033,13 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 		Body:   bytes.NewReader([]byte(s3Body)),
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	requireMRGetObjectEventually(t, ctx, cli, nfs4Bucket, "s3-file.txt", []byte(s3Body))
+	headOut, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(nfs4Bucket),
+		Key:    aws.String("s3-file.txt"),
+	})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(headOut.ContentLength).To(gomega.Equal(aws.Int64(int64(len(s3Body)))))
 
 	const nfsBody = "written-via-nfs"
 	if !runNFSv4SmokeClient(t, c.nfs4Ports[0], nfs4Bucket, s3Body, nfsBody) {
@@ -1054,15 +1051,7 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
-	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(nfs4Bucket),
-		Key:    aws.String("nfs-file.txt"),
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(func() { _ = getOut.Body.Close() })
-	nfsReadBody, err := io.ReadAll(getOut.Body)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(string(nfsReadBody)).To(gomega.Equal(nfsBody))
+	requireMRGetObjectEventually(t, ctx, cli, nfs4Bucket, "nfs-file.txt", []byte(nfsBody))
 
 	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
@@ -1130,12 +1119,12 @@ func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBod
 		hostIP = "192.168.5.2"
 	}
 
-	name := strings.ReplaceAll(t.Name(), "/", "-")
+	name := strings.NewReplacer("/", "-", " ", "-", "\t", "-", "\\", "-").Replace(t.Name())
 	mountDir := fmt.Sprintf("/mnt/grainfs-mr-nfs-%s-%d", name, time.Now().UnixNano())
 	runColimaSSH(t, "sudo", "mkdir", "-p", mountDir)
 	ginkgo.DeferCleanup(func() {
-		_ = colimaSSH("sudo", "umount", "-l", mountDir).Run()
-		_ = colimaSSH("sudo", "rmdir", mountDir).Run()
+		_, _ = colimaSSHCombinedOutput(5*time.Second, "sudo", "umount", "-l", mountDir)
+		_, _ = colimaSSHCombinedOutput(5*time.Second, "sudo", "rmdir", mountDir)
 	})
 
 	if out, err := colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
@@ -1148,15 +1137,20 @@ func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBod
 	}
 
 	nfsFilePath := mountDir + "/" + bucket + "/s3-file.txt"
+	var lastReadErr error
+	var lastReadOut []byte
 	gomega.Eventually(func() bool {
 		out, err := colimaSSHCombinedOutput(2*time.Second, "sudo", "cat", nfsFilePath)
+		lastReadErr = err
+		lastReadOut = out
 		return err == nil && string(out) == s3Body
 	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
-		Should(gomega.BeTrue(), "object not visible via Colima NFSv4 mount")
+		Should(gomega.BeTrue(), "object not visible via Colima NFSv4 mount: last err=%v out=%q", lastReadErr, string(lastReadOut))
 
 	nfsNewFilePath := mountDir + "/" + bucket + "/nfs-file.txt"
-	runColimaSSH(t, "sudo", "bash", "-c",
+	out, err := colimaSSHCombinedOutput(10*time.Second, "sudo", "bash", "-c",
 		fmt.Sprintf("printf %%s %s > %s", shellQuote(nfsBody), shellQuote(nfsNewFilePath)))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "write via Colima NFSv4 mount: %s", string(out))
 	return true
 }
 
@@ -1165,9 +1159,16 @@ func colimaSSH(args ...string) *exec.Cmd {
 }
 
 func colimaSSHCombinedOutput(timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "colima", append([]string{"ssh", "--"}, args...)...).CombinedOutput()
+	seconds := int((timeout + time.Second - time.Nanosecond) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	sshArgs := []string{"ssh", "--", "timeout", "--kill-after=1s", fmt.Sprintf("%ds", seconds)}
+	sshArgs = append(sshArgs, args...)
+	cmd := exec.CommandContext(ctx, "colima", sshArgs...)
+	return combinedOutputWithWaitDelay(cmd)
 }
 
 func runColimaSSH(t testing.TB, args ...string) string {

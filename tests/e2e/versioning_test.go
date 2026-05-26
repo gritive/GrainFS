@@ -25,13 +25,13 @@ var _ = ginkgo.Describe("S3 versioning", ginkgo.Label("bucket"), func() {
 })
 
 func describeVersioningContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var (
 			tgt    s3Target
 			client *s3.Client
 		)
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 			client = tgt.pickNode(0)
 		})

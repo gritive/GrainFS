@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -250,80 +249,11 @@ func (f *FSM) applyPutObjectMeta(txn *badger.Txn, data []byte) error {
 	if err != nil {
 		return err
 	}
-	etag := c.ETag
-	if c.IsDeleteMarker {
-		etag = deleteMarkerETag
-	}
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:              c.Key,
-		Size:             c.Size,
-		ContentType:      c.ContentType,
-		ETag:             etag,
-		LastModified:     c.ModTime,
-		ECData:           c.ECData,
-		ECParity:         c.ECParity,
-		NodeIDs:          c.NodeIDs,
-		PlacementGroupID: c.PlacementGroupID,
-		UserMetadata:     c.UserMetadata,
-		SSEAlgorithm:     c.SSEAlgorithm,
-		Parts:            c.Parts,
-		Segments:         segmentMetaEntriesToRefs(c.Segments),
-		Tags:             c.Tags,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal object meta: %w", err)
-	}
-	if c.ExpectedETag != "" {
-		item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key))
-		if gerr != nil {
-			return fmt.Errorf("put object meta CAS: read current meta: %w", gerr)
-		}
-		if err := item.Value(func(val []byte) error {
-			current, derr := unmarshalObjectMeta(val)
-			if derr != nil {
-				return fmt.Errorf("put object meta CAS: decode current meta: %w", derr)
-			}
-			if current.ETag != c.ExpectedETag {
-				return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
-					c.Bucket, c.Key, current.ETag, c.ExpectedETag)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
-	// Versioned entries are only written when a VersionID is supplied. Legacy
-	// replay (empty VersionID) gets the single legacy key only.
-	if c.VersionID != "" {
-		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
-			return err
-		}
-		if c.PreserveLatest {
-			return nil
-		}
-	}
-	if c.IsDeleteMarker {
-		if c.VersionID != "" {
-			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-				return err
-			}
-		}
-		if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		return nil
-	}
-	// Dual-write: keep the legacy latest-only key in sync during the transition
-	// so readers that haven't been ported yet still see the object.
-	if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), meta); err != nil {
+	metaObj := buildPutObjectMeta(c)
+	if err := f.checkPutObjectExpectedETag(txn, c.Bucket, c.Key, c.ExpectedETag); err != nil {
 		return err
 	}
-	if c.VersionID != "" {
-		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return f.persistPutObjectMetaUpdate(txn, c, metaObj)
 }
 
 func (f *FSM) applyDeleteObject(txn *badger.Txn, data []byte) error {
@@ -753,155 +683,38 @@ func (f *FSM) applyAppendObjectFromCmd(txn *badger.Txn, data []byte) error {
 		modifiedUnixSec = time.Now().Unix()
 	}
 
-	metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
-
-	// Read existing objectMeta (if any).
-	var existing *objectMeta
-	item, gerr := txn.Get(metaKey)
-	if gerr == nil {
-		if err := item.Value(func(raw []byte) error {
-			v, oerr := f.openValue(item.Key(), raw)
-			if oerr != nil {
-				return oerr
-			}
-			m, derr := unmarshalObjectMeta(v)
-			if derr != nil {
-				return fmt.Errorf("unmarshal existing objectMeta: %w", derr)
-			}
-			existing = &m
-			return nil
-		}); err != nil {
-			return err
-		}
-	} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
-		return fmt.Errorf("get existing objectMeta: %w", gerr)
-	}
-
-	// Placement check: cmd captured PG at propose time; reject if the
-	// existing object's PG has moved since (rebalance window).
-	if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
-		cmd.PlacementGroupID != existing.PlacementGroupID {
-		return ErrStalePlacement
-	}
-
-	// TODO(Phase 2): Phase 1 dropped SegmentRef.ETag. Cluster still
-	// receives a hex-encoded MD5 in cmd.SegmentETag; stash it in
-	// Checksum so the FB segment vector keeps the digest. Phase 2 will
-	// migrate cluster to xxhash3 like the storage layer.
-	segDigest, _ := hex.DecodeString(cmd.SegmentETag)
-	seg := storage.SegmentRef{
-		BlobID:   cmd.BlobID,
-		Size:     cmd.SegmentSize,
-		Checksum: segDigest,
-	}
-
-	// Idempotency: same BlobID already applied (Raft replay) → no-op.
-	if existing != nil {
-		for _, s := range existing.Segments {
-			if s.BlobID == cmd.BlobID {
-				return nil
-			}
-		}
-	}
-
-	existingVersionID := ""
-	if existing != nil {
-		if item, err := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); err == nil {
-			if err := item.Value(func(raw []byte) error {
-				if string(raw) != deleteMarkerETag {
-					existingVersionID = string(raw)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, badger.ErrKeyNotFound) {
-			return fmt.Errorf("get latest version: %w", err)
-		}
-	}
-
-	var updated objectMeta
-	if existing == nil {
-		if cmd.ExpectedOffset != 0 {
-			return storage.ErrAppendOffsetMismatch
-		}
-		// TODO(Task 3.1 / Phase 2): wire AppendCallMD5s on the cluster side
-		// so Object.ETag composes from per-call MD5 digests instead of from
-		// the segment vector. For now reuse segDigest as the single-call
-		// digest to preserve appendable-ETag semantics on first call.
-		updated = objectMeta{
-			Key:              cmd.Key,
-			Size:             seg.Size,
-			ContentType:      "application/octet-stream",
-			ETag:             storage.CompositeETag([][]byte{segDigest}),
-			LastModified:     modifiedUnixSec,
-			PlacementGroupID: cmd.PlacementGroupID,
-			Segments:         []storage.SegmentRef{seg},
-			IsAppendable:     true,
-		}
-	} else {
-		if existing.Size != cmd.ExpectedOffset {
-			return storage.ErrAppendOffsetMismatch
-		}
-		if len(existing.Segments) >= storage.MaxAppendSegments {
-			return storage.ErrAppendCapExceeded
-		}
-		// Size cap (design 2026-05-19 § Follow-up 2): deterministic, FSM-side
-		// authoritative. Coordinator pre-check may have passed (stale HeadObject),
-		// but the Raft entry sees the freshest committed state. Pre-check
-		// tolerance contract: false-positive (accept what we reject) is fine —
-		// caller retries are idempotent on BlobID; false-negative (reject what we
-		// would have accepted) is FORBIDDEN because the FSM is the single source
-		// of truth.
-		//
-		// On reject, the segment blob already written by the coordinator becomes
-		// an orphan. Best-effort cleanup; full scrubber sweep is a follow-up
-		// (TODOS.md "Scrubber orphan sweep production wiring [P1]").
-		if coalesceCfg.SizeCapBytes > 0 &&
-			existing.Size+seg.Size > coalesceCfg.SizeCapBytes {
-			metrics.AppendSizeCapRejectedTotal.Inc()
-			return storage.ErrAppendObjectTooLarge
-		}
-		segs := append(existing.Segments, seg)
-		updated = *existing
-		if !updated.IsAppendable {
-			updated.IsAppendable = true
-			if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
-				updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, existingVersionID, existing)}
-			}
-		}
-		updated.Segments = segs
-		updated.Size = existing.Size + seg.Size
-		// TODO(Task 3.1 / Phase 2): once cluster persists AppendCallMD5s,
-		// recompute Object.ETag from those per-call digests. For now,
-		// rebuild from the per-segment digests in Checksum to preserve
-		// the legacy "ETag changes per append" wire semantic.
-		callDigests := make([][]byte, 0, len(segs))
-		for _, s := range segs {
-			if len(s.Checksum) > 0 {
-				callDigests = append(callDigests, s.Checksum)
-			}
-		}
-		updated.ETag = storage.CompositeETag(callDigests)
-		updated.LastModified = modifiedUnixSec
-	}
-
-	out, err := marshalObjectMeta(updated)
+	resolved, err := f.resolveObjectMetaForAppendUpdate(txn, cmd.Bucket, cmd.Key, cmd.BlobID)
 	if err != nil {
-		return fmt.Errorf("marshal updated objectMeta: %w", err)
+		return err
 	}
-	// Dual-write: versioned key + latest pointer (when VersionID supplied)
-	// alongside the legacy ObjectMetaKey, matching applyPutObjectMeta so
-	// HeadObject returns a populated obj.VersionID.
-	if cmd.VersionID != "" {
-		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
-			return err
-		}
-		if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
-			return err
-		}
+	if resolved.AlreadyApplied {
+		return nil
 	}
-	return f.setValue(txn, metaKey, out)
+
+	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
+		Existing:          resolved.Existing,
+		ExistingVersionID: resolved.ExistingVersionID,
+		Cmd:               cmd,
+		ModifiedUnixSec:   modifiedUnixSec,
+		CoalesceCfg:       coalesceCfg,
+	})
+	if result.Noop {
+		return nil
+	}
+	if result.SizeCapRejected {
+		metrics.AppendSizeCapRejectedTotal.Inc()
+	}
+	if err != nil {
+		return err
+	}
+
+	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
+		Bucket:    cmd.Bucket,
+		Key:       cmd.Key,
+		VersionID: cmd.VersionID,
+		Meta:      updated,
+		Policy:    objectMetaPersistencePublishLatest,
+	})
 }
 
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
@@ -941,97 +754,31 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(txn *badger.Txn, data []byte) error {
 		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
 	}
 
-	legacyKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
-
-	// Resolve the canonical metaKey: prefer the latest-version pointer (set
-	// by applyAppendObject's dual-write). Falls back to legacy key when no
-	// pointer exists (test fixtures / legacy replay).
-	metaKey := legacyKey
-	versionID := ""
-	if latItem, lerr := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); lerr == nil {
-		_ = latItem.Value(func(v []byte) error {
-			versionID = string(v)
-			return nil
-		})
-		if versionID != "" {
-			metaKey = f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, versionID)
-		}
-	} else if !errors.Is(lerr, badger.ErrKeyNotFound) {
-		return fmt.Errorf("get latest pointer: %w", lerr)
-	}
-
-	item, gerr := txn.Get(metaKey)
-	if gerr != nil {
-		if errors.Is(gerr, badger.ErrKeyNotFound) {
-			return nil // object deleted concurrently — drop silently
-		}
-		return fmt.Errorf("get objectMeta: %w", gerr)
-	}
-	var existing objectMeta
-	if err := item.Value(func(raw []byte) error {
-		v, oerr := f.openValue(item.Key(), raw)
-		if oerr != nil {
-			return oerr
-		}
-		m, derr := unmarshalObjectMeta(v)
-		if derr != nil {
-			return fmt.Errorf("unmarshal: %w", derr)
-		}
-		existing = m
-		return nil
-	}); err != nil {
+	resolved, err := f.resolveObjectMetaForCoalesceUpdate(txn, cmd.Bucket, cmd.Key)
+	if err != nil {
 		return err
 	}
-
-	// Idempotency: same CoalescedID already applied → no-op.
-	for _, c := range existing.Coalesced {
-		if c.CoalescedID == cmd.CoalescedID {
-			return nil
-		}
+	if !resolved.Found {
+		return nil // object deleted concurrently — drop silently
 	}
 
-	// Cap depth — stall coalesce when the chain grows unbounded.
-	if len(existing.Coalesced) >= MaxCoalescedEntries {
+	updated, result, err := applyCoalesceSegmentsTransition(resolved.Meta, cmd)
+	if result.Noop {
+		return nil
+	}
+	if result.CoalescedEntriesAtCap {
 		metrics.AppendCoalescedEntriesAtCap.Inc()
-		return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
 	}
-
-	// Remove consumed segments by exact BlobID match.
-	consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
-	for _, id := range cmd.ConsumedSegmentIDs {
-		consumed[id] = true
-	}
-	kept := existing.Segments[:0]
-	for _, s := range existing.Segments {
-		if !consumed[s.BlobID] {
-			kept = append(kept, s)
-		}
-	}
-	existing.Segments = kept
-	existing.Coalesced = append(existing.Coalesced, CoalescedShardRef{
-		CoalescedID: cmd.CoalescedID,
-		Size:        cmd.Size,
-		ETag:        cmd.ETag,
-		ShardKey:    cmd.ShardKey,
-		Version:     1,
-		ECData:      cmd.ECData,
-		ECParity:    cmd.ECParity,
-		NodeIDs:     append([]string(nil), cmd.Placement...),
-	})
-	out, err := marshalObjectMeta(existing)
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return err
 	}
-	// Dual-write parallel to applyAppendObject: keep legacy key in sync
-	// with the versioned key so any code path that reads either sees the
-	// post-coalesce state.
-	if versionID != "" {
-		if err := f.setValue(txn, metaKey, out); err != nil {
-			return err
-		}
-		return f.setValue(txn, legacyKey, out)
-	}
-	return f.setValue(txn, legacyKey, out)
+	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
+		Bucket:    cmd.Bucket,
+		Key:       cmd.Key,
+		VersionID: resolved.VersionID,
+		Meta:      updated,
+		Policy:    objectMetaPersistenceMirrorVersion,
+	})
 }
 
 // pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.

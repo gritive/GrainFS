@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 		for _, node := range nodes {
 			if node != nil {
 				node.kill()
-				_ = os.RemoveAll(node.dataDir)
+				_ = removeE2EDir(node.dataDir)
 			}
 		}
 	}
@@ -75,6 +76,7 @@ func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 			"--cluster-key", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		}
 		cmd := exec.Command(binary, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		logFile, err := os.CreateTemp("", fmt.Sprintf("ecspike-node-%d-*.log", i))
 		if err != nil {
 			cleanup()
@@ -202,8 +204,9 @@ var _ = ginkgo.Describe("EC spike cluster", func() {
 		t.Logf("ecspike: correctness PASS (%d/%d objects reconstructed)", objCount, objCount)
 
 		// Latency measurement: 100 × 16MB PUT on a fresh cluster so node 0 is alive.
-		// Reuse current cluster sans node 0 → skip this block; instead spawn a fresh
-		// cluster for honest baseline.
+		// Stop the correctness cluster first so the measurement cluster does not
+		// overlap another 5 live grainfs processes in the same spec.
+		cleanup()
 		measureECSpikeP95(t)
 	})
 })

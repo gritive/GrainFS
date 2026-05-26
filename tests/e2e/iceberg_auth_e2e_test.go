@@ -35,7 +35,7 @@ func runIcebergAuthNoAuthRejectedSingleNode(t testing.TB) {
 	srv := startIAMTestServer(t)
 	ginkgo.DeferCleanup(srv.Stop)
 
-	resp, err := http.Post(srv.S3URL+"/iceberg/v1/namespaces", "application/json",
+	resp, err := e2eRawHTTPClient.Post(srv.S3URL+"/iceberg/v1/namespaces", "application/json",
 		bytes.NewReader([]byte(`{"namespace":["x"]}`)))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
@@ -65,7 +65,7 @@ func runIcebergAuthFailuresRejectedSingleNode(t testing.TB) {
 	srv := startIAMTestServer(t)
 	ginkgo.DeferCleanup(srv.Stop)
 	for i := 0; i < 3; i++ {
-		resp, err := http.Post(srv.S3URL+"/iceberg/v1/warehouses", "application/json",
+		resp, err := e2eRawHTTPClient.Post(srv.S3URL+"/iceberg/v1/warehouses", "application/json",
 			bytes.NewReader([]byte(`{}`)))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusUnauthorized))

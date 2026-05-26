@@ -25,7 +25,7 @@ import (
 func runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t testing.TB) {
 	dataDir, err := os.MkdirTemp("", "grainfs-iceberg-duckdb-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dataDir) })
+	ginkgo.DeferCleanup(func() { _ = removeE2EDir(dataDir) })
 	raftPort := freePort()
 	encKeyFile := makeSharedEncryptionKeyFile(t)
 
@@ -481,6 +481,8 @@ func auditWhereBucket(whereClause string) string {
 	return rest[:end]
 }
 
+var auditSearchHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 func auditSearchRows(t testing.TB, endpoint, accessKey, secretKey, bucket, operation string) (int, error) {
 	t.Helper()
 	q := url.Values{}
@@ -495,7 +497,7 @@ func auditSearchRows(t testing.TB, endpoint, accessKey, secretKey, bucket, opera
 	}
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := auditSearchHTTPClient.Do(req)
 	if err != nil {
 		return 0, err
 	}

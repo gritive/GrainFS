@@ -13,8 +13,8 @@ import (
 
 // TestCacheE2E probes the cache-coherence surface (PUT-overwrite, DELETE,
 // HEAD-after-PUT) at the S3 API level. The cache itself is internal; we only
-// assert subsequent reads see fresh data. Shared single + shared cluster
-// fixtures, each sub-test gets its own bucket via uniqueBucket.
+// assert subsequent reads see fresh data. Each sub-test gets its own bucket
+// via uniqueBucket.
 var _ = ginkgo.Describe("Cache", func() {
 	describeCacheContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
@@ -25,10 +25,10 @@ var _ = ginkgo.Describe("Cache", func() {
 })
 
 func describeCacheContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			tgt = factory()
 		})
 

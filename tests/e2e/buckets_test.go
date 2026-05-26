@@ -2,7 +2,7 @@
 //
 // The same case set runs against a single-node fixture and a 4-node cluster
 // fixture. Bucket names are derived from t.Name()+case via tgt.uniqueBucket
-// to avoid namespace collisions in the shared cluster fixture.
+// to avoid namespace collisions when a context reuses one fixture.
 package e2e
 
 import (
@@ -28,14 +28,14 @@ var _ = ginkgo.Describe("Buckets", ginkgo.Label("bucket"), func() {
 })
 
 func describeBucketContext(name string, factory func() s3Target) {
-	ginkgo.Context(name, func() {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var (
 			ctx    context.Context
 			tgt    s3Target
 			client *s3.Client
 		)
 
-		ginkgo.BeforeEach(func() {
+		ginkgo.BeforeAll(func() {
 			ctx = context.Background()
 			tgt = factory()
 			client = tgt.pickNode(0)

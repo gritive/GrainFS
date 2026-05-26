@@ -168,10 +168,9 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 	if !obj.IsAppendable || len(obj.Segments) == 0 {
 		return nil
 	}
-	snapshot := make([]storage.SegmentRef, len(obj.Segments))
-	copy(snapshot, obj.Segments)
 	coalescedID := uuid.Must(uuid.NewV7()).String()
-	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, snapshot)
+	coalescePlan := planCoalesceSnapshot(job.Bucket, job.Key, obj.Segments, coalescedID)
+	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, coalescePlan.Segments)
 	if mErr != nil {
 		return fmt.Errorf("merge: %w", mErr)
 	}
@@ -185,20 +184,30 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		_ = os.Remove(mergedPath)
 	}
 
-	shardKey := job.Key + "/coalesced/" + coalescedID
-	liveNodes := b.ecWriteNodes()
-	placementPlan, err := b.planObjectWritePlacement(ctx, "coalesce", shardKey, liveNodes)
+	placementGroupID := obj.PlacementGroupID
+	if placementGroupID == "" {
+		placementGroupID = b.lookupPlacementGroupForAppend(ctx, obj)
+	}
+	placementPlan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
+		Operation:        "coalesce_object",
+		PlacementGroupID: placementGroupID,
+		LiveNodes:        b.ecWriteNodes(),
+		ShardKey:         coalescePlan.ShardKey,
+	})
 	if err != nil {
 		cleanupMerged()
-		return err
+		return fmt.Errorf("coalesce: plan placement: %w", err)
 	}
+	cfg := placementPlan.Config
+	placement := placementPlan.NodeIDs
 
 	plan := ecObjectWritePlan{
-		Bucket:    job.Bucket,
-		Key:       job.Key,
-		VersionID: "coalesced/" + coalescedID,
-		Config:    placementPlan.Config,
-		Placement: placementPlan.NodeIDs,
+		Bucket:           job.Bucket,
+		Key:              job.Key,
+		VersionID:        "coalesced/" + coalescedID,
+		PlacementGroupID: placementPlan.PlacementGroupID,
+		Config:           cfg,
+		Placement:        placement,
 	}
 	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
@@ -225,21 +234,17 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		}
 	}
 
-	consumedIDs := make([]string, len(snapshot))
-	for i, s := range snapshot {
-		consumedIDs[i] = s.BlobID
-	}
 	cmd := CoalesceSegmentsCmd{
 		Bucket:             job.Bucket,
 		Key:                job.Key,
-		CoalescedID:        coalescedID,
-		ShardKey:           shardKey,
+		CoalescedID:        coalescePlan.CoalescedID,
+		ShardKey:           coalescePlan.ShardKey,
 		Size:               merged.Size,
 		ETag:               merged.ETag,
-		ConsumedSegmentIDs: consumedIDs,
-		Placement:          placementPlan.NodeIDs,
-		ECData:             uint8(placementPlan.Config.DataShards),
-		ECParity:           uint8(placementPlan.Config.ParityShards),
+		ConsumedSegmentIDs: coalescePlan.ConsumedSegmentIDs,
+		Placement:          placement,
+		ECData:             uint8(cfg.DataShards),
+		ECParity:           uint8(cfg.ParityShards),
 	}
 	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
 		// EC shards committed but never referenced. Best-effort orphan cleanup
@@ -281,25 +286,20 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 	}
 	// Snapshot segments — concurrent appends after this point are preserved
 	// by applyCoalesceSegments (consumed-set match is exact BlobID).
-	snapshot := make([]storage.SegmentRef, len(obj.Segments))
-	copy(snapshot, obj.Segments)
 	coalescedID := uuid.Must(uuid.NewV7()).String()
-	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, snapshot)
+	coalescePlan := planCoalesceSnapshot(job.Bucket, job.Key, obj.Segments, coalescedID)
+	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, coalescePlan.Segments)
 	if mErr != nil {
 		return fmt.Errorf("merge: %w", mErr)
 	}
-	consumedIDs := make([]string, len(snapshot))
-	for i, s := range snapshot {
-		consumedIDs[i] = s.BlobID
-	}
 	cmd := CoalesceSegmentsCmd{
-		Bucket:             job.Bucket,
-		Key:                job.Key,
-		CoalescedID:        coalescedID,
-		ShardKey:           job.Key + "/coalesced/" + coalescedID,
+		Bucket:             coalescePlan.Bucket,
+		Key:                coalescePlan.Key,
+		CoalescedID:        coalescePlan.CoalescedID,
+		ShardKey:           coalescePlan.ShardKey,
 		Size:               merged.Size,
 		ETag:               merged.ETag,
-		ConsumedSegmentIDs: consumedIDs,
+		ConsumedSegmentIDs: coalescePlan.ConsumedSegmentIDs,
 	}
 	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
 		// Cleanup intermediate coalesced blob; raw segments remain intact
@@ -310,7 +310,7 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 	// Unlink raw segment files for blobs we just absorbed. Failure → orphans
 	// remain (best-effort; full sweep deferred). Apply already removed them
 	// from metadata, so data is safe even if files persist.
-	for _, s := range snapshot {
+	for _, s := range coalescePlan.Segments {
 		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
 	}
 	return nil
@@ -334,8 +334,8 @@ func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segs []sto
 	if v, ok := b.coalesceFirstSeen.LoadOrStore(cacheKey, nowT); ok {
 		firstT = v.(time.Time)
 	}
-	trig, _ := evaluateCoalesceTrigger(segs, firstT, nowT, *b.coalesceCfg.Load())
-	if !trig {
+	plan := planCoalesceTrigger(segs, firstT, nowT, *b.coalesceCfg.Load())
+	if !plan.ShouldEnqueue {
 		return
 	}
 	b.coalesce.Enqueue(coalesceJob{Bucket: bucket, Key: key})
@@ -422,31 +422,4 @@ func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
 			return nil
 		})
 	})
-}
-
-// evaluateCoalesceTrigger returns (trigger, reason) for the given segment
-// snapshot. Pure function — no side effects.
-//
-// firstCreatedAt is the timestamp of segments[0] (or the first observed
-// time). Caller passes the wall clock for idle comparison (testable).
-//
-// Precedence: count → size → idle. The first satisfied condition wins.
-func evaluateCoalesceTrigger(segs []storage.SegmentRef, firstCreatedAt, now time.Time, cfg CoalesceConfig) (bool, string) {
-	if len(segs) == 0 {
-		return false, ""
-	}
-	if cfg.SegmentCount > 0 && len(segs) >= cfg.SegmentCount {
-		return true, "count"
-	}
-	var total int64
-	for _, s := range segs {
-		total += s.Size
-	}
-	if cfg.SizeBytes > 0 && total >= cfg.SizeBytes {
-		return true, "size"
-	}
-	if cfg.IdleTimeout > 0 && now.Sub(firstCreatedAt) >= cfg.IdleTimeout {
-		return true, "idle"
-	}
-	return false, ""
 }

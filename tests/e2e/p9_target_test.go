@@ -41,7 +41,7 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 
 	dir, err := os.MkdirTemp("", "grainfs-p9-e2e-*")
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = removeE2EDir(dir) })
 
 	httpPort := freePort()
 	p9Port := freePort()

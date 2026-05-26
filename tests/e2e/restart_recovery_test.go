@@ -28,7 +28,7 @@ func runRestartRecoveryOrphanSweepCases(t testing.TB) {
 	binary := getBinary()
 	dir, err := os.MkdirTemp("", "grainfs-restart-recovery-*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(os.RemoveAll, dir)
+	ginkgo.DeferCleanup(removeE2EDir, dir)
 
 	// Plant a stale .tmp file (backdated past the 5-min in-flight guard).
 	staleTmp := filepath.Join(dir, "shards", "b", "k", "0.tmp")

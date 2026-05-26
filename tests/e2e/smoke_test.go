@@ -39,7 +39,7 @@ func runSmokeDeploymentCases() {
 		var err error
 		dir, err = os.MkdirTemp("", "grainfs-smoke-*")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
+		ginkgo.DeferCleanup(func() { _ = removeE2EDir(dir) })
 
 		binary := getBinary()
 		port := freePort()

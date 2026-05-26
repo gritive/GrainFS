@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.352.0] - 2026-05-27
+
+### Changed
+
+- Cluster object-write planning is now split into focused planner and transition
+  helpers, so placement, metadata resolution, persistence, append, and coalesce
+  paths can be tested independently without changing the external S3 behavior.
+
+### Fixed
+
+- E2E cluster fixtures now start and stop the servers they own per spec scope
+  instead of relying on shared TestMain servers, reducing leaked `grainfs`
+  processes and cross-spec data-directory interference.
+- E2E pooled HTTP clients now close idle connections after each spec, avoiding
+  late-suite local TCP exhaustion during long full-suite runs.
+
 ## [0.0.351.0] - 2026-05-27
 
 ### Fixed

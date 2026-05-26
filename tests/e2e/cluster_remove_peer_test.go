@@ -116,7 +116,7 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 
 func getStatusJSON(t testing.TB, base string) map[string]any {
 	t.Helper()
-	resp, err := http.Get(base + "/api/cluster/status")
+	resp, err := e2eRawHTTPClient.Get(base + "/api/cluster/status")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	out := map[string]any{}

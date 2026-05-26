@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hugelgupf/p9/p9"
 	"github.com/onsi/ginkgo/v2"
@@ -142,11 +143,20 @@ func describeP9ContentTypeContext(name string, factory func(testing.TB) *p9Targe
 	})
 }
 
-// anonHTTPClient builds an *http.Client with no keep-alive and no credentials.
+var p9AnonHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     30 * time.Second,
+	},
+	Timeout: 10 * time.Second,
+}
+
+// anonHTTPClient returns an *http.Client with no credentials.
 // Use for anon (no Authorization header) S3 ops against /default in both
 // Phase 0 (anon-enabled=true) and Phase 2 (default-bucket implicit anon allow).
 func anonHTTPClient() *http.Client {
-	return e2eNoKeepAliveHTTPClient(0)
+	return p9AnonHTTPClient
 }
 
 // anonDelete best-effort DELETEs the object via raw HTTP. Ignores errors.

@@ -57,7 +57,7 @@ func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir
 	stop = func() {
 		cancel()
 		_ = cmd.Wait()
-		_ = os.RemoveAll(dir)
+		_ = removeE2EDir(dir)
 	}
 	ginkgo.DeferCleanup(stop)
 
@@ -166,7 +166,7 @@ func runVolumeCLIGuardsCases(tgt func() s3Target) {
 	ginkgo.It("prints a hint when no endpoint is configured", func() {
 		cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ginkgo.DeferCleanup(os.RemoveAll, cwd)
+		ginkgo.DeferCleanup(removeE2EDir, cwd)
 
 		binary, err := filepath.Abs(getBinary())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
