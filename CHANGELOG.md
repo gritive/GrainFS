@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.354.0] - 2026-05-27
+
+### Added
+
+- Cluster transport gained a per-node identity foundation: a node can generate a
+  unique, random ECDSA P-256 keypair whose certificate carries a
+  node-distinguishing SAN (`grainfs://<cluster-id>/<node-id>`), so node-to-node
+  TLS connections become attributable to a specific node in logs and audits
+  rather than every node presenting the same shared identity. The per-node
+  private key is persisted encrypted at rest under the node KEK (AES-256-GCM).
+  This is groundwork; the existing shared-key transport behavior is unchanged
+  until later phases wire it in.
+
+### Changed
+
+- The cluster transport listener now resolves its TLS identity per inbound
+  handshake, so an identity swap takes effect on new connections without a
+  process restart.
+- Accepted-peer (SPKI) verification uses an O(1) lookup, keeping per-connection
+  identity checks cheap as cluster membership grows.
+
 ## [0.0.352.0] - 2026-05-27
 
 ### Changed
