@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -109,5 +110,49 @@ func TestKEKStore_ActiveKEK_ReturnsCopy(t *testing.T) {
 	got2, _ := s.Get(0)
 	if got2[0] == 0x99 {
 		t.Errorf("ActiveKEK returned a reference instead of a copy")
+	}
+}
+
+func TestKEKStore_Get_ReturnsCopy(t *testing.T) {
+	s := NewKEKStore()
+	k0 := bytes.Repeat([]byte{0x5A}, KEKSize)
+	_ = s.Add(0, k0)
+	got, err := s.Get(0)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got[0] = 0x99
+	again, _ := s.Get(0)
+	if again[0] == 0x99 {
+		t.Errorf("Get returned a reference, mutation leaked back into store")
+	}
+}
+
+func TestKEKStore_Delete_UnknownReturnsSentinel(t *testing.T) {
+	s := NewKEKStore()
+	_ = s.Add(0, bytes.Repeat([]byte{0x77}, KEKSize))
+	_ = s.Add(1, bytes.Repeat([]byte{0x88}, KEKSize)) // active=1; v0 now deletable
+	err := s.Delete(42)
+	if err == nil {
+		t.Fatal("Delete(42) on absent version accepted")
+	}
+	if !errors.Is(err, ErrKEKVersionUnknown) {
+		t.Errorf("expected ErrKEKVersionUnknown, got %v", err)
+	}
+}
+
+func TestKEKStore_SentinelErrorsWrappedConsistently(t *testing.T) {
+	s := NewKEKStore()
+	k := bytes.Repeat([]byte{0x11}, KEKSize)
+	_ = s.Add(0, k)
+
+	if err := s.Add(0, k); !errors.Is(err, ErrKEKVersionDuplicate) {
+		t.Errorf("Add(dup): expected ErrKEKVersionDuplicate, got %v", err)
+	}
+	if _, err := s.Get(99); !errors.Is(err, ErrKEKVersionUnknown) {
+		t.Errorf("Get(unknown): expected ErrKEKVersionUnknown, got %v", err)
+	}
+	if err := s.Delete(0); !errors.Is(err, ErrKEKActiveInUse) {
+		t.Errorf("Delete(active): expected ErrKEKActiveInUse, got %v", err)
 	}
 }
