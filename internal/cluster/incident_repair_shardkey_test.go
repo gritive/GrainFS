@@ -65,6 +65,59 @@ func TestRepairShardLocalWithIncident_ShardKeyPath(t *testing.T) {
 	require.True(t, sawShardKeyMsg, "Diagnosed fact must include shardKey for traceability")
 }
 
+func TestRepairShardLocalWithIncident_ShardKeyPath_FailsButReadable(t *testing.T) {
+	backend := setupECBackend(t)
+	svc := backend.shardSvc
+
+	require.NoError(t, backend.CreateBucket(t.Context(), "b"))
+
+	const shardKey = "obj/segments/seg-blob-incident-fails-readable"
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	content := bytes.Repeat([]byte("incident-fails-but-readable-"), 256)
+	freshShards, err := ECSplit(cfg, content)
+	require.NoError(t, err)
+	require.Len(t, freshShards, 2)
+	for i, s := range freshShards {
+		require.NoError(t, svc.WriteLocalShard("b", shardKey, i, s))
+	}
+
+	// Drop shard 1 (the only OTHER shard). Repairing shard 0 skips shard 0 and
+	// finds 0 survivors < DataShards=1, so RepairShardAtShardKey fails. But shard
+	// 0 is still present on disk, so localRepairTargetReadableAtShardKey returns
+	// true → the incident terminates in FactVerified, not FactActionFailed.
+	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 1)))
+
+	rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
+	recorder := &recordingIncidentRecorder{}
+	err = backend.RepairShardLocalWithIncident(t.Context(), IncidentRepairRequest{
+		Bucket:    "b",
+		Key:       "obj",
+		ShardKey:  shardKey,
+		Placement: rec,
+		ShardIdx:  0,
+		Recorder:  recorder,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, recorder.facts)
+	require.Equal(t, incident.FactVerified, recorder.facts[len(recorder.facts)-1].Type)
+}
+
+func TestRepairShardLocalWithIncident_ShardKeyRequiresPlacement(t *testing.T) {
+	backend := setupECBackend(t)
+	recorder := &recordingIncidentRecorder{}
+	err := backend.RepairShardLocalWithIncident(t.Context(), IncidentRepairRequest{
+		Bucket:   "b",
+		Key:      "obj",
+		ShardKey: "obj/segments/seg-blob-no-placement",
+		ShardIdx: 0,
+		Recorder: recorder,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "non-empty Placement.Nodes")
+	// Fast-fail happens before any facts are recorded.
+	require.Empty(t, recorder.facts)
+}
+
 func TestLocalRepairTargetReadableAtShardKey(t *testing.T) {
 	backend := setupECBackend(t)
 	svc := backend.shardSvc

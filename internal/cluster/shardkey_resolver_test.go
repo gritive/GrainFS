@@ -182,21 +182,98 @@ func TestResolveShardKeyPlacement_Capped(t *testing.T) {
 	backend := NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(ctx, "b"))
 
-	// Seed > cap exact-key versions of one object. The EC segment lives on the
-	// first version, but the cap aborts the scan before the map matters.
+	// Seed > cap exact-key versions of one object. The queried blob "seg-x"
+	// lives ONLY on later versions the cap never reaches (the first cap+1
+	// scanned versions carry only filler refs), so the shard is not found and
+	// the capped flag must surface.
 	scan := NewShardKeyPlacementScanCache()
 	scan.cap = 3
-	for i := 0; i < scan.cap+2; i++ {
-		seedObjectMetaVersion(t, backend, "b", "big", fmt.Sprintf("v%03d", i), objectMeta{
-			Segments: []storage.SegmentRef{
+	for i := 0; i < scan.cap+5; i++ {
+		segs := []storage.SegmentRef{
+			{BlobID: "filler", ECData: 2, ECParity: 1, NodeIDs: []string{"x"}},
+		}
+		// "seg-x" only on the newest (last-scanned, beyond cap) versions.
+		if i >= scan.cap+2 {
+			segs = []storage.SegmentRef{
 				{BlobID: "seg-x", ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"}},
-			},
-		})
+			}
+		}
+		seedObjectMetaVersion(t, backend, "b", "big", fmt.Sprintf("v%03d", i), objectMeta{Segments: segs})
 	}
 
 	_, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "big/segments/seg-x", scan)
 	require.NoError(t, err)
 	require.Equal(t, "placement_scan_capped", skip)
+}
+
+func TestResolveShardKeyPlacement_CappedButFound(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	// >cap versions, but the owning ref sits on the earliest-scanned version
+	// (v000), within the first cap+1 versions inspected. A located placement
+	// must win over the capped flag — otherwise the shard is unrepairable.
+	scan := NewShardKeyPlacementScanCache()
+	scan.cap = 3
+	wantNodes := []string{"n1", "n2", "n3"}
+	for i := 0; i < scan.cap+5; i++ {
+		segs := []storage.SegmentRef{
+			{BlobID: "filler", ECData: 2, ECParity: 1, NodeIDs: []string{"x"}},
+		}
+		if i == 0 {
+			segs = []storage.SegmentRef{
+				{BlobID: "owned", ECData: 2, ECParity: 1, NodeIDs: wantNodes},
+			}
+		}
+		seedObjectMetaVersion(t, backend, "b", "big", fmt.Sprintf("v%03d", i), objectMeta{Segments: segs})
+	}
+
+	rec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "big/segments/owned", scan)
+	require.NoError(t, err)
+	require.Empty(t, skip)
+	require.Equal(t, PlacementRecord{Nodes: wantNodes, K: 2, M: 1}, rec)
+}
+
+func TestResolveShardKeyPlacement_EmptyNodeIDsIsStale(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	// ECData>0 but empty NodeIDs is a corrupt/incomplete ref; it must be
+	// excluded from the maps so the resolve reports "stale", not a K/M record
+	// with no nodes that downstream would mislabel "placement_corrupt".
+	seedObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-empty", ECData: 2, ECParity: 1, NodeIDs: nil},
+		},
+		Coalesced: []CoalescedShardRef{
+			{CoalescedID: "c1", ShardKey: "obj/coalesced/c1", ECData: 2, ECParity: 1, NodeIDs: []string{}},
+		},
+	})
+
+	_, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "obj/segments/seg-empty", NewShardKeyPlacementScanCache())
+	require.NoError(t, err)
+	require.Equal(t, "stale", skip)
+
+	_, skip, err = backend.ResolveShardKeyPlacement(ctx, "b", "obj/coalesced/c1", NewShardKeyPlacementScanCache())
+	require.NoError(t, err)
+	require.Equal(t, "stale", skip)
+}
+
+func TestResolveShardKeyPlacement_EmptyObjectKeySkipsScan(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	// Shard key "/segments/x" classifies to objectKey="". Resolver must return
+	// no skip reason and not scan (serveruntime labels it invalid_shard_key).
+	scan := NewShardKeyPlacementScanCache()
+	rec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "/segments/x", scan)
+	require.NoError(t, err)
+	require.Empty(t, skip)
+	require.Equal(t, PlacementRecord{}, rec)
+	require.Equal(t, 0, scan.scans)
 }
 
 func TestResolveShardKeyPlacement_NilCache(t *testing.T) {

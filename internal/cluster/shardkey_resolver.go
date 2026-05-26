@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -71,12 +72,16 @@ func (b *DistributedBackend) ResolveShardKeyPlacement(ctx context.Context, bucke
 		return rec, "", nil
 	}
 
+	// Empty objectKey (shard key like "/segments/x") is structurally invalid;
+	// the serveruntime classify step labels it "invalid_shard_key". Skip the
+	// scan entirely so we never iterate the degenerate "obj:bucket//" prefix.
+	if objectKey == "" {
+		return PlacementRecord{}, "", nil
+	}
+
 	res, err := b.shardKeyScanResult(ctx, bucket, objectKey, scan)
 	if err != nil {
 		return PlacementRecord{}, "", err
-	}
-	if res.capped {
-		return PlacementRecord{}, "placement_scan_capped", nil
 	}
 
 	var (
@@ -92,10 +97,16 @@ func (b *DistributedBackend) ResolveShardKeyPlacement(ctx context.Context, bucke
 		// classified id.
 		found, ok = res.coalesced[shardKey]
 	}
-	if !ok {
-		return PlacementRecord{}, "stale", nil
+	// Cap precedence: a located placement wins even if the scan was capped —
+	// otherwise an object with >cap versions would make every one of its shards
+	// unrepairable. Only report capped when the shard was NOT found.
+	if ok {
+		return found, "", nil
 	}
-	return found, "", nil
+	if res.capped {
+		return PlacementRecord{}, "placement_scan_capped", nil
+	}
+	return PlacementRecord{}, "stale", nil
 }
 
 // shardKeyScanResult returns the cached scan result for (bucket, objectKey),
@@ -125,6 +136,12 @@ func (b *DistributedBackend) shardKeyScanResult(ctx context.Context, bucket, obj
 // and coalesced placement maps from every object version whose meta.Key exactly
 // equals objectKey. Versions whose meta.Key only shares the prefix (nested
 // siblings) are ignored and do not count toward the cap.
+//
+// Placement is resolved from VERSIONED object metadata only: append/chunked/
+// coalesce producers always mint a UUIDv7 versionID, so the versioned
+// obj:bucket/key/<ver> meta is the production invariant. A versionless legacy
+// meta at the non-versioned key is not resolved and stays covered by read-time
+// EC reconstruction (same class as the documented marker-collision caveat).
 func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, objectKey string, capLimit int) (*shardKeyScanResult, error) {
 	res := &shardKeyScanResult{
 		blob:      make(map[string]PlacementRecord),
@@ -143,6 +160,15 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			// Cheap pre-filter BEFORE decrypt: the scan prefix ends with '/', so
+			// the key suffix of a direct version is "<versionID>" (no slash) while
+			// a nested sibling (objectKey/child/.../ver) carries an interior '/'.
+			// Skip nested siblings here to avoid burning crypto on the serial boot
+			// worker and to keep the cap counting only real versions of objectKey.
+			suffix := it.Item().KeyCopy(nil)[len(objPrefix):]
+			if bytes.IndexByte(suffix, '/') >= 0 {
+				continue
+			}
 			val, err := b.itemValueCopy(it.Item())
 			if err != nil {
 				return fmt.Errorf("read object meta value: %w", err)
@@ -151,6 +177,8 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 			if err != nil {
 				return fmt.Errorf("unmarshal object meta: %w", err)
 			}
+			// Defense-in-depth: the raw-suffix pre-filter already excludes nested
+			// siblings, but confirm the unmarshalled key as well.
 			if m.Key != objectKey {
 				continue
 			}
@@ -160,8 +188,11 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 				return nil
 			}
 			for _, ref := range m.Segments {
-				if ref.ECData == 0 {
-					// Owner-local append blob, not EC-distributed.
+				// Insert only usable EC refs: ECData==0 is an owner-local append
+				// blob, and an empty NodeIDs is a corrupt/incomplete ref. Both are
+				// excluded so a found-but-unusable ref misses the map and resolves
+				// to "stale" (consistent with object-version empty-placement).
+				if ref.ECData == 0 || len(ref.NodeIDs) == 0 {
 					continue
 				}
 				res.blob[ref.BlobID] = PlacementRecord{
@@ -174,6 +205,9 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 				}
 			}
 			for _, ref := range m.Coalesced {
+				if ref.ECData == 0 || len(ref.NodeIDs) == 0 {
+					continue
+				}
 				res.coalesced[ref.ShardKey] = PlacementRecord{
 					Nodes: ref.NodeIDs,
 					K:     int(ref.ECData),

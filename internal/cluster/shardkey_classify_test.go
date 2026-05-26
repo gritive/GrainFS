@@ -70,6 +70,13 @@ func TestClassifyStartupRepairShardKey(t *testing.T) {
 			wantKind: ShardKindCoalesced,
 			wantID:   "b/v2",
 		},
+		{
+			name:     "coalesced marker wins over segments marker",
+			shardKey: "foo/coalesced/x/segments/y",
+			wantKey:  "foo",
+			wantKind: ShardKindCoalesced,
+			wantID:   "x/segments/y",
+		},
 	}
 
 	for _, tt := range tests {

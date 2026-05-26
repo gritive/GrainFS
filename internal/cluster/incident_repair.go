@@ -15,8 +15,11 @@ type IncidentRecorder interface {
 }
 
 type IncidentRepairRequest struct {
-	Bucket        string
-	Key           string
+	Bucket string
+	Key    string
+	// VersionID is empty for segment/coalesced (shard-key) repairs: those have no
+	// object version, so the physical target is carried by ShardKey instead and
+	// surfaced in the Diagnosed fact Message (incident.Scope has no ShardKey field).
 	VersionID     string
 	ShardIdx      int
 	Recorder      IncidentRecorder
@@ -39,6 +42,9 @@ func repairDiagMessage(req IncidentRepairRequest) string {
 }
 
 func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, req IncidentRepairRequest) error {
+	if req.ShardKey != "" && len(req.Placement.Nodes) == 0 {
+		return fmt.Errorf("shard-key repair requires non-empty Placement.Nodes for %s", req.ShardKey)
+	}
 	now := req.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
