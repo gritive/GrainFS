@@ -79,6 +79,7 @@ func (r dataWALStartupRepairRuntime) RepairDataWALStartupCandidate(ctx context.C
 	rec, skipReason, err := gb.ResolveShardKeyPlacement(ctx, candidate.Bucket, candidate.ShardKey, r.scanCache)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			metrics.DataWALStartupRepairFailures.WithLabelValues("context_canceled").Inc()
 			return dataWALStartupRepairResult{Failed: "context_canceled"}
 		}
 		metrics.DataWALStartupRepairSkips.WithLabelValues("placement_corrupt").Inc()
