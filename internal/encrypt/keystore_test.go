@@ -178,6 +178,27 @@ func TestKEKStore_LoadOrInitDir_FreshGeneratesV0(t *testing.T) {
 	}
 }
 
+func TestKEKStore_LoadOrInitDir_FreshCreatesDurable(t *testing.T) {
+	// Smoke test for the parent-dir fsync after MkdirAll. We can't easily
+	// trigger a real power-loss to verify the fsync ran, but we can at
+	// least verify the happy path still works when the keys/ directory
+	// did not previously exist (including nested parents that MkdirAll
+	// must create).
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "deeply", "nested", "keys")
+	// keys/ does not exist; LoadOrInitKEKStoreDir must create it and v0.
+	store, err := LoadOrInitKEKStoreDir(keysDir)
+	if err != nil {
+		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
+	}
+	if v := store.ActiveVersion(); v != 0 {
+		t.Errorf("ActiveVersion = %d, want 0", v)
+	}
+	if _, err := os.Stat(filepath.Join(keysDir, "0.key")); err != nil {
+		t.Errorf("0.key not created: %v", err)
+	}
+}
+
 func TestKEKStore_LoadOrInitDir_ReloadsExisting(t *testing.T) {
 	dir := t.TempDir()
 	keysDir := filepath.Join(dir, "keys")

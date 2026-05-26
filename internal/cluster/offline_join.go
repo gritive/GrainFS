@@ -149,7 +149,7 @@ func runOfflineJoinHandshakeV2(
 		fmt.Fprintln(out, "already a cluster member (no-op)")
 		return nil
 	case JoinStatusKEKMismatch:
-		return fmt.Errorf("join refused: KEK mismatch with peer — restore kek.key by `scp <data>/kek.key` from any healthy node, then retry (%s)", joinReply.Message)
+		return fmt.Errorf("join refused: KEK mismatch with peer — ensure <data>/keys/0.key matches the active KEK on the cluster and <data>/cluster.id matches the cluster's identity file (scp both from any healthy peer), then retry (%s)", joinReply.Message)
 	default:
 		if joinReply.Message != "" {
 			return fmt.Errorf("join refused: %s: %s", joinReply.Status, joinReply.Message)

@@ -88,8 +88,19 @@ func (n *NodeConfig) LoadOrInitClusterID() ([]byte, error) {
 	// First boot: generate UUID v7 and persist atomically with the same
 	// durability guarantees as KEKStore writeKEKFileAtomic — O_EXCL + fsync
 	// + atomic rename so a crash mid-write cannot leave a partial file.
-	if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
-		return nil, fmt.Errorf("nodeconfig: mkdir %s: %w", n.dataDir, err)
+	// Durably create dataDir if absent — POSIX requires fsync of the parent
+	// to make a freshly-created directory entry survive a crash. Skip the
+	// fsync when the dir already existed (no new entry to durably commit).
+	if _, err := os.Stat(n.dataDir); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("nodeconfig: stat %s: %w", n.dataDir, err)
+		}
+		if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
+			return nil, fmt.Errorf("nodeconfig: mkdir %s: %w", n.dataDir, err)
+		}
+		if err := fsyncDir(filepath.Dir(n.dataDir)); err != nil {
+			return nil, fmt.Errorf("nodeconfig: durability fsync after mkdir %s: %w", n.dataDir, err)
+		}
 	}
 	id, err := uuid.NewV7()
 	if err != nil {

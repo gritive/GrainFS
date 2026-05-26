@@ -197,8 +197,21 @@ func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 		return nil, fmt.Errorf("KEKStore: stat legacy %q: %w", legacy, err)
 	}
 
-	if err := os.MkdirAll(keysDir, 0o700); err != nil {
-		return nil, fmt.Errorf("KEKStore: mkdir %q: %w", keysDir, err)
+	// Durably create the keys/ directory if absent so the new directory
+	// entry survives a crash. POSIX requires fsync(parent_of_dir) to make a
+	// new directory entry durable; MkdirAll alone is not enough. If the dir
+	// already exists (operator pre-created it, or a prior boot), skip the
+	// extra fsync.
+	if _, err := os.Stat(keysDir); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("KEKStore: stat %q: %w", keysDir, err)
+		}
+		if err := os.MkdirAll(keysDir, 0o700); err != nil {
+			return nil, fmt.Errorf("KEKStore: mkdir %q: %w", keysDir, err)
+		}
+		if err := fsyncDir(parent); err != nil {
+			return nil, fmt.Errorf("KEKStore: durability fsync after mkdir %q: %w", keysDir, err)
+		}
 	}
 
 	entries, err := os.ReadDir(keysDir)
