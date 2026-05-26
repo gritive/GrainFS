@@ -48,7 +48,10 @@ func buildMetaDEKVersionPruneCmd(t *testing.T, gen uint32) []byte {
 	return data
 }
 
-func TestApply_DEKRotate_BumpsActiveGen(t *testing.T) {
+func TestApply_DEKRotate_LegacyIsNoOp(t *testing.T) {
+	// Phase D: legacy type-48 MetaCmdTypeDEKRotate (nil payload) no longer drives
+	// a local-random Rotate() (which diverged across nodes); it is a deterministic
+	// no-op that records the legacy-log marker for the Task 7 greenfield guard.
 	kek := make([]byte, 32)
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
@@ -64,8 +67,43 @@ func TestApply_DEKRotate_BumpsActiveGen(t *testing.T) {
 		t.Fatalf("applyCmd DEKRotate: %v", err)
 	}
 
-	gen, _ := keeper.Active()
-	if gen != 1 {
+	if gen, _ := keeper.Active(); gen != 0 {
+		t.Fatalf("legacy DEKRotate must NOT advance active gen; got %d, want 0", gen)
+	}
+	if !fsm.LegacyDEKRotateSeen() {
+		t.Fatal("legacy DEKRotate apply must set legacyDEKRotateSeen")
+	}
+}
+
+func TestApply_DEKReplicatedRotate_BumpsActiveGen(t *testing.T) {
+	// Phase D replacement: a replicated rotate (leader-generated wrapped bytes)
+	// advances the active gen on every node deterministically.
+	kek := make([]byte, 32)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatal(err)
+	}
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	fsm := newTestMetaFSMWithDEKKeeper(t, keeper)
+
+	wrapped, kekVer, err := keeper.GenerateWrappedDEK(1)
+	if err != nil {
+		t.Fatalf("GenerateWrappedDEK: %v", err)
+	}
+	enc, err := EncodeDEKReplicatedRotateCmd(DEKReplicatedRotateCmd{
+		Gen: 1, WrappedDEK: wrapped, ExpectedActiveGen: 0, ActiveKEKVer: kekVer,
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeDEKReplicatedRotate, enc)
+	if err := fsm.applyCmd(cmd); err != nil {
+		t.Fatalf("applyCmd DEKReplicatedRotate: %v", err)
+	}
+
+	if gen, _ := keeper.Active(); gen != 1 {
 		t.Fatalf("active gen = %d, want 1", gen)
 	}
 }

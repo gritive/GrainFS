@@ -96,14 +96,24 @@ func TestWireDEKKeeper_InjectsAndRegistersHook(t *testing.T) {
 	gen, _ := state.dekKeeper.Active()
 	require.Equal(t, uint32(0), gen, "initial DEK generation must be 0")
 
-	// Apply DEKRotate via the FSM apply path. If SetDEKKeeper was not called,
-	// applyDEKRotate would error or no-op; the generation would not advance.
-	rotateCmd, err := cluster.EncodeMetaCmdForTest(cluster.MetaCmdTypeDEKRotate, nil)
+	// Apply a Phase D replicated DEK rotate via the FSM apply path. Legacy
+	// type-48 is now a deterministic no-op, so the wiring is proven by the
+	// replicated path instead: the leader-generated wrapped bytes come from the
+	// SAME keeper (state.dekKeeper); the FSM advances ONLY if SetDEKKeeper wired
+	// that exact keeper into the apply path. A different/absent keeper would
+	// leave state.dekKeeper at gen 0.
+	wrapped, kekVer, err := state.dekKeeper.GenerateWrappedDEK(1)
+	require.NoError(t, err)
+	enc, err := cluster.EncodeDEKReplicatedRotateCmd(cluster.DEKReplicatedRotateCmd{
+		Gen: 1, WrappedDEK: wrapped, ExpectedActiveGen: 0, ActiveKEKVer: kekVer,
+	})
+	require.NoError(t, err)
+	rotateCmd, err := cluster.EncodeMetaCmdForTest(cluster.MetaCmdTypeDEKReplicatedRotate, enc)
 	require.NoError(t, err)
 	require.NoError(t, fsm.ApplyCmdForTest(rotateCmd))
 
 	gen2, _ := state.dekKeeper.Active()
-	assert.Equal(t, uint32(1), gen2, "DEKRotate apply must advance active generation when keeper is wired")
+	assert.Equal(t, uint32(1), gen2, "replicated DEK rotate must advance active generation when keeper is wired")
 }
 
 // TestWireDEKKeeper_RestartRefusesMissingKEK is the P3-H1 regression

@@ -23,15 +23,40 @@ func newTestFSMWithDEK(t *testing.T) (*MetaFSM, *encrypt.DEKKeeper) {
 	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	require.NoError(t, err)
 	fsm := NewMetaFSM()
+	// Set the SAME non-zero clusterID on the FSM as the keeper so the AAD-bound
+	// replicated rotate path mirrors production (GenerateWrappedDEK / Install
+	// both bind to the keeper's clusterID; the FSM clusterID matches it).
+	fsm.SetClusterID(dekTestClusterID())
 	fsm.SetDEKKeeper(keeper)
 	return fsm, keeper
 }
 
-// applyDEKRotate applies a DEKRotate command to the FSM.
+// applyDEKRotate advances the FSM's DEK gen via the Phase D replicated path
+// (legacy type-48 is now a no-op). It rotates the FSM's own keeper from its
+// current active gen to active+1, mirroring a leader-generated replicated rotate.
 func applyDEKRotate(t *testing.T, fsm *MetaFSM) {
 	t.Helper()
-	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeDEKRotate, nil)
-	require.NoError(t, fsm.applyCmd(cmd))
+	keeper := fsm.DEKKeeper()
+	require.NotNil(t, keeper)
+	_, active := keeper.VersionsAndActive()
+	applyDEKReplicatedRotateForTest(t, fsm, keeper, active+1)
+}
+
+// applyDEKReplicatedRotateForTest drives a single replicated DEK rotate to
+// newGen through the FSM apply path, asserting it advanced the keeper's active
+// gen. The wrapped bytes are AAD-bound to the keeper's clusterID.
+func applyDEKReplicatedRotateForTest(t *testing.T, fsm *MetaFSM, keeper *encrypt.DEKKeeper, newGen uint32) {
+	t.Helper()
+	wrapped, kekVer, err := keeper.GenerateWrappedDEK(newGen)
+	require.NoError(t, err)
+	enc, err := EncodeDEKReplicatedRotateCmd(DEKReplicatedRotateCmd{
+		Gen: newGen, WrappedDEK: wrapped, ExpectedActiveGen: newGen - 1, ActiveKEKVer: kekVer,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.applyDEKReplicatedRotate(uint64(newGen), enc))
+	if gen, _ := keeper.Active(); gen != newGen {
+		t.Fatalf("applyDEKReplicatedRotateForTest: active gen = %d, want %d", gen, newGen)
+	}
 }
 
 // buildJWTRotatePayload builds a deterministic JWTSigningKeyRotate payload using
