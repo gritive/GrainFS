@@ -401,10 +401,23 @@ func (t *QUICTransport) SetMuxConnHandler(h MuxConnHandler) {
 // the cluster identity cert; both verify the peer's cert SPKI matches the
 // expected cluster identity.
 func (t *QUICTransport) Listen(ctx context.Context, addr string) error {
-	tlsConf := t.buildServerTLSConfig()
-	t.tlsConfig = tlsConf
+	// Use GetConfigForClient so each inbound TLS handshake reads the live
+	// IdentitySnapshot via buildServerTLSConfig(). Without this, a post-Listen
+	// SwapIdentity (identity/cert or accept-set change) would leave the listener
+	// serving a stale PresentCert and a stale VerifyPeerCertificate closure; the
+	// swap must take effect on new inbound handshakes without a restart.
+	base := &tls.Config{
+		// Authoritative per-handshake config comes from GetConfigForClient below;
+		// these are kept for ALPN setup / fallback and must stay in sync with buildServerTLSConfig.
+		ClientAuth: tls.RequireAnyClientCert,
+		NextProtos: []string{t.muxALPN(), t.pskALPN()},
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return t.buildServerTLSConfig(), nil
+		},
+	}
+	t.tlsConfig = base
 
-	listener, err := quic.ListenAddr(addr, tlsConf, defaultQUICConfig())
+	listener, err := quic.ListenAddr(addr, base, defaultQUICConfig())
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
