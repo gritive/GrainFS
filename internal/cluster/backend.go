@@ -2227,28 +2227,6 @@ func (b *DistributedBackend) encryptedShardStorage() bool {
 	return b.shardSvc != nil && b.shardSvc.encryptor != nil
 }
 
-// selectECPlacementWeighted applies disk-capacity weights and (optionally) BoundedLoads hot
-// skip. weightedEnabled=false → nil weights (legacy behaviour). bl=nil or blEnabled=false →
-// no hot skip. store=nil also falls back to unweighted.
-func selectECPlacementWeighted(
-	cfg ECConfig,
-	liveNodes []string,
-	shardKey string,
-	store *NodeStatsStore,
-	bl *BoundedLoads,
-	weightedEnabled bool,
-	blEnabled bool,
-) []string {
-	return selectECPlacementFromNodeStates(
-		cfg,
-		liveNodes,
-		shardKey,
-		objectWritePlacementNodeStatesFromRuntime(liveNodes, store, bl),
-		weightedEnabled,
-		blEnabled,
-	)
-}
-
 func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore, bl *BoundedLoads) []ObjectWritePlacementNodeState {
 	if store == nil {
 		return nil

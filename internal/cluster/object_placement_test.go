@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -12,20 +11,18 @@ import (
 )
 
 func TestSelectECPlacement_WeightedFromDiskAvail(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", DiskAvailBytes: 4_000_000_000_000, RequestsPerSec: 10})
-	store.Set(NodeStats{NodeID: "n2", DiskAvailBytes: 1_000_000_000_000, RequestsPerSec: 10})
-	store.Set(NodeStats{NodeID: "n3", DiskAvailBytes: 1_000_000_000_000, RequestsPerSec: 10})
-	store.Set(NodeStats{NodeID: "n4", DiskAvailBytes: 1_000_000_000_000, RequestsPerSec: 10})
-
-	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
-	bl.Refresh()
-
+	liveNodes := []string{"n1", "n2", "n3", "n4"}
+	nodeStates := []ObjectWritePlacementNodeState{
+		{NodeID: "n1", DiskAvailBytes: 4_000_000_000_000},
+		{NodeID: "n2", DiskAvailBytes: 1_000_000_000_000},
+		{NodeID: "n3", DiskAvailBytes: 1_000_000_000_000},
+		{NodeID: "n4", DiskAvailBytes: 1_000_000_000_000},
+	}
 	cfg := ECConfig{DataShards: 2, ParityShards: 1} // 3 shards/object
 	count := make(map[string]int)
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("obj-%d", i)
-		nodes := selectECPlacementWeighted(cfg, []string{"n1", "n2", "n3", "n4"}, key, store, bl, true, true)
+		nodes := selectECPlacementFromNodeStates(cfg, liveNodes, key, nodeStates, true, true)
 		for _, n := range nodes {
 			count[n]++
 		}
@@ -208,9 +205,8 @@ func TestPlacementContextCarriesShardGroup(t *testing.T) {
 }
 
 func TestSelectECPlacement_AllStaleFallback(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
-	// store is empty — every node is stale.
+	// nodeStates is empty — every node is stale.
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	nodes := selectECPlacementWeighted(cfg, []string{"n1", "n2", "n3", "n4"}, "key", store, nil, true, false)
+	nodes := selectECPlacementFromNodeStates(cfg, []string{"n1", "n2", "n3", "n4"}, "key", nil, true, false)
 	assert.Len(t, nodes, 3, "should fall back to unweighted placement, not empty")
 }
