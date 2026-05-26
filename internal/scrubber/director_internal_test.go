@@ -37,7 +37,7 @@ func newBlockingSource(name string) *blockingSource {
 
 func (b *blockingSource) Name() string { return b.name }
 
-func (b *blockingSource) Iter(ctx context.Context, _ ScrubScope, _, _ string) (<-chan Block, error) {
+func (b *blockingSource) Iter(ctx context.Context, _, _ string) (<-chan Block, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.ch, nil
@@ -62,12 +62,11 @@ func TestDirector_ApplyThenLookupDedup_Consistent(t *testing.T) {
 		SessionID: "sess-fixed-1",
 		Bucket:    "__grainfs_volumes",
 		KeyPrefix: "__vol/v/blk_",
-		Scope:     ScopeFull,
 	}
 	d.ApplyFromFSM(entry)
 
 	got, ok := d.LookupDedup(TriggerReq{
-		Bucket: entry.Bucket, KeyPrefix: entry.KeyPrefix, Scope: entry.Scope,
+		Bucket: entry.Bucket, KeyPrefix: entry.KeyPrefix,
 	})
 	require.True(t, ok)
 	require.Equal(t, "sess-fixed-1", got.SessionID)
@@ -81,7 +80,7 @@ func TestDirector_TriggerThenGetSession_Visible(t *testing.T) {
 	defer d.Stop()
 
 	id, created := d.Trigger(TriggerReq{
-		Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_", Scope: ScopeFull,
+		Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_",
 	})
 	require.True(t, created)
 	require.NotEmpty(t, id)
@@ -102,7 +101,7 @@ func TestDirector_CancelStopsWorkerAtNextBoundary(t *testing.T) {
 	defer d.Stop()
 
 	id, _ := d.Trigger(TriggerReq{
-		Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_", Scope: ScopeFull,
+		Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_",
 	})
 	require.NotEmpty(t, id)
 
@@ -141,7 +140,6 @@ func TestDirector_ApplyFromFSM_DuplicateSessionID_NoOp(t *testing.T) {
 		SessionID: "sess-dup",
 		Bucket:    "__grainfs_volumes",
 		KeyPrefix: "__vol/v/blk_",
-		Scope:     ScopeFull,
 	}
 	d.ApplyFromFSM(entry)
 	d.ApplyFromFSM(entry)
@@ -191,7 +189,7 @@ func TestDirector_StopDuringCommand_NoPanic(t *testing.T) {
 				// ApplyFromFSM은 non-blocking inbox send이므로 Stop 후에도 deadlock 없음.
 				d.ApplyFromFSM(ScrubTriggerEntry{
 					SessionID: "spam-" + time.Now().Format(time.StampNano),
-					Bucket:    "b", KeyPrefix: "p", Scope: ScopeFull,
+					Bucket:    "b", KeyPrefix: "p",
 				})
 			}
 		}

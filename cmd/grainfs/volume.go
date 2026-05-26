@@ -117,13 +117,11 @@ var volumeScrubCmd = &cobra.Command{
 and comparing its MD5 against the stored ETag. Corrupt or missing blocks
 are repaired by pulling a healthy peer replica.
 
-Default scope is full (every block including snapshot-only). Use --scope=live
-to limit to currently-live blocks. --dry-run records detection without
-repair. --detach returns immediately after triggering instead of following
-session progress.`,
+--dry-run records detection without repair. --detach returns immediately
+after triggering instead of following session progress.`,
 	Example: `  grainfs volume scrub myvol
   grainfs volume scrub myvol --dry-run
-  grainfs volume scrub myvol --scope=live --detach`,
+  grainfs volume scrub myvol --detach`,
 	Args: cobra.ExactArgs(1),
 	RunE: runVolumeScrub,
 }
@@ -164,7 +162,6 @@ func init() {
 	volumeWriteAtCmd.Flags().String("content", "", "bytes to write (string)")
 	volumeReadAtCmd.Flags().Int64("offset", 0, "byte offset")
 	volumeReadAtCmd.Flags().Int64("length", 0, "bytes to read (1..64MiB)")
-	volumeScrubCmd.Flags().String("scope", "full", "scrub scope: full (snapshot chain) or live")
 	volumeScrubCmd.Flags().Bool("dry-run", false, "detect-only, do not repair")
 	volumeScrubCmd.Flags().Bool("detach", false, "trigger and exit; do not follow session progress")
 
@@ -287,13 +284,11 @@ func runVolumeReadAt(cmd *cobra.Command, args []string) error {
 }
 
 func runVolumeScrub(cmd *cobra.Command, args []string) error {
-	scope, _ := cmd.Flags().GetString("scope")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	detach, _ := cmd.Flags().GetBool("detach")
 	return volumeadmin.RunScrub(cmd.Context(), volumeadmin.ScrubOptions{
 		BaseOptions: baseOptionsFromCmd(cmd),
 		Name:        args[0],
-		Scope:       scope,
 		DryRun:      dryRun,
 		Detach:      detach,
 	})

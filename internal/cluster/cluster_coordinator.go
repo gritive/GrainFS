@@ -2188,7 +2188,6 @@ func (c *ClusterCoordinator) ScanLocalMultipartUploads(bucket string) (<-chan st
 type ScrubPeerStat struct {
 	Bucket       string
 	KeyPrefix    string
-	Scope        int32 // 0=full, 1=live (matches scrubber.ScrubScope)
 	DryRun       bool
 	Status       string
 	StartedAt    int64
@@ -2270,7 +2269,6 @@ type scrubSessionStatDecoded struct {
 	found        bool
 	bucket       string
 	keyPrefix    string
-	scope        int32
 	dryRun       bool
 	status       string
 	startedAt    int64
@@ -2288,7 +2286,6 @@ func (d scrubSessionStatDecoded) toPeerStat() ScrubPeerStat {
 	return ScrubPeerStat{
 		Bucket:       d.bucket,
 		KeyPrefix:    d.keyPrefix,
-		Scope:        d.scope,
 		DryRun:       d.dryRun,
 		Status:       d.status,
 		StartedAt:    d.startedAt,
@@ -2319,7 +2316,6 @@ func decodeScrubSessionStatReply(reply []byte) (scrubSessionStatDecoded, bool) {
 		found:        ss.Found(),
 		bucket:       string(ss.Bucket()),
 		keyPrefix:    string(ss.KeyPrefix()),
-		scope:        ss.Scope(),
 		dryRun:       ss.DryRun(),
 		status:       string(ss.Status()),
 		startedAt:    ss.StartedAt(),

@@ -199,7 +199,7 @@ func TestClient_Scrub_Lifecycle(t *testing.T) {
 	})
 	defer srv.Close()
 	c := NewClientForURL(srv.URL)
-	tr, err := c.TriggerScrub(context.Background(), ScrubTriggerReq{Name: "v1", Scope: "full"})
+	tr, err := c.TriggerScrub(context.Background(), ScrubTriggerReq{Name: "v1"})
 	if err != nil || tr.SessionID != "sess-1" {
 		t.Errorf("trigger: %+v err=%v", tr, err)
 	}

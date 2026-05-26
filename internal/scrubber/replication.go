@@ -22,11 +22,6 @@ type ObjectWalker interface {
 // object. Use one instance per (bucket, prefix) you want to scrub — for
 // example, the volume layer wires it with bucket=__grainfs_volumes and
 // prefix=__vol/, and future internal buckets wire their own instance.
-//
-// ScopeFull and ScopeLive walk identically here. Per-source live-key
-// awareness (e.g. volume live_map filtering) is intentionally out of scope
-// and left to a future LiveKeyFilter hook; correctness over a "live"
-// optimization for now.
 type ReplicationObjectSource struct {
 	walker     ObjectWalker
 	bucket     string
@@ -44,8 +39,7 @@ func NewReplicationObjectSource(name, bucket, prefix string, walker ObjectWalker
 
 func (s *ReplicationObjectSource) Name() string { return s.sourceName }
 
-func (s *ReplicationObjectSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error) {
-	_ = scope
+func (s *ReplicationObjectSource) Iter(ctx context.Context, bucket, keyPrefix string) (<-chan Block, error) {
 	walkBucket := s.bucket
 	if bucket != "" {
 		walkBucket = bucket

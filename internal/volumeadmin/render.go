@@ -67,11 +67,11 @@ func renderScrubJobTable(w io.Writer, jobs []ScrubJobInfo) {
 		fmt.Fprintln(w, "(no scrub sessions)")
 		return
 	}
-	fmt.Fprintf(w, "%-38s  %-10s  %-6s  %-9s  %-9s  %-9s\n",
-		"SESSION", "STATUS", "SCOPE", "CHECKED", "DETECTED", "REPAIRED")
+	fmt.Fprintf(w, "%-38s  %-10s  %-9s  %-9s  %-9s\n",
+		"SESSION", "STATUS", "CHECKED", "DETECTED", "REPAIRED")
 	for _, j := range jobs {
-		fmt.Fprintf(w, "%-38s  %-10s  %-6s  %9d  %9d  %9d\n",
-			j.SessionID, j.Status, j.Scope, j.Checked, j.Detected, j.Repaired)
+		fmt.Fprintf(w, "%-38s  %-10s  %9d  %9d  %9d\n",
+			j.SessionID, j.Status, j.Checked, j.Detected, j.Repaired)
 	}
 }
 
@@ -79,8 +79,8 @@ func renderScrubJobTable(w io.Writer, jobs []ScrubJobInfo) {
 // partial-peer-failure information that the previous CLI implementation
 // silently dropped.
 func renderScrubJobDetail(w io.Writer, j ScrubJobInfo) {
-	fmt.Fprintf(w, "Session: %s\nStatus:  %s\nScope:   %s\nDryRun:  %t\nBucket:  %s\nPrefix:  %s\nChecked: %d  Healthy: %d  Detected: %d  Repaired: %d  Unrepairable: %d\n",
-		j.SessionID, j.Status, j.Scope, j.DryRun,
+	fmt.Fprintf(w, "Session: %s\nStatus:  %s\nDryRun:  %t\nBucket:  %s\nPrefix:  %s\nChecked: %d  Healthy: %d  Detected: %d  Repaired: %d  Unrepairable: %d\n",
+		j.SessionID, j.Status, j.DryRun,
 		j.Bucket, j.KeyPrefix,
 		j.Checked, j.Healthy, j.Detected, j.Repaired, j.Unrepairable)
 	if j.Partial {

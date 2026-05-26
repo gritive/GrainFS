@@ -10,15 +10,13 @@ import (
 )
 
 type countingSource struct {
-	name      string
-	calls     atomic.Int32
-	lastScope atomic.Int32 // ScrubScope encoded as int32 for atomic access
+	name  string
+	calls atomic.Int32
 }
 
 func (c *countingSource) Name() string { return c.name }
-func (c *countingSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error) {
+func (c *countingSource) Iter(ctx context.Context, bucket, keyPrefix string) (<-chan Block, error) {
 	c.calls.Add(1)
-	c.lastScope.Store(int32(scope))
 	ch := make(chan Block)
 	close(ch)
 	return ch, nil
@@ -57,8 +55,6 @@ func TestBackgroundScrubber_SourceTickerFires(t *testing.T) {
 
 	require.Greater(t, int(src.calls.Load()), 0,
 		"replication source should be invoked by the background ticker")
-	require.Equal(t, int32(ScopeFull), src.lastScope.Load(),
-		"background ticker calls source with ScopeFull")
 }
 
 func TestBackgroundScrubber_NoSourceRegistered(t *testing.T) {

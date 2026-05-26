@@ -34,7 +34,7 @@ func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
-	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_", Scope: ScopeFull}
+	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_"}
 	id1, created1 := d.Trigger(req)
 	require.NotEmpty(t, id1)
 	require.True(t, created1)
@@ -54,7 +54,6 @@ func TestDirector_ApplyFromFSM_Nonblocking(t *testing.T) {
 			SessionID: "sess",
 			Bucket:    "__grainfs_volumes",
 			KeyPrefix: "__vol/v/blk_",
-			Scope:     ScopeFull,
 		})
 	}
 	require.Eventually(t, func() bool {
@@ -74,7 +73,6 @@ func TestDirector_RoutesVolumeBlocksToECSource(t *testing.T) {
 	id, created := d.Trigger(TriggerReq{
 		Bucket:    "__grainfs_volumes",
 		KeyPrefix: "__vol/v/blk_",
-		Scope:     ScopeFull,
 	})
 	require.NotEmpty(t, id)
 	require.True(t, created)
@@ -89,11 +87,11 @@ func TestDirector_LookupDedup_Hit(t *testing.T) {
 	d := NewDirector(DirectorOpts{NodeID: "n1"})
 	d.Start(context.Background())
 	defer d.Stop()
-	id, created := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
+	id, created := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p"})
 	require.NotEmpty(t, id)
 	require.True(t, created)
 
-	got, ok := d.LookupDedup(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
+	got, ok := d.LookupDedup(TriggerReq{Bucket: "b1", KeyPrefix: "p"})
 	require.True(t, ok)
 	require.Equal(t, id, got.SessionID)
 	require.Equal(t, "b1", got.Bucket)
@@ -103,6 +101,6 @@ func TestDirector_LookupDedup_Miss(t *testing.T) {
 	d := NewDirector(DirectorOpts{NodeID: "n1"})
 	d.Start(context.Background())
 	defer d.Stop()
-	_, ok := d.LookupDedup(TriggerReq{Bucket: "ghost", Scope: ScopeFull})
+	_, ok := d.LookupDedup(TriggerReq{Bucket: "ghost"})
 	require.False(t, ok)
 }

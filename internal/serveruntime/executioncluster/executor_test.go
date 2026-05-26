@@ -140,7 +140,7 @@ func TestClusterExecutorRejectsInvalidPlanBeforeAdmission(t *testing.T) {
 		Strategy: execution.StrategyCluster,
 		Operation: execution.Operation{
 			Kind:  execution.OperationScrub,
-			Scrub: execution.ScrubOperation{Scope: execution.ScrubScopeFull},
+			Scrub: execution.ScrubOperation{Bucket: ""}, // empty bucket → invalid
 		},
 	})
 
@@ -404,7 +404,6 @@ func validScrubPlan() execution.Plan {
 			Kind: execution.OperationScrub,
 			Scrub: execution.ScrubOperation{
 				Bucket: "ec-bucket",
-				Scope:  execution.ScrubScopeFull,
 			},
 		},
 	}

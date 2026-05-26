@@ -52,7 +52,6 @@ table ScrubSessionStatReply {
   found:bool;
   bucket:string;
   key_prefix:string;
-  scope:int;
   dry_run:bool;
   status:string;       // running | done | cancelled
   started_at:long;

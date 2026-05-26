@@ -27,7 +27,6 @@ func mergeScrubPeerInfo(out ScrubJobInfo, peerInfos []ScrubJobInfo, peerFailures
 		if p.OwnedHere && (out.Bucket == "" || out.Bucket == "—") {
 			out.Bucket = p.Bucket
 			out.KeyPrefix = p.KeyPrefix
-			out.Scope = p.Scope
 			out.DryRun = p.DryRun
 		}
 	}

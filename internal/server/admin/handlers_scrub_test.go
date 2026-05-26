@@ -35,7 +35,8 @@ func (m *mockDirector) CancelSession(id string) error {
 }
 func (m *mockDirector) ApplyFromFSM(_ scrubber.ScrubTriggerEntry) {}
 
-func TestScrubVolume_TriggersWithFullScopeByDefault(t *testing.T) {
+// covers the default scrub-trigger path that used to assert ScopeFull
+func TestScrubVolume_Triggers(t *testing.T) {
 	d := &mockDirector{sessionID: "sess-1", created: true}
 	deps := &Deps{Director: d}
 	resp, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "myvol"})
@@ -44,7 +45,6 @@ func TestScrubVolume_TriggersWithFullScopeByDefault(t *testing.T) {
 	require.True(t, resp.Created)
 	require.Equal(t, "__grainfs_volumes", d.triggered.Bucket)
 	require.Equal(t, "__vol/myvol/blk_", d.triggered.KeyPrefix)
-	require.Equal(t, scrubber.ScopeFull, d.triggered.Scope)
 }
 
 func TestScrubVolume_DryRun(t *testing.T) {
@@ -53,21 +53,6 @@ func TestScrubVolume_DryRun(t *testing.T) {
 	_, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "myvol", DryRun: true})
 	require.NoError(t, err)
 	require.True(t, d.triggered.DryRun)
-}
-
-func TestScrubVolume_LiveScope(t *testing.T) {
-	d := &mockDirector{sessionID: "sess-3", created: true}
-	deps := &Deps{Director: d}
-	_, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "v", Scope: "live"})
-	require.NoError(t, err)
-	require.Equal(t, scrubber.ScopeLive, d.triggered.Scope)
-}
-
-func TestScrubVolume_InvalidScope(t *testing.T) {
-	d := &mockDirector{sessionID: "x", created: true}
-	deps := &Deps{Director: d}
-	_, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "v", Scope: "bogus"})
-	require.Error(t, err)
 }
 
 func TestScrubVolume_NoName(t *testing.T) {
@@ -112,12 +97,11 @@ func (m *mockScrubProposer) Propose(_ context.Context, req scrubber.TriggerReq) 
 
 func TestTriggerScrub_HappyPath(t *testing.T) {
 	p := &mockScrubProposer{entry: scrubber.ScrubTriggerEntry{SessionID: "sid-1"}, created: true}
-	resp, err := TriggerScrub(context.Background(), &Deps{ScrubProposer: p}, ScrubReq{Bucket: "ec1", Scope: "full"})
+	resp, err := TriggerScrub(context.Background(), &Deps{ScrubProposer: p}, ScrubReq{Bucket: "ec1"})
 	require.NoError(t, err)
 	require.Equal(t, "sid-1", resp.SessionID)
 	require.True(t, resp.Created)
 	require.Equal(t, "ec1", p.gotReq.Bucket)
-	require.Equal(t, scrubber.ScopeFull, p.gotReq.Scope)
 }
 
 func TestTriggerScrub_DedupHitReturnsExistingSession(t *testing.T) {
@@ -131,14 +115,6 @@ func TestTriggerScrub_DedupHitReturnsExistingSession(t *testing.T) {
 func TestTriggerScrub_BucketRequired(t *testing.T) {
 	p := &mockScrubProposer{}
 	_, err := TriggerScrub(context.Background(), &Deps{ScrubProposer: p}, ScrubReq{Bucket: ""})
-	var ae *Error
-	require.ErrorAs(t, err, &ae)
-	require.Equal(t, "invalid", ae.Code)
-}
-
-func TestTriggerScrub_InvalidScope(t *testing.T) {
-	p := &mockScrubProposer{}
-	_, err := TriggerScrub(context.Background(), &Deps{ScrubProposer: p}, ScrubReq{Bucket: "ec1", Scope: "weird"})
 	var ae *Error
 	require.ErrorAs(t, err, &ae)
 	require.Equal(t, "invalid", ae.Code)
@@ -177,14 +153,13 @@ func (m *mockExecutionExecutor) Execute(_ context.Context, plan execution.Plan) 
 func TestTriggerScrub_UsesExecutionExecutorWhenConfigured(t *testing.T) {
 	exec := &mockExecutionExecutor{result: execution.Result{Scrub: execution.ScrubResult{SessionID: "sid-exec", Created: true}}}
 
-	resp, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1", Scope: "live", DryRun: true})
+	resp, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1", DryRun: true})
 
 	require.NoError(t, err)
 	require.Equal(t, "sid-exec", resp.SessionID)
 	require.True(t, resp.Created)
 	require.Equal(t, execution.StrategyCluster, exec.gotPlan.Strategy)
 	require.Equal(t, "ec1", exec.gotPlan.Operation.Scrub.Bucket)
-	require.Equal(t, execution.ScrubScopeLive, exec.gotPlan.Operation.Scrub.Scope)
 	require.True(t, exec.gotPlan.Operation.Scrub.DryRun)
 }
 

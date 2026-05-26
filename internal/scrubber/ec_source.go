@@ -75,11 +75,10 @@ func (s *ECScrubSource) PrimeForTest(bucket, key, versionID string, rec ObjectRe
 }
 
 // Iter walks bucket via Scrubbable.ScanObjects and yields one Block per EC
-// ObjectRecord. ScopeFull == ScopeLive — both walk the same `lat:` index
-// for EC today (D7=α). keyPrefix narrows by adapter-side string prefix.
-// ObjectExists race check + ShardOwner filter mirror runOnce policy (D4=A).
-func (s *ECScrubSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error) {
-	_ = scope
+// ObjectRecord — the `lat:` index. keyPrefix narrows by adapter-side string
+// prefix. ObjectExists race check + ShardOwner filter mirror runOnce policy
+// (D4=A).
+func (s *ECScrubSource) Iter(ctx context.Context, bucket, keyPrefix string) (<-chan Block, error) {
 	out := make(chan Block, 64)
 	if bucket == "" {
 		close(out)

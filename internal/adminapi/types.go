@@ -92,7 +92,6 @@ type ListClusterPeersResp struct {
 type ScrubReq struct {
 	Bucket    string `json:"bucket"`
 	KeyPrefix string `json:"key_prefix,omitempty"`
-	Scope     string `json:"scope,omitempty"`
 	DryRun    bool   `json:"dry_run,omitempty"`
 }
 
@@ -238,7 +237,6 @@ type ReadAtVolumeResp struct {
 // ScrubVolumeReq triggers a scrub session over a single volume's blocks.
 type ScrubVolumeReq struct {
 	Name   string `json:"name"`
-	Scope  string `json:"scope,omitempty"`
 	DryRun bool   `json:"dry_run,omitempty"`
 }
 
@@ -253,7 +251,6 @@ type ScrubJobInfo struct {
 	SessionID    string   `json:"session_id"`
 	Bucket       string   `json:"bucket"`
 	KeyPrefix    string   `json:"key_prefix"`
-	Scope        string   `json:"scope"`
 	DryRun       bool     `json:"dry_run"`
 	Status       string   `json:"status"`
 	StartedAt    int64    `json:"started_at"`

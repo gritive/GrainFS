@@ -21,7 +21,6 @@ func TestScrubExecutionBackendPreservesDedupResult(t *testing.T) {
 	req := scrubber.TriggerReq{
 		Bucket:    "ec1",
 		KeyPrefix: "prefix/",
-		Scope:     scrubber.ScopeLive,
 		DryRun:    true,
 	}
 	existingSessionID, created := director.Trigger(req)
@@ -37,7 +36,6 @@ func TestScrubExecutionBackendPreservesDedupResult(t *testing.T) {
 		Scrub: execution.ScrubOperation{
 			Bucket:    req.Bucket,
 			KeyPrefix: req.KeyPrefix,
-			Scope:     execution.ScrubScopeLive,
 			DryRun:    req.DryRun,
 		},
 	})

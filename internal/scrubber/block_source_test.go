@@ -13,7 +13,7 @@ type mockBlockSource struct {
 }
 
 func (m *mockBlockSource) Name() string { return m.name }
-func (m *mockBlockSource) Iter(ctx context.Context, scope ScrubScope, bucket, keyPrefix string) (<-chan Block, error) {
+func (m *mockBlockSource) Iter(ctx context.Context, bucket, keyPrefix string) (<-chan Block, error) {
 	ch := make(chan Block, len(m.blocks))
 	go func() {
 		defer close(ch)
@@ -43,7 +43,7 @@ func TestBlockSource_InterfaceContract(t *testing.T) {
 		blocks: []Block{{Bucket: "b", Key: "k1"}, {Bucket: "b", Key: "k2"}},
 	}
 	require.Equal(t, "mock", src.Name())
-	ch, err := src.Iter(context.Background(), ScopeFull, "", "")
+	ch, err := src.Iter(context.Background(), "", "")
 	require.NoError(t, err)
 	var got []Block
 	for b := range ch {

@@ -13,7 +13,6 @@ func TestScrubJobInfoJSONRoundTrip(t *testing.T) {
 		SessionID:    "sess-1",
 		Bucket:       "bucket",
 		KeyPrefix:    "prefix/",
-		Scope:        "full",
 		DryRun:       true,
 		Status:       "running",
 		StartedAt:    1777777777,

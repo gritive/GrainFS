@@ -13,6 +13,15 @@
   redesigned later. **Breaking:** operators who scripted `grainfs volume snapshot`,
   `grainfs volume clone`, `grainfs volume rollback`, or `grainfs volume delete --force`
   will get an unknown-command/unknown-flag error.
+- **Scrub `--scope full|live` flag.** Both block sources always walked the same
+  index regardless of scope (the `live` distinction depended on the volume
+  live-map that this release removes), so the flag was inert. `grainfs scrub`
+  and `grainfs volume scrub` no longer accept `--scope`; the scrub session's
+  `scope` field is dropped from the admin API and the cluster scrub-trigger /
+  stat wire format. **Breaking:** scripts passing `--scope` get an unknown-flag
+  error. **Rolling-upgrade note:** a scrub triggered during an upgrade that
+  crosses this version cannot aggregate in-flight session stats across
+  mixed-version peers — trigger operator scrubs after the upgrade completes.
 
 ## [0.0.345.1] - 2026-05-26
 

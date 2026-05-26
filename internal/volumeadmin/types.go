@@ -101,7 +101,6 @@ type ReadAtOptions struct {
 type ScrubOptions struct {
 	BaseOptions
 	Name   string
-	Scope  string
 	DryRun bool
 	Detach bool
 

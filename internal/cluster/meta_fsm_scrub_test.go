@@ -11,7 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-func encodeScrubTriggerForTest(t *testing.T, sid, bucket, prefix string, scope int, dryRun bool, requestedAt int64, origNode string) []byte {
+func encodeScrubTriggerForTest(t *testing.T, sid, bucket, prefix string, dryRun bool, requestedAt int64, origNode string) []byte {
 	t.Helper()
 	b := flatbuffers.NewBuilder(64)
 	sidOff := b.CreateString(sid)
@@ -22,7 +22,6 @@ func encodeScrubTriggerForTest(t *testing.T, sid, bucket, prefix string, scope i
 	clusterpb.MetaScrubTriggerCmdAddSessionId(b, sidOff)
 	clusterpb.MetaScrubTriggerCmdAddBucket(b, bktOff)
 	clusterpb.MetaScrubTriggerCmdAddKeyPrefix(b, pfxOff)
-	clusterpb.MetaScrubTriggerCmdAddScope(b, int32(scope))
 	clusterpb.MetaScrubTriggerCmdAddDryRun(b, dryRun)
 	clusterpb.MetaScrubTriggerCmdAddRequestedAt(b, requestedAt)
 	clusterpb.MetaScrubTriggerCmdAddOriginatorNodeId(b, nodeOff)
@@ -39,14 +38,13 @@ func TestMetaFSM_ApplyScrubTrigger_RecentEntry_FiresCallback(t *testing.T) {
 		fired = true
 	})
 
-	data := encodeScrubTriggerForTest(t, "sid-1", "bk", "pfx", 0, false, time.Now().Unix(), "n1")
+	data := encodeScrubTriggerForTest(t, "sid-1", "bk", "pfx", false, time.Now().Unix(), "n1")
 	require.NoError(t, f.applyScrubTrigger(data))
 
 	require.True(t, fired)
 	require.Equal(t, "sid-1", got.SessionID)
 	require.Equal(t, "bk", got.Bucket)
 	require.Equal(t, "pfx", got.KeyPrefix)
-	require.Equal(t, scrubber.ScopeFull, got.Scope)
 	require.Equal(t, "n1", got.OriginatorNodeID)
 }
 
@@ -56,7 +54,7 @@ func TestMetaFSM_ApplyScrubTrigger_StaleEntry_Skipped(t *testing.T) {
 	f.SetOnScrubTrigger(func(scrubber.ScrubTriggerEntry) { fired = true })
 
 	staleAt := time.Now().Add(-2 * time.Hour).Unix()
-	data := encodeScrubTriggerForTest(t, "sid-2", "bk", "", 0, false, staleAt, "n1")
+	data := encodeScrubTriggerForTest(t, "sid-2", "bk", "", false, staleAt, "n1")
 	require.NoError(t, f.applyScrubTrigger(data))
 
 	require.False(t, fired, "stale entry must skip callback")
@@ -64,7 +62,7 @@ func TestMetaFSM_ApplyScrubTrigger_StaleEntry_Skipped(t *testing.T) {
 
 func TestMetaFSM_ApplyScrubTrigger_NoCallback_Noop(t *testing.T) {
 	f := NewMetaFSM()
-	data := encodeScrubTriggerForTest(t, "sid-3", "bk", "", 0, false, time.Now().Unix(), "n1")
+	data := encodeScrubTriggerForTest(t, "sid-3", "bk", "", false, time.Now().Unix(), "n1")
 	require.NoError(t, f.applyScrubTrigger(data))
 }
 

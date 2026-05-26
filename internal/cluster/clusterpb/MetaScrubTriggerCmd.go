@@ -65,20 +65,8 @@ func (rcv *MetaScrubTriggerCmd) KeyPrefix() []byte {
 	return nil
 }
 
-func (rcv *MetaScrubTriggerCmd) Scope() int32 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
-	if o != 0 {
-		return rcv._tab.GetInt32(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *MetaScrubTriggerCmd) MutateScope(n int32) bool {
-	return rcv._tab.MutateInt32Slot(10, n)
-}
-
 func (rcv *MetaScrubTriggerCmd) DryRun() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -86,11 +74,11 @@ func (rcv *MetaScrubTriggerCmd) DryRun() bool {
 }
 
 func (rcv *MetaScrubTriggerCmd) MutateDryRun(n bool) bool {
-	return rcv._tab.MutateBoolSlot(12, n)
+	return rcv._tab.MutateBoolSlot(10, n)
 }
 
 func (rcv *MetaScrubTriggerCmd) RequestedAt() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -98,11 +86,11 @@ func (rcv *MetaScrubTriggerCmd) RequestedAt() int64 {
 }
 
 func (rcv *MetaScrubTriggerCmd) MutateRequestedAt(n int64) bool {
-	return rcv._tab.MutateInt64Slot(14, n)
+	return rcv._tab.MutateInt64Slot(12, n)
 }
 
 func (rcv *MetaScrubTriggerCmd) OriginatorNodeId() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -110,7 +98,7 @@ func (rcv *MetaScrubTriggerCmd) OriginatorNodeId() []byte {
 }
 
 func MetaScrubTriggerCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(6)
 }
 func MetaScrubTriggerCmdAddSessionId(builder *flatbuffers.Builder, sessionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(sessionId), 0)
@@ -121,17 +109,14 @@ func MetaScrubTriggerCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffe
 func MetaScrubTriggerCmdAddKeyPrefix(builder *flatbuffers.Builder, keyPrefix flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(keyPrefix), 0)
 }
-func MetaScrubTriggerCmdAddScope(builder *flatbuffers.Builder, scope int32) {
-	builder.PrependInt32Slot(3, scope, 0)
-}
 func MetaScrubTriggerCmdAddDryRun(builder *flatbuffers.Builder, dryRun bool) {
-	builder.PrependBoolSlot(4, dryRun, false)
+	builder.PrependBoolSlot(3, dryRun, false)
 }
 func MetaScrubTriggerCmdAddRequestedAt(builder *flatbuffers.Builder, requestedAt int64) {
-	builder.PrependInt64Slot(5, requestedAt, 0)
+	builder.PrependInt64Slot(4, requestedAt, 0)
 }
 func MetaScrubTriggerCmdAddOriginatorNodeId(builder *flatbuffers.Builder, originatorNodeId flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(originatorNodeId), 0)
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(originatorNodeId), 0)
 }
 func MetaScrubTriggerCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

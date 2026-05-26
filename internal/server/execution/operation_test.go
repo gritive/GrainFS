@@ -24,17 +24,9 @@ func TestScrubOperationValidateRequiresBucket(t *testing.T) {
 	require.Equal(t, CodeInvalid, CodeOf(err))
 }
 
-func TestScrubOperationValidateAllowsFullLiveAndDefaultScopes(t *testing.T) {
-	for _, scope := range []ScrubScope{"", ScrubScopeFull, ScrubScopeLive} {
-		op := Operation{Kind: OperationScrub, Scrub: ScrubOperation{Bucket: "b1", Scope: scope}}
-		require.NoError(t, op.Validate())
-	}
-}
-
-func TestScrubOperationValidateRejectsUnknownScope(t *testing.T) {
-	err := (Operation{Kind: OperationScrub, Scrub: ScrubOperation{Bucket: "b1", Scope: "bogus"}}).Validate()
-	require.True(t, errors.Is(err, ErrInvalidOperation))
-	require.Equal(t, CodeInvalid, CodeOf(err))
+func TestScrubOperationValidateAllowsBucket(t *testing.T) {
+	op := Operation{Kind: OperationScrub, Scrub: ScrubOperation{Bucket: "b1"}}
+	require.NoError(t, op.Validate())
 }
 
 func TestResultCarriesStableScrubResponseFields(t *testing.T) {
