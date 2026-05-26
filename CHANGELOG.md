@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.355.0] - 2026-05-27
+
+### Added
+
+- **Periodic self-heal now covers segment and coalesced EC shards.** The background
+  placement monitor previously detected and repaired only object-version EC shards; it now
+  also proactively reconstructs missing segment (`<key>/segments/<id>`) and coalesced
+  (`<key>/coalesced/<id>`) EC shards for latest-version objects between boots, and quarantines
+  the parent object when such a shard is corrupt. This complements boot-time startup repair
+  (0.0.350.0) and read-time reconstruction, closing the gap where a lost large-object shard was
+  only healed on read or restart. Non-latest-version shards remain covered by read-time
+  reconstruction.
+
+### Changed
+
+- Added the `grainfs_placement_monitor_invalid_ec_ref_total{kind}` metric — counts
+  segment/coalesced refs the monitor skips for malformed placement (a non-zero rate indicates
+  corrupt object metadata). See `docs/operators/runbook.md` and `docs/operators/sli-slo.md`.
+
 ## [0.0.354.0] - 2026-05-27
 
 ### Added
