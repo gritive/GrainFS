@@ -14,15 +14,13 @@ import (
 
 var _ = Describe("Coalesce read and trigger integration", func() {
 	var (
-		t           GinkgoTInterface
 		b           *DistributedBackend
 		ctx         context.Context
 		bucket, key string
 	)
 
 	BeforeEach(func() {
-		t = GinkgoT()
-		b = newTestDistributedBackend(t)
+		b = newTestDistributedBackend(GinkgoT())
 		ctx = context.Background()
 		bucket, key = "b", "k"
 		Expect(b.CreateBucket(ctx, bucket)).To(Succeed())
@@ -60,7 +58,7 @@ var _ = Describe("Coalesce read and trigger integration", func() {
 		b.SetCoalesceConfig(cfg)
 
 		for i := 0; i < 3; i++ {
-			_, err := b.AppendObject(ctx, bucket, key, currentSize(t, b, bucket, key), bytes.NewReader([]byte("a")))
+			_, err := b.AppendObject(ctx, bucket, key, currentSize(GinkgoT(), b, bucket, key), bytes.NewReader([]byte("a")))
 			Expect(err).NotTo(HaveOccurred())
 		}
 

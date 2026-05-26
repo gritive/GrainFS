@@ -14,15 +14,13 @@ import (
 
 var _ = Describe("Coalesce process integration", func() {
 	var (
-		t           GinkgoTInterface
 		b           *DistributedBackend
 		ctx         context.Context
 		bucket, key string
 	)
 
 	BeforeEach(func() {
-		t = GinkgoT()
-		b = newTestDistributedBackend(t)
+		b = newTestDistributedBackend(GinkgoT())
 		ctx = context.Background()
 		bucket, key = "b", "k"
 		Expect(b.CreateBucket(ctx, "b")).To(Succeed())
@@ -31,7 +29,7 @@ var _ = Describe("Coalesce process integration", func() {
 	appendChunks := func(chunks ...string) {
 		GinkgoHelper()
 		for _, c := range chunks {
-			_, err := b.AppendObject(ctx, bucket, key, int64(currentSize(t, b, bucket, key)), bytes.NewReader([]byte(c)))
+			_, err := b.AppendObject(ctx, bucket, key, int64(currentSize(GinkgoT(), b, bucket, key)), bytes.NewReader([]byte(c)))
 			Expect(err).NotTo(HaveOccurred())
 		}
 	}
