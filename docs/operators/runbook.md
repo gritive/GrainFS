@@ -124,7 +124,15 @@ After a node restart, data WAL replay flags metadata-only EC shards whose local 
 curl -s http://localhost:9000/metrics | grep '^grainfs_datawal_startup_repair_'
 ```
 
-`discovered`/`candidates` show what replay flagged; `successes` should converge toward `attempts`. Sustained `failures_total{reason="insufficient_survivors"}` means too few peers were readable to reconstruct — bring peers back before it becomes data loss. `skips_total{reason="unsupported_shardkey"}` counts segment/coalesced large-object shards startup repair does not yet handle; those stay covered by read-time EC reconstruction and periodic scrub. Repair is best-effort and not re-attempted from the WAL on the next boot (the WAL checkpoint advances after replay), so with periodic scrub disabled, rely on scrub/placement-monitor or operator-initiated repair if a startup repair is interrupted.
+`discovered`/`candidates` show what replay flagged; `successes` should converge toward `attempts`. Sustained `failures_total{reason="insufficient_survivors"}` means too few peers were readable to reconstruct — bring peers back before it becomes data loss.
+
+Skip-reason diagnosis:
+
+- `skips_total{reason="placement_scan_capped"}` — the resolver scanned more than 1000 versions looking for the owning SegmentRef/CoalescedShardRef and gave up. The shard stays covered by read-time EC reconstruction. If this counter is non-zero, investigate whether the affected object has an unusually large version history.
+- `skips_total{reason="stale"}` — the shard was already present and healthy (or the WAL record was superseded). Also absorbs the rare case where an S3 object key literally contains `/segments/` or `/coalesced/` (a marker-collision); the previous `unsupported_shardkey` label is retired and no longer emitted.
+- Other reasons (`no_group`, `no_backend`, `invalid_shard_key`, `placement_corrupt`, `not_local_owner`) — see metric labels for details.
+
+Startup repair now reconstructs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shard keys in addition to object-version shards. Periodic scrub and placement-monitor still do **not** proactively repair segment/coalesced shards — only read-time EC reconstruction and startup repair cover them. Repair is best-effort and not re-attempted from the WAL on the next boot (the WAL checkpoint advances after replay), so with periodic scrub and placement-monitor disabled, rely on operator-initiated repair if a startup repair is interrupted.
 
 ## NFS Multi-Bucket Export
 
