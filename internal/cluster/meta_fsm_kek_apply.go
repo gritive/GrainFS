@@ -453,6 +453,175 @@ func (f *MetaFSM) auditAppendKEKRetire(cmd KEKRetireCmd, applyIndex uint64) {
 	_ = applyIndex
 }
 
+// applyKEKPrune is the deterministic FSM apply of MetaCmdTypeKEKPrune. It
+// permanently removes a Retiring KEK version after every voter has attested
+// lease_count == 0. The voter set is LEADER-STAMPED (cmd.VoterIDs) — Apply
+// uses ONLY the stamped list and NEVER reads live raft configuration
+// (followers lagging on a config-change entry would otherwise see a different
+// voter set than the leader at Apply time, breaking determinism — Pass-12 C1).
+//
+// Idempotent replay branches:
+//
+//	(a) status==Pruned && !HasVersion → no-op no-error
+//	(b) status==Retiring && !HasVersion → partial-apply recovery: the original
+//	    Apply succeeded RemoveAndUnlink but crashed before SetKEKStatus(Pruned).
+//	    Re-validate attestation (so an unrelated corrupt entry cannot be
+//	    silently turned into Pruned by replay) and finalize the status.
+//
+// Voter coverage path runs validatePruneAttestation — a pure helper with no
+// keystore or FSM-lock dependencies, reused by both the ordinary path and the
+// partial-apply recovery branch.
+func (f *MetaFSM) applyKEKPrune(applyIndex uint64, payload []byte) error {
+	cmd, err := DecodeMetaKEKPruneCmd(payload)
+	if err != nil {
+		return fmt.Errorf("KEKPrune: decode: %w", err)
+	}
+
+	// 0. Confirm token — cheap, deterministic, independent of state.
+	expectedConfirm := fmt.Sprintf("delete-permanently-%d", cmd.Version)
+	if cmd.Confirm != expectedConfirm {
+		return fmt.Errorf("KEKPrune: confirm token mismatch (got %q, want %q)", cmd.Confirm, expectedConfirm)
+	}
+
+	if f.keystore == nil {
+		return fmt.Errorf("KEKPrune: keystore not wired")
+	}
+
+	// 1. Idempotent replay branches. Look up status before any mutation so
+	//    replay paths short-circuit cleanly.
+	_, status, retireIdx, ok := f.LookupKEKStatus(cmd.Version)
+	hasVersion := f.keystore.HasVersion(cmd.Version)
+
+	// (a) Already pruned + key not on disk → full replay; no-op.
+	if ok && status == KEKLifecyclePruned && !hasVersion {
+		return nil
+	}
+	// (b) Retiring + key missing on disk → partial-apply recovery. The first
+	//     Apply already unlinked the disk file but crashed before
+	//     SetKEKStatus(Pruned). Validate attestation (defense against a
+	//     corrupt entry silently flipping us to Pruned) then finalize.
+	if ok && status == KEKLifecycleRetiring && !hasVersion {
+		if err := validatePruneAttestation(cmd, retireIdx); err != nil {
+			return fmt.Errorf("KEKPrune: partial-apply recovery: %w", err)
+		}
+		f.SetKEKStatus(cmd.Version, KEKLifecyclePruned, applyIndex)
+		f.RecordRotationRequestStatus(cmd.RequestID, RotationStatusApplied, applyIndex)
+		f.auditAppendKEKPrune(cmd, applyIndex)
+		return nil
+	}
+
+	// 2. Ordinary path: require Retiring state AND key still on disk.
+	if !ok || status != KEKLifecycleRetiring {
+		return fmt.Errorf("KEKPrune: version %d not in retiring state (status=%d, present=%v)", cmd.Version, status, ok)
+	}
+	if !hasVersion {
+		// Defensive: covered by branch (b). If we reach here, lifecycle state
+		// is inconsistent (Retiring without the key bytes) — but the (b)
+		// branch already would have handled it. Treat as ordinary error.
+		return fmt.Errorf("KEKPrune: version %d retiring but missing from keystore", cmd.Version)
+	}
+
+	// 3a. voter_config_hash gate FIRST (Pass-3 H3). Length is already enforced
+	//     by Decode (must be 32). Compare canonical encoding of stamped
+	//     voter_ids against the stamped hash. Mismatch → record StaleNoOp and
+	//     return nil so the leader retries (this is operator-visible drift,
+	//     not a hard rejection — see Task 9 expectation #7).
+	wantHash := encrypt.CanonicalVoterSetHash(cmd.VoterIDs)
+	if !bytes.Equal(wantHash[:], cmd.VoterConfigHash) {
+		f.RecordRotationRequestStatus(cmd.RequestID, RotationStatusStaleNoOp, applyIndex)
+		return nil
+	}
+
+	// 3b. Full attestation validation.
+	if err := validatePruneAttestation(cmd, retireIdx); err != nil {
+		return fmt.Errorf("KEKPrune: %w", err)
+	}
+
+	// 4. Disk-first state mutation. RemoveAndUnlink performs os.Remove +
+	//    fsync(parent) THEN drops the in-memory entry. On disk failure, the
+	//    in-memory state is preserved so a later replay can retry — see
+	//    branch (b) above.
+	if err := f.keystore.RemoveAndUnlink(f.kekDir, cmd.Version); err != nil {
+		return fatalKEKApply(fmt.Errorf("KEKPrune: remove and unlink: %v", err))
+	}
+
+	// 5. Finalize status + record request outcome.
+	f.SetKEKStatus(cmd.Version, KEKLifecyclePruned, applyIndex)
+	f.RecordRotationRequestStatus(cmd.RequestID, RotationStatusApplied, applyIndex)
+
+	// 6. Audit — payload fields only (no node-local time.Now). Task 10 wires the real sink.
+	f.auditAppendKEKPrune(cmd, applyIndex)
+	return nil
+}
+
+// validatePruneAttestation is a pure helper that verifies the attestation
+// portion of a KEKPruneCmd against the stamped voter_ids list and the retire
+// commit index. NO keystore or FSM-lock dependencies — reused by both the
+// ordinary Apply path and the partial-apply recovery branch.
+//
+// Checks (Pass-1 C4, Pass-5 C2, Pass-6 C1):
+//   - voter_ids non-empty
+//   - voter_ids sorted ascending unique (Decode already enforces; double-check)
+//   - voter_config_hash matches CanonicalVoterSetHash(voter_ids)
+//   - attestation count == voter count
+//   - no duplicate node_id in attestations
+//   - every attestation node_id is in voter_ids
+//   - every voter_id has an attestation
+//   - every observed_at_index >= retire commit index
+//   - every lease_count == 0
+func validatePruneAttestation(cmd KEKPruneCmd, retireIdx uint64) error {
+	if len(cmd.VoterIDs) == 0 {
+		return fmt.Errorf("voter_ids must be non-empty")
+	}
+	for i := 1; i < len(cmd.VoterIDs); i++ {
+		if cmd.VoterIDs[i] <= cmd.VoterIDs[i-1] {
+			return fmt.Errorf("voter_ids not sorted ascending unique at index %d", i)
+		}
+	}
+	wantHash := encrypt.CanonicalVoterSetHash(cmd.VoterIDs)
+	if !bytes.Equal(wantHash[:], cmd.VoterConfigHash) {
+		return fmt.Errorf("voter_config_hash does not match canonical encoding of voter_ids")
+	}
+
+	expectedVoters := make(map[string]struct{}, len(cmd.VoterIDs))
+	for _, id := range cmd.VoterIDs {
+		expectedVoters[id] = struct{}{}
+	}
+	if len(cmd.LeaseAttestation) != len(expectedVoters) {
+		return fmt.Errorf("attestation count %d != voter count %d", len(cmd.LeaseAttestation), len(expectedVoters))
+	}
+	seen := make(map[string]struct{}, len(cmd.LeaseAttestation))
+	for _, att := range cmd.LeaseAttestation {
+		if _, dup := seen[att.NodeID]; dup {
+			return fmt.Errorf("duplicate attestation for node %s", att.NodeID)
+		}
+		seen[att.NodeID] = struct{}{}
+		if _, isVoter := expectedVoters[att.NodeID]; !isVoter {
+			return fmt.Errorf("attestation from non-voter %s", att.NodeID)
+		}
+		if att.ObservedAtIndex < retireIdx {
+			return fmt.Errorf("attestation observed_at_index %d < retire commit index %d for node %s", att.ObservedAtIndex, retireIdx, att.NodeID)
+		}
+		if att.LeaseCount != 0 {
+			return fmt.Errorf("node %s lease_count=%d > 0", att.NodeID, att.LeaseCount)
+		}
+	}
+	for nodeID := range expectedVoters {
+		if _, hit := seen[nodeID]; !hit {
+			return fmt.Errorf("missing attestation from voter %s", nodeID)
+		}
+	}
+	return nil
+}
+
+// auditAppendKEKPrune is a placeholder that Task 10 will wire to the real
+// audit sink.
+func (f *MetaFSM) auditAppendKEKPrune(cmd KEKPruneCmd, applyIndex uint64) {
+	// Intentionally empty — Task 10 will populate.
+	_ = cmd
+	_ = applyIndex
+}
+
 // zeroKEK overwrites a KEK-sized byte slice with zeros. Defense against
 // memory forensics on transient unwrapped KEK material.
 func zeroKEK(b []byte) {

@@ -1217,3 +1217,36 @@ table MetaKEKRetireCmd {
   requested_at_unix_nanos:int64;
   cluster_state_at_propose:ClusterStateAtPropose;
 }
+
+// LeaseAttestationEntry is a single voter's attestation that its KEKLeaseTracker
+// reports zero in-flight references for the target KEK version, observed at the
+// raft commit index recorded in observed_at_index. FSM Apply verifies
+// lease_count == 0 for each entry (defense against an adversarial leader).
+table LeaseAttestationEntry {
+  node_id:string;
+  observed_at_index:uint64;
+  lease_count:uint64;
+}
+
+// MetaKEKPruneCmd permanently removes a Retiring KEK version after every voter
+// has attested lease_count == 0. The voter set is LEADER-STAMPED (voter_ids),
+// not read live by followers — determinism requires that FSM Apply uses only
+// stamped payload bytes; voter_config_hash is a defense-in-depth gate that
+// rejects mid-flight corruption of the voter_ids list.
+//
+// confirm must equal "delete-permanently-<version>" (accident prevention).
+// voter_ids MUST be sorted ascending unique.
+// voter_config_hash MUST be 32 bytes (SHA-256 of canonical-encoded voter_ids).
+table MetaKEKPruneCmd {
+  payload_version:uint8 = 1;
+  version:uint32;
+  confirm:string;
+  lease_attestation:[LeaseAttestationEntry];
+  voter_ids:[string];
+  voter_config_index:uint64;
+  voter_config_hash:[ubyte];
+  actor:string;
+  request_id:[ubyte];
+  requested_at_unix_nanos:int64;
+  cluster_state_at_propose:ClusterStateAtPropose;
+}

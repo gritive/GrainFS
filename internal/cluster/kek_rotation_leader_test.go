@@ -39,10 +39,11 @@ func (f *fakeRaftSubmitter) Propose(_ context.Context, cmdType MetaCmdType, payl
 	return err
 }
 
-// fakePeerProbe returns a fixed set of disk-space reports.
+// fakePeerProbe returns a fixed set of disk-space + lease-snapshot reports.
 type fakePeerProbe struct {
-	probes []KEKDiskSpaceResp
-	err    error
+	probes      []KEKDiskSpaceResp
+	err         error
+	leaseSample func(voters []string, version uint32) ([]LeaseAttestationSample, error)
 }
 
 func (p *fakePeerProbe) ProbeAllKEKDiskSpace(_ context.Context) ([]KEKDiskSpaceResp, error) {
@@ -50,6 +51,36 @@ func (p *fakePeerProbe) ProbeAllKEKDiskSpace(_ context.Context) ([]KEKDiskSpaceR
 		return nil, p.err
 	}
 	return p.probes, nil
+}
+
+func (p *fakePeerProbe) ProbeKEKLeaseSnapshot(_ context.Context, voters []string, version uint32) ([]LeaseAttestationSample, error) {
+	if p.leaseSample != nil {
+		return p.leaseSample(voters, version)
+	}
+	// Default: every voter attests lease_count=0 at observed_at_index=10000.
+	out := make([]LeaseAttestationSample, len(voters))
+	for i, v := range voters {
+		out[i] = LeaseAttestationSample{NodeID: v, ObservedAtIndex: 10000 + uint64(i), LeaseCount: 0}
+	}
+	return out, nil
+}
+
+// fakeRaftConfigReader returns a fixed voter list + configIndex; tests can
+// flip configIndexAfter to simulate a membership change between probe-start
+// and probe-end (the race-detect path).
+type fakeRaftConfigReader struct {
+	voters           []string
+	configIndex      uint64
+	configIndexAfter uint64 // 0 → return configIndex; nonzero → return on 2nd call
+	calls            int
+}
+
+func (r *fakeRaftConfigReader) EffectiveConfiguration() ([]string, uint64) {
+	r.calls++
+	if r.calls > 1 && r.configIndexAfter != 0 {
+		return append([]string(nil), r.voters...), r.configIndexAfter
+	}
+	return append([]string(nil), r.voters...), r.configIndex
 }
 
 // leaderTestFixture wires a KEKRotationLeader on top of an FSM seeded with K0
@@ -159,11 +190,12 @@ func newLeaderTestFixture(t *testing.T, opts leaderFixtureOpts) *leaderTestFixtu
 	fx.rngKEK = rng
 
 	fx.leader = NewKEKRotationLeader(KEKRotationLeaderConfig{
-		FSM:       fx.fsm,
-		Raft:      fx.raft,
-		PeerProbe: fx.probe,
-		RNGKEK:    rng,
-		WallClock: func() time.Time { return time.Unix(1717000000, 0) },
+		FSM:              fx.fsm,
+		Raft:             fx.raft,
+		PeerProbe:        fx.probe,
+		RaftConfigReader: &fakeRaftConfigReader{voters: []string{"node-self"}, configIndex: 5},
+		RNGKEK:           rng,
+		WallClock:        func() time.Time { return time.Unix(1717000000, 0) },
 	})
 	if !opts.skipLeadership {
 		fx.leader.SetEpochCtx(context.Background())
@@ -566,5 +598,132 @@ func TestKEKRotationLeader_ConcurrentProposeRejected(t *testing.T) {
 	}
 	if success != 1 || reject != 4 {
 		t.Errorf("got success=%d reject=%d, want 1 + 4 (errs=%v)", success, reject, errs)
+	}
+}
+
+// --- Task 9: ProposeKEKPrune tests ----------------------------------------
+
+// prepareLeaderForPrune extends the standard leader fixture for a prune
+// scenario: seed multiple KEK versions, retire one, wire the raft config
+// reader with the matching voter set, and configure the keystore directory.
+// Returns the fixture + the version to be pruned.
+func prepareLeaderForPrune(t *testing.T, voters []string) (*leaderTestFixture, uint32) {
+	t.Helper()
+	fx := newLeaderTestFixture(t, leaderFixtureOpts{})
+
+	// Wire a real keystore (on tmp dir) so RemoveAndUnlink can actually
+	// unlink. Replace the in-memory store the fixture installed.
+	dir := t.TempDir()
+	store, err := encrypt.LoadOrInitKEKStoreDir(dir)
+	if err != nil {
+		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
+	}
+	// Add versions 1..2 (auto-generated 0 is already there).
+	for v := uint32(1); v <= 2; v++ {
+		kek := bytes.Repeat([]byte{byte(0xB0 + v)}, encrypt.KEKSize)
+		if err := store.AddAndPersist(dir, v, kek); err != nil {
+			t.Fatalf("AddAndPersist v=%d: %v", v, err)
+		}
+	}
+	if err := store.SetActiveVersion(2); err != nil {
+		t.Fatalf("SetActiveVersion 2: %v", err)
+	}
+	fx.fsm.SetKEKStore(store)
+	fx.fsm.SetKEKDir(dir)
+	fx.fsm.SetActiveKEKVersion(2)
+
+	// Retire version 1 (the version we will prune).
+	if err := store.Retire(1); err != nil {
+		t.Fatalf("Retire(1): %v", err)
+	}
+	fx.fsm.SetKEKStatus(1, KEKLifecycleRetiring, 100)
+
+	// Reconfigure raft config reader for the requested voter set.
+	fx.leader.raftConfigReader = &fakeRaftConfigReader{
+		voters:      append([]string(nil), voters...),
+		configIndex: 42,
+	}
+	return fx, 1
+}
+
+func TestLeaderProposeKEKPrune_HappyPath(t *testing.T) {
+	voters := []string{"node-0", "node-1"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	if err := fx.leader.ProposeKEKPrune(version, "admin@uds"); err != nil {
+		t.Fatalf("ProposeKEKPrune: %v", err)
+	}
+	if fx.fsm.KEKStore().HasVersion(version) {
+		t.Errorf("version %d still in keystore after prune", version)
+	}
+	_, status, _, ok := fx.fsm.LookupKEKStatus(version)
+	if !ok || status != KEKLifecyclePruned {
+		t.Errorf("kek_status[%d] = %v ok=%v, want Pruned", version, status, ok)
+	}
+}
+
+func TestLeaderProposeKEKPrune_RejectsWhenNotLeader(t *testing.T) {
+	fx, version := prepareLeaderForPrune(t, []string{"node-0"})
+	fx.leader.ClearEpoch()
+	if err := fx.leader.ProposeKEKPrune(version, "admin@uds"); !errors.Is(err, ErrKEKPruneNotLeader) {
+		t.Errorf("expected ErrKEKPruneNotLeader, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKPrune_RejectsWhenNotRetiring(t *testing.T) {
+	fx, _ := prepareLeaderForPrune(t, []string{"node-0"})
+	// Use the active version 2 which is NOT in Retiring state.
+	if err := fx.leader.ProposeKEKPrune(2, "admin@uds"); err == nil || !strings.Contains(err.Error(), "retiring") {
+		t.Errorf("expected retiring-state reject, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKPrune_DetectsMembershipChangeMidProbe(t *testing.T) {
+	voters := []string{"node-0", "node-1"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	rcr := fx.leader.raftConfigReader.(*fakeRaftConfigReader)
+	rcr.configIndexAfter = rcr.configIndex + 1 // 2nd read advances
+	err := fx.leader.ProposeKEKPrune(version, "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "membership changed") {
+		t.Errorf("expected membership-change reject, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKPrune_RejectsNonZeroLeaseCount(t *testing.T) {
+	voters := []string{"node-0", "node-1"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	fx.probe.leaseSample = func(vs []string, _ uint32) ([]LeaseAttestationSample, error) {
+		out := make([]LeaseAttestationSample, len(vs))
+		for i, v := range vs {
+			lc := uint64(0)
+			if v == "node-0" {
+				lc = 3
+			}
+			out[i] = LeaseAttestationSample{NodeID: v, ObservedAtIndex: 200 + uint64(i), LeaseCount: lc}
+		}
+		return out, nil
+	}
+	err := fx.leader.ProposeKEKPrune(version, "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "lease_count") {
+		t.Errorf("expected lease_count reject, got: %v", err)
+	}
+}
+
+func TestLeaderProposeKEKPrune_RejectsMissingProbeResponses(t *testing.T) {
+	voters := []string{"node-0", "node-1", "node-2"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	fx.probe.leaseSample = func(vs []string, _ uint32) ([]LeaseAttestationSample, error) {
+		// Drop the last voter to simulate transport failure.
+		out := make([]LeaseAttestationSample, 0, len(vs)-1)
+		for i, v := range vs {
+			if i == len(vs)-1 {
+				continue
+			}
+			out = append(out, LeaseAttestationSample{NodeID: v, ObservedAtIndex: 200 + uint64(i), LeaseCount: 0})
+		}
+		return out, nil
+	}
+	err := fx.leader.ProposeKEKPrune(version, "admin@uds")
+	if err == nil || !strings.Contains(err.Error(), "responded") {
+		t.Errorf("expected missing-response reject, got: %v", err)
 	}
 }
