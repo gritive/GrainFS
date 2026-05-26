@@ -31,7 +31,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // KEKRotationOrchestrator is the leader-side API the admin endpoints call.
@@ -223,8 +222,10 @@ func (h *EncryptionKEKHandler) ServePrune(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusOK)
 }
 
-// ServeStatus handles GET /v1/encrypt/kek/status. Bare-minimum shape; Task 13
-// will extend.
+// ServeStatus handles GET /v1/encrypt/kek/status. Returns the active version
+// plus per-version lifecycle status + seal/lease diagnostics. Prometheus
+// scrapes the same live values via the KEK collector (internal/metrics), so
+// this endpoint does not poke any metrics — it is a read-only operator query.
 func (h *EncryptionKEKHandler) ServeStatus(w http.ResponseWriter, _ *http.Request) {
 	if h.reader == nil {
 		http.Error(w, "kek admin disabled", http.StatusServiceUnavailable)
@@ -235,26 +236,16 @@ func (h *EncryptionKEKHandler) ServeStatus(w http.ResponseWriter, _ *http.Reques
 		ActiveVersion: h.reader.ActiveKEKVersion(),
 		Versions:      make([]kekVersionStatus, 0, len(versions)),
 	}
-	retired := 0
 	for _, v := range versions {
 		seals := h.reader.SealCount(v)
-		leases := h.reader.LeaseCount(v)
-		status := lifecycleStatusString(h.reader, v, out.ActiveVersion)
-		if status == "retiring" || status == "pruned" {
-			retired++
-		}
 		out.Versions = append(out.Versions, kekVersionStatus{
 			Version:            v,
-			Status:             status,
+			Status:             lifecycleStatusString(h.reader, v, out.ActiveVersion),
 			SealCount:          seals,
-			LeaseCount:         leases,
+			LeaseCount:         h.reader.LeaseCount(v),
 			NonceCollisionRisk: nonceCollisionRisk(seals),
 		})
-		metrics.SetKEKSealCount(v, seals)
-		metrics.SetKEKLeaseCount(v, leases)
 	}
-	metrics.SetKEKActiveVersion(out.ActiveVersion)
-	metrics.SetKEKRetiredCount(retired)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

@@ -317,6 +317,23 @@ func (k *DEKKeeper) SealCount(kekVersion uint32) uint64 {
 // attributes to. Distinct from the DEK gen returned by Active().
 func (k *DEKKeeper) ActiveKEKVersion() uint32 { return k.activeKEKVer.Load() }
 
+// SealCountSnapshot returns every KEK version's seal count: the frozen value
+// for each retired version plus the live running count for the current active
+// version. Off the hot path (Prometheus scrape via the KEK collector) — reads
+// activeKEKVer + activeSeals atomics and the retiredSeals map under its RLock.
+func (k *DEKKeeper) SealCountSnapshot() map[uint32]uint64 {
+	active := k.activeKEKVer.Load()
+	live := k.activeSeals.Load()
+	k.retiredSealsMu.RLock()
+	out := make(map[uint32]uint64, len(k.retiredSeals)+1)
+	for v, c := range k.retiredSeals {
+		out[v] = c
+	}
+	k.retiredSealsMu.RUnlock()
+	out[active] = live // active wins over any stale retired entry for the same version
+	return out
+}
+
 // OnKEKRotation records that the active KEK version changed to newVersion. The
 // running seal count is frozen under the previous version and the live counter
 // resets to 0 so the new version starts its own count. Called by the FSM
