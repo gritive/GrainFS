@@ -1,6 +1,9 @@
 package storage
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // LocatorScheme classifies how a SegmentRef.BlobID addresses its chunk.
 type LocatorScheme uint8
@@ -53,8 +56,17 @@ func ParseLocator(blobID string) Locator {
 // every frozen-path source MUST build paths through this one function so they
 // can never drift (a drift drops a referenced chunk from the known-set, and the
 // scrubber then deletes a still-referenced chunk -> data loss).
+//
+// The key is canonicalized identically to the on-disk segment layout
+// (filepath.Join cleans trailing slashes, "//", "./", "../"), so a referenced
+// segment whose object key is non-canonical (e.g. "a/b/") still matches the
+// orphan walker's disk-derived path and is never wrongly swept (data loss).
 func SegmentKnownPath(bucket, key, blobID string) string {
-	return bucket + "/" + key + "_segments/" + ParseLocator(blobID).Ref
+	// Mirror filepath.Join(bucketDir, key) relative to bucketDir: clean the key
+	// and drop any leading separator so it lands directly under the bucket dir.
+	cleanKey := filepath.ToSlash(filepath.Clean(filepath.FromSlash(key)))
+	cleanKey = strings.TrimPrefix(cleanKey, "/")
+	return bucket + "/" + cleanKey + "_segments/" + ParseLocator(blobID).Ref
 }
 
 // String renders the locator. LocatorCAS gets the "cas://" prefix; LocatorLegacy
