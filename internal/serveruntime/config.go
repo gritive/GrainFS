@@ -72,10 +72,9 @@ type Config struct {
 	// AppendObject size cap
 	AppendSizeCapBytes int64
 
-	// Lifecycle / dedup / cache
+	// Lifecycle / cache
 	LifecycleInterval time.Duration
 	MigrationInterval time.Duration
-	DedupEnabled      bool
 	BlockCacheSize    int64
 
 	// Dashboard / vlog

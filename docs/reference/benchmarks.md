@@ -123,7 +123,7 @@ S3 requests, 64 KiB objects, concurrency 32, `warp`, `--host-select
 roundrobin`, and `--noclear`. Each target ran in local single-node mode. GET is
 a warm-read pass over objects kept from the preceding PUT pass. `GrainFS` ran
 with at-rest encryption and S3-only benchmark flags:
-`--audit-iceberg=false --dedup=false --block-cache-size=0 --shard-cache-size=0`.
+`--audit-iceberg=false --block-cache-size=0 --shard-cache-size=0`.
 
 | S3 op | MinIO MiB/s | MinIO obj/s | MinIO errors | MinIO RSS MiB | RustFS MiB/s | RustFS obj/s | RustFS errors | RustFS RSS MiB | GrainFS MiB/s | GrainFS obj/s | GrainFS errors | GrainFS RSS MiB | GrainFS artifact |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |

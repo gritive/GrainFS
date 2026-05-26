@@ -96,8 +96,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 			SmokeDefer:      149 * time.Millisecond,
 		},
 
-		DedupEnabled: true,
-
 		FlagsSnapshot: map[string]string{"sentinel": "yes"},
 	}
 
@@ -144,9 +142,8 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.HealReceiptGossipInterval, cfg.HealReceiptGossipInterval)
 	require.Equal(t, opts.HealReceiptWindow, cfg.HealReceiptWindow)
 
-	// Lifecycle / dedup / cache.
+	// Lifecycle / cache.
 	require.Equal(t, opts.LifecycleInterval, cfg.LifecycleInterval)
-	require.Equal(t, opts.DedupEnabled, cfg.DedupEnabled)
 	require.Equal(t, opts.BlockCacheSize, cfg.BlockCacheSize)
 
 	// Dashboard + vlog ratios (sourced from VlogOpts — single flag origin).

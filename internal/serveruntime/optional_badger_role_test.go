@@ -32,7 +32,7 @@ func TestBuildVolumeManagerDisablesDedupWhenOptionalRoleCannotOpen(t *testing.T)
 	require.NoError(t, err)
 	defer backend.Close()
 
-	mgr, cache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{DedupEnabled: true}, dataFile, backend)
+	mgr, cache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{}, dataFile, backend)
 
 	require.NoError(t, err)
 	require.NotNil(t, mgr)

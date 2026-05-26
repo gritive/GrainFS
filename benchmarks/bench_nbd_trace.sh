@@ -49,7 +49,6 @@ echo ""
 
 GRAINFS_VOLUME_TRACE=1 "$BINARY" serve \
   --log-level debug \
-  --dedup=false \
   --data   "$DATA_DIR" \
   --port   "$HTTP_PORT" \
   --nbd-port "$NBD_PORT" \
