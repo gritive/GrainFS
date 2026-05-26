@@ -86,13 +86,12 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	if startupResult.Mode == badgerrole.StartupModeBlocked {
 		return fmt.Errorf("badger startup recovery blocked server start: %v", startupResult.BlockedReasons)
 	}
-	recoveryReadOnly := startupReadOnly
 	if startupReadOnly {
 		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
 		log.Warn().Strs("reasons", startupResult.ReadOnlyReasons).Msg("badger startup recovery read-only gate enabled")
 	}
 	state.backend = backend
-	state.recoveryReadOnly = recoveryReadOnly
+	state.recoveryReadOnly = startupReadOnly
 
 	// DiskCollector exposes grainfs_disk_used_pct metric. In multi-node mode
 	// the balancer owns its own collector; in singleton mode nothing else
@@ -104,7 +103,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// Auto-create "default" bucket only for singleton startup. In cluster mode,
 	// bucket creation is a cluster-wide metadata operation and must be driven by
 	// an explicit client/API action, not repeated independently by every node.
-	if ShouldCreateDefaultBucketOnStartup(state.peers, recoveryReadOnly) {
+	if ShouldCreateDefaultBucketOnStartup(state.peers, startupReadOnly) {
 		if err := CreateDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
 			return fmt.Errorf("create default bucket: %w", err)
 		}
