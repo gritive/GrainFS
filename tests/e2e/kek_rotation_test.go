@@ -33,8 +33,8 @@ package e2e
 // offending node id) and kek_diskspace_rpc_test.go.
 //
 // Building this suite (the first time the whole stack ran together via the
-// real CLI/UDS path) surfaced two gaps the per-task unit tests missed because
-// each wired its own dependencies in test setup.
+// real CLI/UDS path) surfaced a wiring gap the per-task unit tests missed
+// because each wired its own dependencies in test setup.
 //
 //  GAP 2 (FIXED): Single-node prune voter-coverage probe failed with "missing
 //     probe response from voter <raft-addr>". The PeerKEKProbe self-shortcut
@@ -48,20 +48,17 @@ package e2e
 //     probe selfID and both handler NodeIDs. Unblocks the two single-node
 //     prune-path specs below (now It).
 //
-//  GAP 1 (BLOCKER — not a wiring fix): Cluster rotate does not propagate to
-//     followers. Instrumentation of MetaFSM.Apply proved the raft
-//     MetaKEKRotateCmd DOES reach and Apply on every node, but followers
-//     no-op it (RotationStatusStaleNoOp) because the rotate Apply gates on
-//     wrap_set_hash matching the node's own DEKKeeper wrap[] set, and each
-//     node generates its gen-0 DEK independently at random — the wrap sets
-//     diverge cluster-wide. See the long comment on "propagates rotation to
-//     all followers" for the full root cause. This needs an initial-DEK
-//     replication mechanism (Phase D / out of Task 15 scope); the 3
-//     Cluster3Node specs stay PIt.
-//
-// The lifecycle invariants the BLOCKER specs cover are also exercised
-// in-process by internal/cluster (FSM Apply / prune voter-coverage) and
-// internal/encrypt (lease tracker) unit tests.
+// CLUSTER PROPAGATION (RESOLVED in Phase D): cluster KEK rotate now propagates
+// to all followers. The earlier blocker was that each node generated its gen-0
+// DEK independently at random, so every node's wrap[] set — and thus the
+// wrap_set_hash the rotate Apply gates on — diverged, and followers recorded
+// RotationStatusStaleNoOp against the leader-stamped hash. Phase D replicates
+// the gen-0 DEK by value at cluster bootstrap (DEKReplicatedRotateCmd), making
+// the wrap[gen] bytes byte-identical across nodes (proven by
+// internal/cluster TestReplicatedDEK_MakesWrapSetHashMatch). The propagation
+// and prune Cluster3Node specs below — plus a cross-node encrypted-read guard —
+// are therefore active. The leader-restart spec stays PIt for a harness-level
+// leader-rejoin reason documented on that spec (independent of DEK replication).
 
 import (
 	"bytes"
@@ -412,29 +409,13 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 	})
 
 	ginkgo.Context("Cluster3Node", ginkgo.Ordered, func() {
-		// PENDING (BLOCKER — deeper than a wiring gap): a leader KEK rotate
-		// commits to the replicated meta-raft log and EVERY node's
-		// MetaFSM.Apply receives the MetaKEKRotateCmd (confirmed by
-		// instrumentation), but followers no-op it. The rotate Apply gates on
-		// wrap_set_hash == canonical hash of the node's CURRENT DEKKeeper
-		// wrap[] set; on a fresh dynamically-joined cluster each node's gen-0
-		// DEK is generated independently at random (encrypt.NewDEKKeeper does
-		// rand.Read; dekKeeper.Rotate() likewise), so every node's wrap[] —
-		// and thus wrap_set_hash — differs. The leader stamps ITS wrap_set_hash
-		// into the cmd; followers compare against their own divergent set and
-		// record RotationStatusStaleNoOp without advancing active_version.
-		// The Phase B plan's core invariant ("DEKKeeper wrap[gen] byte-identical
-		// across nodes at Apply time") is violated at the source: DEK material
-		// is per-node-random and is NOT replicated by value (the only sync path
-		// is the DKVS snapshot trailer via InstallSnapshot, which does not fire
-		// on a fresh cluster that has not yet hit a snapshot threshold).
-		// Resolving this needs an initial-DEK replication mechanism (e.g. the
-		// leader broadcasting its gen-0 wrap, or a join handshake that transfers
-		// DEK state) — outside Phase B / Task 15 scope. Flip to It once such a
-		// path exists. Naively skipping the follower-side wrap_set_hash /
-		// verifyRewrappedDEKsAgainstWrapSet checks is NOT a valid fix: it would
-		// destroy data already sealed under a follower's own local DEK.
-		ginkgo.PIt("propagates rotation to all followers", func() {
+		// Phase D: a leader KEK rotate commits to the meta-raft log and Applies
+		// on every node. Because the gen-0 DEK is replicated by value at
+		// bootstrap, each node's wrap[] set — and thus wrap_set_hash — is
+		// byte-identical, so the leader-stamped wrap_set_hash matches on every
+		// follower and the rotate advances active_version cluster-wide (no
+		// RotationStatusStaleNoOp).
+		ginkgo.It("propagates rotation to all followers", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
 				Nodes:      3,
@@ -461,12 +442,11 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			}
 		})
 
-		// PENDING (BLOCKER): depends on cluster rotate propagation (above),
-		// which is blocked on the per-node DEK wrap[] divergence documented on
-		// the "propagates rotation to all followers" spec. The voter-coverage
-		// probe self-identity gap is fixed (raft ServerID), but this spec
-		// cannot reach a retired-version state until rotate propagates.
-		ginkgo.PIt("prunes a retired version with all voters lease_count=0", func() {
+		// Phase D: depends on cluster rotate propagation (above). With gen-0 DEK
+		// replicated by value, rotate propagates, so this spec can reach a
+		// retired-version state and exercise the voter-coverage LeaseSnapshot
+		// RPC across all three nodes.
+		ginkgo.It("prunes a retired version with all voters lease_count=0", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
 				Nodes:      3,
@@ -517,10 +497,18 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			}
 		})
 
-		// PENDING (BLOCKER): depends on cluster rotate propagation (above) — the
-		// idempotent-replay assertion is only meaningful once a rotate commits
-		// across the cluster. Blocked on the same per-node DEK wrap[] divergence
-		// documented on the "propagates rotation to all followers" spec.
+		// PENDING (harness fragility — NOT a Phase D blocker): Phase D rotate
+		// propagation is proven by the two specs above + the cross-node read
+		// spec below + internal/cluster TestReplicatedDEK_MakesWrapSetHashMatch.
+		// This spec additionally exercises leader KILL + RESTART. Investigation
+		// (Phase D) showed the restarted OLD LEADER boots, binds its HTTP/admin
+		// ports, and rejoins the reformed cluster — then gracefully self-shuts
+		// ~3s later (before waitHTTPReady can observe it), so the spec times out
+		// in its preamble, never reaching the active_version idempotency
+		// assertion. Restarting a FOLLOWER is fine (cluster_harness_kill_test.go
+		// passes); only the leader-rejoin path self-terminates. This is a
+		// harness/leader-rejoin-lifecycle issue independent of DEK replication —
+		// flip to It once the rejoining-old-leader shutdown is fixed.
 		ginkgo.PIt("survives a leader restart mid-lifecycle without double-applying", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
@@ -565,6 +553,52 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 					"node %d (%s) active_version must be unchanged after leader restart", idx, c.nodeID(idx))
 			}
 			gomega.Expect(kekStatusViaSocket(t, newLeaderDir).ActiveVersion).To(gomega.Equal(capturedActive))
+		})
+
+		// Cross-node encrypted-read regression guard for the deeper Phase D bug:
+		// an object PUT (and sealed) via the leader's S3 must GET byte-identical
+		// via a follower's S3. This only holds if every node shares the same
+		// gen-0 DEK material (replicated by value at bootstrap); under the old
+		// per-node-random DEK, the follower would fail to open the leader-sealed
+		// blob.
+		ginkgo.It("reads on a follower an encrypted object written via the leader", func() {
+			t := ginkgo.GinkgoTB()
+			c := startE2ECluster(t, e2eClusterOptions{
+				Nodes:      3,
+				Mode:       ClusterModeDynamicJoin,
+				DisableNFS: true,
+				DisableNBD: true,
+				LogPrefix:  "kek-crossread-cluster",
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			bucket := "kek-crossnode-read"
+			key := "encrypted-object.bin"
+			body := []byte("phase-d cross-node encrypted read payload")
+
+			leaderIdx, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Pick any follower (a node that is not the writable leader).
+			followerIdx := -1
+			for i := range c.dataDirs {
+				if i != leaderIdx {
+					followerIdx = i
+					break
+				}
+			}
+			gomega.Expect(followerIdx).NotTo(gomega.Equal(-1), "expected at least one follower node")
+
+			// PUT (and seal) via the leader's S3.
+			gomega.Expect(tryPutObject(ctx, c.S3Client(leaderIdx), bucket, key, body)).To(gomega.Succeed())
+
+			// GET via a follower's S3 — must unseal to byte-identical plaintext.
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, c.S3Client(followerIdx), bucket, key)
+			}, 15*time.Second, 200*time.Millisecond).Should(gomega.Equal(body),
+				"follower node %d (%s) must decrypt the leader-sealed object",
+				followerIdx, c.nodeID(followerIdx))
 		})
 	})
 })
