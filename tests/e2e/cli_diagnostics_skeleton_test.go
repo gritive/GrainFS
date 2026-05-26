@@ -4,7 +4,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 )
 
-// Diagnostic CLI subcommands with no e2e coverage: doctor, iceberg config,
+// Diagnostic CLI subcommands with no e2e coverage: iceberg config,
 // nfs debug. These are read-only probes; dual context.
 var _ = ginkgo.Describe("Diagnostics CLI skeletons", func() {
 	for _, tc := range []struct {
@@ -30,11 +30,6 @@ var _ = ginkgo.Describe("Diagnostics CLI skeletons", func() {
 
 func runDiagnosticsCLISkeletonCases(getTgt func() s3Target) {
 	_ = getTgt
-
-	ginkgo.PIt("[TODO:e2e] doctor reports healthy checks on a fresh node", func() {
-		// `grainfs doctor --endpoint <sock>` — verify exit code 0 and that
-		// the report covers raft, badger, scrub, audit, encryption rolls.
-	})
 
 	ginkgo.PIt("[TODO:e2e] iceberg config shows the iceberg client config", func() {
 		// `grainfs iceberg config --endpoint <sock>` — verify endpoint URLs

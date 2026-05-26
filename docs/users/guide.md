@@ -236,35 +236,6 @@ grainfs cluster config --help
 
 See `../operators/runbook.md` for production procedures.
 
-## Recovery
-
-Plan recovery into a fresh target directory:
-
-```bash
-grainfs recover cluster plan \
-  --source-data /var/lib/grainfs \
-  --target-data /var/lib/grainfs-recovered \
-  --new-node-id node-recovered \
-  --new-raft-addr 10.0.0.10:19100
-```
-
-Execute and verify:
-
-```bash
-grainfs recover cluster execute \
-  --source-data /var/lib/grainfs \
-  --target-data /var/lib/grainfs-recovered \
-  --new-node-id node-recovered \
-  --new-raft-addr 10.0.0.10:19100
-
-grainfs recover cluster verify \
-  --target-data /var/lib/grainfs-recovered \
-  --mark-writable
-```
-
-`recover --auto` is intentionally non-mutating and fails closed. See
-`docs/operators/recover-cluster.md`.
-
 ## Operations APIs
 
 Useful local endpoints:

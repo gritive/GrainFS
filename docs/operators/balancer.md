@@ -118,7 +118,7 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
 2. Check source-node QUIC connectivity:
 
    ```bash
-   grainfs doctor --check-peers
+   grainfs cluster --endpoint <data>/admin.sock peers
    ```
 
 3. Check free space on the destination node:
@@ -152,7 +152,7 @@ If `grainfs_balancer_leader_transfers_total` grows frequently, one node is
 likely receiving too much request load.
 
 1. Check each node's `requests_per_sec` through gossip logs or Prometheus.
-2. Look for hot bucket or key patterns with `grainfs doctor --hot-keys`.
+2. Look for hot bucket or key patterns in Prometheus metrics or gossip logs.
 3. Review client load-balancing configuration.
 
 ## Tuning Guide
