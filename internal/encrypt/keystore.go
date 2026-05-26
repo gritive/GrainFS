@@ -345,9 +345,6 @@ func writeKEKFileAtomic(path string, kek []byte) error {
 	return nil
 }
 
-// fsyncDir opens the directory at path and fsyncs it, ensuring that any
-// preceding rename into that directory is durable across crashes. POSIX
-// requires this for the rename to survive a power loss.
 // SealWithActiveKEK encrypts plain using the active KEK directly (NOT the
 // wrapped-DEK keyring). Used by callers that need to sign blobs with cluster
 // trust independently of DEK lifecycle, e.g. capability assertions.
@@ -369,6 +366,9 @@ func (s *KEKStore) OpenWithActiveKEK(ct, aad []byte) ([]byte, error) {
 	return aesgcmOpenWithAAD(kek, ct, aad)
 }
 
+// fsyncDir opens the directory at path and fsyncs it, ensuring that any
+// preceding rename into that directory is durable across crashes. POSIX
+// requires this for the rename to survive a power loss.
 func fsyncDir(path string) error {
 	d, err := os.Open(path)
 	if err != nil {

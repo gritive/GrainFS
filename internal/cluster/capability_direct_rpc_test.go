@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,6 +253,56 @@ func TestCapabilityGateAllow_CacheInvalidatesOnKEKRotation(t *testing.T) {
 	}
 	if probeCount != 2 {
 		t.Errorf("after KEK rotation: probeCount = %d, want 2 (cache must have missed)", probeCount)
+	}
+}
+
+// TestCapabilityGate_Allow_ConcurrentCacheMiss_SingleFanout verifies that
+// multiple goroutines racing on the same cache miss fire the probe fan-out
+// exactly once, not once per goroutine.
+func TestCapabilityGate_Allow_ConcurrentCacheMiss_SingleFanout(t *testing.T) {
+	kekStore := newCapProbeKEKStore(t, 0x11)
+	evidenceSource := &fakeEvidenceSource{
+		caps: map[string]bool{compat.CapabilityKEKEnvelopeV1: true},
+	}
+	handler := NewCapabilityProbeHandler("node-SF", "0.0.344.0", testClusterID, kekStore, evidenceSource)
+
+	var probeCount atomic.Int32
+	// start gate is used to hold all goroutines at the same point before Allow is
+	// called, maximising the chance of a true concurrent cache miss.
+	start := make(chan struct{})
+	countingDialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		probeCount.Add(1)
+		return makeTestDialer(handler)(ctx, peer, payload)
+	}
+
+	gate := NewCapabilityGate(compat.DefaultRegistry, 30*time.Second)
+	cfg := raft.Configuration{Servers: []raft.Server{
+		{ID: "node-SF", Suffrage: raft.Voter},
+	}}
+	gate.SetMetaRaftSnapshot(1, cfg)
+	gate.WithDirectProbe(testClusterID, kekStore, countingDialer)
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	errs := make([]error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // wait until all goroutines are ready
+			_, errs[idx] = gate.Allow(context.Background(), compat.OperationKEKRotate)
+		}(i)
+	}
+	close(start) // release all goroutines simultaneously
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: Allow returned error: %v", i, err)
+		}
+	}
+	if got := probeCount.Load(); got != 1 {
+		t.Errorf("probe fan-out = %d, want 1 (singleflight not coalescing concurrent misses)", got)
 	}
 }
 
