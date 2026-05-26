@@ -36,7 +36,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + NFSv4 + NBD + Web UI를 하나로 제공
 - 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(QUIC/Raft)
-- internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, server/execution, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, config, nodeconfig
+- internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, server/execution, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, chunkref, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### cmd 경계 계약 (cmd thin-runner)
