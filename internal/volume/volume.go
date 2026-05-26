@@ -160,7 +160,6 @@ func (m *Manager) putBlkBuf(b []byte) {
 func (m *Manager) newBlockIOEngine() blockIOEngine {
 	engine := blockIOEngine{
 		objects:   backendBlockObjectStore{backend: m.backend},
-		dedup:     m.dedup,
 		meter:     defaultBlockReadMeter{},
 		getBlkBuf: m.getBlkBuf,
 		putBlkBuf: m.putBlkBuf,
