@@ -31,6 +31,7 @@ const (
 	OperationKEKPrune              Operation = "kek_prune"
 	OperationKEKLeaseSnapshot      Operation = "kek_lease_snapshot"
 	OperationKEKStatusQuery        Operation = "kek_status_query"
+	OperationDEKRotate             Operation = "dek_rotate"
 )
 
 const (
@@ -38,6 +39,7 @@ const (
 	CapabilityNfsExportCreateV1  = "nfs_export_create_v1"
 	CapabilityMultipartListingV1 = "multipart_listing_v1"
 	CapabilityKEKEnvelopeV1      = "kek_envelope_v1"
+	CapabilityDEKReplicatedV1    = "dek_replicated_v1"
 )
 
 type Capability struct {
@@ -88,6 +90,14 @@ var DefaultRegistry = mustRegistryWithOps(
 			Description:       "Cluster-wide KEK rotation lifecycle: rotate/retire/prune raft commands, lease attestation, and capability-gated admin triggers.",
 			Semantics:         "All voters must understand MetaKEKRotate / MetaKEKRetire / MetaKEKPrune commands and the kek_status FSM state to participate in cluster KEK lifecycle.",
 		},
+		{
+			Name:              CapabilityDEKReplicatedV1,
+			Scope:             ScopeMetaRaft,
+			Severity:          SeverityHard,
+			IntroducedVersion: "0.0.347.0",
+			Description:       "Cluster-wide DEK replication: leader-driven DEK bootstrap and rotation committed via Raft so all voters share the active DEK.",
+			Semantics:         "All voters must understand MetaDEKReplicatedRotate commands and apply the new DEK atomically to the keystore to participate in cluster DEK lifecycle.",
+		},
 	},
 	map[Operation][]string{
 		OperationKEKRotate:        {CapabilityKEKEnvelopeV1},
@@ -95,6 +105,7 @@ var DefaultRegistry = mustRegistryWithOps(
 		OperationKEKPrune:         {CapabilityKEKEnvelopeV1},
 		OperationKEKLeaseSnapshot: {CapabilityKEKEnvelopeV1},
 		OperationKEKStatusQuery:   {CapabilityKEKEnvelopeV1},
+		OperationDEKRotate:        {CapabilityDEKReplicatedV1},
 	},
 )
 
