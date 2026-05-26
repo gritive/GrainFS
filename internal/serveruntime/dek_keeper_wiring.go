@@ -113,6 +113,19 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	}
 
 	fsm.SetDEKKeeper(keeper)
+	// Wire the same KEKStore into the FSM. Both MetaKEKRotateCmd Apply and
+	// KEKRotationLeader.ProposeKEKRotate read f.KEKStore(); without this the
+	// whole Phase B rotate/retire/prune lifecycle fails with "keystore not
+	// wired" and GET /v1/encrypt/kek/status reports an empty version list.
+	// (Caught by the Task 15 e2e lifecycle suite; unit tests wired the store
+	// directly so the boot-path gap was invisible.)
+	fsm.SetKEKStore(store)
+	// Back the FSM keystore with the on-disk keys dir so MetaKEKRotateCmd
+	// persists keys/<V>.key (AddAndPersist) and MetaKEKPruneCmd unlinks it
+	// (RemoveAndUnlink). Without this the rotation Apply installs K_new in
+	// memory only, so rotated KEKs are lost on restart and prune cannot
+	// delete the on-disk file. (Caught by the Task 15 e2e lifecycle suite.)
+	fsm.SetKEKDir(keysDir)
 	state.dekKeeper = keeper
 	state.kekStore = store
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
