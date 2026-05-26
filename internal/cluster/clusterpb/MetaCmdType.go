@@ -79,6 +79,7 @@ const (
 	MetaCmdTypeKEKRotate                    MetaCmdType = 69
 	MetaCmdTypeKEKRetire                    MetaCmdType = 70
 	MetaCmdTypeKEKPrune                     MetaCmdType = 71
+	MetaCmdTypeDEKReplicatedRotate          MetaCmdType = 72
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -154,6 +155,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeKEKRotate:                    "KEKRotate",
 	MetaCmdTypeKEKRetire:                    "KEKRetire",
 	MetaCmdTypeKEKPrune:                     "KEKPrune",
+	MetaCmdTypeDEKReplicatedRotate:          "DEKReplicatedRotate",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -229,6 +231,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"KEKRotate":                    MetaCmdTypeKEKRotate,
 	"KEKRetire":                    MetaCmdTypeKEKRetire,
 	"KEKPrune":                     MetaCmdTypeKEKPrune,
+	"DEKReplicatedRotate":          MetaCmdTypeDEKReplicatedRotate,
 }
 
 func (v MetaCmdType) String() string {
