@@ -101,11 +101,10 @@ type blockIOResult struct {
 	Bytes                int
 	AllocationBytesDelta int64
 	InvalidatedKeys      []string
-	LiveMapDirty         bool
 	CommitFns            []func() error
 }
 
-func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string) (blockIOResult, error) {
+func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64) (blockIOResult, error) {
 	bs := int64(vol.BlockSize)
 	var result blockIOResult
 
@@ -114,7 +113,7 @@ func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveM
 		blkNum := pos / bs
 		blkOff := pos % bs
 
-		phyKey := physicalKey(name, blkNum, liveMap)
+		phyKey := blockKey(name, blkNum)
 
 		e.meter.RecordVolumeBlock(phyKey)
 
@@ -172,27 +171,27 @@ func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveM
 	return result, nil
 }
 
-func (e blockIOEngine) write(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string, currentAllocatedBytes, poolQuota int64) (blockIOResult, error) {
+func (e blockIOEngine) write(name string, vol *Volume, p []byte, off int64, currentAllocatedBytes, poolQuota int64) (blockIOResult, error) {
 	pl := blockIOPlanner{objects: e.objects}
 	ex := blockIOExecutor{objects: e.objects, cache: e.cache, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
-	actions, err := pl.planWrite(name, vol, p, off, liveMap, currentAllocatedBytes, poolQuota, false)
+	actions, err := pl.planWrite(name, vol, p, off, currentAllocatedBytes, poolQuota, false)
 	if err != nil {
 		return blockIOResult{}, err
 	}
-	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
+	return ex.executeWrite(context.Background(), name, vol, p, actions)
 }
 
-func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string) (blockIOResult, error) {
+func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int64) (blockIOResult, error) {
 	pl := blockIOPlanner{objects: e.objects}
 	ex := blockIOExecutor{objects: e.objects, cache: e.cache, deferred: e.deferred, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
-	actions, err := pl.planWrite(name, vol, p, off, liveMap, 0, 0, true)
+	actions, err := pl.planWrite(name, vol, p, off, 0, 0, true)
 	if err != nil {
 		return blockIOResult{}, err
 	}
-	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
+	return ex.executeWrite(context.Background(), name, vol, p, actions)
 }
 
-func (e blockIOEngine) discard(name string, vol *Volume, off, length int64, liveMap map[int64]string) (blockIOResult, error) {
+func (e blockIOEngine) discard(name string, vol *Volume, off, length int64) (blockIOResult, error) {
 	bs := int64(vol.BlockSize)
 	firstBlock := (off + bs - 1) / bs
 	lastBlock := (off+length)/bs - 1
@@ -204,14 +203,10 @@ func (e blockIOEngine) discard(name string, vol *Volume, off, length int64, live
 	var result blockIOResult
 	var freed int64
 	for blkNum := firstBlock; blkNum <= lastBlock; blkNum++ {
-		key := physicalKey(name, blkNum, liveMap)
+		key := blockKey(name, blkNum)
 		result.InvalidatedKeys = append(result.InvalidatedKeys, key)
 		if err := e.objects.DeleteObject(context.Background(), volumeBucketName, key); err == nil {
 			freed++
-			if liveMap != nil {
-				delete(liveMap, blkNum)
-				result.LiveMapDirty = true
-			}
 		}
 	}
 

@@ -20,7 +20,6 @@ func (pl blockIOPlanner) planWrite(
 	vol *Volume,
 	p []byte,
 	off int64,
-	liveMap map[int64]string,
 	currentAllocatedBytes, poolQuota int64,
 	asyncEligible bool,
 ) ([]BlockAction, error) {

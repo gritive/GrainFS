@@ -29,7 +29,7 @@ func TestExecuteWrite_DirectNewBlockPutsObject(t *testing.T) {
 			Key: blockKey("v", 0), OldKey: blockKey("v", 0), IsNew: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, DefaultBlockSize, result.Bytes)
@@ -48,7 +48,7 @@ func TestExecuteWrite_DirectExistingBlockNoAllocationDelta(t *testing.T) {
 			Key: blockKey("v", 0), OldKey: blockKey("v", 0), IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, int64(0), result.AllocationBytesDelta)
@@ -66,7 +66,7 @@ func TestExecuteWrite_DirectInvalidatesCache(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true},
 	}
 
-	_, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	_, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Contains(t, cache.invalidations, key)
@@ -85,7 +85,7 @@ func TestExecuteWrite_AsyncDirectCollectsCommitFn(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true, Async: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Len(t, result.CommitFns, 1)
@@ -103,7 +103,7 @@ func TestExecuteWrite_DirectWriteAtPath(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, DefaultBlockSize, result.Bytes)
@@ -123,7 +123,7 @@ func TestExecuteWrite_DirectPartialBlock(t *testing.T) {
 			Key: key, OldKey: key, IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, 5, result.Bytes)
@@ -144,7 +144,7 @@ func TestExecuteWrite_AsyncDirectPartialBlock(t *testing.T) {
 			Key: key, OldKey: key, IsNew: false, Async: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Len(t, result.CommitFns, 1)
@@ -163,7 +163,7 @@ func TestExecuteWrite_PartialDirectNewBlockCountsAllocation(t *testing.T) {
 			Key: key, OldKey: key, IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta,
@@ -181,7 +181,7 @@ func TestExecuteWrite_InvalidateAllNilCache(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true},
 	}
 
-	_, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
+	_, err := ex.executeWrite(context.Background(), "v", vol, p, actions)
 	require.NoError(t, err) // must not panic with nil cache
 }
 

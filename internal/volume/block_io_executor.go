@@ -29,7 +29,6 @@ func (ex blockIOExecutor) executeWrite(
 	name string,
 	vol *Volume,
 	p []byte,
-	liveMap map[int64]string,
 	actions []BlockAction,
 ) (blockIOResult, error) {
 	bs := int64(vol.BlockSize)

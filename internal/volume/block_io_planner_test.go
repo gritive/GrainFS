@@ -17,7 +17,7 @@ func TestPlanWrite_DirectNewBlock(t *testing.T) {
 	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
 	p := make([]byte, DefaultBlockSize)
 
-	actions, err := pl.planWrite("v", vol, p, 0, nil, 0, 0, false)
+	actions, err := pl.planWrite("v", vol, p, 0, 0, 0, false)
 
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
@@ -36,7 +36,7 @@ func TestPlanWrite_DirectExistingBlock(t *testing.T) {
 	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
 	p := make([]byte, DefaultBlockSize)
 
-	actions, err := pl.planWrite("v", vol, p, 0, nil, 0, 0, false)
+	actions, err := pl.planWrite("v", vol, p, 0, 0, 0, false)
 
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
@@ -49,7 +49,7 @@ func TestPlanWrite_AsyncEligibleWhenFlagSet(t *testing.T) {
 	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
 	p := make([]byte, DefaultBlockSize)
 
-	actions, err := pl.planWrite("v", vol, p, 0, nil, 0, 0, true /*asyncEligible*/)
+	actions, err := pl.planWrite("v", vol, p, 0, 0, 0, true /*asyncEligible*/)
 
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
@@ -63,7 +63,7 @@ func TestPlanWrite_QuotaExceededWhenNewBlocksExceedLimit(t *testing.T) {
 	p := make([]byte, DefaultBlockSize*2) // 2 new blocks needed
 
 	// quota allows only 1 block
-	_, err := pl.planWrite("v", vol, p, 0, nil, 0, int64(DefaultBlockSize), false)
+	_, err := pl.planWrite("v", vol, p, 0, 0, int64(DefaultBlockSize), false)
 
 	require.ErrorIs(t, err, ErrPoolQuotaExceeded)
 }
@@ -77,7 +77,7 @@ func TestPlanWrite_QuotaOkWhenBlocksAlreadyAllocated(t *testing.T) {
 	p := make([]byte, DefaultBlockSize)
 
 	// quota only allows 0 new blocks; since the block exists this should pass
-	actions, err := pl.planWrite("v", vol, p, 0, nil, int64(DefaultBlockSize), int64(DefaultBlockSize), false)
+	actions, err := pl.planWrite("v", vol, p, 0, int64(DefaultBlockSize), int64(DefaultBlockSize), false)
 
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
@@ -90,7 +90,7 @@ func TestPlanWrite_MultipleBlocks(t *testing.T) {
 	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 4), BlockSize: DefaultBlockSize}
 	p := make([]byte, DefaultBlockSize*3)
 
-	actions, err := pl.planWrite("v", vol, p, 0, nil, 0, 0, false)
+	actions, err := pl.planWrite("v", vol, p, 0, 0, 0, false)
 
 	require.NoError(t, err)
 	require.Len(t, actions, 3)
@@ -108,7 +108,7 @@ func TestPlanWrite_PartialBlockAtOffset(t *testing.T) {
 	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
 	p := make([]byte, 100) // 100 bytes into block 0
 
-	actions, err := pl.planWrite("v", vol, p, 512, nil, 0, 0, false)
+	actions, err := pl.planWrite("v", vol, p, 512, 0, 0, false)
 
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
@@ -124,7 +124,7 @@ func TestPlanWrite_PartialDirectNoHeadObject(t *testing.T) {
 	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
 	p := make([]byte, 100) // partial block
 
-	_, err := pl.planWrite("v", vol, p, 512, nil, 0, 0, false)
+	_, err := pl.planWrite("v", vol, p, 512, 0, 0, false)
 
 	require.NoError(t, err)
 	require.Empty(t, store.heads, "partial block must not call HeadObject")
