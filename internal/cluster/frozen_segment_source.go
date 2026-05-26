@@ -1,6 +1,15 @@
 package cluster
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// segmentGCReadIndexTimeout bounds the ReadIndex barrier used by CaughtUp so
+// the caught-up gate never stalls a scrub cycle. A timeout fails closed
+// (CaughtUp returns false -> GC skips this cycle), which is safe.
+const segmentGCReadIndexTimeout = 5 * time.Second
 
 // SetFrozenSegmentPathSource injects the snapshot Manager's AllFrozenSegmentPaths
 // so this backend can supply the snapshot half of the scrubber's known-set. Call
@@ -20,27 +29,25 @@ func (b *DistributedBackend) AllFrozenSegmentPaths() (map[string][]string, error
 	return b.frozenSegSrc()
 }
 
-// CaughtUp reports whether this node's applied FSM state is provably current,
-// gating the scrubber's orphan-segment GC against data loss.
+// CaughtUp reports whether this node's applied FSM state is current enough to
+// trust ListAllObjectsStrict for the GC known-set. Uses the Raft ReadIndex
+// barrier (quorum-confirmed commit index) so a stale follower or deposed leader
+// cannot falsely report caught-up and delete still-referenced segments. Bounded
+// so it never stalls the scrub cycle; any error/timeout fails closed (returns
+// false -> GC pauses this cycle, which is safe).
 //
-// The scrubber builds its known-set from ListAllObjects(), a stale local Badger
-// read with no linearizable barrier. On a cluster follower whose Raft apply
-// lags, the local FSM may not yet hold a committed object's metadata, so a
-// committed segment could look orphaned and be wrongly deleted. CaughtUp blocks
-// GC until applied >= the node's locally-known commit index.
-//
-// Conservative by design: a false negative merely delays GC one cycle (safe);
-// a false positive risks data loss. Single-node / unit-test path (no raft node)
-// is trivially current and returns true so GC can run.
-//
-// Limitation: CommittedIndex() is the node's LOCAL view. A follower whose latest
-// AppendEntries has not yet landed has a stale local commit, so applied >=
-// localCommit can hold while the cluster has committed further. This matches the
-// scrubber's own semantics — its known-set is also a local read — so the gate is
-// consistent with what it protects, not a global linearizability guarantee.
-func (b *DistributedBackend) CaughtUp() bool {
+// Followers' local node.ReadIndex returns ErrNotLeader, so a follower fails
+// closed and skips its segment sweep — only the leader (whose ReadIndex is
+// quorum-confirmed) runs GC. Both branches are data-loss safe.
+func (b *DistributedBackend) CaughtUp(ctx context.Context) bool {
 	if b.node == nil {
-		return true
+		return true // no raft (single-node serve / tests): local state is authoritative
 	}
-	return b.lastApplied.Load() >= b.node.CommittedIndex()
+	cctx, cancel := context.WithTimeout(ctx, segmentGCReadIndexTimeout)
+	defer cancel()
+	idx, err := b.node.ReadIndex(cctx)
+	if err != nil {
+		return false // cannot confirm freshness -> fail closed
+	}
+	return b.lastApplied.Load() >= idx
 }

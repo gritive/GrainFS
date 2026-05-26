@@ -122,8 +122,11 @@ type segmentManifestSource interface {
 // caughtUpReporter lets a backend signal that its local metadata view is
 // up-to-date enough to safely compute the known-set. A lagging node's
 // ListAllObjects is stale and could mark a committed segment as orphaned, so
-// the sweep is skipped for the whole cycle when CaughtUp() is false.
-type caughtUpReporter interface{ CaughtUp() bool }
+// the sweep is skipped for the whole cycle when CaughtUp() is false. The ctx
+// bounds the underlying ReadIndex barrier so the gate never stalls the cycle.
+type caughtUpReporter interface {
+	CaughtUp(ctx context.Context) bool
+}
 
 // segmentOrphanLog persists when a raw segment blob first became unreferenced
 // (t_zero) so the orphan sweep can enforce a retention window across cycles and
@@ -655,7 +658,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	if hasSegScanner && hasSegWalker {
 		// (E) caught-up gate: a lagging node's ListAllObjects is stale and could
 		// mark a committed segment orphan. Skip the whole segment sweep this cycle.
-		if cu, ok := s.backend.(caughtUpReporter); ok && !cu.CaughtUp() {
+		if cu, ok := s.backend.(caughtUpReporter); ok && !cu.CaughtUp(ctx) {
 			log.Warn().Msg("scrub: node not caught up, skipping orphan-segment sweep this cycle")
 		} else if segByBucket, frozenByBucket, ok := s.hoistSegmentSources(); ok {
 			// (G) reconcile: a segment in the known-set is referenced -> must not

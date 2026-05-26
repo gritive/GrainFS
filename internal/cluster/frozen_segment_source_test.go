@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -40,17 +41,17 @@ func TestAllFrozenSegmentPaths_DelegatesToSource(t *testing.T) {
 // node is wired: the backend is trivially current so GC is never starved.
 func TestCaughtUp_NilNode(t *testing.T) {
 	b := &DistributedBackend{}
-	require.True(t, b.CaughtUp())
+	require.True(t, b.CaughtUp(context.Background()))
 }
 
-// TestCaughtUp_SingleNodeLeader exercises the real strategy-(a) comparison
-// (lastApplied >= node.CommittedIndex()) against a single-node leader. Once the
+// TestCaughtUp_SingleNodeLeader exercises the ReadIndex barrier against a
+// single-node leader (self-quorum confirms commitIndex inline). Once the
 // bootstrap no-op applies, CaughtUp must report true so GC can run.
 func TestCaughtUp_SingleNodeLeader(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	caughtUp := false
 	for range 2000 {
-		if b.CaughtUp() {
+		if b.CaughtUp(context.Background()) {
 			caughtUp = true
 			break
 		}
