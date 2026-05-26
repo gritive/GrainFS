@@ -146,6 +146,7 @@ firewall-restricted addresses.
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
 | Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |
+| Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock` |
 | Create an NBD volume | `grainfs volume create <name> --size 10Gi --endpoint <data>/admin.sock` |
 | Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
 | Check incidents | `curl http://localhost:9000/api/incidents` |
