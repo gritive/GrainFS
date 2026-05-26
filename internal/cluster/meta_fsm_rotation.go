@@ -93,6 +93,19 @@ func (f *MetaFSM) PendingDEKVersions() (map[uint32][]byte, uint32) {
 	return f.pendingDEKVersions, f.pendingDEKActive
 }
 
+// SnapshotCapturedKEKVersion returns the active_kek_version that was recorded
+// in the DKVS trailer of the most recent Restore call. This is the KEK version
+// the wrapped DEKs were sealed under at snapshot time — which may differ from
+// ActiveKEKVersion() if KEK rotation log entries have since been replayed.
+// Returns 0 if no DKVS trailer was present (Phase A / pre-rotation snapshots).
+// Task 4c: rebuildDEKKeeperFromRestore uses this to select the correct KEK
+// for LoadFromFSM instead of store.ActiveKEK() (which is the current rotation state).
+func (f *MetaFSM) SnapshotCapturedKEKVersion() uint32 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.pendingActiveKEKVersion
+}
+
 // ActiveKEKVersion returns the cluster-wide active KEK version that wrap[gen]
 // entries are sealed under. Phase A always returns 0 (no rotation yet);
 // Phase B will mutate this via MetaCmdTypeKEKRotate Apply.

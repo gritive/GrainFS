@@ -334,6 +334,13 @@ type MetaFSM struct {
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
 
+	// pendingActiveKEKVersion is the active_kek_version field read from the DKVS
+	// trailer during Restore. It names which KEK version the wrapped DEKs were
+	// sealed under at snapshot time. Set alongside pendingDEKVersions (Task 4c);
+	// consumed by rebuildDEKKeeperFromRestore to select the correct unwrap key.
+	// Distinct from activeKEKVersion which is mutated during log replay.
+	pendingActiveKEKVersion uint32
+
 	// activeKEKVersion is the cluster-wide KEK version that current wrap[gen]
 	// entries are sealed under. Phase A pins this to 0 (no rotation yet);
 	// Phase B will mutate it via MetaCmdTypeKEKRotate Apply. Persisted in the

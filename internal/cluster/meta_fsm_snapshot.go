@@ -671,6 +671,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.pendingDEKVersions = newDEKVersions
 		f.pendingDEKActive = newDEKActive
 		f.activeKEKVersion = newActiveKEKVersion
+		// Task 4c: remember which KEK version the snapshot wraps were sealed under.
+		// This field is read by SnapshotCapturedKEKVersion() → rebuildDEKKeeperFromRestore.
+		// It must NOT be overwritten by KEKRotateCmd log replay, hence the separate field.
+		f.pendingActiveKEKVersion = newActiveKEKVersion
 		if newDEKRefs != nil {
 			f.dekRefCounts = newDEKRefs
 		} else {
