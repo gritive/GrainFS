@@ -249,26 +249,8 @@ func (f *FSM) applyPutObjectMeta(txn *badger.Txn, data []byte) error {
 	if err != nil {
 		return err
 	}
-	etag := c.ETag
-	if c.IsDeleteMarker {
-		etag = deleteMarkerETag
-	}
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:              c.Key,
-		Size:             c.Size,
-		ContentType:      c.ContentType,
-		ETag:             etag,
-		LastModified:     c.ModTime,
-		ECData:           c.ECData,
-		ECParity:         c.ECParity,
-		NodeIDs:          c.NodeIDs,
-		PlacementGroupID: c.PlacementGroupID,
-		UserMetadata:     c.UserMetadata,
-		SSEAlgorithm:     c.SSEAlgorithm,
-		Parts:            c.Parts,
-		Segments:         segmentMetaEntriesToRefs(c.Segments),
-		Tags:             c.Tags,
-	})
+	metaObj := buildPutObjectMeta(c)
+	meta, err := marshalObjectMeta(metaObj)
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
