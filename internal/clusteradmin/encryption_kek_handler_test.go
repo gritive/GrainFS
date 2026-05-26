@@ -74,6 +74,8 @@ type fakeStatusReader struct {
 	active   uint32
 	versions []uint32
 	statuses map[uint32]cluster.KEKLifecycleStatus
+	seals    map[uint32]uint64
+	leases   map[uint32]uint64
 }
 
 func (r *fakeStatusReader) ActiveKEKVersion() uint32   { return r.active }
@@ -88,6 +90,8 @@ func (r *fakeStatusReader) LookupKEKStatus(v uint32) (uint32, cluster.KEKLifecyc
 	}
 	return v, s, 0, true
 }
+func (r *fakeStatusReader) SealCount(v uint32) uint64  { return r.seals[v] }
+func (r *fakeStatusReader) LeaseCount(v uint32) uint64 { return r.leases[v] }
 
 func newTestHandler(orch *fakeOrchestrator, gate *fakeGate, reader KEKStatusReader) *EncryptionKEKHandler {
 	var go_ KEKCapabilityGate
@@ -238,6 +242,12 @@ func TestAdmin_GetEncryptKEKStatus_ReturnsActiveAndVersions(t *testing.T) {
 			0: cluster.KEKLifecyclePruned,
 			1: cluster.KEKLifecycleRetiring,
 		},
+		seals: map[uint32]uint64{
+			2: 250_000_000, // active version → warn band
+		},
+		leases: map[uint32]uint64{
+			1: 3,
+		},
 	}
 	h := newTestHandler(nil, nil, reader)
 	r := httptest.NewRequest("GET", "/v1/encrypt/kek/status", nil)
@@ -256,6 +266,31 @@ func TestAdmin_GetEncryptKEKStatus_ReturnsActiveAndVersions(t *testing.T) {
 	require.Equal(t, "pruned", out.Versions[0].Status)
 	require.Equal(t, "retiring", out.Versions[1].Status)
 	require.Equal(t, "active", out.Versions[2].Status)
+
+	// Task 13: per-version diagnostic fields.
+	require.Equal(t, uint64(3), out.Versions[1].LeaseCount, "v1 lease count")
+	require.Equal(t, uint64(250_000_000), out.Versions[2].SealCount, "v2 active seal count")
+	require.Equal(t, "warn", out.Versions[2].NonceCollisionRisk, "250M seals → warn")
+	require.Equal(t, "ok", out.Versions[0].NonceCollisionRisk, "0 seals → ok")
+}
+
+func TestNonceCollisionRisk_Thresholds(t *testing.T) {
+	cases := []struct {
+		seals uint64
+		want  string
+	}{
+		{0, "ok"},
+		{99_999_999, "ok"},
+		{100_000_000, "warn"},
+		{999_999_999, "warn"},
+		{1_000_000_000, "alert"},
+		{5_000_000_000, "alert"},
+	}
+	for _, c := range cases {
+		if got := nonceCollisionRisk(c.seals); got != c.want {
+			t.Errorf("nonceCollisionRisk(%d) = %q, want %q", c.seals, got, c.want)
+		}
+	}
 }
 
 func TestAdmin_PostEncryptKEKRotate_DisabledWhenLeaderNil(t *testing.T) {

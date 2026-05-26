@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // DEKSize is the size of a Data Encryption Key in bytes (AES-256).
@@ -46,6 +47,19 @@ type DEKKeeper struct {
 	active uint32
 	wrap   map[uint32][]byte      // dek_gen → wrapped DEK (snapshot persistence)
 	aead   map[uint32]cipher.AEAD // dek_gen → cached AEAD (hot-path)
+
+	// Seal-count diagnostics for nonce-collision monitoring (Task 13). The
+	// count is per active KEK version: every Seal/SealWithAAD/Rewrap under the
+	// active AEAD increments activeSeals (a single lock-free atomic.Add — no
+	// map lookup on the hot path). On KEK rotation, OnKEKRotation freezes the
+	// running count into retiredSeals[old version] and resets activeSeals so
+	// the new version starts its own count. activeKEKVersion is the label the
+	// counter belongs to (DEK gen and KEK version are distinct: a KEK rotation
+	// re-wraps DEKs without bumping the DEK gen).
+	activeSeals    atomic.Uint64
+	activeKEKVer   atomic.Uint32
+	retiredSealsMu sync.RWMutex
+	retiredSeals   map[uint32]uint64
 }
 
 // NewDEKKeeper creates a new DEKKeeper with generation 0, sealing a freshly
@@ -69,10 +83,11 @@ func NewDEKKeeper(kek []byte) (*DEKKeeper, error) {
 		return nil, err
 	}
 	return &DEKKeeper{
-		kek:    append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
-		active: 0,
-		wrap:   map[uint32][]byte{0: wrapped},
-		aead:   map[uint32]cipher.AEAD{0: aead},
+		kek:          append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
+		active:       0,
+		wrap:         map[uint32][]byte{0: wrapped},
+		aead:         map[uint32]cipher.AEAD{0: aead},
+		retiredSeals: make(map[uint32]uint64),
 	}, nil
 }
 
@@ -101,6 +116,7 @@ func (k *DEKKeeper) Seal(plain []byte) ([]byte, uint32, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, 0, err
 	}
+	k.activeSeals.Add(1)
 	return aead.Seal(nonce, nonce, plain, nil), k.active, nil
 }
 
@@ -118,6 +134,7 @@ func (k *DEKKeeper) SealWithAAD(plain, aad []byte) ([]byte, uint32, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, 0, err
 	}
+	k.activeSeals.Add(1)
 	return aead.Seal(nonce, nonce, plain, aad), k.active, nil
 }
 
@@ -232,6 +249,7 @@ func (k *DEKKeeper) Rewrap(ct []byte, oldGen uint32) ([]byte, uint32, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, 0, err
 	}
+	k.activeSeals.Add(1)
 	return activeAEAD.Seal(nonce, nonce, plain, nil), k.active, nil
 }
 
@@ -263,6 +281,7 @@ func (k *DEKKeeper) RewrapWithAAD(ct []byte, oldGen uint32, aad []byte) ([]byte,
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, 0, err
 	}
+	k.activeSeals.Add(1)
 	return activeAEAD.Seal(nonce, nonce, plain, aad), k.active, nil
 }
 
@@ -280,6 +299,44 @@ func (k *DEKKeeper) VersionsAndActive() (versions map[uint32][]byte, active uint
 	}
 	return out, k.active
 }
+
+// SealCount returns the number of active-AEAD seals attributed to KEK version
+// kekVersion. For the current active version this is the live running counter;
+// for a prior version it is the value frozen by OnKEKRotation at the moment
+// that version stopped being active. Unknown versions return 0.
+func (k *DEKKeeper) SealCount(kekVersion uint32) uint64 {
+	if kekVersion == k.activeKEKVer.Load() {
+		return k.activeSeals.Load()
+	}
+	k.retiredSealsMu.RLock()
+	defer k.retiredSealsMu.RUnlock()
+	return k.retiredSeals[kekVersion]
+}
+
+// ActiveKEKVersion returns the KEK version the seal counter currently
+// attributes to. Distinct from the DEK gen returned by Active().
+func (k *DEKKeeper) ActiveKEKVersion() uint32 { return k.activeKEKVer.Load() }
+
+// OnKEKRotation records that the active KEK version changed to newVersion. The
+// running seal count is frozen under the previous version and the live counter
+// resets to 0 so the new version starts its own count. Called by the FSM
+// immediately after InstallKEKRotation under f.mu (single-writer apply path).
+func (k *DEKKeeper) OnKEKRotation(newVersion uint32) {
+	prev := k.activeKEKVer.Swap(newVersion)
+	if prev == newVersion {
+		return
+	}
+	frozen := k.activeSeals.Swap(0)
+	k.retiredSealsMu.Lock()
+	k.retiredSeals[prev] = frozen
+	k.retiredSealsMu.Unlock()
+}
+
+// SetActiveKEKVersion sets the KEK version the seal counter attributes to,
+// without freezing or resetting the running count. Used at boot
+// (wireDEKKeeper / restore) to label the keeper's initial active version,
+// which may be > 0 after a snapshot restore.
+func (k *DEKKeeper) SetActiveKEKVersion(v uint32) { k.activeKEKVer.Store(v) }
 
 // InstallKEKRotation atomically replaces the keeper's internal KEK and the
 // wrapped-DEK map with the post-rotation versions. Used by FSM Apply after
@@ -355,10 +412,11 @@ func LoadFromFSM(kek []byte, versions map[uint32][]byte) (*DEKKeeper, error) {
 		aead[g] = a
 	}
 	return &DEKKeeper{
-		kek:    append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
-		active: active,
-		wrap:   wrap,
-		aead:   aead,
+		kek:          append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
+		active:       active,
+		wrap:         wrap,
+		aead:         aead,
+		retiredSeals: make(map[uint32]uint64),
 	}, nil
 }
 

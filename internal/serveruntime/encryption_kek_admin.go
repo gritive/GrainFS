@@ -7,12 +7,20 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/clusteradmin"
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-// kekStatusReaderAdapter bridges *cluster.MetaFSM into the
-// clusteradmin.KEKStatusReader interface. The interface deliberately omits
-// `*encrypt.KEKStore` so tests can inject lighter fakes.
-type kekStatusReaderAdapter struct{ fsm *cluster.MetaFSM }
+// kekStatusReaderAdapter bridges *cluster.MetaFSM (lifecycle status + version
+// list) plus the DEK keeper (seal counts) and lease tracker (lease counts)
+// into the clusteradmin.KEKStatusReader interface. The interface deliberately
+// omits `*encrypt.KEKStore` so tests can inject lighter fakes. keeper and
+// tracker may be nil (encryption disabled / Phase A); the adapter then reports
+// 0 for the corresponding counters.
+type kekStatusReaderAdapter struct {
+	fsm     *cluster.MetaFSM
+	keeper  *encrypt.DEKKeeper
+	tracker *encrypt.KEKLeaseTracker
+}
 
 func (a kekStatusReaderAdapter) ActiveKEKVersion() uint32 { return a.fsm.ActiveKEKVersion() }
 func (a kekStatusReaderAdapter) KEKStoreVersions() []uint32 {
@@ -24,6 +32,18 @@ func (a kekStatusReaderAdapter) KEKStoreVersions() []uint32 {
 }
 func (a kekStatusReaderAdapter) LookupKEKStatus(v uint32) (uint32, cluster.KEKLifecycleStatus, uint64, bool) {
 	return a.fsm.LookupKEKStatus(v)
+}
+func (a kekStatusReaderAdapter) SealCount(v uint32) uint64 {
+	if a.keeper == nil {
+		return 0
+	}
+	return a.keeper.SealCount(v)
+}
+func (a kekStatusReaderAdapter) LeaseCount(v uint32) uint64 {
+	if a.tracker == nil {
+		return 0
+	}
+	return a.tracker.Count(v)
 }
 
 // RegisterEncryptionKEKRoutes wires the four KEK envelope admin endpoints
@@ -39,10 +59,12 @@ func RegisterEncryptionKEKRoutes(
 	orchestrator clusteradmin.KEKRotationOrchestrator,
 	gate clusteradmin.KEKCapabilityGate,
 	fsm *cluster.MetaFSM,
+	keeper *encrypt.DEKKeeper,
+	tracker *encrypt.KEKLeaseTracker,
 ) {
 	var reader clusteradmin.KEKStatusReader
 	if fsm != nil {
-		reader = kekStatusReaderAdapter{fsm: fsm}
+		reader = kekStatusReaderAdapter{fsm: fsm, keeper: keeper, tracker: tracker}
 	}
 	handler := clusteradmin.NewEncryptionKEKHandler(orchestrator, gate, reader)
 	h.POST("/v1/encrypt/kek/rotate", wrapStdlibNoParam(handler.ServeRotate))

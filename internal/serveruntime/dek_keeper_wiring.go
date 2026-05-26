@@ -89,6 +89,10 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	if err != nil {
 		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
 	}
+	// Label the seal counter with the keystore's active KEK version so the
+	// grainfs_kek_seal_count metric reports against the correct version from
+	// boot (a restored node may already be past version 0).
+	keeper.SetActiveKEKVersion(store.ActiveVersion())
 
 	// cluster.id load mode: strict when join mode OR prior state exists,
 	// so a missing cluster.id on a restart surfaces as

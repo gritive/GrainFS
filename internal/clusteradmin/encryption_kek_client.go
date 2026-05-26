@@ -10,8 +10,11 @@ import (
 // Mirrors EncryptionKEKHandler's kekVersionStatus; kept here so the CLI
 // and any non-handler callers have a typed home.
 type KEKVersionStatus struct {
-	Version uint32 `json:"version"`
-	Status  string `json:"status"`
+	Version            uint32 `json:"version"`
+	Status             string `json:"status"`
+	SealCount          uint64 `json:"seal_count"`
+	LeaseCount         uint64 `json:"lease_count"`
+	NonceCollisionRisk string `json:"nonce_collision_risk"`
 }
 
 // KEKStatus is the wire shape returned by GET /v1/encrypt/kek/status.

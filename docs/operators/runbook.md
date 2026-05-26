@@ -986,3 +986,56 @@ grainfs config set trusted-proxy.cidr 10.0.0.0/8 --endpoint <data>/admin.sock
 ```
 
 See also: `docs/operators/deploy-production-cluster.md` for TLS posture details.
+
+---
+
+## Keystore disk full
+
+The keystore directory (`<dataDir>/keys/`) requires at least 64 KiB of free
+space to perform a KEK rotation: the leader writes the new `keys/<V>.key` and
+re-wraps every live DEK before committing the raft command. The leader probes
+every voter's keystore partition before accepting a rotation.
+
+If `grainfs_keystore_disk_free_bytes < 65536` on any node, the rotation propose
+is rejected and the response names the offending node id. New writes and reads
+continue to work — only rotation is blocked.
+
+Recover by freeing space on that node's data partition (rotate/ship logs, prune
+old snapshots, or grow the volume), then retry:
+
+```bash
+grainfs encrypt kek rotate --i-know --endpoint <data>/admin.sock
+```
+
+Monitor `grainfs_keystore_disk_free_bytes` per node so the condition is caught
+before an operator attempts a rotation.
+
+---
+
+## DEK rotation cadence
+
+Each DEK encrypts object data under AES-256-GCM with a random 96-bit nonce. A
+single DEK can safely produce about 2^32 seals before the nonce-collision
+probability exceeds 2^-32. Above that bound, a repeated nonce under the same key
+would leak plaintext relationships, so the DEK must be rotated.
+
+GrainFS tracks seals per active KEK version and surfaces a risk band in
+`grainfs encrypt kek status` (the `nonce=` column) and in Prometheus
+(`grainfs_kek_seal_count{kek_version="<active>"}`):
+
+| seal_count          | risk    | action                                      |
+| ------------------- | ------- | ------------------------------------------- |
+| `< 100,000,000`     | `ok`    | none                                        |
+| `100M – 1,000M`     | `warn`  | schedule a DEK rotation within 7 days       |
+| `>= 1,000,000,000`  | `alert` | rotate immediately: `grainfs dek rotate`    |
+
+Alert on the active version's seal count at these thresholds:
+
+```promql
+grainfs_kek_seal_count{kek_version="<active>"} >= 100000000   # warn
+grainfs_kek_seal_count{kek_version="<active>"} >= 1000000000  # alert
+```
+
+DEK rotation does not block client I/O: it adds a new DEK generation in parallel
+and new seals immediately use it, while existing objects remain readable under
+their original generation.
