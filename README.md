@@ -45,13 +45,14 @@ That guide also covers 9P mounts, authenticated Mount SAs, and read-only exports
 <details>
 <summary>Cluster</summary>
 
-`scp` `./tmp/kek.key` from node A to node B, then run on node B:
+Phase A stages two files on each joining node: `<data>/keys/0.key` (active KEK) and `<data>/cluster.id` (cluster identity). Both must be copied from a healthy peer before running `cluster join`:
 
 ```bash
 DATA_DIR=./dataB
-mkdir -p "$DATA_DIR"
-scp <nodeA>:<nodeA-data-dir>/kek.key "$DATA_DIR/kek.key"
-chmod 0600 "$DATA_DIR/kek.key"
+mkdir -p "$DATA_DIR/keys"
+scp <nodeA>:<nodeA-data-dir>/keys/0.key "$DATA_DIR/keys/0.key"
+scp <nodeA>:<nodeA-data-dir>/cluster.id "$DATA_DIR/cluster.id"
+chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
 ./bin/grainfs cluster join <nodeA>:7001 \
   --data "$DATA_DIR" \
   --node-id node-b \
