@@ -307,6 +307,46 @@ func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 	return s, nil
 }
 
+// RemoveAndUnlink permanently removes a KEK version from disk AND in-memory.
+// Disk operations happen FIRST (unlink + parent-dir fsync); only after disk
+// success is the in-memory entry deleted. This ordering preserves replay
+// safety: if unlink/fsync fails, the in-memory state is left untouched so a
+// subsequent MetaKEKPruneCmd replay (partial-apply branch) can retry
+// deterministically.
+//
+// Refuses to remove the active version (defense-in-depth — the caller is
+// expected to have already gated on Retiring lifecycle state).
+//
+// keysDir is the on-disk directory passed at boot (Phase A: keystore does
+// not own the path). Missing on-disk file is tolerated (ErrNotExist) — a
+// crashed prune that already unlinked but failed to delete in-memory will
+// reach this path on replay.
+func (s *KEKStore) RemoveAndUnlink(keysDir string, version uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version == s.active {
+		return fmt.Errorf("KEKStore.RemoveAndUnlink: cannot remove active version %d", version)
+	}
+	if keysDir != "" {
+		path := filepath.Join(keysDir, strconv.FormatUint(uint64(version), 10)+".key")
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("KEKStore.RemoveAndUnlink: unlink %q: %w", path, err)
+		}
+		if err := fsyncDir(keysDir); err != nil {
+			return fmt.Errorf("KEKStore.RemoveAndUnlink: fsync %q: %w", keysDir, err)
+		}
+	}
+	// Only after successful disk ops: zeroize in-memory bytes and drop the entry.
+	if bytes, ok := s.keys[version]; ok {
+		for i := range bytes {
+			bytes[i] = 0
+		}
+		delete(s.keys, version)
+	}
+	delete(s.retiringVersions, version)
+	return nil
+}
+
 // AddAndPersist writes a KEK version to disk atomically THEN adds it to
 // the in-memory store. Disk-first is critical: if Add succeeds but the
 // disk write later fails, in-memory state would silently diverge from
@@ -457,6 +497,32 @@ func CanonicalWrapSetHash(entries []WrapSetEntry) [32]byte {
 		h.Write(buf[:])
 		inner := sha256.Sum256(e.Wrap)
 		h.Write(inner[:])
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// CanonicalVoterSetHash produces a deterministic 32-byte SHA-256 fingerprint
+// over a raft voter set. The leader stamps both the voter_ids list and this
+// hash into MetaKEKPruneCmd; the FSM Apply path uses the stamped voter_ids
+// directly (determinism — see Pass-12 C1 in the Phase B plan) and cross-checks
+// the hash against canonical encoding of those stamped IDs as a defense-in-depth
+// gate against payload corruption.
+//
+// Canonical encoding: input is copied, sorted ascending (lexicographic), then
+// each ID contributes uint32-big-endian(len(id)) || id_bytes to the running
+// SHA-256. The length prefix prevents concatenation ambiguity between IDs.
+func CanonicalVoterSetHash(voterIDs []string) [32]byte {
+	sorted := make([]string, len(voterIDs))
+	copy(sorted, voterIDs)
+	sort.Strings(sorted)
+	h := sha256.New()
+	var lenBuf [4]byte
+	for _, id := range sorted {
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(id)))
+		h.Write(lenBuf[:])
+		h.Write([]byte(id))
 	}
 	var out [32]byte
 	copy(out[:], h.Sum(nil))

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -524,5 +527,337 @@ func TestFSM_Apply_KEKRetire_MissingKEKIsFatal(t *testing.T) {
 	}
 	if !errors.Is(err, ErrFSMKEKFatal) {
 		t.Errorf("expected ErrFSMKEKFatal, got: %v", err)
+	}
+}
+
+// kekPruneTestFixture builds an FSM with active=4 and versions 0..4 loaded,
+// version 3 already in Retiring state at retireIdx=100, with kekDir wired to
+// a tmp directory containing 3.key (so RemoveAndUnlink can actually unlink).
+// voters list lives on the fixture; tests pass through buildValidPruneCmd to
+// assemble a canonical-hash-correct payload.
+type kekPruneTestFixture struct {
+	t         *testing.T
+	fsm       *MetaFSM
+	kekDir    string
+	voters    []string
+	retireIdx uint64
+}
+
+func newKEKPruneTestFixture(t *testing.T) *kekPruneTestFixture {
+	t.Helper()
+	f := &kekPruneTestFixture{
+		t:         t,
+		fsm:       NewMetaFSM(),
+		voters:    []string{"node-0", "node-1"},
+		retireIdx: 100,
+	}
+
+	dir := t.TempDir()
+	f.kekDir = dir
+	store, err := encrypt.LoadOrInitKEKStoreDir(dir)
+	if err != nil {
+		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
+	}
+	// Already has version 0 (auto-generated). Add versions 1..4 to disk.
+	for v := uint32(1); v <= 4; v++ {
+		kek := bytes.Repeat([]byte{byte(0xA0 + v)}, encrypt.KEKSize)
+		if err := store.AddAndPersist(dir, v, kek); err != nil {
+			t.Fatalf("AddAndPersist v=%d: %v", v, err)
+		}
+	}
+	if err := store.SetActiveVersion(4); err != nil {
+		t.Fatalf("SetActiveVersion 4: %v", err)
+	}
+	f.fsm.SetKEKStore(store)
+	f.fsm.SetKEKDir(dir)
+	f.fsm.SetActiveKEKVersion(4)
+
+	// Pre-retire version 3.
+	if err := store.Retire(3); err != nil {
+		t.Fatalf("Retire(3): %v", err)
+	}
+	f.fsm.SetKEKStatus(3, KEKLifecycleRetiring, f.retireIdx)
+
+	// Minimal DEKKeeper so Snapshot works if exercised.
+	k0 := bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)
+	plainDEK := bytes.Repeat([]byte{0xD1}, encrypt.DEKSize)
+	wrappedDEK, err := encrypt.AESGCMSeal(k0, plainDEK)
+	if err != nil {
+		t.Fatalf("seal DEK: %v", err)
+	}
+	keeper, err := encrypt.LoadFromFSM(k0, map[uint32][]byte{1: wrappedDEK})
+	if err != nil {
+		t.Fatalf("LoadFromFSM: %v", err)
+	}
+	f.fsm.SetDEKKeeper(keeper)
+
+	return f
+}
+
+// buildValidPruneCmd constructs a fully valid KEKPruneCmd for the given
+// version + attestations. voter_ids comes from the fixture (sorted ascending),
+// voter_config_hash is the canonical hash, and lease_count defaults to 0 for
+// each attestation. Tests that want to exercise a specific reject branch
+// mutate fields after the helper returns.
+func (f *kekPruneTestFixture) buildValidPruneCmd(version uint32, attestations []LeaseAttestationEntry, requestID [16]byte) KEKPruneCmd {
+	voters := append([]string(nil), f.voters...)
+	hash := encrypt.CanonicalVoterSetHash(voters)
+	return KEKPruneCmd{
+		PayloadVersion:        1,
+		Version:               version,
+		Confirm:               fmt.Sprintf("delete-permanently-%d", version),
+		LeaseAttestation:      attestations,
+		VoterIDs:              voters,
+		VoterConfigIndex:      7,
+		VoterConfigHash:       hash[:],
+		Actor:                 "admin@uds",
+		RequestID:             requestID,
+		RequestedAtUnixNanos:  1717000000000000000,
+		ClusterStateAtPropose: ClusterStateAtPropose{ActiveKEKVersion: 4, RetainedKEKCount: 5, LiveDEKGenCount: 1},
+	}
+}
+
+func (f *kekPruneTestFixture) encodeAndWrap(cmd KEKPruneCmd) []byte {
+	f.t.Helper()
+	payload, err := EncodeMetaKEKPruneCmd(cmd)
+	if err != nil {
+		f.t.Fatalf("encode MetaKEKPruneCmd: %v", err)
+	}
+	envelope, err := encodeMetaCmd(MetaCmdTypeKEKPrune, payload)
+	if err != nil {
+		f.t.Fatalf("encode MetaCmd envelope: %v", err)
+	}
+	return envelope
+}
+
+// happyAttestations returns lease attestations for every fixture voter, with
+// observed_at_index above retireIdx and lease_count=0.
+func (f *kekPruneTestFixture) happyAttestations() []LeaseAttestationEntry {
+	out := make([]LeaseAttestationEntry, len(f.voters))
+	for i, v := range f.voters {
+		out[i] = LeaseAttestationEntry{NodeID: v, ObservedAtIndex: f.retireIdx + 5 + uint64(i), LeaseCount: 0}
+	}
+	return out
+}
+
+// TestFSM_Apply_KEKPrune_HappyPath_RemovesKEK verifies that a valid prune
+// command removes the KEK from the keystore + disk and transitions kek_status
+// to Pruned.
+func TestFSM_Apply_KEKPrune_HappyPath_RemovesKEK(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	cmd := fx.buildValidPruneCmd(3, fx.happyAttestations(), [16]byte{0x77})
+	envelope := fx.encodeAndWrap(cmd)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 200); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if fx.fsm.KEKStore().HasVersion(3) {
+		t.Errorf("KEK version 3 still in keystore after Prune")
+	}
+	if _, err := os.Stat(filepath.Join(fx.kekDir, "3.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("3.key still on disk: %v", err)
+	}
+	_, status, _, ok := fx.fsm.LookupKEKStatus(3)
+	if !ok || status != KEKLifecyclePruned {
+		t.Errorf("kek_status[3] = %v ok=%v, want Pruned", status, ok)
+	}
+	// Applied status recorded for leader readback.
+	if got, found := fx.fsm.LookupRotationRequestStatus(cmd.RequestID); !found || got != RotationStatusApplied {
+		t.Errorf("rotation request status = %v found=%v, want Applied", got, found)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_RejectsWithoutRetirePhase verifies that pruning a
+// version not in Retiring state is rejected (non-fatal).
+func TestFSM_Apply_KEKPrune_RejectsWithoutRetirePhase(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	// Version 2 has not been Retired.
+	cmd := fx.buildValidPruneCmd(2, []LeaseAttestationEntry{
+		{NodeID: "node-0", ObservedAtIndex: 200},
+		{NodeID: "node-1", ObservedAtIndex: 201},
+	}, [16]byte{0x78})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 201)
+	if err == nil {
+		t.Fatalf("expected error pruning non-retired version, got nil")
+	}
+	if !strings.Contains(err.Error(), "retiring") {
+		t.Errorf("expected 'retiring' in error, got: %v", err)
+	}
+	if errors.Is(err, ErrFSMKEKFatal) {
+		t.Errorf("missing Retire phase must NOT be fatal: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_RejectsAttestationBeforeRetireIndex verifies that an
+// attestation observed at a raft index < the retire commit index is rejected.
+func TestFSM_Apply_KEKPrune_RejectsAttestationBeforeRetireIndex(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	atts := []LeaseAttestationEntry{
+		{NodeID: "node-0", ObservedAtIndex: fx.retireIdx - 1, LeaseCount: 0}, // < retireIdx
+		{NodeID: "node-1", ObservedAtIndex: fx.retireIdx + 5, LeaseCount: 0},
+	}
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x79})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 210)
+	if err == nil {
+		t.Fatalf("expected error for attestation < retireIdx, got nil")
+	}
+	if !strings.Contains(err.Error(), "observed_at_index") {
+		t.Errorf("expected observed_at_index in error, got: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_IdempotentReplay verifies that applying the same
+// prune command twice is a no-op on the second apply.
+func TestFSM_Apply_KEKPrune_IdempotentReplay(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	cmd := fx.buildValidPruneCmd(3, fx.happyAttestations(), [16]byte{0x7A})
+	envelope := fx.encodeAndWrap(cmd)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 220); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if err := fx.fsm.applyCmdAtIndex(envelope, 220); err != nil {
+		t.Errorf("idempotent replay failed: %v", err)
+	}
+	_, status, _, ok := fx.fsm.LookupKEKStatus(3)
+	if !ok || status != KEKLifecyclePruned {
+		t.Errorf("kek_status[3] = %v ok=%v after replay, want Pruned", status, ok)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_PartialApplyRecovery verifies that a state of
+// Retiring + key-missing-from-keystore is treated as a partial-apply replay:
+// validate attestation, then finalize to Pruned.
+func TestFSM_Apply_KEKPrune_PartialApplyRecovery(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	// Simulate first-apply crash AFTER RemoveAndUnlink but BEFORE SetKEKStatus.
+	// Status stays Retiring; the key is gone from the keystore + disk.
+	if err := fx.fsm.KEKStore().RemoveAndUnlink(fx.kekDir, 3); err != nil {
+		t.Fatalf("setup: RemoveAndUnlink: %v", err)
+	}
+	cmd := fx.buildValidPruneCmd(3, fx.happyAttestations(), [16]byte{0x7B})
+	envelope := fx.encodeAndWrap(cmd)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 230); err != nil {
+		t.Fatalf("partial-apply recovery: %v", err)
+	}
+	_, status, _, ok := fx.fsm.LookupKEKStatus(3)
+	if !ok || status != KEKLifecyclePruned {
+		t.Errorf("kek_status[3] = %v ok=%v after recovery, want Pruned", status, ok)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_MissingVoter_Rejects verifies that an attestation
+// count below voter count (missing voter) is rejected.
+func TestFSM_Apply_KEKPrune_MissingVoter_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	fx.voters = []string{"node-0", "node-1", "node-2"}
+	atts := []LeaseAttestationEntry{
+		{NodeID: "node-0", ObservedAtIndex: 200, LeaseCount: 0},
+		{NodeID: "node-1", ObservedAtIndex: 201, LeaseCount: 0},
+		// node-2 missing
+	}
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x7C})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 240)
+	if err == nil {
+		t.Fatalf("expected missing voter reject, got nil")
+	}
+	// Either "attestation count" mismatch or "missing attestation from voter node-2"
+	// is acceptable — both correctly identify the missing voter.
+	if !strings.Contains(err.Error(), "node-2") &&
+		!strings.Contains(err.Error(), "missing") &&
+		!strings.Contains(err.Error(), "attestation count") {
+		t.Errorf("expected attestation-count/missing voter error, got: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_NonVoterAttestation_Rejects verifies that an
+// attestation from a node not in voter_ids is rejected.
+func TestFSM_Apply_KEKPrune_NonVoterAttestation_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	atts := []LeaseAttestationEntry{
+		{NodeID: "node-0", ObservedAtIndex: 200, LeaseCount: 0},
+		{NodeID: "node-stranger", ObservedAtIndex: 201, LeaseCount: 0},
+	}
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x7D})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 250)
+	if err == nil {
+		t.Fatalf("expected non-voter reject, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-voter") {
+		t.Errorf("expected 'non-voter' in error, got: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_DuplicateAttestation_Rejects verifies that a
+// duplicate node_id in attestations is rejected.
+func TestFSM_Apply_KEKPrune_DuplicateAttestation_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	atts := []LeaseAttestationEntry{
+		{NodeID: "node-0", ObservedAtIndex: 200, LeaseCount: 0},
+		{NodeID: "node-0", ObservedAtIndex: 201, LeaseCount: 0}, // dup
+	}
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x7E})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 260)
+	if err == nil {
+		t.Fatalf("expected duplicate reject, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("expected 'duplicate' in error, got: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKPrune_VoterConfigHashMismatch_StaleNoOp verifies that a
+// payload whose voter_config_hash does not match the canonical encoding of
+// voter_ids is recorded as RotationStatusStaleNoOp and returns nil (operator
+// retries — voter set drifted mid-flight, not a hard rejection).
+func TestFSM_Apply_KEKPrune_VoterConfigHashMismatch_StaleNoOp(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	cmd := fx.buildValidPruneCmd(3, fx.happyAttestations(), [16]byte{0x7F})
+	// Tamper one byte of the hash so it no longer matches canonical encoding.
+	cmd.VoterConfigHash = append([]byte(nil), cmd.VoterConfigHash...)
+	cmd.VoterConfigHash[0] ^= 0xFF
+	envelope := fx.encodeAndWrap(cmd)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 270); err != nil {
+		t.Fatalf("expected StaleNoOp (nil), got error: %v", err)
+	}
+	status, found := fx.fsm.LookupRotationRequestStatus(cmd.RequestID)
+	if !found || status != RotationStatusStaleNoOp {
+		t.Errorf("rotation request status = %v found=%v, want StaleNoOp", status, found)
+	}
+	// Key must NOT be removed (no mutation on StaleNoOp).
+	if !fx.fsm.KEKStore().HasVersion(3) {
+		t.Errorf("version 3 prematurely removed on StaleNoOp path")
+	}
+}
+
+// TestFSM_Apply_KEKPrune_NonZeroLeaseCount_Rejects verifies that an
+// attestation with lease_count > 0 is rejected — defense against an
+// adversarial leader who skipped the probe (Pass-6 C1).
+func TestFSM_Apply_KEKPrune_NonZeroLeaseCount_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	atts := fx.happyAttestations()
+	atts[0].LeaseCount = 1 // <-- nonzero
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x80})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 280)
+	if err == nil {
+		t.Fatalf("expected lease_count>0 reject, got nil")
+	}
+	if !strings.Contains(err.Error(), "lease_count") {
+		t.Errorf("expected 'lease_count' in error, got: %v", err)
 	}
 }

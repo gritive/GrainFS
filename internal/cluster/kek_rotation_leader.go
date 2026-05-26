@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,12 +57,48 @@ const (
 var ErrKEKRotateAnotherInFlight = errors.New("KEKRotate: another rotation in flight")
 
 // PeerKEKProbe is the interface the leader uses to query every voter's
-// keystore-directory free bytes. ProbeAllKEKDiskSpace MUST include the local
-// (leader) node in the returned slice — disk pressure on the proposer is just
-// as fatal as on a follower.
+// keystore-directory free bytes (rotate path) and per-version in-flight lease
+// count (prune path).
+//
+// ProbeAllKEKDiskSpace MUST include the local (leader) node in the returned
+// slice — disk pressure on the proposer is just as fatal as on a follower.
+//
+// ProbeKEKLeaseSnapshot accepts an explicit voter list (leader-stamped at
+// propose time) so the prune path's voter coverage matches the voter set the
+// FSM Apply will later validate against. It MUST attempt every voter and
+// return exactly one LeaseAttestationSample per voter on success; missing or
+// failed voters surface as an error.
 type PeerKEKProbe interface {
 	ProbeAllKEKDiskSpace(ctx context.Context) ([]KEKDiskSpaceResp, error)
+	ProbeKEKLeaseSnapshot(ctx context.Context, voters []string, version uint32) ([]LeaseAttestationSample, error)
 }
+
+// LeaseAttestationSample is the leader-side view of a single voter's
+// KEKLeaseSnapshotResp — flattened to the fields the FSM cmd actually carries.
+type LeaseAttestationSample struct {
+	NodeID          string
+	ObservedAtIndex uint64
+	LeaseCount      uint64
+}
+
+// RaftConfigReader exposes the effective raft configuration (the committed
+// voter list) to the leader at propose time. The returned voter IDs MUST
+// already be sorted ascending unique. configIndex is the raft log index at
+// which the current configuration was committed; the leader uses it to
+// detect mid-flight membership changes (race-detect: re-read after probe,
+// abort if it advanced).
+//
+// FSM Apply NEVER consults this — voter set is leader-stamped into the
+// MetaKEKPruneCmd payload (Pass-12 C1). A follower lagging on a config-change
+// entry would otherwise see a different live voter set than the leader at
+// Apply time → nondeterminism.
+type RaftConfigReader interface {
+	EffectiveConfiguration() (voterIDs []string, configIndex uint64)
+}
+
+// ErrKEKPruneNotLeader is returned by ProposeKEKPrune when the local node is
+// not the raft leader.
+var ErrKEKPruneNotLeader = errors.New("KEKPrune: not leader")
 
 // KEKRaftSubmitter is the subset of MetaRaft the leader orchestrator depends on.
 // Production wires *MetaRaft directly. Tests inject a fake whose Propose runs
@@ -83,9 +120,10 @@ type leadershipEpoch struct {
 // state with AcquireLeadership / LoseLeadership (or the legacy SetEpochCtx /
 // ClearEpoch aliases). Single-flight is enforced via mu.
 type KEKRotationLeader struct {
-	fsm       *MetaFSM
-	raft      KEKRaftSubmitter
-	peerProbe PeerKEKProbe
+	fsm              *MetaFSM
+	raft             KEKRaftSubmitter
+	peerProbe        PeerKEKProbe
+	raftConfigReader RaftConfigReader
 
 	// mu serialises all KEK lifecycle operations: Rotate (now), and Retire /
 	// Prune (implemented in later tasks). Conceptually "kek_lifecycle_in_flight":
@@ -121,8 +159,13 @@ type KEKRotationLeaderConfig struct {
 	FSM       *MetaFSM
 	Raft      KEKRaftSubmitter
 	PeerProbe PeerKEKProbe
-	RNGKEK    func() ([]byte, error)
-	WallClock func() time.Time
+	// RaftConfigReader is consulted by ProposeKEKPrune at propose time to
+	// snapshot the voter set + raft config_index. Optional for code paths
+	// that only call ProposeKEKRotate (it is unused by rotate); ProposeKEKPrune
+	// returns an error if it is nil.
+	RaftConfigReader RaftConfigReader
+	RNGKEK           func() ([]byte, error)
+	WallClock        func() time.Time
 }
 
 // NewKEKRotationLeader constructs a leader. Panics on nil required fields —
@@ -146,11 +189,12 @@ func NewKEKRotationLeader(cfg KEKRotationLeaderConfig) *KEKRotationLeader {
 		clk = time.Now
 	}
 	return &KEKRotationLeader{
-		fsm:       cfg.FSM,
-		raft:      cfg.Raft,
-		peerProbe: cfg.PeerProbe,
-		rngKEK:    rng,
-		wallClock: clk,
+		fsm:              cfg.FSM,
+		raft:             cfg.Raft,
+		peerProbe:        cfg.PeerProbe,
+		raftConfigReader: cfg.RaftConfigReader,
+		rngKEK:           rng,
+		wallClock:        clk,
 	}
 }
 
@@ -507,3 +551,172 @@ func dryRunValidateKEKRotate(fsm *MetaFSM, cmd KEKRotateCmd, activeKEK, plainKne
 // the alias we export here. Guards against schema drift breaking the propose
 // path silently.
 var _ clusterpb.MetaCmdType = MetaCmdTypeKEKRotate
+
+// ProposeKEKPrune runs the leader-side prune pipeline:
+//
+//  1. Epoch guard + bounded 60s timeout.
+//  2. Single-flight via the same kek_lifecycle_in_flight mutex used by rotate.
+//  3. Pre-check: target version must be Retiring in FSM kek_status.
+//  4. Snapshot raft effective configuration (sorted voter IDs + config_index).
+//  5. Probe every voter for an in-flight lease snapshot.
+//  6. Race-detect: re-read config_index after the probe — abort if it advanced
+//     (a newly added voter would otherwise be missing from the attestation).
+//  7. Verify every attestation has lease_count == 0.
+//  8. Build MetaKEKPruneCmd with leader-stamped voter_ids + voter_config_hash.
+//  9. Submit via raft and translate the FSM-recorded request status.
+//
+// Returns nil on FSM Applied. Returns ErrKEKRotateAnotherInFlight on concurrent
+// attempt (same mutex as ProposeKEKRotate). Other failures surface a wrapped
+// error describing which gate rejected.
+func (l *KEKRotationLeader) ProposeKEKPrune(version uint32, actor string) error {
+	// 1. Epoch guard.
+	ep := l.epochCtx.Load()
+	if ep == nil {
+		return ErrKEKPruneNotLeader
+	}
+
+	// 2. Bounded timeout off the epoch ctx so leader step-down cancels us.
+	ctx, cancel := context.WithTimeout(ep.ctx, 60*time.Second)
+	defer cancel()
+
+	// 3. Single-flight: share the rotate mutex.
+	if !l.mu.TryLock() {
+		return ErrKEKRotateAnotherInFlight
+	}
+	defer l.mu.Unlock()
+	if l.onMutexAcquired != nil {
+		l.onMutexAcquired()
+	}
+
+	if l.raftConfigReader == nil {
+		return errors.New("KEKPrune: raft config reader not wired")
+	}
+
+	// 4. Pre-check: target version must be Retiring in FSM kek_status.
+	_, status, _, ok := l.fsm.LookupKEKStatus(version)
+	if !ok || status != KEKLifecycleRetiring {
+		return fmt.Errorf("KEKPrune: version %d must be in retiring state (status=%d, present=%v)", version, status, ok)
+	}
+
+	// 5. Snapshot raft effective configuration (voter IDs sorted ascending +
+	//    config_index). Voter IDs MUST be sorted ascending unique per
+	//    RaftConfigReader contract. Defensive sort here in case a future
+	//    implementor returns unsorted.
+	voters, configIndex := l.raftConfigReader.EffectiveConfiguration()
+	if len(voters) == 0 {
+		return errors.New("KEKPrune: empty voter set in raft configuration")
+	}
+	sortedVoters := append([]string(nil), voters...)
+	sort.Strings(sortedVoters)
+	for i := 1; i < len(sortedVoters); i++ {
+		if sortedVoters[i] == sortedVoters[i-1] {
+			return fmt.Errorf("KEKPrune: duplicate voter %q in raft configuration", sortedVoters[i])
+		}
+	}
+	voterHash := encrypt.CanonicalVoterSetHash(sortedVoters)
+
+	// 6. Probe every voter for an in-flight lease snapshot. Probe MUST attempt
+	//    each voter (including local node) and return exactly one sample per
+	//    voter on success.
+	samples, err := l.peerProbe.ProbeKEKLeaseSnapshot(ctx, sortedVoters, version)
+	if err != nil {
+		return fmt.Errorf("KEKPrune: probe lease snapshot: %w", err)
+	}
+	if len(samples) != len(sortedVoters) {
+		return fmt.Errorf("KEKPrune: only %d/%d voters responded — retry when cluster healthy", len(samples), len(sortedVoters))
+	}
+
+	// 7. Race-detect: did membership change between read and probe completion?
+	_, configIndexAfter := l.raftConfigReader.EffectiveConfiguration()
+	if configIndexAfter != configIndex {
+		return fmt.Errorf("KEKPrune: raft membership changed during probe (config_index %d → %d) — retry", configIndex, configIndexAfter)
+	}
+
+	// 8. Verify every attestation has lease_count == 0. (FSM Apply will also
+	//    re-check this — defense in depth.) Build the attestation list in
+	//    voter sort order so the encoded payload is canonical.
+	attestationByNode := make(map[string]LeaseAttestationSample, len(samples))
+	for _, s := range samples {
+		if _, dup := attestationByNode[s.NodeID]; dup {
+			return fmt.Errorf("KEKPrune: duplicate probe response for node %s", s.NodeID)
+		}
+		attestationByNode[s.NodeID] = s
+		if s.LeaseCount != 0 {
+			return fmt.Errorf("KEKPrune: node %s lease_count=%d > 0 — version still in use", s.NodeID, s.LeaseCount)
+		}
+	}
+	attestations := make([]LeaseAttestationEntry, 0, len(sortedVoters))
+	for _, v := range sortedVoters {
+		s, hit := attestationByNode[v]
+		if !hit {
+			return fmt.Errorf("KEKPrune: missing probe response from voter %s", v)
+		}
+		attestations = append(attestations, LeaseAttestationEntry(s))
+	}
+
+	// 9. Build cmd.
+	uuidV7, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("KEKPrune: request id: %w", err)
+	}
+	var requestID [16]byte
+	copy(requestID[:], uuidV7[:])
+
+	cmd := KEKPruneCmd{
+		PayloadVersion:       currentKEKPrunePayloadVersion,
+		Version:              version,
+		Confirm:              fmt.Sprintf("delete-permanently-%d", version),
+		LeaseAttestation:     attestations,
+		VoterIDs:             sortedVoters,
+		VoterConfigIndex:     configIndex,
+		VoterConfigHash:      voterHash[:],
+		Actor:                actor,
+		RequestID:            requestID,
+		RequestedAtUnixNanos: l.wallClock().UnixNano(),
+		ClusterStateAtPropose: ClusterStateAtPropose{
+			ActiveKEKVersion: l.fsm.ActiveKEKVersion(),
+			RetainedKEKCount: uint32(len(l.fsm.KEKStore().Versions())),
+			LiveDEKGenCount:  uint32(l.liveDEKGenCount()),
+		},
+	}
+
+	payload, err := EncodeMetaKEKPruneCmd(cmd)
+	if err != nil {
+		return fmt.Errorf("KEKPrune: encode: %w", err)
+	}
+
+	// 10. Submit via raft. MetaRaft.Propose blocks until applied locally —
+	//     no separate readback wait needed (same shape as ProposeKEKRotate).
+	if err := l.raft.Propose(ctx, MetaCmdTypeKEKPrune, payload); err != nil {
+		if l.epochCtx.Load() == nil {
+			return errors.New("KEKPrune: not leader (lost leadership mid-prune)")
+		}
+		return fmt.Errorf("KEKPrune: submit: %w", err)
+	}
+
+	// 11. Translate FSM-recorded request status.
+	st, found := l.fsm.LookupRotationRequestStatus(requestID)
+	if !found {
+		return nil
+	}
+	switch st {
+	case RotationStatusApplied:
+		return nil
+	case RotationStatusStaleNoOp:
+		return errors.New("KEKPrune: stale voter set (voter_config_hash drift); retry")
+	case RotationStatusRejected:
+		return errors.New("KEKPrune: rejected by FSM")
+	default:
+		return fmt.Errorf("KEKPrune: unexpected FSM status %d", st)
+	}
+}
+
+// liveDEKGenCount returns the number of live DEK generations or 0 if the
+// keeper is not wired. Helper to keep the audit struct compact.
+func (l *KEKRotationLeader) liveDEKGenCount() int {
+	if l.fsm == nil || l.fsm.dekKeeper == nil {
+		return 0
+	}
+	wraps, _ := l.fsm.dekKeeper.VersionsAndActive()
+	return len(wraps)
+}
