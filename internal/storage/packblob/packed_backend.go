@@ -768,6 +768,30 @@ func (pb *PackedBackend) Truncate(ctx context.Context, bucket, key string, size 
 	return tr.Truncate(ctx, bucket, key, size)
 }
 
+// PreferReadAt forwards the optional capability probe to the inner backend.
+// Without this method, callers that themselves probe optional interfaces
+// (e.g. pullthrough.PreferReadAt, wal.PreferReadAt) hit a type-assert miss
+// at PackedBackend and conclude the chain prefers full-object GETs — that
+// disables the partial-IO fast path on every protocol layered on top
+// (9P, NFSv4), even though PackedBackend.ReadAt already routes non-packed
+// entries directly to inner.
+func (pb *PackedBackend) PreferReadAt(bucket string) bool {
+	type readAtPreference interface {
+		PreferReadAt(bucket string) bool
+	}
+	pref, ok := pb.inner.(readAtPreference)
+	return ok && pref.PreferReadAt(bucket)
+}
+
+// PreferWriteAt mirrors PreferReadAt for the write side.
+func (pb *PackedBackend) PreferWriteAt(bucket string) bool {
+	type writeAtPreference interface {
+		PreferWriteAt(bucket string) bool
+	}
+	pref, ok := pb.inner.(writeAtPreference)
+	return ok && pref.PreferWriteAt(bucket)
+}
+
 func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	if v, packed := pb.index.Load(packedKey{bucket: bucket, key: key}); packed {
 		entry := v.(*indexEntry)

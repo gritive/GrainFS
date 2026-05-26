@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.339.1] - 2026-05-26
+
+### Performance
+
+- **9P read on encrypted user buckets: ~7.3× throughput, 99% allocation reduction.** `packblob.PackedBackend` now forwards `PreferReadAt` / `PreferWriteAt` capability probes to its inner backend. Without this, callers higher in the chain (`pullthrough`, `wal`) treated the type-assert miss as "prefer full GETs", which made every 9P 128 KiB ReadAt fall back to `GetObject` and reconstruct the whole object via EC on each read. Single-node fio: sequential 128 KiB 9P read 27.6 → 201 MiB/s (median of 3 × 15s runs); ECReconstruct allocs / 15s 212 GB → < 0.05 GB; `runtime.memmove` flat CPU 38% → top-10 out. Random 4 KiB read also improved (19 → 24 MiB/s) but is now bottlenecked by 9P protocol RTT (`syscall.rawsyscalln` + `kevent` dominate post-fix). Single-node only — cluster mode does not wrap with packblob.
+- **WriteAt capability probe now correct for internal-bucket callers** (NFS4 metadata, Volume Device) as a side effect of the same fix. User-bucket 9P writes still take the RMW path because `ClusterCoordinator.PreferWriteAt` returns false for user buckets.
+
 ## [0.0.339.0] - 2026-05-26
 
 ### Performance
