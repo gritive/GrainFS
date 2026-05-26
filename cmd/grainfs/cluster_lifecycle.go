@@ -194,7 +194,8 @@ func runClusterDrain(ctx context.Context, client *clusteradmin.Client, id string
 		}
 		return fmt.Errorf("remove-peer: %w", rerr)
 	}
-	fmt.Fprintf(w, "drained — rejoin with: grainfs join <leader-addr> --data-dir <data> ...\n")
+	fmt.Fprintf(w, "drained — to rejoin, pre-stage <data>/keys/0.key and <data>/cluster.id from a healthy peer, then run:\n")
+	fmt.Fprintf(w, "  grainfs join <leader-addr> --data-dir <data> --confirm-staged-keys ...\n")
 	return nil
 }
 

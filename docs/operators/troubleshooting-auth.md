@@ -69,20 +69,27 @@ GRAINFS_TLS_CERT=/etc/grainfs/cert.pem GRAINFS_TLS_KEY=/etc/grainfs/key.pem grai
 grainfs config set trusted-proxy.cidr 10.0.0.0/8
 ```
 
-## "KEK not found at <data>/kek.key"
+## "KEK not found at <data>/keys/0.key"
 
-The node restarted without its KEK file. The KEK is needed to unwrap the FSM-stored DEK. Options:
+The node restarted without its keystore. Phase A stores the active KEK in the
+versioned keystore directory at `<data>/keys/0.key` and the cluster identity at
+`<data>/cluster.id`. Both are needed: the KEK unwraps the FSM-stored DEK, and
+the cluster identity binds this node to its cluster in the join handshake.
+Options:
 
 ```bash
-# Option A (recommended): scp KEK from any healthy peer
-scp nodeA:<data>/kek.key <data>/kek.key
-chmod 0600 <data>/kek.key
+# Option A (recommended): scp keystore + cluster identity from any healthy peer
+mkdir -p <data>/keys
+scp nodeA:<data>/keys/0.key  <data>/keys/0.key
+scp nodeA:<data>/cluster.id  <data>/cluster.id
+chmod 0600 <data>/keys/0.key <data>/cluster.id
 
 # Option B: decommission and rejoin before starting the replacement node
 rm -rf <data>
-mkdir -p <data>
-scp nodeA:<data>/kek.key <data>/kek.key
-chmod 0600 <data>/kek.key
+mkdir -p <data>/keys
+scp nodeA:<data>/keys/0.key  <data>/keys/0.key
+scp nodeA:<data>/cluster.id  <data>/cluster.id
+chmod 0600 <data>/keys/0.key <data>/cluster.id
 grainfs cluster join <healthy-peer>:7001 \
   --data <data> \
   --node-id <replacement-node-id> \
@@ -97,11 +104,12 @@ grainfs serve \
 
 `grainfs cluster join` is the offline bootstrap path for a not-yet-running
 node. If the node is already running and has an admin socket, use
-`grainfs join <healthy-peer>:7001 --endpoint <data>/admin.sock` instead.
+`grainfs join <healthy-peer>:7001 --endpoint <data>/admin.sock --confirm-staged-keys`
+instead — Phase A requires the operator acknowledge the staged keystore.
 
 ## "KEK does not decrypt FSM DEK"
 
-A KEK was placed at the right path but doesn't match the one that wrapped the FSM DEK — usually a stale backup or a KEK from a different cluster. Replace with the right KEK (see "KEK not found" above for `scp` path).
+A KEK was placed at the right path but doesn't match the one that wrapped the FSM DEK — usually a stale backup or a KEK from a different cluster. Replace with the right KEK (see "KEK not found" above for `scp` path) and confirm `<data>/cluster.id` matches the destination cluster.
 
 ## Cluster join refused with 403
 
@@ -109,7 +117,11 @@ A KEK was placed at the right path but doesn't match the one that wrapped the FS
 WARN: KEK handshake HMAC mismatch from <addr>
 ```
 
-The joiner has the wrong KEK. Verify the file matches a healthy node's `kek.key` byte-for-byte (`sha256sum kek.key`). On match, retry `cluster join`. Nonces are single-use and 60s-TTL — a retry forces a fresh challenge automatically.
+The joiner has the wrong KEK. Verify `<data>/keys/0.key` matches a healthy
+node's active KEK byte-for-byte (`sha256sum <data>/keys/0.key`), and that
+`<data>/cluster.id` matches the destination cluster's identity. On match,
+retry `cluster join`. Nonces are single-use and 60s-TTL — a retry forces a
+fresh challenge automatically.
 
 ## Audit table queries return zero rows
 
