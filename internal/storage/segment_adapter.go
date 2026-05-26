@@ -27,9 +27,15 @@ type localSegmentStore struct {
 
 func (s localSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.ReadCloser, error) {
 	_ = ctx
-	path := s.b.segmentPath(s.bucket, s.key, ref.BlobID)
+	loc := ParseLocator(ref.BlobID)
+	if loc.Scheme == LocatorCAS {
+		return nil, ErrCASNotImplemented
+	}
+	// LocatorLegacy: existing key-scoped physical path (unchanged behavior).
+	blobID := loc.Ref
+	path := s.b.segmentPath(s.bucket, s.key, blobID)
 	if s.b.encryptor != nil {
-		return openEncryptedObjectFile(path, s.b.encryptor, encryptedObjectFileDomain(s.bucket, s.key+"/segments/"+ref.BlobID), ref.Size)
+		return openEncryptedObjectFile(path, s.b.encryptor, encryptedObjectFileDomain(s.bucket, s.key+"/segments/"+blobID), ref.Size)
 	}
 	return os.Open(path)
 }

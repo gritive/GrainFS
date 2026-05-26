@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.347.0] - 2026-05-26
+
+### Changed
+
+- Object chunk read-path에 `Locator` 스킴 추상화(`legacy://` / `cas://`)를 도입했다.
+  기존 UUIDv7 segment 식별자는 implicit-legacy로 100% 동일하게 동작하며(on-disk 포맷·
+  암호화 도메인 불변), `cas://` content-addressed chunk는 아직 미구현이라 read-path에서
+  명시적으로 거부된다. object/bucket snapshot·PITR·dedup 재설계를 위한 내부 토대다.
+
 ## [0.0.346.0] - 2026-05-26
 
 ### Removed
