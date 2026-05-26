@@ -96,35 +96,6 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 	return plan, nil
 }
 
-func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, operation, shardKey string, liveNodes []string) (ObjectWritePlacementPlan, error) {
-	placementGroupID, _ := PlacementGroupFromContext(ctx)
-	var placementGroup *ShardGroupEntry
-	if group, ok := PlacementGroupEntryFromContext(ctx); ok {
-		placementGroup = &group
-	}
-	var peerHealth []PeerHealthEntry
-	hasPeerHealth := false
-	if ph := b.currentPeerHealth(); ph != nil {
-		peerHealth = ph.Snapshot()
-		hasPeerHealth = true
-	}
-	return PlanObjectWritePlacement(ObjectWritePlacementInput{
-		Operation:           operation,
-		PlacementGroupID:    placementGroupID,
-		PlacementGroup:      placementGroup,
-		LiveNodes:           liveNodes,
-		CurrentECConfig:     b.currentECConfig(),
-		BypassBucketCheck:   b.bypassBucketCheck,
-		ShardKey:            shardKey,
-		NodeStates:          objectWritePlacementNodeStatesFromRuntime(liveNodes, b.nodeStatsStore, b.bl),
-		WeightedHRWEnabled:  b.clusterCfg.WeightedHRWEnabled(),
-		BoundedLoadsEnabled: b.clusterCfg.BoundedLoadsEnabled(),
-		PeerHealth:          peerHealth,
-		HasPeerHealth:       hasPeerHealth,
-		SelfID:              b.currentSelfAddr(),
-	})
-}
-
 func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
 	group, ok := PlacementGroupEntryFromContext(ctx)
 	if !ok {
@@ -195,4 +166,32 @@ func checkObjectWritePlacementHealth(in ObjectWritePlacementInput, group ShardGr
 		}
 	}
 	return nil
+}
+
+func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, in ObjectWritePlacementInput) (ObjectWritePlacementPlan, error) {
+	if in.Operation == "" {
+		in.Operation = "put_object"
+	}
+	if in.PlacementGroupID == "" && ctx != nil {
+		in.PlacementGroupID, _ = PlacementGroupFromContext(ctx)
+	}
+	if in.PlacementGroup == nil && ctx != nil {
+		if group, ok := PlacementGroupEntryFromContext(ctx); ok {
+			in.PlacementGroup = &group
+		}
+	}
+	if in.LiveNodes == nil {
+		in.LiveNodes = b.effectivePlacementNodes()
+	}
+	in.CurrentECConfig = b.currentECConfig()
+	in.BypassBucketCheck = b.bypassBucketCheck
+	if ph := b.currentPeerHealth(); ph != nil {
+		in.PeerHealth = ph.Snapshot()
+		in.HasPeerHealth = true
+	}
+	in.SelfID = b.currentSelfAddr()
+	in.NodeStates = objectWritePlacementNodeStatesFromRuntime(in.LiveNodes, b.nodeStatsStore, b.bl)
+	in.WeightedHRWEnabled = b.clusterCfg.WeightedHRWEnabled()
+	in.BoundedLoadsEnabled = b.clusterCfg.BoundedLoadsEnabled()
+	return PlanObjectWritePlacement(in)
 }

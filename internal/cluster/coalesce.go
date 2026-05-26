@@ -186,19 +186,30 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 	}
 
 	shardKey := job.Key + "/coalesced/" + coalescedID
-	liveNodes := b.ecWriteNodes()
-	placementPlan, err := b.planObjectWritePlacement(ctx, "coalesce", shardKey, liveNodes)
+	placementGroupID := obj.PlacementGroupID
+	if placementGroupID == "" {
+		placementGroupID = b.lookupPlacementGroupForAppend(ctx, obj)
+	}
+	placementPlan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
+		Operation:        "coalesce_object",
+		PlacementGroupID: placementGroupID,
+		LiveNodes:        b.ecWriteNodes(),
+		ShardKey:         shardKey,
+	})
 	if err != nil {
 		cleanupMerged()
-		return err
+		return fmt.Errorf("coalesce: plan placement: %w", err)
 	}
+	cfg := placementPlan.Config
+	placement := placementPlan.NodeIDs
 
 	plan := ecObjectWritePlan{
-		Bucket:    job.Bucket,
-		Key:       job.Key,
-		VersionID: "coalesced/" + coalescedID,
-		Config:    placementPlan.Config,
-		Placement: placementPlan.NodeIDs,
+		Bucket:           job.Bucket,
+		Key:              job.Key,
+		VersionID:        "coalesced/" + coalescedID,
+		PlacementGroupID: placementPlan.PlacementGroupID,
+		Config:           cfg,
+		Placement:        placement,
 	}
 	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
