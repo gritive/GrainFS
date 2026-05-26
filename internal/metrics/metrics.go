@@ -533,4 +533,31 @@ var (
 		Help:    "Tag count per PUT (header or body).",
 		Buckets: []float64{0, 1, 2, 3, 5, 10},
 	})
+
+	// Data WAL startup repair candidates, attempts, successes, failures, and skips.
+
+	DataWALStartupRepairCandidates = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_candidates_total",
+		Help: "Distinct data WAL shard repair candidates queued for the startup worker after (bucket, shardKey, shardIdx) deduplication.",
+	}, []string{"reason"})
+
+	DataWALStartupRepairAttempts = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_attempts_total",
+		Help: "Startup data WAL EC shard repair attempts.",
+	})
+
+	DataWALStartupRepairSuccesses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_successes_total",
+		Help: "Successful startup data WAL EC shard repairs.",
+	})
+
+	DataWALStartupRepairFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_failures_total",
+		Help: "Failed startup data WAL EC shard repairs.",
+	}, []string{"reason"})
+
+	DataWALStartupRepairSkips = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_skips_total",
+		Help: "Startup data WAL EC shard repair candidates skipped before repair.",
+	}, []string{"reason"})
 )
