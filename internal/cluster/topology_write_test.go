@@ -55,6 +55,20 @@ func TestPlanObjectWritePlacement_UsesFallbackPlacementWithoutFullGroup(t *testi
 	require.Equal(t, PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
 }
 
+func TestPlanObjectWritePlacement_RejectsInvalidFullGroupPlan(t *testing.T) {
+	group := ShardGroupEntry{ID: "group-1"}
+	_, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:        "put_object",
+		PlacementGroupID: "group-1",
+		PlacementGroup:   &group,
+		LiveNodes:        []string{"fallback-1", "fallback-2", "fallback-3"},
+		CurrentECConfig:  ECConfig{DataShards: 2, ParityShards: 1},
+		ShardKey:         "k/v1",
+	})
+	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
+	require.ErrorContains(t, err, "placement group has no zero-config EC profile")
+}
+
 func TestPlanObjectWritePlacement_RejectsUnhealthyTopologyTarget(t *testing.T) {
 	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
 	_, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
