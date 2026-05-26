@@ -207,6 +207,9 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 		f.mu.Unlock()
 		return fatalKEKApply(fmt.Errorf("KEKRotate: DEKKeeper install: %v", err))
 	}
+	// Re-label the seal counter to the new active KEK version: freezes the
+	// prior version's count and resets the live counter (Task 13).
+	f.dekKeeper.OnKEKRotation(cmd.NewVersion)
 	if err := f.keystore.SetActiveVersion(cmd.NewVersion); err != nil {
 		f.mu.Unlock()
 		return fatalKEKApply(fmt.Errorf("KEKRotate: SetActiveVersion: %v", err))

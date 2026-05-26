@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -150,7 +148,7 @@ var encryptKEKStatusCmd = &cobra.Command{
 		if jsonOut(cmd) {
 			return printJSON(cmd, s)
 		}
-		printKEKStatus(cmd.OutOrStdout(), s)
+		clusteradmin.RenderKEKStatus(cmd.OutOrStdout(), s)
 		return nil
 	},
 }
@@ -163,24 +161,6 @@ func kekClusterNodeID(ctx context.Context, client *clusteradmin.Client) (string,
 		return "", err
 	}
 	return s.NodeID, nil
-}
-
-func printKEKStatus(w io.Writer, s *clusteradmin.KEKStatus) {
-	fmt.Fprintf(w, "active_version: %d\n", s.ActiveVersion)
-	if len(s.Versions) == 0 {
-		fmt.Fprintln(w, "versions: (none)")
-		return
-	}
-	fmt.Fprintln(w, "versions:")
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	for _, v := range s.Versions {
-		active := ""
-		if v.Version == s.ActiveVersion {
-			active = " (active)"
-		}
-		fmt.Fprintf(tw, "  version=%d\tstatus=%s%s\n", v.Version, v.Status, active)
-	}
-	_ = tw.Flush()
 }
 
 func init() {

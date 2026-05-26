@@ -66,6 +66,7 @@ func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 			"Restore the matching KEK by scp from any healthy peer.", keysDir, err)
 	}
 
+	keeper.SetActiveKEKVersion(fsm.SnapshotCapturedKEKVersion())
 	fsm.SetDEKKeeper(keeper)
 	state.dekKeeper = keeper
 	return nil

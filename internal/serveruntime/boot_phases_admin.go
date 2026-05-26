@@ -121,7 +121,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				// instead of a generic 404. state.kekRotationLeader is nil
 				// until the production wiring lands (Phase B Task 11 step 2),
 				// at which point the handler proxies through to the leader.
-				RegisterEncryptionKEKRoutes(h, state.kekRotationLeader, state.capabilityGate, state.metaRaft.FSM())
+				RegisterEncryptionKEKRoutes(h, state.kekRotationLeader, state.capabilityGate, state.metaRaft.FSM(), state.dekKeeper, state.kekLeaseTracker)
 
 				joinH := &JoinHandler{
 					dataDir:     cfg.DataDir,

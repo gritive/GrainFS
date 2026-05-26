@@ -31,6 +31,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // KEKRotationOrchestrator is the leader-side API the admin endpoints call.
@@ -55,6 +56,12 @@ type KEKStatusReader interface {
 	ActiveKEKVersion() uint32
 	KEKStoreVersions() []uint32
 	LookupKEKStatus(version uint32) (v uint32, status cluster.KEKLifecycleStatus, retireCommitIndex uint64, ok bool)
+	// SealCount returns the number of active-AEAD seals attributed to the KEK
+	// version (running count for the active version; frozen value otherwise).
+	SealCount(version uint32) uint64
+	// LeaseCount returns the in-flight KEK lease count for the version. Phase
+	// B has no acquire sites, so this is 0 in practice (Phase D wires it).
+	LeaseCount(version uint32) uint64
 }
 
 // EncryptionKEKHandler serves the four KEK envelope admin endpoints. Construct
@@ -83,17 +90,40 @@ type versionConfirmRequest struct {
 	Confirm string `json:"confirm"`
 }
 
-// kekStatusResponse is the bare-minimum body returned by GET status. Task 13
-// will extend this with retain count, last applied index, etc; the wire field
-// names below are stable.
+// kekStatusResponse is the body returned by GET /v1/encrypt/kek/status. The
+// wire field names are stable (consumed by the CLI and operator tooling).
 type kekStatusResponse struct {
 	ActiveVersion uint32             `json:"active_version"`
 	Versions      []kekVersionStatus `json:"versions"`
 }
 
 type kekVersionStatus struct {
-	Version uint32 `json:"version"`
-	Status  string `json:"status"`
+	Version            uint32 `json:"version"`
+	Status             string `json:"status"`
+	SealCount          uint64 `json:"seal_count"`
+	LeaseCount         uint64 `json:"lease_count"`
+	NonceCollisionRisk string `json:"nonce_collision_risk"`
+}
+
+// Nonce-collision risk thresholds, keyed on the active KEK version's seal
+// count. Each AES-GCM DEK can produce ~2^32 random-nonce seals before the
+// collision probability exceeds 2^-32; these bands give operators headroom to
+// schedule a DEK rotation before that bound is reached.
+const (
+	nonceWarnThreshold  = 100_000_000   // 1e8
+	nonceAlertThreshold = 1_000_000_000 // 1e9
+)
+
+// nonceCollisionRisk maps a seal count to "ok" / "warn" / "alert".
+func nonceCollisionRisk(sealCount uint64) string {
+	switch {
+	case sealCount >= nonceAlertThreshold:
+		return "alert"
+	case sealCount >= nonceWarnThreshold:
+		return "warn"
+	default:
+		return "ok"
+	}
 }
 
 // ServeRotate handles POST /v1/encrypt/kek/rotate.
@@ -205,12 +235,27 @@ func (h *EncryptionKEKHandler) ServeStatus(w http.ResponseWriter, _ *http.Reques
 		ActiveVersion: h.reader.ActiveKEKVersion(),
 		Versions:      make([]kekVersionStatus, 0, len(versions)),
 	}
+	retired := 0
 	for _, v := range versions {
+		seals := h.reader.SealCount(v)
+		leases := h.reader.LeaseCount(v)
+		status := lifecycleStatusString(h.reader, v, out.ActiveVersion)
+		if status == "retiring" || status == "pruned" {
+			retired++
+		}
 		out.Versions = append(out.Versions, kekVersionStatus{
-			Version: v,
-			Status:  lifecycleStatusString(h.reader, v, out.ActiveVersion),
+			Version:            v,
+			Status:             status,
+			SealCount:          seals,
+			LeaseCount:         leases,
+			NonceCollisionRisk: nonceCollisionRisk(seals),
 		})
+		metrics.SetKEKSealCount(v, seals)
+		metrics.SetKEKLeaseCount(v, leases)
 	}
+	metrics.SetKEKActiveVersion(out.ActiveVersion)
+	metrics.SetKEKRetiredCount(retired)
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
