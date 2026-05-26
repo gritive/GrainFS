@@ -792,6 +792,22 @@ table MetaConfigSnapshot {
   entries:[ConfigEntry];
 }
 
+// Phase B Task 2: KEK rotation request idempotency record.
+// status: 0=Applied, 1=StaleNoOp, 2=Rejected
+table LastRotationRequestEntry {
+  request_id:[ubyte];        // 16 bytes (UUID v7)
+  status:uint8;
+  apply_index:uint64;
+}
+
+// Phase B Task 2: KEK lifecycle status per version.
+// status: 0=Active, 1=Retiring, 2=Pruned
+table KEKStatusEntry {
+  version:uint32;
+  status:uint8;
+  retire_commit_index:uint64;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
   shard_groups:[ShardGroupEntry];             // PR-C
@@ -804,6 +820,8 @@ table MetaStateSnapshot {
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
   nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
   iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
+  last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
+  kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

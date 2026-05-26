@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"testing"
@@ -1175,4 +1176,69 @@ func buildLegacyIcebergSnapshot(t *testing.T) []byte {
 	out := make([]byte, len(fb))
 	copy(out, fb)
 	return out
+}
+
+func TestFSM_LastRotationRequestStatus_FIFOEvictAt1024(t *testing.T) {
+	fsm := NewMetaFSM()
+	for i := 0; i < 1025; i++ {
+		var rid [16]byte
+		binary.BigEndian.PutUint64(rid[:8], uint64(i))
+		fsm.RecordRotationRequestStatus(rid, RotationStatusApplied, uint64(i)+1)
+	}
+	var oldest [16]byte
+	binary.BigEndian.PutUint64(oldest[:8], 0)
+	if _, ok := fsm.LookupRotationRequestStatus(oldest); ok {
+		t.Errorf("oldest entry not evicted at cap=1024")
+	}
+	var newest [16]byte
+	binary.BigEndian.PutUint64(newest[:8], 1024)
+	if status, ok := fsm.LookupRotationRequestStatus(newest); !ok || status != RotationStatusApplied {
+		t.Errorf("newest entry missing; status=%v ok=%v", status, ok)
+	}
+}
+
+func TestFSM_LookupNoMutationOnRead(t *testing.T) {
+	fsm := NewMetaFSM()
+	var rid [16]byte
+	rid[0] = 0xAA
+	fsm.RecordRotationRequestStatus(rid, RotationStatusStaleNoOp, 1)
+	for i := 0; i < 1024; i++ {
+		var x [16]byte
+		binary.BigEndian.PutUint64(x[:8], uint64(i)+1)
+		fsm.LookupRotationRequestStatus(rid)
+		fsm.RecordRotationRequestStatus(x, RotationStatusApplied, uint64(i)+2)
+	}
+	if _, ok := fsm.LookupRotationRequestStatus(rid); ok {
+		t.Errorf("read promoted entry — must be insertion-order FIFO")
+	}
+}
+
+func TestFSM_Snapshot_RoundTrip_RotationStatusAndKEKStatus(t *testing.T) {
+	src := NewMetaFSM()
+	var rid1, rid2 [16]byte
+	rid1[0] = 0x01
+	rid2[0] = 0x02
+	src.RecordRotationRequestStatus(rid1, RotationStatusApplied, 1)
+	src.RecordRotationRequestStatus(rid2, RotationStatusStaleNoOp, 2)
+	src.SetKEKStatus(5, KEKLifecycleRetiring, 100)
+
+	buf, err := src.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	dst := NewMetaFSM()
+	if err := dst.Restore(raft.SnapshotMeta{}, buf); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	if s, ok := dst.LookupRotationRequestStatus(rid1); !ok || s != RotationStatusApplied {
+		t.Errorf("rid1 round-trip: status=%v ok=%v", s, ok)
+	}
+	if s, ok := dst.LookupRotationRequestStatus(rid2); !ok || s != RotationStatusStaleNoOp {
+		t.Errorf("rid2 round-trip: status=%v ok=%v", s, ok)
+	}
+	v, s, idx, ok := dst.LookupKEKStatus(5)
+	if !ok || s != KEKLifecycleRetiring || idx != 100 || v != 5 {
+		t.Errorf("kek_status round-trip: v=%d s=%v idx=%d ok=%v", v, s, idx, ok)
+	}
 }
