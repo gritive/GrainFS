@@ -59,6 +59,13 @@ type bootState struct {
 	metaDir  string
 	raftDir  string
 	bootID   string
+	// priorState is captured by bootValidateConfig BEFORE bootOpenMetaDB
+	// runs. True if <dataDir>/meta or <dataDir>/raft already contained
+	// data on entry — signals a restart of an existing node (versus a
+	// fresh-cluster init on an empty data dir). Consumed by
+	// wireDEKKeeper to refuse silent auto-regeneration of keys/0.key and
+	// cluster.id when prior raft/meta state exists.
+	priorState bool
 
 	// Storage role tracking (populated incrementally by storage phases;
 	// readers in run.go body use these for the boot decision summary).

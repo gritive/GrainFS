@@ -160,6 +160,11 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	}
 	c.SAID, c.AccessKey, c.SecretKey = saID, ak, sk
 
+	// TODO(phase-a-followup): legacy <data>/kek.key staging — Phase A unified
+	// the keystore at <data>/keys/0.key + <data>/cluster.id. This harness
+	// must be updated before Phase A lands externally. Tracking:
+	// docs/superpowers/specs/2026-05-26-dek-kek-envelope-redesign.md Phase A.
+	//
 	// §7 B3 — followers must have the cluster KEK in place BEFORE serve
 	// boots; otherwise wireDEKKeeper refuses startup in join mode. Mirror the
 	// real operator workflow (`scp <peer>:<data>/kek.key`) by copying the

@@ -107,6 +107,11 @@ func bootValidateConfig(state *bootState) error {
 		state.metaDir = filepath.Join(cfg.DataDir, "meta")
 	}
 	state.raftDir = filepath.Join(cfg.DataDir, "raft")
+	// Capture prior-state signal BEFORE any DB phase (bootOpenMetaDB)
+	// has a chance to populate <dataDir>/meta. True if either meta or
+	// raft dir is non-empty on entry → restart of an existing node.
+	// Consumed by wireDEKKeeper to refuse silent auto-regeneration.
+	state.priorState = dirHasContent(state.metaDir) || dirHasContent(state.raftDir)
 	state.bootID = uuid.NewString()
 	state.roleRegistry = badgerrole.DefaultRegistry()
 	state.startupDecisions = make([]badgerrole.Decision, 0, 8)
@@ -263,4 +268,17 @@ func bootOpenSharedFSMDB(state *bootState) error {
 	})
 	log.Info().Str("dir", sharedDir).Msg("shared FSM-state DB opened")
 	return nil
+}
+
+// dirHasContent reports whether dir exists and contains at least one entry.
+// Returns false on any error (missing dir, permission denied, etc.) — used
+// as a signal that the directory holds data from a prior boot, so a
+// permission error conservatively means "no prior state" (the boot would
+// fail downstream on the real open anyway).
+func dirHasContent(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	return len(entries) > 0
 }

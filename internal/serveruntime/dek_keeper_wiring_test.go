@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,4 +103,66 @@ func TestWireDEKKeeper_InjectsAndRegistersHook(t *testing.T) {
 
 	gen2, _ := state.dekKeeper.Active()
 	assert.Equal(t, uint32(1), gen2, "DEKRotate apply must advance active generation when keeper is wired")
+}
+
+// TestWireDEKKeeper_RestartRefusesMissingKEK is the P3-H1 regression
+// guard. Simulates a restart of an existing node (priorState=true was
+// captured by bootValidateConfig) where the operator accidentally
+// deleted keys/0.key. The strict-restart path must refuse to
+// auto-generate a fresh KEK — otherwise raft Restore would unwrap
+// FSM-stored DEKs with the wrong key (silent corruption).
+func TestWireDEKKeeper_RestartRefusesMissingKEK(t *testing.T) {
+	dir := t.TempDir()
+	// DELIBERATELY do not stage keys/0.key.
+	// Stage cluster.id so this test isolates the KEK refusal.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cluster.id"), bytes.Repeat([]byte{0x42}, 16), 0o600))
+
+	// priorState=true mirrors bootValidateConfig observing existing
+	// raft/meta content from a prior boot.
+	state := &bootState{cfg: Config{DataDir: dir}, priorState: true}
+	fsm := cluster.NewMetaFSM()
+
+	err := wireDEKKeeper(state, fsm)
+	require.Error(t, err, "wireDEKKeeper must refuse to auto-generate KEK in restart mode")
+	// Verify keys/0.key was NOT created.
+	_, statErr := os.Stat(filepath.Join(dir, "keys", "0.key"))
+	require.Error(t, statErr, "keys/0.key was auto-created in restart mode")
+}
+
+// TestWireDEKKeeper_RestartRefusesMissingClusterID guards against
+// silent cluster.id drift on restart. priorState=true + a valid KEK
+// present, but cluster.id missing — strict load must surface
+// ErrClusterIDMissing rather than minting a fresh UUID.
+func TestWireDEKKeeper_RestartRefusesMissingClusterID(t *testing.T) {
+	dir := t.TempDir()
+	// KEK staged, cluster.id missing.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "keys"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "keys", "0.key"),
+		bytes.Repeat([]byte{0x55}, encrypt.KEKSize), 0o600))
+
+	state := &bootState{cfg: Config{DataDir: dir}, priorState: true}
+	fsm := cluster.NewMetaFSM()
+
+	err := wireDEKKeeper(state, fsm)
+	require.Error(t, err, "wireDEKKeeper must refuse to auto-generate cluster.id in restart mode")
+	// Verify cluster.id was NOT created.
+	_, statErr := os.Stat(filepath.Join(dir, "cluster.id"))
+	require.Error(t, statErr, "cluster.id was auto-created in restart mode")
+}
+
+// TestWireDEKKeeper_FreshBootStillAutoGenerates pins the fresh-boot
+// behavior unchanged by the P3-H1 fix: priorState=false, no join, no
+// peers → keys/0.key and cluster.id auto-generate.
+func TestWireDEKKeeper_FreshBootStillAutoGenerates(t *testing.T) {
+	dir := t.TempDir()
+	// priorState=false (default) — pure fresh boot.
+	state := &bootState{cfg: Config{DataDir: dir}}
+	fsm := cluster.NewMetaFSM()
+
+	require.NoError(t, wireDEKKeeper(state, fsm))
+	// keys/0.key and cluster.id should be auto-generated.
+	_, err := os.Stat(filepath.Join(dir, "keys", "0.key"))
+	require.NoError(t, err, "fresh boot did not generate keys/0.key")
+	_, err = os.Stat(filepath.Join(dir, "cluster.id"))
+	require.NoError(t, err, "fresh boot did not generate cluster.id")
 }

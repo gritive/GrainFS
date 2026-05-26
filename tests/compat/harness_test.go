@@ -89,6 +89,11 @@ func startCompatCluster(t *testing.T, binaries []string) *compatCluster {
 	c.accessKey = ak
 	c.secretKey = sk
 
+	// TODO(phase-a-followup): legacy <data>/kek.key staging — Phase A unified
+	// the keystore at <data>/keys/0.key + <data>/cluster.id. This harness
+	// must be updated before Phase A lands externally. Tracking:
+	// docs/superpowers/specs/2026-05-26-dek-kek-envelope-redesign.md Phase A.
+	//
 	// Start followers. §7 B3: stage the seed's kek.key before each follower
 	// boots in join mode (wireDEKKeeper refuses to auto-generate a KEK).
 	seedKEK, kekErr := os.ReadFile(filepath.Join(c.dataDirs[0], "kek.key"))

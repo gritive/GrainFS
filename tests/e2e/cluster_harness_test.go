@@ -454,6 +454,11 @@ func (c *e2eCluster) writeJoinPending(i int, seedRaftAddr string) error {
 // seedDataDir is the seed node's data dir; the seed's kek.key is copied into
 // dataDir so the joiner can complete the KEK handshake. If seedDataDir is
 // empty, kek-staging is skipped (legacy single-node tests).
+//
+// TODO(phase-a-followup): legacy <data>/kek.key staging — Phase A unified
+// the keystore at <data>/keys/0.key + <data>/cluster.id. This harness must
+// be updated before Phase A lands externally. Tracking:
+// docs/superpowers/specs/2026-05-26-dek-kek-envelope-redesign.md Phase A.
 func writeNodeJoinPending(dataDir, seedDataDir, seedRaftAddr string) error {
 	if seedDataDir != "" {
 		seedKEK := filepath.Join(seedDataDir, "kek.key")

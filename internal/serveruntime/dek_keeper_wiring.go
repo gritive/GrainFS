@@ -42,12 +42,18 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 		return fmt.Errorf("wireDEKKeeper: %w", err)
 	}
 
-	if state.joinMode || len(state.peers) > 0 {
+	// Refuse to auto-generate keys/0.key in any case where this is NOT a
+	// fresh-cluster init: join mode (joining peers), OR a restart (prior
+	// raft/meta state exists — captured by bootValidateConfig BEFORE
+	// bootOpenMetaDB ran). Auto-generation in either case would silently
+	// corrupt the cluster — restore would unwrap FSM-stored DEKs with
+	// the wrong KEK.
+	if state.joinMode || len(state.peers) > 0 || state.priorState {
 		if empty, err := encrypt.KeysDirIsEmpty(keysDir); err != nil {
 			return fmt.Errorf("wireDEKKeeper: stat keys dir %s: %w", keysDir, err)
 		} else if empty {
-			return fmt.Errorf("KEK not found at %s and this node is configured to join an existing cluster. "+
-				"A joining node MUST already hold the cluster's KEK before serve can start — "+
+			return fmt.Errorf("KEK not found at %s and this node is configured to join an existing cluster or has prior raft/meta state. "+
+				"A joining or restarting node MUST already hold the cluster's KEK before serve can start — "+
 				"auto-generating a fresh KEK here would produce a node whose KEK never decrypts "+
 				"the cluster's FSM-wrapped DEKs. Options: "+
 				"(a) restore the cluster KEK by scp from any healthy peer "+
@@ -75,14 +81,22 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
 	}
 
+	// cluster.id load mode: strict when join mode OR prior state exists,
+	// so a missing cluster.id on a restart surfaces as
+	// ErrClusterIDMissing rather than silently regenerating a fresh UUID
+	// (which would drift the cluster identity from what raft/meta
+	// already contains).
 	var clusterID []byte
-	if state.joinMode || len(state.peers) > 0 {
+	if state.joinMode || len(state.peers) > 0 || state.priorState {
 		clusterID, err = cfg.LoadClusterID()
+		if err != nil {
+			return fmt.Errorf("wireDEKKeeper: cluster.id (strict): %w", err)
+		}
 	} else {
 		clusterID, err = cfg.LoadOrInitClusterID()
-	}
-	if err != nil {
-		return fmt.Errorf("wireDEKKeeper: cluster.id: %w", err)
+		if err != nil {
+			return fmt.Errorf("wireDEKKeeper: cluster.id: %w", err)
+		}
 	}
 
 	fsm.SetDEKKeeper(keeper)
