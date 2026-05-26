@@ -117,3 +117,45 @@ func TestDefaultRegistryIncludesMultipartListingCapability(t *testing.T) {
 		t.Fatalf("OperationListMultipartUploads = %s", OperationListMultipartUploads)
 	}
 }
+
+func TestRegistryKEKEnvelopeV1Registered(t *testing.T) {
+	cap, ok := DefaultRegistry.ByName(CapabilityKEKEnvelopeV1)
+	if !ok {
+		t.Fatalf("kek_envelope_v1 not registered")
+	}
+	if cap.Scope != ScopeMetaRaft {
+		t.Errorf("scope = %q, want meta_raft", cap.Scope)
+	}
+	if cap.Severity != SeverityHard {
+		t.Errorf("severity = %q, want hard", cap.Severity)
+	}
+	if cap.IntroducedVersion == "" {
+		t.Errorf("IntroducedVersion empty")
+	}
+}
+
+func TestKEKOperationsGated(t *testing.T) {
+	for _, op := range []Operation{
+		OperationKEKRotate,
+		OperationKEKRetire,
+		OperationKEKPrune,
+		OperationKEKLeaseSnapshot,
+		OperationKEKStatusQuery,
+	} {
+		caps, ok := DefaultRegistry.RequiredCapabilitiesForOperation(op)
+		if !ok {
+			t.Errorf("operation %q not gated", op)
+			continue
+		}
+		found := false
+		for _, c := range caps {
+			if c == CapabilityKEKEnvelopeV1 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("operation %q missing kek_envelope_v1 gate", op)
+		}
+	}
+}
