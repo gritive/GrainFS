@@ -24,18 +24,18 @@ func StartAutoSnapshotterWhenReady(
 	cfg *cluster.ClusterConfig,
 	enc *encrypt.Encryptor,
 	readinessTimeout time.Duration,
-) error {
+) (*snapshot.Manager, error) {
 	snapshotable, ok := backend.(storage.Snapshotable)
 	if !ok {
 		log.Debug().Msg("auto-snapshot skipped: backend does not implement Snapshotable")
-		return nil
+		return nil, nil
 	}
 	if err := waitForSnapshotBackendReady(ctx, snapshotable, readinessTimeout); err != nil {
-		return err
+		return nil, err
 	}
 	objSnapMgr, err := snapshot.NewManagerWithEncryptor(filepath.Join(dataDir, "snapshots"), snapshotable, walDir, enc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	as := snapshot.NewAutoSnapshotter(objSnapMgr, cfg, 0)
 	as.Start(ctx)
@@ -43,5 +43,5 @@ func StartAutoSnapshotterWhenReady(
 		Dur("interval", cfg.SnapshotInterval()).
 		Int32("retain", cfg.SnapshotRetain()).
 		Msg("auto-snapshot enabled (cluster-config driven)")
-	return nil
+	return objSnapMgr, nil
 }
