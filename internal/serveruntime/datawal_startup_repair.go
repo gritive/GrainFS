@@ -24,6 +24,11 @@ type dataWALStartupRepairer interface {
 	RepairDataWALStartupCandidate(context.Context, cluster.DataWALRepairCandidate) dataWALStartupRepairResult
 }
 
+// splitDataWALStartupRepairShardKey is intentionally KEPT (not replaced by
+// cluster.ClassifyStartupRepairShardKey): the placement monitor in
+// boot_phases_scrubber.go (OnMissing/OnCorrupt) still uses it for the
+// object-version-only repair path. Migrating that path to segment/coalesced
+// repair is the deferred scrub follow-up tracked in TODOS.md.
 func splitDataWALStartupRepairShardKey(shardKey string) (string, string) {
 	objectKey, versionID := shardKey, ""
 	if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
