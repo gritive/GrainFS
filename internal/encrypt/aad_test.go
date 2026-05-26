@@ -86,3 +86,48 @@ func TestBuildAAD_RejectClusterIDWrongLen(t *testing.T) {
 	}()
 	BuildAAD(DomainShard, []byte{0x01})
 }
+
+func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
+	clusterID := bytes.Repeat([]byte{0}, 16)
+	// IAMAdmin was omitted from the original uniqueness test; lock it in
+	// alongside every other domain so a future tag collision is caught.
+	domains := []AADDomain{
+		DomainShard, DomainWAL, DomainSnapshotBody, DomainSnapshotDEK,
+		DomainJWTKey, DomainDEKFSMWrap, DomainKEKRotate, DomainKEKCatchup,
+		DomainNBD, DomainIAMAdmin,
+	}
+	seen := make(map[uint16]struct{}, len(domains))
+	for _, d := range domains {
+		if _, dup := seen[uint16(d)]; dup {
+			t.Errorf("duplicate domain_tag %#x", uint16(d))
+		}
+		seen[uint16(d)] = struct{}{}
+		_ = BuildAAD(d, clusterID) // exercise BuildAAD with every domain
+	}
+	if len(seen) != 10 {
+		t.Errorf("expected 10 unique domains, got %d", len(seen))
+	}
+}
+
+func TestBuildAAD_FieldBytesDefensiveCopy(t *testing.T) {
+	// The AAD format is consensus-critical: if FieldBytes ever loses its
+	// defensive copy, callers can silently produce divergent AADs by
+	// mutating their input slice between FieldBytes and BuildAAD. This
+	// test locks the invariant.
+	clusterID := bytes.Repeat([]byte{0}, 16)
+	input := []byte{0x01, 0x02, 0x03}
+	field := FieldBytes(input)
+
+	// Mutate the input AFTER constructing the field but BEFORE BuildAAD.
+	input[0] = 0x99
+
+	aad := BuildAAD(DomainShard, clusterID, field)
+
+	// Last 3 bytes of aad must be the ORIGINAL {0x01, 0x02, 0x03}, not the
+	// post-mutation value.
+	last3 := aad[len(aad)-3:]
+	want := []byte{0x01, 0x02, 0x03}
+	if !bytes.Equal(last3, want) {
+		t.Errorf("FieldBytes did not defensively copy: got %x, want %x", last3, want)
+	}
+}
