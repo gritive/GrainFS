@@ -195,6 +195,18 @@ func (k *DEKKeeper) GenerateWrappedDEK(newGen uint32) (wrapped []byte, kekVer ui
 	return wrapped, kekVer, nil
 }
 
+// HasActiveGen reports whether the active generation has its material
+// installed (i.e. wrap[active] is present). Genesis keepers are ready
+// immediately; empty keepers (NewEmptyDEKKeeper) return false until gen-0
+// is installed via InstallReplicatedDEK or LoadFromFSM. Lock-free hot-path:
+// single RLock, no allocation.
+func (k *DEKKeeper) HasActiveGen() bool {
+	k.mu.RLock()
+	_, ok := k.wrap[k.active]
+	k.mu.RUnlock()
+	return ok
+}
+
 // Active returns the current active generation number and a copy of its
 // wrapped DEK bytes. The copy prevents callers from accidentally mutating
 // internal keeper state.
