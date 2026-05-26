@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.349.0] - 2026-05-26
+
+### Added
+
+- Object chunk 계층에 `chunkref` reference primitive를 도입했다 — snapshot·PITR·dedup이
+  공유할 idempotent `(manifestID, chunkID)` reference table + t_zero GC tombstone registry.
+  refcount는 manifest 집합에서 rebuild 가능한 파생 캐시이며, GC 후보는 `ref==0` 그리고
+  보존 윈도우 경과 두 조건을 만족할 때만 노출하고 t_zero generation을 함께 반환해
+  재참조 churn(ABA)을 호출자가 감지할 수 있게 한다. 아직 read/write-path에 연결되지 않은
+  내부 토대다(영속화·scrubber 연결은 후속).
+
 ## [0.0.348.0] - 2026-05-26
 
 ### Added
