@@ -1606,22 +1606,19 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 
 	if b.putPipeline != nil && b.shardSvc != nil && b.shardSvc.encryptor != nil && !storage.IsInternalBucket(bucket) && req.SizeHint != nil {
 		liveNodes := b.effectivePlacementNodes()
-		effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
-		if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
-			effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
-		}
-		placement := selectECPlacementWeighted(effectiveCfg, liveNodes, ecObjectShardKey(key, ""), b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
-		if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-			effectiveCfg = cfg
-			placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+		placementPlan, planErr := b.planObjectWritePlacement(ctx, "put_object", ecObjectShardKey(key, ""), liveNodes)
+		if planErr != nil && PlacementGroupHasFullEntry(ctx) {
+			return nil, planErr
 		}
 		selfID := b.currentSelfAddr()
 		// Actor-eligible: all shards local and EC config is non-zero.
-		allLocal := effectiveCfg.NumShards() > 0
-		for _, p := range placement {
-			if p != selfID {
-				allLocal = false
-				break
+		allLocal := planErr == nil && placementPlan.Config.NumShards() > 0
+		if allLocal {
+			for _, p := range placementPlan.NodeIDs {
+				if p != selfID {
+					allLocal = false
+					break
+				}
 			}
 		}
 		if allLocal {
@@ -1640,11 +1637,8 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			if err != nil {
 				return nil, err
 			}
-			placementGroupID, ok := PlacementGroupFromContext(ctx)
-			if !ok {
-				placementGroupID = "group-0"
-			}
-			nodeIDs := make([]string, effectiveCfg.NumShards())
+			placementGroupID := placementPlan.PlacementGroupID
+			nodeIDs := make([]string, placementPlan.Config.NumShards())
 			for i := range nodeIDs {
 				nodeIDs[i] = selfID
 			}
@@ -1657,8 +1651,8 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				ModTime:          obj.LastModified,
 				VersionID:        versionID,
 				PlacementGroupID: placementGroupID,
-				ECData:           uint8(effectiveCfg.DataShards),
-				ECParity:         uint8(effectiveCfg.ParityShards),
+				ECData:           uint8(placementPlan.Config.DataShards),
+				ECParity:         uint8(placementPlan.Config.ParityShards),
 				NodeIDs:          nodeIDs,
 				UserMetadata:     cloneStringMap(userMetadata),
 				SSEAlgorithm:     sseAlgorithm,
@@ -1676,8 +1670,8 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				UserMetadata:     cloneStringMap(userMetadata),
 				SSEAlgorithm:     sseAlgorithm,
 				PlacementGroupID: placementGroupID,
-				ECData:           uint8(effectiveCfg.DataShards),
-				ECParity:         uint8(effectiveCfg.ParityShards),
+				ECData:           uint8(placementPlan.Config.DataShards),
+				ECParity:         uint8(placementPlan.Config.ParityShards),
 				NodeIDs:          cloneStringSlice(nodeIDs),
 			}, nil
 		}
@@ -1721,31 +1715,19 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 ) (*storage.Object, bool, error) {
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, false, nil
-		}
-		placementGroupID = "group-0"
-	}
 	liveNodes := b.effectivePlacementNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
-	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
-		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
-	}
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacementWeighted(effectiveCfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
-	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-		placementGroupID = group.ID
-		effectiveCfg = cfg
-		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-	} else if PlacementGroupHasFullEntry(ctx) {
-		return nil, false, err
-	}
-	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
+	placementPlan, err := b.planObjectWritePlacement(ctx, "put_object", shardKey, liveNodes)
+	if err != nil {
+		if PlacementGroupHasFullEntry(ctx) {
+			return nil, false, err
+		}
 		return nil, false, nil
 	}
-	if len(placement) != 1 || placement[0] != b.currentSelfAddr() {
+	if placementPlan.Config.DataShards != 1 || placementPlan.Config.ParityShards != 0 {
+		return nil, false, nil
+	}
+	if len(placementPlan.NodeIDs) != 1 || placementPlan.NodeIDs[0] != b.currentSelfAddr() {
 		return nil, false, nil
 	}
 
@@ -1767,8 +1749,8 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		bucket,
 		key,
 		versionID,
-		placementGroupID,
-		placement,
+		placementPlan.PlacementGroupID,
+		placementPlan.NodeIDs,
 		sp,
 		body,
 		contentType,
@@ -1795,35 +1777,19 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 	if sizeHint == nil || *sizeHint < 0 {
 		return nil, false, nil
 	}
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, false, nil
-		}
-		placementGroupID = "group-0"
-	}
 	liveNodes := b.effectivePlacementNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
-	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
-		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
-	}
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacementWeighted(
-		effectiveCfg, liveNodes, shardKey,
-		b.nodeStatsStore, b.bl,
-		b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled(),
-	)
-	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-		placementGroupID = group.ID
-		effectiveCfg = cfg
-		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-	} else if PlacementGroupHasFullEntry(ctx) {
-		return nil, false, err
-	}
-	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
+	placementPlan, err := b.planObjectWritePlacement(ctx, "put_object", shardKey, liveNodes)
+	if err != nil {
+		if PlacementGroupHasFullEntry(ctx) {
+			return nil, false, err
+		}
 		return nil, false, nil
 	}
-	if len(placement) != 1 || placement[0] != b.currentSelfAddr() {
+	if placementPlan.Config.DataShards != 1 || placementPlan.Config.ParityShards != 0 {
+		return nil, false, nil
+	}
+	if len(placementPlan.NodeIDs) != 1 || placementPlan.NodeIDs[0] != b.currentSelfAddr() {
 		return nil, false, nil
 	}
 
@@ -1838,8 +1804,8 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 		bucket,
 		key,
 		versionID,
-		placementGroupID,
-		placement,
+		placementPlan.PlacementGroupID,
+		placementPlan.NodeIDs,
 		sp,
 		r,
 		contentType,
@@ -1906,7 +1872,7 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 // the in-memory EC fast path may be used in this request, or ok=false when the
 // fast path is disabled for this placement.
 func (b *DistributedBackend) ecMemoryShardFastPathLimit(ctx context.Context) (int64, bool) {
-	if _, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+	if cfg, err := objectWritePlacementConfigFromContext(ctx, "put_object"); err == nil {
 		if !ecMemoryShardFastPathEnabled(cfg) {
 			return 0, false
 		}
@@ -2261,37 +2227,55 @@ func (b *DistributedBackend) encryptedShardStorage() bool {
 	return b.shardSvc != nil && b.shardSvc.encryptor != nil
 }
 
-// selectECPlacementWeighted applies disk-capacity weights and (optionally) BoundedLoads hot
-// skip. weightedEnabled=false → nil weights (legacy behaviour). bl=nil or blEnabled=false →
-// no hot skip. store=nil also falls back to unweighted.
-func selectECPlacementWeighted(
+func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore, bl *BoundedLoads) []ObjectWritePlacementNodeState {
+	if store == nil {
+		return nil
+	}
+	states := make([]ObjectWritePlacementNodeState, 0, len(liveNodes))
+	for _, nodeID := range liveNodes {
+		state := ObjectWritePlacementNodeState{NodeID: nodeID}
+		if ns, ok := store.Get(nodeID); ok {
+			state.DiskAvailBytes = ns.DiskAvailBytes
+		}
+		if bl != nil && bl.IsHot(nodeID) {
+			state.Hot = true
+		}
+		states = append(states, state)
+	}
+	return states
+}
+
+func selectECPlacementFromNodeStates(
 	cfg ECConfig,
 	liveNodes []string,
 	shardKey string,
-	store *NodeStatsStore,
-	bl *BoundedLoads,
+	nodeStates []ObjectWritePlacementNodeState,
 	weightedEnabled bool,
 	blEnabled bool,
 ) []string {
-	if !weightedEnabled || store == nil {
+	if !weightedEnabled || len(nodeStates) == 0 {
 		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+	}
+	stateByNode := make(map[string]ObjectWritePlacementNodeState, len(nodeStates))
+	for _, state := range nodeStates {
+		stateByNode[state.NodeID] = state
 	}
 	weights := make([]float64, len(liveNodes))
 	skipReason := make([]string, len(liveNodes))
 	active := 0
 	for i, nodeID := range liveNodes {
-		ns, ok := store.Get(nodeID)
-		if !ok || ns.DiskAvailBytes == 0 {
+		state, ok := stateByNode[nodeID]
+		if !ok || state.DiskAvailBytes == 0 {
 			weights[i] = 0
 			skipReason[i] = "stale"
 			continue
 		}
-		if blEnabled && bl != nil && bl.IsHot(nodeID) {
+		if blEnabled && state.Hot {
 			weights[i] = 0
 			skipReason[i] = "bl_hot"
 			continue
 		}
-		weights[i] = float64(ns.DiskAvailBytes)
+		weights[i] = float64(state.DiskAvailBytes)
 		active++
 	}
 
@@ -2306,9 +2290,9 @@ func selectECPlacementWeighted(
 	if active < cfg.NumShards() {
 		for i := range weights {
 			if skipReason[i] == "bl_hot" {
-				ns, ok := store.Get(liveNodes[i])
-				if ok && ns.DiskAvailBytes > 0 {
-					weights[i] = float64(ns.DiskAvailBytes)
+				state := stateByNode[liveNodes[i]]
+				if state.DiskAvailBytes > 0 {
+					weights[i] = float64(state.DiskAvailBytes)
 					skipReason[i] = ""
 					active++
 				}
@@ -2355,46 +2339,14 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 // ECData/ECParity + NodeIDs are stored in object metadata so reads can
 // reconstruct shards without a separate Raft record.
 func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, versionID string, data []byte, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
-		}
-		placementGroupID = "group-0"
-	}
 	liveNodes := b.effectivePlacementNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
-	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
-		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
-	}
-	if effectiveCfg.NumShards() == 0 {
-		return nil, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
-	}
-
 	// ShardService's key parameter carries the versionID as a suffix so shards
 	// for different versions land at different paths without changing the API.
 	shardKey := ecObjectShardKey(key, versionID)
 
-	placement := selectECPlacementWeighted(effectiveCfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
-	topologyWrite := false
-	topologyGroup := ShardGroupEntry{}
-	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-		topologyWrite = true
-		topologyGroup = group
-		placementGroupID = group.ID
-		effectiveCfg = cfg
-		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-	} else if PlacementGroupHasFullEntry(ctx) {
+	placementPlan, err := b.planObjectWritePlacement(ctx, "put_object", shardKey, liveNodes)
+	if err != nil {
 		return nil, err
-	}
-	if len(placement) != effectiveCfg.NumShards() {
-		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
-			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
-	}
-	if topologyWrite {
-		if err := b.checkTopologyPlacementHealth(topologyGroup, effectiveCfg, placement); err != nil {
-			return nil, err
-		}
 	}
 
 	// Commit metadata. ECData/ECParity + NodeIDs stored so reads can
@@ -2404,9 +2356,9 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		Bucket:           bucket,
 		Key:              key,
 		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		Config:           effectiveCfg,
-		Placement:        placement,
+		PlacementGroupID: placementPlan.PlacementGroupID,
+		Config:           placementPlan.Config,
+		Placement:        placementPlan.NodeIDs,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
@@ -2414,8 +2366,8 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeDataShards(ctx, plan, data)
 	if err != nil {
-		if topologyWrite {
-			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
+		if placementPlan.TopologyWrite {
+			return nil, topologyShardWriteError(placementPlan.TopologyGroup, placementPlan.Config, err)
 		}
 		return nil, err
 	}
@@ -2428,12 +2380,8 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 
 func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error, parts []storage.MultipartPartEntry, tags []storage.Tag, multipartUploadID string) (*storage.Object, error) {
 	stageStart := time.Now()
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
-		}
-		placementGroupID = "group-0"
+	if _, ok := PlacementGroupFromContext(ctx); !ok && b.bypassBucketCheck {
+		return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
 	}
 	liveNodes := b.effectivePlacementNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
@@ -2463,36 +2411,11 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	shardKey := ecObjectShardKey(key, versionID)
-	var placementGroup *ShardGroupEntry
-	if group, ok := PlacementGroupEntryFromContext(ctx); ok {
-		placementGroup = &group
-	}
-	var peerHealth []PeerHealthEntry
-	hasPeerHealth := false
-	if ph := b.currentPeerHealth(); ph != nil {
-		peerHealth = ph.Snapshot()
-		hasPeerHealth = true
-	}
-	placementPlan, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
-		Operation:           "put_object",
-		PlacementGroupID:    placementGroupID,
-		PlacementGroup:      placementGroup,
-		LiveNodes:           liveNodes,
-		CurrentECConfig:     b.currentECConfig(),
-		BypassBucketCheck:   b.bypassBucketCheck,
-		ShardKey:            shardKey,
-		NodeStatsStore:      b.nodeStatsStore,
-		BoundedLoads:        b.bl,
-		WeightedHRWEnabled:  b.clusterCfg.WeightedHRWEnabled(),
-		BoundedLoadsEnabled: b.clusterCfg.BoundedLoadsEnabled(),
-		PeerHealth:          peerHealth,
-		HasPeerHealth:       hasPeerHealth,
-		SelfID:              b.currentSelfAddr(),
-	})
+	placementPlan, err := b.planObjectWritePlacement(ctx, "put_object", shardKey, liveNodes)
 	if err != nil {
 		return nil, err
 	}
-	placementGroupID = placementPlan.PlacementGroupID
+	placementGroupID := placementPlan.PlacementGroupID
 	effectiveCfg = placementPlan.Config
 	placement := placementPlan.NodeIDs
 	observePutStage("ec", "placement", stageStart)
@@ -2562,28 +2485,6 @@ func topologyShardWriteError(group ShardGroupEntry, cfg ECConfig, err error) err
 		Unavailable:   []string{shardErr.node},
 		FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
 	}
-}
-
-func (b *DistributedBackend) checkTopologyPlacementHealth(group ShardGroupEntry, cfg ECConfig, placement []string) error {
-	if b.currentPeerHealth() == nil {
-		return nil
-	}
-	for _, node := range placement {
-		if node == b.currentSelfAddr() {
-			continue
-		}
-		if !b.currentPeerHealth().IsHealthy(node) {
-			return &ErrInsufficientPlacementTargets{
-				Operation:     "put_object",
-				GroupID:       group.ID,
-				Desired:       cfg,
-				Configured:    cloneStringSlice(group.PeerIDs),
-				Unavailable:   []string{node},
-				FailureReason: "known unhealthy placement target",
-			}
-		}
-	}
-	return nil
 }
 
 func (b *DistributedBackend) tryPutObjectECMemoryShards(

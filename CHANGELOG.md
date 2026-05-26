@@ -6,6 +6,17 @@
 
 - **Removed the `--dedup` serve flag. Dedup is now always enabled.** The flag was deprecated and hidden, but its value was still honored at boot, so `--dedup=false` could silently disable block-level deduplication. That path is gone: every server now starts with the dedup BadgerDB index at `{data}/dedup/` (the optional-role fallback that disables dedup when its role directory can't be opened is unchanged). **Breaking:** operators who still pass `--dedup=true` or `--dedup=false` in startup scripts will hit an `unknown flag` error on boot — remove the argument before upgrading.
 
+## [0.0.340.0] - 2026-05-26
+
+### Changed
+
+- **Backend integration coverage is now grouped by Ginkgo spec area.** Cluster append, bucket, object, EC, multipart, coalesce, scrubber, snapshot, versioning, quarantine, reshard, and pipeline coverage moved out of monolithic/assert-style tests into focused Ginkgo integration specs.
+- **Object write placement fast-path tests now cover the shared placement plan shape.** Fast-path and coalesce coverage now exercise placement decisions through the same plan boundary used by the write path.
+
+### Fixed
+
+- **Backend placement lint is clean again.** Removed ineffective placement-group assignments and an unused topology-health helper left behind during the placement-plan split.
+
 ## [0.0.339.1] - 2026-05-26
 
 ### Performance

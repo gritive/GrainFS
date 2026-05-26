@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/stretchr/testify/require"
@@ -195,6 +196,15 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 			}
 		})
 	}
+}
+
+func writeMultipartMeta(b testing.TB, bk *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+	b.Helper()
+	raw, err := marshalClusterMultipartMeta(meta)
+	require.NoError(b, err)
+	require.NoError(b, bk.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(bk.ks().MultipartKey(uploadID), raw)
+	}))
 }
 
 func BenchmarkDistributedBackend_CompleteSinglePartMultipart64KiB(b *testing.B) {
