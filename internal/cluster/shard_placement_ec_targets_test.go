@@ -176,3 +176,44 @@ func TestIterECShardScanTargets(t *testing.T) {
 	require.True(t, legacySeen, "legacy unversioned object must be enumerated via the shared-core fallback")
 	require.False(t, legacyVerSet, "legacy fallback ref carries an empty VersionID")
 }
+
+// TestIterECShardScanTargets_DeletedChunkedObject reproduces Finding 2: when the
+// latest pointer is a delete marker, the lat: pass returns before adding the base
+// key to `seen`, so the legacy obj: fallback enumerates the OLDER versioned meta
+// (obj:bucket/k/v1) with a first-slash split — yielding ref.Key="k/v1",
+// ref.VersionID="". Without the VersionID!="" guard this misparse would emit a
+// WRONG segment target "k/v1/segments/<blob>" and trigger a false-missing repair
+// every scan. Assert NO segment target is emitted for the deleted object.
+func TestIterECShardScanTargets_DeletedChunkedObject(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	segNodes := []string{"n1", "n2", "n3"}
+	// Older chunked version k/v1 with an EC segment, NO lat: pointer of its own.
+	seedObjectMetaVersion(t, backend, "b", "k", "v1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: segNodes,
+		Segments: []storage.SegmentRef{
+			{BlobID: "blob-1", ECData: 2, ECParity: 1, NodeIDs: segNodes},
+		},
+	})
+	// Latest version is a delete marker; lat: -> del-v2.
+	seedLatestObjectMetaVersion(t, backend, "b", "k", "del-v2", objectMeta{
+		ETag: deleteMarkerETag,
+	})
+
+	got := collectECTargets(t, backend)
+
+	for _, tgt := range got {
+		if tgt.Kind == ECShardSegment {
+			require.NotEqual(t, "k/v1/segments/blob-1", tgt.ShardKey,
+				"deleted chunked object must not emit a misparsed segment target")
+		}
+		// More broadly: no segment/coalesced target may carry the misparsed
+		// legacy-fallback key shape for this object.
+		if tgt.Kind == ECShardSegment || tgt.Kind == ECShardCoalesced {
+			require.NotEqual(t, "k/v1", tgt.ObjectKey,
+				"misparsed legacy-fallback ref must not yield a segment/coalesced target")
+		}
+	}
+}

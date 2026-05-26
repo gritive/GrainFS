@@ -266,6 +266,19 @@ func (f *FSM) IterECShardScanTargets(fn func(ECShardScanTarget) error) error {
 			})
 		}
 
+		// Segment/coalesced targets are emitted ONLY for versioned refs. The lat:
+		// pass always sets VersionID; the legacy obj: fallback leaves it empty.
+		// Modern chunked/coalesced objects are always versioned (the writer mints a
+		// UUIDv7 version), so a VersionID=="" ref is either an ancient unversioned
+		// object (no EC segments) or a delete-marker legacy-fallback misparse —
+		// neither must yield a segment/coalesced target (a misparse would emit a
+		// WRONG shard key like "key/v1/segments/<blob>" and trigger a false-missing
+		// repair every scan). Object-version targets are still emitted above for
+		// VersionID=="" legacy refs (that coverage is intended).
+		if ref.VersionID == "" {
+			return nil
+		}
+
 		for i := range m.Segments {
 			seg := m.Segments[i]
 			if seg.ECData == 0 {

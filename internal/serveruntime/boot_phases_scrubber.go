@@ -181,6 +181,14 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 					// plain object-version shard: no ShardKey/Placement needed
 					logKey = target.ObjectKey
 				case cluster.ECShardSegment, cluster.ECShardCoalesced:
+					// Re-verify the shard is still referenced in the current meta
+					// before repairing: coalesce/delete/GC between the monitor's
+					// scan and this deferred callback can de-reference it, and
+					// reconstructing an orphan shard would just fight GC.
+					if !gb.ShardTargetStillReferenced(monitorCtx, target) {
+						log.Info().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", target.ShardKey).Int("shard", shardIdx).Msg("skipping repair of de-referenced shard")
+						return
+					}
 					repairReq.ShardKey = target.ShardKey
 					repairReq.Placement = target.Placement
 					logKey = target.ShardKey
@@ -214,7 +222,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 				case cluster.ECShardObjectVersion:
 					err = gb.QuarantineCorruptShardLocal(target.Bucket, target.ObjectKey, target.VersionID, shardIdx, readErr.Error())
 				case cluster.ECShardSegment, cluster.ECShardCoalesced:
-					err = gb.QuarantineCorruptShardLocalAtShardKey(target.Bucket, target.ObjectKey, target.VersionID, target.ShardKey, shardIdx, readErr.Error())
+					err = gb.QuarantineCorruptShardLocalAtShardKey(target, shardIdx, readErr.Error())
 				}
 				if err != nil {
 					var logKey string
