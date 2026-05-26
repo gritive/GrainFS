@@ -1,6 +1,10 @@
 package storage
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 func TestParseLocator(t *testing.T) {
 	tests := []struct {
@@ -24,6 +28,15 @@ func TestParseLocator(t *testing.T) {
 				t.Fatalf("ref = %q, want %q", loc.Ref, tt.wantRef)
 			}
 		})
+	}
+}
+
+func TestLocalOpenSegmentRejectsCAS(t *testing.T) {
+	b := newTestLocalBackend(t)
+	store := localSegmentStore{b: b, bucket: "bkt", key: "obj"}
+	_, err := store.OpenSegment(context.Background(), SegmentRef{BlobID: "cas://b3-deadbeef", Size: 16})
+	if !errors.Is(err, ErrCASNotImplemented) {
+		t.Fatalf("err = %v, want ErrCASNotImplemented", err)
 	}
 }
 
