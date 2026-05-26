@@ -26,7 +26,8 @@ opcode or returning partial data.
 | Capability | Introduced | Scope | Operations gated | Mixed-version behavior |
 | --- | --- | --- | --- | --- |
 | `multipart_listing_v1` | `0.0.213.0` | Peer transport | `CreateMultipartUpload`, `ListMultipartUploads`, `ListParts` | Reject until all target peers advertise the capability. |
-| `kek_envelope_v1` | `0.0.344.0` | Meta-raft commands + admin operations | `KEKRotate`, `KEKRetire`, `KEKPrune`, `KEKLeaseSnapshot`, `KEKStatusQuery` | Reject until all voters advertise. Mixed-version cluster cannot rotate/retire/prune until upgrade complete. |
+| `kek_envelope_v1` | `0.0.353.0` | Meta-raft commands + admin operations | `KEKRotate`, `KEKRetire`, `KEKPrune`, `KEKLeaseSnapshot`, `KEKStatusQuery` | Reject until all voters advertise. Mixed-version cluster cannot rotate/retire/prune until upgrade complete. |
+| `dek_replicated_v1` | `0.0.353.0` | Meta-raft | `DEKRotate` | Reject until all voters advertise. Pre-0.0.353.0 encrypted multi-node clusters cannot upgrade in place — greenfield boundary only. |
 
 ## Running the Compat Suite
 
