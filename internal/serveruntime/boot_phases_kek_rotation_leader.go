@@ -60,6 +60,17 @@ func bootKEKRotationLeader(state *bootState) error {
 	cfg := nodeconfig.New(state.cfg.DataDir)
 	keystoreDir := cfg.KEKDir()
 
+	// KEK probe + attestation identity. The voter set the prune path validates
+	// against comes from MetaRaft.Node().Configuration().Servers[].ID, which is
+	// the raft ServerID (production wires RaftID = state.raftAddr, see
+	// boot_phases_raft.go). The PeerKEKProbe self-shortcut and the probe handler
+	// NodeIDs MUST use that SAME raft ServerID so (a) the self-call matches a
+	// voter entry and (b) remote voters' attestation node_ids match the
+	// leader-stamped voter_ids the FSM checks in validatePruneAttestation.
+	// Using state.nodeID (the operator-facing --node-id) here would never match
+	// the raft voter set → "missing probe response from voter <raft-addr>".
+	raftServerID := state.metaRaft.Node().ID()
+
 	// 1. Audit sink — append-only file at <dataDir>/audit/kek.log. 0o600 keeps
 	//    it host-root-readable but not group/world. Errors surface as boot
 	//    failures: a missing sink would silently drop KEK lifecycle audit
@@ -80,9 +91,9 @@ func bootKEKRotationLeader(state *bootState) error {
 	//    leader's GetKEKDiskSpace / GetKEKLeaseSnapshot reaches this node as a
 	//    voter.
 	state.quicTransport.Handle(transport.StreamKEKDiskSpaceProbe,
-		cluster.NewKEKDiskSpaceHandler(state.nodeID, keystoreDir, nil /* statfs default */).Handle)
+		cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */).Handle)
 	state.quicTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
-		cluster.NewKEKLeaseSnapshotHandler(state.nodeID, state.kekLeaseTracker, func() uint64 {
+		cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
 			return state.metaRaft.Node().CommittedIndex()
 		}).Handle)
 
@@ -94,7 +105,7 @@ func bootKEKRotationLeader(state *bootState) error {
 	dialer := &cluster.QUICPeerProbeDialer{T: state.quicTransport}
 	leaseTracker := state.kekLeaseTracker
 	mr := state.metaRaft
-	selfID := state.nodeID
+	selfID := raftServerID
 	probe := cluster.NewPeerKEKProbe(
 		dialer,
 		raftConfig,
