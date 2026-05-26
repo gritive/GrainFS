@@ -97,6 +97,7 @@ func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Eviden
 	// was never wired into the evidence source.)
 	if f.keystore != nil {
 		caps[compat.CapabilityKEKEnvelopeV1] = true
+		caps[compat.CapabilityDEKReplicatedV1] = true
 	}
 	return compat.Evidence{
 		NodeID:       compat.NodeID(nodeID),
