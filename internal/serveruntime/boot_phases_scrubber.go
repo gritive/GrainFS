@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,6 +65,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	}
 
 	clusterIncidentRecorder, scrubberIncidentRecorder := IncidentRecorderInterfaces(state.incidentRecorder)
+	startDataWALStartupRepairWorker(ctx, state)
 
 	// All three plumbings (walk, opener, repair) route through the local
 	// data-group that owns the bucket — single-node serve still sits inside
@@ -164,15 +164,8 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 				gb.SetIncidentRecorder(clusterIncidentRecorder)
 			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), cfg.ScrubInterval)
-			splitShardKey := func(shardKey string) (string, string) {
-				objectKey, versionID := shardKey, ""
-				if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
-					objectKey, versionID = shardKey[:i], shardKey[i+1:]
-				}
-				return objectKey, versionID
-			}
 			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
-				objectKey, versionID := splitShardKey(shardKey)
+				objectKey, versionID := splitDataWALStartupRepairShardKey(shardKey)
 				correlationID := uuid.Must(uuid.NewV7()).String()
 				receiptID := "rcpt-" + correlationID
 				repairReq := cluster.IncidentRepairRequest{
@@ -207,7 +200,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 				}
 			})
 			placementMonitor.SetOnCorrupt(func(bucket, shardKey string, shardIdx int, readErr error) {
-				objectKey, versionID := splitShardKey(shardKey)
+				objectKey, versionID := splitDataWALStartupRepairShardKey(shardKey)
 				if err := gb.QuarantineCorruptShardLocal(bucket, objectKey, versionID, shardIdx, readErr.Error()); err != nil {
 					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
 				}

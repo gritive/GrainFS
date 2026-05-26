@@ -141,6 +141,9 @@ func WithNoRedundancy(fn func() bool) ShardServiceOption {
 // after construction.
 func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
 
+// HasDataWALRepairSink reports whether a data WAL repair candidate sink is wired.
+func (s *ShardService) HasDataWALRepairSink() bool { return s.dataWALRepairSink != nil }
+
 // Close releases resources owned by the ShardService — currently the shard-pack
 // actor goroutine, which is spawned only when a data WAL is wired. The data WAL
 // itself is owned by the caller (WithDataWAL) and is not closed here. Safe to

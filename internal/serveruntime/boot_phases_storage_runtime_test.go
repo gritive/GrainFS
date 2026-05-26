@@ -146,6 +146,17 @@ func TestBootShardService_ClosesShardPackActorOnShutdown(t *testing.T) {
 	goleak.VerifyNone(t, baseline)
 }
 
+func TestBootShardServiceWiresDataWALRepairCollector(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
+
+	require.NoError(t, bootShardService(ctx, state))
+
+	require.NotNil(t, state.dataWALRepairCollector)
+	require.NotNil(t, state.shardSvc)
+	require.True(t, state.shardSvc.HasDataWALRepairSink(),
+		"shard service must be constructed with the repair-candidate sink")
+}
+
 func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
 
