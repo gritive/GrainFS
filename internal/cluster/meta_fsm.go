@@ -514,6 +514,21 @@ func (f *MetaFSM) LookupKEKStatus(version uint32) (v uint32, status KEKLifecycle
 	return 0, 0, 0, false
 }
 
+// LifecycleKEKVersions returns the sorted list of KEK versions that have a
+// kek_status lifecycle record (retiring/pruned). A pruned version is removed
+// from the keystore but its lifecycle record persists, so the status endpoint
+// can still report it as "pruned" — callers union this with the live keystore
+// versions. Read-only; returns a fresh slice.
+func (f *MetaFSM) LifecycleKEKVersions() []uint32 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]uint32, 0, len(f.kekStatuses))
+	for _, e := range f.kekStatuses {
+		out = append(out, e.version)
+	}
+	return out
+}
+
 // RetiredKEKVersionCount returns the number of KEK store versions whose
 // lifecycle status is retiring or pruned. The active version is never counted
 // (it is "active" regardless of any stale status entry) — this mirrors the

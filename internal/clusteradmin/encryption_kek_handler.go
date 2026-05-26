@@ -53,6 +53,10 @@ type KEKCapabilityGate interface {
 // stub returning canned versions + lifecycle statuses.
 type KEKStatusReader interface {
 	ActiveKEKVersion() uint32
+	// KEKStoreVersions returns the versions to report in the status response.
+	// Production unions the live keystore versions with the lifecycle-tracked
+	// versions so a pruned version (removed from the keystore but retained in
+	// kek_status) still appears as "pruned".
 	KEKStoreVersions() []uint32
 	LookupKEKStatus(version uint32) (v uint32, status cluster.KEKLifecycleStatus, retireCommitIndex uint64, ok bool)
 	// SealCount returns the number of active-AEAD seals attributed to the KEK
