@@ -156,16 +156,15 @@ Accepts plaintext token endpoint behind a validated proxy (`Forwarded` or `X-For
 
 ### Operator-managed KEK source
 
-```bash
-GRAINFS_KEK_SOURCE=file:///etc/grainfs/kek.key ./grainfs serve --data /var/lib/grainfs ...
-```
+> **Phase A:** The legacy `GRAINFS_KEK_SOURCE` env var is no longer supported and
+> boot will refuse if it is set. The keystore is always at `<data>/keys/0.key`.
+> For test environments only, `GRAINFS_KEK_DIR` overrides the directory.
 
-By default, the first node auto-generates `<data>/keys/0.key`. `GRAINFS_KEK_SOURCE`
-changes where GrainFS reads the KEK from. The contents still need to be the
-same on every node, and only `file://` sources are supported in this release.
-Do not replace the KEK after data exists unless you are restoring the same
-32-byte cluster KEK; GrainFS does not currently expose a separate KEK rotation
-flow.
+By default, the first node auto-generates `<data>/keys/0.key`. The contents
+must be identical on every node — stage the file out-of-band (e.g. `scp` from
+a healthy peer) before starting a joining node. Do not replace the KEK after
+data exists unless you are restoring the same 32-byte cluster KEK; GrainFS
+does not currently expose a separate KEK rotation flow.
 
 ### DEK rotation
 

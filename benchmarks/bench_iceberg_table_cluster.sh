@@ -134,9 +134,15 @@ if [[ "$PROFILE" == "1" ]]; then
 fi
 bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n0" "bench-iceberg-cluster"
 
+bench_wait_file "$BENCH_DIR/n0/keys/0.key" "node-0 KEK" 100 0.2
+bench_wait_file "$BENCH_DIR/n0/cluster.id" "node-0 cluster.id" 100 0.2
+
 for i in $(seq 1 $((NODE_COUNT - 1))); do
-  cp "$BENCH_DIR/n0/kek.key" "$BENCH_DIR/n$i/kek.key"
-  chmod 600 "$BENCH_DIR/n$i/kek.key"
+  mkdir -p "$BENCH_DIR/n$i/keys"
+  cp "$BENCH_DIR/n0/keys/0.key" "$BENCH_DIR/n$i/keys/0.key"
+  chmod 600 "$BENCH_DIR/n$i/keys/0.key"
+  cp "$BENCH_DIR/n0/cluster.id" "$BENCH_DIR/n$i/cluster.id"
+  chmod 600 "$BENCH_DIR/n$i/cluster.id"
   printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
   chmod 600 "$BENCH_DIR/n$i/.join-pending"
   start_node "$i"

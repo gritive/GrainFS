@@ -81,9 +81,9 @@ func TestStartup_RefusesWhenKEKMissing(t *testing.T) {
 	require.NoError(t, err)
 	fsm := fsmWithWrappedDEKs(t, kek)
 
-	// Deliberately do NOT write kek.key under dataDir. GRAINFS_KEK_SOURCE is
-	// also unset (test environment) so KEKSource() defaults to dataDir/kek.key,
-	// which does not exist.
+	// Deliberately do NOT stage <dataDir>/keys/0.key. Phase A always loads
+	// the KEK from <dataDir>/keys/<V>.key (no env override) so the keystore
+	// is absent here.
 
 	err = rebuildDEKKeeperFromRestore(state, fsm)
 	require.Error(t, err, "missing KEK with FSM-wrapped DEKs must refuse startup")

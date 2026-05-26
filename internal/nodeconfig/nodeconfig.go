@@ -40,13 +40,6 @@ func (n *NodeConfig) TLSKeyPath() string {
 	return filepath.Join(n.dataDir, "tls", "key.pem")
 }
 
-func (n *NodeConfig) KEKSource() string {
-	if v := os.Getenv("GRAINFS_KEK_SOURCE"); v != "" {
-		return v
-	}
-	return "file://" + filepath.Join(n.dataDir, "kek.key")
-}
-
 // KEKDir returns the directory that holds keys/<V>.key files. Honors the
 // GRAINFS_KEK_DIR env var override (tests, custom layouts).
 func (n *NodeConfig) KEKDir() string {

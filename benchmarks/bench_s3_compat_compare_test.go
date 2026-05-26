@@ -276,16 +276,21 @@ func TestBenchS3CompatClusterStagesKEKBeforeJoinersStart(t *testing.T) {
 		t.Fatalf("start_grainfs_cluster must keep data dir names short so admin.sock does not exceed Unix socket path limits")
 	}
 	for _, want := range []string{
-		`local kek_file="$cluster_dir/n1/kek.key"`,
+		`local kek_file="$cluster_dir/n1/keys/0.key"`,
+		`local cluster_id_file="$cluster_dir/n1/cluster.id"`,
 		`bench_wait_file "$kek_file" "grainfs-cluster node1 KEK"`,
-		`cp "$kek_file" "$cluster_dir/n${idx}/kek.key"`,
-		`chmod 600 "$cluster_dir/n${idx}/kek.key"`,
+		`bench_wait_file "$cluster_id_file" "grainfs-cluster node1 cluster.id"`,
+		`mkdir -p "$cluster_dir/n${idx}/keys"`,
+		`cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"`,
+		`chmod 600 "$cluster_dir/n${idx}/keys/0.key"`,
+		`cp "$cluster_id_file" "$cluster_dir/n${idx}/cluster.id"`,
+		`chmod 600 "$cluster_dir/n${idx}/cluster.id"`,
 	} {
 		if !strings.Contains(cluster, want) {
-			t.Fatalf("start_grainfs_cluster must stage KEK for joiners with %q", want)
+			t.Fatalf("start_grainfs_cluster must stage KEK + cluster.id for joiners with %q", want)
 		}
 	}
-	if strings.Index(cluster, `cp "$kek_file" "$cluster_dir/n${idx}/kek.key"`) > strings.Index(cluster, `start_grainfs_cluster_node "$idx"`) {
+	if strings.Index(cluster, `cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"`) > strings.Index(cluster, `start_grainfs_cluster_node "$idx"`) {
 		t.Fatalf("start_grainfs_cluster must copy KEK before starting joiner nodes")
 	}
 }
@@ -385,13 +390,17 @@ func TestIcebergClusterBenchCopiesKEKBeforeJoinersStart(t *testing.T) {
 	}
 	script := string(body)
 
-	copyKEK := strings.Index(script, `cp "$BENCH_DIR/n0/kek.key" "$BENCH_DIR/n$i/kek.key"`)
+	copyKEK := strings.Index(script, `cp "$BENCH_DIR/n0/keys/0.key" "$BENCH_DIR/n$i/keys/0.key"`)
+	copyClusterID := strings.Index(script, `cp "$BENCH_DIR/n0/cluster.id" "$BENCH_DIR/n$i/cluster.id"`)
 	joinPending := strings.Index(script, `printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"`)
 	startJoiner := strings.Index(script, `start_node "$i"`)
 	if copyKEK < 0 {
-		t.Fatalf("bench_iceberg_table_cluster.sh must copy n0 kek.key before starting joiners")
+		t.Fatalf("bench_iceberg_table_cluster.sh must copy n0 keys/0.key before starting joiners")
 	}
-	if !(copyKEK < joinPending && joinPending < startJoiner) {
-		t.Fatalf("Iceberg cluster joiner KEK copy must happen before join-pending and start_node")
+	if copyClusterID < 0 {
+		t.Fatalf("bench_iceberg_table_cluster.sh must copy n0 cluster.id before starting joiners")
+	}
+	if !(copyKEK < joinPending && copyClusterID < joinPending && joinPending < startJoiner) {
+		t.Fatalf("Iceberg cluster joiner KEK + cluster.id copy must happen before join-pending and start_node")
 	}
 }

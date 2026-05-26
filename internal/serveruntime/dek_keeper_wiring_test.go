@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -148,6 +149,26 @@ func TestWireDEKKeeper_RestartRefusesMissingClusterID(t *testing.T) {
 	// Verify cluster.id was NOT created.
 	_, statErr := os.Stat(filepath.Join(dir, "cluster.id"))
 	require.Error(t, statErr, "cluster.id was auto-created in restart mode")
+}
+
+// TestWireDEKKeeper_RefusesLegacyKEKSourceEnv pins the P6-M1 fix: an
+// operator setting GRAINFS_KEK_SOURCE expecting an override must get a
+// clear refusal, not silent ignore. The env var was honored by the old
+// NodeConfig.KEKSource() helper but no production code path reads it
+// after the KEKStore migration.
+func TestWireDEKKeeper_RefusesLegacyKEKSourceEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GRAINFS_KEK_SOURCE", "file:///etc/grainfs/kek.key")
+
+	state := &bootState{cfg: Config{DataDir: dir}}
+	fsm := cluster.NewMetaFSM()
+	err := wireDEKKeeper(state, fsm)
+	if err == nil {
+		t.Fatal("wireDEKKeeper accepted GRAINFS_KEK_SOURCE in env")
+	}
+	if !strings.Contains(err.Error(), "GRAINFS_KEK_SOURCE") {
+		t.Errorf("error does not mention GRAINFS_KEK_SOURCE: %v", err)
+	}
 }
 
 // TestWireDEKKeeper_FreshBootStillAutoGenerates pins the fresh-boot

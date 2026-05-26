@@ -416,12 +416,17 @@ start_grainfs_cluster() {
   }
 
   start_grainfs_cluster_node 1
-  local kek_file="$cluster_dir/n1/kek.key"
+  local kek_file="$cluster_dir/n1/keys/0.key"
+  local cluster_id_file="$cluster_dir/n1/cluster.id"
   bench_wait_file "$kek_file" "grainfs-cluster node1 KEK" 100 0.2 >&2
+  bench_wait_file "$cluster_id_file" "grainfs-cluster node1 cluster.id" 100 0.2 >&2
   bench_bootstrap_iam_credentials "$BINARY" "$cluster_dir/n1" "bench-s3-compat-cluster" >&2
   for idx in $(seq 2 "$GRAINFS_CLUSTER_NODES"); do
-    cp "$kek_file" "$cluster_dir/n${idx}/kek.key"
-    chmod 600 "$cluster_dir/n${idx}/kek.key"
+    mkdir -p "$cluster_dir/n${idx}/keys"
+    cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"
+    chmod 600 "$cluster_dir/n${idx}/keys/0.key"
+    cp "$cluster_id_file" "$cluster_dir/n${idx}/cluster.id"
+    chmod 600 "$cluster_dir/n${idx}/cluster.id"
     printf '%s' "127.0.0.1:${raft_ports[0]}" >"$cluster_dir/n${idx}/.join-pending"
     chmod 600 "$cluster_dir/n${idx}/.join-pending"
     start_grainfs_cluster_node "$idx"

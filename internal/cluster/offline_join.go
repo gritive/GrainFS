@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -37,6 +38,14 @@ type OfflineJoinOptions struct {
 // PerformOfflineJoin executes the offline cluster-join handshake against
 // opts.Peer. The caller's ctx is wrapped with opts.Timeout.
 func PerformOfflineJoin(ctx context.Context, opts OfflineJoinOptions) error {
+	// Phase A no longer honors GRAINFS_KEK_SOURCE — the keystore is always
+	// at <dataDir>/keys/<V>.key (configurable via GRAINFS_KEK_DIR for tests).
+	// Refuse the env var consistently across boot paths so the operator gets
+	// the same error regardless of mode.
+	if v := os.Getenv("GRAINFS_KEK_SOURCE"); v != "" {
+		return fmt.Errorf("offline-join: GRAINFS_KEK_SOURCE is no longer supported (was: %q). Phase A uses <dataDir>/keys/<V>.key. Unset GRAINFS_KEK_SOURCE and stage your KEK at <dataDir>/keys/0.key (override the directory with GRAINFS_KEK_DIR if needed).", v)
+	}
+
 	nc := nodeconfig.New(opts.DataDir)
 	keysDir := nc.KEKDir()
 	// §7 T57 (F#21): a joining node MUST already hold the cluster's KEK

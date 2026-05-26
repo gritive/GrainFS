@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -32,6 +33,14 @@ import (
 // <dataDir>/cluster.id, and loaded on subsequent boots. Joiners receive
 // the file out-of-band (operator scp's it alongside the active KEK).
 func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
+	// Phase A no longer honors GRAINFS_KEK_SOURCE — the keystore is always
+	// at <dataDir>/keys/<V>.key (configurable via GRAINFS_KEK_DIR for tests).
+	// Surface a clear error if an operator still sets the legacy env var,
+	// rather than silently using the default path.
+	if v := os.Getenv("GRAINFS_KEK_SOURCE"); v != "" {
+		return fmt.Errorf("wireDEKKeeper: GRAINFS_KEK_SOURCE is no longer supported (was: %q). Phase A uses <dataDir>/keys/<V>.key. Unset GRAINFS_KEK_SOURCE and stage your KEK at <dataDir>/keys/0.key (override the directory with GRAINFS_KEK_DIR if needed).", v)
+	}
+
 	cfg := nodeconfig.New(state.cfg.DataDir)
 	keysDir := cfg.KEKDir()
 
