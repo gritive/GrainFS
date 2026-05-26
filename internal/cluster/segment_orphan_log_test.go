@@ -78,6 +78,26 @@ func TestSegmentOrphanLog_AbsentIsNotTombstoned(t *testing.T) {
 	}
 }
 
+// TestSegmentOrphanLog_CorruptValueErrors proves that TombstoneTime returns a
+// non-nil error when the stored value is not exactly 8 bytes. This exercises
+// the fail-closed guard the scrubber relies on to KEEP segments on bad data.
+func TestSegmentOrphanLog_CorruptValueErrors(t *testing.T) {
+	db := newTestBadger(t)
+	l := NewSegmentOrphanLog(db, "group-0")
+	c := chunkref.ChunkID("blob-corrupt")
+	// Write a 3-byte value directly via the unexported key() method so TombstoneTime
+	// encounters a corrupt (len≠8) record.
+	if err := db.Update(func(txn *badger.Txn) error {
+		return txn.Set(l.key(c), []byte{0x01, 0x02, 0x03})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := l.TombstoneTime(c)
+	if err == nil {
+		t.Fatal("TombstoneTime with corrupt (len=3) value must return non-nil error")
+	}
+}
+
 // TestSegmentOrphanLog_SurvivesFSMRestore proves that sgc: keys survive the
 // exact DropPrefix call that FSM.Restore makes on the group prefix. This is the
 // critical safety property: orphan-log entries must not be wiped by a Raft

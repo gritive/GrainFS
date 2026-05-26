@@ -319,14 +319,12 @@ func WithEmitter(e Emitter) ScrubberOption {
 
 // WithSegmentOrphanLog activates retention-windowed orphan-segment GC. The
 // backend MUST also supply snapshot-frozen paths (segmentManifestSource) per the
-// activation constraint, else a snapshot-pinned chunk could be swept. window<=0
-// keeps age-gate-only behavior (no retention delay), but with a wired log the
-// reconcile/observe paths still run.
+// activation constraint, else a snapshot-pinned chunk could be swept.
+// window<=0 disables retention gating (only the walker age-gate applies); the reconcile and observe paths still run so the log stays consistent.
 //
 // t_zero is the first WALK observation of an unreferenced segment, NOT the
 // instant it was first unreferenced. The effective grace before deletion is
-// therefore walker age-gate (≈5m) + retention window + cycle timing. window<=0
-// leaves only the age-gate.
+// therefore walker age-gate (≈5m) + retention window + cycle timing.
 func WithSegmentOrphanLog(log segmentOrphanLog, window time.Duration) ScrubberOption {
 	return func(s *BackgroundScrubber) { s.orphanLog = log; s.orphanRetention = window }
 }
@@ -661,7 +659,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		// mark a committed segment orphan. Skip the whole segment sweep this cycle.
 		if cu, ok := s.backend.(caughtUpReporter); ok && !cu.CaughtUp(ctx) {
 			log.Warn().Msg("scrub: node not caught up, skipping orphan-segment sweep this cycle")
-		} else if segByBucket, frozenByBucket, ok := s.hoistSegmentSources(); ok {
+		} else if segByBucket, frozenByBucket, sourcesOK := s.hoistSegmentSources(); sourcesOK {
 			// (G) reconcile: a segment in the known-set is referenced -> must not
 			// carry a t_zero. Clear stale entries (covers re-reference across
 			// restart) before observing/sweeping.

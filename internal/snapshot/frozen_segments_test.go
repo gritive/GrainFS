@@ -8,6 +8,22 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// TestAllFrozenSegmentPaths_EmptyDir verifies that an empty snapshot directory
+// returns a non-nil map (safe for callers to range over) and no error.
+func TestAllFrozenSegmentPaths_EmptyDir(t *testing.T) {
+	m, err := NewManager(t.TempDir(), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.AllFrozenSegmentPaths()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("AllFrozenSegmentPaths must return a non-nil map for an empty dir")
+	}
+}
+
 func TestAllFrozenSegmentPaths_PathFormAndGrouping(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewManager(dir, nil, "")

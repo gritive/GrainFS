@@ -98,7 +98,7 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 		if !strings.HasPrefix(p, bucket+"/") {
 			continue
 		}
-		blobID := chunkref.ChunkID(p[strings.LastIndex(p, "/")+1:])
+		blobID := chunkref.ChunkID(blobIDOf(p))
 		if _, still := currentSet[p]; !still {
 			delete(s.segmentTombstone, p)
 			if s.orphanLog != nil {
@@ -128,7 +128,7 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 		delete(s.segmentTombstone, p)
 		deletedThisCycle[p] = struct{}{}
 		if s.orphanLog != nil {
-			_ = s.orphanLog.Forget(blobID)
+			_ = s.orphanLog.Forget(blobID) // best-effort: segment already deleted; a Forget failure just extends the window one cycle
 		}
 		metrics.OrphanSegmentsDeletedTotal.Inc()
 		capRemaining--
@@ -146,7 +146,7 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 		if _, gone := deletedThisCycle[p]; gone {
 			continue // deleted above; don't re-observe a fresh t_zero
 		}
-		blobID := chunkref.ChunkID(p[strings.LastIndex(p, "/")+1:])
+		blobID := chunkref.ChunkID(blobIDOf(p))
 		if s.orphanLog != nil {
 			if err := s.orphanLog.Observe(blobID, time.Now()); err != nil { // (B) fail-closed: don't tombstone w/o t_zero
 				log.Warn().Str("path", p).Err(err).Msg("scrub: orphan-log observe failed, deferring tombstone")

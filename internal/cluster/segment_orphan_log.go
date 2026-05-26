@@ -122,8 +122,7 @@ func (l *SegmentOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, e
 	return t, ok, err
 }
 
-// NewSegmentOrphanLog returns a node-local orphan-segment t_zero log bound to
-// this backend's Badger handle and group.
+// NewSegmentOrphanLog returns an orphan log bound to this backend's Badger DB and groupID.
 func (b *DistributedBackend) NewSegmentOrphanLog() *SegmentOrphanLog {
 	return NewSegmentOrphanLog(b.db, b.groupID)
 }
