@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -777,31 +776,8 @@ func (f *FSM) applyAppendObjectFromCmd(txn *badger.Txn, data []byte) error {
 		return fmt.Errorf("get existing objectMeta: %w", gerr)
 	}
 
-	// Placement check: cmd captured PG at propose time; reject if the
-	// existing object's PG has moved since (rebalance window).
-	if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
-		cmd.PlacementGroupID != existing.PlacementGroupID {
-		return ErrStalePlacement
-	}
-
-	// TODO(Phase 2): Phase 1 dropped SegmentRef.ETag. Cluster still
-	// receives a hex-encoded MD5 in cmd.SegmentETag; stash it in
-	// Checksum so the FB segment vector keeps the digest. Phase 2 will
-	// migrate cluster to xxhash3 like the storage layer.
-	segDigest, _ := hex.DecodeString(cmd.SegmentETag)
-	seg := storage.SegmentRef{
-		BlobID:   cmd.BlobID,
-		Size:     cmd.SegmentSize,
-		Checksum: segDigest,
-	}
-
-	// Idempotency: same BlobID already applied (Raft replay) → no-op.
-	if existing != nil {
-		for _, s := range existing.Segments {
-			if s.BlobID == cmd.BlobID {
-				return nil
-			}
-		}
+	if appendObjectCommandAlreadyApplied(existing, cmd.BlobID) {
+		return nil
 	}
 
 	existingVersionID := ""
@@ -820,70 +796,21 @@ func (f *FSM) applyAppendObjectFromCmd(txn *badger.Txn, data []byte) error {
 		}
 	}
 
-	var updated objectMeta
-	if existing == nil {
-		if cmd.ExpectedOffset != 0 {
-			return storage.ErrAppendOffsetMismatch
-		}
-		// TODO(Task 3.1 / Phase 2): wire AppendCallMD5s on the cluster side
-		// so Object.ETag composes from per-call MD5 digests instead of from
-		// the segment vector. For now reuse segDigest as the single-call
-		// digest to preserve appendable-ETag semantics on first call.
-		updated = objectMeta{
-			Key:              cmd.Key,
-			Size:             seg.Size,
-			ContentType:      "application/octet-stream",
-			ETag:             storage.CompositeETag([][]byte{segDigest}),
-			LastModified:     modifiedUnixSec,
-			PlacementGroupID: cmd.PlacementGroupID,
-			Segments:         []storage.SegmentRef{seg},
-			IsAppendable:     true,
-		}
-	} else {
-		if existing.Size != cmd.ExpectedOffset {
-			return storage.ErrAppendOffsetMismatch
-		}
-		if len(existing.Segments) >= storage.MaxAppendSegments {
-			return storage.ErrAppendCapExceeded
-		}
-		// Size cap (design 2026-05-19 § Follow-up 2): deterministic, FSM-side
-		// authoritative. Coordinator pre-check may have passed (stale HeadObject),
-		// but the Raft entry sees the freshest committed state. Pre-check
-		// tolerance contract: false-positive (accept what we reject) is fine —
-		// caller retries are idempotent on BlobID; false-negative (reject what we
-		// would have accepted) is FORBIDDEN because the FSM is the single source
-		// of truth.
-		//
-		// On reject, the segment blob already written by the coordinator becomes
-		// an orphan. Best-effort cleanup; full scrubber sweep is a follow-up
-		// (TODOS.md "Scrubber orphan sweep production wiring [P1]").
-		if coalesceCfg.SizeCapBytes > 0 &&
-			existing.Size+seg.Size > coalesceCfg.SizeCapBytes {
-			metrics.AppendSizeCapRejectedTotal.Inc()
-			return storage.ErrAppendObjectTooLarge
-		}
-		segs := append(existing.Segments, seg)
-		updated = *existing
-		if !updated.IsAppendable {
-			updated.IsAppendable = true
-			if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
-				updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, existingVersionID, existing)}
-			}
-		}
-		updated.Segments = segs
-		updated.Size = existing.Size + seg.Size
-		// TODO(Task 3.1 / Phase 2): once cluster persists AppendCallMD5s,
-		// recompute Object.ETag from those per-call digests. For now,
-		// rebuild from the per-segment digests in Checksum to preserve
-		// the legacy "ETag changes per append" wire semantic.
-		callDigests := make([][]byte, 0, len(segs))
-		for _, s := range segs {
-			if len(s.Checksum) > 0 {
-				callDigests = append(callDigests, s.Checksum)
-			}
-		}
-		updated.ETag = storage.CompositeETag(callDigests)
-		updated.LastModified = modifiedUnixSec
+	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
+		Existing:          existing,
+		ExistingVersionID: existingVersionID,
+		Cmd:               cmd,
+		ModifiedUnixSec:   modifiedUnixSec,
+		CoalesceCfg:       coalesceCfg,
+	})
+	if result.Noop {
+		return nil
+	}
+	if result.SizeCapRejected {
+		metrics.AppendSizeCapRejectedTotal.Inc()
+	}
+	if err != nil {
+		return err
 	}
 
 	out, err := marshalObjectMeta(updated)
