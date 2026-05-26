@@ -96,25 +96,6 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 	return plan, nil
 }
 
-func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
-	group, ok := PlacementGroupEntryFromContext(ctx)
-	if !ok {
-		groupID, _ := PlacementGroupFromContext(ctx)
-		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
-			Operation:     operation,
-			GroupID:       groupID,
-			FailureReason: "full placement group not present in write context",
-		}
-	}
-	groupID, _ := PlacementGroupFromContext(ctx)
-	return objectWritePlacementTargetsForGroup(operation, group, groupID)
-}
-
-func objectWritePlacementConfigFromContext(ctx context.Context, operation string) (ECConfig, error) {
-	_, cfg, err := placementTargetsFromContext(ctx, operation)
-	return cfg, err
-}
-
 func objectWritePlacementTargetsForGroup(operation string, group ShardGroupEntry, groupID string) (ShardGroupEntry, ECConfig, error) {
 	if group.ID == "" {
 		group.ID = groupID

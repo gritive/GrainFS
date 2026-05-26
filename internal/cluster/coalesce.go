@@ -423,15 +423,3 @@ func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
 		})
 	})
 }
-
-// evaluateCoalesceTrigger returns (trigger, reason) for the given segment
-// snapshot. Pure function — no side effects.
-//
-// firstCreatedAt is the timestamp of segments[0] (or the first observed
-// time). Caller passes the wall clock for idle comparison (testable).
-//
-// Precedence: count → size → idle. The first satisfied condition wins.
-func evaluateCoalesceTrigger(segs []storage.SegmentRef, firstCreatedAt, now time.Time, cfg CoalesceConfig) (bool, string) {
-	plan := planCoalesceTrigger(segs, firstCreatedAt, now, cfg)
-	return plan.ShouldEnqueue, plan.Reason
-}
