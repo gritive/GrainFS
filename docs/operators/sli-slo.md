@@ -176,10 +176,14 @@ keep working via read-time EC reconstruction while the worker drains.
   becomes data loss.
 - `grainfs_datawal_startup_repair_skips_total{reason}` (Counter) — candidates skipped
   before repair (`reason`: `no_group`, `no_backend`, `invalid_shard_key`,
-  `placement_corrupt`, `not_local_owner`, `stale`, `unsupported_shardkey`).
-  `unsupported_shardkey` counts segment/coalesced large-object shards that startup
-  repair does not yet resolve (tracked in TODOS.md); those remain covered by
-  read-time EC reconstruction and scrub.
+  `placement_corrupt`, `not_local_owner`, `stale`, `placement_scan_capped`).
+  `placement_scan_capped` means the resolver hit the 1000-version scan cap while
+  looking for the owning SegmentRef/CoalescedShardRef; those shards stay covered by
+  read-time EC reconstruction. Startup repair now resolves segment
+  (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) shard keys
+  directly; the `unsupported_shardkey` label is retired and no longer emitted. The
+  rare marker-collision case (an S3 object key literally containing `/segments/` or
+  `/coalesced/`) folds into the `stale` reason instead.
 
 ---
 

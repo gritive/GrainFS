@@ -24,24 +24,17 @@ type dataWALStartupRepairer interface {
 	RepairDataWALStartupCandidate(context.Context, cluster.DataWALRepairCandidate) dataWALStartupRepairResult
 }
 
+// splitDataWALStartupRepairShardKey is intentionally KEPT (not replaced by
+// cluster.ClassifyStartupRepairShardKey): the placement monitor in
+// boot_phases_scrubber.go (OnMissing/OnCorrupt) still uses it for the
+// object-version-only repair path. Migrating that path to segment/coalesced
+// repair is the deferred scrub follow-up tracked in TODOS.md.
 func splitDataWALStartupRepairShardKey(shardKey string) (string, string) {
 	objectKey, versionID := shardKey, ""
 	if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {
 		objectKey, versionID = shardKey[:i], shardKey[i+1:]
 	}
 	return objectKey, versionID
-}
-
-// isUnsupportedStartupRepairShardKey reports whether a shard key uses the
-// segment ("<key>/segments/<blobID>") or coalesced ("<key>/coalesced/<id>")
-// form. Startup repair cannot yet resolve placement for these (it lives in
-// segment metadata, not object-version metadata), so the worker skips them.
-// A false positive (an object literally named ".../segments/...") only causes
-// a benign skip — the shard stays covered by read-time EC reconstruction.
-// TODO(datawal-startup-repair): resolve segment/coalesced placement and repair
-// these shards (tracked in TODOS.md).
-func isUnsupportedStartupRepairShardKey(shardKey string) bool {
-	return strings.Contains(shardKey, "/segments/") || strings.Contains(shardKey, "/coalesced/")
 }
 
 func classifyDataWALStartupRepairFailure(err error) string {
@@ -74,6 +67,7 @@ type dataWALStartupRepairRuntime struct {
 	router           *cluster.Router
 	incidentRecorder cluster.IncidentRecorder
 	receiptWiring    *HealReceiptWiring
+	scanCache        *cluster.ShardKeyPlacementScanCache
 }
 
 func (r dataWALStartupRepairRuntime) RepairDataWALStartupCandidate(ctx context.Context, candidate cluster.DataWALRepairCandidate) dataWALStartupRepairResult {
@@ -87,14 +81,22 @@ func (r dataWALStartupRepairRuntime) RepairDataWALStartupCandidate(ctx context.C
 		metrics.DataWALStartupRepairSkips.WithLabelValues("no_backend").Inc()
 		return dataWALStartupRepairResult{Skipped: "no_backend"}
 	}
-	if isUnsupportedStartupRepairShardKey(candidate.ShardKey) {
-		metrics.DataWALStartupRepairSkips.WithLabelValues("unsupported_shardkey").Inc()
-		return dataWALStartupRepairResult{Skipped: "unsupported_shardkey"}
+	rec, skipReason, err := gb.ResolveShardKeyPlacement(ctx, candidate.Bucket, candidate.ShardKey, r.scanCache)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			metrics.DataWALStartupRepairFailures.WithLabelValues("context_canceled").Inc()
+			return dataWALStartupRepairResult{Failed: "context_canceled"}
+		}
+		metrics.DataWALStartupRepairSkips.WithLabelValues("placement_corrupt").Inc()
+		return dataWALStartupRepairResult{Skipped: "placement_corrupt"}
 	}
-	objectKey, versionID := splitDataWALStartupRepairShardKey(candidate.ShardKey)
-	rec, lookupErr := gb.FSMRef().LookupObjectPlacement(candidate.Bucket, objectKey, versionID)
+	if skipReason != "" {
+		metrics.DataWALStartupRepairSkips.WithLabelValues(skipReason).Inc()
+		return dataWALStartupRepairResult{Skipped: skipReason}
+	}
+	objectKey, kind, id := cluster.ClassifyStartupRepairShardKey(candidate.ShardKey)
 	cfg := rec.ECConfigOrFallback(gb.CurrentECConfigForStartupRepair())
-	skip := classifyDataWALStartupRepairPlacement(objectKey, candidate.ShardIdx, rec, cfg, lookupErr, gb.NodeID())
+	skip := classifyDataWALStartupRepairPlacement(objectKey, candidate.ShardIdx, rec, cfg, gb.NodeID())
 	if skip != "" {
 		metrics.DataWALStartupRepairSkips.WithLabelValues(skip).Inc()
 		return dataWALStartupRepairResult{Skipped: skip}
@@ -104,10 +106,15 @@ func (r dataWALStartupRepairRuntime) RepairDataWALStartupCandidate(ctx context.C
 	repairReq := cluster.IncidentRepairRequest{
 		Bucket:        candidate.Bucket,
 		Key:           objectKey,
-		VersionID:     versionID,
 		ShardIdx:      candidate.ShardIdx,
 		Recorder:      r.incidentRecorder,
 		CorrelationID: correlationID,
+	}
+	if kind == cluster.ShardKindObjectVersion {
+		repairReq.VersionID = id
+	} else {
+		repairReq.ShardKey = candidate.ShardKey
+		repairReq.Placement = rec
 	}
 	metrics.DataWALStartupRepairAttempts.Inc()
 	if err := gb.RepairShardLocalWithIncident(ctx, repairReq); err != nil {
@@ -128,12 +135,9 @@ func (r dataWALStartupRepairRuntime) RepairDataWALStartupCandidate(ctx context.C
 	return dataWALStartupRepairResult{Repaired: true}
 }
 
-func classifyDataWALStartupRepairPlacement(objectKey string, shardIdx int, rec cluster.PlacementRecord, cfg cluster.ECConfig, lookupErr error, nodeID string) string {
+func classifyDataWALStartupRepairPlacement(objectKey string, shardIdx int, rec cluster.PlacementRecord, cfg cluster.ECConfig, nodeID string) string {
 	if objectKey == "" || shardIdx < 0 {
 		return "invalid_shard_key"
-	}
-	if lookupErr != nil {
-		return "placement_corrupt"
 	}
 	if len(rec.Nodes) == 0 {
 		return "stale"
@@ -195,6 +199,7 @@ func startDataWALStartupRepairWorker(ctx context.Context, state *bootState) {
 		router:           state.clusterRouter,
 		incidentRecorder: clusterIncidentRecorder,
 		receiptWiring:    state.receiptWiring,
+		scanCache:        cluster.NewShardKeyPlacementScanCache(),
 	}
 	// Fire-and-forget, intentionally untracked: serving must not wait for repair.
 	// Best-effort — if the process exits or the worker is interrupted before a
