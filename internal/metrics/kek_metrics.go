@@ -34,6 +34,14 @@ type kekLeaseReader interface {
 	Snapshot() map[uint32]uint64
 }
 
+// kekLifecycleReader is the subset of *cluster.MetaFSM the collector needs to
+// report retired_count. The FSM lifecycle table is the source of truth for
+// retiring/pruned status, the same source the admin status endpoint renders —
+// so the metric and the JSON agree by construction.
+type kekLifecycleReader interface {
+	RetiredKEKVersionCount() int
+}
+
 var (
 	kekActiveVersionDesc = prometheus.NewDesc(
 		"grainfs_kek_active_version",
@@ -52,24 +60,26 @@ var (
 	)
 	kekRetiredCountDesc = prometheus.NewDesc(
 		"grainfs_kek_retired_count",
-		"Number of non-active KEK versions the keeper still tracks (versions rotated away from).",
+		"Number of KEK versions in retiring or pruned lifecycle state.",
 		nil, nil,
 	)
 )
 
 // kekCollector reads live KEK state at scrape time. keeper may be nil
-// (encryption disabled / Phase A) — Collect then emits nothing. tracker may be
-// nil independently; lease counts are then omitted (seal counts still emit).
+// (encryption disabled / Phase A) — Collect then emits nothing. tracker and
+// lifecycle may each be nil independently; the corresponding metric is then
+// omitted (seal counts still emit).
 type kekCollector struct {
-	keeper  kekSealReader
-	tracker kekLeaseReader
+	keeper    kekSealReader
+	tracker   kekLeaseReader
+	lifecycle kekLifecycleReader
 }
 
-// NewKEKCollector builds the collector. keeper and tracker are the live
-// sources; either may be nil. Register the result with prometheus.MustRegister
-// once at boot (see RegisterKEKCollector).
-func NewKEKCollector(keeper kekSealReader, tracker kekLeaseReader) prometheus.Collector {
-	return &kekCollector{keeper: keeper, tracker: tracker}
+// NewKEKCollector builds the collector. keeper, tracker, and lifecycle are the
+// live sources; any may be nil. Register the result once at boot (see
+// RegisterKEKCollector).
+func NewKEKCollector(keeper kekSealReader, tracker kekLeaseReader, lifecycle kekLifecycleReader) prometheus.Collector {
+	return &kekCollector{keeper: keeper, tracker: tracker, lifecycle: lifecycle}
 }
 
 // RegisterKEKCollector registers a KEK collector on the default registry. A nil
@@ -80,11 +90,11 @@ func NewKEKCollector(keeper kekSealReader, tracker kekLeaseReader) prometheus.Co
 // test process) returns prometheus.AlreadyRegisteredError, which is swallowed.
 // Production boots exactly once. Uses Register (not MustRegister) so a repeat
 // registration does not panic.
-func RegisterKEKCollector(keeper kekSealReader, tracker kekLeaseReader) {
+func RegisterKEKCollector(keeper kekSealReader, tracker kekLeaseReader, lifecycle kekLifecycleReader) {
 	if keeper == nil {
 		return
 	}
-	if err := prometheus.Register(NewKEKCollector(keeper, tracker)); err != nil {
+	if err := prometheus.Register(NewKEKCollector(keeper, tracker, lifecycle)); err != nil {
 		var already prometheus.AlreadyRegisteredError
 		if !errors.As(err, &already) {
 			panic(fmt.Errorf("RegisterKEKCollector: %w", err))
@@ -107,16 +117,21 @@ func (c *kekCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(kekActiveVersionDesc, prometheus.GaugeValue, float64(active))
 
 	seals := c.keeper.SealCountSnapshot()
-	retired := 0
 	for v, count := range seals {
 		ch <- prometheus.MustNewConstMetric(
 			kekSealCountDesc, prometheus.CounterValue, float64(count), kekVerLabel(v),
 		)
-		if v != active {
-			retired++
-		}
 	}
-	ch <- prometheus.MustNewConstMetric(kekRetiredCountDesc, prometheus.GaugeValue, float64(retired))
+
+	// retired_count comes from the FSM lifecycle table (retiring/pruned), NOT
+	// from the seal snapshot — a version rotated away from is "previous active",
+	// not "retired", until an operator runs `encrypt kek retire`. Omitted (not
+	// 0) when no lifecycle source is wired, matching active_version's behaviour.
+	if c.lifecycle != nil {
+		ch <- prometheus.MustNewConstMetric(
+			kekRetiredCountDesc, prometheus.GaugeValue, float64(c.lifecycle.RetiredKEKVersionCount()),
+		)
+	}
 
 	if c.tracker != nil {
 		for v, count := range c.tracker.Snapshot() {

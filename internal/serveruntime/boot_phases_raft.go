@@ -323,11 +323,12 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 	}
 	// Register the live KEK Prometheus collector now that state.dekKeeper is
 	// final (rebuildDEKKeeperFromRestore may have swapped it during preApply).
-	// The collector reads the keeper + lease tracker at scrape time, so
-	// grainfs_kek_seal_count is scrape-fresh on /metrics. No-op when encryption
-	// is disabled (nil keeper).
+	// The collector reads the keeper + lease tracker + FSM lifecycle table at
+	// scrape time, so grainfs_kek_seal_count is scrape-fresh on /metrics and
+	// grainfs_kek_retired_count agrees with the admin status JSON. No-op when
+	// encryption is disabled (nil keeper).
 	if state.dekKeeper != nil {
-		metrics.RegisterKEKCollector(state.dekKeeper, state.kekLeaseTracker)
+		metrics.RegisterKEKCollector(state.dekKeeper, state.kekLeaseTracker, state.metaRaft.FSM())
 	}
 	// previous.key cleanup goroutine — deletes keys.d/previous.key after
 	// RotationPreviousGrace expires. Runs on all nodes (FSM state is

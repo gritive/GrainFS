@@ -321,6 +321,12 @@ func (k *DEKKeeper) ActiveKEKVersion() uint32 { return k.activeKEKVer.Load() }
 // for each retired version plus the live running count for the current active
 // version. Off the hot path (Prometheus scrape via the KEK collector) — reads
 // activeKEKVer + activeSeals atomics and the retiredSeals map under its RLock.
+//
+// Transient race (acceptable for a diagnostic): a concurrent OnKEKRotation
+// between the Load of activeKEKVer and activeSeals can momentarily overwrite a
+// just-frozen retired count with 0 in the returned map; the next scrape
+// self-corrects. Locking would have to span the hot-path atomics, so it is
+// deliberately not added.
 func (k *DEKKeeper) SealCountSnapshot() map[uint32]uint64 {
 	active := k.activeKEKVer.Load()
 	live := k.activeSeals.Load()
