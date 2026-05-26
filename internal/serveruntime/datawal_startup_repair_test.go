@@ -59,8 +59,11 @@ func TestDataWALStartupRepairWorkerRunsSerially(t *testing.T) {
 
 func TestClassifyDataWALStartupRepairFailure(t *testing.T) {
 	require.Equal(t, "context_canceled", classifyDataWALStartupRepairFailure(context.Canceled))
-	require.Equal(t, "insufficient_survivors", classifyDataWALStartupRepairFailure(assertErr("only 2 other shards readable")))
+	// Verbatim production error from internal/cluster/backend.go.
+	require.Equal(t, "insufficient_survivors", classifyDataWALStartupRepairFailure(assertErr("repair: only 1/2 other shards readable, need 2")))
 	require.Equal(t, "repair_failed", classifyDataWALStartupRepairFailure(assertErr("disk failed")))
+	// Prove the old broad "only " arm is gone: this must NOT match insufficient_survivors.
+	require.Equal(t, "repair_failed", classifyDataWALStartupRepairFailure(assertErr("operation only valid on leader")))
 }
 
 type assertErr string
@@ -103,6 +106,26 @@ func TestDataWALStartupRepairWorkerStopsOnCancel(t *testing.T) {
 		require.Equal(t, "context_canceled", got[0].Failed)
 		require.Equal(t, 1, calls, "repairer should only be called once before stopping")
 	})
+}
+
+// TestWriteDataWALStartupRepairReceipt_NilGuards verifies that the function
+// returns silently (no panic) when wiring is nil or its Store/KeyStore are nil.
+// The gb *cluster.DistributedBackend arg is nil because the guard returns before
+// gb is accessed.
+func TestWriteDataWALStartupRepairReceipt_NilGuards(t *testing.T) {
+	req := cluster.IncidentRepairRequest{
+		Bucket:    "b",
+		Key:       "obj",
+		VersionID: "v1",
+		ShardIdx:  0,
+	}
+	ctx := context.Background()
+
+	// nil wiring: must not panic
+	writeDataWALStartupRepairReceipt(ctx, nil, nil, req, "corr-1")
+
+	// non-nil wiring with nil Store (Store() returns nil because store field is nil)
+	writeDataWALStartupRepairReceipt(ctx, nil, &HealReceiptWiring{}, req, "corr-2")
 }
 
 func TestDataWALStartupRepairRuntimeSkipsNoGroup(t *testing.T) {

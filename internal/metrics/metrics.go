@@ -551,6 +551,11 @@ var (
 		Help: "Successful startup data WAL EC shard repairs.",
 	})
 
+	// DataWALStartupRepairFailures reason label values:
+	//   context_canceled       — repair context was canceled
+	//   insufficient_survivors — too few EC shards readable for reconstruction
+	//   repair_failed          — other repair error
+	//   panic                  — worker goroutine panicked
 	DataWALStartupRepairFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_datawal_startup_repair_failures_total",
 		Help: "Failed startup data WAL EC shard repairs.",

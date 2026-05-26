@@ -36,7 +36,7 @@ func classifyDataWALStartupRepairFailure(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "context_canceled"
 	}
-	if err != nil && (strings.Contains(err.Error(), "other shards readable") || strings.Contains(err.Error(), "only ")) {
+	if err != nil && strings.Contains(err.Error(), "other shards readable") {
 		return "insufficient_survivors"
 	}
 	return "repair_failed"
@@ -180,15 +180,16 @@ func startDataWALStartupRepairWorker(ctx context.Context, state *bootState) {
 		incidentRecorder: clusterIncidentRecorder,
 		receiptWiring:    state.receiptWiring,
 	}
-	// Fire-and-forget: the worker is intentionally untracked and non-blocking.
-	// Serving must never wait for repair to complete. If the process terminates
-	// mid-receipt, the candidate is simply re-discovered on the next startup WAL
-	// scan — repair is idempotent (RepairShardLocalWithIncident verifies the
-	// local target before/after reconstruction).
+	// Fire-and-forget, intentionally untracked: serving must not wait for repair.
+	// Best-effort — if the process exits or the worker is interrupted before a
+	// candidate is repaired, the shard is NOT re-discovered from the WAL next boot
+	// (datawal.Recover advances its checkpoint after replay). It remains covered by
+	// read-time EC reconstruction and, when enabled, scrub/placement-monitor repair.
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Error().Interface("panic", rec).Msg("startup data WAL repair worker panicked; aborting (candidates re-discovered on next startup scan)")
+				log.Error().Interface("panic", rec).Msg("startup data WAL repair worker panicked")
+				metrics.DataWALStartupRepairFailures.WithLabelValues("panic").Inc()
 			}
 		}()
 		log.Info().Int("candidates", len(candidates)).Msg("startup data WAL repair worker started")

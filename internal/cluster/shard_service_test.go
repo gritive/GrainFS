@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1209,6 +1211,32 @@ func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *test
 		ExpectedSize: int64(walPayloadInlineThreshold),
 		Reason:       DataWALRepairSizeMismatch,
 	}}, collector.Candidates())
+}
+
+func TestDataWALRepairCollector_ConcurrentAddIsRaceFree(t *testing.T) {
+	collector := NewDataWALRepairCollector()
+
+	const goroutines = 50
+	// Keys 0..39 are distinct; keys 40..49 duplicate key "0".
+	// Distinct key count is 40.
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		key := strconv.Itoa(i % 40)
+		go func() {
+			defer wg.Done()
+			collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+				Bucket:   "b",
+				ShardKey: key,
+				ShardIdx: 0,
+				Reason:   DataWALRepairMissing,
+			})
+		}()
+	}
+	wg.Wait()
+
+	require.Len(t, collector.Candidates(), 40)
 }
 
 func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T) {
