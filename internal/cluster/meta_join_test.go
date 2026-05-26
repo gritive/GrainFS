@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/ed25519"
 	"reflect"
 	"sync"
 	"testing"
@@ -188,6 +189,21 @@ func (f *fakeJoinCoordinator) Join(ctx context.Context, id, addr string) error {
 }
 func (f *fakeJoinCoordinator) Nodes() []MetaNodeEntry {
 	return f.fsm.Nodes()
+}
+func (f *fakeJoinCoordinator) IsSPKIDenylisted(spki [32]byte) bool {
+	return f.fsm.peers.isDenylisted(spki)
+}
+func (f *fakeJoinCoordinator) SPKIOwner(spki [32]byte) (string, bool) {
+	return f.fsm.peers.spkiOwner(spki)
+}
+func (f *fakeJoinCoordinator) LookupInvite(id string, now time.Time) (ed25519.PublicKey, bool) {
+	return f.fsm.invites.lookup(id, now)
+}
+func (f *fakeJoinCoordinator) AcceptSPKIBytes() [][]byte {
+	return f.fsm.peers.acceptSPKIBytes()
+}
+func (f *fakeJoinCoordinator) JoinViaInvite(ctx context.Context, nodeID, addr string, spki [32]byte, inviteID string) error {
+	return f.Join(ctx, nodeID, addr)
 }
 
 func (f *fakeJoinCoordinator) JoinCalls() int {

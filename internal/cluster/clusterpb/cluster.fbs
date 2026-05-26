@@ -956,11 +956,23 @@ enum JoinStatus : byte {
   KEKMismatch   = 9,
 }
 
+// SPKIBytes wraps a single SPKI ([ubyte]) so JoinReply can carry a vector of
+// them (FlatBuffers forbids a direct vector-of-vectors). Zero-CA Phase 2 §4.2.
+table SPKIBytes {
+  value : [ubyte];
+}
+
 table JoinRequest {
   node_id            : string;
   address            : string;
   handshake_nonce    : [ubyte];
   handshake_response : [ubyte];
+  // Invite path (brand-new node, asymmetric — Path A: cert in request).
+  spki       : [ubyte];   // sha256(SubjectPublicKeyInfo) of the joiner
+  cert_der   : [ubyte];   // joiner per-node leaf cert DER (Path A)
+  node_sig   : [ubyte];   // ECDSA over the invite transcript
+  invite_sig : [ubyte];   // Ed25519 over the SAME transcript
+  invite_id  : string;
 }
 
 table JoinReply {
@@ -969,6 +981,7 @@ table JoinReply {
   message     : string;
   leader_id   : string;
   leader_addr : string;
+  peer_spkis  : [SPKIBytes]; // accept-set delivered at commit1 (no KEK)
 }
 
 // ChallengeRequest is sent by a joining node to a peer to obtain a fresh

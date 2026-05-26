@@ -143,6 +143,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	// passes iff the joiner holds the same KEK.
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
 		WithHandshakeVerifier(state.handshakeVerifier).
+		WithClusterID(state.handshakeVerifier.ClusterID()).
 		WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
 			if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
 				return err

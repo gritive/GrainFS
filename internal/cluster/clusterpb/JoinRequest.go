@@ -125,8 +125,152 @@ func (rcv *JoinRequest) MutateHandshakeResponse(j int, n byte) bool {
 	return false
 }
 
+func (rcv *JoinRequest) Spki(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) SpkiLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) SpkiBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *JoinRequest) MutateSpki(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+func (rcv *JoinRequest) CertDer(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) CertDerLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) CertDerBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *JoinRequest) MutateCertDer(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+func (rcv *JoinRequest) NodeSig(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) NodeSigLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) NodeSigBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *JoinRequest) MutateNodeSig(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+func (rcv *JoinRequest) InviteSig(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) InviteSigLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) InviteSigBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *JoinRequest) MutateInviteSig(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+func (rcv *JoinRequest) InviteId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func JoinRequestStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(9)
 }
 func JoinRequestAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
@@ -145,6 +289,33 @@ func JoinRequestAddHandshakeResponse(builder *flatbuffers.Builder, handshakeResp
 }
 func JoinRequestStartHandshakeResponseVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
+}
+func JoinRequestAddSpki(builder *flatbuffers.Builder, spki flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(spki), 0)
+}
+func JoinRequestStartSpkiVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func JoinRequestAddCertDer(builder *flatbuffers.Builder, certDer flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(certDer), 0)
+}
+func JoinRequestStartCertDerVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func JoinRequestAddNodeSig(builder *flatbuffers.Builder, nodeSig flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(nodeSig), 0)
+}
+func JoinRequestStartNodeSigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func JoinRequestAddInviteSig(builder *flatbuffers.Builder, inviteSig flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(inviteSig), 0)
+}
+func JoinRequestStartInviteSigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func JoinRequestAddInviteId(builder *flatbuffers.Builder, inviteId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(inviteId), 0)
 }
 func JoinRequestEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
