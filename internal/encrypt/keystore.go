@@ -1,10 +1,17 @@
 package encrypt
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 )
 
 // ErrKEKVersionUnknown is returned by Get/Delete when the requested version
@@ -119,5 +126,159 @@ func (s *KEKStore) Delete(version uint32) error {
 		bytes[i] = 0
 	}
 	delete(s.keys, version)
+	return nil
+}
+
+// ErrLegacyKEKDetected indicates the on-disk layout still has the pre-v1
+// single-file kek.key alongside the new keys/ directory. The caller MUST
+// refuse boot — silently migrating would conflict with the green-field
+// cutover invariants of a later phase.
+var ErrLegacyKEKDetected = errors.New("legacy kek.key file detected; refusing to boot in Phase A. Green-field cutover required.")
+
+// parseKeyFilename accepts "<uint32>.key" and rejects everything else.
+// Centralised so the parser stays consistent with the writer.
+func parseKeyFilename(name string) (uint32, bool) {
+	if !strings.HasSuffix(name, ".key") {
+		return 0, false
+	}
+	stem := strings.TrimSuffix(name, ".key")
+	v, err := strconv.ParseUint(stem, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(v), true
+}
+
+// LoadOrInitKEKStoreDir loads all `<V>.key` files from keysDir into a fresh
+// KEKStore. If the directory is missing or empty, it generates a fresh
+// version 0 KEK and persists it. Refuses boot if a legacy `kek.key` exists
+// at the sibling path (parent of keysDir), to prevent silent migration
+// ambiguity.
+//
+// File invariants:
+//   - Files are exactly KEKSize bytes (32).
+//   - Mode must be 0o600 (operator's responsibility to maintain).
+//   - No symlinks (O_NOFOLLOW).
+func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
+	parent := filepath.Dir(keysDir)
+	legacy := filepath.Join(parent, "kek.key")
+	if _, err := os.Stat(legacy); err == nil {
+		return nil, fmt.Errorf("%w: %s", ErrLegacyKEKDetected, legacy)
+	}
+
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		return nil, fmt.Errorf("KEKStore: mkdir %q: %w", keysDir, err)
+	}
+
+	entries, err := os.ReadDir(keysDir)
+	if err != nil {
+		return nil, fmt.Errorf("KEKStore: read %q: %w", keysDir, err)
+	}
+
+	s := NewKEKStore()
+	loaded := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		v, ok := parseKeyFilename(e.Name())
+		if !ok {
+			continue // ignore other files (operator notes, etc.)
+		}
+		path := filepath.Join(keysDir, e.Name())
+		kek, err := readKEKFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.Add(v, kek); err != nil {
+			return nil, fmt.Errorf("KEKStore: add v=%d from %s: %w", v, path, err)
+		}
+		loaded++
+	}
+
+	if loaded == 0 {
+		// Fresh: generate v0
+		kek := make([]byte, KEKSize)
+		if _, err := io.ReadFull(rand.Reader, kek); err != nil {
+			return nil, fmt.Errorf("KEKStore: generate v0: %w", err)
+		}
+		if err := writeKEKFileAtomic(filepath.Join(keysDir, "0.key"), kek); err != nil {
+			return nil, fmt.Errorf("KEKStore: write v0: %w", err)
+		}
+		if err := s.Add(0, kek); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+// AddAndPersist adds a KEK version to the in-memory store AND writes it to
+// disk atomically. Used by KEK rotation Apply in a later phase; exposed
+// in Phase A for testability.
+func (s *KEKStore) AddAndPersist(keysDir string, version uint32, kek []byte) error {
+	if err := s.Add(version, kek); err != nil {
+		return err
+	}
+	path := filepath.Join(keysDir, strconv.FormatUint(uint64(version), 10)+".key")
+	return writeKEKFileAtomic(path, kek)
+}
+
+func readKEKFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat %q: %w", path, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		return nil, fmt.Errorf("KEK file %q has mode %#o, want 0o600", path, perm)
+	}
+
+	buf := make([]byte, KEKSize+1)
+	n, err := io.ReadFull(f, buf[:KEKSize])
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", path, err)
+	}
+	if n != KEKSize {
+		return nil, fmt.Errorf("KEK file %q has %d bytes, want %d", path, n, KEKSize)
+	}
+	extra, _ := f.Read(buf[KEKSize:])
+	if extra > 0 {
+		return nil, fmt.Errorf("KEK file %q exceeds %d bytes", path, KEKSize)
+	}
+	return buf[:KEKSize], nil
+}
+
+func writeKEKFileAtomic(path string, kek []byte) error {
+	if len(kek) != KEKSize {
+		return fmt.Errorf("writeKEKFileAtomic: kek len = %d, want %d", len(kek), KEKSize)
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("open tmp %q: %w", tmp, err)
+	}
+	if _, err := f.Write(kek); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write tmp %q: %w", tmp, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("fsync tmp %q: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close tmp %q: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename %q -> %q: %w", tmp, path, err)
+	}
 	return nil
 }

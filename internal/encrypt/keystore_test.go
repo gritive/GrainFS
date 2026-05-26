@@ -3,6 +3,8 @@ package encrypt
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -154,5 +156,110 @@ func TestKEKStore_SentinelErrorsWrappedConsistently(t *testing.T) {
 	}
 	if err := s.Delete(0); !errors.Is(err, ErrKEKActiveInUse) {
 		t.Errorf("Delete(active): expected ErrKEKActiveInUse, got %v", err)
+	}
+}
+
+func TestKEKStore_LoadOrInitDir_FreshGeneratesV0(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	s, err := LoadOrInitKEKStoreDir(keysDir)
+	if err != nil {
+		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
+	}
+	if v := s.ActiveVersion(); v != 0 {
+		t.Errorf("fresh store active version = %d, want 0", v)
+	}
+	info, err := os.Stat(filepath.Join(keysDir, "0.key"))
+	if err != nil {
+		t.Fatalf("0.key not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("0.key perm = %#o, want 0o600", perm)
+	}
+}
+
+func TestKEKStore_LoadOrInitDir_ReloadsExisting(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	s1, err := LoadOrInitKEKStoreDir(keysDir)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	k0, _ := s1.Get(0)
+	s2, err := LoadOrInitKEKStoreDir(keysDir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got, _ := s2.Get(0)
+	if !bytes.Equal(got, k0) {
+		t.Errorf("reloaded KEK does not match original")
+	}
+}
+
+func TestKEKStore_LoadOrInitDir_RefuseLegacyKEKFile(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	// Legacy kek.key sits at <dataDir>/kek.key, which is the sibling of keys/.
+	legacyPath := filepath.Join(filepath.Dir(keysDir), "kek.key")
+	if err := os.WriteFile(legacyPath, bytes.Repeat([]byte{0x01}, KEKSize), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	_, err := LoadOrInitKEKStoreDir(keysDir)
+	if err == nil {
+		t.Fatalf("expected refuse-boot error on legacy kek.key, got nil")
+	}
+	if !errors.Is(err, ErrLegacyKEKDetected) {
+		t.Errorf("err = %v, want ErrLegacyKEKDetected", err)
+	}
+}
+
+func TestKEKStore_AddAndPersist(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	s, _ := LoadOrInitKEKStoreDir(keysDir)
+	k1 := bytes.Repeat([]byte{0x42}, KEKSize)
+	if err := s.AddAndPersist(keysDir, 1, k1); err != nil {
+		t.Fatalf("AddAndPersist: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(keysDir, "1.key"))
+	if err != nil {
+		t.Fatalf("1.key not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("1.key perm = %#o, want 0o600", perm)
+	}
+	s2, _ := LoadOrInitKEKStoreDir(keysDir)
+	if v := s2.ActiveVersion(); v != 1 {
+		t.Errorf("reloaded active = %d, want 1", v)
+	}
+}
+
+func TestKEKStore_LoadOrInitDir_RejectsBadFileSize(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bad := filepath.Join(keysDir, "0.key")
+	if err := os.WriteFile(bad, []byte{0x01, 0x02, 0x03}, 0o600); err != nil {
+		t.Fatalf("write bad: %v", err)
+	}
+	if _, err := LoadOrInitKEKStoreDir(keysDir); err == nil {
+		t.Fatalf("expected error for 3-byte KEK file, got nil")
+	}
+}
+
+func TestKEKStore_LoadOrInitDir_RejectsLoosePerms(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	loose := filepath.Join(keysDir, "0.key")
+	if err := os.WriteFile(loose, bytes.Repeat([]byte{0x01}, KEKSize), 0o644); err != nil {
+		t.Fatalf("write loose: %v", err)
+	}
+	if _, err := LoadOrInitKEKStoreDir(keysDir); err == nil {
+		t.Fatalf("expected perm error for 0o644 KEK file, got nil")
 	}
 }
