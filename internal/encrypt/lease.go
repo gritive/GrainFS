@@ -65,7 +65,7 @@ func (t *KEKLeaseTracker) Count(version uint32) uint64 {
 	return c.Load()
 }
 
-// Snapshot returns a defensive copy of all non-zero counters keyed by version.
+// Snapshot returns a defensive copy of all counters keyed by version.
 func (t *KEKLeaseTracker) Snapshot() map[uint32]uint64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
