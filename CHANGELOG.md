@@ -4,17 +4,20 @@
 
 ### Added
 
-- **시작 시 data WAL EC 샤드 자동 복구.** 노드 부팅 시 data WAL replay가 로컬 EC 샤드
-  파일이 없거나 크기가 어긋난 metadata-only 샤드를 감지하면, 백그라운드 워커가 현재
-  placement와 로컬 소유권을 검증한 뒤 기존 EC 복구 경로(`RepairShardLocalWithIncident`)로
-  살아있는 피어에서 직렬 재구성한다. 논블로킹이라 서빙은 즉시 시작되고, 복구가 대기 중이거나
-  실패해도 read-time EC 재구성이 폴백으로 동작한다. 주기적 scrub가 비활성화되어 있어도
-  동작한다. `grainfs_datawal_startup_repair_*` 카운터(discovered/candidates/attempts/
-  successes/failures/skips)로 부팅 시 자가 복구를 관찰할 수 있다(운영 문서:
-  `docs/operators/sli-slo.md`, `docs/operators/runbook.md`). 현재 plain
-  `key/versionID` EC 객체를 복구하며, 대용량 segment(`key/segments/…`)·coalesced
-  (`key/coalesced/…`) 샤드는 `unsupported_shardkey`로 스킵하고 read-time 재구성과
-  scrub에 맡긴다(후속 작업은 TODOS.md).
+- **Startup auto-repair of data WAL EC shards.** On node boot, data WAL replay
+  detects metadata-only EC shards whose local file is missing or the wrong size; a
+  background worker then validates each against current FSM placement and local
+  ownership and reconstructs it from surviving peers through the existing EC repair
+  path (`RepairShardLocalWithIncident`), one shard at a time. It is non-blocking —
+  serving starts immediately, and read-time EC reconstruction remains the fallback
+  while a repair is pending or fails. It runs even when periodic scrub is disabled.
+  The `grainfs_datawal_startup_repair_*` counters
+  (discovered/candidates/attempts/successes/failures/skips) make boot-time
+  self-healing observable (operator docs: `docs/operators/sli-slo.md`,
+  `docs/operators/runbook.md`). Repairs plain `key/versionID` EC objects; large
+  segment (`key/segments/…`) and coalesced (`key/coalesced/…`) shards are skipped
+  as `unsupported_shardkey` and stay covered by read-time reconstruction and scrub
+  (follow-up tracked in TODOS.md).
 
 ## [0.0.347.0] - 2026-05-26
 
