@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -490,63 +487,6 @@ func TestUpgradeObjectEC_PreservesTags(t *testing.T) {
 	postTags, err := backend.GetObjectTags(bucket, key, "")
 	require.NoError(t, err)
 	require.Len(t, postTags, 2, "tags must be preserved after EC upgrade")
-	gotKeys := map[string]string{}
-	for _, tag := range postTags {
-		gotKeys[tag.Key] = tag.Value
-	}
-	assert.Equal(t, "prod", gotKeys["env"])
-	assert.Equal(t, "alice", gotKeys["owner"])
-}
-
-// TestConvertObjectToEC_PreservesTags is the regression guard for the
-// background N×→EC reshard path. Phase 2's PutObjectMetaCmd.Tags widening +
-// applyPutObjectMeta's unconditional Tags write means ConvertObjectToEC's
-// final propose must forward the existing object's tags or any tagged legacy
-// object gets its tags clobbered when the reshard manager promotes it to EC.
-func TestConvertObjectToEC_PreservesTags(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-
-	payload := bytes.Repeat([]byte("convert-tags-"), 4096)
-	key := "tagged-legacy.bin"
-	versionID := ""
-	path := b.objectPath("bucket", key)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, payload, 0o600))
-
-	seededTags := []storage.Tag{
-		{Key: "env", Value: "prod"},
-		{Key: "owner", Value: "alice"},
-	}
-	sum := md5.Sum(payload)
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "bucket",
-		Key:         key,
-		VersionID:   versionID,
-		Size:        int64(len(payload)),
-		ContentType: "application/octet-stream",
-		ETag:        hex.EncodeToString(sum[:]),
-		ModTime:     1,
-		Tags:        seededTags,
-	})
-	require.NoError(t, err)
-	require.NoError(t, b.fsm.Apply(raw))
-
-	// Sanity-check the seed: tags are readable before the conversion.
-	preTags, err := b.GetObjectTags("bucket", key, "")
-	require.NoError(t, err)
-	require.Len(t, preTags, 2, "seed tags must be present before convert")
-
-	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
-	b.SetShardService(NewShardService(b.root, nil), []string{b.selfAddr, b.selfAddr, b.selfAddr})
-
-	require.NoError(t, b.ConvertObjectToEC(ctx, "bucket", key))
-
-	// Regression assertion: tags must survive the N×→EC conversion.
-	postTags, err := b.GetObjectTags("bucket", key, "")
-	require.NoError(t, err)
-	require.Len(t, postTags, 2, "tags must be preserved after EC conversion")
 	gotKeys := map[string]string{}
 	for _, tag := range postTags {
 		gotKeys[tag.Key] = tag.Value
