@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"crypto/md5"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -64,18 +63,6 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
 		return nil, err
 	}
-	if existing == nil {
-		if expectedOffset != 0 {
-			return nil, storage.ErrAppendOffsetMismatch
-		}
-	} else {
-		if existing.Size != expectedOffset {
-			return nil, storage.ErrAppendOffsetMismatch
-		}
-		if len(existing.Segments) >= storage.MaxAppendSegments {
-			return nil, storage.ErrAppendCapExceeded
-		}
-	}
 
 	// Size-cap fast-reject hint (design § Follow-up 2). Tolerance contract:
 	// false-positive (reject what FSM would accept due to stale HeadObject)
@@ -87,18 +74,17 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// reject.
 	//
 	// Body is not yet read; segment blob is not yet written; no orphan.
-	chunkSize := int64(-1)
-	if seek, ok := r.(io.Seeker); ok {
-		if cur, err := seek.Seek(0, io.SeekCurrent); err == nil {
-			if end, err := seek.Seek(0, io.SeekEnd); err == nil {
-				_, _ = seek.Seek(cur, io.SeekStart)
-				chunkSize = end - cur
-			}
-		}
+	sizeCapBytes := int64(0)
+	if cfg := b.coalesceCfg.Load(); cfg != nil {
+		sizeCapBytes = cfg.SizeCapBytes
 	}
-	if cfg := b.coalesceCfg.Load(); existing != nil && cfg != nil && chunkSize > 0 && cfg.SizeCapBytes > 0 &&
-		existing.Size+chunkSize > cfg.SizeCapBytes {
-		return nil, storage.ErrAppendObjectTooLarge
+	if err := planAppendObjectAdmission(appendObjectAdmissionInput{
+		Existing:       existing,
+		ExpectedOffset: expectedOffset,
+		ChunkSize:      appendChunkSize(r),
+		SizeCapBytes:   sizeCapBytes,
+	}); err != nil {
+		return nil, err
 	}
 	if b.testBeforeAppendSegmentWrite != nil {
 		b.testBeforeAppendSegmentWrite()
@@ -126,19 +112,15 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		versionID = uuid.Must(uuid.NewV7()).String()
 	}
 	modifiedUnixSec := time.Now().Unix()
-	cmd := AppendObjectCmd{
-		Bucket:         bucket,
-		Key:            key,
-		ExpectedOffset: expectedOffset,
-		BlobID:         seg.BlobID,
-		SegmentSize:    seg.Size,
-		// TODO(Phase 2): cluster's segment writer still produces MD5; reuse as
-		// SegmentETag wire field until Phase 2 migrates cluster to xxhash3.
-		SegmentETag:      hex.EncodeToString(seg.Checksum),
+	cmd := buildAppendObjectCommand(appendObjectCommandInput{
+		Bucket:           bucket,
+		Key:              key,
+		ExpectedOffset:   expectedOffset,
+		Segment:          seg,
 		PlacementGroupID: pgID,
 		VersionID:        versionID,
 		ModifiedUnixSec:  modifiedUnixSec,
-	}
+	})
 	if err := b.propose(ctx, CmdAppendObject, cmd); err != nil {
 		// Best-effort cleanup of orphan segment blob on apply rejection
 		// (full sweep deferred — see TODOS.md "Scrubber orphan sweep production wiring [P1]").
