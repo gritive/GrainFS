@@ -81,6 +81,7 @@ const (
 	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
 	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
 	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
+	MetaCmdTypeDEKReplicatedRotate          = clusterpb.MetaCmdTypeDEKReplicatedRotate
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
 	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
 	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
@@ -401,6 +402,13 @@ type MetaFSM struct {
 	// Lock-free: atomic.Pointer so the halted check can run before f.mu
 	// without ordering hazards.
 	halted atomic.Pointer[error]
+
+	// legacyDEKRotateSeen is set when a legacy type-48 MetaCmdTypeDEKRotate
+	// (nil-payload, pre Phase D) is replayed. The local-random Rotate() it once
+	// drove diverged across nodes and is now a deterministic no-op; the flag
+	// records that this cluster's log predates Phase D so the Task 7 greenfield
+	// startup guard can refuse a non-upgradable boot. Lock-free atomic.Bool.
+	legacyDEKRotateSeen atomic.Bool
 
 	// auditSink is the destination for KEK lifecycle audit lines. nil means
 	// audit writes are no-ops (default). Set via SetAuditSink before the raft
@@ -811,6 +819,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyKEKPrune(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		return f.applyDEKRotate()
+	case clusterpb.MetaCmdTypeDEKReplicatedRotate:
+		return f.applyDEKReplicatedRotate(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKVersionPrune:
 		return f.applyDEKVersionPrune(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeJWTSigningKeyRotate:
