@@ -230,6 +230,11 @@ type IcebergDeleteTableCmd struct {
 //     single lock (rather than per-map atomics) is the simplest consistency guarantee.
 //   - onBucketAssigned is stored in the same lock to ensure the callback always
 //     sees the freshly updated map state without a separate atomic.
+//
+// LOCK ORDER: f.mu before k.mu (DEKKeeper.mu). Snapshot() acquires f.mu first,
+// then calls DEKKeeper.VersionsAndActive() which acquires keeper.mu. Apply paths
+// that call InstallKEKRotation() hold f.mu and then acquire keeper.mu inside
+// InstallKEKRotation. Never acquire keeper.mu before f.mu.
 type MetaFSM struct {
 	mu                sync.RWMutex
 	nodes             map[string]MetaNodeEntry

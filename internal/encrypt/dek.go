@@ -35,6 +35,11 @@ var ErrDEKGenUnknown = errors.New("DEK generation unknown")
 // (defense against memory forensics: core dumps, /proc/PID/mem). The
 // cipher.AEAD retains the key in opaque crypto state, not in a Go-visible
 // slice.
+//
+// LOCK ORDER: k.mu is always acquired AFTER MetaFSM.mu (f.mu). MetaFSM.Snapshot()
+// holds f.mu while calling VersionsAndActive() (which acquires k.mu). KEK rotation
+// Apply holds f.mu while calling InstallKEKRotation() (which acquires k.mu).
+// Never acquire k.mu before f.mu.
 type DEKKeeper struct {
 	mu     sync.RWMutex
 	kek    []byte
