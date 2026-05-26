@@ -160,21 +160,37 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	}
 	c.SAID, c.AccessKey, c.SecretKey = saID, ak, sk
 
-	// §7 B3 — followers must have the cluster KEK in place BEFORE serve
-	// boots; otherwise wireDEKKeeper refuses startup in join mode. Mirror the
-	// real operator workflow (`scp <peer>:<data>/kek.key`) by copying the
-	// seed's kek.key into each follower's data dir.
-	seedKEK := filepath.Join(c.DataDirs[0], "kek.key")
+	// §7 B3 — followers must have the cluster KEK + cluster identity in
+	// place BEFORE serve boots; otherwise wireDEKKeeper refuses startup in
+	// join mode. Phase A binds the join handshake to per-cluster KEK +
+	// cluster_id, so both files must be staged. Mirror the real operator
+	// workflow (scp <peer>:<data>/keys/0.key and <peer>:<data>/cluster.id)
+	// by copying the seed's keystore + identity into each follower's data
+	// dir.
+	seedKEK := filepath.Join(c.DataDirs[0], "keys", "0.key")
 	if err := waitForFile(seedKEK, 30*time.Second); err != nil {
 		c.Stop()
-		t.Fatalf("seed kek.key did not appear: %v", err)
+		t.Fatalf("seed keys/0.key did not appear: %v", err)
+	}
+	seedClusterID := filepath.Join(c.DataDirs[0], "cluster.id")
+	if err := waitForFile(seedClusterID, 30*time.Second); err != nil {
+		c.Stop()
+		t.Fatalf("seed cluster.id did not appear: %v", err)
 	}
 	// Followers join via .join-pending file containing seed raft addr.
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.RaftPorts[0])
 	for i := 1; i < numNodes; i++ {
-		if err := copyFileMode(seedKEK, filepath.Join(c.DataDirs[i], "kek.key"), 0o600); err != nil {
+		if err := os.MkdirAll(filepath.Join(c.DataDirs[i], "keys"), 0o700); err != nil {
 			c.Stop()
-			t.Fatalf("copy kek.key to follower %d: %v", i, err)
+			t.Fatalf("mkdir follower %d keys dir: %v", i, err)
+		}
+		if err := copyFileMode(seedKEK, filepath.Join(c.DataDirs[i], "keys", "0.key"), 0o600); err != nil {
+			c.Stop()
+			t.Fatalf("copy keys/0.key to follower %d: %v", i, err)
+		}
+		if err := copyFileMode(seedClusterID, filepath.Join(c.DataDirs[i], "cluster.id"), 0o600); err != nil {
+			c.Stop()
+			t.Fatalf("copy cluster.id to follower %d: %v", i, err)
 		}
 		if err := writeJoinPending(c.DataDirs[i], seedRaftAddr); err != nil {
 			c.Stop()
@@ -366,9 +382,10 @@ func writeJoinPending(dataDir, seedRaftAddr string) error {
 }
 
 // copyFileMode copies src into dst with the given permission. Used by the
-// cluster fixture to plant the seed's kek.key on follower data dirs before
-// they boot in join mode — wireDEKKeeper refuses to auto-generate a KEK on a
-// joiner (§7 B3 / F#21).
+// cluster fixture to plant the seed's keys/0.key + cluster.id on follower
+// data dirs before they boot in join mode — wireDEKKeeper refuses to
+// auto-generate a KEK on a joiner (§7 B3 / F#21) and Phase A binds the
+// handshake to the cluster identity.
 func copyFileMode(src, dst string, mode os.FileMode) error {
 	data, err := os.ReadFile(src)
 	if err != nil {

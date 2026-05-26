@@ -14,6 +14,7 @@
 package serveruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"os"
@@ -28,10 +29,11 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// TestB3_WireDEKKeeper_JoinModeRefusesMissingKEK covers §7 B3 / F#21: a fresh
-// joiner with no kek.key on disk must NOT silently auto-generate one. Without
-// this guard, the joiner would boot with a wrong KEK that can never decrypt
-// the cluster's wrapped DEKs and whose challenge-response would fail anyway.
+// TestB3_WireDEKKeeper_JoinModeRefusesMissingKEK covers §7 B3 / F#21: a
+// fresh joiner with no KEK file under keys/ must NOT silently
+// auto-generate one. Without this guard, the joiner would boot with a
+// wrong KEK that can never decrypt the cluster's wrapped DEKs and whose
+// challenge-response would fail anyway.
 func TestB3_WireDEKKeeper_JoinModeRefusesMissingKEK(t *testing.T) {
 	dataDir := t.TempDir()
 	state := &bootState{
@@ -42,8 +44,7 @@ func TestB3_WireDEKKeeper_JoinModeRefusesMissingKEK(t *testing.T) {
 	}
 	fsm := cluster.NewMetaFSM()
 
-	// GRAINFS_KEK_SOURCE is unset in the test env so KEKSource() resolves to
-	// <dataDir>/kek.key, which does not exist.
+	// keys/ is absent under dataDir.
 	err := wireDEKKeeper(state, fsm)
 	require.Error(t, err, "join-mode with missing KEK must refuse startup")
 	assert.Contains(t, err.Error(), "KEK not found",
@@ -53,10 +54,9 @@ func TestB3_WireDEKKeeper_JoinModeRefusesMissingKEK(t *testing.T) {
 	assert.Nil(t, state.dekKeeper, "no keeper installed when refusal fires")
 	assert.Nil(t, state.handshakeVerifier, "no verifier installed when refusal fires")
 
-	// CRITICAL: the file must not exist after the failed wire — i.e. strict
-	// LoadKEK did not silently fall through to LoadOrGenerateKEK.
-	_, statErr := os.Stat(filepath.Join(dataDir, "kek.key"))
-	require.True(t, os.IsNotExist(statErr), "wireDEKKeeper must NOT auto-generate kek.key in join mode")
+	// CRITICAL: keys/ must not have been auto-generated.
+	_, statErr := os.Stat(filepath.Join(dataDir, "keys", "0.key"))
+	require.True(t, os.IsNotExist(statErr), "wireDEKKeeper must NOT auto-generate keys/0.key in join mode")
 }
 
 // TestB3_WireDEKKeeper_JoinModeAcceptsStagedKEK is the positive companion:
@@ -76,11 +76,53 @@ func TestB3_WireDEKKeeper_JoinModeAcceptsStagedKEK(t *testing.T) {
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
 	writeKEKFile(t, dataDir, kek)
+	// Stage cluster.id alongside the KEK (operator scp's both from a
+	// healthy peer). LoadClusterID is strict in join mode.
+	writeClusterID(t, dataDir, bytes.Repeat([]byte{0xAB}, 16))
 
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.dekKeeper, "keeper must be installed")
 	require.NotNil(t, state.handshakeVerifier, "handshake verifier must be installed alongside keeper")
-	require.Equal(t, kek, state.kek, "state.kek must hold the loaded KEK bytes")
+	gotKEK, err := state.kekStore.ActiveKEK()
+	require.NoError(t, err, "ActiveKEK")
+	defer func() {
+		for i := range gotKEK {
+			gotKEK[i] = 0
+		}
+	}()
+	require.Equal(t, kek, gotKEK, "kekStore.ActiveKEK() must hold the loaded KEK bytes")
+}
+
+// TestWireDEKKeeper_JoinModeRefusesMissingClusterID covers C-F3: when a
+// joiner has staged the KEK but forgot cluster.id, wireDEKKeeper MUST
+// surface a clear "cluster.id not found" error rather than silently
+// auto-generating a fresh UUID that fails the handshake later as a
+// confusing KEK mismatch.
+func TestWireDEKKeeper_JoinModeRefusesMissingClusterID(t *testing.T) {
+	dataDir := t.TempDir()
+	state := &bootState{
+		cfg:      Config{DataDir: dataDir},
+		joinMode: true,
+		peers:    []string{"127.0.0.1:7001"},
+	}
+	fsm := cluster.NewMetaFSM()
+
+	// Stage KEK but DELIBERATELY no cluster.id.
+	kek := make([]byte, encrypt.KEKSize)
+	_, err := rand.Read(kek)
+	require.NoError(t, err)
+	writeKEKFile(t, dataDir, kek)
+
+	err = wireDEKKeeper(state, fsm)
+	require.Error(t, err, "join-mode with missing cluster.id must refuse startup")
+	assert.Contains(t, err.Error(), "cluster.id",
+		"error must mention cluster.id, not surface a confusing KEK mismatch")
+	assert.Nil(t, state.dekKeeper, "no keeper installed when refusal fires")
+	assert.Nil(t, state.handshakeVerifier, "no verifier installed when refusal fires")
+
+	// cluster.id must NOT have been auto-generated.
+	_, statErr := os.Stat(filepath.Join(dataDir, "cluster.id"))
+	require.True(t, os.IsNotExist(statErr), "wireDEKKeeper must NOT auto-generate cluster.id in join mode")
 }
 
 // TestB3_WireDEKKeeper_StandaloneModeAutoGenerates documents the
@@ -94,11 +136,18 @@ func TestB3_WireDEKKeeper_StandaloneModeAutoGenerates(t *testing.T) {
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.dekKeeper)
 	require.NotNil(t, state.handshakeVerifier)
-	require.Len(t, state.kek, encrypt.KEKSize)
+	gotKEK, err := state.kekStore.ActiveKEK()
+	require.NoError(t, err, "ActiveKEK")
+	defer func() {
+		for i := range gotKEK {
+			gotKEK[i] = 0
+		}
+	}()
+	require.Len(t, gotKEK, encrypt.KEKSize)
 
-	// kek.key was created by LoadOrGenerateKEK.
-	_, statErr := os.Stat(filepath.Join(dataDir, "kek.key"))
-	require.NoError(t, statErr, "first-init mode auto-generates kek.key")
+	// keys/0.key was created by LoadOrInitKEKStoreDir.
+	_, statErr := os.Stat(filepath.Join(dataDir, "keys", "0.key"))
+	require.NoError(t, statErr, "first-init mode auto-generates keys/0.key")
 }
 
 // inProcessQUICPair returns two QUIC transports configured to talk to each
@@ -196,7 +245,11 @@ func TestB2_PerformMetaJoinHandshake_WrongKEK(t *testing.T) {
 func runHandshakeRoundTrip(t *testing.T, leaderKEK, joinerKEK []byte) bool {
 	t.Helper()
 
-	verifier := encrypt.NewHandshakeVerifier(leaderKEK)
+	clusterID := bytes.Repeat([]byte{0xCD}, 16)
+	leaderStore := encrypt.NewKEKStore()
+	require.NoError(t, leaderStore.Add(0, leaderKEK))
+	verifier := encrypt.NewHandshakeVerifier(leaderStore, clusterID)
+
 	router := transport.NewStreamRouter()
 	joinRcv := cluster.NewMetaJoinReceiver(&fakeJoinCoord{leader: true}).
 		WithHandshakeVerifier(verifier)
@@ -219,7 +272,18 @@ func runHandshakeRoundTrip(t *testing.T, leaderKEK, joinerKEK []byte) bool {
 	require.NoError(t, err)
 	require.Equal(t, cluster.JoinStatusOK, chalReply.Status)
 
-	response := encrypt.ComputeHandshakeResponse(joinerKEK, chalReply.Nonce)
+	joinerStore := encrypt.NewKEKStore()
+	require.NoError(t, joinerStore.Add(0, joinerKEK))
+	transcript := encrypt.JoinTranscript{
+		ClusterID:           clusterID,
+		Nonce:               chalReply.Nonce,
+		NodeID:              "joiner",
+		Address:             "127.0.0.1:7002",
+		JoinerVersion:       0,
+		LeaderActiveVersion: 0,
+	}
+	response, err := encrypt.ComputeHandshakeResponse(joinerStore, 0, transcript)
+	require.NoError(t, err)
 	joinReqBytes, err := cluster.EncodeJoinRequestForTest(cluster.JoinRequest{
 		NodeID:            "joiner",
 		Address:           "127.0.0.1:7002",

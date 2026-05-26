@@ -111,7 +111,7 @@ func runClusterBootstrapJoinCLIIdempotent(t testing.TB) {
 // runGrainFSJoin runs `grainfs join <peerAddr> --endpoint <sock>` and returns
 // combined stdout+stderr output.
 func runGrainFSJoin(ctx context.Context, sock, peerAddr string) (string, error) {
-	cmd := exec.CommandContext(ctx, getBinary(), "join", peerAddr, "--endpoint", sock)
+	cmd := exec.CommandContext(ctx, getBinary(), "join", peerAddr, "--endpoint", sock, "--confirm-staged-keys")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := cmd.CombinedOutput()
 	return fmt.Sprintf("%s", out), err

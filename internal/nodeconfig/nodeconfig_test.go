@@ -21,22 +21,6 @@ func TestTLSKeyPath_EnvOverride(t *testing.T) {
 	}
 }
 
-func TestKEKSource_DefaultIsFileURI(t *testing.T) {
-	t.Setenv("GRAINFS_KEK_SOURCE", "")
-	nc := New("/tmp/data-x")
-	if got, want := nc.KEKSource(), "file:///tmp/data-x/kek.key"; got != want {
-		t.Fatalf("KEKSource() = %q, want %q", got, want)
-	}
-}
-
-func TestKEKSource_KMSOverride(t *testing.T) {
-	t.Setenv("GRAINFS_KEK_SOURCE", "kms://arn:aws:kms:us-east-1:1:key/abc")
-	nc := New("/tmp/data-x")
-	if got, want := nc.KEKSource(), "kms://arn:aws:kms:us-east-1:1:key/abc"; got != want {
-		t.Fatalf("KEKSource() = %q, want %q", got, want)
-	}
-}
-
 func TestLogLevel_Default(t *testing.T) {
 	t.Setenv("GRAINFS_LOG_LEVEL", "")
 	nc := New("/tmp/data-x")

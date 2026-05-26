@@ -177,7 +177,7 @@ func (f *MetaFSM) appendConfigSnapshotTrailer(out []byte) ([]byte, error) {
 	return appendSnapshotTrailer(out, cfgPayload, cfgSnapshotTrailerLen, cfgSnapshotTrailerMagic), nil
 }
 
-func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, refCounts map[uint32]uint64) ([]byte, error) {
+func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
 	if f.dekKeeper == nil {
 		return out, nil
 	}
@@ -188,7 +188,7 @@ func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, refCounts map[uint32]uint
 	if len(dekVersions) == 0 {
 		return out, nil
 	}
-	dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive, refCounts)
+	dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive, refCounts, activeKEKVersion)
 	if err != nil {
 		return nil, fmt.Errorf("meta_fsm: Snapshot: encode DEK versions: %w", err)
 	}
@@ -235,7 +235,7 @@ func (f *MetaFSM) appendJWTKeySnapshotTrailer(out []byte) []byte {
 	return appendSnapshotTrailer(out, jkeyPayload, jkeySnapshotTrailerLen, jkeySnapshotTrailerMagic)
 }
 
-func (f *MetaFSM) appendSnapshotTrailers(base []byte, refCounts map[uint32]uint64) ([]byte, error) {
+func (f *MetaFSM) appendSnapshotTrailers(base []byte, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
 	out := append([]byte(nil), base...)
 	var err error
 	out, err = f.appendIAMSnapshotTrailer(out)
@@ -246,7 +246,7 @@ func (f *MetaFSM) appendSnapshotTrailers(base []byte, refCounts map[uint32]uint6
 	if err != nil {
 		return nil, err
 	}
-	out, err = f.appendDEKSnapshotTrailer(out, refCounts)
+	out, err = f.appendDEKSnapshotTrailer(out, refCounts, activeKEKVersion)
 	if err != nil {
 		return nil, err
 	}

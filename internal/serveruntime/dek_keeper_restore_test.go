@@ -43,10 +43,27 @@ func fsmWithWrappedDEKs(t *testing.T, kek []byte) *cluster.MetaFSM {
 	return dst
 }
 
+// writeKEKFile stages keys/0.key under dataDir using the new KEKStore
+// disk layout. Returns the path written.
 func writeKEKFile(t *testing.T, dir string, kek []byte) string {
 	t.Helper()
-	path := filepath.Join(dir, "kek.key")
+	keysDir := filepath.Join(dir, "keys")
+	require.NoError(t, os.MkdirAll(keysDir, 0o700))
+	path := filepath.Join(keysDir, "0.key")
 	require.NoError(t, os.WriteFile(path, kek, 0o600))
+	return path
+}
+
+// writeClusterID stages cluster.id under dataDir, simulating an operator
+// scp'ing it from a healthy peer alongside the active KEK. Join-mode
+// wiring uses strict LoadClusterID, so this file must be present for
+// wireDEKKeeper to succeed.
+func writeClusterID(t *testing.T, dir string, id []byte) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.Len(t, id, 16)
+	path := filepath.Join(dir, "cluster.id")
+	require.NoError(t, os.WriteFile(path, id, 0o600))
 	return path
 }
 
@@ -64,9 +81,9 @@ func TestStartup_RefusesWhenKEKMissing(t *testing.T) {
 	require.NoError(t, err)
 	fsm := fsmWithWrappedDEKs(t, kek)
 
-	// Deliberately do NOT write kek.key under dataDir. GRAINFS_KEK_SOURCE is
-	// also unset (test environment) so KEKSource() defaults to dataDir/kek.key,
-	// which does not exist.
+	// Deliberately do NOT stage <dataDir>/keys/0.key. Phase A always loads
+	// the KEK from <dataDir>/keys/<V>.key (no env override) so the keystore
+	// is absent here.
 
 	err = rebuildDEKKeeperFromRestore(state, fsm)
 	require.Error(t, err, "missing KEK with FSM-wrapped DEKs must refuse startup")

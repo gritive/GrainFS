@@ -4,17 +4,29 @@ If the node is already a cluster member the call is a no-op.
 If the node is a solo bootstrap and the peer is reachable, the server will
 restart and join the cluster on next boot.
 
+Phase A REQUIREMENT — pre-stage the cluster keystore + identity:
+  The restarted node would otherwise boot with its own auto-generated
+  keys/0.key and cluster.id, which will NOT match the target cluster and
+  produce confusing handshake errors. Before running this command, copy
+  the active keystore + cluster identity from a healthy peer:
+
+      scp <peer>:<dataDir>/keys/0.key   <local-dataDir>/keys/0.key
+      scp <peer>:<dataDir>/cluster.id   <local-dataDir>/cluster.id
+
+  Both files must have mode 0o600. Then re-run with --confirm-staged-keys.
+
 Example:
-  grainfs join 192.168.1.10:8301 --endpoint /data/admin.sock
+  grainfs join 192.168.1.10:8301 --endpoint /data/admin.sock --confirm-staged-keys
 
 Usage:
   grainfs join <peer-raft-addr> [flags]
 
 Flags:
-      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
-      --force              force join even if solo node has user data (data will be discarded)
-  -h, --help               help for join
-      --timeout duration   admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)
+      --confirm-staged-keys   Confirm that <dataDir>/keys/0.key and <dataDir>/cluster.id have been staged from the target cluster (REQUIRED in Phase A — runtime join cannot auto-stage these files)
+      --endpoint string       admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --force                 force join even if solo node has user data (data will be discarded)
+  -h, --help                  help for join
+      --timeout duration      admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)
 
 Global Flags:
       --log-level string   log level: debug, info, warn, error (default "info")

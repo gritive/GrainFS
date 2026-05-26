@@ -573,10 +573,13 @@ table DEKRefEntry {
 // plus the active generation at snapshot time.
 // Wire position: appended after the GCFG trailer (if any).
 // ref_counts field added in Task 12 (append-only; old readers decode as empty list).
+// active_kek_version added in Phase A KEK envelope (append-only; defaults to 0
+// for pre-rotation snapshots — pre-rotation clusters logically sit on v0).
 table MetaDEKVersionSnapshot {
   versions:[DEKVersionEntry];
   active:uint32;
   ref_counts:[DEKRefEntry];
+  active_kek_version:uint32 = 0;
 }
 
 // PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.

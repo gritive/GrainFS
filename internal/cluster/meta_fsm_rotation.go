@@ -93,6 +93,29 @@ func (f *MetaFSM) PendingDEKVersions() (map[uint32][]byte, uint32) {
 	return f.pendingDEKVersions, f.pendingDEKActive
 }
 
+// ActiveKEKVersion returns the cluster-wide active KEK version that wrap[gen]
+// entries are sealed under. Phase A always returns 0 (no rotation yet);
+// Phase B will mutate this via MetaCmdTypeKEKRotate Apply.
+func (f *MetaFSM) ActiveKEKVersion() uint32 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.activeKEKVersion
+}
+
+// SetActiveKEKVersion overwrites the in-memory active KEK version. Intended
+// for future use by MetaCmdTypeKEKRotate Apply (Phase B) and for test setup.
+// Not exposed via any RPC.
+//
+// Persistence note: the value is written only when the DKVS snapshot trailer
+// is emitted (i.e. DEKKeeper wired with ≥1 version). For a freshly booted FSM
+// with no DEKs yet, Snapshot/Restore round-trips will silently default the
+// value back to 0 — which is the correct Phase A semantics.
+func (f *MetaFSM) SetActiveKEKVersion(v uint32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activeKEKVersion = v
+}
+
 // Rotation returns the rotation sub-FSM. State is decoupled from the rest of
 // MetaFSM and has its own RWMutex; callers can read snapshots concurrently.
 func (f *MetaFSM) Rotation() *RotationFSM { return f.rotation }

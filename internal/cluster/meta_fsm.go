@@ -324,6 +324,12 @@ type MetaFSM struct {
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
 
+	// activeKEKVersion is the cluster-wide KEK version that current wrap[gen]
+	// entries are sealed under. Phase A pins this to 0 (no rotation yet);
+	// Phase B will mutate it via MetaCmdTypeKEKRotate Apply. Persisted in the
+	// DKVS snapshot trailer alongside DEK versions.
+	activeKEKVersion uint32
+
 	// jwtKeyStore holds the wrapped JWT signing key seeds persisted in the JKEY
 	// snapshot trailer. Always non-nil after NewMetaFSM.
 	jwtKeyStore *JWTKeyStore

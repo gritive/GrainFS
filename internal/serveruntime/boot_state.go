@@ -59,6 +59,13 @@ type bootState struct {
 	metaDir  string
 	raftDir  string
 	bootID   string
+	// priorState is captured by bootValidateConfig BEFORE bootOpenMetaDB
+	// runs. True if <dataDir>/meta or <dataDir>/raft already contained
+	// data on entry — signals a restart of an existing node (versus a
+	// fresh-cluster init on an empty data dir). Consumed by
+	// wireDEKKeeper to refuse silent auto-regeneration of keys/0.key and
+	// cluster.id when prior raft/meta state exists.
+	priorState bool
 
 	// Storage role tracking (populated incrementally by storage phases;
 	// readers in run.go body use these for the boot decision summary).
@@ -100,10 +107,12 @@ type bootState struct {
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
-	// kek holds the loaded 32-byte KEK so downstream phases (PerformMetaJoin
-	// handshake, MetaChallengeReceiver) can share the same key without
-	// re-reading kek.key from disk. Set by wireDEKKeeper.
-	kek []byte
+	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
+	// A holds a single version (0). Later phases use it for rotation,
+	// prune, and join keystore catch-up. Receivers reach the active version
+	// + cluster_id via state.handshakeVerifier rather than reading the
+	// store directly.
+	kekStore *encrypt.KEKStore
 	// handshakeVerifier gates cluster-join admission via HMAC-SHA256 challenge-
 	// response. The SAME instance must be wired into both MetaJoinReceiver and
 	// MetaChallengeReceiver so the issued-nonce map is shared. Set by

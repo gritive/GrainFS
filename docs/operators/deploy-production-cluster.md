@@ -23,12 +23,14 @@ install -d -m 0700 "$DATA_DIR"
 ./grainfs serve --data "$DATA_DIR" --port 9000 --cluster-key "$CLUSTER_KEY"
 ```
 
-- `<data>/kek.key` (mode 0600) is auto-generated on first start
+- `<data>/keys/0.key` (mode 0600) is auto-generated on first start — this is the active KEK file in the versioned keystore
+- `<data>/cluster.id` (16-byte UUID v7) is generated at first-cluster boot and binds the cluster identity into the join handshake
 - `--cluster-key` is required even for the first single-node bootstrap
 - `default` bucket is auto-created with anonymous read/write access
 - `_grainfs` reserved bucket + `_grainfs/audit/evaluations` Iceberg table seeded
 
-Joining nodes need the same `<data>/kek.key` bytes as the first node.
+Joining nodes need the same `<data>/keys/0.key` bytes and the same
+`<data>/cluster.id` bytes as the first node.
 
 Verify (TTHW ~30s):
 
@@ -49,16 +51,22 @@ running and you want it to restart into the cluster through its admin socket.
 
 ### Offline bootstrap for a new node
 
-All nodes in one cluster must use the same cluster KEK bytes. The first node
-auto-generates `<data>/kek.key`; the joining node must have a byte-for-byte
-copy before `grainfs cluster join` runs. The command below copies it from the
-first node.
+## Phase A: Keystore + Cluster Identity Staging
+
+Each node has TWO files that must be staged before joining an existing cluster:
+
+1. `<dataDir>/keys/0.key` — the cluster's active Key Encryption Key (KEK). 32 bytes, 0o600.
+2. `<dataDir>/cluster.id` — the 16-byte cluster identity (UUID v7) bound into the join handshake.
+
+Both files are generated at first-cluster boot. To add a node to an existing cluster, copy both from a healthy peer:
 
 ```bash
 DATA_DIR=/var/lib/grainfs
 install -d -m 0700 "$DATA_DIR"
-scp node-a:/var/lib/grainfs/kek.key "$DATA_DIR/kek.key"
-chmod 0600 "$DATA_DIR/kek.key"
+install -d -m 0700 "$DATA_DIR/keys"
+scp node-a:/var/lib/grainfs/keys/0.key  "$DATA_DIR/keys/0.key"
+scp node-a:/var/lib/grainfs/cluster.id  "$DATA_DIR/cluster.id"
+chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
 ./grainfs cluster join node-a:7001 \
   --data "$DATA_DIR" \
   --node-id node-b \
@@ -85,10 +93,15 @@ be able to decrypt the cluster's wrapped DEKs anyway.
 ### Runtime join for an already-running node
 
 If the node is already running as a solo node, send the join request through
-that node's admin socket instead:
+that node's admin socket instead. Phase A requires that both
+`<dataDir>/keys/0.key` and `<dataDir>/cluster.id` be pre-staged before the
+runtime join, and the operator must explicitly acknowledge that the staged
+keys belong to the destination cluster via `--confirm-staged-keys`:
 
 ```bash
-grainfs join node-a:7001 --endpoint /var/lib/grainfs/admin.sock
+grainfs join node-a:7001 \
+  --endpoint /var/lib/grainfs/admin.sock \
+  --confirm-staged-keys
 ```
 
 If the node has local user data, the admin API refuses the join unless you
@@ -143,16 +156,15 @@ Accepts plaintext token endpoint behind a validated proxy (`Forwarded` or `X-For
 
 ### Operator-managed KEK source
 
-```bash
-GRAINFS_KEK_SOURCE=file:///etc/grainfs/kek.key ./grainfs serve --data /var/lib/grainfs ...
-```
+> **Phase A:** The legacy `GRAINFS_KEK_SOURCE` env var is no longer supported and
+> boot will refuse if it is set. The keystore is always at `<data>/keys/0.key`.
+> For test environments only, `GRAINFS_KEK_DIR` overrides the directory.
 
-By default, the first node auto-generates `<data>/kek.key`. `GRAINFS_KEK_SOURCE`
-changes where GrainFS reads the KEK from. The contents still need to be the
-same on every node, and only `file://` sources are supported in this release.
-Do not replace the KEK after data exists unless you are restoring the same
-32-byte cluster KEK; GrainFS does not currently expose a separate KEK rotation
-flow.
+By default, the first node auto-generates `<data>/keys/0.key`. The contents
+must be identical on every node — stage the file out-of-band (e.g. `scp` from
+a healthy peer) before starting a joining node. Do not replace the KEK after
+data exists unless you are restoring the same 32-byte cluster KEK; GrainFS
+does not currently expose a separate KEK rotation flow.
 
 ### DEK rotation
 

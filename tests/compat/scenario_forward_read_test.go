@@ -1,5 +1,9 @@
 //go:build compat
 
+// Phase A status: all standalone prev→current restart tests in this file
+// are skipped. Phase A is green-field (no legacy <dataDir>/kek.key
+// support); reactivation requires Phase B legacy-migration tooling.
+
 package compat
 
 import (
@@ -21,6 +25,7 @@ import (
 // TestForwardRead writes data with the previous binary and reads it back
 // with the current binary, verifying forward-read compatibility.
 func TestForwardRead(t *testing.T) {
+	t.Skip("Phase A green-field cutover: legacy <dataDir>/kek.key is refused at boot; cross-version restart tests require Phase B migration support")
 	prev := prevBinary(t)
 	cur := getBinary()
 

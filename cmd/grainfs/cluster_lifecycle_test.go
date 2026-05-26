@@ -100,7 +100,10 @@ func TestRunClusterDrain_LeaderHappy(t *testing.T) {
 	out := stdout.String()
 	require.Contains(t, out, "leadership transferred to n2")
 	require.Contains(t, out, "drained")
-	require.Contains(t, out, "rejoin with")
+	require.Contains(t, out, "to rejoin")
+	require.Contains(t, out, "--confirm-staged-keys")
+	require.Contains(t, out, "keys/0.key")
+	require.Contains(t, out, "cluster.id")
 }
 
 func TestRunClusterDrain_FollowerHappy(t *testing.T) {

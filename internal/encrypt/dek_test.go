@@ -224,3 +224,107 @@ func TestDEKKeeper_ConcurrentSealOpenRotate(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestDEKKeeper_SealOpenWithAAD_RoundTrip(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, KEKSize)
+	k, err := NewDEKKeeper(kek)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	plain := []byte("secret payload")
+	aad := []byte("ctx|123")
+	ct, gen, err := k.SealWithAAD(plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithAAD: %v", err)
+	}
+	got, err := k.OpenWithAAD(ct, gen, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("round-trip mismatch: %q vs %q", got, plain)
+	}
+}
+
+func TestDEKKeeper_OpenWithAAD_MismatchedAAD(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x22}, KEKSize)
+	k, _ := NewDEKKeeper(kek)
+	ct, gen, _ := k.SealWithAAD([]byte("p"), []byte("ctx-A"))
+	if _, err := k.OpenWithAAD(ct, gen, []byte("ctx-B")); err == nil {
+		t.Fatal("expected error on AAD mismatch, got nil")
+	}
+}
+
+func TestDEKKeeper_RewrapWithAAD_CrossGen(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x33}, KEKSize)
+	k, _ := NewDEKKeeper(kek)
+	aad := []byte("rewrap-ctx")
+	ct, oldGen, _ := k.SealWithAAD([]byte("payload"), aad)
+	if err := k.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	newCt, newGen, err := k.RewrapWithAAD(ct, oldGen, aad)
+	if err != nil {
+		t.Fatalf("RewrapWithAAD: %v", err)
+	}
+	if newGen == oldGen {
+		t.Errorf("RewrapWithAAD did not advance gen")
+	}
+	plain, err := k.OpenWithAAD(newCt, newGen, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD after rewrap: %v", err)
+	}
+	if !bytes.Equal(plain, []byte("payload")) {
+		t.Errorf("rewrapped plaintext mismatch")
+	}
+}
+
+func TestDEKKeeper_RetainsKEKAfterCallerZeroizes(t *testing.T) {
+	// Caller code (e.g., wireDEKKeeper) may zeroize its local KEK copy
+	// after constructing a DEKKeeper. The keeper MUST retain its own
+	// independent copy so Rotate continues to produce wraps that
+	// LoadFromFSM (with the real KEK from disk) can later unwrap.
+	kek := bytes.Repeat([]byte{0xAB}, KEKSize)
+	keeper, err := NewDEKKeeper(kek)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	original := append([]byte(nil), kek...) // remember the real KEK
+	// Caller zeroizes their copy:
+	for i := range kek {
+		kek[i] = 0
+	}
+	if err := keeper.Rotate(); err != nil {
+		t.Fatalf("Rotate after caller zeroize: %v", err)
+	}
+	// The keeper's wrap[1] must be openable with the ORIGINAL kek bytes
+	// via a fresh LoadFromFSM. Simulates "restart with real kek.key on
+	// disk".
+	versions := keeper.Versions() // returns deep copy of wrap[] map
+	restored, err := LoadFromFSM(original, versions)
+	if err != nil {
+		t.Fatalf("LoadFromFSM with original KEK: %v", err)
+	}
+	if gen, _ := restored.Active(); gen == 0 {
+		t.Errorf("LoadFromFSM did not see rotated gen=1; got active=%d", gen)
+	}
+}
+
+func TestLoadFromFSM_RetainsKEKAfterCallerZeroizes(t *testing.T) {
+	// Same invariant on the restore path.
+	kek := bytes.Repeat([]byte{0xCD}, KEKSize)
+	// Build a versions map by going through one keeper.
+	src, _ := NewDEKKeeper(append([]byte(nil), kek...))
+	versions := src.Versions()
+	keeper, err := LoadFromFSM(kek, versions)
+	if err != nil {
+		t.Fatalf("LoadFromFSM: %v", err)
+	}
+	// Caller zeroizes their copy:
+	for i := range kek {
+		kek[i] = 0
+	}
+	if err := keeper.Rotate(); err != nil {
+		t.Fatalf("Rotate after caller zeroize: %v", err)
+	}
+}

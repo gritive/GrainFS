@@ -29,10 +29,14 @@ func clusterJoinCmd() *cobra.Command {
 		Short: "Join an existing cluster via KEK challenge-response handshake (offline bootstrap)",
 		Long: `Performs the §7 cluster-join handshake against <peer-addr> directly over
 QUIC. Intended for first-time bootstrap of a not-yet-running node: loads the
-local KEK from <data>/kek.key (or $GRAINFS_KEK_SOURCE), runs Challenge to
-get a fresh nonce from the peer, computes HMAC-SHA256(KEK, nonce), and sends
-Join with the response. The peer's MetaJoinReceiver verifies the response
+active KEK from <data>/keys/0.key and the cluster identity from <data>/cluster.id,
+runs Challenge to get a fresh nonce from the peer, computes HMAC-SHA256(KEK, nonce),
+and sends Join with the response. The peer's MetaJoinReceiver verifies the response
 under its own KEK and admits the node via AddVoter only on match.
+
+Both <data>/keys/0.key and <data>/cluster.id MUST be staged from a healthy peer
+before running this command (e.g. ` + "`scp peer:<data>/keys/0.key <data>/keys/`" + ` and
+` + "`scp peer:<data>/cluster.id <data>/`" + `).
 
 For runtime restart-into-join on an already-running node, use ` + "`grainfs join`" + ` (which
 talks to that node's admin UDS).
@@ -46,7 +50,7 @@ Example:
 		Args: cobra.ExactArgs(1),
 		RunE: runClusterJoin,
 	}
-	cmd.Flags().StringP("data", "d", "./data", "data directory (used to locate kek.key)")
+	cmd.Flags().StringP("data", "d", "./data", "data directory (holds keys/0.key and cluster.id, staged from a healthy peer)")
 	cmd.Flags().String("node-id", "", "unique node ID for the joining node (required)")
 	cmd.Flags().String("bind-addr", "", "raft listen address the joining node will advertise (required)")
 	cmd.Flags().String("cluster-key", "", "pre-shared cluster key (required; same as serve --cluster-key)")

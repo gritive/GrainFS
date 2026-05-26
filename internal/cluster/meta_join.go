@@ -164,8 +164,24 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 	// KEK handshake gate. Runs after the leader check so non-leaders return
 	// JoinStatusNotLeader without consuming a nonce on the leader's verifier
 	// (saves nonce churn on follower retries). §7 T55 (D#15, F#23).
+	//
+	// Phase A: transcript joiner_version and leader_active_version are
+	// pinned to 0 on both sides — the wire JoinRequest carries only
+	// (NodeID, Address, Nonce, Response); the version fields will be
+	// extended in Phase C. The verifier already holds cluster_id from
+	// boot; we reach it via ClusterID() so receivers stay decoupled from
+	// NodeConfig.
 	if r.verifier != nil {
-		if err := r.verifier.VerifyResponse(joinReq.HandshakeNonce, joinReq.HandshakeResponse); err != nil {
+		transcript := encrypt.JoinTranscript{
+			ClusterID:           r.verifier.ClusterID(),
+			Nonce:               joinReq.HandshakeNonce,
+			NodeID:              joinReq.NodeID,
+			Address:             joinReq.Address,
+			JoinerVersion:       0,
+			LeaderActiveVersion: 0,
+		}
+		activeVer := r.verifier.Store().ActiveVersion()
+		if err := r.verifier.VerifyResponse(activeVer, transcript, joinReq.HandshakeResponse); err != nil {
 			return joinMessage(JoinReply{
 				Accepted: false,
 				Status:   JoinStatusKEKMismatch,

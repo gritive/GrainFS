@@ -167,6 +167,43 @@ func TestSnapshot_DEKVersionTrailerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMetaFSM_ActiveKEKVersion_DefaultZero(t *testing.T) {
+	fsm := NewMetaFSM()
+	if got := fsm.ActiveKEKVersion(); got != 0 {
+		t.Errorf("fresh FSM ActiveKEKVersion = %d, want 0", got)
+	}
+}
+
+func TestMetaFSM_Snapshot_PreservesActiveKEKVersion(t *testing.T) {
+	// Round-trip a non-zero active_kek_version through the DKVS trailer.
+	// Requires a wired DEKKeeper with ≥1 version; otherwise the trailer is
+	// skipped (documented on SetActiveKEKVersion).
+	kek := make([]byte, 32)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatal(err)
+	}
+	keeper, err := encrypt.NewDEKKeeper(kek)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+
+	fsm1 := newTestMetaFSMWithDEKKeeper(t, keeper)
+	fsm1.SetActiveKEKVersion(7)
+
+	snapBytes, err := fsm1.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	fsm2 := NewMetaFSM()
+	if err := fsm2.Restore(raft.SnapshotMeta{}, snapBytes); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := fsm2.ActiveKEKVersion(); got != 7 {
+		t.Errorf("after Restore, ActiveKEKVersion = %d, want 7", got)
+	}
+}
+
 func TestSnapshot_DEKVersionTrailer_AbsentWhenNoKeeper(t *testing.T) {
 	// Snapshot with no DEKKeeper wired should not contain a DKVS trailer.
 	// Restore into a fresh FSM should leave PendingDEKVersions empty.

@@ -10,17 +10,25 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// PerformMetaJoin issues the §7 cluster-join handshake — Challenge → compute
-// HMAC-SHA256(KEK, nonce) → Join — against each peer in turn until one
-// accepts the join. Used by --join-mode bootstrap so a fresh node can
-// register itself with the meta-raft leader without operator intervention.
+// PerformMetaJoin issues the §7 cluster-join handshake — Challenge →
+// compute HMAC-SHA256(K_active, transcript) → Join — against each peer
+// in turn until one accepts the join. Used by --join-mode bootstrap so
+// a fresh node can register itself with the meta-raft leader without
+// operator intervention.
 //
-// kek is the local 32-byte KEK loaded by wireDEKKeeper. It is required: a
-// joiner with no KEK cannot answer the Challenge under the cluster's KEK and
-// would be refused with JoinStatusKEKMismatch anyway. B2 (§7).
-func PerformMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport, peers []string, nodeID, raftAddr string, kek []byte) error {
-	if len(kek) == 0 {
-		return fmt.Errorf("meta join: KEK is required for the challenge-response handshake")
+// store is the local KEKStore loaded by wireDEKKeeper. clusterID is the
+// 16-byte cluster identity persisted at <dataDir>/cluster.id. Both are
+// required: a joiner with no KEK cannot answer the Challenge under the
+// cluster's KEK and would be refused with JoinStatusKEKMismatch anyway.
+//
+// Phase A pins joiner_version and leader_active_version to 0 on both
+// sides; the wire-level transcript exchange is Phase C scope.
+func PerformMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport, peers []string, nodeID, raftAddr string, store *encrypt.KEKStore, clusterID []byte) error {
+	if store == nil {
+		return fmt.Errorf("meta join: KEK store is required for the challenge-response handshake")
+	}
+	if len(clusterID) != 16 {
+		return fmt.Errorf("meta join: cluster_id must be 16 bytes, got %d", len(clusterID))
 	}
 	joinCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
@@ -55,7 +63,19 @@ func PerformMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport
 			lastErr = fmt.Errorf("meta join challenge refused by %s: %s: %s", peer, chalReply.Status, chalReply.Message)
 			continue
 		}
-		response := encrypt.ComputeHandshakeResponse(kek, chalReply.Nonce)
+		transcript := encrypt.JoinTranscript{
+			ClusterID:           clusterID,
+			Nonce:               chalReply.Nonce,
+			NodeID:              nodeID,
+			Address:             raftAddr,
+			JoinerVersion:       0,
+			LeaderActiveVersion: 0,
+		}
+		response, err := encrypt.ComputeHandshakeResponse(store, store.ActiveVersion(), transcript)
+		if err != nil {
+			lastErr = fmt.Errorf("meta join: compute handshake response: %w", err)
+			continue
+		}
 		reply, err := joinSender.SendJoin(joinCtx, []string{peer}, cluster.JoinRequest{
 			NodeID:            nodeID,
 			Address:           raftAddr,
@@ -68,7 +88,7 @@ func PerformMetaJoin(ctx context.Context, quicTransport *transport.QUICTransport
 		}
 		if !reply.Accepted {
 			if reply.Status == cluster.JoinStatusKEKMismatch {
-				return fmt.Errorf("meta join refused: KEK mismatch with peer %s — restore kek.key by `scp <peer>:<data>/kek.key` from any healthy node, then retry (%s)", peer, reply.Message)
+				return fmt.Errorf("meta join refused: KEK mismatch with peer %s — restore the cluster KEK by `scp <peer>:<data>/keys/0.key <data>/keys/` from any healthy node, then retry (%s)", peer, reply.Message)
 			}
 			if reply.Message != "" {
 				return fmt.Errorf("meta join rejected: %s: %s", reply.Status, reply.Message)

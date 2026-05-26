@@ -89,6 +89,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 			dekRefCountsCopy[g] = c
 		}
 	}
+	// Capture active KEK version under the same RLock so a concurrent
+	// SetActiveKEKVersion can't race the DKVS trailer emission.
+	activeKEKVersionCopy := f.activeKEKVersion
 	f.mu.RUnlock()
 
 	nfsExports := map[string]nfsexport.Config(nil)
@@ -224,7 +227,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
-	return f.appendSnapshotTrailers(bs, dekRefCountsCopy)
+	return f.appendSnapshotTrailers(bs, dekRefCountsCopy, activeKEKVersionCopy)
 }
 
 // Restore deserializes a MetaStateSnapshot and replaces current state. The
@@ -493,19 +496,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 
 	// DKVS: decode DEK version snapshot.
 	var (
-		newDEKVersions map[uint32][]byte
-		newDEKActive   uint32
-		newDEKRefs     map[uint32]uint64
-		hasDEKData     bool
+		newDEKVersions      map[uint32][]byte
+		newDEKActive        uint32
+		newDEKRefs          map[uint32]uint64
+		newActiveKEKVersion uint32
+		hasDEKData          bool
 	)
 	if len(trailers.dekData) > 0 {
-		versions, active, refs, err := decodeMetaDEKVersionSnapshot(trailers.dekData)
+		versions, active, refs, activeKEK, err := decodeMetaDEKVersionSnapshot(trailers.dekData)
 		if err != nil {
 			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
 		}
 		newDEKVersions = versions
 		newDEKActive = active
 		newDEKRefs = refs
+		newActiveKEKVersion = activeKEK
 		hasDEKData = true
 	}
 
@@ -581,6 +586,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	if hasDEKData {
 		f.pendingDEKVersions = newDEKVersions
 		f.pendingDEKActive = newDEKActive
+		f.activeKEKVersion = newActiveKEKVersion
 		if newDEKRefs != nil {
 			f.dekRefCounts = newDEKRefs
 		} else {

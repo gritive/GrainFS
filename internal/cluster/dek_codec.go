@@ -29,10 +29,12 @@ func decodeMetaDEKVersionPruneCmd(data []byte) (gen uint32, err error) {
 }
 
 // encodeMetaDEKVersionSnapshot serializes the DEK versions map + active gen +
-// per-generation ref counts into a MetaDEKVersionSnapshot FlatBuffers buffer
-// used as the DKVS trailer payload. Entries are emitted in ascending gen order
-// for byte-determinism across replicas. refCounts may be nil (emits empty list).
-func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64) ([]byte, error) {
+// per-generation ref counts + active KEK version into a MetaDEKVersionSnapshot
+// FlatBuffers buffer used as the DKVS trailer payload. Entries are emitted in
+// ascending gen order for byte-determinism across replicas. refCounts may be
+// nil (emits empty list). activeKEKVersion defaults to 0 in Phase A (no
+// rotation yet).
+func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
 	// Sort gens for deterministic output.
@@ -85,18 +87,21 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, ref
 	clusterpb.MetaDEKVersionSnapshotAddVersions(b, versionsVec)
 	clusterpb.MetaDEKVersionSnapshotAddActive(b, active)
 	clusterpb.MetaDEKVersionSnapshotAddRefCounts(b, refVec)
+	clusterpb.MetaDEKVersionSnapshotAddActiveKekVersion(b, activeKEKVersion)
 	return fbFinish(b, clusterpb.MetaDEKVersionSnapshotEnd(b)), nil
 }
 
 // decodeMetaDEKVersionSnapshot parses a MetaDEKVersionSnapshot FlatBuffers buffer
-// and returns the versions map, active generation, and per-generation ref counts.
-// refCounts is nil when the field was absent (pre-Task-12 snapshot backward compat).
-func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, err error) {
+// and returns the versions map, active generation, per-generation ref counts,
+// and the active KEK version. refCounts is nil when the field was absent
+// (pre-Task-12 snapshot backward compat). activeKEKVersion is 0 when the field
+// was absent (pre-Phase-A snapshot backward compat).
+func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, err error) {
 	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaDEKVersionSnapshot {
 		return clusterpb.GetRootAsMetaDEKVersionSnapshot(d, 0)
 	})
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("dek_codec: MetaDEKVersionSnapshot: %w", err)
+		return nil, 0, nil, 0, fmt.Errorf("dek_codec: MetaDEKVersionSnapshot: %w", err)
 	}
 
 	out := make(map[uint32][]byte, snap.VersionsLength())
@@ -126,5 +131,5 @@ func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, acti
 			}
 		}
 	}
-	return out, snap.Active(), refs, nil
+	return out, snap.Active(), refs, snap.ActiveKekVersion(), nil
 }

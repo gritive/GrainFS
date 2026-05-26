@@ -93,8 +93,20 @@ func (rcv *MetaDEKVersionSnapshot) RefCountsLength() int {
 	return 0
 }
 
+func (rcv *MetaDEKVersionSnapshot) ActiveKekVersion() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaDEKVersionSnapshot) MutateActiveKekVersion(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(10, n)
+}
+
 func MetaDEKVersionSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func MetaDEKVersionSnapshotAddVersions(builder *flatbuffers.Builder, versions flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(versions), 0)
@@ -110,6 +122,9 @@ func MetaDEKVersionSnapshotAddRefCounts(builder *flatbuffers.Builder, refCounts 
 }
 func MetaDEKVersionSnapshotStartRefCountsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func MetaDEKVersionSnapshotAddActiveKekVersion(builder *flatbuffers.Builder, activeKekVersion uint32) {
+	builder.PrependUint32Slot(3, activeKekVersion, 0)
 }
 func MetaDEKVersionSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
