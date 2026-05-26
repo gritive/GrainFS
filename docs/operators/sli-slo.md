@@ -156,6 +156,31 @@ avg(grainfs_node_recovery_duration_seconds)
 - `grainfs_scrub_orphan_segments_{found,deleted,sweep_capped,walk_errors,delete_errors}_total` —
   Orphan segment sweep counters (see runbook.md for diagnosis).
 
+### Startup data WAL repair metrics (reference)
+
+On boot, data WAL replay flags metadata-only EC shards whose local file is missing
+or the wrong size, and a non-blocking background worker reconstructs them serially
+from surviving peers (see runbook.md for diagnosis). Repair is best-effort: reads
+keep working via read-time EC reconstruction while the worker drains.
+
+- `grainfs_datawal_startup_repair_discovered_total{reason}` (Counter) — metadata-only
+  shard repair candidates found during replay, counted per WAL record before dedup
+  (`reason`: `missing`, `size_mismatch`).
+- `grainfs_datawal_startup_repair_candidates_total{reason}` (Counter) — distinct
+  candidates queued for the worker after `(bucket, shardKey, shardIdx)` dedup.
+- `grainfs_datawal_startup_repair_attempts_total` (Counter) — repair attempts started.
+- `grainfs_datawal_startup_repair_successes_total` (Counter) — shards reconstructed.
+- `grainfs_datawal_startup_repair_failures_total{reason}` (Counter) — failed repairs
+  (`reason`: `repair_failed`, `insufficient_survivors`, `context_canceled`, `panic`).
+  Sustained `insufficient_survivors` means peers are down — investigate before it
+  becomes data loss.
+- `grainfs_datawal_startup_repair_skips_total{reason}` (Counter) — candidates skipped
+  before repair (`reason`: `no_group`, `no_backend`, `invalid_shard_key`,
+  `placement_corrupt`, `not_local_owner`, `stale`, `unsupported_shardkey`).
+  `unsupported_shardkey` counts segment/coalesced large-object shards that startup
+  repair does not yet resolve (tracked in TODOS.md); those remain covered by
+  read-time EC reconstruction and scrub.
+
 ---
 
 ## Pre-Flight Checklist (Before "Production Ready")

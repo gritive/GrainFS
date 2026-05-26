@@ -343,6 +343,47 @@ func decodePlacementValue(data []byte) (PlacementRecord, error) {
 	return PlacementRecord{K: int(k), M: int(m), Nodes: nodes}, nil
 }
 
+// LookupObjectPlacement returns the EC placement stored in exact object
+// metadata. versionID="" reads the unversioned bare key (kept in sync with the
+// latest version by dual-write); a non-empty versionID reads the exact
+// versioned metadata key. Returns an empty PlacementRecord when the object is
+// missing, is not EC-managed, or has incomplete EC metadata (ECData==0 or no
+// NodeIDs) — callers treat an empty record as "no actionable placement".
+func (f *FSM) LookupObjectPlacement(bucket, key, versionID string) (PlacementRecord, error) {
+	var rec PlacementRecord
+	err := f.db.View(func(txn *badger.Txn) error {
+		dbKey := f.keys.ObjectMetaKey(bucket, key)
+		if versionID != "" {
+			dbKey = f.keys.ObjectMetaKeyV(bucket, key, versionID)
+		}
+		item, err := txn.Get(dbKey)
+		if err != nil {
+			return err
+		}
+		val, err := f.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		meta, derr := unmarshalObjectMeta(val)
+		if derr != nil {
+			return derr
+		}
+		if meta.ECData == 0 || len(meta.NodeIDs) == 0 {
+			return nil
+		}
+		rec = PlacementRecord{
+			K:     int(meta.ECData),
+			M:     int(meta.ECParity),
+			Nodes: append([]string(nil), meta.NodeIDs...),
+		}
+		return nil
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return PlacementRecord{}, nil
+	}
+	return rec, err
+}
+
 // LookupObjectECShards returns the EC shard parameters (k, m) stored in ObjectMeta
 // for the given versioned object. Returns (0, 0, nil) when the object has no EC
 // metadata (N× replication mode). Returns (0, 0, err) on a real BadgerDB read error.

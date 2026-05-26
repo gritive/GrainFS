@@ -118,6 +118,14 @@ curl -s http://localhost:9000/metrics | grep '^grainfs_ec_scrub_unverified_shard
 
 If `reason="legacy_no_crc"` is non-zero, scrub can read the shard bytes but cannot prove bit-level integrity. Treat those shards as migration candidates, not healthy repaired data.
 
+After a node restart, data WAL replay flags metadata-only EC shards whose local file is missing or the wrong size, and a non-blocking background worker rebuilds them from surviving peers. Watch the startup repair counters to confirm boot-time self-healing landed:
+
+```bash
+curl -s http://localhost:9000/metrics | grep '^grainfs_datawal_startup_repair_'
+```
+
+`discovered`/`candidates` show what replay flagged; `successes` should converge toward `attempts`. Sustained `failures_total{reason="insufficient_survivors"}` means too few peers were readable to reconstruct — bring peers back before it becomes data loss. `skips_total{reason="unsupported_shardkey"}` counts segment/coalesced large-object shards startup repair does not yet handle; those stay covered by read-time EC reconstruction and periodic scrub. Repair is best-effort and not re-attempted from the WAL on the next boot (the WAL checkpoint advances after replay), so with periodic scrub disabled, rely on scrub/placement-monitor or operator-initiated repair if a startup repair is interrupted.
+
 ## NFS Multi-Bucket Export
 
 Use explicit exports for every bucket mounted through NFSv4:

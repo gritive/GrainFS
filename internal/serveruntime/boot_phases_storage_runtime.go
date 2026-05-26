@@ -95,6 +95,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
+	state.dataWALRepairCollector = cluster.NewDataWALRepairCollector()
 	shardSvcOpts := []cluster.ShardServiceOption{
 		cluster.WithEncryptor(state.cfg.Encryptor),
 		cluster.WithDataWAL(state.dataWAL),
@@ -102,6 +103,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		// metadata-only shard write must fsync the shard file directly — read
 		// live so a later EC reconfig is honored.
 		cluster.WithNoRedundancy(func() bool { return state.effectiveEC.ParityShards == 0 }),
+		cluster.WithDataWALRepairSink(state.dataWALRepairCollector),
 	}
 	if state.cfg.DirectIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())

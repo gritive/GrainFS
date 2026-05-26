@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.348.0] - 2026-05-26
+
+### Added
+
+- **Startup auto-repair of data WAL EC shards.** On node boot, data WAL replay
+  detects metadata-only EC shards whose local file is missing or the wrong size; a
+  background worker then validates each against current FSM placement and local
+  ownership and reconstructs it from surviving peers through the existing EC repair
+  path (`RepairShardLocalWithIncident`), one shard at a time. It is non-blocking —
+  serving starts immediately, and read-time EC reconstruction remains the fallback
+  while a repair is pending or fails. It runs even when periodic scrub is disabled.
+  The `grainfs_datawal_startup_repair_*` counters
+  (discovered/candidates/attempts/successes/failures/skips) make boot-time
+  self-healing observable (operator docs: `docs/operators/sli-slo.md`,
+  `docs/operators/runbook.md`). Repairs plain `key/versionID` EC objects; large
+  segment (`key/segments/…`) and coalesced (`key/coalesced/…`) shards are skipped
+  as `unsupported_shardkey` and stay covered by read-time reconstruction and scrub
+  (follow-up tracked in TODOS.md).
+
 ## [0.0.347.0] - 2026-05-26
 
 ### Changed

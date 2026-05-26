@@ -324,3 +324,64 @@ func TestFSM_PlacementIsolation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
 }
+
+func TestFSM_LookupObjectPlacementExactVersion(t *testing.T) {
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(cb))
+
+	oldMeta, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "dir/obj", VersionID: "v-old", Size: 10,
+		ContentType: "application/octet-stream", ETag: "old", ModTime: 1,
+		ECData: 2, ECParity: 1, NodeIDs: []string{"n0", "n1", "n2"},
+	})
+	require.NoError(t, fsm.Apply(oldMeta))
+	newMeta, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "dir/obj", VersionID: "v-new", Size: 11,
+		ContentType: "application/octet-stream", ETag: "new", ModTime: 2,
+		ECData: 3, ECParity: 1, NodeIDs: []string{"n3", "n4", "n5", "n6"},
+	})
+	require.NoError(t, fsm.Apply(newMeta))
+
+	got, err := fsm.LookupObjectPlacement("b", "dir/obj", "v-old")
+	require.NoError(t, err)
+	require.Equal(t, PlacementRecord{K: 2, M: 1, Nodes: []string{"n0", "n1", "n2"}}, got)
+
+	gotNew, err := fsm.LookupObjectPlacement("b", "dir/obj", "v-new")
+	require.NoError(t, err)
+	require.Equal(t, PlacementRecord{K: 3, M: 1, Nodes: []string{"n3", "n4", "n5", "n6"}}, gotNew)
+}
+
+func TestFSM_LookupObjectPlacementLegacyBareKey(t *testing.T) {
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(cb))
+	meta, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "legacy", Size: 10,
+		ContentType: "application/octet-stream", ETag: "e", ModTime: 1,
+		ECData: 1, ECParity: 1, NodeIDs: []string{"n0", "n1"},
+	})
+	require.NoError(t, fsm.Apply(meta))
+
+	got, err := fsm.LookupObjectPlacement("b", "legacy", "")
+	require.NoError(t, err)
+	require.Equal(t, PlacementRecord{K: 1, M: 1, Nodes: []string{"n0", "n1"}}, got)
+}
+
+func TestFSM_LookupObjectPlacementReturnsEmptyForMissingOrNonEC(t *testing.T) {
+	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	cb, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(cb))
+	meta, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "plain", VersionID: "v1", Size: 10,
+		ContentType: "application/octet-stream", ETag: "e", ModTime: 1,
+	})
+	require.NoError(t, fsm.Apply(meta))
+
+	got, err := fsm.LookupObjectPlacement("b", "plain", "v1")
+	require.NoError(t, err)
+	require.Equal(t, PlacementRecord{}, got)
+	got, err = fsm.LookupObjectPlacement("b", "missing", "v1")
+	require.NoError(t, err)
+	require.Equal(t, PlacementRecord{}, got)
+}

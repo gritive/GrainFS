@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
@@ -68,6 +69,9 @@ type ShardService struct {
 	// dataWAL, when set, receives an OpShardPut record before each local shard
 	// file mutation so that a torn / lost shard file can be replayed on boot.
 	dataWAL DataWALAppender
+	// dataWALRepairSink, when set, receives repair candidates discovered
+	// during startup scanning of metadata-only WAL records.
+	dataWALRepairSink DataWALRepairSink
 	// replayingDataWAL is true only while RecoverDataWAL is materializing
 	// records. Atomic because shard writes fan out across goroutines (e.g. EC
 	// writer) and may consult it concurrently with boot recovery in tests.
@@ -117,6 +121,12 @@ func WithDataWAL(w DataWALAppender) ShardServiceOption {
 	return func(s *ShardService) { s.dataWAL = w }
 }
 
+// WithDataWALRepairSink wires a sink that receives repair candidates
+// discovered during startup scanning of metadata-only WAL records.
+func WithDataWALRepairSink(sink DataWALRepairSink) ShardServiceOption {
+	return func(s *ShardService) { s.dataWALRepairSink = sink }
+}
+
 // WithNoRedundancy wires a provider reporting whether the deployment has no EC
 // redundancy (ParityShards==0, single-node 1+0). When it returns true, a large
 // metadata-only shard write is fsynced directly because EC reconstruction
@@ -130,6 +140,9 @@ func WithNoRedundancy(fn func() bool) ShardServiceOption {
 // (and its tests) to assert that production callers actually attached a WAL
 // after construction.
 func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
+
+// HasDataWALRepairSink reports whether a data WAL repair candidate sink is wired.
+func (s *ShardService) HasDataWALRepairSink() bool { return s.dataWALRepairSink != nil }
 
 // Close releases resources owned by the ShardService — currently the shard-pack
 // actor goroutine, which is spawned only when a data WAL is wired. The data WAL
@@ -1257,6 +1270,28 @@ type shardDataWALMaterializer struct {
 	s *ShardService
 }
 
+// addRepairCandidate enqueues a repair candidate and bumps the discovered
+// metric, returning true when a sink was wired (and thus the candidate was
+// queued). Returns false with no side effects when no sink is configured, so
+// callers can keep the operator log honest about whether a repair was queued.
+func (m shardDataWALMaterializer) addRepairCandidate(rec datawal.Record, shardIdx int, reason DataWALRepairReason) bool {
+	if m.s.dataWALRepairSink == nil {
+		return false
+	}
+	// Discovered is counted per record (pre-dedup); the queued-after-dedup count
+	// is emitted by the serveruntime starter. Both labels match the design's
+	// observability list.
+	metrics.DataWALStartupRepairDiscovered.WithLabelValues(string(reason)).Inc()
+	m.s.dataWALRepairSink.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       rec.Bucket,
+		ShardKey:     rec.Key,
+		ShardIdx:     shardIdx,
+		ExpectedSize: rec.Size,
+		Reason:       reason,
+	})
+	return true
+}
+
 func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
 	_ = ctx
 	// Pack ops are replayed unconditionally: the pack store is rebuilt from
@@ -1319,17 +1354,25 @@ func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 				if info.Size() == rec.Size {
 					return nil // already present at expected size
 				}
+				msg := "data WAL replay: shard size mismatch — will reconstruct on read"
+				if m.addRepairCandidate(rec, idx, DataWALRepairSizeMismatch) {
+					msg = "data WAL replay: shard size mismatch — queued startup repair"
+				}
 				log.Warn().
 					Str("shard", path).
 					Int64("expected", rec.Size).
 					Int64("got", info.Size()).
-					Msg("data WAL replay: shard size mismatch — will reconstruct on read")
+					Msg(msg)
 				return nil
 			} else if os.IsNotExist(statErr) {
+				msg := "data WAL replay: shard missing — will reconstruct on read"
+				if m.addRepairCandidate(rec, idx, DataWALRepairMissing) {
+					msg = "data WAL replay: shard missing — queued startup repair"
+				}
 				log.Warn().
 					Str("shard", path).
 					Int64("expected", rec.Size).
-					Msg("data WAL replay: shard missing — will reconstruct on read")
+					Msg(msg)
 				return nil
 			} else {
 				return statErr

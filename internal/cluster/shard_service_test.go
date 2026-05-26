@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1071,4 +1073,191 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	got, err := svc.ReadLocalShard("b", "k", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte("encrypted-payload"), got)
+}
+
+func TestDataWALRepairCollector_CoalescesByBucketShardAndIndex(t *testing.T) {
+	collector := NewDataWALRepairCollector()
+
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 10,
+		Reason:       DataWALRepairMissing,
+	})
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 99,
+		Reason:       DataWALRepairSizeMismatch,
+	})
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     3,
+		ExpectedSize: 11,
+		Reason:       DataWALRepairMissing,
+	})
+	// Same ShardIdx as the first entry but a different Bucket: must NOT
+	// coalesce, proving the composite key includes Bucket.
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "other",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 22,
+		Reason:       DataWALRepairMissing,
+	})
+	// Same Bucket and ShardIdx as the first entry but a different ShardKey:
+	// must NOT coalesce, proving the composite key includes ShardKey.
+	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v2",
+		ShardIdx:     2,
+		ExpectedSize: 33,
+		Reason:       DataWALRepairMissing,
+	})
+
+	got := collector.Candidates()
+	require.Len(t, got, 4)
+	require.Equal(t, DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 99,
+		Reason:       DataWALRepairSizeMismatch,
+	}, got[0])
+	require.Equal(t, 3, got[1].ShardIdx)
+	require.Equal(t, DataWALRepairCandidate{
+		Bucket:       "other",
+		ShardKey:     "obj/v1",
+		ShardIdx:     2,
+		ExpectedSize: 22,
+		Reason:       DataWALRepairMissing,
+	}, got[2])
+	require.Equal(t, DataWALRepairCandidate{
+		Bucket:       "b",
+		ShardKey:     "obj/v2",
+		ShardIdx:     2,
+		ExpectedSize: 33,
+		Reason:       DataWALRepairMissing,
+	}, got[3])
+}
+
+func TestShardService_DataWALMetadataOnlyMissingQueuesStartupRepair(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	collector := NewDataWALRepairCollector()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithDataWALRepairSink(collector),
+	)
+
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op:     datawal.OpShardPut,
+		Bucket: "b",
+		Key:    "obj/v1",
+		Target: "0",
+		Size:   int64(walPayloadInlineThreshold),
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	require.Equal(t, []DataWALRepairCandidate{{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     0,
+		ExpectedSize: int64(walPayloadInlineThreshold),
+		Reason:       DataWALRepairMissing,
+	}}, collector.Candidates())
+}
+
+func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	collector := NewDataWALRepairCollector()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithDataWALRepairSink(collector),
+	)
+
+	path := svc.getShardPath("b", "obj/v1", 1)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("short"), 0o600))
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op:     datawal.OpShardPut,
+		Bucket: "b",
+		Key:    "obj/v1",
+		Target: "1",
+		Size:   int64(walPayloadInlineThreshold),
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	require.Equal(t, []DataWALRepairCandidate{{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     1,
+		ExpectedSize: int64(walPayloadInlineThreshold),
+		Reason:       DataWALRepairSizeMismatch,
+	}}, collector.Candidates())
+}
+
+func TestDataWALRepairCollector_ConcurrentAddIsRaceFree(t *testing.T) {
+	collector := NewDataWALRepairCollector()
+
+	const goroutines = 50
+	// Keys 0..39 are distinct; keys 40..49 duplicate key "0".
+	// Distinct key count is 40.
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		key := strconv.Itoa(i % 40)
+		go func() {
+			defer wg.Done()
+			collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
+				Bucket:   "b",
+				ShardKey: key,
+				ShardIdx: 0,
+				Reason:   DataWALRepairMissing,
+			})
+		}()
+	}
+	wg.Wait()
+
+	require.Len(t, collector.Candidates(), 40)
+}
+
+func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	collector := NewDataWALRepairCollector()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithDataWALRepairSink(collector),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "small", 0, []byte("payload")))
+	require.NoError(t, dwal.Flush())
+	require.NoError(t, os.Remove(svc.getShardPath("b", "small", 0)))
+
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	require.Empty(t, collector.Candidates())
+	got, err := svc.ReadLocalShard("b", "small", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), got)
 }

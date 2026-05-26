@@ -137,6 +137,14 @@ var (
 		Help: "1 if split brain is suspected (multiple leaders or large term divergence), 0 otherwise.",
 	})
 
+	// DataWALStartupRepairDiscovered counts metadata-only data WAL shard repair
+	// candidates discovered and queued during startup replay, per record before
+	// deduplication. Only counted when a repair sink is configured.
+	DataWALStartupRepairDiscovered = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_discovered_total",
+		Help: "Metadata-only data WAL shard repair candidates discovered and queued during startup replay (only counted when a repair sink is configured); counted per WAL record before deduplication.",
+	}, []string{"reason"})
+
 	// ScrubShardErrorsTotal counts shard errors (missing + corrupt) detected during scrubbing.
 	ScrubShardErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_scrub_shard_errors_total",
@@ -525,4 +533,44 @@ var (
 		Help:    "Tag count per PUT (header or body).",
 		Buckets: []float64{0, 1, 2, 3, 5, 10},
 	})
+
+	// Data WAL startup repair candidates, attempts, successes, failures, and skips.
+
+	DataWALStartupRepairCandidates = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_candidates_total",
+		Help: "Distinct data WAL shard repair candidates queued for the startup worker after (bucket, shardKey, shardIdx) deduplication.",
+	}, []string{"reason"})
+
+	DataWALStartupRepairAttempts = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_attempts_total",
+		Help: "Startup data WAL EC shard repair attempts.",
+	})
+
+	DataWALStartupRepairSuccesses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_successes_total",
+		Help: "Successful startup data WAL EC shard repairs.",
+	})
+
+	// DataWALStartupRepairFailures reason label values:
+	//   context_canceled       — repair context was canceled
+	//   insufficient_survivors — too few EC shards readable for reconstruction
+	//   repair_failed          — other repair error
+	//   panic                  — worker goroutine panicked
+	DataWALStartupRepairFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_failures_total",
+		Help: "Failed startup data WAL EC shard repairs.",
+	}, []string{"reason"})
+
+	// DataWALStartupRepairSkips reason label values:
+	//   no_group              — bucket has no data group assignment
+	//   no_backend            — data group has no distributed backend
+	//   unsupported_shardkey  — segment or coalesced shard key form (placement in segment metadata, not yet supported)
+	//   invalid_shard_key     — shard key is empty or shard index is negative
+	//   placement_corrupt     — LookupObjectPlacement returned an error or inconsistent node count
+	//   not_local_owner       — this node does not own the shard
+	//   stale                 — placement record has no nodes (object version deleted)
+	DataWALStartupRepairSkips = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_skips_total",
+		Help: "Startup data WAL EC shard repair candidates skipped before repair.",
+	}, []string{"reason"})
 )

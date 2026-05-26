@@ -187,6 +187,10 @@ type bootState struct {
 	// is registered downstream by bootStreamRouter).
 	dataWAL    *datawal.WAL
 	dataWALDir string
+	// dataWALRepairCollector receives metadata-only WAL replay candidates during
+	// bootShardService; the background repair worker drains them after data
+	// groups, incident recording, and receipts are available.
+	dataWALRepairCollector *cluster.DataWALRepairCollector
 
 	// bootWALAndForwarders
 	wal               *wal.WAL

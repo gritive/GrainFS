@@ -527,6 +527,12 @@ func (b *DistributedBackend) currentECConfig() ECConfig {
 	return b.ecConfig
 }
 
+// CurrentECConfigForStartupRepair returns the resolved EC config for use during
+// startup repair classification, where no caller-supplied default is available.
+func (b *DistributedBackend) CurrentECConfigForStartupRepair() ECConfig {
+	return b.currentECConfig()
+}
+
 func (b *DistributedBackend) publishRuntimeSnapshot(topology backendTopology, cfg ECConfig) {
 	b.runtimeSnapshot.Store(&backendRuntimeSnapshot{
 		topology: topology,
