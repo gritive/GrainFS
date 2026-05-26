@@ -98,6 +98,10 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	shardSvcOpts := []cluster.ShardServiceOption{
 		cluster.WithEncryptor(state.cfg.Encryptor),
 		cluster.WithDataWAL(state.dataWAL),
+		// Single-node (ParityShards==0) has no EC redundancy, so a large
+		// metadata-only shard write must fsync the shard file directly — read
+		// live so a later EC reconfig is honored.
+		cluster.WithNoRedundancy(func() bool { return state.effectiveEC.ParityShards == 0 }),
 	}
 	if state.cfg.DirectIO {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
