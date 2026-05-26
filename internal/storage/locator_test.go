@@ -40,6 +40,26 @@ func TestLocalOpenSegmentRejectsCAS(t *testing.T) {
 	}
 }
 
+func TestParseLocatorEdgeCases(t *testing.T) {
+	tests := []struct {
+		blobID     string
+		wantScheme LocatorScheme
+		wantRef    string
+	}{
+		{"cas://", LocatorCAS, ""},
+		{"legacy://", LocatorLegacy, ""},
+		{"legacy://bucket/key/", LocatorLegacy, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.blobID, func(t *testing.T) {
+			loc := ParseLocator(tt.blobID)
+			if loc.Scheme != tt.wantScheme || loc.Ref != tt.wantRef {
+				t.Fatalf("ParseLocator(%q) = %+v, want scheme=%v ref=%q", tt.blobID, loc, tt.wantScheme, tt.wantRef)
+			}
+		})
+	}
+}
+
 func TestLocatorStringRoundTrip(t *testing.T) {
 	loc := Locator{Scheme: LocatorCAS, Ref: "b3-0011223344556677"}
 	if got := loc.String(); got != "cas://b3-0011223344556677" {
