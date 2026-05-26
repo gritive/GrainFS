@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"net/http"
+	"sort"
 
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 
@@ -23,12 +24,30 @@ type kekStatusReaderAdapter struct {
 }
 
 func (a kekStatusReaderAdapter) ActiveKEKVersion() uint32 { return a.fsm.ActiveKEKVersion() }
+
+// KEKStoreVersions returns the sorted union of the live keystore versions and
+// the lifecycle-tracked versions. A pruned version is unlinked from the
+// keystore but its kek_status record persists, so unioning keeps it visible in
+// the status response (reported as "pruned" via lifecycleStatusString).
 func (a kekStatusReaderAdapter) KEKStoreVersions() []uint32 {
-	store := a.fsm.KEKStore()
-	if store == nil {
+	seen := make(map[uint32]struct{})
+	if store := a.fsm.KEKStore(); store != nil {
+		for _, v := range store.Versions() {
+			seen[v] = struct{}{}
+		}
+	}
+	for _, v := range a.fsm.LifecycleKEKVersions() {
+		seen[v] = struct{}{}
+	}
+	if len(seen) == 0 {
 		return nil
 	}
-	return store.Versions()
+	out := make([]uint32, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 func (a kekStatusReaderAdapter) LookupKEKStatus(v uint32) (uint32, cluster.KEKLifecycleStatus, uint64, bool) {
 	return a.fsm.LookupKEKStatus(v)
