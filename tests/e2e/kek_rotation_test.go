@@ -32,26 +32,36 @@ package e2e
 // (ProbeAllKEKDiskSpace below MinKeystoreFreeBytes → rotate rejected with the
 // offending node id) and kek_diskspace_rpc_test.go.
 //
-// PENDING (PIt) — Phase B is NOT yet end-to-end functional. Building this
-// suite (the first time the whole stack ran together via the real CLI/UDS
-// path) surfaced wiring gaps that the per-task unit tests missed because each
-// wired its own dependencies in test setup. Three were fixed alongside this
-// suite (FSM SetKEKStore + SetKEKDir at boot; kek_envelope_v1 capability
-// advertise). Two remain and gate the following specs as PIt:
+// Building this suite (the first time the whole stack ran together via the
+// real CLI/UDS path) surfaced two gaps the per-task unit tests missed because
+// each wired its own dependencies in test setup.
 //
-//  1. Cluster rotate does not propagate to followers — after a leader rotate,
-//     follower active_version stays 0 (the raft MetaKEKRotateCmd is not
-//     reaching/applying on peers). Blocks all 3 Cluster3Node specs.
-//  2. Single-node prune voter-coverage probe fails with "missing probe
-//     response from voter <raft-addr>": the PeerKEKProbe self-shortcut is
-//     keyed on state.nodeID while the raft voter set uses the raft address, so
-//     self never matches (boot_phases_kek_rotation_leader.go). Blocks the two
-//     prune-path Single-node specs.
+//  GAP 2 (FIXED): Single-node prune voter-coverage probe failed with "missing
+//     probe response from voter <raft-addr>". The PeerKEKProbe self-shortcut
+//     and the two probe RPC handlers were keyed on state.nodeID (the
+//     operator-facing --node-id), but the raft voter set returned by
+//     EffectiveConfiguration() uses the raft ServerID (production wires
+//     RaftID = state.raftAddr). Self never matched a voter, and remote voters'
+//     attestation node_ids never matched the leader-stamped voter_ids the FSM
+//     validates. Fixed in boot_phases_kek_rotation_leader.go by using
+//     state.metaRaft.Node().ID() (the raft ServerID) consistently for the
+//     probe selfID and both handler NodeIDs. Unblocks the two single-node
+//     prune-path specs below (now It).
 //
-// The PIt specs are written end-to-end and ready to flip to It once a Phase B
-// wiring-completion pass lands. The lifecycle invariants they cover are also
-// exercised in-process by internal/cluster (FSM Apply / prune voter-coverage)
-// and internal/encrypt (lease tracker) unit tests.
+//  GAP 1 (BLOCKER — not a wiring fix): Cluster rotate does not propagate to
+//     followers. Instrumentation of MetaFSM.Apply proved the raft
+//     MetaKEKRotateCmd DOES reach and Apply on every node, but followers
+//     no-op it (RotationStatusStaleNoOp) because the rotate Apply gates on
+//     wrap_set_hash matching the node's own DEKKeeper wrap[] set, and each
+//     node generates its gen-0 DEK independently at random — the wrap sets
+//     diverge cluster-wide. See the long comment on "propagates rotation to
+//     all followers" for the full root cause. This needs an initial-DEK
+//     replication mechanism (Phase D / out of Task 15 scope); the 3
+//     Cluster3Node specs stay PIt.
+//
+// The lifecycle invariants the BLOCKER specs cover are also exercised
+// in-process by internal/cluster (FSM Apply / prune voter-coverage) and
+// internal/encrypt (lease tracker) unit tests.
 
 import (
 	"bytes"
@@ -312,12 +322,7 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			gomega.Expect(after.Versions).To(gomega.HaveLen(len(before.Versions) + 1))
 		})
 
-		// PENDING: prune voter-coverage probe self-shortcut is keyed on
-		// state.nodeID but the raft voter set uses the raft address, so prune
-		// fails with "missing probe response from voter <raft-addr>". Flip to
-		// It once the PeerKEKProbe self-wiring in
-		// boot_phases_kek_rotation_leader.go uses the raft voter ID.
-		ginkgo.PIt("two-phase prune removes a retired version from the keystore", func() {
+		ginkgo.It("two-phase prune removes a retired version from the keystore", func() {
 			t := ginkgo.GinkgoTB()
 			dir, nodeID := startSingleKEKNode(t)
 
@@ -359,12 +364,7 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				"keys/1.key must be unlinked after prune")
 		})
 
-		// PENDING: the prune CLI runs the voter-coverage probe at propose time
-		// (before the FSM's retiring-state check), so it currently fails with
-		// "missing probe response from voter <raft-addr>" rather than the
-		// expected "retiring" rejection. Same self-shortcut gap as above. Flip
-		// to It once the probe self-wiring is fixed.
-		ginkgo.PIt("rejects prune without a prior retire", func() {
+		ginkgo.It("rejects prune without a prior retire", func() {
 			t := ginkgo.GinkgoTB()
 			dir, nodeID := startSingleKEKNode(t)
 
@@ -412,10 +412,28 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 	})
 
 	ginkgo.Context("Cluster3Node", ginkgo.Ordered, func() {
-		// PENDING: a leader KEK rotate does not propagate to followers — the
-		// follower's active_version stays at 0 (the raft MetaKEKRotateCmd is
-		// not reaching/applying on peers). Flip to It once cluster KEK rotate
-		// replication is wired end-to-end.
+		// PENDING (BLOCKER — deeper than a wiring gap): a leader KEK rotate
+		// commits to the replicated meta-raft log and EVERY node's
+		// MetaFSM.Apply receives the MetaKEKRotateCmd (confirmed by
+		// instrumentation), but followers no-op it. The rotate Apply gates on
+		// wrap_set_hash == canonical hash of the node's CURRENT DEKKeeper
+		// wrap[] set; on a fresh dynamically-joined cluster each node's gen-0
+		// DEK is generated independently at random (encrypt.NewDEKKeeper does
+		// rand.Read; dekKeeper.Rotate() likewise), so every node's wrap[] —
+		// and thus wrap_set_hash — differs. The leader stamps ITS wrap_set_hash
+		// into the cmd; followers compare against their own divergent set and
+		// record RotationStatusStaleNoOp without advancing active_version.
+		// The Phase B plan's core invariant ("DEKKeeper wrap[gen] byte-identical
+		// across nodes at Apply time") is violated at the source: DEK material
+		// is per-node-random and is NOT replicated by value (the only sync path
+		// is the DKVS snapshot trailer via InstallSnapshot, which does not fire
+		// on a fresh cluster that has not yet hit a snapshot threshold).
+		// Resolving this needs an initial-DEK replication mechanism (e.g. the
+		// leader broadcasting its gen-0 wrap, or a join handshake that transfers
+		// DEK state) — outside Phase B / Task 15 scope. Flip to It once such a
+		// path exists. Naively skipping the follower-side wrap_set_hash /
+		// verifyRewrappedDEKsAgainstWrapSet checks is NOT a valid fix: it would
+		// destroy data already sealed under a follower's own local DEK.
 		ginkgo.PIt("propagates rotation to all followers", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
@@ -443,8 +461,11 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			}
 		})
 
-		// PENDING: depends on cluster rotate propagation (above) AND the prune
-		// voter-coverage probe. Flip to It once both are wired.
+		// PENDING (BLOCKER): depends on cluster rotate propagation (above),
+		// which is blocked on the per-node DEK wrap[] divergence documented on
+		// the "propagates rotation to all followers" spec. The voter-coverage
+		// probe self-identity gap is fixed (raft ServerID), but this spec
+		// cannot reach a retired-version state until rotate propagates.
 		ginkgo.PIt("prunes a retired version with all voters lease_count=0", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
@@ -496,9 +517,10 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			}
 		})
 
-		// PENDING: depends on cluster rotate propagation (above) — the
+		// PENDING (BLOCKER): depends on cluster rotate propagation (above) — the
 		// idempotent-replay assertion is only meaningful once a rotate commits
-		// across the cluster. Flip to It once propagation is wired.
+		// across the cluster. Blocked on the same per-node DEK wrap[] divergence
+		// documented on the "propagates rotation to all followers" spec.
 		ginkgo.PIt("survives a leader restart mid-lifecycle without double-applying", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
