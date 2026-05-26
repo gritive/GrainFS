@@ -512,6 +512,7 @@ enum MetaCmdType : uint8 {
   KEKRotate                    = 69, // KEK: install rotated KEK + rewrapped DEKs (Phase B)
   KEKRetire                    = 70, // KEK: mark prior KEK version retired (Phase B)
   KEKPrune                     = 71, // KEK: prune retired KEK version after voter attestation (Phase B)
+  DEKReplicatedRotate          = 72, // DEK: leader-generated KEK-wrapped DEK bytes replicated to all nodes (Phase D)
 }
 
 table MetaNodeEntry {
@@ -557,6 +558,19 @@ table MetaConfigDeleteCmd {
 // DEKRotate has no payload — just the type byte.
 table MetaDEKVersionPruneCmd {
   gen:uint32;
+}
+
+// MetaDEKReplicatedRotateCmd is the FSM command payload for DEK replication (Phase D).
+// The leader generates a fresh DEK, wraps it under the active KEK, and replicates
+// the wrapped bytes through the Raft log so every node holds byte-identical DEKs.
+// expected_active_gen: active DEK gen the leader observed at propose time;
+//   math.MaxUint32 = gen-0 bootstrap sentinel ("no existing DEK").
+// active_kek_ver: KEK version wrapped_dek is sealed under (determinism guard + AAD input).
+table MetaDEKReplicatedRotateCmd {
+  gen:uint32;                 // the DEK generation this wrap installs
+  wrapped_dek:[ubyte];        // DEK plaintext sealed under active KEK (AES-GCM, DomainDEKFSMWrap AAD bound to clusterID+gen+kek_ver)
+  expected_active_gen:uint32; // active DEK gen the leader observed at propose; math.MaxUint32 = gen-0 bootstrap sentinel ("no existing DEK")
+  active_kek_ver:uint32;      // KEK version wrapped_dek is sealed under (LOAD-BEARING determinism guard, also AAD input)
 }
 
 // DEK snapshot trailer entry: one wrapped DEK generation.
