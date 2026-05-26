@@ -348,3 +348,51 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 	state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
 	return nil
 }
+
+// genesisBootstrapDEKWait bounds how long the genesis node waits to win its
+// (single-voter) election before proposing gen-0. Genesis elects in ~1 heartbeat
+// tick; a few seconds is generous slack while still surfacing a real bug if the
+// node never becomes leader.
+const genesisBootstrapDEKWait = 10 * time.Second
+
+// bootGenesisDEKBootstrap replicates the genesis node's locally-generated DEK
+// gen-0 through the UNGATED bootstrap propose (Phase D Task 5) so joining nodes
+// install identical bytes via log replay / snapshot restore.
+//
+// Fires EXACTLY ONCE in the cluster's lifetime, on the original fresh-init boot:
+//
+//   - Never on a joiner / node with static peers: isGenesisBoot is false, and
+//     such a node holds an EMPTY keeper anyway (nothing to propose).
+//   - Never on a restart of a former-genesis node: priorState makes
+//     isGenesisBoot false; gen-0 is reinstalled by rebuildDEKKeeperFromRestore.
+//   - Even a stray duplicate is a deterministic no-op: ProposeDEKBootstrap
+//     rejects gen != 0 and applyDEKReplicatedRotate's bootstrap sentinel only
+//     installs when no DEK gen exists yet (belt-and-suspenders).
+//
+// The propose is UNGATED by design: at this moment the genesis node is the sole
+// voter, so the all-voter dek_replicated_v1 gate cannot pass (followers have not
+// gossiped capability evidence yet — the gen-0 paradox). Propose forwards to the
+// leader when not leader, so we wait for this node to win its single-voter
+// election before proposing.
+func bootGenesisDEKBootstrap(ctx context.Context, state *bootState) error {
+	if !isGenesisBoot(state) || state.dekKeeper == nil {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, genesisBootstrapDEKWait)
+	defer cancel()
+	tick := time.NewTicker(cluster.MetaRaftHeartbeatInterval)
+	defer tick.Stop()
+	for !state.metaRaft.IsLeader() {
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("bootGenesisDEKBootstrap: genesis node did not win leadership within %s: %w", genesisBootstrapDEKWait, waitCtx.Err())
+		case <-tick.C:
+		}
+	}
+	versions, active := state.dekKeeper.VersionsAndActive() // active=0, gen-0 present
+	kekVer := state.kekStore.ActiveVersion()
+	if err := state.metaRaft.ProposeDEKBootstrap(ctx, active, versions[active], kekVer); err != nil {
+		return fmt.Errorf("bootGenesisDEKBootstrap: replicate gen-0: %w", err)
+	}
+	return nil
+}

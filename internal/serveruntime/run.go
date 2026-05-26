@@ -140,6 +140,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootMetaRaftStart(ctx, state, StartRotationSocket); err != nil {
 		return err
 	}
+	// Phase D Task 5: on a fresh genesis boot (single voter), replicate the
+	// locally-generated DEK gen-0 through the ungated bootstrap propose so
+	// joiners install identical bytes. No-op on joiners / restarts (not genesis).
+	if err := bootGenesisDEKBootstrap(ctx, state); err != nil {
+		return err
+	}
 
 	recordStartupDecision := func(decision badgerrole.Decision) {
 		recordBadgerStartupDecision(state, decision)

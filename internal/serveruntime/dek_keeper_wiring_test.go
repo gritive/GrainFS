@@ -181,6 +181,59 @@ func TestWireDEKKeeper_RefusesLegacyKEKSourceEnv(t *testing.T) {
 	}
 }
 
+// TestWireDEKKeeper_NonGenesisStartsEmpty pins Task 5: a joining node
+// (joinMode → not genesis) MUST start with an EMPTY DEK keeper. No local
+// gen-0 is generated; gen-0 arrives via log replay / snapshot restore after
+// the node joins. Seal must fail until a generation is installed.
+func TestWireDEKKeeper_NonGenesisStartsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	// Joiner must already hold the cluster KEK + cluster.id before serve
+	// (wireDEKKeeper refuses auto-gen in join mode), so stage both.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "keys"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "keys", "0.key"),
+		bytes.Repeat([]byte{0x55}, encrypt.KEKSize), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cluster.id"),
+		bytes.Repeat([]byte{0x42}, 16), 0o600))
+
+	state := &bootState{cfg: Config{DataDir: dir}, joinMode: true}
+	fsm := cluster.NewMetaFSM()
+	require.NoError(t, wireDEKKeeper(state, fsm))
+
+	_, _, err := state.dekKeeper.Seal([]byte("x"))
+	require.Error(t, err, "non-genesis node must start with empty keeper (no local gen-0)")
+}
+
+// TestWireDEKKeeper_GenesisGeneratesGen0 pins Task 5: a fresh single-voter
+// bootstrap (!joinMode, no peers, no priorState) IS genesis and generates a
+// random gen-0 locally. Seal must succeed immediately.
+func TestWireDEKKeeper_GenesisGeneratesGen0(t *testing.T) {
+	dir := t.TempDir()
+	state := &bootState{cfg: Config{DataDir: dir}}
+	fsm := cluster.NewMetaFSM()
+	require.NoError(t, wireDEKKeeper(state, fsm))
+
+	_, _, err := state.dekKeeper.Seal([]byte("x"))
+	require.NoError(t, err, "genesis node must have gen-0")
+}
+
+// TestWireDEKKeeper_SetsFSMClusterID is a production-path regression guard
+// (HIGH 1 / Pass 3): wireDEKKeeper MUST bind the persisted cluster.id into the
+// FSM so the KEK-rewrap AAD matches the DEK keeper's AAD. Without SetClusterID
+// the FSM returns all-zero and the first KEK rotation over AAD-bound DEKs
+// fails auth.
+func TestWireDEKKeeper_SetsFSMClusterID(t *testing.T) {
+	dir := t.TempDir()
+	state := &bootState{cfg: Config{DataDir: dir}}
+	fsm := cluster.NewMetaFSM()
+	require.NoError(t, wireDEKKeeper(state, fsm))
+
+	persisted, err := os.ReadFile(filepath.Join(dir, "cluster.id"))
+	require.NoError(t, err, "wireDEKKeeper must persist cluster.id on first boot")
+	got := fsm.ClusterID()
+	require.NotEqual(t, [16]byte{}, got, "wireDEKKeeper must SetClusterID on the FSM (got all-zero)")
+	require.True(t, bytes.Equal(got[:], persisted), "FSM clusterID %x != persisted cluster.id %x", got[:], persisted)
+}
+
 // TestWireDEKKeeper_FreshBootStillAutoGenerates pins the fresh-boot
 // behavior unchanged by the P3-H1 fix: priorState=false, no join, no
 // peers → keys/0.key and cluster.id auto-generate.
