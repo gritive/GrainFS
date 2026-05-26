@@ -185,6 +185,30 @@ func (f *MetaFSM) LegacyDEKRotateSeen() bool {
 	return f.legacyDEKRotateSeen.Load()
 }
 
+// CheckGreenfieldDEKBoundary refuses startup if the replayed log contained a
+// legacy type-48 DEKRotate (legacyDEKRotateSeen) that produced live DEK gens
+// NOT covered by a DKVS snapshot trailer install. Phase D is a hard greenfield
+// upgrade boundary: pre-Phase-D divergent-DEK logs cannot be safely upgraded
+// in place.
+//
+// Coverage: this guard covers the live-log path (un-compacted type-48 entries).
+// The snapshot path is covered separately by the LoadFromFSM AAD-unwrap discipline
+// (Task 1b): a pre-Phase-D snapshot wrap sealed with nil AAD fails authentication
+// during Restore → boot aborts before this method is ever reached.
+//
+// Mixed-version safety: ProposeDEKRotate no longer emits type-48 (it emits
+// type-50, Task 4) and the type-48 propose path is removed in this binary, so
+// this guard fires only on a log that predates Phase D. A true greenfield
+// cluster never emits type-48.
+func (f *MetaFSM) CheckGreenfieldDEKBoundary() error {
+	if !f.legacyDEKRotateSeen.Load() {
+		return nil
+	}
+	return fmt.Errorf("refusing startup: replicated log contains legacy pre-Phase-D DEKRotate (type-48) entries. " +
+		"Phase D replicated-DEK is a greenfield boundary — pre-existing clusters with divergent DEKs cannot be upgraded in place. " +
+		"Provision a fresh cluster (the scope decision for Phase D is greenfield).")
+}
+
 // applyDEKReplicatedRotate installs a leader-generated, KEK-wrapped DEK
 // generation into the local keeper. Deterministic: every node installs the SAME
 // wrapped bytes shipped in the command, under f.mu. Replaces the legacy

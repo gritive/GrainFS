@@ -133,6 +133,30 @@ func TestDEKWrapAAD_BoundToClusterID(t *testing.T) {
 	}
 }
 
+// TestGreenfieldGuard_SnapshotPath_RejectsNilAADLegacyWraps asserts that a
+// pre-Phase-D snapshot wrap (sealed with nil AAD, the old format) is rejected by
+// LoadFromFSM, which now AAD-unwraps every wrap with DomainDEKFSMWrap bound to
+// (gen, activeKEKVer). This is the snapshot-path guard: no extra format marker
+// is needed — the AAD change IS the marker.
+func TestGreenfieldGuard_SnapshotPath_RejectsNilAADLegacyWraps(t *testing.T) {
+	kek := make([]byte, KEKSize)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatal(err)
+	}
+	cid := testClusterID()
+	// Build a LEGACY (pre-Phase-D) wrap: sealed with nil AAD, the old format.
+	legacyWrap, err := AESGCMSeal(kek, make([]byte, DEKSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// LoadFromFSM now AAD-unwraps with DomainDEKFSMWrap(gen=0, kekVer=0); the
+	// nil-AAD legacy wrap MUST fail authentication → restore errors → boot aborts.
+	_, err = LoadFromFSM(kek, cid, map[uint32][]byte{0: legacyWrap}, 0)
+	if err == nil {
+		t.Fatal("LoadFromFSM must reject nil-AAD legacy snapshot wraps (greenfield snapshot-path guard)")
+	}
+}
+
 // InstallReplicatedDEK is idempotent for identical bytes and rejects mismatched
 // bytes for an already-installed gen.
 func TestInstallReplicatedDEK_Idempotent(t *testing.T) {
