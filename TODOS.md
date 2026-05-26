@@ -290,15 +290,13 @@ Work these in order. Do not run them in parallel.
   format version that encodes segment refs, preserve old replay compatibility,
   and add PITR coverage for a chunked object created after the snapshot point.
 
-- [ ] **Scrub / placement-monitor: proactively repair segment and coalesced EC shard keys [P2]**:
-  Startup repair now covers segment (`<key>/segments/<blobID>`) and coalesced
-  (`<key>/coalesced/<id>`) shard keys at boot time. The periodic placement-monitor
-  (`boot_phases_scrubber.go` `OnMissing`/`OnCorrupt` paths) still resolves shard keys
-  via the object-version-only `splitDataWALStartupRepairShardKey` path and does not
-  handle segment/coalesced forms. It could reuse the new
-  `cluster.ResolveShardKeyPlacement` + `RepairShardAtShardKey` primitives to extend
-  continuous/periodic coverage to those shard types, closing the gap between boot-time
-  discovery (already covered) and between-boot degraded-shard windows.
+- [ ] **Placement monitor: scan non-latest object versions' segment/coalesced shards [P3]**:
+  The placement monitor currently covers only the latest object version
+  (`IterObjectMetas` semantics). Segment and coalesced EC shards belonging to
+  non-latest versions are not proactively scanned; they rely on read-time EC
+  reconstruction. Extend the monitor to iterate non-latest versions' segment refs
+  as well, closing the between-boot gap for versioned objects with degraded
+  older-version shards.
 
 - [ ] **AppendObject real per-call MD5 chain [P2]**: `AppendObject` still stores
   segment xxhash checksums in `AppendCallMD5s` as a stopgap. Capture each append

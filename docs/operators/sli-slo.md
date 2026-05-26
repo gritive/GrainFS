@@ -185,6 +185,19 @@ keep working via read-time EC reconstruction while the worker drains.
   rare marker-collision case (an S3 object key literally containing `/segments/` or
   `/coalesced/`) folds into the `stale` reason instead.
 
+### Placement monitor metrics (reference)
+
+The periodic ShardPlacementMonitor detects and repairs missing or corrupt EC shards
+for **latest-version** objects between boots. Non-latest-version segment/coalesced
+shards are not proactively scanned; they remain covered by read-time EC
+reconstruction (see runbook.md for diagnosis). Repairs are observable via the
+incident/receipt path.
+
+- `grainfs_placement_monitor_invalid_ec_ref_total{kind}` (Counter) — incremented
+  when a segment (`kind="segment"`) or coalesced (`kind="coalesced"`) ref has
+  malformed placement (`len(NodeIDs) != ECData+ECParity`). A non-zero rate indicates
+  corrupt object metadata; investigate affected objects.
+
 ---
 
 ## Pre-Flight Checklist (Before "Production Ready")
