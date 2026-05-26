@@ -22,6 +22,20 @@ type IncidentRepairRequest struct {
 	Recorder      IncidentRecorder
 	CorrelationID string
 	Now           time.Time
+	// ShardKey, when non-empty, routes RepairShardLocalWithIncident to the shard-key repair path; Placement must also be set.
+	ShardKey string
+	// Placement is the resolved EC placement used by the shard-key repair path; only consulted when ShardKey is non-empty.
+	Placement PlacementRecord
+}
+
+// repairDiagMessage builds the Diagnosed-fact message, appending the shardKey
+// for traceability on the segment/coalesced (shard-key) repair path.
+func repairDiagMessage(req IncidentRepairRequest) string {
+	msg := "attempting shard reconstruction from surviving peers"
+	if req.ShardKey != "" {
+		msg += fmt.Sprintf(" (shardKey=%s)", req.ShardKey)
+	}
+	return msg
 }
 
 func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, req IncidentRepairRequest) error {
@@ -50,12 +64,23 @@ func (b *DistributedBackend) RepairShardLocalWithIncident(ctx context.Context, r
 		return err
 	}
 	facts = append(facts,
-		incident.Fact{CorrelationID: cid, Type: incident.FactDiagnosed, Cause: incident.CauseMissingShard, Scope: scope, Message: "attempting shard reconstruction from surviving peers", At: time.Now().UTC()},
+		incident.Fact{CorrelationID: cid, Type: incident.FactDiagnosed, Cause: incident.CauseMissingShard, Scope: scope, Message: repairDiagMessage(req), At: time.Now().UTC()},
 		incident.Fact{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionReconstructShard, At: time.Now().UTC()},
 	)
-	err := b.RepairShard(ctx, req.Bucket, req.Key, req.VersionID, req.ShardIdx)
+	var err error
+	if req.ShardKey != "" {
+		err = b.RepairShardAtShardKey(ctx, req.Bucket, req.ShardKey, req.Placement, req.ShardIdx)
+	} else {
+		err = b.RepairShard(ctx, req.Bucket, req.Key, req.VersionID, req.ShardIdx)
+	}
 	if err != nil {
-		if b.localRepairTargetReadable(ctx, req.Bucket, req.Key, req.VersionID, req.ShardIdx) {
+		readable := false
+		if req.ShardKey != "" {
+			readable = b.localRepairTargetReadableAtShardKey(ctx, req.Bucket, req.ShardKey, req.Placement, req.ShardIdx)
+		} else {
+			readable = b.localRepairTargetReadable(ctx, req.Bucket, req.Key, req.VersionID, req.ShardIdx)
+		}
+		if readable {
 			facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactVerified, At: time.Now().UTC()})
 			return recordIncident(ctx, req.Recorder, facts)
 		}
@@ -95,6 +120,24 @@ func (b *DistributedBackend) localRepairTargetReadable(ctx context.Context, buck
 	return err == nil
 }
 
+// localRepairTargetReadableAtShardKey mirrors localRepairTargetReadable but uses
+// the explicit shardKey + resolved placement record rather than re-resolving
+// object-version placement. Used for segment/coalesced shard repair where the
+// physical shard key is not derivable from an object version.
+func (b *DistributedBackend) localRepairTargetReadableAtShardKey(_ context.Context, bucket, shardKey string, rec PlacementRecord, shardIdx int) bool {
+	if b.shardSvc == nil {
+		return false
+	}
+	if shardIdx < 0 || shardIdx >= len(rec.Nodes) {
+		return false
+	}
+	if rec.Nodes[shardIdx] != b.currentSelfAddr() {
+		return false
+	}
+	_, err := b.shardSvc.ReadLocalShard(bucket, shardKey, shardIdx)
+	return err == nil
+}
+
 func (b *DistributedBackend) RecordRepairReceiptSigned(ctx context.Context, req IncidentRepairRequest, receiptID string) error {
 	if receiptID == "" {
 		return nil
@@ -107,7 +150,7 @@ func (b *DistributedBackend) RecordRepairReceiptSigned(ctx context.Context, req 
 	scope := incident.Scope{Kind: incident.ScopeShard, Bucket: req.Bucket, Key: req.Key, VersionID: req.VersionID, ShardID: req.ShardIdx, NodeID: b.NodeID()}
 	facts := []incident.Fact{
 		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseMissingShard, Scope: scope, At: now},
-		{CorrelationID: cid, Type: incident.FactDiagnosed, Cause: incident.CauseMissingShard, Scope: scope, Message: "attempting shard reconstruction from surviving peers", At: now.Add(time.Millisecond)},
+		{CorrelationID: cid, Type: incident.FactDiagnosed, Cause: incident.CauseMissingShard, Scope: scope, Message: repairDiagMessage(req), At: now.Add(time.Millisecond)},
 		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionReconstructShard, At: now.Add(2 * time.Millisecond)},
 		{CorrelationID: cid, Type: incident.FactVerified, At: now.Add(3 * time.Millisecond)},
 		{CorrelationID: cid, Type: incident.FactReceiptSigned, ReceiptID: receiptID, At: now.Add(4 * time.Millisecond)},
