@@ -376,13 +376,19 @@ func buildRewrappedMap(payload []RewrappedDEKEntry) map[uint32][]byte {
 	return out
 }
 
-// auditAppendKEKRotate is a placeholder that Task 10 will wire to the real
-// audit sink. Kept deterministic (payload fields only) so the structure
-// can be exercised by tests today.
+// auditAppendKEKRotate writes a deterministic audit line for a KEKRotate Apply.
+// All fields are sourced from the payload — ZERO calls to time.Now() or any
+// other node-local nondeterministic source. The same payload applied by N
+// different nodes produces N byte-identical lines.
 func (f *MetaFSM) auditAppendKEKRotate(cmd KEKRotateCmd, applyIndex uint64) {
-	// Intentionally empty — Task 10 will populate.
-	_ = cmd
-	_ = applyIndex
+	f.appendAudit(fmt.Sprintf(
+		"kek_rotate from=%d to=%d actor=%q request_id=%x requested_at_unix_nanos=%d cluster_state_at_propose={active=%d retained=%d live_deks=%d}",
+		cmd.NewVersion-1, cmd.NewVersion,
+		cmd.Actor, cmd.RequestID, cmd.RequestedAtUnixNanos,
+		cmd.ClusterStateAtPropose.ActiveKEKVersion,
+		cmd.ClusterStateAtPropose.RetainedKEKCount,
+		cmd.ClusterStateAtPropose.LiveDEKGenCount,
+	))
 }
 
 // applyKEKRetire is the deterministic FSM apply of MetaCmdTypeKEKRetire.
@@ -445,12 +451,17 @@ func (f *MetaFSM) applyKEKRetire(applyIndex uint64, payload []byte) error {
 	return nil
 }
 
-// auditAppendKEKRetire is a placeholder that Task 10 will wire to the real
-// audit sink.
+// auditAppendKEKRetire writes a deterministic audit line for a KEKRetire Apply.
+// All fields are sourced from the payload — ZERO calls to time.Now().
 func (f *MetaFSM) auditAppendKEKRetire(cmd KEKRetireCmd, applyIndex uint64) {
-	// Intentionally empty — Task 10 will populate.
-	_ = cmd
-	_ = applyIndex
+	f.appendAudit(fmt.Sprintf(
+		"kek_retire version=%d actor=%q request_id=%x requested_at_unix_nanos=%d cluster_state_at_propose={active=%d retained=%d live_deks=%d}",
+		cmd.Version,
+		cmd.Actor, cmd.RequestID, cmd.RequestedAtUnixNanos,
+		cmd.ClusterStateAtPropose.ActiveKEKVersion,
+		cmd.ClusterStateAtPropose.RetainedKEKCount,
+		cmd.ClusterStateAtPropose.LiveDEKGenCount,
+	))
 }
 
 // applyKEKPrune is the deterministic FSM apply of MetaCmdTypeKEKPrune. It
@@ -614,12 +625,18 @@ func validatePruneAttestation(cmd KEKPruneCmd, retireIdx uint64) error {
 	return nil
 }
 
-// auditAppendKEKPrune is a placeholder that Task 10 will wire to the real
-// audit sink.
+// auditAppendKEKPrune writes a deterministic audit line for a KEKPrune Apply.
+// All fields are sourced from the payload — ZERO calls to time.Now().
 func (f *MetaFSM) auditAppendKEKPrune(cmd KEKPruneCmd, applyIndex uint64) {
-	// Intentionally empty — Task 10 will populate.
-	_ = cmd
-	_ = applyIndex
+	f.appendAudit(fmt.Sprintf(
+		"kek_prune version=%d actor=%q request_id=%x requested_at_unix_nanos=%d voter_config_index=%d voter_count=%d cluster_state_at_propose={active=%d retained=%d live_deks=%d}",
+		cmd.Version,
+		cmd.Actor, cmd.RequestID, cmd.RequestedAtUnixNanos,
+		cmd.VoterConfigIndex, len(cmd.VoterIDs),
+		cmd.ClusterStateAtPropose.ActiveKEKVersion,
+		cmd.ClusterStateAtPropose.RetainedKEKCount,
+		cmd.ClusterStateAtPropose.LiveDEKGenCount,
+	))
 }
 
 // zeroKEK overwrites a KEK-sized byte slice with zeros. Defense against

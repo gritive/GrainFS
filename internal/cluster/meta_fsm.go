@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"sync"
@@ -400,6 +401,12 @@ type MetaFSM struct {
 	// Lock-free: atomic.Pointer so the halted check can run before f.mu
 	// without ordering hazards.
 	halted atomic.Pointer[error]
+
+	// auditSink is the destination for KEK lifecycle audit lines. nil means
+	// audit writes are no-ops (default). Set via SetAuditSink before the raft
+	// apply loop starts; production wiring (Task 11) points this at an
+	// append-only file; tests inject a *bytes.Buffer.
+	auditSink io.Writer
 }
 
 // RotationStatus is the outcome code stored for each KEK rotation request.
@@ -525,6 +532,25 @@ func (f *MetaFSM) FatalHaltedErr() error {
 		return *p
 	}
 	return nil
+}
+
+// SetAuditSink wires a writer that receives KEK lifecycle audit lines.
+// Each line is a newline-terminated string written by appendAudit.
+// Pass nil to disable (default). Must be called before the apply loop starts.
+// Production wiring (Task 11) provides an append-only file; tests inject a
+// *bytes.Buffer.
+func (f *MetaFSM) SetAuditSink(w io.Writer) {
+	f.auditSink = w
+}
+
+// appendAudit writes a single audit line (with trailing newline) to the
+// configured sink. No-op when the sink is nil. MUST be called from payload
+// fields only — no time.Now() or any other node-local nondeterministic source.
+func (f *MetaFSM) appendAudit(line string) {
+	if f.auditSink == nil {
+		return
+	}
+	_, _ = fmt.Fprintln(f.auditSink, line)
 }
 
 func NewMetaFSM() *MetaFSM {
