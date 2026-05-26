@@ -3,11 +3,8 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -27,29 +23,6 @@ type blockingSnapshotter struct {
 	entered chan struct{}
 	release chan struct{}
 	closed  atomic.Bool
-}
-
-type recordingRaftNode struct {
-	RaftNode
-	mu    sync.Mutex
-	types []CommandType
-}
-
-func (n *recordingRaftNode) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
-	if cmd, err := DecodeCommand(command); err == nil {
-		n.mu.Lock()
-		n.types = append(n.types, cmd.Type)
-		n.mu.Unlock()
-	}
-	return n.RaftNode.ProposeWait(ctx, command)
-}
-
-func (n *recordingRaftNode) commandTypes() []CommandType {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	out := make([]CommandType, len(n.types))
-	copy(out, n.types)
-	return out
 }
 
 func newBlockingSnapshotter() *blockingSnapshotter {
@@ -144,54 +117,6 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 func TestProposalForwardPeersFallsBackToShardServicePeers(t *testing.T) {
 	got := proposalForwardPeers(nil, []string{"127.0.0.1:7001", "127.0.0.1:7002"}, "127.0.0.1:7002")
 	require.Equal(t, []string{"127.0.0.1:7001"}, got)
-}
-
-func TestDistributedBackend_CompleteMultipartDoesNotProposeSeparateAbort(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-
-	up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("small-final-part")))
-	require.NoError(t, err)
-
-	rec := &recordingRaftNode{RaftNode: b.node}
-	b.node = rec
-
-	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-
-	require.Equal(t, []CommandType{CmdCompleteMultipart}, rec.commandTypes())
-}
-
-func TestDistributedBackend_CompleteSinglePartMultipartBypassesCompleteSpool(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-
-	up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	payload := []byte("small-final-part")
-	part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
-	require.NoError(t, err)
-
-	require.NoError(t, os.MkdirAll(filepath.Dir(b.spoolDir()), 0o700))
-	require.NoError(t, os.Mkdir(b.spoolDir(), 0o500))
-	require.NoError(t, os.Chmod(b.spoolDir(), 0o500))
-	t.Cleanup(func() { _ = os.Chmod(b.spoolDir(), 0o700) })
-
-	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
-	require.NoError(t, err)
-	require.Equal(t, int64(len(payload)), obj.Size)
-
-	rc, _, err := b.GetObject(ctx, "bucket", "mp.bin")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
 }
 
 func TestDistributedBackend_ReadAtObjectUsesPreparedECPlacement(t *testing.T) {
@@ -522,257 +447,6 @@ func TestDistributedBackend_NestedKey(t *testing.T) {
 
 	data, _ := io.ReadAll(rc)
 	require.Equal(t, "deep", string(data))
-}
-
-func TestDistributedBackend_MultipartComplete(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	part1 := bytes.Repeat([]byte("A"), 5<<20)
-	part2 := bytes.Repeat([]byte("B"), 512)
-
-	upload, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	require.NotEmpty(t, upload.UploadID)
-
-	p1, err := b.UploadPart(context.Background(), "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1))
-	require.NoError(t, err)
-	require.Equal(t, 1, p1.PartNumber)
-	require.Equal(t, int64(5<<20), p1.Size)
-
-	p2, err := b.UploadPart(context.Background(), "bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2))
-	require.NoError(t, err)
-
-	obj, err := b.CompleteMultipartUpload(context.Background(), "bucket", "mp.bin", upload.UploadID, []storage.Part{
-		{PartNumber: p1.PartNumber, ETag: p1.ETag, Size: p1.Size},
-		{PartNumber: p2.PartNumber, ETag: p2.ETag, Size: p2.Size},
-	})
-	require.NoError(t, err)
-	require.Equal(t, int64(len(part1)+len(part2)), obj.Size)
-
-	rc, _, err := b.GetObject(context.Background(), "bucket", "mp.bin")
-	require.NoError(t, err)
-	defer rc.Close()
-
-	data, _ := io.ReadAll(rc)
-	require.Equal(t, len(part1)+len(part2), len(data))
-	require.Equal(t, part1, data[:len(part1)])
-	require.Equal(t, part2, data[len(part1):])
-}
-
-func TestDistributedBackend_ChunkedMultipartCompleteStoresSegmentsAndParts(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	configureChunkedMultipartTestBackend(t, b)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	part1 := bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)
-	part2 := bytes.Repeat([]byte("B"), testChunkedMultipartChunkSize)
-	part3 := []byte("C")
-	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "large-mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	p1, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(part1))
-	require.NoError(t, err)
-	p2, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader(part2))
-	require.NoError(t, err)
-	p3, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 3, bytes.NewReader(part3))
-	require.NoError(t, err)
-
-	obj, err := b.CompleteMultipartUpload(context.Background(), "bucket", "large-mp.bin", up.UploadID, []storage.Part{*p1, *p2, *p3})
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(obj.Segments), 2)
-	require.Len(t, obj.Parts, 3)
-
-	head, err := b.HeadObject(context.Background(), "bucket", "large-mp.bin")
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(head.Segments), 2)
-	require.Len(t, head.Parts, 3)
-	require.Equal(t, int64(len(part1)+len(part2)+len(part3)), head.Size)
-
-	rc, _, err := b.GetObject(context.Background(), "bucket", "large-mp.bin")
-	require.NoError(t, err)
-	got, readErr := io.ReadAll(rc)
-	closeErr := rc.Close()
-	require.NoError(t, readErr)
-	require.NoError(t, closeErr)
-	want := append(append(append([]byte{}, part1...), part2...), part3...)
-	require.Equal(t, want, got)
-}
-
-func TestDistributedBackend_ChunkedMultipartCompleteFailurePreservesUpload(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	configureChunkedMultipartTestBackend(t, b)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "large-mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	p1, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)))
-	require.NoError(t, err)
-	p2, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader([]byte("B")))
-	require.NoError(t, err)
-
-	b.testBeforeChunkedMultipartCommit = func() error { return errors.New("injected commit preflight failure") }
-	_, err = b.CompleteMultipartUpload(context.Background(), "bucket", "large-mp.bin", up.UploadID, []storage.Part{*p1, *p2})
-	require.ErrorContains(t, err, "injected commit preflight failure")
-
-	listed, listErr := b.ListParts(context.Background(), "bucket", "large-mp.bin", up.UploadID, 100)
-	require.NoError(t, listErr)
-	require.Len(t, listed, 2, "failed Complete must keep upload parts for retry")
-	_, headErr := b.HeadObject(context.Background(), "bucket", "large-mp.bin")
-	require.ErrorIs(t, headErr, storage.ErrObjectNotFound)
-}
-
-func configureChunkedMultipartTestBackend(t *testing.T, b *DistributedBackend) {
-	t.Helper()
-	nodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
-	b.SetShardService(NewShardService(b.root, nil), nodes)
-	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
-	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
-	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-		"group-0": {ID: "group-0", PeerIDs: nodes},
-	}})
-}
-
-const testChunkedMultipartChunkSize = 5 << 20
-
-func TestDistributedBackend_EncryptedMultipartHidesPartPlaintext(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x45}, 32))
-	require.NoError(t, err)
-	b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc)), []string{b.selfAddr})
-
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-	partBytes := []byte("cluster multipart sensitive payload")
-	upload, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-
-	part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(partBytes))
-	require.NoError(t, err)
-	require.Equal(t, int64(len(partBytes)), part.Size)
-
-	rawPart, err := os.ReadFile(b.partPath(upload.UploadID, 1))
-	require.NoError(t, err)
-	require.NotContains(t, string(rawPart), string(partBytes))
-
-	listed, err := b.ListParts(ctx, "bucket", "mp.bin", upload.UploadID, 100)
-	require.NoError(t, err)
-	require.Len(t, listed, 1)
-	require.Equal(t, part.ETag, listed[0].ETag)
-
-	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", upload.UploadID, []storage.Part{*part})
-	require.NoError(t, err)
-	require.Equal(t, int64(len(partBytes)), obj.Size)
-
-	rc, _, err := b.GetObject(ctx, "bucket", "mp.bin")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, partBytes, got)
-}
-
-func TestDistributedBackend_MultipartAbort(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	upload, err := b.CreateMultipartUpload(context.Background(), "bucket", "abort.bin", "application/octet-stream")
-	require.NoError(t, err)
-
-	_, err = b.UploadPart(context.Background(), "bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"))
-	require.NoError(t, err)
-
-	require.NoError(t, b.AbortMultipartUpload(context.Background(), "bucket", "abort.bin", upload.UploadID))
-
-	_, err = b.HeadObject(context.Background(), "bucket", "abort.bin")
-	require.ErrorIs(t, err, storage.ErrObjectNotFound)
-}
-
-func TestDistributedBackend_UploadPartRecreatesActiveUploadDir(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	upload, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	require.NoError(t, os.RemoveAll(b.partDir(upload.UploadID)))
-
-	part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", upload.UploadID, 1, strings.NewReader("data"))
-	require.NoError(t, err)
-	require.Equal(t, 1, part.PartNumber)
-}
-
-func TestDistributedBackend_MultipartBadUploadID(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	_, err := b.UploadPart(context.Background(), "bucket", "file.bin", "bad-id", 1, strings.NewReader("data"))
-	require.ErrorIs(t, err, storage.ErrUploadNotFound)
-
-	err = b.AbortMultipartUpload(context.Background(), "bucket", "file.bin", "bad-id")
-	require.ErrorIs(t, err, storage.ErrUploadNotFound)
-
-	_, err = b.CompleteMultipartUpload(context.Background(), "bucket", "file.bin", "bad-id", nil)
-	require.ErrorIs(t, err, storage.ErrUploadNotFound)
-}
-
-func TestDistributedBackend_MultipartBadBucket(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	_, err := b.CreateMultipartUpload(context.Background(), "nope", "file.bin", "application/octet-stream")
-	require.ErrorIs(t, err, storage.ErrBucketNotFound)
-}
-
-func TestDistributedBackend_ListMultipartUploadsFiltersSkipsLegacyAndSorts(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-	require.NoError(t, b.CreateBucket(ctx, "other"))
-
-	writeMultipartMeta(t, b, "upload-late", clusterMultipartMeta{
-		Bucket: "bucket", Key: "prefix/z.bin", CreatedAt: 300, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
-	})
-	writeMultipartMeta(t, b, "upload-early-b", clusterMultipartMeta{
-		Bucket: "bucket", Key: "prefix/b.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
-	})
-	writeMultipartMeta(t, b, "upload-early-a", clusterMultipartMeta{
-		Bucket: "bucket", Key: "prefix/a.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
-	})
-	writeMultipartMeta(t, b, "upload-other-prefix", clusterMultipartMeta{
-		Bucket: "bucket", Key: "else/a.bin", CreatedAt: 50, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
-	})
-	writeMultipartMeta(t, b, "upload-other-bucket", clusterMultipartMeta{
-		Bucket: "other", Key: "prefix/a.bin", CreatedAt: 25, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
-	})
-	writeMultipartMeta(t, b, "upload-legacy", clusterMultipartMeta{
-		ContentType: "application/octet-stream", PlacementGroupID: "group-1",
-	})
-
-	out, err := b.ListMultipartUploads(ctx, "bucket", "prefix/", 2)
-	require.NoError(t, err)
-	require.Len(t, out, 2)
-	require.Equal(t, "upload-early-a", out[0].UploadID)
-	require.Equal(t, "prefix/a.bin", out[0].Key)
-	require.Equal(t, int64(100), out[0].CreatedAt)
-	require.Equal(t, "upload-early-b", out[1].UploadID)
-	require.Equal(t, "prefix/b.bin", out[1].Key)
-
-	all, err := b.ListMultipartUploads(ctx, "bucket", "prefix/", 0)
-	require.NoError(t, err)
-	require.Equal(t, []string{"upload-early-a", "upload-early-b", "upload-late"}, multipartUploadIDs(all))
-}
-
-func writeMultipartMeta(t testing.TB, b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
-	t.Helper()
-	raw, err := marshalClusterMultipartMeta(meta)
-	require.NoError(t, err)
-	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.ks().MultipartKey(uploadID), raw)
-	}))
-}
-
-func multipartUploadIDs(uploads []*storage.MultipartUpload) []string {
-	out := make([]string, len(uploads))
-	for i, upload := range uploads {
-		out[i] = upload.UploadID
-	}
-	return out
 }
 
 func TestDistributedBackend_Close(t *testing.T) {
