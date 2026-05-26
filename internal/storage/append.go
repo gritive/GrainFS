@@ -279,18 +279,12 @@ func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string,
 // readObjectInTxn reads and decodes the Object stored at mk within txn.
 // Returns (nil, badger.ErrKeyNotFound) when no record exists.
 func (b *LocalBackend) readObjectInTxn(txn *badger.Txn, mk []byte) (*Object, error) {
-	item, err := txn.Get(mk)
+	plain, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
 	if err != nil {
 		return nil, err
 	}
 	var obj Object
-	if err := item.Value(func(val []byte) error {
-		plain, derr := openBadgerValue(b.encryptor, badgerDomainObject, mk, val)
-		if derr != nil {
-			return derr
-		}
-		return unmarshalObjectInto(plain, &obj)
-	}); err != nil {
+	if err := unmarshalObjectInto(plain, &obj); err != nil {
 		return nil, err
 	}
 	return &obj, nil

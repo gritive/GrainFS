@@ -64,6 +64,36 @@ func TestOverwriteRemovesStaleChunkRefs(t *testing.T) {
 	}
 }
 
+func TestOverwritePartialOverlapChunkRefs(t *testing.T) {
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+	_ = b.CreateBucket(ctx, "bkt")
+	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-B"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-C"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.View(func(txn *badger.Txn) error {
+		s := NewChunkRefStore(txn)
+		if n, _ := s.RefCount("chunk-A"); n != 1 {
+			t.Fatalf("chunk-A RefCount = %d, want 1 (shared, survives)", n)
+		}
+		if n, _ := s.RefCount("chunk-B"); n != 0 {
+			t.Fatalf("chunk-B RefCount = %d, want 0 (dropped)", n)
+		}
+		if _, ok, _ := s.TombstoneTime("chunk-B"); !ok {
+			t.Fatalf("expected tombstone for dropped chunk-B")
+		}
+		if n, _ := s.RefCount("chunk-C"); n != 1 {
+			t.Fatalf("chunk-C RefCount = %d, want 1 (new)", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeleteObjectRemovesChunkRefs(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
