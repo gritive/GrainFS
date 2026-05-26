@@ -752,53 +752,17 @@ func (f *FSM) applyAppendObjectFromCmd(txn *badger.Txn, data []byte) error {
 		modifiedUnixSec = time.Now().Unix()
 	}
 
-	metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
-
-	// Read existing objectMeta (if any).
-	var existing *objectMeta
-	item, gerr := txn.Get(metaKey)
-	if gerr == nil {
-		if err := item.Value(func(raw []byte) error {
-			v, oerr := f.openValue(item.Key(), raw)
-			if oerr != nil {
-				return oerr
-			}
-			m, derr := unmarshalObjectMeta(v)
-			if derr != nil {
-				return fmt.Errorf("unmarshal existing objectMeta: %w", derr)
-			}
-			existing = &m
-			return nil
-		}); err != nil {
-			return err
-		}
-	} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
-		return fmt.Errorf("get existing objectMeta: %w", gerr)
+	resolved, err := f.resolveObjectMetaForAppendUpdate(txn, cmd.Bucket, cmd.Key, cmd.BlobID)
+	if err != nil {
+		return err
 	}
-
-	if appendObjectCommandAlreadyApplied(existing, cmd.BlobID) {
+	if resolved.AlreadyApplied {
 		return nil
 	}
 
-	existingVersionID := ""
-	if existing != nil {
-		if item, err := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); err == nil {
-			if err := item.Value(func(raw []byte) error {
-				if string(raw) != deleteMarkerETag {
-					existingVersionID = string(raw)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, badger.ErrKeyNotFound) {
-			return fmt.Errorf("get latest version: %w", err)
-		}
-	}
-
 	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
-		Existing:          existing,
-		ExistingVersionID: existingVersionID,
+		Existing:          resolved.Existing,
+		ExistingVersionID: resolved.ExistingVersionID,
 		Cmd:               cmd,
 		ModifiedUnixSec:   modifiedUnixSec,
 		CoalesceCfg:       coalesceCfg,

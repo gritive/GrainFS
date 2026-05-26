@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestResolveObjectMetaForCoalesceUsesLegacyWhenNoLatestPointer(t *testing.T) {
@@ -67,6 +69,79 @@ func TestResolveObjectMetaForCoalesceMissingReturnsNotFound(t *testing.T) {
 	}
 	if resolved.Found {
 		t.Fatalf("resolved = %+v, want not found", resolved)
+	}
+}
+
+func TestResolveObjectMetaForAppendMissingReturnsEmpty(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+
+	var resolved objectMetaForAppendUpdate
+	err := f.db.View(func(txn *badger.Txn) error {
+		var err error
+		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "missing", "blob-1")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("resolveObjectMetaForAppendUpdate: %v", err)
+	}
+	if resolved.Found || resolved.Existing != nil || resolved.AlreadyApplied || resolved.ExistingVersionID != "" {
+		t.Fatalf("resolved = %+v, want empty", resolved)
+	}
+}
+
+func TestResolveObjectMetaForAppendDetectsAlreadyApplied(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+	seed := objectMeta{
+		Key:      "k",
+		Size:     12,
+		Segments: []storage.SegmentRef{{BlobID: "blob-1", Size: 12}},
+	}
+	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), seed)
+
+	var resolved objectMetaForAppendUpdate
+	err := f.db.View(func(txn *badger.Txn) error {
+		var err error
+		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "k", "blob-1")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("resolveObjectMetaForAppendUpdate: %v", err)
+	}
+	if !resolved.Found || resolved.Existing == nil || !resolved.AlreadyApplied {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+}
+
+func TestResolveObjectMetaForAppendReadsLatestVersionUnlessTombstone(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+	seed := objectMeta{Key: "k", Size: 12}
+	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), seed)
+	requireSetLatestForResolveTest(t, f, "b", "k", "v1")
+
+	var resolved objectMetaForAppendUpdate
+	err := f.db.View(func(txn *badger.Txn) error {
+		var err error
+		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "k", "blob-2")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("resolveObjectMetaForAppendUpdate: %v", err)
+	}
+	if !resolved.Found || resolved.Existing == nil || resolved.ExistingVersionID != "v1" {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+
+	requireSetLatestForResolveTest(t, f, "b", "k", deleteMarkerETag)
+	err = f.db.View(func(txn *badger.Txn) error {
+		var err error
+		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "k", "blob-2")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("resolveObjectMetaForAppendUpdate tombstone: %v", err)
+	}
+	if resolved.ExistingVersionID != "" {
+		t.Fatalf("ExistingVersionID=%q want empty for tombstone", resolved.ExistingVersionID)
 	}
 }
 
