@@ -355,6 +355,12 @@ func (l *KEKRotationLeader) ProposeKEKRotate(confirm, actor string) error {
 	// 15. Submit via raft. MetaRaft.Propose blocks until applied locally —
 	//     no separate readback wait needed.
 	if err := l.raft.Propose(ctx, MetaCmdTypeKEKRotate, payload); err != nil {
+		// If the epoch was cleared while we were in-flight, surface a
+		// leader-loss error rather than a raw context cancellation so callers
+		// can distinguish "step-down, retry on new leader" from "raft error".
+		if l.epochCtx.Load() == nil {
+			return errors.New("KEKRotate: not leader (lost leadership mid-rotation)")
+		}
 		return fmt.Errorf("KEKRotate: submit: %w", err)
 	}
 
