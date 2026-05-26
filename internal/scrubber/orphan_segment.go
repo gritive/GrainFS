@@ -2,11 +2,37 @@ package scrubber
 
 import (
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
+
+type retentionInput struct {
+	tZero    time.Time
+	hasTZero bool
+	now      time.Time
+	window   time.Duration
+}
+
+// evalGCCandidate decides whether an orphan segment (already confirmed absent
+// from the known manifest set and past the walker's age gate) may be physically
+// deleted. A chunk with a tombstone is deletable only after its retention window
+// elapses (now - t_zero > window); a chunk with no tombstone has already passed
+// the walker age gate and is deletable.
+func evalGCCandidate(in retentionInput) bool {
+	if !in.hasTZero {
+		return true
+	}
+	return in.now.Sub(in.tZero) > in.window
+}
+
+// tombstoneSource yields the t_zero for an unreferenced chunk, if tracked.
+type tombstoneSource interface {
+	TombstoneTime(c chunkref.ChunkID) (t time.Time, ok bool, err error)
+}
 
 // OrphanSegmentWalkable is an optional Scrubbable extension for raw segment
 // orphan sweep. Independent from OrphanWalkable (EC shards) — they share
@@ -32,6 +58,8 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 	bucket string,
 	known map[string]bool,
 	capRemaining int,
+	tombstones tombstoneSource,
+	window time.Duration,
 ) int {
 	var candidates []string
 	err := walker.WalkOrphanSegments(bucket, known, func(path string) error {
@@ -61,6 +89,14 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 		if capRemaining <= 0 {
 			deferred++
 			continue
+		}
+		if tombstones != nil {
+			blobID := p[strings.LastIndex(p, "/")+1:]
+			if tZero, ok, err := tombstones.TombstoneTime(chunkref.ChunkID(blobID)); err == nil {
+				if !evalGCCandidate(retentionInput{tZero: tZero, hasTZero: ok, now: time.Now(), window: window}) {
+					continue // within retention window — keep
+				}
+			}
 		}
 		if err := walker.DeleteOrphanSegment(p); err != nil {
 			metrics.OrphanSegmentDeleteErrorsTotal.Inc()

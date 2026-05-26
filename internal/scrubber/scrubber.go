@@ -597,7 +597,8 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 					knownSegmentsB[k] = v
 				}
 			}
-			segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
+			// tombstone source + retention window are wired in serveruntime (Task 10); nil = age-gate only (today's behavior).
+			segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining, nil, 0)
 		}
 	}
 
