@@ -92,6 +92,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// Capture active KEK version under the same RLock so a concurrent
 	// SetActiveKEKVersion can't race the DKVS trailer emission.
 	activeKEKVersionCopy := f.activeKEKVersion
+	// Capture rotation request ring and KEK status slice (Phase B Task 2).
+	lastRotationRequestsCopy := make([]rotationRequestRecord, len(f.lastRotationRequests))
+	copy(lastRotationRequestsCopy, f.lastRotationRequests)
+	kekStatusesCopy := make([]kekStatusRecord, len(f.kekStatuses))
+	copy(kekStatusesCopy, f.kekStatuses)
 	f.mu.RUnlock()
 
 	nfsExports := map[string]nfsexport.Config(nil)
@@ -210,6 +215,39 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	ccBytes := serializeClusterConfig(f.clusterCfg)
 	clusterConfigVec := b.CreateByteVector(ccBytes)
 
+	// Phase B Task 2: build last_rotation_request_entries vector.
+	lrrOffs := make([]flatbuffers.UOffsetT, len(lastRotationRequestsCopy))
+	for i := len(lastRotationRequestsCopy) - 1; i >= 0; i-- {
+		r := lastRotationRequestsCopy[i]
+		ridVec := b.CreateByteVector(r.requestID[:])
+		clusterpb.LastRotationRequestEntryStart(b)
+		clusterpb.LastRotationRequestEntryAddRequestId(b, ridVec)
+		clusterpb.LastRotationRequestEntryAddStatus(b, byte(r.status))
+		clusterpb.LastRotationRequestEntryAddApplyIndex(b, r.applyIndex)
+		lrrOffs[i] = clusterpb.LastRotationRequestEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartLastRotationRequestEntriesVector(b, len(lrrOffs))
+	for i := len(lrrOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(lrrOffs[i])
+	}
+	lrrVec := b.EndVector(len(lrrOffs))
+
+	// Phase B Task 2: build kek_status_entries vector.
+	kekOffs := make([]flatbuffers.UOffsetT, len(kekStatusesCopy))
+	for i := len(kekStatusesCopy) - 1; i >= 0; i-- {
+		e := kekStatusesCopy[i]
+		clusterpb.KEKStatusEntryStart(b)
+		clusterpb.KEKStatusEntryAddVersion(b, e.version)
+		clusterpb.KEKStatusEntryAddStatus(b, byte(e.status))
+		clusterpb.KEKStatusEntryAddRetireCommitIndex(b, e.retireCommitIndex)
+		kekOffs[i] = clusterpb.KEKStatusEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartKekStatusEntriesVector(b, len(kekOffs))
+	for i := len(kekOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(kekOffs[i])
+	}
+	kekStatusVec := b.EndVector(len(kekOffs))
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -224,6 +262,8 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
 	clusterpb.MetaStateSnapshotAddNfsExports(b, nfsExportVec)
 	clusterpb.MetaStateSnapshotAddIcebergSchemaVersion(b, 2)
+	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)
+	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -455,6 +495,36 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newClusterCfgSnap = cs
 	}
 
+	// Phase B Task 2: decode last_rotation_request_entries (slot 11).
+	newLastRotationRequests := make([]rotationRequestRecord, 0, snap.LastRotationRequestEntriesLength())
+	var lrrFB clusterpb.LastRotationRequestEntry
+	for i := 0; i < snap.LastRotationRequestEntriesLength(); i++ {
+		if !snap.LastRotationRequestEntries(&lrrFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: last_rotation_request_entries[%d] decode failed", i)
+		}
+		var rid [16]byte
+		copy(rid[:], lrrFB.RequestIdBytes())
+		newLastRotationRequests = append(newLastRotationRequests, rotationRequestRecord{
+			requestID:  rid,
+			status:     RotationStatus(lrrFB.Status()),
+			applyIndex: lrrFB.ApplyIndex(),
+		})
+	}
+
+	// Phase B Task 2: decode kek_status_entries (slot 12).
+	newKEKStatuses := make([]kekStatusRecord, 0, snap.KekStatusEntriesLength())
+	var kekFB clusterpb.KEKStatusEntry
+	for i := 0; i < snap.KekStatusEntriesLength(); i++ {
+		if !snap.KekStatusEntries(&kekFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: kek_status_entries[%d] decode failed", i)
+		}
+		newKEKStatuses = append(newKEKStatuses, kekStatusRecord{
+			version:           kekFB.Version(),
+			status:            KEKLifecycleStatus(kekFB.Status()),
+			retireCommitIndex: kekFB.RetireCommitIndex(),
+		})
+	}
+
 	// --- DECODE PHASE ---
 	// Decode all trailers into local variables BEFORE touching any f.* field.
 	// If any decode fails, Restore returns an error with f.* completely untouched.
@@ -583,6 +653,8 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.activePlan = newActivePlan
 	f.icebergNamespaces = newIcebergNamespaces
 	f.icebergTables = newIcebergTables
+	f.lastRotationRequests = newLastRotationRequests
+	f.kekStatuses = newKEKStatuses
 	if hasDEKData {
 		f.pendingDEKVersions = newDEKVersions
 		f.pendingDEKActive = newDEKActive

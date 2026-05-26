@@ -342,6 +342,120 @@ type MetaFSM struct {
 	// Read on every apply via a single atomic load (no mutex). Register path
 	// uses copy-on-write CAS; see post_commit.go for the contract.
 	postCommitHooks postCommitHooksField
+
+	// lastRotationRequests is a bounded FIFO ring of KEK rotation request
+	// idempotency records. Capped at maxRotationRequestStatusEntries; oldest
+	// evicted on overflow. Insertion-order only — reads must NOT reorder.
+	lastRotationRequests []rotationRequestRecord
+
+	// kekStatuses holds the lifecycle status of each KEK version, sorted by
+	// version ascending. Upserted via SetKEKStatus.
+	kekStatuses []kekStatusRecord
+}
+
+// RotationStatus is the outcome code stored for each KEK rotation request.
+type RotationStatus uint8
+
+const (
+	RotationStatusApplied   RotationStatus = 0
+	RotationStatusStaleNoOp RotationStatus = 1
+	RotationStatusRejected  RotationStatus = 2
+)
+
+// KEKLifecycleStatus is the lifecycle stage of a KEK version.
+type KEKLifecycleStatus uint8
+
+const (
+	KEKLifecycleActive   KEKLifecycleStatus = 0
+	KEKLifecycleRetiring KEKLifecycleStatus = 1
+	KEKLifecyclePruned   KEKLifecycleStatus = 2
+)
+
+// maxRotationRequestStatusEntries is the FIFO ring capacity.
+const maxRotationRequestStatusEntries = 1024
+
+type rotationRequestRecord struct {
+	requestID  [16]byte
+	status     RotationStatus
+	applyIndex uint64
+}
+
+type kekStatusRecord struct {
+	version           uint32
+	status            KEKLifecycleStatus
+	retireCommitIndex uint64
+}
+
+// RecordRotationRequestStatus appends a rotation request outcome to the FIFO
+// ring. Acquires the write lock. Evicts the oldest entry when the ring is full.
+func (f *MetaFSM) RecordRotationRequestStatus(requestID [16]byte, status RotationStatus, applyIndex uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recordRotationRequestStatusLocked(requestID, status, applyIndex)
+}
+
+func (f *MetaFSM) recordRotationRequestStatusLocked(requestID [16]byte, status RotationStatus, applyIndex uint64) {
+	if len(f.lastRotationRequests) >= maxRotationRequestStatusEntries {
+		f.lastRotationRequests = f.lastRotationRequests[1:]
+	}
+	f.lastRotationRequests = append(f.lastRotationRequests, rotationRequestRecord{
+		requestID:  requestID,
+		status:     status,
+		applyIndex: applyIndex,
+	})
+}
+
+// LookupRotationRequestStatus returns the status of the given request ID,
+// scanning newest-first. Returns (0, false) if not found. Read-only; does NOT
+// reorder entries.
+func (f *MetaFSM) LookupRotationRequestStatus(requestID [16]byte) (RotationStatus, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.lookupRotationRequestStatusLocked(requestID)
+}
+
+func (f *MetaFSM) lookupRotationRequestStatusLocked(requestID [16]byte) (RotationStatus, bool) {
+	for i := len(f.lastRotationRequests) - 1; i >= 0; i-- {
+		if f.lastRotationRequests[i].requestID == requestID {
+			return f.lastRotationRequests[i].status, true
+		}
+	}
+	return 0, false
+}
+
+// SetKEKStatus upserts the lifecycle status for a KEK version. The slice is
+// kept sorted by version ascending. Acquires the write lock.
+func (f *MetaFSM) SetKEKStatus(version uint32, status KEKLifecycleStatus, retireCommitIndex uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, e := range f.kekStatuses {
+		if e.version == version {
+			f.kekStatuses[i].status = status
+			f.kekStatuses[i].retireCommitIndex = retireCommitIndex
+			return
+		}
+	}
+	f.kekStatuses = append(f.kekStatuses, kekStatusRecord{
+		version:           version,
+		status:            status,
+		retireCommitIndex: retireCommitIndex,
+	})
+	sort.Slice(f.kekStatuses, func(i, j int) bool {
+		return f.kekStatuses[i].version < f.kekStatuses[j].version
+	})
+}
+
+// LookupKEKStatus returns the lifecycle status for the given KEK version.
+// Returns (0, 0, 0, false) if not found.
+func (f *MetaFSM) LookupKEKStatus(version uint32) (v uint32, status KEKLifecycleStatus, retireCommitIndex uint64, ok bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for _, e := range f.kekStatuses {
+		if e.version == version {
+			return e.version, e.status, e.retireCommitIndex, true
+		}
+	}
+	return 0, 0, 0, false
 }
 
 func NewMetaFSM() *MetaFSM {
