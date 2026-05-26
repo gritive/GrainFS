@@ -31,13 +31,15 @@ func TestChunkRefStoreAddIsIdempotent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	_ = db.View(func(txn *badger.Txn) error {
+	if err := db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if got, _ := s.RefCount(c); got != 1 {
 			t.Fatalf("RefCount = %d, want 1", got)
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
 }
 
 func TestChunkRefStoreRemoveToZeroWritesTombstone(t *testing.T) {
@@ -45,12 +47,16 @@ func TestChunkRefStoreRemoveToZeroWritesTombstone(t *testing.T) {
 	m := chunkref.ObjectVersionID("bkt", "k", "v1")
 	c := chunkref.ChunkID("chunk-1")
 	tZero := time.Unix(1000, 0)
-	_ = db.Update(func(txn *badger.Txn) error {
+	if err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		_ = s.AddRef(m, c)
+		if err := s.AddRef(m, c); err != nil {
+			return err
+		}
 		return s.RemoveRef(m, c, tZero)
-	})
-	_ = db.View(func(txn *badger.Txn) error {
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if got, _ := s.RefCount(c); got != 0 {
 			t.Fatalf("RefCount = %d, want 0", got)
@@ -60,7 +66,9 @@ func TestChunkRefStoreRemoveToZeroWritesTombstone(t *testing.T) {
 			t.Fatalf("TombstoneTime = (%v,%v), want (%v,true)", ts, ok, tZero)
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
 }
 
 func TestChunkRefStoreReAddEvictsTombstone(t *testing.T) {
@@ -68,13 +76,19 @@ func TestChunkRefStoreReAddEvictsTombstone(t *testing.T) {
 	m1 := chunkref.ObjectVersionID("bkt", "k", "v1")
 	m2 := chunkref.SnapshotID(7)
 	c := chunkref.ChunkID("chunk-1")
-	_ = db.Update(func(txn *badger.Txn) error {
+	if err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		_ = s.AddRef(m1, c)
-		_ = s.RemoveRef(m1, c, time.Unix(1000, 0))
+		if err := s.AddRef(m1, c); err != nil {
+			return err
+		}
+		if err := s.RemoveRef(m1, c, time.Unix(1000, 0)); err != nil {
+			return err
+		}
 		return s.AddRef(m2, c)
-	})
-	_ = db.View(func(txn *badger.Txn) error {
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if _, ok, _ := s.TombstoneTime(c); ok {
 			t.Fatalf("tombstone present after re-add, want evicted")
@@ -83,7 +97,9 @@ func TestChunkRefStoreReAddEvictsTombstone(t *testing.T) {
 			t.Fatalf("RefCount = %d, want 1", got)
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
 }
 
 func TestChunkRefStoreRemoveAbsentIsNoop(t *testing.T) {
@@ -96,11 +112,13 @@ func TestChunkRefStoreRemoveAbsentIsNoop(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("remove absent should be no-op, got %v", err)
 	}
-	_ = db.View(func(txn *badger.Txn) error {
+	if err := db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if _, ok, _ := s.TombstoneTime(c); ok {
 			t.Fatalf("no-op remove must not write tombstone")
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
 }

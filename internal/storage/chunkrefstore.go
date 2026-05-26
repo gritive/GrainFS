@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -24,6 +25,11 @@ type ChunkRefStore struct {
 	txn *badger.Txn
 }
 
+// NewChunkRefStore wraps a Badger transaction in a chunk-ref store view.
+func NewChunkRefStore(txn *badger.Txn) ChunkRefStore {
+	return ChunkRefStore{txn: txn}
+}
+
 func refMembershipChunkPrefix(c chunkref.ChunkID) []byte {
 	return []byte(refMembershipPrefix + string(c) + refKeySep)
 }
@@ -43,7 +49,7 @@ func refTombstoneKey(c chunkref.ChunkID) []byte {
 // tombstone (c is referenced again, so no longer a GC candidate).
 func (s ChunkRefStore) AddRef(m chunkref.ManifestID, c chunkref.ChunkID) error {
 	if err := s.txn.Set(refMembershipKey(m, c), nil); err != nil {
-		return err
+		return fmt.Errorf("chunkref store: set membership: %w", err)
 	}
 	return s.deleteTombstone(c)
 }
@@ -55,10 +61,10 @@ func (s ChunkRefStore) RemoveRef(m chunkref.ManifestID, c chunkref.ChunkID, now 
 	if _, err := s.txn.Get(mk); err == badger.ErrKeyNotFound {
 		return nil
 	} else if err != nil {
-		return err
+		return fmt.Errorf("chunkref store: get membership: %w", err)
 	}
 	if err := s.txn.Delete(mk); err != nil {
-		return err
+		return fmt.Errorf("chunkref store: delete membership: %w", err)
 	}
 	n, err := s.RefCount(c)
 	if err != nil {
@@ -67,7 +73,9 @@ func (s ChunkRefStore) RemoveRef(m chunkref.ManifestID, c chunkref.ChunkID, now 
 	if n == 0 {
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], uint64(now.UnixNano()))
-		return s.txn.Set(refTombstoneKey(c), buf[:])
+		if err := s.txn.Set(refTombstoneKey(c), buf[:]); err != nil {
+			return fmt.Errorf("chunkref store: set tombstone: %w", err)
+		}
 	}
 	return nil
 }
@@ -95,21 +103,21 @@ func (s ChunkRefStore) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error
 		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, false, fmt.Errorf("chunkref store: get tombstone: %w", err)
 	}
 	var nanos uint64
 	if err := item.Value(func(v []byte) error {
 		nanos = binary.BigEndian.Uint64(v)
 		return nil
 	}); err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, false, fmt.Errorf("chunkref store: read tombstone value: %w", err)
 	}
 	return time.Unix(0, int64(nanos)), true, nil
 }
 
 func (s ChunkRefStore) deleteTombstone(c chunkref.ChunkID) error {
 	if err := s.txn.Delete(refTombstoneKey(c)); err != nil && err != badger.ErrKeyNotFound {
-		return err
+		return fmt.Errorf("chunkref store: delete tombstone: %w", err)
 	}
 	return nil
 }
