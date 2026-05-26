@@ -9,13 +9,21 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-// errKEKFatal is a private placeholder for the Task 4d fatal-sentinel. The
-// Apply path wraps unrecoverable conditions (disk I/O failures, content
-// mismatches discovered during replay) with this sentinel so a later task
-// can rewire the public ErrFSMKEKFatal classifier without touching every
-// callsite. Distinct from the per-error message: callers MUST use
-// errors.Is(err, errKEKFatal) to check fatality, not string matching.
-var errKEKFatal = errors.New("kek apply fatal")
+// ErrFSMKEKFatal indicates a KEK lifecycle Apply failure that is local to this
+// node (disk I/O, content-match mismatch, in-memory mutation failure). Peers
+// may have succeeded — continuing the apply loop would silently fork. The
+// apply loop MUST halt on this sentinel.
+var ErrFSMKEKFatal = errors.New("kek apply fatal: node-local failure during cluster-replicated mutation")
+
+// fatalKEKApply wraps err with ErrFSMKEKFatal so callers can use
+// errors.Is(err, ErrFSMKEKFatal) to classify the error as fatal.
+// Returns nil when err is nil.
+func fatalKEKApply(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrFSMKEKFatal, err)
+}
 
 // SetKEKStore wires the cluster-wide KEK store into the MetaFSM. Must be
 // called before the apply loop replays MetaCmdTypeKEKRotate. nil disables
@@ -149,15 +157,15 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 			if errors.Is(err, encrypt.ErrKEKVersionDuplicate) {
 				existing, getErr := f.keystore.Get(cmd.NewVersion)
 				if getErr != nil {
-					return fmt.Errorf("KEKRotate: %w: refetch K_new after duplicate: %v", errKEKFatal, getErr)
+					return fatalKEKApply(fmt.Errorf("KEKRotate: refetch K_new after duplicate: %v", getErr))
 				}
 				if subtle.ConstantTimeCompare(existing, newKEK) != 1 {
 					zeroKEK(existing)
-					return fmt.Errorf("KEKRotate: %w: K_new disk content mismatch — graceful halt", errKEKFatal)
+					return fatalKEKApply(fmt.Errorf("KEKRotate: K_new disk content mismatch — graceful halt"))
 				}
 				zeroKEK(existing)
 			} else {
-				return fmt.Errorf("KEKRotate: %w: persist K_new: %v", errKEKFatal, err)
+				return fatalKEKApply(fmt.Errorf("KEKRotate: persist K_new: %v", err))
 			}
 		}
 	} else {
@@ -167,15 +175,15 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 			if errors.Is(err, encrypt.ErrKEKVersionDuplicate) {
 				existing, getErr := f.keystore.Get(cmd.NewVersion)
 				if getErr != nil {
-					return fmt.Errorf("KEKRotate: %w: refetch K_new after duplicate: %v", errKEKFatal, getErr)
+					return fatalKEKApply(fmt.Errorf("KEKRotate: refetch K_new after duplicate: %v", getErr))
 				}
 				if subtle.ConstantTimeCompare(existing, newKEK) != 1 {
 					zeroKEK(existing)
-					return fmt.Errorf("KEKRotate: %w: K_new in-memory content mismatch — graceful halt", errKEKFatal)
+					return fatalKEKApply(fmt.Errorf("KEKRotate: K_new in-memory content mismatch — graceful halt"))
 				}
 				zeroKEK(existing)
 			} else {
-				return fmt.Errorf("KEKRotate: %w: store K_new: %v", errKEKFatal, err)
+				return fatalKEKApply(fmt.Errorf("KEKRotate: store K_new: %v", err))
 			}
 		}
 	}
@@ -197,11 +205,11 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 	f.activeKEKVersion = cmd.NewVersion
 	if err := f.dekKeeper.InstallKEKRotation(newKEK, rewrappedMap); err != nil {
 		f.mu.Unlock()
-		return fmt.Errorf("KEKRotate: %w: DEKKeeper install: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: DEKKeeper install: %v", err))
 	}
 	if err := f.keystore.SetActiveVersion(cmd.NewVersion); err != nil {
 		f.mu.Unlock()
-		return fmt.Errorf("KEKRotate: %w: SetActiveVersion: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: SetActiveVersion: %v", err))
 	}
 	f.recordRotationRequestStatusLocked(cmd.RequestID, RotationStatusApplied, applyIndex)
 	f.mu.Unlock()
@@ -214,35 +222,35 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 
 // replayKEKRotate runs the idempotent-replay verification with f.mu already
 // held by the caller. Returns nil on success (full state consistent with
-// payload), or a wrapped errKEKFatal on any mismatch we cannot repair.
+// payload), or a wrapped ErrFSMKEKFatal on any mismatch we cannot repair.
 func (f *MetaFSM) replayKEKRotate(applyIndex uint64, cmd KEKRotateCmd) error {
 	// (a) K_new on disk byte-identical to the payload-unwrapped K_new. We
 	// re-derive K_new from cmd.WrappedNewKEK to confirm the snapshot bytes
 	// match what this log entry would have produced.
 	existing, err := f.keystore.Get(cmd.NewVersion)
 	if err != nil {
-		return fmt.Errorf("KEKRotate: %w: replay get K_new: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: replay get K_new: %v", err))
 	}
 	defer zeroKEK(existing)
 	prevKEK, err := f.keystore.Get(cmd.NewVersion - 1)
 	if err != nil {
-		return fmt.Errorf("KEKRotate: %w: replay get K_prev: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: replay get K_prev: %v", err))
 	}
 	defer zeroKEK(prevKEK)
 	aad := encrypt.BuildAAD(encrypt.DomainKEKRotate, f.clusterID[:], encrypt.FieldUint32(cmd.NewVersion))
 	replayKEK, err := encrypt.AESGCMOpenWithAAD(prevKEK, cmd.WrappedNewKEK, aad)
 	if err != nil {
-		return fmt.Errorf("KEKRotate: %w: replay unwrap K_new: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: replay unwrap K_new: %v", err))
 	}
 	defer zeroKEK(replayKEK)
 	if subtle.ConstantTimeCompare(existing, replayKEK) != 1 {
-		return fmt.Errorf("KEKRotate: %w: replay K_new disk content mismatch", errKEKFatal)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: replay K_new disk content mismatch"))
 	}
 
 	// (b) FSM wrap[] must equal cmd.RewrappedDEKs byte-for-byte. Acquires
 	// DEKKeeper.mu under f.mu (lock order: f.mu → keeper.mu).
 	if err := f.verifyWrapMapEqualsPayload(cmd.RewrappedDEKs); err != nil {
-		return fmt.Errorf("KEKRotate: %w: replay wrap[] mismatch: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: replay wrap[] mismatch: %v", err))
 	}
 
 	// (c) DEKKeeper idempotent install. InstallKEKRotation overwrites k.kek
@@ -250,7 +258,7 @@ func (f *MetaFSM) replayKEKRotate(applyIndex uint64, cmd KEKRotateCmd) error {
 	// already match the payload, the call is a no-op.
 	rewrappedMap := buildRewrappedMap(cmd.RewrappedDEKs)
 	if err := f.dekKeeper.InstallKEKRotation(replayKEK, rewrappedMap); err != nil {
-		return fmt.Errorf("KEKRotate: %w: replay DEKKeeper install: %v", errKEKFatal, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: replay DEKKeeper install: %v", err))
 	}
 
 	// (d) Request status repair. The FIFO ring may have evicted the original
@@ -264,7 +272,7 @@ func (f *MetaFSM) replayKEKRotate(applyIndex uint64, cmd KEKRotateCmd) error {
 	// idempotent repair brings it back in line.
 	if f.keystore.ActiveVersion() != cmd.NewVersion {
 		if err := f.keystore.SetActiveVersion(cmd.NewVersion); err != nil {
-			return fmt.Errorf("KEKRotate: %w: replay SetActiveVersion repair: %v", errKEKFatal, err)
+			return fatalKEKApply(fmt.Errorf("KEKRotate: replay SetActiveVersion repair: %v", err))
 		}
 	}
 

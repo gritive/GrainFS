@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -391,6 +392,14 @@ type MetaFSM struct {
 	// status records. Defaults to 0 in test paths that call applyCmd
 	// directly. Read-and-set only on the apply goroutine; no lock needed.
 	lastApplyIndex uint64
+
+	// halted is set by MarkFatalHalted when a KEK lifecycle Apply encounters
+	// a node-local fatal failure (disk I/O, content-mismatch). Once set, all
+	// subsequent Apply calls short-circuit and Snapshot refuses. The first
+	// error wins (CompareAndSwap); later calls are no-ops.
+	// Lock-free: atomic.Pointer so the halted check can run before f.mu
+	// without ordering hazards.
+	halted atomic.Pointer[error]
 }
 
 // RotationStatus is the outcome code stored for each KEK rotation request.
@@ -498,6 +507,26 @@ func (f *MetaFSM) LookupKEKStatus(version uint32) (v uint32, status KEKLifecycle
 	return 0, 0, 0, false
 }
 
+// MarkFatalHalted poisons the FSM with err so all subsequent Apply calls
+// and Snapshot calls fail immediately without dispatching. The first error
+// wins; subsequent calls are no-ops. Safe to call from any goroutine.
+func (f *MetaFSM) MarkFatalHalted(err error) {
+	if err == nil {
+		return
+	}
+	e := err
+	f.halted.CompareAndSwap(nil, &e)
+}
+
+// FatalHaltedErr returns the error that halted the FSM, or nil if the FSM
+// has not been poisoned. Safe to call from any goroutine.
+func (f *MetaFSM) FatalHaltedErr() error {
+	if p := f.halted.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
 		nodes:             make(map[string]MetaNodeEntry),
@@ -522,7 +551,12 @@ func NewMetaFSM() *MetaFSM {
 // raft log entry's index so KEK rotation Apply can stamp deterministic
 // request-status records. Test callers that don't need an index continue to
 // use applyCmd, which passes 0 and means "synthetic / unknown index".
+// Returns the poison error immediately if the FSM has been halted by
+// MarkFatalHalted — no dispatching occurs.
 func (f *MetaFSM) applyCmdAtIndex(data []byte, index uint64) error {
+	if err := f.FatalHaltedErr(); err != nil {
+		return err
+	}
 	f.lastApplyIndex = index
 	return f.applyCmd(data)
 }

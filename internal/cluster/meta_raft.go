@@ -905,6 +905,11 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 					break
 				}
 				if err := m.fsm.applyCmdAtIndex(entry.Command, entry.Index); err != nil {
+					if errors.Is(err, ErrFSMKEKFatal) {
+						log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FATAL KEK apply error — halting apply loop to prevent silent FSM divergence")
+						m.fsm.MarkFatalHalted(err)
+						return
+					}
 					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
 					m.recordApplyResult(entry.Index, err)
 				}

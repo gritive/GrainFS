@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -241,5 +242,87 @@ func TestFSM_Apply_KEKRotate_IdempotentReplay(t *testing.T) {
 	wraps, _ := fx.fsm.dekKeeper.VersionsAndActive()
 	if !bytes.Equal(wraps[1], fx.wrappedDEKK1) {
 		t.Errorf("keeper wrap[1] diverged on replay")
+	}
+}
+
+// TestFSM_Apply_KEKRotate_ContentMismatch_PoisonsFSM verifies the fatal-halt
+// discipline. Pre-place a different K1 (same version, wrong bytes) in the
+// KEKStore so applyKEKRotate hits the in-memory content-mismatch path and
+// returns a wrapped ErrFSMKEKFatal. The apply loop (simulated here via
+// MarkFatalHalted) must poison the FSM, and Snapshot must refuse afterwards.
+func TestFSM_Apply_KEKRotate_ContentMismatch_PoisonsFSM(t *testing.T) {
+	fx := newKEKRotateTestFixture(t)
+	requestID := [16]byte{0xBB}
+	cmd := fx.buildHappyCmd(requestID)
+
+	// Pre-place a *different* K1 so the duplicate-add branch finds a mismatch.
+	differentK1 := bytes.Repeat([]byte{0xDE}, encrypt.KEKSize)
+	if err := fx.fsm.KEKStore().Add(cmd.NewVersion, differentK1); err != nil {
+		t.Fatalf("pre-place different K1: %v", err)
+	}
+
+	envelope := fx.encodeAndWrap(cmd)
+	err := fx.fsm.applyCmdAtIndex(envelope, 42)
+	if err == nil {
+		t.Fatalf("expected fatal error, got nil")
+	}
+	if !errors.Is(err, ErrFSMKEKFatal) {
+		t.Errorf("expected ErrFSMKEKFatal, got: %v", err)
+	}
+
+	// Simulate what runApplyLoop does on ErrFSMKEKFatal: poison the FSM.
+	fx.fsm.MarkFatalHalted(err)
+
+	// FSM must now be poisoned.
+	if haltErr := fx.fsm.FatalHaltedErr(); haltErr == nil {
+		t.Fatalf("FSM not poisoned after MarkFatalHalted")
+	}
+
+	// Snapshot must refuse.
+	if _, snapErr := fx.fsm.Snapshot(); snapErr == nil {
+		t.Fatalf("Snapshot must refuse after fatal halt")
+	}
+
+	// Subsequent applyCmdAtIndex must short-circuit without dispatching.
+	happyCmd := fx.buildHappyCmd([16]byte{0xCC})
+	happyEnvelope := fx.encodeAndWrap(happyCmd)
+	err2 := fx.fsm.applyCmdAtIndex(happyEnvelope, 43)
+	if err2 == nil {
+		t.Fatalf("expected halted error on second Apply, got nil")
+	}
+	// Active version must not have advanced during the second Apply.
+	if got := fx.fsm.ActiveKEKVersion(); got != 0 {
+		t.Errorf("active_kek_version mutated after halt: got %d, want 0", got)
+	}
+}
+
+// TestFSM_Apply_KEKRotate_StaleNoOp_DoesNotPoisonFSM verifies that a
+// wrap_set_hash mismatch (deterministic stale no-op) does not halt the FSM
+// and records RotationStatusStaleNoOp.
+func TestFSM_Apply_KEKRotate_StaleNoOp_DoesNotPoisonFSM(t *testing.T) {
+	fx := newKEKRotateTestFixture(t)
+	cmd := fx.buildHappyCmd([16]byte{0x88})
+	// Intentionally wrong hash triggers the stale_noop path.
+	cmd.WrapSetHash = bytes.Repeat([]byte{0xFF}, 32)
+	envelope := fx.encodeAndWrap(cmd)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 7); err != nil {
+		t.Errorf("stale_noop should be non-fatal, got error: %v", err)
+	}
+
+	// FSM must not be poisoned.
+	if haltErr := fx.fsm.FatalHaltedErr(); haltErr != nil {
+		t.Fatalf("FSM unexpectedly halted on stale_noop: %v", haltErr)
+	}
+
+	// Status recorded as StaleNoOp.
+	s, ok := fx.fsm.LookupRotationRequestStatus(cmd.RequestID)
+	if !ok || s != RotationStatusStaleNoOp {
+		t.Errorf("status = %v ok=%v, want StaleNoOp", s, ok)
+	}
+
+	// Snapshot must still work.
+	if _, snapErr := fx.fsm.Snapshot(); snapErr != nil {
+		t.Errorf("Snapshot must succeed after stale_noop: %v", snapErr)
 	}
 }
