@@ -18,6 +18,9 @@ type clusterSegmentStore struct {
 }
 
 func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.SegmentRef) (io.ReadCloser, error) {
+	if storage.ParseLocator(ref.BlobID).Scheme == storage.LocatorCAS {
+		return nil, storage.ErrCASNotImplemented
+	}
 	entry, ok := s.segmentRef(ref.BlobID)
 	if !ok {
 		return nil, fmt.Errorf("segment %s not found in metadata for %s/%s", ref.BlobID, s.bucket, s.key)
@@ -54,6 +57,9 @@ func (r *segmentBytesReadCloser) SegmentBytes() []byte { return r.data }
 func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.SegmentRef, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, fmt.Errorf("segment %s: negative offset %d", ref.BlobID, offset)
+	}
+	if storage.ParseLocator(ref.BlobID).Scheme == storage.LocatorCAS {
+		return 0, storage.ErrCASNotImplemented
 	}
 	entry, ok := s.segmentRef(ref.BlobID)
 	if !ok {
