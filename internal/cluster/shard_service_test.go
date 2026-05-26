@@ -1141,3 +1141,95 @@ func TestDataWALRepairCollector_CoalescesByBucketShardAndIndex(t *testing.T) {
 		Reason:       DataWALRepairMissing,
 	}, got[3])
 }
+
+func TestShardService_DataWALMetadataOnlyMissingQueuesStartupRepair(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	collector := NewDataWALRepairCollector()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithDataWALRepairSink(collector),
+	)
+
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op:     datawal.OpShardPut,
+		Bucket: "b",
+		Key:    "obj/v1",
+		Target: "0",
+		Size:   int64(walPayloadInlineThreshold),
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	require.Equal(t, []DataWALRepairCandidate{{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     0,
+		ExpectedSize: int64(walPayloadInlineThreshold),
+		Reason:       DataWALRepairMissing,
+	}}, collector.Candidates())
+}
+
+func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	collector := NewDataWALRepairCollector()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithDataWALRepairSink(collector),
+	)
+
+	path := svc.getShardPath("b", "obj/v1", 1)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("short"), 0o600))
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op:     datawal.OpShardPut,
+		Bucket: "b",
+		Key:    "obj/v1",
+		Target: "1",
+		Size:   int64(walPayloadInlineThreshold),
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	require.Equal(t, []DataWALRepairCandidate{{
+		Bucket:       "b",
+		ShardKey:     "obj/v1",
+		ShardIdx:     1,
+		ExpectedSize: int64(walPayloadInlineThreshold),
+		Reason:       DataWALRepairSizeMismatch,
+	}}, collector.Candidates())
+}
+
+func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T) {
+	dir := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	require.NoError(t, err)
+	collector := NewDataWALRepairCollector()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithDataWAL(dwal),
+		WithDataWALRepairSink(collector),
+	)
+	require.NoError(t, svc.WriteLocalShard("b", "small", 0, []byte("payload")))
+	require.NoError(t, dwal.Flush())
+	require.NoError(t, os.Remove(svc.getShardPath("b", "small", 0)))
+
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
+
+	require.Empty(t, collector.Candidates())
+	got, err := svc.ReadLocalShard("b", "small", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), got)
+}

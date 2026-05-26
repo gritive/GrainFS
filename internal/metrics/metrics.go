@@ -137,6 +137,14 @@ var (
 		Help: "1 if split brain is suspected (multiple leaders or large term divergence), 0 otherwise.",
 	})
 
+	// DataWALStartupRepairDiscovered counts metadata-only data WAL shard repair
+	// candidates discovered and queued during startup replay, per record before
+	// deduplication. Only counted when a repair sink is configured.
+	DataWALStartupRepairDiscovered = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_datawal_startup_repair_discovered_total",
+		Help: "Metadata-only data WAL shard repair candidates discovered and queued during startup replay (only counted when a repair sink is configured); counted per WAL record before deduplication.",
+	}, []string{"reason"})
+
 	// ScrubShardErrorsTotal counts shard errors (missing + corrupt) detected during scrubbing.
 	ScrubShardErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_scrub_shard_errors_total",
