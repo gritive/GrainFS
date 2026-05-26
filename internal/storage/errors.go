@@ -34,4 +34,9 @@ var (
 	// ErrForwardBackpressure is returned when this node is already streaming
 	// the configured maximum number of forwarded write bodies.
 	ErrForwardBackpressure = errors.New("forward stream backpressure")
+
+	// ErrCASNotImplemented is returned by read-path when a SegmentRef resolves to a
+	// LocatorCAS chunk. CAS physical storage lands in a later plan; until then the
+	// read-path rejects cas:// locators explicitly rather than mis-routing them.
+	ErrCASNotImplemented = errors.New("storage: CAS chunk locator not implemented")
 )
