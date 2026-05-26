@@ -737,6 +737,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeKEKRotate:
 		return f.applyKEKRotate(f.lastApplyIndex, cmd.DataBytes())
+	case clusterpb.MetaCmdTypeKEKRetire:
+		return f.applyKEKRetire(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		return f.applyDEKRotate()
 	case clusterpb.MetaCmdTypeDEKVersionPrune:

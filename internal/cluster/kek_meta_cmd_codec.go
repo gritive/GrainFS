@@ -10,6 +10,7 @@ import (
 )
 
 const currentKEKRotatePayloadVersion uint8 = 1
+const currentKEKRetirePayloadVersion uint8 = 1
 
 // RewrappedDEKEntry holds a single DEK generation re-wrapped under the new KEK.
 type RewrappedDEKEntry struct {
@@ -159,6 +160,93 @@ func DecodeMetaKEKRotateCmd(data []byte) (KEKRotateCmd, error) {
 		WrappedNewKEK:         append([]byte(nil), t.WrappedNewKekBytes()...),
 		WrapSetHash:           append([]byte(nil), rawWrapSetHash...),
 		RewrappedDEKs:         deks,
+		Confirm:               string(t.Confirm()),
+		Actor:                 string(t.Actor()),
+		RequestID:             requestID,
+		RequestedAtUnixNanos:  t.RequestedAtUnixNanos(),
+		ClusterStateAtPropose: clusterState,
+	}, nil
+}
+
+// KEKRetireCmd is the decoded in-memory form of a MetaKEKRetireCmd payload.
+type KEKRetireCmd struct {
+	PayloadVersion        uint8
+	Version               uint32
+	Confirm               string
+	Actor                 string
+	RequestID             [16]byte
+	RequestedAtUnixNanos  int64
+	ClusterStateAtPropose ClusterStateAtPropose
+}
+
+// EncodeMetaKEKRetireCmd serializes a KEKRetireCmd to a FlatBuffers byte slice.
+// PayloadVersion = 0 is normalized to currentKEKRetirePayloadVersion before encoding.
+func EncodeMetaKEKRetireCmd(cmd KEKRetireCmd) ([]byte, error) {
+	if cmd.PayloadVersion == 0 {
+		cmd.PayloadVersion = currentKEKRetirePayloadVersion
+	}
+
+	b := clusterBuilderPool.Get()
+
+	confirmOff := b.CreateString(cmd.Confirm)
+	actorOff := b.CreateString(cmd.Actor)
+	requestIDOff := b.CreateByteVector(cmd.RequestID[:])
+
+	clusterpb.ClusterStateAtProposeStart(b)
+	clusterpb.ClusterStateAtProposeAddActiveKekVersion(b, cmd.ClusterStateAtPropose.ActiveKEKVersion)
+	clusterpb.ClusterStateAtProposeAddRetainedKekCount(b, cmd.ClusterStateAtPropose.RetainedKEKCount)
+	clusterpb.ClusterStateAtProposeAddLiveDekGenCount(b, cmd.ClusterStateAtPropose.LiveDEKGenCount)
+	clusterStateOff := clusterpb.ClusterStateAtProposeEnd(b)
+
+	clusterpb.MetaKEKRetireCmdStart(b)
+	clusterpb.MetaKEKRetireCmdAddPayloadVersion(b, cmd.PayloadVersion)
+	clusterpb.MetaKEKRetireCmdAddVersion(b, cmd.Version)
+	clusterpb.MetaKEKRetireCmdAddConfirm(b, confirmOff)
+	clusterpb.MetaKEKRetireCmdAddActor(b, actorOff)
+	clusterpb.MetaKEKRetireCmdAddRequestId(b, requestIDOff)
+	clusterpb.MetaKEKRetireCmdAddRequestedAtUnixNanos(b, cmd.RequestedAtUnixNanos)
+	clusterpb.MetaKEKRetireCmdAddClusterStateAtPropose(b, clusterStateOff)
+	return fbFinish(b, clusterpb.MetaKEKRetireCmdEnd(b)), nil
+}
+
+// DecodeMetaKEKRetireCmd parses a FlatBuffers-encoded MetaKEKRetireCmd payload.
+// Returns errors for empty/truncated data, unsupported payload_version, and
+// invalid request_id length (must be 16 bytes).
+func DecodeMetaKEKRetireCmd(data []byte) (KEKRetireCmd, error) {
+	if len(data) == 0 {
+		return KEKRetireCmd{}, errors.New("kek_meta_cmd_codec: MetaKEKRetireCmd: empty payload")
+	}
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaKEKRetireCmd {
+		return clusterpb.GetRootAsMetaKEKRetireCmd(d, 0)
+	})
+	if err != nil {
+		return KEKRetireCmd{}, fmt.Errorf("kek_meta_cmd_codec: MetaKEKRetireCmd: %w", err)
+	}
+
+	pv := t.PayloadVersion()
+	if pv != currentKEKRetirePayloadVersion {
+		return KEKRetireCmd{}, fmt.Errorf("kek_meta_cmd_codec: MetaKEKRetireCmd: unsupported payload_version %d (want %d)", pv, currentKEKRetirePayloadVersion)
+	}
+
+	rawRequestID := t.RequestIdBytes()
+	if len(rawRequestID) != 16 {
+		return KEKRetireCmd{}, fmt.Errorf("kek_meta_cmd_codec: MetaKEKRetireCmd: request_id must be 16 bytes, got %d", len(rawRequestID))
+	}
+	var requestID [16]byte
+	copy(requestID[:], rawRequestID)
+
+	var clusterState ClusterStateAtPropose
+	if cs := t.ClusterStateAtPropose(nil); cs != nil {
+		clusterState = ClusterStateAtPropose{
+			ActiveKEKVersion: cs.ActiveKekVersion(),
+			RetainedKEKCount: cs.RetainedKekCount(),
+			LiveDEKGenCount:  cs.LiveDekGenCount(),
+		}
+	}
+
+	return KEKRetireCmd{
+		PayloadVersion:        pv,
+		Version:               t.Version(),
 		Confirm:               string(t.Confirm()),
 		Actor:                 string(t.Actor()),
 		RequestID:             requestID,

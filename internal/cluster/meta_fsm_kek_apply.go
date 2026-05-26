@@ -385,6 +385,74 @@ func (f *MetaFSM) auditAppendKEKRotate(cmd KEKRotateCmd, applyIndex uint64) {
 	_ = applyIndex
 }
 
+// applyKEKRetire is the deterministic FSM apply of MetaCmdTypeKEKRetire.
+// It marks the given KEK version as Retiring in both the kek_status table and
+// the KEKStore. The key bytes are NOT removed — that is MetaKEKPruneCmd's job.
+//
+// Idempotent replay: if the version is already Retiring or Pruned the command
+// is a no-op (return nil). This handles snapshot-tail re-application cleanly.
+func (f *MetaFSM) applyKEKRetire(applyIndex uint64, payload []byte) error {
+	cmd, err := DecodeMetaKEKRetireCmd(payload)
+	if err != nil {
+		return fmt.Errorf("KEKRetire: decode: %w", err)
+	}
+
+	// 0. confirm token — cheap, deterministic, independent of state.
+	expectedConfirm := fmt.Sprintf("delete-permanently-%d", cmd.Version)
+	if cmd.Confirm != expectedConfirm {
+		return fmt.Errorf("KEKRetire: confirm token mismatch (got %q, want %q)", cmd.Confirm, expectedConfirm)
+	}
+
+	// 1. Idempotent replay: already Retiring or Pruned → no-op.
+	if _, status, _, ok := f.LookupKEKStatus(cmd.Version); ok {
+		if status == KEKLifecycleRetiring || status == KEKLifecyclePruned {
+			return nil
+		}
+	}
+
+	f.mu.Lock()
+	currentActive := f.activeKEKVersion
+	f.mu.Unlock()
+
+	// 2. Cannot retire the active version.
+	if cmd.Version >= currentActive {
+		return fmt.Errorf("KEKRetire: version %d must be < active %d", cmd.Version, currentActive)
+	}
+
+	// 3. Missing version is a node-local divergence — fatal.
+	if !f.keystore.HasVersion(cmd.Version) {
+		return fatalKEKApply(fmt.Errorf("KEKRetire: version %d not in keystore (local divergence)", cmd.Version))
+	}
+
+	// 4. cluster_state_at_propose mismatch → stale no-op (leader retries).
+	if cmd.ClusterStateAtPropose.ActiveKEKVersion != currentActive {
+		f.RecordRotationRequestStatus(cmd.RequestID, RotationStatusStaleNoOp, applyIndex)
+		return nil
+	}
+
+	// 5. Mark in-memory retiring state.
+	if err := f.keystore.Retire(cmd.Version); err != nil {
+		return fatalKEKApply(fmt.Errorf("KEKRetire: in-memory mark: %w", err))
+	}
+
+	// 6. Update FSM kek_status and request status. SetKEKStatus acquires f.mu
+	//    internally, so call it outside any f.mu lock window.
+	f.SetKEKStatus(cmd.Version, KEKLifecycleRetiring, applyIndex)
+	f.RecordRotationRequestStatus(cmd.RequestID, RotationStatusApplied, applyIndex)
+
+	// 7. Audit — payload fields only (no node-local time.Now). Task 10 wires the real sink.
+	f.auditAppendKEKRetire(cmd, applyIndex)
+	return nil
+}
+
+// auditAppendKEKRetire is a placeholder that Task 10 will wire to the real
+// audit sink.
+func (f *MetaFSM) auditAppendKEKRetire(cmd KEKRetireCmd, applyIndex uint64) {
+	// Intentionally empty — Task 10 will populate.
+	_ = cmd
+	_ = applyIndex
+}
+
 // zeroKEK overwrites a KEK-sized byte slice with zeros. Defense against
 // memory forensics on transient unwrapped KEK material.
 func zeroKEK(b []byte) {

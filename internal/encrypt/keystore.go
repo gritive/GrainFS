@@ -37,14 +37,39 @@ var ErrKEKActiveInUse = errors.New("cannot delete active KEK version")
 // Delete) are admin-rate, not hot-path — a Mutex would suffice, but Get
 // runs on the hot path during DEK operations, hence RWMutex.
 type KEKStore struct {
-	mu     sync.RWMutex
-	keys   map[uint32][]byte
-	active uint32
+	mu               sync.RWMutex
+	keys             map[uint32][]byte
+	active           uint32
+	retiringVersions map[uint32]struct{}
 }
 
 // NewKEKStore creates an empty KEKStore.
 func NewKEKStore() *KEKStore {
-	return &KEKStore{keys: make(map[uint32][]byte)}
+	return &KEKStore{
+		keys:             make(map[uint32][]byte),
+		retiringVersions: make(map[uint32]struct{}),
+	}
+}
+
+// Retire marks the given version as retiring in memory. The key bytes are
+// retained until a subsequent MetaKEKPruneCmd removes them. Returns an error
+// if the version is not loaded.
+func (s *KEKStore) Retire(version uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.keys[version]; !ok {
+		return fmt.Errorf("KEKStore.Retire: version %d not loaded", version)
+	}
+	s.retiringVersions[version] = struct{}{}
+	return nil
+}
+
+// IsRetiring reports whether the given version has been marked as retiring.
+func (s *KEKStore) IsRetiring(version uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.retiringVersions[version]
+	return ok
 }
 
 // Add inserts kek at version. Refuses len(kek) != KEKSize and duplicate
