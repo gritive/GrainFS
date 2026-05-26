@@ -15,6 +15,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
@@ -238,12 +239,59 @@ func (b *LocalBackend) PutObjectRecord(ctx context.Context, bucket, key string, 
 	})
 }
 
-// PutObjectRecordInTxn persists Object within a caller-provided txn.
-// Cluster FSM apply will use this for atomic write within a larger txn.
+// PutObjectRecordInTxn persists Object within a caller-provided txn and
+// atomically updates chunk refcounts. Any prior record at the same meta key is
+// read first; its chunk refs are removed before the new refs are added, so an
+// overwrite never leaves stale refcounts.
 func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string, obj *Object) error {
+	mk := b.objectMetaKey(bucket, key)
+	store := NewChunkRefStore(txn)
+	m := chunkref.ObjectVersionID(bucket, key, obj.VersionID)
+
+	// Remove stale chunk refs from the prior record (if any).
+	if prev, err := b.readObjectInTxn(txn, mk); err == nil && prev != nil {
+		prevM := chunkref.ObjectVersionID(bucket, key, prev.VersionID)
+		now := time.Now()
+		for _, c := range prev.ChunkLocators() {
+			if err := store.RemoveRef(prevM, chunkref.ChunkID(c), now); err != nil {
+				return err
+			}
+		}
+	} else if err != nil && err != badger.ErrKeyNotFound {
+		return err
+	}
+
 	data, err := marshalObject(obj)
 	if err != nil {
 		return err
 	}
-	return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), data)
+	if err := setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, data); err != nil {
+		return err
+	}
+	for _, c := range obj.ChunkLocators() {
+		if err := store.AddRef(m, chunkref.ChunkID(c)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readObjectInTxn reads and decodes the Object stored at mk within txn.
+// Returns (nil, badger.ErrKeyNotFound) when no record exists.
+func (b *LocalBackend) readObjectInTxn(txn *badger.Txn, mk []byte) (*Object, error) {
+	item, err := txn.Get(mk)
+	if err != nil {
+		return nil, err
+	}
+	var obj Object
+	if err := item.Value(func(val []byte) error {
+		plain, derr := openBadgerValue(b.encryptor, badgerDomainObject, mk, val)
+		if derr != nil {
+			return derr
+		}
+		return unmarshalObjectInto(plain, &obj)
+	}); err != nil {
+		return nil, err
+	}
+	return &obj, nil
 }
