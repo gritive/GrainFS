@@ -373,12 +373,15 @@ Work these in order. Do not run them in parallel.
   feature.
 - [ ] **Multi-tenancy**: account/namespace isolation above IAM.
 - [ ] **Quota**: capacity limits per service account or team.
-- [ ] **Volume export/import**: backup/restore for volume data and snapshot
-  chains.
-- [ ] **Volume policy**: per-volume pool quota, dedup, encryption key, and EC
+- [ ] **Volume export/import**: backup/restore for volume data.
+- [ ] **Volume policy**: per-volume pool quota, encryption key, and EC
   profile overrides.
 - [ ] **Volume attach/detach**: runtime NBD exposure toggles.
-- [ ] **Volume rename**: migrate live-map and snapshot key prefixes.
+- [ ] **Volume rename**: migrate volume block key prefixes.
+
+> Volume dedup, snapshot, clone, rollback, and copy-on-write were removed in
+> v0.0.346.0 (plain block device). Items above that previously assumed those
+> features are descoped accordingly and depend on the eventual volume redesign.
 - [ ] **`__grainfs_volumes` EC policy**: revisit forced replication for volume
   blocks after EC scrub and migration strategy are ready.
 
