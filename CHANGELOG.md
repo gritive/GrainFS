@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.342.0] - 2026-05-26
+
+### Changed
+
+- **Keystore layout migrated to a versioned `keys/` directory plus a `cluster.id` identity file.** Each node now keeps its active KEK at `<dataDir>/keys/0.key` and a 16-byte cluster identity at `<dataDir>/cluster.id`. The legacy single `<dataDir>/kek.key` file is no longer read or written. To add a node to an existing cluster, copy BOTH files from a healthy peer before booting:
+  ```sh
+  mkdir -p <local-dataDir>/keys
+  scp <peer>:<dataDir>/keys/0.key   <local-dataDir>/keys/0.key
+  scp <peer>:<dataDir>/cluster.id   <local-dataDir>/cluster.id
+  chmod 0600 <local-dataDir>/keys/0.key <local-dataDir>/cluster.id
+  ```
+- **`grainfs join` now requires `--confirm-staged-keys`.** The runtime restart-into-join command refuses to write `.join-pending` unless the operator explicitly confirms that `keys/0.key` and `cluster.id` have been staged from the target cluster. Without staging, the rebooted node would generate its own KEK and cluster ID, then fail the cluster handshake with a confusing KEK-mismatch error.
+- **Boot enforces strict load on existing nodes.** A node that already has raft / meta state on disk now refuses to auto-generate a fresh `keys/0.key` or `cluster.id`. Previously, accidentally deleting either file would silently regenerate it and then fail to unwrap the FSM-stored DEKs at restore. The new behaviour surfaces the missing-file as an explicit error pointing at restore-from-backup. Fresh-cluster bootstrap is unchanged — empty data directories still auto-generate.
+
+### Removed
+
+- **Boot refuses legacy `<dataDir>/kek.key`.** A pre-existing legacy file at this path causes `ErrLegacyKEKDetected` and an explicit "green-field cutover required" error. This is a deliberate guard against silent migration — operators must either migrate manually (move the file into `keys/0.key`) or wipe and rejoin.
+- **`GRAINFS_KEK_SOURCE` environment variable is no longer honored.** Boot returns an explicit error if the variable is set. Use the `<dataDir>/keys/<V>.key` layout instead. `GRAINFS_KEK_DIR` (test-only override) remains supported.
+
 ## [0.0.341.0] - 2026-05-26
 
 ### Removed
