@@ -87,6 +87,10 @@ func TestMain(m *testing.M) {
 		"--nbd-port", fmt.Sprintf("%d", testServerNBDPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		// FILE_SYNC ack means Linux NFS clients skip COMMIT on fdatasync;
+		// shrink the idle flush so e2e tests see backend state within a
+		// few seconds instead of the 30s production default.
+		"--nfs-write-buffer-idle", "1s",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}
 
 	// GRAINFS_PPROF=1 enables comprehensive pprof profiling.
