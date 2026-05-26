@@ -2,6 +2,7 @@ package scrubber_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -9,8 +10,41 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
+
+// fakeOrphanLog implements scrubber's segmentOrphanLog with optional error
+// injection (observeErr / readErr) for fail-closed tests.
+type fakeOrphanLog struct {
+	t          map[chunkref.ChunkID]time.Time
+	observeErr error
+	readErr    error
+}
+
+func newFakeOrphanLog() *fakeOrphanLog { return &fakeOrphanLog{t: map[chunkref.ChunkID]time.Time{}} }
+
+func (f *fakeOrphanLog) Observe(c chunkref.ChunkID, now time.Time) error {
+	if f.observeErr != nil {
+		return f.observeErr
+	}
+	if _, ok := f.t[c]; !ok {
+		f.t[c] = now
+	}
+	return nil
+}
+
+func (f *fakeOrphanLog) Forget(c chunkref.ChunkID) error { delete(f.t, c); return nil }
+
+func (f *fakeOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error) {
+	if f.readErr != nil {
+		return time.Time{}, false, f.readErr
+	}
+	v, ok := f.t[c]
+	return v, ok, nil
+}
+
+var errBoom = errors.New("boom")
 
 // segmentBackend embeds mockBackend and adds segment orphan support.
 type segmentBackend struct {
@@ -146,4 +180,95 @@ func TestSegmentSweep_CapAcrossBuckets(t *testing.T) {
 	s.RunOnce(context.Background()) // cap 50: A 40 + B 10
 
 	require.Len(t, b.deletedSegments, 50)
+}
+
+func TestSegmentSweep_RetentionWindowGate(t *testing.T) {
+	b := newSegmentBackend()
+	b.records["bucket"] = nil
+	b.addOrphanSegment("bucket/key_segments/blob1", 10*time.Minute)
+	logp := newFakeOrphanLog()
+
+	s := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(logp, time.Hour))
+
+	s.RunOnce(context.Background()) // cycle1: tombstone + observe t_zero
+	require.Empty(t, b.deletedSegments, "cycle1 only tombstones")
+	tZero, ok, err := logp.TombstoneTime("blob1")
+	require.NoError(t, err)
+	require.True(t, ok, "t_zero observed in cycle1")
+	require.False(t, tZero.IsZero())
+
+	s.RunOnce(context.Background()) // cycle2: within retention window
+	require.Empty(t, b.deletedSegments, "cycle2 within window, not deleted")
+
+	// Age the t_zero past the window.
+	logp.t["blob1"] = time.Now().Add(-2 * time.Hour)
+
+	s.RunOnce(context.Background()) // cycle3: window elapsed -> delete + forget
+	require.Len(t, b.deletedSegments, 1, "cycle3 deletes after window")
+	_, ok, err = logp.TombstoneTime("blob1")
+	require.NoError(t, err)
+	require.False(t, ok, "t_zero forgotten after delete")
+}
+
+func TestSegmentSweep_ReReferenceForgets(t *testing.T) {
+	b := newSegmentBackend()
+	b.records["bucket"] = nil
+	b.addOrphanSegment("bucket/key_segments/blob1", 10*time.Minute)
+	logp := newFakeOrphanLog()
+
+	s := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(logp, time.Hour))
+
+	s.RunOnce(context.Background()) // cycle1: observe t_zero
+	_, ok, err := logp.TombstoneTime("blob1")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Segment becomes known (metadata committed): appendable now references it.
+	b.appendableRecs["bucket"] = []scrubber.AppendableRecord{{
+		Bucket:         "bucket",
+		Key:            "key",
+		SegmentBlobIDs: []string{"blob1"},
+	}}
+
+	s.RunOnce(context.Background()) // cycle2: re-referenced -> not deleted + forgotten
+	require.Empty(t, b.deletedSegments, "re-referenced segment not deleted")
+	_, ok, err = logp.TombstoneTime("blob1")
+	require.NoError(t, err)
+	require.False(t, ok, "t_zero forgotten on re-reference")
+}
+
+func TestSegmentSweep_ObserveErrorDefersTombstone(t *testing.T) {
+	b := newSegmentBackend()
+	b.records["bucket"] = nil
+	b.addOrphanSegment("bucket/key_segments/blob1", 10*time.Minute)
+	logp := newFakeOrphanLog()
+	logp.observeErr = errBoom
+
+	s := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(logp, time.Hour))
+
+	s.RunOnce(context.Background())
+	s.RunOnce(context.Background())
+
+	require.Empty(t, b.deletedSegments, "observe error must defer tombstone (never deleted)")
+}
+
+func TestSegmentSweep_ReadErrorKeeps(t *testing.T) {
+	b := newSegmentBackend()
+	b.records["bucket"] = nil
+	b.addOrphanSegment("bucket/key_segments/blob1", 10*time.Minute)
+	logp := newFakeOrphanLog()
+
+	s := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(logp, time.Hour))
+
+	s.RunOnce(context.Background()) // cycle1: observe ok
+	_, ok, err := logp.TombstoneTime("blob1")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Window elapsed, but read now fails: fail-closed KEEP.
+	logp.t["blob1"] = time.Now().Add(-2 * time.Hour)
+	logp.readErr = errBoom
+
+	s.RunOnce(context.Background())
+	require.Empty(t, b.deletedSegments, "read error must keep (fail-closed), not delete")
 }

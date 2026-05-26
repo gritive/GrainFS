@@ -26,21 +26,21 @@ type retentionInput struct {
 // The hasTZero==false → deletable default is correct ONLY because the known-set
 // (authoritative manifest-absence, the spec's third GC condition) already
 // excluded every chunk a live object or snapshot references before a chunk ever
-// reaches here. ACTIVATION CONSTRAINT (Plan 3.5): a tombstoneSource MUST NOT be
-// wired without SnapshotFrozenSegmentPaths in the same change — otherwise a
-// snapshot-pinned chunk (refcount>0, hence no tombstone) that is missing from
-// the known-set would fall through to deletion (data loss). Wire both, or
-// neither.
+// reaches here. ACTIVATION CONSTRAINT (Plan 3.5): a segmentOrphanLog MUST NOT be
+// wired without snapshot-frozen paths (segmentManifestSource) in the same change
+// — otherwise a snapshot-pinned chunk (refcount>0, hence no tombstone) that is
+// missing from the known-set would fall through to deletion (data loss). Wire
+// both, or neither.
+//
+// (H) t_zero is the FIRST WALK observation of the unreferenced chunk, not the
+// instant it first became unreferenced. The effective grace before deletion is
+// therefore walker age-gate (≈5m) + retention window + cycle timing. A
+// window<=0 leaves only the age-gate (now-t_zero > 0 is true on the next walk).
 func evalGCCandidate(in retentionInput) bool {
 	if !in.hasTZero {
 		return true
 	}
 	return in.now.Sub(in.tZero) > in.window
-}
-
-// tombstoneSource yields the t_zero for an unreferenced chunk, if tracked.
-type tombstoneSource interface {
-	TombstoneTime(c chunkref.ChunkID) (t time.Time, ok bool, err error)
 }
 
 // OrphanSegmentWalkable is an optional Scrubbable extension for raw segment
@@ -62,13 +62,16 @@ const maxSegmentsPerCycle = 50
 
 // segmentSweepBucket finds and cleans up orphan raw segment files for one
 // bucket. capRemaining is the cycle-shared cap; returns updated remaining.
+//
+// Retention gating, observe, and reconcile use s.orphanLog/s.orphanRetention
+// (nil log = age-gate-only behavior). All orphan-log interactions are
+// FAIL-CLOSED: a read error KEEPS the segment; an observe error DEFERS the
+// tombstone (never delete without a recorded t_zero).
 func (s *BackgroundScrubber) segmentSweepBucket(
 	walker OrphanSegmentWalkable,
 	bucket string,
 	known map[string]bool,
 	capRemaining int,
-	tombstones tombstoneSource,
-	window time.Duration,
 ) int {
 	var candidates []string
 	err := walker.WalkOrphanSegments(bucket, known, func(path string) error {
@@ -86,25 +89,35 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 		currentSet[p] = struct{}{}
 	}
 
+	// deletedThisCycle guards the re-observe loop below: a path deleted in the
+	// tombstone loop is still present in `candidates` (captured before deletion),
+	// so without this we would Observe a fresh t_zero for a blob we just removed.
+	deletedThisCycle := make(map[string]struct{})
 	deferred := 0
 	for p := range s.segmentTombstone {
 		if !strings.HasPrefix(p, bucket+"/") {
 			continue
 		}
+		blobID := chunkref.ChunkID(p[strings.LastIndex(p, "/")+1:])
 		if _, still := currentSet[p]; !still {
 			delete(s.segmentTombstone, p)
+			if s.orphanLog != nil {
+				_ = s.orphanLog.Forget(blobID) // re-referenced/gone -> reset window
+			}
 			continue
 		}
 		if capRemaining <= 0 {
 			deferred++
 			continue
 		}
-		if tombstones != nil {
-			blobID := p[strings.LastIndex(p, "/")+1:]
-			if tZero, ok, err := tombstones.TombstoneTime(chunkref.ChunkID(blobID)); err == nil {
-				if !evalGCCandidate(retentionInput{tZero: tZero, hasTZero: ok, now: time.Now(), window: window}) {
-					continue // within retention window — keep
-				}
+		if s.orphanLog != nil {
+			tZero, ok, err := s.orphanLog.TombstoneTime(blobID)
+			if err != nil { // (B) fail-closed: KEEP on read error
+				log.Warn().Str("path", p).Err(err).Msg("scrub: orphan-log read failed, keeping (fail-closed)")
+				continue
+			}
+			if !evalGCCandidate(retentionInput{tZero: tZero, hasTZero: ok, now: time.Now(), window: s.orphanRetention}) {
+				continue // within retention window — keep
 			}
 		}
 		if err := walker.DeleteOrphanSegment(p); err != nil {
@@ -113,6 +126,10 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 			continue
 		}
 		delete(s.segmentTombstone, p)
+		deletedThisCycle[p] = struct{}{}
+		if s.orphanLog != nil {
+			_ = s.orphanLog.Forget(blobID)
+		}
 		metrics.OrphanSegmentsDeletedTotal.Inc()
 		capRemaining--
 		log.Info().Str("path", p).Msg("scrub: orphan segment deleted")
@@ -125,6 +142,16 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 	for _, p := range candidates {
 		if _, already := s.segmentTombstone[p]; already {
 			continue
+		}
+		if _, gone := deletedThisCycle[p]; gone {
+			continue // deleted above; don't re-observe a fresh t_zero
+		}
+		blobID := chunkref.ChunkID(p[strings.LastIndex(p, "/")+1:])
+		if s.orphanLog != nil {
+			if err := s.orphanLog.Observe(blobID, time.Now()); err != nil { // (B) fail-closed: don't tombstone w/o t_zero
+				log.Warn().Str("path", p).Err(err).Msg("scrub: orphan-log observe failed, deferring tombstone")
+				continue
+			}
 		}
 		metrics.OrphanSegmentsFoundTotal.Inc()
 		s.segmentTombstone[p] = struct{}{}
