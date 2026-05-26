@@ -19,11 +19,7 @@ func TestSwapIdentity_AtomicSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	multi := &IdentitySnapshot{
-		AcceptSPKIs: [][32]byte{tr.expectedSPKI, spkiB},
-		PresentCert: tr.identityCert,
-		PresentSPKI: tr.expectedSPKI,
-	}
+	multi := NewIdentitySnapshot([][32]byte{tr.expectedSPKI, spkiB}, tr.identityCert, tr.expectedSPKI)
 	tr.SwapIdentity(multi)
 
 	snap := tr.identity.Load()
@@ -32,13 +28,14 @@ func TestSwapIdentity_AtomicSnapshot(t *testing.T) {
 	}
 }
 
-func TestPinAnyAcceptedSPKI_AcceptsEither(t *testing.T) {
+func TestPinAcceptedSPKI_AcceptsEither(t *testing.T) {
 	pskA := strings.Repeat("a", 64)
 	pskB := strings.Repeat("b", 64)
 	certA, spkiA, _ := DeriveClusterIdentity(pskA)
 	certB, spkiB, _ := DeriveClusterIdentity(pskB)
 
-	pin := pinAnyAcceptedSPKI([][32]byte{spkiA, spkiB})
+	snap := NewIdentitySnapshot([][32]byte{spkiA, spkiB}, certA, spkiA)
+	pin := pinAcceptedSPKI(snap)
 
 	if err := pin([][]byte{certA.Certificate[0]}, nil); err != nil {
 		t.Fatalf("should accept A: %v", err)
@@ -82,16 +79,8 @@ func TestSwapIdentity_ConcurrentReadDuringSwap(t *testing.T) {
 	}()
 
 	for i := 0; i < 1000; i++ {
-		tr.SwapIdentity(&IdentitySnapshot{
-			AcceptSPKIs: [][32]byte{tr.expectedSPKI},
-			PresentCert: tr.identityCert,
-			PresentSPKI: tr.expectedSPKI,
-		})
-		tr.SwapIdentity(&IdentitySnapshot{
-			AcceptSPKIs: [][32]byte{tr.expectedSPKI, spkiB},
-			PresentCert: tr.identityCert,
-			PresentSPKI: tr.expectedSPKI,
-		})
+		tr.SwapIdentity(NewIdentitySnapshot([][32]byte{tr.expectedSPKI}, tr.identityCert, tr.expectedSPKI))
+		tr.SwapIdentity(NewIdentitySnapshot([][32]byte{tr.expectedSPKI, spkiB}, tr.identityCert, tr.expectedSPKI))
 	}
 	close(stop)
 	wg.Wait()
