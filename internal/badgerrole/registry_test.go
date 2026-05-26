@@ -19,7 +19,6 @@ func TestRegistryContainsEveryStartupRole(t *testing.T) {
 		RoleGroupState,
 		RoleGroupRaftLog,
 		RoleReceipts,
-		RoleDedup,
 		RoleVolumeCatalog,
 		RoleIncidentState,
 	}

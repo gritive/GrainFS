@@ -110,7 +110,7 @@ func TestVlogDecisionMessageWithBreakdown_Top3Sorted(t *testing.T) {
 			Categories: map[resourcewatch.Category]int{
 				resourcewatch.DBCategoryGroupRaft: 5,
 				resourcewatch.DBCategoryMeta:      4,
-				resourcewatch.DBCategoryDedup:     3,
+				resourcewatch.DBCategoryIncident:  3,
 				resourcewatch.DBCategoryReceipts:  2,
 				resourcewatch.DBCategoryStorage:   1,
 			},
@@ -120,7 +120,7 @@ func TestVlogDecisionMessageWithBreakdown_Top3Sorted(t *testing.T) {
 	assert.Contains(t, out, "top:")
 	assert.Contains(t, out, "group-raft=5")
 	assert.Contains(t, out, "meta=4")
-	assert.Contains(t, out, "dedup=3")
+	assert.Contains(t, out, "incident=3")
 	assert.NotContains(t, out, "receipts")
 	assert.NotContains(t, out, "storage")
 }

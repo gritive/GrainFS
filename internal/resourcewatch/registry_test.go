@@ -39,7 +39,7 @@ func TestRegistry_Snapshot_StableCopy(t *testing.T) {
 	r := NewRegistry()
 	r.Register(DBCategoryMeta, openTestDB(t))
 	snap := r.Snapshot()
-	r.Register(DBCategoryDedup, openTestDB(t))
+	r.Register(DBCategoryReceipts, openTestDB(t))
 	if len(snap) != 1 {
 		t.Fatalf("snapshot mutated by later Register: len=%d want 1", len(snap))
 	}

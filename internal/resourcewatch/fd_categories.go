@@ -20,6 +20,5 @@ const (
 	DBCategoryGroupRaft     Category = "group-raft"
 	DBCategoryIncident      Category = "incident"
 	DBCategoryReceipts      Category = "receipts"
-	DBCategoryDedup         Category = "dedup"
 	DBCategoryStorage       Category = "storage"
 )

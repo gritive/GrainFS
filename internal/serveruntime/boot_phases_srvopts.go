@@ -49,9 +49,9 @@ import (
 //	state.incidentRecorder, state.lifecycleMgr, state.volMgr,
 //	state.mutationGate.
 //
-// Cleanup: receiptWiring.Close, incidentDB.Close + DeregisterDB, dedupDB.Close +
-// DeregisterDB are all registered via state.AddCleanup so behavior matches the
-// original `defer` ordering at Run() exit.
+// Cleanup: receiptWiring.Close, incidentDB.Close + DeregisterDB are all
+// registered via state.AddCleanup so behavior matches the original `defer`
+// ordering at Run() exit.
 //
 // Phase ordering: must run AFTER bootBackendWrap (state.backend, state.diskCollector
 // populated) and BEFORE bootHTTPServerAndAdmin (which calls server.New(state.srvOpts)).
@@ -295,16 +295,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}
 
-	volMgr, blockCache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)
+	volMgr, blockCache, err := BuildVolumeManager(VolumeManagerOptions{BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)
 	if err != nil {
 		return fmt.Errorf("volume manager: %w", err)
 	}
 	state.volMgr = volMgr
-	if dedupDB != nil {
-		state.AddCleanup(func() { _ = dedupDB.Close() })
-		dedupVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategoryDedup, dedupDB)
-		state.AddCleanup(func() { resourcewatch.DeregisterDB(dedupVlogEntry) })
-	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(state.shardCache))
 	if !state.joinMode {
 		srvOpts = append(srvOpts, server.WithReadIndexer(state.distBackend))
