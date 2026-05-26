@@ -1204,3 +1204,16 @@ table MetaKEKRotateCmd {
   requested_at_unix_nanos:int64;
   cluster_state_at_propose:ClusterStateAtPropose;
 }
+
+// MetaKEKRetireCmd marks an older KEK version as Retiring. The version must
+// be strictly less than the active KEK version. The confirm token prevents
+// accidental retirement: it must equal "delete-permanently-<version>".
+table MetaKEKRetireCmd {
+  payload_version:uint8 = 1;
+  version:uint32;
+  confirm:string;
+  actor:string;
+  request_id:[ubyte];
+  requested_at_unix_nanos:int64;
+  cluster_state_at_propose:ClusterStateAtPropose;
+}

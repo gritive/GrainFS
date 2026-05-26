@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -324,5 +325,204 @@ func TestFSM_Apply_KEKRotate_StaleNoOp_DoesNotPoisonFSM(t *testing.T) {
 	// Snapshot must still work.
 	if _, snapErr := fx.fsm.Snapshot(); snapErr != nil {
 		t.Errorf("Snapshot must succeed after stale_noop: %v", snapErr)
+	}
+}
+
+// --- KEKRetire FSM Apply tests ---
+
+// kekRetireTestFixture builds an FSM with active=5 and versions 3,4,5 loaded.
+// Version 3 is the target for retire operations.
+type kekRetireTestFixture struct {
+	t   *testing.T
+	fsm *MetaFSM
+}
+
+func newKEKRetireTestFixture(t *testing.T) *kekRetireTestFixture {
+	t.Helper()
+	f := &kekRetireTestFixture{t: t, fsm: NewMetaFSM()}
+
+	store := encrypt.NewKEKStore()
+	for _, v := range []uint32{0, 1, 2, 3, 4} {
+		kek := bytes.Repeat([]byte{byte(0xA0 + v)}, encrypt.KEKSize)
+		if err := store.Add(v, kek); err != nil {
+			t.Fatalf("seed KEKStore v=%d: %v", v, err)
+		}
+	}
+	if err := store.SetActiveVersion(4); err != nil {
+		t.Fatalf("set active 4: %v", err)
+	}
+	f.fsm.SetKEKStore(store)
+	f.fsm.SetActiveKEKVersion(4)
+
+	// Wire a minimal DEKKeeper so Snapshot works.
+	k0 := bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)
+	plainDEK := bytes.Repeat([]byte{0xD1}, encrypt.DEKSize)
+	wrappedDEK, err := encrypt.AESGCMSeal(k0, plainDEK)
+	if err != nil {
+		t.Fatalf("seal DEK: %v", err)
+	}
+	keeper, err := encrypt.LoadFromFSM(k0, map[uint32][]byte{1: wrappedDEK})
+	if err != nil {
+		t.Fatalf("LoadFromFSM: %v", err)
+	}
+	f.fsm.SetDEKKeeper(keeper)
+
+	return f
+}
+
+func (f *kekRetireTestFixture) buildRetireCmd(version uint32, requestID [16]byte) KEKRetireCmd {
+	return KEKRetireCmd{
+		PayloadVersion:        1,
+		Version:               version,
+		Confirm:               fmt.Sprintf("delete-permanently-%d", version),
+		Actor:                 "admin@uds",
+		RequestID:             requestID,
+		RequestedAtUnixNanos:  1717000000000000000,
+		ClusterStateAtPropose: ClusterStateAtPropose{ActiveKEKVersion: 4, RetainedKEKCount: 5, LiveDEKGenCount: 1},
+	}
+}
+
+func (f *kekRetireTestFixture) encodeAndWrap(cmd KEKRetireCmd) []byte {
+	f.t.Helper()
+	payload, err := EncodeMetaKEKRetireCmd(cmd)
+	if err != nil {
+		f.t.Fatalf("encode MetaKEKRetireCmd: %v", err)
+	}
+	envelope, err := encodeMetaCmd(MetaCmdTypeKEKRetire, payload)
+	if err != nil {
+		f.t.Fatalf("encode MetaCmd envelope: %v", err)
+	}
+	return envelope
+}
+
+// TestFSM_Apply_KEKRetire_HappyPath verifies that a valid retire command marks
+// version 3 as Retiring, records the retire commit index, and does NOT remove
+// the key from the keystore (that is Prune's responsibility).
+func TestFSM_Apply_KEKRetire_HappyPath(t *testing.T) {
+	fx := newKEKRetireTestFixture(t)
+	requestID := [16]byte{0x44}
+	cmd := fx.buildRetireCmd(3, requestID)
+	envelope := fx.encodeAndWrap(cmd)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 100); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	_, status, retireIdx, ok := fx.fsm.LookupKEKStatus(3)
+	if !ok || status != KEKLifecycleRetiring {
+		t.Errorf("kek_status[3] = %v ok=%v, want Retiring", status, ok)
+	}
+	if retireIdx == 0 {
+		t.Errorf("retire_commit_index not set (got 0)")
+	}
+
+	// Key must still be present — Prune removes it, not Retire.
+	if !fx.fsm.KEKStore().HasVersion(3) {
+		t.Errorf("KEK version 3 prematurely removed during Retire")
+	}
+
+	// keystore.IsRetiring must report true.
+	if !fx.fsm.KEKStore().IsRetiring(3) {
+		t.Errorf("KEKStore.IsRetiring(3) = false, want true")
+	}
+}
+
+// TestFSM_Apply_KEKRetire_RejectsActiveVersion verifies that retiring the
+// active version returns a non-fatal error.
+func TestFSM_Apply_KEKRetire_RejectsActiveVersion(t *testing.T) {
+	fx := newKEKRetireTestFixture(t)
+	cmd := KEKRetireCmd{
+		PayloadVersion: 1,
+		Version:        4, // active version
+		Confirm:        "delete-permanently-4",
+		RequestID:      [16]byte{0x01},
+	}
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 1)
+	if err == nil {
+		t.Fatalf("expected error for retiring active version, got nil")
+	}
+	if errors.Is(err, ErrFSMKEKFatal) {
+		t.Errorf("retiring active version must NOT be fatal: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKRetire_RejectsBadConfirm verifies that a wrong confirm token
+// returns a non-fatal error before any state change.
+func TestFSM_Apply_KEKRetire_RejectsBadConfirm(t *testing.T) {
+	fx := newKEKRetireTestFixture(t)
+	cmd := KEKRetireCmd{
+		PayloadVersion: 1,
+		Version:        3,
+		Confirm:        "delete-permanently-2", // wrong version number in token
+		RequestID:      [16]byte{0x02},
+	}
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 1)
+	if err == nil {
+		t.Fatalf("expected confirm mismatch error, got nil")
+	}
+	if errors.Is(err, ErrFSMKEKFatal) {
+		t.Errorf("bad confirm must NOT be fatal: %v", err)
+	}
+}
+
+// TestFSM_Apply_KEKRetire_IdempotentReplay verifies that applying the same
+// retire command twice is a no-op on the second apply.
+func TestFSM_Apply_KEKRetire_IdempotentReplay(t *testing.T) {
+	fx := newKEKRetireTestFixture(t)
+	requestID := [16]byte{0x55}
+	cmd := fx.buildRetireCmd(3, requestID)
+	envelope := fx.encodeAndWrap(cmd)
+
+	// First apply.
+	if err := fx.fsm.applyCmdAtIndex(envelope, 50); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	_, status1, idx1, _ := fx.fsm.LookupKEKStatus(3)
+
+	// Second apply (snapshot tail replay).
+	if err := fx.fsm.applyCmdAtIndex(envelope, 50); err != nil {
+		t.Errorf("idempotent replay failed: %v", err)
+	}
+	_, status2, idx2, _ := fx.fsm.LookupKEKStatus(3)
+	if status2 != status1 {
+		t.Errorf("status changed on replay: %v → %v", status1, status2)
+	}
+	if idx2 != idx1 {
+		t.Errorf("retire_commit_index changed on replay: %d → %d", idx1, idx2)
+	}
+}
+
+// TestFSM_Apply_KEKRetire_MissingKEKIsFatal verifies that a retire command for
+// a version not in the keystore (but < active) returns ErrFSMKEKFatal,
+// indicating node-local divergence that must halt the apply loop.
+func TestFSM_Apply_KEKRetire_MissingKEKIsFatal(t *testing.T) {
+	fx := newKEKRetireTestFixture(t)
+
+	// Remove version 2 from the keystore to simulate local divergence.
+	// The fixture loads versions 0-4 with active=4. Delete version 2 so it
+	// is legitimately < active but missing from this node's keystore.
+	if err := fx.fsm.KEKStore().Delete(2); err != nil {
+		t.Fatalf("setup: delete v2: %v", err)
+	}
+
+	cmd := KEKRetireCmd{
+		PayloadVersion:        1,
+		Version:               2, // < active(4), but not in keystore
+		Confirm:               "delete-permanently-2",
+		RequestID:             [16]byte{0x66},
+		ClusterStateAtPropose: ClusterStateAtPropose{ActiveKEKVersion: 4},
+	}
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 1)
+	if err == nil {
+		t.Fatalf("expected fatal error, got nil")
+	}
+	if !errors.Is(err, ErrFSMKEKFatal) {
+		t.Errorf("expected ErrFSMKEKFatal, got: %v", err)
 	}
 }
