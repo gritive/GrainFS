@@ -273,9 +273,9 @@ func (f *MetaFSM) replayKEKRotate(applyIndex uint64, cmd KEKRotateCmd) error {
 	return nil
 }
 
-// canonicalCurrentWrapSetHash computes the canonical SHA-256 fingerprint of
-// the FSM's current wrap[] map, matching what the leader hashed at proposal
-// time. Pre-condition: caller must NOT hold f.mu — this acquires it.
+// canonicalCurrentWrapSetHash returns the deterministic SHA-256 hash of the
+// current DEKKeeper wrap[] entries (sorted by gen). The caller may or may not
+// hold f.mu; this method acquires keeper.mu only via DEKKeeper.VersionsAndActive.
 func (f *MetaFSM) canonicalCurrentWrapSetHash() [32]byte {
 	wraps, _ := f.dekKeeper.VersionsAndActive()
 	entries := make([]encrypt.WrapSetEntry, 0, len(wraps))
