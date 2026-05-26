@@ -129,17 +129,17 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 	// 4. Unwrap K_new under the active KEK with the rotation AAD.
 	activeKEK, err := f.keystore.Get(currentActive)
 	if err != nil {
-		return fmt.Errorf("KEKRotate: get active KEK %d: %w", currentActive, err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: get active KEK %d: %v", currentActive, err))
 	}
 	defer zeroKEK(activeKEK)
 	aad := encrypt.BuildAAD(encrypt.DomainKEKRotate, f.clusterID[:], encrypt.FieldUint32(cmd.NewVersion))
 	newKEK, err := encrypt.AESGCMOpenWithAAD(activeKEK, cmd.WrappedNewKEK, aad)
 	if err != nil {
-		return fmt.Errorf("KEKRotate: unwrap K_new: %w", err)
+		return fatalKEKApply(fmt.Errorf("KEKRotate: unwrap K_new: %v", err))
 	}
 	defer zeroKEK(newKEK)
 	if len(newKEK) != encrypt.KEKSize {
-		return fmt.Errorf("KEKRotate: K_new wrong length %d", len(newKEK))
+		return fatalKEKApply(fmt.Errorf("KEKRotate: K_new wrong length %d", len(newKEK)))
 	}
 
 	// 5. Verify the rewrapped DEK set: equal gen set, sorted ascending unique,
