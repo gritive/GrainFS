@@ -2,7 +2,6 @@ package serveruntime
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -36,7 +35,7 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	keysDir := cfg.KEKDir()
 
 	if state.joinMode || len(state.peers) > 0 {
-		if empty, err := keysDirIsEmpty(keysDir); err != nil {
+		if empty, err := encrypt.KeysDirIsEmpty(keysDir); err != nil {
 			return fmt.Errorf("wireDEKKeeper: stat keys dir %s: %w", keysDir, err)
 		} else if empty {
 			return fmt.Errorf("KEK not found at %s and this node is configured to join an existing cluster. "+
@@ -76,37 +75,9 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	fsm.SetDEKKeeper(keeper)
 	state.dekKeeper = keeper
 	state.kekStore = store
-	// state.kek retained for downstream callers (PerformMetaJoin, restore
-	// path) that still read raw bytes. Holds a fresh copy because
-	// activeKEK is zeroed by defer.
-	state.kek = append([]byte(nil), activeKEK...)
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
 	WireDEKPostCommit(fsm, nil /* proposer (§6) */, keeper, nil /* scrubberKick (§6) */)
 	return nil
-}
-
-// keysDirIsEmpty returns true when keysDir is absent or contains no
-// `<V>.key` files. Other files (operator notes, dotfiles) are ignored —
-// matches LoadOrInitKEKStoreDir's parseKeyFilename gate.
-func keysDirIsEmpty(keysDir string) (bool, error) {
-	entries, err := os.ReadDir(keysDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		// crude check: any *.key file present counts as non-empty.
-		if len(name) > 4 && name[len(name)-4:] == ".key" {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func zeroizeKEKCopy(b []byte) {

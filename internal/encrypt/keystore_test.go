@@ -312,3 +312,57 @@ func TestKEKStore_AddAndPersist_RefusesExistingDiskVersion(t *testing.T) {
 	}
 	_ = s
 }
+
+func TestKeysDirIsEmpty(t *testing.T) {
+	t.Run("missing dir counts as empty", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "does-not-exist")
+		empty, err := KeysDirIsEmpty(dir)
+		if err != nil {
+			t.Fatalf("KeysDirIsEmpty: %v", err)
+		}
+		if !empty {
+			t.Errorf("missing dir must be reported as empty")
+		}
+	})
+	t.Run("empty dir is empty", func(t *testing.T) {
+		dir := t.TempDir()
+		empty, err := KeysDirIsEmpty(dir)
+		if err != nil {
+			t.Fatalf("KeysDirIsEmpty: %v", err)
+		}
+		if !empty {
+			t.Errorf("empty dir must be reported as empty")
+		}
+	})
+	t.Run("canonical 0.key makes dir non-empty", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "0.key"), bytes.Repeat([]byte{0x01}, KEKSize), 0o600); err != nil {
+			t.Fatalf("seed 0.key: %v", err)
+		}
+		empty, err := KeysDirIsEmpty(dir)
+		if err != nil {
+			t.Fatalf("KeysDirIsEmpty: %v", err)
+		}
+		if empty {
+			t.Errorf("dir with canonical 0.key must be reported as non-empty")
+		}
+	})
+	t.Run("non-canonical *.key files are ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		// Leading-zero stem and non-numeric stem are both rejected by
+		// parseKeyFilename, so they must NOT make the dir non-empty.
+		if err := os.WriteFile(filepath.Join(dir, "01.key"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed 01.key: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "abc.key"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed abc.key: %v", err)
+		}
+		empty, err := KeysDirIsEmpty(dir)
+		if err != nil {
+			t.Fatalf("KeysDirIsEmpty: %v", err)
+		}
+		if !empty {
+			t.Errorf("dir with only non-canonical *.key files must be reported as empty")
+		}
+	})
+}

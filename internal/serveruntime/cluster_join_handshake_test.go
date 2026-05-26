@@ -80,7 +80,14 @@ func TestB3_WireDEKKeeper_JoinModeAcceptsStagedKEK(t *testing.T) {
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.dekKeeper, "keeper must be installed")
 	require.NotNil(t, state.handshakeVerifier, "handshake verifier must be installed alongside keeper")
-	require.Equal(t, kek, state.kek, "state.kek must hold the loaded KEK bytes")
+	gotKEK, err := state.kekStore.ActiveKEK()
+	require.NoError(t, err, "ActiveKEK")
+	defer func() {
+		for i := range gotKEK {
+			gotKEK[i] = 0
+		}
+	}()
+	require.Equal(t, kek, gotKEK, "kekStore.ActiveKEK() must hold the loaded KEK bytes")
 }
 
 // TestB3_WireDEKKeeper_StandaloneModeAutoGenerates documents the
@@ -94,7 +101,14 @@ func TestB3_WireDEKKeeper_StandaloneModeAutoGenerates(t *testing.T) {
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.dekKeeper)
 	require.NotNil(t, state.handshakeVerifier)
-	require.Len(t, state.kek, encrypt.KEKSize)
+	gotKEK, err := state.kekStore.ActiveKEK()
+	require.NoError(t, err, "ActiveKEK")
+	defer func() {
+		for i := range gotKEK {
+			gotKEK[i] = 0
+		}
+	}()
+	require.Len(t, gotKEK, encrypt.KEKSize)
 
 	// keys/0.key was created by LoadOrInitKEKStoreDir.
 	_, statErr := os.Stat(filepath.Join(dataDir, "keys", "0.key"))

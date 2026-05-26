@@ -16,7 +16,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -46,7 +45,7 @@ func PerformOfflineJoin(ctx context.Context, opts OfflineJoinOptions) error {
 	// whose Challenge handshake would fail anyway. Pre-flight checks the
 	// keys/ directory is non-empty before LoadOrInitKEKStoreDir, which
 	// otherwise auto-generates v0 on an empty directory.
-	if empty, err := offlineJoinKeysDirEmpty(keysDir); err != nil {
+	if empty, err := encrypt.KeysDirIsEmpty(keysDir); err != nil {
 		return fmt.Errorf("offline-join: stat %s: %w", keysDir, err)
 	} else if empty {
 		return fmt.Errorf("KEK not found at %s. "+
@@ -92,26 +91,6 @@ func PerformOfflineJoin(ctx context.Context, opts OfflineJoinOptions) error {
 	})
 
 	return runOfflineJoinHandshakeV2(ctx, chalSender, joinSender, opts.Peer, opts.NodeID, opts.BindAddr, store, clusterID, opts.Stdout)
-}
-
-func offlineJoinKeysDirEmpty(keysDir string) (bool, error) {
-	entries, err := os.ReadDir(keysDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if len(name) > 4 && name[len(name)-4:] == ".key" {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // runOfflineJoinHandshakeV2 runs the Challenge → Join state machine using

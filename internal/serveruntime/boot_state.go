@@ -100,10 +100,6 @@ type bootState struct {
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
-	// kek holds the loaded 32-byte KEK so downstream phases (PerformMetaJoin
-	// handshake, MetaChallengeReceiver) can share the same key without
-	// re-reading kek.key from disk. Set by wireDEKKeeper.
-	kek []byte
 	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
 	// A holds a single version (0). Later phases use it for rotation,
 	// prune, and join keystore catch-up. Receivers reach the active version

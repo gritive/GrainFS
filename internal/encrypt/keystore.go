@@ -153,6 +153,31 @@ func parseKeyFilename(name string) (uint32, bool) {
 	return uint32(v), true
 }
 
+// KeysDirIsEmpty reports whether keysDir contains zero KEK files in the
+// canonical `<uint32>.key` form. Missing directory counts as empty.
+// Files with the wrong filename pattern (e.g. backups, operator notes)
+// are ignored — they do not make the dir "non-empty" for boot-mode
+// auto-generate gating, because LoadOrInitKEKStoreDir would skip them
+// the same way.
+func KeysDirIsEmpty(keysDir string) (bool, error) {
+	entries, err := os.ReadDir(keysDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, fmt.Errorf("KeysDirIsEmpty: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if _, ok := parseKeyFilename(e.Name()); ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // LoadOrInitKEKStoreDir loads all `<V>.key` files from keysDir into a fresh
 // KEKStore. If the directory is missing or empty, it generates a fresh
 // version 0 KEK and persists it. Refuses boot if a legacy `kek.key` exists

@@ -138,8 +138,8 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
 	// §7 B1 — share the same *encrypt.HandshakeVerifier instance between the
 	// Join receiver (reads issued-nonce map) and the Challenge receiver
-	// (writes it). state.handshakeVerifier is set by wireDEKKeeper alongside
-	// state.kek; the verifier is keyed by the local KEK so VerifyResponse
+	// (writes it). state.handshakeVerifier is set by wireDEKKeeper bound to
+	// state.kekStore; the verifier is keyed by the local KEK so VerifyResponse
 	// passes iff the joiner holds the same KEK.
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
 		WithHandshakeVerifier(state.handshakeVerifier).

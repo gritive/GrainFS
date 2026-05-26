@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/google/uuid"
 )
@@ -78,6 +79,9 @@ func (n *NodeConfig) LoadOrInitClusterID() ([]byte, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("nodeconfig: read %s: %w", path, err)
 	}
+	// First boot: generate UUID v7 and persist atomically with the same
+	// durability guarantees as KEKStore writeKEKFileAtomic — O_EXCL + fsync
+	// + atomic rename so a crash mid-write cannot leave a partial file.
 	if err := os.MkdirAll(n.dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("nodeconfig: mkdir %s: %w", n.dataDir, err)
 	}
@@ -87,8 +91,23 @@ func (n *NodeConfig) LoadOrInitClusterID() ([]byte, error) {
 	}
 	raw := id[:]
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("nodeconfig: open tmp %s: %w", tmp, err)
+	}
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return nil, fmt.Errorf("nodeconfig: write tmp %s: %w", tmp, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return nil, fmt.Errorf("nodeconfig: fsync tmp %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return nil, fmt.Errorf("nodeconfig: close tmp %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
