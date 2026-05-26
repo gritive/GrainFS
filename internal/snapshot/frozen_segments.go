@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,9 @@ func (m *Manager) AllFrozenSegmentPaths() (map[string][]string, error) {
 		}
 		snap, err := readSnapshot(filepath.Join(m.dir, e.Name()))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // descriptor rotated away mid-scan; not corruption
+			}
 			return nil, fmt.Errorf("corrupt snapshot descriptor %s: %w", e.Name(), err)
 		}
 		for i := range snap.Objects {

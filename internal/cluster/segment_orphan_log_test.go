@@ -49,6 +49,28 @@ func TestSegmentOrphanLog_Forget(t *testing.T) {
 	}
 }
 
+func TestSegmentOrphanLog_Reconcile(t *testing.T) {
+	log := NewSegmentOrphanLog(newTestBadger(t), "group-0")
+	kept := chunkref.ChunkID("blob-keep")
+	forgotten := chunkref.ChunkID("blob-ref")
+	if err := log.Observe(kept, time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Observe(forgotten, time.Unix(2000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	// `forgotten` is referenced again -> must be removed; `kept` stays.
+	if err := log.Reconcile(map[chunkref.ChunkID]struct{}{forgotten: {}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := log.TombstoneTime(forgotten); err != nil || ok {
+		t.Fatalf("re-referenced chunk must be forgotten: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := log.TombstoneTime(kept); err != nil || !ok {
+		t.Fatalf("unreferenced chunk must remain: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSegmentOrphanLog_AbsentIsNotTombstoned(t *testing.T) {
 	log := NewSegmentOrphanLog(newTestBadger(t), "group-0")
 	if _, ok, err := log.TombstoneTime(chunkref.ChunkID("never")); err != nil || ok {

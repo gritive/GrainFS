@@ -36,6 +36,15 @@ func (f *fakeOrphanLog) Observe(c chunkref.ChunkID, now time.Time) error {
 
 func (f *fakeOrphanLog) Forget(c chunkref.ChunkID) error { delete(f.t, c); return nil }
 
+func (f *fakeOrphanLog) Reconcile(known map[chunkref.ChunkID]struct{}) error {
+	for c := range f.t {
+		if _, ok := known[c]; ok {
+			delete(f.t, c)
+		}
+	}
+	return nil
+}
+
 func (f *fakeOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error) {
 	if f.readErr != nil {
 		return time.Time{}, false, f.readErr

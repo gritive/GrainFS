@@ -63,6 +63,40 @@ func (l *SegmentOrphanLog) Forget(c chunkref.ChunkID) error {
 	})
 }
 
+// Reconcile removes orphan-log entries for chunks that are referenced again
+// (present in `known`). It scans this group's sgc: entries once (read) and
+// deletes only the intersection in a single write txn, avoiding a write
+// (LSM tombstone) per known chunk. known is keyed by chunk filename.
+func (l *SegmentOrphanLog) Reconcile(known map[chunkref.ChunkID]struct{}) error {
+	prefix := []byte(segmentOrphanPrefix + l.groupID + ":")
+	var toDelete [][]byte
+	if err := l.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.IteratorOptions{PrefetchValues: false, Prefix: prefix})
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			k := it.Item().KeyCopy(nil)
+			c := chunkref.ChunkID(k[len(prefix):])
+			if _, ok := known[c]; ok {
+				toDelete = append(toDelete, k)
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("segment orphan log: reconcile scan: %w", err)
+	}
+	if len(toDelete) == 0 {
+		return nil
+	}
+	return l.db.Update(func(txn *badger.Txn) error {
+		for _, k := range toDelete {
+			if err := txn.Delete(k); err != nil {
+				return fmt.Errorf("segment orphan log: reconcile delete: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 // TombstoneTime returns (t_zero, true, nil) if c has been observed as orphaned,
 // or (zero, false, nil) if it has not. Returns a non-nil error only on I/O failure.
 func (l *SegmentOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error) {

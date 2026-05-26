@@ -9,6 +9,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -23,7 +24,12 @@ type manifestSegmentBackend struct {
 	liveObjects []storage.SnapshotObject
 	listErr     error               // when set, ListAllObjectsStrict fails closed
 	frozen      map[string][]string // bucket -> frozen paths
+	caughtUp    bool                // reported by CaughtUp; false gates off the sweep
 }
+
+// CaughtUp implements scrubber's caughtUpReporter. When false the scrubber skips
+// the entire orphan-segment sweep for the cycle.
+func (m *manifestSegmentBackend) CaughtUp(ctx context.Context) bool { return m.caughtUp }
 
 func (m *manifestSegmentBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
 	return m.liveObjects, m.listErr
@@ -53,6 +59,7 @@ func TestSegmentGCActivation_PreservesAndReclaims(t *testing.T) {
 	b := &manifestSegmentBackend{
 		segmentBackend: newSegmentBackend(),
 		frozen:         map[string][]string{},
+		caughtUp:       true, // sweep runs; the gate is exercised separately
 	}
 	b.records["bucket"] = nil // bucket exists; no EC records
 
@@ -94,6 +101,14 @@ func TestSegmentGCActivation_PreservesAndReclaims(t *testing.T) {
 	// reach candidacy in WalkOrphanSegments.
 	scA := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, time.Hour))
 	scA.RunOnce(context.Background()) // tombstone + observe Oblob
+
+	// Prove t_zero was actually persisted to the orphan-log (else Phase B's
+	// deletion would not depend on persistence — the real claim under test).
+	tz, ok, err := orphanLog.TombstoneTime(chunkref.ChunkID("Oblob"))
+	require.NoError(t, err)
+	require.True(t, ok, "Oblob t_zero must be persisted after first observe")
+	require.False(t, tz.IsZero())
+
 	scA.RunOnce(context.Background()) // within window -> keep
 	require.Empty(t, b.deletedSegments, "Phase A: nothing deleted within window; live+frozen never candidates")
 
@@ -124,6 +139,7 @@ func TestSegmentGCFailsClosedOnKnownSetError(t *testing.T) {
 		segmentBackend: newSegmentBackend(),
 		frozen:         map[string][]string{},
 		listErr:        errors.New("corrupt object meta"),
+		caughtUp:       true, // isolate the known-set fail-closed path from the caught-up gate
 	}
 	b.records["bucket"] = nil
 
@@ -144,4 +160,39 @@ func TestSegmentGCFailsClosedOnKnownSetError(t *testing.T) {
 
 	require.Empty(t, b.deletedSegments,
 		"known-set error must skip the whole segment sweep (fail-closed): nothing deleted")
+}
+
+// TestSegmentGCActivation_NotCaughtUpSkipsSweep proves the caught-up safety gate:
+// when the backend reports CaughtUp(ctx)==false, the ENTIRE orphan-segment sweep
+// is skipped for the cycle. A true past-window orphan is therefore never even
+// observed (no t_zero recorded) and never deleted — the node's stale local view
+// must not be allowed to reclaim a possibly-still-referenced segment.
+func TestSegmentGCActivation_NotCaughtUpSkipsSweep(t *testing.T) {
+	b := &manifestSegmentBackend{
+		segmentBackend: newSegmentBackend(),
+		frozen:         map[string][]string{},
+		caughtUp:       false, // gate off the whole sweep
+	}
+	b.records["bucket"] = nil
+
+	// A true orphan old enough to pass the age gate; with the gate open and
+	// window=0 it would be tombstoned then deleted. The gate must prevent both.
+	orphanPath := storage.SegmentKnownPath("bucket", "orphanobj", "Oblob")
+	b.addOrphanSegment(orphanPath, 10*time.Minute)
+
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
+	require.NoError(t, err)
+	defer db.Close()
+	orphanLog := cluster.NewSegmentOrphanLog(db, "group-0")
+
+	sc := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, 0))
+	sc.RunOnce(context.Background())
+	sc.RunOnce(context.Background())
+
+	require.Empty(t, b.deletedSegments,
+		"not caught up: the whole segment sweep is gated off; nothing deleted")
+	_, ok, err := orphanLog.TombstoneTime(chunkref.ChunkID("Oblob"))
+	require.NoError(t, err)
+	require.False(t, ok,
+		"not caught up: orphan must never even be observed (no t_zero) because the sweep is gated off")
 }

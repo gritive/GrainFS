@@ -135,6 +135,7 @@ type segmentOrphanLog interface {
 	TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error)
 	Observe(c chunkref.ChunkID, now time.Time) error
 	Forget(c chunkref.ChunkID) error
+	Reconcile(known map[chunkref.ChunkID]struct{}) error
 }
 
 // buildKnownSegments merges the per-bucket known-segment set from pre-fetched
@@ -665,15 +666,19 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			// carry a t_zero. Clear stale entries (covers re-reference across
 			// restart) before observing/sweeping.
 			if s.orphanLog != nil {
+				known := make(map[chunkref.ChunkID]struct{})
 				for _, paths := range frozenByBucket {
 					for _, p := range paths {
-						_ = s.orphanLog.Forget(chunkref.ChunkID(blobIDOf(p)))
+						known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
 					}
 				}
 				for _, m := range segByBucket {
 					for p := range m {
-						_ = s.orphanLog.Forget(chunkref.ChunkID(blobIDOf(p)))
+						known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
 					}
+				}
+				if err := s.orphanLog.Reconcile(known); err != nil {
+					log.Warn().Err(err).Msg("scrub: orphan-log reconcile failed")
 				}
 			}
 			segCapRemaining := maxSegmentsPerCycle
