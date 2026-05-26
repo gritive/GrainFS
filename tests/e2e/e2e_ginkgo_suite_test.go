@@ -12,7 +12,22 @@ var _ = ginkgo.AfterEach(func() {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
 	}
+	closeIdleConnections(e2eS3HTTPClient)
+	closeIdleConnections(e2eRawHTTPClient)
 })
+
+type idleConnectionCloser interface {
+	CloseIdleConnections()
+}
+
+func closeIdleConnections(client *http.Client) {
+	if client == nil || client.Transport == nil {
+		return
+	}
+	if transport, ok := client.Transport.(idleConnectionCloser); ok {
+		transport.CloseIdleConnections()
+	}
+}
 
 func TestE2EGinkgo(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
