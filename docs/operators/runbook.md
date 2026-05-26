@@ -193,7 +193,7 @@ Failures that happen before the incident-state DB opens are also written under `
 
 - `badger_startup_blocked` or `badger_open_failed` with `block_startup`: restore the named Badger role from a clean snapshot, or fix the disk, lock, or permission error before retrying startup.
 - `badger_read_only_admitted` or log message `badger startup recovery read-only gate enabled`: read paths remain available, but storage writes and mutating admin APIs return HTTP 503 with code `RecoveryReadOnly`. Repair or restore the failed group-state role, then restart and verify normal writes.
-- `disable_feature`: the server started without the optional role. Receipts, dedup, or incident-state behavior may be unavailable until the role directory is repaired and the process restarts.
+- `disable_feature`: the server started without the optional role. Receipts or incident-state behavior may be unavailable until the role directory is repaired and the process restarts.
 
 ---
 

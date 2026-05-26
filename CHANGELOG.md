@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.346.0] - 2026-05-26
+
+### Removed
+
+- **Volume deduplication, snapshot, clone, rollback, and copy-on-write.** NBD
+  volumes are now plain block devices (read/write/discard, direct in-place block
+  overwrite). The `volume snapshot`/`volume clone`/`volume rollback` CLI commands,
+  the `volume delete --force` cascade flag, and their admin API endpoints are
+  removed. Volumes written by prior versions with deduplication or snapshots are
+  not readable after upgrade (pre-1.0, no migration). This subsystem will be
+  redesigned later. **Breaking:** operators who scripted `grainfs volume snapshot`,
+  `grainfs volume clone`, `grainfs volume rollback`, or `grainfs volume delete --force`
+  will get an unknown-command/unknown-flag error.
+
 ## [0.0.345.1] - 2026-05-26
 
 ### Fixed
