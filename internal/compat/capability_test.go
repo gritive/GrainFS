@@ -119,7 +119,7 @@ func TestDefaultRegistryIncludesMultipartListingCapability(t *testing.T) {
 }
 
 func TestRegistryKEKEnvelopeV1Registered(t *testing.T) {
-	cap, ok := DefaultRegistry.ByName(CapabilityKEKEnvelopeV1)
+	cap, ok := DefaultRegistry.Lookup(CapabilityKEKEnvelopeV1)
 	if !ok {
 		t.Fatalf("kek_envelope_v1 not registered")
 	}
@@ -156,6 +156,21 @@ func TestKEKOperationsGated(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("operation %q missing kek_envelope_v1 gate", op)
+		}
+	}
+}
+
+func TestKEKOperationStringValues(t *testing.T) {
+	pinned := map[Operation]string{
+		OperationKEKRotate:        "kek_rotate",
+		OperationKEKRetire:        "kek_retire",
+		OperationKEKPrune:         "kek_prune",
+		OperationKEKLeaseSnapshot: "kek_lease_snapshot",
+		OperationKEKStatusQuery:   "kek_status_query",
+	}
+	for op, want := range pinned {
+		if string(op) != want {
+			t.Errorf("operation %q != %q", string(op), want)
 		}
 	}
 }

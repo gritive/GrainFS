@@ -135,13 +135,9 @@ func (r *Registry) Lookup(name string) (Capability, bool) {
 	return cap, ok
 }
 
-// ByName is an alias for Lookup.
-func (r *Registry) ByName(name string) (Capability, bool) {
-	return r.Lookup(name)
-}
-
-// RequiredCapabilitiesForOperation returns the capability names that gate the
-// given operation. Returns (nil, false) if the operation is not gated.
+// RequiredCapabilitiesForOperation returns the capability names required to
+// perform op, or (nil, false) if op is not gated. The returned slice is owned
+// by the registry; callers MUST NOT modify it.
 func (r *Registry) RequiredCapabilitiesForOperation(op Operation) ([]string, bool) {
 	if r == nil || r.operationCaps == nil {
 		return nil, false
