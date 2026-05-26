@@ -97,6 +97,18 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	copy(lastRotationRequestsCopy, f.lastRotationRequests)
 	kekStatusesCopy := make([]kekStatusRecord, len(f.kekStatuses))
 	copy(kekStatusesCopy, f.kekStatuses)
+	// Task 4b: capture DEKKeeper wraps inside the same lock window as
+	// activeKEKVersion. LOCK ORDER: f.mu → keeper.mu (VersionsAndActive
+	// acquires keeper.mu). Releasing f.mu first and then calling
+	// VersionsAndActive would allow a concurrent KEK rotation Apply to
+	// interleave and produce a torn snapshot (new wraps / old active version).
+	var (
+		dekVersionsCopy map[uint32][]byte
+		dekActiveCopy   uint32
+	)
+	if f.dekKeeper != nil {
+		dekVersionsCopy, dekActiveCopy = f.dekKeeper.VersionsAndActive()
+	}
 	f.mu.RUnlock()
 
 	nfsExports := map[string]nfsexport.Config(nil)
@@ -267,7 +279,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
-	return f.appendSnapshotTrailers(bs, dekRefCountsCopy, activeKEKVersionCopy)
+	return f.appendSnapshotTrailers(bs, dekVersionsCopy, dekActiveCopy, dekRefCountsCopy, activeKEKVersionCopy)
 }
 
 // Restore deserializes a MetaStateSnapshot and replaces current state. The
