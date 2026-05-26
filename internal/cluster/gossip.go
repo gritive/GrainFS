@@ -302,6 +302,10 @@ func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 		RequestsPerSec: pb.RequestsPerSec(),
 		JoinedAt:       joinedAt,
 	})
+	// Gossip capabilities are diagnostic-only — capability gates use direct
+	// RPC via CapabilityGate.Allow (Task 1b). ReportEvidence here feeds
+	// EvidenceSnapshot (admin /v1/cluster/capabilities) and the bench warmup
+	// probe, not production gate enforcement.
 	if gate := r.capabilityGate.Load(); gate != nil && pb.CapabilitiesLength() > 0 {
 		capabilities := make(map[string]bool, pb.CapabilitiesLength())
 		for i := 0; i < pb.CapabilitiesLength(); i++ {
