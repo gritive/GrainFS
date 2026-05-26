@@ -1,7 +1,10 @@
 package cluster
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -58,5 +61,51 @@ func TestBuildPutObjectMetaDeleteMarkerUsesSentinelETag(t *testing.T) {
 	})
 	if meta.ETag != deleteMarkerETag {
 		t.Fatalf("ETag=%q want %q", meta.ETag, deleteMarkerETag)
+	}
+}
+
+func TestCheckPutObjectExpectedETag(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), objectMeta{
+		Key:  "k",
+		ETag: "current",
+	})
+
+	tests := []struct {
+		name       string
+		expected   string
+		wantErrSub string
+	}{
+		{name: "empty expected etag skips read", expected: ""},
+		{name: "matching expected etag passes", expected: "current"},
+		{name: "mismatched expected etag fails", expected: "old", wantErrSub: "etag changed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.db.View(func(txn *badger.Txn) error {
+				return f.checkPutObjectExpectedETag(txn, "b", "k", tt.expected)
+			})
+			if tt.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("checkPutObjectExpectedETag: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("checkPutObjectExpectedETag error=%v want substring %q", err, tt.wantErrSub)
+			}
+		})
+	}
+}
+
+func TestCheckPutObjectExpectedETagMissingCurrentFails(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+
+	err := f.db.View(func(txn *badger.Txn) error {
+		return f.checkPutObjectExpectedETag(txn, "b", "missing", "etag")
+	})
+	if err == nil || !strings.Contains(err.Error(), "read current meta") {
+		t.Fatalf("checkPutObjectExpectedETag error=%v want read current meta", err)
 	}
 }
