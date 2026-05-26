@@ -76,6 +76,9 @@ const (
 	MetaCmdTypeMountSADelete                MetaCmdType = 66
 	MetaCmdTypeMountSAAttachPolicy          MetaCmdType = 67
 	MetaCmdTypeMountSADetachPolicy          MetaCmdType = 68
+	MetaCmdTypeKEKRotate                    MetaCmdType = 69
+	MetaCmdTypeKEKRetire                    MetaCmdType = 70
+	MetaCmdTypeKEKPrune                     MetaCmdType = 71
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -148,6 +151,9 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeMountSADelete:                "MountSADelete",
 	MetaCmdTypeMountSAAttachPolicy:          "MountSAAttachPolicy",
 	MetaCmdTypeMountSADetachPolicy:          "MountSADetachPolicy",
+	MetaCmdTypeKEKRotate:                    "KEKRotate",
+	MetaCmdTypeKEKRetire:                    "KEKRetire",
+	MetaCmdTypeKEKPrune:                     "KEKPrune",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -220,6 +226,9 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"MountSADelete":                MetaCmdTypeMountSADelete,
 	"MountSAAttachPolicy":          MetaCmdTypeMountSAAttachPolicy,
 	"MountSADetachPolicy":          MetaCmdTypeMountSADetachPolicy,
+	"KEKRotate":                    MetaCmdTypeKEKRotate,
+	"KEKRetire":                    MetaCmdTypeKEKRetire,
+	"KEKPrune":                     MetaCmdTypeKEKPrune,
 }
 
 func (v MetaCmdType) String() string {
