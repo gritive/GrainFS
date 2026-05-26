@@ -387,3 +387,70 @@ func TestKeysDirIsEmpty(t *testing.T) {
 		}
 	})
 }
+
+func TestKEKStore_SealOpenWithActiveKEK_RoundTrip(t *testing.T) {
+	s := NewKEKStore()
+	kek := make([]byte, KEKSize)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	if err := s.Add(0, kek); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	plain := []byte("hello capability assertion")
+	aad := []byte("test-aad")
+
+	ct, err := s.SealWithActiveKEK(plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithActiveKEK: %v", err)
+	}
+	got, err := s.OpenWithActiveKEK(ct, aad)
+	if err != nil {
+		t.Fatalf("OpenWithActiveKEK: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("round-trip mismatch: got %q, want %q", got, plain)
+	}
+}
+
+func TestKEKStore_SealOpenWithActiveKEK_AADMismatchRejects(t *testing.T) {
+	s := NewKEKStore()
+	kek := make([]byte, KEKSize)
+	for i := range kek {
+		kek[i] = byte(i + 2)
+	}
+	if err := s.Add(0, kek); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	plain := []byte("some data")
+	ct, err := s.SealWithActiveKEK(plain, []byte("aad-a"))
+	if err != nil {
+		t.Fatalf("SealWithActiveKEK: %v", err)
+	}
+	_, err = s.OpenWithActiveKEK(ct, []byte("aad-b"))
+	if err == nil {
+		t.Fatal("expected error on AAD mismatch, got nil")
+	}
+}
+
+func TestKEKStore_SealOpenWithActiveKEK_WrongKEKRejects(t *testing.T) {
+	s1 := NewKEKStore()
+	s2 := NewKEKStore()
+	kek1 := bytes.Repeat([]byte{0x11}, KEKSize)
+	kek2 := bytes.Repeat([]byte{0x22}, KEKSize)
+	if err := s1.Add(0, kek1); err != nil {
+		t.Fatalf("s1.Add: %v", err)
+	}
+	if err := s2.Add(0, kek2); err != nil {
+		t.Fatalf("s2.Add: %v", err)
+	}
+	aad := []byte("shared-aad")
+	ct, err := s1.SealWithActiveKEK([]byte("secret"), aad)
+	if err != nil {
+		t.Fatalf("SealWithActiveKEK: %v", err)
+	}
+	_, err = s2.OpenWithActiveKEK(ct, aad)
+	if err == nil {
+		t.Fatal("expected error when opening with wrong KEK, got nil")
+	}
+}
