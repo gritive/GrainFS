@@ -861,3 +861,147 @@ func TestFSM_Apply_KEKPrune_NonZeroLeaseCount_Rejects(t *testing.T) {
 		t.Errorf("expected 'lease_count' in error, got: %v", err)
 	}
 }
+
+// --- Task 10: Audit determinism tests ---
+
+// cloneKEKRotateFixtureFSM creates a second MetaFSM seeded with the same
+// initial state as src (same cluster ID, same K0, same wrapped DEK bytes,
+// same active version). Used to simulate a follower that has replayed all
+// prior log entries and now receives the same Apply payload. Both FSMs must
+// have byte-identical initial state so the WrapSetHash gate in applyKEKRotate
+// passes for both.
+func cloneKEKRotateFixtureFSM(t *testing.T, src *kekRotateTestFixture) *MetaFSM {
+	t.Helper()
+	fsm2 := NewMetaFSM()
+	fsm2.SetClusterID(src.clusterID[:])
+
+	store2 := encrypt.NewKEKStore()
+	if err := store2.Add(0, src.k0); err != nil {
+		t.Fatalf("clone KEKStore: %v", err)
+	}
+	fsm2.SetKEKStore(store2)
+
+	// Load with the same wrapped DEK bytes as src — critical for hash equality.
+	keeper2, err := encrypt.LoadFromFSM(src.k0, map[uint32][]byte{1: src.wrappedDEKK0})
+	if err != nil {
+		t.Fatalf("clone LoadFromFSM: %v", err)
+	}
+	fsm2.SetDEKKeeper(keeper2)
+	return fsm2
+}
+
+// TestFSM_Apply_KEKRotate_AuditDeterminism_AllFollowersIdentical verifies that
+// two FSM instances that apply the same KEKRotateCmd payload produce byte-identical
+// audit lines — regardless of any node-local state (e.g. wall clock). The audit
+// line must contain the payload-stamped requested_at_unix_nanos, not any live time.
+func TestFSM_Apply_KEKRotate_AuditDeterminism_AllFollowersIdentical(t *testing.T) {
+	// Build one fixture then clone it so both FSMs have byte-identical initial
+	// state (same wrapped DEK bytes → same WrapSetHash → both reach the audit
+	// step rather than the StaleNoOp branch).
+	fx := newKEKRotateTestFixture(t)
+	fsm2 := cloneKEKRotateFixtureFSM(t, fx)
+
+	requestID := [16]byte{0xA0}
+	cmd := fx.buildHappyCmd(requestID)
+	envelope := fx.encodeAndWrap(cmd)
+
+	var buf1, buf2 bytes.Buffer
+	fx.fsm.SetAuditSink(&buf1)
+	fsm2.SetAuditSink(&buf2)
+
+	if err := fx.fsm.applyCmdAtIndex(envelope, 100); err != nil {
+		t.Fatalf("fsm1 Apply: %v", err)
+	}
+	if err := fsm2.applyCmdAtIndex(envelope, 100); err != nil {
+		t.Fatalf("fsm2 Apply: %v", err)
+	}
+
+	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+		t.Errorf("audit divergence:\n  fsm1: %q\n  fsm2: %q", buf1.String(), buf2.String())
+	}
+	if !strings.Contains(buf1.String(), "requested_at_unix_nanos=1717000000000000000") {
+		t.Errorf("audit must use payload-stamped time, not node clock; got: %q", buf1.String())
+	}
+	if !strings.Contains(buf1.String(), "kek_rotate") {
+		t.Errorf("audit must contain kek_rotate; got: %q", buf1.String())
+	}
+	if !strings.Contains(buf1.String(), "actor=") {
+		t.Errorf("audit must contain actor field; got: %q", buf1.String())
+	}
+}
+
+// TestFSM_Apply_KEKRetire_AuditDeterminism_AllFollowersIdentical verifies
+// byte-identical audit output for KEKRetire across two FSM instances.
+func TestFSM_Apply_KEKRetire_AuditDeterminism_AllFollowersIdentical(t *testing.T) {
+	fx1 := newKEKRetireTestFixture(t)
+	fx2 := newKEKRetireTestFixture(t)
+
+	requestID := [16]byte{0xB0}
+	cmd := fx1.buildRetireCmd(3, requestID)
+	envelope := fx1.encodeAndWrap(cmd)
+
+	var buf1, buf2 bytes.Buffer
+	fx1.fsm.SetAuditSink(&buf1)
+	fx2.fsm.SetAuditSink(&buf2)
+
+	if err := fx1.fsm.applyCmdAtIndex(envelope, 101); err != nil {
+		t.Fatalf("fsm1 Apply: %v", err)
+	}
+	if err := fx2.fsm.applyCmdAtIndex(envelope, 101); err != nil {
+		t.Fatalf("fsm2 Apply: %v", err)
+	}
+
+	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+		t.Errorf("audit divergence:\n  fsm1: %q\n  fsm2: %q", buf1.String(), buf2.String())
+	}
+	if !strings.Contains(buf1.String(), "kek_retire") {
+		t.Errorf("audit must contain kek_retire; got: %q", buf1.String())
+	}
+	if !strings.Contains(buf1.String(), "requested_at_unix_nanos=1717000000000000000") {
+		t.Errorf("audit must use payload-stamped time; got: %q", buf1.String())
+	}
+}
+
+// TestFSM_Apply_KEKPrune_AuditDeterminism_AllFollowersIdentical verifies
+// byte-identical audit output for KEKPrune across two FSM instances.
+func TestFSM_Apply_KEKPrune_AuditDeterminism_AllFollowersIdentical(t *testing.T) {
+	fx1 := newKEKPruneTestFixture(t)
+	fx2 := newKEKPruneTestFixture(t)
+
+	requestID := [16]byte{0xC0}
+	cmd := fx1.buildValidPruneCmd(3, fx1.happyAttestations(), requestID)
+	envelope := fx1.encodeAndWrap(cmd)
+
+	var buf1, buf2 bytes.Buffer
+	fx1.fsm.SetAuditSink(&buf1)
+	fx2.fsm.SetAuditSink(&buf2)
+
+	if err := fx1.fsm.applyCmdAtIndex(envelope, 200); err != nil {
+		t.Fatalf("fsm1 Apply: %v", err)
+	}
+	if err := fx2.fsm.applyCmdAtIndex(envelope, 200); err != nil {
+		t.Fatalf("fsm2 Apply: %v", err)
+	}
+
+	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+		t.Errorf("audit divergence:\n  fsm1: %q\n  fsm2: %q", buf1.String(), buf2.String())
+	}
+	if !strings.Contains(buf1.String(), "kek_prune") {
+		t.Errorf("audit must contain kek_prune; got: %q", buf1.String())
+	}
+	if !strings.Contains(buf1.String(), "requested_at_unix_nanos=1717000000000000000") {
+		t.Errorf("audit must use payload-stamped time; got: %q", buf1.String())
+	}
+}
+
+// TestFSM_Apply_KEKRotate_AuditSinkNil_NoOp verifies that a nil audit sink
+// does not panic — no-op when no sink is wired.
+func TestFSM_Apply_KEKRotate_AuditSinkNil_NoOp(t *testing.T) {
+	fx := newKEKRotateTestFixture(t)
+	// No SetAuditSink call — sink remains nil.
+	cmd := fx.buildHappyCmd([16]byte{0xD0})
+	envelope := fx.encodeAndWrap(cmd)
+	if err := fx.fsm.applyCmdAtIndex(envelope, 300); err != nil {
+		t.Fatalf("Apply with nil sink: %v", err)
+	}
+}
