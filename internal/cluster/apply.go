@@ -859,49 +859,15 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(txn *badger.Txn, data []byte) error {
 		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
 	}
 
-	legacyKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
-
-	// Resolve the canonical metaKey: prefer the latest-version pointer (set
-	// by applyAppendObject's dual-write). Falls back to legacy key when no
-	// pointer exists (test fixtures / legacy replay).
-	metaKey := legacyKey
-	versionID := ""
-	if latItem, lerr := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); lerr == nil {
-		_ = latItem.Value(func(v []byte) error {
-			versionID = string(v)
-			return nil
-		})
-		if versionID != "" {
-			metaKey = f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, versionID)
-		}
-	} else if !errors.Is(lerr, badger.ErrKeyNotFound) {
-		return fmt.Errorf("get latest pointer: %w", lerr)
-	}
-
-	item, gerr := txn.Get(metaKey)
-	if gerr != nil {
-		if errors.Is(gerr, badger.ErrKeyNotFound) {
-			return nil // object deleted concurrently — drop silently
-		}
-		return fmt.Errorf("get objectMeta: %w", gerr)
-	}
-	var existing objectMeta
-	if err := item.Value(func(raw []byte) error {
-		v, oerr := f.openValue(item.Key(), raw)
-		if oerr != nil {
-			return oerr
-		}
-		m, derr := unmarshalObjectMeta(v)
-		if derr != nil {
-			return fmt.Errorf("unmarshal: %w", derr)
-		}
-		existing = m
-		return nil
-	}); err != nil {
+	resolved, err := f.resolveObjectMetaForCoalesceUpdate(txn, cmd.Bucket, cmd.Key)
+	if err != nil {
 		return err
 	}
+	if !resolved.Found {
+		return nil // object deleted concurrently — drop silently
+	}
 
-	updated, result, err := applyCoalesceSegmentsTransition(existing, cmd)
+	updated, result, err := applyCoalesceSegmentsTransition(resolved.Meta, cmd)
 	if result.Noop {
 		return nil
 	}
@@ -914,7 +880,7 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(txn *badger.Txn, data []byte) error {
 	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
 		Bucket:    cmd.Bucket,
 		Key:       cmd.Key,
-		VersionID: versionID,
+		VersionID: resolved.VersionID,
 		Meta:      updated,
 		Policy:    objectMetaPersistenceMirrorVersion,
 	})
