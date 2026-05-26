@@ -313,10 +313,6 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 	return b.blobExists(snap.Bucket, snap.Key, snap.VersionID)
 }
 
-// blobExists checks whether the blob for the given object version exists on
-// this node's local storage (N× versioned path, legacy unversioned path, or
-// first EC shard). When versionID is empty (e.g. from WAL replay that doesn't
-// record versionIDs), resolve the current latest pointer from the FSM.
 // coalescedRefsFromMeta maps cluster CoalescedShardRef → storage.CoalescedRef,
 // carrying the coalesced-blob chunk identifier (the field ChunkLocators reads).
 func coalescedRefsFromMeta(in []CoalescedShardRef) []storage.CoalescedRef {
@@ -330,6 +326,10 @@ func coalescedRefsFromMeta(in []CoalescedShardRef) []storage.CoalescedRef {
 	return out
 }
 
+// blobExists checks whether the blob for the given object version exists on
+// this node's local storage (N× versioned path, legacy unversioned path, or
+// first EC shard). When versionID is empty (e.g. from WAL replay that doesn't
+// record versionIDs), resolve the current latest pointer from the FSM.
 func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 	if versionID == "" {
 		// Resolve versionID from the lat: pointer so WAL-replayed objects

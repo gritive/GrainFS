@@ -21,3 +21,12 @@ func TestSweepNoTombstoneFallsBackToAgeGate(t *testing.T) {
 		t.Fatalf("orphan without tombstone should be deletable (age gate already applied)")
 	}
 }
+
+func TestSweepExactBoundaryNotDeletable(t *testing.T) {
+	// now - t_zero == window exactly: the strict `>` keeps it (not yet elapsed).
+	now := time.Unix(10000, 0)
+	window := time.Hour
+	if evalGCCandidate(retentionInput{tZero: now.Add(-window), hasTZero: true, now: now, window: window}) {
+		t.Fatalf("chunk at exact window boundary must be kept (strict > comparison)")
+	}
+}

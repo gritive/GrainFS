@@ -118,25 +118,38 @@ type segmentManifestSource interface {
 // buildKnownSegments assembles the known-segment set for one bucket from all
 // authoritative manifest sources (spec: known-set must cover live versions +
 // snapshot descriptors, not just appendable objects).
-func buildKnownSegments(bucket string, src segmentManifestSource) map[string]bool {
+//
+// Fail-closed: if either source errors the partial set is unsafe to sweep
+// against (a missing entry would make a live chunk look orphaned and get
+// deleted), so the error is returned and the caller MUST skip the sweep for
+// this bucket rather than delete against an incomplete known set.
+//
+// Only o.Segments contributes: coalesced blobs live at "<key>/coalesced/<id>",
+// not under "<key>_segments/", so the orphan-SEGMENT sweep never targets them
+// and they are intentionally excluded from this segment-scoped known set.
+func buildKnownSegments(bucket string, src segmentManifestSource) (map[string]bool, error) {
 	known := make(map[string]bool)
-	if objs, err := src.ListAllObjects(); err == nil {
-		for i := range objs {
-			o := &objs[i]
-			if o.Bucket != bucket {
-				continue
-			}
-			for _, seg := range o.Segments {
-				known[bucket+"/"+o.Key+"_segments/"+storage.ParseLocator(seg.BlobID).Ref] = true
-			}
+	objs, err := src.ListAllObjects()
+	if err != nil {
+		return nil, fmt.Errorf("known-set list objects: %w", err)
+	}
+	for i := range objs {
+		o := &objs[i]
+		if o.Bucket != bucket {
+			continue
+		}
+		for _, seg := range o.Segments {
+			known[bucket+"/"+o.Key+"_segments/"+storage.ParseLocator(seg.BlobID).Ref] = true
 		}
 	}
-	if paths, err := src.SnapshotFrozenSegmentPaths(bucket); err == nil {
-		for _, p := range paths {
-			known[p] = true
-		}
+	paths, err := src.SnapshotFrozenSegmentPaths(bucket)
+	if err != nil {
+		return nil, fmt.Errorf("known-set snapshot paths: %w", err)
 	}
-	return known
+	for _, p := range paths {
+		known[p] = true
+	}
+	return known, nil
 }
 
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
@@ -593,7 +606,14 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 			// SnapshotFrozenSegmentPaths into a real backend, no backend will satisfy
 			// the full interface so this block is a no-op (regression-zero).
 			if src, ok := s.backend.(segmentManifestSource); ok {
-				for k, v := range buildKnownSegments(bucket, src) {
+				extra, err := buildKnownSegments(bucket, src)
+				if err != nil {
+					// Fail-closed: a partial known set could mark a live chunk
+					// orphaned and delete it. Skip this bucket's segment sweep.
+					log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: known-set build failed, skipping segment sweep")
+					continue
+				}
+				for k, v := range extra {
 					knownSegmentsB[k] = v
 				}
 			}

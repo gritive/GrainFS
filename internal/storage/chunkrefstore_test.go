@@ -18,6 +18,40 @@ func openTestRefDB(t *testing.T) *badger.DB {
 	return db
 }
 
+func TestChunkRefStoreRemoveStillReferencedNoTombstone(t *testing.T) {
+	// Two manifests reference the same chunk; removing one leaves refcount 1 and
+	// must NOT write a tombstone (the chunk is still pinned — e.g. by a snapshot
+	// after the live object is deleted). This is the false-eviction guard.
+	db := openTestRefDB(t)
+	c := chunkref.ChunkID("shared")
+	m1 := chunkref.ObjectVersionID("bkt", "k", "v1")
+	m2 := chunkref.SnapshotID(7)
+	if err := db.Update(func(txn *badger.Txn) error {
+		s := ChunkRefStore{txn: txn}
+		if err := s.AddRef(m1, c); err != nil {
+			return err
+		}
+		if err := s.AddRef(m2, c); err != nil {
+			return err
+		}
+		return s.RemoveRef(m1, c, time.Unix(1000, 0))
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := db.View(func(txn *badger.Txn) error {
+		s := ChunkRefStore{txn: txn}
+		if got, _ := s.RefCount(c); got != 1 {
+			t.Fatalf("RefCount = %d, want 1 (still referenced by m2)", got)
+		}
+		if _, ok, _ := s.TombstoneTime(c); ok {
+			t.Fatalf("tombstone written while chunk still referenced — false GC candidate")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
+}
+
 func TestChunkRefStoreAddIsIdempotent(t *testing.T) {
 	db := openTestRefDB(t)
 	m := chunkref.ObjectVersionID("bkt", "k", "v1")

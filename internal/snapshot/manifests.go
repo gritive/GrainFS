@@ -9,6 +9,11 @@ import (
 // manifests, the rebuilt RefTable keeps chunks frozen by a snapshot referenced
 // even after the live object is deleted — preventing retention-window GC from
 // reclaiming chunks a snapshot still needs.
+//
+// A multi-object snapshot emits one Manifest per object, all sharing the same
+// SnapshotID(seq). This is valid input to chunkref.Rebuild because AddRef has set
+// semantics keyed by ManifestID: the snapshot contributes refcount 1 per distinct
+// chunk regardless of how many objects within it reference that chunk.
 func ManifestsFromSnapshots(snaps []*Snapshot) []chunkref.Manifest {
 	manifests := make([]chunkref.Manifest, 0, len(snaps))
 	for _, s := range snaps {

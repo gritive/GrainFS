@@ -79,6 +79,9 @@ func TestOverwritePartialOverlapChunkRefs(t *testing.T) {
 		if n, _ := s.RefCount("chunk-A"); n != 1 {
 			t.Fatalf("chunk-A RefCount = %d, want 1 (shared, survives)", n)
 		}
+		if _, ok, _ := s.TombstoneTime("chunk-A"); ok {
+			t.Fatalf("chunk-A has a tombstone after surviving overwrite — false GC candidate")
+		}
 		if n, _ := s.RefCount("chunk-B"); n != 0 {
 			t.Fatalf("chunk-B RefCount = %d, want 0 (dropped)", n)
 		}

@@ -257,7 +257,7 @@ func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string,
 				return err
 			}
 		}
-	} else if err != nil && err != badger.ErrKeyNotFound {
+	} else if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
 		return err
 	}
 

@@ -22,6 +22,15 @@ type retentionInput struct {
 // deleted. A chunk with a tombstone is deletable only after its retention window
 // elapses (now - t_zero > window); a chunk with no tombstone has already passed
 // the walker age gate and is deletable.
+//
+// The hasTZero==false → deletable default is correct ONLY because the known-set
+// (authoritative manifest-absence, the spec's third GC condition) already
+// excluded every chunk a live object or snapshot references before a chunk ever
+// reaches here. ACTIVATION CONSTRAINT (Plan 3.5): a tombstoneSource MUST NOT be
+// wired without SnapshotFrozenSegmentPaths in the same change — otherwise a
+// snapshot-pinned chunk (refcount>0, hence no tombstone) that is missing from
+// the known-set would fall through to deletion (data loss). Wire both, or
+// neither.
 func evalGCCandidate(in retentionInput) bool {
 	if !in.hasTZero {
 		return true

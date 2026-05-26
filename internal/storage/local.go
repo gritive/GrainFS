@@ -1141,7 +1141,7 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 	return b.db.Update(func(txn *badger.Txn) error {
 		mk := b.objectMetaKey(bucket, key)
 		prev, err := b.readObjectInTxn(txn, mk)
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, badger.ErrKeyNotFound) {
 			return nil // S3: delete nonexistent is not an error
 		}
 		if err != nil {
