@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.348.0] - 2026-05-26
+
+### Added
+
+- **시작 시 data WAL EC 샤드 자동 복구.** 노드 부팅 시 data WAL replay가 로컬 EC 샤드
+  파일이 없거나 크기가 어긋난 metadata-only 샤드를 감지하면, 백그라운드 워커가 현재
+  placement와 로컬 소유권을 검증한 뒤 기존 EC 복구 경로(`RepairShardLocalWithIncident`)로
+  살아있는 피어에서 직렬 재구성한다. 논블로킹이라 서빙은 즉시 시작되고, 복구가 대기 중이거나
+  실패해도 read-time EC 재구성이 폴백으로 동작한다. 주기적 scrub가 비활성화되어 있어도
+  동작한다. `grainfs_datawal_startup_repair_*` 카운터(discovered/candidates/attempts/
+  successes/failures/skips)로 부팅 시 자가 복구를 관찰할 수 있다(운영 문서:
+  `docs/operators/sli-slo.md`, `docs/operators/runbook.md`). 현재 plain
+  `key/versionID` EC 객체를 복구하며, 대용량 segment(`key/segments/…`)·coalesced
+  (`key/coalesced/…`) 샤드는 `unsupported_shardkey`로 스킵하고 read-time 재구성과
+  scrub에 맡긴다(후속 작업은 TODOS.md).
+
 ## [0.0.347.0] - 2026-05-26
 
 ### Changed
