@@ -514,6 +514,33 @@ func (f *MetaFSM) LookupKEKStatus(version uint32) (v uint32, status KEKLifecycle
 	return 0, 0, 0, false
 }
 
+// RetiredKEKVersionCount returns the number of KEK store versions whose
+// lifecycle status is retiring or pruned. The active version is never counted
+// (it is "active" regardless of any stale status entry) — this mirrors the
+// active-wins rule used to render per-version status in the admin status JSON,
+// so grainfs_kek_retired_count and the status endpoint agree by construction.
+//
+// A version with no status entry is implicitly "active" (never retired) and is
+// not counted — so a normal rotation V0→V1 with no operator retire reports 0.
+func (f *MetaFSM) RetiredKEKVersionCount() int {
+	store := f.KEKStore()
+	if store == nil {
+		return 0
+	}
+	active := f.ActiveKEKVersion()
+	n := 0
+	for _, v := range store.Versions() {
+		if v == active {
+			continue
+		}
+		if _, status, _, ok := f.LookupKEKStatus(v); ok &&
+			(status == KEKLifecycleRetiring || status == KEKLifecyclePruned) {
+			n++
+		}
+	}
+	return n
+}
+
 // MarkFatalHalted poisons the FSM with err so all subsequent Apply calls
 // and Snapshot calls fail immediately without dispatching. The first error
 // wins; subsequent calls are no-ops. Safe to call from any goroutine.

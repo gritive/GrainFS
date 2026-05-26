@@ -22,76 +22,108 @@ type fakeLeaseReader struct{ leases map[uint32]uint64 }
 
 func (f fakeLeaseReader) Snapshot() map[uint32]uint64 { return f.leases }
 
-func TestKEKCollector_ActiveAndRetired(t *testing.T) {
+// fakeLifecycleReader is a static stand-in for *cluster.MetaFSM's
+// RetiredKEKVersionCount.
+type fakeLifecycleReader struct{ retired int }
+
+func (f fakeLifecycleReader) RetiredKEKVersionCount() int { return f.retired }
+
+const (
+	wantActiveHdr = `# HELP grainfs_kek_active_version Current active cluster KEK version (the version new DEK seals are wrapped under).
+# TYPE grainfs_kek_active_version gauge
+`
+	wantRetiredHdr = `# HELP grainfs_kek_retired_count Number of KEK versions in retiring or pruned lifecycle state.
+# TYPE grainfs_kek_retired_count gauge
+`
+	wantSealHdr = `# HELP grainfs_kek_seal_count Active-AEAD seals attributed to each KEK version (monotonic per version). Monitor the active version against nonce-collision thresholds (warn 1e8, alert 1e9).
+# TYPE grainfs_kek_seal_count counter
+`
+	wantLeaseHdr = `# HELP grainfs_kek_lease_count In-flight KEK consumer leases per version. Must reach 0 before a retired version can be pruned.
+# TYPE grainfs_kek_lease_count gauge
+`
+)
+
+func TestKEKCollector_ActiveRetiredAndLeases(t *testing.T) {
 	keeper := fakeSealReader{
 		active: 2,
 		seals: map[uint32]uint64{
-			0: 5,           // retired
-			1: 100_000_000, // retired
+			0: 5,           // older version
+			1: 100_000_000, // older version
 			2: 42,          // active
 		},
 	}
 	tracker := fakeLeaseReader{leases: map[uint32]uint64{1: 3}}
+	// FSM says 2 versions are retiring/pruned.
+	lifecycle := fakeLifecycleReader{retired: 2}
 
-	c := NewKEKCollector(keeper, tracker)
+	c := NewKEKCollector(keeper, tracker, lifecycle)
 
-	want := `
-# HELP grainfs_kek_active_version Current active cluster KEK version (the version new DEK seals are wrapped under).
-# TYPE grainfs_kek_active_version gauge
-grainfs_kek_active_version 2
-# HELP grainfs_kek_retired_count Number of non-active KEK versions the keeper still tracks (versions rotated away from).
-# TYPE grainfs_kek_retired_count gauge
-grainfs_kek_retired_count 2
-# HELP grainfs_kek_seal_count Active-AEAD seals attributed to each KEK version (monotonic per version). Monitor the active version against nonce-collision thresholds (warn 1e8, alert 1e9).
-# TYPE grainfs_kek_seal_count counter
-grainfs_kek_seal_count{kek_version="0"} 5
-grainfs_kek_seal_count{kek_version="1"} 1e+08
-grainfs_kek_seal_count{kek_version="2"} 42
-# HELP grainfs_kek_lease_count In-flight KEK consumer leases per version. Must reach 0 before a retired version can be pruned.
-# TYPE grainfs_kek_lease_count gauge
-grainfs_kek_lease_count{kek_version="1"} 3
-`
+	want := "\n" + wantActiveHdr + "grainfs_kek_active_version 2\n" +
+		wantRetiredHdr + "grainfs_kek_retired_count 2\n" +
+		wantSealHdr +
+		"grainfs_kek_seal_count{kek_version=\"0\"} 5\n" +
+		"grainfs_kek_seal_count{kek_version=\"1\"} 1e+08\n" +
+		"grainfs_kek_seal_count{kek_version=\"2\"} 42\n" +
+		wantLeaseHdr +
+		"grainfs_kek_lease_count{kek_version=\"1\"} 3\n"
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
 		t.Fatalf("unexpected metrics: %v", err)
 	}
 }
 
-func TestKEKCollector_ActiveOnly_NoLeases(t *testing.T) {
-	keeper := fakeSealReader{active: 0, seals: map[uint32]uint64{0: 0}}
-	c := NewKEKCollector(keeper, nil)
+// TestKEKCollector_PostRotationNoRetire is the regression guard for the HIGH
+// review finding: after V0→V1 rotation with NO operator `retire`, the keeper
+// snapshot still carries both versions {0,1}, but the FSM lifecycle reports 0
+// retired (V0 is "previous active", not retired). retired_count MUST be 0 —
+// driven by the FSM lifecycle source, not len(snapshot)-1.
+func TestKEKCollector_PostRotationNoRetire(t *testing.T) {
+	keeper := fakeSealReader{
+		active: 1,
+		seals: map[uint32]uint64{
+			0: 5,  // previous active, never retired
+			1: 42, // active
+		},
+	}
+	lifecycle := fakeLifecycleReader{retired: 0}
 
-	// active-only: one seal row at 0, retired_count 0, no lease rows.
-	want := `
-# HELP grainfs_kek_active_version Current active cluster KEK version (the version new DEK seals are wrapped under).
-# TYPE grainfs_kek_active_version gauge
-grainfs_kek_active_version 0
-# HELP grainfs_kek_retired_count Number of non-active KEK versions the keeper still tracks (versions rotated away from).
-# TYPE grainfs_kek_retired_count gauge
-grainfs_kek_retired_count 0
-# HELP grainfs_kek_seal_count Active-AEAD seals attributed to each KEK version (monotonic per version). Monitor the active version against nonce-collision thresholds (warn 1e8, alert 1e9).
-# TYPE grainfs_kek_seal_count counter
-grainfs_kek_seal_count{kek_version="0"} 0
-`
+	c := NewKEKCollector(keeper, nil, lifecycle)
+
+	want := "\n" + wantActiveHdr + "grainfs_kek_active_version 1\n" +
+		wantRetiredHdr + "grainfs_kek_retired_count 0\n" +
+		wantSealHdr +
+		"grainfs_kek_seal_count{kek_version=\"0\"} 5\n" +
+		"grainfs_kek_seal_count{kek_version=\"1\"} 42\n"
+	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
+		t.Fatalf("unexpected metrics: %v", err)
+	}
+}
+
+func TestKEKCollector_NilLifecycle_OmitsRetiredCount(t *testing.T) {
+	keeper := fakeSealReader{active: 0, seals: map[uint32]uint64{0: 0}}
+	c := NewKEKCollector(keeper, nil, nil)
+
+	// No lifecycle reader: retired_count omitted entirely (not emitted as 0).
+	want := "\n" + wantActiveHdr + "grainfs_kek_active_version 0\n" +
+		wantSealHdr +
+		"grainfs_kek_seal_count{kek_version=\"0\"} 0\n"
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
 		t.Fatalf("unexpected metrics: %v", err)
 	}
 }
 
 func TestKEKCollector_NilKeeper_EmitsNothing(t *testing.T) {
-	c := NewKEKCollector(nil, nil)
+	c := NewKEKCollector(nil, nil, fakeLifecycleReader{retired: 5})
 	if n := testutil.CollectAndCount(c); n != 0 {
 		t.Fatalf("nil keeper must emit no metrics, got %d", n)
 	}
 }
 
 func TestRegisterKEKCollector_NilKeeperIsNoOp(t *testing.T) {
-	// Must not panic and must not register anything.
 	reg := prometheus.NewRegistry()
-	// RegisterKEKCollector uses the default registry; verify the guard path
-	// directly via NewKEKCollector against a private registry instead.
-	if err := reg.Register(NewKEKCollector(fakeSealReader{seals: map[uint32]uint64{0: 0}}, nil)); err != nil {
+	// Verify the collector registers cleanly on a private registry.
+	if err := reg.Register(NewKEKCollector(fakeSealReader{seals: map[uint32]uint64{0: 0}}, nil, nil)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	// Calling with nil keeper must be a no-op (no panic).
-	RegisterKEKCollector(nil, nil)
+	// Calling RegisterKEKCollector with a nil keeper must be a no-op (no panic).
+	RegisterKEKCollector(nil, nil, nil)
 }
