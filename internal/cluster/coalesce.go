@@ -138,8 +138,8 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 //
 //  1. HeadObject → snapshot S = current segments.
 //  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
-//  3. selectECPlacement + writeSpooledShards distribute the coalesced blob
-//     across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
+//  3. planObjectWritePlacement + writeSpooledShards distribute the coalesced
+//     blob across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
 //  4. propose CmdCoalesceSegments with EC params; FSM apply stores them on
 //     the resulting CoalescedShardRef.
 //  5. Remove owner-local coalesced blob. Raw segment metadata is pruned by
@@ -187,29 +187,26 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 
 	shardKey := job.Key + "/coalesced/" + coalescedID
 	liveNodes := b.ecWriteNodes()
-	cfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
-	if cfg.NumShards() == 0 {
+	placementPlan, err := b.planObjectWritePlacement(ctx, "coalesce", shardKey, liveNodes)
+	if err != nil {
 		cleanupMerged()
-		return fmt.Errorf("coalesce: no effective EC config for %d live nodes", len(liveNodes))
-	}
-	placement := selectECPlacementWeighted(cfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
-	if len(placement) != cfg.NumShards() {
-		cleanupMerged()
-		return fmt.Errorf("coalesce: placement has %d nodes, need %d (k=%d m=%d)",
-			len(placement), cfg.NumShards(), cfg.DataShards, cfg.ParityShards)
+		return err
 	}
 
 	plan := ecObjectWritePlan{
 		Bucket:    job.Bucket,
 		Key:       job.Key,
 		VersionID: "coalesced/" + coalescedID,
-		Config:    cfg,
-		Placement: placement,
+		Config:    placementPlan.Config,
+		Placement: placementPlan.NodeIDs,
 	}
 	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	if _, err := writer.writeSpooledShards(ctx, plan, b.coalescedSpoolDir(), sp); err != nil {
 		cleanupMerged()
+		if placementPlan.TopologyWrite {
+			return topologyShardWriteError(placementPlan.TopologyGroup, placementPlan.Config, err)
+		}
 		return fmt.Errorf("ec write: %w", err)
 	}
 	// EC shards now contain the merged body while raw segments remain the
@@ -240,9 +237,9 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		Size:               merged.Size,
 		ETag:               merged.ETag,
 		ConsumedSegmentIDs: consumedIDs,
-		Placement:          placement,
-		ECData:             uint8(cfg.DataShards),
-		ECParity:           uint8(cfg.ParityShards),
+		Placement:          placementPlan.NodeIDs,
+		ECData:             uint8(placementPlan.Config.DataShards),
+		ECParity:           uint8(placementPlan.Config.ParityShards),
 	}
 	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
 		// EC shards committed but never referenced. Best-effort orphan cleanup

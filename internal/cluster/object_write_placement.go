@@ -13,13 +13,18 @@ type ObjectWritePlacementInput struct {
 	CurrentECConfig     ECConfig
 	BypassBucketCheck   bool
 	ShardKey            string
-	NodeStatsStore      *NodeStatsStore
-	BoundedLoads        *BoundedLoads
+	NodeStates          []ObjectWritePlacementNodeState
 	WeightedHRWEnabled  bool
 	BoundedLoadsEnabled bool
 	PeerHealth          []PeerHealthEntry
 	HasPeerHealth       bool
 	SelfID              string
+}
+
+type ObjectWritePlacementNodeState struct {
+	NodeID         string
+	DiskAvailBytes uint64
+	Hot            bool
 }
 
 type ObjectWritePlacementPlan struct {
@@ -53,12 +58,11 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 		return ObjectWritePlacementPlan{}, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
 	}
 
-	placement := selectECPlacementWeighted(
+	placement := selectECPlacementFromNodeStates(
 		effectiveCfg,
 		liveNodes,
 		in.ShardKey,
-		in.NodeStatsStore,
-		in.BoundedLoads,
+		in.NodeStates,
 		in.WeightedHRWEnabled,
 		in.BoundedLoadsEnabled,
 	)
@@ -70,13 +74,14 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 
 	if in.PlacementGroup != nil {
 		group, cfg, err := objectWritePlacementTargetsForGroup(operation, *in.PlacementGroup, placementGroupID)
-		if err == nil {
-			plan.TopologyWrite = true
-			plan.TopologyGroup = group
-			plan.PlacementGroupID = group.ID
-			plan.Config = cfg
-			plan.NodeIDs = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+		if err != nil {
+			return ObjectWritePlacementPlan{}, err
 		}
+		plan.TopologyWrite = true
+		plan.TopologyGroup = group
+		plan.PlacementGroupID = group.ID
+		plan.Config = cfg
+		plan.NodeIDs = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
 	}
 
 	if len(plan.NodeIDs) != plan.Config.NumShards() {
@@ -91,6 +96,35 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 	return plan, nil
 }
 
+func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, operation, shardKey string, liveNodes []string) (ObjectWritePlacementPlan, error) {
+	placementGroupID, _ := PlacementGroupFromContext(ctx)
+	var placementGroup *ShardGroupEntry
+	if group, ok := PlacementGroupEntryFromContext(ctx); ok {
+		placementGroup = &group
+	}
+	var peerHealth []PeerHealthEntry
+	hasPeerHealth := false
+	if ph := b.currentPeerHealth(); ph != nil {
+		peerHealth = ph.Snapshot()
+		hasPeerHealth = true
+	}
+	return PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:           operation,
+		PlacementGroupID:    placementGroupID,
+		PlacementGroup:      placementGroup,
+		LiveNodes:           liveNodes,
+		CurrentECConfig:     b.currentECConfig(),
+		BypassBucketCheck:   b.bypassBucketCheck,
+		ShardKey:            shardKey,
+		NodeStates:          objectWritePlacementNodeStatesFromRuntime(liveNodes, b.nodeStatsStore, b.bl),
+		WeightedHRWEnabled:  b.clusterCfg.WeightedHRWEnabled(),
+		BoundedLoadsEnabled: b.clusterCfg.BoundedLoadsEnabled(),
+		PeerHealth:          peerHealth,
+		HasPeerHealth:       hasPeerHealth,
+		SelfID:              b.currentSelfAddr(),
+	})
+}
+
 func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
 	group, ok := PlacementGroupEntryFromContext(ctx)
 	if !ok {
@@ -103,6 +137,11 @@ func placementTargetsFromContext(ctx context.Context, operation string) (ShardGr
 	}
 	groupID, _ := PlacementGroupFromContext(ctx)
 	return objectWritePlacementTargetsForGroup(operation, group, groupID)
+}
+
+func objectWritePlacementConfigFromContext(ctx context.Context, operation string) (ECConfig, error) {
+	_, cfg, err := placementTargetsFromContext(ctx, operation)
+	return cfg, err
 }
 
 func objectWritePlacementTargetsForGroup(operation string, group ShardGroupEntry, groupID string) (ShardGroupEntry, ECConfig, error) {
