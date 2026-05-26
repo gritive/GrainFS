@@ -246,8 +246,20 @@ func NewIdentitySnapshot(accept [][32]byte, present tls.Certificate, presentSPKI
 // in cleartext during the TLS handshake — so map-lookup timing reveals nothing
 // not already visible on the wire; constant-time comparison is unnecessary here.
 func (s *IdentitySnapshot) Accepts(spki [32]byte) bool {
-	_, ok := s.acceptSet[spki]
-	return ok
+	if s.acceptSet != nil {
+		_, ok := s.acceptSet[spki]
+		return ok
+	}
+	// Defensive fallback: a snapshot built via a raw struct literal (not
+	// NewIdentitySnapshot) has a nil acceptSet. Scan AcceptSPKIs directly so it
+	// still verifies correctly (O(N), misuse path only) rather than silently
+	// accepting nothing.
+	for _, a := range s.AcceptSPKIs {
+		if a == spki {
+			return true
+		}
+	}
+	return false
 }
 
 // QUICTransport implements Transport using QUIC for node-to-node communication.

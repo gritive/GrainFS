@@ -110,3 +110,22 @@ func TestNodeKeystore_ResealOverwrites(t *testing.T) {
 		t.Fatalf("loaded SPKI %x != second identity SPKI %x; re-seal did not overwrite", loadedSPKI, spki2)
 	}
 }
+
+func TestNodeKeystore_RejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	kek := make([]byte, 32)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatal(err)
+	}
+	keysDir := filepath.Join(dir, "keys.d")
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Write an oversized (>64KiB) file in place of a sealed key.
+	if err := os.WriteFile(filepath.Join(keysDir, "node.key.enc"), make([]byte, (64<<10)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadNodeKey(dir, kek); err == nil {
+		t.Fatal("LoadNodeKey accepted an oversized file; want bounded-read rejection")
+	}
+}

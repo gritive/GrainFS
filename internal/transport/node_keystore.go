@@ -108,9 +108,16 @@ func LoadNodeKey(dataDir string, kek []byte) (tls.Certificate, [32]byte, error) 
 		return tls.Certificate{}, [32]byte{}, err // includes os.ErrNotExist
 	}
 	defer f.Close()
-	sealed, err := io.ReadAll(f)
+	// Bound the read: a sealed P-256 PKCS#8 key is a few hundred bytes. Cap
+	// generously so a corrupt/oversized/tampered file can't blow up memory
+	// before GCM rejects it.
+	const maxSealedNodeKey = 64 << 10
+	sealed, err := io.ReadAll(io.LimitReader(f, maxSealedNodeKey+1))
 	if err != nil {
 		return tls.Certificate{}, [32]byte{}, fmt.Errorf("LoadNodeKey: read: %w", err)
+	}
+	if len(sealed) > maxSealedNodeKey {
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("LoadNodeKey: sealed key exceeds %d bytes (corrupt or tampered)", maxSealedNodeKey)
 	}
 	pemBytes, err := encrypt.AESGCMOpen(kek, sealed)
 	if err != nil {
