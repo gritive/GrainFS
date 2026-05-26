@@ -140,3 +140,98 @@ func TestStartup_NoOpWhenSnapshotHasNoWrappedDEKs(t *testing.T) {
 	require.NoError(t, rebuildDEKKeeperFromRestore(state, fsm))
 	assert.Nil(t, state.dekKeeper, "no-op branch must leave state untouched")
 }
+
+// fsmWithWrappedDEKsAtKEKVersion builds a snapshot whose DKVS trailer records
+// activeKEKVersion=kekVersion. The wrapped DEKs are sealed under kek. The
+// returned FSM is the restore target; callers populate state.kekStore manually.
+func fsmWithWrappedDEKsAtKEKVersion(t *testing.T, kek []byte, kekVersion uint32) *cluster.MetaFSM {
+	t.Helper()
+
+	keeper, err := encrypt.NewDEKKeeper(kek)
+	require.NoError(t, err)
+	require.NoError(t, keeper.Rotate()) // two gens: 0 and 1
+
+	src := cluster.NewMetaFSM()
+	src.SetDEKKeeper(keeper)
+	src.SetActiveKEKVersion(kekVersion)
+
+	snap, err := src.Snapshot()
+	require.NoError(t, err)
+
+	dst := cluster.NewMetaFSM()
+	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
+
+	pending, _ := dst.PendingDEKVersions()
+	require.NotEmpty(t, pending, "pendingDEKVersions must be populated by Restore")
+	return dst
+}
+
+// TestRestore_UsesSnapshotActiveKEKVersion_NotKeystoreActive is the Task 4c
+// regression guard (codex Pass-9 H2). It verifies that rebuildDEKKeeperFromRestore
+// uses the snapshot-captured active_kek_version to select the unwrap KEK, not
+// the keystore's current active version.
+//
+// Scenario: cluster rotated KEK from V=1 to V=2. A raft snapshot was taken
+// when active was V=1 (wraps sealed under K_1). The keystore now has V=2 active.
+// Restore on a lagging node must succeed by loading K_1 (from the snapshot field),
+// NOT K_2 (the current keystore active) which would fail AES-GCM open.
+func TestRestore_UsesSnapshotActiveKEKVersion_NotKeystoreActive(t *testing.T) {
+	k1 := make([]byte, encrypt.KEKSize)
+	k2 := make([]byte, encrypt.KEKSize)
+	_, err := rand.Read(k1)
+	require.NoError(t, err)
+	_, err = rand.Read(k2)
+	require.NoError(t, err)
+	require.NotEqual(t, k1, k2, "test fixture must use distinct KEK bytes")
+
+	// Build source FSM: DEKs wrapped under K_1, activeKEKVersion=1.
+	fsm := fsmWithWrappedDEKsAtKEKVersion(t, k1, 1)
+
+	// Verify snapshot captured KEK version 1.
+	require.Equal(t, uint32(1), fsm.SnapshotCapturedKEKVersion(),
+		"SnapshotCapturedKEKVersion must return the value from the DKVS trailer")
+
+	// Build a KEKStore with both V=1 and V=2; current active is V=2.
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(1, k1))
+	require.NoError(t, store.Add(2, k2))
+	require.NoError(t, store.SetActiveVersion(2))
+	require.Equal(t, uint32(2), store.ActiveVersion(), "keystore active must be V=2")
+
+	// rebuildDEKKeeperFromRestore must use K_1 (snapshot-captured), not K_2 (current active).
+	state := &bootState{kekStore: store}
+	require.NoError(t, rebuildDEKKeeperFromRestore(state, fsm),
+		"must succeed by selecting K_1 per snapshot active_kek_version=1")
+	require.NotNil(t, state.dekKeeper,
+		"dekKeeper must be installed after successful restore")
+
+	// Confirm the keeper was built with K_1: the active DEK gen must unseal.
+	gen, wrapped := state.dekKeeper.Active()
+	require.Equal(t, uint32(1), gen, "keeper active gen must be 1 (last Rotate)")
+	kekForVerify, err := store.Get(1)
+	require.NoError(t, err)
+	_, err = encrypt.AESGCMOpen(kekForVerify, wrapped)
+	require.NoError(t, err, "active DEK wrap must unseal under K_1")
+}
+
+// TestRestore_FallsBackToKeystoreActiveWhenSnapshotVersionIsZero guards
+// backward compat: Phase A snapshots record active_kek_version=0 (the
+// proto default). The restore path must treat zero the same as before —
+// Get(0) or ActiveKEK() (both return the same key when V=0 is active).
+func TestRestore_FallsBackToKeystoreActiveWhenSnapshotVersionIsZero(t *testing.T) {
+	k0 := make([]byte, encrypt.KEKSize)
+	_, err := rand.Read(k0)
+	require.NoError(t, err)
+
+	// Phase-A-style FSM: activeKEKVersion not set → 0 default.
+	fsm := fsmWithWrappedDEKsAtKEKVersion(t, k0, 0)
+	require.Equal(t, uint32(0), fsm.SnapshotCapturedKEKVersion())
+
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(0, k0))
+	// Active stays 0 by default.
+
+	state := &bootState{kekStore: store}
+	require.NoError(t, rebuildDEKKeeperFromRestore(state, fsm))
+	require.NotNil(t, state.dekKeeper)
+}
