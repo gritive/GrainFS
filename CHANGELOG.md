@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.351.0] - 2026-05-27
+
+### Fixed
+
+- **Cluster snapshots and PITR now preserve object chunk references.** A cluster
+  snapshot previously captured object metadata without the object's segment and
+  coalesced-blob references, so objects restored from a cluster snapshot (or via
+  point-in-time restore) lost the manifest needed to read their data back. Snapshots
+  now carry the full chunk reference list (segments and coalesced blobs) for every
+  object version, so restored objects remain readable. Single-node snapshots were
+  unaffected.
+
+## [0.0.350.0] - 2026-05-27
+
+### Added
+
+- **Startup auto-repair now covers segment and coalesced EC shards.** Boot-time data
+  WAL repair (added in 0.0.348.0) previously reconstructed only object-version EC shards
+  and skipped large-object segment (`<key>/segments/<id>`) and coalesced
+  (`<key>/coalesced/<id>`) shards. It now resolves their placement from object metadata
+  and reconstructs them too, closing the main coverage gap for large objects. Repair stays
+  non-blocking and best-effort — reads are still served by read-time EC reconstruction
+  while the background worker drains.
+
+### Changed
+
+- Startup data WAL repair metrics: added the `placement_scan_capped` skip reason to
+  `grainfs_datawal_startup_repair_skips_total{reason}` (emitted when an object's version
+  count exceeds the placement-scan cap); retired the `unsupported_shardkey` reason now that
+  segment/coalesced shards are repaired. See `docs/operators/runbook.md` and
+  `docs/operators/sli-slo.md`.
+
 ## [0.0.349.0] - 2026-05-26
 
 ### Added

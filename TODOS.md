@@ -290,15 +290,15 @@ Work these in order. Do not run them in parallel.
   format version that encodes segment refs, preserve old replay compatibility,
   and add PITR coverage for a chunked object created after the snapshot point.
 
-- [ ] **Startup data WAL repair: support segment and coalesced EC shard keys [P2]**:
-  Currently `isUnsupportedStartupRepairShardKey` detects `key/segments/<blobID>` and
-  `key/coalesced/<id>` shard key forms and skips them with metric reason
-  `unsupported_shardkey`. Placement for these lives in `objectMeta.Segments[]` /
-  `Coalesced[]`, not object-version metadata. Full support needs: a
-  `shardKey→PlacementRecord` resolver that walks segment metadata, a shardKey-based
-  repair entry (`RepairShardAtShardKey`), and an all-versions placement iterator.
-  Large objects are the primary metadata-only-WAL case, so this is the bulk of real
-  coverage gap in startup repair.
+- [ ] **Scrub / placement-monitor: proactively repair segment and coalesced EC shard keys [P2]**:
+  Startup repair now covers segment (`<key>/segments/<blobID>`) and coalesced
+  (`<key>/coalesced/<id>`) shard keys at boot time. The periodic placement-monitor
+  (`boot_phases_scrubber.go` `OnMissing`/`OnCorrupt` paths) still resolves shard keys
+  via the object-version-only `splitDataWALStartupRepairShardKey` path and does not
+  handle segment/coalesced forms. It could reuse the new
+  `cluster.ResolveShardKeyPlacement` + `RepairShardAtShardKey` primitives to extend
+  continuous/periodic coverage to those shard types, closing the gap between boot-time
+  discovery (already covered) and between-boot degraded-shard windows.
 
 - [ ] **AppendObject real per-call MD5 chain [P2]**: `AppendObject` still stores
   segment xxhash checksums in `AppendCallMD5s` as a stopgap. Capture each append
