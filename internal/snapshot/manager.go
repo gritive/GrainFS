@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -20,6 +21,13 @@ type WALProvider interface {
 	WALOffset() uint64
 }
 
+// RefSink receives chunk-ref mutations for snapshot freeze/delete. The snapshot
+// domain ManifestID is chunkref.SnapshotID(seq). nil disables ref tracking.
+type RefSink interface {
+	AddRef(m chunkref.ManifestID, c chunkref.ChunkID) error
+	RemoveRef(m chunkref.ManifestID, c chunkref.ChunkID, now time.Time) error
+}
+
 // Manager manages snapshot creation, listing, restore, and deletion.
 type Manager struct {
 	dir     string
@@ -27,6 +35,7 @@ type Manager struct {
 	nextSeq atomic.Uint64
 	walDir  string // optional: path to WAL directory for PITR
 	walEnc  *encrypt.Encryptor
+	refs    RefSink
 }
 
 // NewManager creates a Manager backed by the given snapshotable backend.
@@ -34,6 +43,17 @@ type Manager struct {
 // walDir is optional: if non-empty, enables PITR via WAL replay.
 func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string) (*Manager, error) {
 	return NewManagerWithEncryptor(snapshotDir, backend, walDir, nil)
+}
+
+// NewManagerWithRefSink is NewManagerWithEncryptor plus a chunk-ref sink so
+// snapshot freeze pins (AddRef) and delete unpins (RemoveRef) the frozen chunks.
+func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor, refs RefSink) (*Manager, error) {
+	m, err := NewManagerWithEncryptor(snapshotDir, backend, walDir, enc)
+	if err != nil {
+		return nil, err
+	}
+	m.refs = refs
+	return m, nil
 }
 
 // NewManagerWithEncryptor creates a Manager that can replay encrypted WAL
@@ -118,6 +138,18 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 		os.Remove(tmpPath)
 		return nil, fmt.Errorf("write snapshot: %w", err)
 	}
+	// Pin chunks before committing the descriptor (crash ordering: ref-add → descriptor commit).
+	if m.refs != nil {
+		mid := chunkref.SnapshotID(seq)
+		for i := range objects {
+			for _, c := range objects[i].ChunkLocators() {
+				if err := m.refs.AddRef(mid, chunkref.ChunkID(c)); err != nil {
+					os.Remove(tmpPath)
+					return nil, fmt.Errorf("pin snapshot chunk: %w", err)
+				}
+			}
+		}
+	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
 		return nil, fmt.Errorf("commit snapshot: %w", err)
@@ -177,6 +209,20 @@ func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.S
 // Delete removes the snapshot file for the given seq.
 func (m *Manager) Delete(seq uint64) error {
 	p := m.path(seq)
+	// Unpin chunks before removing the descriptor so GC cannot reclaim while we read.
+	if m.refs != nil {
+		if snap, err := readSnapshot(p); err == nil {
+			mid := chunkref.SnapshotID(seq)
+			now := time.Now()
+			for i := range snap.Objects {
+				for _, c := range snap.Objects[i].ChunkLocators() {
+					if err := m.refs.RemoveRef(mid, chunkref.ChunkID(c), now); err != nil {
+						return fmt.Errorf("unpin snapshot chunk: %w", err)
+					}
+				}
+			}
+		}
+	}
 	if err := os.Remove(p); err != nil {
 		if os.IsNotExist(err) {
 			return ErrNotFound
