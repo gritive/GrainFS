@@ -22,7 +22,12 @@ import (
 )
 
 // Snapshot serializes current state as FlatBuffers MetaStateSnapshot.
+// Returns an error immediately if the FSM has been poisoned by MarkFatalHalted —
+// a halted FSM must not produce snapshots that could mask a diverged state.
 func (f *MetaFSM) Snapshot() ([]byte, error) {
+	if err := f.FatalHaltedErr(); err != nil {
+		return nil, fmt.Errorf("FSM halted: %w", err)
+	}
 	f.mu.RLock()
 	nodes := make([]MetaNodeEntry, 0, len(f.nodes))
 	for _, n := range f.nodes {
