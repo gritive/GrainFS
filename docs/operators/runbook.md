@@ -1043,3 +1043,35 @@ at scrape time, so these alerts fire autonomously without any polling of the
 DEK rotation does not block client I/O: it adds a new DEK generation in parallel
 and new seals immediately use it, while existing objects remain readable under
 their original generation.
+
+> **Caveat (seal-count resets on KEK rotation):** the `grainfs_kek_seal_count`
+> metric is keyed by KEK version and resets when you rotate the KEK. A KEK
+> rotation re-wraps the existing DEKs but does NOT change the DEK keys, so the
+> true per-DEK nonce usage continues across a KEK rotation. After a KEK rotation
+> the reported count under-states cumulative DEK nonce usage. Until this is
+> re-keyed to the DEK generation, treat the `nonce=` band as a lower bound and
+> prefer rotating the DEK (`grainfs dek rotate`) on a fixed cadence rather than
+> relying solely on the band after a recent KEK rotation.
+
+---
+
+## KEK retire / prune
+
+KEK removal is two-phase: `grainfs encrypt kek retire --version N` marks an old
+KEK version draining, then `grainfs encrypt kek prune --version N` permanently
+removes it once every voter attests no active lease holds it.
+
+> **Do not prune a KEK version that a retained snapshot still depends on.** A
+> snapshot taken before a KEK rotation has its DEK wraps sealed under the KEK
+> version active at snapshot time. After a later KEK rotation the live keystore
+> is re-wrapped under the new version, but an OLD snapshot you keep for disaster
+> recovery still references the older KEK. Pruning that KEK makes the old
+> snapshot unrestorable. Confirm no retained snapshot references version N
+> before pruning it. (Phase B does not lease-track snapshot references — this is
+> an operator responsibility.)
+
+> **Prune may need retries on a busy cluster.** Prune validates the voter set
+> against the raft committed index at probe time and rejects if the committed
+> index advanced mid-probe (a possible membership change). On a cluster under
+> continuous writes the committed index advances constantly, so prune can be
+> rejected repeatedly. Retry during a quiet window, or briefly quiesce writes.

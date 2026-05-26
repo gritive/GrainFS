@@ -149,6 +149,11 @@ func (m *MetaRaft) ProposeDEKRotate(ctx context.Context) error {
 			return fmt.Errorf("ProposeDEKRotate: %w", err) // epoch cancelled or 60s elapsed
 		}
 		_, active := keeper.VersionsAndActive()
+		if active == math.MaxUint32 {
+			// gen space exhausted: active+1 would wrap to 0 and be misread as the
+			// bootstrap sentinel downstream. Hard-stop rather than silently no-op.
+			return fmt.Errorf("ProposeDEKRotate: DEK generation space exhausted at %d", active)
+		}
 		expectedGen := active
 		newGen := active + 1
 		wrapped, kekVer, err := keeper.GenerateWrappedDEK(newGen)
