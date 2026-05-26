@@ -80,22 +80,24 @@ type leadershipEpoch struct {
 
 // KEKRotationLeader orchestrates the leader-side validate-and-submit pipeline
 // for MetaKEKRotateCmd. Construct via NewKEKRotationLeader; wire leadership
-// state with SetEpochCtx / ClearEpoch. Single-flight on rotation is enforced
-// internally via mu (Task 6 will widen the mutex to cover Retire + Prune).
+// state with AcquireLeadership / LoseLeadership (or the legacy SetEpochCtx /
+// ClearEpoch aliases). Single-flight is enforced via mu.
 type KEKRotationLeader struct {
 	fsm       *MetaFSM
 	raft      KEKRaftSubmitter
 	peerProbe PeerKEKProbe
 
-	// mu is acquired non-blocking via TryLock — two concurrent
-	// ProposeKEKRotate calls collapse to one. Task 6 will rename this
-	// kekLifecycleInFlight and have Retire / Prune share it.
+	// mu serialises all KEK lifecycle operations: Rotate (now), and Retire /
+	// Prune (implemented in later tasks). Conceptually "kek_lifecycle_in_flight":
+	// only one lifecycle operation runs at a time. Acquired non-blocking via
+	// TryLock — concurrent calls fail-fast rather than queuing. Auto-released by
+	// the in-flight goroutine's deferred Unlock when the epoch ctx is cancelled
+	// on leadership loss; LoseLeadership must NOT explicitly Unlock (race).
 	mu sync.Mutex
 
 	// epochCtx.Load() returns nil when this node is NOT leader. The ctx is
-	// cancelled by Task 6's loss-of-leadership hook; ProposeKEKRotate uses
-	// it as the parent of its bounded 60s timeout so a rotation in flight
-	// aborts cleanly on leader step-down.
+	// cancelled by LoseLeadership; ProposeKEKRotate uses it as the parent of its
+	// bounded 60s timeout so an in-flight rotation aborts cleanly on step-down.
 	epochCtx atomic.Pointer[leadershipEpoch]
 
 	// rngKEK returns 32 random bytes for K_new. crypto/rand by default;
@@ -105,6 +107,11 @@ type KEKRotationLeader struct {
 	// wallClock stamps audit fields. time.Now by default; tests inject a
 	// deterministic clock.
 	wallClock func() time.Time
+
+	// onMutexAcquired is a test-only hook called immediately after mu.TryLock
+	// succeeds. nil in production. Used to signal test goroutines that the mutex
+	// is held so they can call LoseLeadership without a sleep race.
+	onMutexAcquired func()
 }
 
 // KEKRotationLeaderConfig wires production dependencies. fsm + raft + peerProbe
@@ -156,9 +163,26 @@ func defaultRNGKEK() ([]byte, error) {
 	return buf, nil
 }
 
-// SetEpochCtx publishes a leadership-epoch context. Production: Task 6 calls
-// this from the raft leader-state observer. Tests call it directly to simulate
-// "we are leader now". A previous epoch is cancelled before the new one is
+// AcquireLeadership is called when this node wins raft leadership. It installs
+// a fresh cancellable epoch context so ProposeKEKRotate can proceed, and
+// cancels any stale prior epoch. The mutex is NOT held on entry (a fresh leader
+// starts unlocked — enforced by test TestKEKRotationLeader_NewLeaderStartsUnlocked).
+func (l *KEKRotationLeader) AcquireLeadership() {
+	l.SetEpochCtx(context.Background())
+}
+
+// LoseLeadership is called when this node steps down. It cancels the epoch
+// context, which propagates into any in-flight ProposeKEKRotate's ctx, causing
+// the propose to return ErrNotLeader. The goroutine's deferred mu.Unlock then
+// releases the mutex — LoseLeadership must NOT explicitly unlock (race).
+func (l *KEKRotationLeader) LoseLeadership() {
+	l.ClearEpoch()
+}
+
+// SetEpochCtx publishes a leadership-epoch context derived from parent.
+// AcquireLeadership is the preferred production entry-point (passes
+// context.Background()); SetEpochCtx exists for tests that need a
+// controllable parent. A previous epoch is cancelled before the new one is
 // stored.
 func (l *KEKRotationLeader) SetEpochCtx(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
@@ -170,6 +194,8 @@ func (l *KEKRotationLeader) SetEpochCtx(parent context.Context) {
 
 // ClearEpoch signals loss-of-leadership: the stored epoch (if any) is cancelled
 // and removed. Any in-flight ProposeKEKRotate sees its ctx done and unwinds.
+// LoseLeadership is the preferred production entry-point; ClearEpoch exists as
+// an alias for backwards-compatible test helpers.
 func (l *KEKRotationLeader) ClearEpoch() {
 	if old := l.epochCtx.Swap(nil); old != nil {
 		old.cancel()
@@ -202,6 +228,9 @@ func (l *KEKRotationLeader) ProposeKEKRotate(confirm, actor string) error {
 		return ErrKEKRotateAnotherInFlight
 	}
 	defer l.mu.Unlock()
+	if l.onMutexAcquired != nil {
+		l.onMutexAcquired()
+	}
 
 	// 5. uint32 overflow guard. Active == math.MaxUint32 cannot advance
 	//    without a v2 keyspace migration (cmd schema is uint32).

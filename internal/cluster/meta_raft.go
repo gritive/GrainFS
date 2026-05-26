@@ -90,6 +90,12 @@ type MetaRaft struct {
 	icebergWaiters map[string]chan error
 
 	lastSnapshotIndex uint64
+
+	// kekRotationLeader is optionally wired via SetKEKRotationLeader before
+	// Start. When non-nil, runKEKLeadershipWatcher tracks raft leadership
+	// transitions and calls AcquireLeadership / LoseLeadership so any
+	// in-flight KEK lifecycle operation aborts cleanly on step-down.
+	kekRotationLeader *KEKRotationLeader
 }
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
@@ -211,6 +217,14 @@ func (m *MetaRaft) SetForwarderWithGate(fn func(ctx context.Context, data []byte
 	m.forwardFnWithGate = fn
 }
 
+// SetKEKRotationLeader wires the KEKRotationLeader so that MetaRaft's
+// leadership-watcher goroutine (started by Start) calls AcquireLeadership /
+// LoseLeadership on every raft leadership transition. Must be called before
+// Start. Production: wired from the serve-layer boot path (Task 11).
+func (m *MetaRaft) SetKEKRotationLeader(l *KEKRotationLeader) {
+	m.kekRotationLeader = l
+}
+
 func (m *MetaRaft) SetCapabilityGate(gate *CapabilityGate) {
 	m.capabilityGate = gate
 }
@@ -271,6 +285,7 @@ func (m *MetaRaft) Start(ctx context.Context, preApplyLoop func() error) error {
 	m.node.Start()
 	go m.runApplyLoop(ctx)
 	go m.runRotationAutoProgress(ctx)
+	go m.runKEKLeadershipWatcher(ctx)
 	return nil
 }
 
@@ -935,6 +950,49 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// runKEKLeadershipWatcher tracks raft leadership transitions and calls
+// AcquireLeadership / LoseLeadership on the wired KEKRotationLeader. The
+// registered observer API is a no-op in this codebase, so we edge-detect using
+// the same State()-polling approach as runRotationAutoProgress.
+//
+// Polling interval: MetaRaftHeartbeatInterval (~150ms) — fast enough that a
+// leadership loss reaches the epoch cancel well before the 60s propose timeout.
+//
+// On ctx cancellation / m.done close we call LoseLeadership to cancel any
+// in-flight lifecycle operation. The mutex is released by the goroutine's
+// deferred Unlock — NOT here — to avoid a race.
+func (m *MetaRaft) runKEKLeadershipWatcher(ctx context.Context) {
+	if m.kekRotationLeader == nil {
+		return
+	}
+	tick := time.NewTicker(MetaRaftHeartbeatInterval)
+	defer tick.Stop()
+	var wasLeader bool
+	for {
+		select {
+		case <-ctx.Done():
+			if wasLeader {
+				m.kekRotationLeader.LoseLeadership()
+			}
+			return
+		case <-m.done:
+			if wasLeader {
+				m.kekRotationLeader.LoseLeadership()
+			}
+			return
+		case <-tick.C:
+		}
+		isLeader := m.node.IsLeader()
+		switch {
+		case isLeader && !wasLeader:
+			m.kekRotationLeader.AcquireLeadership()
+		case !isLeader && wasLeader:
+			m.kekRotationLeader.LoseLeadership()
+		}
+		wasLeader = isLeader
 	}
 }
 

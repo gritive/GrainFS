@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -426,5 +428,142 @@ func TestDryRunValidateKEKRotate_RejectsBadRewrap(t *testing.T) {
 	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
 	if err == nil || !strings.Contains(err.Error(), "rewrapped_deks") {
 		t.Errorf("expected rewrapped_deks reject, got: %v", err)
+	}
+}
+
+// --- Task 6: leadership-epoch lifecycle + mutex auto-release tests ----------
+
+// blockedRaftSubmitter blocks Propose until the block channel is closed,
+// then returns nil. Used to hold a ProposeKEKRotate goroutine inside the mutex.
+type blockedRaftSubmitter struct {
+	block <-chan struct{}
+}
+
+func (b *blockedRaftSubmitter) Propose(ctx context.Context, _ MetaCmdType, _ []byte) error {
+	select {
+	case <-b.block:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("KEKRotate: not leader: %w", ctx.Err())
+	}
+}
+
+// slowRaftSubmitterOpts carries a per-submit delay for newTestKEKRotationLeader.
+type slowRaftSubmitterOpts struct {
+	delay time.Duration
+}
+
+// slowRaftSubmitter wraps fakeRaftSubmitter with a configurable delay before
+// the synchronous FSM apply, giving concurrent goroutines time to attempt
+// their own TryLock.
+type slowRaftSubmitter struct {
+	inner *fakeRaftSubmitter
+	delay time.Duration
+}
+
+func (s *slowRaftSubmitter) Propose(ctx context.Context, cmdType MetaCmdType, payload []byte) error {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.inner.Propose(ctx, cmdType, payload)
+}
+
+// withSlowRaftSubmit is a functional option for newTestKEKRotationLeader.
+func withSlowRaftSubmit(d time.Duration) func(*slowRaftSubmitterOpts) {
+	return func(o *slowRaftSubmitterOpts) { o.delay = d }
+}
+
+// newTestKEKRotationLeader builds a KEKRotationLeader backed by the standard
+// leaderTestFixture, without pre-installing a leadership epoch. Callers must
+// call leader.AcquireLeadership() when they want the leader state.
+// Accepts optional withSlowRaftSubmit options.
+func newTestKEKRotationLeader(t *testing.T, opts ...func(*slowRaftSubmitterOpts)) *KEKRotationLeader {
+	t.Helper()
+	o := &slowRaftSubmitterOpts{}
+	for _, fn := range opts {
+		fn(o)
+	}
+	fx := newLeaderTestFixture(t, leaderFixtureOpts{skipLeadership: true})
+	if o.delay > 0 {
+		slow := &slowRaftSubmitter{inner: fx.raft, delay: o.delay}
+		fx.leader.raft = slow
+	}
+	return fx.leader
+}
+
+func TestKEKRotationLeader_MutexReleasesOnLeadershipLoss(t *testing.T) {
+	leader := newTestKEKRotationLeader(t)
+	leader.AcquireLeadership()
+
+	// Block raft submit so propose is stuck in-flight.
+	blocker := make(chan struct{})
+	leader.raft = &blockedRaftSubmitter{block: blocker}
+	mutexHeld := make(chan struct{})
+	leader.onMutexAcquired = func() { close(mutexHeld) }
+
+	done := make(chan error, 1)
+	go func() {
+		done <- leader.ProposeKEKRotate("rotate-now", "admin@uds")
+	}()
+	select {
+	case <-mutexHeld:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("propose never acquired mutex")
+	}
+
+	leader.LoseLeadership() // cancels epoch ctx
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "leader") {
+			t.Errorf("expected leadership-loss error, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("propose did not return on leadership loss")
+	}
+	close(blocker)
+	// mutex must be released by the goroutine's defer.
+	if !leader.mu.TryLock() {
+		t.Errorf("mutex still held after leadership loss")
+	}
+	leader.mu.Unlock()
+}
+
+func TestKEKRotationLeader_NewLeaderStartsUnlocked(t *testing.T) {
+	leader := newTestKEKRotationLeader(t)
+	leader.AcquireLeadership()
+	if !leader.mu.TryLock() {
+		t.Errorf("fresh leader mutex held")
+	}
+	leader.mu.Unlock()
+}
+
+func TestKEKRotationLeader_ConcurrentProposeRejected(t *testing.T) {
+	leader := newTestKEKRotationLeader(t, withSlowRaftSubmit(200*time.Millisecond))
+	leader.AcquireLeadership()
+
+	var wg sync.WaitGroup
+	errs := make([]error, 5)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = leader.ProposeKEKRotate("rotate-now", "admin@uds")
+		}(i)
+	}
+	wg.Wait()
+
+	success, reject := 0, 0
+	for _, err := range errs {
+		if err == nil {
+			success++
+		} else if strings.Contains(err.Error(), "in flight") {
+			reject++
+		}
+	}
+	if success != 1 || reject != 4 {
+		t.Errorf("got success=%d reject=%d, want 1 + 4 (errs=%v)", success, reject, errs)
 	}
 }
