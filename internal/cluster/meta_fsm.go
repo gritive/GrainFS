@@ -99,6 +99,11 @@ const (
 	MetaCmdTypeMountSADelete                = clusterpb.MetaCmdTypeMountSADelete
 	MetaCmdTypeMountSAAttachPolicy          = clusterpb.MetaCmdTypeMountSAAttachPolicy
 	MetaCmdTypeMountSADetachPolicy          = clusterpb.MetaCmdTypeMountSADetachPolicy
+	// KEK envelope rotation (Phase B): rotate the cluster KEK in lockstep with
+	// the FSM-deterministic install of the rewrapped DEK set.
+	MetaCmdTypeKEKRotate = clusterpb.MetaCmdTypeKEKRotate
+	MetaCmdTypeKEKRetire = clusterpb.MetaCmdTypeKEKRetire
+	MetaCmdTypeKEKPrune  = clusterpb.MetaCmdTypeKEKPrune
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -351,6 +356,29 @@ type MetaFSM struct {
 	// kekStatuses holds the lifecycle status of each KEK version, sorted by
 	// version ascending. Upserted via SetKEKStatus.
 	kekStatuses []kekStatusRecord
+
+	// keystore is the cluster KEK store. nil until SetKEKStore is called.
+	// MetaCmdTypeKEKRotate Apply uses it to read the active KEK (to unwrap
+	// the proposal's wrapped K_new), persist the new KEK to disk, and flip
+	// the active marker — all under the FSM's lock window.
+	keystore *encrypt.KEKStore
+
+	// clusterID is the 16-byte cluster identity used as AAD context for
+	// KEK rotation envelopes. Set once via SetClusterID before any Apply
+	// reaches a KEK command. Zero-valued until configured.
+	clusterID [16]byte
+
+	// kekDir is the on-disk directory that backs keystore (used by
+	// AddAndPersist during MetaKEKRotateCmd Apply). Empty string disables
+	// disk persistence — useful in unit tests; production wiring sets it
+	// to the same path passed to LoadOrInitKEKStoreDir.
+	kekDir string
+
+	// lastApplyIndex is set by runApplyLoop via applyCmdAtIndex before each
+	// apply, then consumed by KEK rotation handlers for idempotent request
+	// status records. Defaults to 0 in test paths that call applyCmd
+	// directly. Read-and-set only on the apply goroutine; no lock needed.
+	lastApplyIndex uint64
 }
 
 // RotationStatus is the outcome code stored for each KEK rotation request.
@@ -476,6 +504,15 @@ func NewMetaFSM() *MetaFSM {
 		jwtKeyStore:       NewJWTKeyStore(),
 		jwtKeys:           iamjwt.NewKeySet(),
 	}
+}
+
+// applyCmdAtIndex is the production entry point — wraps applyCmd with the
+// raft log entry's index so KEK rotation Apply can stamp deterministic
+// request-status records. Test callers that don't need an index continue to
+// use applyCmd, which passes 0 and means "synthetic / unknown index".
+func (f *MetaFSM) applyCmdAtIndex(data []byte, index uint64) error {
+	f.lastApplyIndex = index
+	return f.applyCmd(data)
 }
 
 // applyCmd decodes a MetaCmd FlatBuffers envelope, mutates state, and fires
@@ -652,6 +689,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyMountSADetachPolicy(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeKEKRotate:
+		return f.applyKEKRotate(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		return f.applyDEKRotate()
 	case clusterpb.MetaCmdTypeDEKVersionPrune:

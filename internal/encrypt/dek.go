@@ -276,6 +276,42 @@ func (k *DEKKeeper) VersionsAndActive() (versions map[uint32][]byte, active uint
 	return out, k.active
 }
 
+// InstallKEKRotation atomically replaces the keeper's internal KEK and the
+// wrapped-DEK map with the post-rotation versions. Used by FSM Apply after
+// MetaKEKRotateCmd: the FSM has already verified that every rewrapped wrap
+// unwraps to the same plaintext DEK under newKEK as the corresponding old
+// wrap under the previous KEK — this method just swaps the references.
+//
+// Cached AEADs in k.aead are preserved: the underlying DEK plaintexts are
+// unchanged across a KEK rotation (only the wrapping changed), so the
+// per-gen cipher.AEAD instances remain valid. Pruning a gen still happens
+// via Prune().
+//
+// Defensive copies are taken so the caller (FSM Apply, holding the only
+// references to the wire payload bytes) may mutate or zeroize its inputs
+// after this returns. Returns an error iff newKEK length is wrong; map
+// content is not otherwise validated (callers vet the rewrap set first).
+func (k *DEKKeeper) InstallKEKRotation(newKEK []byte, rewrapped map[uint32][]byte) error {
+	if len(newKEK) != KEKSize {
+		return fmt.Errorf("DEKKeeper.InstallKEKRotation: kek len = %d, want %d", len(newKEK), KEKSize)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	// Replace KEK in-place over the existing slice when possible (no
+	// reallocation if cap is sufficient). The keeper retains a private
+	// defensive copy distinct from the caller's slice.
+	k.kek = append(k.kek[:0], newKEK...)
+	// Replace wrap[] deeply. Drop entries not present in rewrapped — the
+	// FSM-side verifier already asserted gen set equality with the payload.
+	for g := range k.wrap {
+		delete(k.wrap, g)
+	}
+	for g, w := range rewrapped {
+		k.wrap[g] = append([]byte(nil), w...)
+	}
+	return nil
+}
+
 // LoadFromFSM reconstructs a DEKKeeper from persisted wrapped DEKs (used after raft restore).
 // Active gen is set to the maximum key in versions.
 //

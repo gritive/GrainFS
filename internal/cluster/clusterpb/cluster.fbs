@@ -509,6 +509,9 @@ enum MetaCmdType : uint8 {
   MountSADelete                = 66, // MountSA: delete NFS/9P mount service account
   MountSAAttachPolicy          = 67, // MountSA: attach policy to mount SA
   MountSADetachPolicy          = 68, // MountSA: detach policy from mount SA
+  KEKRotate                    = 69, // KEK: install rotated KEK + rewrapped DEKs (Phase B)
+  KEKRetire                    = 70, // KEK: mark prior KEK version retired (Phase B)
+  KEKPrune                     = 71, // KEK: prune retired KEK version after voter attestation (Phase B)
 }
 
 table MetaNodeEntry {

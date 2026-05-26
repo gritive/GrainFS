@@ -904,7 +904,7 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 				if len(entry.Command) == 0 {
 					break
 				}
-				if err := m.fsm.applyCmd(entry.Command); err != nil {
+				if err := m.fsm.applyCmdAtIndex(entry.Command, entry.Index); err != nil {
 					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
 					m.recordApplyResult(entry.Index, err)
 				}

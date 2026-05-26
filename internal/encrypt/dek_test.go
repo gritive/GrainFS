@@ -328,3 +328,137 @@ func TestLoadFromFSM_RetainsKEKAfterCallerZeroizes(t *testing.T) {
 		t.Fatalf("Rotate after caller zeroize: %v", err)
 	}
 }
+
+// TestDEKKeeper_InstallKEKRotation_SwapsKEKAndWraps simulates an FSM-driven
+// KEK rotation: seed a keeper with K_old wrapping gen 0, then call
+// InstallKEKRotation with K_new and the gen-0 DEK rewrapped under K_new.
+// After the swap, Rotate() generates gen 1 — its wrap must unseal under
+// K_new (proves the keeper installed the new KEK, not just the wraps).
+func TestDEKKeeper_InstallKEKRotation_SwapsKEKAndWraps(t *testing.T) {
+	kOld := bytes.Repeat([]byte{0xA0}, KEKSize)
+	kNew := bytes.Repeat([]byte{0xA1}, KEKSize)
+
+	// Seed keeper with K_old. Capture the original gen-0 wrap so we can
+	// rebuild the equivalent ciphertext under K_new.
+	keeper, err := NewDEKKeeper(kOld)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	_, origWrap := keeper.Active()
+
+	// Unwrap gen-0 plaintext with K_old, then re-seal under K_new — this is
+	// what the rotation leader would do off the FSM apply path.
+	plain0, err := AESGCMOpen(kOld, origWrap)
+	if err != nil {
+		t.Fatalf("unwrap gen-0 with kOld: %v", err)
+	}
+	newWrap0, err := AESGCMSeal(kNew, plain0)
+	if err != nil {
+		t.Fatalf("reseal gen-0 with kNew: %v", err)
+	}
+	zeroize(plain0)
+
+	// Install: swap KEK + replace wrap[0] with the new ciphertext.
+	if err := keeper.InstallKEKRotation(kNew, map[uint32][]byte{0: newWrap0}); err != nil {
+		t.Fatalf("InstallKEKRotation: %v", err)
+	}
+
+	// Rotate creates gen-1 — its wrap must unseal under K_new, NOT K_old.
+	if err := keeper.Rotate(); err != nil {
+		t.Fatalf("Rotate after Install: %v", err)
+	}
+	wraps, active := keeper.VersionsAndActive()
+	if active != 1 {
+		t.Fatalf("active gen = %d, want 1", active)
+	}
+	w1, ok := wraps[1]
+	if !ok {
+		t.Fatalf("wrap[1] missing after Rotate")
+	}
+	if _, err := AESGCMOpen(kNew, w1); err != nil {
+		t.Errorf("wrap[1] should unseal under K_new: %v", err)
+	}
+	if _, err := AESGCMOpen(kOld, w1); err == nil {
+		t.Errorf("wrap[1] should NOT unseal under K_old — KEK swap failed")
+	}
+
+	// Existing AEAD for gen-0 must still work (plaintext unchanged across
+	// KEK rotation): Open with the keeper succeeds.
+	ct0, gen, err := keeper.Seal([]byte("after-rotate"))
+	if err != nil {
+		t.Fatalf("Seal after Install: %v", err)
+	}
+	if gen != 1 {
+		t.Errorf("Seal gen = %d, want active=1", gen)
+	}
+	got, err := keeper.Open(ct0, gen)
+	if err != nil {
+		t.Fatalf("Open after Install: %v", err)
+	}
+	if !bytes.Equal(got, []byte("after-rotate")) {
+		t.Errorf("roundtrip mismatch after rotation")
+	}
+}
+
+func TestDEKKeeper_InstallKEKRotation_RejectsWrongLen(t *testing.T) {
+	kek := bytes.Repeat([]byte{0xA0}, KEKSize)
+	keeper, _ := NewDEKKeeper(kek)
+	short := make([]byte, KEKSize-1)
+	if err := keeper.InstallKEKRotation(short, map[uint32][]byte{}); err == nil {
+		t.Errorf("expected error on short KEK")
+	}
+}
+
+func TestKEKStore_HasVersion_SetActiveVersion(t *testing.T) {
+	s := NewKEKStore()
+	k0 := bytes.Repeat([]byte{0xA0}, KEKSize)
+	k1 := bytes.Repeat([]byte{0xA1}, KEKSize)
+	if err := s.Add(0, k0); err != nil {
+		t.Fatalf("Add 0: %v", err)
+	}
+	if !s.HasVersion(0) {
+		t.Errorf("HasVersion(0) = false, want true")
+	}
+	if s.HasVersion(1) {
+		t.Errorf("HasVersion(1) = true on empty slot")
+	}
+	if err := s.SetActiveVersion(7); err == nil {
+		t.Errorf("SetActiveVersion(7) should fail on unloaded version")
+	}
+	if err := s.Add(1, k1); err != nil {
+		t.Fatalf("Add 1: %v", err)
+	}
+	if err := s.SetActiveVersion(0); err != nil {
+		t.Fatalf("SetActiveVersion(0): %v", err)
+	}
+	if got := s.ActiveVersion(); got != 0 {
+		t.Errorf("ActiveVersion = %d, want 0 after explicit SetActiveVersion", got)
+	}
+}
+
+func TestCanonicalWrapSetHash_DeterministicAndOrderInvariant(t *testing.T) {
+	a := []WrapSetEntry{
+		{Gen: 1, Wrap: []byte("w1")},
+		{Gen: 3, Wrap: []byte("w3")},
+		{Gen: 2, Wrap: []byte("w2")},
+	}
+	b := []WrapSetEntry{
+		{Gen: 3, Wrap: []byte("w3")},
+		{Gen: 1, Wrap: []byte("w1")},
+		{Gen: 2, Wrap: []byte("w2")},
+	}
+	ha := CanonicalWrapSetHash(a)
+	hb := CanonicalWrapSetHash(b)
+	if ha != hb {
+		t.Errorf("hash order-sensitive: %x vs %x", ha, hb)
+	}
+	// Change content → different hash.
+	c := []WrapSetEntry{
+		{Gen: 1, Wrap: []byte("w1")},
+		{Gen: 3, Wrap: []byte("w3")},
+		{Gen: 2, Wrap: []byte("WRONG")},
+	}
+	if CanonicalWrapSetHash(c) == ha {
+		t.Errorf("hash collided despite differing wrap bytes")
+	}
+}

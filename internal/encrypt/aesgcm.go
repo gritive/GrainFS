@@ -57,6 +57,21 @@ func aesgcmOpenWithAAD(key, ct, aad []byte) ([]byte, error) {
 	return plain, nil
 }
 
+// AESGCMSealWithAAD encrypts plain under key with AAD binding, using a random
+// 12-byte nonce. Output: nonce(12) + ciphertext + GCM-tag(16). Key must be 32
+// bytes. Exported wrapper over aesgcmSealWithAAD so callers outside the
+// package (cluster FSM Apply, KEK rotation tests) can produce AAD-bound
+// ciphertexts without duplicating the AEAD construction.
+func AESGCMSealWithAAD(key, plain, aad []byte) ([]byte, error) {
+	return aesgcmSealWithAAD(key, plain, aad)
+}
+
+// AESGCMOpenWithAAD decrypts ct produced by AESGCMSealWithAAD. See
+// AESGCMSealWithAAD for the rationale of the exported wrapper.
+func AESGCMOpenWithAAD(key, ct, aad []byte) ([]byte, error) {
+	return aesgcmOpenWithAAD(key, ct, aad)
+}
+
 // AESGCMSeal encrypts plain under key using AES-256-GCM with a random 12-byte
 // nonce. The output format is: nonce(12) + ciphertext + tag(16).
 // key must be exactly 32 bytes.

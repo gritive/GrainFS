@@ -2,6 +2,8 @@ package encrypt
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -85,6 +87,30 @@ func (s *KEKStore) ActiveVersion() uint32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.active
+}
+
+// HasVersion reports whether the given version is loaded in the store.
+// Read-locked; safe for concurrent use with hot-path Get.
+func (s *KEKStore) HasVersion(version uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.keys[version]
+	return ok
+}
+
+// SetActiveVersion overrides the active KEK marker to the requested version.
+// Fails if the version is not loaded. Used by MetaKEKRotateCmd FSM Apply to
+// flip the active marker atomically with the in-memory + on-disk install of
+// the rewrapped DEK set (Phase B). Distinct from Add, which only advances
+// active when the new version is strictly greater.
+func (s *KEKStore) SetActiveVersion(version uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.keys[version]; !ok {
+		return fmt.Errorf("KEKStore.SetActiveVersion: version %d not loaded", version)
+	}
+	s.active = version
+	return nil
 }
 
 // ActiveKEK returns the KEK bytes for the active version. Convenience over
@@ -379,4 +405,35 @@ func fsyncDir(path string) error {
 		return fmt.Errorf("fsync dir %q: %w", path, err)
 	}
 	return nil
+}
+
+// WrapSetEntry is one entry in the canonical wrap-set hash input: a DEK
+// generation number paired with its KEK-wrapped DEK bytes. Used by leaders
+// to summarise the FSM's current wrap[] state as a deterministic 32-byte
+// fingerprint for inclusion in MetaKEKRotateCmd.wrap_set_hash.
+type WrapSetEntry struct {
+	Gen  uint32
+	Wrap []byte
+}
+
+// CanonicalWrapSetHash produces a deterministic 32-byte SHA-256 fingerprint
+// over a wrap set. Entries are sorted ascending by gen, then each contributes
+// uint32-big-endian(gen) || sha256(wrap) to the running hash. The inner hash
+// keeps the input length-decoupled (two wraps of different size collide only
+// on full sha256 collision), and the sort gives FSM-replay determinism.
+func CanonicalWrapSetHash(entries []WrapSetEntry) [32]byte {
+	sorted := make([]WrapSetEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Gen < sorted[j].Gen })
+	h := sha256.New()
+	for _, e := range sorted {
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], e.Gen)
+		h.Write(buf[:])
+		inner := sha256.Sum256(e.Wrap)
+		h.Write(inner[:])
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
