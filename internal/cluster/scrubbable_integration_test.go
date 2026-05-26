@@ -132,7 +132,7 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("matches the shard service layout", func() {
-			svc := NewShardService(b.root, nil)
+			svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 3, []byte("payload"))).To(Succeed())
 
 			paths := b.ShardPaths("bkt", "key", "01VID", 4)
@@ -145,7 +145,7 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("uses the shared shard service root", func() {
 			shardRoot := GinkgoT().TempDir()
-			svc := NewShardService(shardRoot, nil)
+			svc := NewShardService(shardRoot, nil, withTestWAL(GinkgoT()))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
@@ -181,7 +181,7 @@ var _ = Describe("Scrubbable integration", func() {
 		It("verifies encrypted shard-service shards", func() {
 			enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{7}, 32))
 			Expect(err).NotTo(HaveOccurred())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithEncryptor(enc))
+			svc := NewShardService(GinkgoT().TempDir(), nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
@@ -195,7 +195,7 @@ var _ = Describe("Scrubbable integration", func() {
 		It("verifies packed shards through shared shard service", func() {
 			enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{8}, 32))
 			Expect(err).NotTo(HaveOccurred())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithEncryptor(enc), WithShardPackThreshold(1024))
+			svc := NewShardService(GinkgoT().TempDir(), nil, WithEncryptor(enc), WithShardPackThreshold(1024), withTestWALEnc(GinkgoT(), enc))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("packed-payload"))).To(Succeed())
 

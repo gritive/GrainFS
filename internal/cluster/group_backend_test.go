@@ -49,7 +49,7 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	svc := NewShardService(dir+"/shards", nil)
+	svc := NewShardService(dir+"/shards", nil, withTestWAL(t))
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,

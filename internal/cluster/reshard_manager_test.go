@@ -360,7 +360,7 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 
 	// Wire a local-only ShardService (nil transport — no remote calls needed).
 	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
+	svc := NewShardService(shardDir, nil, withTestWAL(t))
 	backend.SetShardService(svc, []string{"self"})
 	backend.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 
@@ -432,7 +432,7 @@ func TestUpgradeObjectEC_PreservesTags(t *testing.T) {
 	backend := NewSingletonBackendForTest(t)
 
 	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
+	svc := NewShardService(shardDir, nil, withTestWAL(t))
 	backend.SetShardService(svc, []string{"self"})
 	backend.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 

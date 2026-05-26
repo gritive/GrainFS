@@ -649,7 +649,7 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBac
 			return nil, fmt.Errorf("no peers")
 		},
 	)
-	svc := NewShardService(dir+"/shards", nil)
+	svc := NewShardService(dir+"/shards", nil, withTestWAL(t))
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,

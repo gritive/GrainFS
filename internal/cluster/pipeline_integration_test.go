@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,7 +33,10 @@ var _ = Describe("Backend put pipeline integration", func() {
 	It("round-trips objects through the actor pipeline", func() {
 		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0xAB}, 32))
 		Expect(err).NotTo(HaveOccurred())
-		b.SetShardService(cluster.NewShardService(b.Root(), nil, cluster.WithEncryptor(enc)), []string{b.SelfAddr()})
+		dwal, err := datawal.Open(filepath.Join(b.Root(), "datawal"), enc)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = dwal.Close() })
+		b.SetShardService(cluster.NewShardService(b.Root(), nil, cluster.WithEncryptor(enc), cluster.WithDataWAL(dwal)), []string{b.SelfAddr()})
 
 		shardsDir := filepath.Join(b.Root(), "shards")
 		pipeline := putpipeline.New(putpipeline.Config{

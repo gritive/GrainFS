@@ -18,7 +18,7 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 	dir, err := os.MkdirTemp("", "shard-svc-test-*")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	svc := NewShardService(dir, nil)
+	svc := NewShardService(dir, nil, withTestWAL(t))
 	return svc, dir
 }
 

@@ -15,7 +15,7 @@ func TestGetObjectVersion_ReconstructsEC(t *testing.T) {
 
 	const selfAddr = "addr-self:9001"
 	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
+	svc := NewShardService(shardDir, nil, withTestWAL(t))
 	backend.SetShardService(svc, []string{selfAddr})
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1}) // 1+1 so single node works
 

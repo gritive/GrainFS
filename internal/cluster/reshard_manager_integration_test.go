@@ -56,7 +56,7 @@ var _ = Describe("Reshard manager integration", func() {
 		Expect(preTags).To(HaveLen(2))
 
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
-		b.SetShardService(NewShardService(b.root, nil), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, withTestWAL(GinkgoT())), []string{b.selfAddr, b.selfAddr, b.selfAddr})
 
 		Expect(b.ConvertObjectToEC(ctx, "bucket", key)).To(Succeed())
 

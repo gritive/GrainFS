@@ -83,7 +83,7 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	require.NoError(t, err)
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	svc := NewShardService(backend.root, nil)
+	svc := NewShardService(backend.root, nil, withTestWAL(t))
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})
@@ -96,6 +96,9 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 		}
 		if backend.coalesce != nil {
 			backend.coalesce.Stop()
+		}
+		if backend.shardSvc != nil {
+			_ = backend.shardSvc.Close()
 		}
 		close(stopApply)
 		node.Close()
