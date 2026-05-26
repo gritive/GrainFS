@@ -13,7 +13,9 @@ import (
 // write path too: with no WAL wired the stream write must be rejected rather
 // than silently writing a shard file the WAL never observed.
 func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
-	svc := NewShardService(t.TempDir(), transport.MustNewQUICTransport("test-cluster-psk")) // no WithDataWAL
+	tr := transport.MustNewQUICTransport("test-cluster-psk")
+	t.Cleanup(func() { _ = tr.Close() })
+	svc := NewShardService(t.TempDir(), tr) // no WithDataWAL
 
 	err := svc.WriteLocalShardStreamContext(context.Background(), "b", "k", 0, bytes.NewReader([]byte("payload")))
 	require.Error(t, err, "stream shard write without a WAL must be rejected")
@@ -23,7 +25,9 @@ func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
 // TestWriteLocalShardStream_WithWALReadable asserts the stream write goes
 // through the WAL/[]byte path and the shard is readable afterward.
 func TestWriteLocalShardStream_WithWALReadable(t *testing.T) {
-	svc := NewShardService(t.TempDir(), transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
+	tr := transport.MustNewQUICTransport("test-cluster-psk")
+	t.Cleanup(func() { _ = tr.Close() })
+	svc := NewShardService(t.TempDir(), tr, withTestWAL(t))
 
 	plaintext := []byte("streamed shard payload")
 	require.NoError(t, svc.WriteLocalShardStreamContext(context.Background(), "b", "k", 0, bytes.NewReader(plaintext)))

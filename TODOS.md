@@ -339,19 +339,15 @@ Work these in order. Do not run them in parallel.
   expiration 후에도 delete-marker semantics 적용. S3-parity 위해 NotFound 일관화
   필요.
 
-- [ ] **`SetShardService` leaks previous shard service's shard-pack actor [P1]**:
-  `internal/cluster/backend.go:383` `SetShardService` reassigns `b.shardSvc`
-  without closing the previous service. When called repeatedly (every test that
-  swaps the shard service via `configureEC`), the initial service from
-  `newTestDistributedBackend` is orphaned and its shard-pack actor goroutine
-  (spawned when a data WAL is wired, since #544) keeps running. This is the
-  root cause of the flaky `goleak.VerifyNone` in
-  `internal/cluster/ec_fix_integration_test.go` ("retrieves EC objects without
-  leaking goroutines after k-of-n succeeds"), which intermittently fails under
-  multi-package `go test ... -count=1` runs (`make test-unit` was green).
-  Fix: close the previous `b.shardSvc` before replacing it in `SetShardService`
-  (production calls it once, so old is nil; tests call it repeatedly). Needs its
-  own TDD cycle for a deterministic regression test. Follow-up branch.
+- [ ] **Cluster tests create QUIC transports without closing them [P2]**:
+  ~60 call sites in `internal/cluster/*_test.go` create
+  `transport.MustNewQUICTransport(...)` but never `Close()` it, so quic-go's
+  `Transport.listen` / `sendQueue.Run` / `Conn.run` goroutines live until process
+  exit. They accumulate across the cluster test binary and are the goroutines that
+  `ec_fix_integration_test.go`'s process-global `goleak.VerifyNone` was catching
+  (now scoped via `goleak.IgnoreCurrent` baseline). Hygiene cleanup: add a
+  `newTestTransport(t)` helper that registers `t.Cleanup(tr.Close)` and migrate the
+  call sites. Mechanical but large; not required for correctness.
 
 - [ ] **`TestBlobStoreAppendNoCompressKeepsAllocationBound` race-mode fail [P2]**:
   baseline에서도 동일하게 fail (allocations=4 vs ≤1 expected). `-race` 빌드에서
