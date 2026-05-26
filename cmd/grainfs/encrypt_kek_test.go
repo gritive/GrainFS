@@ -155,3 +155,44 @@ func TestCLI_Encrypt_KEK_Retire_ClusterNameMismatch(t *testing.T) {
 		t.Errorf("error should mention supplied name %q; got:\nout=%s\nerr=%v", "wrong-cluster", out, err)
 	}
 }
+
+// TestCLI_Encrypt_KEK_Prune_ClusterNameMismatch verifies that passing a
+// --cluster-name that does not match the actual node_id from /v1/cluster/status
+// is rejected BEFORE sending the prune request to /v1/encrypt/kek/prune.
+func TestCLI_Encrypt_KEK_Prune_ClusterNameMismatch(t *testing.T) {
+	resetEncryptKEKFlags(t)
+
+	var pruneCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mode":    "cluster",
+			"node_id": "real-cluster",
+		})
+	})
+	mux.HandleFunc("/v1/encrypt/kek/prune", func(w http.ResponseWriter, r *http.Request) {
+		pruneCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	out, err := runEncryptKEKCmd(t, "encrypt", "kek", "prune",
+		"--endpoint", sock,
+		"--version", "2",
+		"--confirm-name", "delete-permanently-2",
+		"--cluster-name", "wrong-cluster",
+	)
+	if err == nil {
+		t.Fatalf("expected error on cluster-name mismatch; output:\n%s", out)
+	}
+	if pruneCalled {
+		t.Error("prune endpoint must NOT be called when cluster-name mismatches")
+	}
+	combined := out + err.Error()
+	if !strings.Contains(combined, "real-cluster") {
+		t.Errorf("error should mention actual name %q; got:\nout=%s\nerr=%v", "real-cluster", out, err)
+	}
+	if !strings.Contains(combined, "wrong-cluster") {
+		t.Errorf("error should mention supplied name %q; got:\nout=%s\nerr=%v", "wrong-cluster", out, err)
+	}
+}

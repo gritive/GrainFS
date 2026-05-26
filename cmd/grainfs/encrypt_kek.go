@@ -67,6 +67,9 @@ Follow with 'encrypt kek prune' once all leases are zero.
 The --cluster-name flag must match the node_id shown by 'grainfs cluster status'.
 This is a second-factor safety check to prevent accidental cross-cluster operations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if retireVersion == 0 {
+			return fmt.Errorf("version must be >= 1; version 0 is reserved")
+		}
 		expectedConfirm := fmt.Sprintf("delete-permanently-%d", retireVersion)
 		if retireConfirm != expectedConfirm {
 			return fmt.Errorf("--confirm-name must be %q (got %q)", expectedConfirm, retireConfirm)
@@ -107,6 +110,9 @@ collects lease attestations from all voters as part of the raft proposal.
 The --cluster-name flag must match the node_id shown by 'grainfs cluster status'.
 This is a second-factor safety check to prevent accidental cross-cluster operations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if pruneVersion == 0 {
+			return fmt.Errorf("version must be >= 1; version 0 is reserved")
+		}
 		expectedConfirm := fmt.Sprintf("delete-permanently-%d", pruneVersion)
 		if pruneConfirm != expectedConfirm {
 			return fmt.Errorf("--confirm-name must be %q (got %q)", expectedConfirm, pruneConfirm)
