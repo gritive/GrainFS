@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GrainFS — one binary for object, file, block, and Iceberg storage</title>
+    <meta
+      name="description"
+      content="GrainFS is a single-binary distributed storage server for developer and data infrastructure teams that need S3, NFS/9P, NBD, and Iceberg REST Catalog interfaces over one storage layer."
+    />
+    <meta property="og:title" content="GrainFS" />
+    <meta
+      property="og:description"
+      content="One binary for object, file, block, and Iceberg storage."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://grainfs.gritive.com" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://grainfs.gritive.com" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #ffffff;
+        --ink: #171717;
+        --muted: #4d4d4d;
+        --soft: #666666;
+        --line: rgba(0, 0, 0, 0.08);
+        --panel: #fafafa;
+        --blue: #0a72ef;
+        --pink: #de1d8d;
+        --red: #ff5b4f;
+        --green: #0f9f6e;
+        --shadow-border: 0 0 0 1px rgba(0, 0, 0, 0.08);
+        --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 2px 2px rgba(0, 0, 0, 0.04),
+          0 8px 8px -8px rgba(0, 0, 0, 0.04), 0 0 0 1px #fafafa inset;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-feature-settings: "liga" 1;
+        text-rendering: optimizeLegibility;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .shell {
+        width: min(1180px, calc(100vw - 40px));
+        margin: 0 auto;
+      }
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        background: rgba(255, 255, 255, 0.86);
+        backdrop-filter: blur(16px);
+        box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
+      }
+
+      .nav-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 68px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+        letter-spacing: -0.04em;
+      }
+
+      .mark {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border-radius: 7px;
+        color: #fff;
+        background: var(--ink);
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      .nav-links a:hover {
+        color: var(--ink);
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 40px;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border-radius: 7px;
+        padding: 0 15px;
+        font-size: 14px;
+        font-weight: 500;
+        transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+      }
+
+      .button:hover {
+        transform: translateY(-1px);
+      }
+
+      .button.primary {
+        background: var(--ink);
+        color: #fff;
+      }
+
+      .button.secondary {
+        background: #fff;
+        color: var(--ink);
+        box-shadow: var(--shadow-border);
+      }
+
+      .hero {
+        position: relative;
+        overflow: hidden;
+        padding: 92px 0 80px;
+        text-align: center;
+      }
+
+      .hero::before {
+        position: absolute;
+        inset: 40px auto auto 50%;
+        width: min(760px, 90vw);
+        height: 300px;
+        content: "";
+        transform: translateX(-50%);
+        border-radius: 999px;
+        background: radial-gradient(circle at 20% 40%, rgba(10, 114, 239, 0.14), transparent 30%),
+          radial-gradient(circle at 60% 20%, rgba(222, 29, 141, 0.12), transparent 30%),
+          radial-gradient(circle at 80% 60%, rgba(255, 91, 79, 0.12), transparent 35%);
+        filter: blur(24px);
+        pointer-events: none;
+      }
+
+      .eyebrow,
+      .mono {
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 22px;
+        border-radius: 999px;
+        padding: 7px 10px;
+        background: #fff;
+        box-shadow: var(--shadow-border);
+        color: var(--muted);
+      }
+
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 0 4px rgba(15, 159, 110, 0.12);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        position: relative;
+        max-width: 930px;
+        margin: 0 auto;
+        font-size: clamp(50px, 8vw, 88px);
+        font-weight: 600;
+        letter-spacing: -0.066em;
+        line-height: 0.94;
+      }
+
+      .lead {
+        position: relative;
+        max-width: 760px;
+        margin: 28px auto 0;
+        color: var(--muted);
+        font-size: clamp(18px, 2vw, 22px);
+        line-height: 1.7;
+      }
+
+      .hero-actions {
+        position: relative;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 12px;
+        margin-top: 34px;
+      }
+
+      .terminal-card {
+        position: relative;
+        max-width: 860px;
+        margin: 58px auto 0;
+        overflow: hidden;
+        border-radius: 12px;
+        background: #050505;
+        color: #f5f5f5;
+        text-align: left;
+        box-shadow: 0 22px 80px rgba(0, 0, 0, 0.16), var(--shadow-border);
+      }
+
+      .terminal-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 12px 14px;
+        color: #a3a3a3;
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+
+      .lights {
+        display: flex;
+        gap: 6px;
+      }
+
+      .lights span {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #333;
+      }
+
+      .lights span:nth-child(1) { background: #ff5f57; }
+      .lights span:nth-child(2) { background: #ffbd2e; }
+      .lights span:nth-child(3) { background: #28c840; }
+
+      pre {
+        margin: 0;
+        overflow: auto;
+        padding: 22px;
+        font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 14px;
+        line-height: 1.8;
+      }
+
+      .muted-code { color: #8c8c8c; }
+      .blue { color: #65a9ff; }
+      .green { color: #55d187; }
+      .pink { color: #ff7ac3; }
+
+      .section {
+        padding: 78px 0;
+        border-top: 1px solid rgba(0, 0, 0, 0.08);
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 36px;
+        align-items: end;
+        margin-bottom: 32px;
+      }
+
+      .section h2 {
+        font-size: clamp(34px, 4vw, 54px);
+        font-weight: 600;
+        letter-spacing: -0.06em;
+        line-height: 1;
+      }
+
+      .section-head p {
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1.7;
+      }
+
+      .grid-4,
+      .grid-3,
+      .grid-2 {
+        display: grid;
+        gap: 14px;
+      }
+
+      .grid-4 { grid-template-columns: repeat(4, 1fr); }
+      .grid-3 { grid-template-columns: repeat(3, 1fr); }
+      .grid-2 { grid-template-columns: repeat(2, 1fr); }
+
+      .card {
+        min-height: 100%;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: var(--shadow-card);
+        padding: 24px;
+      }
+
+      .card h3 {
+        margin-top: 14px;
+        font-size: 23px;
+        font-weight: 600;
+        letter-spacing: -0.045em;
+        line-height: 1.15;
+      }
+
+      .card p,
+      .card li {
+        color: var(--muted);
+        font-size: 15.5px;
+        line-height: 1.65;
+      }
+
+      .card p {
+        margin-top: 12px;
+      }
+
+      .card ul {
+        display: grid;
+        gap: 9px;
+        margin: 18px 0 0;
+        padding-left: 18px;
+      }
+
+      .tag {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        border-radius: 999px;
+        padding: 5px 9px;
+        background: #ebf5ff;
+        color: #0068d6;
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .tag.pinktag { background: #fff0f8; color: #c31373; }
+      .tag.redtag { background: #fff1ef; color: #c93428; }
+      .tag.greentag { background: #ecfdf5; color: #047857; }
+
+      .surfaces {
+        display: grid;
+        grid-template-columns: 1fr 110px 1fr;
+        gap: 16px;
+        align-items: center;
+      }
+
+      .surface-list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .surface-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-radius: 10px;
+        padding: 15px 16px;
+        background: #fff;
+        box-shadow: var(--shadow-border);
+      }
+
+      .surface-item strong {
+        letter-spacing: -0.02em;
+      }
+
+      .surface-item span {
+        color: var(--soft);
+        font-size: 14px;
+      }
+
+      .core {
+        display: grid;
+        min-height: 210px;
+        place-items: center;
+        border-radius: 22px;
+        background: var(--ink);
+        color: #fff;
+        text-align: center;
+        box-shadow: var(--shadow-card);
+      }
+
+      .core strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 26px;
+        letter-spacing: -0.05em;
+      }
+
+      .metric {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .metric strong {
+        font-size: 44px;
+        font-weight: 600;
+        letter-spacing: -0.06em;
+        line-height: 1;
+      }
+
+      .metric span {
+        color: var(--soft);
+        font-size: 14px;
+      }
+
+      .note {
+        margin-top: 18px;
+        color: var(--soft);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .pricing {
+        align-items: stretch;
+      }
+
+      .price-card {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .price-card .button {
+        margin-top: auto;
+      }
+
+      .footer {
+        padding: 34px 0;
+        border-top: 1px solid rgba(0, 0, 0, 0.08);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .footer-inner {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .footer-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+      }
+
+      @media (max-width: 900px) {
+        .nav-links a:not(.button) {
+          display: none;
+        }
+
+        .section-head,
+        .surfaces,
+        .grid-4,
+        .grid-3,
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          padding-top: 64px;
+        }
+
+        h1 {
+          letter-spacing: -0.055em;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .shell {
+          width: min(100vw - 28px, 1180px);
+        }
+
+        .nav-inner {
+          height: 62px;
+        }
+
+        .button {
+          width: 100%;
+        }
+
+        .nav-links .button {
+          width: auto;
+        }
+
+        pre {
+          font-size: 12px;
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="nav" aria-label="Primary navigation">
+      <div class="shell nav-inner">
+        <a class="brand" href="#top" aria-label="GrainFS home">
+          <span class="mark">G</span>
+          <span>GrainFS</span>
+        </a>
+        <div class="nav-links">
+          <a href="#surfaces">Surfaces</a>
+          <a href="#teams">Teams</a>
+          <a href="#trust">Trust</a>
+          <a href="#plans">Plans</a>
+          <a class="button primary" href="https://github.com/gritive/GrainFS">GitHub</a>
+        </div>
+      </div>
+    </nav>
+
+    <main id="top">
+      <section class="hero">
+        <div class="shell">
+          <div class="eyebrow"><span class="dot"></span> Apache 2.0 storage infrastructure</div>
+          <h1>One binary for object, file, block, and Iceberg storage.</h1>
+          <p class="lead">
+            GrainFS is a single-binary distributed storage server for developer and data infrastructure teams that need
+            S3-compatible object storage, NFS/9P file access, Linux NBD volumes, and an Iceberg REST Catalog over one
+            storage layer.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/gritive/GrainFS#quick-start-2-5-minutes">Get started</a>
+            <a class="button secondary" href="https://github.com/gritive/GrainFS/tree/master/docs">Read the docs</a>
+          </div>
+
+          <div class="terminal-card" aria-label="GrainFS quick start terminal example">
+            <div class="terminal-top">
+              <div class="lights"><span></span><span></span><span></span></div>
+              <span>grainfs quick start</span>
+            </div>
+            <pre><code><span class="muted-code"># start a local S3-compatible storage server</span>
+<span class="blue">DATA_DIR</span>=./tmp
+make bin/grainfs
+<span class="blue">CLUSTER_KEY</span>=$(openssl rand -hex 32)
+./bin/grainfs serve --data "$DATA_DIR" --port 9000 --cluster-key "$CLUSTER_KEY"
+
+<span class="muted-code"># use it from standard S3 tooling</span>
+echo <span class="green">"hello grainfs"</span> &gt; file.txt
+aws --no-sign-request --endpoint-url http://localhost:9000 s3 cp file.txt s3://default/</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="surfaces">
+        <div class="shell">
+          <div class="section-head">
+            <h2>Four storage interfaces. One operational unit.</h2>
+            <p>
+              GrainFS exposes object, file, block, and table/catalog surfaces over shared storage and cluster contracts.
+              Protocol adapters translate client behavior without turning every interface into a separate system to run.
+            </p>
+          </div>
+          <div class="surfaces">
+            <div class="surface-list">
+              <div class="surface-item"><strong>S3-compatible HTTP API</strong><span>object</span></div>
+              <div class="surface-item"><strong>NFSv4 + 9P2000.L</strong><span>file</span></div>
+            </div>
+            <div class="core">
+              <div>
+                <span class="mono">single binary</span>
+                <strong>GrainFS</strong>
+              </div>
+            </div>
+            <div class="surface-list">
+              <div class="surface-item"><strong>Linux NBD volumes</strong><span>block</span></div>
+              <div class="surface-item"><strong>Iceberg REST Catalog</strong><span>lake</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="teams">
+        <div class="shell">
+          <div class="section-head">
+            <h2>Built for teams stitching storage systems together.</h2>
+            <p>
+              GrainFS starts with open-source adoption, then grows into paid operational tooling for teams that need
+              confidence around deployment, recovery, observability, and upgrades.
+            </p>
+          </div>
+          <div class="grid-3">
+            <article class="card">
+              <span class="tag">Data / AI platforms</span>
+              <h3>Local lake workflows without extra services.</h3>
+              <p>
+                Use S3-compatible storage and an Iceberg REST Catalog for DuckDB-oriented development, internal data
+                platform sandboxes, and lakehouse integration testing.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag pinktag">On-prem / edge / lab</span>
+              <h3>Small clusters with multiple protocol surfaces.</h3>
+              <p>
+                Run object, file, and block interfaces near private infrastructure, GPU boxes, lab devices, or edge
+                deployments where a heavyweight storage stack is too much.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag redtag">Developer infrastructure</span>
+              <h3>A storage protocol testbed in one binary.</h3>
+              <p>
+                Replace a pile of local fixtures with one storage server for S3, NFS/9P, NBD, and Iceberg client and
+                product integration tests.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="trust">
+        <div class="shell">
+          <div class="section-head">
+            <h2>Operator trust is the product boundary.</h2>
+            <p>
+              The roadmap focuses on safe defaults, explicit escape hatches, observable recovery, compatibility gates,
+              and operational runbooks — the parts teams need before trusting storage with real workloads.
+            </p>
+          </div>
+          <div class="grid-4">
+            <article class="card">
+              <span class="mono" style="color: var(--blue)">S3 PUT</span>
+              <div class="metric"><strong>548.30</strong><span>MiB/s</span></div>
+              <p>Same-host single-node warp run, 64 KiB objects, concurrency 32, signed requests, 0 errors.</p>
+            </article>
+            <article class="card">
+              <span class="mono" style="color: var(--pink)">S3 GET</span>
+              <div class="metric"><strong>1849.34</strong><span>MiB/s</span></div>
+              <p>Warm-read pass over objects kept from the preceding PUT pass on the local Apple M3 setup.</p>
+            </article>
+            <article class="card">
+              <span class="mono" style="color: var(--red)">Catalog mixed</span>
+              <div class="metric"><strong>60k+</strong><span>ops/s</span></div>
+              <p>Single-node Iceberg REST Catalog benchmark via warp iceberg, with 0 errors in the referenced run.</p>
+            </article>
+            <article class="card">
+              <span class="mono" style="color: var(--green)">License</span>
+              <div class="metric"><strong>Apache</strong><span>2.0</span></div>
+              <p>Permissive open-source core for local use, small clusters, protocol testing, and infrastructure adoption.</p>
+            </article>
+          </div>
+          <p class="note">
+            Benchmark claims should be read with their methodology: same host class, comparable durability, object size,
+            concurrency, warm/cold-cache rules, signed S3 requests, and raw artifacts. See the benchmark reference in the
+            GrainFS repository before publishing comparisons.
+          </p>
+        </div>
+      </section>
+
+      <section class="section" id="plans">
+        <div class="shell">
+          <div class="section-head">
+            <h2>Open core adoption. Paid operational confidence.</h2>
+            <p>
+              The business model starts with a strong open-source engine, then monetizes the control plane, enterprise
+              operating features, and support paths that production teams need.
+            </p>
+          </div>
+          <div class="grid-3 pricing">
+            <article class="card price-card">
+              <span class="tag greentag">Community</span>
+              <h3>Open-source engine</h3>
+              <ul>
+                <li>Single-node and small-cluster usage</li>
+                <li>S3, NFS/9P, NBD, and Iceberg surfaces</li>
+                <li>CLI, docs, runbooks, and benchmark references</li>
+              </ul>
+              <a class="button secondary" href="https://github.com/gritive/GrainFS">Start on GitHub</a>
+            </article>
+            <article class="card price-card">
+              <span class="tag">Pro</span>
+              <h3>Team control plane</h3>
+              <ul>
+                <li>Cluster dashboard and health inventory</li>
+                <li>Diagnostics, backup/restore workflows, upgrade checks</li>
+                <li>Slack/email support and operational guidance</li>
+              </ul>
+              <a class="button primary" href="mailto:hello@gritive.com?subject=GrainFS%20Pro">Talk to us</a>
+            </article>
+            <article class="card price-card">
+              <span class="tag pinktag">Enterprise</span>
+              <h3>Private infrastructure support</h3>
+              <ul>
+                <li>Air-gapped install and long-term support builds</li>
+                <li>SSO/RBAC, audit workflows, recovery assistance</li>
+                <li>Architecture review for on-prem, edge, and lab clusters</li>
+              </ul>
+              <a class="button secondary" href="mailto:hello@gritive.com?subject=GrainFS%20Enterprise">Contact sales</a>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="shell">
+          <div class="card" style="display: grid; gap: 18px; text-align: center; padding: 42px 24px">
+            <span class="mono" style="color: var(--soft)">grainfs.gritive.com</span>
+            <h2>Try GrainFS locally in minutes.</h2>
+            <p class="lead" style="margin-top: 0">
+              Start with the open-source binary, validate your storage workflow, then bring the control-plane and
+              enterprise operating model when the workload matters.
+            </p>
+            <div class="hero-actions" style="margin-top: 6px">
+              <a class="button primary" href="https://github.com/gritive/GrainFS#quick-start-2-5-minutes">Quick start</a>
+              <a class="button secondary" href="https://github.com/gritive/GrainFS/tree/master/docs/reference">Compatibility docs</a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="shell footer-inner">
+        <div>© 2026 Gritive / GrainFS. Apache 2.0 open-source storage infrastructure.</div>
+        <div class="footer-links">
+          <a href="https://github.com/gritive/GrainFS">GitHub</a>
+          <a href="https://github.com/gritive/GrainFS/tree/master/docs">Docs</a>
+          <a href="mailto:hello@gritive.com">Contact</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
