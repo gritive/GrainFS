@@ -1036,6 +1036,10 @@ grainfs_kek_seal_count{kek_version="<active>"} >= 100000000   # warn
 grainfs_kek_seal_count{kek_version="<active>"} >= 1000000000  # alert
 ```
 
+`grainfs_kek_seal_count` is collected live from each node's `/metrics` endpoint
+at scrape time, so these alerts fire autonomously without any polling of the
+`grainfs encrypt kek status` admin endpoint.
+
 DEK rotation does not block client I/O: it adds a new DEK generation in parallel
 and new seals immediately use it, while existing objects remain readable under
 their original generation.

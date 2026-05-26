@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/server"
@@ -319,6 +320,14 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 	}
 	if err := state.metaRaft.Start(ctx, preApply); err != nil {
 		return fmt.Errorf("meta-raft start: %w", err)
+	}
+	// Register the live KEK Prometheus collector now that state.dekKeeper is
+	// final (rebuildDEKKeeperFromRestore may have swapped it during preApply).
+	// The collector reads the keeper + lease tracker at scrape time, so
+	// grainfs_kek_seal_count is scrape-fresh on /metrics. No-op when encryption
+	// is disabled (nil keeper).
+	if state.dekKeeper != nil {
+		metrics.RegisterKEKCollector(state.dekKeeper, state.kekLeaseTracker)
 	}
 	// previous.key cleanup goroutine — deletes keys.d/previous.key after
 	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
