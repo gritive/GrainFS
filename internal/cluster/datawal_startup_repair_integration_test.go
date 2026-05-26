@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage/datawal"
@@ -159,6 +161,104 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.
 		ShardIdx:  cand.ShardIdx,
 	}))
 
+	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, content, got)
+}
+
+// TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd proves the full
+// continuous-scrub loop: a real chunked PutObject writes per-segment EC shards,
+// one segment shard is lost on disk, the periodic ShardPlacementMonitor.Scan
+// DETECTS it missing (firing onMissing with an ECShardSegment target carrying the
+// authoritative ShardKey/Placement), the repair callback (mirroring the Task 4
+// serveruntime boot wiring) RECONSTRUCTS it via RepairShardLocalWithIncident, and
+// GetObject then returns the original bytes — proving end-to-end the scrub monitor
+// heals a lost segment shard with no startup-WAL involvement.
+func TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd(t *testing.T) {
+	shardDir := t.TempDir()
+	svc := NewShardService(shardDir, nil, withTestWAL(t))
+
+	backend := NewSingletonBackendForTest(t)
+	const selfAddr = "self"
+	backend.shardSvc = svc
+	backend.selfAddr = selfAddr
+	backend.allNodes = []string{selfAddr, selfAddr} // 1+1, all shards local
+	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
+	// Small chunk size flips both the chunked-PUT routing threshold and the
+	// SegmentWriter chunker. With k=1 the per-segment data shard ≈ chunkSize.
+	const chunkSize = 2 << 20
+	backend.chunkedPutChunkSize = chunkSize
+	// ShardGroupSource is required for putObjectChunked. Two "self" peers ⇒
+	// DesiredECConfigForGroup == {1,1}, group IsActive, every shard index maps to
+	// "self" (all local).
+	backend.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-0": {ID: "group-0", PeerIDs: []string{selfAddr, selfAddr}},
+	}})
+
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
+	// 3 MiB > 2 MiB chunk ⇒ 2 segments, each EC-split into 2 shards (k=1,m=1).
+	content := bytes.Repeat([]byte("scrub-monitor-segment-repair-"), (3<<20)/29+1)
+	obj, err := backend.PutObject(context.Background(), "b", "obj", bytes.NewReader(content), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	// The chunked PUT EC-wrote real per-segment shards on disk. Pick one and
+	// remove its shard 0 so the monitor must classify it as locally missing.
+	segShardKey := firstSegmentShardKeyOnDisk(t, svc)
+	require.Contains(t, segShardKey, "/segments/", "must target the segment path, not object-version")
+	_, err = os.Stat(svc.getShardPath("b", segShardKey, 0))
+	require.NoError(t, err, "segment shard 0 must exist before removal")
+	require.NoError(t, os.Remove(svc.getShardPath("b", segShardKey, 0)))
+
+	// Construct the monitor over the SAME FSM the chunked PutObject wrote object
+	// meta into (backend.fsm), with the backend as resolver and shardSvc.
+	monitor := NewShardPlacementMonitor(backend.FSMRef(), backend, svc, selfAddr, time.Second)
+
+	var reported []ECShardScanTarget
+	var reportedIdx []int
+	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
+		reported = append(reported, target)
+		reportedIdx = append(reportedIdx, shardIdx)
+		// Mirror the Task 4 serveruntime boot wiring (boot_phases_scrubber.go):
+		// segment/coalesced targets repair off the authoritative ShardKey +
+		// Placement. Recorder is nil in this focused test.
+		repairReq := IncidentRepairRequest{
+			Bucket:    target.Bucket,
+			Key:       target.ObjectKey,
+			VersionID: target.VersionID,
+			ShardIdx:  shardIdx,
+		}
+		switch target.Kind {
+		case ECShardSegment, ECShardCoalesced:
+			repairReq.ShardKey = target.ShardKey
+			repairReq.Placement = target.Placement
+		}
+		require.NoError(t, backend.RepairShardLocalWithIncident(context.Background(), repairReq))
+	})
+
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+
+	// Exactly the one removed segment shard must be detected missing — every other
+	// segment shard is still on disk, so a duplicate/extra fire would be a bug.
+	assert.Equal(t, 1, missing)
+	require.Len(t, reported, 1)
+	assert.Equal(t, []int{0}, reportedIdx)
+	assert.Equal(t, ECShardSegment, reported[0].Kind)
+	assert.Equal(t, "b", reported[0].Bucket)
+	assert.Equal(t, "obj", reported[0].ObjectKey)
+	assert.Equal(t, segShardKey, reported[0].ShardKey)
+	assert.Contains(t, reported[0].ShardKey, "/segments/")
+	require.NotEmpty(t, reported[0].Placement.Nodes)
+
+	// The repair callback reconstructed shard 0; it must be back on disk.
+	_, err = os.Stat(svc.getShardPath("b", segShardKey, 0))
+	require.NoError(t, err, "segment shard 0 must exist again after repair")
+
+	// End-to-end proof: the object reads back byte-for-byte after the scrub repair.
 	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
 	require.NoError(t, err)
 	defer rc.Close()
