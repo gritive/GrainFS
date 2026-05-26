@@ -68,22 +68,42 @@ func (t *RefTable) RemoveRef(m ManifestID, c ChunkID, now time.Time) {
 	}
 }
 
+// GCCandidate is a chunk eligible for garbage collection by the cache's local
+// conditions, paired with the t_zero at which it became unreferenced. The caller
+// MUST re-check, immediately before deleting, that the chunk's current tombstone
+// still carries this same TZero: a chunk can be re-referenced and unreferenced
+// again between the scan and the delete, resetting its retention window. Deleting
+// on a stale TZero would delete a chunk whose new window has not yet elapsed
+// (PITR data loss).
+type GCCandidate struct {
+	ChunkID ChunkID
+	TZero   time.Time
+}
+
 // GCCandidates returns chunks meeting the cache's two LOCAL garbage-collection
-// conditions: refcount == 0 AND (now - t_zero) > window. Tombstoned chunks are
-// exactly the refcount==0 chunks, so iteration stays proportional to the
-// unreferenced set (incremental-friendly).
+// conditions: refcount == 0 AND (now - t_zero) > window. Each candidate carries
+// its t_zero so the caller can detect re-reference churn (see GCCandidate).
+//
+// Tombstoned chunks are the once-referenced, currently-unreferenced chunks
+// (refcount == 0); a chunk that was never referenced has refcount 0 but no
+// tombstone and never appears here. The tombstone set is therefore NOT the sole
+// GC source: chunks unreferenced before the last Rebuild are invisible to this
+// method, and the authoritative orphan walk (spec OrphanSegmentWalkable) is what
+// catches those. Use this set for retention-window timing of newly-unreferenced
+// chunks; iteration then stays proportional to that set (incremental-friendly).
 //
 // This is NOT sufficient for physical deletion. The caller (scrubber) MUST
 // re-verify the third condition — absence from the authoritative manifest set —
-// immediately before deleting, because this derived cache may be stale. See spec
+// AND the TZero generation (see GCCandidate) immediately before deleting, because
+// this derived cache may be stale. See spec
 // "GC = 보존 윈도우 밖 AND cache ref==0 AND authoritative manifest absence".
 //
 // The returned slice order is unspecified (map iteration).
-func (t *RefTable) GCCandidates(now time.Time, window time.Duration) []ChunkID {
-	var out []ChunkID
+func (t *RefTable) GCCandidates(now time.Time, window time.Duration) []GCCandidate {
+	var out []GCCandidate
 	for c, tZero := range t.tombstones {
 		if now.Sub(tZero) > window {
-			out = append(out, c)
+			out = append(out, GCCandidate{ChunkID: c, TZero: tZero})
 		}
 	}
 	return out
