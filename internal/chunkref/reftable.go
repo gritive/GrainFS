@@ -49,6 +49,20 @@ func (t *RefTable) Has(m ManifestID, c ChunkID) bool {
 	return ok
 }
 
+// TombstoneTime returns the current t_zero for chunk c (the time it became
+// unreferenced) and true if c is currently tombstoned. Returns the zero Time
+// and false otherwise (c is referenced, or was never tombstoned).
+//
+// The scrubber pairs this with GCCandidate.TZero immediately before physical
+// deletion: if the current t_zero differs from the candidate's TZero, c was
+// re-referenced and unreferenced again between the scan and the delete, its
+// retention window has reset, and the candidate is stale (skip it to avoid PITR
+// data loss).
+func (t *RefTable) TombstoneTime(c ChunkID) (time.Time, bool) {
+	tZero, ok := t.tombstones[c]
+	return tZero, ok
+}
+
 // RemoveRef idempotently removes manifest m's reference to chunk c. Removing a
 // non-existent (m, c) pair is a no-op. When the removal drops c's refcount to 0,
 // a tombstone is recorded with t_zero = now, marking when the chunk became
@@ -71,8 +85,9 @@ func (t *RefTable) RemoveRef(m ManifestID, c ChunkID, now time.Time) {
 // GCCandidate is a chunk eligible for garbage collection by the cache's local
 // conditions, paired with the t_zero at which it became unreferenced. The caller
 // MUST re-check, immediately before deleting, that the chunk's current tombstone
-// still carries this same TZero: a chunk can be re-referenced and unreferenced
-// again between the scan and the delete, resetting its retention window. Deleting
+// still carries this same TZero (compare against RefTable.TombstoneTime): a
+// chunk can be re-referenced and unreferenced again between the scan and the
+// delete, resetting its retention window. Deleting
 // on a stale TZero would delete a chunk whose new window has not yet elapsed
 // (PITR data loss).
 type GCCandidate struct {

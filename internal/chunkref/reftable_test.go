@@ -180,6 +180,36 @@ func TestGCCandidatesPartialWindow(t *testing.T) {
 	}
 }
 
+func TestTombstoneTimeMatchesCandidate(t *testing.T) {
+	tbl := NewRefTable()
+	m := ManifestID{Domain: DomainObjectVersion, VersionID: "v1"}
+	c := ChunkID("chunk-1")
+	tZero := time.Unix(1000, 0)
+
+	if _, ok := tbl.TombstoneTime(c); ok {
+		t.Fatalf("TombstoneTime on never-added chunk returned ok=true")
+	}
+
+	tbl.AddRef(m, c)
+	if _, ok := tbl.TombstoneTime(c); ok {
+		t.Fatalf("TombstoneTime on referenced chunk returned ok=true")
+	}
+
+	tbl.RemoveRef(m, c, tZero)
+	got, ok := tbl.TombstoneTime(c)
+	if !ok || !got.Equal(tZero) {
+		t.Fatalf("TombstoneTime = (%v, %v), want (%v, true)", got, ok, tZero)
+	}
+
+	// Re-reference resets the tombstone: the current generation diverges from any
+	// candidate captured before the re-reference, so the stale candidate is
+	// detectable.
+	tbl.AddRef(m, c)
+	if _, ok := tbl.TombstoneTime(c); ok {
+		t.Fatalf("TombstoneTime after re-AddRef returned ok=true (tombstone should be evicted)")
+	}
+}
+
 func TestRebuildDeduplicatesIntraManifestChunks(t *testing.T) {
 	m := ManifestID{Domain: DomainObjectVersion, VersionID: "v1"}
 	c := ChunkID("chunk-dup")
