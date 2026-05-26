@@ -82,6 +82,9 @@ const (
 	MetaCmdTypeDEKReplicatedRotate          MetaCmdType = 72
 	MetaCmdTypeInviteMint                   MetaCmdType = 73
 	MetaCmdTypeInviteConsume                MetaCmdType = 74
+	MetaCmdTypeRegisterPendingLearner       MetaCmdType = 75
+	MetaCmdTypePromoteMember                MetaCmdType = 76
+	MetaCmdTypeRevokePeer                   MetaCmdType = 77
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -160,6 +163,9 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeDEKReplicatedRotate:          "DEKReplicatedRotate",
 	MetaCmdTypeInviteMint:                   "InviteMint",
 	MetaCmdTypeInviteConsume:                "InviteConsume",
+	MetaCmdTypeRegisterPendingLearner:       "RegisterPendingLearner",
+	MetaCmdTypePromoteMember:                "PromoteMember",
+	MetaCmdTypeRevokePeer:                   "RevokePeer",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -238,6 +244,9 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"DEKReplicatedRotate":          MetaCmdTypeDEKReplicatedRotate,
 	"InviteMint":                   MetaCmdTypeInviteMint,
 	"InviteConsume":                MetaCmdTypeInviteConsume,
+	"RegisterPendingLearner":       MetaCmdTypeRegisterPendingLearner,
+	"PromoteMember":                MetaCmdTypePromoteMember,
+	"RevokePeer":                   MetaCmdTypeRevokePeer,
 }
 
 func (v MetaCmdType) String() string {

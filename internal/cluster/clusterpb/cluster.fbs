@@ -515,6 +515,9 @@ enum MetaCmdType : uint8 {
   DEKReplicatedRotate          = 72, // DEK: leader-generated KEK-wrapped DEK bytes replicated to all nodes (Phase D)
   InviteMint                   = 73, // zero-CA: mint a single-use invite token (stores pub key + TTL)
   InviteConsume                = 74, // zero-CA: consume (invalidate) a minted invite after join
+  RegisterPendingLearner       = 75, // zero-CA: register a pending-learner peer (node-id, SPKI, addr)
+  PromoteMember                = 76, // zero-CA: promote a pending-learner to voting member
+  RevokePeer                   = 77, // zero-CA: remove a peer + denylist its SPKI
 }
 
 table MetaNodeEntry {
@@ -781,6 +784,19 @@ table MetaInviteMintCmd {
 }
 table MetaInviteConsumeCmd {
   id:string;
+}
+
+// zero-CA: peer registry commands (slots 75-77).
+table MetaRegisterPendingLearnerCmd {
+  node_id:string;
+  spki:[ubyte];     // 32 bytes
+  address:string;
+}
+table MetaPromoteMemberCmd {
+  node_id:string;
+}
+table MetaRevokePeerCmd {
+  node_id:string;
 }
 
 // NFSv4 multi-export registry. Per design doc D2/D3/D5.
