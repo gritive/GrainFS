@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.340.0] - 2026-05-26
+
+### Changed
+
+- **Backend integration coverage is now grouped by Ginkgo spec area.** Cluster append, bucket, object, EC, multipart, coalesce, scrubber, snapshot, versioning, quarantine, reshard, and pipeline coverage moved out of monolithic/assert-style tests into focused Ginkgo integration specs.
+- **Object write placement fast-path tests now cover the shared placement plan shape.** Fast-path and coalesce coverage now exercise placement decisions through the same plan boundary used by the write path.
+
+### Fixed
+
+- **Backend placement lint is clean again.** Removed ineffective placement-group assignments and an unused topology-health helper left behind during the placement-plan split.
+
 ## [0.0.339.1] - 2026-05-26
 
 ### Performance
