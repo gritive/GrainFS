@@ -813,22 +813,13 @@ func (f *FSM) applyAppendObjectFromCmd(txn *badger.Txn, data []byte) error {
 		return err
 	}
 
-	out, err := marshalObjectMeta(updated)
-	if err != nil {
-		return fmt.Errorf("marshal updated objectMeta: %w", err)
-	}
-	// Dual-write: versioned key + latest pointer (when VersionID supplied)
-	// alongside the legacy ObjectMetaKey, matching applyPutObjectMeta so
-	// HeadObject returns a populated obj.VersionID.
-	if cmd.VersionID != "" {
-		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
-			return err
-		}
-		if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
-			return err
-		}
-	}
-	return f.setValue(txn, metaKey, out)
+	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
+		Bucket:    cmd.Bucket,
+		Key:       cmd.Key,
+		VersionID: cmd.VersionID,
+		Meta:      updated,
+		Policy:    objectMetaPersistencePublishLatest,
+	})
 }
 
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
@@ -920,20 +911,13 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(txn *badger.Txn, data []byte) error {
 	if err != nil {
 		return err
 	}
-	out, err := marshalObjectMeta(updated)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	// Dual-write parallel to applyAppendObject: keep legacy key in sync
-	// with the versioned key so any code path that reads either sees the
-	// post-coalesce state.
-	if versionID != "" {
-		if err := f.setValue(txn, metaKey, out); err != nil {
-			return err
-		}
-		return f.setValue(txn, legacyKey, out)
-	}
-	return f.setValue(txn, legacyKey, out)
+	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
+		Bucket:    cmd.Bucket,
+		Key:       cmd.Key,
+		VersionID: versionID,
+		Meta:      updated,
+		Policy:    objectMetaPersistenceMirrorVersion,
+	})
 }
 
 // pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.
