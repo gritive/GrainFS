@@ -910,42 +910,17 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(txn *badger.Txn, data []byte) error {
 		return err
 	}
 
-	// Idempotency: same CoalescedID already applied → no-op.
-	for _, c := range existing.Coalesced {
-		if c.CoalescedID == cmd.CoalescedID {
-			return nil
-		}
+	updated, result, err := applyCoalesceSegmentsTransition(existing, cmd)
+	if result.Noop {
+		return nil
 	}
-
-	// Cap depth — stall coalesce when the chain grows unbounded.
-	if len(existing.Coalesced) >= MaxCoalescedEntries {
+	if result.CoalescedEntriesAtCap {
 		metrics.AppendCoalescedEntriesAtCap.Inc()
-		return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
 	}
-
-	// Remove consumed segments by exact BlobID match.
-	consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
-	for _, id := range cmd.ConsumedSegmentIDs {
-		consumed[id] = true
+	if err != nil {
+		return err
 	}
-	kept := existing.Segments[:0]
-	for _, s := range existing.Segments {
-		if !consumed[s.BlobID] {
-			kept = append(kept, s)
-		}
-	}
-	existing.Segments = kept
-	existing.Coalesced = append(existing.Coalesced, CoalescedShardRef{
-		CoalescedID: cmd.CoalescedID,
-		Size:        cmd.Size,
-		ETag:        cmd.ETag,
-		ShardKey:    cmd.ShardKey,
-		Version:     1,
-		ECData:      cmd.ECData,
-		ECParity:    cmd.ECParity,
-		NodeIDs:     append([]string(nil), cmd.Placement...),
-	})
-	out, err := marshalObjectMeta(existing)
+	out, err := marshalObjectMeta(updated)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
