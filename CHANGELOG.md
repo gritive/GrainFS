@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.343.0] - 2026-05-26
+
+### Removed
+
+- **Removed the `grainfs recover` and `grainfs doctor` commands.** Both shipped a partial, misleading surface. `doctor` only checked that directories existed (its BadgerDB check was a TODO stub that passed on a corrupt DB), and `recover cluster` rebuilt **metadata Raft state only** into a fresh single node — not object data — while its name and help implied full cluster recovery. Shipping a half-baked disaster-recovery surface is worse than none, so both are removed now; a proper recovery design will return after failure-domain boundaries are defined. The `recover` verb is intentionally parked until then. **Breaking:** operators who scripted `grainfs recover` / `recover cluster` / `grainfs doctor` will get an unknown-command error. There is no transitional flag. Object data durability is unchanged (handled by erasure coding + the storage backend); for point-in-time user-data recovery use volume snapshots (`grainfs volume rollback`) or S3 object versioning. A metadata-quorum-lost cluster has no built-in CLI recovery in the meantime — restore from backup or rebuild.
+
 ## [0.0.342.0] - 2026-05-26
 
 ### Changed

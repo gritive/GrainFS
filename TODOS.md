@@ -385,6 +385,7 @@ Work these in order. Do not run them in parallel.
 
 ## Parked
 
+- [ ] **Redesign disaster-recovery surface.** `grainfs recover` and `grainfs doctor` were removed in v0.0.343.0 (shipped partial/misleading). Before reintroducing: (1) define failure domains explicitly (rack/AZ/region); (2) name commands by what they actually do (`recover metadata` vs `recover data`, never bare `recover cluster`); (3) `doctor` must do real integrity checks, not directory-existence stubs; (4) RPO + data-vs-metadata semantics must be in help text. Until then the `recover` verb stays unbound.
 - [ ] Redis protocol.
 - [ ] TSDB.
 - [ ] 9P/NFS shared write-back layer.

@@ -81,12 +81,6 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
   ```
 ### Safety Checks
 
-- [ ] **Run diagnostics**:
-  ```bash
-  grainfs doctor --data $GRAINFS_DATA_DIR
-  ```
-  Expected: All checks pass (overall_health: pass)
-
 - [ ] **Verify existing data** (if migrating):
   ```bash
   ls -la $GRAINFS_DATA_DIR/badger
@@ -372,12 +366,6 @@ AWS_DEFAULT_REGION=us-east-1 \
 ```
 Expected: No error, bucket list returned (may be empty)
 
-**Diagnostics check:**
-```bash
-grainfs doctor --data $GRAINFS_DATA_DIR
-```
-Expected: Overall health: pass
-
 **Verify metrics:**
 ```bash
 curl http://localhost:9000/metrics | grep grainfs_up
@@ -471,8 +459,10 @@ export ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
 **`--force` semantics**: bypasses pre-flight only. It does not bypass the
 engine. Use it when the operator has confirmed the peer is permanently lost and
 the joint-consensus commit can still progress, such as 3-of-5 alive while
-removing 1 dead voter. For clusters that have lost quorum, use `recover cluster`
-(offline snapshot recovery) instead of `remove-peer --force`.
+removing 1 dead voter. Clusters that have lost quorum cannot be recovered with
+`remove-peer --force`; there is currently no built-in offline recovery command
+(the previous `recover cluster` flow was removed in v0.0.343.0 pending a redesign
+around failure-domain boundaries) — restore from a backup or rebuild.
 
 **Removing the leader**: the engine commits the joint Cnew, then the leader
 steps down via commit-time wakeup. The remaining voters elect a new leader. The
@@ -569,7 +559,7 @@ ss -s
 **Fix:**
 - Check disk saturation (move to faster storage)
 - Check network bandwidth
-- Check for lock contention (grainfs doctor)
+- Check for lock contention
 
 ### Issue: AppendObject HTTP 503 SlowDown
 

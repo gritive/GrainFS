@@ -91,15 +91,6 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 		backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
 		log.Warn().Strs("reasons", startupResult.ReadOnlyReasons).Msg("badger startup recovery read-only gate enabled")
 	}
-	if marker, err := cluster.LoadRecoverClusterMarker(cfg.DataDir); err != nil {
-		return fmt.Errorf("load recovery marker: %w", err)
-	} else if marker != nil && !marker.Writable {
-		recoveryReadOnly = true
-		if !startupReadOnly {
-			backend = storage.NewRecoveryWriteGate(backend, storage.ErrRecoveryWriteDisabled)
-		}
-		log.Warn().Str("marker", filepath.Join(cfg.DataDir, cluster.RecoverClusterMarkerPath)).Msg("recovered cluster write gate enabled")
-	}
 	state.backend = backend
 	state.recoveryReadOnly = recoveryReadOnly
 
