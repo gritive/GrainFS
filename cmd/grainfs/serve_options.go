@@ -95,7 +95,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.PprofPort, _ = cmd.Flags().GetInt("pprof-port")
 
 	// Misc / hidden / deprecated.
-	opts.DedupEnabled, _ = cmd.Flags().GetBool("dedup")
 	opts.BadgerValueThreshold, _ = cmd.Flags().GetInt64("badger-value-threshold")
 	opts.StrictVlogRegistry, _ = cmd.Flags().GetBool("strict-vlog-registry")
 	opts.VlogSmokeDefer, _ = cmd.Flags().GetDuration("vlog-smoke-defer")

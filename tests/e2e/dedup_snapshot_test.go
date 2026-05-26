@@ -9,7 +9,7 @@ import (
 )
 
 // Dedup snapshot specs validate the full dedup+snapshot lifecycle via the
-// grainfs CLI against an isolated server with --dedup=true.
+// grainfs CLI against an isolated server (dedup is always enabled).
 //
 // Historical regression target: before PR-B, the second CreateSnapshot under
 // dedup returned "dedup + snapshots not supported in Phase A". This test
@@ -28,7 +28,7 @@ var _ = ginkgo.Describe("Dedup snapshots", func() {
 		var dataDir string
 
 		ginkgo.BeforeEach(func() {
-			dataDir, _, _ = startTestServer(ginkgo.GinkgoTB(), "--dedup=true")
+			dataDir, _, _ = startTestServer(ginkgo.GinkgoTB())
 		})
 
 		ginkgo.It("supports create, list, rollback, and delete", func() {

@@ -295,7 +295,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}
 
-	volMgr, blockCache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{DedupEnabled: cfg.DedupEnabled, BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)
+	volMgr, blockCache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)
 	if err != nil {
 		return fmt.Errorf("volume manager: %w", err)
 	}

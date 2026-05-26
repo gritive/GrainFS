@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.341.0] - 2026-05-26
+
+### Removed
+
+- **Removed the `--dedup` serve flag. Dedup is now always enabled.** The flag was deprecated and hidden, but its value was still honored at boot, so `--dedup=false` could silently disable block-level deduplication. That path is gone: every server now starts with the dedup BadgerDB index at `{data}/dedup/` (the optional-role fallback that disables dedup when its role directory can't be opened is unchanged). **Breaking:** operators who still pass `--dedup=true` or `--dedup=false` in startup scripts will hit an `unknown flag` error on boot — remove the argument before upgrading.
+
 ## [0.0.340.0] - 2026-05-26
 
 ### Changed

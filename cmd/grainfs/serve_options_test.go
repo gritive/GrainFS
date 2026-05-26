@@ -84,7 +84,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--otel-endpoint", "localhost:4318",
 		"--otel-sample-rate", "0.42",
 		"--pprof-port", "6060",
-		"--dedup=false",
 		"--raft-heartbeat-interval", "37ms",
 		"--raft-election-timeout", "41ms",
 		"--quic-mux-pool", "17",
@@ -176,7 +175,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "/tmp/sentinel-data", opts.VlogOpts.DataDir, "VlogOpts.DataDir threads through DataDir")
 
 	// Misc / hidden / deprecated.
-	require.False(t, opts.DedupEnabled)
 	require.Equal(t, int64(12345), opts.BadgerValueThreshold)
 	require.True(t, opts.StrictVlogRegistry)
 	require.Equal(t, "149ms", opts.VlogSmokeDefer.String())

@@ -64,7 +64,6 @@ func optionsToConfig(
 	cfg.HealReceiptWindow = opts.HealReceiptWindow
 
 	cfg.LifecycleInterval = opts.LifecycleInterval
-	cfg.DedupEnabled = opts.DedupEnabled
 	cfg.BlockCacheSize = opts.BlockCacheSize
 
 	cfg.PublicURL = opts.PublicURL

@@ -113,22 +113,13 @@ var _ = ginkgo.Describe("Volume scrub", func() {
 	registerScrubTarget := func(name string, mk volumeScrubFactory) {
 		ginkgo.Context("Scrub "+name, func() {
 			ginkgo.It("is a no-op on a healthy volume", func() {
-				runVolumeScrubHealthyNoop(ginkgo.GinkgoTB(), mk, false)
-			})
-			ginkgo.It("is a no-op on a healthy dedup volume", func() {
-				runVolumeScrubHealthyNoop(ginkgo.GinkgoTB(), mk, true)
+				runVolumeScrubHealthyNoop(ginkgo.GinkgoTB(), mk)
 			})
 			ginkgo.It("detects corruption in dry-run mode", func() {
-				runVolumeScrubDryRunDetectsCorruption(ginkgo.GinkgoTB(), mk, false)
-			})
-			ginkgo.It("detects corruption in dry-run mode for dedup", func() {
-				runVolumeScrubDryRunDetectsCorruption(ginkgo.GinkgoTB(), mk, true)
+				runVolumeScrubDryRunDetectsCorruption(ginkgo.GinkgoTB(), mk)
 			})
 			ginkgo.It("repairs or reports corruption according to target shape", func() {
-				runVolumeScrubRepairBehavior(ginkgo.GinkgoTB(), mk, false)
-			})
-			ginkgo.It("repairs or reports dedup corruption according to target shape", func() {
-				runVolumeScrubRepairBehavior(ginkgo.GinkgoTB(), mk, true)
+				runVolumeScrubRepairBehavior(ginkgo.GinkgoTB(), mk)
 			})
 			ginkgo.It("supports admin trigger with zero scrub interval", func() {
 				runVolumeScrubAdminTriggerWorksAtZeroInterval(ginkgo.GinkgoTB(), mk)
@@ -176,8 +167,9 @@ func runFindVolumeBlockOnDiskShardLayout(t testing.TB) {
 }
 
 // volumeScrubFactory builds a fresh per-case fixture with the given grainfs
-// serve args. Each scrub case needs its own dedup/scrub-interval, so the case
-// set is parametrised on a fixture factory rather than a single s3Target.
+// serve args. Each scrub case needs its own serve args (e.g. scrub-interval),
+// so the case set is parametrised on a fixture factory rather than a single
+// s3Target.
 type volumeScrubFactory func(t testing.TB, args ...string) s3Target
 
 // scrubDataDir returns the dataDir to drive CLI commands against tgt for the
@@ -223,16 +215,11 @@ func truncateAVolumeBlock(t testing.TB, tgt s3Target, vol string, blockNum int) 
 // expectations per fixture: single → Unrepairable=1 (no peer), cluster →
 // Repaired=1 (EC peer-pull). MultiNodeRepair (formerly its own test) is
 // absorbed by RepairBehavior's cluster branch.
-func runVolumeScrubHealthyNoop(t testing.TB, mk volumeScrubFactory, dedup bool) {
+func runVolumeScrubHealthyNoop(t testing.TB, mk volumeScrubFactory) {
 	t.Helper()
 
-	dedupArg := "--dedup=false"
 	vol := "vs1"
-	if dedup {
-		dedupArg = "--dedup=true"
-		vol = "vsd1"
-	}
-	tgt := mk(t, dedupArg)
+	tgt := mk(t)
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
 	gomega.Expect(code).To(gomega.Equal(0), out)
@@ -244,16 +231,11 @@ func runVolumeScrubHealthyNoop(t testing.TB, mk volumeScrubFactory, dedup bool) 
 	gomega.Expect(out).To(gomega.ContainSubstring("Detected=0"), "got:\n%s", out)
 }
 
-func runVolumeScrubDryRunDetectsCorruption(t testing.TB, mk volumeScrubFactory, dedup bool) {
+func runVolumeScrubDryRunDetectsCorruption(t testing.TB, mk volumeScrubFactory) {
 	t.Helper()
 
-	dedupArg := "--dedup=false"
 	vol := "vs2"
-	if dedup {
-		dedupArg = "--dedup=true"
-		vol = "vsd2"
-	}
-	tgt := mk(t, dedupArg, "--pack-threshold=0", "--shard-pack-threshold=0")
+	tgt := mk(t, "--pack-threshold=0", "--shard-pack-threshold=0")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
 	gomega.Expect(code).To(gomega.Equal(0), out)
@@ -273,18 +255,13 @@ func runVolumeScrubDryRunDetectsCorruption(t testing.TB, mk volumeScrubFactory, 
 	gomega.Expect(fi.Size()).To(gomega.Equal(int64(1)), "dry-run must leave the local file untouched")
 }
 
-func runVolumeScrubRepairBehavior(t testing.TB, mk volumeScrubFactory, dedup bool) {
+func runVolumeScrubRepairBehavior(t testing.TB, mk volumeScrubFactory) {
 	t.Helper()
 
-	dedupArg := "--dedup=false"
 	vol := "vs3"
-	if dedup {
-		dedupArg = "--dedup=true"
-		vol = "vsd3"
-	}
 	// Single-node: no peer to pull from → Unrepairable=1.
 	// Cluster:      EC peer-pull repair  → Repaired=1.
-	tgt := mk(t, dedupArg, "--pack-threshold=0", "--shard-pack-threshold=0")
+	tgt := mk(t, "--pack-threshold=0", "--shard-pack-threshold=0")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
 	gomega.Expect(code).To(gomega.Equal(0), out)
@@ -310,7 +287,7 @@ func runVolumeScrubAdminTriggerWorksAtZeroInterval(t testing.TB, mk volumeScrubF
 	// Regression guard for Director-wiring fix. --scrub-interval=0
 	// disables the periodic loop but admin trigger must keep working
 	// (pre-fix returned "scrub director not configured").
-	tgt := mk(t, "--dedup=false", "--scrub-interval=0")
+	tgt := mk(t, "--scrub-interval=0")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", "vsi0", "--size", "1Mi")
 	gomega.Expect(code).To(gomega.Equal(0), out)
@@ -326,7 +303,7 @@ func runVolumeScrubAdminTriggerWorksAtZeroInterval(t testing.TB, mk volumeScrubF
 func runVolumeScrubStatusListCancel(t testing.TB, mk volumeScrubFactory) {
 	t.Helper()
 
-	tgt := mk(t, "--dedup=false")
+	tgt := mk(t)
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", "vs4", "--size", "1Mi")
 	gomega.Expect(code).To(gomega.Equal(0), out)

@@ -89,7 +89,6 @@ type ServeOptions struct {
 	VlogOpts              resourceguard.VlogOptions
 
 	// --- Misc / hidden / deprecated ---
-	DedupEnabled         bool  // --dedup (deprecated; ignored at runtime)
 	BadgerValueThreshold int64 // --badger-value-threshold (hidden, test-only)
 	StrictVlogRegistry   bool  // --strict-vlog-registry
 	VlogSmokeDefer       time.Duration
