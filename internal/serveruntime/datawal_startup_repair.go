@@ -24,12 +24,6 @@ type dataWALStartupRepairer interface {
 	RepairDataWALStartupCandidate(context.Context, cluster.DataWALRepairCandidate) dataWALStartupRepairResult
 }
 
-type dataWALStartupRepairFunc func(context.Context, cluster.DataWALRepairCandidate) dataWALStartupRepairResult
-
-func (f dataWALStartupRepairFunc) RepairDataWALStartupCandidate(ctx context.Context, candidate cluster.DataWALRepairCandidate) dataWALStartupRepairResult {
-	return f(ctx, candidate)
-}
-
 func splitDataWALStartupRepairShardKey(shardKey string) (string, string) {
 	objectKey, versionID := shardKey, ""
 	if i := strings.LastIndexByte(shardKey, '/'); i >= 0 {

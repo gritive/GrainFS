@@ -11,6 +11,15 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
+// dataWALStartupRepairFunc adapts a function to the dataWALStartupRepairer
+// interface so tests can inject a fake repairer. Test-only: production uses
+// dataWALStartupRepairRuntime.
+type dataWALStartupRepairFunc func(context.Context, cluster.DataWALRepairCandidate) dataWALStartupRepairResult
+
+func (f dataWALStartupRepairFunc) RepairDataWALStartupCandidate(ctx context.Context, candidate cluster.DataWALRepairCandidate) dataWALStartupRepairResult {
+	return f(ctx, candidate)
+}
+
 func TestSplitDataWALStartupRepairShardKey(t *testing.T) {
 	key, versionID := splitDataWALStartupRepairShardKey("dir/object/v1")
 	require.Equal(t, "dir/object", key)
