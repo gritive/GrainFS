@@ -2341,39 +2341,6 @@ func countSkippedFor(reasons []string, target string) int {
 	return n
 }
 
-func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
-	group, ok := PlacementGroupEntryFromContext(ctx)
-	if !ok {
-		groupID, _ := PlacementGroupFromContext(ctx)
-		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
-			Operation:     operation,
-			GroupID:       groupID,
-			FailureReason: "full placement group not present in write context",
-		}
-	}
-	cfg := DesiredECConfigForGroup(group)
-	if cfg.NumShards() == 0 {
-		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
-			Operation:     operation,
-			GroupID:       group.ID,
-			Configured:    cloneStringSlice(group.PeerIDs),
-			FailureReason: "placement group has no zero-config EC profile",
-		}
-	}
-	if len(group.PeerIDs) < cfg.NumShards() {
-		return ShardGroupEntry{}, ECConfig{}, &ErrInsufficientPlacementTargets{
-			Operation:     operation,
-			GroupID:       group.ID,
-			Desired:       cfg,
-			Configured:    cloneStringSlice(group.PeerIDs),
-			Unavailable:   cloneStringSlice(group.PeerIDs),
-			FailureReason: "configured placement group is narrower than desired profile",
-		}
-	}
-	group.PeerIDs = cloneStringSlice(group.PeerIDs)
-	return group, cfg, nil
-}
-
 func PlacementGroupHasFullEntry(ctx context.Context) bool {
 	_, ok := PlacementGroupEntryFromContext(ctx)
 	return ok
@@ -2496,25 +2463,38 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	shardKey := ecObjectShardKey(key, versionID)
-	placement := selectECPlacementWeighted(effectiveCfg, liveNodes, shardKey, b.nodeStatsStore, b.bl, b.clusterCfg.WeightedHRWEnabled(), b.clusterCfg.BoundedLoadsEnabled())
-	topologyWrite := false
-	topologyGroup := ShardGroupEntry{}
-	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-		topologyWrite = true
-		topologyGroup = group
-		placementGroupID = group.ID
-		effectiveCfg = cfg
-		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+	var placementGroup *ShardGroupEntry
+	if group, ok := PlacementGroupEntryFromContext(ctx); ok {
+		placementGroup = &group
 	}
-	if len(placement) != effectiveCfg.NumShards() {
-		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
-			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
+	var peerHealth []PeerHealthEntry
+	hasPeerHealth := false
+	if ph := b.currentPeerHealth(); ph != nil {
+		peerHealth = ph.Snapshot()
+		hasPeerHealth = true
 	}
-	if topologyWrite {
-		if err := b.checkTopologyPlacementHealth(topologyGroup, effectiveCfg, placement); err != nil {
-			return nil, err
-		}
+	placementPlan, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:           "put_object",
+		PlacementGroupID:    placementGroupID,
+		PlacementGroup:      placementGroup,
+		LiveNodes:           liveNodes,
+		CurrentECConfig:     b.currentECConfig(),
+		BypassBucketCheck:   b.bypassBucketCheck,
+		ShardKey:            shardKey,
+		NodeStatsStore:      b.nodeStatsStore,
+		BoundedLoads:        b.bl,
+		WeightedHRWEnabled:  b.clusterCfg.WeightedHRWEnabled(),
+		BoundedLoadsEnabled: b.clusterCfg.BoundedLoadsEnabled(),
+		PeerHealth:          peerHealth,
+		HasPeerHealth:       hasPeerHealth,
+		SelfID:              b.currentSelfAddr(),
+	})
+	if err != nil {
+		return nil, err
 	}
+	placementGroupID = placementPlan.PlacementGroupID
+	effectiveCfg = placementPlan.Config
+	placement := placementPlan.NodeIDs
 	observePutStage("ec", "placement", stageStart)
 
 	selfID := b.currentSelfAddr()
@@ -2524,8 +2504,8 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 
 	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
 		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
-		if err != nil && topologyWrite {
-			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
+		if err != nil && placementPlan.TopologyWrite {
+			return nil, topologyShardWriteError(placementPlan.TopologyGroup, effectiveCfg, err)
 		}
 		if handled || err != nil {
 			return obj, err
@@ -2549,8 +2529,8 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSpooledShards(ctx, plan, b.ecSpoolDir(), sp)
 	if err != nil {
-		if topologyWrite {
-			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
+		if placementPlan.TopologyWrite {
+			return nil, topologyShardWriteError(placementPlan.TopologyGroup, effectiveCfg, err)
 		}
 		return nil, err
 	}

@@ -203,6 +203,20 @@ Runtime concerns stay outside `adminapi`: handler dependencies, CLI options,
 endpoint-specific typed errors, and server-side domain models remain in
 their owning packages.
 
+### Object Write Placement Plan
+
+The object write placement plan is the cluster module that turns a routed data
+group plus current EC policy into the concrete write targets for an object
+mutation. It owns topology-routed object write admission: effective EC profile
+selection, required shard target count, placement group identity, node target
+order, and peer-health rejection before shard writes.
+
+The plan is not the bucket/object router. Routing decides which data group owns
+the operation. The plan decides whether that routed group can safely execute
+the EC write and what exact node IDs the write will use. Callers should consume
+the plan instead of re-reading placement group context and recomputing EC target
+rules in each write fast path.
+
 ### Shard Group Peer Identity
 
 Shard group peer identity is the node identifier stored in

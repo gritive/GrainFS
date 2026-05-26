@@ -21,3 +21,56 @@ func TestPlacementTargetsFromContext_RejectsMissingFullGroup(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrPlacementTargetsUnavailable))
 }
+
+func TestPlanObjectWritePlacement_UsesFullGroupPlan(t *testing.T) {
+	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
+	plan, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:        "put_object",
+		PlacementGroupID: "group-1",
+		PlacementGroup:   &group,
+		LiveNodes:        []string{"fallback-1", "fallback-2", "fallback-3"},
+		CurrentECConfig:  ECConfig{DataShards: 2, ParityShards: 1},
+		ShardKey:         "k/v1",
+	})
+	require.NoError(t, err)
+	require.True(t, plan.TopologyWrite)
+	require.Equal(t, "group-1", plan.PlacementGroupID)
+	require.Equal(t, ECConfig{DataShards: 2, ParityShards: 1}, plan.Config)
+	require.Equal(t, []string{"n1", "n2", "n3"}, plan.NodeIDs)
+}
+
+func TestPlanObjectWritePlacement_UsesFallbackPlacementWithoutFullGroup(t *testing.T) {
+	liveNodes := []string{"n1", "n2", "n3"}
+	plan, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:        "put_object",
+		PlacementGroupID: "group-1",
+		LiveNodes:        liveNodes,
+		CurrentECConfig:  ECConfig{DataShards: 2, ParityShards: 1},
+		ShardKey:         "k/v1",
+	})
+	require.NoError(t, err)
+	require.False(t, plan.TopologyWrite)
+	require.Equal(t, "group-1", plan.PlacementGroupID)
+	require.Equal(t, ECConfig{DataShards: 2, ParityShards: 1}, plan.Config)
+	require.Equal(t, PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
+}
+
+func TestPlanObjectWritePlacement_RejectsUnhealthyTopologyTarget(t *testing.T) {
+	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
+	_, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:        "put_object",
+		PlacementGroupID: "group-1",
+		PlacementGroup:   &group,
+		LiveNodes:        []string{"n1", "n2", "n3"},
+		CurrentECConfig:  ECConfig{DataShards: 2, ParityShards: 1},
+		ShardKey:         "k/v1",
+		PeerHealth: []PeerHealthEntry{
+			{ID: "n1", Healthy: true},
+			{ID: "n2", Healthy: false},
+			{ID: "n3", Healthy: true},
+		},
+		HasPeerHealth: true,
+	})
+	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
+	require.ErrorContains(t, err, "known unhealthy placement target")
+}
