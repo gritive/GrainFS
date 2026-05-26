@@ -205,7 +205,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 			}
 		}
 	}
-	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, iamCfg)
+	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
 		state.adminDeps.NFSDiag = nodeSvc.NFS4()

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -107,6 +109,7 @@ type NodeServicesIAMConfig struct {
 // for linearizable NBD reads (nil = no gate). iam is optional; nil = no IAM gate.
 func StartNodeServices(ctx context.Context, backend storage.Backend,
 	volMgr *volume.Manager, nfs4Port, nbdPort int, p9Bind string, p9Port int, ri nbd.ReadIndexer,
+	nfsWriteBufDir string, nfsWriteBufIdle time.Duration, dataDir string,
 	iam ...*NodeServicesIAMConfig,
 ) *NodeServices {
 	svc := &NodeServices{}
@@ -124,6 +127,25 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			log.Error().Err(svc.nfs4Err).Msg("nfs4 server start failed")
 		} else {
 			var nfs4Opts []nfs4server.ServerOption
+			if nfsWriteBufIdle > 0 {
+				bufDir := nfsWriteBufDir
+				if bufDir == "" {
+					bufDir = filepath.Join(dataDir, "nfs-writebuf")
+				}
+				wb := nfs4server.NewWriteBuffer(bufDir, backend)
+				wb.SetIdleTimeout(nfsWriteBufIdle)
+				if err := wb.Recover(ctx); err != nil {
+					svc.nfs4Err = fmt.Errorf("nfs write buffer recover: %w", err)
+					log.Error().Err(svc.nfs4Err).Msg("nfs4 write buffer recovery failed")
+				} else {
+					go wb.Run(ctx)
+					nfs4Opts = append(nfs4Opts, nfs4server.WithWriteBuffer(wb))
+				}
+			}
+			if svc.nfs4Err != nil {
+				_ = ln.Close()
+				return svc
+			}
 			if iamCfg != nil && iamCfg.MountSAStore != nil {
 				nfs4Opts = append(nfs4Opts, nfs4server.WithMountSAStore(iamCfg.MountSAStore))
 			}

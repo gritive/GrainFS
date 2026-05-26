@@ -407,6 +407,9 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
+		// Match helpers_test.go: shrink NFS write buffer idle for e2e so
+		// fdatasync-only flows don't wait 30s for the flusher.
+		"--nfs-write-buffer-idle", "1s",
 	}
 	if c.pprofPorts[i] != 0 {
 		args = append(args, "--pprof-port", fmt.Sprintf("%d", c.pprofPorts[i]))

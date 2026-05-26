@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.339.0] - 2026-05-26
+
+### Performance
+
+- **NFS write coalescing.** Consecutive WRITE ops to the same key are accumulated in a local file under `<data>/nfs-writebuf/` and flushed once per COMMIT, SETATTR truncate, idle timeout (default 30s, `--nfs-write-buffer-idle`), or shutdown. fio sequential write throughput improves ~7× on single-node (9.66 → 71.6 MiB/s aggregate, 4 threads × 128 KiB blocks). Heap allocations drop ~25× (149 → 6 GB over a 15s run) and `crypto/md5` CPU share falls from 17% to 1%. See `docs/operators/runbook.md#nfs-write-buffer` for disk sizing and the cluster-mode limitation (per-node buffering — pin clients to a single node, or disable with `--nfs-write-buffer-idle=0`).
+- **Smaller alloc per shard PUT via sized dataWAL stream.** `writeLocalShardStreamContext` now threads `streamSize` through to the data WAL so the WAL appender can pre-allocate one sized buffer instead of growing through `io.ReadAll`. Total alloc on the bench-nfs streaming workload dropped ~19% before the coalescing buffer landed; see the NFS coalescing entry above for the full post-B1 picture.
+
+### Fixed
+
+- **NFS write coalescing: data loss when WRITE raced with idle flush.** A Write that queued on the entry mutex while Flush was running could inherit a stale entry — the on-disk file had been removed under it, so `OpenFile O_CREATE` made an orphan file outside the buffer map, and the next Read fell back to the backend without those bytes. `Write` now retries with a fresh entry if the one it locked was concurrently flushed or discarded.
+
 ## [0.0.338.0] - 2026-05-26
 
 ### Changed

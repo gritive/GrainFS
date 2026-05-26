@@ -46,10 +46,12 @@ type ServeOptions struct {
 	ShardCacheSize     int64 // --shard-cache-size
 
 	// --- Protocols ---
-	NFS4Port int    // --nfs4-port
-	NBDPort  int    // --nbd-port
-	P9Bind   string // --9p-bind
-	P9Port   int    // --9p-port
+	NFS4Port           int           // --nfs4-port
+	NFSWriteBufferDir  string        // --nfs-write-buffer-dir
+	NFSWriteBufferIdle time.Duration // --nfs-write-buffer-idle
+	NBDPort            int           // --nbd-port
+	P9Bind             string        // --9p-bind
+	P9Port             int           // --9p-port
 
 	// --- Intervals ---
 	ScrubInterval            time.Duration // --scrub-interval

@@ -84,6 +84,9 @@ func getDispatcherWithClient(backend storage.Backend, state *StateManager, serve
 	d.minorVer = 0
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
+	if server != nil {
+		d.writeBuffer = server.writeBuffer
+	}
 	return d
 }
 
@@ -95,6 +98,7 @@ func putDispatcher(d *Dispatcher) {
 	d.hinter = nil
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
+	d.writeBuffer = nil
 	dispatcherPool.Put(d)
 }
 
@@ -256,6 +260,7 @@ type Dispatcher struct {
 	minorVer         uint32
 	replayFull       []byte     // non-nil when a SEQUENCE cache hit provides the full COMPOUND response
 	pendingCacheSlot *SlotEntry // non-nil when cacheThis=1; filled after full response is encoded
+	writeBuffer      *writeBuffer
 }
 
 const (
@@ -773,15 +778,30 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 			lastModUnix = meta.Mtime / 1e9
 		}
 	} else if !isDir && d.backend != nil {
-		obj, err := d.backend.HeadObject(context.Background(), bucket, key)
-		if err == nil {
-			isDir = false
-			fileSize = uint64(obj.Size)
-			lastModUnix = obj.LastModified
-		} else {
-			// Unknown path: treat as directory (fallback for uncreated subdirs)
-			isDir = true
-			fileSize = 4096
+		// WriteBuffer (when wired) holds pending writes that haven't flushed
+		// to backend yet — its file size must take precedence over backend
+		// HeadObject, otherwise NFS clients see stale size (often 0 for new
+		// objects) and short-circuit reads as past-EOF.
+		bufferHit := false
+		if d.writeBuffer != nil {
+			if sz, ok := d.writeBuffer.Size(bucket, key); ok {
+				isDir = false
+				fileSize = uint64(sz)
+				lastModUnix = time.Now().Unix()
+				bufferHit = true
+			}
+		}
+		if !bufferHit {
+			obj, err := d.backend.HeadObject(context.Background(), bucket, key)
+			if err == nil {
+				isDir = false
+				fileSize = uint64(obj.Size)
+				lastModUnix = obj.LastModified
+			} else {
+				// Unknown path: treat as directory (fallback for uncreated subdirs)
+				isDir = true
+				fileSize = 4096
+			}
 		}
 
 		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
@@ -1115,6 +1135,16 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	count := binary.BigEndian.Uint32(data[24:28])
 
 	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.writeBuffer != nil {
+		data, hit, err := d.writeBuffer.Read(context.Background(), bucket, key, offset, count)
+		if err != nil {
+			return OpResult{OpCode: OpRead, Status: NFS4ERR_IO}
+		}
+		if hit {
+			eof := uint64(len(data)) < uint64(count)
+			return OpResult{OpCode: OpRead, Status: NFS4_OK, readData: data, readEOF: eof}
+		}
+	}
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
 	if ra, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
 		var buf []byte
@@ -1246,7 +1276,21 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	release := d.state.LockPath(objectLockKey(bucket, key))
 	defer release()
 
-	if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
+	if d.writeBuffer != nil {
+		// WriteBuffer is the source of truth for this key while wired —
+		// it must preempt both the WriteAt fast path and the RMW fallback
+		// so concurrent reads/truncates see consistent state and coalescing
+		// applies regardless of backend capabilities (plan §D8).
+		existingContentType := "application/octet-stream"
+		if obj, herr := d.backend.HeadObject(context.Background(), bucket, key); herr == nil {
+			if obj.ContentType != "" {
+				existingContentType = obj.ContentType
+			}
+		}
+		if err = d.writeBuffer.Write(context.Background(), bucket, key, offset, writeData, existingContentType); err != nil {
+			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
+		}
+	} else if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
 		if _, err = wa.WriteAt(context.Background(), bucket, key, offset, writeData); err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1568,6 +1612,11 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		release := d.state.LockPath(objectLockKey(bucket, key))
 		defer release()
 		if tr, ok := truncatableBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
+			if d.writeBuffer != nil {
+				if err := d.writeBuffer.Discard(context.Background(), bucket, key); err != nil {
+					return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
+				}
+			}
 			if err := tr.Truncate(context.Background(), bucket, key, int64(size)); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
@@ -1648,6 +1697,11 @@ func (d *Dispatcher) opCommit() OpResult {
 		return OpResult{OpCode: OpCommit, Status: NFS4ERR_NOFILEHANDLE}
 	}
 	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.writeBuffer != nil {
+		if err := d.writeBuffer.Flush(context.Background(), bucket, key); err != nil {
+			return OpResult{OpCode: OpCommit, Status: NFS4ERR_IO}
+		}
+	}
 	if s, ok := d.backend.(storage.Syncable); ok {
 		if err := s.Sync(bucket, key); err != nil {
 			return OpResult{OpCode: OpCommit, Status: NFS4ERR_IO}

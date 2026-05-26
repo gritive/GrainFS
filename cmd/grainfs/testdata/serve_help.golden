@@ -59,6 +59,8 @@ Flags:
       --measure-read-amp                                    enable read-amplification simulator (informs Unified Buffer Cache decision)
       --meta-dir string                                     dedicated fast metadata storage directory (defaults to first path in --data)
       --nbd-port int                                        NBD server port (0 = disabled). Client-side nbd-client still requires Linux. (default 10809)
+      --nfs-write-buffer-dir string                         directory for NFS write coalescing buffer files (empty = derive from --data)
+      --nfs-write-buffer-idle duration                      idle timeout before write buffer auto-flushes (0 = disable buffering) (default 30s)
       --nfs4-port int                                       NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces (default 2049)
       --node-id string                                      unique node ID (auto-generated if omitted)
       --otel-endpoint string                                OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)

@@ -1046,6 +1046,39 @@ func maxRawShardPayloadForWAL(encrypted bool) int64 {
 	return datawal.MaxPayloadBytes - overhead
 }
 
+// readShardPayload buffers body into a byte slice bounded by rawCap. When
+// streamSize >= 0 the caller has committed to an exact length: we pre-allocate
+// once with make + io.ReadFull, avoiding the bytes.Buffer doubling chain that
+// io.ReadAll otherwise drives on every shard write. When streamSize < 0 the
+// size is unknown and we fall back to io.ReadAll with the historical cap
+// guard.
+func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) ([]byte, error) {
+	overCapErr := func(n int64) error {
+		if encrypted {
+			return fmt.Errorf("shard payload too large after encryption: %d raw bytes exceeds %d cap", n, rawCap)
+		}
+		return fmt.Errorf("data WAL shard payload too large: %d", n)
+	}
+	if streamSize >= 0 {
+		if streamSize > rawCap {
+			return nil, overCapErr(streamSize)
+		}
+		data := make([]byte, streamSize)
+		if _, err := io.ReadFull(body, data); err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, rawCap+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > rawCap {
+		return nil, overCapErr(int64(len(data)))
+	}
+	return data, nil
+}
+
 // walPayloadInlineThreshold is the size at which the data WAL stops inlining
 // the shard payload. Below the threshold the WAL stores the full encoded
 // payload and provides durability for the subsequent shard file write (single
@@ -1278,7 +1311,7 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 }
 
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
-	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, true)
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, -1, true)
 }
 
 func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
@@ -1286,10 +1319,10 @@ func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bu
 	if s.shardPack != nil && s.packThreshold > 0 && streamSize >= int64(s.packThreshold) {
 		allowPack = false
 	}
-	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, allowPack)
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, streamSize, allowPack)
 }
 
-func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, allowPack bool) error {
+func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64, allowPack bool) error {
 	// When a data WAL is wired we cannot stream directly to disk: the WAL must
 	// observe the full payload before any file mutation so recovery can replay
 	// it. Buffer the body (bounded by datawal.MaxPayloadBytes minus the
@@ -1302,15 +1335,9 @@ func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket,
 	// callers see the same effective shard stream cap as before WAL wiring.
 	if s.dataWAL != nil && !s.replayingDataWAL.Load() {
 		rawCap := maxRawShardPayloadForWAL(s.encryptor != nil)
-		data, err := io.ReadAll(io.LimitReader(body, rawCap+1))
+		data, err := readShardPayload(body, rawCap, streamSize, s.encryptor != nil)
 		if err != nil {
 			return err
-		}
-		if int64(len(data)) > rawCap {
-			if s.encryptor != nil {
-				return fmt.Errorf("shard payload too large after encryption: %d raw bytes exceeds %d cap", len(data), rawCap)
-			}
-			return fmt.Errorf("data WAL shard payload too large: %d", len(data))
 		}
 		return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
 	}

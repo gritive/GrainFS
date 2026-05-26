@@ -148,6 +148,34 @@ Metrics:
 - `grainfs_nfs_lookup_unknown_export_total`
 - `grainfs_nfs_revoked_stateids_total{reason}`
 
+## NFS Write Buffer
+
+NFS WRITE ops are coalesced into a local file under `<data>/nfs-writebuf/`. The buffer flushes to backend `PutObject` on:
+
+- NFS COMMIT op
+- `SETATTR` truncate (discard semantics — buffered writes are dropped)
+- Idle timeout (`--nfs-write-buffer-idle`, default 30s)
+- Server shutdown drain
+
+### Disk sizing
+
+Plan for `max(concurrent NFS objects) × max(object size)` of disk under `<data>/nfs-writebuf/`. The idle timeout bounds dwell time. For most workloads the live set is small (open files only); long-lived idle keys are flushed on the next idle tick.
+
+### Cluster mode limitation
+
+Buffering is per-node. Two NFS clients mounted to **different** GrainFS nodes that write the **same** key may see last-write-wins on flush (no cross-node coordination yet). For strict consistency in a multi-node cluster: pin all NFS clients to a single GrainFS node, or wait for cluster-scoped buffer support.
+
+### Recovery
+
+On startup the buffer dir is scanned and leftover files are flushed to backend. If a flush fails (backend unreachable), files are renamed to `<sha1>.failed.<reason>.<timestamp>` so subsequent writes for the same key cannot collide. Inspect `*.failed.*` files manually and either:
+
+- Replay them via `dd if=<failed-file> | aws s3 cp - s3://<bucket>/<key>` (read the `.meta` sidecar for `bucket`/`key`), or
+- Delete them after confirming the data is recoverable from elsewhere.
+
+### Disable buffering
+
+Set `--nfs-write-buffer-idle=0` to disable. NFS WRITE then falls back to the per-write RMW path (older behaviour, ~10× slower on sequential workloads, no buffer correctness concerns).
+
 Grafana example: `docs/observability/nfs-multi-export.json`.
 
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.

@@ -14,7 +14,7 @@ func TestNodeServicesProtocolStatusReportsFailedListenerAsDisabled(t *testing.T)
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	svc := StartNodeServices(context.Background(), nil, nil, 0, 0, "127.0.0.1", port, nil)
+	svc := StartNodeServices(context.Background(), nil, nil, 0, 0, "127.0.0.1", port, nil, "", 0, "")
 	t.Cleanup(svc.Close)
 
 	status := svc.ProtocolStatus(Config{P9Bind: "127.0.0.1", P9Port: port})

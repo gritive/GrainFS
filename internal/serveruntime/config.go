@@ -101,10 +101,12 @@ type Config struct {
 	AuditCommitInterval time.Duration
 
 	// Node services
-	NFS4Port int
-	NBDPort  int
-	P9Bind   string
-	P9Port   int
+	NFS4Port           int
+	NFSWriteBufferDir  string
+	NFSWriteBufferIdle time.Duration
+	NBDPort            int
+	P9Bind             string
+	P9Port             int
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool
