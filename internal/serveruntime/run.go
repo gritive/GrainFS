@@ -215,6 +215,30 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootRecoveryAndScrubber(ctx, state); err != nil {
 		return err
 	}
+
+	// Phase D Task 6: do not accept user-facing encrypted-data traffic until
+	// the active DEK is installed (gen-0 via genesis Apply, or via join replay /
+	// snapshot restore on a joiner). Bounded so a joiner that cannot install
+	// never deadlocks boot — it fails fast instead. Genesis single-node is
+	// ready immediately.
+	if state.dekKeeper != nil {
+		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
+		err := WaitDEKReady(readyCtx, state.dekKeeper)
+		readyCancel()
+		if err != nil {
+			return fmt.Errorf("DEK readiness: %w", err)
+		}
+	}
+
+	// Phase D Task 7: refuse to boot if the replayed raft log contained a
+	// legacy type-48 DEKRotate (pre-Phase-D). Live-log path guard: snapshot
+	// path is covered by LoadFromFSM AAD-unwrap failing during Restore.
+	if state.metaRaft != nil {
+		if err := state.metaRaft.FSM().CheckGreenfieldDEKBoundary(); err != nil {
+			return fmt.Errorf("greenfield DEK boundary: %w", err)
+		}
+	}
+
 	if err := bootResharderAndDegraded(ctx, state); err != nil {
 		return err
 	}
