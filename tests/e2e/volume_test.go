@@ -23,7 +23,6 @@ type volumeResp struct {
 	BlockSize       int    `json:"block_size"`
 	AllocatedBlocks int64  `json:"allocated_blocks"`
 	AllocatedBytes  int64  `json:"allocated_bytes"`
-	SnapshotCount   int32  `json:"snapshot_count"`
 }
 
 type volumeListResp struct {
@@ -84,7 +83,7 @@ func runVolumeDeleteAny(t testing.TB, tgt s3Target, name string) (string, int) {
 	var lastCode int
 	var deleted bool
 	for _, dir := range volumeDataDirs(tgt) {
-		out, code := runCLI(t, dir, "volume", "delete", name, "--force", "--format", "json")
+		out, code := runCLI(t, dir, "volume", "delete", name, "--format", "json")
 		if code == 0 {
 			deleted = true
 			lastOut, lastCode = out, code
@@ -257,7 +256,7 @@ func runVolumeCases(getTgt func() s3Target) {
 	})
 
 	// Absorbed from TestE2E_VolumeCLI_FullLifecycle — the same admin-CLI
-	// surface (list/create/info/resize/snapshot/delete) on one volume.
+	// surface (list/create/info/resize/delete) on one volume.
 	ginkgo.It("runs the full volume CLI lifecycle", func() {
 		t, tgt, dataDir := volumeFixture()
 		name := uniqueVolName(tgt, "lifecycle")
@@ -276,13 +275,6 @@ func runVolumeCases(getTgt func() s3Target) {
 		out, code = runCLI(t, dataDir, "volume", "resize", name, "--size", "2Mi")
 		gomega.Expect(code).To(gomega.Equal(0), out)
 		gomega.Expect(out).To(gomega.ContainSubstring("resized"))
-
-		out, code = runCLI(t, dataDir, "volume", "snapshot", "create", name)
-		gomega.Expect(code).To(gomega.Equal(0), out)
-		gomega.Expect(out).To(gomega.ContainSubstring("created"))
-
-		_, code = runCLI(t, dataDir, "volume", "delete", name)
-		gomega.Expect(code).NotTo(gomega.Equal(0), "delete with snapshots should fail")
 
 		if tgt.isCluster {
 			out, code = runVolumeDeleteAny(t, tgt, name)

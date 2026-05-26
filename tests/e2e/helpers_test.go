@@ -945,3 +945,15 @@ func createBucket(t testing.TB, name string) {
 		})
 	})
 }
+
+// postJSON POSTs body as JSON to url and returns the response.
+func postJSON(url string, body interface{}) (*http.Response, error) {
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			return nil, err
+		}
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	return client.Post(url, "application/json", &buf) //nolint:noctx
+}
