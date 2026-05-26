@@ -165,6 +165,31 @@ func (wb *writeBuffer) materializeLocked(ctx context.Context, entry *writeBuffer
 	return nil
 }
 
+// Size returns the buffered object's current on-disk size. ok=false means
+// the caller should fall back to backend metadata (HeadObject etc.). Used by
+// NFS metadata ops (GETATTR, LOOKUP) so client `stat` sees the buffered file
+// size — without this, stat reports backend size (often 0 for new objects),
+// the client thinks the file is empty, and `read` short-circuits without
+// issuing a READ op.
+func (wb *writeBuffer) Size(bucket, key string) (int64, bool) {
+	k := wb.entryKey(bucket, key)
+	v, ok := wb.entries.Load(k)
+	if !ok {
+		return 0, false
+	}
+	entry := v.(*writeBufferEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.materialized {
+		return 0, false
+	}
+	fi, err := os.Stat(entry.dataPath)
+	if err != nil {
+		return 0, false
+	}
+	return fi.Size(), true
+}
+
 // Read returns (data, hit, err). hit=false means caller should fall back to backend.
 //
 // Concurrency: holds the entry mutex only through state check + os.Open.

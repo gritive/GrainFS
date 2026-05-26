@@ -778,15 +778,30 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 			lastModUnix = meta.Mtime / 1e9
 		}
 	} else if !isDir && d.backend != nil {
-		obj, err := d.backend.HeadObject(context.Background(), bucket, key)
-		if err == nil {
-			isDir = false
-			fileSize = uint64(obj.Size)
-			lastModUnix = obj.LastModified
-		} else {
-			// Unknown path: treat as directory (fallback for uncreated subdirs)
-			isDir = true
-			fileSize = 4096
+		// WriteBuffer (when wired) holds pending writes that haven't flushed
+		// to backend yet — its file size must take precedence over backend
+		// HeadObject, otherwise NFS clients see stale size (often 0 for new
+		// objects) and short-circuit reads as past-EOF.
+		bufferHit := false
+		if d.writeBuffer != nil {
+			if sz, ok := d.writeBuffer.Size(bucket, key); ok {
+				isDir = false
+				fileSize = uint64(sz)
+				lastModUnix = time.Now().Unix()
+				bufferHit = true
+			}
+		}
+		if !bufferHit {
+			obj, err := d.backend.HeadObject(context.Background(), bucket, key)
+			if err == nil {
+				isDir = false
+				fileSize = uint64(obj.Size)
+				lastModUnix = obj.LastModified
+			} else {
+				// Unknown path: treat as directory (fallback for uncreated subdirs)
+				isDir = true
+				fileSize = 4096
+			}
 		}
 
 		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
