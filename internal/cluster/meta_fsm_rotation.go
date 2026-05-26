@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -9,6 +11,12 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 )
+
+// dekBootstrapSentinel is the DEKReplicatedRotateCmd.ExpectedActiveGen value
+// that marks the gen-0 bootstrap path ("no existing DEK yet"). math.MaxUint32
+// cannot be a real expected-active gen (a uint32 keyspace would need to wrap),
+// so it is an unambiguous sentinel.
+const dekBootstrapSentinel = math.MaxUint32
 
 // SetEncryptor wires the cluster-wide encryptor used to gate cluster-config
 // patches carrying wrapped secrets. Must be called before the raft log starts
@@ -35,6 +43,16 @@ func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dekKeeper = k
+}
+
+// DEKKeeper returns the wired DEK keeper, or nil if encryption is not
+// configured. Locked read (mirrors SetDEKKeeper's f.mu write and KEKStore()'s
+// RLock form). ProposeDEKRotate uses it to read the active gen + generate the
+// next wrapped DEK on the leader.
+func (f *MetaFSM) DEKKeeper() *encrypt.DEKKeeper {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.dekKeeper
 }
 
 // SetJWTKeySet replaces the in-process JWT KeySet used by the FSM apply path
@@ -148,11 +166,92 @@ func (f *MetaFSM) SetRotationSteady(activeSPKI [32]byte) {
 	f.rotation.SetSteady(activeSPKI)
 }
 
+// applyDEKRotate handles the LEGACY nil-payload MetaCmdTypeDEKRotate (type-48,
+// pre Phase D). The local-random Rotate() it once drove generated DIFFERENT DEK
+// bytes on every node, so a replayed type-48 entry would fork at-rest
+// encryption state. It is now a deterministic no-op; new DEK generations arrive
+// via MetaCmdTypeDEKReplicatedRotate (byte-identical leader material). A type-48
+// entry in the replicated log means this cluster's log predates Phase D — record
+// it so the Task 7 greenfield startup guard can refuse a non-upgradable boot.
 func (f *MetaFSM) applyDEKRotate() error {
-	if f.dekKeeper == nil {
-		return nil
+	f.legacyDEKRotateSeen.Store(true)
+	return nil
+}
+
+// LegacyDEKRotateSeen reports whether a legacy type-48 MetaCmdTypeDEKRotate was
+// replayed since this FSM was constructed. The Task 7 greenfield startup guard
+// reads it after replay to refuse a non-upgradable boot. Lock-free.
+func (f *MetaFSM) LegacyDEKRotateSeen() bool {
+	return f.legacyDEKRotateSeen.Load()
+}
+
+// applyDEKReplicatedRotate installs a leader-generated, KEK-wrapped DEK
+// generation into the local keeper. Deterministic: every node installs the SAME
+// wrapped bytes shipped in the command, under f.mu. Replaces the legacy
+// local-random applyDEKRotate.
+//
+// Preconditions (deterministic STALE-NO-OP if they don't hold — mirrors
+// applyKEKRotate's wrap_set_hash stale-no-op):
+//   - bootstrap (ExpectedActiveGen == dekBootstrapSentinel): accepted ONLY for
+//     gen-0 when the keeper holds NO gens yet; otherwise no-op (defense-in-depth
+//     against an abused ungated path).
+//   - rotation (ExpectedActiveGen != sentinel): current active gen must equal
+//     ExpectedActiveGen AND current active KEK version must equal ActiveKEKVer.
+//
+// A genuine unwrap failure or a same-gen DIFFERENT-bytes install is fatal
+// (InstallReplicatedDEK distinguishes these). The DEK is unwrapped under the
+// CURRENT active KEK, which by the precondition equals cmd.ActiveKEKVer — so no
+// historical-KEK unwrap is ever needed. The cmd carries no RequestID, so this
+// Apply records nothing into the rotation-status ring: the leader detects stale
+// by re-reading VersionsAndActive() after Apply and retrying.
+func (f *MetaFSM) applyDEKReplicatedRotate(applyIndex uint64, data []byte) error {
+	cmd, err := DecodeDEKReplicatedRotateCmd(data)
+	if err != nil {
+		return fmt.Errorf("DEKReplicatedRotate: decode: %w", err)
 	}
-	return f.dekKeeper.Rotate()
+	if f.dekKeeper == nil {
+		return nil // encryption disabled -> deterministic no-op
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	versions, curActive := f.dekKeeper.VersionsAndActive()
+	curKEKVer := f.activeKEKVersion
+
+	if cmd.ExpectedActiveGen == dekBootstrapSentinel {
+		// Bootstrap is valid ONLY for gen-0 AND only when no DEK gen exists yet.
+		// Enforce cmd.Gen == 0 first: a malformed ungated sentinel command must
+		// NOT be able to install gen 5 as "genesis" (MEDIUM 1 / Pass 2).
+		if cmd.Gen != 0 {
+			return nil // sentinel with non-zero gen → deterministic no-op (never installs)
+		}
+		if len(versions) != 0 {
+			// Idempotent replay of the SAME gen-0 bytes passes silently;
+			// anything else over an existing keeper is a deterministic no-op.
+			if w, ok := versions[cmd.Gen]; ok && bytes.Equal(w, cmd.WrappedDEK) {
+				return nil
+			}
+			return nil
+		}
+	} else {
+		// Rotation precondition: active gen + KEK version must match what the
+		// leader observed at propose. ActiveKEKVer is LOAD-BEARING.
+		if cmd.ExpectedActiveGen != curActive || cmd.ActiveKEKVer != curKEKVer {
+			// Idempotent replay of an already-installed gen passes silently.
+			if w, ok := versions[cmd.Gen]; ok && bytes.Equal(w, cmd.WrappedDEK) {
+				return nil
+			}
+			return nil // stale precondition → deterministic no-op (NOT fatal)
+		}
+	}
+
+	if err := f.dekKeeper.InstallReplicatedDEK(cmd.Gen, cmd.WrappedDEK, cmd.ActiveKEKVer); err != nil {
+		// genuine unwrap failure / same-gen different bytes → KEK or prior state
+		// diverged. Halt rather than silently skew.
+		return fatalKEKApply(fmt.Errorf("DEKReplicatedRotate gen %d: %w", cmd.Gen, err))
+	}
+	return nil
 }
 
 func (f *MetaFSM) applyDEKVersionPrune(data []byte) error {
