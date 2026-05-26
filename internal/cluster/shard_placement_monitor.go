@@ -137,16 +137,18 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 				m.logger.Warn().Str("bucket", t.Bucket).Str("key", t.ObjectKey).Err(rerr).Msg("resolve placement during scan failed")
 				continue
 			}
-			if _, ok := seen[t.Bucket+"\x00"+resolved.ShardKey]; ok {
+			seenKey := t.Bucket + "\x00" + resolved.ShardKey
+			if _, ok := seen[seenKey]; ok {
 				continue
 			}
-			seen[t.Bucket+"\x00"+resolved.ShardKey] = struct{}{}
+			seen[seenKey] = struct{}{}
 			m.scanRecord(ctx, t, resolved.ShardKey, resolved.Record, &missing, &repairs, &corrupt)
 		case ECShardSegment, ECShardCoalesced:
-			if _, ok := seen[t.Bucket+"\x00"+t.ShardKey]; ok {
+			seenKey := t.Bucket + "\x00" + t.ShardKey
+			if _, ok := seen[seenKey]; ok {
 				continue
 			}
-			seen[t.Bucket+"\x00"+t.ShardKey] = struct{}{}
+			seen[seenKey] = struct{}{}
 			m.scanRecord(ctx, t, t.ShardKey, t.Placement, &missing, &repairs, &corrupt)
 		}
 	}

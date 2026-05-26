@@ -20,6 +20,15 @@ import (
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
+// targetLogKey returns the log-friendly key for an EC shard scan target:
+// ObjectKey for object-version targets, ShardKey for segment/coalesced targets.
+func targetLogKey(t cluster.ECShardScanTarget) string {
+	if t.Kind == cluster.ECShardObjectVersion {
+		return t.ObjectKey
+	}
+	return t.ShardKey
+}
+
 // bootRecoveryAndScrubber wires the per-node startup recovery, the scrubber
 // Director (with replication + EC sources), placement monitors, and the
 // scrubber-aware healing emitter.
@@ -175,11 +184,9 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 					Recorder:      clusterIncidentRecorder,
 					CorrelationID: correlationID,
 				}
-				var logKey string
 				switch target.Kind {
 				case cluster.ECShardObjectVersion:
 					// plain object-version shard: no ShardKey/Placement needed
-					logKey = target.ObjectKey
 				case cluster.ECShardSegment, cluster.ECShardCoalesced:
 					// Re-verify the shard is still referenced in the current meta
 					// before repairing: coalesce/delete/GC between the monitor's
@@ -191,10 +198,9 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 					}
 					repairReq.ShardKey = target.ShardKey
 					repairReq.Placement = target.Placement
-					logKey = target.ShardKey
 				}
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
-					log.Warn().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", logKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
+					log.Warn().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", targetLogKey(target)).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
 				} else if receiptWiring != nil && receiptWiring.Store() != nil && receiptWiring.KeyStore() != nil {
 					r := &receipt.HealReceipt{
 						ReceiptID:     receiptID,
@@ -225,13 +231,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 					err = gb.QuarantineCorruptShardLocalAtShardKey(target, shardIdx, readErr.Error())
 				}
 				if err != nil {
-					var logKey string
-					if target.Kind == cluster.ECShardObjectVersion {
-						logKey = target.ObjectKey
-					} else {
-						logKey = target.ShardKey
-					}
-					log.Warn().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", logKey).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
+					log.Warn().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", targetLogKey(target)).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
 				}
 			})
 			go placementMonitor.Start(monitorCtx)

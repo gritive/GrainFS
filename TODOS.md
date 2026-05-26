@@ -290,6 +290,18 @@ Work these in order. Do not run them in parallel.
   format version that encodes segment refs, preserve old replay compatibility,
   and add PITR coverage for a chunked object created after the snapshot point.
 
+- [ ] **Placement monitor: classify transient vs corruption errors before quarantine [P1]**:
+  `scanRecord` treats any non-ENOENT `ReadLocalShard` error as corrupt → quarantines the
+  parent object. A transient FS fault (EIO/EMFILE/EBUSY) is misclassified; with segment
+  scanning this now affects N× more objects (one bad node-day → mass false isolation).
+  Needs `ReadLocalShard` to surface typed errors, or an N-strikes counter in the monitor.
+  (Pre-existing for object-version; amplified by segment/coalesced coverage.)
+
+- [ ] **Placement monitor: stream scan targets instead of buffering O(objects+segments) [P3]**:
+  `Scan` buffers all `ECShardScanTarget`s before processing; ~1.5 GB peak for 1 M chunked
+  objects × 10 segments each. Follow up if production scans show RAM pressure; streaming
+  would hold the FSM read transaction open during local shard checks (its own tradeoff).
+
 - [ ] **Placement monitor: scan non-latest object versions' segment/coalesced shards [P3]**:
   The placement monitor currently covers only the latest object version
   (`IterObjectMetas` semantics). Segment and coalesced EC shards belonging to

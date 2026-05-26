@@ -243,11 +243,10 @@ type ECShardScanTarget struct {
 //     segments nor coalesced shards (a real key/versionID object-version shard
 //     exists on disk). For chunked/coalesced objects the top-level EC fields are
 //     just a segment-0 mirror with no on-disk object-version shard, so no
-//     object-version target is emitted. No EC validation happens here — the
-//     monitor's ResolvePlacement owns that and skips non-EC objects.
-//   - Each EC segment ref yields an ECShardSegment target; each EC coalesced
-//     ref yields an ECShardCoalesced target. A ref with ECData==0 (owner-local)
-//     is silently skipped; a ref whose NodeIDs length != ECData+ECParity is
+//     object-version target is emitted. Object-version targets are not
+//     EC-validated here — ResolvePlacement owns that and skips non-EC objects.
+//   - Each segment/coalesced ref IS validated: a ref with ECData==0 (owner-local)
+//     is silently skipped; a ref whose len(NodeIDs) != ECData+ECParity is
 //     malformed and is skipped with a warning + metric.
 //
 // fn returning a non-nil error stops iteration.
@@ -281,21 +280,21 @@ func (f *FSM) IterECShardScanTargets(fn func(ECShardScanTarget) error) error {
 
 		for i := range m.Segments {
 			seg := m.Segments[i]
-			if seg.ECData == 0 {
-				continue // owner-local segment: no EC shard to verify
-			}
-			if len(seg.NodeIDs) != int(seg.ECData)+int(seg.ECParity) {
-				log.Warn().
-					Str("component", "placement-monitor").
-					Str("bucket", ref.Bucket).
-					Str("key", ref.Key).
-					Str("blob_id", seg.BlobID).
-					Int("ec_data", int(seg.ECData)).
-					Int("ec_parity", int(seg.ECParity)).
-					Int("node_ids", len(seg.NodeIDs)).
-					Msg("placement-monitor: skipping malformed segment EC ref (NodeIDs length mismatch)")
-				metrics.PlacementMonitorInvalidECRef.WithLabelValues("segment").Inc()
-				continue
+			if !validateECRefPlacement(seg.ECData, seg.ECParity, seg.NodeIDs) {
+				if seg.ECData != 0 {
+					// malformed: ECData>0 but NodeIDs length mismatches
+					log.Warn().
+						Str("component", "placement-monitor").
+						Str("bucket", ref.Bucket).
+						Str("key", ref.Key).
+						Str("blob_id", seg.BlobID).
+						Int("ec_data", int(seg.ECData)).
+						Int("ec_parity", int(seg.ECParity)).
+						Int("node_ids", len(seg.NodeIDs)).
+						Msg("placement-monitor: skipping malformed segment EC ref (NodeIDs length mismatch)")
+					metrics.PlacementMonitorInvalidECRef.WithLabelValues("segment").Inc()
+				}
+				continue // owner-local (ECData==0) or malformed
 			}
 			if err := fn(ECShardScanTarget{
 				Kind:      ECShardSegment,
@@ -315,21 +314,21 @@ func (f *FSM) IterECShardScanTargets(fn func(ECShardScanTarget) error) error {
 
 		for i := range m.Coalesced {
 			cs := m.Coalesced[i]
-			if cs.ECData == 0 {
-				continue // owner-local coalesced blob: no EC shard to verify
-			}
-			if len(cs.NodeIDs) != int(cs.ECData)+int(cs.ECParity) {
-				log.Warn().
-					Str("component", "placement-monitor").
-					Str("bucket", ref.Bucket).
-					Str("key", ref.Key).
-					Str("coalesced_id", cs.CoalescedID).
-					Int("ec_data", int(cs.ECData)).
-					Int("ec_parity", int(cs.ECParity)).
-					Int("node_ids", len(cs.NodeIDs)).
-					Msg("placement-monitor: skipping malformed coalesced EC ref (NodeIDs length mismatch)")
-				metrics.PlacementMonitorInvalidECRef.WithLabelValues("coalesced").Inc()
-				continue
+			if !validateECRefPlacement(cs.ECData, cs.ECParity, cs.NodeIDs) {
+				if cs.ECData != 0 {
+					// malformed: ECData>0 but NodeIDs length mismatches
+					log.Warn().
+						Str("component", "placement-monitor").
+						Str("bucket", ref.Bucket).
+						Str("key", ref.Key).
+						Str("coalesced_id", cs.CoalescedID).
+						Int("ec_data", int(cs.ECData)).
+						Int("ec_parity", int(cs.ECParity)).
+						Int("node_ids", len(cs.NodeIDs)).
+						Msg("placement-monitor: skipping malformed coalesced EC ref (NodeIDs length mismatch)")
+					metrics.PlacementMonitorInvalidECRef.WithLabelValues("coalesced").Inc()
+				}
+				continue // owner-local (ECData==0) or malformed
 			}
 			// Asymmetry: the coalesced ShardKey is authoritative (the
 			// pre-populated CoalescedShardRef.ShardKey), whereas the segment
@@ -352,6 +351,19 @@ func (f *FSM) IterECShardScanTargets(fn func(ECShardScanTarget) error) error {
 		}
 		return nil
 	})
+}
+
+// validateECRefPlacement reports whether an EC ref describes a distributedly-
+// striped blob with a well-formed node list. It returns false (and callers must
+// skip) for two cases:
+//   - ECData==0: owner-local blob, no EC shard to verify (silent skip).
+//   - len(nodeIDs) != int(ecData)+int(ecParity): malformed ref (caller logs +
+//     increments the metric before skipping).
+func validateECRefPlacement(ecData, ecParity uint8, nodeIDs []string) bool {
+	if ecData == 0 {
+		return false
+	}
+	return len(nodeIDs) == int(ecData)+int(ecParity)
 }
 
 // lastIndexByte mirrors strings.LastIndexByte without pulling the import.
