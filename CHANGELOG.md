@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.345.1] - 2026-05-26
+
+### Fixed
+
+- **Cluster EC test no longer flakes on unrelated goroutines.** The shard-recovery goroutine-leak check in the cluster test suite was process-global and intermittently failed under load when it caught quic-go transport goroutines left running by other tests. It now baselines the goroutines that exist before the test starts, so it only flags leaks the test itself introduces. Test-only change; no runtime behavior is affected.
+
 ## [0.0.345.0] - 2026-05-26
 
 ### Fixed
