@@ -1169,3 +1169,35 @@ table MountSADetachPolicyPayload {
   mount_sa:string;
   policy:string;
 }
+
+// ─── KEK rotation command ─────────────────────────────────────────────────────
+
+// RewrappedDEKEntry holds a single DEK generation re-wrapped under the new KEK.
+table RewrappedDEKEntry {
+  gen:uint32;
+  wrapped:[ubyte];
+}
+
+// ClusterStateAtPropose captures the cluster KEK state at proposal time for
+// determinism and idempotent replay in the FSM apply path.
+table ClusterStateAtPropose {
+  active_kek_version:uint32;
+  retained_kek_count:uint32;
+  live_dek_gen_count:uint32;
+}
+
+// MetaKEKRotateCmd is the FSM command payload for a KEK rotation operation.
+// All random material (new key bytes, re-wrapped DEKs) is stamped by the
+// proposer so the apply path is fully deterministic across all Raft replicas.
+table MetaKEKRotateCmd {
+  payload_version:uint8 = 1;
+  new_version:uint32;
+  wrapped_new_kek:[ubyte];
+  wrap_set_hash:[ubyte];
+  rewrapped_deks:[RewrappedDEKEntry];
+  confirm:string;
+  actor:string;
+  request_id:[ubyte];
+  requested_at_unix_nanos:int64;
+  cluster_state_at_propose:ClusterStateAtPropose;
+}
