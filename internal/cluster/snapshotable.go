@@ -14,7 +14,22 @@ import (
 
 // ListAllObjects implements storage.Snapshotable by enumerating every
 // versioned object record, including non-latest versions and delete markers.
+// It is tolerant: it skips unreadable/undecodable object metadata so a single
+// corrupt record can't block snapshot creation.
 func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
+	return b.listAllObjects(false)
+}
+
+// ListAllObjectsStrict is ListAllObjects for the GC known-set: it FAILS CLOSED
+// on any unreadable/undecodable object metadata (returns an error) so the
+// scrubber skips its sweep rather than deleting a segment whose object record
+// it could not read. snapshot Create deliberately uses the tolerant
+// ListAllObjects instead.
+func (b *DistributedBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
+	return b.listAllObjects(true)
+}
+
+func (b *DistributedBackend) listAllObjects(strict bool) ([]storage.SnapshotObject, error) {
 	ctx := context.Background()
 	buckets, err := b.ListBuckets(ctx)
 	if err != nil {
@@ -51,10 +66,16 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 				var meta objectMeta
 				v, err := b.itemValueCopy(item)
 				if err != nil {
+					if strict {
+						return fmt.Errorf("gc known-set: read object meta %s/%s@%s: %w", bucket, key, versionID, err)
+					}
 					return nil
 				}
 				meta, err = unmarshalObjectMeta(v)
 				if err != nil {
+					if strict {
+						return fmt.Errorf("gc known-set: decode object meta %s/%s@%s: %w", bucket, key, versionID, err)
+					}
 					return nil
 				}
 				result = append(result, storage.SnapshotObject{

@@ -34,7 +34,7 @@ func newFakeManifestSource() *fakeManifestSource {
 	return &fakeManifestSource{}
 }
 
-func (f *fakeManifestSource) ListAllObjects() ([]storage.SnapshotObject, error) {
+func (f *fakeManifestSource) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
 	return f.liveVersions, f.listErr
 }
 func (f *fakeManifestSource) AllFrozenSegmentPaths() (map[string][]string, error) {

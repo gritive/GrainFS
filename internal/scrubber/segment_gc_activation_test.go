@@ -2,6 +2,7 @@ package scrubber_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -20,11 +21,12 @@ import (
 type manifestSegmentBackend struct {
 	*segmentBackend
 	liveObjects []storage.SnapshotObject
+	listErr     error               // when set, ListAllObjectsStrict fails closed
 	frozen      map[string][]string // bucket -> frozen paths
 }
 
-func (m *manifestSegmentBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
-	return m.liveObjects, nil
+func (m *manifestSegmentBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
+	return m.liveObjects, m.listErr
 }
 
 func (m *manifestSegmentBackend) AllFrozenSegmentPaths() (map[string][]string, error) {
@@ -110,4 +112,36 @@ func TestSegmentGCActivation_PreservesAndReclaims(t *testing.T) {
 
 	require.Equal(t, []string{orphanPath}, b.deletedSegments,
 		"Phase B: only the true orphan is deleted; live+frozen preserved via known-set")
+}
+
+// TestSegmentGCFailsClosedOnKnownSetError proves the fail-closed invariant: when
+// the known-set source (ListAllObjectsStrict) errors, hoistSegmentSources returns
+// ok=false and the ENTIRE segment sweep is skipped — so even a past-window orphan
+// is NOT deleted, rather than risk deleting a still-referenced segment whose
+// object record could not be read.
+func TestSegmentGCFailsClosedOnKnownSetError(t *testing.T) {
+	b := &manifestSegmentBackend{
+		segmentBackend: newSegmentBackend(),
+		frozen:         map[string][]string{},
+		listErr:        errors.New("corrupt object meta"),
+	}
+	b.records["bucket"] = nil
+
+	// A true orphan, old enough to pass the age gate. With a clean known-set it
+	// would be tombstoned then (window=0) deleted. The known-set error must
+	// prevent the sweep entirely.
+	orphanPath := storage.SegmentKnownPath("bucket", "orphanobj", "Oblob")
+	b.addOrphanSegment(orphanPath, 10*time.Minute)
+
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
+	require.NoError(t, err)
+	defer db.Close()
+	orphanLog := cluster.NewSegmentOrphanLog(db, "group-0")
+
+	sc := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, 0))
+	sc.RunOnce(context.Background())
+	sc.RunOnce(context.Background())
+
+	require.Empty(t, b.deletedSegments,
+		"known-set error must skip the whole segment sweep (fail-closed): nothing deleted")
 }

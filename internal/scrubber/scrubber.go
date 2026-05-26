@@ -109,8 +109,10 @@ type AppendableScannable interface {
 // AllFrozenSegmentPaths returns the grouped (bucket → []path) set so the sweep
 // can hoist both sources ONCE per cycle instead of re-listing per bucket.
 type segmentManifestSource interface {
-	// ListAllObjects returns every live object version (with Segments).
-	ListAllObjects() ([]storage.SnapshotObject, error)
+	// ListAllObjectsStrict returns every live object version (with Segments),
+	// failing closed on any unreadable/undecodable object metadata so a record
+	// the backend could not read never silently drops from the known-set.
+	ListAllObjectsStrict() ([]storage.SnapshotObject, error)
 	// AllFrozenSegmentPaths returns segment file paths pinned by live snapshot
 	// descriptors, grouped by bucket, each in "<bucket>/<key>_segments/<blobID>"
 	// form (via storage.SegmentKnownPath).
@@ -169,7 +171,7 @@ func (s *BackgroundScrubber) hoistSegmentSources() (segByBucket map[string]map[s
 	if !isManifest {
 		return nil, nil, true
 	}
-	objs, err := src.ListAllObjects()
+	objs, err := src.ListAllObjectsStrict()
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub: known-set list objects failed, skipping segment sweep")
 		return nil, nil, false
