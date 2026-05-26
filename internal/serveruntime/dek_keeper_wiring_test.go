@@ -35,7 +35,7 @@ func TestDEKKeeperWiring(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, kek, encrypt.KEKSize, "KEK must be %d bytes", encrypt.KEKSize)
 
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, restoreTestClusterID())
 	require.NoError(t, err, "NewDEKKeeper must succeed with a valid KEK")
 	require.NotNil(t, keeper)
 

@@ -336,12 +336,14 @@ func (l *KEKRotationLeader) ProposeKEKRotate(confirm, actor string) error {
 		return fmt.Errorf("KEKRotate: wrap K_new: %w", err)
 	}
 
-	// 10. Re-seal every live DEK under K_new (NIL AAD, matching Phase A).
-	//     Iterate the wrap map from step 6 — the apply path will verify the
-	//     payload against the current wrap set via wrap_set_hash, so any
-	//     concurrent DEK rotation between here and the FSM apply collapses
-	//     to a StaleNoOp.
-	rewrapped, err := reSealAllDEKs(currentWraps, activeKEK, plainKnew)
+	// 10. Re-seal every live DEK under K_new, re-binding each wrap's
+	//     DomainDEKFSMWrap AAD from (clusterID, gen, active) to
+	//     (clusterID, gen, newVersion). Iterate the wrap map from step 6 —
+	//     the apply path will verify the payload against the current wrap set
+	//     via wrap_set_hash, so any concurrent DEK rotation between here and
+	//     the FSM apply collapses to a StaleNoOp.
+	cidRot := clusterID
+	rewrapped, err := reSealAllDEKs(currentWraps, activeKEK, plainKnew, cidRot[:], active, newVersion)
 	if err != nil {
 		return fmt.Errorf("KEKRotate: re-seal DEKs: %w", err)
 	}
@@ -430,11 +432,12 @@ func (l *KEKRotationLeader) ProposeKEKRotate(confirm, actor string) error {
 	}
 }
 
-// reSealAllDEKs unseals every (gen, wrap) under activeKEK with NIL AAD and
-// re-seals under newKEK with NIL AAD. The result is sorted ascending by gen
-// — the FSM verifier rejects unsorted/duplicate payloads. Plaintext DEK
+// reSealAllDEKs unseals every (gen, wrap) under activeKEK with the
+// DomainDEKFSMWrap AAD bound to (clusterID, gen, oldKEKVer) and re-seals under
+// newKEK bound to (clusterID, gen, newKEKVer). The result is sorted ascending
+// by gen — the FSM verifier rejects unsorted/duplicate payloads. Plaintext DEK
 // material is zeroed before return.
-func reSealAllDEKs(currentWraps map[uint32][]byte, activeKEK, newKEK []byte) ([]RewrappedDEKEntry, error) {
+func reSealAllDEKs(currentWraps map[uint32][]byte, activeKEK, newKEK, clusterID []byte, oldKEKVer, newKEKVer uint32) ([]RewrappedDEKEntry, error) {
 	if len(currentWraps) == 0 {
 		// Empty DEK set is legal (e.g. very fresh cluster); FSM will accept
 		// a payload with zero rewrapped entries and just rotate the KEK.
@@ -442,11 +445,13 @@ func reSealAllDEKs(currentWraps map[uint32][]byte, activeKEK, newKEK []byte) ([]
 	}
 	out := make([]RewrappedDEKEntry, 0, len(currentWraps))
 	for gen, wrap := range currentWraps {
-		plain, err := encrypt.AESGCMOpen(activeKEK, wrap)
+		oldAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID, encrypt.FieldUint32(gen), encrypt.FieldUint32(oldKEKVer))
+		plain, err := encrypt.AESGCMOpenWithAAD(activeKEK, wrap, oldAAD)
 		if err != nil {
 			return nil, fmt.Errorf("unseal gen %d under active KEK: %w", gen, err)
 		}
-		rewrapped, err := encrypt.AESGCMSeal(newKEK, plain)
+		newAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID, encrypt.FieldUint32(gen), encrypt.FieldUint32(newKEKVer))
+		rewrapped, err := encrypt.AESGCMSealWithAAD(newKEK, plain, newAAD)
 		zeroKEK(plain)
 		if err != nil {
 			return nil, fmt.Errorf("re-seal gen %d under new KEK: %w", gen, err)
@@ -541,7 +546,7 @@ func dryRunValidateKEKRotate(fsm *MetaFSM, cmd KEKRotateCmd, activeKEK, plainKne
 
 	// (d) Rewrapped DEK set checks — reuse the FSM verifier so the leader
 	//     dry-run and the apply path are bit-for-bit equivalent.
-	if err := fsm.verifyRewrappedDEKsAgainstWrapSet(cmd.RewrappedDEKs, activeKEK, unwrapped); err != nil {
+	if err := fsm.verifyRewrappedDEKsAgainstWrapSet(cmd.RewrappedDEKs, activeKEK, unwrapped, active, cmd.NewVersion); err != nil {
 		return fmt.Errorf("rewrapped_deks: %w", err)
 	}
 	return nil

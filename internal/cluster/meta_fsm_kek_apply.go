@@ -144,9 +144,10 @@ func (f *MetaFSM) applyKEKRotate(applyIndex uint64, payload []byte) error {
 
 	// 5. Verify the rewrapped DEK set: equal gen set, sorted ascending unique,
 	//    every payload entry unseals under newKEK to the same plaintext as the
-	//    corresponding current wrap under activeKEK. DEK wraps use NIL AAD
-	//    (matches Phase A DEKKeeper.Rotate/Rewrap).
-	if err := f.verifyRewrappedDEKsAgainstWrapSet(cmd.RewrappedDEKs, activeKEK, newKEK); err != nil {
+	//    corresponding current wrap under activeKEK. DEK wraps are AAD-bound to
+	//    (clusterID, gen, kekVer): current under currentActive, rewrapped under
+	//    cmd.NewVersion.
+	if err := f.verifyRewrappedDEKsAgainstWrapSet(cmd.RewrappedDEKs, activeKEK, newKEK, currentActive, cmd.NewVersion); err != nil {
 		return fmt.Errorf("KEKRotate: rewrapped_deks: %w", err)
 	}
 
@@ -297,10 +298,11 @@ func (f *MetaFSM) canonicalCurrentWrapSetHash() [32]byte {
 }
 
 // verifyRewrappedDEKsAgainstWrapSet enforces that every payload entry matches
-// the FSM's current wrap[] in plaintext under the supplied KEKs. DEK wraps
-// use NIL AAD to match Phase A DEKKeeper.Rotate / Rewrap (no AAD on the
-// fsm-internal wrap envelope; storage-layer AAD lives at the value layer).
-func (f *MetaFSM) verifyRewrappedDEKsAgainstWrapSet(payload []RewrappedDEKEntry, activeKEK, newKEK []byte) error {
+// the FSM's current wrap[] in plaintext under the supplied KEKs. DEK wraps are
+// AAD-bound to (clusterID, gen, kekVer) via DomainDEKFSMWrap: the current wrap
+// is opened under oldKEKVer (the active version the wraps are currently sealed
+// under) and each rewrapped payload entry under newKEKVer (cmd.NewVersion).
+func (f *MetaFSM) verifyRewrappedDEKsAgainstWrapSet(payload []RewrappedDEKEntry, activeKEK, newKEK []byte, oldKEKVer, newKEKVer uint32) error {
 	// Sort ascending, reject duplicates.
 	for i := 1; i < len(payload); i++ {
 		if payload[i].Gen <= payload[i-1].Gen {
@@ -313,16 +315,19 @@ func (f *MetaFSM) verifyRewrappedDEKsAgainstWrapSet(payload []RewrappedDEKEntry,
 		return fmt.Errorf("payload gen count %d != FSM wrap count %d", len(payload), len(currentWraps))
 	}
 
+	cid := f.clusterID[:]
 	for _, e := range payload {
 		currentWrap, ok := currentWraps[e.Gen]
 		if !ok {
 			return fmt.Errorf("payload gen %d not in FSM wrap[]", e.Gen)
 		}
-		oldPlain, err := encrypt.AESGCMOpen(activeKEK, currentWrap)
+		oldAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, cid, encrypt.FieldUint32(e.Gen), encrypt.FieldUint32(oldKEKVer))
+		oldPlain, err := encrypt.AESGCMOpenWithAAD(activeKEK, currentWrap, oldAAD)
 		if err != nil {
 			return fmt.Errorf("payload gen %d: unseal current wrap with active KEK: %w", e.Gen, err)
 		}
-		newPlain, err := encrypt.AESGCMOpen(newKEK, e.Wrapped)
+		newAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, cid, encrypt.FieldUint32(e.Gen), encrypt.FieldUint32(newKEKVer))
+		newPlain, err := encrypt.AESGCMOpenWithAAD(newKEK, e.Wrapped, newAAD)
 		if err != nil {
 			zeroKEK(oldPlain)
 			return fmt.Errorf("payload gen %d: unseal rewrapped with new KEK: %w", e.Gen, err)

@@ -76,7 +76,7 @@ func TestDispatcher_DEKRotate_KicksScrubber(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, restoreTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestDispatcher_NilScrubberKick_NoOp(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, restoreTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestWireDEKPostCommit_RegistersHook(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, restoreTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}

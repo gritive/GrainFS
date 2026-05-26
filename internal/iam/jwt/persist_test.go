@@ -9,11 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// jwtTestClusterID returns a deterministic 16-byte clusterID for DEKKeeper
+// construction (DEK wraps are AAD-bound to clusterID).
+func jwtTestClusterID() []byte {
+	id := make([]byte, 16)
+	for i := range id {
+		id[i] = byte(i + 1)
+	}
+	return id
+}
+
 func TestKeySet_LoadFromSeeds_Roundtrip(t *testing.T) {
 	kek := make([]byte, 32)
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, jwtTestClusterID())
 	require.NoError(t, err)
 
 	secret := make([]byte, 32)
@@ -36,7 +46,7 @@ func TestKeySet_DemoteAndInstall(t *testing.T) {
 	kek := make([]byte, 32)
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, jwtTestClusterID())
 	require.NoError(t, err)
 
 	// Install first key

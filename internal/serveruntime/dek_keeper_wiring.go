@@ -85,20 +85,12 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	}
 	defer zeroizeKEKCopy(activeKEK)
 
-	keeper, err := encrypt.NewDEKKeeper(activeKEK)
-	if err != nil {
-		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
-	}
-	// Label the seal counter with the keystore's active KEK version so the
-	// grainfs_kek_seal_count metric reports against the correct version from
-	// boot (a restored node may already be past version 0).
-	keeper.SetActiveKEKVersion(store.ActiveVersion())
-
 	// cluster.id load mode: strict when join mode OR prior state exists,
 	// so a missing cluster.id on a restart surfaces as
 	// ErrClusterIDMissing rather than silently regenerating a fresh UUID
 	// (which would drift the cluster identity from what raft/meta
-	// already contains).
+	// already contains). Loaded BEFORE NewDEKKeeper because every DEK wrap is
+	// now AAD-bound to clusterID (DomainDEKFSMWrap).
 	var clusterID []byte
 	if state.joinMode || len(state.peers) > 0 || state.priorState {
 		clusterID, err = cfg.LoadClusterID()
@@ -111,6 +103,23 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 			return fmt.Errorf("wireDEKKeeper: cluster.id: %w", err)
 		}
 	}
+
+	keeper, err := encrypt.NewDEKKeeper(activeKEK, clusterID)
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
+	}
+	// Label the seal counter with the keystore's active KEK version so the
+	// grainfs_kek_seal_count metric reports against the correct version from
+	// boot (a restored node may already be past version 0).
+	keeper.SetActiveKEKVersion(store.ActiveVersion())
+
+	// Bind the FSM's clusterID so the KEK-rewrap verify path
+	// (verifyRewrappedDEKsAgainstWrapSet) reconstructs the SAME
+	// DomainDEKFSMWrap AAD the keeper used to seal each wrap. Without this the
+	// FSM's clusterID stays all-zero and every KEK rotate would fail AAD auth
+	// on a fresh-boot cluster (Task 1b HIGH 1 — production parity with
+	// rebuildDEKKeeperFromRestore).
+	fsm.SetClusterID(clusterID)
 
 	fsm.SetDEKKeeper(keeper)
 	// Wire the same KEKStore into the FSM. Both MetaKEKRotateCmd Apply and

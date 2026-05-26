@@ -22,12 +22,19 @@ func newTestMetaFSMWithKEKAndDEK(t *testing.T) (*MetaFSM, []byte) {
 		t.Fatalf("rand plainDEK: %v", err)
 	}
 
-	wrappedDEKK0, err := encrypt.AESGCMSeal(k0, plainDEK)
+	// Cluster ID — deterministic. DEK wraps are AAD-bound to (clusterID, gen,
+	// kekVer); seed gen 1 under KEK version 0.
+	var clusterID [16]byte
+	for i := range clusterID {
+		clusterID[i] = byte(i + 1)
+	}
+	dekAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID[:], encrypt.FieldUint32(1), encrypt.FieldUint32(0))
+	wrappedDEKK0, err := encrypt.AESGCMSealWithAAD(k0, plainDEK, dekAAD)
 	if err != nil {
 		t.Fatalf("seal DEK under K0: %v", err)
 	}
 
-	keeper, err := encrypt.LoadFromFSM(k0, map[uint32][]byte{1: wrappedDEKK0})
+	keeper, err := encrypt.LoadFromFSM(k0, clusterID[:], map[uint32][]byte{1: wrappedDEKK0}, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
@@ -38,12 +45,6 @@ func newTestMetaFSMWithKEKAndDEK(t *testing.T) (*MetaFSM, []byte) {
 	}
 
 	fsm := NewMetaFSM()
-
-	// Cluster ID — deterministic.
-	var clusterID [16]byte
-	for i := range clusterID {
-		clusterID[i] = byte(i + 1)
-	}
 	fsm.SetClusterID(clusterID[:])
 	fsm.SetKEKStore(store)
 	fsm.SetDEKKeeper(keeper)
@@ -88,13 +89,15 @@ func applyValidKEKRotateForTest(t *testing.T, fsm *MetaFSM) error {
 	wrapEntries := make([]encrypt.WrapSetEntry, 0, len(dekVersions))
 	rewrapped := make([]RewrappedDEKEntry, 0, len(dekVersions))
 	for gen, oldWrap := range dekVersions {
-		// Unseal the DEK plaintext from the old wrap.
-		plainDEK, err := encrypt.AESGCMOpen(currentKEK, oldWrap)
+		// Unseal the DEK plaintext from the old wrap (AAD bound to current ver).
+		oldAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID[:], encrypt.FieldUint32(gen), encrypt.FieldUint32(currentVer))
+		plainDEK, err := encrypt.AESGCMOpenWithAAD(currentKEK, oldWrap, oldAAD)
 		if err != nil {
 			return fmt.Errorf("unseal DEK gen %d: %w", gen, err)
 		}
-		// Rewrap under newKEK.
-		newWrap, err := encrypt.AESGCMSeal(newKEK, plainDEK)
+		// Rewrap under newKEK, re-binding AAD to the new KEK version.
+		newAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID[:], encrypt.FieldUint32(gen), encrypt.FieldUint32(newVer))
+		newWrap, err := encrypt.AESGCMSealWithAAD(newKEK, plainDEK, newAAD)
 		if err != nil {
 			return fmt.Errorf("rewrap DEK gen %d: %w", gen, err)
 		}
@@ -164,8 +167,15 @@ func verifySnapshotAtomicForTest(t *testing.T, snapBytes []byte, kekStore *encry
 	if err != nil {
 		return fmt.Errorf("KEKStore.Get(%d): %w", activeKEKVersion, err)
 	}
+	// DEK wraps are AAD-bound to (clusterID, gen, activeKEKVersion); the test
+	// FSMs use the deterministic byte(i+1) clusterID.
+	var clusterID [16]byte
+	for i := range clusterID {
+		clusterID[i] = byte(i + 1)
+	}
 	for gen, wrap := range dekVersions {
-		if _, err := encrypt.AESGCMOpen(activeKEK, wrap); err != nil {
+		aad := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID[:], encrypt.FieldUint32(gen), encrypt.FieldUint32(activeKEKVersion))
+		if _, err := encrypt.AESGCMOpenWithAAD(activeKEK, wrap, aad); err != nil {
 			return fmt.Errorf("wrap[gen=%d] does not unseal under KEK v%d (torn snapshot): %w",
 				gen, activeKEKVersion, err)
 		}

@@ -9,10 +9,22 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
+// dekTestClusterID returns a deterministic 16-byte clusterID for DEK-keeper
+// tests. DEK wraps are AAD-bound to (clusterID, gen, kekVer); source and
+// restore keepers in a test pair MUST share this clusterID.
+func dekTestClusterID() []byte {
+	id := make([]byte, 16)
+	for i := range id {
+		id[i] = byte(i + 1)
+	}
+	return id
+}
+
 // newTestMetaFSMWithDEKKeeper builds a minimal MetaFSM with the given DEKKeeper wired.
 func newTestMetaFSMWithDEKKeeper(t *testing.T, keeper *encrypt.DEKKeeper) *MetaFSM {
 	t.Helper()
 	f := NewMetaFSM()
+	f.SetClusterID(dekTestClusterID())
 	f.SetDEKKeeper(keeper)
 	return f
 }
@@ -41,7 +53,7 @@ func TestApply_DEKRotate_BumpsActiveGen(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -71,7 +83,7 @@ func TestApply_DEKVersionPrune_RefusesIfReferenced(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -94,7 +106,7 @@ func TestApply_DEKVersionPrune_SucceedsWhenUnreferenced(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -125,7 +137,7 @@ func TestSnapshot_DEKVersionTrailerRoundTrip(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -182,7 +194,7 @@ func TestMetaFSM_Snapshot_PreservesActiveKEKVersion(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}

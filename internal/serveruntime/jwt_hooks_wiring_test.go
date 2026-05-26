@@ -34,7 +34,7 @@ func newTestDEKKeeper(t *testing.T) *encrypt.DEKKeeper {
 	kek := make([]byte, 32)
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, restoreTestClusterID())
 	require.NoError(t, err)
 	return keeper
 }

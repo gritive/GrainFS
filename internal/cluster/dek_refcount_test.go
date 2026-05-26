@@ -76,7 +76,7 @@ func TestDEKRefCount_PersistsInSnapshot(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestDEKRefCount_PersistsInSnapshot(t *testing.T) {
 	// Restore into a fresh FSM with the same keeper
 	kek2 := make([]byte, 32)
 	copy(kek2, kek)
-	keeper2, err := encrypt.LoadFromFSM(kek2, keeper.Versions())
+	keeper2, err := encrypt.LoadFromFSM(kek2, dekTestClusterID(), keeper.Versions(), 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 	legacySnap = append(legacySnap, legacyFooter[:]...)
 
 	// Restore from the legacy snapshot.
-	keeper2, err := encrypt.LoadFromFSM(kek, versions)
+	keeper2, err := encrypt.LoadFromFSM(kek, dekTestClusterID(), versions, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}

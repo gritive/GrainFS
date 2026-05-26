@@ -8,7 +8,7 @@ import (
 func TestDEKKeeper_SealCount_IncrementsOnActiveSealPath(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 
 	// active KEK version defaults to 0.
 	if got := k.SealCount(0); got != 0 {
@@ -29,7 +29,7 @@ func TestDEKKeeper_SealCount_IncrementsOnActiveSealPath(t *testing.T) {
 func TestDEKKeeper_SealCount_ResetsOnKEKRotation(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 
 	k.Seal([]byte("a"))
 	k.Seal([]byte("b"))
