@@ -89,6 +89,15 @@ func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Eviden
 		caps[compat.CapabilityNfsExportCreateV1] = true
 	}
 	caps[compat.CapabilityMultipartListingV1] = true
+	// Advertise the KEK envelope lifecycle capability once the cluster KEK
+	// store is wired (same readiness signal MetaKEKRotateCmd Apply checks).
+	// Without this no node advertises kek_envelope_v1, so the capability gate
+	// rejects every rotate/retire/prune with "missing=[<peer>]". (Caught by
+	// the Task 15 e2e lifecycle suite; plan line 111's claimed auto-advertise
+	// was never wired into the evidence source.)
+	if f.keystore != nil {
+		caps[compat.CapabilityKEKEnvelopeV1] = true
+	}
 	return compat.Evidence{
 		NodeID:       compat.NodeID(nodeID),
 		Capabilities: caps,
