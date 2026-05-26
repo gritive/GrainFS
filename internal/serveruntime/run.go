@@ -236,18 +236,25 @@ func Run(ctx context.Context, cfg Config) error {
 	// path is covered by LoadFromFSM AAD-unwrap failing during Restore.
 	//
 	// REPLAY-ORDERING BARRIER: applyDEKRotate sets legacyDEKRotateSeen during
-	// the apply loop, which runs ASYNC after MetaRaft.Start() returns. On a
-	// restart, CommittedIndex starts at the snapshot floor and post-snapshot
-	// type-48 entries are not re-applied until the becomeLeader no-op (single
-	// voter) or an AppendEntries LeaderCommit (follower) advances commit to the
-	// log tail. So we must drain the apply loop up to the DURABLE last-log
-	// index (NOT CommittedIndex, which is volatile) before reading the flag —
-	// otherwise the guard would pass silently on an un-replayed legacy log.
-	// Bounded: a genuinely stuck apply fails loud rather than booting divergent.
+	// the apply loop, which runs ASYNC after MetaRaft.Start() returns. We must
+	// drain the apply loop up to the current COMMITTED index before reading the
+	// flag, or the guard passes silently on an un-replayed legacy log.
+	//
+	// We target CommittedIndex (captured HERE, not at Start). This phase runs
+	// late in boot — after bootMetaRaftStart, the becomeLeader no-op (single
+	// voter), join, and AppendEntries catch-up (follower) have all advanced
+	// commit past the snapshot floor to cover every legacy type-48 entry that
+	// was committed on the pre-Phase-D cluster. Committed entries are exactly
+	// the ones that WILL apply, so waiting on them is sufficient. We do NOT wait
+	// on LastLogIndex: an uncommitted tail (e.g. a former leader that appended
+	// but never replicated before crashing) may be truncated by the new leader
+	// and would otherwise block this drain until the 10s timeout, failing boot
+	// spuriously during leader churn. Bounded: a genuinely stuck apply fails
+	// loud rather than booting divergent.
 	if state.metaRaft != nil {
-		if lastLog := state.metaRaft.Node().LastLogIndex(); lastLog > 0 {
+		if committed := state.metaRaft.Node().CommittedIndex(); committed > 0 {
 			drainCtx, drainCancel := context.WithTimeout(ctx, 10*time.Second)
-			err := state.metaRaft.WaitApplied(drainCtx, lastLog)
+			err := state.metaRaft.WaitApplied(drainCtx, committed)
 			drainCancel()
 			if err != nil {
 				return fmt.Errorf("greenfield DEK boundary: wait for log drain: %w", err)
