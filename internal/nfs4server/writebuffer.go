@@ -107,8 +107,10 @@ func (wb *writeBuffer) Write(ctx context.Context, bucket, key string, offset uin
 	if err := os.MkdirAll(wb.dir, 0o755); err != nil {
 		return fmt.Errorf("writebuffer mkdir: %w", err)
 	}
-	entry := wb.getOrCreate(bucket, key, contentType)
-	entry.mu.Lock()
+	entry, err := wb.acquireLiveEntry(bucket, key, contentType)
+	if err != nil {
+		return err
+	}
 	defer entry.mu.Unlock()
 
 	if !entry.materialized {
@@ -134,6 +136,36 @@ func (wb *writeBuffer) Write(ctx context.Context, bucket, key string, offset uin
 	}
 	entry.lastTouch = time.Now()
 	return nil
+}
+
+// acquireLiveEntry returns a locked entry that is the canonical map entry
+// for (bucket, key). It guards against the Flush/Discard race: if Flush
+// pops the entry from the map and removes the on-disk file while a
+// concurrent Write is queued on the same key, that Write would otherwise
+// inherit a stale entry, pwrite into a fresh-but-orphan file, and lose
+// data (subsequent Read misses the map and falls back to backend, which
+// has the flushed state without the new bytes).
+//
+// The retry loop is bounded: each iteration either (a) wins the
+// LoadOrStore race and becomes the canonical entry, or (b) finds another
+// goroutine got there first and uses that entry. In both cases the loop
+// exits after at most one extra getOrCreate.
+func (wb *writeBuffer) acquireLiveEntry(bucket, key, contentType string) (*writeBufferEntry, error) {
+	k := wb.entryKey(bucket, key)
+	for attempt := 0; attempt < 8; attempt++ {
+		entry := wb.getOrCreate(bucket, key, contentType)
+		entry.mu.Lock()
+		current, ok := wb.entries.Load(k)
+		if ok && current.(*writeBufferEntry) == entry {
+			return entry, nil
+		}
+		// Stale: another goroutine deleted us (Flush/Discard) or swapped
+		// in a different entry. Drop the mutex and retry. The entry we
+		// just locked is now orphan — its on-disk file was removed by
+		// whoever popped it, so we don't need to clean anything up.
+		entry.mu.Unlock()
+	}
+	return nil, fmt.Errorf("writebuffer: could not acquire live entry for %s/%s after 8 retries", bucket, key)
 }
 
 func (wb *writeBuffer) materializeLocked(ctx context.Context, entry *writeBufferEntry) error {
@@ -315,7 +347,13 @@ func (wb *writeBuffer) Discard(_ context.Context, bucket, key string) error {
 // ctx.Done() it drains all outstanding entries before returning, so server
 // shutdown doesn't strand ACK'd writes in local files.
 func (wb *writeBuffer) Run(ctx context.Context) {
-	tick := time.NewTicker(wb.idleTimeout / 2)
+	interval := wb.idleTimeout / 2
+	if interval <= 0 {
+		// SetIdleTimeout(0) or unset — fall back to the default so callers
+		// can't accidentally panic time.NewTicker with a zero interval.
+		interval = writeBufferDefaultIdleTimeout / 2
+	}
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
 		select {

@@ -268,3 +268,41 @@ func TestWriteBuffer_IdleFlush(t *testing.T) {
 		return be.PutCalls == 1
 	}, 2*time.Second, 20*time.Millisecond, "idle flush should fire within ~2× idleTimeout")
 }
+
+// TestWriteBuffer_WriteAfterFlushDoesNotLoseData ensures a Write that
+// queued on the entry mutex while Flush was running re-acquires a live
+// entry (re-materialize from backend) instead of inheriting the stale
+// just-deleted one. Without acquireLiveEntry's retry, the second write
+// would pwrite into an orphan file and the subsequent Read would miss
+// the map → backend GetObject returns only the flushed bytes.
+func TestWriteBuffer_WriteAfterFlushDoesNotLoseData(t *testing.T) {
+	dir := t.TempDir()
+	be := &slowPutBackend{delay: 50 * time.Millisecond}
+	wb := newWriteBuffer(dir, be)
+
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("first-write-data"), "text/plain"))
+
+	flushDone := make(chan struct{})
+	go func() {
+		require.NoError(t, wb.Flush(context.Background(), "bkt", "key"))
+		close(flushDone)
+	}()
+
+	// Race a second write in mid-flush. It queues on the entry mutex, so it
+	// only proceeds after Flush deletes the entry from the map. With the
+	// fix, acquireLiveEntry retries with a fresh entry; without it, the
+	// write pwrites into a deleted entry's orphan file.
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, wb.Write(context.Background(), "bkt", "key", 0, []byte("second-write-data"), "text/plain"))
+	<-flushDone
+
+	// Flush the second write so backend reflects it. Then Read via the
+	// public flow (map → buffer or backend) must return the second write,
+	// not the first.
+	require.NoError(t, wb.Flush(context.Background(), "bkt", "key"))
+	be.mu.Lock()
+	got := append([]byte(nil), be.LastPutBody...)
+	be.mu.Unlock()
+	require.Equal(t, []byte("second-write-data"), got,
+		"second write must survive concurrent flush — would be lost if Write used a stale entry")
+}
