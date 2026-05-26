@@ -21,17 +21,19 @@ var _ scrubber.ShardOwner = (*DistributedBackend)(nil)
 // bypassing the Raft proposal path. Matches the byte layout that
 // applyPutShardPlacement writes. Used by tests that call LookupShardPlacement
 // directly (not ResolvePlacement).
-func writePlacement(t *testing.T, b *DistributedBackend, bucket, key string, nodes []string) {
+func writePlacement(t clusterTestTB, b *DistributedBackend, bucket, key string, nodes []string) {
 	t.Helper()
-	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+	if err := b.db.Update(func(txn *badger.Txn) error {
 		rec := PlacementRecord{Nodes: nodes, K: 4, M: 2}
 		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(rec))
-	}))
+	}); err != nil {
+		t.Fatalf("write placement: %v", err)
+	}
 }
 
 // seedPlacementMeta writes an object metadata record (including EC placement)
 // via FSM Apply, so that readPlacementMeta can resolve it.
-func seedPlacementMeta(t *testing.T, b *DistributedBackend, bucket, key, versionID string, nodes []string, ecData, ecParity uint8) {
+func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, versionID string, nodes []string, ecData, ecParity uint8) {
 	t.Helper()
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      bucket,
@@ -45,8 +47,12 @@ func seedPlacementMeta(t *testing.T, b *DistributedBackend, bucket, key, version
 		ECParity:    ecParity,
 		NodeIDs:     nodes,
 	})
-	require.NoError(t, err)
-	require.NoError(t, b.fsm.Apply(raw))
+	if err != nil {
+		t.Fatalf("encode placement meta: %v", err)
+	}
+	if err := b.fsm.Apply(raw); err != nil {
+		t.Fatalf("apply placement meta: %v", err)
+	}
 }
 
 func TestNodeID_ReturnsSelfAddr(t *testing.T) {
