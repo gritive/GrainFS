@@ -1060,3 +1060,50 @@ func TestFSM_Apply_KEKRotate_AuditSinkNil_NoOp(t *testing.T) {
 		t.Fatalf("Apply with nil sink: %v", err)
 	}
 }
+
+// TestReplicatedDEK_MakesWrapSetHashMatch is the Phase D integration proof: a
+// leader keeper (gen-0 generated locally) and a follower keeper (empty, then
+// InstallReplicatedDEK of the leader's gen-0 wrap bytes) produce an IDENTICAL
+// canonicalCurrentWrapSetHash. This is what makes a leader-stamped
+// KEKRotateCmd.WrapSetHash match on every follower (no RotationStatusStaleNoOp),
+// so a cluster KEK rotate actually propagates. If the hashes diverge, the
+// replicated bytes are not byte-identical — investigate CanonicalWrapSetHash
+// input ordering / InstallReplicatedDEK rewrap, do NOT paper over.
+func TestReplicatedDEK_MakesWrapSetHashMatch(t *testing.T) {
+	kek := make([]byte, encrypt.KEKSize)
+	// dekTestClusterID matches the clusterID newTestMetaFSMWithDEKKeeper stamps
+	// onto the FSM, so the AAD-bound InstallReplicatedDEK unwrap succeeds.
+	cid := dekTestClusterID()
+
+	leader, err := encrypt.NewDEKKeeper(kek, cid)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper(leader): %v", err)
+	}
+	lv, _ := leader.VersionsAndActive()
+
+	follower, err := encrypt.NewEmptyDEKKeeper(kek, cid)
+	if err != nil {
+		t.Fatalf("NewEmptyDEKKeeper(follower): %v", err)
+	}
+	if err := follower.InstallReplicatedDEK(0, lv[0], 0); err != nil {
+		t.Fatalf("InstallReplicatedDEK: %v", err)
+	}
+
+	lf := newTestMetaFSMWithDEKKeeper(t, leader)
+	ff := newTestMetaFSMWithDEKKeeper(t, follower)
+
+	lh := lf.canonicalCurrentWrapSetHash()
+	fh := ff.canonicalCurrentWrapSetHash()
+	if lh != fh {
+		// Surface the discriminating evidence per the Phase D plan: are the
+		// replicated wrap bytes byte-identical? If yes, the divergence is in
+		// CanonicalWrapSetHash entry ordering; if no, InstallReplicatedDEK
+		// rewrapped to different bytes.
+		lw, _ := leader.VersionsAndActive()
+		fw, _ := follower.VersionsAndActive()
+		t.Fatalf("wrap set hashes diverge after replicated install:\n"+
+			"  leader hash:   %x\n  follower hash: %x\n"+
+			"  wrap[0] bytes equal: %v",
+			lh[:], fh[:], bytes.Equal(lw[0], fw[0]))
+	}
+}
