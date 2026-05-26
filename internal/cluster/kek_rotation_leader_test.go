@@ -135,21 +135,25 @@ func newLeaderTestFixture(t *testing.T, opts leaderFixtureOpts) *leaderTestFixtu
 	}
 	fx.fsm.SetKEKStore(store)
 
-	// Build a DEKKeeper with gen 1 (and optional extra gens) all sealed under K0.
+	// Build a DEKKeeper with gen 1 (and optional extra gens) all sealed under
+	// K0. DEK wraps are AAD-bound to (clusterID, gen, kekVer=0).
+	dekAAD := func(gen uint32) []byte {
+		return encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, clusterID[:], encrypt.FieldUint32(gen), encrypt.FieldUint32(0))
+	}
 	var err error
-	fx.dekK0, err = encrypt.AESGCMSeal(fx.k0, fx.plain)
+	fx.dekK0, err = encrypt.AESGCMSealWithAAD(fx.k0, fx.plain, dekAAD(1))
 	if err != nil {
 		t.Fatalf("seal DEK gen 1: %v", err)
 	}
 	versions := map[uint32][]byte{1: fx.dekK0}
 	for i := 2; i <= 1+opts.extraLiveDEKs; i++ {
-		w, err := encrypt.AESGCMSeal(fx.k0, fx.plain)
+		w, err := encrypt.AESGCMSealWithAAD(fx.k0, fx.plain, dekAAD(uint32(i)))
 		if err != nil {
 			t.Fatalf("seal DEK gen %d: %v", i, err)
 		}
 		versions[uint32(i)] = w
 	}
-	keeper, err := encrypt.LoadFromFSM(fx.k0, versions)
+	keeper, err := encrypt.LoadFromFSM(fx.k0, clusterID[:], versions, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}

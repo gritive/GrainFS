@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -42,11 +43,16 @@ var ErrDEKGenUnknown = errors.New("DEK generation unknown")
 // Apply holds f.mu while calling InstallKEKRotation() (which acquires k.mu).
 // Never acquire k.mu before f.mu.
 type DEKKeeper struct {
-	mu     sync.RWMutex
-	kek    []byte
-	active uint32
-	wrap   map[uint32][]byte      // dek_gen → wrapped DEK (snapshot persistence)
-	aead   map[uint32]cipher.AEAD // dek_gen → cached AEAD (hot-path)
+	mu sync.RWMutex
+	// clusterID is the 16-byte cluster identity bound into every DEK wrap's
+	// AAD (DomainDEKFSMWrap). A wrap sealed for one cluster cannot be
+	// unwrapped under another, even if the KEK leaks. Set once at
+	// construction (NewDEKKeeper / NewEmptyDEKKeeper / LoadFromFSM).
+	clusterID []byte
+	kek       []byte
+	active    uint32
+	wrap      map[uint32][]byte      // dek_gen → wrapped DEK (snapshot persistence)
+	aead      map[uint32]cipher.AEAD // dek_gen → cached AEAD (hot-path)
 
 	// Seal-count diagnostics for nonce-collision monitoring (Task 13). The
 	// count is per active KEK version: every Seal/SealWithAAD/Rewrap under the
@@ -63,10 +69,14 @@ type DEKKeeper struct {
 }
 
 // NewDEKKeeper creates a new DEKKeeper with generation 0, sealing a freshly
-// generated random DEK with kek.
-func NewDEKKeeper(kek []byte) (*DEKKeeper, error) {
+// generated random DEK with kek. The gen-0 wrap is AAD-bound to
+// (clusterID, gen=0, kekVer=0) via DomainDEKFSMWrap. clusterID must be 16 bytes.
+func NewDEKKeeper(kek, clusterID []byte) (*DEKKeeper, error) {
 	if len(kek) != KEKSize {
 		return nil, fmt.Errorf("NewDEKKeeper: KEK len = %d, want %d", len(kek), KEKSize)
+	}
+	if len(clusterID) != 16 {
+		return nil, fmt.Errorf("NewDEKKeeper: clusterID must be 16 bytes, got %d", len(clusterID))
 	}
 	plain := make([]byte, DEKSize)
 	if _, err := rand.Read(plain); err != nil {
@@ -74,7 +84,15 @@ func NewDEKKeeper(kek []byte) (*DEKKeeper, error) {
 	}
 	defer zeroize(plain)
 
-	wrapped, err := AESGCMSeal(kek, plain)
+	k := &DEKKeeper{
+		kek:          append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
+		clusterID:    append([]byte(nil), clusterID...),
+		active:       0,
+		wrap:         make(map[uint32][]byte, 1),
+		aead:         make(map[uint32]cipher.AEAD, 1),
+		retiredSeals: make(map[uint32]uint64),
+	}
+	wrapped, err := AESGCMSealWithAAD(kek, plain, k.dekWrapAAD(0, 0))
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +100,99 @@ func NewDEKKeeper(kek []byte) (*DEKKeeper, error) {
 	if err != nil {
 		return nil, err
 	}
+	k.wrap[0] = wrapped
+	k.aead[0] = aead
+	return k, nil
+}
+
+// NewEmptyDEKKeeper constructs a keeper that holds the cluster KEK + clusterID
+// but NO DEK generations. Seal/Open fail with ErrDEKGenUnknown until a
+// generation is installed via InstallReplicatedDEK (from a replicated raft
+// command) or LoadFromFSM (from a snapshot restore). Used on non-genesis
+// cluster nodes so DEK material is never generated locally (which would
+// diverge across nodes).
+func NewEmptyDEKKeeper(kek, clusterID []byte) (*DEKKeeper, error) {
+	if len(kek) != KEKSize {
+		return nil, fmt.Errorf("encrypt: KEK must be %d bytes, got %d", KEKSize, len(kek))
+	}
+	if len(clusterID) != 16 {
+		return nil, fmt.Errorf("encrypt: clusterID must be 16 bytes, got %d", len(clusterID))
+	}
 	return &DEKKeeper{
-		kek:          append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
-		active:       0,
-		wrap:         map[uint32][]byte{0: wrapped},
-		aead:         map[uint32]cipher.AEAD{0: aead},
+		kek:          append([]byte(nil), kek...),
+		clusterID:    append([]byte(nil), clusterID...),
+		wrap:         make(map[uint32][]byte),
+		aead:         make(map[uint32]cipher.AEAD),
 		retiredSeals: make(map[uint32]uint64),
+		// active intentionally 0 with no wrap[0] -> Seal returns ErrDEKGenUnknown.
 	}, nil
+}
+
+// dekWrapAAD binds a DEK wrap to this cluster + the wrap's gen + the KEK
+// version it is sealed under. Mirrors the KEK-rotate AAD discipline
+// (DomainKEKRotate) but for DEK wraps. clusterID is 16 bytes (checked at
+// construction).
+func (k *DEKKeeper) dekWrapAAD(gen, kekVer uint32) []byte {
+	return BuildAAD(DomainDEKFSMWrap, k.clusterID, FieldUint32(gen), FieldUint32(kekVer))
+}
+
+// InstallReplicatedDEK installs a single DEK generation from its KEK-wrapped
+// bytes (produced on the leader, shipped through the raft log) and makes it the
+// active generation. The wrapped bytes are unwrapped under the current KEK with
+// the DomainDEKFSMWrap AAD bound to (clusterID, gen, kekVer).
+// Idempotent: installing the same gen+bytes twice is a no-op success;
+// installing DIFFERENT bytes for an existing gen returns an error (would break
+// determinism — caller treats as fatal).
+func (k *DEKKeeper) InstallReplicatedDEK(gen uint32, wrapped []byte, kekVer uint32) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if existing, ok := k.wrap[gen]; ok {
+		if !bytes.Equal(existing, wrapped) {
+			return fmt.Errorf("encrypt: InstallReplicatedDEK gen %d: wrapped bytes mismatch (non-deterministic)", gen)
+		}
+		k.active = gen
+		return nil
+	}
+	aad := k.dekWrapAAD(gen, kekVer)
+	plain, err := AESGCMOpenWithAAD(k.kek, wrapped, aad)
+	if err != nil {
+		return fmt.Errorf("encrypt: InstallReplicatedDEK gen %d: unwrap: %w", gen, err)
+	}
+	aead, err := newAEAD(plain)
+	if err != nil {
+		zeroize(plain)
+		return fmt.Errorf("encrypt: InstallReplicatedDEK gen %d: aead: %w", gen, err)
+	}
+	zeroize(plain)
+	k.wrap[gen] = append([]byte(nil), wrapped...)
+	k.aead[gen] = aead
+	k.active = gen
+	return nil
+}
+
+// GenerateWrappedDEK generates a fresh random DEK for newGen on the LEADER,
+// seals it under the active KEK with the DomainDEKFSMWrap AAD, and returns the
+// wrapped bytes + the KEK version it was sealed under. It does NOT install
+// locally — install happens uniformly via Apply on every node (incl. leader),
+// preserving single-codepath determinism (mirrors the KEK-rotate install-via-
+// Apply discipline in meta_fsm_kek_apply.go).
+func (k *DEKKeeper) GenerateWrappedDEK(newGen uint32) (wrapped []byte, kekVer uint32, err error) {
+	plain := make([]byte, DEKSize)
+	if _, err = rand.Read(plain); err != nil {
+		return nil, 0, err
+	}
+	defer zeroize(plain)
+	k.mu.RLock()
+	kekVer = k.activeKEKVer.Load()
+	aad := k.dekWrapAAD(newGen, kekVer)
+	kekCopy := append([]byte(nil), k.kek...)
+	k.mu.RUnlock()
+	defer zeroize(kekCopy)
+	wrapped, err = AESGCMSealWithAAD(kekCopy, plain, aad)
+	if err != nil {
+		return nil, 0, err
+	}
+	return wrapped, kekVer, nil
 }
 
 // Active returns the current active generation number and a copy of its
@@ -169,6 +273,9 @@ func (k *DEKKeeper) OpenWithAAD(ct []byte, gen uint32, aad []byte) ([]byte, erro
 }
 
 // Rotate generates a new DEK at active+1 and makes it the active generation.
+// The new wrap is AAD-bound to (clusterID, active+1, activeKEKVer). Used by the
+// single-node / non-clustered DEK rotation apply path; clustered nodes install
+// leader-generated wraps via InstallReplicatedDEK instead.
 func (k *DEKKeeper) Rotate() error {
 	plain := make([]byte, DEKSize)
 	if _, err := rand.Read(plain); err != nil {
@@ -176,7 +283,10 @@ func (k *DEKKeeper) Rotate() error {
 	}
 	defer zeroize(plain)
 
-	wrapped, err := AESGCMSeal(k.kek, plain)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	newGen := k.active + 1
+	wrapped, err := AESGCMSealWithAAD(k.kek, plain, k.dekWrapAAD(newGen, k.activeKEKVer.Load()))
 	if err != nil {
 		return err
 	}
@@ -184,10 +294,7 @@ func (k *DEKKeeper) Rotate() error {
 	if err != nil {
 		return err
 	}
-
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.active++
+	k.active = newGen
 	k.wrap[k.active] = wrapped
 	k.aead[k.active] = aead
 	return nil
@@ -406,9 +513,18 @@ func (k *DEKKeeper) InstallKEKRotation(newKEK []byte, rewrapped map[uint32][]byt
 //
 // Each persisted DEK is unwrapped once here so its AEAD can be cached; the
 // plaintext is zeroed before the function returns.
-func LoadFromFSM(kek []byte, versions map[uint32][]byte) (*DEKKeeper, error) {
+// activeKEKVer is the KEK version the persisted wraps are currently sealed
+// under (the snapshot's active_kek_version trailer, which applyKEKRotate keeps
+// in lockstep with the wraps it re-sealed). It is used both to label the seal
+// counter AND as the kekVer field of every wrap's DomainDEKFSMWrap AAD — the
+// persisted wraps were re-sealed under this version at the last KEK rotation
+// (InstallKEKRotation stores them verbatim). clusterID must be 16 bytes.
+func LoadFromFSM(kek, clusterID []byte, versions map[uint32][]byte, activeKEKVer uint32) (*DEKKeeper, error) {
 	if len(kek) != KEKSize {
 		return nil, fmt.Errorf("LoadFromFSM: KEK len = %d, want %d", len(kek), KEKSize)
+	}
+	if len(clusterID) != 16 {
+		return nil, fmt.Errorf("LoadFromFSM: clusterID must be 16 bytes, got %d", len(clusterID))
 	}
 	if len(versions) == 0 {
 		return nil, errors.New("LoadFromFSM: empty versions map")
@@ -419,11 +535,18 @@ func LoadFromFSM(kek []byte, versions map[uint32][]byte) (*DEKKeeper, error) {
 			active = g
 		}
 	}
-	wrap := make(map[uint32][]byte, len(versions))
-	aead := make(map[uint32]cipher.AEAD, len(versions))
+	k := &DEKKeeper{
+		kek:          append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
+		clusterID:    append([]byte(nil), clusterID...),
+		active:       active,
+		wrap:         make(map[uint32][]byte, len(versions)),
+		aead:         make(map[uint32]cipher.AEAD, len(versions)),
+		retiredSeals: make(map[uint32]uint64),
+	}
 	for g, w := range versions {
-		wrap[g] = append([]byte(nil), w...)
-		plain, err := AESGCMOpen(kek, w)
+		k.wrap[g] = append([]byte(nil), w...)
+		aad := k.dekWrapAAD(g, activeKEKVer)
+		plain, err := AESGCMOpenWithAAD(kek, w, aad)
 		if err != nil {
 			return nil, fmt.Errorf("LoadFromFSM: unwrap gen %d: %w", g, err)
 		}
@@ -432,15 +555,10 @@ func LoadFromFSM(kek []byte, versions map[uint32][]byte) (*DEKKeeper, error) {
 		if err != nil {
 			return nil, fmt.Errorf("LoadFromFSM: build AEAD for gen %d: %w", g, err)
 		}
-		aead[g] = a
+		k.aead[g] = a
 	}
-	return &DEKKeeper{
-		kek:          append([]byte(nil), kek...), // defensive copy: caller may zeroize their slice after this returns
-		active:       active,
-		wrap:         wrap,
-		aead:         aead,
-		retiredSeals: make(map[uint32]uint64),
-	}, nil
+	k.activeKEKVer.Store(activeKEKVer) // label the seal counter
+	return k, nil
 }
 
 // newAEAD builds an AES-256-GCM AEAD from a 32-byte key.

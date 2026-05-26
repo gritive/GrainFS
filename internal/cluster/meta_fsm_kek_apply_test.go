@@ -51,19 +51,24 @@ func newKEKRotateTestFixture(t *testing.T) *kekRotateTestFixture {
 
 	// Seal the canonical DEK plaintext under K0 to produce the FSM-resident
 	// wrap. Build a DEKKeeper at gen 1 (matches plan's seed) via LoadFromFSM.
+	// DEK wraps are AAD-bound to (clusterID, gen, kekVer): gen 1 under KEK
+	// version 0 here.
 	var err error
-	f.wrappedDEKK0, err = encrypt.AESGCMSeal(f.k0, f.plainDEK)
+	dekAADK0 := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, f.clusterID[:], encrypt.FieldUint32(1), encrypt.FieldUint32(0))
+	f.wrappedDEKK0, err = encrypt.AESGCMSealWithAAD(f.k0, f.plainDEK, dekAADK0)
 	if err != nil {
 		t.Fatalf("seal DEK under K0: %v", err)
 	}
-	keeper, err := encrypt.LoadFromFSM(f.k0, map[uint32][]byte{1: f.wrappedDEKK0})
+	keeper, err := encrypt.LoadFromFSM(f.k0, f.clusterID[:], map[uint32][]byte{1: f.wrappedDEKK0}, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
 	f.fsm.SetDEKKeeper(keeper)
 
-	// Rewrap the same plaintext under K1.
-	f.wrappedDEKK1, err = encrypt.AESGCMSeal(f.k1, f.plainDEK)
+	// Rewrap the same plaintext under K1, re-binding the AAD kekVer to the new
+	// KEK version (NewVersion=1).
+	dekAADK1 := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, f.clusterID[:], encrypt.FieldUint32(1), encrypt.FieldUint32(1))
+	f.wrappedDEKK1, err = encrypt.AESGCMSealWithAAD(f.k1, f.plainDEK, dekAADK1)
 	if err != nil {
 		t.Fatalf("seal DEK under K1: %v", err)
 	}
@@ -158,6 +163,47 @@ func TestFSM_Apply_KEKRotate_HappyPath_InstallsRewrappedDEKs(t *testing.T) {
 	}
 	if !bytes.Equal(pt, []byte("post-rotate")) {
 		t.Errorf("roundtrip mismatch after rotate")
+	}
+}
+
+// TestKEKRotate_RewrapsAADBoundDEKs drives a full KEK rotate over AAD-bound DEK
+// wraps and asserts both the leader/follower verify path accepts it and the
+// post-apply keeper Seals/Opens under the rotated KEK. HIGH 1 / Pass 3: the
+// fixture uses a NON-ZERO clusterID end-to-end (newKEKRotateTestFixture calls
+// fsm.SetClusterID with the same cid the wraps are AAD-bound under). The
+// second half proves the missing-SetClusterID regression is caught: with a
+// zero clusterID the verify AAD would not match the wrap AAD and verify fails.
+func TestKEKRotate_RewrapsAADBoundDEKs(t *testing.T) {
+	fx := newKEKRotateTestFixture(t)
+
+	// Build + verify path accept the AAD-bound rewrap.
+	cmd := fx.buildHappyCmd([16]byte{0xA1})
+	if err := fx.fsm.verifyRewrappedDEKsAgainstWrapSet(cmd.RewrappedDEKs, fx.k0, fx.k1, 0, 1); err != nil {
+		t.Fatalf("verify with correct clusterID must pass: %v", err)
+	}
+
+	// Regression guard: a zero clusterID (the missing-SetClusterID bug) makes
+	// the verify AAD differ from the wrap AAD, so unwrap fails authentication.
+	zeroFSM := NewMetaFSM() // clusterID all-zero (no SetClusterID)
+	zeroFSM.SetDEKKeeper(fx.fsm.dekKeeper)
+	if err := zeroFSM.verifyRewrappedDEKsAgainstWrapSet(cmd.RewrappedDEKs, fx.k0, fx.k1, 0, 1); err == nil {
+		t.Fatal("verify with zero clusterID must FAIL AAD auth (missing-SetClusterID regression)")
+	}
+
+	// Full apply + post-rotate Seal/Open under the rotated KEK.
+	if err := fx.fsm.applyCmdAtIndex(fx.encodeAndWrap(cmd), 200); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := fx.fsm.ActiveKEKVersion(); got != 1 {
+		t.Fatalf("active_kek_version = %d, want 1", got)
+	}
+	ct, gen, err := fx.fsm.dekKeeper.Seal([]byte("aad-bound"))
+	if err != nil {
+		t.Fatalf("Seal after rotate: %v", err)
+	}
+	pt, err := fx.fsm.dekKeeper.Open(ct, gen)
+	if err != nil || !bytes.Equal(pt, []byte("aad-bound")) {
+		t.Fatalf("Open after rotate: pt=%q err=%v", pt, err)
 	}
 }
 
@@ -357,14 +403,19 @@ func newKEKRetireTestFixture(t *testing.T) *kekRetireTestFixture {
 	f.fsm.SetKEKStore(store)
 	f.fsm.SetActiveKEKVersion(4)
 
-	// Wire a minimal DEKKeeper so Snapshot works.
+	// Wire a minimal DEKKeeper so Snapshot works. DEK wraps are AAD-bound to
+	// (clusterID, gen, kekVer); this fixture leaves the FSM clusterID zero (no
+	// rotation is exercised), so seal under a zero clusterID for internal
+	// consistency with LoadFromFSM.
+	var zeroCID [16]byte
 	k0 := bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)
 	plainDEK := bytes.Repeat([]byte{0xD1}, encrypt.DEKSize)
-	wrappedDEK, err := encrypt.AESGCMSeal(k0, plainDEK)
+	dekAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, zeroCID[:], encrypt.FieldUint32(1), encrypt.FieldUint32(0))
+	wrappedDEK, err := encrypt.AESGCMSealWithAAD(k0, plainDEK, dekAAD)
 	if err != nil {
 		t.Fatalf("seal DEK: %v", err)
 	}
-	keeper, err := encrypt.LoadFromFSM(k0, map[uint32][]byte{1: wrappedDEK})
+	keeper, err := encrypt.LoadFromFSM(k0, zeroCID[:], map[uint32][]byte{1: wrappedDEK}, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
@@ -578,14 +629,18 @@ func newKEKPruneTestFixture(t *testing.T) *kekPruneTestFixture {
 	}
 	f.fsm.SetKEKStatus(3, KEKLifecycleRetiring, f.retireIdx)
 
-	// Minimal DEKKeeper so Snapshot works if exercised.
+	// Minimal DEKKeeper so Snapshot works if exercised. DEK wraps are AAD-bound;
+	// FSM clusterID is zero here (no rotation exercised) — seal under a zero
+	// clusterID for internal consistency with LoadFromFSM.
+	var zeroCID [16]byte
 	k0 := bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)
 	plainDEK := bytes.Repeat([]byte{0xD1}, encrypt.DEKSize)
-	wrappedDEK, err := encrypt.AESGCMSeal(k0, plainDEK)
+	dekAAD := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, zeroCID[:], encrypt.FieldUint32(1), encrypt.FieldUint32(0))
+	wrappedDEK, err := encrypt.AESGCMSealWithAAD(k0, plainDEK, dekAAD)
 	if err != nil {
 		t.Fatalf("seal DEK: %v", err)
 	}
-	keeper, err := encrypt.LoadFromFSM(k0, map[uint32][]byte{1: wrappedDEK})
+	keeper, err := encrypt.LoadFromFSM(k0, zeroCID[:], map[uint32][]byte{1: wrappedDEK}, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
@@ -882,7 +937,7 @@ func cloneKEKRotateFixtureFSM(t *testing.T, src *kekRotateTestFixture) *MetaFSM 
 	fsm2.SetKEKStore(store2)
 
 	// Load with the same wrapped DEK bytes as src — critical for hash equality.
-	keeper2, err := encrypt.LoadFromFSM(src.k0, map[uint32][]byte{1: src.wrappedDEKK0})
+	keeper2, err := encrypt.LoadFromFSM(src.k0, src.clusterID[:], map[uint32][]byte{1: src.wrappedDEKK0}, 0)
 	if err != nil {
 		t.Fatalf("clone LoadFromFSM: %v", err)
 	}

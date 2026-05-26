@@ -43,8 +43,11 @@ func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 		return nil
 	}
 
-	keysDir := nodeconfig.New(state.cfg.DataDir).KEKDir()
-	kek, err := loadKEKForRestore(state, keysDir, fsm.SnapshotCapturedKEKVersion())
+	cfg := nodeconfig.New(state.cfg.DataDir)
+	keysDir := cfg.KEKDir()
+
+	snapshotKEKVer := fsm.SnapshotCapturedKEKVersion()
+	kek, err := loadKEKForRestore(state, keysDir, snapshotKEKVer)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, encrypt.ErrKEKVersionUnknown) {
 			return fmt.Errorf("KEK not found at %s and the raft snapshot carries FSM-wrapped DEKs that require it. "+
@@ -58,7 +61,21 @@ func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 	}
 	defer zeroizeKEKCopy(kek)
 
-	keeper, err := encrypt.LoadFromFSM(kek, versions)
+	// cluster.id is required to reconstruct each persisted wrap's
+	// DomainDEKFSMWrap AAD. A restore implies prior cluster state, so load
+	// strictly (a missing cluster.id is a corrupted node, not a fresh init).
+	// Loaded after the KEK so a missing KEK still surfaces the KEK-specific
+	// remediation message.
+	clusterID, err := cfg.LoadClusterID()
+	if err != nil {
+		return fmt.Errorf("rebuildDEKKeeperFromRestore: cluster.id: %w", err)
+	}
+
+	// The persisted wraps are all sealed under the snapshot's captured active
+	// KEK version (applyKEKRotate keeps them in lockstep), so unwrap each under
+	// AAD (clusterID, gen, snapshotKEKVer). LoadFromFSM also labels the seal
+	// counter with snapshotKEKVer.
+	keeper, err := encrypt.LoadFromFSM(kek, clusterID, versions, snapshotKEKVer)
 	if err != nil {
 		return fmt.Errorf("decrypt FSM-wrapped DEK with KEK at %s: %w. "+
 			"This usually means the KEK on this node was rotated or replaced "+
@@ -66,7 +83,10 @@ func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 			"Restore the matching KEK by scp from any healthy peer.", keysDir, err)
 	}
 
-	keeper.SetActiveKEKVersion(fsm.SnapshotCapturedKEKVersion())
+	// Bind the FSM's clusterID so a subsequent KEK rotate's verify path uses
+	// the SAME DomainDEKFSMWrap AAD the keeper just unwrapped under
+	// (Task 1b HIGH 1).
+	fsm.SetClusterID(clusterID)
 	fsm.SetDEKKeeper(keeper)
 	state.dekKeeper = keeper
 	return nil

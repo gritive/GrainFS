@@ -12,7 +12,7 @@ import (
 func TestDEKKeeper_GenerateInitial(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, err := NewDEKKeeper(kek)
+	k, err := NewDEKKeeper(kek, testClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestDEKKeeper_GenerateInitial(t *testing.T) {
 func TestDEKKeeper_SealOpenRoundTrip(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	plain := []byte("hello dek")
 	ct, gen, err := k.Seal(plain)
 	if err != nil {
@@ -45,7 +45,7 @@ func TestDEKKeeper_SealOpenRoundTrip(t *testing.T) {
 func TestDEKKeeper_RotateBumpsGen(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	ct0, gen0, _ := k.Seal([]byte("v0"))
 	if gen0 != 0 {
 		t.Fatalf("gen0 = %d, want 0", gen0)
@@ -69,7 +69,7 @@ func TestDEKKeeper_RotateBumpsGen(t *testing.T) {
 func TestDEKKeeper_PruneRefusedWhenStillReferenced(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	k.Rotate() // now have gen 0 and 1
 	// gen 0 has not been rewrapped — prune must refuse
 	if err := k.Prune(0 /*safe=*/, false); err == nil {
@@ -83,7 +83,7 @@ func TestDEKKeeper_PruneRefusedWhenStillReferenced(t *testing.T) {
 func TestDEKKeeper_PruneRefusesActiveGen(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	_ = k.Rotate() // active = 1
 	if err := k.Prune(1, true); err == nil {
 		t.Fatal("Prune(active_gen, true) must refuse — would lose ability to seal new objects")
@@ -93,10 +93,10 @@ func TestDEKKeeper_PruneRefusesActiveGen(t *testing.T) {
 func TestLoadFromFSM_EmptyVersions(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	if _, err := LoadFromFSM(kek, nil); err == nil {
+	if _, err := LoadFromFSM(kek, testClusterID(), nil, 0); err == nil {
 		t.Fatal("LoadFromFSM(nil) must reject")
 	}
-	if _, err := LoadFromFSM(kek, map[uint32][]byte{}); err == nil {
+	if _, err := LoadFromFSM(kek, testClusterID(), map[uint32][]byte{}, 0); err == nil {
 		t.Fatal("LoadFromFSM(empty map) must reject")
 	}
 }
@@ -104,11 +104,11 @@ func TestLoadFromFSM_EmptyVersions(t *testing.T) {
 func TestLoadFromFSM_RoundTrip(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	original, _ := NewDEKKeeper(kek)
+	original, _ := NewDEKKeeper(kek, testClusterID())
 	_ = original.Rotate()
 	_ = original.Rotate() // gens 0, 1, 2 active=2
 
-	restored, err := LoadFromFSM(kek, original.Versions())
+	restored, err := LoadFromFSM(kek, testClusterID(), original.Versions(), 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestLoadFromFSM_RoundTrip(t *testing.T) {
 func TestDEKKeeper_VersionsIsDeepCopy(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	got := k.Versions()
 	// Zero the returned bytes for active gen; subsequent Seal must still work.
 	for g := range got {
@@ -148,7 +148,7 @@ func TestDEKKeeper_VersionsIsDeepCopy(t *testing.T) {
 func TestDEKKeeper_ActiveReturnsCopy(t *testing.T) {
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	_, w := k.Active()
 	orig := append([]byte(nil), w...)
 	for i := range w {
@@ -170,7 +170,7 @@ func TestDEKKeeper_ConcurrentSealOpenRotate(t *testing.T) {
 	// any data race the RWMutex contract should prevent.
 	kek := make([]byte, 32)
 	rand.Read(kek)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -227,7 +227,7 @@ func TestDEKKeeper_ConcurrentSealOpenRotate(t *testing.T) {
 
 func TestDEKKeeper_SealOpenWithAAD_RoundTrip(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x11}, KEKSize)
-	k, err := NewDEKKeeper(kek)
+	k, err := NewDEKKeeper(kek, testClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestDEKKeeper_SealOpenWithAAD_RoundTrip(t *testing.T) {
 
 func TestDEKKeeper_OpenWithAAD_MismatchedAAD(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x22}, KEKSize)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	ct, gen, _ := k.SealWithAAD([]byte("p"), []byte("ctx-A"))
 	if _, err := k.OpenWithAAD(ct, gen, []byte("ctx-B")); err == nil {
 		t.Fatal("expected error on AAD mismatch, got nil")
@@ -257,7 +257,7 @@ func TestDEKKeeper_OpenWithAAD_MismatchedAAD(t *testing.T) {
 
 func TestDEKKeeper_RewrapWithAAD_CrossGen(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x33}, KEKSize)
-	k, _ := NewDEKKeeper(kek)
+	k, _ := NewDEKKeeper(kek, testClusterID())
 	aad := []byte("rewrap-ctx")
 	ct, oldGen, _ := k.SealWithAAD([]byte("payload"), aad)
 	if err := k.Rotate(); err != nil {
@@ -285,7 +285,7 @@ func TestDEKKeeper_RetainsKEKAfterCallerZeroizes(t *testing.T) {
 	// independent copy so Rotate continues to produce wraps that
 	// LoadFromFSM (with the real KEK from disk) can later unwrap.
 	kek := bytes.Repeat([]byte{0xAB}, KEKSize)
-	keeper, err := NewDEKKeeper(kek)
+	keeper, err := NewDEKKeeper(kek, testClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestDEKKeeper_RetainsKEKAfterCallerZeroizes(t *testing.T) {
 	// via a fresh LoadFromFSM. Simulates "restart with real kek.key on
 	// disk".
 	versions := keeper.Versions() // returns deep copy of wrap[] map
-	restored, err := LoadFromFSM(original, versions)
+	restored, err := LoadFromFSM(original, testClusterID(), versions, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM with original KEK: %v", err)
 	}
@@ -314,9 +314,9 @@ func TestLoadFromFSM_RetainsKEKAfterCallerZeroizes(t *testing.T) {
 	// Same invariant on the restore path.
 	kek := bytes.Repeat([]byte{0xCD}, KEKSize)
 	// Build a versions map by going through one keeper.
-	src, _ := NewDEKKeeper(append([]byte(nil), kek...))
+	src, _ := NewDEKKeeper(append([]byte(nil), kek...), testClusterID())
 	versions := src.Versions()
-	keeper, err := LoadFromFSM(kek, versions)
+	keeper, err := LoadFromFSM(kek, testClusterID(), versions, 0)
 	if err != nil {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
@@ -340,19 +340,23 @@ func TestDEKKeeper_InstallKEKRotation_SwapsKEKAndWraps(t *testing.T) {
 
 	// Seed keeper with K_old. Capture the original gen-0 wrap so we can
 	// rebuild the equivalent ciphertext under K_new.
-	keeper, err := NewDEKKeeper(kOld)
+	keeper, err := NewDEKKeeper(kOld, testClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
 	_, origWrap := keeper.Active()
 
 	// Unwrap gen-0 plaintext with K_old, then re-seal under K_new — this is
-	// what the rotation leader would do off the FSM apply path.
-	plain0, err := AESGCMOpen(kOld, origWrap)
+	// what the rotation leader would do off the FSM apply path. DEK wraps are
+	// AAD-bound to (clusterID, gen, kekVer); a KEK rotation keeps the same
+	// kekVer label here (InstallKEKRotation does not bump activeKEKVer).
+	cid := testClusterID()
+	aad0 := BuildAAD(DomainDEKFSMWrap, cid, FieldUint32(0), FieldUint32(0))
+	plain0, err := AESGCMOpenWithAAD(kOld, origWrap, aad0)
 	if err != nil {
 		t.Fatalf("unwrap gen-0 with kOld: %v", err)
 	}
-	newWrap0, err := AESGCMSeal(kNew, plain0)
+	newWrap0, err := AESGCMSealWithAAD(kNew, plain0, aad0)
 	if err != nil {
 		t.Fatalf("reseal gen-0 with kNew: %v", err)
 	}
@@ -375,10 +379,11 @@ func TestDEKKeeper_InstallKEKRotation_SwapsKEKAndWraps(t *testing.T) {
 	if !ok {
 		t.Fatalf("wrap[1] missing after Rotate")
 	}
-	if _, err := AESGCMOpen(kNew, w1); err != nil {
+	aad1 := BuildAAD(DomainDEKFSMWrap, cid, FieldUint32(1), FieldUint32(0))
+	if _, err := AESGCMOpenWithAAD(kNew, w1, aad1); err != nil {
 		t.Errorf("wrap[1] should unseal under K_new: %v", err)
 	}
-	if _, err := AESGCMOpen(kOld, w1); err == nil {
+	if _, err := AESGCMOpenWithAAD(kOld, w1, aad1); err == nil {
 		t.Errorf("wrap[1] should NOT unseal under K_old — KEK swap failed")
 	}
 
@@ -402,7 +407,7 @@ func TestDEKKeeper_InstallKEKRotation_SwapsKEKAndWraps(t *testing.T) {
 
 func TestDEKKeeper_InstallKEKRotation_RejectsWrongLen(t *testing.T) {
 	kek := bytes.Repeat([]byte{0xA0}, KEKSize)
-	keeper, _ := NewDEKKeeper(kek)
+	keeper, _ := NewDEKKeeper(kek, testClusterID())
 	short := make([]byte, KEKSize-1)
 	if err := keeper.InstallKEKRotation(short, map[uint32][]byte{}); err == nil {
 		t.Errorf("expected error on short KEK")

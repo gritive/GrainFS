@@ -20,7 +20,7 @@ func newTestFSMWithDEK(t *testing.T) (*MetaFSM, *encrypt.DEKKeeper) {
 	kek := make([]byte, 32)
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	keeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	require.NoError(t, err)
 	fsm := NewMetaFSM()
 	fsm.SetDEKKeeper(keeper)
@@ -193,7 +193,7 @@ func TestMetaFSM_Restore_RollbackOnJKEYLoadSeedFailure(t *testing.T) {
 	wrongKEK := make([]byte, 32)
 	_, err = rand.Read(wrongKEK)
 	require.NoError(t, err)
-	wrongKeeper, err := encrypt.NewDEKKeeper(wrongKEK)
+	wrongKeeper, err := encrypt.NewDEKKeeper(wrongKEK, dekTestClusterID())
 	require.NoError(t, err)
 
 	dst := NewMetaFSM()

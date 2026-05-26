@@ -20,14 +20,31 @@ import (
 // the snapshot to a peer, peer Restores, pendingDEKVersions is set. The runtime
 // then has to unwrap those bytes with the local kek.key — which is exactly the
 // failure surface §7 T57 covers.
+// restoreTestClusterID returns the deterministic 16-byte clusterID used by the
+// restore fixtures. DEK wraps are AAD-bound to (clusterID, gen, kekVer), so the
+// same clusterID must be staged on disk (cluster.id) for the restore path to
+// reconstruct the AAD.
+func restoreTestClusterID() []byte {
+	id := make([]byte, 16)
+	for i := range id {
+		id[i] = byte(i + 1)
+	}
+	return id
+}
+
 func fsmWithWrappedDEKs(t *testing.T, kek []byte) *cluster.MetaFSM {
 	t.Helper()
 
-	keeper, err := encrypt.NewDEKKeeper(kek)
-	require.NoError(t, err, "NewDEKKeeper")
-	// Rotate once so we have multiple wrapped generations in the trailer —
-	// confirms the LoadFromFSM path exercises >1 unwrap.
-	require.NoError(t, keeper.Rotate(), "Rotate")
+	// Build wraps via the replication primitives so the wrap AAD is bound to
+	// (clusterID, gen, kekVer=0) — consistent with what the restore path
+	// reconstructs. Two generations confirm LoadFromFSM exercises >1 unwrap.
+	keeper, err := encrypt.NewEmptyDEKKeeper(kek, restoreTestClusterID())
+	require.NoError(t, err, "NewEmptyDEKKeeper")
+	for gen := uint32(0); gen <= 1; gen++ {
+		w, kv, err := keeper.GenerateWrappedDEK(gen)
+		require.NoError(t, err, "GenerateWrappedDEK")
+		require.NoError(t, keeper.InstallReplicatedDEK(gen, w, kv), "InstallReplicatedDEK")
+	}
 
 	src := cluster.NewMetaFSM()
 	src.SetDEKKeeper(keeper)
@@ -116,6 +133,9 @@ func TestStartup_RefusesWhenKEKDoesNotDecryptDEK(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, clusterKEK, wrongKEK, "test fixture must use distinct KEK bytes")
 	writeKEKFile(t, dataDir, wrongKEK)
+	// cluster.id must be present so the path reaches the DEK unwrap (the
+	// failure under test) rather than erroring earlier on a missing cluster.id.
+	writeClusterID(t, dataDir, restoreTestClusterID())
 
 	err = rebuildDEKKeeperFromRestore(state, fsm)
 	require.Error(t, err, "wrong KEK with FSM-wrapped DEKs must refuse startup")
@@ -147,9 +167,17 @@ func TestStartup_NoOpWhenSnapshotHasNoWrappedDEKs(t *testing.T) {
 func fsmWithWrappedDEKsAtKEKVersion(t *testing.T, kek []byte, kekVersion uint32) *cluster.MetaFSM {
 	t.Helper()
 
-	keeper, err := encrypt.NewDEKKeeper(kek)
+	// Seal both gens under kekVersion so the wrap AAD matches the version the
+	// snapshot records (production: InstallKEKRotation re-seals on rotation).
+	keeper, err := encrypt.NewEmptyDEKKeeper(kek, restoreTestClusterID())
 	require.NoError(t, err)
-	require.NoError(t, keeper.Rotate()) // two gens: 0 and 1
+	keeper.SetActiveKEKVersion(kekVersion)
+	for gen := uint32(0); gen <= 1; gen++ {
+		w, kv, err := keeper.GenerateWrappedDEK(gen)
+		require.NoError(t, err)
+		require.Equal(t, kekVersion, kv, "GenerateWrappedDEK must seal under the labeled KEK version")
+		require.NoError(t, keeper.InstallReplicatedDEK(gen, w, kv))
+	}
 
 	src := cluster.NewMetaFSM()
 	src.SetDEKKeeper(keeper)
@@ -199,18 +227,22 @@ func TestRestore_UsesSnapshotActiveKEKVersion_NotKeystoreActive(t *testing.T) {
 	require.Equal(t, uint32(2), store.ActiveVersion(), "keystore active must be V=2")
 
 	// rebuildDEKKeeperFromRestore must use K_1 (snapshot-captured), not K_2 (current active).
-	state := &bootState{kekStore: store}
+	dataDir := t.TempDir()
+	writeClusterID(t, dataDir, restoreTestClusterID())
+	state := &bootState{cfg: Config{DataDir: dataDir}, kekStore: store}
 	require.NoError(t, rebuildDEKKeeperFromRestore(state, fsm),
 		"must succeed by selecting K_1 per snapshot active_kek_version=1")
 	require.NotNil(t, state.dekKeeper,
 		"dekKeeper must be installed after successful restore")
 
-	// Confirm the keeper was built with K_1: the active DEK gen must unseal.
+	// Confirm the keeper was built with K_1: the active DEK gen must unseal
+	// under the AAD bound to (clusterID, gen, kekVer=1).
 	gen, wrapped := state.dekKeeper.Active()
-	require.Equal(t, uint32(1), gen, "keeper active gen must be 1 (last Rotate)")
+	require.Equal(t, uint32(1), gen, "keeper active gen must be 1 (last gen)")
 	kekForVerify, err := store.Get(1)
 	require.NoError(t, err)
-	_, err = encrypt.AESGCMOpen(kekForVerify, wrapped)
+	aad := encrypt.BuildAAD(encrypt.DomainDEKFSMWrap, restoreTestClusterID(), encrypt.FieldUint32(gen), encrypt.FieldUint32(1))
+	_, err = encrypt.AESGCMOpenWithAAD(kekForVerify, wrapped, aad)
 	require.NoError(t, err, "active DEK wrap must unseal under K_1")
 }
 
@@ -231,7 +263,9 @@ func TestRestore_FallsBackToKeystoreActiveWhenSnapshotVersionIsZero(t *testing.T
 	require.NoError(t, store.Add(0, k0))
 	// Active stays 0 by default.
 
-	state := &bootState{kekStore: store}
+	dataDir := t.TempDir()
+	writeClusterID(t, dataDir, restoreTestClusterID())
+	state := &bootState{cfg: Config{DataDir: dataDir}, kekStore: store}
 	require.NoError(t, rebuildDEKKeeperFromRestore(state, fsm))
 	require.NotNil(t, state.dekKeeper)
 }

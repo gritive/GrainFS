@@ -86,7 +86,7 @@ func TestPhaseA_KeyAcrossKEKStore_DEKKeeper_AAD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActiveKEK: %v", err)
 	}
-	keeper, err := encrypt.NewDEKKeeper(activeKEK)
+	keeper, err := encrypt.NewDEKKeeper(activeKEK, restoreTestClusterID())
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
