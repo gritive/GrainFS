@@ -99,6 +99,23 @@ func (k *DEKKeeper) Seal(plain []byte) ([]byte, uint32, error) {
 	return aead.Seal(nonce, nonce, plain, nil), k.active, nil
 }
 
+// SealWithAAD encrypts plain using the active generation's cached AEAD,
+// binding the ciphertext to aad. The same aad bytes must be supplied to
+// OpenWithAAD to decrypt — different aad fails authentication.
+func (k *DEKKeeper) SealWithAAD(plain, aad []byte) ([]byte, uint32, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	aead, ok := k.aead[k.active]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, 0, err
+	}
+	return aead.Seal(nonce, nonce, plain, aad), k.active, nil
+}
+
 // Open decrypts ct using the cached AEAD for the specified gen.
 func (k *DEKKeeper) Open(ct []byte, gen uint32) ([]byte, error) {
 	k.mu.RLock()
@@ -112,6 +129,21 @@ func (k *DEKKeeper) Open(ct []byte, gen uint32) ([]byte, error) {
 		return nil, ErrCiphertextTooShort
 	}
 	return aead.Open(nil, ct[:ns], ct[ns:], nil)
+}
+
+// OpenWithAAD decrypts ct produced by SealWithAAD under the supplied aad.
+func (k *DEKKeeper) OpenWithAAD(ct []byte, gen uint32, aad []byte) ([]byte, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	aead, ok := k.aead[gen]
+	if !ok {
+		return nil, ErrDEKGenUnknown
+	}
+	ns := aead.NonceSize()
+	if len(ct) < ns {
+		return nil, ErrCiphertextTooShort
+	}
+	return aead.Open(nil, ct[:ns], ct[ns:], aad)
 }
 
 // Rotate generates a new DEK at active+1 and makes it the active generation.
@@ -196,6 +228,37 @@ func (k *DEKKeeper) Rewrap(ct []byte, oldGen uint32) ([]byte, uint32, error) {
 		return nil, 0, err
 	}
 	return activeAEAD.Seal(nonce, nonce, plain, nil), k.active, nil
+}
+
+// RewrapWithAAD decrypts ct under the oldGen AEAD with aad and re-seals it
+// under the active AEAD with the SAME aad. Used by the rewrap scrubber to
+// fold Open+Seal into a single RLock acquisition while preserving the AAD
+// binding (so re-wrap does not weaken context binding).
+func (k *DEKKeeper) RewrapWithAAD(ct []byte, oldGen uint32, aad []byte) ([]byte, uint32, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	oldAEAD, ok := k.aead[oldGen]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	ns := oldAEAD.NonceSize()
+	if len(ct) < ns {
+		return nil, 0, ErrCiphertextTooShort
+	}
+	plain, err := oldAEAD.Open(nil, ct[:ns], ct[ns:], aad)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer zeroize(plain)
+	activeAEAD, ok := k.aead[k.active]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	nonce := make([]byte, activeAEAD.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, 0, err
+	}
+	return activeAEAD.Seal(nonce, nonce, plain, aad), k.active, nil
 }
 
 // VersionsAndActive returns a deep copy of the wrapped-DEK map AND the active

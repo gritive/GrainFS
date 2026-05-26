@@ -224,3 +224,57 @@ func TestDEKKeeper_ConcurrentSealOpenRotate(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestDEKKeeper_SealOpenWithAAD_RoundTrip(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, KEKSize)
+	k, err := NewDEKKeeper(kek)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	plain := []byte("secret payload")
+	aad := []byte("ctx|123")
+	ct, gen, err := k.SealWithAAD(plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithAAD: %v", err)
+	}
+	got, err := k.OpenWithAAD(ct, gen, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("round-trip mismatch: %q vs %q", got, plain)
+	}
+}
+
+func TestDEKKeeper_OpenWithAAD_MismatchedAAD(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x22}, KEKSize)
+	k, _ := NewDEKKeeper(kek)
+	ct, gen, _ := k.SealWithAAD([]byte("p"), []byte("ctx-A"))
+	if _, err := k.OpenWithAAD(ct, gen, []byte("ctx-B")); err == nil {
+		t.Fatal("expected error on AAD mismatch, got nil")
+	}
+}
+
+func TestDEKKeeper_RewrapWithAAD_CrossGen(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x33}, KEKSize)
+	k, _ := NewDEKKeeper(kek)
+	aad := []byte("rewrap-ctx")
+	ct, oldGen, _ := k.SealWithAAD([]byte("payload"), aad)
+	if err := k.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	newCt, newGen, err := k.RewrapWithAAD(ct, oldGen, aad)
+	if err != nil {
+		t.Fatalf("RewrapWithAAD: %v", err)
+	}
+	if newGen == oldGen {
+		t.Errorf("RewrapWithAAD did not advance gen")
+	}
+	plain, err := k.OpenWithAAD(newCt, newGen, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD after rewrap: %v", err)
+	}
+	if !bytes.Equal(plain, []byte("payload")) {
+		t.Errorf("rewrapped plaintext mismatch")
+	}
+}
