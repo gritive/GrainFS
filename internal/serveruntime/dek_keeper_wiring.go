@@ -166,7 +166,20 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	// 0 deterministically in Phase B, which is correct: prune-after-retire only
 	// requires lease_count == 0, and there are no consumers to drive it nonzero.
 	state.kekLeaseTracker = encrypt.NewKEKLeaseTracker()
-	WireDEKPostCommit(fsm, nil /* proposer (§6) */, keeper, nil /* scrubberKick (§6) */)
+	// Wire the real DEK proposer (state.metaRaft) and leader gate now that
+	// metaRaft is already stored on state (boot_phases_raft.go:54 runs before
+	// this call at line 100). The leader gate collapses N-node post-commit
+	// fan-out to a single proposal. scrubberKick remains nil until the
+	// storage-layer adapter is implemented.
+	//
+	// Unit tests that call wireDEKKeeper directly without a MetaRaft pass nil
+	// for both proposer and isLeader; nil isLeader is treated as not-leader
+	// (fail-safe) by DEKPostCommitDispatcher.handleConfigPut.
+	var isLeaderFn func() bool
+	if state.metaRaft != nil {
+		isLeaderFn = state.metaRaft.IsLeader
+	}
+	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, nil /* scrubberKick (§6) */)
 	return nil
 }
 
