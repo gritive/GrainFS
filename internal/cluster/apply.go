@@ -250,10 +250,6 @@ func (f *FSM) applyPutObjectMeta(txn *badger.Txn, data []byte) error {
 		return err
 	}
 	metaObj := buildPutObjectMeta(c)
-	meta, err := marshalObjectMeta(metaObj)
-	if err != nil {
-		return fmt.Errorf("marshal object meta: %w", err)
-	}
 	if c.ExpectedETag != "" {
 		item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key))
 		if gerr != nil {
@@ -273,38 +269,7 @@ func (f *FSM) applyPutObjectMeta(txn *badger.Txn, data []byte) error {
 			return err
 		}
 	}
-	// Versioned entries are only written when a VersionID is supplied. Legacy
-	// replay (empty VersionID) gets the single legacy key only.
-	if c.VersionID != "" {
-		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
-			return err
-		}
-		if c.PreserveLatest {
-			return nil
-		}
-	}
-	if c.IsDeleteMarker {
-		if c.VersionID != "" {
-			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-				return err
-			}
-		}
-		if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		return nil
-	}
-	// Dual-write: keep the legacy latest-only key in sync during the transition
-	// so readers that haven't been ported yet still see the object.
-	if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), meta); err != nil {
-		return err
-	}
-	if c.VersionID != "" {
-		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return f.persistPutObjectMetaUpdate(txn, c, metaObj)
 }
 
 func (f *FSM) applyDeleteObject(txn *badger.Txn, data []byte) error {

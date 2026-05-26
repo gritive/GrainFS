@@ -86,6 +86,87 @@ func TestPersistObjectMetaUpdateLegacyOnly(t *testing.T) {
 	}
 }
 
+func TestPersistPutObjectMetaUpdatePublishesVersionedObject(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+	meta := objectMeta{Key: "k", Size: 12}
+
+	err := f.db.Update(func(txn *badger.Txn) error {
+		return f.persistPutObjectMetaUpdate(txn, PutObjectMetaCmd{
+			Bucket:    "b",
+			Key:       "k",
+			VersionID: "v1",
+		}, meta)
+	})
+	if err != nil {
+		t.Fatalf("persistPutObjectMetaUpdate: %v", err)
+	}
+
+	legacy := readObjectMetaForPersistenceTest(t, f, f.keys.ObjectMetaKey("b", "k"))
+	versioned := readObjectMetaForPersistenceTest(t, f, f.keys.ObjectMetaKeyV("b", "k", "v1"))
+	if legacy.Size != 12 || versioned.Size != 12 {
+		t.Fatalf("unexpected persisted meta: legacy=%+v versioned=%+v", legacy, versioned)
+	}
+	if got := readLatestForPersistenceTest(t, f, "b", "k"); got != "v1" {
+		t.Fatalf("latest=%q want v1", got)
+	}
+}
+
+func TestPersistPutObjectMetaUpdatePreserveLatestWritesOnlyVersion(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+	previous := objectMeta{Key: "k", Size: 1}
+	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), previous)
+	requireSetLatestForResolveTest(t, f, "b", "k", "v-current")
+
+	err := f.db.Update(func(txn *badger.Txn) error {
+		return f.persistPutObjectMetaUpdate(txn, PutObjectMetaCmd{
+			Bucket:         "b",
+			Key:            "k",
+			VersionID:      "v-old",
+			PreserveLatest: true,
+		}, objectMeta{Key: "k", Size: 12})
+	})
+	if err != nil {
+		t.Fatalf("persistPutObjectMetaUpdate: %v", err)
+	}
+
+	legacy := readObjectMetaForPersistenceTest(t, f, f.keys.ObjectMetaKey("b", "k"))
+	versioned := readObjectMetaForPersistenceTest(t, f, f.keys.ObjectMetaKeyV("b", "k", "v-old"))
+	if legacy.Size != 1 || versioned.Size != 12 {
+		t.Fatalf("unexpected persisted meta: legacy=%+v versioned=%+v", legacy, versioned)
+	}
+	if got := readLatestForPersistenceTest(t, f, "b", "k"); got != "v-current" {
+		t.Fatalf("latest=%q want v-current", got)
+	}
+}
+
+func TestPersistPutObjectMetaUpdateDeleteMarkerPublishesLatestAndDeletesLegacy(t *testing.T) {
+	f := newCoalesceTestFSM(t)
+	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), objectMeta{Key: "k", Size: 12})
+
+	err := f.db.Update(func(txn *badger.Txn) error {
+		return f.persistPutObjectMetaUpdate(txn, PutObjectMetaCmd{
+			Bucket:         "b",
+			Key:            "k",
+			VersionID:      "del-v1",
+			IsDeleteMarker: true,
+		}, objectMeta{Key: "k", ETag: deleteMarkerETag})
+	})
+	if err != nil {
+		t.Fatalf("persistPutObjectMetaUpdate: %v", err)
+	}
+
+	marker := readObjectMetaForPersistenceTest(t, f, f.keys.ObjectMetaKeyV("b", "k", "del-v1"))
+	if marker.ETag != deleteMarkerETag {
+		t.Fatalf("marker=%+v", marker)
+	}
+	if got := readLatestForPersistenceTest(t, f, "b", "k"); got != "del-v1" {
+		t.Fatalf("latest=%q want del-v1", got)
+	}
+	if _, err := readObjectMetaMaybeForPersistenceTest(t, f, f.keys.ObjectMetaKey("b", "k")); !errors.Is(err, badger.ErrKeyNotFound) {
+		t.Fatalf("legacy err=%v want ErrKeyNotFound", err)
+	}
+}
+
 func readObjectMetaForPersistenceTest(t *testing.T, f *FSM, key []byte) objectMeta {
 	t.Helper()
 	meta, err := readObjectMetaMaybeForPersistenceTest(t, f, key)
