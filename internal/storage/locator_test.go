@@ -60,6 +60,14 @@ func TestParseLocatorEdgeCases(t *testing.T) {
 	}
 }
 
+func TestSegmentKnownPath(t *testing.T) {
+	got := SegmentKnownPath("b1", "dir/obj", "01HXYZ-raw")
+	want := "b1/dir/obj_segments/" + ParseLocator("01HXYZ-raw").Ref
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
 func TestLocatorStringRoundTrip(t *testing.T) {
 	loc := Locator{Scheme: LocatorCAS, Ref: "b3-0011223344556677"}
 	if got := loc.String(); got != "cas://b3-0011223344556677" {

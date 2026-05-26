@@ -48,6 +48,15 @@ func ParseLocator(blobID string) Locator {
 	}
 }
 
+// SegmentKnownPath is the canonical orphan-sweep path for a raw segment blob:
+// "<bucket>/<key>_segments/<normalized-blobID>". The scrubber's known-set and
+// every frozen-path source MUST build paths through this one function so they
+// can never drift (a drift drops a referenced chunk from the known-set, and the
+// scrubber then deletes a still-referenced chunk -> data loss).
+func SegmentKnownPath(bucket, key, blobID string) string {
+	return bucket + "/" + key + "_segments/" + ParseLocator(blobID).Ref
+}
+
 // String renders the locator. LocatorCAS gets the "cas://" prefix; LocatorLegacy
 // renders its bare Ref verbatim (no prefix) to preserve existing on-disk BlobIDs.
 func (l Locator) String() string {

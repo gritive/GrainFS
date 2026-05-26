@@ -139,7 +139,7 @@ func buildKnownSegments(bucket string, src segmentManifestSource) (map[string]bo
 			continue
 		}
 		for _, seg := range o.Segments {
-			known[bucket+"/"+o.Key+"_segments/"+storage.ParseLocator(seg.BlobID).Ref] = true
+			known[storage.SegmentKnownPath(bucket, o.Key, seg.BlobID)] = true
 		}
 	}
 	paths, err := src.SnapshotFrozenSegmentPaths(bucket)
