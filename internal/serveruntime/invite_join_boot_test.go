@@ -29,6 +29,10 @@ func TestClassifyInviteJoinResume(t *testing.T) {
 		// hard-fail on the missing keys.d/current.key and brick the node forever).
 		{"bundle, key, incomplete, not acked -> fresh (was bricking)", true, true, false, false, inviteFreshJoin},
 		{"bundle, complete but not acked -> resume", true, true, true, false, inviteResume},
+		// P2: a complete-but-unacked sentinel must resume Phase-2 even WITHOUT the
+		// bundle env (one-shot env; a restart need not re-set it). Otherwise the
+		// node boots on staged secrets but never sends the membership ACK.
+		{"no bundle, complete but not acked -> resume", false, true, true, false, inviteResume},
 		{"bundle, complete and acked -> normal", true, true, true, true, inviteNormalBoot},
 		// Incomplete dominates acked: re-run Phase-1 rather than resume.
 		{"bundle, key, acked but incomplete -> fresh", true, true, false, true, inviteFreshJoin},
@@ -83,6 +87,22 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		mustWrite(t, p.pendingSentinel, []byte("pending"))
 		if got := gateInviteJoin(dir, true); got != inviteResume {
 			t.Fatalf("got %d want Resume", got)
+		}
+	})
+
+	t.Run("all artifacts staged + sentinel present + NO bundle -> resume (P2)", func(t *testing.T) {
+		// The bundle env is one-shot: a restart that does not re-set it must still
+		// resume the Phase-2 ACK from the complete-but-unacked sentinel, NOT boot as
+		// a non-member on the staged secrets.
+		dir := t.TempDir()
+		p := inviteJoinPathsFor(dir)
+		mustWrite(t, p.encryptionKey, []byte("k"))
+		mustWrite(t, p.clusterID, []byte("cid"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
+		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		if got := gateInviteJoin(dir, false); got != inviteResume {
+			t.Fatalf("got %d want Resume (no bundle env, complete+unacked)", got)
 		}
 	})
 
@@ -163,6 +183,36 @@ func TestMaybeInviteJoin_RejectsEphemeralRaftAddr(t *testing.T) {
 	}
 }
 
+// stageResumeArtifacts writes all Phase-1 artifacts + a REAL binary sentinel +
+// the mirrored transport PSK so the gate classifies Resume and the resume path
+// can reconstruct its state from the sentinel. Returns the staged PSK.
+func stageResumeArtifacts(t *testing.T, dir string) string {
+	t.Helper()
+	p := inviteJoinPathsFor(dir)
+	mustWrite(t, p.encryptionKey, []byte("k"))
+	mustWrite(t, p.clusterID, []byte("cid"))
+	mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
+	mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+	// A REAL binary sentinel (the resume path now decodes it, not just stat()s it).
+	if err := writeInvitePendingSentinel(dir, p.pendingSentinel, &inviteJoinState{
+		seedAddr:      "seed:7000",
+		seedSPKI:      [32]byte{1, 2, 3},
+		inviteID:      "invite-123",
+		nodeID:        "fixed-node-id",
+		raftAddr:      "10.0.0.1:7000",
+		leaderID:      "leader-xyz",
+		nodeSPKI:      [32]byte{9, 9, 9},
+		nodeKeyKEKGen: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const psk = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	if err := transport.NewKeystore(dir).WriteCurrent(psk); err != nil {
+		t.Fatal(err)
+	}
+	return psk
+}
+
 // TestMaybeInviteJoin_ResumePopulatesClusterKey: on Resume, opts.ClusterKey is
 // read from keys.d/current.key (the gate runs BEFORE bootQUICTransport, so an
 // empty key would trip the --cluster-key gate).
@@ -170,21 +220,7 @@ func TestMaybeInviteJoin_ResumePopulatesClusterKey(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(inviteBundleEnv, mintTestBundleToken(t))
 	mustWrite(t, filepath.Join(dir, "node-id"), []byte("fixed-node-id\n"))
-
-	// Make the gate classify Resume: ALL Phase-1 artifacts staged + pending
-	// sentinel (artifacts complete but not yet acked).
-	p := inviteJoinPathsFor(dir)
-	mustWrite(t, p.encryptionKey, []byte("k"))
-	mustWrite(t, p.clusterID, []byte("cid"))
-	mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
-	mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
-	mustWrite(t, p.pendingSentinel, []byte("pending"))
-
-	// Stage the transport PSK on disk (Phase-1 mirrored it on the prior boot).
-	const psk = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
-	if err := transport.NewKeystore(dir).WriteCurrent(psk); err != nil {
-		t.Fatal(err)
-	}
+	psk := stageResumeArtifacts(t, dir)
 
 	opts := &ServeOptions{DataDir: dir, RaftAddr: "10.0.0.1:7000"}
 	st, err := maybeInviteJoin(t.Context(), opts)
@@ -196,6 +232,34 @@ func TestMaybeInviteJoin_ResumePopulatesClusterKey(t *testing.T) {
 	}
 	if opts.ClusterKey != psk {
 		t.Fatalf("resume should populate opts.ClusterKey from current.key, got %q", opts.ClusterKey)
+	}
+}
+
+// TestMaybeInviteJoin_ResumeWithoutBundleEnv is the P2 load-bearing assertion: a
+// complete-but-unacked sentinel must resume Phase-2 even though the one-shot
+// GRAINFS_INVITE_BUNDLE env is NOT set on this restart. State is reconstructed
+// from the sentinel; opts.ClusterKey is loaded from keys.d/current.key.
+func TestMaybeInviteJoin_ResumeWithoutBundleEnv(t *testing.T) {
+	dir := t.TempDir()
+	// NOTE: deliberately NO t.Setenv(inviteBundleEnv, ...).
+	mustWrite(t, filepath.Join(dir, "node-id"), []byte("fixed-node-id\n"))
+	psk := stageResumeArtifacts(t, dir)
+
+	// No RaftAddr: resume must NOT depend on it (the sentinel carries raftAddr).
+	opts := &ServeOptions{DataDir: dir}
+	st, err := maybeInviteJoin(t.Context(), opts)
+	if err != nil {
+		t.Fatalf("resume without bundle env: %v", err)
+	}
+	if st == nil {
+		t.Fatal("resume without bundle env should return non-nil state")
+	}
+	if opts.ClusterKey != psk {
+		t.Fatalf("resume should populate opts.ClusterKey from current.key, got %q", opts.ClusterKey)
+	}
+	if st.seedAddr != "seed:7000" || st.inviteID != "invite-123" ||
+		st.nodeID != "fixed-node-id" || st.raftAddr != "10.0.0.1:7000" {
+		t.Fatalf("resume state not reconstructed from sentinel: %+v", st)
 	}
 }
 

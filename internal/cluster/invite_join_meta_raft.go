@@ -10,6 +10,11 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
+// errInviteAddressTaken rejects a Phase-2 ACK whose advertised raft address (or
+// SPKI) is already owned by a DIFFERENT existing node. Routed to JoinStatusError
+// by joinReplyFromError's default branch; the invite stays unconsumed.
+var errInviteAddressTaken = errors.New("invite-join: address owned by another node")
+
 // IsSPKIDenylisted reports whether an SPKI is revoked (invite admission gate).
 func (m *MetaRaft) IsSPKIDenylisted(spki [32]byte) bool { return m.fsm.peers.isDenylisted(spki) }
 
@@ -48,6 +53,23 @@ func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki 
 	raftID := addr
 	if raftID == "" {
 		raftID = nodeID
+	}
+	// Ownership guard (BEFORE any membership mutation): raft IDs ARE addresses, so
+	// a joiner that advertised an address already owned by a DIFFERENT existing
+	// node (e.g. the leader's own raft address — the joiner controls the Phase-1
+	// transcript address) would otherwise hit AddLearner's ErrAlreadyLearner /
+	// PromoteToVoter's ErrNotALearner, get tolerated as a "resume", and then
+	// ProposeAddNode would register a NEW meta member/SPKI over the existing
+	// node's address → membership corruption + a consumed single-use invite.
+	// Tolerate the already-present states ONLY when the existing entry at that
+	// address (and that SPKI) belongs to THIS pending join (same nodeID). Running
+	// this before AddLearner also keeps handleJoinPhase2's unconditional
+	// RemoveLearner rollback a harmless no-op on rejection.
+	if existing, ok := m.fsm.ResolveNodeIDByAddress(addr); ok && existing != nodeID {
+		return fmt.Errorf("%w: address %s owned by node %s", errInviteAddressTaken, addr, existing)
+	}
+	if owner, ok := m.fsm.peers.spkiOwner(spki); ok && owner != nodeID {
+		return fmt.Errorf("%w: SPKI owned by node %s", errInviteAddressTaken, owner)
 	}
 	// commit1: register pending-learner SPKI + AddLearner.
 	if err := m.ProposeRegisterPendingLearner(ctx, nodeID, spki, addr); err != nil {

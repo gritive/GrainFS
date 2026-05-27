@@ -441,6 +441,79 @@ func TestHandleJoin_Phase2_ResumesFromMembershipAppliedNotConsumed(t *testing.T)
 	require.False(t, ok, "invite must be consumed after the resuming Phase-2")
 }
 
+// TestHandleJoin_Phase2_RejectsAddressOwnedByAnotherNode is the P1 ownership
+// guard: a Phase-1 redeem may advertise ANY address (the joiner controls its own
+// transcript). If that address is already owned by a DIFFERENT existing voter,
+// the Phase-2 ACK must be REJECTED — otherwise AddLearner's already-learner /
+// PromoteToVoter's already-voter would be tolerated as a resume and ProposeAddNode
+// would register a NEW member/SPKI over the existing node's address (membership
+// corruption + a burned single-use invite).
+func TestHandleJoin_Phase2_RejectsAddressOwnedByAnotherNode(t *testing.T) {
+	fx, _ := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+	const ownedAddr = "node-b-addr" // node-b's real membership address.
+
+	// node-b joins for real: Phase-1 + Phase-2 → voting member at ownedAddr.
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	p2 := fx.req
+	p2.JoinPhase = 2
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p2).Accepted)
+	require.True(t, fsmHasNode(fx.leader, "node-b"))
+	require.Equal(t, peerStateMember, fx.leader.fsm.peers.byNodeID["node-b"].State)
+
+	// Mint a SECOND, independent invite for a different identity (node-c).
+	invitePrivC, invitePubC, inviteIDC, err := MintInviteKeypair()
+	require.NoError(t, err)
+	require.NoError(t, fx.leader.ProposeInviteMint(ctx, inviteIDC, invitePubC, time.Now().Add(time.Hour).UnixNano()))
+
+	certC, spkiC, err := transport.GenerateNodeIdentity("cluster-x", "node-c")
+	require.NoError(t, err)
+	keyC := certC.PrivateKey.(*ecdsa.PrivateKey)
+	// node-c advertises node-b's address in its (validly signed) transcript.
+	trC := encrypt.InviteTranscript{
+		ClusterID: transcriptClusterID,
+		Nonce:     []byte("joiner-nonce-c"),
+		NodeID:    "node-c",
+		Address:   ownedAddr,
+		SPKI:      spkiC[:],
+		Bind:      nil,
+	}
+	reqC := JoinRequest{
+		NodeID:         "node-c",
+		Address:        ownedAddr,
+		HandshakeNonce: []byte("joiner-nonce-c"),
+		SPKI:           spkiC[:],
+		CertDER:        certC.Leaf.Raw,
+		NodeSig:        mustSignNode(t, keyC, trC),
+		InviteSig:      encrypt.SignInviteTranscript(invitePrivC, trC),
+		InviteID:       inviteIDC,
+	}
+
+	// Phase-1 succeeds (fresh invite, own SPKI; the address is not validated at
+	// Phase-1 — it is bound into the pending redemption).
+	reqC.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, spkiC, reqC).Accepted)
+
+	// Phase-2 ACK must be REJECTED: ownedAddr belongs to node-b, not node-c.
+	reqC.JoinPhase = 2
+	reply := fx.receiver.HandleJoin(ctx, spkiC, reqC)
+	require.False(t, reply.Accepted, "phase-2 must reject an address owned by another node")
+	require.Equal(t, JoinStatusError, reply.Status)
+
+	// node-b's membership is intact (no NEW member registered for the address, no
+	// SPKI overwrite).
+	require.True(t, fsmHasNode(fx.leader, "node-b"))
+	require.Equal(t, fx.spki, fx.leader.fsm.peers.byNodeID["node-b"].SPKI)
+	require.False(t, fsmHasNode(fx.leader, "node-c"), "node-c must NOT become a member")
+
+	// node-c's invite is NOT consumed (still redeemable for a legitimate retry
+	// with a correct address).
+	_, ok := fx.leader.LookupInvite(inviteIDC, time.Now())
+	require.True(t, ok, "the rejected join must NOT consume node-c's single-use invite")
+}
+
 // --- helpers -----------------------------------------------------------------
 
 func fsmHasNode(m *MetaRaft, id string) bool {

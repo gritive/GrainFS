@@ -139,6 +139,15 @@ const (
 //	bundle && !complete (any acked)  → FreshJoin (run/re-run Phase-1)
 func classifyInviteJoinResume(bundlePresent, persistedInviteNodeKey, artifactsComplete, acked bool) inviteJoinDecision {
 	_ = persistedInviteNodeKey // signature preserved for the table test; unused by design
+	// A complete-but-unacked sentinel resumes Phase-2 INDEPENDENT of bundle-env
+	// presence: GRAINFS_INVITE_BUNDLE is one-shot, so a restart that does not
+	// re-set it must still finish the membership ACK from the sentinel rather than
+	// booting on staged secrets as a non-member. Phase-2 reads everything (seed
+	// addr/SPKI, inviteID, nodeID, KEK gen) from the sentinel — it needs neither
+	// the invite priv key nor the bundle.
+	if artifactsComplete && !acked {
+		return inviteResume
+	}
 	if !bundlePresent {
 		return inviteNormalBoot
 	}
@@ -147,10 +156,8 @@ func classifyInviteJoinResume(bundlePresent, persistedInviteNodeKey, artifactsCo
 		// staging): re-run Phase-1 rather than resume Phase-2.
 		return inviteFreshJoin
 	}
-	if acked {
-		return inviteNormalBoot
-	}
-	return inviteResume
+	// artifactsComplete && acked: fully joined → normal boot.
+	return inviteNormalBoot
 }
 
 // inviteJoinPaths bundles the on-disk locations the gate + staging touch.
@@ -228,6 +235,15 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 		return nil, nil
 	}
 
+	if decision == inviteResume {
+		// Resume Phase-2 ACK from the sentinel ALONE — independent of the bundle
+		// env (one-shot; a restart need not re-set it). Everything Phase-2 needs
+		// (seed addr/SPKI, inviteID, nodeID, raftAddr, KEK gen) is persisted in the
+		// sentinel; the node SPKI + leaderID are reloaded from node.key.enc + the
+		// sentinel at Phase-2. We do NOT decode the bundle here.
+		return inviteJoinResumeFromSentinel(opts)
+	}
+
 	bundle, err := cluster.DecodeInviteBundle(token)
 	if err != nil {
 		return nil, fmt.Errorf("decode invite bundle: %w", err)
@@ -266,26 +282,46 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 		clusterID: clusterID,
 	}
 
-	if decision == inviteResume {
-		// Phase-1 already staged secrets + identity on a prior boot. The
-		// --cluster-key gate (bootValidateConfig) runs BEFORE bootQUICTransport's
-		// ResolveClusterKey, so we MUST populate opts.ClusterKey here from the
-		// transport PSK that Phase-1 mirrored to keys.d/current.key — leaving it
-		// empty would trip ErrEmptyClusterKey before disk is ever read. The node
-		// SPKI + leaderID are reloaded from node.key.enc + the sentinel at Phase-2.
-		psk, err := transport.NewKeystore(opts.DataDir).ReadCurrent()
-		if err != nil || psk == "" {
-			return nil, fmt.Errorf("invite-join resume: transport PSK (keys.d/current.key) missing or unreadable: %w", err)
-		}
-		opts.ClusterKey = psk
-		log.Warn().Str("node_id", st.nodeID).Msg("zero-CA invite-join: resuming (Phase-1 artifacts durable, Phase-2 ACK pending)")
-		return st, nil
-	}
-
 	// FreshJoin: run Phase-1 (pull + stage + seal + sentinel).
 	if err := inviteJoinPhase1(ctx, opts, bundle, st); err != nil {
 		return nil, err
 	}
+	return st, nil
+}
+
+// inviteJoinResumeFromSentinel reconstructs the Phase-2 resume state from the
+// persisted sentinel (NOT the bundle env, which is one-shot). It is reached when
+// the gate classifies inviteResume (artifacts complete but the ACK never
+// landed), regardless of whether the bundle env is set on this restart. It also
+// populates opts.ClusterKey from the transport PSK Phase-1 mirrored to
+// keys.d/current.key, because bootValidateConfig's --cluster-key gate runs
+// BEFORE bootQUICTransport's ResolveClusterKey reads disk.
+func inviteJoinResumeFromSentinel(opts *ServeOptions) (*inviteJoinState, error) {
+	rec, ok := readInvitePendingSentinel(opts.DataDir)
+	if !ok {
+		return nil, fmt.Errorf("invite-join resume: sentinel missing or unreadable")
+	}
+	psk, err := transport.NewKeystore(opts.DataDir).ReadCurrent()
+	if err != nil || psk == "" {
+		return nil, fmt.Errorf("invite-join resume: transport PSK (keys.d/current.key) missing or unreadable: %w", err)
+	}
+	opts.ClusterKey = psk
+	if opts.NodeID == "" {
+		opts.NodeID = rec.nodeID
+	}
+	st := &inviteJoinState{
+		seedAddr:      rec.seedAddr,
+		seedSPKI:      rec.seedSPKI,
+		inviteID:      rec.inviteID,
+		nodeID:        rec.nodeID,
+		raftAddr:      rec.raftAddr,
+		leaderID:      rec.leaderID,
+		nodeSPKI:      rec.nodeSPKI,
+		nodeKeyKEKGen: rec.nodeKeyKEKGen,
+		// clusterID stays nil: Phase-2 does not use it (the seal was opened in
+		// Phase-1). FreshJoin needs it; resume does not.
+	}
+	log.Warn().Str("node_id", st.nodeID).Msg("zero-CA invite-join: resuming from sentinel (Phase-1 artifacts durable, Phase-2 ACK pending)")
 	return st, nil
 }
 
