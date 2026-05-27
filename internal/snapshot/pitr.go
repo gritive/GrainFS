@@ -52,7 +52,8 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 		replayFn := wal.Replay
 		if m.walEnc != nil {
 			replayFn = func(dir string, fromSeq uint64, targetTime time.Time, fn func(wal.Entry)) (int, error) {
-				return wal.ReplayEncrypted(dir, fromSeq, targetTime, m.walEnc, fn)
+				var zero [16]byte
+				return wal.ReplayEncrypted(dir, fromSeq, targetTime, storage.NewEncryptorAdapter(m.walEnc, zero[:]), "pitr-wal", fn)
 			}
 		}
 		walReplayed, err = replayFn(m.walDir, base.WALOffset, targetTime, func(e wal.Entry) {
