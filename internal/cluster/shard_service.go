@@ -1580,26 +1580,59 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		return decoded.Bytes(), nil
 	}
 	_ = f.Close()
-	if peekErr != nil && peekErr != io.ErrUnexpectedEOF && peekErr != io.EOF {
-		return nil, peekErr // OS-level error (e.g. EISDIR) — transient, not corruption
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("read shard: %w: legacy plain (GFSCRC1) shard is not supported in this version", eccodec.ErrShardCorrupt)
+	return s.decodeLocalShardBytes(raw, aad)
 }
 
+// decodeLocalShardBytes decodes a non-GFSENC2 on-disk shard blob into
+// plaintext. The encryptor is mandatory, so the only accepted shapes are an
+// encrypted single-blob (XAES), optionally wrapped in the GFSCRC1 CRC envelope
+// as the scrubber repair write path produces (eccodec.EncodeShard over an
+// EncryptPayload blob). A pre-XAES single-blob is rejected with a distinct
+// diagnostic; a genuinely unencrypted (plain GFSCRC1 or raw) shard is rejected
+// as corruption — plain shards are not supported in this version.
 func (s *ShardService) decodeLocalShardBytes(raw []byte, aad []byte) ([]byte, error) {
-	if !eccodec.IsEncryptedShard(raw) {
-		return nil, fmt.Errorf("read shard: %w: legacy plain (GFSCRC1) shard is not supported in this version", eccodec.ErrShardCorrupt)
+	if eccodec.IsEncryptedShard(raw) {
+		var decoded bytes.Buffer
+		if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.encryptor, aad); err != nil {
+			return nil, fmt.Errorf("decrypt shard: %w", err)
+		}
+		return decoded.Bytes(), nil
 	}
-	var decoded bytes.Buffer
-	if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.encryptor, aad); err != nil {
-		return nil, fmt.Errorf("decrypt shard: %w", err)
+	data := raw
+	if eccodec.IsEncodedShard(raw) {
+		decoded, err := eccodec.DecodeShard(raw)
+		if err != nil {
+			return nil, err
+		}
+		data = decoded
 	}
-	return decoded.Bytes(), nil
+	if !encrypt.IsEncryptedBlob(data) {
+		if encrypt.IsLegacyEncryptedBlob(data) {
+			return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
+		}
+		// Encryptor is mandatory and the bytes are not an encrypted blob:
+		// either a genuinely plain (unencrypted GFSCRC1) shard or unrecognized
+		// bytes. Plain shards are not supported in this version.
+		return nil, fmt.Errorf("decrypt shard: %w: shard is not an encrypted blob (plain GFSCRC1 / unrecognized format not supported)", eccodec.ErrShardCorrupt)
+	}
+	decrypted, err := s.encryptor.DecryptWithAAD(data, aad)
+	if err != nil {
+		// AEAD auth failure on an owned single-blob shard ⟹ tampered bytes or
+		// AAD mismatch: corruption, not a transient fault.
+		return nil, fmt.Errorf("decrypt shard: %w: %w", eccodec.ErrShardCorrupt, err)
+	}
+	return decrypted, nil
 }
 
-// OpenLocalShard opens a local shard as plaintext. Only GFSENC2 chunked
-// encrypted shards are supported; any other on-disk format is rejected as
-// corrupt (legacy GFSCRC1 shards are not supported in this version).
+// OpenLocalShard opens a local shard as plaintext. GFSENC2 chunked encrypted
+// shards stream chunk-by-chunk; an encrypted single-blob (XAES, optionally
+// GFSCRC1-wrapped as the scrubber repair path writes) falls back to a buffered
+// decrypt via ReadLocalShard. Plain (unencrypted) shards are not supported.
 func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error) {
 	if s.shardPack != nil {
 		if data, ok, err := s.ReadLocalShardFromPack(bucket, key, shardIdx); ok || err != nil {
@@ -1639,10 +1672,15 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 		}}, nil
 	}
 	_ = f.Close()
-	if peekErr != nil && peekErr != io.ErrUnexpectedEOF && peekErr != io.EOF {
-		return nil, peekErr // OS-level error (e.g. EISDIR) — transient, not corruption
+	// Non-GFSENC2: an encrypted single-blob (possibly GFSCRC1-wrapped) cannot
+	// be streamed without decrypting, so buffer-decrypt via ReadLocalShard,
+	// which also propagates OS-level read errors (transient) and rejects plain
+	// shards as corruption.
+	data, err := s.ReadLocalShard(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("read shard: %w: legacy plain (GFSCRC1) shard is not supported in this version", eccodec.ErrShardCorrupt)
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 func (s *ShardService) ReadLocalShardFromPack(bucket, key string, shardIdx int) ([]byte, bool, error) {
@@ -1685,22 +1723,33 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
 
 	var prefix [8]byte
 	_, peekErr := io.ReadFull(f, prefix[:])
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
 		n, err := eccodec.ReadEncryptedShardRangeAt(f, s.encryptor, aad, offset, buf)
+		_ = f.Close()
 		if err != nil {
 			return n, fmt.Errorf("decrypt shard range: %w", err)
 		}
 		return n, nil
 	}
-	if peekErr != nil && peekErr != io.ErrUnexpectedEOF && peekErr != io.EOF {
-		return 0, peekErr // OS-level error (e.g. EISDIR) — transient, not corruption
+	_ = f.Close()
+	// Non-GFSENC2 (encrypted single-blob, possibly GFSCRC1-wrapped): buffer the
+	// whole shard via OpenLocalShard (which decrypts and rejects plain shards /
+	// propagates OS errors), then skip to offset and copy.
+	r, err := s.OpenLocalShard(bucket, key, shardIdx)
+	if err != nil {
+		return 0, err
 	}
-	return 0, fmt.Errorf("read shard: %w: legacy plain (GFSCRC1) shard is not supported in this version", eccodec.ErrShardCorrupt)
+	defer r.Close()
+	if offset > 0 {
+		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
+			return 0, err
+		}
+	}
+	return io.ReadFull(r, buf)
 }
 
 func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, offset int64, length int64) (io.ReadCloser, error) {
@@ -1754,10 +1803,43 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 		return &multiReadCloser{Reader: r, close: closeFn}, nil
 	}
 	_ = f.Close()
-	if peekErr != nil && peekErr != io.ErrUnexpectedEOF && peekErr != io.EOF {
-		return nil, peekErr // OS-level error (e.g. EISDIR) — transient, not corruption
+	// Non-GFSENC2 (encrypted single-blob, possibly GFSCRC1-wrapped): cannot be
+	// streamed without decrypting, so buffer-decrypt the whole shard via
+	// OpenLocalShard (which rejects plain shards / propagates OS errors), then
+	// skip+limit to the requested range.
+	r, err := s.OpenLocalShard(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("read shard: %w: legacy plain (GFSCRC1) shard is not supported in this version", eccodec.ErrShardCorrupt)
+	if offset == 0 {
+		return &multiReadCloser{Reader: io.LimitReader(r, length), close: r.Close}, nil
+	}
+	return &multiReadCloser{Reader: &skipThenLimitReader{r: r, skip: offset, limit: length}, close: r.Close}, nil
+}
+
+type skipThenLimitReader struct {
+	r       io.Reader
+	skip    int64
+	limit   int64
+	skipped bool
+}
+
+func (r *skipThenLimitReader) Read(p []byte) (int, error) {
+	if !r.skipped {
+		if _, err := io.CopyN(io.Discard, r.r, r.skip); err != nil {
+			return 0, err
+		}
+		r.skipped = true
+	}
+	if r.limit <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.limit {
+		p = p[:r.limit]
+	}
+	n, err := r.r.Read(p)
+	r.limit -= int64(n)
+	return n, err
 }
 
 // DeleteLocalShards removes every shard for key on the local node (all indices).

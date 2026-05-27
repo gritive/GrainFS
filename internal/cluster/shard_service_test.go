@@ -345,7 +345,8 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 
 	_, err = svc.ReadLocalShard("bkt", "obj", 0)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not supported")
+	assert.Contains(t, err.Error(), "decrypt shard")
+	assert.True(t, eccodec.IsCorruption(err), "non-encrypted bytes must classify as corruption: %v", err)
 }
 
 // TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt confirms that
@@ -369,7 +370,8 @@ func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) 
 		require.NoError(t, err)
 		// Flip a ciphertext byte BEFORE the CRC envelope is applied, so the outer
 		// CRC matches the tampered payload (valid) but the inner AEAD tag fails.
-		// A GFSCRC1-encoded shard is rejected before AEAD decryption is attempted.
+		// The single-blob (XAES) inner is decrypted and its AEAD auth failure is
+		// classified as corruption (not a transient fault).
 		blob[len(blob)/2] ^= 0xFF
 		raw := eccodec.EncodeShard(blob)
 
@@ -379,8 +381,8 @@ func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) 
 
 		_, err = svc.ReadLocalShard(bucket, objKey, 0)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not supported")
-		assert.True(t, eccodec.IsCorruption(err), "legacy shard must classify as corruption: %v", err)
+		assert.Contains(t, err.Error(), "decrypt shard")
+		assert.True(t, eccodec.IsCorruption(err), "tampered shard must classify as corruption: %v", err)
 	})
 
 	t.Run("structural missing magic", func(t *testing.T) {
@@ -394,9 +396,63 @@ func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) 
 
 		_, err := svc.ReadLocalShard(bucket, "structural", 0)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not supported")
+		assert.Contains(t, err.Error(), "decrypt shard")
 		assert.True(t, eccodec.IsCorruption(err), "unrecognized format must classify as corruption: %v", err)
 	})
+
+	t.Run("plain GFSCRC1 fail-loud", func(t *testing.T) {
+		// A genuinely unencrypted GFSCRC1 shard (valid CRC framing over plain
+		// bytes, no inner encrypted-blob magic) is the format we intentionally
+		// removed: it must fail loud as corruption, not be returned as plaintext.
+		raw := eccodec.EncodeShard(bytes.Repeat([]byte("plain shard bytes "), 8))
+
+		rawPath := filepath.Join(dir, "shards", bucket, "plaincrc", "shard_0")
+		require.NoError(t, os.MkdirAll(filepath.Dir(rawPath), 0o755))
+		require.NoError(t, os.WriteFile(rawPath, raw, 0o644))
+
+		_, err := svc.ReadLocalShard(bucket, "plaincrc", 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decrypt shard")
+		assert.True(t, eccodec.IsCorruption(err), "plain GFSCRC1 must classify as corruption: %v", err)
+	})
+}
+
+// TestShardService_ReadLocalShard_SingleBlobRoundTrip proves the scrubber
+// repair on-disk format — eccodec.EncodeShard over an EncryptPayload (single-
+// blob XAES) blob — is readable through both ReadLocalShard and the
+// ReadLocalShardAt range path. This is the regression the plain-GFSCRC1 read
+// removal could silently introduce (single-blob is NOT GFSENC2 but MUST decode).
+func TestShardService_ReadLocalShard_SingleBlobRoundTrip(t *testing.T) {
+	enc := testEncryptor(t)
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
+
+	const bucket, objKey = "bkt", "obj"
+	// AAD must match ShardService's read-path AAD: bucket/key/shardIdx.
+	aad := []byte(bucket + "/" + objKey + "/0")
+	plaintext := bytes.Repeat([]byte("single-blob xaes round trip payload "), 16)
+
+	// Build exactly what DistributedBackend.WriteShard (scrubber repair) writes:
+	// EncodeShard(EncryptPayload(data, aad)).
+	blob, err := svc.EncryptPayload(plaintext, aad)
+	require.NoError(t, err)
+	raw := eccodec.EncodeShard(blob)
+
+	rawPath := filepath.Join(dir, "shards", bucket, objKey, "shard_0")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rawPath), 0o755))
+	require.NoError(t, os.WriteFile(rawPath, raw, 0o644))
+
+	got, err := svc.ReadLocalShard(bucket, objKey, 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+
+	// Mid-range read through the range path must also decode the single-blob.
+	const off = 40
+	buf := make([]byte, 32)
+	n, err := svc.ReadLocalShardAt(bucket, objKey, 0, off, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 32, n)
+	assert.Equal(t, plaintext[off:off+32], buf)
 }
 
 func TestShardService_ResolvePeerAddress(t *testing.T) {
