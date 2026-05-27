@@ -39,8 +39,7 @@ func describeECObjectsContext(name string, factory func() s3Target) {
 			cli = tgt.pickNode(0)
 
 			if tgt.isCluster {
-				probe := tgt.name + "-ec-mp-probe"
-				tgt.createBkt(t, probe)
+				probe := tgt.uniqueBucket(t, "ec-mp-probe")
 				gateCtx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 				ginkgo.DeferCleanup(cancel)
 				waitForMultipartListingCreate(t, gateCtx, cli, probe, multipartListingKey, 120*time.Second)

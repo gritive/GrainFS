@@ -1,8 +1,8 @@
 // Presigned URL S3 e2e (target table-driven).
 //
 // The four presigned URL cases (GET, PUT, Expired, WrongKey) run against
-// both a single-node fixture and a 4-node cluster fixture. Bucket names are
-// prefixed with tgt.name to avoid collisions.
+// both a single-node fixture and a 4-node cluster fixture. Created buckets use
+// tgt.uniqueBucket so shared fixtures do not leak state across specs.
 //
 // TestMetrics_Endpoint and TestDashboard_Serves are not S3-op tests and stay
 // out of the target-table.
@@ -58,8 +58,7 @@ func runPresignedCases(getTgt func() s3Target) {
 		client := tgt.pickNode(0)
 		endpoint := tgt.endpoint(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-presign-get"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "presign-get")
 
 		content := "presigned content"
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
@@ -89,8 +88,7 @@ func runPresignedCases(getTgt func() s3Target) {
 		client := tgt.pickNode(0)
 		endpoint := tgt.endpoint(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-presign-put"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "presign-put")
 
 		presigned, err := s3auth.PresignURL(http.MethodPut,
 			endpoint+"/"+bucket+"/uploaded.txt",

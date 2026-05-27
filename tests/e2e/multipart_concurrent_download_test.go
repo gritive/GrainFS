@@ -79,8 +79,7 @@ func runMultipartUploadPartRecreatesClusterPartDir(t testing.TB, tgt s3Target) {
 	t.Helper()
 	client := tgt.pickNode(0)
 
-	probe := tgt.name + "-mp-put-dir-probe"
-	tgt.createBkt(t, probe)
+	probe := tgt.uniqueBucket(t, "mp-put-dir-probe")
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	ginkgo.DeferCleanup(cancel)
 	waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
@@ -197,8 +196,7 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 	client := tgt.pickNode(0)
 
 	if tgt.isCluster {
-		probe := tgt.name + "-mp-cd-probe"
-		tgt.createBkt(t, probe)
+		probe := tgt.uniqueBucket(t, "mp-cd-probe")
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 		ginkgo.DeferCleanup(cancel)
 		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
@@ -250,13 +248,16 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	// 16 concurrent GETs distributed round-robin across nodes. Mirrors the
-	// warp `multipart --concurrent 16` pattern that triggers the bulk-class
-	// inbound-traffic overload on the data-group leader.
-	const (
-		workers           = 16
-		iterationsPerGoro = 4
-	)
+	// Cluster keeps the warp `multipart --concurrent 16` shape that triggers
+	// forwarded fan-in on the data-group leader. Single-node is a parity guard
+	// with no forwarding path, so keep it concurrent but lighter to avoid full
+	// suite resource pressure masking the cluster regression signal.
+	workers := 16
+	iterationsPerGoro := 4
+	if !tgt.isCluster {
+		workers = 4
+		iterationsPerGoro = 2
+	}
 
 	parts := [][]byte{part1, part2}
 	partsLabel := [2]byte{'A', 'B'}

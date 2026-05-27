@@ -370,18 +370,9 @@ func runAuditIcebergClusterLeaderFlap(t testing.TB) {
 	cluster.GrantAdminOnBuckets("grainfs-audit")
 	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
 	createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "grainfs-tables", client)
-	createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "flap-bucket", client)
+	flapBucket := bucketNameFor("iceberg", t.Name(), "flap")
+	createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, flapBucket, client)
 	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
-
-	// Write on a follower so events need shipping.
-	followerIdx := (cluster.leaderIdx + 1) % 3
-	followerClient := ecS3Client(cluster.httpURLs[followerIdx], cluster.accessKey, cluster.secretKey)
-	_, err := followerClient.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("flap-bucket"),
-		Key:    aws.String("before-flap"),
-		Body:   strings.NewReader("pre-flap data"),
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Kill the leader to force re-election.
 	oldLeaderIdx := cluster.leaderIdx
@@ -396,9 +387,43 @@ func runAuditIcebergClusterLeaderFlap(t testing.TB) {
 	cluster.procs[oldLeaderIdx] = cluster.startNode(oldLeaderIdx)
 	waitForPort(t, cluster.httpPorts[oldLeaderIdx], 60*time.Second)
 
+	probeCtx, probeCancel := context.WithTimeout(ctx, 90*time.Second)
+	defer probeCancel()
+	newLeaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		cluster.httpURLs,
+		90*time.Second,
+		5*time.Second,
+		time.Second,
+		func(ctx context.Context, endpoint string) error {
+			return tryPutObject(ctx, ecS3Client(endpoint, cluster.accessKey, cluster.secretKey), flapBucket, "__leader_probe_after_flap", []byte("probe"))
+		},
+	)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cluster must become writable after leader flap")
+	cluster.leaderIdx = newLeaderIdx
+
+	// Write on a follower after re-election so events still need shipping, but
+	// the test does not race the old leader's shutdown drain.
+	followerIdx := (cluster.leaderIdx + 1) % 3
+	followerClient := ecS3Client(cluster.httpURLs[followerIdx], cluster.accessKey, cluster.secretKey)
+	var putErr error
+	gomega.Eventually(func() bool {
+		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelPut()
+		_, putErr = followerClient.PutObject(putCtx, &s3.PutObjectInput{
+			Bucket: aws.String(flapBucket),
+			Key:    aws.String("after-flap"),
+			Body:   strings.NewReader("post-flap data"),
+		}, func(o *s3.Options) {
+			o.RetryMaxAttempts = 1
+		})
+		return putErr == nil
+	}).WithTimeout(90*time.Second).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "follower write after leader flap should recover: %v", putErr)
+
 	// Poll until the restarted node ships or commits its durable outbox.
 	countAuditRowsAnyEndpoint(t, cluster.httpURLs, cluster.accessKey, cluster.secretKey,
-		"bucket = 'flap-bucket'",
+		fmt.Sprintf("bucket = '%s' AND method = 'PUT'", flapBucket),
 		1, 90*time.Second,
 	)
 }

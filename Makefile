@@ -10,11 +10,12 @@ FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 .PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-9p-colima test-cluster-mount-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
-E2E_TEST_PATTERN ?= ^Test
-E2E_TEST_TIMEOUT ?= 900s
-E2E_TEST_PARALLEL ?= 1
-E2E_TEST_P ?= 1
-E2E_TEST_JOBS ?= 2
+E2E_TEST_TIMEOUT ?= 3600s
+E2E_TEST_JOBS ?= 1
+GINKGO ?= go run github.com/onsi/ginkgo/v2/ginkgo
+E2E_GINKGO_PROCS ?= $(E2E_TEST_JOBS)
+E2E_GINKGO_REPORT_ARGS ?= --output-interceptor-mode=none --silence-skips
+E2E_GINKGO_ARGS ?=
 
 bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
@@ -58,18 +59,7 @@ test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
 
 test-e2e: bin/$(BINARY)
-	@set -e; \
-	trap 'trap - INT TERM EXIT; kill 0 2>/dev/null; wait 2>/dev/null; exit' INT TERM EXIT; \
-	list_out=$$(mktemp); \
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -list '$(E2E_TEST_PATTERN)' > $$list_out; \
-	tests=$$(awk '/^Test/ { print $$1 }' $$list_out); \
-	rm -f $$list_out; \
-	if [ -z "$$tests" ]; then exit 0; fi; \
-	printf '%s\n' $$tests | xargs -P $(E2E_TEST_JOBS) -I {} sh -c '\
-		test="$$1"; \
-		echo "=== RUN SINGLE $$test ==="; \
-		GRAINFS_BINARY="$(CURDIR)/bin/$(BINARY)" go test -p $(E2E_TEST_P) ./tests/e2e/ -run "^$${test}$$" -v -count=1 -timeout $(E2E_TEST_TIMEOUT); \
-	' sh {}
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) $(GINKGO) --procs=$(E2E_GINKGO_PROCS) --timeout=$(E2E_TEST_TIMEOUT) $(E2E_GINKGO_REPORT_ARGS) $(E2E_GINKGO_ARGS) ./tests/e2e
 
 test-e2e-iceberg: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestIceberg -v -count=1 -timeout 5m

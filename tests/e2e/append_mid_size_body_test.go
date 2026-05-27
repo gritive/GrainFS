@@ -34,8 +34,7 @@ func runAppendMidSizeBodySpecs() {
 
 func runMidSizeAppendCase(t testing.TB, tgt s3Target) {
 	t.Helper()
-	bucket := "append-mid-" + tgt.name
-	tgt.createBkt(t, bucket)
+	bucket := tgt.uniqueBucket(t, "append-mid")
 	key := "obj-8mib"
 	body := bytes.Repeat([]byte("m"), 8*1024*1024)
 	gomega.Expect(putAppend(tgt.pickNode(0), bucket, key, 0, body)).To(gomega.Succeed())
