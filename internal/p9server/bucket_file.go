@@ -37,7 +37,7 @@ type bucketFile struct {
 	prefix      string
 	binding     fhBinding    // set by rootFile.Walk when IAM gate is wired
 	exportStore exportGetter // nil = no gate
-	cfg         ConfigReader // nil = no anon flip gate
+	cfg         ConfigReader // retained for compatibility; anonymous access is policy-driven
 }
 
 func (f *bucketFile) isReadOnly() bool {

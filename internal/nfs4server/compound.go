@@ -512,8 +512,8 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
 		} else {
 			// T12 propagation fix: a fresh subdir fh must inherit the parent's
-			// saID binding so the per-op anon flip gate (anonRejected) can
-			// distinguish mount-SA-bound subdir sessions from anon ones.
+			// saID binding so mount-SA-bound subdir sessions stay bound to the
+			// same principal.
 			// BindFHGeneration preserves an existing saID, but a freshly-
 			// created fh has saID="" which would mis-classify as anon. Pull
 			// parent's saID explicitly when it is set.
@@ -670,7 +670,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 		bucket, _ := extractBucketAndKey(newPath)
 		gen := d.server.exportGeneration(bucket)
 		// T12: propagate parent's saID so the new fh inherits the session
-		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		// binding (anon "" vs mount-SA "<name>").
 		parentBind, ok := d.state.FHBinding(d.currentFH)
 		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
 			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
@@ -1491,7 +1491,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 		bucket, _ := extractBucketAndKey(childPath)
 		gen := d.server.exportGeneration(bucket)
 		// T12: propagate parent's saID so the new fh inherits the session
-		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		// binding (anon "" vs mount-SA "<name>").
 		parentBind, ok := d.state.FHBinding(d.currentFH)
 		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
 			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
@@ -1754,7 +1754,6 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 
 func (d *Dispatcher) opRename(data []byte) OpResult {
 	// Rename involves both savedFH (source parent) and currentFH (dest parent).
-	// Reject if either is anon-bound and the flip happened.
 	if d.anonRejected(d.savedFH) || d.anonRejected(d.currentFH) {
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_ACCESS}
 	}

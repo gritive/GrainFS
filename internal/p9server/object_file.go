@@ -24,7 +24,7 @@ type objectFile struct {
 	meta        *storage.Object
 	exportStore exportGetter // nil = no gate
 	binding     fhBinding    // inherited from the bucketFile that produced this file
-	cfg         ConfigReader // inherited; nil = no anon flip gate
+	cfg         ConfigReader // inherited compatibility reader; anonymous access is policy-driven
 
 	dirtyLoaded bool
 	dirty       bool
@@ -39,11 +39,9 @@ func (f *objectFile) isReadOnly() bool {
 	return ok && cfg.ReadOnly
 }
 
-// anonRejected mirrors bucketFile.anonRejected for objectFile. See the
-// bucketFile method for the full contract, including the FU#6 carve-out for
-// anonRejected is retained for 9P operation call sites. The global anonymous
-// transition no longer exists, so established anonymous 9P bindings are not
-// revoked by a cluster config flip.
+// anonRejected mirrors bucketFile.anonRejected for objectFile. The global
+// anonymous transition no longer exists, so established anonymous 9P bindings
+// are not revoked by cluster config state.
 func (f *objectFile) anonRejected() bool {
 	return false
 }

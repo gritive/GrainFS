@@ -92,8 +92,8 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 // (backward compat).
 //
 // CfgStore is retained for compatibility with node service wiring. Anonymous
-// access is now controlled at attach/mount authorization time rather than by a
-// global anon flip.
+// access is now controlled at attach/mount authorization time rather than by
+// global anonymous config.
 //
 // AuditHook is called synchronously after every grainfs:NFSMount /
 // grainfs:9PAttach allow/deny decision (T15 NFS§C). nil = no audit emit.

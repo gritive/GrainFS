@@ -9,9 +9,9 @@ import (
 )
 
 // Phase 0→2 P9 anon close exercises the NFS§B T12 / §9 T73 invariant
-// over real 9P wire: an anon-bound 9P session that worked before the Phase
-// 0→2 flip is rejected on the next anon-attach to a non-default bucket after
-// the flip.
+// over real 9P wire: default remains anonymously accessible, while a fresh
+// anonymous attach to a non-default bucket without policy is denied after
+// bootstrap.
 //
 // SingleNode only — mrCluster always bootstraps admin (Phase 2 from boot), so
 // there is no point where Phase 0 → 2 can be driven explicitly. Cluster3Node
@@ -26,9 +26,8 @@ var _ = ginkgo.Describe("Phase 0 to 2 P9 anon close", ginkgo.Label("p9", "phase-
 
 func describePhase0to2P9Context(name string, factory func(testing.TB) *p9Target) {
 	ginkgo.Context(name, func() {
-		// Each spec needs a fresh Phase 0 fixture because the first-SA-create
-		// flip is one-way. Use BeforeEach (not BeforeAll) — Phase 0 is consumed
-		// by the flip-to-2 path inside the spec.
+		// Each spec needs a fresh fixture because the bootstrap path mutates
+		// node-local IAM state.
 		var tgt *p9Target
 
 		ginkgo.BeforeEach(func() {
@@ -66,10 +65,10 @@ func describePhase0to2P9Context(name string, factory func(testing.TB) *p9Target)
 				defer cli2.Close()
 			}
 			gomega.Expect(err).To(gomega.HaveOccurred(),
-				"anon attach to non-default bucket after Phase 2 flip must be denied (target=%s)",
+				"anon attach to non-default bucket after bootstrap must be denied (target=%s)",
 				tgt.name)
 			gomega.Expect(isEACCES(err) || isENOENT(err)).To(gomega.BeTrue(),
-				"expected EACCES or ENOENT after flip, got: %v", err)
+				"expected EACCES or ENOENT after bootstrap, got: %v", err)
 		})
 	})
 }

@@ -18,9 +18,9 @@ import (
 // Allow via D#2 at attach time, but hugelgupf/p9's tattach handler
 // (handlers.go: handle tattach → doWalk → walkOne → from.GetAttr) called
 // bucketFile.GetAttr immediately after the Walk, which routed through
-// bucketFile.anonRejected(). The flip gate there returned true for any
-// anon-bound binding in Phase 2 — without honoring D#2 — and returned EACCES,
-// killing the attach. The fix: anonRejected() carves out f.bucket=="default".
+// bucketFile.anonRejected(). That legacy per-op gate rejected anon-bound
+// bindings in Phase 2 without honoring D#2 and returned EACCES, killing the
+// attach. The global gate is now gone.
 //
 // SingleNode-only. Cluster3Node would also exhibit the bug, but
 // newClusterP9Target's underlying mrCluster does not auto-seed "default"
