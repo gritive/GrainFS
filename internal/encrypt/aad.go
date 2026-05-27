@@ -22,6 +22,10 @@ const (
 	DomainNBD                AADDomain = 0x0009
 	DomainIAMAdmin           AADDomain = 0x000A
 	DomainCapabilityAssertV1 AADDomain = 0x000B
+	// DomainCASChunk binds content-addressed canonical chunk ciphertext.
+	// Keyed by (cluster_id, canonical_locator) only — object-independent —
+	// so a single stored copy decrypts for every object that references it.
+	DomainCASChunk AADDomain = 0x000C
 )
 
 const aadMagic = "AAD\x01"
