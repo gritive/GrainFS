@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
@@ -18,13 +17,10 @@ const (
 	encryptedObjectMagic         = "GFOBJENC2"
 	encryptedObjectFormatVersion = uint16(1)
 	encryptedChunkSize           = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
+	// encryptedObjectHeaderLen is the on-disk header size before the first
+	// record: magic + format_version(2) + dek_gen(4).
+	encryptedObjectHeaderLen = len(encryptedObjectMagic) + 6
 )
-
-func encryptedChunkAADBytes(dst []byte, domain string, chunk uint64) []byte {
-	dst = append(dst[:0], domain...)
-	dst = append(dst, ":chunk:"...)
-	return strconv.AppendUint(dst, chunk, 10)
-}
 
 // writeEncryptedObjectHeader writes the GFOBJENC2 file header: magic,
 // format_version, and the dek_gen all chunks in the file were sealed under.
@@ -61,13 +57,16 @@ func readEncryptedObjectHeader(r io.Reader) (uint32, error) {
 	return binary.BigEndian.Uint32(hdr[2:6]), nil
 }
 
-// writeEncryptedObjectFile streams r into the encrypted on-disk format at
-// path, sealing each plaintext chunk with enc and tee'ing the plaintext
-// through plainSink so the caller can compute a digest (MD5, xxhash3, …)
-// over the unsealed bytes. Returns the plaintext byte count.
+// writeEncryptedObjectFile streams r into the GFOBJENC2 format at path,
+// sealing each plaintext chunk via enc under DomainShard with baseFields plus
+// the per-chunk ordinal. plainSink receives the unsealed bytes for digesting
+// (pass io.Discard when no digest is needed). Returns the plaintext byte count.
 //
-// Pass io.Discard for plainSink when no digest is needed.
-func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, r io.Reader, plainSink io.Writer) (int64, error) {
+// All chunks are sealed under one pinned generation: the gen returned by the
+// first chunk is captured and written into the file header; if a later chunk
+// seals at a different gen (e.g. a rotation raced the write) the whole write
+// fails so the header's dek_gen always describes every chunk.
+func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, r io.Reader, plainSink io.Writer) (int64, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return 0, fmt.Errorf("create encrypted object: %w", err)
@@ -75,15 +74,17 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 	defer f.Close()
 	bw := bufio.NewWriterSize(f, 1<<20)
 
-	if _, err := bw.Write([]byte(encryptedObjectMagic)); err != nil {
-		return 0, fmt.Errorf("write encrypted object magic: %w", err)
-	}
+	// fields is baseFields with one extra slot for the per-chunk ordinal,
+	// rewritten each iteration to avoid per-chunk allocation.
+	fields := make([]encrypt.AADField, len(baseFields)+1)
+	copy(fields, baseFields)
+	ordinalIdx := len(baseFields)
 
 	buf := make([]byte, encryptedChunkSize)
-	sealedBuf := make([]byte, 0, 3+12+encryptedChunkSize+enc.AEADOverhead())
-	aadBuf := make([]byte, 0, len(domain)+len(":chunk:")+20)
 	var size int64
 	var chunk uint64
+	var pinnedGen uint32
+	var headerWritten bool
 	for {
 		n, readErr := r.Read(buf)
 		if n > 0 {
@@ -91,15 +92,23 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 			if plainSink != nil {
 				_, _ = plainSink.Write(plain)
 			}
-			aadBuf = encryptedChunkAADBytes(aadBuf, domain, chunk)
-			sealed, err := enc.SealValueAADTo(sealedBuf[:0], aadBuf, plain)
+			fields[ordinalIdx] = encrypt.FieldUint32(uint32(chunk))
+			sealed, gen, err := enc.Seal(encrypt.DomainShard, fields, plain)
 			if err != nil {
 				return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
+			}
+			if chunk == 0 {
+				pinnedGen = gen
+				if err := writeEncryptedObjectHeader(bw, pinnedGen); err != nil {
+					return 0, err
+				}
+				headerWritten = true
+			} else if gen != pinnedGen {
+				return 0, fmt.Errorf("encrypt object chunk %d sealed at gen %d, pinned %d", chunk, gen, pinnedGen)
 			}
 			if err := writeEncryptedObjectRecord(bw, uint32(n), sealed); err != nil {
 				return 0, err
 			}
-			sealedBuf = sealed
 			size += int64(n)
 			chunk++
 		}
@@ -110,6 +119,12 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 			return 0, fmt.Errorf("read object plaintext: %w", readErr)
 		}
 	}
+	if !headerWritten {
+		// Empty object: still emit a valid header (gen 0) so open succeeds.
+		if err := writeEncryptedObjectHeader(bw, pinnedGen); err != nil {
+			return 0, err
+		}
+	}
 	if err := bw.Flush(); err != nil {
 		return 0, fmt.Errorf("flush encrypted object: %w", err)
 	}
@@ -118,35 +133,32 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 	return size, nil
 }
 
-func openEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, size int64) (io.ReadCloser, error) {
+func openEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, size int64) (io.ReadCloser, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-
-	magic := make([]byte, len(encryptedObjectMagic))
-	if _, err := io.ReadFull(f, magic); err != nil {
+	gen, err := readEncryptedObjectHeader(f)
+	if err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("read encrypted object magic: %w", err)
-	}
-	if string(magic) != encryptedObjectMagic {
-		_ = f.Close()
-		return nil, fmt.Errorf("invalid encrypted object magic")
+		return nil, err
 	}
 	return &encryptedObjectReader{
-		f:         f,
-		enc:       enc,
-		domain:    domain,
-		remaining: size,
+		f:          f,
+		enc:        enc,
+		baseFields: baseFields,
+		gen:        gen,
+		remaining:  size,
 	}, nil
 }
 
 type encryptedObjectReader struct {
-	f         *os.File
-	enc       *encrypt.Encryptor
-	domain    string
-	chunk     uint64
-	remaining int64
+	f          *os.File
+	enc        DataEncryptor
+	baseFields []encrypt.AADField
+	gen        uint32
+	chunk      uint64
+	remaining  int64
 	// buf holds the current chunk's plaintext, drained by Read(). After the
 	// last byte is consumed, the underlying array is reused as the destination
 	// for the next chunk's decrypt — eliminating one heap allocation per chunk.
@@ -154,10 +166,9 @@ type encryptedObjectReader struct {
 	// boundary truncation clears the discarded tail, so reused capacity always
 	// starts zeroed.
 	buf []byte
-	// aadBuf and sealedBuf are reusable scratch for the per-chunk AAD string
-	// and the on-disk sealed record body. Both grow to chunk-class size on
-	// the first chunk and stay there for the lifetime of the reader.
-	aadBuf    []byte
+	// sealedBuf is reusable scratch for the on-disk sealed record body. It
+	// grows to chunk-class size on the first chunk and stays there for the
+	// lifetime of the reader.
 	sealedBuf []byte
 	err       error
 }
@@ -187,9 +198,6 @@ func (r *encryptedObjectReader) Close() error {
 	if cap(r.sealedBuf) > 0 {
 		clear(r.sealedBuf[:cap(r.sealedBuf)])
 	}
-	if cap(r.aadBuf) > 0 {
-		clear(r.aadBuf[:cap(r.aadBuf)])
-	}
 	return r.f.Close()
 }
 
@@ -208,8 +216,8 @@ func (r *encryptedObjectReader) loadNext() error {
 		return err
 	}
 	r.sealedBuf = sealed
-	r.aadBuf = encryptedChunkAADBytes(r.aadBuf[:0], r.domain, r.chunk)
-	plain, err := r.enc.OpenValueAADTo(r.buf[:0], r.aadBuf, sealed)
+	fields := append(append([]encrypt.AADField(nil), r.baseFields...), encrypt.FieldUint32(uint32(r.chunk)))
+	plain, err := r.enc.Open(encrypt.DomainShard, fields, r.gen, sealed)
 	clear(sealed)
 	if err != nil {
 		return fmt.Errorf("decrypt object chunk %d: %w", r.chunk, err)
@@ -229,7 +237,7 @@ func (r *encryptedObjectReader) loadNext() error {
 	return nil
 }
 
-func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, size int64, offset int64, buf []byte) (int, error) {
+func readAtEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, size int64, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, fmt.Errorf("negative offset")
 	}
@@ -242,19 +250,15 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 	}
 	defer f.Close()
 
-	magic := make([]byte, len(encryptedObjectMagic))
-	if _, err := io.ReadFull(f, magic); err != nil {
-		return 0, fmt.Errorf("read encrypted object magic: %w", err)
-	}
-	if string(magic) != encryptedObjectMagic {
-		return 0, fmt.Errorf("invalid encrypted object magic")
+	gen, err := readEncryptedObjectHeader(f)
+	if err != nil {
+		return 0, err
 	}
 
 	var (
 		copied    int
 		chunk     uint64
 		plainPos  int64
-		aadBuf    []byte
 		sealedBuf []byte
 		plainBuf  []byte
 	)
@@ -262,9 +266,6 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 	// call. Done as deferred clears rather than function-end inline so early
 	// returns (errors) still wipe.
 	defer func() {
-		if cap(aadBuf) > 0 {
-			clear(aadBuf[:cap(aadBuf)])
-		}
 		if cap(sealedBuf) > 0 {
 			clear(sealedBuf[:cap(sealedBuf)])
 		}
@@ -314,8 +315,8 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 		if _, err := io.ReadFull(f, sealedBuf); err != nil {
 			return copied, fmt.Errorf("read encrypted object record body: %w", err)
 		}
-		aadBuf = encryptedChunkAADBytes(aadBuf[:0], domain, chunk)
-		plain, err := enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealedBuf)
+		fields := append(append([]encrypt.AADField(nil), baseFields...), encrypt.FieldUint32(uint32(chunk)))
+		plain, err := enc.Open(encrypt.DomainShard, fields, gen, sealedBuf)
 		clear(sealedBuf)
 		if err != nil {
 			return copied, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
@@ -346,8 +347,8 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 	return copied, nil
 }
 
-func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, offset uint64, data []byte, currentSize int64) (int64, string, error) {
-	plain, err := readEncryptedObjectFile(path, enc, domain, currentSize)
+func writeAtEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, offset uint64, data []byte, currentSize int64) (int64, string, error) {
+	plain, err := readEncryptedObjectFile(path, enc, baseFields, currentSize)
 	if err != nil {
 		if !os.IsNotExist(err) || currentSize != 0 {
 			return 0, "", err
@@ -371,18 +372,18 @@ func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain stri
 	copy(plain[off:], data)
 	h, release := hashForBucket("")
 	defer release()
-	size, err := writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain), h)
+	size, err := writeEncryptedObjectFileAtomic(path, enc, baseFields, bytes.NewReader(plain), h)
 	if err != nil {
 		return 0, "", err
 	}
 	return size, etagFromHash(h), nil
 }
 
-func truncateEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, currentSize int64, newSize int64) (int64, error) {
+func truncateEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, currentSize int64, newSize int64) (int64, error) {
 	if newSize < 0 {
 		return 0, fmt.Errorf("negative size")
 	}
-	plain, err := readEncryptedObjectFile(path, enc, domain, currentSize)
+	plain, err := readEncryptedObjectFile(path, enc, baseFields, currentSize)
 	if err != nil {
 		return 0, err
 	}
@@ -396,14 +397,14 @@ func truncateEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain str
 		copy(extended, plain)
 		plain = extended
 	}
-	_, err = writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain), io.Discard)
+	_, err = writeEncryptedObjectFileAtomic(path, enc, baseFields, bytes.NewReader(plain), io.Discard)
 	if err != nil {
 		return 0, err
 	}
 	return newSize, nil
 }
 
-func writeEncryptedObjectFileAtomic(path string, enc *encrypt.Encryptor, domain string, r io.Reader, plainSink io.Writer) (int64, error) {
+func writeEncryptedObjectFileAtomic(path string, enc DataEncryptor, baseFields []encrypt.AADField, r io.Reader, plainSink io.Writer) (int64, error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".encrypted-object-*")
 	if err != nil {
@@ -418,7 +419,7 @@ func writeEncryptedObjectFileAtomic(path string, enc *encrypt.Encryptor, domain 
 		_ = os.Remove(tmpPath)
 	}
 
-	size, err := writeEncryptedObjectFile(tmpPath, enc, domain, r, plainSink)
+	size, err := writeEncryptedObjectFile(tmpPath, enc, baseFields, r, plainSink)
 	if err != nil {
 		cleanup()
 		return 0, err
@@ -434,32 +435,25 @@ func writeEncryptedObjectFileAtomic(path string, enc *encrypt.Encryptor, domain 
 	return size, nil
 }
 
-func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, expectedSize int64) ([]byte, error) {
+func readEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, expectedSize int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	magic := make([]byte, len(encryptedObjectMagic))
-	if _, err := io.ReadFull(f, magic); err != nil {
-		return nil, fmt.Errorf("read encrypted object magic: %w", err)
-	}
-	if string(magic) != encryptedObjectMagic {
-		return nil, fmt.Errorf("invalid encrypted object magic")
+	gen, err := readEncryptedObjectHeader(f)
+	if err != nil {
+		return nil, err
 	}
 
 	var out bytes.Buffer
 	var (
 		chunk     uint64
-		aadBuf    []byte
 		sealedBuf []byte
 		plainBuf  []byte
 	)
 	defer func() {
-		if cap(aadBuf) > 0 {
-			clear(aadBuf[:cap(aadBuf)])
-		}
 		if cap(sealedBuf) > 0 {
 			clear(sealedBuf[:cap(sealedBuf)])
 		}
@@ -476,8 +470,8 @@ func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string,
 			return nil, err
 		}
 		sealedBuf = sealed
-		aadBuf = encryptedChunkAADBytes(aadBuf[:0], domain, chunk)
-		plain, err := enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealed)
+		fields := append(append([]encrypt.AADField(nil), baseFields...), encrypt.FieldUint32(uint32(chunk)))
+		plain, err := enc.Open(encrypt.DomainShard, fields, gen, sealed)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
@@ -494,32 +488,25 @@ func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string,
 	return out.Bytes(), nil
 }
 
-func hashEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, h hash.Hash) (int64, error) {
+func hashEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, h hash.Hash) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
 
-	magic := make([]byte, len(encryptedObjectMagic))
-	if _, err := io.ReadFull(f, magic); err != nil {
-		return 0, fmt.Errorf("read encrypted object magic: %w", err)
-	}
-	if string(magic) != encryptedObjectMagic {
-		return 0, fmt.Errorf("invalid encrypted object magic")
+	gen, err := readEncryptedObjectHeader(f)
+	if err != nil {
+		return 0, err
 	}
 
 	var size int64
 	var (
 		chunk     uint64
-		aadBuf    []byte
 		sealedBuf []byte
 		plainBuf  []byte
 	)
 	defer func() {
-		if cap(aadBuf) > 0 {
-			clear(aadBuf[:cap(aadBuf)])
-		}
 		if cap(sealedBuf) > 0 {
 			clear(sealedBuf[:cap(sealedBuf)])
 		}
@@ -536,8 +523,8 @@ func hashEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string,
 			return 0, err
 		}
 		sealedBuf = sealed
-		aadBuf = encryptedChunkAADBytes(aadBuf[:0], domain, chunk)
-		plain, err := enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealed)
+		fields := append(append([]encrypt.AADField(nil), baseFields...), encrypt.FieldUint32(uint32(chunk)))
+		plain, err := enc.Open(encrypt.DomainShard, fields, gen, sealed)
 		clear(sealed)
 		if err != nil {
 			return 0, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
@@ -562,12 +549,8 @@ func encryptedObjectFilePlainSize(path string) (int64, error) {
 	}
 	defer f.Close()
 
-	magic := make([]byte, len(encryptedObjectMagic))
-	if _, err := io.ReadFull(f, magic); err != nil {
-		return 0, fmt.Errorf("read encrypted object magic: %w", err)
-	}
-	if string(magic) != encryptedObjectMagic {
-		return 0, fmt.Errorf("invalid encrypted object magic")
+	if _, err := readEncryptedObjectHeader(f); err != nil {
+		return 0, err
 	}
 
 	var size int64

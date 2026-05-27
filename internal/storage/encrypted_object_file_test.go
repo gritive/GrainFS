@@ -22,14 +22,21 @@ func testEncryptor(t *testing.T) *encrypt.Encryptor {
 	return enc
 }
 
+// testSegEnc wraps the static test Encryptor in the DataEncryptor seam (the
+// EncryptorAdapter seals at gen 0), matching how LocalBackend builds segEnc.
+func testSegEnc(t *testing.T) DataEncryptor {
+	t.Helper()
+	return NewEncryptorAdapter(testEncryptor(t), make([]byte, 16))
+}
+
 func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
+	enc := testSegEnc(t)
 	plaintext := bytes.Repeat([]byte("sensitive-local-object-"), 4096)
 
 	h, release := hashForBucket("")
 	defer release()
-	size, err := writeEncryptedObjectFile(path, enc, "local-object:physical-1", bytes.NewReader(plaintext), h)
+	size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), bytes.NewReader(plaintext), h)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
 	require.NotEmpty(t, etagFromHash(h))
@@ -38,7 +45,7 @@ func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "sensitive-local-object")
 
-	rc, err := openEncryptedObjectFile(path, enc, "local-object:physical-1", size)
+	rc, err := openEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), size)
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -48,10 +55,10 @@ func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
 
 func TestEncryptedObjectFileWriteKeepsRecordsBoundedForReadAt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
+	enc := testSegEnc(t)
 	plaintext := bytes.Repeat([]byte("x"), 2*(1<<20)+1)
 
-	size, err := writeEncryptedObjectFile(path, enc, "local-object:large-records", bytes.NewReader(plaintext), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
 
@@ -61,29 +68,29 @@ func TestEncryptedObjectFileWriteKeepsRecordsBoundedForReadAt(t *testing.T) {
 
 func TestEncryptedObjectFileReadAtWriteAtAndTruncate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-2"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(26), size)
 
-	size, etag, err := writeAtEncryptedObjectFile(path, enc, domain, 5, []byte("-----"), size)
+	size, etag, err := writeAtEncryptedObjectFile(path, enc, fields, 5, []byte("-----"), size)
 	require.NoError(t, err)
 	require.Equal(t, int64(26), size)
 	require.NotEmpty(t, etag)
 
 	buf := make([]byte, 10)
-	n, err := readAtEncryptedObjectFile(path, enc, domain, size, 0, buf)
+	n, err := readAtEncryptedObjectFile(path, enc, fields, size, 0, buf)
 	require.NoError(t, err)
 	require.Equal(t, 10, n)
 	require.Equal(t, "ABCDE-----", string(buf))
 
-	size, err = truncateEncryptedObjectFile(path, enc, domain, size, 8)
+	size, err = truncateEncryptedObjectFile(path, enc, fields, size, 8)
 	require.NoError(t, err)
 	require.Equal(t, int64(8), size)
 
-	rc, err := openEncryptedObjectFile(path, enc, domain, size)
+	rc, err := openEncryptedObjectFile(path, enc, fields, size)
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -93,22 +100,22 @@ func TestEncryptedObjectFileReadAtWriteAtAndTruncate(t *testing.T) {
 
 func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-readat"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	require.NoError(t, err)
 	var hdr [8]byte
-	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	_, err = f.ReadAt(hdr[:], int64(encryptedObjectHeaderLen))
 	require.NoError(t, err)
 	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
 	// Corrupt the second encrypted record body. A ReadAt contained in the first
 	// chunk should not need to authenticate or decrypt this record.
-	secondBodyOffset := int64(len(encryptedObjectMagic) + 8 + int(firstBlobLen) + 8)
+	secondBodyOffset := int64(encryptedObjectHeaderLen + 8 + int(firstBlobLen) + 8)
 	_, err = f.Seek(secondBodyOffset, io.SeekStart)
 	require.NoError(t, err)
 	_, err = f.Write([]byte{0x00})
@@ -116,7 +123,7 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	buf := make([]byte, 32)
-	n, err := readAtEncryptedObjectFile(path, enc, domain, size, 0, buf)
+	n, err := readAtEncryptedObjectFile(path, enc, fields, size, 0, buf)
 	require.NoError(t, err)
 	require.Equal(t, len(buf), n)
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
@@ -124,46 +131,46 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 
 func TestEncryptedObjectFileReadAtRejectsSkippedChunkHeaderTamper(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-readat-header-tamper"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	require.NoError(t, err)
 	var hdr [8]byte
-	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	_, err = f.ReadAt(hdr[:], int64(encryptedObjectHeaderLen))
 	require.NoError(t, err)
 	binary.BigEndian.PutUint32(hdr[:4], encryptedChunkSize-1)
-	_, err = f.WriteAt(hdr[:], int64(len(encryptedObjectMagic)))
+	_, err = f.WriteAt(hdr[:], int64(encryptedObjectHeaderLen))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
 	buf := make([]byte, 32)
-	_, err = readAtEncryptedObjectFile(path, enc, domain, size, int64(encryptedChunkSize), buf)
+	_, err = readAtEncryptedObjectFile(path, enc, fields, size, int64(encryptedChunkSize), buf)
 	require.Error(t, err)
 }
 
 func TestEncryptedObjectFileReadAtRejectsCorruptRequestedChunk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-readat-corrupt"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	require.NoError(t, err)
-	firstBodyOffset := int64(len(encryptedObjectMagic) + 8)
+	firstBodyOffset := int64(encryptedObjectHeaderLen + 8)
 	_, err = f.WriteAt([]byte{0x00}, firstBodyOffset)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
 	buf := make([]byte, 32)
-	_, err = readAtEncryptedObjectFile(path, enc, domain, size, 0, buf)
+	_, err = readAtEncryptedObjectFile(path, enc, fields, size, 0, buf)
 	require.Error(t, err)
 }
 
@@ -174,10 +181,8 @@ func countEncryptedObjectRecords(t *testing.T, path string) int {
 	require.NoError(t, err)
 	defer f.Close()
 
-	magic := make([]byte, len(encryptedObjectMagic))
-	_, err = io.ReadFull(f, magic)
+	_, err = readEncryptedObjectHeader(f)
 	require.NoError(t, err)
-	require.Equal(t, encryptedObjectMagic, string(magic))
 
 	records := 0
 	var hdr [8]byte
@@ -197,27 +202,27 @@ func countEncryptedObjectRecords(t *testing.T, path string) int {
 
 func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-stream"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	require.NoError(t, err)
 	var hdr [8]byte
-	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	_, err = f.ReadAt(hdr[:], int64(encryptedObjectHeaderLen))
 	require.NoError(t, err)
 	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
-	secondBodyOffset := int64(len(encryptedObjectMagic) + 8 + int(firstBlobLen) + 8)
+	secondBodyOffset := int64(encryptedObjectHeaderLen + 8 + int(firstBlobLen) + 8)
 	_, err = f.Seek(secondBodyOffset, io.SeekStart)
 	require.NoError(t, err)
 	_, err = f.Write([]byte{0x00})
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	rc, err := openEncryptedObjectFile(path, enc, domain, size)
+	rc, err := openEncryptedObjectFile(path, enc, fields, size)
 	require.NoError(t, err)
 	defer rc.Close()
 	buf := make([]byte, 32)
@@ -229,14 +234,14 @@ func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.
 
 func TestEncryptedObjectFileOpenRejectsTruncatedExpectedObject(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-truncated"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("payload")), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader([]byte("payload")), io.Discard)
 	require.NoError(t, err)
-	require.NoError(t, os.Truncate(path, int64(len(encryptedObjectMagic))))
+	require.NoError(t, os.Truncate(path, int64(encryptedObjectHeaderLen)))
 
-	rc, err := openEncryptedObjectFile(path, enc, domain, size)
+	rc, err := openEncryptedObjectFile(path, enc, fields, size)
 	require.NoError(t, err)
 	defer rc.Close()
 	_, err = io.ReadAll(rc)
@@ -245,25 +250,25 @@ func TestEncryptedObjectFileOpenRejectsTruncatedExpectedObject(t *testing.T) {
 
 func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
-	enc := testEncryptor(t)
-	domain := "local-object:physical-whole-record-truncated"
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k", 0)
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), 32)...)
 
-	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.Open(path)
 	require.NoError(t, err)
 	var hdr [8]byte
-	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	_, err = f.ReadAt(hdr[:], int64(encryptedObjectHeaderLen))
 	require.NoError(t, err)
 	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
 	require.NoError(t, f.Close())
 
-	firstRecordEnd := int64(len(encryptedObjectMagic) + len(hdr) + int(firstBlobLen))
+	firstRecordEnd := int64(encryptedObjectHeaderLen + len(hdr) + int(firstBlobLen))
 	require.NoError(t, os.Truncate(path, firstRecordEnd))
 
-	_, _, err = writeAtEncryptedObjectFile(path, enc, domain, 0, []byte("z"), size)
+	_, _, err = writeAtEncryptedObjectFile(path, enc, fields, 0, []byte("z"), size)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
@@ -351,4 +356,75 @@ func TestEncryptedSegment_PerSegmentAADIsolation(t *testing.T) {
 	rest, err := io.ReadAll(rc)
 	require.Error(t, err, "corrupted segment 2 must surface as an error")
 	require.Empty(t, rest, "no partial plaintext from corrupted segment expected")
+}
+
+// fakeDataEncryptor records the gen it seals at and can be told to advance the
+// gen mid-stream to exercise the writer's generation-pinning guard.
+type fakeDataEncryptor struct {
+	gen     uint32
+	advance bool // when true, gen++ after each Seal
+	enc     *encrypt.Encryptor
+}
+
+func newFakeDataEncryptor(t *testing.T) *fakeDataEncryptor {
+	t.Helper()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x07}, 32))
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	return &fakeDataEncryptor{enc: enc}
+}
+
+func (f *fakeDataEncryptor) aad(domain encrypt.AADDomain, fields []encrypt.AADField) []byte {
+	return encrypt.BuildAAD(domain, make([]byte, 16), fields...)
+}
+
+func (f *fakeDataEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	ct, err := f.enc.SealValueAADTo(nil, f.aad(domain, fields), plain)
+	if err != nil {
+		return nil, 0, err
+	}
+	g := f.gen
+	if f.advance {
+		f.gen++
+	}
+	return ct, g, nil
+}
+
+func (f *fakeDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return f.enc.OpenValueAADTo(nil, f.aad(domain, fields), ct)
+}
+
+func TestWriteEncryptedObjectFile_GenPinning_FailsOnMidStreamChange(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/obj"
+	f := newFakeDataEncryptor(t)
+	f.advance = true // gen changes after the first chunk
+	// Two chunks worth of plaintext forces a second Seal at a different gen.
+	plain := bytes.Repeat([]byte("x"), encryptedChunkSize+1)
+	_, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k", 0), bytes.NewReader(plain), io.Discard)
+	if err == nil {
+		t.Fatal("expected gen-pinning to fail the write on mid-stream gen change")
+	}
+}
+
+func TestWriteEncryptedObjectFile_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/obj"
+	f := newFakeDataEncryptor(t) // constant gen 0
+	plain := bytes.Repeat([]byte("y"), encryptedChunkSize+123)
+	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k", 0), bytes.NewReader(plain), io.Discard)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if n != int64(len(plain)) {
+		t.Fatalf("size mismatch: want %d got %d", len(plain), n)
+	}
+	got, err := readEncryptedObjectFile(path, f, objectFileAADFields("b", "k", 0), n)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatal("round-trip mismatch")
+	}
 }

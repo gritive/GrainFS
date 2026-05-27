@@ -27,10 +27,6 @@ func (b *LocalBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
 }
 
-func (b *LocalBackend) multipartPartDomain(uploadID string, partNumber int) string {
-	return fmt.Sprintf("multipart-part:%s:%d", uploadID, partNumber)
-}
-
 type multipartMeta struct {
 	UploadID    string
 	Bucket      string
@@ -137,9 +133,9 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 	}
 
 	partFile := b.partPath(uploadID, partNumber)
-	if b.encryptor != nil {
+	if b.segEnc != nil {
 		h, release := hashForBucket(bucket)
-		size, err := writeEncryptedObjectFile(partFile, b.encryptor, b.multipartPartDomain(uploadID, partNumber), r, h)
+		size, err := writeEncryptedObjectFile(partFile, b.segEnc, multipartPartAADFields(uploadID, partNumber, 0), r, h)
 		if err != nil {
 			release()
 			os.Remove(partFile)
@@ -213,11 +209,11 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	var totalSize int64
 	var etag string
 
-	if b.encryptor != nil {
+	if b.segEnc != nil {
 		partReader := &encryptedMultipartPartsReader{backend: b, uploadID: uploadID, parts: parts}
 		defer partReader.Close()
 		h, release := hashForBucket(bucket)
-		totalSize, err = writeEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), partReader, h)
+		totalSize, err = writeEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key, 0), partReader, h)
 		if err != nil {
 			release()
 			os.Remove(objPath)
@@ -326,8 +322,8 @@ func (r *encryptedMultipartPartsReader) Read(p []byte) (int, error) {
 			}
 			rc, err := openEncryptedObjectFile(
 				partPath,
-				r.backend.encryptor,
-				r.backend.multipartPartDomain(r.uploadID, part.PartNumber),
+				r.backend.segEnc,
+				multipartPartAADFields(r.uploadID, part.PartNumber, 0),
 				size,
 			)
 			if err != nil {
@@ -467,9 +463,9 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 		h, release := hashForBucket(bucket)
 		var size int64
 		name := fmt.Sprintf("%05d", partNumber)
-		if b.encryptor != nil {
+		if b.segEnc != nil {
 			var err error
-			size, err = hashEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.encryptor, b.multipartPartDomain(uploadID, partNumber), h)
+			size, err = hashEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.segEnc, multipartPartAADFields(uploadID, partNumber, 0), h)
 			if err != nil {
 				release()
 				return nil, fmt.Errorf("hash encrypted part %d: %w", partNumber, err)

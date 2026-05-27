@@ -145,8 +145,8 @@ func (b *LocalBackend) ensureAppendableBase(ctx context.Context, bucket, key str
 // BlobID (UUIDv7) + Size + xxhash3-128 Checksum of the plaintext bytes.
 // Exported so cluster.DistributedBackend.AppendObject can call directly.
 //
-// AAD ISOLATION: the encryption domain includes the segment's unique
-// blob_id (via encryptedObjectFileDomain(bucket, key+"/segments/"+blobID)).
+// AAD ISOLATION: the encryption AAD includes the segment's unique
+// blob_id (via segmentFileAADFields(bucket, key, blobID, chunk)).
 // Because blobID is a fresh UUIDv7 per segment, segments belonging to the
 // same object cannot be successfully decrypted under each other's AAD,
 // even if their plaintext or ciphertext happens to be identical. The
@@ -182,14 +182,13 @@ func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (Segmen
 		return SegmentRef{}, err
 	}
 	checksumHasher := NewChecksumHasher()
-	domain := encryptedObjectFileDomain(bucket, key+"/segments/"+blobID)
 	var (
 		size int64
 		err  error
 	)
-	if b.encryptor != nil {
+	if b.segEnc != nil {
 		// Encrypted writer tees plaintext through checksumHasher.
-		size, err = writeEncryptedObjectFile(path, b.encryptor, domain, r, checksumHasher)
+		size, err = writeEncryptedObjectFile(path, b.segEnc, segmentFileAADFields(bucket, key, blobID, 0), r, checksumHasher)
 	} else {
 		var f *os.File
 		f, err = os.Create(path)

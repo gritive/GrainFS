@@ -34,8 +34,8 @@ func (s localSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.
 	// LocatorLegacy: existing key-scoped physical path (unchanged behavior).
 	blobID := loc.Ref
 	path := s.b.segmentPath(s.bucket, s.key, blobID)
-	if s.b.encryptor != nil {
-		return openEncryptedObjectFile(path, s.b.encryptor, encryptedObjectFileDomain(s.bucket, s.key+"/segments/"+blobID), ref.Size)
+	if s.b.segEnc != nil {
+		return openEncryptedObjectFile(path, s.b.segEnc, segmentFileAADFields(s.bucket, s.key, blobID, 0), ref.Size)
 	}
 	return os.Open(path)
 }
