@@ -15,7 +15,8 @@ import (
 func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
 	tr := transport.MustNewQUICTransport("test-cluster-psk")
 	t.Cleanup(func() { _ = tr.Close() })
-	svc := NewShardService(t.TempDir(), tr) // no WithDataWAL
+	enc := testEncryptor(t)
+	svc := NewShardService(t.TempDir(), tr, WithEncryptor(enc)) // no WithDataWAL
 
 	err := svc.WriteLocalShardStreamContext(context.Background(), "b", "k", 0, bytes.NewReader([]byte("payload")))
 	require.Error(t, err, "stream shard write without a WAL must be rejected")
