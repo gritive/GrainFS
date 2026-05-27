@@ -316,6 +316,15 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 	if len(r.clusterID) == 0 {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"}
 	}
+	// Required-field guard, mirroring the in-process Handle path. The dedicated
+	// QUIC join listener dispatches decoded requests straight here, so without
+	// this a malformed client could sign Phase-1 with an empty node_id/address;
+	// Phase-2 would then register/promote a learner keyed by the address and only
+	// ProposeAddNode rejects the empty id AFTER promotion, leaving an orphan voter
+	// the learner rollback cannot remove.
+	if req.NodeID == "" || req.Address == "" {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "node_id and address are required"}
+	}
 	var spki [32]byte
 	copy(spki[:], req.SPKI)
 
