@@ -469,7 +469,7 @@ GrantWildcardPut), and `MetaCmdType` 31 (`IAMInitFirstSA`) carries the
 composite `InitFirstSAPayload` for atomic first-SA bootstrap. Each
 payload is a FlatBuffers blob in `internal/iam/iampb/`.
 
-Secret_key persistence uses AES-256-GCM via `internal/encrypt.Encryptor`
+Secret_key persistence uses XAES-256-GCM via `internal/encrypt.Encryptor`
 with the SA id as additional-authenticated-data, so a stolen ciphertext
 without the matching sa_id binding cannot be unwrapped against another
 SA. Plaintext only ever lives in memory after `UnwrapSecret` and is

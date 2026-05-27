@@ -50,7 +50,7 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 
 ### 보안 규칙
 - S3 인증: admin UDS로 부트스트랩한 SA의 access_key/secret_key로 HMAC-SHA256 서명 검증
-- At-rest Encryption: AES-256-GCM (기본 활성)
+- At-rest Encryption: XAES-256-GCM (기본 활성)
 - 시크릿은 환경변수 또는 파일 경로로만 전달
 - 하드코딩 금지
 
