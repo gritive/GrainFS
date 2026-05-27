@@ -1033,9 +1033,9 @@ single DEK can safely produce about 2^32 seals before the nonce-collision
 probability exceeds 2^-32. Above that bound, a repeated nonce under the same key
 would leak plaintext relationships, so the DEK must be rotated.
 
-GrainFS tracks seals per active KEK version and surfaces a risk band in
-`grainfs encrypt kek status` (the `nonce=` column) and in Prometheus
-(`grainfs_kek_seal_count{kek_version="<active>"}`):
+GrainFS tracks seals per active DEK generation and surfaces a risk band in
+`grainfs encrypt kek status` (the `dek_generations` section, `nonce=` column)
+and in Prometheus (`grainfs_kek_seal_count{dek_generation="<active>"}`):
 
 | seal_count          | risk    | action                                      |
 | ------------------- | ------- | ------------------------------------------- |
@@ -1043,29 +1043,28 @@ GrainFS tracks seals per active KEK version and surfaces a risk band in
 | `100M – 1,000M`     | `warn`  | schedule a DEK rotation within 7 days       |
 | `>= 1,000,000,000`  | `alert` | rotate immediately: `grainfs dek rotate`    |
 
-Alert on the active version's seal count at these thresholds:
+Alert when ANY DEK generation's seal count crosses these thresholds (no need to
+template the active generation — a generation that exceeds the bound is the one
+to rotate):
 
 ```promql
-grainfs_kek_seal_count{kek_version="<active>"} >= 100000000   # warn
-grainfs_kek_seal_count{kek_version="<active>"} >= 1000000000  # alert
+max(grainfs_kek_seal_count) >= 100000000   # warn
+max(grainfs_kek_seal_count) >= 1000000000  # alert
 ```
 
 `grainfs_kek_seal_count` is collected live from each node's `/metrics` endpoint
 at scrape time, so these alerts fire autonomously without any polling of the
 `grainfs encrypt kek status` admin endpoint.
 
+The seal count is keyed by DEK generation because AES-GCM nonce exhaustion is
+per-DEK-key. A KEK rotation re-wraps the existing DEKs without changing the DEK
+keys, so the per-DEK nonce count PERSISTS across a KEK rotation; it resets only
+when a new DEK generation is installed (`grainfs dek rotate`). The reported band
+therefore reflects true cumulative nonce usage for each DEK generation.
+
 DEK rotation does not block client I/O: it adds a new DEK generation in parallel
 and new seals immediately use it, while existing objects remain readable under
 their original generation.
-
-> **Caveat (seal-count resets on KEK rotation):** the `grainfs_kek_seal_count`
-> metric is keyed by KEK version and resets when you rotate the KEK. A KEK
-> rotation re-wraps the existing DEKs but does NOT change the DEK keys, so the
-> true per-DEK nonce usage continues across a KEK rotation. After a KEK rotation
-> the reported count under-states cumulative DEK nonce usage. Until this is
-> re-keyed to the DEK generation, treat the `nonce=` band as a lower bound and
-> prefer rotating the DEK (`grainfs dek rotate`) on a fixed cadence rather than
-> relying solely on the band after a recent KEK rotation.
 
 ---
 

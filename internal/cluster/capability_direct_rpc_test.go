@@ -306,6 +306,61 @@ func TestCapabilityGate_Allow_ConcurrentCacheMiss_SingleFanout(t *testing.T) {
 	}
 }
 
+// TestCapabilityGateAllow_DirectPath_RejectsPeerMissingCapability verifies that
+// when the direct-RPC path is wired, Allow exercises the signed probe (not
+// gossip) and rejects a voter that does not advertise the required capability.
+// The gate has NO gossip evidence reported, so a passing result can only come
+// from the direct signed assertion; a rejection proves the missing-cap peer was
+// caught on the direct path.
+func TestCapabilityGateAllow_DirectPath_RejectsPeerMissingCapability(t *testing.T) {
+	kekStore := newCapProbeKEKStore(t, 0x66)
+	// Peer advertises an unrelated cap but NOT kek_envelope_v1.
+	evidenceSource := &fakeEvidenceSource{
+		caps: map[string]bool{compat.CapabilityMultipartListingV1: true},
+	}
+	handler := NewCapabilityProbeHandler("node-MISS", "0.0.356.0", testClusterID, kekStore, evidenceSource)
+	dialer := makeTestDialer(handler)
+
+	gate := NewCapabilityGate(compat.DefaultRegistry, 30*time.Second)
+	gate.SetMetaRaftSnapshot(1, raft.Configuration{Servers: []raft.Server{
+		{ID: "node-MISS", Suffrage: raft.Voter},
+	}})
+	gate.WithDirectProbe(testClusterID, kekStore, dialer)
+
+	plan, err := gate.Allow(context.Background(), compat.OperationKEKRotate)
+	if err == nil {
+		t.Fatalf("Allow should reject voter missing kek_envelope_v1, got nil (plan=%+v)", plan)
+	}
+	if len(plan.Missing) != 1 || plan.Missing[0] != "node-MISS" {
+		t.Errorf("expected Missing=[node-MISS], got %+v", plan.Missing)
+	}
+}
+
+// TestCapabilityGateAllow_FallsBackToGossipWhenUnwired verifies that with no
+// direct probe wired, Allow uses the gossip evidence path (RequireMetaRaft-
+// Capability). HasDirectProbe must report false and a peer with gossiped
+// evidence passes.
+func TestCapabilityGateAllow_FallsBackToGossipWhenUnwired(t *testing.T) {
+	gate := NewCapabilityGate(compat.DefaultRegistry, 30*time.Second)
+	if gate.HasDirectProbe() {
+		t.Fatal("fresh gate must not have a direct probe wired")
+	}
+	gate.SetMetaRaftSnapshot(1, raft.Configuration{Servers: []raft.Server{
+		{ID: "node-G", Suffrage: raft.Voter},
+	}})
+	// Gossip evidence advertises the cap; the direct path is unwired so Allow
+	// must consult this evidence.
+	gate.ReportEvidence(compat.Evidence{
+		NodeID:       "node-G",
+		Capabilities: map[string]bool{compat.CapabilityKEKEnvelopeV1: true},
+		LastSeen:     time.Now(),
+		Ready:        true,
+	})
+	if _, err := gate.Allow(context.Background(), compat.OperationKEKRotate); err != nil {
+		t.Fatalf("Allow via gossip fallback should pass with advertised evidence: %v", err)
+	}
+}
+
 // capTestContains returns true if s contains sub.
 func capTestContains(s, sub string) bool {
 	if len(sub) == 0 {

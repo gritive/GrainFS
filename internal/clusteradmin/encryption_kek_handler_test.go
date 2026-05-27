@@ -71,11 +71,12 @@ func (g *fakeGate) Allow(_ context.Context, _ compat.Operation) (compat.GatePlan
 
 // fakeStatusReader feeds GET /encrypt/kek/status.
 type fakeStatusReader struct {
-	active   uint32
-	versions []uint32
-	statuses map[uint32]cluster.KEKLifecycleStatus
-	seals    map[uint32]uint64
-	leases   map[uint32]uint64
+	active    uint32
+	activeGen uint32
+	versions  []uint32
+	statuses  map[uint32]cluster.KEKLifecycleStatus
+	seals     map[uint32]uint64 // keyed by DEK generation
+	leases    map[uint32]uint64
 }
 
 func (r *fakeStatusReader) ActiveKEKVersion() uint32   { return r.active }
@@ -90,8 +91,9 @@ func (r *fakeStatusReader) LookupKEKStatus(v uint32) (uint32, cluster.KEKLifecyc
 	}
 	return v, s, 0, true
 }
-func (r *fakeStatusReader) SealCount(v uint32) uint64  { return r.seals[v] }
-func (r *fakeStatusReader) LeaseCount(v uint32) uint64 { return r.leases[v] }
+func (r *fakeStatusReader) ActiveDEKGeneration() uint32          { return r.activeGen }
+func (r *fakeStatusReader) SealCountSnapshot() map[uint32]uint64 { return r.seals }
+func (r *fakeStatusReader) LeaseCount(v uint32) uint64           { return r.leases[v] }
 
 func newTestHandler(orch *fakeOrchestrator, gate *fakeGate, reader KEKStatusReader) *EncryptionKEKHandler {
 	var go_ KEKCapabilityGate
@@ -236,14 +238,16 @@ func TestAdmin_PostEncryptKEKPrune_HappyPath(t *testing.T) {
 
 func TestAdmin_GetEncryptKEKStatus_ReturnsActiveAndVersions(t *testing.T) {
 	reader := &fakeStatusReader{
-		active:   2,
-		versions: []uint32{0, 1, 2},
+		active:    2,
+		activeGen: 1, // DEK gen distinct from KEK version (KEK rotated, DEK rotated once)
+		versions:  []uint32{0, 1, 2},
 		statuses: map[uint32]cluster.KEKLifecycleStatus{
 			0: cluster.KEKLifecyclePruned,
 			1: cluster.KEKLifecycleRetiring,
 		},
-		seals: map[uint32]uint64{
-			2: 250_000_000, // active version → warn band
+		seals: map[uint32]uint64{ // keyed by DEK generation
+			0: 10,          // retired DEK gen → ok
+			1: 250_000_000, // active DEK gen → warn band
 		},
 		leases: map[uint32]uint64{
 			1: 3,
@@ -260,18 +264,25 @@ func TestAdmin_GetEncryptKEKStatus_ReturnsActiveAndVersions(t *testing.T) {
 	var out kekStatusResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	require.Equal(t, uint32(2), out.ActiveVersion)
+	require.Equal(t, uint32(1), out.ActiveDEKGeneration)
 	require.Len(t, out.Versions, 3)
 	// versions arrive in keystore order (sorted ascending in our fake).
 	require.Equal(t, uint32(0), out.Versions[0].Version)
 	require.Equal(t, "pruned", out.Versions[0].Status)
 	require.Equal(t, "retiring", out.Versions[1].Status)
 	require.Equal(t, "active", out.Versions[2].Status)
-
-	// Task 13: per-version diagnostic fields.
 	require.Equal(t, uint64(3), out.Versions[1].LeaseCount, "v1 lease count")
-	require.Equal(t, uint64(250_000_000), out.Versions[2].SealCount, "v2 active seal count")
-	require.Equal(t, "warn", out.Versions[2].NonceCollisionRisk, "250M seals → warn")
-	require.Equal(t, "ok", out.Versions[0].NonceCollisionRisk, "0 seals → ok")
+
+	// Per-DEK-generation nonce-collision diagnostics, sorted ascending.
+	require.Len(t, out.DEKGenerations, 2)
+	require.Equal(t, uint32(0), out.DEKGenerations[0].Generation)
+	require.False(t, out.DEKGenerations[0].Active)
+	require.Equal(t, uint64(10), out.DEKGenerations[0].SealCount)
+	require.Equal(t, "ok", out.DEKGenerations[0].NonceCollisionRisk, "10 seals → ok")
+	require.Equal(t, uint32(1), out.DEKGenerations[1].Generation)
+	require.True(t, out.DEKGenerations[1].Active)
+	require.Equal(t, uint64(250_000_000), out.DEKGenerations[1].SealCount, "active DEK gen seal count")
+	require.Equal(t, "warn", out.DEKGenerations[1].NonceCollisionRisk, "250M seals → warn")
 }
 
 func TestNonceCollisionRisk_Thresholds(t *testing.T) {

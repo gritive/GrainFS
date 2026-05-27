@@ -12,8 +12,8 @@ import (
 //
 // These are emitted by a custom prometheus.Collector that reads live state at
 // scrape time — NOT a set of gauges poked on an HTTP call. Prometheus scrapes
-// /metrics, so the collector reads the DEKKeeper (active version + per-version
-// seal counts) and the KEKLeaseTracker (per-version lease counts) directly on
+// /metrics, so the collector reads the DEKKeeper (active KEK version +
+// per-DEK-generation seal counts) and the KEKLeaseTracker (per-version lease counts) directly on
 // every Collect(). This keeps grainfs_kek_seal_count scrape-fresh so the
 // runbook's PromQL nonce-collision alerts fire autonomously, with no polling
 // of the admin status endpoint required.
@@ -50,8 +50,8 @@ var (
 	)
 	kekSealCountDesc = prometheus.NewDesc(
 		"grainfs_kek_seal_count",
-		"Active-AEAD seals attributed to each KEK version (monotonic per version). Monitor the active version against nonce-collision thresholds (warn 1e8, alert 1e9).",
-		[]string{"kek_version"}, nil,
+		"Active-AEAD seals attributed to each DEK generation (monotonic per generation). Monitor the active generation against nonce-collision thresholds (warn 1e8, alert 1e9). Keyed by DEK generation, not KEK version: a KEK rotation re-wraps the DEK without resetting this count.",
+		[]string{"dek_generation"}, nil,
 	)
 	kekLeaseCountDesc = prometheus.NewDesc(
 		"grainfs_kek_lease_count",
@@ -116,10 +116,12 @@ func (c *kekCollector) Collect(ch chan<- prometheus.Metric) {
 	active := c.keeper.ActiveKEKVersion()
 	ch <- prometheus.MustNewConstMetric(kekActiveVersionDesc, prometheus.GaugeValue, float64(active))
 
+	// Seal counts are keyed by DEK generation (AES-GCM nonce exhaustion is
+	// per-DEK-key), distinct from the KEK version above.
 	seals := c.keeper.SealCountSnapshot()
-	for v, count := range seals {
+	for gen, count := range seals {
 		ch <- prometheus.MustNewConstMetric(
-			kekSealCountDesc, prometheus.CounterValue, float64(count), kekVerLabel(v),
+			kekSealCountDesc, prometheus.CounterValue, float64(count), dekGenLabel(gen),
 		)
 	}
 
@@ -143,3 +145,5 @@ func (c *kekCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func kekVerLabel(v uint32) string { return strconv.FormatUint(uint64(v), 10) }
+
+func dekGenLabel(g uint32) string { return strconv.FormatUint(uint64(g), 10) }

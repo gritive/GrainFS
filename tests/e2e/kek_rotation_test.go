@@ -81,17 +81,25 @@ import (
 
 // kekVersionStatusE2E mirrors clusteradmin.KEKVersionStatus on the wire.
 type kekVersionStatusE2E struct {
-	Version            uint32 `json:"version"`
-	Status             string `json:"status"`
+	Version    uint32 `json:"version"`
+	Status     string `json:"status"`
+	LeaseCount uint64 `json:"lease_count"`
+}
+
+// dekGenerationStatusE2E mirrors clusteradmin.DEKGenerationStatus on the wire.
+type dekGenerationStatusE2E struct {
+	Generation         uint32 `json:"generation"`
+	Active             bool   `json:"active"`
 	SealCount          uint64 `json:"seal_count"`
-	LeaseCount         uint64 `json:"lease_count"`
 	NonceCollisionRisk string `json:"nonce_collision_risk"`
 }
 
 // kekStatusE2E mirrors clusteradmin.KEKStatus on the wire.
 type kekStatusE2E struct {
-	ActiveVersion uint32                `json:"active_version"`
-	Versions      []kekVersionStatusE2E `json:"versions"`
+	ActiveVersion       uint32                   `json:"active_version"`
+	ActiveDEKGeneration uint32                   `json:"active_dek_generation"`
+	Versions            []kekVersionStatusE2E    `json:"versions"`
+	DEKGenerations      []dekGenerationStatusE2E `json:"dek_generations"`
 }
 
 func (s kekStatusE2E) version(v uint32) (kekVersionStatusE2E, bool) {
@@ -497,19 +505,17 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			}
 		})
 
-		// PENDING (harness fragility — NOT a Phase D blocker): Phase D rotate
-		// propagation is proven by the two specs above + the cross-node read
-		// spec below + internal/cluster TestReplicatedDEK_MakesWrapSetHashMatch.
-		// This spec additionally exercises leader KILL + RESTART. Investigation
-		// (Phase D) showed the restarted OLD LEADER boots, binds its HTTP/admin
-		// ports, and rejoins the reformed cluster — then gracefully self-shuts
-		// ~3s later (before waitHTTPReady can observe it), so the spec times out
-		// in its preamble, never reaching the active_version idempotency
-		// assertion. Restarting a FOLLOWER is fine (cluster_harness_kill_test.go
-		// passes); only the leader-rejoin path self-terminates. This is a
-		// harness/leader-rejoin-lifecycle issue independent of DEK replication —
-		// flip to It once the rejoining-old-leader shutdown is fixed.
-		ginkgo.PIt("survives a leader restart mid-lifecycle without double-applying", func() {
+		// Exercises leader KILL + RESTART after a committed KEK rotation. This
+		// previously self-terminated ~3s after rejoin and was misread as harness
+		// fragility; the real cause was a PRODUCTION bug: a restarting node boots
+		// its DEKKeeper with the ACTIVE KEK (v1) while the raft log still carries
+		// the gen-0 DEK bootstrap entry sealed under KEK v0. Replay unwrapped that
+		// entry under v1 → AES-GCM auth failure → fatal KEK apply → boot halts
+		// before any port was ready. Fixed in applyDEKReplicatedRotate by
+		// resolving the historical KEK (cmd.ActiveKEKVer) from the keystore for
+		// the unwrap. The assertion below (active_version unchanged after restart)
+		// confirms idempotent replay with no double-apply.
+		ginkgo.It("survives a leader restart mid-lifecycle without double-applying", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
 				Nodes:      3,

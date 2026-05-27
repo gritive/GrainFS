@@ -52,11 +52,17 @@ func (a kekStatusReaderAdapter) KEKStoreVersions() []uint32 {
 func (a kekStatusReaderAdapter) LookupKEKStatus(v uint32) (uint32, cluster.KEKLifecycleStatus, uint64, bool) {
 	return a.fsm.LookupKEKStatus(v)
 }
-func (a kekStatusReaderAdapter) SealCount(v uint32) uint64 {
+func (a kekStatusReaderAdapter) ActiveDEKGeneration() uint32 {
 	if a.keeper == nil {
 		return 0
 	}
-	return a.keeper.SealCount(v)
+	return a.keeper.ActiveDEKGeneration()
+}
+func (a kekStatusReaderAdapter) SealCountSnapshot() map[uint32]uint64 {
+	if a.keeper == nil {
+		return nil
+	}
+	return a.keeper.SealCountSnapshot()
 }
 func (a kekStatusReaderAdapter) LeaseCount(v uint32) uint64 {
 	if a.tracker == nil {

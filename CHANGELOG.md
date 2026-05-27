@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.360.0] - 2026-05-27
+
+### Fixed
+
+- **A node now boots cleanly when it restarts after a cluster KEK rotation.** Previously a
+  node that restarted after a committed KEK rotation failed to start: replaying the
+  replicated DEK bootstrap log entry tried to unwrap it under the *current* KEK version
+  instead of the version it was originally sealed under, so AES-GCM authentication failed
+  and the node halted before it could serve. The DEK replay now unwraps each entry under
+  the historical KEK version recorded with it. Affects any multi-node encrypted cluster
+  that has rotated its KEK at least once.
+
+### Changed
+
+- **Breaking (advisory surfaces):** the `grainfs_kek_seal_count` Prometheus label changed
+  from `kek_version` to `dek_generation`, and the `GET /v1/encrypt/kek/status` response
+  moved `seal_count` / `nonce_collision_risk` off the per-KEK-version rows into a new
+  top-level `dek_generations` array (plus an `active_dek_generation` field). AES-GCM nonce
+  exhaustion is per-DEK-key, so the seal count now persists across a KEK rotation (which
+  re-wraps the DEK without changing its key) and resets only when a new DEK generation is
+  installed — previously it reset on KEK rotation, under-reporting cumulative nonce usage
+  and risking a missed warn/alert threshold.
+
 ## [0.0.359.0] - 2026-05-27
 
 ### Added
@@ -55,8 +78,9 @@
   leases. `status` reports active version, per-version seal/lease counts, and retired
   count in human-readable or `--format json` output.
 - **GET `/v1/encrypt/kek/status` admin endpoint** for programmatic KEK/DEK health queries.
-- **`grainfs_kek_*` Prometheus metrics** — active KEK version, per-version seal and lease
-  counts, retired version count — to make KEK rotation and nonce-collision risk observable.
+- **`grainfs_kek_*` Prometheus metrics** — active KEK version, per-DEK-generation seal
+  counts, per-version lease counts, retired version count — to make KEK rotation and
+  nonce-collision risk observable.
 - **Runbook sections** for keystore disk-full and DEK rotation cadence in
   `docs/operators/runbook.md`.
 

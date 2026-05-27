@@ -53,6 +53,16 @@ func (g *CapabilityGate) WithDirectProbe(clusterID []byte, kekStore *encrypt.KEK
 	return g
 }
 
+// HasDirectProbe reports whether the direct-RPC signed-assertion path is wired
+// (i.e. WithDirectProbe was called). When false, Allow falls back to gossip
+// evidence — the correct behavior when encryption is disabled. Exposed so boot
+// wiring is observable in tests without reaching into unexported fields.
+func (g *CapabilityGate) HasDirectProbe() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.directCfg != nil
+}
+
 // Allow checks whether all current meta-raft voters advertise the capabilities
 // required for op via the direct signed-assertion RPC path. Results are cached
 // by (op, voter_config_hash, active_kek_version) — the cache automatically

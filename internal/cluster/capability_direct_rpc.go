@@ -34,6 +34,23 @@ var capProbeReplyMagic = []byte("CAPREP\x01")
 // Production wires it to: func(ctx, peer, payload) { return quicTransport.Call(ctx, peer, &transport.Message{Type: transport.StreamCapabilityProbe, Payload: payload}) }
 type capabilityProbeDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
+// NewQUICCapabilityProbeDialer builds the production capabilityProbeDialer that
+// dispatches a StreamCapabilityProbe request over the shared QUIC transport and
+// returns the raw response payload. Used by serve-runtime boot to wire the
+// CapabilityGate's direct signed-assertion path.
+func NewQUICCapabilityProbeDialer(t *transport.QUICTransport) capabilityProbeDialer {
+	return func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		resp, err := t.Call(ctx, peer, &transport.Message{
+			Type:    transport.StreamCapabilityProbe,
+			Payload: payload,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("capability_probe: call %s: %w", peer, err)
+		}
+		return resp.Payload, nil
+	}
+}
+
 // capabilityProbeRequest is the client-side request.
 type capabilityProbeRequest struct {
 	ExpectedServerID string

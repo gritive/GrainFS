@@ -35,7 +35,7 @@ const (
 	wantRetiredHdr = `# HELP grainfs_kek_retired_count Number of KEK versions in retiring or pruned lifecycle state.
 # TYPE grainfs_kek_retired_count gauge
 `
-	wantSealHdr = `# HELP grainfs_kek_seal_count Active-AEAD seals attributed to each KEK version (monotonic per version). Monitor the active version against nonce-collision thresholds (warn 1e8, alert 1e9).
+	wantSealHdr = `# HELP grainfs_kek_seal_count Active-AEAD seals attributed to each DEK generation (monotonic per generation). Monitor the active generation against nonce-collision thresholds (warn 1e8, alert 1e9). Keyed by DEK generation, not KEK version: a KEK rotation re-wraps the DEK without resetting this count.
 # TYPE grainfs_kek_seal_count counter
 `
 	wantLeaseHdr = `# HELP grainfs_kek_lease_count In-flight KEK consumer leases per version. Must reach 0 before a retired version can be pruned.
@@ -45,11 +45,11 @@ const (
 
 func TestKEKCollector_ActiveRetiredAndLeases(t *testing.T) {
 	keeper := fakeSealReader{
-		active: 2,
-		seals: map[uint32]uint64{
-			0: 5,           // older version
-			1: 100_000_000, // older version
-			2: 42,          // active
+		active: 2, // active KEK version (lease/active gauge)
+		seals: map[uint32]uint64{ // keyed by DEK generation
+			0: 5,           // retired DEK gen
+			1: 100_000_000, // retired DEK gen
+			2: 42,          // active DEK gen
 		},
 	}
 	tracker := fakeLeaseReader{leases: map[uint32]uint64{1: 3}}
@@ -61,9 +61,9 @@ func TestKEKCollector_ActiveRetiredAndLeases(t *testing.T) {
 	want := "\n" + wantActiveHdr + "grainfs_kek_active_version 2\n" +
 		wantRetiredHdr + "grainfs_kek_retired_count 2\n" +
 		wantSealHdr +
-		"grainfs_kek_seal_count{kek_version=\"0\"} 5\n" +
-		"grainfs_kek_seal_count{kek_version=\"1\"} 1e+08\n" +
-		"grainfs_kek_seal_count{kek_version=\"2\"} 42\n" +
+		"grainfs_kek_seal_count{dek_generation=\"0\"} 5\n" +
+		"grainfs_kek_seal_count{dek_generation=\"1\"} 1e+08\n" +
+		"grainfs_kek_seal_count{dek_generation=\"2\"} 42\n" +
 		wantLeaseHdr +
 		"grainfs_kek_lease_count{kek_version=\"1\"} 3\n"
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
@@ -91,8 +91,8 @@ func TestKEKCollector_PostRotationNoRetire(t *testing.T) {
 	want := "\n" + wantActiveHdr + "grainfs_kek_active_version 1\n" +
 		wantRetiredHdr + "grainfs_kek_retired_count 0\n" +
 		wantSealHdr +
-		"grainfs_kek_seal_count{kek_version=\"0\"} 5\n" +
-		"grainfs_kek_seal_count{kek_version=\"1\"} 42\n"
+		"grainfs_kek_seal_count{dek_generation=\"0\"} 5\n" +
+		"grainfs_kek_seal_count{dek_generation=\"1\"} 42\n"
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
 		t.Fatalf("unexpected metrics: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestKEKCollector_NilLifecycle_OmitsRetiredCount(t *testing.T) {
 	// No lifecycle reader: retired_count omitted entirely (not emitted as 0).
 	want := "\n" + wantActiveHdr + "grainfs_kek_active_version 0\n" +
 		wantSealHdr +
-		"grainfs_kek_seal_count{kek_version=\"0\"} 0\n"
+		"grainfs_kek_seal_count{dek_generation=\"0\"} 0\n"
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want)); err != nil {
 		t.Fatalf("unexpected metrics: %v", err)
 	}

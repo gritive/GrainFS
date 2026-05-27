@@ -54,18 +54,24 @@ type DEKKeeper struct {
 	wrap      map[uint32][]byte      // dek_gen → wrapped DEK (snapshot persistence)
 	aead      map[uint32]cipher.AEAD // dek_gen → cached AEAD (hot-path)
 
-	// Seal-count diagnostics for nonce-collision monitoring (Task 13). The
-	// count is per active KEK version: every Seal/SealWithAAD/Rewrap under the
-	// active AEAD increments activeSeals (a single lock-free atomic.Add — no
-	// map lookup on the hot path). On KEK rotation, OnKEKRotation freezes the
-	// running count into retiredSeals[old version] and resets activeSeals so
-	// the new version starts its own count. activeKEKVersion is the label the
-	// counter belongs to (DEK gen and KEK version are distinct: a KEK rotation
-	// re-wraps DEKs without bumping the DEK gen).
+	// Seal-count diagnostics for nonce-collision monitoring (Task 13). AES-GCM
+	// nonce exhaustion is per-DEK-key, so the count is keyed by the active DEK
+	// GENERATION (k.active), NOT by KEK version: every Seal/SealWithAAD/Rewrap
+	// under the active AEAD increments activeSeals (a single lock-free
+	// atomic.Add — no map lookup on the hot path). When a NEW DEK generation is
+	// installed (Rotate / InstallReplicatedDEK advancing k.active), freezeSeals
+	// freezes the running count into retiredSeals[old gen] and resets
+	// activeSeals so the new gen starts its own nonce count.
+	//
+	// A KEK rotation re-wraps the same DEK plaintexts without changing the keys
+	// — so it does NOT touch this counter (OnKEKRotation only re-labels
+	// activeKEKVer). activeKEKVer is tracked separately for the
+	// grainfs_kek_active_version gauge and the DEK-wrap AAD; it is NOT the key
+	// of the seal counter.
 	activeSeals    atomic.Uint64
 	activeKEKVer   atomic.Uint32
 	retiredSealsMu sync.RWMutex
-	retiredSeals   map[uint32]uint64
+	retiredSeals   map[uint32]uint64 // dek_gen → frozen seal count
 }
 
 // NewDEKKeeper creates a new DEKKeeper with generation 0, sealing a freshly
@@ -142,8 +148,26 @@ func (k *DEKKeeper) dekWrapAAD(gen, kekVer uint32) []byte {
 // the DomainDEKFSMWrap AAD bound to (clusterID, gen, kekVer).
 // Idempotent: installing the same gen+bytes twice is a no-op success;
 // installing DIFFERENT bytes for an existing gen returns an error (would break
-// determinism — caller treats as fatal).
+// determinism — caller treats as fatal). When the gen genuinely ADVANCES to a
+// new generation, the prior gen's nonce seal count is frozen and the live
+// counter reset (freezeSeals) — the idempotent-replay branch does NOT, so a
+// snapshot-tail re-Apply preserves the running count.
 func (k *DEKKeeper) InstallReplicatedDEK(gen uint32, wrapped []byte, kekVer uint32) error {
+	return k.installReplicatedDEK(gen, wrapped, kekVer, nil)
+}
+
+// InstallReplicatedDEKWithKEK is InstallReplicatedDEK but unwraps the bytes
+// under the supplied unwrapKEK instead of the keeper's current active KEK. The
+// FSM uses this on log replay: a DEKReplicatedRotate entry committed before the
+// most recent KEK rotation carries bytes sealed under an OLDER KEK version
+// (cmd.ActiveKEKVer), which the keeper's active KEK can no longer authenticate.
+// unwrapKEK must be the keystore's KEK at kekVer. A nil/empty unwrapKEK falls
+// back to the active KEK (callers that know kekVer == active pass nil).
+func (k *DEKKeeper) InstallReplicatedDEKWithKEK(gen uint32, wrapped []byte, kekVer uint32, unwrapKEK []byte) error {
+	return k.installReplicatedDEK(gen, wrapped, kekVer, unwrapKEK)
+}
+
+func (k *DEKKeeper) installReplicatedDEK(gen uint32, wrapped []byte, kekVer uint32, unwrapKEK []byte) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if existing, ok := k.wrap[gen]; ok {
@@ -153,8 +177,12 @@ func (k *DEKKeeper) InstallReplicatedDEK(gen uint32, wrapped []byte, kekVer uint
 		k.active = gen
 		return nil
 	}
+	kek := k.kek
+	if len(unwrapKEK) != 0 {
+		kek = unwrapKEK
+	}
 	aad := k.dekWrapAAD(gen, kekVer)
-	plain, err := AESGCMOpenWithAAD(k.kek, wrapped, aad)
+	plain, err := AESGCMOpenWithAAD(kek, wrapped, aad)
 	if err != nil {
 		return fmt.Errorf("encrypt: InstallReplicatedDEK gen %d: unwrap: %w", gen, err)
 	}
@@ -164,10 +192,32 @@ func (k *DEKKeeper) InstallReplicatedDEK(gen uint32, wrapped []byte, kekVer uint
 		return fmt.Errorf("encrypt: InstallReplicatedDEK gen %d: aead: %w", gen, err)
 	}
 	zeroize(plain)
+	// A genuinely new DEK generation is being installed. Freeze the prior
+	// active gen's nonce count and reset the live counter so the new gen starts
+	// fresh (AES-GCM nonce exhaustion is per-DEK-key). This is reached only on a
+	// real new gen: the idempotent same-gen+bytes replay returned above before
+	// touching the counter.
+	prevActive := k.active
 	k.wrap[gen] = append([]byte(nil), wrapped...)
 	k.aead[gen] = aead
+	if gen != prevActive {
+		k.freezeSeals(prevActive)
+	}
 	k.active = gen
 	return nil
+}
+
+// freezeSeals freezes the running active-AEAD seal count under oldGen and
+// resets the live counter to 0, so a freshly installed DEK generation starts
+// its own nonce count. The freeze runs under retiredSealsMu (off the hot path);
+// the live counter swap is a single lock-free atomic. Callers hold k.mu and
+// must invoke this BEFORE advancing k.active to the new generation (so oldGen
+// is the generation whose count is being frozen).
+func (k *DEKKeeper) freezeSeals(oldGen uint32) {
+	frozen := k.activeSeals.Swap(0)
+	k.retiredSealsMu.Lock()
+	k.retiredSeals[oldGen] = frozen
+	k.retiredSealsMu.Unlock()
 }
 
 // GenerateWrappedDEK generates a fresh random DEK for newGen on the LEADER,
@@ -306,6 +356,7 @@ func (k *DEKKeeper) Rotate() error {
 	if err != nil {
 		return err
 	}
+	k.freezeSeals(k.active) // freeze prior gen's nonce count before advancing
 	k.active = newGen
 	k.wrap[k.active] = wrapped
 	k.aead[k.active] = aead
@@ -454,59 +505,68 @@ func (k *DEKKeeper) VersionsAndActive() (versions map[uint32][]byte, active uint
 	return out, k.active
 }
 
-// SealCount returns the number of active-AEAD seals attributed to KEK version
-// kekVersion. For the current active version this is the live running counter;
-// for a prior version it is the value frozen by OnKEKRotation at the moment
-// that version stopped being active. Unknown versions return 0.
-func (k *DEKKeeper) SealCount(kekVersion uint32) uint64 {
-	if kekVersion == k.activeKEKVer.Load() {
+// SealCount returns the number of active-AEAD seals attributed to DEK
+// generation gen. For the current active generation this is the live running
+// counter; for a prior generation it is the value frozen by freezeSeals at the
+// moment that gen stopped being active (DEK rotation). Unknown generations
+// return 0. AES-GCM nonce exhaustion is per-DEK-key, so this is keyed by DEK
+// generation, NOT KEK version — a KEK rotation re-wraps the DEK without
+// resetting this count.
+func (k *DEKKeeper) SealCount(gen uint32) uint64 {
+	if gen == k.ActiveDEKGeneration() {
 		return k.activeSeals.Load()
 	}
 	k.retiredSealsMu.RLock()
 	defer k.retiredSealsMu.RUnlock()
-	return k.retiredSeals[kekVersion]
+	return k.retiredSeals[gen]
 }
 
-// ActiveKEKVersion returns the KEK version the seal counter currently
-// attributes to. Distinct from the DEK gen returned by Active().
+// ActiveKEKVersion returns the KEK version the keeper currently wraps DEKs
+// under (the grainfs_kek_active_version gauge + DEK-wrap AAD). Distinct from
+// the active DEK generation (ActiveDEKGeneration); a KEK rotation advances this
+// without changing the DEK gen.
 func (k *DEKKeeper) ActiveKEKVersion() uint32 { return k.activeKEKVer.Load() }
 
-// SealCountSnapshot returns every KEK version's seal count: the frozen value
-// for each retired version plus the live running count for the current active
-// version. Off the hot path (Prometheus scrape via the KEK collector) — reads
-// activeKEKVer + activeSeals atomics and the retiredSeals map under its RLock.
+// ActiveDEKGeneration returns the current active DEK generation — the key the
+// live seal counter belongs to.
+func (k *DEKKeeper) ActiveDEKGeneration() uint32 {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.active
+}
+
+// SealCountSnapshot returns every DEK generation's seal count: the frozen value
+// for each retired generation plus the live running count for the current
+// active generation. Off the hot path (Prometheus scrape via the KEK
+// collector) — reads the active gen under k.mu, the activeSeals atomic, and the
+// retiredSeals map under its RLock.
 //
-// Transient race (acceptable for a diagnostic): a concurrent OnKEKRotation
-// between the Load of activeKEKVer and activeSeals can momentarily overwrite a
-// just-frozen retired count with 0 in the returned map; the next scrape
-// self-corrects. Locking would have to span the hot-path atomics, so it is
-// deliberately not added.
+// Transient race (acceptable for a diagnostic): a concurrent DEK rotation
+// (freezeSeals) between the read of the active gen and activeSeals can
+// momentarily overwrite a just-frozen retired count with 0 in the returned
+// map; the next scrape self-corrects. Locking would have to span the hot-path
+// atomics, so it is deliberately not added.
 func (k *DEKKeeper) SealCountSnapshot() map[uint32]uint64 {
-	active := k.activeKEKVer.Load()
+	active := k.ActiveDEKGeneration()
 	live := k.activeSeals.Load()
 	k.retiredSealsMu.RLock()
 	out := make(map[uint32]uint64, len(k.retiredSeals)+1)
-	for v, c := range k.retiredSeals {
-		out[v] = c
+	for g, c := range k.retiredSeals {
+		out[g] = c
 	}
 	k.retiredSealsMu.RUnlock()
-	out[active] = live // active wins over any stale retired entry for the same version
+	out[active] = live // active wins over any stale retired entry for the same gen
 	return out
 }
 
-// OnKEKRotation records that the active KEK version changed to newVersion. The
-// running seal count is frozen under the previous version and the live counter
-// resets to 0 so the new version starts its own count. Called by the FSM
-// immediately after InstallKEKRotation under f.mu (single-writer apply path).
+// OnKEKRotation records that the active KEK version changed to newVersion. It
+// re-labels the KEK version ONLY — the seal counter is keyed by DEK generation
+// and a KEK rotation re-wraps the same DEK without changing its key, so the
+// running nonce count MUST persist (the reset happens on DEK rotation via
+// freezeSeals, not here). Called by the FSM immediately after
+// InstallKEKRotation under f.mu (single-writer apply path).
 func (k *DEKKeeper) OnKEKRotation(newVersion uint32) {
-	prev := k.activeKEKVer.Swap(newVersion)
-	if prev == newVersion {
-		return
-	}
-	frozen := k.activeSeals.Swap(0)
-	k.retiredSealsMu.Lock()
-	k.retiredSeals[prev] = frozen
-	k.retiredSealsMu.Unlock()
+	k.activeKEKVer.Store(newVersion)
 }
 
 // SetActiveKEKVersion sets the KEK version the seal counter attributes to,
