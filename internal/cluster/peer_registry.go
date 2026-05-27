@@ -105,14 +105,6 @@ func (r *peerRegistry) promoteMember(nodeID string) error {
 	return nil
 }
 
-// lookupByNodeID returns the entry for a node-id (snapshot copy).
-func (r *peerRegistry) lookupByNodeID(nodeID string) (peerEntry, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	e, ok := r.byNodeID[nodeID]
-	return e, ok
-}
-
 // export returns a snapshot copy of every registered entry (member AND
 // pending-learner). Used by MetaFSM.Snapshot to serialize the registry into the
 // meta-state snapshot so the per-node accept-set survives log compaction.

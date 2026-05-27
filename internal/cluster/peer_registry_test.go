@@ -4,6 +4,16 @@ import "testing"
 
 func spki(b byte) [32]byte { var s [32]byte; s[0] = b; return s }
 
+// lookupByNodeID is a test-only read accessor (the production registry has no
+// node-id lookup yet; the revocation slice will add one when RevokeNode needs
+// it). Kept in _test.go so it is not flagged as unused production code.
+func (r *peerRegistry) lookupByNodeID(nodeID string) (peerEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.byNodeID[nodeID]
+	return e, ok
+}
+
 func TestPeerRegistry_RegisterPromoteLookup(t *testing.T) {
 	r := newPeerRegistry()
 	if err := r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000"); err != nil {
