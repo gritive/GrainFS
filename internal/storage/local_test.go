@@ -78,6 +78,32 @@ func TestListBuckets(t *testing.T) {
 	require.Len(t, buckets, 2)
 }
 
+func TestLocalBackend_DEKKeeperSegEnc_RoundTrip(t *testing.T) {
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x88}, encrypt.KEKSize), bytes.Repeat([]byte{0x99}, 16))
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	b, err := NewLocalBackendWithDEKKeeper(t.TempDir(), keeper, bytes.Repeat([]byte{0x99}, 16))
+	if err != nil {
+		t.Fatalf("NewLocalBackendWithDEKKeeper: %v", err)
+	}
+	defer b.Close()
+
+	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"), "CreateBucket")
+
+	data := []byte("hello dek")
+	_, err = b.PutObject(context.Background(), "test-bucket", "greeting.txt", bytes.NewReader(data), "text/plain")
+	require.NoError(t, err, "PutObject")
+
+	rc, _, err := b.GetObject(context.Background(), "test-bucket", "greeting.txt")
+	require.NoError(t, err, "GetObject")
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err, "ReadAll")
+	require.Equal(t, data, got)
+}
+
 func TestPutAndGetObject(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")
@@ -139,7 +165,7 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 func TestLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	dwal, err := datawal.Open(filepath.Join(root, "datawal"), nil)
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), nil, "datawal")
 	require.NoError(t, err)
 
 	b, err := NewLocalBackendWithDataWAL(root, dwal)
@@ -168,7 +194,7 @@ func TestEncryptedLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(root, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 
 	b, err := NewEncryptedLocalBackendWithDataWAL(root, enc, dwal)
@@ -1057,7 +1083,7 @@ func TestMultiRootLocalBackend(t *testing.T) {
 
 func TestLocalBackend_DataWALRestoresWriteAtAndTruncate(t *testing.T) {
 	dir := t.TempDir()
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil, "datawal")
 	require.NoError(t, err)
 	b, err := NewLocalBackendWithDataWAL(filepath.Join(dir, "objects"), dwal)
 	require.NoError(t, err)

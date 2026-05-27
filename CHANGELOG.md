@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.371.0] - 2026-05-28
+
+### Fixed
+
+- OAuth token issuance now evaluates `aws:SourceIp` against the direct peer by default and the existing trusted-proxy validator when served through the Iceberg gateway, preventing spoofed `X-Forwarded-For` headers from bypassing service-account location policies.
+
+## [0.0.370.0] - 2026-05-28
+
+### Changed
+
+- Data WAL records now seal through the DataEncryptor seam with position-bound AEAD (DomainWAL + WAL namespace + record sequence) and a `dek_gen` file header (DWAL format v2), groundwork for KEK-envelope key rotation of data at rest. Behavior is unchanged under the static encryptor; the on-disk WAL format is a hard break (old v1 segment files are not read).
+
+## [0.0.369.0] - 2026-05-27
+
+### Changed
+
+- Packed small-object blob storage (single-node packed backend) now seals entries through the DataEncryptor seam with position-bound AEAD, groundwork for KEK-envelope key rotation of data at rest.
+
+## [0.0.368.0] - 2026-05-27
+
+### Changed
+
+- At-rest encryption is now key-generation-aware end-to-end: erasure-coded shard
+  and object/segment data are sealed and opened through the cluster DEK keeper
+  bound to the real cluster identity, so a KEK/DEK rotation re-keys new writes
+  while existing data stays readable at the generation it was written under. A
+  key generation that has not yet replicated to a node is treated as a transient
+  read condition (retried), never as shard corruption.
+
 ## [0.0.366.0] - 2026-05-27
 
 ### Fixed

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -795,7 +796,7 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
@@ -811,7 +812,7 @@ func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
@@ -827,7 +828,7 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	svc := NewShardService(
 		dir,
@@ -857,7 +858,7 @@ func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
 func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	svc := NewShardService(
 		dir,
@@ -897,7 +898,7 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, 32)
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	svc := NewShardService(
 		dir,
@@ -987,7 +988,7 @@ func TestDataWALRepairCollector_CoalescesByBucketShardAndIndex(t *testing.T) {
 func TestShardService_DataWALMetadataOnlyMissingQueuesStartupRepair(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(
@@ -1022,7 +1023,7 @@ func TestShardService_DataWALMetadataOnlyMissingQueuesStartupRepair(t *testing.T
 func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(
@@ -1086,7 +1087,7 @@ func TestDataWALRepairCollector_ConcurrentAddIsRaceFree(t *testing.T) {
 func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T) {
 	dir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(
@@ -1106,4 +1107,36 @@ func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T)
 	got, err := svc.ReadLocalShard("b", "small", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte("payload"), got)
+}
+
+func TestWithShardDEKKeeper_SetsSegEncAndClusterID(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x11}, 32))
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x22}, encrypt.KEKSize), bytes.Repeat([]byte{0x33}, 16))
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	cid := bytes.Repeat([]byte{0x44}, 16)
+	s := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(keeper, cid))
+	if !bytes.Equal(s.clusterID[:], cid) {
+		t.Fatalf("clusterID not threaded: %x", s.clusterID)
+	}
+	ct, gen, err := s.segEnc.Seal(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, []byte("hi"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	pt, err := s.segEnc.Open(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, gen, ct)
+	if err != nil || string(pt) != "hi" {
+		t.Fatalf("open: pt=%q err=%v", pt, err)
+	}
+}
+
+func TestWithShardDEKKeeper_NilOrBadClusterIDIsNoOp(t *testing.T) {
+	enc, _ := encrypt.NewEncryptor(bytes.Repeat([]byte{0x11}, 32))
+	s := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(nil, nil))
+	if s.segEnc == nil {
+		t.Fatal("nil keeper must leave the EncryptorAdapter segEnc intact")
+	}
 }

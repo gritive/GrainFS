@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // BlobLocation identifies where an entry lives within a blob file.
@@ -30,10 +31,8 @@ const (
 )
 
 var (
-	blobAppendAADPool    = make(chan []byte, 256)
-	blobAppendSealedPool = make(chan []byte, 256)
-	blobReadKeyPool      = make(chan []byte, 256)
-	blobReadPayloadPool  = make(chan []byte, 256)
+	blobReadKeyPool     = make(chan []byte, 256)
+	blobReadPayloadPool = make(chan []byte, 256)
 )
 
 // BlobStore manages append-only blob files for packing small objects.
@@ -46,8 +45,10 @@ type BlobStore struct {
 	activeOff int64
 	nextID    atomic.Uint64
 	compress  bool
-	encryptor *encrypt.Encryptor
-	lockFile  *os.File // held for the lifetime of this BlobStore (flock on unix)
+	encryptor *encrypt.Encryptor    // legacy; replaced by segEnc on the data path (Tasks 3-4)
+	segEnc    storage.DataEncryptor // data-at-rest seam (EncryptorAdapter in this lane)
+	clusterID [16]byte              // zero sentinel (single-node, no cluster ID)
+	lockFile  *os.File              // held for the lifetime of this BlobStore (flock on unix)
 
 	// readFiles caches open *os.File handles for completed (read-only) blobs.
 	// Published as an immutable map snapshot via atomic.Pointer so the hot
@@ -77,7 +78,8 @@ func NewBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	return newBlobStore(dir, maxSize)
 }
 
-// NewEncryptedBlobStore creates a blob store that encrypts entry payloads.
+// NewEncryptedBlobStore creates a blob store that encrypts entry payloads via
+// the DataEncryptor seam (EncryptorAdapter over the static key in this lane).
 func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*BlobStore, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("encrypted blob store requires encryptor")
@@ -87,6 +89,8 @@ func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*
 		return nil, err
 	}
 	bs.encryptor = enc
+	// D-seg-pack: EncryptorAdapter over the static key, zero-sentinel clusterID.
+	bs.segEnc = storage.NewEncryptorAdapter(enc, bs.clusterID[:])
 	return bs, nil
 }
 
@@ -155,19 +159,13 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	defer bs.mu.Unlock()
 
 	offset := bs.activeOff
-	var aadBuf []byte
-	var sealedBuf []byte
-	if bs.encryptor != nil {
+	if bs.segEnc != nil {
 		flags |= flagEncrypted
-		aadBuf = takeBlobAppendAADBuffer(len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key))
-		sealedBuf = takeBlobAppendSealedBuffer(len(storedPayload) + 64)
-		sealed, err := bs.encryptor.SealValueAADTo(sealedBuf[:0], bs.entryAADTo(aadBuf, bs.activeID, uint64(offset), key, flags), storedPayload)
+		sealed, _, err := bs.segEnc.Seal(encrypt.DomainShard,
+			blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
 		if err != nil {
-			releaseBlobAppendAADBuffer(aadBuf)
-			releaseBlobAppendSealedBuffer(sealedBuf)
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 		}
-		sealedBuf = sealed
 		payload = sealed
 	}
 
@@ -176,19 +174,15 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	// Rotate if this entry would exceed max blob size
 	if bs.activeOff+entrySize > bs.maxSize && bs.activeOff > 0 {
 		if err := bs.rotate(); err != nil {
-			releaseBlobAppendAADBuffer(aadBuf)
-			releaseBlobAppendSealedBuffer(sealedBuf)
 			return BlobLocation{}, err
 		}
 		offset = bs.activeOff
-		if bs.encryptor != nil {
-			sealed, err := bs.encryptor.SealValueAADTo(sealedBuf[:0], bs.entryAADTo(aadBuf, bs.activeID, uint64(offset), key, flags), storedPayload)
+		if bs.segEnc != nil {
+			sealed, _, err := bs.segEnc.Seal(encrypt.DomainShard,
+				blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
 			if err != nil {
-				releaseBlobAppendAADBuffer(aadBuf)
-				releaseBlobAppendSealedBuffer(sealedBuf)
 				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 			}
-			sealedBuf = sealed
 			payload = sealed
 			entrySize = int64(entryOverhead + len(key) + len(payload))
 		}
@@ -198,38 +192,26 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(key)))
 	if _, err := bs.active.Write(header[:]); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.WriteString(key); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	var entryHeader [5]byte
 	entryHeader[0] = flags
 	binary.BigEndian.PutUint32(entryHeader[1:], uint32(len(payload)))
 	if _, err := bs.active.Write(entryHeader[:]); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.Write(payload); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 
 	var crc [4]byte
 	binary.BigEndian.PutUint32(crc[:], blobEntryCRC([]byte(key), flags, payload))
 	if _, err := bs.active.Write(crc[:]); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
-	releaseBlobAppendAADBuffer(aadBuf)
-	releaseBlobAppendSealedBuffer(sealedBuf)
 
 	bs.activeOff += entrySize
 
@@ -290,7 +272,7 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	payloadLen := int(dataLen)
 	payload := make([]byte, payloadLen)
 	pooledPayload := false
-	if bs.encryptor != nil && flags&flagEncrypted != 0 {
+	if bs.segEnc != nil && flags&flagEncrypted != 0 {
 		payload = takeBlobReadPayloadBuffer(payloadLen)
 		pooledPayload = cap(payload) > 0
 	}
@@ -318,11 +300,10 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		}
 	}
 
-	if bs.encryptor != nil && flags&flagEncrypted != 0 {
-		aadBuf := takeBlobAppendAADBuffer(len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key))
+	if bs.segEnc != nil && flags&flagEncrypted != 0 {
 		encryptedPayload := payload
-		payload, err = bs.encryptor.OpenValueAADTo(nil, entryAADBytesTo(aadBuf, loc.BlobID, loc.Offset, key, flags), encryptedPayload)
-		releaseBlobAppendAADBuffer(aadBuf)
+		payload, err = bs.segEnc.Open(encrypt.DomainShard,
+			blobEntryAADFields(loc.BlobID, loc.Offset, string(key), flags), 0, encryptedPayload)
 		releaseBlobReadBuffers(key, encryptedPayload, pooledPayload)
 	} else {
 		keyString := string(key)
@@ -548,100 +529,6 @@ func (bs *BlobStore) blobPath(id uint64) string {
 	return filepath.Join(bs.dir, fmt.Sprintf("blob_%016x.blob", id))
 }
 
-func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags byte) []byte {
-	return bs.entryAADTo(nil, blobID, offset, key, flags)
-}
-
-func (bs *BlobStore) entryAADTo(dst []byte, blobID uint64, offset uint64, key string, flags byte) []byte {
-	aadLen := len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key)
-	if cap(dst) < aadLen {
-		dst = make([]byte, aadLen)
-	}
-	aad := dst[:aadLen]
-	copy(aad, "packblob:v2:")
-	off := len("packblob:v2:")
-	binary.BigEndian.PutUint64(aad[off:], blobID)
-	off += 8
-	binary.BigEndian.PutUint64(aad[off:], offset)
-	off += 8
-	aad[off] = flags
-	off++
-	binary.BigEndian.PutUint32(aad[off:], uint32(len(key)))
-	off += 4
-	copy(aad[off:], key)
-	return aad
-}
-
-func entryAADBytesTo(dst []byte, blobID uint64, offset uint64, key []byte, flags byte) []byte {
-	aadLen := len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key)
-	if cap(dst) < aadLen {
-		dst = make([]byte, aadLen)
-	}
-	aad := dst[:aadLen]
-	copy(aad, "packblob:v2:")
-	off := len("packblob:v2:")
-	binary.BigEndian.PutUint64(aad[off:], blobID)
-	off += 8
-	binary.BigEndian.PutUint64(aad[off:], offset)
-	off += 8
-	aad[off] = flags
-	off++
-	binary.BigEndian.PutUint32(aad[off:], uint32(len(key)))
-	off += 4
-	copy(aad[off:], key)
-	return aad
-}
-
-func takeBlobAppendAADBuffer(n int) []byte {
-	if n == 0 {
-		return nil
-	}
-	select {
-	case buf := <-blobAppendAADPool:
-		if cap(buf) >= n {
-			return buf[:n]
-		}
-	default:
-	}
-	return make([]byte, n)
-}
-
-func releaseBlobAppendAADBuffer(buf []byte) {
-	if cap(buf) == 0 || cap(buf) > 4<<10 {
-		return
-	}
-	clear(buf[:cap(buf)])
-	select {
-	case blobAppendAADPool <- buf[:0]:
-	default:
-	}
-}
-
-func takeBlobAppendSealedBuffer(n int) []byte {
-	if n == 0 {
-		return nil
-	}
-	select {
-	case buf := <-blobAppendSealedPool:
-		if cap(buf) >= n {
-			return buf[:n]
-		}
-	default:
-	}
-	return make([]byte, n)
-}
-
-func releaseBlobAppendSealedBuffer(buf []byte) {
-	if cap(buf) == 0 || cap(buf) > 1<<20 {
-		return
-	}
-	clear(buf[:cap(buf)])
-	select {
-	case blobAppendSealedPool <- buf[:0]:
-	default:
-	}
-}
-
 func takeBlobReadKeyBuffer(n int) []byte {
 	if n == 0 {
 		return nil
@@ -717,11 +604,11 @@ func crc32UpdateIEEEByte(crc uint32, b byte) uint32 {
 }
 
 func (bs *BlobStore) rejectEncryptedFlagDowngrade(blobID uint64, offset uint64, key string, flags byte, payload []byte) error {
-	if bs.encryptor == nil || flags&flagEncrypted != 0 || !encrypt.IsEncryptedValue(payload) {
+	if bs.segEnc == nil || flags&flagEncrypted != 0 || !encrypt.IsEncryptedValue(payload) {
 		return nil
 	}
 	for _, candidate := range encryptedFlagCandidates(flags) {
-		if _, err := bs.encryptor.OpenValueAAD(bs.entryAAD(blobID, offset, key, candidate), payload); err == nil {
+		if _, err := bs.segEnc.Open(encrypt.DomainShard, blobEntryAADFields(blobID, offset, key, candidate), 0, payload); err == nil {
 			return fmt.Errorf("encrypted blob entry flags mismatch")
 		}
 	}
@@ -738,14 +625,14 @@ func encryptedFlagCandidates(flags byte) []byte {
 }
 
 func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, payload []byte) ([]byte, error) {
-	if bs.encryptor == nil {
+	if bs.segEnc == nil {
 		if encrypt.IsLegacyEncryptedValue(payload) {
 			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 		}
 		return payload, nil
 	}
 	if flags&flagEncrypted != 0 {
-		plain, err := bs.encryptor.OpenValueAAD(bs.entryAAD(blobID, offset, key, flags), payload)
+		plain, err := bs.segEnc.Open(encrypt.DomainShard, blobEntryAADFields(blobID, offset, key, flags), 0, payload)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt blob entry: %w", err)
 		}

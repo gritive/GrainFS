@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -154,13 +155,16 @@ func extractWarehouse(scope string) (string, error) {
 }
 
 func clientIP(r *http.Request) string {
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		return host
 	}
-	if i := strings.LastIndex(r.RemoteAddr, ":"); i > 0 {
-		return r.RemoteAddr[:i]
+	if strings.HasPrefix(remote, "[") {
+		if end := strings.IndexByte(remote, ']'); end > 0 {
+			return remote[1:end]
+		}
 	}
-	return r.RemoteAddr
+	return remote
 }
 
 func writeOAuthError(w http.ResponseWriter, code int, errKind, desc string) {

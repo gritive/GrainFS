@@ -60,7 +60,7 @@ func (noopWAL) Flush() error { return nil }
 func mockWAL() DataWALAppender { return noopWAL{} }
 
 func realWAL(b *testing.B) DataWALAppender {
-	w, err := datawal.Open(filepath.Join(b.TempDir(), "datawal"), nil)
+	w, err := datawal.Open(filepath.Join(b.TempDir(), "datawal"), nil, "datawal")
 	if err != nil {
 		b.Fatal(err)
 	}

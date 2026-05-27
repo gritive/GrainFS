@@ -107,6 +107,22 @@ func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 	}
 }
 
+// WithShardDEKKeeper wires the generation-aware DEK keeper as the chunked
+// EC-shard data-at-rest seam (slice C activation), overriding the static
+// EncryptorAdapter that WithEncryptor installs. clusterID MUST be 16 bytes and
+// MUST equal the value the put pipeline binds (divergence fails every GET).
+// nil keeper or non-16-byte clusterID → no-op (leaves the EncryptorAdapter;
+// also avoids the BuildAAD panic on a bad clusterID). Apply AFTER WithEncryptor.
+func WithShardDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) ShardServiceOption {
+	return func(s *ShardService) {
+		if keeper == nil || len(clusterID) != 16 {
+			return
+		}
+		copy(s.clusterID[:], clusterID)
+		s.segEnc = storage.NewDEKKeeperAdapter(keeper, s.clusterID[:])
+	}
+}
+
 // WithDirectIO enables direct I/O (page-cache bypass) on the local shard
 // write path. Beneficial for the typical EC shard size range (1-4 MB),
 // neutral for larger shards. Off by default — opt in after measuring on the
@@ -1237,7 +1253,12 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	}
 	s.replayingDataWAL.Store(true)
 	defer s.replayingDataWAL.Store(false)
-	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, s.encryptor, shardDataWALMaterializer{s: s}); err != nil {
+	var sealer datawal.RecordSealer
+	if s.encryptor != nil {
+		var zero [16]byte
+		sealer = storage.NewEncryptorAdapter(s.encryptor, zero[:])
+	}
+	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, "datawal", shardDataWALMaterializer{s: s}); err != nil {
 		return err
 	}
 	// The materializer may have constructed a nil-WAL pack store while

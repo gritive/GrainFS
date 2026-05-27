@@ -33,7 +33,7 @@ var _ = Describe("Backend put pipeline integration", func() {
 	It("round-trips objects through the actor pipeline", func() {
 		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0xAB}, 32))
 		Expect(err).NotTo(HaveOccurred())
-		dwal, err := datawal.Open(filepath.Join(b.Root(), "datawal"), enc)
+		dwal, err := datawal.Open(filepath.Join(b.Root(), "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { _ = dwal.Close() })
 		b.SetShardService(cluster.NewShardService(b.Root(), nil, cluster.WithEncryptor(enc), cluster.WithDataWAL(dwal)), []string{b.SelfAddr()})

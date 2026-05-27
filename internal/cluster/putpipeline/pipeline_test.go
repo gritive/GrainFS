@@ -12,8 +12,45 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPipeline_DEKKeeperAdapter_WriteReadParity(t *testing.T) {
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x55}, encrypt.KEKSize), bytes.Repeat([]byte{0x66}, 16))
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	cid := bytes.Repeat([]byte{0x77}, 16)
+	writeEnc := storage.NewDEKKeeperAdapter(keeper, cid)
+	readEnc := storage.NewDEKKeeperAdapter(keeper, cid)
+	fields := cluster.ShardAADFields("bkt", "key", 2)
+	var buf bytes.Buffer
+	if err := eccodec.EncodeEncryptedShard(&buf, bytes.NewReader(bytes.Repeat([]byte("p"), 4096)), writeEnc, fields, eccodec.DefaultEncryptedChunkSize); err != nil {
+		t.Fatalf("encode (write adapter): %v", err)
+	}
+	var out bytes.Buffer
+	if err := eccodec.DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), readEnc, fields); err != nil {
+		t.Fatalf("decode (read adapter) — clusterID coupling broke?: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), bytes.Repeat([]byte("p"), 4096)) {
+		t.Fatal("parity mismatch")
+	}
+	badRead := storage.NewDEKKeeperAdapter(keeper, bytes.Repeat([]byte{0x00}, 16))
+	if err := eccodec.DecodeEncryptedShard(&bytes.Buffer{}, bytes.NewReader(buf.Bytes()), badRead, fields); err == nil {
+		t.Fatal("expected divergent clusterID to fail AEAD")
+	}
+}
+
+func TestPipelineNew_BuildsDEKKeeperAdapterWhenKeeperSet(t *testing.T) {
+	keeper, _ := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x55}, encrypt.KEKSize), bytes.Repeat([]byte{0x66}, 16))
+	p := New(Config{DataDirs: []string{t.TempDir()}, DEKKeeper: keeper, ClusterID: bytes.Repeat([]byte{0x77}, 16), ECConfig: cluster.ECConfig{DataShards: 1, ParityShards: 0}})
+	if _, ok := p.cpu.enc.(*storage.DEKKeeperAdapter); !ok {
+		t.Fatalf("expected *storage.DEKKeeperAdapter, got %T", p.cpu.enc)
+	}
+}
 
 func TestPipeline_Put_5MiB_RoundTrip(t *testing.T) {
 	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()}

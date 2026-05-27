@@ -209,6 +209,70 @@ Work these in order. Do not run them in parallel.
 
 ## Deferred Until Triggered
 
+- [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
+  Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
+  generation in segment metadata was cut because the only cheap source
+  (`keeper.Active()` at segment-write time) is not guaranteed to equal the actual
+  per-shard seal gen (gen-pinning is per-shard-stream; rotation-mid-write / remote-node
+  differences), so a recorded value could be silently wrong — a footgun for a prune
+  consumer that trusts it to drop DEK generations (wrong-low → prune a still-referenced
+  DEK → unreadable data). Authoritative per-shard gen already lives in the GFSENC3 header.
+  When reopened: thread the REAL seal gen out of the shard write path through
+  `storage.SegmentRef` + `storagepb.SegmentRef` + `clusterpb.SegmentRef` +
+  `clusterpb.SegmentMetaEntry` + PutObjectMeta/CompleteMultipart codecs +
+  `segmentMetaEntriesToRefs`, AND build the prune consumer that reads it (cross-checking
+  the GFSENC3 header gen). Bundle both so the recorded value is correct before anything trusts it.
+- [ ] **KEK-envelope: write-path `ErrDEKGenUnknown` → retriable 503**. On the EC-shard
+  PUT path, `cpupool.go` → `commit.go` collapses a per-shard `encrypt.ErrDEKGenUnknown`
+  (gen not yet local) into a generic "K shards unreachable" error → likely a 500 on S3
+  PUT. `WaitDEKReady` (run.go:227) gates serving so a normal write never hits an empty
+  keeper, making this unreachable on a serving node today. Reopen as a hardening pass:
+  detect `errors.Is(err, encrypt.ErrDEKGenUnknown)` in the commit coordinator and map it
+  to a retriable 503 (not 500). The READ side already classifies it as transient (slice C).
+- [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
+  D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
+  on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
+  specs were skipped because the e2e harness has no dynamic `AddNode` (4th node post-
+  bootstrap) and no snapshot-restore-boot helper (it has `KillNode`/`RestartNode` only).
+  Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
+  `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK
+  rotation lifecycle" Describe.
+- [ ] **KEK-envelope: DataEncryptor `SealTo`/`OpenTo` buffer-reusing seam methods**.
+  Deferred from D-seg-pack (v0.0.369.0). The seam's `Seal`/`Open` return a freshly
+  allocated buffer per call (the cipher owns its buffer), so migrating packblob's
+  encrypted hot path off its pooled `blobAppendAADPool`/`blobAppendSealedPool` raised the
+  per-small-object-PUT allocation count (Append encrypted bound 5→15, Read 8→16 in
+  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local,
+  D-seg-ec, and now datawal (D-wal-data v0.0.370.0 dropped the per-open pooled buffer in
+  `scanRecords`). Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
+  / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
+  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec/datawal call sites.
+  Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
+- [ ] **KEK-envelope D-wal: activate generation-aware datawal encryption**. Deferred from
+  D-wal-data (v0.0.370.0). That slice migrated `internal/storage/datawal` to the `RecordSealer`
+  seam but left it on `EncryptorAdapter` (gen=0) with a dedicated zero-sentinel clusterID.
+  To flip to `DEKKeeperAdapter` + the real 16-byte clusterID (mirroring D-seg-ec-activate):
+  inject the keeper-backed adapter into the WAL's **writer AND reader together** (a clusterID
+  divergence breaks all replay via AEAD mismatch); set the header `dek_gen` to the keeper's
+  active generation **at file creation** via a probe-seal — `Seal(DomainWAL, fields, nil)` at
+  segment init to capture the active gen, write it to the header, discard the probe ciphertext
+  (cheaper than widening the seam with `ActiveGen()`). The per-file gen-pin machinery already
+  enforces consistency once the header gen is correct. Same activation applies to D-wal-legacy.
+- [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. D-wal-data binds AAD with a
+  single `"datawal"` namespace constant across all call sites; D-wal-legacy will use one
+  constant too. A frame from one physical WAL dir could AEAD-verify in another with the same
+  namespace+seq. To close cross-WAL frame-swap, give the cluster-shard WAL and the node WAL
+  distinct namespaces (e.g. `"datawal/shard"` vs `"datawal/node"`), which requires auditing
+  which call site (`boot_phases_storage_runtime`, `local.go`, `shard_service.go`) owns which
+  physical dir so the writer and reader of each dir agree. Within-WAL positional binding
+  (namespace+seq+monotonicity) already holds; this only hardens the cross-WAL case.
+- [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
+  (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
+  source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks
+  to rotate if compacting the active blob (~522), then `os.Remove`s the old file (~542). A
+  concurrent `Append` can land in the blob after the read pass but before rotation/removal,
+  then `Compact` unlinks it. Reopen: forbid compacting the active blob, or lock+rotate
+  before scanning. Add a concurrent Append-during-Compact regression test.
 - [ ] **S3 Range GET residual p95/p99**: reopen when product/SLO requires p95
   below 25 ms and p99 below 35 ms, or when FUSE/s3fs/goofys random reads
   reproduce EC read amplification.

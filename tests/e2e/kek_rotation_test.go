@@ -63,6 +63,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -605,6 +606,118 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 			}, 15*time.Second, 200*time.Millisecond).Should(gomega.Equal(body),
 				"follower node %d (%s) must decrypt the leader-sealed object",
 				followerIdx, c.nodeID(followerIdx))
+		})
+
+		// Object-data survives the KEK lifecycle on the DEKKeeper data plane: a
+		// multi-MB object (large enough for multi-chunk EC shards) PUT before a
+		// KEK rotation must GET byte-identical after the rotation. This guards
+		// the encryption-activation slice that flipped the cluster EC-shard +
+		// object data plane to the generation-aware DEKKeeper — the bulk-data
+		// DEK is independent of the rotating KEK, so the object must remain
+		// readable across the rotation.
+		ginkgo.It("serves an object written before a KEK rotation after the rotation", func() {
+			t := ginkgo.GinkgoTB()
+			c := startE2ECluster(t, e2eClusterOptions{
+				Nodes:      3,
+				Mode:       ClusterModeDynamicJoin,
+				DisableNFS: true,
+				DisableNBD: true,
+				LogPrefix:  "kek-objsurvive-cluster",
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			bucket := "kek-object-survives-rotation"
+			key := "pre-rotation-object.bin"
+			body := make([]byte, 5<<20) // 5 MiB → multi-chunk EC shards
+			_, err := rand.Read(body)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			leaderIdx, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			leaderDir := c.dataDirs[leaderIdx]
+
+			// PUT (and seal) the object BEFORE the rotation.
+			gomega.Expect(tryPutObject(ctx, c.S3Client(leaderIdx), bucket, key, body)).To(gomega.Succeed())
+
+			before := kekStatusViaSocket(t, leaderDir)
+			rotateWithGateRetry(leaderDir)
+
+			// Wait until the rotation is applied on the leader.
+			want := before.ActiveVersion + 1
+			gomega.Eventually(func() uint32 {
+				return kekStatusViaSocket(t, leaderDir).ActiveVersion
+			}, 10*time.Second, 100*time.Millisecond).Should(gomega.Equal(want),
+				"leader node %d (%s) should reach active_version=%d", leaderIdx, c.nodeID(leaderIdx), want)
+
+			// GET via the leader — the pre-rotation object must still unseal.
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, c.S3Client(leaderIdx), bucket, key)
+			}, 15*time.Second, 200*time.Millisecond).Should(gomega.Equal(body),
+				"leader must still decrypt the object sealed before the KEK rotation")
+		})
+
+		// Follower-read after rotation on the DEKKeeper data plane: a multi-MB
+		// object PUT via the leader must GET byte-identical via a FOLLOWER after a
+		// KEK rotation. eccodec treats encrypt.ErrDEKGenUnknown as transient (not
+		// corruption), so the follower must serve the shards WITHOUT quarantining
+		// them — a successful round-trip is the load-bearing assertion.
+		ginkgo.It("serves an object on a follower after rotation without quarantining it", func() {
+			t := ginkgo.GinkgoTB()
+			c := startE2ECluster(t, e2eClusterOptions{
+				Nodes:      3,
+				Mode:       ClusterModeDynamicJoin,
+				DisableNFS: true,
+				DisableNBD: true,
+				LogPrefix:  "kek-follower-rotate-cluster",
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			bucket := "kek-follower-after-rotation"
+			key := "leader-sealed-object.bin"
+			body := make([]byte, 5<<20) // 5 MiB → multi-chunk EC shards
+			_, err := rand.Read(body)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			leaderIdx, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			leaderDir := c.dataDirs[leaderIdx]
+
+			// Pick any follower (a node that is not the writable leader).
+			followerIdx := -1
+			for i := range c.dataDirs {
+				if i != leaderIdx {
+					followerIdx = i
+					break
+				}
+			}
+			gomega.Expect(followerIdx).NotTo(gomega.Equal(-1), "expected at least one follower node")
+
+			// PUT (and seal) via the leader BEFORE the rotation.
+			gomega.Expect(tryPutObject(ctx, c.S3Client(leaderIdx), bucket, key, body)).To(gomega.Succeed())
+
+			before := kekStatusViaSocket(t, leaderDir)
+			rotateWithGateRetry(leaderDir)
+
+			// Wait until the rotation is applied on the FOLLOWER (not just the
+			// leader) before issuing the follower GET — otherwise we race raft
+			// replication and the read does not prove post-rotation behaviour.
+			want := before.ActiveVersion + 1
+			gomega.Eventually(func() uint32 {
+				return kekStatusViaSocket(t, c.dataDirs[followerIdx]).ActiveVersion
+			}, 10*time.Second, 100*time.Millisecond).Should(gomega.Equal(want),
+				"follower node %d (%s) should reach active_version=%d", followerIdx, c.nodeID(followerIdx), want)
+
+			// GET via the follower — must unseal to byte-identical plaintext.
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, c.S3Client(followerIdx), bucket, key)
+			}, 15*time.Second, 200*time.Millisecond).Should(gomega.Equal(body),
+				"follower node %d (%s) must decrypt the leader-sealed object after rotation",
+				followerIdx, c.nodeID(followerIdx))
+			// TODO: also assert the placement-monitor quarantine counter stays
+			// zero once a readily-usable e2e metrics/quarantine helper exists; the
+			// successful round-trip above is currently the load-bearing assertion.
 		})
 	})
 })
