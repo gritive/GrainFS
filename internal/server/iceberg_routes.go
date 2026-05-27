@@ -26,6 +26,7 @@ func (s *Server) registerIcebergAPI(h *server.Hertz) {
 			resolver,
 			s.jwtKeys,
 			authorizer,
+			s.authoritativeClientIP,
 		)
 	}
 

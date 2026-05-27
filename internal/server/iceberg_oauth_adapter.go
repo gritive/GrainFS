@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -17,11 +18,12 @@ import (
 // The oauth.Handler parses form bodies via r.ParseForm(); we reconstruct
 // a stdlib http.Request with the raw POST body so ParseForm works correctly.
 type icebergOAuthHandler struct {
-	inner *oauth.Handler
+	inner    *oauth.Handler
+	sourceIP func(*app.RequestContext) string
 }
 
-func newIcebergOAuthHandler(sa oauth.SAResolver, keys *iamjwt.KeySet, authz oauth.Authorizer) *icebergOAuthHandler {
-	return &icebergOAuthHandler{inner: oauth.NewHandler(sa, keys, authz)}
+func newIcebergOAuthHandler(sa oauth.SAResolver, keys *iamjwt.KeySet, authz oauth.Authorizer, sourceIP func(*app.RequestContext) string) *icebergOAuthHandler {
+	return &icebergOAuthHandler{inner: oauth.NewHandler(sa, keys, authz), sourceIP: sourceIP}
 }
 
 type auditInternalOAuthResolver struct {
@@ -69,6 +71,9 @@ func (h *icebergOAuthHandler) handle(ctx context.Context, c *app.RequestContext)
 	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
+	}
+	if h.sourceIP != nil {
+		r.RemoteAddr = strings.TrimSpace(h.sourceIP(c))
 	}
 	// Copy headers so ParseForm and BasicAuth work.
 	c.Request.Header.VisitAll(func(k, v []byte) {
