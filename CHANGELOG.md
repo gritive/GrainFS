@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.377.0] - 2026-05-28
+
+### Added
+
+- Added a unified protocol credential foundation so operators can create, list,
+  inspect, rotate, and revoke protocol-scoped credentials for service accounts
+  across S3, Iceberg, NFS, 9P, and NBD without changing current data-plane
+  authentication behavior.
+- Added `grainfs credential` commands for create/list/get/rotate/revoke, including
+  one-time secret output and protocol-specific connection hints such as NBD export
+  names.
+- Added trusted admin UDS API endpoints under `/v1/credentials` and runtime wiring
+  for the node-local credential service.
+- Added tests for the credential domain, admin handlers, CLI client behavior,
+  runtime wiring, and IAM namespace parsing.
+
+### Changed
+
+- Documented the protocol credential migration path and clarified that this
+  release is control-plane groundwork; existing protocol clients continue using
+  their current authentication flows until enforcement lands in follow-up work.
+
+### Fixed
+
+- Kept MountSA policy attachment strict by rejecting credential-management and
+  volume-attach actions while still allowing those action names in normal IAM
+  policy parsing.
+- Removed stale lint failures left by the merged base branch so the build gate
+  passes on the combined branch.
+
+### Removed
+
+- Removed an obsolete repository memory note that had been moved out of this tree.
+
 ## [0.0.376.0] - 2026-05-28
 
 ### Changed
