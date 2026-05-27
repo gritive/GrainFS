@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.372.0] - 2026-05-28
+
+### Changed
+
+- Legacy PITR write-ahead-log records now seal through the DataEncryptor seam with position-bound AEAD (DomainWAL + WAL namespace + record sequence) and a `dek_gen` file header (WAL1 format v4), groundwork for KEK-envelope key rotation of data at rest. Behavior is unchanged under the static encryptor; the on-disk encrypted-WAL format is a hard break (old v3 encrypted segment files are not read). Plaintext WALs are unaffected.
+
 ## [0.0.371.0] - 2026-05-28
 
 ### Fixed
