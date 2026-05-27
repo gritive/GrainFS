@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -138,4 +139,32 @@ func TestIcebergConfigHandler_HTTPDoesNotPublishS3Secrets(t *testing.T) {
 	require.NotContains(t, got.Overrides, "s3.secret-access-key")
 	require.NotContains(t, got.Overrides, "s3.path-style-access")
 	require.True(t, strings.HasPrefix(got.Overrides["s3.endpoint"], "http://"))
+}
+
+func TestIcebergConfigHandler_HTTPSPublishesCallerS3Secrets(t *testing.T) {
+	hh := newIAMTestHelper(t)
+	hh.applySACreate(t, "sa-bench")
+	hh.applyKeyCreate(t, "AK-bench", "sa-bench", "SK-bench")
+	s := &Server{
+		iamStore:       hh.store,
+		icebergCatalog: fakeIcebergCatalog{warehouse: "s3://grainfs-tables/warehouse"},
+	}
+	ctx := WithAccessKey(context.Background(), "AK-bench")
+	c := app.NewContext(0)
+	c.Request.SetRequestURI("/iceberg/v1/config?warehouse=warehouse")
+	c.Request.SetHost("grainfs.example")
+	c.Request.URI().SetScheme("https")
+
+	s.icebergConfig(ctx, c)
+
+	require.Equal(t, http.StatusOK, c.Response.StatusCode())
+	var got struct {
+		Defaults  map[string]string `json:"defaults"`
+		Overrides map[string]string `json:"overrides"`
+	}
+	require.NoError(t, json.Unmarshal(c.Response.Body(), &got))
+	require.Equal(t, "AK-bench", got.Overrides["s3.access-key-id"])
+	require.Equal(t, "SK-bench", got.Overrides["s3.secret-access-key"])
+	require.Equal(t, "true", got.Overrides["s3.path-style-access"])
+	require.Equal(t, "https://grainfs.example", got.Overrides["s3.endpoint"])
 }
