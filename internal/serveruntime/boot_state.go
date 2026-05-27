@@ -214,6 +214,12 @@ type bootState struct {
 	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
+	// joinListener is the Zero-CA QUIC join listener (leader side, W9) serving
+	// the two-phase invite handler on cfg.JoinListenAddr with a persisted stable
+	// cert. Nil in single-node mode. Closed via AddCleanup on shutdown; its
+	// Addr()/SPKI() are exposed to W10 (invite-bundle advertisement) via
+	// JoinListenerAddr()/JoinListenerSPKI().
+	joinListener *transport.JoinListener
 	// coalesceCfg is the cluster-wide coalesce/cap configuration derived from
 	// CLI flags. Stored here so that GroupBackends instantiated after
 	// bootWALAndForwarders (including dynamically created shard groups) can

@@ -220,16 +220,16 @@ func certSPKI(cert tls.Certificate) ([32]byte, error) {
 // are the production join-wire helpers (lifted from the Zero-CA de-risk spike);
 // W7 builds the invite request/reply messages on top of them.
 
-// joinPutField appends a length-prefixed field to buf.
-func joinPutField(buf []byte, f []byte) []byte {
+// JoinPutField appends a length-prefixed field to buf.
+func JoinPutField(buf []byte, f []byte) []byte {
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(f)))
 	buf = append(buf, hdr[:]...)
 	return append(buf, f...)
 }
 
-// joinReadFields reads exactly n length-prefixed fields from r.
-func joinReadFields(r io.Reader, n int) ([][]byte, error) {
+// JoinReadFields reads exactly n length-prefixed fields from r.
+func JoinReadFields(r io.Reader, n int) ([][]byte, error) {
 	out := make([][]byte, n)
 	for i := 0; i < n; i++ {
 		var hdr [4]byte

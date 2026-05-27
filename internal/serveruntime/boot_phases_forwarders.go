@@ -154,6 +154,17 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
 	})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
+	// Zero-CA QUIC join listener (W9, leader side): a dedicated QUIC listener on
+	// its own ALPN serving the two-phase invite handler. A brand-new joiner whose
+	// self-signed SPKI is in nobody's accept-set cannot reach the production
+	// cluster listener, so the invite flow rides this isolated transport. The
+	// listener cert is persisted+stable (outstanding invite bundles pin its SPKI
+	// across leader restarts). Only clustered nodes start it; single-node skips.
+	if state.clusterMode {
+		if err := startJoinListener(state, metaJoinReceiver); err != nil {
+			return fmt.Errorf("start join listener: %w", err)
+		}
+	}
 	metaChallengeReceiver := cluster.NewMetaChallengeReceiver(state.handshakeVerifier)
 	state.streamRouter.Handle(transport.StreamMetaJoinChallenge, metaChallengeReceiver.Handle)
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {

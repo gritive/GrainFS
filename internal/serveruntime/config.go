@@ -32,6 +32,11 @@ type Config struct {
 	RaftAddr         string
 	RaftAddrExplicit bool
 	ClusterKey       string
+	// JoinListenAddr is the bind address for the Zero-CA QUIC join listener
+	// (two-phase invite handler, leader side). Empty derives a kernel-picked
+	// port on the raft-addr host; the resolved address is advertised in the
+	// invite bundle (W10).
+	JoinListenAddr string
 
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts  []server.Option

@@ -55,6 +55,7 @@ Flags:
       --heal-receipt-retention duration                     HealReceipt retention window (older entries are GC'd) (default 720h0m0s)
       --heal-receipt-window int                             rolling window size — how many recent receipt IDs to gossip per tick (default 50)
   -h, --help                                                help for serve
+      --join-listen-addr string                             Zero-CA QUIC join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host
       --lifecycle-interval duration                         lifecycle rule evaluation interval (0 to disable) (default 1h0m0s)
       --measure-read-amp                                    enable read-amplification simulator (informs Unified Buffer Cache decision)
       --meta-dir string                                     dedicated fast metadata storage directory (defaults to first path in --data)

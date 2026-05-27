@@ -27,6 +27,7 @@ type ServeOptions struct {
 	// --- Cluster identity ---
 	NodeID            string // --node-id
 	RaftAddr          string // --raft-addr
+	JoinListenAddr    string // --join-listen-addr
 	ClusterKey        string // --cluster-key
 	EncryptionKeyFile string // --encryption-key-file
 

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"reflect"
@@ -297,4 +298,37 @@ func TestJoinStatus_DriftGuard(t *testing.T) {
 			t.Errorf("drift: %q -> %v -> %q", s, fb, back)
 		}
 	}
+}
+
+// rwcPipe is an in-memory io.ReadWriteCloser for HandleJoinStream tests: reads
+// drain the request frame, writes capture the reply frame.
+type rwcPipe struct {
+	in     *bytes.Reader
+	out    bytes.Buffer
+	closed bool
+}
+
+func (p *rwcPipe) Read(b []byte) (int, error)  { return p.in.Read(b) }
+func (p *rwcPipe) Write(b []byte) (int, error) { return p.out.Write(b) }
+func (p *rwcPipe) Close() error                { p.closed = true; return nil }
+
+func TestHandleJoinStream_NotLeaderReturnsRedirect(t *testing.T) {
+	fsm := NewMetaFSM()
+	coord := &fakeJoinCoordinator{leader: false, leaderID: "leader-1", fsm: fsm}
+	r := NewMetaJoinReceiver(coord)
+
+	reqBytes, err := encodeJoinRequest(JoinRequest{NodeID: "n2", Address: "10.0.0.2:7001"})
+	require.NoError(t, err)
+	pipe := &rwcPipe{in: bytes.NewReader(transport.JoinPutField(nil, reqBytes))}
+
+	r.HandleJoinStream(context.Background(), [32]byte{1}, pipe)
+	require.True(t, pipe.closed, "stream must be closed by the handler")
+
+	fields, err := transport.JoinReadFields(bytes.NewReader(pipe.out.Bytes()), 1)
+	require.NoError(t, err)
+	reply, err := decodeJoinReply(fields[0])
+	require.NoError(t, err)
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusNotLeader, reply.Status)
+	require.Equal(t, "leader-1", reply.LeaderID)
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -227,27 +228,11 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "node_id and address are required"})
 	}
 	if !r.meta.IsLeader() {
-		leaderID := r.meta.LeaderID()
-		leaderAddr := ""
-		for _, n := range r.meta.Nodes() {
-			if n.ID == leaderID || n.Address == leaderID {
-				leaderAddr = n.Address
-				break
-			}
-		}
-		if leaderAddr == "" {
-			leaderAddr = leaderID
-		}
 		// TODO(W7b/W9): return leader_join_addr+leader_join_spki from member state
 		// so an invite joiner can redirect its join-listener dial to the leader.
 		// The full join-listener redirect (MetaNodeEntry extension) is a separate
 		// task and is intentionally NOT implemented here.
-		return joinMessage(JoinReply{
-			Accepted:   false,
-			Status:     JoinStatusNotLeader,
-			LeaderID:   leaderID,
-			LeaderAddr: leaderAddr,
-		})
+		return joinMessage(r.notLeaderReply())
 	}
 	// Invite admission path (zero-CA Phase 2, §4.2). A brand-new node with no
 	// pre-shared KEK presents an invite signature + its per-node ECDSA cert.
@@ -341,6 +326,70 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 		// Phase-1 (and any legacy invite request that omits join_phase): gate +
 		// seal, no membership.
 		return r.handleJoinPhase1(ctx, capturedSPKI, spki, req)
+	}
+}
+
+// HandleJoinStream is the JoinListener (W9) glue: it reads the framed JoinRequest
+// off the QUIC stream, runs HandleJoin with the TLS-captured peer SPKI, and
+// writes the framed JoinReply back. The wire is length-prefixed binary (NO
+// JSON) using transport.JoinReadFields/JoinPutField: exactly ONE field in each
+// direction, carrying the magic-prefixed FlatBuffers JoinRequest/JoinReply blob.
+// stream is typically a *quic.Stream (io.ReadWriteCloser); the caller owns
+// closing the underlying connection.
+func (r *MetaJoinReceiver) HandleJoinStream(ctx context.Context, peerSPKI [32]byte, stream io.ReadWriteCloser) {
+	defer func() { _ = stream.Close() }()
+	fields, err := transport.JoinReadFields(stream, 1)
+	if err != nil {
+		log.Warn().Err(err).Msg("meta_join: read join request frame failed")
+		return
+	}
+	req, err := decodeJoinRequest(fields[0])
+	if err != nil {
+		r.writeJoinReply(stream, JoinReply{Accepted: false, Status: JoinStatusError, Message: err.Error()})
+		return
+	}
+	// Leadership gate: HandleJoin assumes IsLeader() is true. Every node runs a
+	// join listener, so a follower that receives a dial must return the standard
+	// not-leader reply (with leader hint) rather than running the invite path
+	// and failing noisily at the raft layer. (The leader_join_addr/spki redirect
+	// extension is W7b — intentionally out of scope here.)
+	if !r.meta.IsLeader() {
+		r.writeJoinReply(stream, r.notLeaderReply())
+		return
+	}
+	r.writeJoinReply(stream, r.HandleJoin(ctx, peerSPKI, req))
+}
+
+// notLeaderReply builds the JoinStatusNotLeader reply with the best-effort
+// leader id + address hint, mirroring the in-process Handle path.
+func (r *MetaJoinReceiver) notLeaderReply() JoinReply {
+	leaderID := r.meta.LeaderID()
+	leaderAddr := ""
+	for _, n := range r.meta.Nodes() {
+		if n.ID == leaderID || n.Address == leaderID {
+			leaderAddr = n.Address
+			break
+		}
+	}
+	if leaderAddr == "" {
+		leaderAddr = leaderID
+	}
+	return JoinReply{
+		Accepted:   false,
+		Status:     JoinStatusNotLeader,
+		LeaderID:   leaderID,
+		LeaderAddr: leaderAddr,
+	}
+}
+
+func (r *MetaJoinReceiver) writeJoinReply(w io.Writer, reply JoinReply) {
+	replyBytes, err := encodeJoinReply(reply)
+	if err != nil {
+		log.Warn().Err(err).Msg("meta_join: encode join reply failed")
+		return
+	}
+	if _, err := w.Write(transport.JoinPutField(nil, replyBytes)); err != nil {
+		log.Warn().Err(err).Msg("meta_join: write join reply frame failed")
 	}
 }
 
