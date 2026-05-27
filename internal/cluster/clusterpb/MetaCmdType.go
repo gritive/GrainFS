@@ -87,6 +87,11 @@ const (
 	MetaCmdTypeRevokePeer                   MetaCmdType = 77
 	MetaCmdTypeInvitePending                MetaCmdType = 78
 	MetaCmdTypeRegisterMember               MetaCmdType = 79
+	MetaCmdTypeProtocolCredentialCreate     MetaCmdType = 80
+	MetaCmdTypeProtocolCredentialRotate     MetaCmdType = 81
+	MetaCmdTypeProtocolCredentialRevoke     MetaCmdType = 82
+	MetaCmdTypeProtocolCredentialMarkStale  MetaCmdType = 83
+	MetaCmdTypeProtocolCredentialLastUsed   MetaCmdType = 84
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -170,6 +175,11 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeRevokePeer:                   "RevokePeer",
 	MetaCmdTypeInvitePending:                "InvitePending",
 	MetaCmdTypeRegisterMember:               "RegisterMember",
+	MetaCmdTypeProtocolCredentialCreate:     "ProtocolCredentialCreate",
+	MetaCmdTypeProtocolCredentialRotate:     "ProtocolCredentialRotate",
+	MetaCmdTypeProtocolCredentialRevoke:     "ProtocolCredentialRevoke",
+	MetaCmdTypeProtocolCredentialMarkStale:  "ProtocolCredentialMarkStale",
+	MetaCmdTypeProtocolCredentialLastUsed:   "ProtocolCredentialLastUsed",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -253,6 +263,11 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"RevokePeer":                   MetaCmdTypeRevokePeer,
 	"InvitePending":                MetaCmdTypeInvitePending,
 	"RegisterMember":               MetaCmdTypeRegisterMember,
+	"ProtocolCredentialCreate":     MetaCmdTypeProtocolCredentialCreate,
+	"ProtocolCredentialRotate":     MetaCmdTypeProtocolCredentialRotate,
+	"ProtocolCredentialRevoke":     MetaCmdTypeProtocolCredentialRevoke,
+	"ProtocolCredentialMarkStale":  MetaCmdTypeProtocolCredentialMarkStale,
+	"ProtocolCredentialLastUsed":   MetaCmdTypeProtocolCredentialLastUsed,
 }
 
 func (v MetaCmdType) String() string {
