@@ -105,6 +105,43 @@ func (r *peerRegistry) promoteMember(nodeID string) error {
 	return nil
 }
 
+// lookupByNodeID returns the entry for a node-id (snapshot copy).
+func (r *peerRegistry) lookupByNodeID(nodeID string) (peerEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.byNodeID[nodeID]
+	return e, ok
+}
+
+// export returns a snapshot copy of every registered entry (member AND
+// pending-learner). Used by MetaFSM.Snapshot to serialize the registry into the
+// meta-state snapshot so the per-node accept-set survives log compaction.
+func (r *peerRegistry) export() []peerEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]peerEntry, 0, len(r.byNodeID))
+	for _, e := range r.byNodeID {
+		out = append(out, e)
+	}
+	return out
+}
+
+// importEntries rebuilds the registry from a snapshot's entries. It REPLACES
+// the byNodeID + bySPKI indexes wholesale (state restore — NOT a register*
+// flow, so the uniqueness/rebind guards are intentionally bypassed). The deny
+// set is left untouched (it is not part of the snapshot; see Task 5 report).
+// State and PresentsPerNode are preserved verbatim.
+func (r *peerRegistry) importEntries(entries []peerEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byNodeID = make(map[string]peerEntry, len(entries))
+	r.bySPKI = make(map[[32]byte]string, len(entries))
+	for _, e := range entries {
+		r.byNodeID[e.NodeID] = e
+		r.bySPKI[e.SPKI] = e.NodeID
+	}
+}
+
 // spkiOwner returns the node-id that owns an SPKI (Task 5 uses this).
 func (r *peerRegistry) spkiOwner(s [32]byte) (string, bool) {
 	r.mu.RLock()

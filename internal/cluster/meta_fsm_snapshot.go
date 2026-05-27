@@ -102,6 +102,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	copy(lastRotationRequestsCopy, f.lastRotationRequests)
 	kekStatusesCopy := make([]kekStatusRecord, len(f.kekStatuses))
 	copy(kekStatusesCopy, f.kekStatuses)
+	// zero-CA peer registry (Task 5): export under the same RLock window so the
+	// serialized accept-set is consistent with the rest of the snapshot.
+	peersCopy := f.peers.export()
 	// Task 4b: capture DEKKeeper wraps inside the same lock window as
 	// activeKEKVersion. LOCK ORDER: f.mu → keeper.mu (VersionsAndActive
 	// acquires keeper.mu). Releasing f.mu first and then calling
@@ -265,6 +268,28 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	kekStatusVec := b.EndVector(len(kekOffs))
 
+	// zero-CA peer registry (Task 5): build PeerEntry offsets + vector. Nested
+	// strings/vectors must be created before PeerEntryStart (A1).
+	peerOffs := make([]flatbuffers.UOffsetT, len(peersCopy))
+	for i := len(peersCopy) - 1; i >= 0; i-- {
+		p := peersCopy[i]
+		nodeIDOff := b.CreateString(p.NodeID)
+		spkiVec := b.CreateByteVector(p.SPKI[:])
+		addrOff := b.CreateString(p.Address)
+		clusterpb.PeerEntryStart(b)
+		clusterpb.PeerEntryAddNodeId(b, nodeIDOff)
+		clusterpb.PeerEntryAddSpki(b, spkiVec)
+		clusterpb.PeerEntryAddAddress(b, addrOff)
+		clusterpb.PeerEntryAddState(b, byte(p.State))
+		clusterpb.PeerEntryAddPresentsPerNode(b, p.PresentsPerNode)
+		peerOffs[i] = clusterpb.PeerEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartPeersVector(b, len(peerOffs))
+	for i := len(peerOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(peerOffs[i])
+	}
+	peersVec := b.EndVector(len(peerOffs))
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -281,6 +306,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergSchemaVersion(b, 2)
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)
 	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
+	clusterpb.MetaStateSnapshotAddPeers(b, peersVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -542,6 +568,26 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		})
 	}
 
+	// zero-CA peer registry (Task 5, slot 13): decode every PeerEntry. A missing
+	// vector (legacy pre-Task-5 snapshot) yields an empty slice — importEntries
+	// then clears the registry, matching a fresh node with no membership yet.
+	newPeers := make([]peerEntry, 0, snap.PeersLength())
+	var peerFB clusterpb.PeerEntry
+	for i := 0; i < snap.PeersLength(); i++ {
+		if !snap.Peers(&peerFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: peers[%d] decode failed", i)
+		}
+		var spki [32]byte
+		copy(spki[:], peerFB.SpkiBytes())
+		newPeers = append(newPeers, peerEntry{
+			NodeID:          string(peerFB.NodeId()),
+			SPKI:            spki,
+			Address:         string(peerFB.Address()),
+			State:           peerState(peerFB.State()),
+			PresentsPerNode: peerFB.PresentsPerNode(),
+		})
+	}
+
 	// --- DECODE PHASE ---
 	// Decode all trailers into local variables BEFORE touching any f.* field.
 	// If any decode fails, Restore returns an error with f.* completely untouched.
@@ -723,6 +769,15 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	}
 	// onRebalancePlan is intentionally NOT called here.
 	// Rebalancer handles resume on next tick by checking ActivePlan().
+
+	// zero-CA peer registry (Task 5): rebuild the registry indexes from the
+	// snapshot, then fire onPeersChanged so the transport composer rebuilds the
+	// accept-set union. Without this, the per-node SPKIs vanish after snapshot
+	// install and the composer silently drops them → partition. The registry has
+	// its own mutex, so importEntries runs outside f.mu. firePeersChanged
+	// snapshots the callback under RLock and invokes it outside (existing pattern).
+	f.peers.importEntries(newPeers)
+	f.firePeersChanged()
 
 	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
 	// RestoreFrom copies the state pointer from iamTempStore into f.iamStore in one

@@ -867,6 +867,16 @@ table KEKStatusEntry {
   retire_commit_index:uint64;
 }
 
+// zero-CA peer registry entry. state: 0=pendingLearner, 1=member.
+// spki is the 32-byte SubjectPublicKeyInfo digest pinning the peer identity.
+table PeerEntry {
+  node_id:string;
+  spki:[ubyte];                 // 32 bytes
+  address:string;
+  state:ubyte;
+  presents_per_node:bool;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
   shard_groups:[ShardGroupEntry];             // PR-C
@@ -881,6 +891,7 @@ table MetaStateSnapshot {
   iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
   last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
+  peers:[PeerEntry];                                        // zero-CA peer registry: slot 13 (Task 5, codex P1)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's
