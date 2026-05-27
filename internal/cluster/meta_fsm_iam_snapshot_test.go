@@ -83,6 +83,7 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 	}
 
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	f.SetIAM(store, applier)
 
 	snap, err := f.Snapshot()
@@ -94,6 +95,7 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 	store2 := iam.NewStore()
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)
 	if err := f2.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -117,6 +119,7 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 	enc := newIAMTestEncryptor(t)
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	f.SetIAM(iam.NewStore(), iam.NewApplier(iam.NewStore(), enc))
 
 	snap, err := f.Snapshot()
@@ -127,6 +130,7 @@ func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 	store2 := iam.NewStore()
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)
 	if err := f2.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -160,6 +164,7 @@ func TestMetaFSM_Restore_IAM_AtomicCommit(t *testing.T) {
 	}
 
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	f.SetIAM(store, applier)
 	snap, err := f.Snapshot()
 	if err != nil {
@@ -171,6 +176,7 @@ func TestMetaFSM_Restore_IAM_AtomicCommit(t *testing.T) {
 	store2 := iam.NewStore()
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)
 	if err := f2.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -195,11 +201,17 @@ func TestMetaFSM_Restore_IAM_AtomicCommit(t *testing.T) {
 func TestMetaFSM_Snapshot_LegacySnapshot_Restores_NoIAM(t *testing.T) {
 	enc := newIAMTestEncryptor(t)
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	f.SetIAM(iam.NewStore(), iam.NewApplier(iam.NewStore(), enc))
 
-	snap, err := f.Snapshot()
+	sealed, err := f.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
+	}
+	// Decrypt the Phase D-snap envelope to operate on the plaintext trailer.
+	snap, err := f.openSnapshotEnvelope(sealed)
+	if err != nil {
+		t.Fatalf("openSnapshotEnvelope: %v", err)
 	}
 	// Strip [u32 iam_len][u32 magic] trailer (and the 0-length IAM section,
 	// which is itself zero bytes for an empty store).
@@ -211,8 +223,14 @@ func TestMetaFSM_Snapshot_LegacySnapshot_Restores_NoIAM(t *testing.T) {
 	store2 := iam.NewStore()
 	applier2 := iam.NewApplier(store2, enc)
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)
-	if err := f2.Restore(raft.SnapshotMeta{}, legacy); err != nil {
+	// Re-seal the stripped plaintext so Restore can decrypt it.
+	sealedLegacy, err := f.sealSnapshotEnvelope(legacy)
+	if err != nil {
+		t.Fatalf("sealSnapshotEnvelope (legacy): %v", err)
+	}
+	if err := f2.Restore(raft.SnapshotMeta{}, sealedLegacy); err != nil {
 		t.Fatalf("Restore legacy: %v", err)
 	}
 	if !store2.IsEmpty() {

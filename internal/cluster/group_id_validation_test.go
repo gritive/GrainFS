@@ -81,6 +81,7 @@ func TestMetaRaft_ProposeShardGroup_RejectsReserved(t *testing.T) {
 // snapshot contains a reserved ID.
 func TestMetaFSM_Restore_DropsReservedShardGroups(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	// Direct injection — same-package test bypasses apply validation. This
 	// is exactly the situation a pre-v0.0.19 snapshot encodes.
 	f.shardGroups["__meta__"] = ShardGroupEntry{ID: "__meta__", PeerIDs: []string{"n0"}}
@@ -91,6 +92,7 @@ func TestMetaFSM_Restore_DropsReservedShardGroups(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	// Reserved IDs dropped.

@@ -233,6 +233,26 @@ Work these in order. Do not run them in parallel.
   keeper, making this unreachable on a serving node today. Reopen as a hardening pass:
   detect `errors.Is(err, encrypt.ErrDEKGenUnknown)` in the commit coordinator and map it
   to a retriable 503 (not 500). The READ side already classifies it as transient (slice C).
+- [ ] **InstallSnapshot Restore failure should fatal-halt, not log-and-advance**.
+  `meta_raft.go` apply-loop `LogEntrySnapshot` case logs a `Restore` error then
+  advances `lastApplied` to the entry index regardless. A joiner that receives an
+  InstallSnapshot it cannot open (now reachable via D-snap envelope-open failure:
+  unknown KEK version, wrong cluster, or corruption) continues with un-restored FSM
+  state but an advanced applied index → silent divergence. Pre-existing pattern;
+  D-snap adds a new crypto failure mode to it. Surfaced by /review adversarial pass
+  (2026-05-28). Fix: treat envelope-open / Restore failure on InstallSnapshot as a
+  fatal halt (mirror the existing `ErrFSMKEKFatal` path) rather than log-and-advance.
+- [ ] **KEK-envelope Phase D-snap Slice 2: encrypt object metadata snapshots**.
+  Slice 1 (Raft meta-FSM snapshot body) landed via `encrypt.SealSnapshotEnvelope`
+  (per-snapshot ephemeral DEK + KEK wrap, `internal/encrypt/snapshot_envelope.go`).
+  The object metadata snapshots in `internal/snapshot/` (PITR; `format.go` writes
+  zstd JSON in the clear) are still plaintext. Reopen: wire the KEK/KEKStore into
+  `snapshot.Manager` (currently `serveruntime/snapshot.go:36` passes only
+  `*encrypt.Encryptor` via `NewManagerWithEncryptor`), then seal the snapshot body
+  through the existing `SealSnapshotEnvelope` primitive in `writeSnapshot`/decrypt in
+  `readSnapshot`. Object snapshots are restored post-boot so the KEK is always
+  available; the AAD has no raft_index/term. Needed before D-cut's "all data under
+  DEK" boot-refuse can be consistent. See [[project-grains-at-rest-two-key-systems]].
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read

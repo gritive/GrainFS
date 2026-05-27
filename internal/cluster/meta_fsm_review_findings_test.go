@@ -27,7 +27,12 @@ func TestMetaFSM_Restore_RollbackOnJKEYCorruption(t *testing.T) {
 		t.Fatalf("seed namespace: %v", err)
 	}
 
-	snap, err := src.Snapshot()
+	sealed, err := src.Snapshot()
+	require.NoError(t, err)
+	// Phase D-snap: corrupt the plaintext body, then re-seal so Restore decrypts
+	// to the corrupted inner snapshot and fails at the JKEY decode (not the
+	// envelope layer).
+	snap, err := src.openSnapshotEnvelope(sealed)
 	require.NoError(t, err)
 
 	// Corrupt the JKEY payload bytes while keeping the trailer length/magic intact.
@@ -67,7 +72,10 @@ func TestMetaFSM_Restore_RollbackOnJKEYCorruption(t *testing.T) {
 	dst.icebergNamespaces = sentinel
 	dst.mu.Unlock()
 
-	err = dst.Restore(raft.SnapshotMeta{}, corrupted)
+	// Re-seal the corrupted plaintext so Restore decrypts to it.
+	sealedCorrupted, err := src.sealSnapshotEnvelope(corrupted)
+	require.NoError(t, err)
+	err = dst.Restore(raft.SnapshotMeta{}, sealedCorrupted)
 	require.Error(t, err, "Restore with corrupt JKEY must return an error")
 
 	// icebergNamespaces must still be the sentinel — not the src snapshot value.
@@ -89,18 +97,23 @@ func TestMetaFSM_Restore_JKEYWithoutDEKKeeper_Errors(t *testing.T) {
 	applyDEKRotate(t, src)
 	applyJWTRotate(t, src)
 
-	snap, err := src.Snapshot()
+	sealed, err := src.Snapshot()
 	require.NoError(t, err)
 
-	// Verify JKEY trailer is present.
-	require.GreaterOrEqual(t, len(snap), jkeySnapshotTrailerLen)
-	gotMagic := binary.LittleEndian.Uint32(snap[len(snap)-4:])
+	// Verify JKEY trailer is present in the decrypted plaintext.
+	plain, err := src.openSnapshotEnvelope(sealed)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(plain), jkeySnapshotTrailerLen)
+	gotMagic := binary.LittleEndian.Uint32(plain[len(plain)-4:])
 	require.Equal(t, uint32(jkeySnapshotTrailerMagic), gotMagic)
 
-	// Fresh FSM with NO DEK keeper wired.
+	// Fresh FSM with NO DEK keeper wired, but a KEK store so the envelope opens
+	// before Restore reaches the JKEY-without-keeper check. clusterID matches
+	// src (dekTestClusterID == wireTestKEK's byte(i+1)).
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 
-	err = dst.Restore(raft.SnapshotMeta{}, snap)
+	err = dst.Restore(raft.SnapshotMeta{}, sealed)
 	require.Error(t, err, "Restore with JKEY but no DEK keeper must error")
 	assert.Contains(t, err.Error(), "DEK keeper not wired")
 }
@@ -110,19 +123,26 @@ func TestMetaFSM_Restore_JKEYWithoutDEKKeeper_Errors(t *testing.T) {
 func TestMetaFSM_Restore_RejectsUnsupportedIcebergSchemaVersion(t *testing.T) {
 	// Build a valid snapshot from a fresh FSM.
 	src := NewMetaFSM()
-	snap, err := src.Snapshot()
+	wireTestKEK(t, src)
+	sealed, err := src.Snapshot()
 	require.NoError(t, err)
 
-	// The snapshot starts with a FlatBuffers root table.  We need to mutate
-	// the iceberg_schema_version field to an unsupported value (1).
+	// Phase D-snap: the FlatBuffers root lives in the encrypted body — decrypt,
+	// mutate iceberg_schema_version to an unsupported value (1), then re-seal so
+	// Restore reaches the inner schema-version check.
+	snap, err := src.openSnapshotEnvelope(sealed)
+	require.NoError(t, err)
 	// FlatBuffers mutable accessor MutateIcebergSchemaVersion operates on the
 	// root object in-place.
 	snapMut := clusterpb.GetRootAsMetaStateSnapshot(snap, 0)
 	ok := snapMut.MutateIcebergSchemaVersion(1)
 	require.True(t, ok, "MutateIcebergSchemaVersion must succeed (field is a scalar)")
+	resealed, err := src.sealSnapshotEnvelope(snap)
+	require.NoError(t, err)
 
 	dst := NewMetaFSM()
-	err = dst.Restore(raft.SnapshotMeta{}, snap)
+	wireTestKEK(t, dst)
+	err = dst.Restore(raft.SnapshotMeta{}, resealed)
 	require.Error(t, err, "Restore with iceberg_schema_version=1 must error")
 	assert.Contains(t, err.Error(), "unsupported iceberg_schema_version=1")
 }
