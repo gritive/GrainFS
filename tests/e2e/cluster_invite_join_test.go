@@ -220,16 +220,13 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 
 		// Full S3 round-trip THROUGH the invite-joined node. Both write and read
 		// are routed to the joiner's own S3 endpoint. PutObject through the joiner
-		// works (forwarded to the group leader). GetObject through the joiner still
-		// returns HTTP 500 "not the leader": the router-sync parity fix makes the
-		// joiner AWARE of bucket→group assignments, but the invite-join Phase-2 path
-		// does not yet extend DATA-GROUP membership for the new voter (the joiner is
-		// a meta-raft voter but not a member/leader of any data group, and no
-		// read-forward fallback fires on this path). Un-skip once invite-join Phase-2
-		// expands data-group membership (the addJoinedNodeToLegacyDataRaft /
-		// expandShardGroupsForJoinedNode equivalent that actually lands the joiner in
-		// the data group). NOT a DEK/F3/F4 issue — DEK readiness now passes.
-		ginkgo.PIt("serves an S3 PutObject/GetObject round-trip through the joined node (blocked: invite-join data-group membership)", func() {
+		// works (forwarded to the group leader), and GetObject now works the same
+		// way: the invite-joiner no longer installs the group-0 read-index fence
+		// (it is not the group-0 leader), so reads skip ReadIndex/ErrNotLeader and
+		// reach the ClusterCoordinator forward path that routes them to the real
+		// group leader — exactly the path PUTs already use. The joiner does not
+		// need its own data-group membership; it forwards reads to the group leader.
+		ginkgo.It("serves an S3 PutObject/GetObject round-trip through the joined node", func() {
 			t := ginkgo.GinkgoTB()
 			encKeyFile := makeSharedEncryptionKeyFile(t)
 
