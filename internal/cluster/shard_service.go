@@ -1253,7 +1253,12 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	}
 	s.replayingDataWAL.Store(true)
 	defer s.replayingDataWAL.Store(false)
-	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, s.encryptor, shardDataWALMaterializer{s: s}); err != nil {
+	var sealer datawal.RecordSealer
+	if s.encryptor != nil {
+		var zero [16]byte
+		sealer = storage.NewEncryptorAdapter(s.encryptor, zero[:])
+	}
+	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, "datawal", shardDataWALMaterializer{s: s}); err != nil {
 		return err
 	}
 	// The materializer may have constructed a nil-WAL pack store while

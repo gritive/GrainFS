@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
@@ -43,7 +44,7 @@ func BenchmarkShardServiceWriteLocalShardStream_DataWAL_5MiB(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			dir := b.TempDir()
-			dwal, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+			dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 			require.NoError(b, err)
 			b.Cleanup(func() { _ = dwal.Close() })
 

@@ -242,11 +242,39 @@ Work these in order. Do not run them in parallel.
   allocated buffer per call (the cipher owns its buffer), so migrating packblob's
   encrypted hot path off its pooled `blobAppendAADPool`/`blobAppendSealedPool` raised the
   per-small-object-PUT allocation count (Append encrypted bound 5→15, Read 8→16 in
-  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local
-  and D-seg-ec. Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
+  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local,
+  D-seg-ec, and now datawal (D-wal-data v0.0.370.0 dropped the per-open pooled buffer in
+  `scanRecords`). Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
   / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
-  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec call sites.
+  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec/datawal call sites.
   Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
+- [ ] **KEK-envelope D-wal: activate generation-aware datawal encryption**. Deferred from
+  D-wal-data (v0.0.370.0). That slice migrated `internal/storage/datawal` to the `RecordSealer`
+  seam but left it on `EncryptorAdapter` (gen=0) with a dedicated zero-sentinel clusterID.
+  To flip to `DEKKeeperAdapter` + the real 16-byte clusterID (mirroring D-seg-ec-activate):
+  inject the keeper-backed adapter into the WAL's **writer AND reader together** (a clusterID
+  divergence breaks all replay via AEAD mismatch); set the header `dek_gen` to the keeper's
+  active generation **at file creation** via a probe-seal — `Seal(DomainWAL, fields, nil)` at
+  segment init to capture the active gen, write it to the header, discard the probe ciphertext
+  (cheaper than widening the seam with `ActiveGen()`). The per-file gen-pin machinery already
+  enforces consistency once the header gen is correct. Same activation applies to D-wal-legacy.
+  **Legacy-WAL caveat (codex, D-wal-legacy code gate):** `internal/storage/wal` writes via the
+  async `AppendAsync` path — `lastSeq` advances at submit time and the background goroutine logs
+  and DROPS on seal error. Under a real gen>0 DEKKeeper, a header-gen-vs-seal-gen mismatch would
+  silently lose PITR entries (worse than datawal's synchronous error return). The probe-seal-
+  before-header-write design prevents the mismatch by construction (header gen == actual seal
+  gen → never mismatches); the activation slice MUST use it, not write header gen=0 and hope
+  later writes match. (Unreachable in the dormant slice: `EncryptorAdapter.Seal` returns gen 0.)
+- [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. The legacy↔datawal half is
+  done: D-wal-legacy (storage/wal) uses namespace `"pitr-wal"` while D-wal-data (datawal) uses
+  `"datawal"`, so a frame from one WAL family will not AEAD-verify in the other. What remains is
+  the cluster-shard datawal vs node datawal split: both currently share the single `"datawal"`
+  constant, so a frame from one physical datawal dir could AEAD-verify in another with the same
+  namespace+seq. To close that cross-WAL frame-swap, give the cluster-shard WAL and the node WAL
+  distinct namespaces (e.g. `"datawal/shard"` vs `"datawal/node"`), which requires auditing
+  which call site (`boot_phases_storage_runtime`, `local.go`, `shard_service.go`) owns which
+  physical dir so the writer and reader of each dir agree. Within-WAL positional binding
+  (namespace+seq+monotonicity) already holds; this only hardens the cross-WAL case.
 - [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
   (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
   source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks

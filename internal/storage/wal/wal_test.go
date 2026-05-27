@@ -12,8 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 )
+
+func newSealer(enc *encrypt.Encryptor) wal.RecordSealer {
+	return storage.NewEncryptorAdapter(enc, make([]byte, 16))
+}
 
 func TestWAL_AppendAndReplay(t *testing.T) {
 	dir := t.TempDir()
@@ -178,7 +183,7 @@ func TestWAL_EncryptedBodyHidesCustomerFields(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key", ETag: "secret-etag", ContentType: "text/plain", Size: 12})
 	require.NoError(t, w.Flush())
@@ -204,7 +209,7 @@ func TestWAL_EncryptedBodyHidesCustomerFields(t *testing.T) {
 	require.NotContains(t, string(raw), "secret-etag")
 
 	var got wal.Entry
-	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {
+	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {
 		got = e
 	})
 	require.NoError(t, err)
@@ -220,13 +225,13 @@ func TestWAL_EncryptedReplayRejectsWrongKey(t *testing.T) {
 	wrong, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x78}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
 	require.NoError(t, w.Flush())
 	require.NoError(t, w.Close())
 
-	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), wrong, func(e wal.Entry) {})
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(wrong), "pitr-wal", func(e wal.Entry) {})
 	require.Error(t, err)
 }
 
@@ -235,7 +240,7 @@ func TestWAL_EncryptedReplayRejectsFrameMetadataTamper(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
 	require.NoError(t, w.Flush())
@@ -256,10 +261,10 @@ func TestWAL_EncryptedReplayRejectsFrameMetadataTamper(t *testing.T) {
 
 	raw, err := os.ReadFile(walPath)
 	require.NoError(t, err)
-	raw[15] ^= 0x01 // header(8) + seq field's last byte
+	raw[19] ^= 0x01 // header(12) + seq field's last byte
 	require.NoError(t, os.WriteFile(walPath, raw, 0o644))
 
-	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {})
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {})
 	require.Error(t, err)
 }
 
@@ -268,7 +273,7 @@ func TestWAL_EncryptedReplayRejectsTruncatedFrame(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
 	require.NoError(t, w.Flush())
@@ -291,7 +296,7 @@ func TestWAL_EncryptedReplayRejectsTruncatedFrame(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Truncate(walPath, info.Size()-1))
 
-	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {})
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {})
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
@@ -300,7 +305,7 @@ func TestWAL_EncryptedOpenIgnoresTrailingPartialFrame(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
 	require.NoError(t, w.Flush())
@@ -323,7 +328,7 @@ func TestWAL_EncryptedOpenIgnoresTrailingPartialFrame(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Truncate(walPath, info.Size()-1))
 
-	reopened, err := wal.OpenEncrypted(dir, enc)
+	reopened, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	require.NoError(t, reopened.Close())
 }
@@ -333,7 +338,7 @@ func TestWAL_EncryptedOpenRejectsFrameMetadataTamper(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
 	require.NoError(t, w.Flush())
@@ -354,10 +359,10 @@ func TestWAL_EncryptedOpenRejectsFrameMetadataTamper(t *testing.T) {
 
 	raw, err := os.ReadFile(walPath)
 	require.NoError(t, err)
-	raw[15] ^= 0x01 // header(8) + seq field's last byte
+	raw[19] ^= 0x01 // header(12) + seq field's last byte
 	require.NoError(t, os.WriteFile(walPath, raw, 0o644))
 
-	_, err = wal.OpenEncrypted(dir, enc)
+	_, err = wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.Error(t, err)
 }
 
@@ -366,7 +371,7 @@ func TestWAL_EncryptedPersistsAcrossReopen(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(dir, enc)
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k1", ETag: "e1", Size: 42})
 	w.AppendAsync(wal.Entry{Op: wal.OpDelete, Bucket: "b", Key: "k1"})
@@ -374,7 +379,7 @@ func TestWAL_EncryptedPersistsAcrossReopen(t *testing.T) {
 	firstSeq := w.CurrentSeq()
 	require.NoError(t, w.Close())
 
-	w2, err := wal.OpenEncrypted(dir, enc)
+	w2, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
 	require.NoError(t, err)
 	require.Equal(t, firstSeq, w2.CurrentSeq())
 
@@ -384,12 +389,129 @@ func TestWAL_EncryptedPersistsAcrossReopen(t *testing.T) {
 	require.NoError(t, w2.Close())
 
 	var keys []string
-	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {
+	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {
 		keys = append(keys, e.Key)
 	})
 	require.NoError(t, err)
 	require.Equal(t, 3, n)
 	require.Equal(t, []string{"k1", "k1", "k2"}, keys)
+}
+
+func TestWAL_EncryptedReplayRejectsWrongNamespace(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k1"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	// Same key, but a different namespace → different AAD → Open must fail.
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "datawal", func(e wal.Entry) {})
+	require.Error(t, err)
+}
+
+func TestWAL_EncryptedHeaderGenPinnedOnReopen(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k1"})
+	require.NoError(t, w.Flush())
+	firstSeq := w.CurrentSeq()
+	require.NoError(t, w.Close())
+
+	// Reopen scans the active segment's header gen (0 for the EncryptorAdapter)
+	// and keeps appending into the same gen-pinned file without a gen-mismatch error.
+	w2, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
+	require.NoError(t, err)
+	require.Equal(t, firstSeq, w2.CurrentSeq())
+	w2.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k2"})
+	require.NoError(t, w2.Flush())
+	require.NoError(t, w2.Close())
+
+	var keys []string
+	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {
+		keys = append(keys, e.Key)
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, []string{"k1", "k2"}, keys)
+}
+
+func TestWAL_EncryptedReplayRejectsCrossSegmentReorder(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, newSealer(enc), "pitr-wal")
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k1"})
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k2"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	// Locate the single segment and duplicate it under a higher-sorting name.
+	// Replay visits files in seq order; the duplicate restarts at seq 1, which
+	// is <= the prior segment's max seq → cross-segment monotonicity violation.
+	var segPath string
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasPrefix(filepath.Base(path), "wal-") && strings.HasSuffix(filepath.Base(path), ".bin") {
+			segPath = path
+		}
+		return nil
+	}))
+	require.NotEmpty(t, segPath)
+	raw, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+	dup := filepath.Join(dir, "wal-0000009999.bin")
+	require.NoError(t, os.WriteFile(dup, raw, 0o644))
+
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {})
+	require.Error(t, err)
+}
+
+func TestWAL_MixedVersionPlainAndEncryptedReplay(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	// Encrypted v4 WAL.
+	encDir := t.TempDir()
+	we, err := wal.OpenEncrypted(encDir, newSealer(enc), "pitr-wal")
+	require.NoError(t, err)
+	we.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "enc-key"})
+	require.NoError(t, we.Flush())
+	require.NoError(t, we.Close())
+
+	// Plain v2 WAL in the same process.
+	plainDir := t.TempDir()
+	wp, err := wal.Open(plainDir)
+	require.NoError(t, err)
+	wp.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "plain-key"})
+	require.NoError(t, wp.Flush())
+	require.NoError(t, wp.Close())
+
+	var encKey, plainKey string
+	ne, err := wal.ReplayEncrypted(encDir, 0, time.Now().Add(time.Second), newSealer(enc), "pitr-wal", func(e wal.Entry) {
+		encKey = e.Key
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, ne)
+	require.Equal(t, "enc-key", encKey)
+
+	np, err := wal.Replay(plainDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
+		plainKey = e.Key
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, np)
+	require.Equal(t, "plain-key", plainKey)
 }
 
 func TestWAL_NonexistentDirReturnsError(t *testing.T) {

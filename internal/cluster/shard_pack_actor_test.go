@@ -18,7 +18,7 @@ import (
 func newTestWAL(t *testing.T) *datawal.WAL {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "datawal")
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = w.Close() })
 	return w

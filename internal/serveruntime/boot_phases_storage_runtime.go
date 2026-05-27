@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -37,7 +38,12 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	// before bootStreamRouter registers QUIC handlers that would otherwise
 	// surface partially-recovered state to peers.
 	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
-	dw, err := datawal.Open(state.dataWALDir, state.cfg.Encryptor)
+	var sealer datawal.RecordSealer
+	if state.cfg.Encryptor != nil {
+		var zero [16]byte
+		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
+	}
+	dw, err := datawal.Open(state.dataWALDir, sealer, "datawal")
 	if err != nil {
 		return fmt.Errorf("open data WAL: %w", err)
 	}

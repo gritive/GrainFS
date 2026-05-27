@@ -30,6 +30,9 @@ const (
 	// fileVersionV3 stores seq/timestamp in a plaintext frame and encrypts
 	// the mutation body.
 	fileVersionV3 = uint32(3)
+	// fileVersionV4 is the seam-based encrypted format; the header carries
+	// dek_gen so replay can pin the generation each ciphertext was sealed under.
+	fileVersionV4 = uint32(4)
 
 	OpPut           = byte(0)
 	OpDelete        = byte(1)
@@ -40,6 +43,18 @@ const (
 	chanCap           = 4096
 	maxEntryBodyBytes = 16 * 1024 * 1024
 )
+
+// RecordSealer is the wal package's view of the storage.DataEncryptor seam.
+// Declared locally so package wal never imports storage; *storage.EncryptorAdapter
+// satisfies it structurally.
+type RecordSealer interface {
+	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
+	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
+}
+
+func walEntryAADFields(namespace string, seq uint64) []encrypt.AADField {
+	return []encrypt.AADField{encrypt.FieldString(namespace), encrypt.FieldUint64(seq)}
+}
 
 // Entry is a single WAL record.
 type Entry struct {
@@ -72,24 +87,26 @@ type WAL struct {
 	wg   sync.WaitGroup
 
 	lastSeq   atomic.Uint64
-	encryptor *encrypt.Encryptor
+	sealer    RecordSealer
+	namespace string
+	dekGen    uint32
 	version   uint32
 }
 
 // Open opens (or creates) a WAL in dir. Starts the background writer.
 func Open(dir string) (*WAL, error) {
-	return open(dir, nil, fileVersionV2)
+	return open(dir, nil, "", fileVersionV2)
 }
 
 // OpenEncrypted opens (or creates) a WAL that encrypts mutation bodies.
-func OpenEncrypted(dir string, enc *encrypt.Encryptor) (*WAL, error) {
-	if enc == nil {
-		return nil, fmt.Errorf("encrypted WAL requires encryptor")
+func OpenEncrypted(dir string, sealer RecordSealer, namespace string) (*WAL, error) {
+	if sealer == nil {
+		return nil, fmt.Errorf("encrypted WAL requires sealer")
 	}
-	return open(dir, enc, fileVersionV3)
+	return open(dir, sealer, namespace, fileVersionV4)
 }
 
-func open(dir string, enc *encrypt.Encryptor, version uint32) (*WAL, error) {
+func open(dir string, sealer RecordSealer, namespace string, version uint32) (*WAL, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
@@ -97,15 +114,17 @@ func open(dir string, enc *encrypt.Encryptor, version uint32) (*WAL, error) {
 		dir:       dir,
 		ch:        make(chan Entry, chanCap),
 		done:      make(chan struct{}),
-		encryptor: enc,
+		sealer:    sealer,
+		namespace: namespace,
 		version:   version,
 	}
-	// Seed lastSeq from existing files
-	maxSeq, err := w.scanMaxSeq()
+	// Seed lastSeq from existing files; pin the active segment's header gen.
+	maxSeq, dekGen, err := w.scanMaxSeq()
 	if err != nil {
 		return nil, err
 	}
 	w.lastSeq.Store(maxSeq)
+	w.dekGen = dekGen
 
 	w.wg.Add(1)
 	go w.writer()
@@ -195,7 +214,7 @@ func (w *WAL) writeEntry(e Entry) error {
 			return err
 		}
 	}
-	n, err := marshalEntry(w.file, e, w.encryptor)
+	n, err := marshalEntry(w.file, e, w.sealer, w.namespace, w.dekGen)
 	if err != nil {
 		return err
 	}
@@ -222,7 +241,7 @@ func (w *WAL) rotate(firstSeq uint64) error {
 	// Write header only if new file
 	fi, _ := f.Stat()
 	if fi.Size() == 0 {
-		if err := writeHeader(f, w.version); err != nil {
+		if err := writeHeader(f, w.version, w.dekGen); err != nil {
 			f.Close()
 			return err
 		}
@@ -233,29 +252,30 @@ func (w *WAL) rotate(firstSeq uint64) error {
 	return nil
 }
 
-// scanMaxSeq reads all existing WAL segments and returns the highest seq seen.
-func (w *WAL) scanMaxSeq() (uint64, error) {
-	entries, err := os.ReadDir(w.dir)
+// scanMaxSeq reads all existing WAL segments and returns the highest seq seen
+// plus the dek_gen from the active (highest-seq) segment's header. Segments are
+// scanned in seq order so the active segment is the last one with entries.
+func (w *WAL) scanMaxSeq() (uint64, uint32, error) {
+	files, err := segmentFiles(w.dir)
 	if err != nil {
-		return 0, fmt.Errorf("wal: read dir: %w", err)
+		return 0, 0, err
 	}
 	var maxSeq uint64
-	for _, e := range entries {
-		if !walFilename(e.Name()) {
-			continue
-		}
-		seq, err := lastSeqInFile(filepath.Join(w.dir, e.Name()), w.encryptor)
+	var activeGen uint32
+	for _, path := range files {
+		seq, gen, err := lastSeqInFile(path, w.sealer, w.namespace)
 		if err != nil {
-			log.Warn().Str("file", e.Name()).Err(err).Msg("wal: scan failed")
-			if w.encryptor != nil {
-				return 0, err
+			log.Warn().Str("file", path).Err(err).Msg("wal: scan failed")
+			if w.sealer != nil {
+				return 0, 0, err
 			}
 		}
-		if seq > maxSeq {
+		if seq >= maxSeq {
 			maxSeq = seq
+			activeGen = gen
 		}
 	}
-	return maxSeq, nil
+	return maxSeq, activeGen, nil
 }
 
 // segmentFiles returns WAL segment paths sorted ascending by first-seq in filename.
@@ -278,29 +298,44 @@ func walFilename(name string) bool {
 	return strings.HasPrefix(name, "wal-") && strings.HasSuffix(name, ".bin")
 }
 
+// seqMonotonic enforces strict ascending seq across all segments of a replay.
+type seqMonotonic struct {
+	prev uint64
+	have bool
+}
+
+func (m *seqMonotonic) check(seq uint64) error {
+	if m.have && seq <= m.prev {
+		return fmt.Errorf("wal: non-monotonic seq %d after %d", seq, m.prev)
+	}
+	m.prev, m.have = seq, true
+	return nil
+}
+
 // Replay reads WAL entries with seq > fromSeq and timestamp <= targetTime,
 // calling fn for each. Returns the number of entries processed.
 func Replay(dir string, fromSeq uint64, targetTime time.Time, fn func(Entry)) (int, error) {
-	return replay(dir, fromSeq, targetTime, nil, false, fn)
+	return replay(dir, fromSeq, targetTime, nil, "", false, fn)
 }
 
 // ReplayEncrypted reads WAL entries written by OpenEncrypted.
-func ReplayEncrypted(dir string, fromSeq uint64, targetTime time.Time, enc *encrypt.Encryptor, fn func(Entry)) (int, error) {
-	if enc == nil {
-		return 0, fmt.Errorf("encrypted WAL replay requires encryptor")
+func ReplayEncrypted(dir string, fromSeq uint64, targetTime time.Time, sealer RecordSealer, namespace string, fn func(Entry)) (int, error) {
+	if sealer == nil {
+		return 0, fmt.Errorf("encrypted WAL replay requires sealer")
 	}
-	return replay(dir, fromSeq, targetTime, enc, true, fn)
+	return replay(dir, fromSeq, targetTime, sealer, namespace, true, fn)
 }
 
-func replay(dir string, fromSeq uint64, targetTime time.Time, enc *encrypt.Encryptor, strict bool, fn func(Entry)) (int, error) {
+func replay(dir string, fromSeq uint64, targetTime time.Time, sealer RecordSealer, namespace string, strict bool, fn func(Entry)) (int, error) {
 	target := targetTime.UnixNano()
 	files, err := segmentFiles(dir)
 	if err != nil {
 		return 0, err
 	}
+	mono := &seqMonotonic{}
 	var count int
 	for _, path := range files {
-		n, err := replayFile(path, fromSeq, target, enc, fn)
+		n, err := replayFile(path, fromSeq, target, sealer, namespace, mono, fn)
 		count += n
 		if err != nil {
 			if strict {
@@ -313,14 +348,14 @@ func replay(dir string, fromSeq uint64, targetTime time.Time, enc *encrypt.Encry
 	return count, nil
 }
 
-func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryptor, fn func(Entry)) (int, error) {
+func replayFile(path string, fromSeq uint64, targetNs int64, sealer RecordSealer, namespace string, mono *seqMonotonic, fn func(Entry)) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
 
-	ver, err := readHeader(f)
+	ver, headerGen, err := readHeader(f)
 	if err != nil {
 		return 0, err
 	}
@@ -332,7 +367,7 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 			break
 		}
 		if err == io.ErrUnexpectedEOF {
-			if ver == fileVersionV3 {
+			if ver == fileVersionV4 {
 				return count, err
 			}
 			break
@@ -340,14 +375,17 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 		if err != nil {
 			return count, fmt.Errorf("wal: read entry: %w", err)
 		}
-		if ver == fileVersionV3 {
-			if enc == nil {
-				return count, fmt.Errorf("wal: encrypted entry requires encryptor")
+		if ver == fileVersionV4 {
+			if sealer == nil {
+				return count, fmt.Errorf("wal: encrypted entry requires sealer")
 			}
-			e, err = decryptEntryBody(e, body, enc)
+			e, err = decryptEntryBody(e, body, sealer, namespace, headerGen)
 			if err != nil {
 				return count, err
 			}
+		}
+		if err := mono.check(e.Seq); err != nil {
+			return count, err
 		}
 		if e.Seq <= fromSeq {
 			continue
@@ -361,15 +399,15 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 	return count, nil
 }
 
-func lastSeqInFile(path string, enc *encrypt.Encryptor) (uint64, error) {
+func lastSeqInFile(path string, sealer RecordSealer, namespace string) (uint64, uint32, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer f.Close()
-	ver, err := readHeader(f)
+	ver, headerGen, err := readHeader(f)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	var lastSeq uint64
 	for {
@@ -378,49 +416,65 @@ func lastSeqInFile(path string, enc *encrypt.Encryptor) (uint64, error) {
 			break
 		}
 		if err != nil {
-			if ver == fileVersionV3 {
-				return lastSeq, err
+			if ver == fileVersionV4 {
+				return lastSeq, headerGen, err
 			}
-			return lastSeq, nil
+			return lastSeq, headerGen, nil
 		}
-		if ver == fileVersionV3 {
-			if enc == nil {
-				return lastSeq, fmt.Errorf("wal: encrypted segment requires encryptor")
+		if ver == fileVersionV4 {
+			if sealer == nil {
+				return lastSeq, headerGen, fmt.Errorf("wal: encrypted segment requires sealer")
 			}
-			if _, err := decryptEntryBody(e, body, enc); err != nil {
-				return lastSeq, err
+			if _, err := decryptEntryBody(e, body, sealer, namespace, headerGen); err != nil {
+				return lastSeq, headerGen, err
 			}
 		}
 		lastSeq = e.Seq
 	}
-	return lastSeq, nil
+	return lastSeq, headerGen, nil
 }
 
 // --- Binary format ---
 
-func writeHeader(w io.Writer, version uint32) error {
-	buf := make([]byte, 8)
+func writeHeader(w io.Writer, version uint32, dekGen uint32) error {
+	if version == fileVersionV4 {
+		var buf [12]byte
+		binary.BigEndian.PutUint32(buf[0:4], fileMagic)
+		binary.BigEndian.PutUint32(buf[4:8], version)
+		binary.BigEndian.PutUint32(buf[8:12], dekGen)
+		_, err := w.Write(buf[:])
+		return err
+	}
+	var buf [8]byte
 	binary.BigEndian.PutUint32(buf[0:4], fileMagic)
 	binary.BigEndian.PutUint32(buf[4:8], version)
-	_, err := w.Write(buf)
+	_, err := w.Write(buf[:])
 	return err
 }
 
 // readHeader reads and validates the segment header. Returns the wire version
-// so the caller can dispatch per-entry decoding appropriately.
-func readHeader(r io.Reader) (uint32, error) {
-	buf := make([]byte, 8)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return 0, fmt.Errorf("wal: read header: %w", err)
+// (for per-entry decode dispatch) and the dek_gen (0 for non-v4 layouts).
+func readHeader(r io.Reader) (uint32, uint32, error) {
+	var fixed [8]byte
+	if _, err := io.ReadFull(r, fixed[:]); err != nil {
+		return 0, 0, err
 	}
-	if binary.BigEndian.Uint32(buf[0:4]) != fileMagic {
-		return 0, fmt.Errorf("wal: invalid magic")
+	if binary.BigEndian.Uint32(fixed[0:4]) != fileMagic {
+		return 0, 0, fmt.Errorf("wal: invalid magic")
 	}
-	v := binary.BigEndian.Uint32(buf[4:8])
-	if v != fileVersionV1 && v != fileVersionV2 && v != fileVersionV3 {
-		return 0, fmt.Errorf("wal: unsupported version %d", v)
+	version := binary.BigEndian.Uint32(fixed[4:8])
+	switch version {
+	case fileVersionV1, fileVersionV2, fileVersionV3:
+		return version, 0, nil
+	case fileVersionV4:
+		var gen [4]byte
+		if _, err := io.ReadFull(r, gen[:]); err != nil {
+			return 0, 0, err
+		}
+		return version, binary.BigEndian.Uint32(gen[:]), nil
+	default:
+		return 0, 0, fmt.Errorf("wal: unsupported version %d", version)
 	}
-	return v, nil
 }
 
 const poolMaxBufSize = 256 * 1024 // 256 KB is way more than enough for metadata entries
@@ -457,8 +511,8 @@ func putString16(dst []byte, off int, s string) int {
 }
 
 // marshalEntry writes an entry in binary format and returns bytes written.
-func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
-	if enc == nil {
+func marshalEntry(w io.Writer, e Entry, sealer RecordSealer, namespace string, wantGen uint32) (int, error) {
+	if sealer == nil {
 		return marshalPlainEntry(w, e)
 	}
 	bodySize := 1 + 2 + len(e.Bucket) + 2 + len(e.Key) + 2 + len(e.ETag) + 2 + len(e.ContentType) + 8 + 2 + len(e.VersionID)
@@ -466,13 +520,13 @@ func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
 	defer putBuffer(bodyBuf)
 
 	body := marshalEntryBodyTo(bodyBuf[:0], e, true)
-	sealedSize := 3 + enc.AEADOverhead() + len(body) + enc.AEADOverhead() + 64
-	sealedBuf := getBuffer(sealedSize)
-	defer putBuffer(sealedBuf)
 
-	sealed, err := enc.SealValueAADTo(sealedBuf[:0], walRecordAAD(e.Seq, e.Timestamp), body)
+	sealed, gen, err := sealer.Seal(encrypt.DomainWAL, walEntryAADFields(namespace, e.Seq), body)
 	if err != nil {
 		return 0, fmt.Errorf("wal: encrypt entry body: %w", err)
+	}
+	if gen != wantGen {
+		return 0, fmt.Errorf("wal: entry gen %d != pinned header gen %d", gen, wantGen)
 	}
 
 	frameSize := 8 + 8 + 4 + len(sealed)
@@ -488,7 +542,7 @@ func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
 	off += 4
 	copy(frameBuf[off:], sealed)
 
-	n, err := w.Write(frameBuf)
+	n, err := w.Write(frameBuf[:frameSize])
 	return n, err
 }
 
@@ -544,7 +598,7 @@ func marshalEntryBodyTo(dst []byte, e Entry, includeVersionID bool) []byte {
 }
 
 func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
-	if wireVer == fileVersionV3 {
+	if wireVer == fileVersionV4 {
 		var fixed [8 + 8 + 4]byte
 		if _, err := io.ReadFull(r, fixed[:]); err != nil {
 			return Entry{}, nil, err
@@ -556,6 +610,10 @@ func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
 		body := make([]byte, bodyLen)
 		if bodyLen > 0 {
 			if _, err := io.ReadFull(r, body); err != nil {
+				if err == io.EOF {
+					// fixed header consumed but body missing → torn tail, not clean EOF.
+					return Entry{}, nil, io.ErrUnexpectedEOF
+				}
 				return Entry{}, nil, err
 			}
 		}
@@ -568,10 +626,8 @@ func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
 	return e, nil, err
 }
 
-func decryptEntryBody(frame Entry, encryptedBody []byte, enc *encrypt.Encryptor) (Entry, error) {
-	bodyBuf := getBuffer(len(encryptedBody))
-	defer putBuffer(bodyBuf)
-	body, err := enc.OpenValueAADTo(bodyBuf[:0], walRecordAAD(frame.Seq, frame.Timestamp), encryptedBody)
+func decryptEntryBody(frame Entry, encryptedBody []byte, sealer RecordSealer, namespace string, gen uint32) (Entry, error) {
+	body, err := sealer.Open(encrypt.DomainWAL, walEntryAADFields(namespace, frame.Seq), gen, encryptedBody)
 	if err != nil {
 		return Entry{}, fmt.Errorf("wal: decrypt entry body: %w", err)
 	}
@@ -583,14 +639,6 @@ func decryptEntryBody(frame Entry, encryptedBody []byte, enc *encrypt.Encryptor)
 	e.Seq = frame.Seq
 	e.Timestamp = frame.Timestamp
 	return e, nil
-}
-
-func walRecordAAD(seq uint64, timestamp int64) []byte {
-	var aad [len("wal:record:v3") + 8 + 8]byte
-	copy(aad[:], "wal:record:v3")
-	binary.BigEndian.PutUint64(aad[len("wal:record:v3"):], seq)
-	binary.BigEndian.PutUint64(aad[len("wal:record:v3")+8:], uint64(timestamp))
-	return aad[:]
 }
 
 // readPlainEntry reads a legacy plaintext entry in the given wire version.

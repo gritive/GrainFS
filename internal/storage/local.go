@@ -1057,7 +1057,12 @@ func (b *LocalBackend) PreferWriteAt(bucket string) bool {
 func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
 	b.replayingDataWAL = true
 	defer func() { b.replayingDataWAL = false }()
-	return datawal.Recover(ctx, b.dataWALDir, 0, b.encryptor, localDataWALMaterializer{b: b})
+	var sealer datawal.RecordSealer
+	if b.encryptor != nil {
+		var zero [16]byte
+		sealer = NewEncryptorAdapter(b.encryptor, zero[:])
+	}
+	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, "datawal", localDataWALMaterializer{b: b})
 }
 
 type localDataWALMaterializer struct {

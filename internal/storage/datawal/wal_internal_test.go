@@ -3,6 +3,7 @@ package datawal
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
@@ -16,6 +17,96 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
+
+// fakeSealer is a real-crypto RecordSealer for datawal tests. It mirrors
+// storage.EncryptorAdapter (gen 0) without importing storage (which would form
+// a cycle: storage imports datawal).
+type fakeSealer struct {
+	enc       *encrypt.Encryptor
+	clusterID []byte
+}
+
+func newFakeSealer() *fakeSealer {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte("k"), 32))
+	if err != nil {
+		panic(err)
+	}
+	return &fakeSealer{enc: enc, clusterID: make([]byte, 16)}
+}
+
+func (s *fakeSealer) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	ct, err := s.enc.SealValueAADTo(nil, encrypt.BuildAAD(domain, s.clusterID, fields...), plain)
+	return ct, 0, err
+}
+
+func (s *fakeSealer) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return s.enc.OpenValueAADTo(nil, encrypt.BuildAAD(domain, s.clusterID, fields...), ct)
+}
+
+func TestHeaderV2RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeHeader(&buf, fileModeEncrypted, 7); err != nil {
+		t.Fatalf("writeHeader: %v", err)
+	}
+	if buf.Len() != fileHeaderBytes {
+		t.Fatalf("header len = %d, want %d", buf.Len(), fileHeaderBytes)
+	}
+	mode, gen, err := readHeader(&buf)
+	if err != nil {
+		t.Fatalf("readHeader: %v", err)
+	}
+	if mode != fileModeEncrypted || gen != 7 {
+		t.Fatalf("got mode=%d gen=%d, want 2/7", mode, gen)
+	}
+}
+
+func TestEncryptedRecordSeqBoundFrame(t *testing.T) {
+	s := newFakeSealer()
+	rec := Record{Op: OpObjectWriteAt, Seq: 42, Bucket: "b", Key: "k", Payload: []byte("hello")}
+	var buf bytes.Buffer
+	if err := EncodeEncryptedRecord(&buf, rec, s, "datawal"); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	// First 8 bytes are the plaintext seq.
+	if got := binary.BigEndian.Uint64(buf.Bytes()[:8]); got != 42 {
+		t.Fatalf("plaintext seq = %d, want 42", got)
+	}
+	got, err := DecodeEncryptedRecord(&buf, s, "datawal", 0)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Seq != 42 || string(got.Payload) != "hello" {
+		t.Fatalf("roundtrip mismatch: %+v", got)
+	}
+}
+
+func TestReadEncryptedFramePrefixOnlyIsTorn(t *testing.T) {
+	// 8-byte seq prefix with no following frame must be reported as a torn
+	// tail (io.ErrUnexpectedEOF), never a clean io.EOF — otherwise a missing
+	// frame on a non-active segment would be silently accepted.
+	var prefix [8]byte
+	binary.BigEndian.PutUint64(prefix[:], 99)
+	_, _, err := readEncryptedFrame(bytes.NewReader(prefix[:]))
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("got %v, want io.ErrUnexpectedEOF", err)
+	}
+	// Zero bytes = clean EOF.
+	if _, _, err := readEncryptedFrame(bytes.NewReader(nil)); err != io.EOF {
+		t.Fatalf("got %v, want io.EOF", err)
+	}
+}
+
+func TestEncryptedRecordWrongNamespaceRejected(t *testing.T) {
+	s := newFakeSealer()
+	rec := Record{Op: OpObjectWriteAt, Seq: 1, Payload: []byte("x")}
+	var buf bytes.Buffer
+	if err := EncodeEncryptedRecord(&buf, rec, s, "datawal"); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := DecodeEncryptedRecord(&buf, s, "other-ns", 0); err == nil {
+		t.Fatal("expected decode failure under wrong namespace")
+	}
+}
 
 func TestAppendRollbackAfterPartialWrite(t *testing.T) {
 	f := &failingWALFile{failAfter: 10}
@@ -48,7 +139,7 @@ func TestAppendTimestampMonotonicWhenClockMovesBackward(t *testing.T) {
 	require.Greater(t, w.lastTimestamp, first)
 
 	var timestamps []int64
-	_, err = scanRecords(bytes.NewReader(f.data), fileModePlain, nil, true, func(rec Record) error {
+	_, err = scanRecords(bytes.NewReader(f.data), fileModePlain, nil, "datawal", 0, &seqMonotonic{}, true, func(rec Record) error {
 		timestamps = append(timestamps, rec.Timestamp)
 		return nil
 	})
@@ -90,13 +181,12 @@ func TestAppendRejectsTimestampOverflow(t *testing.T) {
 }
 
 func TestEncryptedRecordRejectsSealedFrameAboveDecodeLimit(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
-	require.NoError(t, err)
+	s := newFakeSealer()
 	payload := bytes.Repeat([]byte{'p'}, MaxPayloadBytes)
 	bucket := strings.Repeat("b", maxRecordBodyBytes-MaxPayloadBytes-recordBodyFixedBytes)
 
 	var buf bytes.Buffer
-	err = EncodeEncryptedRecord(&buf, Record{Op: OpSegmentPut, Bucket: bucket, Payload: payload}, enc)
+	err := EncodeEncryptedRecord(&buf, Record{Op: OpSegmentPut, Bucket: bucket, Payload: payload}, s, "datawal")
 	require.Error(t, err)
 	require.Empty(t, buf.Bytes())
 }
@@ -106,10 +196,10 @@ func TestNonLatestSegmentTornTailFailsReplayAndOpen(t *testing.T) {
 	writePlainSegmentForTest(t, dir, 1, []Record{{Seq: 1, Timestamp: 1, Op: OpSegmentPut, Key: "first"}}, []byte{0x00, 0x00, 0x00, 0x20, 0xaa})
 	writePlainSegmentForTest(t, dir, 2, []Record{{Seq: 2, Timestamp: 2, Op: OpSegmentPut, Key: "second"}}, nil)
 
-	err := Replay(context.Background(), dir, 0, nil, func(Record) error { return nil })
+	err := Replay(context.Background(), dir, 0, nil, "datawal", func(Record) error { return nil })
 	require.Error(t, err)
 
-	_, err = Open(dir, nil)
+	_, err = Open(dir, nil, "datawal")
 	require.Error(t, err)
 }
 
@@ -118,14 +208,14 @@ func TestOpenRecoversEmptyLatestSegment(t *testing.T) {
 	writePlainSegmentForTest(t, dir, 1, []Record{{Seq: 1, Timestamp: 1, Op: OpSegmentPut, Key: "first"}}, nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, segmentName(2)), nil, 0o644))
 
-	w, err := Open(dir, nil)
+	w, err := Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), Record{Op: OpSegmentPut, Key: "second"})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
 	var keys []string
-	require.NoError(t, Replay(context.Background(), dir, 0, nil, func(rec Record) error {
+	require.NoError(t, Replay(context.Background(), dir, 0, nil, "datawal", func(rec Record) error {
 		keys = append(keys, rec.Key)
 		return nil
 	}))
@@ -137,14 +227,14 @@ func TestOpenRecoversPartialHeaderLatestSegment(t *testing.T) {
 	writePlainSegmentForTest(t, dir, 1, []Record{{Seq: 1, Timestamp: 1, Op: OpSegmentPut, Key: "first"}}, nil)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, segmentName(2)), []byte{0x44, 0x57, 0x41}, 0o644))
 
-	w, err := Open(dir, nil)
+	w, err := Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), Record{Op: OpSegmentPut, Key: "second"})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
 	var keys []string
-	require.NoError(t, Replay(context.Background(), dir, 0, nil, func(rec Record) error {
+	require.NoError(t, Replay(context.Background(), dir, 0, nil, "datawal", func(rec Record) error {
 		keys = append(keys, rec.Key)
 		return nil
 	}))
@@ -164,10 +254,10 @@ func TestNonLatestEmptyOrPartialHeaderSegmentFails(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, segmentName(1)), tc.data, 0o644))
 			writePlainSegmentForTest(t, dir, 2, []Record{{Seq: 2, Timestamp: 2, Op: OpSegmentPut, Key: "second"}}, nil)
 
-			err := Replay(context.Background(), dir, 0, nil, func(Record) error { return nil })
+			err := Replay(context.Background(), dir, 0, nil, "datawal", func(Record) error { return nil })
 			require.Error(t, err)
 
-			_, err = Open(dir, nil)
+			_, err = Open(dir, nil, "datawal")
 			require.Error(t, err)
 		})
 	}
@@ -263,7 +353,7 @@ func writePlainSegmentForTest(t *testing.T, dir string, seq uint64, records []Re
 	f, err := os.Create(filepath.Join(dir, segmentName(seq)))
 	require.NoError(t, err)
 	defer f.Close()
-	require.NoError(t, writeHeader(f, fileModePlain))
+	require.NoError(t, writeHeader(f, fileModePlain, 0))
 	for _, rec := range records {
 		require.NoError(t, EncodeRecord(f, rec))
 	}

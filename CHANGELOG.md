@@ -1,27 +1,46 @@
 # Changelog
 
+## [0.0.373.0] - 2026-05-28
+
+### Changed
+
+- Full e2e runs now execute directly through Ginkgo with one shared single-node
+  fixture and one shared four-node cluster fixture per worker process, removing
+  the legacy `test-e2e` wrapper and `TestMain`/`TestCase` harness path that made
+  the suite spend most of its time bootstrapping servers.
+- Shared-fixture S3 specs now create unique bucket names from the spec and case
+  name, so long-lived single-node and cluster fixtures do not leak state between
+  specs.
+- E2E HTTP traffic now keeps pooled clients alive across shared-fixture specs and
+  uses the shared raw HTTP client for presigned URL and metrics calls, reducing
+  local port churn during the long S3 workflow matrix.
+- Dedicated cluster fixtures now register cleanup as soon as bootstrap begins,
+  so startup failures or interrupted tests clean up partially started servers.
+- The single-node multipart concurrent download parity case now runs a lighter
+  local concurrency shape while the cluster case keeps the forwarded fan-in
+  workload, preserving the cluster regression signal without masking it behind
+  single-node resource pressure.
+- The audit Iceberg leader-flap e2e now writes after re-election against a
+  writable endpoint and filters audit rows by PUT method, avoiding a race with
+  the old leader's shutdown drain.
+
+## [0.0.372.0] - 2026-05-28
+
+### Changed
+
+- Legacy PITR write-ahead-log records now seal through the DataEncryptor seam with position-bound AEAD (DomainWAL + WAL namespace + record sequence) and a `dek_gen` file header (WAL1 format v4), groundwork for KEK-envelope key rotation of data at rest. Behavior is unchanged under the static encryptor; the on-disk encrypted-WAL format is a hard break (old v3 encrypted segment files are not read). Plaintext WALs are unaffected.
+
+## [0.0.371.0] - 2026-05-28
+
+### Fixed
+
+- OAuth token issuance now evaluates `aws:SourceIp` against the direct peer by default and the existing trusted-proxy validator when served through the Iceberg gateway, preventing spoofed `X-Forwarded-For` headers from bypassing service-account location policies.
+
 ## [0.0.370.0] - 2026-05-28
 
 ### Changed
 
-- Full e2e runs now use the Ginkgo runner directly, with one shared single-node
-  fixture and one shared four-node cluster fixture per worker process. This
-  removes the previous per-test bootstrap loop that made full e2e runs exceed
-  an hour while preserving dedicated fixtures for specs that intentionally need
-  isolated server state.
-- Shared-fixture e2e specs now create unique bucket names from the spec name and
-  case name, avoiding cross-spec state pollution when buckets live for the
-  duration of the shared server.
-- E2E HTTP clients now use larger pooled transports and close idle connections
-  before and after each spec, reducing local connection churn during the long S3
-  workflow matrix.
-- The single-node multipart concurrent download parity case now runs a lighter
-  local concurrency shape while the cluster case keeps the full forwarded fan-in
-  workload, so full-suite resource pressure no longer masks the cluster
-  regression signal.
-- The audit Iceberg leader-flap e2e now writes after re-election against a
-  writable endpoint and filters audit rows by PUT method, avoiding a race with
-  the old leader's shutdown drain.
+- Data WAL records now seal through the DataEncryptor seam with position-bound AEAD (DomainWAL + WAL namespace + record sequence) and a `dek_gen` file header (DWAL format v2), groundwork for KEK-envelope key rotation of data at rest. Behavior is unchanged under the static encryptor; the on-disk WAL format is a hard break (old v1 segment files are not read).
 
 ## [0.0.369.0] - 2026-05-27
 
