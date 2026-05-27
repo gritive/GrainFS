@@ -239,6 +239,7 @@ func (f *fakeRaftNode) AddVoterCtx(context.Context, string, string) error { retu
 func (f *fakeRaftNode) RemoveVoter(string) error                          { return nil }
 func (f *fakeRaftNode) AddLearner(string, string) error                   { return nil }
 func (f *fakeRaftNode) PromoteToVoter(string) error                       { return nil }
+func (f *fakeRaftNode) RemoveLearner(string) error                        { return nil }
 func (f *fakeRaftNode) TransferLeadership() error                         { return nil }
 func (f *fakeRaftNode) ChangeMembership(context.Context, []raft.ServerEntry, []string) error {
 	return nil

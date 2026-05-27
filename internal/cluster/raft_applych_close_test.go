@@ -66,6 +66,7 @@ func (s *applyChCloseStubNode) AddVoterCtx(context.Context, string, string) erro
 func (s *applyChCloseStubNode) RemoveVoter(string) error        { panic("unused") }
 func (s *applyChCloseStubNode) AddLearner(string, string) error { panic("unused") }
 func (s *applyChCloseStubNode) PromoteToVoter(string) error     { panic("unused") }
+func (s *applyChCloseStubNode) RemoveLearner(string) error      { panic("unused") }
 func (s *applyChCloseStubNode) TransferLeadership() error       { panic("unused") }
 func (s *applyChCloseStubNode) ChangeMembership(context.Context, []raft.ServerEntry, []string) error {
 	panic("unused")

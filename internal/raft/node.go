@@ -571,6 +571,21 @@ func (n *Node) PromoteToVoter(id string) error {
 	return n.submitLearnerCmd(context.Background(), cmdPromote, id, "")
 }
 
+// RemoveLearner submits a single-phase ConfChange that drops id from the
+// learner set (M6.0 Path B inverse of AddLearner). Quorum math is
+// unchanged; voter slices are unchanged. Used to roll back an
+// un-promoted learner left behind by a failed invite-join. Blocks until
+// the entry commits.
+//
+// Errors:
+//   - ErrNotLeader: not the leader.
+//   - ErrConfChangeInFlight: a previous membership change is pending.
+//   - ErrNotALearner: id is not a registered learner.
+//   - ErrProposalFailed: leader stepped down before the entry committed.
+func (n *Node) RemoveLearner(id string) error {
+	return n.submitLearnerCmd(context.Background(), cmdRemoveLearner, id, "")
+}
+
 // submitLearnerCmd enqueues a learner-targeted command and waits for the
 // actor's reply. The ctx case is honoured both on the enqueue side (in
 // case the actor cmdCh is full and the actor is wedged on a long apply)

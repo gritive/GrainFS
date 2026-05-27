@@ -187,6 +187,7 @@ const (
 	cmdInstallSnapshotReply
 	cmdConfChange
 	cmdAddLearner         // M6.0 (Path B): single-phase AddLearner
+	cmdRemoveLearner      // M6.0 (Path B): single-phase RemoveLearner
 	cmdPromote            // M6.0 (Path B): two-entry PromoteToVoter
 	cmdHandleTimeoutNow   // inbound TimeoutNow from leader (Raft §3.10)
 	cmdTransferLeadership // local call to initiate leadership transfer
@@ -341,6 +342,8 @@ func (n *Node) handle(cmd command) {
 		n.handleConfChange(cmd)
 	case cmdAddLearner:
 		n.handleAddLearner(cmd)
+	case cmdRemoveLearner:
+		n.handleRemoveLearner(cmd)
 	case cmdPromote:
 		n.handlePromote(cmd)
 	case cmdTestPeekMatchIndex:
