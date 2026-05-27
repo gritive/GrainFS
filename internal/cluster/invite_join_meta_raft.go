@@ -79,14 +79,18 @@ func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki 
 	if owner, ok := m.fsm.peers.spkiOwner(spki); ok && owner != nodeID {
 		return fmt.Errorf("%w: SPKI owned by node %s", errInviteAddressTaken, owner)
 	}
-	// Node-id reuse guard: if this nodeID is ALREADY a meta member at a different
-	// address, reject. A genuine idempotent retry (this join's prior attempt
-	// already ran ProposeAddNode) leaves the entry at THIS join's addr, so it
-	// passes. Genesis/KEK members are in f.nodes but not the peer registry, so the
-	// address/SPKI-owner guards above miss them; this catches a fresh-addr+SPKI
-	// join that tries to overwrite an existing node id.
-	if existing, ok := m.fsm.NodeByID(nodeID); ok && existing.Address != addr {
-		return fmt.Errorf("%w: node %s already a member at %s", errInviteNodeIDTaken, nodeID, existing.Address)
+	// Node-id reuse guard: if this nodeID is ALREADY a meta member, a legitimate
+	// invite-joiner always has a brand-new generated id, so allow ONLY when the
+	// peer registry already binds this exact (nodeID, spki) — proving THIS join's
+	// prior attempt registered it (a genuine idempotent retry). Reusing a
+	// pre-existing member id (e.g. a genesis/KEK node in f.nodes but NOT the peer
+	// registry) with a fresh SPKI is rejected even at the SAME address, preventing
+	// an SPKI takeover that the address/SPKI-owner guards above would miss. Running
+	// this BEFORE any membership mutation leaves the invite unconsumed on reject.
+	if _, ok := m.fsm.NodeByID(nodeID); ok {
+		if owner, ok := m.fsm.peers.spkiOwner(spki); !ok || owner != nodeID {
+			return fmt.Errorf("%w: node %s already a member", errInviteNodeIDTaken, nodeID)
+		}
 	}
 	// commit1: register pending-learner SPKI + AddLearner.
 	if err := m.ProposeRegisterPendingLearner(ctx, nodeID, spki, addr); err != nil {

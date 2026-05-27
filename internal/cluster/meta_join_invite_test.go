@@ -586,6 +586,75 @@ func TestHandleJoin_Phase2_RejectsNodeIDOwnedByAnotherNode(t *testing.T) {
 	require.True(t, ok, "the rejected join must NOT consume the single-use invite")
 }
 
+// TestHandleJoin_Phase2_RejectsNodeIDReuseAtSameAddress is the SAME-address
+// variant of the node-id reuse guard: an attacker reuses an existing member's
+// NODE ID at that member's OWN address with a fresh SPKI. The address-owner
+// guard sees a matching (nodeID, addr) and the legacy "different address only"
+// node-id guard would let it slip through to ProposeRegisterPendingLearner,
+// binding the attacker SPKI under the existing id → SPKI takeover. The guard
+// must reject because the peer registry has no prior (nodeID, spki) binding for
+// this join.
+func TestHandleJoin_Phase2_RejectsNodeIDReuseAtSameAddress(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	ctx := context.Background()
+
+	// Seed an existing member "node-b" directly in the FSM membership at addr A —
+	// a genesis/KEK-style member NOT registered in the peer registry.
+	const ownedAddr = "node-b-real-addr"
+	require.NoError(t, fx.leader.ProposeAddNode(ctx, MetaNodeEntry{ID: "node-b", Address: ownedAddr, Role: 0}))
+	require.True(t, fsmHasNode(fx.leader, "node-b"))
+
+	// Mint a fresh invite for an attacker that reuses node-b's NODE ID at the SAME
+	// address A but presents a brand-new SPKI.
+	invitePrivX, invitePubX, inviteIDX, err := MintInviteKeypair()
+	require.NoError(t, err)
+	require.NoError(t, fx.leader.ProposeInviteMint(ctx, inviteIDX, invitePubX, time.Now().Add(time.Hour).UnixNano()))
+
+	certX, spkiX, err := transport.GenerateNodeIdentity("cluster-x", "node-b")
+	require.NoError(t, err)
+	keyX := certX.PrivateKey.(*ecdsa.PrivateKey)
+	trX := encrypt.InviteTranscript{
+		ClusterID: transcriptClusterID,
+		Nonce:     []byte("joiner-nonce-same"),
+		NodeID:    "node-b",  // reuse the existing member's node id
+		Address:   ownedAddr, // at the SAME address
+		SPKI:      spkiX[:],
+		Bind:      nil,
+	}
+	reqX := JoinRequest{
+		NodeID:         "node-b",
+		Address:        ownedAddr,
+		HandshakeNonce: []byte("joiner-nonce-same"),
+		SPKI:           spkiX[:],
+		CertDER:        certX.Leaf.Raw,
+		NodeSig:        mustSignNode(t, keyX, trX),
+		InviteSig:      encrypt.SignInviteTranscript(invitePrivX, trX),
+		InviteID:       inviteIDX,
+	}
+
+	// Phase-1 succeeds (fresh invite, own SPKI; address bound, not validated).
+	reqX.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, spkiX, reqX).Accepted)
+
+	// Phase-2 ACK must be REJECTED: node-b's node id is already a member and the
+	// peer registry has no prior (node-b, spkiX) binding for this join.
+	reqX.JoinPhase = 2
+	reply := fx.receiver.HandleJoin(ctx, spkiX, reqX)
+	require.False(t, reply.Accepted, "phase-2 must reject node-id reuse even at the same address")
+	require.Equal(t, JoinStatusError, reply.Status)
+
+	// Membership uncorrupted and the attacker SPKI NOT registered.
+	existing, ok := fx.leader.fsm.NodeByID("node-b")
+	require.True(t, ok)
+	require.Equal(t, ownedAddr, existing.Address, "node-b's address must be unchanged")
+	_, spkiOwned := fx.leader.fsm.peers.spkiOwner(spkiX)
+	require.False(t, spkiOwned, "the attacker SPKI must not be registered")
+
+	// The invite is NOT consumed (rejected before ProposeInviteConsume).
+	_, ok = fx.leader.LookupInvite(inviteIDX, time.Now())
+	require.True(t, ok, "the rejected join must NOT consume the single-use invite")
+}
+
 // --- helpers -----------------------------------------------------------------
 
 func fsmHasNode(m *MetaRaft, id string) bool {
