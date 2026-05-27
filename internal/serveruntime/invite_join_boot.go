@@ -167,6 +167,7 @@ type inviteJoinPaths struct {
 	keysDir         string // keys/ — staged KEK gens live here (any <N>.key)
 	nodeKeyEnc      string
 	nodeKeyUnsealed string
+	currentKey      string // keys.d/current.key — transport PSK (resume needs it)
 	pendingSentinel string
 }
 
@@ -179,6 +180,7 @@ func inviteJoinPathsFor(dataDir string) inviteJoinPaths {
 		keysDir:         keysDir,
 		nodeKeyEnc:      filepath.Join(keysD, "node.key.enc"),
 		nodeKeyUnsealed: filepath.Join(keysD, nodeKeyUnsealedFile),
+		currentKey:      filepath.Join(keysD, "current.key"),
 		pendingSentinel: filepath.Join(dataDir, invitePendingFile),
 	}
 }
@@ -208,6 +210,7 @@ func gateInviteJoin(dataDir string, bundlePresent bool) inviteJoinDecision {
 		fileExists(p.clusterID) &&
 		keysDirHasKEK(p.keysDir) &&
 		fileExists(p.nodeKeyEnc) &&
+		fileExists(p.currentKey) && // PSK durable: resume-only state can't rerun Phase-1
 		!fileExists(p.nodeKeyUnsealed)
 	acked := !fileExists(p.pendingSentinel)
 	return classifyInviteJoinResume(bundlePresent, persistedKey, artifactsComplete, acked)
@@ -457,32 +460,39 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 	}
 	st.nodeKeyKEKGen = sealGen
 	// Re-persist the sentinel with the chosen gen BEFORE sealing (the step-2 write
-	// predates staging and carries gen 0). Ordering matters for crash safety:
+	// predates staging and carries gen 0). Ordering matters for crash safety
+	// (artifactsComplete requires node.key.enc present + node.key.unsealed absent +
+	// keys.d/current.key present):
 	//   - crash after this write, before SealNodeKey → no node.key.enc →
 	//     !artifactsComplete → FreshJoin re-runs Phase-1 (reusing the unsealed key);
-	//   - crash after SealNodeKey, before shred → unsealed still present →
+	//   - crash after SealNodeKey, before PSK write → unsealed still present →
 	//     !artifactsComplete → FreshJoin re-seals (atomic temp+rename overwrites);
-	//   - crash after shred → artifactsComplete, sentinel already carries the
-	//     correct gen → Resume → Phase-2 LoadNodeKey under the SAME gen.
+	//   - crash after PSK write, before shred → unsealed still present →
+	//     !artifactsComplete → FreshJoin re-runs (PSK write is idempotent overwrite);
+	//   - crash after shred → artifactsComplete (PSK already durable), sentinel
+	//     carries the correct gen → Resume → Phase-2 LoadNodeKey under the SAME gen.
 	if err := writeInvitePendingSentinel(opts.DataDir, paths.pendingSentinel, st); err != nil {
 		return err
 	}
 	if err := transport.SealNodeKey(opts.DataDir, sealKEK, cert); err != nil {
 		return fmt.Errorf("seal node key: %w", err)
 	}
-	shredFile(paths.nodeKeyUnsealed)
 
 	// 9. set the transport PSK in memory so bootValidateConfig's --cluster-key
-	// gate passes (PSK is the hex cluster-key string, applied verbatim). Also
-	// mirror it to keys.d/current.key NOW so a crash before bootQUICTransport
-	// still lets the resume boot (which leaves opts.ClusterKey empty) read the
-	// PSK from disk (ResolveClusterKey: disk wins).
+	// gate passes (PSK is the hex cluster-key string, applied verbatim), and
+	// mirror it to keys.d/current.key. This MUST happen BEFORE shredding the
+	// unsealed node key: a resume boot (which leaves opts.ClusterKey empty) reads
+	// the PSK from disk, and inviteJoinResumeFromSentinel hard-fails without it.
+	// Writing the PSK before the shred guarantees no crash window can leave
+	// {node.key.enc present, unsealed absent, current.key missing} — a state the
+	// gate would classify as Resume yet which can no longer rerun Phase-1.
 	opts.ClusterKey = string(psk)
 	if len(psk) > 0 {
 		if err := transport.NewKeystore(opts.DataDir).WriteCurrent(string(psk)); err != nil {
 			return fmt.Errorf("mirror transport PSK to keystore: %w", err)
 		}
 	}
+	shredFile(paths.nodeKeyUnsealed)
 
 	log.Warn().
 		Str("node_id", st.nodeID).

@@ -84,6 +84,7 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
 		mustWrite(t, p.pendingSentinel, []byte("pending"))
 		if got := gateInviteJoin(dir, true); got != inviteResume {
 			t.Fatalf("got %d want Resume", got)
@@ -100,6 +101,7 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
 		mustWrite(t, p.pendingSentinel, []byte("pending"))
 		if got := gateInviteJoin(dir, false); got != inviteResume {
 			t.Fatalf("got %d want Resume (no bundle env, complete+unacked)", got)
@@ -115,9 +117,29 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "3.key"), []byte("kek3"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
 		mustWrite(t, p.pendingSentinel, []byte("pending"))
 		if got := gateInviteJoin(dir, true); got != inviteResume {
 			t.Fatalf("got %d want Resume (gen-3 staged, no gen-0)", got)
+		}
+	})
+
+	t.Run("all secrets staged but PSK (current.key) missing -> fresh (P2)", func(t *testing.T) {
+		// Crash window: node.key.enc written + node.key.unsealed shredded, but the
+		// transport PSK never reached keys.d/current.key. Without current.key in the
+		// completeness gate this would classify as Resume, which then hard-fails
+		// (inviteJoinResumeFromSentinel needs the PSK) and can no longer rerun
+		// Phase-1. The gate must keep it FreshJoin instead.
+		dir := t.TempDir()
+		p := inviteJoinPathsFor(dir)
+		mustWrite(t, p.encryptionKey, []byte("k"))
+		mustWrite(t, p.clusterID, []byte("cid"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
+		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		// no current.key, no node.key.unsealed
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		if got := gateInviteJoin(dir, true); got != inviteFreshJoin {
+			t.Fatalf("got %d want FreshJoin (PSK missing = incomplete)", got)
 		}
 	})
 
@@ -128,6 +150,7 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
 		// no node.key.unsealed, no sentinel
 		if got := gateInviteJoin(dir, true); got != inviteNormalBoot {
 			t.Fatalf("got %d want NormalBoot", got)
