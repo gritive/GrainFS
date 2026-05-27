@@ -6,6 +6,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // pprof endpoints registered on DefaultServeMux when PprofPort > 0
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -61,6 +62,13 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	)
 	if err != nil {
 		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
+	}
+	metaDir := opts.MetaDir
+	if metaDir == "" {
+		metaDir = filepath.Join(opts.DataDir, "meta")
+	}
+	if err := EnsureBulkCipherFormat(opts.DataDir, BulkDataPresent(opts.DataDir, opts.DataDirs, metaDir)); err != nil {
+		return fmt.Errorf("encryption format guard: %w", err)
 	}
 	iamApplier := iam.NewApplier(iamStore, shardEncryptor)
 
