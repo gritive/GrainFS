@@ -286,6 +286,10 @@ type QUICTransport struct {
 	identityCert tls.Certificate
 	identity     atomic.Pointer[IdentitySnapshot] // rotation-spec D16: lock-free reload
 	expectedSPKI [32]byte
+	// composer owns the union of the three accept-set sources (base PSK,
+	// KEK-rotation window, peer-registry SPKIs) and issues one SwapIdentity per
+	// change so no source clobbers another (spec §6 D-rev3 step 3).
+	composer *identityComposer
 }
 
 // NewQUICTransport constructs a QUIC transport pinned to the cluster identity
@@ -315,7 +319,13 @@ func NewQUICTransport(psk string) (*QUICTransport, error) {
 		identityCert: cert,
 		expectedSPKI: spki,
 	}
-	t.identity.Store(NewIdentitySnapshot([][32]byte{spki}, cert, spki))
+	// The composer owns all subsequent accept-set changes and recomputes the
+	// union. Its swap closure stores the snapshot atomically (same effect as
+	// SwapIdentity). Seeding present = the PSK cert/SPKI makes the composer's
+	// initial recompute match today's initial identity (base PSK accepted,
+	// present = PSK cert) and overwrites the zero-cert default.
+	t.composer = newIdentityComposer(spki, func(snap *IdentitySnapshot) { t.identity.Store(snap) })
+	t.composer.setPresent(cert, spki)
 	return t, nil
 }
 
@@ -326,6 +336,23 @@ func NewQUICTransport(psk string) (*QUICTransport, error) {
 // concurrent readers may hold the pointer indefinitely.
 func (t *QUICTransport) SwapIdentity(snap *IdentitySnapshot) {
 	t.identity.Store(snap)
+}
+
+// UpdateRegistryAccept feeds the peer-registry per-node SPKIs into the
+// composer as a delta. The composer recomputes base ∪ rotation ∪ registry so
+// the registry never clobbers the base PSK or the live rotation window
+// (spec §6 D-rev3 step 3).
+func (t *QUICTransport) UpdateRegistryAccept(spkis [][32]byte) {
+	t.composer.setRegistry(spkis)
+}
+
+// ApplyRotation routes one rotation-phase change through the composer as a
+// single atomic op: it sets the rotation window + present cert/SPKI and, when
+// newBase is non-nil, advances the base — then recomputes once. Done under one
+// composer lock so an intermediate recompute never drops acceptance of the
+// just-presented cert. Called by the rotation worker per phase transition.
+func (t *QUICTransport) ApplyRotation(window [][32]byte, present tls.Certificate, presentSPKI [32]byte, newBase *[32]byte) {
+	t.composer.applyRotation(window, present, presentSPKI, newBase)
 }
 
 // MustNewQUICTransport is NewQUICTransport that panics on error. Intended only

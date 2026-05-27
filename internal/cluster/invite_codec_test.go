@@ -118,6 +118,35 @@ func TestCodecRoundTrip_RevokePeer(t *testing.T) {
 	}
 }
 
+// TestCodecRoundTrip_RegisterMember encodes and decodes a RegisterMember
+// command, including the presents_per_node bool.
+func TestCodecRoundTrip_RegisterMember(t *testing.T) {
+	nodeID := "node-member-rt"
+	s := spki(11)
+	addr := "10.0.3.4:7003"
+
+	data, err := encodeRegisterMemberCmd(nodeID, s, addr, true)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	gotNode, gotSPKI, gotAddr, gotPresents, err := decodeRegisterMemberCmd(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if gotNode != nodeID {
+		t.Errorf("nodeID: got %q, want %q", gotNode, nodeID)
+	}
+	if gotSPKI != s {
+		t.Error("spki mismatch")
+	}
+	if gotAddr != addr {
+		t.Errorf("addr: got %q, want %q", gotAddr, addr)
+	}
+	if !gotPresents {
+		t.Error("presents_per_node: got false, want true")
+	}
+}
+
 // TestCodecRoundTrip_InvitePending encodes and decodes an InvitePending command.
 func TestCodecRoundTrip_InvitePending(t *testing.T) {
 	inviteID := "inv-pending-rt"

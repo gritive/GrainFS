@@ -519,6 +519,7 @@ enum MetaCmdType : uint8 {
   PromoteMember                = 76, // zero-CA: promote a pending-learner to voting member
   RevokePeer                   = 77, // zero-CA: remove a peer + denylist its SPKI
   InvitePending                = 78, // zero-CA: record a pending invite-join (invite_id, node_id, SPKI, addr)
+  RegisterMember               = 79, // zero-CA: non-demoting boot-time self-registration as member (D-rev3 step2)
 }
 
 table MetaNodeEntry {
@@ -801,6 +802,17 @@ table MetaRevokePeerCmd {
   node_id:string;
 }
 
+// MetaRegisterMemberCmd is non-demoting boot-time self-registration (slot 79).
+// Unlike RegisterPendingLearner it inserts/keeps a peer as member, never
+// downgrading an existing member or pending-learner. presents_per_node is
+// recording-only plumbing (Task 7).
+table MetaRegisterMemberCmd {
+  node_id:string;
+  spki:[ubyte];     // 32 bytes
+  address:string;
+  presents_per_node:bool;
+}
+
 // NFSv4 multi-export registry. Per design doc D2/D3/D5.
 // fsid_major = cluster namespace; fsid_minor = monotonic export id;
 // generation increments on every Upsert so Phase 3 FHs from a prior
@@ -855,6 +867,16 @@ table KEKStatusEntry {
   retire_commit_index:uint64;
 }
 
+// zero-CA peer registry entry. state: 0=pendingLearner, 1=member.
+// spki is the 32-byte SubjectPublicKeyInfo digest pinning the peer identity.
+table PeerEntry {
+  node_id:string;
+  spki:[ubyte];                 // 32 bytes
+  address:string;
+  state:ubyte;
+  presents_per_node:bool;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
   shard_groups:[ShardGroupEntry];             // PR-C
@@ -869,6 +891,7 @@ table MetaStateSnapshot {
   iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
   last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
+  peers:[PeerEntry];                                        // zero-CA peer registry: slot 13 (Task 5, codex P1)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

@@ -114,6 +114,7 @@ const (
 	MetaCmdTypeRegisterPendingLearner = clusterpb.MetaCmdTypeRegisterPendingLearner
 	MetaCmdTypePromoteMember          = clusterpb.MetaCmdTypePromoteMember
 	MetaCmdTypeRevokePeer             = clusterpb.MetaCmdTypeRevokePeer
+	MetaCmdTypeRegisterMember         = clusterpb.MetaCmdTypeRegisterMember
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -739,6 +740,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyPromoteMember(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRevokePeer:
 		return f.applyRevokePeer(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRegisterMember:
+		return f.applyRegisterMember(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeScrubTrigger:
 		return f.applyScrubTrigger(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeIAMSACreate:

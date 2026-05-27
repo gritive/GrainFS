@@ -18,6 +18,9 @@ type peerEntry struct {
 	SPKI    [32]byte
 	Address string
 	State   peerState
+	// PresentsPerNode records whether this peer presents a per-node identity
+	// (D-rev3). Recording-only plumbing; Task 7 reads it.
+	PresentsPerNode bool
 }
 
 // peerRegistry is the deterministic membership/SPKI registry applied from the
@@ -66,6 +69,30 @@ func (r *peerRegistry) registerPendingLearner(nodeID string, s [32]byte, addr st
 	return nil
 }
 
+// registerMember is non-demoting boot-time self-registration (D-rev3 step 2).
+// If the node is absent it is inserted directly as a member. If it is already
+// present with the SAME (nodeID, SPKI) it is kept/UPGRADED to member — an
+// existing member stays member, a pending-learner is promoted; it is NEVER
+// downgraded. Address and PresentsPerNode are refreshed last-write-wins on an
+// idempotent re-register. The same SPKI-uniqueness and node-id-rebind guards as
+// registerPendingLearner apply. presentsPerNode is recording-only (Task 7).
+func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, presentsPerNode bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, denied := r.deny[s]; denied {
+		return errSPKIDenylisted
+	}
+	if owner, ok := r.bySPKI[s]; ok && owner != nodeID {
+		return fmt.Errorf("%w: owned by %s", errSPKINotUnique, owner)
+	}
+	if existing, ok := r.byNodeID[nodeID]; ok && existing.SPKI != s {
+		return fmt.Errorf("%w: node %s already bound to a different SPKI", errNodeIDRebind, nodeID)
+	}
+	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStateMember, PresentsPerNode: presentsPerNode}
+	r.bySPKI[s] = nodeID
+	return nil
+}
+
 func (r *peerRegistry) promoteMember(nodeID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -76,6 +103,72 @@ func (r *peerRegistry) promoteMember(nodeID string) error {
 	e.State = peerStateMember
 	r.byNodeID[nodeID] = e
 	return nil
+}
+
+// export returns a snapshot copy of every registered entry (member AND
+// pending-learner). Used by MetaFSM.Snapshot to serialize the registry into the
+// meta-state snapshot so the per-node accept-set survives log compaction.
+func (r *peerRegistry) export() []peerEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]peerEntry, 0, len(r.byNodeID))
+	for _, e := range r.byNodeID {
+		out = append(out, e)
+	}
+	return out
+}
+
+// validatePeerEntries validates a snapshot's peer entries and BUILDS the
+// byNodeID/bySPKI indexes WITHOUT touching the live registry. It REPLACES the
+// indexes wholesale on commit (state restore — NOT a register* flow); the deny
+// set is left untouched (it is not part of the snapshot; see Task 5 report).
+// State and PresentsPerNode are preserved verbatim.
+//
+// Validation: a corrupt meta snapshot is fatal, so this hard-errors on any
+// malformed/inconsistent entry. Checks: non-empty node ID; valid State enum;
+// SPKI not zero (a short SPKI copy zero-pads, so zero is the corruption signal —
+// the decode loop in meta_fsm_snapshot.go also rejects wrong-length SPKI
+// upstream); no duplicate node ID; no duplicate SPKI (so bySPKI can never point
+// at two node-ids). Deterministic across nodes: same bytes → same error.
+//
+// The meta-FSM Restore decode phase calls this EARLY so a corrupt peer vector
+// returns an error BEFORE any core FSM state is committed (no partial restore);
+// the commit phase then calls commitPeerIndexes with the pre-validated maps,
+// which cannot fail.
+func validatePeerEntries(entries []peerEntry) (map[string]peerEntry, map[[32]byte]string, error) {
+	byNodeID := make(map[string]peerEntry, len(entries))
+	bySPKI := make(map[[32]byte]string, len(entries))
+	for i, e := range entries {
+		if e.NodeID == "" {
+			return nil, nil, fmt.Errorf("importEntries: entry[%d] has empty node ID", i)
+		}
+		if e.State != peerStatePendingLearner && e.State != peerStateMember {
+			return nil, nil, fmt.Errorf("importEntries: node %s has invalid state %d", e.NodeID, e.State)
+		}
+		if e.SPKI == ([32]byte{}) {
+			return nil, nil, fmt.Errorf("importEntries: node %s has zero/malformed SPKI", e.NodeID)
+		}
+		if _, dup := byNodeID[e.NodeID]; dup {
+			return nil, nil, fmt.Errorf("importEntries: duplicate node ID %s", e.NodeID)
+		}
+		if owner, dup := bySPKI[e.SPKI]; dup {
+			return nil, nil, fmt.Errorf("importEntries: duplicate SPKI shared by node %s and node %s", owner, e.NodeID)
+		}
+		byNodeID[e.NodeID] = e
+		bySPKI[e.SPKI] = e.NodeID
+	}
+	return byNodeID, bySPKI, nil
+}
+
+// commitPeerIndexes swaps pre-validated indexes (from validatePeerEntries) into
+// the live registry under lock. It is the unfailable commit half of the
+// validate/commit split — Restore calls it only after every other section has
+// been committed.
+func (r *peerRegistry) commitPeerIndexes(byNodeID map[string]peerEntry, bySPKI map[[32]byte]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byNodeID = byNodeID
+	r.bySPKI = bySPKI
 }
 
 // spkiOwner returns the node-id that owns an SPKI (Task 5 uses this).

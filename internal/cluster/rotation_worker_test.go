@@ -1,20 +1,28 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"strings"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// fakeIdentitySwapper captures SwapIdentity calls so we can assert on them
-// without spinning a real QUIC transport.
+// fakeIdentitySwapper captures identity-swap calls so we can assert on them
+// without spinning a real QUIC transport. The worker now routes phase changes
+// through ApplyRotation (composer path); the fake synthesizes the equivalent
+// snapshot (accept = rotation window, present = supplied cert/SPKI) so existing
+// assertions on AcceptSPKIs/PresentSPKI keep holding.
 type fakeIdentitySwapper struct {
 	calls []*transport.IdentitySnapshot
 }
 
 func (f *fakeIdentitySwapper) SwapIdentity(snap *transport.IdentitySnapshot) {
 	f.calls = append(f.calls, snap)
+}
+
+func (f *fakeIdentitySwapper) ApplyRotation(window [][32]byte, present tls.Certificate, presentSPKI [32]byte, newBase *[32]byte) {
+	f.calls = append(f.calls, transport.NewIdentitySnapshot(window, present, presentSPKI))
 }
 
 func TestRotationWorker_PhaseBegun_AddsNewToAccept(t *testing.T) {
