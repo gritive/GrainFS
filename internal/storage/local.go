@@ -1090,8 +1090,15 @@ func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 			return err
 		}
 		if m.b.segEnc != nil {
-			_, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), bytes.NewReader(rec.Payload), io.Discard)
-			return err
+			if _, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), bytes.NewReader(rec.Payload), io.Discard); err != nil {
+				// Drop the partial so WAL recovery re-materializes cleanly
+				// instead of trying to decrypt a half-written segment. Mirrors
+				// WriteSegmentBlob's cleanup; matters once D-seg-ec's
+				// DEKKeeperAdapter makes gen-pinning failures reachable.
+				_ = os.Remove(path)
+				return err
+			}
+			return nil
 		}
 		return os.WriteFile(path, rec.Payload, 0o644)
 	case datawal.OpObjectWriteAt:
