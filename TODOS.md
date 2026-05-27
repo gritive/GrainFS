@@ -325,13 +325,12 @@ Work these in order. Do not run them in parallel.
   reopen when their telemetry triggers fire.
 - [ ] **Incident store scope index / `ScanObjects(bucket, keyPrefix)`**: reopen
   when measured margins fail or a concrete caller needs prefix scope.
-- [ ] **NFSv4 / NBD auth integration with SA model**: reopen after the
-  S3+Iceberg IAM redesign (admin-UDS-only bucket lifecycle, 2-tier
-  None/Read/Write, OAuth2 bearer for Iceberg) lands. Today NFSv4 relies on
-  AUTH_SYS / RPCSEC_GSS and NBD on TLS X.509 / LAN trust. Decide how (or
-  whether) mount-time credentials map onto SA + per-bucket Grant, and how
-  NFS uid/gid is reconciled with `(SA, Bucket, Role)`. Out of scope for the
-  current IAM grilling.
+- [ ] **Protocol credential data-plane enforcement**: the shared
+  `grainfs credential` admin API/CLI foundation exists for S3, Iceberg, NFS,
+  9P, and NBD. Follow up by persisting credentials through Raft, checking IAM
+  permissions on create/rotate/revoke, enforcing NBD `volume@secret` attach,
+  and migrating NFS/9P from MountSA-only auth onto protocol credentials without
+  losing uid/gid audit context.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

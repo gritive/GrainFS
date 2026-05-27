@@ -3,33 +3,11 @@ package serveruntime
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 )
-
-// enforceTLSPostureValues is the pure boot-path form. Returns nil when anon is
-// enabled, or a cert is on disk, or a trusted-proxy CIDR is set. The error
-// message names all three remediation options.
-func enforceTLSPostureValues(anon bool, certPath, keyPath, proxyCIDR string) error {
-	if anon {
-		return nil
-	}
-	if _, err := os.Stat(certPath); err == nil {
-		return nil
-	}
-	if proxyCIDR != "" {
-		return nil
-	}
-	return fmt.Errorf("auth required + no TLS cert + no trusted proxy. "+
-		"Place cert at %s + %s, OR "+
-		"set GRAINFS_TLS_CERT/KEY, OR "+
-		"`grainfs config set trusted-proxy.cidr <cidr>`",
-		certPath, keyPath)
-}
 
 // enforceTLSPosture is retained as a boot hook, but no longer gates startup on
 // the removed iam.anon-enabled key. TLS requirements are now operator policy,

@@ -29,6 +29,10 @@ const (
 	routePathDashboardToken  = "/dashboard/token"
 	routePathDashboardRotate = "/dashboard/token/rotate"
 
+	routePathCredentials      = "/credentials"
+	routePathCredential       = "/credentials/:id"
+	routePathCredentialRotate = "/credentials/:id/rotate"
+
 	routePathBuckets          = "/buckets"
 	routePathBucket           = "/buckets/:name"
 	routePathBucketPolicy     = "/buckets/:name/policy"

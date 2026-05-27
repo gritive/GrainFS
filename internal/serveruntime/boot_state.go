@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -272,10 +273,11 @@ type bootState struct {
 	auditOutbox *audit.Outbox
 
 	// bootHTTPServerAndAdmin
-	srv        *server.Server
-	tokenStore *dashboard.TokenStore
-	adminDeps  *admin.Deps
-	adminSrv   *admin.Server
+	srv                 *server.Server
+	tokenStore          *dashboard.TokenStore
+	adminDeps           *admin.Deps
+	adminSrv            *admin.Server
+	protocolCredentials *protocred.Service
 
 	// bootRecoveryAndScrubber
 	scrubDirector *scrubber.Director
