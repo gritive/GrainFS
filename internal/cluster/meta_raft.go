@@ -90,6 +90,24 @@ type MetaRaft struct {
 	icebergWaiters map[string]chan error
 
 	lastSnapshotIndex uint64
+
+	// kekRotationLeader is optionally wired via SetKEKRotationLeader before
+	// Start. When non-nil, runKEKLeadershipWatcher tracks raft leadership
+	// transitions and calls AcquireLeadership / LoseLeadership so any
+	// in-flight KEK lifecycle operation aborts cleanly on step-down.
+	kekRotationLeader *KEKRotationLeader
+
+	// dekEpoch holds the DEK-rotation leadership epoch context: nil when not
+	// leader, cancelled on step-down. Published NON-destructively + leader-aware
+	// by ensureDEKLeadership (CAS-only), cancelled solely by loseDEKLeadership.
+	// ProposeDEKRotate derives its bounded 60s ctx from this so a step-down
+	// cancels an in-flight rotation. atomic.Pointer (stdlib, lock-free) so the
+	// post-commit hook can race the leadership watcher without a mutex.
+	dekEpoch atomic.Pointer[leadershipEpoch]
+
+	// dekRotateMu single-flights ProposeDEKRotate. Acquired via TryLock
+	// (fail-fast); a concurrent rotation returns ErrDEKRotateInProgress.
+	dekRotateMu sync.Mutex
 }
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
@@ -211,6 +229,14 @@ func (m *MetaRaft) SetForwarderWithGate(fn func(ctx context.Context, data []byte
 	m.forwardFnWithGate = fn
 }
 
+// SetKEKRotationLeader wires the KEKRotationLeader so that MetaRaft's
+// leadership-watcher goroutine (started by Start) calls AcquireLeadership /
+// LoseLeadership on every raft leadership transition. Must be called before
+// Start. Production: wired from the serve-layer boot path (Task 11).
+func (m *MetaRaft) SetKEKRotationLeader(l *KEKRotationLeader) {
+	m.kekRotationLeader = l
+}
+
 func (m *MetaRaft) SetCapabilityGate(gate *CapabilityGate) {
 	m.capabilityGate = gate
 }
@@ -271,6 +297,7 @@ func (m *MetaRaft) Start(ctx context.Context, preApplyLoop func() error) error {
 	m.node.Start()
 	go m.runApplyLoop(ctx)
 	go m.runRotationAutoProgress(ctx)
+	go m.runKEKLeadershipWatcher(ctx)
 	return nil
 }
 
@@ -566,12 +593,6 @@ func (m *MetaRaft) ProposeConfigDelete(ctx context.Context, key string) error {
 		return fmt.Errorf("meta_raft: encode ConfigDelete: %w", err)
 	}
 	return m.Propose(ctx, MetaCmdTypeConfigDelete, payload)
-}
-
-// ProposeDEKRotate proposes a DEKRotate command (no payload) to the cluster,
-// blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeDEKRotate(ctx context.Context) error {
-	return m.Propose(ctx, MetaCmdTypeDEKRotate, nil)
 }
 
 // ProposeDEKVersionPrune proposes a DEKVersionPrune command for the given
@@ -904,7 +925,12 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 				if len(entry.Command) == 0 {
 					break
 				}
-				if err := m.fsm.applyCmd(entry.Command); err != nil {
+				if err := m.fsm.applyCmdAtIndex(entry.Command, entry.Index); err != nil {
+					if errors.Is(err, ErrFSMKEKFatal) {
+						log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FATAL KEK apply error — halting apply loop to prevent silent FSM divergence")
+						m.fsm.MarkFatalHalted(err)
+						return
+					}
 					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
 					m.recordApplyResult(entry.Index, err)
 				}
@@ -930,6 +956,67 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// runKEKLeadershipWatcher tracks raft leadership transitions and calls
+// AcquireLeadership / LoseLeadership on the wired KEKRotationLeader. The
+// registered observer API is a no-op in this codebase, so we edge-detect using
+// the same State()-polling approach as runRotationAutoProgress.
+//
+// Polling interval: MetaRaftHeartbeatInterval (~150ms) — fast enough that a
+// leadership loss reaches the epoch cancel well before the 60s propose timeout.
+//
+// On ctx cancellation / m.done close we call LoseLeadership to cancel any
+// in-flight lifecycle operation. The mutex is released by the goroutine's
+// deferred Unlock — NOT here — to avoid a race.
+func (m *MetaRaft) runKEKLeadershipWatcher(ctx context.Context) {
+	// The early-return guard (m.kekRotationLeader == nil) is intentionally
+	// dropped (Phase D): the watcher also drives the DEK leadership epoch, which
+	// must be published even if a future build leaves kekRotationLeader nil. Each
+	// KEK call is independently nil-guarded.
+	tick := time.NewTicker(MetaRaftHeartbeatInterval)
+	defer tick.Stop()
+	var wasLeader bool
+	for {
+		select {
+		case <-ctx.Done():
+			if wasLeader {
+				if m.kekRotationLeader != nil {
+					m.kekRotationLeader.LoseLeadership()
+				}
+				m.loseDEKLeadership()
+			}
+			return
+		case <-m.done:
+			if wasLeader {
+				if m.kekRotationLeader != nil {
+					m.kekRotationLeader.LoseLeadership()
+				}
+				m.loseDEKLeadership()
+			}
+			return
+		case <-tick.C:
+		}
+		isLeader := m.node.IsLeader()
+		switch {
+		case isLeader && !wasLeader:
+			if m.kekRotationLeader != nil {
+				m.kekRotationLeader.AcquireLeadership()
+			}
+			// Publish-only on the leader edge; ignore (ep, err) — the watcher
+			// just primes the epoch, IsLeader() is true here. The in-line
+			// ensure in ProposeDEKRotate closes the post-win publication-window
+			// gap, and this call is NON-destructive so it never cancels an epoch
+			// a hook already self-published.
+			_, _ = m.ensureDEKLeadership()
+		case !isLeader && wasLeader:
+			if m.kekRotationLeader != nil {
+				m.kekRotationLeader.LoseLeadership()
+			}
+			m.loseDEKLeadership()
+		}
+		wasLeader = isLeader
 	}
 }
 

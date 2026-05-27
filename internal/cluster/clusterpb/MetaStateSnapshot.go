@@ -260,8 +260,48 @@ func (rcv *MetaStateSnapshot) MutateIcebergSchemaVersion(n int32) bool {
 	return rcv._tab.MutateInt32Slot(24, n)
 }
 
+func (rcv *MetaStateSnapshot) LastRotationRequestEntries(obj *LastRotationRequestEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) LastRotationRequestEntriesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MetaStateSnapshot) KekStatusEntries(obj *KEKStatusEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) KekStatusEntriesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(13)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -322,6 +362,18 @@ func MetaStateSnapshotStartNfsExportsVector(builder *flatbuffers.Builder, numEle
 }
 func MetaStateSnapshotAddIcebergSchemaVersion(builder *flatbuffers.Builder, icebergSchemaVersion int32) {
 	builder.PrependInt32Slot(10, icebergSchemaVersion, 0)
+}
+func MetaStateSnapshotAddLastRotationRequestEntries(builder *flatbuffers.Builder, lastRotationRequestEntries flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(lastRotationRequestEntries), 0)
+}
+func MetaStateSnapshotStartLastRotationRequestEntriesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaStateSnapshotAddKekStatusEntries(builder *flatbuffers.Builder, kekStatusEntries flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(kekStatusEntries), 0)
+}
+func MetaStateSnapshotStartKekStatusEntriesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

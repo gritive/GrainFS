@@ -26,6 +26,8 @@ opcode or returning partial data.
 | Capability | Introduced | Scope | Operations gated | Mixed-version behavior |
 | --- | --- | --- | --- | --- |
 | `multipart_listing_v1` | `0.0.213.0` | Peer transport | `CreateMultipartUpload`, `ListMultipartUploads`, `ListParts` | Reject until all target peers advertise the capability. |
+| `kek_envelope_v1` | `0.0.355.0` | Meta-raft commands + admin operations | `KEKRotate`, `KEKRetire`, `KEKPrune`, `KEKLeaseSnapshot`, `KEKStatusQuery` | Reject until all voters advertise. Mixed-version cluster cannot rotate/retire/prune until upgrade complete. |
+| `dek_replicated_v1` | `0.0.355.0` | Meta-raft | `DEKRotate` | Reject until all voters advertise. Pre-0.0.355.0 encrypted multi-node clusters cannot upgrade in place — greenfield boundary only. |
 
 ## Running the Compat Suite
 
@@ -58,6 +60,7 @@ The second entry is the previous version. If parsing fails or only one version e
 | 5 | `TestInstallSnapshotPath` | N-1 cluster runs; N node joins and receives InstallSnapshot RPC | live |
 | 6 | `TestRestartToOlderBinary` | Canary: documents behavior when N-1 binary reads N-format data | live |
 | 7 | `TestHeadSnapshotInvisibleToOlderBinary` | HEAD-format `.json.zst` snapshot is invisible to older `.json.gz` readers with non-200 restore response | live |
+| 8 | `TestKEKEnvelopeV1Rejected` | Mixed N-1 + N cluster: admin KEK rotate trigger on N node rejected (503) because N-1 does not advertise `kek_envelope_v1` | live |
 
 > A separate PR handles Scenario 4, FSM divergence detection via StateHash.
 

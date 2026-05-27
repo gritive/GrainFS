@@ -117,3 +117,99 @@ func TestDefaultRegistryIncludesMultipartListingCapability(t *testing.T) {
 		t.Fatalf("OperationListMultipartUploads = %s", OperationListMultipartUploads)
 	}
 }
+
+func TestRegistryKEKEnvelopeV1Registered(t *testing.T) {
+	cap, ok := DefaultRegistry.Lookup(CapabilityKEKEnvelopeV1)
+	if !ok {
+		t.Fatalf("kek_envelope_v1 not registered")
+	}
+	if cap.Scope != ScopeMetaRaft {
+		t.Errorf("scope = %q, want meta_raft", cap.Scope)
+	}
+	if cap.Severity != SeverityHard {
+		t.Errorf("severity = %q, want hard", cap.Severity)
+	}
+	if cap.IntroducedVersion == "" {
+		t.Errorf("IntroducedVersion empty")
+	}
+}
+
+func TestKEKOperationsGated(t *testing.T) {
+	for _, op := range []Operation{
+		OperationKEKRotate,
+		OperationKEKRetire,
+		OperationKEKPrune,
+		OperationKEKLeaseSnapshot,
+		OperationKEKStatusQuery,
+	} {
+		caps, ok := DefaultRegistry.RequiredCapabilitiesForOperation(op)
+		if !ok {
+			t.Errorf("operation %q not gated", op)
+			continue
+		}
+		found := false
+		for _, c := range caps {
+			if c == CapabilityKEKEnvelopeV1 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("operation %q missing kek_envelope_v1 gate", op)
+		}
+	}
+}
+
+func TestKEKOperationStringValues(t *testing.T) {
+	pinned := map[Operation]string{
+		OperationKEKRotate:        "kek_rotate",
+		OperationKEKRetire:        "kek_retire",
+		OperationKEKPrune:         "kek_prune",
+		OperationKEKLeaseSnapshot: "kek_lease_snapshot",
+		OperationKEKStatusQuery:   "kek_status_query",
+	}
+	for op, want := range pinned {
+		if string(op) != want {
+			t.Errorf("operation %q != %q", string(op), want)
+		}
+	}
+}
+
+func TestRegistryDEKReplicatedV1Registered(t *testing.T) {
+	cap, ok := DefaultRegistry.Lookup(CapabilityDEKReplicatedV1)
+	if !ok {
+		t.Fatalf("dek_replicated_v1 not registered")
+	}
+	if cap.Scope != ScopeMetaRaft {
+		t.Errorf("scope = %q, want meta_raft", cap.Scope)
+	}
+	if cap.Severity != SeverityHard {
+		t.Errorf("severity = %q, want hard", cap.Severity)
+	}
+	if cap.IntroducedVersion == "" {
+		t.Errorf("IntroducedVersion empty")
+	}
+}
+
+func TestDEKRotateOperationGated(t *testing.T) {
+	caps, ok := DefaultRegistry.RequiredCapabilitiesForOperation(OperationDEKRotate)
+	if !ok {
+		t.Fatalf("OperationDEKRotate not gated")
+	}
+	found := false
+	for _, c := range caps {
+		if c == CapabilityDEKReplicatedV1 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("OperationDEKRotate missing dek_replicated_v1 gate")
+	}
+}
+
+func TestDEKOperationStringValues(t *testing.T) {
+	if string(OperationDEKRotate) != "dek_rotate" {
+		t.Errorf("OperationDEKRotate = %q, want dek_rotate", string(OperationDEKRotate))
+	}
+}

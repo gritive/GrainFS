@@ -215,6 +215,7 @@ func (f *fakeRaftNode) LeaderID() string {
 	return f.id
 }
 func (f *fakeRaftNode) CommittedIndex() uint64                              { return 0 }
+func (f *fakeRaftNode) LastLogIndex() uint64                                { return 0 }
 func (f *fakeRaftNode) Configuration() raft.Configuration                   { return raft.Configuration{} }
 func (f *fakeRaftNode) Peers() []string                                     { return append([]string(nil), f.peers...) }
 func (f *fakeRaftNode) PeerMatchIndex(string) (uint64, bool)                { return 0, false }

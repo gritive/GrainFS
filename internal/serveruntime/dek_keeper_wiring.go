@@ -32,6 +32,16 @@ import (
 // cluster.id (Phase A): generated as UUID v7 on first boot, persisted to
 // <dataDir>/cluster.id, and loaded on subsequent boots. Joiners receive
 // the file out-of-band (operator scp's it alongside the active KEK).
+// isGenesisBoot reports whether this node is bootstrapping a brand-new cluster
+// as the initial single voter — the sole source of truth for genesis material
+// (KEK v0, cluster.id, DEK gen-0). It is the negation of "joiner or restart":
+// joinMode (.join-pending), static peers configured, or prior raft/meta state.
+// SAME signal the KEK auto-generate branch and the cluster.id strict-mode branch
+// already trust.
+func isGenesisBoot(state *bootState) bool {
+	return !(state.joinMode || len(state.peers) > 0 || state.priorState)
+}
+
 func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	// Phase A no longer honors GRAINFS_KEK_SOURCE — the keystore is always
 	// at <dataDir>/keys/<V>.key (configurable via GRAINFS_KEK_DIR for tests).
@@ -57,7 +67,7 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	// bootOpenMetaDB ran). Auto-generation in either case would silently
 	// corrupt the cluster — restore would unwrap FSM-stored DEKs with
 	// the wrong KEK.
-	if state.joinMode || len(state.peers) > 0 || state.priorState {
+	if !isGenesisBoot(state) {
 		if empty, err := encrypt.KeysDirIsEmpty(keysDir); err != nil {
 			return fmt.Errorf("wireDEKKeeper: stat keys dir %s: %w", keysDir, err)
 		} else if empty {
@@ -85,18 +95,14 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	}
 	defer zeroizeKEKCopy(activeKEK)
 
-	keeper, err := encrypt.NewDEKKeeper(activeKEK)
-	if err != nil {
-		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
-	}
-
 	// cluster.id load mode: strict when join mode OR prior state exists,
 	// so a missing cluster.id on a restart surfaces as
 	// ErrClusterIDMissing rather than silently regenerating a fresh UUID
 	// (which would drift the cluster identity from what raft/meta
-	// already contains).
+	// already contains). Loaded BEFORE NewDEKKeeper because every DEK wrap is
+	// now AAD-bound to clusterID (DomainDEKFSMWrap).
 	var clusterID []byte
-	if state.joinMode || len(state.peers) > 0 || state.priorState {
+	if !isGenesisBoot(state) {
 		clusterID, err = cfg.LoadClusterID()
 		if err != nil {
 			return fmt.Errorf("wireDEKKeeper: cluster.id (strict): %w", err)
@@ -108,11 +114,72 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 		}
 	}
 
+	// Genesis vs non-genesis DEK keeper (Phase D Task 5). Only the genesis node
+	// (fresh single-voter init) is the sole source of truth for gen-0 — it
+	// generates a random gen-0 locally and replicates it via the ungated
+	// bootstrap propose. Joiners / restarts start EMPTY: gen-0 arrives via raft
+	// log replay or snapshot restore (rebuildDEKKeeperFromRestore via
+	// LoadFromFSM). Generating DEK material locally on a non-genesis node would
+	// diverge across the cluster.
+	var keeper *encrypt.DEKKeeper
+	if isGenesisBoot(state) {
+		keeper, err = encrypt.NewDEKKeeper(activeKEK, clusterID) // random gen-0, AAD-bound
+	} else {
+		keeper, err = encrypt.NewEmptyDEKKeeper(activeKEK, clusterID) // gen-0 arrives via replay/restore
+	}
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: init DEK keeper: %w", err)
+	}
+	// Label the seal counter with the keystore's active KEK version so the
+	// grainfs_kek_seal_count metric reports against the correct version from
+	// boot (a restored node may already be past version 0).
+	keeper.SetActiveKEKVersion(store.ActiveVersion())
+
+	// Bind the FSM's clusterID so the KEK-rewrap verify path
+	// (verifyRewrappedDEKsAgainstWrapSet) reconstructs the SAME
+	// DomainDEKFSMWrap AAD the keeper used to seal each wrap. Without this the
+	// FSM's clusterID stays all-zero and every KEK rotate would fail AAD auth
+	// on a fresh-boot cluster (Task 1b HIGH 1 — production parity with
+	// rebuildDEKKeeperFromRestore).
+	fsm.SetClusterID(clusterID)
+
 	fsm.SetDEKKeeper(keeper)
+	// Wire the same KEKStore into the FSM. Both MetaKEKRotateCmd Apply and
+	// KEKRotationLeader.ProposeKEKRotate read f.KEKStore(); without this the
+	// whole Phase B rotate/retire/prune lifecycle fails with "keystore not
+	// wired" and GET /v1/encrypt/kek/status reports an empty version list.
+	// (Caught by the Task 15 e2e lifecycle suite; unit tests wired the store
+	// directly so the boot-path gap was invisible.)
+	fsm.SetKEKStore(store)
+	// Back the FSM keystore with the on-disk keys dir so MetaKEKRotateCmd
+	// persists keys/<V>.key (AddAndPersist) and MetaKEKPruneCmd unlinks it
+	// (RemoveAndUnlink). Without this the rotation Apply installs K_new in
+	// memory only, so rotated KEKs are lost on restart and prune cannot
+	// delete the on-disk file. (Caught by the Task 15 e2e lifecycle suite.)
+	fsm.SetKEKDir(keysDir)
 	state.dekKeeper = keeper
 	state.kekStore = store
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
-	WireDEKPostCommit(fsm, nil /* proposer (§6) */, keeper, nil /* scrubberKick (§6) */)
+	// kekLeaseTracker counts in-flight KEK consumers per version. Phase B has no
+	// runtime acquire sites — Phase D wires them (raft snapshot reader holding
+	// K_old during decrypt + InstallSnapshot receiver). LeaseSnapshot RPC returns
+	// 0 deterministically in Phase B, which is correct: prune-after-retire only
+	// requires lease_count == 0, and there are no consumers to drive it nonzero.
+	state.kekLeaseTracker = encrypt.NewKEKLeaseTracker()
+	// Wire the real DEK proposer (state.metaRaft) and leader gate now that
+	// metaRaft is already stored on state (boot_phases_raft.go:54 runs before
+	// this call at line 100). The leader gate collapses N-node post-commit
+	// fan-out to a single proposal. scrubberKick remains nil until the
+	// storage-layer adapter is implemented.
+	//
+	// Unit tests that call wireDEKKeeper directly without a MetaRaft pass nil
+	// for both proposer and isLeader; nil isLeader is treated as not-leader
+	// (fail-safe) by DEKPostCommitDispatcher.handleConfigPut.
+	var isLeaderFn func() bool
+	if state.metaRaft != nil {
+		isLeaderFn = state.metaRaft.IsLeader
+	}
+	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, nil /* scrubberKick (§6) */)
 	return nil
 }
 

@@ -387,3 +387,151 @@ func TestKeysDirIsEmpty(t *testing.T) {
 		}
 	})
 }
+
+func TestKEKStore_SealOpenWithActiveKEK_RoundTrip(t *testing.T) {
+	s := NewKEKStore()
+	kek := make([]byte, KEKSize)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	if err := s.Add(0, kek); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	plain := []byte("hello capability assertion")
+	aad := []byte("test-aad")
+
+	ct, err := s.SealWithActiveKEK(plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithActiveKEK: %v", err)
+	}
+	got, err := s.OpenWithActiveKEK(ct, aad)
+	if err != nil {
+		t.Fatalf("OpenWithActiveKEK: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("round-trip mismatch: got %q, want %q", got, plain)
+	}
+}
+
+func TestKEKStore_SealOpenWithActiveKEK_AADMismatchRejects(t *testing.T) {
+	s := NewKEKStore()
+	kek := make([]byte, KEKSize)
+	for i := range kek {
+		kek[i] = byte(i + 2)
+	}
+	if err := s.Add(0, kek); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	plain := []byte("some data")
+	ct, err := s.SealWithActiveKEK(plain, []byte("aad-a"))
+	if err != nil {
+		t.Fatalf("SealWithActiveKEK: %v", err)
+	}
+	_, err = s.OpenWithActiveKEK(ct, []byte("aad-b"))
+	if err == nil {
+		t.Fatal("expected error on AAD mismatch, got nil")
+	}
+}
+
+func TestKEKStore_SealOpenWithActiveKEK_WrongKEKRejects(t *testing.T) {
+	s1 := NewKEKStore()
+	s2 := NewKEKStore()
+	kek1 := bytes.Repeat([]byte{0x11}, KEKSize)
+	kek2 := bytes.Repeat([]byte{0x22}, KEKSize)
+	if err := s1.Add(0, kek1); err != nil {
+		t.Fatalf("s1.Add: %v", err)
+	}
+	if err := s2.Add(0, kek2); err != nil {
+		t.Fatalf("s2.Add: %v", err)
+	}
+	aad := []byte("shared-aad")
+	ct, err := s1.SealWithActiveKEK([]byte("secret"), aad)
+	if err != nil {
+		t.Fatalf("SealWithActiveKEK: %v", err)
+	}
+	_, err = s2.OpenWithActiveKEK(ct, aad)
+	if err == nil {
+		t.Fatal("expected error when opening with wrong KEK, got nil")
+	}
+}
+
+// TestKEKStore_RemoveAndUnlink_DiskFirst verifies disk unlink + parent-dir
+// fsync happens BEFORE the in-memory delete. We force a disk failure (read-only
+// keysDir + missing file path) and assert the in-memory entry is preserved so
+// a replay can retry deterministically.
+func TestKEKStore_RemoveAndUnlink_DiskFirst(t *testing.T) {
+	dir := t.TempDir()
+	s, err := LoadOrInitKEKStoreDir(dir)
+	if err != nil {
+		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
+	}
+	// Add a second version so we can remove a non-active one.
+	k1 := bytes.Repeat([]byte{0xB1}, KEKSize)
+	if err := s.AddAndPersist(dir, 1, k1); err != nil {
+		t.Fatalf("AddAndPersist v1: %v", err)
+	}
+	// Active is now 1. Remove version 0.
+	if !s.HasVersion(0) {
+		t.Fatalf("setup: expected version 0 present")
+	}
+	if err := s.RemoveAndUnlink(dir, 0); err != nil {
+		t.Fatalf("RemoveAndUnlink(0): %v", err)
+	}
+	// In-memory gone.
+	if s.HasVersion(0) {
+		t.Errorf("HasVersion(0) = true after RemoveAndUnlink; want false")
+	}
+	// On-disk gone.
+	if _, err := os.Stat(filepath.Join(dir, "0.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("0.key still on disk: %v", err)
+	}
+	// Refuses to remove active version.
+	if err := s.RemoveAndUnlink(dir, 1); err == nil {
+		t.Errorf("RemoveAndUnlink(active=1) accepted; want error")
+	}
+	// Idempotent: a second remove on already-removed version is a no-op.
+	if err := s.RemoveAndUnlink(dir, 0); err != nil {
+		t.Errorf("RemoveAndUnlink replay: %v", err)
+	}
+
+	// Disk-first ordering: when the directory does not exist, fsync fails and
+	// the in-memory state must be preserved.
+	k2 := bytes.Repeat([]byte{0xB2}, KEKSize)
+	if err := s.AddAndPersist(dir, 2, k2); err != nil {
+		t.Fatalf("AddAndPersist v2: %v", err)
+	}
+	if err := s.RemoveAndUnlink("/non/existent/dir", 1); err == nil {
+		t.Errorf("RemoveAndUnlink with bad dir accepted; want fsync failure")
+	}
+	// In-memory state for v1 must still be present — replay-safe.
+	if !s.HasVersion(1) {
+		t.Errorf("HasVersion(1) = false after failed RemoveAndUnlink; in-memory state must be preserved")
+	}
+}
+
+// TestCanonicalVoterSetHash_DeterministicAndSortInvariant verifies that
+// CanonicalVoterSetHash is deterministic, order-invariant, and discriminates
+// different voter sets.
+func TestCanonicalVoterSetHash_DeterministicAndSortInvariant(t *testing.T) {
+	a := []string{"node-c", "node-a", "node-b"}
+	b := []string{"node-a", "node-b", "node-c"}
+	c := []string{"node-b", "node-c", "node-a"}
+	if CanonicalVoterSetHash(a) != CanonicalVoterSetHash(b) {
+		t.Errorf("hash differs for same set in different order (a vs b)")
+	}
+	if CanonicalVoterSetHash(a) != CanonicalVoterSetHash(c) {
+		t.Errorf("hash differs for same set in different order (a vs c)")
+	}
+	// Different membership must produce a different hash.
+	d := []string{"node-a", "node-b"}
+	if CanonicalVoterSetHash(a) == CanonicalVoterSetHash(d) {
+		t.Errorf("hash equal for distinct sets {a,b,c} vs {a,b}")
+	}
+	// Distinct strings that would collide under naive concatenation must
+	// produce different hashes (length-prefix discipline).
+	x := []string{"ab", "c"}
+	y := []string{"a", "bc"}
+	if CanonicalVoterSetHash(x) == CanonicalVoterSetHash(y) {
+		t.Errorf("hash collides for {ab,c} vs {a,bc}; length-prefix missing?")
+	}
+}

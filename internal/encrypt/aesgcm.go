@@ -12,6 +12,66 @@ import (
 // ErrCiphertextTooShort is returned when the ciphertext is shorter than the GCM nonce.
 var ErrCiphertextTooShort = errors.New("ciphertext shorter than GCM nonce")
 
+// aesgcmSealWithAAD encrypts plain under key with AAD binding, random nonce.
+// Output: nonce(12) + ciphertext + GCM-tag(16). Key must be 32 bytes.
+func aesgcmSealWithAAD(key, plain, aad []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("aesgcmSealWithAAD: key must be 32 bytes, got %d", len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aesgcmSealWithAAD: create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("aesgcmSealWithAAD: create GCM: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("aesgcmSealWithAAD: generate nonce: %w", err)
+	}
+	return gcm.Seal(nonce, nonce, plain, aad), nil
+}
+
+// aesgcmOpenWithAAD decrypts ct produced by aesgcmSealWithAAD. Key must be 32 bytes.
+func aesgcmOpenWithAAD(key, ct, aad []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, fmt.Errorf("aesgcmOpenWithAAD: key must be 32 bytes, got %d", len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aesgcmOpenWithAAD: create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("aesgcmOpenWithAAD: create GCM: %w", err)
+	}
+	ns := gcm.NonceSize()
+	if len(ct) < ns {
+		return nil, ErrCiphertextTooShort
+	}
+	plain, err := gcm.Open(nil, ct[:ns], ct[ns:], aad)
+	if err != nil {
+		return nil, fmt.Errorf("aesgcmOpenWithAAD: %w", err)
+	}
+	return plain, nil
+}
+
+// AESGCMSealWithAAD encrypts plain under key with AAD binding, using a random
+// 12-byte nonce. Output: nonce(12) + ciphertext + GCM-tag(16). Key must be 32
+// bytes. Exported wrapper over aesgcmSealWithAAD so callers outside the
+// package (cluster FSM Apply, KEK rotation tests) can produce AAD-bound
+// ciphertexts without duplicating the AEAD construction.
+func AESGCMSealWithAAD(key, plain, aad []byte) ([]byte, error) {
+	return aesgcmSealWithAAD(key, plain, aad)
+}
+
+// AESGCMOpenWithAAD decrypts ct produced by AESGCMSealWithAAD. See
+// AESGCMSealWithAAD for the rationale of the exported wrapper.
+func AESGCMOpenWithAAD(key, ct, aad []byte) ([]byte, error) {
+	return aesgcmOpenWithAAD(key, ct, aad)
+}
+
 // AESGCMSeal encrypts plain under key using AES-256-GCM with a random 12-byte
 // nonce. The output format is: nonce(12) + ciphertext + tag(16).
 // key must be exactly 32 bytes.

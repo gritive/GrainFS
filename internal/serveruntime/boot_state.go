@@ -119,6 +119,18 @@ type bootState struct {
 	// MetaChallengeReceiver so the issued-nonce map is shared. Set by
 	// wireDEKKeeper; consumed by bootWALAndForwarders. §7 T55 / B1.
 	handshakeVerifier *encrypt.HandshakeVerifier
+	// kekLeaseTracker counts in-flight KEK consumers per version. Phase B has no
+	// runtime acquire sites — Phase D wires them (raft snapshot reader holding
+	// K_old during decrypt + InstallSnapshot receiver). LeaseSnapshot RPC returns
+	// 0 deterministically in Phase B, which is correct: prune-after-retire only
+	// requires lease_count == 0, and there are no consumers to drive it nonzero.
+	kekLeaseTracker *encrypt.KEKLeaseTracker
+	// kekRotationLeader orchestrates leader-side KEK lifecycle (rotate / retire /
+	// prune). Wired by bootKEKRotationLeader once the peer probe + raft config
+	// reader implementations land. Nil during boot → admin endpoints return 503
+	// "kek admin disabled" instead of a 5xx. Set via MetaRaft.SetKEKRotationLeader
+	// so the leadership watcher cancels in-flight propose calls on step-down.
+	kekRotationLeader *cluster.KEKRotationLeader
 	// refreshProxyCIDR re-seeds the trusted-proxy.cidr atomic snapshot used by
 	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
 	// start (so any snapshot Restore has already populated cfgStore).

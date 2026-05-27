@@ -24,7 +24,7 @@ func TestMetaFSM_JWTRotate_DeterministicAcrossNodes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Node A gets a fresh DEKKeeper.
-	keeperA, err := encrypt.NewDEKKeeper(kek)
+	keeperA, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	require.NoError(t, err)
 
 	// Node B's DEKKeeper is loaded from A's wrapped DEK state — this mimics
@@ -32,7 +32,7 @@ func TestMetaFSM_JWTRotate_DeterministicAcrossNodes(t *testing.T) {
 	// snapshot restore (the KEK is per-cluster but the wrapped DEK is stored
 	// in the Raft log and shared).
 	versions, _ := keeperA.VersionsAndActive()
-	keeperB, err := encrypt.LoadFromFSM(kek, versions)
+	keeperB, err := encrypt.LoadFromFSM(kek, dekTestClusterID(), versions, 0)
 	require.NoError(t, err)
 
 	fsmA := NewMetaFSM()

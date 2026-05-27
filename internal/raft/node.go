@@ -120,6 +120,14 @@ type Node struct {
 	// concurrent multi-voter test clusters do not draw identical timeouts.
 	rng *rand.Rand
 
+	// logStore is an immutable reference to the same LogStore held by st.log,
+	// captured at construction so LastLogIndex() can read the durable last-log
+	// index from OUTSIDE the actor goroutine without touching actor-owned st.
+	// Safe because production LogStore (badgerLogStore) reads LastIndex() via
+	// atomics (documented thread-safe). The reference itself never changes
+	// after NewNode.
+	logStore LogStore
+
 	// bootstrapped records whether Bootstrap() has been called. CURRENTLY
 	// INFORMATIONAL ONLY: actor.run() auto-promotes a single-voter cluster
 	// to Leader regardless of this flag, and multi-voter Nodes start as
@@ -226,6 +234,8 @@ func NewNode(cfg Config) (*Node, error) {
 		// in the same nanosecond still draw different timeouts. Sole user is
 		// the actor goroutine, so no locking needed.
 		rng: rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(hashID(cfg.ID)))),
+
+		logStore: logStore,
 	}
 	// Allocate the election timer in a stopped state. The actor's run() will
 	// arm it (multi-voter) or leave it parked (single-voter) on first tick.
@@ -292,6 +302,15 @@ func (n *Node) LeaderID() string { return n.rs.Load().leaderID }
 
 // CommittedIndex returns the latest committed log index. Hot path.
 func (n *Node) CommittedIndex() uint64 { return n.rs.Load().commitIndex }
+
+// LastLogIndex returns the durable index of the last entry in the persistent
+// log (the log tail), independent of commitIndex. Unlike CommittedIndex (which
+// is volatile and on restart only reaches the snapshot floor until the next
+// leader no-op / AppendEntries re-establishes it), this reflects everything
+// already persisted — including post-snapshot entries not yet re-applied. Boot
+// drains the apply loop up to this index. Reads through the immutable LogStore
+// reference; production badgerLogStore.LastIndex() is atomic-safe.
+func (n *Node) LastLogIndex() uint64 { return n.logStore.LastIndex() }
 
 // SetTransport configures the outbound Transport. Documented contract:
 // call before Start. The atomic swap makes a late call data-race-free vs

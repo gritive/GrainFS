@@ -16,7 +16,7 @@ the command decoder, apply methods, snapshot trailer, and focused tests near
 each other while preserving the same external MetaFSM interface.
 
 Examples include cluster placement/object-index commands, IAM policy-store
-commands, cluster config commands, DEK/JWT key material commands, NFS export
+commands, cluster config commands, DEK/KEK/JWT key material commands, NFS export
 commands, lifecycle commands, migration commands, and Iceberg catalog commands.
 
 ### Storage Operations Facade

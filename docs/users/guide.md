@@ -200,6 +200,53 @@ sudo mount -t 9p \
 
 See `../reference/9p-compatibility.md` for the supported 9P surface.
 
+## Encryption Key Rotation
+
+GrainFS encrypts data at rest with AES-256-GCM. The active Key Encryption Key (KEK) wraps
+per-node Data Encryption Keys (DEKs). On a cluster, DEK material is leader-driven and
+Raft-replicated so every node shares the same active DEK. Use `grainfs encrypt kek` to
+manage the KEK lifecycle.
+
+Check current status:
+
+```bash
+grainfs encrypt kek status --endpoint ./data/admin.sock
+grainfs encrypt kek status --endpoint ./data/admin.sock --format json
+```
+
+Rotate to a new KEK version (generates a fresh KEK and re-wraps the active DEK under it):
+
+```bash
+# --i-know confirms you understand this triggers a cluster-wide re-wrap.
+grainfs encrypt kek rotate --endpoint ./data/admin.sock --i-know
+```
+
+After confirming the new version is healthy (all nodes report the new active version via
+`kek status`), retire the old version. Retire marks the version inactive and begins
+draining any in-flight leases:
+
+```bash
+grainfs encrypt kek retire --version <old-version> --endpoint ./data/admin.sock
+```
+
+Once leases are fully drained (confirmed by `kek status` showing zero lease count for
+that version), prune removes it permanently. `--confirm-name` must match the
+`cluster_name` / node-id shown by `kek status` to prevent accidental cross-cluster
+prune:
+
+```bash
+grainfs encrypt kek prune \
+  --version <old-version> \
+  --confirm-name <node-id> \
+  --endpoint ./data/admin.sock
+```
+
+> **Multi-node note:** all four subcommands require every cluster voter to advertise the
+> `kek_envelope_v1` capability (shipped in 0.0.353.0). In a mixed-version rolling upgrade
+> the commands return 503 until the upgrade is complete.
+
+See `../operators/runbook.md` for keystore disk-full and DEK rotation cadence procedures.
+
 ## Cluster Operations
 
 Inspect peers:
