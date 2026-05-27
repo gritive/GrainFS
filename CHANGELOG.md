@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.362.0] - 2026-05-27
+
+### Added
+
+- Storage gained a `DataEncryptor` seam — one interface for data-at-rest
+  encrypt/decrypt with two implementations: one over the existing static key and
+  one over the generation-aware KEK envelope. This is groundwork for migrating
+  segment, WAL, and snapshot encryption onto the rotating KEK envelope; nothing
+  in the write or read path uses the seam yet, so current behavior is unchanged
+  until later phases wire it in.
+
 ## [0.0.361.0] - 2026-05-27
 
 ### Fixed
