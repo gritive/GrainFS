@@ -51,7 +51,8 @@ func (f *fakeSAResolver) LookupByAccessKey(_ context.Context, accessKey string) 
 }
 
 type fakeAuthorizer struct {
-	deny map[string]bool // saID → deny
+	deny    map[string]bool // saID → deny
+	lastReq policy.RequestContext
 }
 
 func newFakeAuthorizer() *fakeAuthorizer { return &fakeAuthorizer{deny: make(map[string]bool)} }
@@ -59,7 +60,8 @@ func newFakeAuthorizer() *fakeAuthorizer { return &fakeAuthorizer{deny: make(map
 func (a *fakeAuthorizer) denyAll(saID string)    { a.deny[saID] = true }
 func (a *fakeAuthorizer) allowAll(_ string) bool { return true }
 
-func (a *fakeAuthorizer) Authorize(_ context.Context, saID, _ string, _ policy.RequestContext) policy.EvalResult {
+func (a *fakeAuthorizer) Authorize(_ context.Context, saID, _ string, ctxReq policy.RequestContext) policy.EvalResult {
+	a.lastReq = ctxReq
 	if a.deny[saID] {
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "test deny"}
 	}
@@ -126,6 +128,21 @@ func TestOAuth_FormBodyMint(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"bearer"`) {
 		t.Fatal(`token_type must be "bearer" (DuckDB #18483)`)
 	}
+}
+
+func TestOAuth_SourceIPIgnoresSpoofedXForwardedFor(t *testing.T) {
+	ts := newTestHandler(t)
+	req := httptest.NewRequest("POST", "/iceberg/v1/oauth/tokens",
+		strings.NewReader("grant_type=client_credentials&client_id=AKIA-test&client_secret=secret&scope=PRINCIPAL_ROLE:analytics"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", "198.51.100.99")
+	req.RemoteAddr = "203.0.113.7:54321"
+	w := httptest.NewRecorder()
+
+	ts.h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Code, "token mint should still succeed")
+	require.Equal(t, "203.0.113.7", ts.authz.lastReq.SourceIP)
 }
 
 func TestOAuth_FormBodyMintInitializesMissingSigningKey(t *testing.T) {
