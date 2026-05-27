@@ -323,6 +323,15 @@ Work these in order. Do not run them in parallel.
   uses) and only quarantine if reconstruction fails. This downgrades most corruption
   events from object isolation to a silent local repair. (`internal/cluster/shard_placement_monitor.go`.)
 
+- [ ] **`ReadLocalShardAt` plain-CRC range reads skip footer-CRC verification [P2]**:
+  The GFSCRC1 (unencrypted, encoded) branch of `ReadLocalShardAt`
+  (`internal/cluster/shard_service.go` ~:1829) range-reads the requested window via
+  `f.ReadAt(buf, 8+offset)` without verifying the trailing footer CRC, so a payload
+  bit-flip inside the requested range returns corrupt bytes with a nil error. This is
+  pre-existing (not introduced by the transient-classification work) and is NOT on the
+  placement-monitor path (the monitor uses full `ReadLocalShard`, which verifies CRC).
+  Verify the footer CRC (or at least the covered range) before returning bytes.
+
 - [ ] **Placement monitor: stream scan targets instead of buffering O(objects+segments) [P3]**:
   `Scan` buffers all `ECShardScanTarget`s before processing; ~1.5 GB peak for 1 M chunked
   objects × 10 segments each. Follow up if production scans show RAM pressure; streaming

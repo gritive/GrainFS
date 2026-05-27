@@ -392,6 +392,50 @@ func TestIsCorruption_RangePath(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			// Multi-chunk shard truncated AFTER chunk 0 reads cleanly. chunk 0
+			// succeeds (done > 0), then chunk 1's header/payload is past EOF. The
+			// caller must preserve ErrShardCorrupt rather than remapping the
+			// truncation to a bare io.ErrUnexpectedEOF (the single-chunk truncation
+			// case never exercises that remap because done == 0).
+			name: "RangeAt multi-chunk truncated after first chunk",
+			build: func(t *testing.T) error {
+				const chunkSize = 32
+				var buf bytes.Buffer
+				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, chunkSize))
+				raw := buf.Bytes()
+				// Cut a few bytes into chunk 1 so chunk 0 stays intact.
+				fullCipherLen := chunkSize + enc.AEADOverhead()
+				cut := encryptedHeaderLen + encryptedChunkHeaderLen + fullCipherLen + 2
+				require.Less(t, cut, len(raw), "expected a multi-chunk shard")
+				dst := make([]byte, len(plaintext))
+				n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw[:cut]), enc, aad, 0, dst)
+				require.Error(t, err)
+				require.Greater(t, n, 0, "chunk 0 should have been read before truncation")
+				return err
+			},
+			want: true,
+		},
+		{
+			// Same layout via the streaming range reader, to confirm both range
+			// paths agree on classification.
+			name: "RangeReader multi-chunk truncated after first chunk",
+			build: func(t *testing.T) error {
+				const chunkSize = 32
+				var buf bytes.Buffer
+				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, chunkSize))
+				raw := buf.Bytes()
+				fullCipherLen := chunkSize + enc.AEADOverhead()
+				cut := encryptedHeaderLen + encryptedChunkHeaderLen + fullCipherLen + 2
+				require.Less(t, cut, len(raw), "expected a multi-chunk shard")
+				rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw[:cut]), enc, aad, 0, int64(len(plaintext)))
+				require.NoError(t, err)
+				_, err = io.Copy(io.Discard, rr)
+				require.Error(t, err)
+				return err
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -400,4 +444,62 @@ func TestIsCorruption_RangePath(t *testing.T) {
 			assert.Equal(t, tt.want, IsCorruption(err), "err=%v", err)
 		})
 	}
+}
+
+// TestRangePath_HealthyExactMultiple_NotCorruption is the regression test for
+// the P1 where a healthy shard whose plaintext is an exact multiple of
+// chunkSize (no trailing partial chunk) was mis-classified as corruption when
+// a read advanced past the last chunk and the next chunk-header ReadAt hit a
+// clean (n==0) io.EOF. A clean read must return the data; an over-read by one
+// byte must surface a non-IsCorruption error.
+func TestRangePath_HealthyExactMultiple_NotCorruption(t *testing.T) {
+	enc := testEncryptor(t)
+	aad := []byte("v2/bucket/key/0")
+	const chunkSize = 32
+	// Exactly two full chunks, no trailing partial.
+	plaintext := bytes.Repeat([]byte("Q"), 2*chunkSize)
+
+	var buf bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, chunkSize))
+	raw := buf.Bytes()
+
+	t.Run("ReadEncryptedShardRangeAt full read", func(t *testing.T) {
+		dst := make([]byte, len(plaintext))
+		n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, aad, 0, dst)
+		require.NoError(t, err)
+		assert.Equal(t, len(plaintext), n)
+		assert.Equal(t, plaintext, dst)
+	})
+
+	t.Run("NewEncryptedShardRangeReader full stream", func(t *testing.T) {
+		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, aad, 0, int64(len(plaintext)))
+		require.NoError(t, err)
+		got, err := io.ReadAll(rr)
+		require.NoError(t, err)
+		assert.Equal(t, plaintext, got)
+	})
+
+	t.Run("ReadEncryptedShardRangeAt over-read by one byte", func(t *testing.T) {
+		// Requesting one byte past the true end of a HEALTHY shard must NOT be
+		// corruption: the next chunk-header ReadAt sees a clean n==0 EOF, which
+		// ReadEncryptedShardRangeAt remaps to io.ErrUnexpectedEOF because some
+		// bytes were already delivered.
+		dst := make([]byte, len(plaintext)+1)
+		n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, aad, 0, dst)
+		require.Error(t, err)
+		assert.False(t, IsCorruption(err), "over-read on a healthy shard must not be corruption, err=%v", err)
+		assert.Equal(t, len(plaintext), n)
+		assert.Equal(t, plaintext, dst[:n])
+	})
+
+	t.Run("NewEncryptedShardRangeReader over-range request", func(t *testing.T) {
+		// Range length extends past the true plaintext end of a healthy shard.
+		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, aad, 0, int64(len(plaintext)+8))
+		require.NoError(t, err)
+		got, err := io.ReadAll(rr)
+		// io.ReadAll swallows io.EOF; a clean end-of-stream yields no error and
+		// the true bytes. Either way it must never be IsCorruption.
+		assert.False(t, IsCorruption(err), "over-range on a healthy shard must not be corruption, err=%v", err)
+		assert.Equal(t, plaintext, got)
+	})
 }

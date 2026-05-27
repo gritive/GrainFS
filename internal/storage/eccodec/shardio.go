@@ -507,6 +507,11 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 		done += n
 		pos += int64(n)
 		if err != nil {
+			// A truncated chunk wraps both ErrShardCorrupt and io.EOF; preserve the
+			// corruption sentinel rather than remapping it to a bare unexpected-EOF.
+			if errors.Is(err, ErrShardCorrupt) {
+				return done, err
+			}
 			if done > 0 && errors.Is(err, io.EOF) {
 				return done, io.ErrUnexpectedEOF
 			}
@@ -528,10 +533,21 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	chunkFileOffset := int64(encryptedHeaderLen) + chunkIdx64*(int64(encryptedChunkHeaderLen)+fullCipherLen)
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
-	if _, err := r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
-		// ReadAt io.EOF here means the chunk header is past end-of-file:
-		// truncation → corruption. Other errors are transient I/O faults.
+	if n, err := r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
+		// ReadAt returns io.EOF for both "offset fully past EOF, 0 bytes read"
+		// (clean end-of-stream: no chunk here, normal for a healthy shard read
+		// past its last chunk) and "partial header at EOF" (truncation). Unlike
+		// io.ReadFull, ReadAt does not split these into EOF vs ErrUnexpectedEOF,
+		// so we disambiguate by bytes read (n).
+		if n == 0 && errors.Is(err, io.EOF) {
+			// Clean end-of-stream: NOT corruption. The caller
+			// (ReadEncryptedShardRangeAt) remaps a partial (done>0) read to
+			// io.ErrUnexpectedEOF; an exact-boundary full read sees no error.
+			return 0, io.EOF
+		}
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			// n>0: a partial chunk header at EOF means the file is truncated
+			// mid-structure → corruption.
 			return 0, fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
 		}
 		return 0, fmt.Errorf("read encrypted shard chunk header: %w", err)
@@ -803,10 +819,16 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	chunkFileOffset := int64(encryptedHeaderLen) + chunkIdx64*(int64(encryptedChunkHeaderLen)+fullCipherLen)
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
-	if _, err := r.r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
-		// ReadAt io.EOF here means the chunk header is past end-of-file:
-		// truncation → corruption. Other errors are transient I/O faults.
+	if n, err := r.r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
+		// See readEncryptedShardChunkAt: ReadAt collapses clean end-of-stream
+		// and truncation into io.EOF, so disambiguate by bytes read (n).
+		if n == 0 && errors.Is(err, io.EOF) {
+			// Clean end-of-stream at a chunk boundary: NOT corruption. The
+			// Read loop treats a bare io.EOF as normal end.
+			return io.EOF
+		}
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			// n>0: partial chunk header at EOF = truncation → corruption.
 			return fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
 		}
 		return fmt.Errorf("read encrypted shard chunk header: %w", err)
