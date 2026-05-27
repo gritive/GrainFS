@@ -84,6 +84,29 @@ func TestMetaFSMProtocolCredentialLegacySnapshotWithoutTrailerLeavesStoreEmpty(t
 	require.Empty(t, dstStore.Snapshot())
 }
 
+func TestMetaFSMProtocolCredentialLegacySnapshotWithoutTrailerClearsExistingState(t *testing.T) {
+	src := NewMetaFSM()
+	wireTestKEK(t, src)
+
+	snap, err := src.Snapshot()
+	require.NoError(t, err)
+
+	dstStore := protocred.NewStore()
+	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
+	dst.SetProtocolCredentialStore(dstStore)
+	row := testFSMProtocolCredential("pc_stale_after_restore")
+	require.NoError(t, applyProtocolCredentialCreateForTest(dst, "req-stale-before-restore", row))
+
+	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
+	require.Empty(t, dstStore.Snapshot())
+
+	conflict := row
+	conflict.ID = "pc_after_restore"
+	require.NoError(t, applyProtocolCredentialCreateForTest(dst, "req-stale-before-restore", conflict))
+	require.Len(t, dstStore.Snapshot(), 1)
+}
+
 func TestMetaFSMProtocolCredentialEmptySnapshotClearsWiredStore(t *testing.T) {
 	src := NewMetaFSM()
 	wireTestKEK(t, src)
@@ -109,4 +132,43 @@ func TestMetaFSMProtocolCredentialEmptySnapshotClearsWiredStore(t *testing.T) {
 
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
 	require.Empty(t, dstStore.Snapshot())
+}
+
+func TestMetaFSMProtocolCredentialRequestIndexSurvivesRestore(t *testing.T) {
+	srcStore := protocred.NewStore()
+	src := NewMetaFSM()
+	wireTestKEK(t, src)
+	src.SetProtocolCredentialStore(srcStore)
+	row := testFSMProtocolCredential("pc_restore_req")
+
+	require.NoError(t, applyProtocolCredentialCreateForTest(src, "req-create", row))
+	snap, err := src.Snapshot()
+	require.NoError(t, err)
+
+	dstStore := protocred.NewStore()
+	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
+	dst.SetProtocolCredentialStore(dstStore)
+	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
+
+	require.NoError(t, applyProtocolCredentialCreateForTest(dst, "req-create", row))
+	require.Len(t, dstStore.Snapshot(), 1)
+
+	conflict := row
+	conflict.ID = "pc_restore_conflict"
+	err = applyProtocolCredentialCreateForTest(dst, "req-create", conflict)
+	require.Error(t, err)
+	require.ErrorIs(t, err, protocred.ErrConflict)
+}
+
+func TestMetaFSMProtocolCredentialSnapshotNormalizesLegacyGeneration(t *testing.T) {
+	row := testFSMProtocolCredential("pc_legacy_generation")
+	row.Generation = 0
+	payload, err := encodeProtocolCredentialsSnapshot([]protocred.Credential{row})
+	require.NoError(t, err)
+
+	rows, err := decodeProtocolCredentialsSnapshot(payload)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, uint64(1), rows[0].Generation)
 }

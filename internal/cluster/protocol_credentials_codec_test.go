@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/protocred"
 )
 
@@ -19,18 +20,21 @@ func TestProtocolCredentialCommandCodecsRoundTrip(t *testing.T) {
 	hash := sha256.Sum256([]byte("secret"))
 
 	row := protocred.Credential{
-		ID:         "pc_1",
-		SAID:       "sa_app",
-		Protocol:   protocred.ProtocolNBD,
-		Resource:   "volume/devdisk",
-		Mode:       protocred.ModeRW,
-		SecretHash: hash,
-		SecretHint: "pcsec...tail",
-		CreatedAt:  now,
-		CreatedBy:  "admin",
-		ExpiresAt:  &exp,
-		RevokedAt:  &revoked,
-		LastUsedAt: &used,
+		ID:          "pc_1",
+		SAID:        "sa_app",
+		Protocol:    protocred.ProtocolNBD,
+		Resource:    "volume/devdisk",
+		Mode:        protocred.ModeRW,
+		SecretHash:  hash,
+		SecretHint:  "pcsec...tail",
+		CreatedAt:   now,
+		CreatedBy:   "admin",
+		ExpiresAt:   &exp,
+		RevokedAt:   &revoked,
+		LastUsedAt:  &used,
+		Generation:  4,
+		StaleAt:     &used,
+		StaleReason: "policy_detached",
 	}
 
 	createBytes, err := encodeProtocolCredentialCreateCmd(ProtocolCredentialCreateCmd{
@@ -105,6 +109,8 @@ func TestProtocolCredentialCommandCodecsRejectMalformedBytes(t *testing.T) {
 	require.Error(t, err)
 	_, err = decodeProtocolCredentialsSnapshot(malformed)
 	require.Error(t, err)
+	_, _, err = decodeProtocolCredentialsSnapshotState(malformed)
+	require.Error(t, err)
 }
 
 func TestProtocolCredentialSnapshotCodecDeterministicAndRoundTrips(t *testing.T) {
@@ -124,19 +130,23 @@ func TestProtocolCredentialSnapshotCodecDeterministicAndRoundTrips(t *testing.T)
 		CreatedAt:  now,
 		CreatedBy:  "admin-a",
 		ExpiresAt:  &exp,
+		Generation: 1,
 	}
 	b := protocred.Credential{
-		ID:         "pc_b",
-		SAID:       "sa_b",
-		Protocol:   protocred.ProtocolIceberg,
-		Resource:   "catalog/b",
-		Mode:       protocred.ModeRW,
-		SecretHash: sha256.Sum256([]byte("b")),
-		SecretHint: "hint-b",
-		CreatedAt:  now.Add(time.Minute),
-		CreatedBy:  "admin-b",
-		RevokedAt:  &revoked,
-		LastUsedAt: &used,
+		ID:          "pc_b",
+		SAID:        "sa_b",
+		Protocol:    protocred.ProtocolIceberg,
+		Resource:    "catalog/b",
+		Mode:        protocred.ModeRW,
+		SecretHash:  sha256.Sum256([]byte("b")),
+		SecretHint:  "hint-b",
+		CreatedAt:   now.Add(time.Minute),
+		CreatedBy:   "admin-b",
+		RevokedAt:   &revoked,
+		LastUsedAt:  &used,
+		Generation:  3,
+		StaleAt:     &used,
+		StaleReason: "policy_changed",
 	}
 
 	encodedAB, err := encodeProtocolCredentialsSnapshot([]protocred.Credential{a, b})
@@ -150,6 +160,96 @@ func TestProtocolCredentialSnapshotCodecDeterministicAndRoundTrips(t *testing.T)
 	require.Len(t, rows, 2)
 	requireCredentialEqual(t, a, rows[0])
 	requireCredentialEqual(t, b, rows[1])
+}
+
+func TestProtocolCredentialSnapshotRequestIndexDeterministicAndRoundTrips(t *testing.T) {
+	now := time.Date(2026, 5, 28, 4, 5, 6, 7, time.UTC)
+	rows := []protocred.Credential{
+		{
+			ID:         "pc_b",
+			SAID:       "sa_b",
+			Protocol:   protocred.ProtocolNBD,
+			Resource:   "volume/b",
+			Mode:       protocred.ModeRW,
+			SecretHash: sha256.Sum256([]byte("b")),
+			SecretHint: "hint-b",
+			CreatedAt:  now,
+			CreatedBy:  "admin-b",
+			Generation: 1,
+		},
+	}
+	requestsAB := []ProtocolCredentialRequestRecord{
+		{RequestID: "req_b", Operation: "rotate", CredentialID: "pc_b", PayloadHash: sha256.Sum256([]byte("b"))},
+		{RequestID: "req_a", Operation: "create", CredentialID: "pc_b", PayloadHash: sha256.Sum256([]byte("a"))},
+	}
+	requestsBA := []ProtocolCredentialRequestRecord{requestsAB[1], requestsAB[0]}
+
+	encodedAB, err := encodeProtocolCredentialsSnapshotState(rows, requestsAB)
+	require.NoError(t, err)
+	encodedBA, err := encodeProtocolCredentialsSnapshotState(rows, requestsBA)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(encodedAB, encodedBA), "request index bytes must be deterministic")
+
+	gotRows, gotRequests, err := decodeProtocolCredentialsSnapshotState(encodedAB)
+	require.NoError(t, err)
+	require.Len(t, gotRows, 1)
+	requireCredentialEqual(t, rows[0], gotRows[0])
+	require.Equal(t, []ProtocolCredentialRequestRecord{
+		{RequestID: "req_a", Operation: "create", CredentialID: "pc_b", PayloadHash: sha256.Sum256([]byte("a"))},
+		{RequestID: "req_b", Operation: "rotate", CredentialID: "pc_b", PayloadHash: sha256.Sum256([]byte("b"))},
+	}, gotRequests)
+}
+
+func TestProtocolCredentialSnapshotRequestIndexRejectsInvalidRows(t *testing.T) {
+	rows := []protocred.Credential{{
+		ID:         "pc_b",
+		SAID:       "sa_b",
+		Protocol:   protocred.ProtocolNBD,
+		Resource:   "volume/b",
+		Mode:       protocred.ModeRW,
+		SecretHash: sha256.Sum256([]byte("b")),
+		SecretHint: "hint-b",
+		CreatedAt:  time.Date(2026, 5, 28, 4, 5, 6, 7, time.UTC),
+		CreatedBy:  "admin-b",
+		Generation: 1,
+	}}
+	encoded, err := encodeProtocolCredentialsSnapshotState(rows, []ProtocolCredentialRequestRecord{
+		{RequestID: "req_bad", Operation: "unknown", CredentialID: "pc_b", PayloadHash: sha256.Sum256([]byte("bad"))},
+	})
+	require.NoError(t, err)
+
+	_, _, err = decodeProtocolCredentialsSnapshotState(encoded)
+	require.Error(t, err)
+}
+
+func TestProtocolCredentialSnapshotRequestIndexAllowsLegacyMissingPayloadHash(t *testing.T) {
+	b := clusterBuilderPool.Get()
+	requestIDOff := b.CreateString("req_legacy")
+	operationOff := b.CreateString("create")
+	credentialIDOff := b.CreateString("pc_legacy")
+	clusterpb.MetaProtocolCredentialRequestEntryStart(b)
+	clusterpb.MetaProtocolCredentialRequestEntryAddRequestId(b, requestIDOff)
+	clusterpb.MetaProtocolCredentialRequestEntryAddOperation(b, operationOff)
+	clusterpb.MetaProtocolCredentialRequestEntryAddCredentialId(b, credentialIDOff)
+	reqOff := clusterpb.MetaProtocolCredentialRequestEntryEnd(b)
+
+	clusterpb.MetaProtocolCredentialsSnapshotStartRowsVector(b, 0)
+	rowsVec := b.EndVector(0)
+	clusterpb.MetaProtocolCredentialsSnapshotStartRequestsVector(b, 1)
+	b.PrependUOffsetT(reqOff)
+	requestsVec := b.EndVector(1)
+	clusterpb.MetaProtocolCredentialsSnapshotStart(b)
+	clusterpb.MetaProtocolCredentialsSnapshotAddRows(b, rowsVec)
+	clusterpb.MetaProtocolCredentialsSnapshotAddRequests(b, requestsVec)
+	encoded := fbFinish(b, clusterpb.MetaProtocolCredentialsSnapshotEnd(b))
+
+	_, requests, err := decodeProtocolCredentialsSnapshotState(encoded)
+	require.NoError(t, err)
+	require.Equal(t, []ProtocolCredentialRequestRecord{{
+		RequestID:    "req_legacy",
+		Operation:    "create",
+		CredentialID: "pc_legacy",
+	}}, requests)
 }
 
 func requireCredentialEqual(t *testing.T, want, got protocred.Credential) {
@@ -166,6 +266,9 @@ func requireCredentialEqual(t *testing.T, want, got protocred.Credential) {
 	requireTimePtrEqual(t, want.ExpiresAt, got.ExpiresAt)
 	requireTimePtrEqual(t, want.RevokedAt, got.RevokedAt)
 	requireTimePtrEqual(t, want.LastUsedAt, got.LastUsedAt)
+	require.Equal(t, want.Generation, got.Generation)
+	requireTimePtrEqual(t, want.StaleAt, got.StaleAt)
+	require.Equal(t, want.StaleReason, got.StaleReason)
 }
 
 func requireTimePtrEqual(t *testing.T, want, got *time.Time) {

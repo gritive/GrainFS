@@ -60,6 +60,7 @@ func (s *Service) Create(req CreateRequest) (Secret, error) {
 		CreatedAt:  s.now(),
 		CreatedBy:  req.CreatedBy,
 		ExpiresAt:  cloneTime(req.ExpiresAt),
+		Generation: 1,
 	}
 	s.store.put(item)
 	return Secret{ID: id, Secret: secret, ConnectionHint: connectionHint(item, secret)}, nil
@@ -162,6 +163,7 @@ func cloneCredential(item Credential) Credential {
 	item.ExpiresAt = cloneTime(item.ExpiresAt)
 	item.RevokedAt = cloneTime(item.RevokedAt)
 	item.LastUsedAt = cloneTime(item.LastUsedAt)
+	item.StaleAt = cloneTime(item.StaleAt)
 	return item
 }
 

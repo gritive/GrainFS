@@ -1,8 +1,10 @@
 package protocred
 
 import (
+	"crypto/sha256"
 	"sort"
 	"sync"
+	"time"
 )
 
 type Store struct {
@@ -80,4 +82,120 @@ func (s *Store) Restore(rows []Credential) {
 		items[row.ID] = cloneCredential(row)
 	}
 	s.items = items
+}
+
+// ApplyCreate inserts a fully-materialized credential row from durable FSM
+// state. Replaying the same row is a success; conflicting rows fail loud.
+func (s *Store) ApplyCreate(row Credential) (Credential, error) {
+	if row.ID == "" || row.SAID == "" || row.Resource == "" || !validProtocol(row.Protocol) || !validMode(row.Mode) {
+		return Credential{}, ErrInvalid
+	}
+	if row.Generation == 0 {
+		row.Generation = 1
+	}
+	row = cloneCredential(row)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.items[row.ID]; ok {
+		if credentialsEqual(existing, row) {
+			return cloneCredential(existing), nil
+		}
+		return Credential{}, ErrConflict
+	}
+	s.items[row.ID] = row
+	return cloneCredential(row), nil
+}
+
+// ApplyRotate replaces secret material for an existing, non-revoked row.
+func (s *Store) ApplyRotate(id string, hash [sha256.Size]byte, hint string) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[id]
+	if !ok {
+		return Credential{}, ErrNotFound
+	}
+	if item.RevokedAt != nil {
+		return Credential{}, ErrRevoked
+	}
+	item.SecretHash = hash
+	item.SecretHint = hint
+	item.Generation++
+	s.items[id] = item
+	return cloneCredential(item), nil
+}
+
+// ApplyRevoke marks a credential revoked once. Replays preserve the first
+// revocation timestamp.
+func (s *Store) ApplyRevoke(id string, revokedAt time.Time) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[id]
+	if !ok {
+		return Credential{}, ErrNotFound
+	}
+	if item.RevokedAt == nil {
+		item.RevokedAt = cloneTime(&revokedAt)
+		item.Generation++
+		s.items[id] = item
+	}
+	return cloneCredential(item), nil
+}
+
+// ApplyMarkStale records the first stale marker for a credential.
+func (s *Store) ApplyMarkStale(id string, staleAt time.Time, reason string) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[id]
+	if !ok {
+		return Credential{}, ErrNotFound
+	}
+	if item.StaleAt == nil {
+		item.StaleAt = cloneTime(&staleAt)
+		item.StaleReason = reason
+		item.Generation++
+		s.items[id] = item
+	}
+	return cloneCredential(item), nil
+}
+
+// ApplyLastUsed records the newest observed use timestamp.
+func (s *Store) ApplyLastUsed(id string, usedAt time.Time) (Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[id]
+	if !ok {
+		return Credential{}, ErrNotFound
+	}
+	if item.LastUsedAt == nil || item.LastUsedAt.Before(usedAt) {
+		item.LastUsedAt = cloneTime(&usedAt)
+		item.Generation++
+		s.items[id] = item
+	}
+	return cloneCredential(item), nil
+}
+
+func credentialsEqual(a, b Credential) bool {
+	return a.ID == b.ID &&
+		a.SAID == b.SAID &&
+		a.Protocol == b.Protocol &&
+		a.Resource == b.Resource &&
+		a.Mode == b.Mode &&
+		a.SecretHash == b.SecretHash &&
+		a.SecretHint == b.SecretHint &&
+		a.CreatedAt.Equal(b.CreatedAt) &&
+		a.CreatedBy == b.CreatedBy &&
+		timePtrEqual(a.ExpiresAt, b.ExpiresAt) &&
+		timePtrEqual(a.RevokedAt, b.RevokedAt) &&
+		timePtrEqual(a.LastUsedAt, b.LastUsedAt) &&
+		a.Generation == b.Generation &&
+		timePtrEqual(a.StaleAt, b.StaleAt) &&
+		a.StaleReason == b.StaleReason
+}
+
+func timePtrEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
 }
