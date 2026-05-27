@@ -29,6 +29,7 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -115,6 +116,12 @@ const (
 	MetaCmdTypePromoteMember          = clusterpb.MetaCmdTypePromoteMember
 	MetaCmdTypeRevokePeer             = clusterpb.MetaCmdTypeRevokePeer
 	MetaCmdTypeRegisterMember         = clusterpb.MetaCmdTypeRegisterMember
+
+	MetaCmdTypeProtocolCredentialCreate    = clusterpb.MetaCmdTypeProtocolCredentialCreate
+	MetaCmdTypeProtocolCredentialRotate    = clusterpb.MetaCmdTypeProtocolCredentialRotate
+	MetaCmdTypeProtocolCredentialRevoke    = clusterpb.MetaCmdTypeProtocolCredentialRevoke
+	MetaCmdTypeProtocolCredentialMarkStale = clusterpb.MetaCmdTypeProtocolCredentialMarkStale
+	MetaCmdTypeProtocolCredentialLastUsed  = clusterpb.MetaCmdTypeProtocolCredentialLastUsed
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -332,6 +339,10 @@ type MetaFSM struct {
 	// mountSAStore is the NFS/9P mount service account store backed by Badger.
 	// nil until SetMountSAStore is called; MountSA* commands return an error when nil.
 	mountSAStore *mountsastore.Store
+
+	// protocolCredentialStore is the durable protocol credential snapshot store.
+	// Phase 1A snapshots/restores it; Phase 1B wires command apply semantics.
+	protocolCredentialStore *protocred.Store
 
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
