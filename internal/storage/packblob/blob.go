@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // BlobLocation identifies where an entry lives within a blob file.
@@ -46,8 +47,10 @@ type BlobStore struct {
 	activeOff int64
 	nextID    atomic.Uint64
 	compress  bool
-	encryptor *encrypt.Encryptor
-	lockFile  *os.File // held for the lifetime of this BlobStore (flock on unix)
+	encryptor *encrypt.Encryptor    // legacy; replaced by segEnc on the data path (Tasks 3-4)
+	segEnc    storage.DataEncryptor // data-at-rest seam (EncryptorAdapter in this lane)
+	clusterID [16]byte              // zero sentinel (single-node, no cluster ID)
+	lockFile  *os.File              // held for the lifetime of this BlobStore (flock on unix)
 
 	// readFiles caches open *os.File handles for completed (read-only) blobs.
 	// Published as an immutable map snapshot via atomic.Pointer so the hot
@@ -77,7 +80,8 @@ func NewBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	return newBlobStore(dir, maxSize)
 }
 
-// NewEncryptedBlobStore creates a blob store that encrypts entry payloads.
+// NewEncryptedBlobStore creates a blob store that encrypts entry payloads via
+// the DataEncryptor seam (EncryptorAdapter over the static key in this lane).
 func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*BlobStore, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("encrypted blob store requires encryptor")
@@ -87,6 +91,8 @@ func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*
 		return nil, err
 	}
 	bs.encryptor = enc
+	// D-seg-pack: EncryptorAdapter over the static key, zero-sentinel clusterID.
+	bs.segEnc = storage.NewEncryptorAdapter(enc, bs.clusterID[:])
 	return bs, nil
 }
 
