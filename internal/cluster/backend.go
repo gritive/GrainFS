@@ -65,8 +65,6 @@ const (
 	ecShardWriteBackoff  = 250 * time.Millisecond
 )
 
-var distributedWriteAtTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
-
 type readerWithoutWriterTo struct {
 	io.Reader
 }
@@ -170,7 +168,6 @@ type DistributedBackend struct {
 	bypassBucketCheck bool
 
 	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
-	internalDirCache  sync.Map // map[string]struct{}
 	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
 
 	// Phase A: FSM apply error propagation. Mirrors MetaRaft.applyErrs
@@ -1119,11 +1116,7 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 	return b.registry
 }
 
-var (
-	_ storage.Backend     = (*DistributedBackend)(nil)
-	_ storage.PartialIO   = (*DistributedBackend)(nil)
-	_ storage.Truncatable = (*DistributedBackend)(nil)
-)
+var _ storage.Backend = (*DistributedBackend)(nil)
 
 // SetBucketAssigner injects the MetaRaft proposer for bucket assignment persistence.
 // Must be called before CreateBucket. Nil disables persistence (single-node legacy mode).
@@ -1934,131 +1927,6 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	return obj, func() error { return nil }, err
 }
 
-// WriteAt implements a pwrite-based fast path for internal buckets (NFS4 and
-// VFS). It avoids the full-file RMW cost by calling pwrite(2) directly on the
-// versioned path, then updating BadgerDB metadata without a Raft propose.
-//
-// Constraints: single-node only — no peer replication, no EC. Callers MUST
-// check IsInternalBucket before relying on this; ErrNotSupported is returned
-// for user-facing buckets.
-func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
-	if !storage.IsInternalBucket(bucket) {
-		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
-	}
-	if b.encryptedShardStorage() {
-		return nil, fmt.Errorf("WriteAt not supported for encrypted shard storage")
-	}
-
-	var tStart, tStage time.Time
-	if distributedWriteAtTraceEnabled {
-		tStart = time.Now()
-		tStage = tStart
-	}
-
-	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
-	objPath := b.currentInternalObjectPath(bucket, key)
-	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
-		return nil, fmt.Errorf("create object dir: %w", err)
-	}
-	if distributedWriteAtTraceEnabled {
-		log.Debug().Dur("ensure_dir", time.Since(tStage)).Str("bucket", bucket).Msg("Distributed WriteAt trace")
-		tStage = time.Now()
-	}
-
-	f, err := os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
-	if errors.Is(err, os.ErrNotExist) {
-		b.internalDirCache.Delete(objPath.dir)
-		if derr := b.ensureInternalObjectDir(objPath.dir); derr != nil {
-			return nil, fmt.Errorf("create object dir: %w", derr)
-		}
-		f, err = os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("open object: %w", err)
-	}
-	defer f.Close()
-	if distributedWriteAtTraceEnabled {
-		log.Debug().Dur("open", time.Since(tStage)).Msg("Distributed WriteAt trace")
-		tStage = time.Now()
-	}
-
-	if _, err = f.WriteAt(data, int64(offset)); err != nil {
-		return nil, fmt.Errorf("pwrite object: %w", err)
-	}
-	if distributedWriteAtTraceEnabled {
-		log.Debug().Dur("pwrite", time.Since(tStage)).Int("bytes", len(data)).Msg("Distributed WriteAt trace")
-		tStage = time.Now()
-	}
-
-	newSize := int64(offset) + int64(len(data))
-	if cached, ok := b.internalSizeCache.Load(cacheKey); ok {
-		if size := cached.(int64); size > newSize {
-			newSize = size
-		}
-	} else {
-		fi, err := f.Stat()
-		if err != nil {
-			return nil, fmt.Errorf("stat object: %w", err)
-		}
-		newSize = fi.Size()
-	}
-	if distributedWriteAtTraceEnabled {
-		log.Debug().Dur("size_lookup", time.Since(tStage)).Int64("object_size", newSize).Msg("Distributed WriteAt trace")
-		tStage = time.Now()
-	}
-	b.internalSizeCache.Store(cacheKey, newSize)
-	now := time.Now().Unix()
-
-	// Full-file MD5 after every pwrite makes NFS/NBD append workloads O(n^2).
-	// Keep an ETag oracle only when this call overwrites the full object from
-	// byte zero; scrubber treats empty ETags as "no oracle" and skips them.
-	etag := writeAtETag(data, offset, newSize)
-
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:          key,
-		Size:         newSize,
-		ContentType:  "application/octet-stream",
-		ETag:         etag,
-		LastModified: now,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal object meta: %w", err)
-	}
-	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objPath.metaKey, meta)
-	}); err != nil {
-		return nil, fmt.Errorf("update object meta: %w", err)
-	}
-	if distributedWriteAtTraceEnabled {
-		log.Debug().Dur("badger_update", time.Since(tStage)).Dur("total", time.Since(tStart)).Msg("Distributed WriteAt trace")
-	}
-
-	return &storage.Object{
-		Key:          key,
-		Size:         newSize,
-		ContentType:  "application/octet-stream",
-		ETag:         etag,
-		LastModified: now,
-		VersionID:    "current",
-	}, nil
-}
-
-// writeAtETag computes an xxhash3 ETag when a WriteAt call overwrites the
-// whole object. Partial writes return an empty ETag so scrubber skips the
-// object instead of forcing every NFS/NBD write to re-read the full file.
-//
-// Empty ETag contract: scrubber's ReplicationVerifier reports such blocks as
-// Skipped (not Corrupt) — see internal/scrubber/replication.go and
-// TestReplicationVerifier_LegacyETagSkipped. Trade-off: files that have only
-// ever been touched via partial writes lose the per-block oracle; EC
-// parity still detects shard-level corruption on read.
-func writeAtETag(data []byte, offset uint64, size int64) string {
-	if offset == 0 && int64(len(data)) == size {
-		return storage.InternalETag(data)
-	}
-	return ""
-}
-
 // ReadAt implements partial object reads. Internal buckets use the historical
 // direct pread path. EC user buckets read only the data shard segments that
 // overlap the requested byte range when those data shards are available.
@@ -2068,16 +1936,6 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	}
 	if len(buf) == 0 {
 		return 0, nil
-	}
-	if storage.IsInternalBucket(bucket) {
-		f, err := os.Open(b.currentInternalObjectPath(bucket, key).path)
-		if err == nil {
-			defer f.Close()
-			return f.ReadAt(buf, offset)
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return 0, err
-		}
 	}
 
 	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -2176,70 +2034,6 @@ func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, k
 
 func (b *DistributedBackend) PreferReadAt(bucket string) bool {
 	return true
-}
-
-func (b *DistributedBackend) PreferWriteAt(bucket string) bool {
-	if !storage.IsInternalBucket(bucket) {
-		return false
-	}
-	if b.encryptedShardStorage() {
-		return false
-	}
-	nodes := b.liveNodes()
-	if len(nodes) <= 1 {
-		return true
-	}
-	unique := make(map[string]struct{}, len(nodes))
-	for _, node := range nodes {
-		unique[node] = struct{}{}
-	}
-	return len(unique) <= 1
-}
-
-// Truncate implements the internal-bucket fast path used by NFS SETATTR size.
-// It updates the fixed "current" object and metadata in place, avoiding the
-// full-object read/append/write fallback used by generic object stores.
-func (b *DistributedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
-	if !storage.IsInternalBucket(bucket) {
-		return fmt.Errorf("Truncate not supported for user bucket %q", bucket)
-	}
-	if b.encryptedShardStorage() {
-		return fmt.Errorf("Truncate not supported for encrypted shard storage")
-	}
-	if size < 0 {
-		return fmt.Errorf("truncate: negative size %d", size)
-	}
-	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
-	objPath := b.currentInternalObjectPath(bucket, key)
-	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
-		return fmt.Errorf("create object dir: %w", err)
-	}
-	f, err := os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return fmt.Errorf("open object: %w", err)
-	}
-	if err := f.Truncate(size); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("truncate object: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close object: %w", err)
-	}
-	b.internalSizeCache.Store(cacheKey, size)
-
-	now := time.Now().Unix()
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:          key,
-		Size:         size,
-		ContentType:  "application/octet-stream",
-		LastModified: now,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal object meta: %w", err)
-	}
-	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objPath.metaKey, meta)
-	})
 }
 
 func (b *DistributedBackend) encryptedShardStorage() bool {
@@ -4678,40 +4472,6 @@ func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObje
 	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: b.ks().ObjectMetaKey(bucket, key)}
 	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
 	return actual.(internalObjectPath)
-}
-
-func (b *DistributedBackend) currentInternalObjectPath(bucket, key string) internalObjectPath {
-	objPath := b.internalObjectPath(bucket, key)
-	_ = b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.ks().LatestKey(bucket, key))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			versionID := string(v)
-			if versionID == "" {
-				return nil
-			}
-			objPath = internalObjectPath{
-				path:    objPath.path,
-				dir:     objPath.dir,
-				metaKey: b.ks().ObjectMetaKeyV(bucket, key, versionID),
-			}
-			return nil
-		})
-	})
-	return objPath
-}
-
-func (b *DistributedBackend) ensureInternalObjectDir(dir string) error {
-	if _, ok := b.internalDirCache.Load(dir); ok {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	b.internalDirCache.Store(dir, struct{}{})
-	return nil
 }
 
 // objectPath returns the legacy-unversioned local path for a full-object copy.

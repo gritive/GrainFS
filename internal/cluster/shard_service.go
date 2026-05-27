@@ -207,6 +207,16 @@ func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, op
 			log.Warn().Err(err).Msg("cluster shard pack disabled")
 		}
 	}
+	if s.encryptor == nil {
+		panic("cluster.NewShardService: encryptor is mandatory (at-rest encryption is always on); use WithEncryptor")
+	}
+	// segEnc is the chunked-EC seam derived from the encryptor by WithEncryptor;
+	// the write path uses it unconditionally, so a non-nil encryptor MUST imply a
+	// non-nil segEnc. Guard the coupling so a future encryptor-setter that forgets
+	// segEnc fails loudly here instead of NPEing inside EncodeEncryptedShard.
+	if s.segEnc == nil {
+		panic("cluster.NewShardService: segEnc not derived from encryptor; set both via WithEncryptor")
+	}
 	return s
 }
 
@@ -837,16 +847,11 @@ func (s *ShardService) WriteLocalShardContext(ctx context.Context, bucket, key s
 
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
 	if s.shardPack != nil && len(data) < s.packThreshold {
-		var payload []byte
-		if s.segEnc != nil {
-			var buf bytes.Buffer
-			if err := eccodec.EncodeEncryptedShard(&buf, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
-				return err
-			}
-			payload = buf.Bytes()
-		} else {
-			payload = eccodec.EncodeShard(data)
+		var buf bytes.Buffer
+		if err := eccodec.EncodeEncryptedShard(&buf, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+			return err
 		}
+		payload := buf.Bytes()
 		// Pack-routed writes are logged inside shardPackStore.append as
 		// OpShardPackPut so a torn pack blob can be replayed. Logging
 		// OpShardPut here too would resurrect a non-existent per-shard file
@@ -885,71 +890,42 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		ShardTargetClass: "local",
 	})
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	if s.segEnc != nil {
-		encodeStart := time.Now()
-		var encoded bytes.Buffer
-		if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
-				Bytes:            int64(len(data)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return err
-		}
+	encodeStart := time.Now()
+	var encoded bytes.Buffer
+	if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
+			Error:            err.Error(),
 		})
-		payload := encoded.Bytes()
-		requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload)
-		if err != nil {
-			return err
-		}
-		fileStart := time.Now()
-		if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return err
-		}
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-		})
-	} else {
-		encodeStart := time.Now()
-		payload := eccodec.EncodeShard(data)
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-		})
-		requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload)
-		if err != nil {
-			return err
-		}
-		fileStart := time.Now()
-		if err := s.writeShardFile(ctx, path, payload, shardIdx, requireFsync); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return err
-		}
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-		})
+		return err
 	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+	payload := encoded.Bytes()
+	requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload)
+	if err != nil {
+		return err
+	}
+	fileStart := time.Now()
+	if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+			Bytes:            int64(len(payload)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		return err
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+		Bytes:            int64(len(payload)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
 	// Directory metadata durability is owned by the data WAL: the WAL
 	// record was flushed before the on-disk write ran, so a crash after
 	// rename replays the same bytes. The dir-sync trace stage is preserved
@@ -1659,7 +1635,7 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 				return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
 			}
 			if decodedEncoded {
-				return data, nil
+				return nil, fmt.Errorf("decrypt shard: %w: shard is not an encrypted blob (plain GFSCRC1 / unrecognized format not supported)", eccodec.ErrShardCorrupt)
 			}
 			// Encryption is enabled and the outer CRC validated, but the inner
 			// magic header is missing: structural format corruption.
@@ -1712,7 +1688,7 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, sha
 				return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
 			}
 			if decodedEncoded {
-				return data, nil
+				return nil, fmt.Errorf("decrypt shard: %w: shard is not an encrypted blob (plain GFSCRC1 / unrecognized format not supported)", eccodec.ErrShardCorrupt)
 			}
 			// Encryption is enabled and the outer CRC validated, but the inner
 			// magic header is missing: structural format corruption.
@@ -1806,18 +1782,15 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 			_ = f.Close()
 			return nil, err
 		}
-		info, err := f.Stat()
+		// GFSCRC1-wrapped shard: may be an encrypted single-blob (XAES) that
+		// cannot be streamed without decrypting. Delegate to ReadLocalShard to
+		// buffer-decrypt; reject plain shards as corruption.
+		_ = f.Close()
+		data, err := s.ReadLocalShard(bucket, key, shardIdx)
 		if err != nil {
-			_ = f.Close()
 			return nil, err
 		}
-		payloadLen := info.Size() - 8 - 4
-		if payloadLen < 0 {
-			_ = f.Close()
-			return nil, eccodec.ErrCRCMismatch
-		}
-		r := eccodec.NewSizedShardReader(f, payloadLen)
-		return &multiReadCloser{Reader: r, close: f.Close}, nil
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	_ = f.Close()
 	data, err := s.ReadLocalShard(bucket, key, shardIdx)
@@ -1882,23 +1855,14 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		if err := rejectLegacyEncodedShardBlob(f); err != nil {
+			_ = f.Close()
 			return 0, err
 		}
-		info, err := f.Stat()
-		if err != nil {
-			return 0, err
-		}
-		payloadLen := info.Size() - 8 - 4
-		if payloadLen < 0 {
-			return 0, eccodec.ErrCRCMismatch
-		}
-		if offset >= payloadLen {
-			return 0, io.EOF
-		}
-		if max := payloadLen - offset; int64(len(buf)) > max {
-			buf = buf[:max]
-		}
-		return f.ReadAt(buf, 8+offset)
+		// GFSCRC1-wrapped shard: may be an encrypted single-blob (XAES) that
+		// cannot be range-read without decrypting. Fall through to OpenLocalShard.
+		_ = f.Close()
+	} else {
+		_ = f.Close()
 	}
 	r, err := s.OpenLocalShard(bucket, key, shardIdx)
 	if err != nil {

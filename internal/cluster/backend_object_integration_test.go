@@ -35,7 +35,8 @@ var _ = Describe("Backend object integration", func() {
 	configureParityEC := func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
-		b.SetShardService(NewShardService(b.root, nil, withTestWAL(GinkgoT())), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		enc := testEncryptor(GinkgoT())
+		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
 	}
 
 	It("puts and gets objects", func() {

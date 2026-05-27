@@ -25,7 +25,8 @@ func newECBenchmarkBackend(b *testing.B) *DistributedBackend {
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	bk.SetECConfig(cfg)
 
-	svc := NewShardService(bk.root, nil, withTestWAL(b))
+	enc := testEncryptor(b)
+	svc := NewShardService(bk.root, nil, WithEncryptor(enc), withTestWALEnc(b, enc))
 	allNodes := make([]string, cfg.NumShards())
 	for i := range allNodes {
 		allNodes[i] = bk.selfAddr

@@ -41,7 +41,8 @@ func withTestWALEnc(tb clusterTestTB, enc *encrypt.Encryptor) ShardServiceOption
 // path must reject a write when no WAL is wired, instead of silently signalling
 // a direct-fsync fallback (the old requireFsync=true behaviour).
 func TestAppendShardDataWAL_RequiresWAL(t *testing.T) {
-	svc := NewShardService(t.TempDir(), nil) // no WithDataWAL → dataWAL == nil
+	enc := testEncryptor(t)
+	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc)) // no WithDataWAL → dataWAL == nil
 	_, err := svc.appendShardDataWAL(context.Background(), "bucket", "key", 0, []byte("payload"))
 	require.Error(t, err, "shard write without a WAL must be rejected")
 	require.Contains(t, err.Error(), "WAL")
@@ -52,7 +53,8 @@ func TestAppendShardDataWAL_RequiresWAL(t *testing.T) {
 // fsync the shard file directly.
 func TestAppendShardDataWAL_ReplayRequiresFsync(t *testing.T) {
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDataWAL(mustTestDataWAL(t, dir, nil)))
+	enc := testEncryptor(t)
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), WithDataWAL(mustTestDataWAL(t, dir, enc)))
 	svc.replayingDataWAL.Store(true)
 
 	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, []byte("d"))

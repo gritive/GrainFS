@@ -20,8 +20,10 @@ func largeShardPayload() []byte {
 // reconstruction cannot rebuild a page-cache-lost shard, so the WAL's
 // metadata-only record is not enough — the file itself must be durable.
 func TestAppendShardDataWAL_NoRedundancyForcesFsyncForLargeShard(t *testing.T) {
+	enc := testEncryptor(t)
 	svc := NewShardService(t.TempDir(), nil,
-		withTestWAL(t),
+		WithEncryptor(enc),
+		withTestWALEnc(t, enc),
 		WithNoRedundancy(func() bool { return true }),
 	)
 
@@ -34,8 +36,10 @@ func TestAppendShardDataWAL_NoRedundancyForcesFsyncForLargeShard(t *testing.T) {
 // (inlined) payload path is unchanged even under no-redundancy: the WAL inlines
 // the full payload, so replay rebuilds the file and no direct fsync is needed.
 func TestAppendShardDataWAL_NoRedundancyKeepsSmallShardWALOnly(t *testing.T) {
+	enc := testEncryptor(t)
 	svc := NewShardService(t.TempDir(), nil,
-		withTestWAL(t),
+		WithEncryptor(enc),
+		withTestWALEnc(t, enc),
 		WithNoRedundancy(func() bool { return true }),
 	)
 
@@ -48,8 +52,10 @@ func TestAppendShardDataWAL_NoRedundancyKeepsSmallShardWALOnly(t *testing.T) {
 // is unchanged: a large metadata-only write relies on EC reconstruction, so no
 // direct shard fsync is forced.
 func TestAppendShardDataWAL_RedundancyLargeShardWALOnly(t *testing.T) {
+	enc := testEncryptor(t)
 	svc := NewShardService(t.TempDir(), nil,
-		withTestWAL(t),
+		WithEncryptor(enc),
+		withTestWALEnc(t, enc),
 		WithNoRedundancy(func() bool { return false }),
 	)
 
@@ -61,7 +67,8 @@ func TestAppendShardDataWAL_RedundancyLargeShardWALOnly(t *testing.T) {
 // TestAppendShardDataWAL_NilNoRedundancyNeverForcesFsync asserts the default
 // (no provider wired, as in legacy callers/tests) never forces a direct fsync.
 func TestAppendShardDataWAL_NilNoRedundancyNeverForcesFsync(t *testing.T) {
-	svc := NewShardService(t.TempDir(), nil, withTestWAL(t)) // no WithNoRedundancy
+	enc := testEncryptor(t)
+	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc), withTestWALEnc(t, enc)) // no WithNoRedundancy
 
 	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, largeShardPayload())
 	require.NoError(t, err)

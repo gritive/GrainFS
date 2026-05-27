@@ -1508,19 +1508,12 @@ func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]sto
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as
-// NFSv4. WAL exposes WriteAt to NFS, so the coordinator must either pass it to
-// the local group leader or provide a correct routed fallback.
+// NFSv4. Uses the generic RMW path (GetObject -> modify -> PutObject) which
+// works correctly for both encrypted and unencrypted backends.
 func (c *ClusterCoordinator) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
-	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
+	_, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
-	}
-	if target.SelfIsOnlyVoter {
-		if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-			return nil, err
-		} else if gb != nil {
-			return gb.WriteAt(ctx, bucket, key, offset, data)
-		}
 	}
 
 	var existing []byte
@@ -1546,21 +1539,16 @@ func (c *ClusterCoordinator) WriteAt(ctx context.Context, bucket, key string, of
 	return c.PutObject(ctx, bucket, key, bytes.NewReader(existing), "application/octet-stream")
 }
 
-// Truncate implements the SETATTR-size fast path for routed internal buckets.
+// Truncate implements the SETATTR-size path for internal buckets via a generic
+// RMW (GetObject -> resize -> PutObject), which works correctly for both
+// encrypted and unencrypted backends.
 func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	if size < 0 {
 		return storage.ErrEntityTooLarge
 	}
-	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
+	_, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return err
-	}
-	if target.SelfIsOnlyVoter {
-		if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
-			return err
-		} else if gb != nil {
-			return gb.Truncate(ctx, bucket, key, size)
-		}
 	}
 
 	var existing []byte
@@ -1700,22 +1688,10 @@ func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
 	return true
 }
 
+// PreferWriteAt always returns false. The plain-file pwrite fast-path has been
+// removed; all internal-bucket writes now use the encrypted RMW path via PutObject.
 func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
-	if !storage.IsInternalBucket(bucket) {
-		return false
-	}
-	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
-	if err != nil {
-		return false
-	}
-	if !target.SelfIsOnlyVoter {
-		return false
-	}
-	gb, err := c.runtimeState().localExec.ResolveWrite(context.Background(), target)
-	if err != nil || gb == nil {
-		return false
-	}
-	return gb.PreferWriteAt(bucket)
+	return false
 }
 
 func (c *ClusterCoordinator) UploadPart(

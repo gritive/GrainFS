@@ -299,7 +299,8 @@ var _ = Describe("Backend multipart integration", func() {
 func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 	GinkgoHelper()
 	nodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
-	b.SetShardService(NewShardService(b.root, nil, withTestWAL(GinkgoT())), nodes)
+	enc := testEncryptor(GinkgoT())
+	b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), nodes)
 	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
