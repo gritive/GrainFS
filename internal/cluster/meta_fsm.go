@@ -284,6 +284,14 @@ type MetaFSM struct {
 	peers          *peerRegistry
 	onPeersChanged func([][32]byte) // fired after each peer-registry apply; nil = no-op
 
+	// zero-CA cutover drop bit (spec §8 H3): persisted in the snapshot so a node
+	// restarting from a post-drop snapshot drops its cluster-key base too. PR-1
+	// has no command that sets this true; PR-2 (DropClusterKeyAccept) does. The
+	// side effect (transport SetDropped) is decoupled via onClusterKeyDropped,
+	// fired once on Restore of a dropped=true snapshot.
+	clusterKeyDropped   bool
+	onClusterKeyDropped func() // fired on Restore of a dropped snapshot; nil = no-op
+
 	// IAM sub-FSM — wired after construction via SetIAM (Phase 1). iamStore is
 	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
 	iamStore   *iam.Store

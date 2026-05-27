@@ -106,6 +106,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// zero-CA peer registry (Task 5): export under the same RLock window so the
 	// serialized accept-set is consistent with the rest of the snapshot.
 	peersCopy := f.peers.export()
+	// zero-CA cutover drop bit (slot 14, H3): capture under the same RLock so the
+	// serialized bit is consistent with the rest of the snapshot.
+	droppedCopy := f.clusterKeyDropped
 	// Task 4b: capture DEKKeeper wraps inside the same lock window as
 	// activeKEKVersion. LOCK ORDER: f.mu → keeper.mu (VersionsAndActive
 	// acquires keeper.mu). Releasing f.mu first and then calling
@@ -308,6 +311,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)
 	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
 	clusterpb.MetaStateSnapshotAddPeers(b, peersVec)
+	clusterpb.MetaStateSnapshotAddClusterKeyDropped(b, droppedCopy)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -616,6 +620,11 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: peer registry validate: %w", err)
 	}
 
+	// zero-CA cutover drop bit (slot 14, H3): decode into a local here so the
+	// commit + callback-fire below use the captured value, never a field read
+	// outside the lock. Legacy snapshots default false (FlatBuffer default).
+	droppedDecoded := snap.ClusterKeyDropped()
+
 	// --- DECODE PHASE ---
 	// Decode all trailers into local variables BEFORE touching any f.* field.
 	// If any decode fails, Restore returns an error with f.* completely untouched.
@@ -762,6 +771,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.icebergTables = newIcebergTables
 	f.lastRotationRequests = newLastRotationRequests
 	f.kekStatuses = newKEKStatuses
+	f.clusterKeyDropped = droppedDecoded
 	if hasDEKData {
 		f.pendingDEKVersions = newDEKVersions
 		f.pendingDEKActive = newDEKActive
@@ -905,5 +915,18 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// is documented atomic/no-error, so nothing after this point can err.
 	f.peers.commitPeerIndexes(newPeersByNodeID, newPeersBySPKI)
 	f.firePeersChanged()
+
+	// zero-CA cutover drop bit (spec §8 H3): if the restored snapshot says the
+	// cluster key was dropped, fire the boot callback OUTSIDE f.mu (the callback
+	// mutates transport state). Gated on the decoded local, not a field read, to
+	// avoid an outside-lock field access. Dormant in PR-1 (snapshot always false).
+	if droppedDecoded {
+		f.mu.RLock()
+		cb := f.onClusterKeyDropped
+		f.mu.RUnlock()
+		if cb != nil {
+			cb()
+		}
+	}
 	return nil
 }
