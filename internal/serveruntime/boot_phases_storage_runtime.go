@@ -118,6 +118,10 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithNodeAddressBook(state.metaRaft.FSM()))
+	if state.dekKeeper != nil && len(state.clusterID) != 16 {
+		return fmt.Errorf("bootShardService: DEK keeper wired but clusterID is %d bytes (want 16)", len(state.clusterID))
+	}
+	shardSvcOpts = append(shardSvcOpts, cluster.WithShardDEKKeeper(state.dekKeeper, state.clusterID))
 	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.quicTransport, shardSvcOpts...)
 	// Stop the shard-pack actor goroutine (spawned when a WAL is wired) on
 	// shutdown. Registered after the data WAL cleanup so the LIFO cleanup stack
