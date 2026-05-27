@@ -12,14 +12,6 @@ var _ = ginkgo.AfterSuite(func() {
 	closeE2EIdleConnections()
 })
 
-var _ = ginkgo.BeforeEach(func() {
-	closeE2EIdleConnections()
-})
-
-var _ = ginkgo.AfterEach(func() {
-	closeE2EIdleConnections()
-})
-
 func closeE2EIdleConnections() {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport.CloseIdleConnections()

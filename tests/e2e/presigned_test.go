@@ -73,7 +73,7 @@ func runPresignedCases(getTgt func() s3Target) {
 			tgt.accessKey, tgt.secretKey, "us-east-1", 3600)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		resp, err := http.Get(presigned)
+		resp, err := e2eRawHTTPClient.Get(presigned)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 
@@ -100,7 +100,7 @@ func runPresignedCases(getTgt func() s3Target) {
 		var lastStatus int
 		gomega.Eventually(func() bool {
 			req, _ := http.NewRequest(http.MethodPut, presigned, strings.NewReader(content))
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := e2eRawHTTPClient.Do(req)
 			lastErr = err
 			if err != nil {
 				return false
@@ -129,7 +129,7 @@ func runPresignedCases(getTgt func() s3Target) {
 			tgt.accessKey, tgt.secretKey, "us-east-1", 1, time.Now().Add(-10*time.Second))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		resp, err := http.Get(presigned)
+		resp, err := e2eRawHTTPClient.Get(presigned)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
@@ -143,7 +143,7 @@ func runPresignedCases(getTgt func() s3Target) {
 			tgt.accessKey, "wrongsecret", "us-east-1", 3600)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		resp, err := http.Get(presigned)
+		resp, err := e2eRawHTTPClient.Get(presigned)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
@@ -229,7 +229,7 @@ func runMetricsEndpointCases(getTgt func() s3Target) {
 
 		req, _ := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
 		req.Header.Set("Accept-Encoding", "identity")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := e2eRawHTTPClient.Do(req)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 
