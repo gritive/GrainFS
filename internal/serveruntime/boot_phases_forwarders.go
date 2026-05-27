@@ -142,13 +142,16 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	// state.kekStore; the verifier is keyed by the local KEK so VerifyResponse
 	// passes iff the joiner holds the same KEK.
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
-		WithHandshakeVerifier(state.handshakeVerifier).
-		WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
-			if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
-				return err
-			}
-			return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
-		})
+		WithHandshakeVerifier(state.handshakeVerifier)
+	if state.handshakeVerifier != nil {
+		metaJoinReceiver = metaJoinReceiver.WithClusterID(state.handshakeVerifier.ClusterID())
+	}
+	metaJoinReceiver = metaJoinReceiver.WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
+		if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
+			return err
+		}
+		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
+	})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
 	metaChallengeReceiver := cluster.NewMetaChallengeReceiver(state.handshakeVerifier)
 	state.streamRouter.Handle(transport.StreamMetaJoinChallenge, metaChallengeReceiver.Handle)

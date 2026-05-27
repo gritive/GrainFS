@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.0.359.0] - 2026-05-27
+
+### Added
+
+- Server-side foundation for zero-CA dynamic cluster join via single-use invite
+  tokens. An operator can mint an asymmetric invite (an Ed25519 keypair whose public
+  key is committed to Raft with a TTL, while the private key travels in an opaque
+  operator bundle alongside the cluster id and the seed node's SPKI). The cluster now
+  carries the pieces a brand-new node needs to prove possession of an invite and its
+  own per-node identity: a single-use, TTL-bounded invite registry replicated through
+  Raft; a peer registry that enforces a bijective node-id↔SPKI mapping (rejecting both
+  duplicate SPKIs and attempts to rebind an existing node-id to a different key) plus a
+  denylist; canonical transcript signing/verification (Ed25519 for the invite, ECDSA
+  for the node identity); and a leader-side join path that verifies an invited node and
+  stages it as a non-voting learner before promotion. This is groundwork: the
+  over-the-wire join listener, the joiner-side bundle handling, and the `cluster invite`
+  CLI ship in a follow-up, so there is no end-user-visible join flow yet.
+
+### Added
+
+- Encryption gained an object-independent domain for content-addressed (CAS) chunks:
+  a dedicated AAD domain tag plus a content-locator-keyed AAD builder, so a single
+  stored copy of a deduplicated chunk can be decrypted by every object that references
+  it, regardless of which bucket or key it came from. A transition primitive can
+  re-seal a chunk from its legacy object-scoped binding into the CAS domain under the
+  active key generation. This is groundwork for background deduplication; nothing in
+  the write or read path uses it yet, so current behavior is unchanged until later
+  phases wire it in.
+
+## [0.0.357.0] - 2026-05-27
+
+### Added
+
+- **Automatic reclamation of orphaned object segment blobs.** The background scrubber now
+  garbage-collects raw segment blobs left behind when large or appendable objects are
+  overwritten or deleted. Previously these orphaned segments accumulated on disk and were
+  never reclaimed. A segment is deleted only when no live object version and no snapshot
+  references it, and only after it has been unreferenced longer than the retention window —
+  so snapshots and point-in-time restores are never affected. In a multi-node cluster this
+  runs on the group-0 leader (single-node deployments reclaim all orphaned segments);
+  broader multi-group fan-out is planned.
+- **`--segment-gc-retention` flag** (default `24h`) sets the grace period before an
+  unreferenced segment blob becomes eligible for deletion. Set it to `0` to drop the
+  time-based grace period (the 5-minute orphan age gate still applies).
+
 ## [0.0.356.0] - 2026-05-27
 
 ### Added

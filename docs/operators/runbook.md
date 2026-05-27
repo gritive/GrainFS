@@ -620,6 +620,20 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
 **Fix:**
 - Default age gate is 5 minutes. Long-running writes >5min may need a longer
   gate: `--scrub-orphan-age 10m` (and 1s in tests).
+- A retention window gates deletion on top of the age gate: an orphan is deleted
+  only after it has stayed unreferenced for `--segment-gc-retention` (default
+  24h). Set `--segment-gc-retention 0` to disable the time-based grace period
+  (the 5-minute age gate still applies). If disk reclamation lags after a large
+  delete/overwrite, this window is usually why — shorten it deliberately, not
+  reflexively (it protects in-flight reads and recent-PITR margin).
+- Deletion is reference-counted: a segment is removed only when no live object
+  version and no snapshot references it. If `found` stays high but `deleted` is
+  zero, the segments are still referenced (expected) rather than stuck.
+- GC only runs when the node's metadata view is caught-up. Single-node always
+  qualifies; in a cluster the sweep runs on the group-0 leader only (followers
+  and non-group-0 segments are not yet reclaimed — tracked as multi-group fan-out
+  follow-up). On a lagging or non-leader node the whole sweep cycle is skipped
+  fail-closed, so found/deleted counters staying flat there is expected.
 - Sweep cap is 50 per cycle (cycle-shared across buckets). If
   `OrphanSegmentSweepCappedTotal` is climbing, shorten scrub interval rather
   than raising the cap (cap protects I/O burst).

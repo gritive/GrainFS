@@ -94,7 +94,7 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 	domains := []AADDomain{
 		DomainShard, DomainWAL, DomainSnapshotBody, DomainSnapshotDEK,
 		DomainJWTKey, DomainDEKFSMWrap, DomainKEKRotate, DomainKEKCatchup,
-		DomainNBD, DomainIAMAdmin, DomainCapabilityAssertV1,
+		DomainNBD, DomainIAMAdmin, DomainCapabilityAssertV1, DomainCASChunk,
 	}
 	seen := make(map[uint16]struct{}, len(domains))
 	for _, d := range domains {
@@ -104,8 +104,8 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		seen[uint16(d)] = struct{}{}
 		_ = BuildAAD(d, clusterID) // exercise BuildAAD with every domain
 	}
-	if len(seen) != 11 {
-		t.Errorf("expected 11 unique domains, got %d", len(seen))
+	if len(seen) != 12 {
+		t.Errorf("expected 12 unique domains, got %d", len(seen))
 	}
 }
 

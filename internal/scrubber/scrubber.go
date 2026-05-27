@@ -3,6 +3,7 @@ package scrubber
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"golang.org/x/time/rate"
 
+	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -104,52 +106,98 @@ type AppendableScannable interface {
 // objects live inside packblobs (not under <key>_segments/), so the orphan
 // SEGMENT sweep never targets them — intentionally out of this set.
 //
-// No backend satisfies this interface yet (SnapshotFrozenSegmentPaths wiring
-// is Task 10). Until then the type-assert in the sweep loop returns false and
-// behaviour is identical to today (regression-zero).
+// AllFrozenSegmentPaths returns the grouped (bucket → []path) set so the sweep
+// can hoist both sources ONCE per cycle instead of re-listing per bucket.
 type segmentManifestSource interface {
-	// ListAllObjects returns every live object version (with Segments).
-	ListAllObjects() ([]storage.SnapshotObject, error)
-	// SnapshotFrozenSegmentPaths returns segment file paths pinned by live
-	// snapshot descriptors, in "<bucket>/<key>_segments/<blobID>" form.
-	SnapshotFrozenSegmentPaths(bucket string) ([]string, error)
+	// ListAllObjectsStrict returns every live object version (with Segments),
+	// failing closed on any unreadable/undecodable object metadata so a record
+	// the backend could not read never silently drops from the known-set.
+	ListAllObjectsStrict() ([]storage.SnapshotObject, error)
+	// AllFrozenSegmentPaths returns segment file paths pinned by live snapshot
+	// descriptors, grouped by bucket, each in "<bucket>/<key>_segments/<blobID>"
+	// form (via storage.SegmentKnownPath).
+	AllFrozenSegmentPaths() (map[string][]string, error)
 }
 
-// buildKnownSegments assembles the known-segment set for one bucket from all
-// authoritative manifest sources (spec: known-set must cover live versions +
-// snapshot descriptors, not just appendable objects).
-//
-// Fail-closed: if either source errors the partial set is unsafe to sweep
-// against (a missing entry would make a live chunk look orphaned and get
-// deleted), so the error is returned and the caller MUST skip the sweep for
-// this bucket rather than delete against an incomplete known set.
+// caughtUpReporter lets a backend signal that its local metadata view is
+// up-to-date enough to safely compute the known-set. A lagging node's
+// ListAllObjects is stale and could mark a committed segment as orphaned, so
+// the sweep is skipped for the whole cycle when CaughtUp() is false. The ctx
+// bounds the underlying ReadIndex barrier so the gate never stalls the cycle.
+type caughtUpReporter interface {
+	CaughtUp(ctx context.Context) bool
+}
+
+// segmentOrphanLog persists when a raw segment blob first became unreferenced
+// (t_zero) so the orphan sweep can enforce a retention window across cycles and
+// restarts. nil disables retention gating (age-gate only).
+type segmentOrphanLog interface {
+	TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error)
+	Observe(c chunkref.ChunkID, now time.Time) error
+	Forget(c chunkref.ChunkID) error
+	Reconcile(known map[chunkref.ChunkID]struct{}) error
+}
+
+// buildKnownSegments merges the per-bucket known-segment set from pre-fetched
+// sources (hoisted once per cycle): live-version segments + snapshot-frozen
+// paths. Pure (no I/O) so the per-bucket loop is cheap.
 //
 // Only o.Segments contributes: coalesced blobs live at "<key>/coalesced/<id>",
 // not under "<key>_segments/", so the orphan-SEGMENT sweep never targets them
 // and they are intentionally excluded from this segment-scoped known set.
-func buildKnownSegments(bucket string, src segmentManifestSource) (map[string]bool, error) {
+func buildKnownSegments(bucket string, segByBucket map[string]map[string]bool, frozenByBucket map[string][]string) map[string]bool {
 	known := make(map[string]bool)
-	objs, err := src.ListAllObjects()
-	if err != nil {
-		return nil, fmt.Errorf("known-set list objects: %w", err)
-	}
-	for i := range objs {
-		o := &objs[i]
-		if o.Bucket != bucket {
-			continue
-		}
-		for _, seg := range o.Segments {
-			known[bucket+"/"+o.Key+"_segments/"+storage.ParseLocator(seg.BlobID).Ref] = true
-		}
-	}
-	paths, err := src.SnapshotFrozenSegmentPaths(bucket)
-	if err != nil {
-		return nil, fmt.Errorf("known-set snapshot paths: %w", err)
-	}
-	for _, p := range paths {
+	for p := range segByBucket[bucket] {
 		known[p] = true
 	}
-	return known, nil
+	for _, p := range frozenByBucket[bucket] {
+		known[p] = true
+	}
+	return known
+}
+
+// blobIDOf extracts the raw blob ID (the path's final segment) from a
+// "<bucket>/<key>_segments/<blobID>" known-set path.
+func blobIDOf(path string) string { return path[strings.LastIndex(path, "/")+1:] }
+
+// hoistSegmentSources fetches the authoritative known-set sources ONCE per
+// cycle: live-version segments (grouped by bucket) and snapshot-frozen paths.
+//
+// When the backend does not implement segmentManifestSource it returns
+// (nil, nil, true) — the per-bucket loop still runs against appendables only
+// (regression-zero for backends without manifest sources).
+//
+// FAIL-CLOSED: when the backend DOES implement the interface but either source
+// errors, it returns ok=false so the caller skips the ENTIRE cycle's segment
+// sweep — a partial known-set could mark a live chunk orphaned and delete it.
+func (s *BackgroundScrubber) hoistSegmentSources() (segByBucket map[string]map[string]bool, frozenByBucket map[string][]string, ok bool) {
+	src, isManifest := s.backend.(segmentManifestSource)
+	if !isManifest {
+		return nil, nil, true
+	}
+	objs, err := src.ListAllObjectsStrict()
+	if err != nil {
+		log.Warn().Err(err).Msg("scrub: known-set list objects failed, skipping segment sweep")
+		return nil, nil, false
+	}
+	frozenByBucket, err = src.AllFrozenSegmentPaths()
+	if err != nil {
+		log.Warn().Err(err).Msg("scrub: known-set frozen paths failed, skipping segment sweep")
+		return nil, nil, false
+	}
+	segByBucket = make(map[string]map[string]bool)
+	for i := range objs {
+		o := &objs[i]
+		m := segByBucket[o.Bucket]
+		if m == nil {
+			m = make(map[string]bool)
+			segByBucket[o.Bucket] = m
+		}
+		for _, seg := range o.Segments {
+			m[storage.SegmentKnownPath(o.Bucket, o.Key, seg.BlobID)] = true
+		}
+	}
+	return segByBucket, frozenByBucket, true
 }
 
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
@@ -217,6 +265,12 @@ type BackgroundScrubber struct {
 	// segmentTombstone tracks raw segment orphan candidates across cycles
 	// (parallel to orphanTombstone for EC shards).
 	segmentTombstone map[string]struct{}
+	// orphanLog persists t_zero for unreferenced segments so the retention
+	// window survives cycles/restarts. nil = age-gate-only behavior.
+	orphanLog segmentOrphanLog
+	// orphanRetention is the retention window applied on top of the walker's
+	// age gate. <=0 leaves only the age gate.
+	orphanRetention time.Duration
 
 	// mu guards lastStatuses for concurrent reads. The background goroutine is the
 	// sole writer; RWMutex lets multiple concurrent callers of LastStatus() proceed
@@ -261,6 +315,18 @@ func WithEmitter(e Emitter) ScrubberOption {
 		s.emitter = e
 		s.repairer = NewRepairEngine(s.backend, WithRepairEmitter(e))
 	}
+}
+
+// WithSegmentOrphanLog activates retention-windowed orphan-segment GC. The
+// backend MUST also supply snapshot-frozen paths (segmentManifestSource) per the
+// activation constraint, else a snapshot-pinned chunk could be swept.
+// window<=0 disables retention gating (only the walker age-gate applies); the reconcile and observe paths still run so the log stays consistent.
+//
+// t_zero is the first WALK observation of an unreferenced segment, NOT the
+// instant it was first unreferenced. The effective grace before deletion is
+// therefore walker age-gate (≈5m) + retention window + cycle timing.
+func WithSegmentOrphanLog(log segmentOrphanLog, window time.Duration) ScrubberOption {
+	return func(s *BackgroundScrubber) { s.orphanLog = log; s.orphanRetention = window }
 }
 
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
@@ -589,37 +655,51 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	segmentScanner, hasSegScanner := s.backend.(AppendableScannable)
 	segmentWalker, hasSegWalker := s.backend.(OrphanSegmentWalkable)
 	if hasSegScanner && hasSegWalker {
-		segCapRemaining := maxSegmentsPerCycle
-		for _, bucket := range buckets {
-			knownSegmentsB := make(map[string]bool)
-			if appCh, appErr := segmentScanner.ScanAppendableObjects(bucket); appErr != nil {
-				log.Warn().Str("bucket", bucket).Err(appErr).Msg("scrub: scan appendable failed")
-			} else {
-				for rec := range appCh {
-					for _, blobID := range rec.SegmentBlobIDs {
-						knownSegmentsB[rec.Bucket+"/"+rec.Key+"_segments/"+blobID] = true
+		// (E) caught-up gate: a lagging node's ListAllObjects is stale and could
+		// mark a committed segment orphan. Skip the whole segment sweep this cycle.
+		if cu, ok := s.backend.(caughtUpReporter); ok && !cu.CaughtUp(ctx) {
+			log.Warn().Msg("scrub: node not caught up, skipping orphan-segment sweep this cycle")
+		} else if segByBucket, frozenByBucket, sourcesOK := s.hoistSegmentSources(); sourcesOK {
+			// (G) reconcile: a segment in the known-set is referenced -> must not
+			// carry a t_zero. Clear stale entries (covers re-reference across
+			// restart) before observing/sweeping.
+			if s.orphanLog != nil {
+				known := make(map[chunkref.ChunkID]struct{})
+				for _, paths := range frozenByBucket {
+					for _, p := range paths {
+						known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
 					}
 				}
-			}
-			// Option (A): union with live object versions + snapshot-frozen paths
-			// when the backend satisfies segmentManifestSource. Until Task 10 wires
-			// SnapshotFrozenSegmentPaths into a real backend, no backend will satisfy
-			// the full interface so this block is a no-op (regression-zero).
-			if src, ok := s.backend.(segmentManifestSource); ok {
-				extra, err := buildKnownSegments(bucket, src)
-				if err != nil {
-					// Fail-closed: a partial known set could mark a live chunk
-					// orphaned and delete it. Skip this bucket's segment sweep.
-					log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: known-set build failed, skipping segment sweep")
-					continue
+				for _, m := range segByBucket {
+					for p := range m {
+						known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
+					}
 				}
-				for k, v := range extra {
+				if err := s.orphanLog.Reconcile(known); err != nil {
+					log.Warn().Err(err).Msg("scrub: orphan-log reconcile failed")
+				}
+			}
+			segCapRemaining := maxSegmentsPerCycle
+			for _, bucket := range buckets {
+				knownSegmentsB := make(map[string]bool)
+				if appCh, appErr := segmentScanner.ScanAppendableObjects(bucket); appErr != nil {
+					log.Warn().Str("bucket", bucket).Err(appErr).Msg("scrub: scan appendable failed")
+				} else {
+					for rec := range appCh {
+						for _, blobID := range rec.SegmentBlobIDs {
+							knownSegmentsB[storage.SegmentKnownPath(rec.Bucket, rec.Key, blobID)] = true
+						}
+					}
+				}
+				for k, v := range buildKnownSegments(bucket, segByBucket, frozenByBucket) {
 					knownSegmentsB[k] = v
 				}
+				segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
 			}
-			// tombstone source + retention window are wired in serveruntime (Task 10); nil = age-gate only (today's behavior).
-			segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining, nil, 0)
 		}
+		// hoistSegmentSources returned ok=false: it already logged and the whole
+		// segment sweep is skipped this cycle (fail-closed against a partial
+		// known-set).
 	}
 
 	// Optional: sweep orphan shard dirs left by migration crashes.

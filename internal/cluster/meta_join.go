@@ -3,6 +3,10 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"sync"
@@ -18,6 +22,10 @@ import (
 )
 
 type JoinStatus string
+
+// metaJoinTimeout is the maximum time a join operation waits for a Raft
+// commit (both the KEK path and the invite path use the same budget).
+const metaJoinTimeout = 60 * time.Second
 
 const (
 	JoinStatusOK            JoinStatus = "ok"
@@ -44,6 +52,12 @@ type JoinRequest struct {
 	// §7 T55 (D#15, F#23).
 	HandshakeNonce    []byte `json:"handshake_nonce,omitempty"`
 	HandshakeResponse []byte `json:"handshake_response,omitempty"`
+	// Invite path (brand-new node, asymmetric — Path A: cert in request).
+	SPKI      []byte `json:"spki,omitempty"`
+	CertDER   []byte `json:"cert_der,omitempty"`   // joiner per-node leaf cert (Path A)
+	NodeSig   []byte `json:"node_sig,omitempty"`   // ECDSA over transcript
+	InviteSig []byte `json:"invite_sig,omitempty"` // Ed25519 over the SAME transcript
+	InviteID  string `json:"invite_id,omitempty"`
 }
 
 type JoinReply struct {
@@ -52,6 +66,10 @@ type JoinReply struct {
 	Message    string     `json:"message,omitempty"`
 	LeaderID   string     `json:"leader_id,omitempty"`
 	LeaderAddr string     `json:"leader_addr,omitempty"`
+	// PeerSPKIs is the cluster accept-set delivered to a freshly admitted
+	// pending-learner at commit1. NO KEK is delivered here — KEK is a
+	// promotion-time follow-up (Phase 3).
+	PeerSPKIs [][]byte `json:"peer_spkis,omitempty"`
 }
 
 type metaJoinDialer func(peer string, payload []byte) ([]byte, error)
@@ -104,6 +122,14 @@ type metaJoinCoordinator interface {
 	LeaderID() string
 	Join(ctx context.Context, id, addr string) error
 	Nodes() []MetaNodeEntry
+	// Invite admission gate (zero-CA Phase 2, Path A). Behavior methods rather
+	// than concrete-type accessors so external packages (serveruntime fakes)
+	// can implement the interface without naming unexported registry types.
+	IsSPKIDenylisted(spki [32]byte) bool
+	SPKIOwner(spki [32]byte) (string, bool)
+	LookupInvite(id string, now time.Time) (ed25519.PublicKey, bool)
+	AcceptSPKIBytes() [][]byte
+	JoinViaInvite(ctx context.Context, nodeID, addr string, spki [32]byte, inviteID string) error
 }
 
 type MetaJoinReceiver struct {
@@ -115,6 +141,10 @@ type MetaJoinReceiver struct {
 	// When nil (legacy callers, unit tests not exercising the handshake), the
 	// HMAC gate is skipped so existing behavior is preserved.
 	verifier *encrypt.HandshakeVerifier
+	// clusterID is the 16-byte cluster identifier bound into the invite
+	// transcript on the receiver side (sourced from the KEK verifier at boot).
+	// The invite gate requires it to be non-empty.
+	clusterID []byte
 }
 
 func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
@@ -131,6 +161,14 @@ func (r *MetaJoinReceiver) WithPostJoinHook(fn func(context.Context, JoinRequest
 // MetaChallengeReceiver so the issued-nonce map is shared. §7 T55 (D#15, F#23).
 func (r *MetaJoinReceiver) WithHandshakeVerifier(v *encrypt.HandshakeVerifier) *MetaJoinReceiver {
 	r.verifier = v
+	return r
+}
+
+// WithClusterID sets the 16-byte cluster identifier bound into the invite
+// transcript. It must match the value the joiner used when signing. Sourced
+// from the KEK verifier's ClusterID() at boot.
+func (r *MetaJoinReceiver) WithClusterID(cid []byte) *MetaJoinReceiver {
+	r.clusterID = append([]byte(nil), cid...)
 	return r
 }
 
@@ -160,6 +198,71 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 			LeaderID:   leaderID,
 			LeaderAddr: leaderAddr,
 		})
+	}
+	// Invite admission path (zero-CA Phase 2, §4.2). A brand-new node with no
+	// pre-shared KEK presents an invite signature + its per-node ECDSA cert.
+	// Path A: the leaf cert DER travels IN the request (the join handler does
+	// not expose the TLS session). Runs after the leader check, instead of the
+	// KEK gate, when InviteSig is present.
+	if len(joinReq.InviteSig) > 0 {
+		if len(r.clusterID) == 0 {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"})
+		}
+		var spki [32]byte
+		copy(spki[:], joinReq.SPKI)
+		// 1. denylist + SPKI uniqueness.
+		if r.meta.IsSPKIDenylisted(spki) {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI denylisted"})
+		}
+		if owner, ok := r.meta.SPKIOwner(spki); ok && owner != joinReq.NodeID {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI already registered"})
+		}
+		// 2. invite public key lookup (present, unused, unexpired).
+		invitePub, ok := r.meta.LookupInvite(joinReq.InviteID, time.Now())
+		if !ok {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite invalid/used/expired"})
+		}
+		// 3. parse joiner cert (Path A) + bind SPKI to it (3-step NodeSig check).
+		leaf, err := x509.ParseCertificate(joinReq.CertDER)
+		if err != nil {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "bad cert"})
+		}
+		if sha256.Sum256(leaf.RawSubjectPublicKeyInfo) != spki {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI does not match presented cert"})
+		}
+		ecPub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "non-ECDSA node key"})
+		}
+		// 4. rebuild canonical transcript. Bind is empty — Path A defers the
+		// TLS-exporter channel binding; the nonce is joiner-generated, carried
+		// in HandshakeNonce, and bound by both signatures.
+		// TODO(phase-2-followup): Path A deferred TLS-exporter channel binding
+		// (Bind) + server-issued nonce freshness; see design doc.
+		tr := encrypt.InviteTranscript{
+			ClusterID: r.clusterID,
+			Nonce:     joinReq.HandshakeNonce,
+			NodeID:    joinReq.NodeID,
+			Address:   joinReq.Address,
+			SPKI:      joinReq.SPKI,
+			Bind:      nil,
+		}
+		// 5. verify BOTH signatures over the same transcript.
+		if !encrypt.VerifyInviteTranscript(invitePub, tr, joinReq.InviteSig) {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite signature invalid"})
+		}
+		if !encrypt.VerifyNodeTranscript(ecPub, tr, joinReq.NodeSig) {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "node signature invalid"})
+		}
+		// 6. staged membership (consumes invite by id in commit1).
+		r.joinMu.Lock()
+		defer r.joinMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
+		defer cancel()
+		if err := r.meta.JoinViaInvite(ctx, joinReq.NodeID, joinReq.Address, spki, joinReq.InviteID); err != nil {
+			return joinMessage(joinReplyFromError(err))
+		}
+		return joinMessage(JoinReply{Accepted: true, Status: JoinStatusOK, PeerSPKIs: r.meta.AcceptSPKIBytes()})
 	}
 	// KEK handshake gate. Runs after the leader check so non-leaders return
 	// JoinStatusNotLeader without consuming a nonce on the leader's verifier
@@ -200,7 +303,7 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
 	defer cancel()
 	if err := r.meta.Join(ctx, joinReq.NodeID, joinReq.Address); err != nil {
 		return joinMessage(joinReplyFromError(err))
@@ -306,11 +409,21 @@ func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 	addrOff := b.CreateString(req.Address)
 	nonceOff := b.CreateByteVector(req.HandshakeNonce)
 	respOff := b.CreateByteVector(req.HandshakeResponse)
+	spkiOff := b.CreateByteVector(req.SPKI)
+	certOff := b.CreateByteVector(req.CertDER)
+	nodeSigOff := b.CreateByteVector(req.NodeSig)
+	inviteSigOff := b.CreateByteVector(req.InviteSig)
+	inviteIDOff := b.CreateString(req.InviteID)
 	clusterpb.JoinRequestStart(b)
 	clusterpb.JoinRequestAddNodeId(b, nodeOff)
 	clusterpb.JoinRequestAddAddress(b, addrOff)
 	clusterpb.JoinRequestAddHandshakeNonce(b, nonceOff)
 	clusterpb.JoinRequestAddHandshakeResponse(b, respOff)
+	clusterpb.JoinRequestAddSpki(b, spkiOff)
+	clusterpb.JoinRequestAddCertDer(b, certOff)
+	clusterpb.JoinRequestAddNodeSig(b, nodeSigOff)
+	clusterpb.JoinRequestAddInviteSig(b, inviteSigOff)
+	clusterpb.JoinRequestAddInviteId(b, inviteIDOff)
 	b.Finish(clusterpb.JoinRequestEnd(b))
 	fb := b.FinishedBytes()
 	out := make([]byte, 0, len(metaJoinRequestMagic)+len(fb))
@@ -337,6 +450,19 @@ func decodeJoinRequest(data []byte) (req JoinRequest, err error) {
 	if r := fb.HandshakeResponseBytes(); len(r) > 0 {
 		req.HandshakeResponse = append([]byte(nil), r...)
 	}
+	if s := fb.SpkiBytes(); len(s) > 0 {
+		req.SPKI = append([]byte(nil), s...)
+	}
+	if c := fb.CertDerBytes(); len(c) > 0 {
+		req.CertDER = append([]byte(nil), c...)
+	}
+	if s := fb.NodeSigBytes(); len(s) > 0 {
+		req.NodeSig = append([]byte(nil), s...)
+	}
+	if s := fb.InviteSigBytes(); len(s) > 0 {
+		req.InviteSig = append([]byte(nil), s...)
+	}
+	req.InviteID = string(fb.InviteId())
 	return req, nil
 }
 
@@ -346,12 +472,30 @@ func encodeJoinReply(reply JoinReply) ([]byte, error) {
 	msgOff := b.CreateString(reply.Message)
 	leaderIDOff := b.CreateString(reply.LeaderID)
 	leaderAddrOff := b.CreateString(reply.LeaderAddr)
+	var peerSPKIsOff flatbuffers.UOffsetT
+	if len(reply.PeerSPKIs) > 0 {
+		offs := make([]flatbuffers.UOffsetT, len(reply.PeerSPKIs))
+		for i, s := range reply.PeerSPKIs {
+			vOff := b.CreateByteVector(s)
+			clusterpb.SPKIBytesStart(b)
+			clusterpb.SPKIBytesAddValue(b, vOff)
+			offs[i] = clusterpb.SPKIBytesEnd(b)
+		}
+		clusterpb.JoinReplyStartPeerSpkisVector(b, len(offs))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		peerSPKIsOff = b.EndVector(len(offs))
+	}
 	clusterpb.JoinReplyStart(b)
 	clusterpb.JoinReplyAddAccepted(b, reply.Accepted)
 	clusterpb.JoinReplyAddStatus(b, joinStatusToFB(reply.Status))
 	clusterpb.JoinReplyAddMessage(b, msgOff)
 	clusterpb.JoinReplyAddLeaderId(b, leaderIDOff)
 	clusterpb.JoinReplyAddLeaderAddr(b, leaderAddrOff)
+	if len(reply.PeerSPKIs) > 0 {
+		clusterpb.JoinReplyAddPeerSpkis(b, peerSPKIsOff)
+	}
 	b.Finish(clusterpb.JoinReplyEnd(b))
 	return append([]byte(nil), b.FinishedBytes()...), nil
 }
@@ -363,11 +507,22 @@ func decodeJoinReply(data []byte) (reply *JoinReply, err error) {
 		}
 	}()
 	fb := clusterpb.GetRootAsJoinReply(data, 0)
-	return &JoinReply{
+	out := &JoinReply{
 		Accepted:   fb.Accepted(),
 		Status:     joinStatusFromFB(fb.Status()),
 		Message:    string(fb.Message()),
 		LeaderID:   string(fb.LeaderId()),
 		LeaderAddr: string(fb.LeaderAddr()),
-	}, nil
+	}
+	if n := fb.PeerSpkisLength(); n > 0 {
+		out.PeerSPKIs = make([][]byte, 0, n)
+		var sp clusterpb.SPKIBytes
+		for i := 0; i < n; i++ {
+			if !fb.PeerSpkis(&sp, i) {
+				continue
+			}
+			out.PeerSPKIs = append(out.PeerSPKIs, append([]byte(nil), sp.ValueBytes()...))
+		}
+	}
+	return out, nil
 }
