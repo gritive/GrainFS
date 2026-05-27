@@ -644,16 +644,31 @@ func inviteJoinDial(ctx context.Context, addr string, serverSPKI [32]byte, clien
 	return *reply, nil
 }
 
-// inviteSealBindContext reproduces W7 MetaJoinReceiver.sealBindContext:
-// clusterID‖inviteID‖nodeID‖leaderID. The joiner derives the SAME bytes to open
-// the sealed bootstrap (both contextInfo and aad use this value).
+// inviteSealBindContext reproduces W7 MetaJoinReceiver.sealBindContext
+// byte-for-byte: a domain tag followed by length-prefixed (4-byte big-endian)
+// clusterID, inviteID, nodeID, leaderID. The joiner derives the SAME bytes to
+// open the sealed bootstrap (both contextInfo and aad use this value). The
+// length prefixing closes a boundary-ambiguity class; this MUST stay in sync
+// with the leader's sealBindContext (the e2e seal/open round-trip enforces it).
+const inviteSealDomain = "grainfs-invite-seal-v1"
+
 func inviteSealBindContext(clusterID []byte, inviteID, nodeID, leaderID string) []byte {
-	out := make([]byte, 0, len(clusterID)+len(inviteID)+len(nodeID)+len(leaderID))
-	out = append(out, clusterID...)
-	out = append(out, inviteID...)
-	out = append(out, nodeID...)
-	out = append(out, leaderID...)
+	out := make([]byte, 0, len(inviteSealDomain)+16+len(clusterID)+len(inviteID)+len(nodeID)+len(leaderID))
+	out = append(out, inviteSealDomain...)
+	out = appendInviteSealField(out, clusterID)
+	out = appendInviteSealField(out, []byte(inviteID))
+	out = appendInviteSealField(out, []byte(nodeID))
+	out = appendInviteSealField(out, []byte(leaderID))
 	return out
+}
+
+// appendInviteSealField appends b length-prefixed (4-byte big-endian length).
+// Mirrors internal/cluster.appendInviteSealField byte-for-byte.
+func appendInviteSealField(out, b []byte) []byte {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(b)))
+	out = append(out, l[:]...)
+	return append(out, b...)
 }
 
 // highestKEKGen returns the highest generation present in gens and its key

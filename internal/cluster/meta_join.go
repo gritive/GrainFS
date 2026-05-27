@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -543,14 +544,34 @@ func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, s
 // blob to its transcript identity: clusterID ‖ inviteID ‖ joinerNodeID ‖
 // leaderNodeID. The joiner reproduces the same bytes when opening. Both
 // contextInfo and aad use this value (consistent with SealToPeer's design).
+//
+// Each variable-length field is length-prefixed (4-byte big-endian) behind a
+// domain tag so two distinct transcripts can never collide into the same
+// context bytes via boundary ambiguity (e.g. inviteID="ab"+nodeID="c" vs
+// inviteID="a"+nodeID="bc"). The joiner's inviteSealBindContext mirrors this
+// byte-for-byte; the e2e seal/open round-trip guards against drift.
 func (r *MetaJoinReceiver) sealBindContext(req JoinRequest) []byte {
 	leaderID := r.meta.LeaderID()
-	out := make([]byte, 0, len(r.clusterID)+len(req.InviteID)+len(req.NodeID)+len(leaderID))
-	out = append(out, r.clusterID...)
-	out = append(out, req.InviteID...)
-	out = append(out, req.NodeID...)
-	out = append(out, leaderID...)
+	out := make([]byte, 0, len(inviteSealDomain)+16+len(r.clusterID)+len(req.InviteID)+len(req.NodeID)+len(leaderID))
+	out = append(out, inviteSealDomain...)
+	out = appendInviteSealField(out, r.clusterID)
+	out = appendInviteSealField(out, []byte(req.InviteID))
+	out = appendInviteSealField(out, []byte(req.NodeID))
+	out = appendInviteSealField(out, []byte(leaderID))
 	return out
+}
+
+// inviteSealDomain is the domain-separation tag prefixing the invite-join seal
+// bind context. invite_join_boot.go's inviteSealBindContext uses the IDENTICAL
+// literal; they MUST stay in sync (the e2e round-trip enforces it).
+const inviteSealDomain = "grainfs-invite-seal-v1"
+
+// appendInviteSealField appends b length-prefixed (4-byte big-endian length).
+func appendInviteSealField(out, b []byte) []byte {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(b)))
+	out = append(out, l[:]...)
+	return append(out, b...)
 }
 
 func joinReplyFromError(err error) JoinReply {

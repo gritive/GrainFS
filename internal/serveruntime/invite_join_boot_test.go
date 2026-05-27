@@ -1,6 +1,8 @@
 package serveruntime
 
 import (
+	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -371,12 +373,34 @@ func TestStageInviteSecrets(t *testing.T) {
 }
 
 // TestInviteSealBindContext matches W7 MetaJoinReceiver.sealBindContext layout:
-// clusterID‖inviteID‖nodeID‖leaderID.
+// domain tag ‖ len-prefixed(clusterID) ‖ len-prefixed(inviteID) ‖
+// len-prefixed(nodeID) ‖ len-prefixed(leaderID). The length prefixing closes a
+// boundary-ambiguity class; this asserts the exact canonical bytes the leader
+// must reproduce.
 func TestInviteSealBindContext(t *testing.T) {
+	lp := func(b []byte) []byte {
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(b)))
+		return append(l[:], b...)
+	}
+	var want []byte
+	want = append(want, "grainfs-invite-seal-v1"...)
+	want = append(want, lp([]byte("CID"))...)
+	want = append(want, lp([]byte("inv"))...)
+	want = append(want, lp([]byte("node"))...)
+	want = append(want, lp([]byte("leader"))...)
+
 	got := inviteSealBindContext([]byte("CID"), "inv", "node", "leader")
-	want := "CIDinvnodeleader"
-	if string(got) != want {
-		t.Fatalf("bindCtx = %q, want %q", got, want)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("bindCtx = %x, want %x", got, want)
+	}
+
+	// Boundary-ambiguity guard: (inviteID="ab", nodeID="c") and
+	// (inviteID="a", nodeID="bc") MUST yield distinct context bytes.
+	a := inviteSealBindContext([]byte("CID"), "ab", "c", "leader")
+	b := inviteSealBindContext([]byte("CID"), "a", "bc", "leader")
+	if bytes.Equal(a, b) {
+		t.Fatal("bindCtx collided across distinct (inviteID,nodeID) splits")
 	}
 }
 
