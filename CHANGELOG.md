@@ -1,6 +1,22 @@
 # Changelog
 
-## [0.0.360.0] - 2026-05-27
+## [0.0.361.0] - 2026-05-27
+
+### Fixed
+
+- **A transient disk fault on one node no longer quarantines otherwise-healthy objects.**
+  The placement monitor used to treat *any* failed read of a locally-owned erasure-coded
+  shard (other than a missing file) as corruption and quarantine the parent object. A
+  transient I/O fault — `EIO`, `EMFILE` ("too many open files"), `EBUSY`, a permission
+  error — was therefore misread as data corruption, and on a node having a bad disk-day
+  this could mass-isolate healthy objects (amplified across every segment of large
+  chunked objects). The monitor now quarantines only on *confirmed* shard corruption
+  (CRC mismatch, structural/truncation damage, or authentication-tag failure on encrypted
+  shards); transient read errors are logged and counted by the new
+  `grainfs_placement_monitor_transient_read_error_total{kind}` metric, then skipped and
+  retried on the next scan. A sustained rate on that metric points at the node's disk or
+  file-descriptor health, not at the objects. Corruption is now classified consistently
+  whether a shard is read in full or by byte range.
 
 ### Fixed
 

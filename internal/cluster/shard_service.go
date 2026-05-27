@@ -1643,11 +1643,15 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 			if decodedEncoded {
 				return data, nil
 			}
-			return nil, fmt.Errorf("decrypt shard: not an encrypted blob (missing magic header)")
+			// Encryption is enabled and the outer CRC validated, but the inner
+			// magic header is missing: structural format corruption.
+			return nil, fmt.Errorf("decrypt shard: %w: not an encrypted blob (missing magic header)", eccodec.ErrShardCorrupt)
 		}
 		data, err = s.encryptor.DecryptWithAAD(data, aad)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt shard: %w", err)
+			// AEAD auth failure on an owned legacy single-blob shard ⟹ tampered
+			// bytes or AAD mismatch: corruption, not a transient fault.
+			return nil, fmt.Errorf("decrypt shard: %w: %w", eccodec.ErrShardCorrupt, err)
 		}
 		return data, nil
 	}
@@ -1683,11 +1687,15 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, aad []byte) ([]byte, er
 			if decodedEncoded {
 				return data, nil
 			}
-			return nil, fmt.Errorf("decrypt shard: not an encrypted blob (missing magic header)")
+			// Encryption is enabled and the outer CRC validated, but the inner
+			// magic header is missing: structural format corruption.
+			return nil, fmt.Errorf("decrypt shard: %w: not an encrypted blob (missing magic header)", eccodec.ErrShardCorrupt)
 		}
 		data, err = s.encryptor.DecryptWithAAD(data, aad)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt shard: %w", err)
+			// AEAD auth failure on an owned legacy single-blob shard ⟹ tampered
+			// bytes or AAD mismatch: corruption, not a transient fault.
+			return nil, fmt.Errorf("decrypt shard: %w: %w", eccodec.ErrShardCorrupt, err)
 		}
 		return data, nil
 	}

@@ -448,6 +448,58 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 	assert.Contains(t, err.Error(), "decrypt shard")
 }
 
+// TestShardService_ReadLocalShard_LegacyAEADCorruption seeds a legacy single-blob
+// encrypted shard (the scrubber repair / pre-v0.0.62.0 format:
+// eccodec.EncodeShard(encryptor.EncryptWithAAD(...))) whose inner AEAD tag fails
+// while the outer CRC footer stays valid, and confirms ReadLocalShard surfaces it
+// as corruption so the placement monitor quarantines instead of skipping.
+func TestShardService_ReadLocalShard_LegacyAEADCorruption(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
+
+	const bucket, objKey = "bkt", "obj"
+	aad := []byte(bucket + "/" + objKey + "/0")
+	plaintext := bytes.Repeat([]byte("legacy single-blob aead corruption probe "), 8)
+
+	t.Run("AEAD tamper", func(t *testing.T) {
+		blob, err := enc.EncryptWithAAD(plaintext, aad)
+		require.NoError(t, err)
+		// Flip a ciphertext byte BEFORE the CRC envelope is applied, so the outer
+		// CRC matches the tampered payload (valid) but the inner AEAD tag fails.
+		blob[len(blob)/2] ^= 0xFF
+		raw := eccodec.EncodeShard(blob)
+
+		rawPath := filepath.Join(dir, "shards", bucket, objKey, "shard_0")
+		require.NoError(t, os.MkdirAll(filepath.Dir(rawPath), 0o755))
+		require.NoError(t, os.WriteFile(rawPath, raw, 0o644))
+
+		_, err = svc.ReadLocalShard(bucket, objKey, 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decrypt shard")
+		assert.True(t, eccodec.IsCorruption(err), "AEAD failure must classify as corruption: %v", err)
+	})
+
+	t.Run("structural missing magic", func(t *testing.T) {
+		// Bytes with no outer CRC envelope and no encrypted-blob magic header:
+		// encryption is enabled but the stored shard is not in any recognized
+		// format → structural format corruption.
+		raw := bytes.Repeat([]byte("X"), 64)
+
+		rawPath := filepath.Join(dir, "shards", bucket, "structural", "shard_0")
+		require.NoError(t, os.MkdirAll(filepath.Dir(rawPath), 0o755))
+		require.NoError(t, os.WriteFile(rawPath, raw, 0o644))
+
+		_, err := svc.ReadLocalShard(bucket, "structural", 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not an encrypted blob")
+		assert.True(t, eccodec.IsCorruption(err), "missing magic must classify as corruption: %v", err)
+	})
+}
+
 func TestShardService_WithEncryptorReadsLegacyCRCShard(t *testing.T) {
 	key := bytes.Repeat([]byte("k"), 32)
 	enc, err := encrypt.NewEncryptor(key)

@@ -208,6 +208,16 @@ var (
 		Help: "Total EC shard refs skipped by the placement monitor due to a malformed NodeIDs length.",
 	}, []string{"kind"})
 
+	// PlacementMonitorTransientReadError counts non-ENOENT shard reads during a
+	// placement scan that were classified as transient (skipped, not
+	// quarantined); a sustained rate indicates node disk/FD health (EIO/EMFILE),
+	// not object corruption. The "kind" label is 'object_version', 'segment',
+	// 'coalesced', or 'unknown'.
+	PlacementMonitorTransientReadError = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_placement_monitor_transient_read_error_total",
+		Help: "Counts non-ENOENT shard reads during placement scan that were classified as transient (skipped, not quarantined); a sustained rate indicates node disk/FD health (EIO/EMFILE), not object corruption. The 'kind' label is 'object_version', 'segment', 'coalesced', or 'unknown'.",
+	}, []string{"kind"})
+
 	// DiskUsedPct tracks local disk usage percentage per node.
 	DiskUsedPct = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_disk_used_pct",

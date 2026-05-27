@@ -136,6 +136,11 @@ avg(grainfs_node_recovery_duration_seconds)
 - Orphan segment tombstone backlog growing for 3+ scrub cycles
   (`grainfs_scrub_orphan_segments_found_total - grainfs_scrub_orphan_segments_deleted_total`
   monotonically increasing)
+- Placement monitor transient shard read errors sustained over ~3 consecutive scan
+  intervals (`rate(grainfs_placement_monitor_transient_read_error_total[15m]) > 0`
+  holding for ≥ 3 scan intervals) — open a ticket to investigate the affected node's
+  disk/FD health (failing disk, fd exhaustion); page if it coincides with elevated
+  read errors or latency on that node.
 
 ### AppendObject SLI metrics (reference)
 
@@ -197,6 +202,13 @@ incident/receipt path.
   when a segment (`kind="segment"`) or coalesced (`kind="coalesced"`) ref has
   malformed placement (`len(NodeIDs) != ECData+ECParity`). A non-zero rate indicates
   corrupt object metadata; investigate affected objects.
+- `grainfs_placement_monitor_transient_read_error_total{kind}` (Counter) — incremented
+  when a local shard read fails with a transient (non-corruption, non-ENOENT) error —
+  `EIO`, `EMFILE`, `EBUSY`, permission denied, or unknown — for an object version
+  (`kind="object_version"`), segment (`kind="segment"`), or coalesced
+  (`kind="coalesced"`) shard. These shards are skipped and retried on the next scan
+  (not quarantined). A sustained rate is a **node** disk/FD health signal, not a
+  per-object corruption signal; investigate the node, not the objects.
 
 ---
 
