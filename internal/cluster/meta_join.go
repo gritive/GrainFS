@@ -7,12 +7,15 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -58,6 +61,15 @@ type JoinRequest struct {
 	NodeSig   []byte `json:"node_sig,omitempty"`   // ECDSA over transcript
 	InviteSig []byte `json:"invite_sig,omitempty"` // Ed25519 over the SAME transcript
 	InviteID  string `json:"invite_id,omitempty"`
+	// JoinPhase selects the two-phase invite-join flow: 0 = legacy/KEK (no
+	// invite), 1 = Phase-1 (invite gate + seal bootstrap, no membership), 2 =
+	// Phase-2 ACK (membership stage + invite consume). W2 wire field.
+	JoinPhase uint8 `json:"join_phase,omitempty"`
+	// JoinerJoinListenerAddr/SPKI advertise the joiner's own join-listener so a
+	// non-leader can later redirect the joiner to the leader's listener. Carried
+	// on the wire (W2); the redirect itself is a later task.
+	JoinerJoinListenerAddr string `json:"joiner_join_listener_addr,omitempty"`
+	JoinerJoinListenerSPKI []byte `json:"joiner_join_listener_spki,omitempty"`
 }
 
 type JoinReply struct {
@@ -70,6 +82,22 @@ type JoinReply struct {
 	// pending-learner at commit1. NO KEK is delivered here — KEK is a
 	// promotion-time follow-up (Phase 3).
 	PeerSPKIs [][]byte `json:"peer_spkis,omitempty"`
+	// SealedBootstrap is the Phase-1 envelope (wire form of encrypt.SealedToPeer)
+	// the leader seals to the joiner's identity key: the bootstrap secrets
+	// (encryption.key, KEK generations, transport PSK). Empty outside Phase-1.
+	SealedBootstrap []byte `json:"sealed_bootstrap,omitempty"`
+}
+
+// BootstrapSecretProvider supplies the SECRET plaintext the invite handler
+// seals to a joiner. Defined at the consuming use-site per repo convention;
+// implemented by serveruntime over bootState. cluster.id is intentionally NOT
+// included here — it is public and carried in the InviteBundle. KEKGen is the
+// type already defined in bootstrap_codec.go (W2).
+type BootstrapSecretProvider interface {
+	// BootstrapSecrets returns the SECRET plaintext to seal: the static
+	// encryption.key bytes, EVERY KEK generation in the KEKStore, and the
+	// transport PSK. cluster.id is NOT included (public, in the InviteBundle).
+	BootstrapSecrets() (encryptionKey []byte, kekGens []KEKGen, transportPSK []byte, err error)
 }
 
 type metaJoinDialer func(peer string, payload []byte) ([]byte, error)
@@ -130,6 +158,13 @@ type metaJoinCoordinator interface {
 	LookupInvite(id string, now time.Time) (ed25519.PublicKey, bool)
 	AcceptSPKIBytes() [][]byte
 	JoinViaInvite(ctx context.Context, nodeID, addr string, spki [32]byte, inviteID string) error
+	// Two-phase invite-join (W7). Phase-1 binds the invite to the first
+	// (nodeID, spki) redeemer; Phase-2 validates the ACK against that binding,
+	// stages membership, and consumes the invite.
+	ProposeInvitePending(ctx context.Context, inviteID, nodeID string, spki [32]byte, addr string) error
+	LookupPending(inviteID string) (nodeID string, spki [32]byte, addr string, ok bool)
+	ProposeInviteConsume(ctx context.Context, inviteID string) error
+	RemoveLearner(nodeID, addr string) error
 }
 
 type MetaJoinReceiver struct {
@@ -145,6 +180,10 @@ type MetaJoinReceiver struct {
 	// transcript on the receiver side (sourced from the KEK verifier at boot).
 	// The invite gate requires it to be non-empty.
 	clusterID []byte
+	// secretProvider supplies the bootstrap secrets (encryption.key, all KEK
+	// generations, transport PSK) the invite handler seals to a joiner. Wired
+	// here in W3; consumed by the seal/handler logic in a later task (W7).
+	secretProvider BootstrapSecretProvider
 }
 
 func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
@@ -161,6 +200,15 @@ func (r *MetaJoinReceiver) WithPostJoinHook(fn func(context.Context, JoinRequest
 // MetaChallengeReceiver so the issued-nonce map is shared. §7 T55 (D#15, F#23).
 func (r *MetaJoinReceiver) WithHandshakeVerifier(v *encrypt.HandshakeVerifier) *MetaJoinReceiver {
 	r.verifier = v
+	return r
+}
+
+// WithBootstrapSecretProvider installs the provider that assembles the secret
+// plaintext (encryption.key, KEK generations, transport PSK) the invite handler
+// seals to a joiner. Wired at boot; the seal logic that calls
+// BootstrapSecrets() lands in a later task.
+func (r *MetaJoinReceiver) WithBootstrapSecretProvider(p BootstrapSecretProvider) *MetaJoinReceiver {
+	r.secretProvider = p
 	return r
 }
 
@@ -181,88 +229,25 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "node_id and address are required"})
 	}
 	if !r.meta.IsLeader() {
-		leaderID := r.meta.LeaderID()
-		leaderAddr := ""
-		for _, n := range r.meta.Nodes() {
-			if n.ID == leaderID || n.Address == leaderID {
-				leaderAddr = n.Address
-				break
-			}
-		}
-		if leaderAddr == "" {
-			leaderAddr = leaderID
-		}
-		return joinMessage(JoinReply{
-			Accepted:   false,
-			Status:     JoinStatusNotLeader,
-			LeaderID:   leaderID,
-			LeaderAddr: leaderAddr,
-		})
+		// TODO(W7b/W9): return leader_join_addr+leader_join_spki from member state
+		// so an invite joiner can redirect its join-listener dial to the leader.
+		// The full join-listener redirect (MetaNodeEntry extension) is a separate
+		// task and is intentionally NOT implemented here.
+		return joinMessage(r.notLeaderReply())
 	}
 	// Invite admission path (zero-CA Phase 2, §4.2). A brand-new node with no
 	// pre-shared KEK presents an invite signature + its per-node ECDSA cert.
 	// Path A: the leaf cert DER travels IN the request (the join handler does
-	// not expose the TLS session). Runs after the leader check, instead of the
-	// KEK gate, when InviteSig is present.
+	// not expose the TLS session). The two-phase flow (W7) is delegated to
+	// HandleJoin. This in-process Handle entry has no TLS session, so it passes
+	// the CLAIMED SPKI as the captured SPKI; W9's JoinListener calls HandleJoin
+	// directly with the real TLS-captured SPKI.
 	if len(joinReq.InviteSig) > 0 {
-		if len(r.clusterID) == 0 {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"})
-		}
-		var spki [32]byte
-		copy(spki[:], joinReq.SPKI)
-		// 1. denylist + SPKI uniqueness.
-		if r.meta.IsSPKIDenylisted(spki) {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI denylisted"})
-		}
-		if owner, ok := r.meta.SPKIOwner(spki); ok && owner != joinReq.NodeID {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI already registered"})
-		}
-		// 2. invite public key lookup (present, unused, unexpired).
-		invitePub, ok := r.meta.LookupInvite(joinReq.InviteID, time.Now())
-		if !ok {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite invalid/used/expired"})
-		}
-		// 3. parse joiner cert (Path A) + bind SPKI to it (3-step NodeSig check).
-		leaf, err := x509.ParseCertificate(joinReq.CertDER)
-		if err != nil {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "bad cert"})
-		}
-		if sha256.Sum256(leaf.RawSubjectPublicKeyInfo) != spki {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI does not match presented cert"})
-		}
-		ecPub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
-		if !ok {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "non-ECDSA node key"})
-		}
-		// 4. rebuild canonical transcript. Bind is empty — Path A defers the
-		// TLS-exporter channel binding; the nonce is joiner-generated, carried
-		// in HandshakeNonce, and bound by both signatures.
-		// TODO(phase-2-followup): Path A deferred TLS-exporter channel binding
-		// (Bind) + server-issued nonce freshness; see design doc.
-		tr := encrypt.InviteTranscript{
-			ClusterID: r.clusterID,
-			Nonce:     joinReq.HandshakeNonce,
-			NodeID:    joinReq.NodeID,
-			Address:   joinReq.Address,
-			SPKI:      joinReq.SPKI,
-			Bind:      nil,
-		}
-		// 5. verify BOTH signatures over the same transcript.
-		if !encrypt.VerifyInviteTranscript(invitePub, tr, joinReq.InviteSig) {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite signature invalid"})
-		}
-		if !encrypt.VerifyNodeTranscript(ecPub, tr, joinReq.NodeSig) {
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "node signature invalid"})
-		}
-		// 6. staged membership (consumes invite by id in commit1).
-		r.joinMu.Lock()
-		defer r.joinMu.Unlock()
+		var captured [32]byte
+		copy(captured[:], joinReq.SPKI)
 		ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
 		defer cancel()
-		if err := r.meta.JoinViaInvite(ctx, joinReq.NodeID, joinReq.Address, spki, joinReq.InviteID); err != nil {
-			return joinMessage(joinReplyFromError(err))
-		}
-		return joinMessage(JoinReply{Accepted: true, Status: JoinStatusOK, PeerSPKIs: r.meta.AcceptSPKIBytes()})
+		return joinMessage(r.HandleJoin(ctx, captured, joinReq))
 	}
 	// KEK handshake gate. Runs after the leader check so non-leaders return
 	// JoinStatusNotLeader without consuming a nonce on the leader's verifier
@@ -314,6 +299,279 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		}
 	}
 	return joinMessage(JoinReply{Accepted: true, Status: JoinStatusOK})
+}
+
+// HandleJoin runs the two-phase invite-join flow (W7). It receives the
+// JoinListener-captured TLS peer SPKI (W9 supplies the real value; the
+// in-process Handle entry passes the claimed SPKI). The caller must already
+// hold leadership; HandleJoin assumes IsLeader() is true.
+//
+//   - Phase-1 (req.JoinPhase==1): run the invite gate, assert capturedSPKI ==
+//     req.SPKI, bind the invite to this (nodeID, spki) via ProposeInvitePending,
+//     and seal the bootstrap secrets to the joiner's identity key. NO membership
+//     change.
+//   - Phase-2 (req.JoinPhase==2): match the ACK against the pending binding AND
+//     capturedSPKI, stage membership (idempotently), run the post-join hook, and
+//     consume the invite. On membership failure: RemoveLearner rollback.
+func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte, req JoinRequest) JoinReply {
+	if len(r.clusterID) == 0 {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"}
+	}
+	// Required-field guard, mirroring the in-process Handle path. The dedicated
+	// QUIC join listener dispatches decoded requests straight here, so without
+	// this a malformed client could sign Phase-1 with an empty node_id/address;
+	// Phase-2 would then register/promote a learner keyed by the address and only
+	// ProposeAddNode rejects the empty id AFTER promotion, leaving an orphan voter
+	// the learner rollback cannot remove.
+	if req.NodeID == "" || req.Address == "" {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "node_id and address are required"}
+	}
+	var spki [32]byte
+	copy(spki[:], req.SPKI)
+
+	switch req.JoinPhase {
+	case 2:
+		return r.handleJoinPhase2(ctx, capturedSPKI, spki, req)
+	default:
+		// Phase-1 (and any legacy invite request that omits join_phase): gate +
+		// seal, no membership.
+		return r.handleJoinPhase1(ctx, capturedSPKI, spki, req)
+	}
+}
+
+// HandleJoinStream is the JoinListener (W9) glue: it reads the framed JoinRequest
+// off the QUIC stream, runs HandleJoin with the TLS-captured peer SPKI, and
+// writes the framed JoinReply back. The wire is length-prefixed binary (NO
+// JSON) using transport.JoinReadFields/JoinPutField: exactly ONE field in each
+// direction, carrying the magic-prefixed FlatBuffers JoinRequest/JoinReply blob.
+// stream is typically a *quic.Stream (io.ReadWriteCloser); the caller owns
+// closing the underlying connection.
+func (r *MetaJoinReceiver) HandleJoinStream(ctx context.Context, peerSPKI [32]byte, stream io.ReadWriteCloser) {
+	defer func() { _ = stream.Close() }()
+	fields, err := transport.JoinReadFields(stream, 1)
+	if err != nil {
+		log.Warn().Err(err).Msg("meta_join: read join request frame failed")
+		return
+	}
+	req, err := decodeJoinRequest(fields[0])
+	if err != nil {
+		r.writeJoinReply(stream, JoinReply{Accepted: false, Status: JoinStatusError, Message: err.Error()})
+		return
+	}
+	// Leadership gate: HandleJoin assumes IsLeader() is true. Every node runs a
+	// join listener, so a follower that receives a dial must return the standard
+	// not-leader reply (with leader hint) rather than running the invite path
+	// and failing noisily at the raft layer. (The leader_join_addr/spki redirect
+	// extension is W7b — intentionally out of scope here.)
+	if !r.meta.IsLeader() {
+		r.writeJoinReply(stream, r.notLeaderReply())
+		return
+	}
+	r.writeJoinReply(stream, r.HandleJoin(ctx, peerSPKI, req))
+}
+
+// notLeaderReply builds the JoinStatusNotLeader reply with the best-effort
+// leader id + address hint, mirroring the in-process Handle path.
+func (r *MetaJoinReceiver) notLeaderReply() JoinReply {
+	leaderID := r.meta.LeaderID()
+	leaderAddr := ""
+	for _, n := range r.meta.Nodes() {
+		if n.ID == leaderID || n.Address == leaderID {
+			leaderAddr = n.Address
+			break
+		}
+	}
+	if leaderAddr == "" {
+		leaderAddr = leaderID
+	}
+	return JoinReply{
+		Accepted:   false,
+		Status:     JoinStatusNotLeader,
+		LeaderID:   leaderID,
+		LeaderAddr: leaderAddr,
+	}
+}
+
+func (r *MetaJoinReceiver) writeJoinReply(w io.Writer, reply JoinReply) {
+	replyBytes, err := encodeJoinReply(reply)
+	if err != nil {
+		log.Warn().Err(err).Msg("meta_join: encode join reply failed")
+		return
+	}
+	if _, err := w.Write(transport.JoinPutField(nil, replyBytes)); err != nil {
+		log.Warn().Err(err).Msg("meta_join: write join reply frame failed")
+	}
+}
+
+// gateInvite runs the invite admission gate shared by Phase-1 (and re-checked
+// before membership at Phase-2). It returns the joiner's ECDSA identity key on
+// success, or a populated rejection reply (ok=false).
+func (r *MetaJoinReceiver) gateInvite(spki [32]byte, req JoinRequest) (*ecdsa.PublicKey, JoinReply, bool) {
+	// 1. denylist + SPKI uniqueness.
+	if r.meta.IsSPKIDenylisted(spki) {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI denylisted"}, false
+	}
+	if owner, ok := r.meta.SPKIOwner(spki); ok && owner != req.NodeID {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI already registered"}, false
+	}
+	// 2. invite public key lookup (present, unused, unexpired).
+	invitePub, ok := r.meta.LookupInvite(req.InviteID, time.Now())
+	if !ok {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite invalid/used/expired"}, false
+	}
+	// 3. parse joiner cert (Path A) + bind SPKI to it.
+	leaf, err := x509.ParseCertificate(req.CertDER)
+	if err != nil {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "bad cert"}, false
+	}
+	if sha256.Sum256(leaf.RawSubjectPublicKeyInfo) != spki {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI does not match presented cert"}, false
+	}
+	ecPub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "non-ECDSA node key"}, false
+	}
+	// 4. rebuild canonical transcript. Bind is empty — Path A defers the
+	// TLS-exporter channel binding; the nonce is joiner-generated, carried in
+	// HandshakeNonce, and bound by both signatures.
+	// TODO(phase-2-followup): Path A deferred TLS-exporter channel binding
+	// (Bind) + server-issued nonce freshness; see design doc.
+	tr := encrypt.InviteTranscript{
+		ClusterID: r.clusterID,
+		Nonce:     req.HandshakeNonce,
+		NodeID:    req.NodeID,
+		Address:   req.Address,
+		SPKI:      req.SPKI,
+		Bind:      nil,
+	}
+	// 5. verify BOTH signatures over the same transcript.
+	if !encrypt.VerifyInviteTranscript(invitePub, tr, req.InviteSig) {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite signature invalid"}, false
+	}
+	if !encrypt.VerifyNodeTranscript(ecPub, tr, req.NodeSig) {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "node signature invalid"}, false
+	}
+	return ecPub, JoinReply{}, true
+}
+
+func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, spki [32]byte, req JoinRequest) JoinReply {
+	ecPub, reject, ok := r.gateInvite(spki, req)
+	if !ok {
+		return reject
+	}
+	// The TLS-captured SPKI must match the claimed identity: a joiner cannot
+	// present a cert it does not hold the key for.
+	if capturedSPKI != spki {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "captured SPKI does not match claimed SPKI"}
+	}
+	r.joinMu.Lock()
+	defer r.joinMu.Unlock()
+	if r.secretProvider == nil {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "bootstrap secret provider not configured"}
+	}
+	// Bind the invite to the first (nodeID, spki) redeemer. A different identity
+	// re-redeeming the same invite is rejected here (errInvitePendingMismatch).
+	if err := r.meta.ProposeInvitePending(ctx, req.InviteID, req.NodeID, spki, req.Address); err != nil {
+		return joinReplyFromError(err)
+	}
+	// Seal the bootstrap secrets to the joiner's identity key.
+	encKey, kekGens, psk, err := r.secretProvider.BootstrapSecrets()
+	if err != nil {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "bootstrap secrets: " + err.Error()}
+	}
+	payload := encodeBootstrapSecretsPayload(encKey, kekGens, psk)
+	bindCtx := r.sealBindContext(req)
+	blob, err := encrypt.SealToPeer(ecPub, payload, bindCtx, bindCtx)
+	if err != nil {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "seal bootstrap: " + err.Error()}
+	}
+	return JoinReply{
+		Accepted: true,
+		Status:   JoinStatusOK,
+		// LeaderID lets the joiner reproduce sealBindContext's leaderNodeID
+		// component when opening the sealed bootstrap (W9 cross-process).
+		LeaderID:        r.meta.LeaderID(),
+		SealedBootstrap: encodeSealedBootstrap(blob.EphemeralPub, blob.Ciphertext),
+	}
+}
+
+func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, spki [32]byte, req JoinRequest) JoinReply {
+	r.joinMu.Lock()
+	defer r.joinMu.Unlock()
+	// Phase-2 security rests on the Phase-1 pending binding (persisted in the
+	// FSM) plus the TLS-captured SPKI — NOT on re-verifying the signatures. The
+	// pending record proves the invite was gate-verified at Phase-1; capturedSPKI
+	// proves this ACK comes from the holder of that Phase-1 key (payload fields
+	// alone are forgeable).
+	pendNode, pendSPKI, pendAddr, ok := r.meta.LookupPending(req.InviteID)
+	if !ok {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "no pending invite redemption"}
+	}
+	if pendNode != req.NodeID || pendSPKI != spki {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "ACK does not match pending redemption"}
+	}
+	if capturedSPKI != pendSPKI {
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "captured SPKI does not match pending redemption"}
+	}
+	// Use the address PERSISTED at Phase-1 (which was bound into the signed invite
+	// transcript), NOT req.Address — a replayed/altered ACK must not be able to
+	// finalize membership for a different (unreachable or attacker-chosen) endpoint
+	// than the one the invite actually authorized.
+	// Stage membership idempotently (JoinViaInvite resumes from the first missing
+	// step). On failure roll back the un-promoted learner.
+	if err := r.meta.JoinViaInvite(ctx, req.NodeID, pendAddr, spki, req.InviteID); err != nil {
+		if rbErr := r.meta.RemoveLearner(req.NodeID, pendAddr); rbErr != nil {
+			log.Warn().Err(rbErr).Str("node_id", req.NodeID).
+				Msg("meta_join: JoinViaInvite rollback RemoveLearner failed")
+		}
+		return joinReplyFromError(err)
+	}
+	if r.postJoinHook != nil {
+		if err := r.postJoinHook(ctx, req); err != nil {
+			return joinReplyFromError(err)
+		}
+	}
+	// Consume the invite (pending → used). Single consume owned by Phase-2. On a
+	// retry the invite is already used — tolerate that so the ACK still succeeds
+	// idempotently (the pending+captured checks above already authorized it).
+	if err := r.meta.ProposeInviteConsume(ctx, req.InviteID); err != nil && !errors.Is(err, errInviteInvalid) {
+		return joinReplyFromError(err)
+	}
+	return JoinReply{Accepted: true, Status: JoinStatusOK, PeerSPKIs: r.meta.AcceptSPKIBytes()}
+}
+
+// sealBindContext derives the contextInfo/aad bytes binding a sealed bootstrap
+// blob to its transcript identity: clusterID ‖ inviteID ‖ joinerNodeID ‖
+// leaderNodeID. The joiner reproduces the same bytes when opening. Both
+// contextInfo and aad use this value (consistent with SealToPeer's design).
+//
+// Each variable-length field is length-prefixed (4-byte big-endian) behind a
+// domain tag so two distinct transcripts can never collide into the same
+// context bytes via boundary ambiguity (e.g. inviteID="ab"+nodeID="c" vs
+// inviteID="a"+nodeID="bc"). The joiner's inviteSealBindContext mirrors this
+// byte-for-byte; the e2e seal/open round-trip guards against drift.
+func (r *MetaJoinReceiver) sealBindContext(req JoinRequest) []byte {
+	leaderID := r.meta.LeaderID()
+	out := make([]byte, 0, len(inviteSealDomain)+16+len(r.clusterID)+len(req.InviteID)+len(req.NodeID)+len(leaderID))
+	out = append(out, inviteSealDomain...)
+	out = appendInviteSealField(out, r.clusterID)
+	out = appendInviteSealField(out, []byte(req.InviteID))
+	out = appendInviteSealField(out, []byte(req.NodeID))
+	out = appendInviteSealField(out, []byte(leaderID))
+	return out
+}
+
+// inviteSealDomain is the domain-separation tag prefixing the invite-join seal
+// bind context. invite_join_boot.go's inviteSealBindContext uses the IDENTICAL
+// literal; they MUST stay in sync (the e2e round-trip enforces it).
+const inviteSealDomain = "grainfs-invite-seal-v1"
+
+// appendInviteSealField appends b length-prefixed (4-byte big-endian length).
+func appendInviteSealField(out, b []byte) []byte {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(b)))
+	out = append(out, l[:]...)
+	return append(out, b...)
 }
 
 func joinReplyFromError(err error) JoinReply {
@@ -402,6 +660,19 @@ func joinStatusFromFB(s clusterpb.JoinStatus) JoinStatus {
 	}
 }
 
+// EncodeJoinRequest serializes a JoinRequest to the magic-prefixed FlatBuffers
+// blob carried in one length-prefixed join-wire field. Used by the W9b joiner
+// to drive Phase-1/Phase-2 over transport.DialJoin.
+func EncodeJoinRequest(req JoinRequest) ([]byte, error) {
+	return encodeJoinRequest(req)
+}
+
+// DecodeJoinReply parses the FlatBuffers JoinReply blob the leader writes back.
+// Used by the W9b joiner.
+func DecodeJoinReply(data []byte) (*JoinReply, error) {
+	return decodeJoinReply(data)
+}
+
 func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 	b := newMetaJoinBuilder()
 	defer releaseMetaJoinBuilder(b)
@@ -414,6 +685,8 @@ func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 	nodeSigOff := b.CreateByteVector(req.NodeSig)
 	inviteSigOff := b.CreateByteVector(req.InviteSig)
 	inviteIDOff := b.CreateString(req.InviteID)
+	joinListenerAddrOff := b.CreateString(req.JoinerJoinListenerAddr)
+	joinListenerSPKIOff := b.CreateByteVector(req.JoinerJoinListenerSPKI)
 	clusterpb.JoinRequestStart(b)
 	clusterpb.JoinRequestAddNodeId(b, nodeOff)
 	clusterpb.JoinRequestAddAddress(b, addrOff)
@@ -424,6 +697,9 @@ func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 	clusterpb.JoinRequestAddNodeSig(b, nodeSigOff)
 	clusterpb.JoinRequestAddInviteSig(b, inviteSigOff)
 	clusterpb.JoinRequestAddInviteId(b, inviteIDOff)
+	clusterpb.JoinRequestAddJoinPhase(b, req.JoinPhase)
+	clusterpb.JoinRequestAddJoinerJoinListenerAddr(b, joinListenerAddrOff)
+	clusterpb.JoinRequestAddJoinerJoinListenerSpki(b, joinListenerSPKIOff)
 	b.Finish(clusterpb.JoinRequestEnd(b))
 	fb := b.FinishedBytes()
 	out := make([]byte, 0, len(metaJoinRequestMagic)+len(fb))
@@ -463,6 +739,11 @@ func decodeJoinRequest(data []byte) (req JoinRequest, err error) {
 		req.InviteSig = append([]byte(nil), s...)
 	}
 	req.InviteID = string(fb.InviteId())
+	req.JoinPhase = fb.JoinPhase()
+	req.JoinerJoinListenerAddr = string(fb.JoinerJoinListenerAddr())
+	if s := fb.JoinerJoinListenerSpkiBytes(); len(s) > 0 {
+		req.JoinerJoinListenerSPKI = append([]byte(nil), s...)
+	}
 	return req, nil
 }
 
@@ -472,6 +753,10 @@ func encodeJoinReply(reply JoinReply) ([]byte, error) {
 	msgOff := b.CreateString(reply.Message)
 	leaderIDOff := b.CreateString(reply.LeaderID)
 	leaderAddrOff := b.CreateString(reply.LeaderAddr)
+	var sealedOff flatbuffers.UOffsetT
+	if len(reply.SealedBootstrap) > 0 {
+		sealedOff = b.CreateByteVector(reply.SealedBootstrap)
+	}
 	var peerSPKIsOff flatbuffers.UOffsetT
 	if len(reply.PeerSPKIs) > 0 {
 		offs := make([]flatbuffers.UOffsetT, len(reply.PeerSPKIs))
@@ -495,6 +780,9 @@ func encodeJoinReply(reply JoinReply) ([]byte, error) {
 	clusterpb.JoinReplyAddLeaderAddr(b, leaderAddrOff)
 	if len(reply.PeerSPKIs) > 0 {
 		clusterpb.JoinReplyAddPeerSpkis(b, peerSPKIsOff)
+	}
+	if sealedOff != 0 {
+		clusterpb.JoinReplyAddSealedBootstrap(b, sealedOff)
 	}
 	b.Finish(clusterpb.JoinReplyEnd(b))
 	return append([]byte(nil), b.FinishedBytes()...), nil
@@ -523,6 +811,9 @@ func decodeJoinReply(data []byte) (reply *JoinReply, err error) {
 			}
 			out.PeerSPKIs = append(out.PeerSPKIs, append([]byte(nil), sp.ValueBytes()...))
 		}
+	}
+	if s := fb.SealedBootstrapBytes(); len(s) > 0 {
+		out.SealedBootstrap = append([]byte(nil), s...)
 	}
 	return out, nil
 }

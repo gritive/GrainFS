@@ -301,7 +301,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	state.volMgr = volMgr
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(state.shardCache))
-	if !state.joinMode {
+	// A joiner (legacy joinMode OR zero-CA inviteJoinMode) must NOT install the
+	// group-0 DistributedBackend read-index fence: it is not the group-0 leader
+	// and has no usable legacy peers, so ReadIndex returns ErrNotLeader and GETs
+	// 500 before the ClusterCoordinator forward path can route them to the real
+	// group leader (the same path PUTs already use). Skip the fence so reads reach
+	// the coordinator and forward correctly.
+	if !state.joinMode && !state.inviteJoinMode {
 		srvOpts = append(srvOpts, server.WithReadIndexer(state.distBackend))
 	}
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(state.distBackend))

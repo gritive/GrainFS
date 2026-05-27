@@ -111,6 +111,41 @@ var _ = ginkgo.Describe("Learner membership", func() {
 		})).To(gomega.Succeed(), "n2 must replay PromoteStage1 + joint AddVoter and see itself as Voter")
 	}, ginkgo.NodeTimeout(10*time.Second))
 
+	ginkgo.It("removes an un-promoted learner via RemoveLearner", func(ginkgo.SpecContext) {
+		node, cleanup, err := startRaftIntegrationSingleVoter("leader")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
+
+		gomega.Expect(node.AddLearner("L1", "addr1")).To(gomega.Succeed())
+
+		isLearner := func(id string) bool {
+			for _, server := range node.Configuration().Servers {
+				if server.ID == id && server.Suffrage == NonVoter {
+					return true
+				}
+			}
+			return false
+		}
+		gomega.Expect(isLearner("L1")).To(gomega.BeTrue(), "L1 must be a learner after AddLearner")
+
+		gomega.Expect(node.RemoveLearner("L1")).To(gomega.Succeed())
+
+		// L1 must be GONE entirely (neither voter nor learner).
+		for _, server := range node.Configuration().Servers {
+			gomega.Expect(server.ID).NotTo(gomega.Equal("L1"), "L1 must not appear after RemoveLearner")
+		}
+	}, ginkgo.NodeTimeout(5*time.Second))
+
+	ginkgo.It("rejects RemoveLearner for non-learners", func(ginkgo.SpecContext) {
+		node, cleanup, err := startRaftIntegrationSingleVoter("leader")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
+
+		// Never-added id and the leader's own voter id both return ErrNotALearner.
+		gomega.Expect(errors.Is(node.RemoveLearner("never-added"), ErrNotALearner)).To(gomega.BeTrue())
+		gomega.Expect(errors.Is(node.RemoveLearner("leader"), ErrNotALearner)).To(gomega.BeTrue())
+	}, ginkgo.NodeTimeout(5*time.Second))
+
 	ginkgo.It("rejects PromoteToVoter for non-learners", func(ginkgo.SpecContext) {
 		node, cleanup, err := startRaftIntegrationSingleVoter("leader")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

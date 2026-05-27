@@ -151,6 +151,21 @@ func TestExplicitMissingEncryptionKeyStillReportsMountFailure(t *testing.T) {
 	require.Contains(t, err.Error(), "mount failure?")
 }
 
+func TestLoadOrCreateEncryptionKeyWithRawReturnsFileContents(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "encryption.key")
+	want := make([]byte, 32)
+	for i := range want {
+		want[i] = byte(i + 1)
+	}
+	require.NoError(t, os.WriteFile(keyFile, want, 0o600))
+
+	enc, raw, err := LoadOrCreateEncryptionKeyWithRaw(keyFile, dir, false)
+	require.NoError(t, err)
+	require.NotNil(t, enc)
+	require.Equal(t, want, raw)
+}
+
 // TestPrimaryDataDirFromDataDirs verifies that when DataDirs is non-empty the
 // canonical primary dir is DataDirs[0], not opts.DataDir. This mirrors the
 // logic optionsToConfig uses (cfg.DataDir = cfg.DataDirs[0]) and is the core

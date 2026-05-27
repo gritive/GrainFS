@@ -41,6 +41,7 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	// Cluster identity.
 	opts.NodeID, _ = cmd.Flags().GetString("node-id")
 	opts.RaftAddr, _ = cmd.Flags().GetString("raft-addr")
+	opts.JoinListenAddr, _ = cmd.Flags().GetString("join-listen-addr")
 	opts.ClusterKey, _ = cmd.Flags().GetString("cluster-key")
 	opts.EncryptionKeyFile, _ = cmd.Flags().GetString("encryption-key-file")
 

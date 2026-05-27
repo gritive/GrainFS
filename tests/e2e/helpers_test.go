@@ -27,10 +27,10 @@ import (
 )
 
 var (
-	freePortCursor   uint32 = initialFreePortCursor()
-	e2eDefaultHTTPTransport = e2ePooledHTTPTransport()
-	e2eS3HTTPClient         = &http.Client{Transport: e2ePooledHTTPTransport()}
-	e2eRawHTTPClient        = &http.Client{
+	freePortCursor          uint32 = initialFreePortCursor()
+	e2eDefaultHTTPTransport        = e2ePooledHTTPTransport()
+	e2eS3HTTPClient                = &http.Client{Transport: e2ePooledHTTPTransport()}
+	e2eRawHTTPClient               = &http.Client{
 		Transport: e2ePooledHTTPTransport(),
 		Timeout:   10 * time.Second,
 	}
