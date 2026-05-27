@@ -31,8 +31,13 @@ func MintInviteKeypair() (priv ed25519.PrivateKey, pub ed25519.PublicKey, id str
 type InviteBundle struct {
 	InvitePriv ed25519.PrivateKey `json:"invite_priv"`
 	InviteID   string             `json:"invite_id"`
-	ClusterID  string             `json:"cluster_id"`
-	SeedSPKI   [32]byte           `json:"seed_spki"`
+	// ClusterIDHex carries the hex encoding of the raw 16-byte cluster.id; a
+	// plain JSON string is not a safe raw-byte carrier.
+	ClusterIDHex string   `json:"cluster_id_hex"`
+	SeedSPKI     [32]byte `json:"seed_spki"`
+	// SeedAddr is the seed node dial address (host:port) the joiner uses to
+	// reach the cluster during invite-join.
+	SeedAddr string `json:"seed_addr"`
 }
 
 // EncodeInviteBundle serializes a bundle to a single base64 token string for
@@ -54,7 +59,7 @@ func DecodeInviteBundle(token string) (InviteBundle, error) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return InviteBundle{}, fmt.Errorf("parse invite bundle: %w", err)
 	}
-	if len(b.InvitePriv) != ed25519.PrivateKeySize || b.InviteID == "" || b.ClusterID == "" {
+	if len(b.InvitePriv) != ed25519.PrivateKeySize || b.InviteID == "" || b.ClusterIDHex == "" {
 		return InviteBundle{}, fmt.Errorf("invite bundle missing required fields")
 	}
 	return b, nil
