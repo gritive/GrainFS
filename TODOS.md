@@ -256,6 +256,19 @@ Work these in order. Do not run them in parallel.
   plaintext passthrough and add a boot-time scan that refuses startup if any
   plaintext snapshot file remains. The `grainfs_snapshot_legacy_plaintext_reads_total`
   counter is a runtime signal, not sufficient alone. Mirrors meta-FSM D-cut.
+- [ ] **KEK prune-refusal: absolute closure of the in-flight snapshot-write window [P3]**.
+  The prune guard scans retained `.json.zst` + in-flight `.json.zst.tmp` and uses the
+  APPLIED raft index for attestation freshness, which closes the race to a
+  sub-millisecond in-memory-seal window (a `Create()` that captured the retiring KEK
+  version but has not yet written its `.tmp` while the same node has already applied
+  retire). For absolute closure, `snapshot.Manager.Create` could acquire a short
+  `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
+  surface as `lease_count > 0`. Very low priority — the current window is practically
+  unreachable.
+- [ ] **KEK lease-probe wire codec: bound node_id length [P3]**. `encodeKEKLeaseSnapshotResp`
+  casts `len(NodeID)` to `uint16` without a guard and the decoder accepts trailing bytes
+  (`internal/cluster/kek_lease_rpc.go`). Pre-existing; raft server IDs are short so it is
+  not currently reachable, but add a length check + exact-length decode.
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
