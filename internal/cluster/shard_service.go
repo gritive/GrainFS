@@ -107,6 +107,22 @@ func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 	}
 }
 
+// WithShardDEKKeeper wires the generation-aware DEK keeper as the chunked
+// EC-shard data-at-rest seam (slice C activation), overriding the static
+// EncryptorAdapter that WithEncryptor installs. clusterID MUST be 16 bytes and
+// MUST equal the value the put pipeline binds (divergence fails every GET).
+// nil keeper or non-16-byte clusterID → no-op (leaves the EncryptorAdapter;
+// also avoids the BuildAAD panic on a bad clusterID). Apply AFTER WithEncryptor.
+func WithShardDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) ShardServiceOption {
+	return func(s *ShardService) {
+		if keeper == nil || len(clusterID) != 16 {
+			return
+		}
+		copy(s.clusterID[:], clusterID)
+		s.segEnc = storage.NewDEKKeeperAdapter(keeper, s.clusterID[:])
+	}
+}
+
 // WithDirectIO enables direct I/O (page-cache bypass) on the local shard
 // write path. Beneficial for the typical EC shard size range (1-4 MB),
 // neutral for larger shards. Off by default — opt in after measuring on the

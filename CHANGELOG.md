@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.368.0] - 2026-05-27
+
+### Changed
+
+- At-rest encryption is now key-generation-aware end-to-end: erasure-coded shard
+  and object/segment data are sealed and opened through the cluster DEK keeper
+  bound to the real cluster identity, so a KEK/DEK rotation re-keys new writes
+  while existing data stays readable at the generation it was written under. A
+  key generation that has not yet replicated to a node is treated as a transient
+  read condition (retried), never as shard corruption.
+
 ## [0.0.366.0] - 2026-05-27
 
 ### Fixed

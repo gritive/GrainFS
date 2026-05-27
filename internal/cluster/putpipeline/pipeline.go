@@ -20,6 +20,8 @@ import (
 type Config struct {
 	DataDirs     []string
 	Encryptor    *encrypt.Encryptor
+	DEKKeeper    *encrypt.DEKKeeper // slice C: generation-aware shard sealing (overrides Encryptor)
+	ClusterID    []byte             // 16-byte data-plane AAD ID; MUST match ShardService's
 	ECConfig     cluster.ECConfig
 	StripeBytes  int           // k * blockSize; defaults to 1<<20 (1 MiB) if 0
 	ChannelDepth int           // per-actor channel cap; defaults to 8 if 0
@@ -111,9 +113,16 @@ func New(cfg Config) *Pipeline {
 		}
 	}
 	var shardEnc eccodec.ShardEncryptor
-	if cfg.Encryptor != nil {
-		var zeroClusterID [16]byte // D-seg-ec-struct sentinel; slice C threads the real ID HERE and in ShardService together (clusterID coupling hazard)
-		shardEnc = storage.NewEncryptorAdapter(cfg.Encryptor, zeroClusterID[:])
+	clusterID := cfg.ClusterID
+	if len(clusterID) != 16 {
+		var zero [16]byte
+		clusterID = zero[:]
+	}
+	switch {
+	case cfg.DEKKeeper != nil:
+		shardEnc = storage.NewDEKKeeperAdapter(cfg.DEKKeeper, clusterID)
+	case cfg.Encryptor != nil:
+		shardEnc = storage.NewEncryptorAdapter(cfg.Encryptor, clusterID)
 	}
 	p.cpu = &CPUPool{
 		in:      p.stripeCh,

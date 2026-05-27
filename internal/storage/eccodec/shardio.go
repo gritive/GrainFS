@@ -50,6 +50,19 @@ func IsCorruption(err error) bool {
 	return errors.Is(err, ErrCRCMismatch) || errors.Is(err, ErrShardCorrupt)
 }
 
+// classifyOpenErr wraps a seam Open failure for an encrypted shard chunk.
+// ErrDEKGenUnknown means the generation this shard was sealed under has not
+// replicated to this node yet (joiner pre-WaitDEKReady, control-plane race,
+// async raft-log replay tail) — TRANSIENT: leave it unwrapped so
+// eccodec.IsCorruption is false and the placement monitor skips quarantine.
+// Any other Open failure (AEAD auth fail, tamper) = on-disk corruption.
+func classifyOpenErr(chunkIdx uint32, err error) error {
+	if errors.Is(err, encrypt.ErrDEKGenUnknown) {
+		return fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+	}
+	return fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
+}
+
 // footerLen is the size of the CRC32 footer appended to every shard.
 const footerLen = 4
 
@@ -511,11 +524,10 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc ShardEncryptor, baseFields []e
 		}
 		return 0, fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
-	// seam Open failure on an owned shard = corruption, not a key-version race;
-	// re-audit when DEKKeeperAdapter is wired in slice C.
+	// AEAD auth failure = corruption; ErrDEKGenUnknown = transient — classifyOpenErr.
 	plaintext, err := enc.Open(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), gen, ciphertext)
 	if err != nil {
-		return 0, fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
+		return 0, classifyOpenErr(chunkIdx, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
 		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
@@ -610,11 +622,10 @@ func (r *encryptedShardReader) loadChunk() error {
 		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
-	// seam Open failure on an owned shard = corruption, not a key-version race;
-	// re-audit when DEKKeeperAdapter is wired in slice C.
+	// AEAD auth failure = corruption; ErrDEKGenUnknown = transient — classifyOpenErr.
 	plaintext, err := r.enc.Open(encrypt.DomainShard, chunkFields(r.baseFields, r.chunkIdx), r.gen, ciphertext)
 	if err != nil {
-		return fmt.Errorf("decrypt shard chunk %d: %w: %w", r.chunkIdx, ErrShardCorrupt, err)
+		return classifyOpenErr(r.chunkIdx, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, r.chunkIdx, len(plaintext), plainLen)
@@ -731,11 +742,10 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
-	// seam Open failure on an owned shard = corruption, not a key-version race;
-	// re-audit when DEKKeeperAdapter is wired in slice C.
+	// AEAD auth failure = corruption; ErrDEKGenUnknown = transient — classifyOpenErr.
 	plaintext, err := r.enc.Open(encrypt.DomainShard, chunkFields(r.baseFields, chunkIdx), r.gen, ciphertext)
 	if err != nil {
-		return fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
+		return classifyOpenErr(chunkIdx, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)

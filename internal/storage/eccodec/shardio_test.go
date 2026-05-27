@@ -659,3 +659,64 @@ func (r *rangeGuardReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	}
 	return n, nil
 }
+
+type errInjectShardEncryptor struct {
+	inner   ShardEncryptor
+	openErr error
+}
+
+func (e *errInjectShardEncryptor) Seal(d encrypt.AADDomain, f []encrypt.AADField, p []byte) ([]byte, uint32, error) {
+	return e.inner.Seal(d, f, p)
+}
+func (e *errInjectShardEncryptor) Open(_ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
+	return nil, e.openErr
+}
+
+func TestEncryptedShardReader_DEKGenUnknown_IsNotCorruption(t *testing.T) {
+	real := newFakeShardEncryptor(t)
+	plain := bytes.Repeat([]byte("g"), DefaultEncryptedChunkSize+5) // 2 chunks
+	var buf bytes.Buffer
+	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), real, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	genUnknown := &errInjectShardEncryptor{inner: real, openErr: encrypt.ErrDEKGenUnknown}
+
+	// Streaming reader path.
+	var out bytes.Buffer
+	err := DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), genUnknown, shardBaseFields())
+	if err == nil || IsCorruption(err) || !errors.Is(err, encrypt.ErrDEKGenUnknown) {
+		t.Fatalf("streaming: want transient+unwrapped, got %v (corrupt=%v)", err, IsCorruption(err))
+	}
+
+	// Range function path.
+	dst := make([]byte, 100)
+	_, rerr := ReadEncryptedShardRangeAt(bytes.NewReader(buf.Bytes()), genUnknown, shardBaseFields(), 0, dst)
+	if rerr == nil || IsCorruption(rerr) || !errors.Is(rerr, encrypt.ErrDEKGenUnknown) {
+		t.Fatalf("range func: got %v (corrupt=%v)", rerr, IsCorruption(rerr))
+	}
+
+	// Range reader struct path (readEncryptedShardChunkAt) via NewEncryptedShardRangeReader.
+	rr, nerr := NewEncryptedShardRangeReader(bytes.NewReader(buf.Bytes()), genUnknown, shardBaseFields(), 0, int64(len(plain)))
+	if nerr != nil {
+		t.Fatalf("NewEncryptedShardRangeReader (header read should succeed): %v", nerr)
+	}
+	_, rrerr := io.ReadAll(rr)
+	if rrerr == nil || IsCorruption(rrerr) || !errors.Is(rrerr, encrypt.ErrDEKGenUnknown) {
+		t.Fatalf("range reader struct: got %v (corrupt=%v)", rrerr, IsCorruption(rrerr))
+	}
+}
+
+func TestEncryptedShardReader_AEADFailure_IsCorruption(t *testing.T) {
+	real := newFakeShardEncryptor(t)
+	plain := bytes.Repeat([]byte("a"), DefaultEncryptedChunkSize+5)
+	var buf bytes.Buffer
+	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), real, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	aeadFail := &errInjectShardEncryptor{inner: real, openErr: errors.New("cipher: message authentication failed")}
+	var out bytes.Buffer
+	err := DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), aeadFail, shardBaseFields())
+	if err == nil || !IsCorruption(err) {
+		t.Fatalf("AEAD failure must be corruption, got %v (corrupt=%v)", err, IsCorruption(err))
+	}
+}

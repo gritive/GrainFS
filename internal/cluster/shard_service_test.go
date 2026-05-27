@@ -1107,3 +1107,35 @@ func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, []byte("payload"), got)
 }
+
+func TestWithShardDEKKeeper_SetsSegEncAndClusterID(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x11}, 32))
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x22}, encrypt.KEKSize), bytes.Repeat([]byte{0x33}, 16))
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	cid := bytes.Repeat([]byte{0x44}, 16)
+	s := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(keeper, cid))
+	if !bytes.Equal(s.clusterID[:], cid) {
+		t.Fatalf("clusterID not threaded: %x", s.clusterID)
+	}
+	ct, gen, err := s.segEnc.Seal(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, []byte("hi"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	pt, err := s.segEnc.Open(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, gen, ct)
+	if err != nil || string(pt) != "hi" {
+		t.Fatalf("open: pt=%q err=%v", pt, err)
+	}
+}
+
+func TestWithShardDEKKeeper_NilOrBadClusterIDIsNoOp(t *testing.T) {
+	enc, _ := encrypt.NewEncryptor(bytes.Repeat([]byte{0x11}, 32))
+	s := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(nil, nil))
+	if s.segEnc == nil {
+		t.Fatal("nil keeper must leave the EncryptorAdapter segEnc intact")
+	}
+}

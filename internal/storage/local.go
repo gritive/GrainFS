@@ -125,6 +125,21 @@ func NewEncryptedLocalBackendWithDataWAL(root string, enc *encrypt.Encryptor, dw
 	return b, nil
 }
 
+// NewLocalBackendWithDEKKeeper builds a LocalBackend whose object/segment
+// data-at-rest seam is the generation-aware DEKKeeper (slice C). clusterID MUST
+// be 16 bytes. The static encryptor is left nil (DEKKeeper-only path).
+func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, clusterID []byte) (*LocalBackend, error) {
+	b, err := newLocalBackend(root, []string{root}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if keeper != nil && len(clusterID) == 16 {
+		copy(b.clusterID[:], clusterID)
+		b.segEnc = NewDEKKeeperAdapter(keeper, b.clusterID[:])
+	}
+	return b, nil
+}
+
 func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
 	for _, root := range dataRoots {
 		dataDir := filepath.Join(root, "data")
