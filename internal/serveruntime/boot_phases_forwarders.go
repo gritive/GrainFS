@@ -11,6 +11,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -42,7 +43,12 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		return fmt.Errorf("data WAL must be opened before logical WAL/forwarders")
 	}
 	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
-	w, err := wal.OpenEncrypted(state.walDir, state.cfg.Encryptor)
+	var sealer wal.RecordSealer
+	if state.cfg.Encryptor != nil {
+		var zero [16]byte
+		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
+	}
+	w, err := wal.OpenEncrypted(state.walDir, sealer, "pitr-wal")
 	if err != nil {
 		return fmt.Errorf("open WAL: %w", err)
 	}
