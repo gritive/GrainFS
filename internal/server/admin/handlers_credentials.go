@@ -5,7 +5,14 @@ import (
 	"errors"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/protocred"
+)
+
+const (
+	protocolCredentialActionCreate = "grainfs:CredentialCreate"
+	protocolCredentialActionRotate = "grainfs:CredentialRotate"
+	protocolCredentialActionRevoke = "grainfs:CredentialRevoke"
 )
 
 func CreateCredential(ctx context.Context, d *Deps, req CredentialCreateReq) (CredentialResp, error) {
@@ -16,13 +23,20 @@ func CreateCredential(ctx context.Context, d *Deps, req CredentialCreateReq) (Cr
 	if err != nil {
 		return CredentialResp{}, NewInvalid("invalid expires_at: " + err.Error())
 	}
-	secret, err := d.ProtocolCredentials.Create(protocred.CreateRequest{
+	createReq := protocred.CreateRequest{
 		SAID:      req.SAID,
 		Protocol:  protocred.ParseProtocol(req.Protocol),
 		Resource:  req.Resource,
 		Mode:      protocred.ParseMode(req.Mode),
 		ExpiresAt: expiresAt,
-	})
+	}
+	if err := protocred.ValidateCreateRequest(createReq); err != nil {
+		return CredentialResp{}, credentialError(err)
+	}
+	if err := authorizeProtocolCredential(ctx, d, createReq.SAID, createReq.Protocol, createReq.Resource, protocolCredentialActionCreate); err != nil {
+		return CredentialResp{}, err
+	}
+	secret, err := d.ProtocolCredentials.Create(createReq)
 	if err != nil {
 		return CredentialResp{}, credentialError(err)
 	}
@@ -60,11 +74,18 @@ func RotateCredential(ctx context.Context, d *Deps, id string) (CredentialResp, 
 	if d.ProtocolCredentials == nil {
 		return CredentialResp{}, NewUnsupported("protocol credential admin not configured on this node", nil)
 	}
+	item, err := d.ProtocolCredentials.Get(id)
+	if err != nil {
+		return CredentialResp{}, credentialError(err)
+	}
+	if err := authorizeProtocolCredential(ctx, d, item.SAID, item.Protocol, item.Resource, protocolCredentialActionRotate); err != nil {
+		return CredentialResp{}, err
+	}
 	secret, err := d.ProtocolCredentials.Rotate(id)
 	if err != nil {
 		return CredentialResp{}, credentialError(err)
 	}
-	item, err := d.ProtocolCredentials.Get(id)
+	item, err = d.ProtocolCredentials.Get(id)
 	if err != nil {
 		return CredentialResp{}, credentialError(err)
 	}
@@ -75,10 +96,39 @@ func RevokeCredential(ctx context.Context, d *Deps, id string) (CredentialRevoke
 	if d.ProtocolCredentials == nil {
 		return CredentialRevokeResp{}, NewUnsupported("protocol credential admin not configured on this node", nil)
 	}
+	item, err := d.ProtocolCredentials.Get(id)
+	if err != nil {
+		return CredentialRevokeResp{}, credentialError(err)
+	}
+	if err := authorizeProtocolCredential(ctx, d, item.SAID, item.Protocol, item.Resource, protocolCredentialActionRevoke); err != nil {
+		return CredentialRevokeResp{}, err
+	}
 	if err := d.ProtocolCredentials.Revoke(id); err != nil {
 		return CredentialRevokeResp{}, credentialError(err)
 	}
 	return CredentialRevokeResp{ID: id, Revoked: true}, nil
+}
+
+func authorizeProtocolCredential(ctx context.Context, d *Deps, saID string, protocol protocred.Protocol, resource, action string) *Error {
+	if d.ProtocolCredAuthz == nil {
+		return nil
+	}
+	result := d.ProtocolCredAuthz.Authorize(ctx, saID, "", policy.RequestContext{
+		Action:   action,
+		Resource: protocolCredentialPolicyResource(protocol, resource),
+	})
+	if result.Decision == policy.DecisionAllow {
+		return nil
+	}
+	msg := "protocol credential permission denied"
+	if result.Reason != "" {
+		msg += ": " + result.Reason
+	}
+	return NewForbidden(msg)
+}
+
+func protocolCredentialPolicyResource(protocol protocred.Protocol, resource string) string {
+	return "protocol-credential/" + string(protocol) + "/" + resource
 }
 
 func credentialResp(item protocred.Credential, secret protocred.Secret) CredentialResp {

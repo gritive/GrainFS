@@ -476,7 +476,12 @@ func (n *Node) Configuration() Configuration {
 	for id := range rs.config.learners {
 		servers = append(servers, Server{ID: id, Suffrage: NonVoter})
 	}
-	return Configuration{Servers: servers}
+	cfg := Configuration{Servers: servers, Joint: rs.config.joint}
+	if rs.config.joint {
+		cfg.OldVoters = append([]string(nil), rs.config.oldVoters...)
+		cfg.NewVoters = append([]string(nil), rs.config.voters...)
+	}
+	return cfg
 }
 
 // AddVoter submits an Add-voter membership change and blocks until both

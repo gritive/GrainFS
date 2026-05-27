@@ -5,6 +5,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -32,7 +33,11 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 }
 
 func (s *Server) registerMetricsAPI(h *server.Hertz) {
-	promHandler := promhttp.Handler()
+	gatherer := s.metricsGatherer
+	if gatherer == nil {
+		gatherer = prometheus.DefaultGatherer
+	}
+	promHandler := promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
 	h.GET(routePathMetrics, func(_ context.Context, c *app.RequestContext) {
 		promHandler.ServeHTTP(newResponseWriter(c), toHTTPRequest(c))
 	})

@@ -89,9 +89,29 @@ The response includes a one-time `secret` and a protocol-specific
 `grainfs credential revoke <id>` to disable a credential.
 
 Protocol credential metadata is stored through Meta Raft so create, rotate, and
-revoke state survives node restart and snapshot restore. Existing S3, Iceberg,
-NFS, 9P, and NBD data-plane authentication behavior is unchanged until each
-protocol is migrated to enforce these credentials.
+revoke state survives node restart and snapshot restore. Create, rotate, and
+revoke now require the target service account to be allowed for
+`grainfs:CredentialCreate`, `grainfs:CredentialRotate`, or
+`grainfs:CredentialRevoke` on `protocol-credential/<protocol>/<resource>`:
+
+```json
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "grainfs:CredentialCreate",
+        "grainfs:CredentialRotate",
+        "grainfs:CredentialRevoke"
+      ],
+      "Resource": "protocol-credential/nbd/volume/v1"
+    }
+  ]
+}
+```
+
+Existing S3, Iceberg, NFS, 9P, and NBD data-plane authentication behavior is
+unchanged until each protocol is migrated to enforce these credentials.
 
 ## S3
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.389.0] - 2026-05-28
+
+### Security
+
+- Protocol credential create, rotate, and revoke now check the target service
+  account's IAM policy before mutating credential state. The admin API evaluates
+  `grainfs:CredentialCreate`, `grainfs:CredentialRotate`, and
+  `grainfs:CredentialRevoke` against
+  `protocol-credential/<protocol>/<resource>`.
+
+### Changed
+
+- Updated protocol credential user documentation and follow-up tracking to
+  reflect that IAM permission gating has landed, while NBD and NFS/9P
+  data-plane enforcement remain follow-up work.
+
+## [0.0.388.0] - 2026-05-28
+
+### Added
+
+- Added low-cardinality operator state metrics for server visibility, cluster
+  membership/quorum, Raft role and lag, bucket counts, and aggregate volume
+  health/capacity. The metrics avoid bucket, volume, peer address, key, path,
+  access key, raw error, and dynamic Raft group labels.
+- Added server-scoped metrics gatherer wiring so runtime-specific operator
+  state collectors can be exposed through `/metrics` without stale global
+  source objects.
+
+### Changed
+
+- Documented operator state metric families and PromQL examples in the
+  production runbook and SLI/SLO reference.
+- Exposed joint-consensus voter metadata through Raft `Configuration` so
+  quorum state checks use both old and new voter majorities during membership
+  changes.
+
 ## [0.0.387.0] - 2026-05-28
 
 ### Added
