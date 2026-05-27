@@ -3,12 +3,30 @@ package serveruntime
 // THROWAWAY feasibility spike (Zero-CA network-path de-risk). Every line in
 // this file is dead unless GRAINFS_ZEROCA_SPIKE=1. It exists ONLY to prove that
 // a node holding NO cluster secrets can boot to a running server using an invite
-// + the encrypt.SealToPeer primitive. NOT production code; do not build on it.
+// + the encrypt.SealToPeer primitive, AND that a brand-new joiner whose SPKI is
+// in NObody's accept-set can reach a handler over the real cluster transport
+// (QUIC). NOT production code; do not build on it.
 //
-// Wire framing here is JSON over a plain TCP socket — this is the operator-style
-// out-of-band spike channel, NOT the internal cluster wire (which is FlatBuffers
-// over QUIC). It is fine to be ugly: it is deleted when the real network-path
-// slice lands.
+// Wire transport here is QUIC (the actual cluster transport), framed with
+// length-prefixed binary fields — NOT JSON, NOT TCP. The earlier TCP+JSON draft
+// cheated on both the transport and the framing; this version de-risks the real
+// question: can an unknown-SPKI peer complete a QUIC handshake + stream to a
+// handler? It can — but ONLY via a DEDICATED spike listener that bypasses the
+// two production SPKI gates (see below). The normal psk/mux listeners keep both
+// gates unchanged.
+//
+// Production gates this spike listener DELIBERATELY bypasses (fresh-read line
+// numbers in internal/transport/quic.go, 2026-05-27):
+//   - buildServerTLSConfig (~:1445) sets VerifyPeerCertificate: pinAcceptedSPKI
+//     (~:518) — TLS-layer accept-set pin. The spike listener uses a permissive
+//     VerifyPeerCertificate that CAPTURES but does NOT pin the peer SPKI.
+//   - acceptLoop (~:448) does an EXPLICIT post-accept SPKI check (~:465, comment
+//     ~:454 "quic-go does NOT reliably enforce ClientAuth") that closes the conn
+//     with "peer cert rejected" BEFORE ALPN routing. The spike listener runs its
+//     OWN minimal accept loop with NO accept-set rejection.
+// The spike listener NEVER touches the identity store, so the joiner's SPKI is
+// never added to any accept-set yet the QUIC handshake+stream succeeds — that is
+// the bypass this spike proves.
 //
 // Scope: the joiner boots as its OWN genesis solo cluster using the leader's
 // secrets. It is NOT a raft member of the leader. That is sufficient to prove
@@ -33,21 +51,25 @@ package serveruntime
 // NOT exercise that binding.
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/json"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -63,43 +85,161 @@ const (
 	spikeEnvNodeID     = "GRAINFS_ZEROCA_SPIKE_NODE_ID"     // joiner: node id used in transcript
 	spikeInviteFile    = "spike-invite.token"               // leader: where the minted bundle token is written
 	spikeContextInfo   = "grainfs-zeroca-spike-v0"
+	spikeALPN          = "grainfs-zeroca-spike" // dedicated, isolated from prod psk/mux ALPNs
+	spikeMaxFrame      = 1 << 20
 )
 
 func spikeEnabled() bool { return os.Getenv(spikeEnvOn) == "1" }
 
-// spikeJoinRequest is the joiner -> leader request (JSON, throwaway).
+// --- binary wire framing (NO JSON) ----------------------------------------
+//
+// Every message is a sequence of length-prefixed []byte fields: each field is a
+// big-endian uint32 length followed by that many bytes. Fixed field order per
+// message type (see encode/decode helpers). This is the throwaway-spike framing
+// standing in for the production FlatBuffers-over-QUIC wire.
+
+func spikePutField(buf []byte, f []byte) []byte {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(f)))
+	buf = append(buf, hdr[:]...)
+	return append(buf, f...)
+}
+
+// spikeReadFields reads exactly n length-prefixed []byte fields from r.
+func spikeReadFields(r io.Reader, n int) ([][]byte, error) {
+	out := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		var hdr [4]byte
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return nil, err
+		}
+		sz := binary.BigEndian.Uint32(hdr[:])
+		if sz > spikeMaxFrame {
+			return nil, fmt.Errorf("spike field too large: %d", sz)
+		}
+		body := make([]byte, sz)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return nil, err
+		}
+		out[i] = body
+	}
+	return out, nil
+}
+
+// spikeJoinRequest is the joiner -> leader request, encoded as 8 binary fields.
 type spikeJoinRequest struct {
-	NodeID    string `json:"node_id"`
-	Address   string `json:"address"`
-	SPKI      []byte `json:"spki"`
-	CertDER   []byte `json:"cert_der"`
-	NodeSig   []byte `json:"node_sig"`
-	InviteSig []byte `json:"invite_sig"`
-	InviteID  string `json:"invite_id"`
-	Nonce     []byte `json:"nonce"`
+	NodeID    string
+	Address   string
+	SPKI      []byte
+	CertDER   []byte
+	NodeSig   []byte
+	InviteSig []byte
+	InviteID  string
+	Nonce     []byte
 }
 
-// spikeSecrets is the cleartext payload sealed to the joiner's pubkey.
+func (q spikeJoinRequest) encode() []byte {
+	var buf []byte
+	buf = spikePutField(buf, []byte(q.NodeID))
+	buf = spikePutField(buf, []byte(q.Address))
+	buf = spikePutField(buf, q.SPKI)
+	buf = spikePutField(buf, q.CertDER)
+	buf = spikePutField(buf, q.NodeSig)
+	buf = spikePutField(buf, q.InviteSig)
+	buf = spikePutField(buf, []byte(q.InviteID))
+	buf = spikePutField(buf, q.Nonce)
+	return buf
+}
+
+func decodeSpikeJoinRequest(r io.Reader) (spikeJoinRequest, error) {
+	f, err := spikeReadFields(r, 8)
+	if err != nil {
+		return spikeJoinRequest{}, err
+	}
+	return spikeJoinRequest{
+		NodeID:    string(f[0]),
+		Address:   string(f[1]),
+		SPKI:      f[2],
+		CertDER:   f[3],
+		NodeSig:   f[4],
+		InviteSig: f[5],
+		InviteID:  string(f[6]),
+		Nonce:     f[7],
+	}, nil
+}
+
+// spikeSecrets is the cleartext payload sealed to the joiner's pubkey, encoded
+// as 4 binary fields (NO JSON inside the sealed blob either).
 type spikeSecrets struct {
-	EncryptionKey []byte `json:"encryption_key"`
-	KEKv0         []byte `json:"kek_v0"`
-	ClusterID     []byte `json:"cluster_id"`
-	ClusterKey    string `json:"cluster_key"`
+	EncryptionKey []byte
+	KEKv0         []byte
+	ClusterID     []byte
+	ClusterKey    string
 }
 
-// spikeSealedReply wraps a SealToPeer blob for the wire.
-type spikeSealedReply struct {
-	EphemeralPub []byte `json:"ephemeral_pub"`
-	Ciphertext   []byte `json:"ciphertext"`
+func (s spikeSecrets) encode() []byte {
+	var buf []byte
+	buf = spikePutField(buf, s.EncryptionKey)
+	buf = spikePutField(buf, s.KEKv0)
+	buf = spikePutField(buf, s.ClusterID)
+	buf = spikePutField(buf, []byte(s.ClusterKey))
+	return buf
+}
+
+func decodeSpikeSecrets(b []byte) (spikeSecrets, error) {
+	f, err := spikeReadFields(newByteReader(b), 4)
+	if err != nil {
+		return spikeSecrets{}, err
+	}
+	return spikeSecrets{
+		EncryptionKey: f[0],
+		KEKv0:         f[1],
+		ClusterID:     f[2],
+		ClusterKey:    string(f[3]),
+	}, nil
+}
+
+// spikeSealedReply wraps a SealToPeer blob: 2 binary fields.
+func encodeSpikeSealedReply(s encrypt.SealedToPeer) []byte {
+	var buf []byte
+	buf = spikePutField(buf, s.EphemeralPub)
+	buf = spikePutField(buf, s.Ciphertext)
+	return buf
+}
+
+func decodeSpikeSealedReply(r io.Reader) (encrypt.SealedToPeer, error) {
+	f, err := spikeReadFields(r, 2)
+	if err != nil {
+		return encrypt.SealedToPeer{}, err
+	}
+	return encrypt.SealedToPeer{EphemeralPub: f[0], Ciphertext: f[1]}, nil
+}
+
+type byteReader struct {
+	b []byte
+	i int
+}
+
+func newByteReader(b []byte) *byteReader { return &byteReader{b: b} }
+
+func (r *byteReader) Read(p []byte) (int, error) {
+	if r.i >= len(r.b) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.b[r.i:])
+	r.i += n
+	return n, nil
 }
 
 // --- leader side ----------------------------------------------------------
 
 // maybeStartSpikeLeader, when the spike is enabled and a listen addr is set,
 // mints an Ed25519 invite, writes the bundle token to <dataDir>/spike-invite.token
-// for the test/operator to hand to the joiner, and starts a TCP listener that
-// serves the secret-delivery RPC. It returns immediately; the listener runs in
-// the background until process exit.
+// for the test/operator to hand to the joiner, and starts a DEDICATED QUIC
+// listener (its own ephemeral self-signed cert, permissive peer verification,
+// own accept loop with NO accept-set gate, single spike ALPN) that serves the
+// secret-delivery RPC. It returns immediately; the listener runs in the
+// background until process exit.
 func maybeStartSpikeLeader(opts ServeOptions) {
 	if !spikeEnabled() {
 		return
@@ -136,30 +276,99 @@ func maybeStartSpikeLeader(opts ServeOptions) {
 		return
 	}
 
-	ln, err := net.Listen("tcp", addr)
+	tlsConf, err := spikeLeaderTLSConfig()
 	if err != nil {
-		log.Error().Err(err).Str("addr", addr).Msg("zeroca-spike: listen failed")
+		log.Error().Err(err).Msg("zeroca-spike: build leader TLS failed")
 		return
 	}
-	log.Warn().Str("addr", addr).Str("invite_id", inviteID).Msg("zeroca-spike: leader secret-delivery listener up (THROWAWAY)")
+	ln, err := quic.ListenAddr(addr, tlsConf, defaultSpikeQUICConfig())
+	if err != nil {
+		log.Error().Err(err).Str("addr", addr).Msg("zeroca-spike: QUIC listen failed")
+		return
+	}
+	log.Warn().Str("addr", addr).Str("invite_id", inviteID).Msg("zeroca-spike: leader QUIC secret-delivery listener up (THROWAWAY)")
 
+	// Dedicated minimal accept loop: NO production acceptLoop SPKI gate. Routes
+	// every accepted conn straight to the seal handler.
 	go func() {
 		for {
-			conn, err := ln.Accept()
+			conn, err := ln.Accept(context.Background())
 			if err != nil {
-				return
+				return // listener closed
 			}
 			go spikeHandleConn(conn, opts, invitePub, inviteID)
 		}
 	}()
 }
 
-func spikeHandleConn(conn net.Conn, opts ServeOptions, invitePub []byte, inviteID string) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+// spikeLeaderTLSConfig returns the listener TLS config that BYPASSES the
+// production accept-set pin: an ephemeral self-signed P-256 cert + a permissive
+// VerifyPeerCertificate that CAPTURES the peer SPKI (logging it) but pins
+// NOTHING. It never consults any IdentitySnapshot / accept-set.
+func spikeLeaderTLSConfig() (*tls.Config, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("gen leader spike key: %w", err)
+	}
+	certDER, err := spikeSelfSignedCert(priv, "zeroca-spike-leader")
+	if err != nil {
+		return nil, fmt.Errorf("self-sign leader spike cert: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: priv}},
+		ClientAuth:   tls.RequireAnyClientCert,
+		NextProtos:   []string{spikeALPN},
+		// quic-go requires InsecureSkipVerify when a custom VerifyPeerCertificate
+		// is used; the spike VerifyPeerCertificate captures but does NOT pin.
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("zeroca-spike: no peer cert")
+			}
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("zeroca-spike: parse peer cert: %w", err)
+			}
+			spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+			// THE BYPASS: log the unknown SPKI and accept it. No accept-set lookup.
+			log.Warn().Str("peer_spki", hex.EncodeToString(spki[:])).
+				Msg("zeroca-spike: accepted unknown-SPKI peer at TLS layer (NO accept-set check) (THROWAWAY)")
+			return nil
+		},
+	}, nil
+}
 
-	var req spikeJoinRequest
-	if err := spikeReadFrame(conn, &req); err != nil {
+func defaultSpikeQUICConfig() *quic.Config {
+	return &quic.Config{
+		KeepAlivePeriod: 5 * time.Second,
+		MaxIdleTimeout:  30 * time.Second,
+	}
+}
+
+func spikeHandleConn(conn *quic.Conn, opts ServeOptions, invitePub []byte, inviteID string) {
+	defer func() { _ = conn.CloseWithError(0, "spike done") }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Confirm we actually reached the handler with an unknown-SPKI peer: the
+	// post-accept SPKI gate of the production acceptLoop was NOT run here.
+	state := conn.ConnectionState()
+	if len(state.TLS.PeerCertificates) > 0 {
+		peerSPKI := sha256.Sum256(state.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
+		log.Warn().Str("peer_spki", hex.EncodeToString(peerSPKI[:])).
+			Msg("zeroca-spike: handler reached by unknown-SPKI peer over QUIC (bypassed acceptLoop gate) (THROWAWAY)")
+	}
+
+	stream, err := conn.AcceptStream(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("zeroca-spike: accept stream failed")
+		return
+	}
+	defer func() { _ = stream.Close() }()
+
+	req, err := decodeSpikeJoinRequest(stream)
+	if err != nil {
 		log.Warn().Err(err).Msg("zeroca-spike: read request failed")
 		return
 	}
@@ -188,11 +397,8 @@ func spikeHandleConn(conn net.Conn, opts ServeOptions, invitePub []byte, inviteI
 
 	// Invite-gate verification — SAME logic as cluster.MetaJoinReceiver.Handle:
 	// SPKI must equal sha256(cert SPKI), both signatures verify over the
-	// canonical transcript (clusterID is the REAL leader cluster.id; the joiner
-	// rebuilds the same transcript because it learns the value... but it cannot
-	// know it before receiving the secret. The spike binds the transcript to the
-	// nonce + node identity only, with an empty clusterID on BOTH sides, since
-	// clusterID delivery is the very thing being bootstrapped here.)
+	// canonical transcript. clusterID is nil on BOTH sides here, since clusterID
+	// delivery is the very thing being bootstrapped (documented KNOWN GAP above).
 	leaf, err := x509.ParseCertificate(req.CertDER)
 	if err != nil {
 		log.Warn().Err(err).Msg("zeroca-spike: bad cert")
@@ -237,19 +443,18 @@ func spikeHandleConn(conn net.Conn, opts ServeOptions, invitePub []byte, inviteI
 		ClusterID:     clusterID,
 		ClusterKey:    opts.ClusterKey,
 	}
-	plain, _ := json.Marshal(secrets)
 	aad := append([]byte(req.NodeID), req.SPKI...)
-	sealed, err := encrypt.SealToPeer(ecPub, plain, []byte(spikeContextInfo), aad)
+	sealed, err := encrypt.SealToPeer(ecPub, secrets.encode(), []byte(spikeContextInfo), aad)
 	if err != nil {
 		log.Warn().Err(err).Msg("zeroca-spike: SealToPeer failed")
 		return
 	}
-	reply := spikeSealedReply{EphemeralPub: sealed.EphemeralPub, Ciphertext: sealed.Ciphertext}
-	if err := spikeWriteFrame(conn, reply); err != nil {
+	if _, err := stream.Write(encodeSpikeSealedReply(sealed)); err != nil {
 		log.Warn().Err(err).Msg("zeroca-spike: write reply failed")
 		return
 	}
-	log.Warn().Str("node_id", req.NodeID).Msg("zeroca-spike: sealed cluster secrets to joiner (THROWAWAY)")
+	// stream.Close (deferred) closes the send side cleanly so the joiner reads to EOF.
+	log.Warn().Str("node_id", req.NodeID).Msg("zeroca-spike: sealed cluster secrets to joiner over QUIC (THROWAWAY)")
 }
 
 // --- joiner side -----------------------------------------------------------
@@ -257,9 +462,10 @@ func spikeHandleConn(conn net.Conn, opts ServeOptions, invitePub []byte, inviteI
 // maybeRunSpikeJoiner, when the spike is enabled and a leader addr + invite are
 // present, performs the secret pull BEFORE the earliest secret gate: it
 // generates a node ECDSA identity, signs the invite transcript, dials the
-// leader, opens the sealed secrets, and stages encryption.key + keys/0.key +
-// cluster.id on disk while setting opts.ClusterKey in memory. After it returns
-// nil, normal boot proceeds as a genesis solo node and finds the staged secrets.
+// leader over QUIC presenting that node cert (unknown SPKI), opens the sealed
+// secrets, and stages encryption.key + keys/0.key + cluster.id on disk while
+// setting opts.ClusterKey in memory. After it returns nil, normal boot proceeds
+// as a genesis solo node and finds the staged secrets.
 func maybeRunSpikeJoiner(opts *ServeOptions) error {
 	if !spikeEnabled() {
 		return nil
@@ -310,7 +516,7 @@ func maybeRunSpikeJoiner(opts *ServeOptions) error {
 		return fmt.Errorf("zeroca-spike joiner: node sig: %w", err)
 	}
 
-	// 3. dial the leader spike listener (retry: leader may still be booting).
+	// 3. dial the leader spike QUIC listener (retry: leader may still be booting).
 	req := spikeJoinRequest{
 		NodeID:    nodeID,
 		Address:   tr.Address,
@@ -321,23 +527,20 @@ func maybeRunSpikeJoiner(opts *ServeOptions) error {
 		InviteID:  bundle.InviteID,
 		Nonce:     nonce,
 	}
-	sealed, err := spikeDialAndPull(leaderAddr, req)
+	sealed, err := spikeDialAndPull(leaderAddr, priv, certDER, req)
 	if err != nil {
 		return fmt.Errorf("zeroca-spike joiner: pull secrets: %w", err)
 	}
 
 	// 4. open the sealed secrets with the node identity key.
 	aad := append([]byte(nodeID), spki[:]...)
-	plain, err := encrypt.OpenFromPeer(priv, encrypt.SealedToPeer{
-		EphemeralPub: sealed.EphemeralPub,
-		Ciphertext:   sealed.Ciphertext,
-	}, []byte(spikeContextInfo), aad)
+	plain, err := encrypt.OpenFromPeer(priv, sealed, []byte(spikeContextInfo), aad)
 	if err != nil {
 		return fmt.Errorf("zeroca-spike joiner: open secrets: %w", err)
 	}
-	var secrets spikeSecrets
-	if err := json.Unmarshal(plain, &secrets); err != nil {
-		return fmt.Errorf("zeroca-spike joiner: unmarshal secrets: %w", err)
+	secrets, err := decodeSpikeSecrets(plain)
+	if err != nil {
+		return fmt.Errorf("zeroca-spike joiner: decode secrets: %w", err)
 	}
 
 	// 5. stage secrets on disk so the normal genesis boot loads them.
@@ -360,35 +563,29 @@ func maybeRunSpikeJoiner(opts *ServeOptions) error {
 
 	// 6. set the PSK in memory so the --cluster-key gate passes.
 	opts.ClusterKey = secrets.ClusterKey
-	log.Warn().Str("node_id", nodeID).Msg("zeroca-spike: joiner staged cluster secrets from invite + SealToPeer (THROWAWAY)")
+	log.Warn().Str("node_id", nodeID).Msg("zeroca-spike: joiner staged cluster secrets from invite + SealToPeer over QUIC (THROWAWAY)")
 	return nil
 }
 
-func spikeDialAndPull(addr string, req spikeJoinRequest) (spikeSealedReply, error) {
+// spikeDialAndPull dials the leader spike QUIC listener presenting the joiner's
+// (unknown-SPKI) node cert, sends the join request on a stream, and reads back
+// the sealed reply. It retries until a deadline since the leader may still be
+// booting.
+func spikeDialAndPull(addr string, priv *ecdsa.PrivateKey, certDER []byte, req spikeJoinRequest) (encrypt.SealedToPeer, error) {
+	clientTLS := &tls.Config{
+		Certificates:       []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: priv}},
+		InsecureSkipVerify: true, // spike leader cert is ephemeral self-signed
+		NextProtos:         []string{spikeALPN},
+	}
 	deadline := time.Now().Add(20 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		reply, err := spikeDialOnce(addr, clientTLS, req)
 		if err != nil {
 			lastErr = err
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-		if err := spikeWriteFrame(conn, req); err != nil {
-			conn.Close()
-			lastErr = err
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		var reply spikeSealedReply
-		if err := spikeReadFrame(conn, &reply); err != nil {
-			conn.Close()
-			lastErr = err
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		conn.Close()
 		if len(reply.Ciphertext) == 0 {
 			lastErr = fmt.Errorf("empty sealed reply (leader rejected?)")
 			time.Sleep(200 * time.Millisecond)
@@ -396,7 +593,29 @@ func spikeDialAndPull(addr string, req spikeJoinRequest) (spikeSealedReply, erro
 		}
 		return reply, nil
 	}
-	return spikeSealedReply{}, fmt.Errorf("dial leader %s: %w", addr, lastErr)
+	return encrypt.SealedToPeer{}, fmt.Errorf("dial leader %s: %w", addr, lastErr)
+}
+
+func spikeDialOnce(addr string, clientTLS *tls.Config, req spikeJoinRequest) (encrypt.SealedToPeer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := quic.DialAddr(ctx, addr, clientTLS, defaultSpikeQUICConfig())
+	if err != nil {
+		return encrypt.SealedToPeer{}, err
+	}
+	defer func() { _ = conn.CloseWithError(0, "spike done") }()
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return encrypt.SealedToPeer{}, err
+	}
+	if _, err := stream.Write(req.encode()); err != nil {
+		return encrypt.SealedToPeer{}, err
+	}
+	// Close the send side so the leader reads our request to EOF; then read the
+	// reply to EOF (leader closes its send side after writing).
+	_ = stream.Close()
+	return decodeSpikeSealedReply(stream)
 }
 
 func spikeSelfSignedCert(priv *ecdsa.PrivateKey, cn string) ([]byte, error) {
@@ -407,47 +626,4 @@ func spikeSelfSignedCert(priv *ecdsa.PrivateKey, cn string) ([]byte, error) {
 		NotAfter:     time.Now().Add(24 * time.Hour),
 	}
 	return x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-}
-
-// spikeWriteFrame writes a 4-byte big-endian length prefix then the JSON body.
-func spikeWriteFrame(conn net.Conn, v interface{}) error {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
-	if _, err := conn.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err = conn.Write(body)
-	return err
-}
-
-func spikeReadFrame(conn net.Conn, v interface{}) error {
-	var hdr [4]byte
-	if _, err := readFull(conn, hdr[:]); err != nil {
-		return err
-	}
-	n := binary.BigEndian.Uint32(hdr[:])
-	if n > 1<<20 {
-		return fmt.Errorf("spike frame too large: %d", n)
-	}
-	body := make([]byte, n)
-	if _, err := readFull(conn, body); err != nil {
-		return err
-	}
-	return json.Unmarshal(body, v)
-}
-
-func readFull(conn net.Conn, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := conn.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
 }

@@ -120,6 +120,18 @@ var _ = ginkgo.Describe("Zero-CA network-path spike", func() {
 		// keys/ before boot; it must exist now (delivered via SealToPeer).
 		gomega.Expect(filepath.Join(joinerData, "encryption.key")).To(beAnExistingFile())
 
+		// --- 4b. PROOF the QUIC accept-set bypass was exercised ---
+		// The joiner's SPKI is in NObody's accept-set, yet the QUIC handshake +
+		// stream reached the leader's spike handler. The leader logs the
+		// unknown-SPKI peer reaching the handler over QUIC (it never consulted
+		// any accept-set). Grep the leader log for that marker.
+		gomega.Eventually(func() string {
+			b, _ := os.ReadFile(leaderLog.Name())
+			return string(b)
+		}, 30*time.Second, 200*time.Millisecond).Should(
+			gomega.ContainSubstring("handler reached by unknown-SPKI peer over QUIC"),
+			"leader spike handler must be reached by the unknown-SPKI joiner over QUIC")
+
 		// --- 5. S3 round-trip on the joined node proves the key works ---
 		joinerURL := fmt.Sprintf("http://127.0.0.1:%d", joinerHTTP)
 		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{joinerData}, 30*time.Second)
