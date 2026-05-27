@@ -13,9 +13,8 @@ import (
 
 // TestPhase0QuickstartE2E mechanically verifies the Phase 0 "magical-moment"
 // quickstart promised by the README: `./grainfs serve` then anon PUT + LIST +
-// GET on s3://default via aws --no-sign-request. The fixture is FRESH and
-// UNBOOTSTRAPPED (iam.anon-enabled=true by default in Phase 0); using a
-// bootstrapped fixture would deny anon requests on Layer 1.
+// GET on s3://default via aws --no-sign-request. The fixture is fresh and
+// unbootstrapped so the default bucket keeps its implicit anonymous policy.
 //
 // Dual-target per R10: SingleNode + Cluster3Node.
 //

@@ -3,7 +3,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -18,17 +17,14 @@ import (
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
-// TestPhaseTransitionE2E proves F#26: when the first SA is created on a Phase 0
-// fixture, iam.anon-enabled atomically flips to false (Phase 2). Anon traffic
-// to s3://default MUST keep working across the flip (the default bucket carries
-// an implicit anon-allow that survives), while anon traffic to other buckets
-// is denied after the flip. No torn intermediate state is observable.
+// TestPhaseTransitionE2E proves first-SA bootstrap does not disturb the default
+// bucket's implicit anonymous policy, while non-default buckets remain denied
+// unless policy explicitly allows anonymous access.
 //
 // Dual-target per R10: SingleNode + Cluster3Node, both Phase 0 (unbootstrapped).
 //
-// Each sub-case spins up its own fresh Phase 0 fixture via newFixture(t) because
-// the first-SA-create flip is one-way (anon-enabled can't roll back through the
-// same hook), and every case needs a fresh Phase 0 start.
+// Each sub-case spins up its own fresh fixture because first-SA bootstrap is a
+// one-way IAM state transition.
 var _ = ginkgo.Describe("Phase transition", func() {
 	describePhaseTransitionContext("SingleNode", "single", func(tb testing.TB) *phase0Target {
 		return newPhase0SingleNodeTarget(tb)
@@ -54,8 +50,6 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 	ginkgo.It("keeps default bucket anonymous access alive after the Phase 2 flip (DefaultBucketAnonSurvivesFlip)", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
-		seedTrustedProxyForFlip(t, tgt.adminSock(0))
-
 		// Phase 0 anon PUT to /default — success.
 		putReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+"/default/before-flip.txt",
@@ -67,23 +61,10 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		gomega.Expect(putResp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"Phase 0 anon PUT to /default must succeed before flip")
 
-		// Trigger Phase 2 flip by creating the first SA.
+		// Create the first SA. This no longer flips a global anonymous config.
 		flipToPhase2(t, tgt.adminSock(0))
 
-		// Wait for iam.anon-enabled to read false. Single-node flips on the
-		// same apply round; cluster needs Raft propagation to the queried node.
-		gomega.Eventually(func() bool {
-			return !isAnonEnabled(t, tgt.adminSock(0))
-		}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).
-			Should(gomega.BeTrue(), "iam.anon-enabled must flip to false after first SA create")
-
-		// F#41-extension: default-bucket anon access is independent of
-		// iam.anon-enabled (banner guarantee — "default remains public"). All
-		// of GET/PUT/LIST on /default must survive the flip. The middleware
-		// anon fast-path in authn_middleware.go pipes anon requests through to
-		// the authorizer when bucket=="default", and the authorizer's D#2
-		// implicit-anon path (authorizer.go:73-81) returns Allow with reason
-		// ReasonDefaultBucketImplicitAnon.
+		// Default-bucket anonymous access is owned by the implicit bucket policy.
 
 		// GET — reads back the Phase 0 PUT.
 		getReq, err := http.NewRequestWithContext(context.Background(),
@@ -93,13 +74,13 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(getResp.Body.Close)
 		gomega.Expect(getResp.StatusCode).To(gomega.Equal(http.StatusOK),
-			"Phase 2 anon GET on /default must succeed (banner promise); status=%d",
+			"anon GET on /default must succeed after first SA create; status=%d",
 			getResp.StatusCode)
 		body, err := io.ReadAll(getResp.Body)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(body).To(gomega.Equal([]byte("before")))
 
-		// PUT — writes after the flip. F#41-ext core assertion.
+		// PUT — writes after first-SA bootstrap.
 		putReq2, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+"/default/after-flip.txt",
 			bytes.NewReader([]byte("after")))
@@ -108,10 +89,10 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = putResp2.Body.Close()
 		gomega.Expect(putResp2.StatusCode).To(gomega.Equal(http.StatusOK),
-			"Phase 2 anon PUT on /default must succeed (banner: 'default remains public'); status=%d",
+			"anon PUT on /default must succeed after first SA create; status=%d",
 			putResp2.StatusCode)
 
-		// LIST — subresource GET. Must also pass authn in Phase 2.
+		// LIST — subresource GET.
 		listReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+"/default/?list-type=2", nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -119,7 +100,7 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(listResp.Body.Close)
 		gomega.Expect(listResp.StatusCode).To(gomega.Equal(http.StatusOK),
-			"Phase 2 anon LIST on /default must succeed (banner: 'default remains public'); status=%d",
+			"anon LIST on /default must succeed after first SA create; status=%d",
 			listResp.StatusCode)
 		listBody, err := io.ReadAll(listResp.Body)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -127,17 +108,11 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 			"LIST response must show the post-flip anon PUT key")
 	})
 
-	ginkgo.It("denies anonymous access to non-default buckets after the Phase 2 flip (NonDefaultBucketAnonDeniedAfterFlip)", func() {
+	ginkgo.It("denies anonymous access to non-default buckets without policy (NonDefaultBucketAnonDenied)", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
-		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
-		// Trigger Phase 2 via first SA create.
 		flipToPhase2(t, tgt.adminSock(0))
-		gomega.Eventually(func() bool {
-			return !isAnonEnabled(t, tgt.adminSock(0))
-		}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).
-			Should(gomega.BeTrue(), "iam.anon-enabled must flip to false after first SA create")
 
 		// Create a non-default bucket via admin UDS (no anon policy attached).
 		bucket := bucketNameFor(tgtName, "phase-tx", "nondef")
@@ -153,15 +128,13 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		gomega.Expect([]int{http.StatusUnauthorized, http.StatusForbidden}).To(gomega.ContainElement(resp.StatusCode),
-			"anon PUT to non-default bucket %q in Phase 2 must be denied (got %d)",
+			"anon PUT to non-default bucket %q without policy must be denied (got %d)",
 			bucket, resp.StatusCode)
 	})
 
 	ginkgo.It("does not expose torn anonymous auth state during the flip (NoTornStateDuringFlip)", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
-		seedTrustedProxyForFlip(t, tgt.adminSock(0))
-
 		// Seed a probe object on /default so cluster GET-routing has a real
 		// owner to resolve. Without this, cluster anon GETs on a never-written
 		// key return 500 "forward: no reachable peer" (cluster data plane
@@ -215,7 +188,7 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 			}
 		}()
 
-		// Let some Phase 0 anon hits land, then flip mid-flight.
+		// Let some anon hits land, then create the first SA mid-flight.
 		time.Sleep(200 * time.Millisecond)
 		flipToPhase2(t, tgt.adminSock(0))
 		wg.Wait()
@@ -226,40 +199,12 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		gomega.Expect(atomic.LoadInt32(&defaultOK)).To(gomega.BeNumerically(">", int32(0)),
 			"expected at least some anon-to-/default to be allowed through during the flip window")
 		gomega.Expect(atomic.LoadInt32(&defaultDeny)).To(gomega.Equal(int32(0)),
-			"anon to /default MUST NEVER be denied during or after the Phase 0→2 flip (F#26 atomic guarantee); deny count=%d",
+			"anon to /default MUST NEVER be denied during or after first-SA bootstrap; deny count=%d",
 			atomic.LoadInt32(&defaultDeny))
 	})
 }
 
-// seedTrustedProxyForFlip sets trusted-proxy.cidr to a benign loopback value
-// so the TLS posture reload hook accepts the subsequent iam.anon-enabled→false
-// flip triggered by first-SA-create. Without this, the FSM's auto-flip in
-// MetaCmdTypeIAMSACreate logs a warning and silently keeps anon enabled (see
-// meta_fsm.go applyIAMSACreate and serveruntime/tls_posture.go
-// reloadHookPostureCheck).
-//
-// Defensive finding (flag only — out of scope for T73): F#26's atomic flip
-// is silently dropped on first-SA-create when TLS posture is unsafe. The
-// Phase 0 → Phase 2 "magical moment" has an unstated precondition (TLS cert OR
-// trusted-proxy.cidr must be set).
-func seedTrustedProxyForFlip(t testing.TB, sock string) {
-	t.Helper()
-	body, err := json.Marshal(map[string]string{"value": "127.0.0.1/32"})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	req, err := http.NewRequestWithContext(context.Background(),
-		http.MethodPut, "http://unix/v1/config/trusted-proxy.cidr",
-		bytes.NewReader(body))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := iamUDSClient(sock).Do(req)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close()
-	gomega.Expect(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent).To(gomega.BeTrue(),
-		"PUT /v1/config/trusted-proxy.cidr → %d", resp.StatusCode)
-}
-
-// flipToPhase2 creates the first SA via admin UDS, which triggers the
-// Phase 0 → Phase 2 atomic flip server-side (iam.anon-enabled set to false).
+// flipToPhase2 creates the first SA via admin UDS.
 // Returns the new SA's id and key pair; callers typically discard them.
 func flipToPhase2(t testing.TB, sock string) (saID, ak, sk string) {
 	t.Helper()
@@ -267,32 +212,8 @@ func flipToPhase2(t testing.TB, sock string) (saID, ak, sk string) {
 	return out.SAID, out.AccessKey, out.SecretKey
 }
 
-// isAnonEnabled reads iam.anon-enabled via admin UDS GET /v1/config/<key>
-// and returns the parsed bool value. Fatals on transport/decode errors.
-func isAnonEnabled(t testing.TB, sock string) bool {
-	t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(),
-		http.MethodGet, "http://unix/v1/config/iam.anon-enabled", nil)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	resp, err := iamUDSClient(sock).Do(req)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close()
-	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
-		"GET /v1/config/iam.anon-enabled → %d", resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	var entry struct {
-		Value string `json:"value"`
-	}
-	gomega.Expect(json.Unmarshal(body, &entry)).To(gomega.Succeed())
-	v, err := strconv.ParseBool(entry.Value)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "parse iam.anon-enabled value %q", entry.Value)
-	return v
-}
-
 // adminCreateBucket creates a bucket via admin UDS with no SA/policy attach.
-// Anon access to the resulting bucket is then governed solely by the global
-// iam.anon-enabled config.
+// Anon access to the resulting bucket is governed by IAM/bucket policy.
 func adminCreateBucket(t testing.TB, sock, bucket string) error {
 	t.Helper()
 	cli := iamadmin.NewClientForURL(sock)

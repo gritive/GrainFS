@@ -26,7 +26,7 @@ import (
 // jwtAuthnServer starts a test server with:
 //   - a fresh KeySet (keys generated)
 //   - no policyAuthorizer (gate disabled → JWT verify is the only gate)
-//   - optional anonCfg to override iam.anon-enabled
+//   - optional config reader for guarded auth tests
 //   - optional policyAuthorizer for action-deny tests
 func setupJWTAuthnServer(t *testing.T, opts ...Option) (base string, keys *iamjwt.KeySet) {
 	t.Helper()
@@ -101,7 +101,7 @@ func (fakeEmptyPolicyStore) BucketPolicy(_ context.Context, _ string) (*policy.D
 func denyAllAuthorizer(t *testing.T) *s3auth.Authorizer {
 	t.Helper()
 	res := policy.NewResolver(fakeEmptyPolicyStore{}, 0)
-	cfg := anonConfigReader{"iam.anon-enabled": false}
+	cfg := anonConfigReader{"iam.allow-anonymous-bucket-policy": false}
 	return s3auth.NewAuthorizer(res, cfg)
 }
 
@@ -209,15 +209,7 @@ func TestIcebergAuthn_ActionDenied_403(t *testing.T) {
 	assert.Contains(t, msg, "policy denied")
 }
 
-// TestIcebergAuthn_AnonPhase0_NoBearerNeeded: anon=true → bearer gate skipped
-// even when an INVALID bearer token is present.
-// A request with a garbage "Bearer bad.token" header must NOT be rejected with
-// 401 when iam.anon-enabled=true — the anon short-circuit fires first.
-func TestIcebergAuthn_AnonPhase0_NoBearerNeeded(t *testing.T) {
-	anonCfg := anonConfigReader{"iam.anon-enabled": true}
-
-	// Build a server with no SigV4 gate (no WithAuth) so the only auth layer is
-	// the bearer/anon gate under test.
+func TestIcebergAuthn_InvalidBearerRejectedWithoutAnonBypass(t *testing.T) {
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
@@ -231,14 +223,11 @@ func TestIcebergAuthn_AnonPhase0_NoBearerNeeded(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend,
 		WithJWTKeySet(ks),
-		WithBearerConfig(anonCfg),
 	)
 	go srv.Run() //nolint:errcheck
 	waitForPort(t, addr)
 	anonBase := "http://" + addr
 
-	// Send an INVALID bearer token — icebergAuthnCheck would reject it 401,
-	// but anon short-circuit in icebergGuarded must fire before Verify() is called.
 	req, err := http.NewRequest(http.MethodGet, anonBase+"/iceberg/v1/config?warehouse=default", nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer this.is.not.a.valid.jwt")
@@ -247,8 +236,7 @@ func TestIcebergAuthn_AnonPhase0_NoBearerNeeded(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	// anon-enabled must short-circuit before JWT verification → must NOT be 401.
-	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode, "anon-enabled must skip bearer requirement even for invalid tokens")
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 // TestIcebergAuthn_SigV4PlusBearer_Passes: F4 regression test.

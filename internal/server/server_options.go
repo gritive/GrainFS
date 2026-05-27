@@ -56,14 +56,6 @@ func WithJWTKeySet(ks *iamjwt.KeySet) Option {
 	}
 }
 
-// WithBearerConfig wires a ConfigReader so the iceberg bearer middleware can
-// check iam.anon-enabled and skip bearer requirement in Phase 0.
-func WithBearerConfig(cfg s3auth.ConfigReader) Option {
-	return func(s *Server) {
-		s.bearerCfg = cfg
-	}
-}
-
 // WithProxyTrust wires the trusted-proxy validator used by
 // (*Server).authoritativeClientIP. §5 T45.
 func WithProxyTrust(pt *ProxyTrust) Option {

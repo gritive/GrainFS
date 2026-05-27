@@ -79,11 +79,8 @@ func (a *StatusAdapter) Report() adminapi.StatusReport {
 		dekGen, _ = a.dekKeeper.Active()
 	}
 
-	// Banner = iam.anon-enabled (BoolSpec, default true).
-	banner := false
-	if a.cfgStore != nil {
-		banner, _ = a.cfgStore.GetBool("iam.anon-enabled")
-	}
+	// Banner reports that the default bucket anonymous-access advisory applies.
+	banner := true
 
 	// Audit deny-only (BoolSpec, default false).
 	auditDenyOnly := false

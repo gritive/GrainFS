@@ -57,7 +57,7 @@ func (allowPolicyStore) BucketPolicy(_ context.Context, _ string) (*policy.Docum
 func allowAuthorizer(t *testing.T) *s3auth.Authorizer {
 	t.Helper()
 	res := policy.NewResolver(allowPolicyStore{}, 0)
-	cfg := anonConfigReader{"iam.anon-enabled": false}
+	cfg := anonConfigReader{"iam.allow-anonymous-bucket-policy": false}
 	return s3auth.NewAuthorizer(res, cfg)
 }
 
@@ -181,11 +181,8 @@ func TestIcebergGuarded_EmitsDenyAuditRow_BadToken(t *testing.T) {
 	assert.Zero(t, ev.AuthzLatencyUS, "AuthzLatencyUS must be 0 when policy layer was not reached")
 }
 
-// TestIcebergGuarded_EmitsAnonAllowAuditRow checks that anon-enabled requests
-// produce an anon_allow audit.s3 row.
-func TestIcebergGuarded_EmitsAnonAllowAuditRow(t *testing.T) {
+func TestIcebergGuarded_ValidBearerDoesNotUseAnonAuditRow(t *testing.T) {
 	emitter := audit.NewEmitterWithRingCapacity("test-node", 64)
-	anonCfg := anonConfigReader{"iam.anon-enabled": true}
 
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
@@ -200,7 +197,6 @@ func TestIcebergGuarded_EmitsAnonAllowAuditRow(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	startTestServer(t, addr, backend,
 		WithJWTKeySet(ks),
-		WithBearerConfig(anonCfg),
 		WithAuditEmitter(emitter),
 	)
 
@@ -208,7 +204,6 @@ func TestIcebergGuarded_EmitsAnonAllowAuditRow(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodGet, anonBase+"/iceberg/v1/config?warehouse=default", nil)
 	require.NoError(t, err)
-	// Send a valid bearer token — anon short-circuit fires before JWT verification.
 	tok := mintBearer(t, ks, "default")
 	req.Header.Set("Authorization", "Bearer "+tok)
 
@@ -222,11 +217,9 @@ func TestIcebergGuarded_EmitsAnonAllowAuditRow(t *testing.T) {
 
 	events := drainAuditEvents(emitter)
 	ev, found := findIcebergAuditEvent(events, "iceberg:GetCatalogConfig")
-	require.True(t, found, "expected anon_allow audit event; got events: %+v", events)
-	assert.Equal(t, "anon_allow", ev.AuthStatus, "AuthStatus should be anon_allow when iam.anon-enabled=true")
-
-	// SAID must carry the canonical sentinel for anonymous requests.
-	assert.Equal(t, audit.AnonSAID, ev.SAID, "SAID should be AnonSAID sentinel for anon requests")
+	require.True(t, found, "expected bearer allow audit event; got events: %+v", events)
+	assert.Equal(t, "allow", ev.AuthStatus)
+	assert.NotEqual(t, audit.AnonSAID, ev.SAID)
 }
 
 // TestIcebergGuarded_SigV4Passthrough_NoAuditFromBearerPath checks that

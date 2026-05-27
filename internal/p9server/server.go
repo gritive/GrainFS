@@ -31,9 +31,7 @@ type p9Authorizer interface {
 }
 
 // ConfigReader is the small slice of the config store that the 9P server
-// reads. The concrete *config.Store satisfies it; tests inject stubs.
-// Used per-op to re-check iam.anon-enabled for anon-bound sessions
-// (NFS§B T12, §9 T73 parity).
+// accepts for compatibility with serveruntime wiring.
 type ConfigReader interface {
 	GetBool(key string) (bool, bool)
 }
@@ -72,10 +70,7 @@ func WithExportStore(store exportGetter) ServerOption {
 	return func(a *attacher) { a.exportStore = store }
 }
 
-// WithConfigReader wires the config store so the 9P server can re-check
-// iam.anon-enabled on every fh-bearing op for anon-bound sessions
-// (NFS§B T12, §9 T73 parity). nil keeps the previous behaviour
-// (no per-op anon flip gate).
+// WithConfigReader wires the config store for compatibility with serveruntime.
 func WithConfigReader(c ConfigReader) ServerOption {
 	return func(a *attacher) { a.cfg = c }
 }

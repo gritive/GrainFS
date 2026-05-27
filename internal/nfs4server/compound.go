@@ -512,8 +512,8 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
 		} else {
 			// T12 propagation fix: a fresh subdir fh must inherit the parent's
-			// saID binding so the per-op anon flip gate (anonRejected) can
-			// distinguish mount-SA-bound subdir sessions from anon ones.
+			// saID binding so mount-SA-bound subdir sessions stay bound to the
+			// same principal.
 			// BindFHGeneration preserves an existing saID, but a freshly-
 			// created fh has saID="" which would mis-classify as anon. Pull
 			// parent's saID explicitly when it is set.
@@ -534,37 +534,11 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 // fh that is awaiting the next LOOKUP to determine mount-SA vs anon binding.
 const fhSAIDPending = "(pending)"
 
-// anonRejected reports whether the given fh's anon binding is no longer
-// allowed: the binding has saID="" (anon confirmed) AND iam.anon-enabled is
-// false. Returns false when the gate is not wired (cfg==nil), when the fh
-// has no binding (pseudo-root / unbound), when the binding is mount-SA
-// confirmed (saID!="" and not pending), or when iam.anon-enabled=true.
-//
-// NFS§B T12: per-op guard for Phase 0 → Phase 2 transitions. Mirrors the
-// S3 path (§9 T73): active anon-bound sessions must be rejected on the
-// next op after the first SA create flips iam.anon-enabled=false.
-//
-// Hot path: one map RLock + one cfg RLock per op when the gate is wired.
-// Zero allocation. The branch is dead when cfg==nil (the production wiring
-// passes config.Store; tests inject a stub).
+// anonRejected is retained for the NFS operation call sites. The global
+// anonymous transition no longer exists, so established anonymous NFS bindings
+// are not revoked by a cluster config flip.
 func (d *Dispatcher) anonRejected(fh FileHandle) bool {
-	if d.server == nil || d.server.cfg == nil {
-		return false
-	}
-	binding, ok := d.state.FHBinding(fh)
-	if !ok {
-		return false
-	}
-	if binding.saID != "" {
-		// "(pending)" or "<mount-sa-name>" — not an anon binding.
-		return false
-	}
-	anon, ok := d.server.cfg.GetBool("iam.anon-enabled")
-	if !ok {
-		// Key not registered: be conservative and do not block.
-		return false
-	}
-	return !anon
+	return false
 }
 
 // opLookupResolvePending handles the 2nd LOOKUP from a bucket fh with
@@ -696,7 +670,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 		bucket, _ := extractBucketAndKey(newPath)
 		gen := d.server.exportGeneration(bucket)
 		// T12: propagate parent's saID so the new fh inherits the session
-		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		// binding (anon "" vs mount-SA "<name>").
 		parentBind, ok := d.state.FHBinding(d.currentFH)
 		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
 			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
@@ -1517,7 +1491,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 		bucket, _ := extractBucketAndKey(childPath)
 		gen := d.server.exportGeneration(bucket)
 		// T12: propagate parent's saID so the new fh inherits the session
-		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		// binding (anon "" vs mount-SA "<name>").
 		parentBind, ok := d.state.FHBinding(d.currentFH)
 		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
 			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
@@ -1780,7 +1754,6 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 
 func (d *Dispatcher) opRename(data []byte) OpResult {
 	// Rename involves both savedFH (source parent) and currentFH (dest parent).
-	// Reject if either is anon-bound and the flip happened.
 	if d.anonRejected(d.savedFH) || d.anonRejected(d.currentFH) {
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_ACCESS}
 	}

@@ -38,7 +38,7 @@ That's it. You have a working local S3 server. To verify the same data through
 NFS on Linux, continue with [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
 That guide also covers 9P mounts, authenticated Mount SAs, and read-only exports.
 
-> ⚠ **Anonymous local mode**: any client on this port can read/write `s3://default`. To require authentication, create the first service account through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
+> ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
 ### Optional: cluster / production setup
 

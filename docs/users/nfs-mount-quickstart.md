@@ -34,9 +34,9 @@ ls /mnt/data                                                      # via NFS/9P
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/  # via S3
 ```
 
-> Anonymous mount works only when `iam.anon-enabled=true` (the default
-> for a fresh cluster). The bucket must also be registered as an export;
-> S3 bucket creation alone does not expose the bucket over NFS or 9P.
+> Anonymous mount access is decided by the bucket/export authorization path.
+> The bucket must be registered as an export; S3 bucket creation alone does not
+> expose the bucket over NFS or 9P.
 
 ## Authenticated mount with a Mount SA
 

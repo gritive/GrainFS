@@ -50,9 +50,7 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 	s.appendFinalizedAuditEvent(context.Background(), normalizeAuditEvent(ev))
 }
 
-// emitIcebergAuditAnonAllow emits an audit.s3 anon_allow row for an Iceberg
-// request that was short-circuited by iam.anon-enabled=true. Called after the
-// downstream handler returns.
+// emitIcebergAuditAnonAllow emits an audit.s3 anon_allow row for legacy callers.
 func (s *Server) emitIcebergAuditAnonAllow(ctx context.Context, c *app.RequestContext, action string, start time.Time) {
 	if !s.auditSinkConfigured() {
 		return

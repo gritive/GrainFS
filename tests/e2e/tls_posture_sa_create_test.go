@@ -1,15 +1,5 @@
-// FU#3 / F#26-tls-posture: e2e coverage for the admin UDS pre-check that
-// rejects the first SA create when the local TLS posture is unsafe.
-//
-// The bug: on a fresh Phase 0 cluster with no TLS cert and no trusted-proxy.cidr,
-// the FSM applies the SACreate AND tries to atomically flip iam.anon-enabled
-// to false. The flip's reload hook refuses on bad posture, the FSM logs a
-// warning and continues — leaving "SA committed, anon still on". The fix
-// rejects the admin UDS RPC up front with a "precondition" error containing
-// a remediation hint, before propose runs.
-//
-// Dual-target per R10: SingleNode + Cluster3Node. Cluster only exercises the
-// rejection case (the admin UDS path is local; full duplication is unnecessary).
+// First-SA create no longer toggles a global anonymous config key, so TLS
+// posture is not coupled to service-account bootstrap.
 package e2e
 
 import (
@@ -29,9 +19,8 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// TLS posture SA create proves that the admin UDS rejects the first SA create
-// when the node-local TLS posture would refuse the implied anon flip, and
-// accepts it once one of the three remediation knobs is in place.
+// TLS posture SA create proves that the admin UDS accepts first-SA bootstrap
+// independently of TLS posture.
 var _ = ginkgo.Describe("TLS posture SA create", func() {
 	ginkgo.BeforeEach(func() {
 		// Neutralize any host-level GRAINFS_TLS_CERT/KEY that would silently
@@ -63,23 +52,16 @@ func describeTLSPostureSACreateContext(name, tgtName string, factory func(testin
 }
 
 func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *phase0Target) {
-	ginkgo.It("rejects the first SA create without cert or trusted proxy", func() {
+	ginkgo.It("accepts the first SA create without cert or trusted proxy", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "admin")
-		gomega.Expect(status).To(gomega.Equal(http.StatusPreconditionFailed),
-			"first SA create on bad-posture fixture must return 412 Precondition Failed; body=%s", body)
-		// Body must mention all three remediation knobs (the
-		// enforceTLSPostureValues error message is reused).
-		gomega.Expect(body).To(gomega.ContainSubstring("GRAINFS_TLS_CERT"),
-			"error body must name the GRAINFS_TLS_CERT env var remediation; body=%s", body)
-		gomega.Expect(body).To(gomega.ContainSubstring("trusted-proxy.cidr"),
-			"error body must name the trusted-proxy.cidr remediation; body=%s", body)
+		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
+			"first SA create must not depend on TLS posture; body=%s", body)
 	})
 
-	// Cluster only exercises the rejection path — admin UDS is per-node, parity
-	// is in the rejection check itself, not in the success knobs.
+	// Cluster only exercises the basic success path.
 	if tgtName == "cluster3" {
 		return
 	}
@@ -101,25 +83,22 @@ func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *pha
 			"SA create with cert on disk must succeed; body=%s", body)
 	})
 
-	ginkgo.It("accepts the first SA create when trusted-proxy.cidr is set", func() {
+	ginkgo.It("accepts the first SA create without trusted-proxy.cidr", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
-		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "admin")
 		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
-			"SA create with trusted-proxy.cidr set must succeed; body=%s", body)
+			"SA create without trusted-proxy.cidr must succeed; body=%s", body)
 	})
 
 	ginkgo.It("does not block a second SA create after posture becomes unsafe", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := newFixture(t)
-		// Use the trusted-proxy.cidr knob to let the first SA through.
-		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "first-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
-			"first SA create with trusted-proxy.cidr must succeed; body=%s", body)
+			"first SA create must succeed; body=%s", body)
 
 		// Clear trusted-proxy.cidr so the local posture is now "bad". A second
 		// SA create must still succeed — the pre-check fires only on an empty

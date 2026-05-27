@@ -13,7 +13,6 @@ import (
 // one place would make every anonymous Allow re-classify as a regular
 // authenticated allow on the audit.s3 row. T51' N1 review.
 const (
-	ReasonAnonEnabled               = "iam.anon-enabled=true"
 	ReasonDefaultBucketImplicitAnon = "default bucket implicit anon (D#2)"
 )
 
@@ -51,8 +50,6 @@ func NewAuthorizer(r *policy.Resolver, c ConfigReader) *Authorizer {
 //     audit-internal SA's localhost read path bypasses Authorize entirely via
 //     authenticateAuditInternalRequest (internal/server/authn_middleware.go),
 //     so the audit reader is unaffected.
-//   - When saID == "" and iam.anon-enabled=true, returns Allow without resolver
-//     lookup (Phase 0 → Phase 1 progressive application).
 //   - Otherwise runs full Evaluate with the SA's effective policies and the
 //     bucket policy. AllowAnonBucket comes from iam.allow-anonymous-bucket-policy.
 func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult {
@@ -71,8 +68,7 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (data plane is admin-UDS-only)", ConditionContext: cc}
 	}
 	// D#2: "default" bucket carries an implicit anon policy unless the operator
-	// has attached an explicit bucket policy. Implicit policy survives Phase 0→2
-	// transitions (i.e., it does NOT depend on iam.anon-enabled).
+	// has attached an explicit bucket policy.
 	if saID == "" && bucket == reservedname.DefaultBucketName {
 		hasExplicit, err := a.resolver.HasBucketPolicy(ctx, reservedname.DefaultBucketName)
 		if err != nil {
@@ -83,9 +79,6 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 		}
 	}
 	if saID == "" {
-		if anon, ok := a.cfg.GetBool("iam.anon-enabled"); ok && anon {
-			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonAnonEnabled, ConditionContext: cc}
-		}
 		// Fall through: Principal:* on a bucket policy may still allow if iam.allow-anonymous-bucket-policy=true.
 	}
 	in, err := a.resolver.Effective(ctx, saID, bucket, ctxReq.PrincipalType)

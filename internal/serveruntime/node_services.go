@@ -91,9 +91,9 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 // servers (NFS§B T8 + T12). Nil fields disable the corresponding gate
 // (backward compat).
 //
-// CfgStore is read per-op on the NFS/9P data path to enforce the Phase 0 →
-// Phase 2 anon flip (T12 / §9 T73 parity): active anon-bound sessions are
-// rejected on the next op after iam.anon-enabled is flipped false.
+// CfgStore is retained for compatibility with node service wiring. Anonymous
+// access is now controlled at attach/mount authorization time rather than by
+// global anonymous config.
 //
 // AuditHook is called synchronously after every grainfs:NFSMount /
 // grainfs:9PAttach allow/deny decision (T15 NFS§C). nil = no audit emit.

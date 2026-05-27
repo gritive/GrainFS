@@ -109,9 +109,8 @@ func (a *AuditLogger) RecordDenyDetailed(ctx context.Context, saID, bucket, key 
 }
 
 // RecordAnonAllow emits an allow decision for an anonymous request that was
-// permitted by an iam.anon-enabled config or the default bucket's implicit
-// anon policy. The status separates it from authenticated allows so audit
-// consumers can filter on Phase 0 traffic.
+// permitted by the default bucket's implicit anon policy or an explicit
+// anonymous bucket policy. The status separates it from authenticated allows.
 func (a *AuditLogger) RecordAnonAllow(ctx context.Context, bucket, key string, action s3auth.S3Action, d AuditDetails) {
 	a.emit(ctx, "", bucket, key, action, AuditStatusAnonAllow, "", d)
 }

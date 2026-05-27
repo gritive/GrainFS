@@ -210,17 +210,6 @@ func mountNFSExportColima(t testing.TB, tgt *nfsTarget, bucket string) (string, 
 		}
 	}
 
-	// Re-enable anon access so the NFS session (which has no MountSA binding)
-	// passes the anonRejected() gate.  TestMain's bootstrap SA creation
-	// auto-flips iam.anon-enabled → false; setConfigViaUDS is documented
-	// specifically for this per-fixture re-enable case.
-	sock := tgt.dataDir(tgt.leaderIdx) + "/admin.sock"
-	gomega.Expect(setConfigViaUDS(sock, "iam.anon-enabled", "true")).
-		To(gomega.Succeed(), "re-enable iam.anon-enabled for NFS anon session")
-	ginkgo.DeferCleanup(func() {
-		_ = setConfigViaUDS(sock, "iam.anon-enabled", "false")
-	})
-
 	if out, err := colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
 		"-o", fmt.Sprintf("vers=4.1,port=%s,rw,hard,intr,timeo=600,retrans=2", port),
 		fmt.Sprintf("%s:/", hostIP),

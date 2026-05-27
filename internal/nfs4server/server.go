@@ -37,10 +37,8 @@ type Server struct {
 	mountSAStore *mountsastore.Store
 	authorizer   nfsAuthorizer
 
-	// NFS§B T12: per-op anon-binding gate. cfg is read at the top of each
-	// fh-bearing op to reject active anon-bound sessions on the next op
-	// after iam.anon-enabled is flipped false (Phase 0 → Phase 2).
-	// nil = no gate (backward compat).
+	// cfg is retained for compatibility with serveruntime wiring. Anonymous
+	// access is decided at mount time, not by a global config flip.
 	cfg ConfigReader
 
 	// T15 NFS§C: audit hook. When non-nil, called after every grainfs:NFSMount
@@ -81,9 +79,7 @@ func WithNFS4Authorizer(a nfsAuthorizer) ServerOption {
 	return func(srv *Server) { srv.authorizer = a }
 }
 
-// WithConfigReader wires the config store so the NFS server can re-check
-// iam.anon-enabled on every fh-bearing op (NFS§B T12, §9 T73 parity). nil
-// keeps the previous behaviour (no per-op anon flip gate).
+// WithConfigReader wires the config store for compatibility with serveruntime.
 func WithConfigReader(c ConfigReader) ServerOption {
 	return func(srv *Server) { srv.cfg = c }
 }

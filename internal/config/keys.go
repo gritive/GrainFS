@@ -8,7 +8,6 @@ import "context"
 // NOTE: OnDEKRotate and OnDEKVersionPrune are intentionally absent — those flows
 // are handled by the FSM post-commit hook in Task 14, not by reload-hook closures.
 type ReloadHooks struct {
-	OnAnonEnabledChange     func(context.Context, bool) error
 	OnAllowAnonBucketPolicy func(context.Context, bool) error
 	OnTrustedProxyCIDR      func(context.Context, string) error
 	OnJWTSigningKeyRotate   func(context.Context) error
@@ -20,17 +19,6 @@ type ReloadHooks struct {
 // RegisterClusterKeys registers every cluster-wide config key into s.
 // Subsystem reload-hook fields in h may be nil; absent hooks are no-ops.
 func RegisterClusterKeys(s *Store, h ReloadHooks) {
-	s.Register("iam.anon-enabled", BoolSpec{
-		Default: true,
-		Desc:    "Allow anonymous (unauthenticated) S3 access",
-		OnReload: func(ctx context.Context, v bool) error {
-			if h.OnAnonEnabledChange == nil {
-				return nil
-			}
-			return h.OnAnonEnabledChange(ctx, v)
-		},
-	})
-
 	s.Register("iam.allow-anonymous-bucket-policy", BoolSpec{
 		Default: false,
 		Desc:    "Allow anonymous access via bucket-level IAM policies",

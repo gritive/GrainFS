@@ -312,12 +312,9 @@ func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
 }
 
 func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
-	// FU#3 / F#26-tls-posture: AdminAPI now rejects the first SA create on
-	// a fresh fixture when no TLS cert and no trusted-proxy CIDR are
-	// configured (the implied iam.anon-enabled flip would silently fail).
 	// E2E fixtures run on loopback without TLS, so seed a benign
-	// trusted-proxy.cidr before the first SA POST. Idempotent — the second
-	// path through this for cluster retries leaves the value in place.
+	// trusted-proxy.cidr before the first SA POST. Idempotent — the second path
+	// through this for cluster retries leaves the value in place.
 	if err := seedBootstrapTrustedProxyCIDR(sock); err != nil {
 		return iamSAResult{}, err
 	}
@@ -350,8 +347,7 @@ func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 }
 
 // seedBootstrapTrustedProxyCIDR PUTs trusted-proxy.cidr=127.0.0.1/32 on the
-// admin UDS so the F#26-tls-posture pre-check accepts the subsequent first
-// SA create. Production deployments must set one of: TLS cert on disk,
+// admin UDS. Production deployments should set one of: TLS cert on disk,
 // GRAINFS_TLS_CERT/KEY env vars, or trusted-proxy.cidr — e2e picks the third.
 // Idempotent: re-running with the same value is a no-op at the FSM level.
 func seedBootstrapTrustedProxyCIDR(sock string) error {
@@ -359,12 +355,7 @@ func seedBootstrapTrustedProxyCIDR(sock string) error {
 }
 
 // setConfigViaUDS PUTs key=value on the admin UDS /v1/config/<key>. Used by
-// e2e fixtures that need to flip operator-path config knobs (e.g. re-enabling
-// iam.anon-enabled after the first-SA auto-flip from D#3 + F#16).
-//
-// Caveat: posture-gated keys (notably iam.anon-enabled=false) require trusted-
-// proxy.cidr or a TLS cert already on the node — otherwise the reload hook
-// rolls back the apply and the PUT surfaces as a 500. See tls_posture.go.
+// e2e fixtures that need to flip operator-path config knobs.
 func setConfigViaUDS(sock, key, value string) error {
 	client := iamUDSClient(sock)
 	payload, err := json.Marshal(struct {
