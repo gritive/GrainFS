@@ -86,6 +86,7 @@ const (
 	MetaCmdTypePromoteMember                MetaCmdType = 76
 	MetaCmdTypeRevokePeer                   MetaCmdType = 77
 	MetaCmdTypeInvitePending                MetaCmdType = 78
+	MetaCmdTypeRegisterMember               MetaCmdType = 79
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -168,6 +169,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypePromoteMember:                "PromoteMember",
 	MetaCmdTypeRevokePeer:                   "RevokePeer",
 	MetaCmdTypeInvitePending:                "InvitePending",
+	MetaCmdTypeRegisterMember:               "RegisterMember",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -250,6 +252,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"PromoteMember":                MetaCmdTypePromoteMember,
 	"RevokePeer":                   MetaCmdTypeRevokePeer,
 	"InvitePending":                MetaCmdTypeInvitePending,
+	"RegisterMember":               MetaCmdTypeRegisterMember,
 }
 
 func (v MetaCmdType) String() string {

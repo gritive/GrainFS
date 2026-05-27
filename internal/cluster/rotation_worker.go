@@ -1,15 +1,20 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"fmt"
 
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // IdentitySwapper is the subset of *transport.QUICTransport the worker needs.
-// Defined here as an interface so tests can use a fake.
+// Defined here as an interface so tests can use a fake. ApplyRotation routes a
+// phase change through the transport's identity composer as a single atomic op
+// so rotation deltas compose with (not clobber) the peer-registry accept-set
+// (spec §6 D-rev3 step 3).
 type IdentitySwapper interface {
 	SwapIdentity(snap *transport.IdentitySnapshot)
+	ApplyRotation(window [][32]byte, present tls.Certificate, presentSPKI [32]byte, newBase *[32]byte)
 }
 
 // RotationWorker performs the side effects of FSM phase changes: disk reads
@@ -80,7 +85,7 @@ func (w *RotationWorker) applyBegun(st RotationState) RotationApplyRecord {
 		return RotationApplyRecord{RotationID: st.RotationID, Phase: -1,
 			Error: fmt.Sprintf("derive current identity: %v", err)}
 	}
-	w.tr.SwapIdentity(transport.NewIdentitySnapshot([][32]byte{st.OldSPKI, st.NewSPKI}, curCert, st.OldSPKI))
+	w.tr.ApplyRotation([][32]byte{st.OldSPKI, st.NewSPKI}, curCert, st.OldSPKI, nil)
 	return RotationApplyRecord{RotationID: st.RotationID, Phase: PhaseBegun}
 }
 
@@ -96,7 +101,7 @@ func (w *RotationWorker) applySwitched(st RotationState) RotationApplyRecord {
 		return RotationApplyRecord{RotationID: st.RotationID, Phase: -1,
 			Error: fmt.Sprintf("derive new identity (switch): %v", err)}
 	}
-	w.tr.SwapIdentity(transport.NewIdentitySnapshot([][32]byte{st.OldSPKI, st.NewSPKI}, newCert, st.NewSPKI))
+	w.tr.ApplyRotation([][32]byte{st.OldSPKI, st.NewSPKI}, newCert, st.NewSPKI, nil)
 	return RotationApplyRecord{RotationID: st.RotationID, Phase: PhaseSwitched}
 }
 
@@ -135,7 +140,7 @@ func (w *RotationWorker) applySteady(st RotationState) RotationApplyRecord {
 	}
 	// Phase-2 abort path: next.key still exists and must be deleted.
 	_ = w.ks.DeleteNext()
-	w.tr.SwapIdentity(transport.NewIdentitySnapshot([][32]byte{curSPKI}, curCert, curSPKI))
+	w.tr.ApplyRotation(nil, curCert, curSPKI, &curSPKI)
 	// previous.key grace timer is scheduled by the meta-raft layer (which has
 	// access to a real clock and goroutine pool); the worker just leaves the
 	// file in place.

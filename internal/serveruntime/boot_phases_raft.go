@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -105,6 +106,46 @@ func bootMetaRaftWiring(state *bootState) error {
 	// dek_keeper_wiring_test.go::TestWireDEKKeeper_InjectsAndRegistersHook).
 	if err := wireDEKKeeper(state, metaRaft.FSM()); err != nil {
 		return err
+	}
+
+	// Zero-CA §6 D-rev3 step 1: persist a per-node transport identity for EVERY
+	// member now that the KEK store + clusterID are wired. This seals
+	// keys.d/node.key.enc once (genesis/normal boot included) and reloads it on
+	// later boots, recording the per-node SPKI. The node does NOT yet present
+	// this identity — accept-side foundation only. Task 6 consumes perNodeSPKI.
+	// Skipped when the static encryption key is not wired (test configs) or
+	// identity inputs are missing; production always has all three. node.key.enc
+	// is sealed under the static encryption.key (never rotates/prunes), so a KEK
+	// rotate+prune can no longer brick the node. kekStore is passed only for the
+	// back-compat migration of Phase-2 KEK-gen-sealed keys.
+	if len(state.cfg.RawEncryptionKey) == 32 && len(state.clusterID) > 0 && state.nodeID != "" {
+		if state.inviteJoinMode {
+			// Invite-join OWNS node.key.enc this boot: Phase-1 sealed it under a KEK
+			// generation and Phase-2 (bootInviteJoinPhase2) LoadNodeKeys it under that
+			// SAME gen. ensureNodeIdentity must NOT touch it here — its back-compat path
+			// would migrate (re-seal) the KEK-gen-sealed key to the static encryption.key
+			// out from under Phase-2's KEK-gen load, which would then fail with a GCM auth
+			// error. Phase-2 itself performs the migration to the static encryption.key at
+			// close-out (loadAndMigrateInviteNodeKey), so the back-compat path in
+			// ensureNodeIdentity is now only a safety net for legacy keys sealed before
+			// that change. Self-register still needs the SPKI, so source it from the
+			// invite-join state (set in Phase-1 / from the resume sentinel).
+			if state.inviteJoin != nil {
+				state.perNodeSPKI = state.inviteJoin.nodeSPKI
+			}
+		} else {
+			spki, err := ensureNodeIdentity(
+				state.cfg.DataDir,
+				hex.EncodeToString(state.clusterID),
+				state.nodeID,
+				state.cfg.RawEncryptionKey,
+				state.kekStore,
+			)
+			if err != nil {
+				return fmt.Errorf("ensure per-node transport identity: %w", err)
+			}
+			state.perNodeSPKI = spki
+		}
 	}
 
 	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
@@ -246,14 +287,11 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		_ = worker.OnPhaseChange(st)
 	})
 	state.metaRaft.FSM().SetOnPeersChanged(func(accept [][32]byte) {
-		// TODO(network-path-slice): wire registry → transport accept-set as a UNION
-		// (registry SPKIs ∪ existing-member PSK-derived SPKIs from bootstrap seeding ∪
-		// live rotation window). The naive IdentitySnapshotForAccept(accept) REPLACES
-		// the accept-set, evicting the steady-state PSK SPKI and partitioning the
-		// cluster on the first invite-join (/review F1 finding, 2026-05-27). Activation
-		// is deferred; the callback stays wired so the FSM→callback path is exercised.
-		log.Debug().Int("registry_spkis", len(accept)).
-			Msg("peer registry changed; transport accept-set rebuild deferred to network-path slice")
+		// Feed the peer-registry SPKIs into the transport's identity composer as
+		// a delta. The composer recomputes base PSK ∪ rotation window ∪ registry,
+		// so the registry never clobbers the steady-state PSK SPKI or a live
+		// rotation window (spec §6 D-rev3 step 3).
+		state.quicTransport.UpdateRegistryAccept(accept)
 	})
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).

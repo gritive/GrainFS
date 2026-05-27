@@ -1,8 +1,21 @@
 package cluster
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func spki(b byte) [32]byte { var s [32]byte; s[0] = b; return s }
+
+// lookupByNodeID is a test-only read accessor (the production registry has no
+// node-id lookup yet; the revocation slice will add one when RevokeNode needs
+// it). Kept in _test.go so it is not flagged as unused production code.
+func (r *peerRegistry) lookupByNodeID(nodeID string) (peerEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.byNodeID[nodeID]
+	return e, ok
+}
 
 func TestPeerRegistry_RegisterPromoteLookup(t *testing.T) {
 	r := newPeerRegistry()
@@ -68,6 +81,121 @@ func TestPeerRegistry_PromoteUnknownErrors(t *testing.T) {
 	}
 }
 
+func TestPeerRegistry_RegisterMember_NeverDemotes(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("n", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("registerPendingLearner: %v", err)
+	}
+	if err := r.promoteMember("n"); err != nil {
+		t.Fatalf("promoteMember: %v", err)
+	}
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("registerMember: %v", err)
+	}
+	if r.byNodeID["n"].State != peerStateMember {
+		t.Fatal("registerMember must not demote an existing member")
+	}
+}
+
+func TestPeerRegistry_RegisterMember_InsertsAsMember(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("registerMember: %v", err)
+	}
+	e, ok := r.byNodeID["n"]
+	if !ok || e.State != peerStateMember {
+		t.Fatal("registerMember on absent node must insert as member")
+	}
+}
+
+func TestPeerRegistry_RegisterMember_PromotesPendingLearner(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("n", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("registerPendingLearner: %v", err)
+	}
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", true); err != nil {
+		t.Fatalf("registerMember: %v", err)
+	}
+	e := r.byNodeID["n"]
+	if e.State != peerStateMember {
+		t.Fatal("registerMember must upgrade a pending-learner to member")
+	}
+	if !e.PresentsPerNode {
+		t.Fatal("registerMember must record presents_per_node")
+	}
+}
+
+func TestPeerRegistry_RegisterMember_Idempotent(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("first registerMember: %v", err)
+	}
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("second registerMember (idempotent): %v", err)
+	}
+	if len(r.byNodeID) != 1 {
+		t.Fatalf("idempotent re-register must yield a single member, got %d", len(r.byNodeID))
+	}
+	if r.byNodeID["n"].State != peerStateMember {
+		t.Fatal("idempotent re-register must keep member state")
+	}
+}
+
+// TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists confirms the
+// presents_per_node readiness bit is recordable end-to-end (D-rev4). It is
+// recording-only this slice; the revocation PSK-drop gate reads it later.
+func TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists(t *testing.T) {
+	// A pending-learner has no presents_per_node concept; defaults false.
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("learner", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("registerPendingLearner: %v", err)
+	}
+	if r.byNodeID["learner"].PresentsPerNode {
+		t.Fatal("pending-learner must default PresentsPerNode=false")
+	}
+
+	// A member registered with presentsPerNode=false records false.
+	if err := r.registerMember("member-off", spki(2), "10.0.0.3:9000", false); err != nil {
+		t.Fatalf("registerMember(false): %v", err)
+	}
+	if r.byNodeID["member-off"].PresentsPerNode {
+		t.Fatal("registerMember(false) must record PresentsPerNode=false")
+	}
+
+	// A member registered with presentsPerNode=true records true.
+	if err := r.registerMember("member-on", spki(3), "10.0.0.4:9000", true); err != nil {
+		t.Fatalf("registerMember(true): %v", err)
+	}
+	if !r.byNodeID["member-on"].PresentsPerNode {
+		t.Fatal("registerMember(true) must record PresentsPerNode=true")
+	}
+
+	// Apply path: decode → applyRegisterMember must carry the bit verbatim.
+	for _, tc := range []struct {
+		name            string
+		nodeID          string
+		spkiByte        byte
+		presentsPerNode bool
+	}{
+		{"apply-true", "apply-on", 4, true},
+		{"apply-false", "apply-off", 5, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fsm := NewMetaFSM()
+			data, err := encodeRegisterMemberCmd(tc.nodeID, spki(tc.spkiByte), "10.0.0.5:9000", tc.presentsPerNode)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			if err := fsm.applyRegisterMember(data); err != nil {
+				t.Fatalf("applyRegisterMember: %v", err)
+			}
+			if got := fsm.Peers().byNodeID[tc.nodeID].PresentsPerNode; got != tc.presentsPerNode {
+				t.Fatalf("PresentsPerNode via apply path = %v, want %v", got, tc.presentsPerNode)
+			}
+		})
+	}
+}
+
 func TestPeerRegistry_AcceptSet(t *testing.T) {
 	r := newPeerRegistry()
 	_ = r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000")
@@ -75,5 +203,135 @@ func TestPeerRegistry_AcceptSet(t *testing.T) {
 	set := r.acceptSPKIs()
 	if len(set) != 2 {
 		t.Fatalf("acceptSPKIs len %d, want 2 (learners are transport-accepted)", len(set))
+	}
+}
+
+func TestApplyRegisterMember_FiresOnPeersChanged(t *testing.T) {
+	fsm := NewMetaFSM()
+	var got [][32]byte
+	fired := 0
+	fsm.SetOnPeersChanged(func(set [][32]byte) {
+		fired++
+		got = set
+	})
+	data, err := encodeRegisterMemberCmd("n", spki(1), "10.0.0.2:9000", true)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := fsm.applyRegisterMember(data); err != nil {
+		t.Fatalf("applyRegisterMember: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("onPeersChanged fired %d times, want 1", fired)
+	}
+	if len(got) != 1 {
+		t.Fatalf("accept-set len %d, want 1", len(got))
+	}
+	if fsm.Peers().byNodeID["n"].State != peerStateMember {
+		t.Fatal("applied RegisterMember must register as member")
+	}
+}
+
+func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
+	good := func() []peerEntry {
+		return []peerEntry{
+			{NodeID: "n1", SPKI: spki(1), Address: "10.0.0.1:9000", State: peerStateMember},
+			{NodeID: "n2", SPKI: spki(2), Address: "10.0.0.2:9000", State: peerStatePendingLearner},
+		}
+	}
+
+	cases := []struct {
+		name    string
+		entries []peerEntry
+		wantErr string
+	}{
+		{
+			name:    "valid entries import cleanly",
+			entries: good(),
+			wantErr: "",
+		},
+		{
+			name: "zero/malformed SPKI (31-byte copy zero-pads)",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: [32]byte{}, Address: "a", State: peerStateMember},
+			},
+			wantErr: "zero/malformed SPKI",
+		},
+		{
+			name: "two entries same SPKI different node-id",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: spki(7), Address: "a", State: peerStateMember},
+				{NodeID: "n2", SPKI: spki(7), Address: "b", State: peerStateMember},
+			},
+			wantErr: "duplicate SPKI",
+		},
+		{
+			name: "two entries same node-id",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: spki(1), Address: "a", State: peerStateMember},
+				{NodeID: "n1", SPKI: spki(2), Address: "b", State: peerStateMember},
+			},
+			wantErr: "duplicate node ID",
+		},
+		{
+			name: "empty node ID",
+			entries: []peerEntry{
+				{NodeID: "", SPKI: spki(1), Address: "a", State: peerStateMember},
+			},
+			wantErr: "empty node ID",
+		},
+		{
+			name: "invalid state enum",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: spki(1), Address: "a", State: peerState(99)},
+			},
+			wantErr: "invalid state",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPeerRegistry()
+			// Seed prior state so we can assert it is untouched on error (validate
+			// BEFORE mutating — no half-cleared registry). validatePeerEntries only
+			// BUILDS local indexes; commitPeerIndexes swaps them in.
+			seedByNode, seedBySPKI, err := validatePeerEntries([]peerEntry{{NodeID: "seed", SPKI: spki(200), Address: "s", State: peerStateMember}})
+			if err != nil {
+				t.Fatalf("seed validate: %v", err)
+			}
+			r.commitPeerIndexes(seedByNode, seedBySPKI)
+
+			byNodeID, bySPKI, err := validatePeerEntries(tc.entries)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want success, got error: %v", err)
+				}
+				r.commitPeerIndexes(byNodeID, bySPKI)
+				// Consistency: no SPKI maps to two node-ids.
+				if len(r.bySPKI) != len(tc.entries) {
+					t.Fatalf("bySPKI len %d, want %d", len(r.bySPKI), len(tc.entries))
+				}
+				for s, owner := range r.bySPKI {
+					if got := r.byNodeID[owner].SPKI; got != s {
+						t.Fatalf("bySPKI[%x]=%s but byNodeID[%s].SPKI=%x (inconsistent)", s[:2], owner, owner, got[:2])
+					}
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+			// On a validation error the registry must be unchanged (validate never
+			// touched it — seed still present, no malformed entry leaked in).
+			if _, ok := r.lookupByNodeID("seed"); !ok {
+				t.Fatal("registry was mutated on error: seed entry lost")
+			}
+			if len(r.byNodeID) != 1 {
+				t.Fatalf("registry mutated on error: byNodeID len %d, want 1 (seed only)", len(r.byNodeID))
+			}
+		})
 	}
 }

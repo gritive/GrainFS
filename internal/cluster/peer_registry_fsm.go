@@ -50,6 +50,21 @@ func (f *MetaFSM) applyRegisterPendingLearner(data []byte) error {
 	return nil
 }
 
+// applyRegisterMember decodes a MetaRegisterMemberCmd and registers the peer as
+// a member without ever demoting an existing entry; on success it rebuilds the
+// transport accept-set.
+func (f *MetaFSM) applyRegisterMember(data []byte) error {
+	nodeID, spki, addr, presentsPerNode, err := decodeRegisterMemberCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: decode RegisterMember: %w", err)
+	}
+	if err := f.peers.registerMember(nodeID, spki, addr, presentsPerNode); err != nil {
+		return fmt.Errorf("meta_fsm: RegisterMember %q: %w", nodeID, err)
+	}
+	f.firePeersChanged()
+	return nil
+}
+
 // applyPromoteMember decodes a MetaPromoteMemberCmd and promotes the peer.
 func (f *MetaFSM) applyPromoteMember(data []byte) error {
 	nodeID, err := decodePromoteMemberCmd(data)
