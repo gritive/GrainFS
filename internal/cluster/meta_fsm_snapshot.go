@@ -797,18 +797,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// onRebalancePlan is intentionally NOT called here.
 	// Rebalancer handles resume on next tick by checking ActivePlan().
 
-	// zero-CA peer registry (Task 5): swap in the pre-validated registry indexes
-	// (validated in the decode phase above), then fire onPeersChanged so the
-	// transport composer rebuilds the accept-set union. Without this, the
-	// per-node SPKIs vanish after snapshot install and the composer silently
-	// drops them → partition. commitPeerIndexes cannot fail — all validation
-	// (duplicate node ID / SPKI, bad state) ran before any core state committed,
-	// so a corrupt peer vector never leaves partially-mutated FSM state. The
-	// registry has its own mutex, so the swap runs outside f.mu. firePeersChanged
-	// snapshots the callback under RLock and invokes it outside (existing pattern).
-	f.peers.commitPeerIndexes(newPeersByNodeID, newPeersBySPKI)
-	f.firePeersChanged()
-
 	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
 	// RestoreFrom copies the state pointer from iamTempStore into f.iamStore in one
 	// atomic store — no second decode/parse is needed, so no error is possible here
@@ -874,5 +862,24 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	} else {
 		f.jwtKeyStore.ReplaceAll(nil, nil)
 	}
+
+	// zero-CA peer registry (Task 5): swap in the pre-validated registry indexes
+	// (validated in the decode phase above), then fire onPeersChanged so the
+	// transport composer rebuilds the accept-set union. Without this, the
+	// per-node SPKIs vanish after snapshot install and the composer silently
+	// drops them → partition. commitPeerIndexes cannot fail — all validation
+	// (duplicate node ID / SPKI, bad state) ran before any core state committed,
+	// so a corrupt peer vector never leaves partially-mutated FSM state. The
+	// registry has its own mutex, so the swap runs outside f.mu. firePeersChanged
+	// snapshots the callback under RLock and invokes it outside (existing pattern).
+	//
+	// This commit + callback are deliberately the LAST side effects of Restore:
+	// the accept-set rebuild must fire ONLY after Restore is guaranteed to return
+	// nil. The last error-returning step is f.mountSAStore.ReplaceAll above (the
+	// IPST commit); a late failure there must NOT have rebuilt the transport
+	// accept-set for a Restore that ultimately fails. The JKEY commit just above
+	// is documented atomic/no-error, so nothing after this point can err.
+	f.peers.commitPeerIndexes(newPeersByNodeID, newPeersBySPKI)
+	f.firePeersChanged()
 	return nil
 }

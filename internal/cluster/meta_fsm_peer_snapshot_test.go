@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"testing"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -115,4 +117,57 @@ func TestMetaFSM_SnapshotRestore_CorruptPeers_NoPartialMutation(t *testing.T) {
 	// Peer registry must also be untouched (commit never ran).
 	_, ok = f2.peers.lookupByNodeID("a")
 	require.False(t, ok, "peer registry must not have been mutated")
+}
+
+// newInMemMountSAStore builds a Badger-backed MountSA store for unit tests.
+func newInMemMountSAStore(t *testing.T) *mountsastore.Store {
+	t.Helper()
+	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s, err := mountsastore.NewStore(db)
+	require.NoError(t, err)
+	return s
+}
+
+// TestMetaFSM_SnapshotRestore_PeersChangedFiresAfterMountSARestore locks the
+// Finding-B fix ordering: f.firePeersChanged() (which triggers the transport
+// accept-set rebuild) must fire ONLY after the LAST error-returning restore
+// step — f.mountSAStore.ReplaceAll (the IPST commit) — has completed. Otherwise
+// a Restore whose late mountSA ReplaceAll fails would still have rebuilt the
+// accept-set for a Restore that ultimately returns an error.
+//
+// We assert ordering by observation: the onPeersChanged callback reads back the
+// target FSM's mountSAStore at fire-time and requires the snapshot's MountSA to
+// already be present. If firePeersChanged ran before the mountSA commit (the
+// pre-fix ordering), the lookup would miss.
+func TestMetaFSM_SnapshotRestore_PeersChangedFiresAfterMountSARestore(t *testing.T) {
+	spki := [32]byte{7, 7, 7}
+
+	src := NewMetaFSM()
+	wireSnapshotKEK(t, src)
+	require.NoError(t, src.peers.registerMember("a", spki, "addr-a", false))
+	srcMountStore := newInMemMountSAStore(t)
+	src.SetMountSAStore(srcMountStore)
+	require.NoError(t, srcMountStore.ApplyCreate(mountsastore.MountSA{Name: "nfs-1", NumericUID: 400001, CreatedAt: 1700000123}))
+
+	snap, err := src.Snapshot()
+	require.NoError(t, err)
+
+	dst := NewMetaFSM()
+	wireSnapshotKEK(t, dst)
+	dstMountStore := newInMemMountSAStore(t)
+	dst.SetMountSAStore(dstMountStore)
+
+	mountSAPresentAtFire := false
+	dst.SetOnPeersChanged(func(_ [][32]byte) {
+		_, ok := dstMountStore.Get("nfs-1")
+		mountSAPresentAtFire = ok
+	})
+
+	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
+
+	require.True(t, mountSAPresentAtFire,
+		"onPeersChanged must fire AFTER mountSAStore restore (Finding B): the MountSA "+
+			"was not yet present when firePeersChanged ran, so the callback ordered before the IPST commit")
 }
