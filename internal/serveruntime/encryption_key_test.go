@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,7 +16,7 @@ func TestEnsureBulkCipherFormat(t *testing.T) {
 		require.NoError(t, err)
 		b, err := os.ReadFile(filepath.Join(dir, "encryption.format"))
 		require.NoError(t, err)
-		require.Equal(t, "2", string(b))
+		require.Equal(t, "3", string(b))
 	})
 
 	t.Run("populated dir without marker is refused", func(t *testing.T) {
@@ -25,16 +26,16 @@ func TestEnsureBulkCipherFormat(t *testing.T) {
 		require.Contains(t, err.Error(), "pre-XAES")
 	})
 
-	t.Run("marker 2 with bulk data returns nil", func(t *testing.T) {
+	t.Run("marker 3 with bulk data returns nil", func(t *testing.T) {
 		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("2"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("3"), 0o600))
 		err := EnsureBulkCipherFormat(dir, true)
 		require.NoError(t, err)
 	})
 
 	t.Run("unknown marker version is refused", func(t *testing.T) {
 		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("3"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("4"), 0o600))
 		err := EnsureBulkCipherFormat(dir, true)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not supported")
@@ -49,7 +50,7 @@ func TestEnsureBulkCipherFormat(t *testing.T) {
 		require.NoError(t, err)
 		b, err := os.ReadFile(filepath.Join(dataDir, "encryption.format"))
 		require.NoError(t, err)
-		require.Equal(t, "2", string(b))
+		require.Equal(t, "3", string(b))
 	})
 }
 
@@ -117,7 +118,7 @@ func TestBulkDataPresent(t *testing.T) {
 		require.NoError(t, EnsureBulkCipherFormat(dir, present))
 		b, err := os.ReadFile(filepath.Join(dir, "encryption.format"))
 		require.NoError(t, err)
-		require.Equal(t, "2", string(b))
+		require.Equal(t, "3", string(b))
 	})
 }
 
@@ -188,8 +189,36 @@ func TestPrimaryDataDirFromDataDirs(t *testing.T) {
 	// Marker must be under DataDirs[0], not strayDataDir.
 	b, err := os.ReadFile(filepath.Join(primaryDataDir, "encryption.format"))
 	require.NoError(t, err)
-	require.Equal(t, "2", string(b))
+	require.Equal(t, "3", string(b))
 
 	_, err = os.Stat(filepath.Join(strayDataDir, "encryption.format"))
 	require.True(t, os.IsNotExist(err), "marker must NOT be under opts.DataDir when DataDirs is set")
+}
+
+func TestEnsureBulkCipherFormatRejectsPreXAESDEK(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := EnsureBulkCipherFormat(dir, true)
+	if err == nil {
+		t.Fatal("expected loud-fail on pre-XAES-DEK marker \"2\", got nil")
+	}
+	if !strings.Contains(err.Error(), "2") || !strings.Contains(err.Error(), "3") {
+		t.Fatalf("error should name the version mismatch (2 vs 3): %v", err)
+	}
+}
+
+func TestEnsureBulkCipherFormatStampsCurrentVersionOnFreshDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureBulkCipherFormat(dir, false); err != nil {
+		t.Fatalf("fresh dir should pass: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "encryption.format"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != "3" {
+		t.Fatalf("fresh dir stamped %q, want \"3\"", got)
+	}
 }
