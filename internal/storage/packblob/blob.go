@@ -749,7 +749,7 @@ func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, fla
 		return plain, nil
 	}
 	if !encrypt.IsEncryptedValue(payload) {
-		if encrypt.HasValueMagic(payload) {
+		if encrypt.IsLegacyEncryptedValue(payload) {
 			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 		}
 		return payload, nil

@@ -125,19 +125,27 @@ func IsEncryptedValue(data []byte) bool {
 	return len(data) >= 3 && data[0] == valueMagic0 && data[1] == valueMagic1 && data[2] == valueVersion2
 }
 
-// HasValueMagic reports whether b carries the value-envelope magic bytes
-// (0xAE 0xE2), regardless of version. Used to distinguish genuine plaintext
-// (no magic) from an encrypted value written by a different/older format
-// version.
-func HasValueMagic(b []byte) bool {
-	return len(b) >= 2 && b[0] == valueMagic0 && b[1] == valueMagic1
+// valueVersion1 is the pre-XAES (AES-256-GCM) value-envelope version byte.
+// The current version is valueVersion2 (0x02).
+const valueVersion1 = byte(0x01)
+
+// IsLegacyEncryptedValue reports whether b is an exact pre-XAES value envelope:
+// value magic (0xAE 0xE2) + old version byte 0x01. Used to LOUD-FAIL on old
+// encrypted data at the XAES greenfield boundary while letting genuine
+// plaintext (any bytes not matching this exact signature) pass through.
+func IsLegacyEncryptedValue(b []byte) bool {
+	return len(b) >= 3 && b[0] == valueMagic0 && b[1] == valueMagic1 && b[2] == valueVersion1
 }
 
-// HasBlobMagic reports whether b carries the blob-envelope magic byte (0xAE).
-// Used to detect blobs encrypted by a different/older format version when
-// IsEncryptedBlob returns false (the second byte changed between versions).
-func HasBlobMagic(b []byte) bool {
-	return len(b) >= 1 && b[0] == encMagic0
+// legacyEncMagic1 is the pre-XAES EncryptWithAAD blob magic second byte.
+// The current blob magic is encMagic1 (0xE3).
+const legacyEncMagic1 = byte(0xE1)
+
+// IsLegacyEncryptedBlob reports whether b is an exact pre-XAES EncryptWithAAD
+// blob: magic 0xAE 0xE1. Used to LOUD-FAIL on old encrypted shard/blob data at
+// the XAES greenfield boundary while letting genuine plaintext pass through.
+func IsLegacyEncryptedBlob(b []byte) bool {
+	return len(b) >= 2 && b[0] == encMagic0 && b[1] == legacyEncMagic1
 }
 
 func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]byte, error) {

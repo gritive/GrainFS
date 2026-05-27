@@ -181,21 +181,27 @@ func TestValueEnvelopeRejectsPlaintext(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestHasValueMagic(t *testing.T) {
-	// Has magic: bytes start with 0xAE 0xE2 (any version)
-	require.True(t, HasValueMagic([]byte{0xAE, 0xE2, 0x01, 0x00})) // old version 1
-	require.True(t, HasValueMagic([]byte{0xAE, 0xE2, 0x02, 0x00})) // current version 2
-	require.False(t, HasValueMagic([]byte("plaintext")))           // no magic
-	require.False(t, HasValueMagic([]byte{0xAE}))                  // too short (only 1 byte)
-	require.False(t, HasValueMagic([]byte{}))                      // empty
-	require.False(t, HasValueMagic([]byte{0xAE, 0xE3, 0x02}))      // blob magic, not value magic
+func TestIsLegacyEncryptedValue(t *testing.T) {
+	// Exact pre-XAES value envelope: 0xAE 0xE2 0x01
+	require.True(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2, 0x01, 0x00})) // old version 1
+	// Current XAES value envelope (0x02) is NOT legacy.
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2, 0x02, 0x00}))
+	// Value magic with an unrelated version byte must pass through (not legacy).
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2, 0x05, 0x00}))
+	require.False(t, IsLegacyEncryptedValue([]byte("plaintext")))      // no magic
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2}))       // too short
+	require.False(t, IsLegacyEncryptedValue([]byte{}))                 // empty
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE3, 0x01})) // blob magic, not value
 }
 
-func TestHasBlobMagic(t *testing.T) {
-	// Has blob magic: first byte is 0xAE (any second byte)
-	require.True(t, HasBlobMagic([]byte{0xAE, 0xE3, 0x00})) // current blob format
-	require.True(t, HasBlobMagic([]byte{0xAE, 0xE1, 0x00})) // old blob format (0xE1)
-	require.True(t, HasBlobMagic([]byte{0xAE, 0xE2, 0x01})) // value magic (also starts 0xAE)
-	require.False(t, HasBlobMagic([]byte("plaintext")))     // no magic
-	require.False(t, HasBlobMagic([]byte{}))                // empty
+func TestIsLegacyEncryptedBlob(t *testing.T) {
+	// Exact pre-XAES EncryptWithAAD blob: 0xAE 0xE1
+	require.True(t, IsLegacyEncryptedBlob([]byte{0xAE, 0xE1, 0x00})) // old blob format
+	// Current XAES blob magic (0xE3) is NOT legacy.
+	require.False(t, IsLegacyEncryptedBlob([]byte{0xAE, 0xE3, 0x00}))
+	// Value magic (0xE2) is not the blob magic.
+	require.False(t, IsLegacyEncryptedBlob([]byte{0xAE, 0xE2, 0x01}))
+	require.False(t, IsLegacyEncryptedBlob([]byte("plaintext"))) // no magic
+	require.False(t, IsLegacyEncryptedBlob([]byte{0xAE}))        // too short
+	require.False(t, IsLegacyEncryptedBlob([]byte{}))            // empty
 }

@@ -31,7 +31,7 @@ func openBadgerValue(enc *encrypt.Encryptor, domain string, key, val []byte) ([]
 		return append([]byte(nil), val...), nil
 	}
 	if !encrypt.IsEncryptedValue(val) {
-		if encrypt.HasValueMagic(val) {
+		if encrypt.IsLegacyEncryptedValue(val) {
 			return nil, fmt.Errorf("value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 		}
 		return append([]byte(nil), val...), nil

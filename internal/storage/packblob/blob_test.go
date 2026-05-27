@@ -392,3 +392,27 @@ func TestEncryptedBlobStoreReadsGenuinePlaintext(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
 }
+
+// TestEncryptedBlobStoreReadsPlaintextWithValueMagicButNonLegacyVersion verifies
+// the precise-match decision: plaintext that happens to start with the value
+// magic (0xAE 0xE2) but does NOT carry the exact pre-XAES version byte 0x01
+// must still pass through as-is. Only the exact legacy signature rejects.
+func TestEncryptedBlobStoreReadsPlaintextWithValueMagicButNonLegacyVersion(t *testing.T) {
+	dir := t.TempDir()
+	plain, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	// Value magic prefix but version byte 0x05 (neither legacy 0x01 nor current 0x02).
+	payload := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
+	loc, err := plain.Append("bucket/key-nonlegacy", payload)
+	require.NoError(t, err)
+	require.NoError(t, plain.Close())
+
+	enc := newPackblobTestEncryptor(t)
+	encrypted, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer encrypted.Close()
+
+	got, err := encrypted.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}

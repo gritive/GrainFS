@@ -39,6 +39,18 @@ func TestEnsureBulkCipherFormat(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not supported")
 	})
+
+	t.Run("non-existent fresh dir is created and stamped", func(t *testing.T) {
+		// The guard runs before preflight creates the data dir, so on a fresh
+		// multi-root boot the dir may not exist yet. EnsureBulkCipherFormat must
+		// create it rather than failing with "no such file or directory".
+		dataDir := filepath.Join(t.TempDir(), "does-not-exist-yet")
+		err := EnsureBulkCipherFormat(dataDir, false)
+		require.NoError(t, err)
+		b, err := os.ReadFile(filepath.Join(dataDir, "encryption.format"))
+		require.NoError(t, err)
+		require.Equal(t, "2", string(b))
+	})
 }
 
 func TestBulkDataPresent(t *testing.T) {

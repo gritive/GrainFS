@@ -74,6 +74,12 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 		if bulkDataPresent {
 			return fmt.Errorf("data dir %s was encrypted with the pre-XAES (AES-GCM) bulk format; in-place upgrade is not supported — create a new cluster (see CHANGELOG XAES boundary)", dataDir)
 		}
+		// The guard runs before preflight creates the data dir, so on a fresh
+		// (multi-root) boot dataDir may not exist yet. The dir is about to be
+		// used regardless, so create it before stamping the marker.
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
+			return fmt.Errorf("create data dir %s: %w", dataDir, err)
+		}
 		if err := os.WriteFile(path, []byte(bulkCipherFormatXAES), 0o600); err != nil {
 			return fmt.Errorf("write %s: %w", bulkCipherFormatFile, err)
 		}
