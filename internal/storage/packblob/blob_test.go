@@ -183,7 +183,10 @@ func TestEncryptedBlobStoreAppendKeepsAllocationBound(t *testing.T) {
 		_, err := bs.Append(key, payload)
 		require.NoError(t, err)
 	})
-	require.LessOrEqual(t, allocs, 2.0)
+	// XAES-256-GCM derives a per-call sub-key (deriveKey + aes.NewCipher +
+	// cipher.NewGCM), adding ~3 allocations vs plain AES-256-GCM. Upper bound
+	// updated from 2 → 5 to reflect the XAES nonce-expansion overhead.
+	require.LessOrEqual(t, allocs, 5.0)
 }
 
 func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
@@ -200,7 +203,9 @@ func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, payload, got)
 	})
-	require.LessOrEqual(t, allocs, 4.0)
+	// XAES-256-GCM adds ~3 allocs per Open (sub-key derivation). Upper bound
+	// updated from 4 → 8 to reflect the XAES nonce-expansion overhead.
+	require.LessOrEqual(t, allocs, 8.0)
 }
 
 func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
