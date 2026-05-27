@@ -525,7 +525,11 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc ShardEncryptor, baseFields []e
 	if max := inChunk + len(dst); max < end {
 		end = max
 	}
-	return copy(dst, plaintext[inChunk:end]), nil
+	n := copy(dst, plaintext[inChunk:end])
+	// Zero the decrypted plaintext (incl. the skipped prefix/suffix) now that the
+	// requested bytes are in dst, so it does not linger in the fresh Open slice.
+	clear(plaintext)
+	return n, nil
 }
 
 type encryptedShardReader struct {
@@ -536,7 +540,8 @@ type encryptedShardReader struct {
 	gen        uint32
 	overhead   uint16
 	chunkIdx   uint32
-	plain      []byte
+	plain      []byte // current read window into plainFull
+	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
 	done       bool
 	closed     bool
 }
@@ -563,12 +568,13 @@ func (r *encryptedShardReader) Close() error {
 		return nil
 	}
 	r.closed = true
-	// The seam's Open returns a fresh plaintext slice; zero it before releasing
-	// so decrypted bytes do not linger in the heap.
-	if len(r.plain) > 0 {
-		clear(r.plain)
+	// The seam's Open returns a fresh plaintext slice; zero the full backing
+	// slice (not just the unread window) so decrypted bytes do not linger.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
 	}
 	r.plain = nil
+	r.plainFull = nil
 	return nil
 }
 
@@ -613,6 +619,11 @@ func (r *encryptedShardReader) loadChunk() error {
 	if uint32(len(plaintext)) != plainLen {
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, r.chunkIdx, len(plaintext), plainLen)
 	}
+	// Zero the previous chunk's decrypted plaintext before dropping it.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
+	}
+	r.plainFull = plaintext
 	r.plain = plaintext
 	r.chunkIdx++
 	if r.chunkIdx == 0 {
@@ -630,7 +641,8 @@ type encryptedShardRangeReader struct {
 	overhead   uint16
 	pos        int64
 	remaining  int64
-	plain      []byte
+	plain      []byte // [inChunk:end] read window into plainFull
+	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
 	closed     bool
 }
 
@@ -661,12 +673,13 @@ func (r *encryptedShardRangeReader) Close() error {
 		return nil
 	}
 	r.closed = true
-	// The seam's Open returns a fresh plaintext slice; zero it before releasing
-	// so decrypted bytes do not linger in the heap.
-	if len(r.plain) > 0 {
-		clear(r.plain)
+	// r.plain is only the [inChunk:end] view; zero the full backing slice so the
+	// skipped prefix and trailing suffix of the decrypted chunk are cleared too.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
 	}
 	r.plain = nil
+	r.plainFull = nil
 	return nil
 }
 
@@ -732,6 +745,11 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	if max := inChunk + int(r.remaining); max < end {
 		end = max
 	}
+	// Zero the previous chunk's decrypted plaintext before dropping it.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
+	}
+	r.plainFull = plaintext
 	r.plain = plaintext[inChunk:end]
 	return nil
 }

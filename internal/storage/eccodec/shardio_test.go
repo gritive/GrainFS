@@ -295,18 +295,30 @@ func TestEncryptedShardRangeReader_CloseReleasesPlaintext(t *testing.T) {
 	var encoded bytes.Buffer
 	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), f, fields, chunkSize))
 
-	reader, err := NewEncryptedShardRangeReader(bytes.NewReader(encoded.Bytes()), f, fields, 0, int64(len(data)))
+	// Read a SUB-range that starts mid-chunk (offset 100) and ends before the
+	// chunk boundary, so the decrypted chunk's backing slice has a non-empty
+	// prefix [0:100] and suffix that the read window never exposes. Both must be
+	// zeroed by Close, not just the visible [inChunk:end] window.
+	reader, err := NewEncryptedShardRangeReader(bytes.NewReader(encoded.Bytes()), f, fields, 100, 200)
 	require.NoError(t, err)
 	rangeReader := reader.(*encryptedShardRangeReader)
 	_, err = io.ReadAll(reader)
 	require.NoError(t, err)
 
-	// Close nils the live plaintext slice (after zeroing it) so decrypted bytes
-	// do not linger in the heap.
+	// Capture the full backing slice before Close so we can observe the zeroing.
+	plainFull := rangeReader.plainFull
+	require.NotEmpty(t, plainFull, "expected a decrypted chunk backing slice")
+	require.Greater(t, len(plainFull), len(rangeReader.plain), "prefix/suffix must exist outside the read window")
+
 	closer, ok := reader.(io.Closer)
 	require.True(t, ok)
 	require.NoError(t, closer.Close())
 	require.Nil(t, rangeReader.plain)
+	require.Nil(t, rangeReader.plainFull)
+	// The full backing allocation (prefix + window + suffix) must be all-zero.
+	for i, b := range plainFull {
+		require.Zerof(t, b, "plainFull[%d] not zeroed after Close", i)
+	}
 }
 
 func TestReadEncryptedShardRangeAt_DoesNotReadSkippedChunks(t *testing.T) {
