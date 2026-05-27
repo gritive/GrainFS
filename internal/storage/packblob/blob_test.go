@@ -183,10 +183,13 @@ func TestEncryptedBlobStoreAppendKeepsAllocationBound(t *testing.T) {
 		_, err := bs.Append(key, payload)
 		require.NoError(t, err)
 	})
-	// XAES-256-GCM derives a per-call sub-key (deriveKey + aes.NewCipher +
-	// cipher.NewGCM), adding ~3 allocations vs plain AES-256-GCM. Upper bound
-	// updated from 2 → 5 to reflect the XAES nonce-expansion overhead.
-	require.LessOrEqual(t, allocs, 5.0)
+	// D-seg-pack: the DataEncryptor seam returns a freshly-allocated ciphertext
+	// per Seal (the cipher owns its buffer) and BuildAAD allocates the AAD blob
+	// plus the four positional AADField slices, replacing the pooled
+	// sealedBuf/aadBuf. Bound raised from 5 → 15 (measured 11 without -race, 14
+	// under -race instrumentation, + margin); SealTo/OpenTo buffer reuse is a
+	// future optimization (TODOS.md).
+	require.LessOrEqual(t, allocs, 15.0)
 }
 
 func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
@@ -203,9 +206,12 @@ func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, payload, got)
 	})
-	// XAES-256-GCM adds ~3 allocs per Open (sub-key derivation). Upper bound
-	// updated from 4 → 8 to reflect the XAES nonce-expansion overhead.
-	require.LessOrEqual(t, allocs, 8.0)
+	// D-seg-pack: the DataEncryptor seam returns a freshly-allocated plaintext
+	// per Open and BuildAAD allocates the AAD blob plus the four positional
+	// AADField slices, replacing the pooled aadBuf scratch. Bound raised from
+	// 8 → 16 (measured 13 without -race, 15 under -race instrumentation, +
+	// margin); SealTo/OpenTo buffer reuse is a future optimization (TODOS.md).
+	require.LessOrEqual(t, allocs, 16.0)
 }
 
 func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
