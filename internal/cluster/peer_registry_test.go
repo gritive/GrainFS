@@ -128,6 +128,61 @@ func TestPeerRegistry_RegisterMember_Idempotent(t *testing.T) {
 	}
 }
 
+// TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists confirms the
+// presents_per_node readiness bit is recordable end-to-end (D-rev4). It is
+// recording-only this slice; the revocation PSK-drop gate reads it later.
+func TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists(t *testing.T) {
+	// A pending-learner has no presents_per_node concept; defaults false.
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("learner", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("registerPendingLearner: %v", err)
+	}
+	if r.byNodeID["learner"].PresentsPerNode {
+		t.Fatal("pending-learner must default PresentsPerNode=false")
+	}
+
+	// A member registered with presentsPerNode=false records false.
+	if err := r.registerMember("member-off", spki(2), "10.0.0.3:9000", false); err != nil {
+		t.Fatalf("registerMember(false): %v", err)
+	}
+	if r.byNodeID["member-off"].PresentsPerNode {
+		t.Fatal("registerMember(false) must record PresentsPerNode=false")
+	}
+
+	// A member registered with presentsPerNode=true records true.
+	if err := r.registerMember("member-on", spki(3), "10.0.0.4:9000", true); err != nil {
+		t.Fatalf("registerMember(true): %v", err)
+	}
+	if !r.byNodeID["member-on"].PresentsPerNode {
+		t.Fatal("registerMember(true) must record PresentsPerNode=true")
+	}
+
+	// Apply path: decode → applyRegisterMember must carry the bit verbatim.
+	for _, tc := range []struct {
+		name            string
+		nodeID          string
+		spkiByte        byte
+		presentsPerNode bool
+	}{
+		{"apply-true", "apply-on", 4, true},
+		{"apply-false", "apply-off", 5, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fsm := NewMetaFSM()
+			data, err := encodeRegisterMemberCmd(tc.nodeID, spki(tc.spkiByte), "10.0.0.5:9000", tc.presentsPerNode)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			if err := fsm.applyRegisterMember(data); err != nil {
+				t.Fatalf("applyRegisterMember: %v", err)
+			}
+			if got := fsm.Peers().byNodeID[tc.nodeID].PresentsPerNode; got != tc.presentsPerNode {
+				t.Fatalf("PresentsPerNode via apply path = %v, want %v", got, tc.presentsPerNode)
+			}
+		})
+	}
+}
+
 func TestPeerRegistry_AcceptSet(t *testing.T) {
 	r := newPeerRegistry()
 	_ = r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000")
