@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -91,6 +92,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		Buckets:              storage.NewOperations(state.backend),
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		ProtocolCredentials:  state.protocolCredentials,
+		ProtocolCredAuthz:    protocolCredentialAuthorizer(state),
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
 	if state.auditSearcher != nil {
@@ -178,6 +180,13 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		_ = adminSrv.Stop(stopCtx)
 	})
 	return nil
+}
+
+func protocolCredentialAuthorizer(state *bootState) admin.CredentialAuthorizer {
+	if state.iamPolicyStores == nil || state.iamPolicyStores.Resolver == nil || state.cfgStore == nil {
+		return nil
+	}
+	return s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
 }
 
 // iamPolicyAdminService returns a wired admin.IAMPolicyService if MetaRaft and
