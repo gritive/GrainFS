@@ -34,6 +34,7 @@ type Deps struct {
 	Buckets              BucketOps                 // optional; nil disables bucket CRUD admin endpoints
 	NfsExports           NfsExportService          // optional; nil disables NFS export admin endpoints
 	ProtocolCredentials  ProtocolCredentialService // optional; nil disables protocol credential endpoints
+	ProtocolCredAuthz    CredentialAuthorizer      // optional; nil skips credential IAM policy gate
 	IcebergConfig        IcebergConfigService      // optional; nil disables iceberg config endpoint
 	AuditQuery           AuditQueryService         // optional; nil disables audit admin endpoints
 	Status               StatusService             // optional; nil disables GET /v1/status

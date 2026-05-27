@@ -118,6 +118,84 @@ curl -s http://localhost:9000/metrics | grep '^grainfs_ec_scrub_unverified_shard
 
 If `reason="legacy_no_crc"` is non-zero, scrub can read the shard bytes but cannot prove bit-level integrity. Treat those shards as migration candidates, not healthy repaired data.
 
+### Service Performance Metrics
+
+Use service metrics when a generic HTTP latency or error-rate alert fires and you need to isolate the affected surface.
+
+Metric families:
+
+- `grainfs_service_requests_total{service,operation,method,status_class}`
+- `grainfs_service_request_duration_seconds_bucket{service,operation,method,status_class,le}`
+- `grainfs_service_request_bytes_total{service,operation,method,status_class}`
+- `grainfs_service_response_bytes_total{service,operation,method,status_class}`
+
+Useful queries:
+
+```promql
+histogram_quantile(0.99, sum(rate(grainfs_service_request_duration_seconds_bucket[5m])) by (service, operation, le))
+```
+
+```promql
+sum(rate(grainfs_service_requests_total{status_class=~"4xx|5xx"}[5m])) by (service, operation, status_class)
+```
+
+```promql
+sum(rate(grainfs_service_response_bytes_total[5m])) by (service, operation)
+```
+
+Labels intentionally exclude bucket, key, access key, raw path, and error strings. Treat `service` and `operation` values as the stable operator-facing contract.
+
+### Operator State Metrics
+
+Use operator state metrics when the symptom is "is the cluster healthy?" rather
+than a specific HTTP operation. These metrics are intentionally aggregate-only:
+bucket names, volume names, peer addresses, keys, paths, access keys, raw errors,
+and dynamic Raft group IDs never appear as labels. Drill into named resources
+through the admin APIs after an aggregate metric indicates a problem.
+
+Metric families:
+
+- `grainfs_server_up{node_id}`
+- `grainfs_server_info{node_id,version}`
+- `grainfs_cluster_members{state}`
+- `grainfs_cluster_quorum_available`
+- `grainfs_raft_role{node_id,group,role}`
+- `grainfs_raft_term{node_id,group}`
+- `grainfs_raft_commit_index{node_id,group}`
+- `grainfs_raft_applied_index{node_id,group}`
+- `grainfs_raft_apply_lag{node_id,group}`
+- `grainfs_buckets_by_state{state}`
+- `grainfs_volumes_by_health{health}`
+- `grainfs_volume_capacity_bytes_total`
+- `grainfs_volume_allocated_bytes_total`
+- `grainfs_operator_state_scrape_errors_total{source}`
+
+Useful queries:
+
+```promql
+min(grainfs_cluster_quorum_available) == 0
+```
+
+```promql
+sum(grainfs_cluster_members{state=~"unhealthy_.*_peer|unknown_peer"}) by (state)
+```
+
+```promql
+sum(grainfs_raft_role{role="leader"}) by (group)
+```
+
+```promql
+max(grainfs_raft_apply_lag) by (node_id, group)
+```
+
+```promql
+sum(grainfs_volumes_by_health{health!="healthy"}) by (health)
+```
+
+```promql
+increase(grainfs_operator_state_scrape_errors_total{source="buckets"}[10m])
+```
+
 After a node restart, data WAL replay flags metadata-only EC shards whose local file is missing or the wrong size, and a non-blocking background worker rebuilds them from surviving peers. Watch the startup repair counters to confirm boot-time self-healing landed:
 
 ```bash

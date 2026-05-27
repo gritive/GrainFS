@@ -17,6 +17,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -602,6 +603,10 @@ func TestMultipartUploadAPI(t *testing.T) {
 func TestMetricsEndpointReturnsPlainText(t *testing.T) {
 	base := setupTestServer(t)
 
+	warmResp, err := http.Get(base + "/metrics")
+	require.NoError(t, err, "warm GET /metrics")
+	require.NoError(t, warmResp.Body.Close())
+
 	resp, err := http.Get(base + "/metrics")
 	require.NoError(t, err, "GET /metrics")
 	defer resp.Body.Close()
@@ -613,6 +618,52 @@ func TestMetricsEndpointReturnsPlainText(t *testing.T) {
 	assert.Contains(t, text, "grainfs_buckets_total", "should contain buckets_total metric as text")
 	assert.Contains(t, text, "grainfs_objects_total", "should contain objects_total metric as text")
 	assert.Contains(t, text, "grainfs_storage_bytes_total", "should contain storage_bytes_total metric as text")
+	assert.Contains(t, text, "grainfs_service_requests_total", "should contain service request counter")
+	assert.Contains(t, text, "grainfs_service_request_duration_seconds", "should contain service duration histogram")
+	assert.Contains(t, text, "grainfs_service_request_bytes_total", "should contain service request byte counter")
+	assert.Contains(t, text, "grainfs_service_response_bytes_total", "should contain service response byte counter")
+}
+
+func TestMetricsEndpointUsesCustomGatherer(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_test_custom_gatherer",
+		Help: "Test-only metric from a server-specific gatherer.",
+	})
+	gauge.Set(7)
+	registry.MustRegister(gauge)
+
+	base := setupTestServerWithOptions(t, WithMetricsGatherer(registry))
+
+	resp, err := http.Get(base + "/metrics")
+	require.NoError(t, err, "GET /metrics")
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "grainfs_test_custom_gatherer 7")
+}
+
+func TestServiceMetricsExposeS3OperationLabels(t *testing.T) {
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "test-bucket")
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/test-bucket/file.txt", strings.NewReader("abc"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp, err = http.Get(base + "/metrics")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	text := string(body)
+
+	assert.Contains(t, text, `grainfs_service_requests_total{method="PUT",operation="PutObject",service="s3",status_class="2xx"}`)
+	assert.Contains(t, text, `grainfs_service_request_duration_seconds_count{method="PUT",operation="PutObject",service="s3",status_class="2xx"}`)
+	assert.Contains(t, text, `grainfs_service_request_bytes_total{method="PUT",operation="PutObject",service="s3",status_class="2xx"}`)
 }
 
 func TestMetrics_ExposesFDGaugeNames(t *testing.T) {

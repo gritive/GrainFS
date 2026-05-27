@@ -79,6 +79,10 @@ func validateCreate(req CreateRequest) error {
 	return nil
 }
 
+func ValidateCreateRequest(req CreateRequest) error {
+	return validateCreate(req)
+}
+
 func validProtocol(p Protocol) bool {
 	switch p {
 	case ProtocolS3, ProtocolIceberg, ProtocolNFS, Protocol9P, ProtocolNBD:

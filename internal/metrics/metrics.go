@@ -19,6 +19,36 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"method"})
 
+	// ServiceRequestsTotal counts requests by stable service and operation
+	// labels. Labels intentionally avoid bucket, key, raw path, access key, and
+	// exact error strings to keep cardinality bounded.
+	ServiceRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_service_requests_total",
+		Help: "Total service requests by service, operation, method, and status class.",
+	}, []string{"service", "operation", "method", "status_class"})
+
+	// ServiceRequestDuration measures service request latency by stable service
+	// and operation labels.
+	ServiceRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "grainfs_service_request_duration_seconds",
+		Help:    "Service request duration in seconds by service and operation.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"service", "operation", "method", "status_class"})
+
+	// ServiceRequestBytesTotal counts request body bytes by stable service and
+	// operation labels.
+	ServiceRequestBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_service_request_bytes_total",
+		Help: "Total request body bytes by service, operation, method, and status class.",
+	}, []string{"service", "operation", "method", "status_class"})
+
+	// ServiceResponseBytesTotal counts response body bytes by stable service
+	// and operation labels.
+	ServiceResponseBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_service_response_bytes_total",
+		Help: "Total response body bytes by service, operation, method, and status class.",
+	}, []string{"service", "operation", "method", "status_class"})
+
 	// ECEncodeDuration measures erasure coding encode duration.
 	ECEncodeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "grainfs_ec_encode_duration_seconds",

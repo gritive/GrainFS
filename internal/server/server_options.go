@@ -6,6 +6,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Option configures the server.
@@ -73,5 +74,11 @@ func WithMutationGate(gate *MutationGate) Option {
 func WithAlerts(state *AlertsState) Option {
 	return func(s *Server) {
 		s.alerts = state
+	}
+}
+
+func WithMetricsGatherer(gatherer prometheus.Gatherer) Option {
+	return func(s *Server) {
+		s.metricsGatherer = gatherer
 	}
 }

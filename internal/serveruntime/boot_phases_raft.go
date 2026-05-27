@@ -17,6 +17,7 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -166,6 +167,10 @@ func bootMetaRaftWiring(state *bootState) error {
 	}
 	metaRaft.FSM().SetMountSAStore(mountSAStore)
 	state.mountSAStore = mountSAStore
+
+	protocolCredentialStore := protocred.NewStore()
+	metaRaft.FSM().SetProtocolCredentialStore(protocolCredentialStore)
+	state.protocolCredentialStore = protocolCredentialStore
 
 	// T33: construct + wire the cluster config store.
 	// T39: JWT signing-key rotate/prune triggers are wired here so that a

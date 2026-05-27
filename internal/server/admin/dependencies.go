@@ -8,6 +8,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -112,6 +113,10 @@ type ProtocolCredentialService interface {
 	Get(id string) (protocred.Credential, error)
 	Rotate(id string) (protocred.Secret, error)
 	Revoke(id string) error
+}
+
+type CredentialAuthorizer interface {
+	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
 }
 
 // BucketWithPolicyProposer is the slim interface the bucket create-with-attach

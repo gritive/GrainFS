@@ -20,6 +20,7 @@ func (s *Server) metricsMiddleware() app.HandlerFunc {
 		status := strconv.Itoa(c.Response.StatusCode())
 		metrics.HTTPRequestsTotal.WithLabelValues(method, status).Inc()
 		metrics.HTTPRequestDuration.WithLabelValues(method).Observe(duration)
+		recordServiceMetrics(c, method, c.Response.StatusCode(), duration)
 	}
 }
 
