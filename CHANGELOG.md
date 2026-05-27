@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.373.0] - 2026-05-28
+
+### Added
+
+- Zero-CA cluster join: a brand-new node can join an existing cluster over QUIC with no pre-shared secrets. An operator mints a single-use, time-limited invite with `grainfs cluster invite create` and hands the joining node the resulting bundle (via `GRAINFS_INVITE_BUNDLE`). The node dials the leader's dedicated join listener, proves its identity, and the leader seals the cluster secrets (data encryption key, all key-encryption-key generations, transport key) directly to the joiner's public key — so the bundle itself never carries an at-rest secret and a leaked bundle exposes nothing beyond a single join attempt. Once joined the node becomes a full voter and serves S3 reads and writes immediately. Invites are single-use and reject cross-cluster replay.
+
 ## [0.0.372.0] - 2026-05-28
 
 ### Changed
