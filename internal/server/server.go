@@ -126,13 +126,11 @@ func (s *Server) buildAuthorizer() {
 				Reason:           result.Reason,
 				ConditionContext: result.ConditionContext,
 				// AnonAllow is set when an anonymous request is permitted by
-				// either iam.anon-enabled or the default bucket's implicit
-				// anon policy (D#2). The authorizer surfaces both via
-				// result.Reason; pattern-match here to keep the policy layer
-				// agnostic of audit vocabulary.
+				// the default bucket's implicit anon policy (D#2). The
+				// authorizer surfaces it via result.Reason; pattern-match here
+				// to keep the policy layer agnostic of audit vocabulary.
 				AnonAllow: saID == "" && result.Decision == policy.DecisionAllow &&
-					(result.Reason == s3auth.ReasonAnonEnabled ||
-						result.Reason == s3auth.ReasonDefaultBucketImplicitAnon),
+					result.Reason == s3auth.ReasonDefaultBucketImplicitAnon,
 			}
 			return result.Decision == policy.DecisionAllow, detail
 		}

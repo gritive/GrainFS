@@ -534,37 +534,11 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 // fh that is awaiting the next LOOKUP to determine mount-SA vs anon binding.
 const fhSAIDPending = "(pending)"
 
-// anonRejected reports whether the given fh's anon binding is no longer
-// allowed: the binding has saID="" (anon confirmed) AND iam.anon-enabled is
-// false. Returns false when the gate is not wired (cfg==nil), when the fh
-// has no binding (pseudo-root / unbound), when the binding is mount-SA
-// confirmed (saID!="" and not pending), or when iam.anon-enabled=true.
-//
-// NFS§B T12: per-op guard for Phase 0 → Phase 2 transitions. Mirrors the
-// S3 path (§9 T73): active anon-bound sessions must be rejected on the
-// next op after the first SA create flips iam.anon-enabled=false.
-//
-// Hot path: one map RLock + one cfg RLock per op when the gate is wired.
-// Zero allocation. The branch is dead when cfg==nil (the production wiring
-// passes config.Store; tests inject a stub).
+// anonRejected is retained for the NFS operation call sites. The global
+// anonymous transition no longer exists, so established anonymous NFS bindings
+// are not revoked by a cluster config flip.
 func (d *Dispatcher) anonRejected(fh FileHandle) bool {
-	if d.server == nil || d.server.cfg == nil {
-		return false
-	}
-	binding, ok := d.state.FHBinding(fh)
-	if !ok {
-		return false
-	}
-	if binding.saID != "" {
-		// "(pending)" or "<mount-sa-name>" — not an anon binding.
-		return false
-	}
-	anon, ok := d.server.cfg.GetBool("iam.anon-enabled")
-	if !ok {
-		// Key not registered: be conservative and do not block.
-		return false
-	}
-	return !anon
+	return false
 }
 
 // opLookupResolvePending handles the 2nd LOOKUP from a bucket fh with

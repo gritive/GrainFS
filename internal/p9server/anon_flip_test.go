@@ -12,9 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubAnonCfg is a minimal ConfigReader stub. It serves the
-// "iam.anon-enabled" key via an atomic.Bool so the test can flip it
-// during the test body without locks.
+// stubAnonCfg is a minimal ConfigReader stub. The old global anonymous config
+// key is gone, so flips here must not affect established bindings.
 type stubAnonCfg struct {
 	anonEnabled atomic.Bool
 }
@@ -26,9 +25,6 @@ func newStubAnonCfg(initial bool) *stubAnonCfg {
 }
 
 func (c *stubAnonCfg) GetBool(key string) (bool, bool) {
-	if key == "iam.anon-enabled" {
-		return c.anonEnabled.Load(), true
-	}
 	return false, false
 }
 
@@ -47,14 +43,7 @@ func walkAnonBucket(t *testing.T, root *rootFile, name string) *bucketFile {
 	return bf
 }
 
-// TestAnon9PSession_FlipAtPhase2_NextOpRejected — anon attach, first GetAttr
-// succeeds, flip iam.anon-enabled=false, next op (Readdir/Create/etc.)
-// returns EACCES.
-//
-// Uses "userbucket" (not "default") because FU#6 carved the "default" bucket
-// out of the per-op anon flip gate to honor D#2 implicit-anon. Default-bucket
-// flip behavior is covered by TestAnon9PSession_DefaultBucket_FlipNotRejected.
-func TestAnon9PSession_FlipAtPhase2_NextOpRejected(t *testing.T) {
+func TestAnon9PSession_ConfigFlipDoesNotRevokeBinding(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "userbucket"))
@@ -74,37 +63,33 @@ func TestAnon9PSession_FlipAtPhase2_NextOpRejected(t *testing.T) {
 
 	// First op succeeds.
 	_, _, _, err := bf.GetAttr(p9.AttrMask{Mode: true})
-	require.NoError(t, err, "GetAttr must succeed while anon-enabled=true")
+	require.NoError(t, err, "GetAttr must succeed")
 
-	// Flip.
 	cfg.flip(false)
 
-	// Next op must reject with EACCES.
 	_, _, _, err = bf.GetAttr(p9.AttrMask{Mode: true})
-	assert.ErrorIs(t, err, syscall.EACCES, "GetAttr after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke GetAttr")
 
-	// Other anon-gated ops also reject.
 	_, err = bf.Readdir(0, 16)
-	assert.ErrorIs(t, err, syscall.EACCES, "Readdir after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke Readdir")
 
 	_, _, err = bf.Walk([]string{"foo"})
-	assert.ErrorIs(t, err, syscall.EACCES, "Walk after flip must be EACCES")
+	assert.ErrorIs(t, err, syscall.ENOENT, "Walk for missing file should reach backend")
 
 	_, _, _, err = bf.Create("newfile", p9.WriteOnly, 0644, 0, 0)
-	assert.ErrorIs(t, err, syscall.EACCES, "Create after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke Create")
 
 	_, err = bf.Mkdir("newdir", 0755, 0, 0)
-	assert.ErrorIs(t, err, syscall.EACCES, "Mkdir after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke Mkdir")
 
 	err = bf.UnlinkAt("foo", 0)
-	assert.ErrorIs(t, err, syscall.EACCES, "UnlinkAt after flip must be EACCES")
+	assert.ErrorIs(t, err, syscall.ENOENT, "UnlinkAt for missing file should reach backend")
 
 	err = bf.RenameAt("a", bf, "b")
-	assert.ErrorIs(t, err, syscall.EACCES, "RenameAt after flip must be EACCES")
+	assert.ErrorIs(t, err, syscall.ENOENT, "RenameAt for missing file should reach backend")
 }
 
-// TestAnon9PSession_NoFlip_OpsContinue — anon attach, multiple ops succeed
-// while anon-enabled stays true.
+// TestAnon9PSession_NoFlip_OpsContinue — anon attach, multiple ops succeed.
 func TestAnon9PSession_NoFlip_OpsContinue(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
@@ -124,15 +109,13 @@ func TestAnon9PSession_NoFlip_OpsContinue(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		_, _, _, err := bf.GetAttr(p9.AttrMask{Mode: true})
-		require.NoError(t, err, "GetAttr #%d must succeed while anon-enabled=true", i)
+		require.NoError(t, err, "GetAttr #%d must succeed", i)
 		_, err = bf.Readdir(0, 16)
 		require.NoError(t, err, "Readdir #%d must succeed", i)
 	}
 }
 
-// TestNonAnon9PSession_FlipAtPhase2_OpsContinue — mount-SA-bound session is
-// unaffected by the iam.anon-enabled flip.
-func TestNonAnon9PSession_FlipAtPhase2_OpsContinue(t *testing.T) {
+func TestNonAnon9PSession_ConfigFlipOpsContinue(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "default"))
@@ -157,7 +140,7 @@ func TestNonAnon9PSession_FlipAtPhase2_OpsContinue(t *testing.T) {
 	_, _, _, err = bf.GetAttr(p9.AttrMask{Mode: true})
 	require.NoError(t, err)
 
-	// Flip anon disabled.
+	// Flip the inert legacy test config.
 	cfg.flip(false)
 
 	// Mount-SA-bound ops must continue.
@@ -167,12 +150,7 @@ func TestNonAnon9PSession_FlipAtPhase2_OpsContinue(t *testing.T) {
 	assert.NoError(t, err, "mount-SA session unaffected by anon flip — Readdir")
 }
 
-// TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected — anon-bound objectFile
-// (created via bucketFile.Create or .Walk) also rejects ops after flip.
-//
-// Uses "userbucket" (not "default") because FU#6 carved the "default" bucket
-// out of the per-op anon flip gate.
-func TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected(t *testing.T) {
+func TestAnon9PObjectFile_ConfigFlipDoesNotRevokeBinding(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "userbucket"))
@@ -202,22 +180,20 @@ func TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected(t *testing.T) {
 	_, _, _, err = of.GetAttr(p9.AttrMask{Mode: true})
 	require.NoError(t, err)
 
-	// Flip.
 	cfg.flip(false)
 
-	// Object-level ops also reject.
 	_, _, _, err = of.GetAttr(p9.AttrMask{Mode: true})
-	assert.ErrorIs(t, err, syscall.EACCES, "objectFile.GetAttr after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke objectFile.GetAttr")
 
 	buf := make([]byte, 4)
 	_, err = of.ReadAt(buf, 0)
-	assert.ErrorIs(t, err, syscall.EACCES, "objectFile.ReadAt after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke objectFile.ReadAt")
 
 	_, err = of.WriteAt([]byte("x"), 0)
-	assert.ErrorIs(t, err, syscall.EACCES, "objectFile.WriteAt after flip must be EACCES")
+	assert.NoError(t, err, "removed anon config must not revoke objectFile.WriteAt")
 
 	err = of.SetAttr(p9.SetAttrMask{Permissions: true}, p9.SetAttr{Permissions: 0600})
-	assert.ErrorIs(t, err, syscall.EACCES, "objectFile.SetAttr after flip must be EACCES")
+	assert.ErrorIs(t, err, syscall.EPERM, "SetAttr permission behavior should reach backend")
 }
 
 // TestAnon9PSession_DefaultBucket_FlipNotRejected — FU#6: anon-bound session
@@ -243,7 +219,7 @@ func TestAnon9PSession_DefaultBucket_FlipNotRejected(t *testing.T) {
 
 	// First op succeeds.
 	_, _, _, err := bf.GetAttr(p9.AttrMask{Mode: true})
-	require.NoError(t, err, "GetAttr must succeed while anon-enabled=true")
+	require.NoError(t, err, "GetAttr must succeed")
 
 	// Flip Phase 2.
 	cfg.flip(false)

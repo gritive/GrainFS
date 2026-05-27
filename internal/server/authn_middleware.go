@@ -41,6 +41,7 @@ func s3PathBucketKey(path string) (string, string) {
 func (s *Server) authMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.URI().Path())
+		isS3Path := routeIsS3Path(path)
 		switch routeAuthnPolicyForPath(path) {
 		case routeAuthnAnonymous:
 			c.Next(ctx)
@@ -53,7 +54,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		}
 
 		r := toHTTPRequest(c)
-		if isBucketFormPost(c) {
+		if isS3Path && isBucketFormPost(c) {
 			ctx = WithAccessKey(ctx, "")
 			c.Next(ctx)
 			return
@@ -74,7 +75,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			return
 		}
 		isObjectRead := (method == "GET" || method == "HEAD") && key != "" && r.URL.RawQuery == ""
-		if isObjectRead && r.Header.Get("Authorization") == "" {
+		if isS3Path && isObjectRead && r.Header.Get("Authorization") == "" {
 			ctx = WithAccessKey(ctx, "")
 			c.Next(ctx)
 			return
@@ -82,22 +83,15 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 
 		isIceberg := routeSurfaceForPath(path) == routeSurfaceIceberg
 
-		// Phase 0 anon fast path (F#41) + default-bucket extension (F#41-ext):
+		// Default-bucket anonymous fast path:
 		// when the caller sent no Authorization header, defer the allow/deny
 		// decision to the authorizer (s3auth.Authorizer at
-		// internal/s3auth/authorizer.go) in either of two cases:
-		//
-		//   1. iam.anon-enabled=true (Phase 0): authorizer short-circuits with
-		//      ReasonAnonEnabled for any bucket; this is the original F#41.
-		//   2. bucket=="default" (F#41-ext): authorizer's D#2 implicit-anon
-		//      Allow path (authorizer.go:73-81) emits
-		//      ReasonDefaultBucketImplicitAnon for any verb on s3://default
-		//      regardless of iam.anon-enabled. The startup banner promises
-		//      "default remains public" and this guarantee must survive the
-		//      Phase 0 → Phase 2 flip (F#26 banner contract). Without (2),
+		// internal/s3auth/authorizer.go) only for bucket=="default". The
+		// authorizer's D#2 implicit-anon Allow path emits
+		// ReasonDefaultBucketImplicitAnon for verbs on s3://default until the
+		// operator installs an explicit bucket policy. Without this fast path,
 		//      unsigned PUT/LIST on /default returned 403 from
-		//      authenticateSignedRequest in Phase 2 before the authorizer
-		//      ever ran — banner-vs-behavior mismatch surfaced by T73.
+		//      authenticateSignedRequest before the authorizer ever ran.
 		//
 		// Authenticated requests (Authorization header present) are NOT
 		// affected by either branch — SigV4 verification still runs, revoked
@@ -113,10 +107,11 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// authenticateSignedRequest so revoked-key checks fire. Use the
 		// canonical s3auth.HasPresignedAlgorithm helper so the predicate
 		// matches the verifier's (handles percent-encoded keys + empty values).
-		if !isIceberg &&
+		if isS3Path &&
+			!isIceberg &&
 			r.Header.Get("Authorization") == "" &&
 			!s3auth.HasPresignedAlgorithm(r) &&
-			(s.anonEnabled() || bucket == reservedname.DefaultBucketName) {
+			bucket == reservedname.DefaultBucketName {
 			ctx = WithAccessKey(ctx, "")
 			c.Next(ctx)
 			return
@@ -156,21 +151,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		ctx = nextCtx
 		c.Next(ctx)
 	}
-}
-
-// anonEnabled reports whether iam.anon-enabled=true on the cluster config
-// store. Reused on the S3 surface to gate the F#41 anon fast path so that the
-// Phase 0 startup banner contract (read/write s3://default with no auth) holds
-// across all verbs. Returns false when the config reader is not wired (the key
-// defaults to true at registration, but we treat "no reader" as conservatively
-// disabled rather than implicitly allowing). bearerCfg is wired by
-// WithBearerConfig from the same cfgStore as the iceberg branch.
-func (s *Server) anonEnabled() bool {
-	if s.bearerCfg == nil {
-		return false
-	}
-	v, ok := s.bearerCfg.GetBool("iam.anon-enabled")
-	return ok && v
 }
 
 // icebergSkewReject returns a non-empty rejection reason if the request's

@@ -1019,13 +1019,6 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 	const nfs4Bucket = "grainfs-nfs4"
 	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, nfs4Bucket, cli)
 	runNfsExportJSONOnDataDir(t, c.dataDirs[0], "add", nfs4Bucket)
-	sock := filepath.Join(c.dataDirs[0], "admin.sock")
-	gomega.Expect(setConfigViaUDS(sock, "iam.anon-enabled", "true")).
-		To(gomega.Succeed(), "re-enable iam.anon-enabled for NFS anon session")
-	ginkgo.DeferCleanup(func() {
-		_ = setConfigViaUDS(sock, "iam.anon-enabled", "false")
-	})
-
 	const s3Body = "written-via-s3"
 	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(nfs4Bucket),

@@ -91,23 +91,21 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	// (deferred via t.Cleanup) will tear it down.
 }
 
-// TestPostRestoreCallback_ProxyTrustAndBannerPrevUpdated — F25+F26 integration:
+// TestPostRestoreCallback_ProxyTrustUpdated — F25 integration:
 // wire cfgStore + proxyTrust + post-restore callback via bootMetaRaftWiring,
-// then simulate a Restore with specific config values and assert both the
-// ProxyTrust CIDR set and the anonBannerSeedPrev are driven correctly.
-func TestPostRestoreCallback_ProxyTrustAndBannerPrevUpdated(t *testing.T) {
+// then simulate a Restore with specific config values and assert the
+// ProxyTrust CIDR set is driven correctly.
+func TestPostRestoreCallback_ProxyTrustUpdated(t *testing.T) {
 	_, state := raftPhasePrereqs(t)
 	state.bannerWriter = &bytes.Buffer{} // suppress stdout in test
 
 	require.NoError(t, bootMetaRaftWiring(state))
 	require.NotNil(t, state.cfgStore)
 	require.NotNil(t, state.proxyTrust)
-	require.NotNil(t, state.anonBannerSeedPrev, "anonBannerSeedPrev must be wired by bootMetaRaftWiring")
 
-	// Simulate Restore installing trusted-proxy.cidr and iam.anon-enabled=false.
+	// Simulate Restore installing trusted-proxy.cidr.
 	state.cfgStore.Restore(map[string]string{
 		"trusted-proxy.cidr": "10.0.0.0/8,192.168.0.0/16",
-		"iam.anon-enabled":   "false",
 	})
 
 	// F25: ProxyTrust must reflect the restored CIDR. With 10.0.0.0/8 trusted,
@@ -118,17 +116,4 @@ func TestPostRestoreCallback_ProxyTrustAndBannerPrevUpdated(t *testing.T) {
 	gotIP, ok := state.proxyTrust.Authoritative("10.1.2.3", "proto=https;for=1.2.3.4", "", "")
 	assert.True(t, ok, "Authoritative must succeed for trusted source with valid headers")
 	assert.Equal(t, "1.2.3.4", gotIP, "ProxyTrust must reflect restored CIDRs after Restore")
-
-	// F26: anonBannerSeedPrev was called with false, so a Set("false")
-	// immediately after must NOT emit a spurious banner (false→false, no flip).
-	var bannerBuf bytes.Buffer
-	state.bannerWriter = &bannerBuf
-	// Re-seed to confirm it's now false (we can't inspect the atomic directly).
-	// Verify by confirming banner is NOT emitted when we Set false again.
-	// We need a trustedProxy set so the posture-check hook doesn't reject it.
-	if err := state.cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
-		// Hook might reject if no trustedProxy is wired in test; that's OK for F26 scope.
-		t.Logf("Set iam.anon-enabled=false returned (posture may reject without cert): %v", err)
-	}
-	assert.Empty(t, bannerBuf.String(), "no spurious banner: prev was seeded to false")
 }

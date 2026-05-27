@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.375.0] - 2026-05-28
+
+### Changed
+
+- Removed the global `iam.anon-enabled` bypass. Anonymous S3 access is now authorized through bucket policy semantics: `s3://default` keeps its implicit anonymous quickstart policy until an explicit bucket policy overrides it, while non-default buckets require explicit anonymous policy. Unsigned `/api/...` requests and Iceberg bearer routes no longer inherit anonymous S3 behavior.
+
 ## [0.0.374.0] - 2026-05-28
 
 ### Added

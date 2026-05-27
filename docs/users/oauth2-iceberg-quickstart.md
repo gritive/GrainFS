@@ -1,8 +1,7 @@
 # OAuth2 Iceberg Quickstart
 
-This guide is for clusters where S3 auth is enabled
-(`iam.anon-enabled=false`). Fresh anonymous clusters serve the catalog without
-auth.
+This guide is for Iceberg clients that authenticate with OAuth2 bearer tokens.
+Iceberg routes do not use the `default` bucket's anonymous S3 quickstart policy.
 
 ## 1. Get the config bundle
 

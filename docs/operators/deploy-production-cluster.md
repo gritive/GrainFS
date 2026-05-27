@@ -118,9 +118,11 @@ grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite
 ```
 
 Side effects of the first `iam sa create`:
-- `iam.anon-enabled` → false atomically
-- Anonymous requests to `s3://default` still succeed (implicit anon policy)
-- Anonymous requests to other buckets → 401
+- The first service account and key are created.
+- Anonymous requests to `s3://default` still succeed until an explicit bucket
+  policy overrides the implicit default policy.
+- Anonymous requests to other buckets require an explicit anonymous bucket
+  policy.
 
 Override default's public access:
 
@@ -144,7 +146,7 @@ Each block independent.
 
 Convention path: `<data>/tls/cert.pem` + `<data>/tls/key.pem` (or `GRAINFS_TLS_CERT/KEY` env). After placing files: `kill -SIGHUP $(pidof grainfs)` for hot-swap.
 
-If `iam.anon-enabled=false` and no TLS cert and no `trusted-proxy.cidr`, startup refuses with the three-option message.
+TLS is strongly recommended for any network-exposed authenticated deployment.
 
 ### Reverse-proxy mode
 
