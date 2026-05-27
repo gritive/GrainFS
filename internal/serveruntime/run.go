@@ -272,6 +272,16 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	// Zero-CA §6 D-rev3 step 2: announce this node's own per-node SPKI into the
+	// peer registry. Placed LAST in the post-join sequence — after
+	// bootWALAndForwarders (forwarder installed) and after invite-join Phase-2
+	// membership promotion (also inside bootWALAndForwarders) — so this node is a
+	// functioning meta-raft member whose Propose reaches the leader. PSK-bridged:
+	// the booting node is still accepted via the PSK SPKI.
+	if err := bootSelfRegisterMember(ctx, state); err != nil {
+		return err
+	}
+
 	// After a successful join-mode boot, remove the pending file and backups.
 	// Backups (*.pre-join-backup) were safety nets for a failed wipe; now that
 	// join succeeded they are no longer needed.
