@@ -135,7 +135,7 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 	partFile := b.partPath(uploadID, partNumber)
 	if b.segEnc != nil {
 		h, release := hashForBucket(bucket)
-		size, err := writeEncryptedObjectFile(partFile, b.segEnc, multipartPartAADFields(uploadID, partNumber, 0), r, h)
+		size, err := writeEncryptedObjectFile(partFile, b.segEnc, multipartPartAADFields(uploadID, partNumber), r, h)
 		if err != nil {
 			release()
 			os.Remove(partFile)
@@ -213,7 +213,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		partReader := &encryptedMultipartPartsReader{backend: b, uploadID: uploadID, parts: parts}
 		defer partReader.Close()
 		h, release := hashForBucket(bucket)
-		totalSize, err = writeEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key, 0), partReader, h)
+		totalSize, err = writeEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), partReader, h)
 		if err != nil {
 			release()
 			os.Remove(objPath)
@@ -323,7 +323,7 @@ func (r *encryptedMultipartPartsReader) Read(p []byte) (int, error) {
 			rc, err := openEncryptedObjectFile(
 				partPath,
 				r.backend.segEnc,
-				multipartPartAADFields(r.uploadID, part.PartNumber, 0),
+				multipartPartAADFields(r.uploadID, part.PartNumber),
 				size,
 			)
 			if err != nil {
@@ -465,7 +465,7 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 		name := fmt.Sprintf("%05d", partNumber)
 		if b.segEnc != nil {
 			var err error
-			size, err = hashEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.segEnc, multipartPartAADFields(uploadID, partNumber, 0), h)
+			size, err = hashEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.segEnc, multipartPartAADFields(uploadID, partNumber), h)
 			if err != nil {
 				release()
 				return nil, fmt.Errorf("hash encrypted part %d: %w", partNumber, err)

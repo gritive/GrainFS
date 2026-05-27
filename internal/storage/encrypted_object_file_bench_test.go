@@ -27,7 +27,7 @@ func BenchmarkEncryptedObjectFileWrite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), bytes.NewReader(payload), io.Discard)
+		size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k"), bytes.NewReader(payload), io.Discard)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -41,7 +41,7 @@ func BenchmarkEncryptedObjectFileRead(b *testing.B) {
 	enc := benchmarkStorageEncryptor(b)
 	payload := bytes.Repeat([]byte("r"), 8<<20)
 	path := filepath.Join(b.TempDir(), "object.enc")
-	size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), bytes.NewReader(payload), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k"), bytes.NewReader(payload), io.Discard)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func BenchmarkEncryptedObjectFileRead(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rc, err := openEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), size)
+		rc, err := openEncryptedObjectFile(path, enc, objectFileAADFields("b", "k"), size)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -72,7 +72,7 @@ func BenchmarkEncryptedObjectFileReadAt(b *testing.B) {
 	enc := benchmarkStorageEncryptor(b)
 	payload := bytes.Repeat([]byte("a"), 8<<20)
 	path := filepath.Join(b.TempDir(), "object.enc")
-	size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), bytes.NewReader(payload), io.Discard)
+	size, err := writeEncryptedObjectFile(path, enc, objectFileAADFields("b", "k"), bytes.NewReader(payload), io.Discard)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func BenchmarkEncryptedObjectFileReadAt(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		n, err := readAtEncryptedObjectFile(path, enc, objectFileAADFields("b", "k", 0), size, int64(i%1024), buf)
+		n, err := readAtEncryptedObjectFile(path, enc, objectFileAADFields("b", "k"), size, int64(i%1024), buf)
 		if err != nil && err != io.EOF {
 			b.Fatal(err)
 		}

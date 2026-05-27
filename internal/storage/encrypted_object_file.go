@@ -159,12 +159,11 @@ type encryptedObjectReader struct {
 	gen        uint32
 	chunk      uint64
 	remaining  int64
-	// buf holds the current chunk's plaintext, drained by Read(). After the
-	// last byte is consumed, the underlying array is reused as the destination
-	// for the next chunk's decrypt — eliminating one heap allocation per chunk.
+	// buf holds the current chunk's plaintext, drained by Read(). loadNext
+	// assigns it the fresh plaintext slice returned by the DataEncryptor seam's
+	// Open (the seam owns the decrypt buffer, so there is no reuse here).
 	// Read() clears bytes as they leave the buffer (security), and the chunk
-	// boundary truncation clears the discarded tail, so reused capacity always
-	// starts zeroed.
+	// boundary truncation clears the discarded tail.
 	buf []byte
 	// sealedBuf is reusable scratch for the on-disk sealed record body. It
 	// grows to chunk-class size on the first chunk and stays there for the

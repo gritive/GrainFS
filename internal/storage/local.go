@@ -197,7 +197,7 @@ func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, erro
 	}
 	objPath := b.objectPath(bucket, key)
 	if b.segEnc != nil {
-		return openEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key, 0), obj.Size)
+		return openEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), obj.Size)
 	}
 	return os.Open(objPath)
 }
@@ -387,7 +387,7 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 			seg := obj.Segments[0]
 			segPath := b.segmentPath(bucket, key, seg.BlobID)
 			if b.segEnc != nil {
-				rc, err := openEncryptedObjectFile(segPath, b.segEnc, segmentFileAADFields(bucket, key, seg.BlobID, 0), seg.Size)
+				rc, err := openEncryptedObjectFile(segPath, b.segEnc, segmentFileAADFields(bucket, key, seg.BlobID), seg.Size)
 				if err != nil {
 					return nil, nil, fmt.Errorf("open encrypted segment: %w", err)
 				}
@@ -408,7 +408,7 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 	// __grainfs_volumes Volume Device blocks written via WriteAt). Range
 	// GETs and Volume Device reads keep using ReadAt directly.
 	if b.segEnc != nil {
-		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.segEnc, objectFileAADFields(bucket, key, 0), obj.Size)
+		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.segEnc, objectFileAADFields(bucket, key), obj.Size)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open encrypted object: %w", err)
 		}
@@ -608,7 +608,7 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 	var currentSize int64
 	if b.segEnc != nil {
 		currentSize = obj.Size
-		if _, err := truncateEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key, 0), currentSize, size); err != nil {
+		if _, err := truncateEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), currentSize, size); err != nil {
 			return fmt.Errorf("truncate encrypted object: %w", err)
 		}
 	} else {
@@ -693,7 +693,7 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		} else if !errors.Is(err, ErrObjectNotFound) {
 			return nil, err
 		}
-		size, etag, err := writeAtEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key, 0), offset, data, currentSize)
+		size, etag, err := writeAtEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), offset, data, currentSize)
 		if err != nil {
 			return nil, fmt.Errorf("encrypted writeat: %w", err)
 		}
@@ -941,7 +941,7 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 	if obj.Segments == nil {
 		objPath := b.objectPath(bucket, key)
 		if b.segEnc != nil {
-			return readAtEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key, 0), obj.Size, offset, buf)
+			return readAtEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), obj.Size, offset, buf)
 		}
 		f, err := os.Open(objPath)
 		if err != nil {
@@ -998,7 +998,7 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 		segPath := b.segmentPath(bucket, key, seg.BlobID)
 		dst := buf[written : written+chunkLen]
 		if b.segEnc != nil {
-			n, rerr := readAtEncryptedObjectFile(segPath, b.segEnc, segmentFileAADFields(bucket, key, seg.BlobID, 0), seg.Size, intraOff, dst)
+			n, rerr := readAtEncryptedObjectFile(segPath, b.segEnc, segmentFileAADFields(bucket, key, seg.BlobID), seg.Size, intraOff, dst)
 			written += n
 			if rerr != nil && rerr != io.EOF {
 				return written, rerr
@@ -1063,7 +1063,7 @@ func (m localDataWALMaterializer) HasReplacement(ctx context.Context, rec datawa
 		return info.Size() == rec.Size, nil
 	}
 
-	rc, err := openEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target, 0), rec.Size)
+	rc, err := openEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), rec.Size)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -1086,7 +1086,7 @@ func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 			return err
 		}
 		if m.b.segEnc != nil {
-			_, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target, 0), bytes.NewReader(rec.Payload), io.Discard)
+			_, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), bytes.NewReader(rec.Payload), io.Discard)
 			return err
 		}
 		return os.WriteFile(path, rec.Payload, 0o644)

@@ -35,7 +35,7 @@ func (s localSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.
 	blobID := loc.Ref
 	path := s.b.segmentPath(s.bucket, s.key, blobID)
 	if s.b.segEnc != nil {
-		return openEncryptedObjectFile(path, s.b.segEnc, segmentFileAADFields(s.bucket, s.key, blobID, 0), ref.Size)
+		return openEncryptedObjectFile(path, s.b.segEnc, segmentFileAADFields(s.bucket, s.key, blobID), ref.Size)
 	}
 	return os.Open(path)
 }

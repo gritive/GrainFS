@@ -2,35 +2,36 @@ package storage
 
 import "github.com/gritive/GrainFS/internal/encrypt"
 
-// objectFileAADFields binds a whole-object encrypted file chunk:
-// (bucket, key, chunk_ordinal). Domain DomainShard + clusterID are added by
-// the DataEncryptor seam.
-func objectFileAADFields(bucket, key string, chunk uint32) []encrypt.AADField {
+// objectFileAADFields returns the BASE AAD fields binding a whole-object
+// encrypted file: (bucket, key). Domain DomainShard + clusterID are added by
+// the DataEncryptor seam; the per-chunk ordinal is appended by the
+// encrypted-object-file layer.
+func objectFileAADFields(bucket, key string) []encrypt.AADField {
 	return []encrypt.AADField{
 		encrypt.FieldString(bucket),
 		encrypt.FieldString(key),
-		encrypt.FieldUint32(chunk),
 	}
 }
 
-// segmentFileAADFields binds a segment blob chunk to its unique blobID so
-// segments of the same object cannot decrypt under each other's AAD even with
-// identical plaintext (replaces the GFOBJENC1 per-segment domain string).
-func segmentFileAADFields(bucket, key, blobID string, chunk uint32) []encrypt.AADField {
+// segmentFileAADFields returns the BASE AAD fields binding a segment blob to
+// its unique blobID so segments of the same object cannot decrypt under each
+// other's AAD even with identical plaintext (replaces the GFOBJENC1
+// per-segment domain string). The per-chunk ordinal is appended by the
+// encrypted-object-file layer.
+func segmentFileAADFields(bucket, key, blobID string) []encrypt.AADField {
 	return []encrypt.AADField{
 		encrypt.FieldString(bucket),
 		encrypt.FieldString(key),
 		encrypt.FieldString(blobID),
-		encrypt.FieldUint32(chunk),
 	}
 }
 
-// multipartPartAADFields binds a multipart part chunk: (uploadID, partNumber,
-// chunk_ordinal).
-func multipartPartAADFields(uploadID string, partNumber int, chunk uint32) []encrypt.AADField {
+// multipartPartAADFields returns the BASE AAD fields binding a multipart part:
+// (uploadID, partNumber). The per-chunk ordinal is appended by the
+// encrypted-object-file layer.
+func multipartPartAADFields(uploadID string, partNumber int) []encrypt.AADField {
 	return []encrypt.AADField{
 		encrypt.FieldString(uploadID),
 		encrypt.FieldUint32(uint32(partNumber)),
-		encrypt.FieldUint32(chunk),
 	}
 }
