@@ -15,6 +15,30 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 Work these in order. Do not run them in parallel.
 
+- [ ] **Static bulk-data encryption key: rotation + nonce-exhaustion lifecycle (design)**
+   - Trust risk: ALL bulk data (objects, EC shards, data-WAL, badger values) is
+     encrypted with one static `<dataDir>/encryption.key` via `encrypt.Encryptor`
+     using RANDOM 96-bit nonces (`encrypt.go` `io.ReadFull(rand.Reader, nonce)`),
+     and that key is NEVER rotated, has NO seal counter, NO metric. On a long-lived
+     high-volume cluster the per-key seal count accrues toward the NIST SP 800-38D
+     random-nonce cap (2^32) with no signal and no remediation — a silent AES-GCM
+     nonce-collision cliff (confidentiality + integrity loss).
+   - Context: the KEK/DEK envelope subsystem (#36–62, v0.0.356.0) governs ONLY JWT
+     signing secrets (`iam/jwt/jwt.go` is the sole `DEKKeeper.Seal`/`DekGen`
+     key-selection consumer); it does NOT protect bulk data. `ObjectIndexEntry.DekGen`
+     is recorded + ref-counted but is NOT used to select a key for object decryption
+     (storage uses the static `b.encryptor`) — a half-built object→DEK bridge.
+   - Options to weigh in design: (a) add seal-count + metric + rotation lifecycle to
+     the static key; (b) migrate bulk data onto the gen-based DEK and reuse the
+     existing KEK-rotation/replication/seal-counter machinery (finish the DekGen
+     bridge). Either is a real subsystem, not a patch.
+   - Signal: per-key seal count, nonce-budget metric, rotation/re-encrypt status.
+   - Verification: high-volume seal-count accounting test; rotation re-encrypt or
+     envelope-migration correctness across all storage layers + EC shards.
+   - Boundary: design first (brainstorm). Surfaced 2026-05-27 by /review-forever
+     killing the mis-targeted auto-DEK-rotation plan (DEK seal volume is JWT-only,
+     never reaches the threshold). See [[project-grains-at-rest-two-key-systems]].
+
 - [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
      during an outage.
