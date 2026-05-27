@@ -45,3 +45,28 @@ func (a *EncryptorAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADFi
 }
 
 var _ DataEncryptor = (*EncryptorAdapter)(nil)
+
+// DEKKeeperAdapter implements DataEncryptor over the generation-aware
+// encrypt.DEKKeeper. Seal uses the active generation; Open uses the supplied
+// generation. clusterID MUST be 16 bytes.
+type DEKKeeperAdapter struct {
+	keeper    *encrypt.DEKKeeper
+	clusterID []byte
+}
+
+// NewDEKKeeperAdapter wraps keeper so it satisfies DataEncryptor.
+func NewDEKKeeperAdapter(keeper *encrypt.DEKKeeper, clusterID []byte) *DEKKeeperAdapter {
+	return &DEKKeeperAdapter{keeper: keeper, clusterID: clusterID}
+}
+
+func (a *DEKKeeperAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	aad := encrypt.BuildAAD(domain, a.clusterID, fields...)
+	return a.keeper.SealWithAAD(plain, aad)
+}
+
+func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	aad := encrypt.BuildAAD(domain, a.clusterID, fields...)
+	return a.keeper.OpenWithAAD(ct, gen, aad)
+}
+
+var _ DataEncryptor = (*DEKKeeperAdapter)(nil)
