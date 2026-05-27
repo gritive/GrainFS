@@ -14,6 +14,7 @@ import (
 
 const operatorMetricsVersionUnknown = "unknown"
 
+//nolint:unused // operator-state scaffolding landed v0.0.388-389 without a lint gate; production uses metrics.OperatorStateSources. Kept until that feature wires or removes it.
 type operatorStateSource struct {
 	nodeID   string
 	metaRaft metaRaftOperatorSource

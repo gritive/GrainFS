@@ -204,13 +204,6 @@ func (m *MetaRaft) WaitApplied(ctx context.Context, index uint64) error {
 	return m.waitApplied(ctx, index)
 }
 
-// LastApplied returns the raft log index of the most-recently applied entry.
-// This is strictly ≤ CommittedIndex and is the correct index source for
-// KEK lease attestation (plan D9: applied ≤ committed = more conservative).
-func (m *MetaRaft) LastApplied() uint64 {
-	return m.lastApplied.Load()
-}
-
 // FSM returns the MetaFSM for callback registration and state inspection.
 // Callers must set callbacks before Start() to avoid a data race with the apply loop.
 func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }
