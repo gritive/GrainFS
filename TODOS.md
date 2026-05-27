@@ -258,10 +258,12 @@ Work these in order. Do not run them in parallel.
   segment init to capture the active gen, write it to the header, discard the probe ciphertext
   (cheaper than widening the seam with `ActiveGen()`). The per-file gen-pin machinery already
   enforces consistency once the header gen is correct. Same activation applies to D-wal-legacy.
-- [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. D-wal-data binds AAD with a
-  single `"datawal"` namespace constant across all call sites; D-wal-legacy will use one
-  constant too. A frame from one physical WAL dir could AEAD-verify in another with the same
-  namespace+seq. To close cross-WAL frame-swap, give the cluster-shard WAL and the node WAL
+- [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. The legacy↔datawal half is
+  done: D-wal-legacy (storage/wal) uses namespace `"pitr-wal"` while D-wal-data (datawal) uses
+  `"datawal"`, so a frame from one WAL family will not AEAD-verify in the other. What remains is
+  the cluster-shard datawal vs node datawal split: both currently share the single `"datawal"`
+  constant, so a frame from one physical datawal dir could AEAD-verify in another with the same
+  namespace+seq. To close that cross-WAL frame-swap, give the cluster-shard WAL and the node WAL
   distinct namespaces (e.g. `"datawal/shard"` vs `"datawal/node"`), which requires auditing
   which call site (`boot_phases_storage_runtime`, `local.go`, `shard_service.go`) owns which
   physical dir so the writer and reader of each dir agree. Within-WAL positional binding
