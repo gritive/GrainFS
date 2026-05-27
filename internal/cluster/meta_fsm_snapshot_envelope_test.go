@@ -160,6 +160,71 @@ func TestMetaFSMSnapshotRestoreRoundTripEnveloped(t *testing.T) {
 	}
 }
 
+// TestMetaFSMSnapshotOpensWithKEKOnly locks the spec §D11 boot-order invariant:
+// the snapshot envelope MUST be openable with the KEK store alone, BEFORE the
+// data-path DEKKeeper is rebuilt from the DKVS trailer (that trailer lives
+// INSIDE the encrypted body and is consumed only AFTER the envelope is opened).
+// At boot, wireDEKKeeper wires the KEK store BEFORE metaRaft.Start runs FSM
+// Restore; this test proves the envelope does not secretly depend on the
+// data-path keeper.
+func TestMetaFSMSnapshotOpensWithKEKOnly(t *testing.T) {
+	const secretBucket = "kek-only-secret-bucket"
+
+	// Fully-wired source: KEK store + DEKKeeper + clusterID byte(i+1). This
+	// produces a production-shaped snapshot whose encrypted body carries a DKVS
+	// trailer. Seed OBJECT/bucket/node state only — NO JWT signing keys, so the
+	// snapshot has no JKEY trailer (Restore refuses JKEY without a wired keeper).
+	src, _ := newTestMetaFSMWithKEKAndDEK(t)
+	if err := src.applyCmd(makeAddNodeCmd(t, "node-1", "addr-1:7001", 0)); err != nil {
+		t.Fatalf("add node: %v", err)
+	}
+	if err := src.applyCmd(makePutShardGroupCmd(t, "group-0", []string{"node-1"})); err != nil {
+		t.Fatalf("put shard group: %v", err)
+	}
+	if err := src.applyCmd(makePutBucketAssignmentCmd(t, secretBucket, "group-0")); err != nil {
+		t.Fatalf("put bucket assignment: %v", err)
+	}
+
+	data, err := src.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Target shares the SAME KEK store + cluster id as src but has NO data-path
+	// DEKKeeper (mirrors the boot moment after wireDEKKeeper has set the KEK store
+	// but before Restore rebuilds the keeper from the DKVS trailer).
+	dst := newTestMetaFSMSharingKEK(t, src.KEKStore())
+	if dst.KEKStore() == nil {
+		t.Fatal("precondition: dst must have a KEK store wired")
+	}
+	if dst.dekKeeper != nil {
+		t.Fatal("precondition: dst must NOT have a data-path DEKKeeper wired")
+	}
+
+	// PRIMARY: the envelope opens with KEK-only. This is the precise boot-order
+	// invariant — no DEKKeeper needed to reach the plaintext body.
+	if !bytes.HasPrefix(data, []byte("GSNE")) {
+		t.Fatalf("snapshot is not GSNE-enveloped; prefix=%q", data[:4])
+	}
+	if _, err := dst.openSnapshotEnvelope(data); err != nil {
+		t.Fatalf("openSnapshotEnvelope must succeed with KEK-only (no DEKKeeper): %v", err)
+	}
+
+	// SECONDARY: the full Restore path also succeeds with KEK-only, because the
+	// snapshot carries no JKEY trailer (the only keeper-dependent Restore branch).
+	// The DKVS trailer is decoded into pending fields without touching the keeper.
+	if err := dst.Restore(raft.SnapshotMeta{Index: 5, Term: 1}, data); err != nil {
+		t.Fatalf("Restore must succeed with KEK-only: %v", err)
+	}
+	if got := dst.BucketAssignments()[secretBucket]; got != "group-0" {
+		t.Fatalf("restored FSM bucket assignment %q = %q, want group-0", secretBucket, got)
+	}
+	nodes := dst.Nodes()
+	if len(nodes) != 1 || nodes[0].ID != "node-1" {
+		t.Fatalf("restored FSM nodes = %+v, want one node-1", nodes)
+	}
+}
+
 func TestFSMSealOpenSnapshotEnvelopeRoundTrip(t *testing.T) {
 	fsm, _ := newTestMetaFSMWithKEKAndDEK(t)
 	body := []byte("plaintext fsm blob")
