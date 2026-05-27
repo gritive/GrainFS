@@ -1044,6 +1044,11 @@ table BootstrapSecretsPayload {
   encryption_key  : [ubyte];
   kek_generations : [KEKGen];
   transport_psk   : [ubyte];
+  // zero-CA cutover (H5' wire-plumbing): member per-node SPKI set + dropped bit
+  // a post-cutover joiner needs PRE-transport. PR-1 wires the fields; the joiner
+  // CONSUMES them in PR-2.
+  peer_spkis          : [SPKIBytes];
+  cluster_key_dropped : bool = false;
 }
 
 // MetaInvitePendingCmd records a pending invite-join (raft cmd data — wrap
