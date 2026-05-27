@@ -10,6 +10,14 @@ import (
 
 var snapshotEnvelopeMagic = [4]byte{'G', 'S', 'N', 'E'}
 
+// IsSnapshotEnvelope reports whether data begins with the snapshot-envelope
+// magic (i.e. was sealed by SealSnapshotEnvelope). A false result means the
+// bytes are a legacy pre-envelope snapshot (plaintext) — callers may read
+// them directly during the Phase D migration window.
+func IsSnapshotEnvelope(data []byte) bool {
+	return len(data) >= 4 && string(data[0:4]) == string(snapshotEnvelopeMagic[:])
+}
+
 // SnapshotEnvelopeFormatV1 is the only supported on-disk format version.
 const SnapshotEnvelopeFormatV1 uint16 = 1
 

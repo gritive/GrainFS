@@ -225,6 +225,54 @@ func TestMetaFSMSnapshotOpensWithKEKOnly(t *testing.T) {
 	}
 }
 
+// TestMetaFSMRestoreReadsLegacyPlaintextSnapshot proves the Phase D-snap
+// read-compat shim: a non-enveloped (plaintext) meta-FSM snapshot — as written
+// by a pre-Slice-1 binary on an existing data dir — restores successfully so a
+// rolling upgrade does not brick the cluster.
+func TestMetaFSMRestoreReadsLegacyPlaintextSnapshot(t *testing.T) {
+	const legacyBucket = "legacy-plaintext-bucket-yyy"
+
+	src := NewMetaFSM()
+	wireTestKEK(t, src)
+	if err := src.applyCmd(makeAddNodeCmd(t, "node-9", "addr-9:7001", 0)); err != nil {
+		t.Fatalf("add node: %v", err)
+	}
+	if err := src.applyCmd(makePutShardGroupCmd(t, "group-9", []string{"node-9"})); err != nil {
+		t.Fatalf("put shard group: %v", err)
+	}
+	if err := src.applyCmd(makePutBucketAssignmentCmd(t, legacyBucket, "group-9")); err != nil {
+		t.Fatalf("put bucket assignment: %v", err)
+	}
+
+	// Recover the exact plaintext snapshot blob (the inner body) by sealing then
+	// opening — this is byte-for-byte what a pre-envelope binary would write.
+	sealed, err := src.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	plain, err := src.openSnapshotEnvelope(sealed)
+	if err != nil {
+		t.Fatalf("openSnapshotEnvelope: %v", err)
+	}
+	if encrypt.IsSnapshotEnvelope(plain) {
+		t.Fatal("legacy test blob must NOT carry envelope magic")
+	}
+
+	// Restore the PLAINTEXT blob on a fresh FSM. The shim must read it directly.
+	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
+	if err := dst.Restore(raft.SnapshotMeta{Index: 3, Term: 1}, plain); err != nil {
+		t.Fatalf("Restore legacy plaintext snapshot must succeed: %v", err)
+	}
+	if got := dst.BucketAssignments()[legacyBucket]; got != "group-9" {
+		t.Fatalf("restored FSM bucket assignment %q = %q, want group-9", legacyBucket, got)
+	}
+	nodes := dst.Nodes()
+	if len(nodes) != 1 || nodes[0].ID != "node-9" {
+		t.Fatalf("restored FSM nodes = %+v, want one node-9", nodes)
+	}
+}
+
 func TestFSMSealOpenSnapshotEnvelopeRoundTrip(t *testing.T) {
 	fsm, _ := newTestMetaFSMWithKEKAndDEK(t)
 	body := []byte("plaintext fsm blob")

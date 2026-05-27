@@ -224,6 +224,15 @@ Work these in order. Do not run them in parallel.
   keeper, making this unreachable on a serving node today. Reopen as a hardening pass:
   detect `errors.Is(err, encrypt.ErrDEKGenUnknown)` in the commit coordinator and map it
   to a retriable 503 (not 500). The READ side already classifies it as transient (slice C).
+- [ ] **InstallSnapshot Restore failure should fatal-halt, not log-and-advance**.
+  `meta_raft.go` apply-loop `LogEntrySnapshot` case logs a `Restore` error then
+  advances `lastApplied` to the entry index regardless. A joiner that receives an
+  InstallSnapshot it cannot open (now reachable via D-snap envelope-open failure:
+  unknown KEK version, wrong cluster, or corruption) continues with un-restored FSM
+  state but an advanced applied index → silent divergence. Pre-existing pattern;
+  D-snap adds a new crypto failure mode to it. Surfaced by /review adversarial pass
+  (2026-05-28). Fix: treat envelope-open / Restore failure on InstallSnapshot as a
+  fatal halt (mirror the existing `ErrFSMKEKFatal` path) rather than log-and-advance.
 - [ ] **KEK-envelope Phase D-snap Slice 2: encrypt object metadata snapshots**.
   Slice 1 (Raft meta-FSM snapshot body) landed via `encrypt.SealSnapshotEnvelope`
   (per-snapshot ephemeral DEK + KEK wrap, `internal/encrypt/snapshot_envelope.go`).

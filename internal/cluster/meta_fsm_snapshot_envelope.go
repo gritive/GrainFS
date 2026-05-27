@@ -35,6 +35,13 @@ func (f *MetaFSM) sealSnapshotEnvelope(body []byte) ([]byte, error) {
 // recorded in the plaintext header from the KEK store (supports restore across
 // a KEK rotation that happened after the snapshot was sealed).
 func (f *MetaFSM) openSnapshotEnvelope(data []byte) ([]byte, error) {
+	// Legacy read-compat (Phase D-snap migration window): a snapshot written by a
+	// pre-Slice-1 binary has no envelope magic; read it as plaintext. Snapshot()
+	// always seals, so the next snapshot migrates it forward. D-cut removes this
+	// fallback once all snapshots are guaranteed enveloped.
+	if !encrypt.IsSnapshotEnvelope(data) {
+		return data, nil
+	}
 	store := f.KEKStore()
 	if store == nil {
 		return nil, fmt.Errorf("meta_fsm: Restore: KEK store not wired")

@@ -167,3 +167,23 @@ func TestSnapshotEnvelopeOpenRejectsUnknownFormatVersion(t *testing.T) {
 		t.Fatal("expected open failure for unsupported format version")
 	}
 }
+
+func TestIsSnapshotEnvelope(t *testing.T) {
+	kek, cid := newTestKEKCID(t)
+	var sid [16]byte
+	sealed, err := SealSnapshotEnvelope(kek, cid[:], sid, 1, []byte("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsSnapshotEnvelope(sealed) {
+		t.Fatal("sealed envelope must be detected as a snapshot envelope")
+	}
+	// A FlatBuffer-like legacy blob (no magic) and short/nil inputs are not envelopes.
+	legacyFB := []byte{0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x04, 0x00}
+	if IsSnapshotEnvelope(legacyFB) {
+		t.Fatal("legacy FlatBuffer blob must not be detected as an envelope")
+	}
+	if IsSnapshotEnvelope(nil) || IsSnapshotEnvelope([]byte{'G', 'S', 'N'}) {
+		t.Fatal("nil / short input must not be detected as an envelope")
+	}
+}
