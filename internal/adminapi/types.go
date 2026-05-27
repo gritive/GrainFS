@@ -201,6 +201,43 @@ type StorageProtocolStatusResp struct {
 	P9   ProtocolEndpointStatus `json:"p9"`
 }
 
+type CredentialCreateReq struct {
+	SAID      string `json:"sa_id"`
+	Protocol  string `json:"protocol"`
+	Resource  string `json:"resource"`
+	Mode      string `json:"mode"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+type CredentialListReq struct {
+	SAID     string `json:"sa_id,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+}
+
+type CredentialResp struct {
+	ID             string            `json:"id"`
+	SAID           string            `json:"sa_id"`
+	Protocol       string            `json:"protocol"`
+	Resource       string            `json:"resource"`
+	Mode           string            `json:"mode"`
+	Secret         string            `json:"secret,omitempty"`
+	SecretHint     string            `json:"secret_hint,omitempty"`
+	ConnectionHint map[string]string `json:"connection_hint,omitempty"`
+	CreatedAt      string            `json:"created_at,omitempty"`
+	ExpiresAt      string            `json:"expires_at,omitempty"`
+	RevokedAt      string            `json:"revoked_at,omitempty"`
+	LastUsedAt     string            `json:"last_used_at,omitempty"`
+}
+
+type CredentialListResp struct {
+	Credentials []CredentialResp `json:"credentials"`
+}
+
+type CredentialRevokeResp struct {
+	ID      string `json:"id"`
+	Revoked bool   `json:"revoked"`
+}
+
 // DashboardTokenResp describes the dashboard URL and token shown to operators.
 type DashboardTokenResp struct {
 	URL          string `json:"url"`
