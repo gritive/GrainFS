@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.386.0] - 2026-05-28
+
+### Added
+
+- Operators can now break down HTTP-facing service performance by stable
+  service and operation labels. `/metrics` exposes request counts, request
+  latency, request bytes, and response bytes for S3, Iceberg, cluster, admin,
+  dashboard, and metrics traffic without bucket, key, access key, or raw path
+  cardinality.
+
+### Changed
+
+- The production runbook now includes PromQL examples for isolating service
+  p99 latency, error rates, and response throughput when a generic latency or
+  error alert fires.
+
 ## [0.0.385.0] - 2026-05-28
 
 ### Added

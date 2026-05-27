@@ -118,6 +118,33 @@ curl -s http://localhost:9000/metrics | grep '^grainfs_ec_scrub_unverified_shard
 
 If `reason="legacy_no_crc"` is non-zero, scrub can read the shard bytes but cannot prove bit-level integrity. Treat those shards as migration candidates, not healthy repaired data.
 
+### Service Performance Metrics
+
+Use service metrics when a generic HTTP latency or error-rate alert fires and you need to isolate the affected surface.
+
+Metric families:
+
+- `grainfs_service_requests_total{service,operation,method,status_class}`
+- `grainfs_service_request_duration_seconds_bucket{service,operation,method,status_class,le}`
+- `grainfs_service_request_bytes_total{service,operation,method,status_class}`
+- `grainfs_service_response_bytes_total{service,operation,method,status_class}`
+
+Useful queries:
+
+```promql
+histogram_quantile(0.99, sum(rate(grainfs_service_request_duration_seconds_bucket[5m])) by (service, operation, le))
+```
+
+```promql
+sum(rate(grainfs_service_requests_total{status_class=~"4xx|5xx"}[5m])) by (service, operation, status_class)
+```
+
+```promql
+sum(rate(grainfs_service_response_bytes_total[5m])) by (service, operation)
+```
+
+Labels intentionally exclude bucket, key, access key, raw path, and error strings. Treat `service` and `operation` values as the stable operator-facing contract.
+
 After a node restart, data WAL replay flags metadata-only EC shards whose local file is missing or the wrong size, and a non-blocking background worker rebuilds them from surviving peers. Watch the startup repair counters to confirm boot-time self-healing landed:
 
 ```bash
