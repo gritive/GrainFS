@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -36,6 +37,8 @@ func (h snapshotEnvelopeHeader) encode(wrappedDEK []byte) []byte {
 	return out
 }
 
+// decodeSnapshotEnvelopeHeader parses the plaintext header. The returned
+// wrappedDEK and body slices alias buf; callers must not mutate them.
 func decodeSnapshotEnvelopeHeader(buf []byte) (h snapshotEnvelopeHeader, wrappedDEK, body []byte, err error) {
 	if len(buf) < snapshotEnvelopeHeaderLen {
 		return h, nil, nil, fmt.Errorf("snapshot envelope: buffer %d shorter than header %d", len(buf), snapshotEnvelopeHeaderLen)
@@ -112,7 +115,8 @@ func SealSnapshotEnvelope(kek, clusterID []byte, snapshotID [16]byte, activeKEKV
 
 // PeekSnapshotEnvelopeHeader reads the plaintext header (and slices) WITHOUT
 // decrypting, so a caller can resolve the KEK for header.ActiveKEKVersion()
-// before calling OpenSnapshotEnvelope.
+// before calling OpenSnapshotEnvelope. The returned wrappedDEK and body slices
+// alias data; callers must not mutate them.
 func PeekSnapshotEnvelopeHeader(data []byte) (OpenedSnapshotHeader, []byte, []byte, error) {
 	hdr, wrappedDEK, body, err := decodeSnapshotEnvelopeHeader(data)
 	if err != nil {
@@ -139,7 +143,7 @@ func OpenSnapshotEnvelope(kek, clusterID []byte, data []byte) (OpenedSnapshotHea
 	if hdr.formatVersion != SnapshotEnvelopeFormatV1 {
 		return out, nil, fmt.Errorf("snapshot envelope: unsupported format version %d", hdr.formatVersion)
 	}
-	if !bytesEqual16(hdr.clusterID, clusterID) {
+	if !bytes.Equal(hdr.clusterID[:], clusterID) {
 		return out, nil, errors.New("snapshot envelope: cluster id mismatch")
 	}
 	dekAAD := snapshotDEKWrapAAD(clusterID, hdr.snapshotID, hdr.formatVersion, hdr.activeKEKVersion)
@@ -165,8 +169,4 @@ func toArr16(b []byte) [16]byte {
 	var a [16]byte
 	copy(a[:], b)
 	return a
-}
-
-func bytesEqual16(a [16]byte, b []byte) bool {
-	return len(b) == 16 && string(a[:]) == string(b[:16])
 }

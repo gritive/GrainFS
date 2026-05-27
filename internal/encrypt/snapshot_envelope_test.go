@@ -83,6 +83,24 @@ func TestSnapshotEnvelopeSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSnapshotEnvelopeEmptyBodyRoundTrip(t *testing.T) {
+	kek, cid := newTestKEKCID(t)
+	var sid [16]byte
+	copy(sid[:], []byte("snapshot-id-16by"))
+
+	sealed, err := SealSnapshotEnvelope(kek, cid[:], sid, 1, []byte{})
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	_, plain, err := OpenSnapshotEnvelope(kek, cid[:], sealed)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if len(plain) != 0 {
+		t.Fatalf("expected empty body, got %d bytes", len(plain))
+	}
+}
+
 func TestSnapshotEnvelopeOpenRejectsWrongKEK(t *testing.T) {
 	kek, cid := newTestKEKCID(t)
 	other := make([]byte, KEKSize)
