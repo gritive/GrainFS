@@ -13,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -41,6 +42,7 @@ func writeLegacyGzipSnapshotFile(t *testing.T, path string, snap *Snapshot) {
 func writeFutureSnapshotFile(t *testing.T, path string, snap *Snapshot, minReader uint32) {
 	t.Helper()
 
+	// Write directly as a GFSNAP01 plaintext legacy file (bypassing envelope).
 	f, err := os.Create(path)
 	require.NoError(t, err)
 	_, err = f.Write([]byte("GFSNAP01"))
@@ -59,15 +61,17 @@ func TestWriteSnapshotAddsHeaderAndRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snapshot-00000000000000000001.json.zst")
 	snap := testSnapshot(1)
+	m := NewTestManager(t, dir, &formatTestBackend{}, "")
 
-	require.NoError(t, writeSnapshot(path, snap))
+	require.NoError(t, m.writeSnapshot(path, snap))
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(raw), 24)
-	require.Equal(t, []byte("GFSNAP01"), raw[:8])
+	// After Phase D-snap Slice 2, the file is sealed — starts with GSNE envelope.
+	require.True(t, encrypt.IsSnapshotEnvelope(raw), "snapshot file must be sealed with GSNE envelope")
 
-	got, err := readSnapshot(path)
+	got, err := m.readSnapshot(path)
 	require.NoError(t, err)
 	require.Equal(t, snap.Seq, got.Seq)
 	require.Equal(t, snap.WALOffset, got.WALOffset)
@@ -77,9 +81,10 @@ func TestReadLegacyGzipSnapshotIsUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snapshot-00000000000000000001.json.gz")
 	writeLegacyGzipSnapshotFile(t, path, testSnapshot(1))
+	m := NewTestManager(t, dir, &formatTestBackend{}, "")
 
-	_, err := readSnapshot(path)
-	require.ErrorIs(t, err, ErrUnsupportedSnapshotFormat)
+	_, err := m.readSnapshot(path)
+	require.Error(t, err, "gzip snapshots must be rejected")
 }
 
 type formatTestBackend struct {
@@ -108,11 +113,11 @@ func (b *formatTestBackend) RestoreBuckets(buckets []storage.SnapshotBucket) err
 func TestRestoreRejectsFutureSnapshotFormatBeforeBackendMutation(t *testing.T) {
 	dir := t.TempDir()
 	backend := &formatTestBackend{}
-	mgr, err := NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := NewTestManager(t, dir, backend, "")
+	// Write a legacy plaintext GFSNAP01 file with a future minReader version.
 	writeFutureSnapshotFile(t, mgr.path(1), testSnapshot(1), currentSnapshotReaderFormat+1)
 
-	_, _, err = mgr.Restore(1)
+	_, _, err := mgr.Restore(1)
 	require.ErrorIs(t, err, ErrUnsupportedSnapshotFormat)
 	require.False(t, backend.restoreObjectsCalled)
 	require.False(t, backend.restoreBucketsCalled)
@@ -121,8 +126,7 @@ func TestRestoreRejectsFutureSnapshotFormatBeforeBackendMutation(t *testing.T) {
 func TestListSkipsUnknownSnapshotEnvelope(t *testing.T) {
 	dir := t.TempDir()
 	backend := &formatTestBackend{}
-	mgr, err := NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := NewTestManager(t, dir, backend, "")
 	require.NoError(t, os.WriteFile(mgr.path(1), []byte("not-a-snapshot"), 0o644))
 
 	snaps, err := mgr.List()
@@ -133,8 +137,7 @@ func TestListSkipsUnknownSnapshotEnvelope(t *testing.T) {
 func TestManagerUsesZstdSuffixAndIgnoresGzipSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	backend := &formatTestBackend{}
-	mgr, err := NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := NewTestManager(t, dir, backend, "")
 
 	snap, err := mgr.Create("suffix")
 	require.NoError(t, err)
@@ -155,11 +158,10 @@ func TestManagerUsesZstdSuffixAndIgnoresGzipSnapshots(t *testing.T) {
 func TestRestoreLegacyGzipSnapshotIsUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	backend := &formatTestBackend{}
-	mgr, err := NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := NewTestManager(t, dir, backend, "")
 	writeLegacyGzipSnapshotFile(t, filepath.Join(dir, "snapshot-1.json.gz"), testSnapshot(1))
 
-	_, _, err = mgr.Restore(1)
+	_, _, err := mgr.Restore(1)
 	require.ErrorIs(t, err, ErrUnsupportedSnapshotFormat)
 	require.False(t, backend.restoreObjectsCalled)
 	require.False(t, backend.restoreBucketsCalled)
@@ -169,8 +171,7 @@ func TestManagerSeedsNextSeqFromLegacyGzipSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	writeLegacyGzipSnapshotFile(t, filepath.Join(dir, "snapshot-99.json.gz"), testSnapshot(99))
 	backend := &formatTestBackend{}
-	mgr, err := NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := NewTestManager(t, dir, backend, "")
 
 	snap, err := mgr.Create("after-legacy")
 	require.NoError(t, err)

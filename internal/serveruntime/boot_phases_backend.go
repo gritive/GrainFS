@@ -117,7 +117,10 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
-	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.cfg.Encryptor, 30*time.Second)
+	if len(state.clusterID) != 16 {
+		return fmt.Errorf("boot: snapshot KEK wiring: cluster id len %d", len(state.clusterID))
+	}
+	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.cfg.Encryptor, state.kekStore, [16]byte(state.clusterID), 30*time.Second)
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}

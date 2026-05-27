@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -55,7 +56,13 @@ func TestSnapshotPinSurvivesLiveDelete(t *testing.T) {
 	seedObjectWithSegments(t, b, "bkt", "k", "v1",
 		[]storage.SegmentRef{{BlobID: "c-frozen"}}, nil)
 
-	mgr, err := snapshot.NewManagerWithEncryptor(t.TempDir(), b, "", nil)
+	store := encrypt.NewKEKStore()
+	if err := store.Add(1, make([]byte, encrypt.KEKSize)); err != nil {
+		t.Fatalf("kek store: %v", err)
+	}
+	var cid [16]byte
+	cid[0] = 0x5A
+	mgr, err := snapshot.NewManagerWithEncryptor(t.TempDir(), b, "", nil, store, cid)
 	if err != nil {
 		t.Fatalf("snap mgr: %v", err)
 	}

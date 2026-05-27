@@ -47,9 +47,8 @@ func TestPITRRestore_ReplaysVersionHistoryAndDeleteMarker(t *testing.T) {
 		VersionID: "v1",
 		IsLatest:  true,
 	}}}
-	mgr, err := snapshot.NewManager(snapDir, backend, walDir)
-	require.NoError(t, err)
-	_, err = mgr.Create("base")
+	mgr := snapshot.NewTestManager(t, snapDir, backend, walDir)
+	_, err := mgr.Create("base")
 	require.NoError(t, err)
 
 	w, err := wal.Open(walDir)
@@ -79,7 +78,8 @@ func TestPITRRestore_ReplaysEncryptedWAL(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 
-	mgr, err := snapshot.NewManagerWithEncryptor(snapDir, backend, walDir, enc)
+	store, cid := snapshot.NewTestKEK(t)
+	mgr, err := snapshot.NewManagerWithEncryptor(snapDir, backend, walDir, enc, store, cid)
 	require.NoError(t, err)
 	_, err = mgr.Create("base")
 	require.NoError(t, err)
@@ -119,9 +119,8 @@ func TestPITRRestore_DropsDeletedHistoryForUnversionedBuckets(t *testing.T) {
 			},
 		},
 	}
-	mgr, err := snapshot.NewManager(snapDir, backend, "")
-	require.NoError(t, err)
-	_, err = mgr.Create("base")
+	mgr := snapshot.NewTestManager(t, snapDir, backend, "")
+	_, err := mgr.Create("base")
 	require.NoError(t, err)
 
 	_, err = mgr.PITRRestore(time.Now().Add(time.Second))
