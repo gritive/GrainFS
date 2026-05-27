@@ -17,9 +17,6 @@ const (
 	encryptedObjectMagic         = "GFOBJENC2"
 	encryptedObjectFormatVersion = uint16(1)
 	encryptedChunkSize           = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
-	// encryptedObjectHeaderLen is the on-disk header size before the first
-	// record: magic + format_version(2) + dek_gen(4).
-	encryptedObjectHeaderLen = len(encryptedObjectMagic) + 6
 )
 
 // writeEncryptedObjectHeader writes the GFOBJENC2 file header: magic,

@@ -14,6 +14,11 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
+// encryptedObjectHeaderLen is the on-disk header size before the first
+// record: magic + format_version(2) + dek_gen(4). Kept in the test file
+// because production code addresses records via sequential reads, not offsets.
+const encryptedObjectHeaderLen = len(encryptedObjectMagic) + 6
+
 func testEncryptor(t *testing.T) *encrypt.Encryptor {
 	t.Helper()
 	key := bytes.Repeat([]byte{0x44}, 32)
