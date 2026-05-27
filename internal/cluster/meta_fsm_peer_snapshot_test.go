@@ -1,12 +1,24 @@
 package cluster
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 )
+
+// wireSnapshotKEK gives an FSM the active KEK that Snapshot/Restore's encryption
+// envelope (master's sealSnapshotEnvelope) requires. Both the snapshotting and
+// restoring FSM must share the same KEK + (zero) ClusterID for the AAD to match.
+func wireSnapshotKEK(t *testing.T, f *MetaFSM) {
+	t.Helper()
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(0, bytes.Repeat([]byte{0x5A}, encrypt.KEKSize)))
+	f.SetKEKStore(store)
+}
 
 // TestMetaFSM_SnapshotRestore_RoundTripsPeers verifies the zero-CA peer
 // registry survives Snapshot/Restore (Task 5, codex P1): after log compaction
@@ -17,6 +29,7 @@ func TestMetaFSM_SnapshotRestore_RoundTripsPeers(t *testing.T) {
 	spki2 := [32]byte{4, 5, 6}
 
 	f := NewMetaFSM()
+	wireSnapshotKEK(t, f)
 	// Register a member (with PresentsPerNode=true to verify it round-trips) and
 	// a pending-learner directly on the registry.
 	require.NoError(t, f.peers.registerMember("a", spki1, "addr-a", true))
@@ -26,6 +39,7 @@ func TestMetaFSM_SnapshotRestore_RoundTripsPeers(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
+	wireSnapshotKEK(t, f2)
 	fired := false
 	var firedSet [][32]byte
 	f2.SetOnPeersChanged(func(s [][32]byte) {
