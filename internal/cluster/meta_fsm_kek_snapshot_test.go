@@ -51,6 +51,40 @@ func newTestMetaFSMWithKEKAndDEK(t *testing.T) (*MetaFSM, []byte) {
 	return fsm, plainDEK
 }
 
+// wireTestKEK wires a deterministic KEKStore (K0 active) + the canonical
+// byte(i+1) clusterID into fsm, the minimum needed for Snapshot()/Restore() to
+// seal/open the snapshot envelope (Phase D-snap). The K0 bytes and clusterID
+// are deterministic so independent FSMs wired with this helper can restore one
+// another's snapshots in round-trip tests.
+func wireTestKEK(t *testing.T, fsm *MetaFSM) {
+	t.Helper()
+	k0 := bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)
+	var clusterID [16]byte
+	for i := range clusterID {
+		clusterID[i] = byte(i + 1)
+	}
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, k0); err != nil {
+		t.Fatalf("seed KEKStore: %v", err)
+	}
+	fsm.SetClusterID(clusterID[:])
+	fsm.SetKEKStore(store)
+}
+
+// wireTestKEKStoreOnly wires a deterministic KEKStore (K0 active) into fsm
+// WITHOUT touching the clusterID. Use this for FSMs that already set a
+// DEK-bound clusterID (e.g. dekTestClusterID) and only need a KEK store so
+// Snapshot()/Restore() can seal/open the snapshot envelope (Phase D-snap).
+func wireTestKEKStoreOnly(t *testing.T, fsm *MetaFSM) {
+	t.Helper()
+	k0 := bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, k0); err != nil {
+		t.Fatalf("seed KEKStore: %v", err)
+	}
+	fsm.SetKEKStore(store)
+}
+
 // applyValidKEKRotateForTest applies a single valid KEK rotation to fsm,
 // advancing activeKEKVersion by 1.
 func applyValidKEKRotateForTest(t *testing.T, fsm *MetaFSM) error {
@@ -146,9 +180,15 @@ func applyValidKEKRotateForTest(t *testing.T, fsm *MetaFSM) error {
 // dekVersions) from the DKVS trailer, and verifies each wrap unseals under
 // kekStore.Get(activeKEKVersion). This is the atomicity invariant: both fields
 // must come from the same locked window.
-func verifySnapshotAtomicForTest(t *testing.T, snapBytes []byte, kekStore *encrypt.KEKStore) error {
+func verifySnapshotAtomicForTest(t *testing.T, fsm *MetaFSM, snapBytes []byte, kekStore *encrypt.KEKStore) error {
 	t.Helper()
-	trailers, err := peelMetaSnapshotTrailers(snapBytes)
+	// Phase D-snap: snapshot bytes are KEK-enveloped; decrypt to the plaintext
+	// trailer blob before peeling.
+	plain, err := fsm.openSnapshotEnvelope(snapBytes)
+	if err != nil {
+		return fmt.Errorf("open snapshot envelope: %w", err)
+	}
+	trailers, err := peelMetaSnapshotTrailers(plain)
 	if err != nil {
 		return fmt.Errorf("peel trailers: %w", err)
 	}
@@ -213,7 +253,7 @@ func TestSnapshot_KEKRotateConcurrency_NoTear(t *testing.T) {
 		if err != nil {
 			t.Fatalf("snapshot %d: %v", i, err)
 		}
-		if err := verifySnapshotAtomicForTest(t, snapBytes, fsm.KEKStore()); err != nil {
+		if err := verifySnapshotAtomicForTest(t, fsm, snapBytes, fsm.KEKStore()); err != nil {
 			stopApply.Store(true)
 			t.Fatalf("torn snapshot at iteration %d: %v", i, err)
 		}

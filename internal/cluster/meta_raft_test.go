@@ -231,6 +231,10 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
 	require.NoError(t, err)
+	// Phase D-snap: meta-FSM snapshots are KEK-enveloped; NewMetaRaft does not
+	// wire a KEK store (production does so in dek_keeper_wiring), so wire a
+	// deterministic test KEK here so Snapshot()/Restore() can seal/open.
+	wireTestKEK(t, m.fsm)
 	require.NoError(t, m.Bootstrap())
 	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
@@ -250,6 +254,8 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 
 	restarted, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
 	require.NoError(t, err)
+	// Same deterministic KEK so the restart can decrypt the snapshot envelope.
+	wireTestKEK(t, restarted.fsm)
 	t.Cleanup(func() { _ = restarted.Close() })
 	require.NoError(t, restarted.Start(context.Background(), nil))
 

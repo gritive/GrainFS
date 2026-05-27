@@ -284,7 +284,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
-	return f.appendSnapshotTrailers(bs, dekVersionsCopy, dekActiveCopy, dekRefCountsCopy, activeKEKVersionCopy)
+	blob, err := f.appendSnapshotTrailers(bs, dekVersionsCopy, dekActiveCopy, dekRefCountsCopy, activeKEKVersionCopy)
+	if err != nil {
+		return nil, err
+	}
+	return f.sealSnapshotEnvelope(blob)
 }
 
 // Restore deserializes a MetaStateSnapshot and replaces current state. The
@@ -296,7 +300,12 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
 
-	trailers, err := peelMetaSnapshotTrailers(data)
+	plain, err := f.openSnapshotEnvelope(data)
+	if err != nil {
+		return err
+	}
+
+	trailers, err := peelMetaSnapshotTrailers(plain)
 	if err != nil {
 		return err
 	}
