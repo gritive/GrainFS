@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfs4server"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -103,6 +104,14 @@ type NfsExportUpsertParams struct {
 type NFSDiag interface {
 	RecentLookups(bucket string, window time.Duration) []nfs4server.LookupRecord
 	ActiveMountClients(bucket string) []string
+}
+
+type ProtocolCredentialService interface {
+	Create(protocred.CreateRequest) (protocred.Secret, error)
+	List(protocred.ListFilter) []protocred.Credential
+	Get(id string) (protocred.Credential, error)
+	Rotate(id string) (protocred.Secret, error)
+	Revoke(id string) error
 }
 
 // BucketWithPolicyProposer is the slim interface the bucket create-with-attach

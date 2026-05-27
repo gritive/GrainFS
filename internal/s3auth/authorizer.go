@@ -78,9 +78,6 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonDefaultBucketImplicitAnon, ConditionContext: cc}
 		}
 	}
-	if saID == "" {
-		// Fall through: Principal:* on a bucket policy may still allow if iam.allow-anonymous-bucket-policy=true.
-	}
 	in, err := a.resolver.Effective(ctx, saID, bucket, ctxReq.PrincipalType)
 	if err != nil {
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: " + err.Error(), ConditionContext: cc}

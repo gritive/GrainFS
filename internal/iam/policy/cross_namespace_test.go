@@ -45,6 +45,20 @@ func TestValidateMountSAPolicyAttach_RejectsMixed(t *testing.T) {
 	require.Contains(t, err.Error(), "s3:GetObject")
 }
 
+func TestValidateMountSAPolicyAttach_RejectsProtocolCredentialAction(t *testing.T) {
+	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"*"}]}`
+	err := ValidateForMountSAAttach(policyJSON)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "grainfs:CredentialCreate")
+}
+
+func TestValidateMountSAPolicyAttach_RejectsVolumeAttachAction(t *testing.T) {
+	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"grainfs:VolumeAttach","Resource":"*"}]}`
+	err := ValidateForMountSAAttach(policyJSON)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "grainfs:VolumeAttach")
+}
+
 func TestValidateS3SAPolicyAttach_RejectsNFSAction(t *testing.T) {
 	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"*"}]}`
 	err := ValidateForS3SAAttach(policyJSON)
@@ -85,4 +99,10 @@ func TestParse_Accepts9PAttachAction(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"arn:aws:s3:::bucket-x"}]}`)
 	_, err := Parse(doc)
 	require.NoError(t, err, "Parse should accept grainfs:9PAttach action")
+}
+
+func TestParse_AcceptsProtocolCredentialActions(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":["grainfs:CredentialCreate","grainfs:VolumeAttach"],"Resource":"*"}]}`)
+	_, err := Parse(doc)
+	require.NoError(t, err, "Parse should accept protocol credential grainfs actions")
 }
