@@ -34,6 +34,23 @@ import (
 // or when a shard is shorter than the 4-byte footer.
 var ErrCRCMismatch = errors.New("eccodec: CRC mismatch (bit-rot detected)")
 
+// ErrShardCorrupt marks errors that mean the bytes ON DISK are structurally
+// bad (corruption), as opposed to a live I/O fault (EIO/EMFILE/EBUSY/perm)
+// propagated from the underlying file. The placement monitor uses
+// IsCorruption to decide whether to quarantine the parent object; transient
+// faults must NOT be wrapped so they stay unwrapped and are skipped.
+var ErrShardCorrupt = errors.New("eccodec: shard content corrupt")
+
+// IsCorruption reports whether err represents confirmed on-disk shard
+// corruption (CRC mismatch, structural decode failure, mid-structure
+// truncation, or AEAD chunk-auth failure). It returns false for transient
+// I/O errors, nil, and generic errors. errors.Is unwrapping means callers
+// can pass an error wrapped with %w through several layers and still get a
+// correct answer.
+func IsCorruption(err error) bool {
+	return errors.Is(err, ErrCRCMismatch) || errors.Is(err, ErrShardCorrupt)
+}
+
 // footerLen is the size of the CRC32 footer appended to every shard.
 const footerLen = 4
 
@@ -365,14 +382,20 @@ func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte
 	}
 	var header [encryptedHeaderLen]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
+		// EOF/ErrUnexpectedEOF here means the file is shorter than the fixed
+		// header the format declares: truncation → corruption. A non-EOF
+		// error is a live I/O fault (EIO etc.) and stays transient.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("read encrypted shard header: %w: %w", ErrShardCorrupt, err)
+		}
 		return nil, fmt.Errorf("read encrypted shard header: %w", err)
 	}
 	if !IsEncryptedShard(header[:]) {
-		return nil, fmt.Errorf("not an encrypted shard")
+		return nil, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
 	}
 	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
 	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return nil, fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
+		return nil, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
 	}
 	var noncePrefix [encryptedNoncePrefixLen]byte
 	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
@@ -401,14 +424,20 @@ func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase
 	}
 	var header [encryptedHeaderLen]byte
 	if _, err := r.ReadAt(header[:], 0); err != nil {
+		// ReadAt reports io.EOF when the file is shorter than the fixed header
+		// it must read: truncation → corruption. A non-EOF error is a live I/O
+		// fault (EIO etc.) and stays transient.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("read encrypted shard header: %w: %w", ErrShardCorrupt, err)
+		}
 		return nil, fmt.Errorf("read encrypted shard header: %w", err)
 	}
 	if !IsEncryptedShard(header[:]) {
-		return nil, fmt.Errorf("not an encrypted shard")
+		return nil, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
 	}
 	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
 	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return nil, fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
+		return nil, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
 	}
 	var noncePrefix [encryptedNoncePrefixLen]byte
 	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
@@ -439,14 +468,20 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	}
 	var header [encryptedHeaderLen]byte
 	if _, err := r.ReadAt(header[:], 0); err != nil {
+		// ReadAt reports io.EOF when the file is shorter than the fixed header
+		// it must read: truncation → corruption. A non-EOF error is a live I/O
+		// fault (EIO etc.) and stays transient.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return 0, fmt.Errorf("read encrypted shard header: %w: %w", ErrShardCorrupt, err)
+		}
 		return 0, fmt.Errorf("read encrypted shard header: %w", err)
 	}
 	if !IsEncryptedShard(header[:]) {
-		return 0, fmt.Errorf("not an encrypted shard")
+		return 0, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
 	}
 	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
 	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return 0, fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
+		return 0, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
 	}
 	var noncePrefix [encryptedNoncePrefixLen]byte
 	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
@@ -494,17 +529,24 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
 	if _, err := r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
+		// ReadAt io.EOF here means the chunk header is past end-of-file:
+		// truncation → corruption. Other errors are transient I/O faults.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return 0, fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
+		}
 		return 0, fmt.Errorf("read encrypted shard chunk header: %w", err)
 	}
 	plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
 	cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
 	if plainLen > chunkSize {
-		return 0, fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", chunkIdx, plainLen, chunkSize)
+		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, chunkIdx, plainLen, chunkSize)
 	}
 	if cipherLen < plainLen || cipherLen > plainLen+uint32(enc.AEADOverhead()) {
-		return 0, fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", chunkIdx, cipherLen, plainLen)
+		return 0, fmt.Errorf("%w: invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen)
 	}
 	if inChunk >= int(plainLen) {
+		// Clean end-of-stream at a chunk boundary: NOT corruption. The caller
+		// (ReadEncryptedShardRangeAt) maps a partial read to io.ErrUnexpectedEOF.
 		return 0, io.EOF
 	}
 
@@ -513,17 +555,29 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	}
 	ciphertext := (*cipherBuf)[:cipherLen]
 	if _, err := r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
+		// The header declared cipherLen bytes; a short ReadAt (io.EOF) means the
+		// payload is truncated → corruption. Other errors are transient.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return 0, fmt.Errorf("read encrypted shard chunk: %w: %w", ErrShardCorrupt, err)
+		}
 		return 0, fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
 	nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
 	aad := encryptedChunkAAD(aadBase, chunkIdx)
 	if inChunk == 0 && len(dst) >= int(plainLen) {
+		// AEAD auth failure ⟹ tampered/corrupt bytes. Gating audit (same as the
+		// streaming reader): ShardService.encryptor is a single static
+		// *encrypt.Encryptor built from one --encryption-key-file with no
+		// versioned data-shard keystore or rotation on this read path, and the
+		// AAD is deterministic from bucket/key/shardIdx, so an Open failure on an
+		// owned shard is corruption, not a key-version race. Re-audit if the
+		// Phase B keystore/DEK envelope is ever wired into ShardService.
 		plaintext, err := enc.OpenWithNonceAAD(dst[:0], nonce[:], ciphertext, aad)
 		if err != nil {
-			return 0, fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+			return 0, fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
 		}
 		if uint32(len(plaintext)) != plainLen {
-			return 0, fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+			return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
 		}
 		return len(plaintext), nil
 	}
@@ -532,10 +586,10 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	}
 	plaintext, err := enc.OpenWithNonceAAD((*plainBuf)[:0], nonce[:], ciphertext, aad)
 	if err != nil {
-		return 0, fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+		return 0, fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
-		return 0, fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
 	}
 	*plainBuf = plaintext
 
@@ -606,19 +660,25 @@ func (r *encryptedShardReader) Close() error {
 func (r *encryptedShardReader) loadChunk() error {
 	var chunkHeader [encryptedChunkHeaderLen]byte
 	if _, err := io.ReadFull(r.r, chunkHeader[:]); err != nil {
+		// Clean EOF at a chunk boundary is the normal end of the stream.
 		if errors.Is(err, io.EOF) {
 			r.done = true
 			return nil
+		}
+		// ErrUnexpectedEOF means a chunk header was started but the file ended
+		// short of it: truncation → corruption. Other errors are transient.
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
 		}
 		return fmt.Errorf("read encrypted shard chunk header: %w", err)
 	}
 	plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
 	cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
 	if plainLen > r.chunkSize {
-		return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", r.chunkIdx, plainLen, r.chunkSize)
+		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, r.chunkIdx, plainLen, r.chunkSize)
 	}
 	if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
-		return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", r.chunkIdx, cipherLen, plainLen)
+		return fmt.Errorf("%w: invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", ErrShardCorrupt, r.chunkIdx, cipherLen, plainLen)
 	}
 
 	if r.cipherPtr == nil {
@@ -630,6 +690,11 @@ func (r *encryptedShardReader) loadChunk() error {
 	}
 	ciphertext := r.cipherBuf[:cipherLen]
 	if _, err := io.ReadFull(r.r, ciphertext); err != nil {
+		// The header declared cipherLen bytes; a short read means the payload
+		// is truncated → corruption. Other errors are transient I/O faults.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("read encrypted shard chunk: %w: %w", ErrShardCorrupt, err)
+		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
 	nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
@@ -641,12 +706,19 @@ func (r *encryptedShardReader) loadChunk() error {
 	if cap(r.plainBuf) < int(plainLen) {
 		r.plainBuf = make([]byte, plainLen)
 	}
+	// AEAD auth failure ⟹ tampered/corrupt ciphertext, header, or AAD. Gating
+	// audit: ShardService.encryptor is a single static *encrypt.Encryptor built
+	// from one --encryption-key-file (serveruntime/encryption_key.go); there is
+	// no versioned data-shard keystore or rotation on this read path, and the
+	// AAD is deterministic from bucket/key/shardIdx. So an Open failure on an
+	// owned shard cannot be a key-version race → it is corruption. Re-audit if
+	// the Phase B keystore/DEK envelope is ever wired into ShardService.
 	plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
 	if err != nil {
-		return fmt.Errorf("decrypt shard chunk %d: %w", r.chunkIdx, err)
+		return fmt.Errorf("decrypt shard chunk %d: %w: %w", r.chunkIdx, ErrShardCorrupt, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
-		return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", r.chunkIdx, len(plaintext), plainLen)
+		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, r.chunkIdx, len(plaintext), plainLen)
 	}
 	r.plainBuf = plaintext[:0]
 	r.plain = plaintext
@@ -732,17 +804,23 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
 	if _, err := r.r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
+		// ReadAt io.EOF here means the chunk header is past end-of-file:
+		// truncation → corruption. Other errors are transient I/O faults.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
+		}
 		return fmt.Errorf("read encrypted shard chunk header: %w", err)
 	}
 	plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
 	cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
 	if plainLen > r.chunkSize {
-		return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", chunkIdx, plainLen, r.chunkSize)
+		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, chunkIdx, plainLen, r.chunkSize)
 	}
 	if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
-		return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", chunkIdx, cipherLen, plainLen)
+		return fmt.Errorf("%w: invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen)
 	}
 	if inChunk >= int(plainLen) {
+		// Clean end-of-stream at a chunk boundary: NOT corruption.
 		return io.EOF
 	}
 
@@ -755,6 +833,11 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	}
 	ciphertext := r.cipherBuf[:cipherLen]
 	if _, err := r.r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
+		// The header declared cipherLen bytes; a short ReadAt (io.EOF) means the
+		// payload is truncated → corruption. Other errors are transient.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("read encrypted shard chunk: %w: %w", ErrShardCorrupt, err)
+		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
 	nonce := encryptedChunkNonce(r.noncePrefix, chunkIdx)
@@ -766,12 +849,19 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	if cap(r.plainBuf) < int(plainLen) {
 		r.plainBuf = make([]byte, plainLen)
 	}
+	// AEAD auth failure ⟹ tampered/corrupt bytes. Gating audit (same as the
+	// streaming reader): ShardService.encryptor is a single static
+	// *encrypt.Encryptor built from one --encryption-key-file with no versioned
+	// data-shard keystore or rotation on this read path, and the AAD is
+	// deterministic from bucket/key/shardIdx, so an Open failure on an owned
+	// shard is corruption, not a key-version race. Re-audit if the Phase B
+	// keystore/DEK envelope is ever wired into ShardService.
 	plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
 	if err != nil {
-		return fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+		return fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
-		return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
 	}
 
 	end := len(plaintext)
