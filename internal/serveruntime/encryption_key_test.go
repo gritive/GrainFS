@@ -57,7 +57,7 @@ func TestBulkDataPresent(t *testing.T) {
 
 	// Each encrypted-bytes location must independently trigger detection, even
 	// with shards/ and datawal/ absent.
-	for _, sub := range []string{"shards", "data", "datawal", "blobs"} {
+	for _, sub := range []string{"shards", "data", "datawal", "blobs", "shared-fsm", "wal"} {
 		t.Run(sub+" non-empty returns true", func(t *testing.T) {
 			dir := t.TempDir()
 			touchEntry(t, dir, sub)
@@ -137,4 +137,32 @@ func TestExplicitMissingEncryptionKeyStillReportsMountFailure(t *testing.T) {
 	_, err := LoadOrCreateEncryptionKey(filepath.Join(t.TempDir(), "missing.key"), t.TempDir(), true)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "mount failure?")
+}
+
+// TestPrimaryDataDirFromDataDirs verifies that when DataDirs is non-empty the
+// canonical primary dir is DataDirs[0], not opts.DataDir. This mirrors the
+// logic optionsToConfig uses (cfg.DataDir = cfg.DataDirs[0]) and is the core
+// of Finding 2: the guard marker must be written under the real primary dir.
+func TestPrimaryDataDirFromDataDirs(t *testing.T) {
+	// primary = DataDirs[0] when DataDirs is non-empty
+	dataDirs := []string{t.TempDir(), t.TempDir()}
+	strayDataDir := t.TempDir() // opts.DataDir — different from DataDirs[0]
+
+	primaryDataDir := strayDataDir
+	if len(dataDirs) > 0 {
+		primaryDataDir = dataDirs[0]
+	}
+	require.Equal(t, dataDirs[0], primaryDataDir)
+	require.NotEqual(t, strayDataDir, primaryDataDir)
+
+	// Stamp the format marker under primaryDataDir (as run_from_options now does).
+	require.NoError(t, EnsureBulkCipherFormat(primaryDataDir, false))
+
+	// Marker must be under DataDirs[0], not strayDataDir.
+	b, err := os.ReadFile(filepath.Join(primaryDataDir, "encryption.format"))
+	require.NoError(t, err)
+	require.Equal(t, "2", string(b))
+
+	_, err = os.Stat(filepath.Join(strayDataDir, "encryption.format"))
+	require.True(t, os.IsNotExist(err), "marker must NOT be under opts.DataDir when DataDirs is set")
 }

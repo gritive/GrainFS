@@ -180,3 +180,22 @@ func TestValueEnvelopeRejectsPlaintext(t *testing.T) {
 	_, err = enc.OpenValueAAD([]byte("badger:meta:object"), []byte("plain"))
 	require.Error(t, err)
 }
+
+func TestHasValueMagic(t *testing.T) {
+	// Has magic: bytes start with 0xAE 0xE2 (any version)
+	require.True(t, HasValueMagic([]byte{0xAE, 0xE2, 0x01, 0x00})) // old version 1
+	require.True(t, HasValueMagic([]byte{0xAE, 0xE2, 0x02, 0x00})) // current version 2
+	require.False(t, HasValueMagic([]byte("plaintext")))           // no magic
+	require.False(t, HasValueMagic([]byte{0xAE}))                  // too short (only 1 byte)
+	require.False(t, HasValueMagic([]byte{}))                      // empty
+	require.False(t, HasValueMagic([]byte{0xAE, 0xE3, 0x02}))      // blob magic, not value magic
+}
+
+func TestHasBlobMagic(t *testing.T) {
+	// Has blob magic: first byte is 0xAE (any second byte)
+	require.True(t, HasBlobMagic([]byte{0xAE, 0xE3, 0x00})) // current blob format
+	require.True(t, HasBlobMagic([]byte{0xAE, 0xE1, 0x00})) // old blob format (0xE1)
+	require.True(t, HasBlobMagic([]byte{0xAE, 0xE2, 0x01})) // value magic (also starts 0xAE)
+	require.False(t, HasBlobMagic([]byte("plaintext")))     // no magic
+	require.False(t, HasBlobMagic([]byte{}))                // empty
+}

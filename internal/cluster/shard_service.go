@@ -792,6 +792,9 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 		if encrypt.IsEncryptedBlob(data) {
 			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 		}
+		if encrypt.HasBlobMagic(data) {
+			return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
+		}
 		return data, nil
 	}
 	decrypted, err := s.encryptor.DecryptWithAAD(data, aad)

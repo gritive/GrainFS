@@ -21,6 +21,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -217,6 +218,10 @@ type EncryptedShardChunkedWriter struct {
 	cipherBuf   []byte // reused cipher scratch
 	cipherPtr   *[]byte
 	closed      bool
+	// stickyErr is set when a permanent error (counter wrap, I/O fault) occurs.
+	// Any subsequent Write or Close returns this error without sealing further
+	// chunks, preventing nonce reuse after a chunk-counter wrap.
+	stickyErr error
 }
 
 // NewEncryptedShardChunkedWriter constructs a streaming writer that produces
@@ -262,6 +267,9 @@ func (w *EncryptedShardChunkedWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, fmt.Errorf("encrypted shard chunked writer: write after close")
 	}
+	if w.stickyErr != nil {
+		return 0, w.stickyErr
+	}
 	if !w.headerSent {
 		if err := w.emitHeader(); err != nil {
 			return 0, err
@@ -293,6 +301,11 @@ func (w *EncryptedShardChunkedWriter) Close() error {
 	if w.closed {
 		return nil
 	}
+	if w.stickyErr != nil {
+		w.closed = true
+		w.releasePools()
+		return w.stickyErr
+	}
 	w.closed = true
 	defer w.releasePools()
 	if !w.headerSent {
@@ -321,6 +334,15 @@ func (w *EncryptedShardChunkedWriter) emitHeader() error {
 }
 
 func (w *EncryptedShardChunkedWriter) emitChunk() error {
+	// Guard against chunk-counter wrap BEFORE sealing: sealing at chunkIdx
+	// math.MaxUint32 would produce nonce[prefix||0xFFFFFFFF], and the next
+	// call (if we incremented past it) would reuse nonce[prefix||0x00000000]
+	// — nonce reuse under XAES-256-GCM is catastrophic. Refuse early and
+	// poison the writer so no further chunk can be sealed.
+	if w.chunkIdx == math.MaxUint32 {
+		w.stickyErr = fmt.Errorf("encrypted shard chunk counter exhausted (2^32-1); refusing to seal chunk to prevent nonce reuse")
+		return w.stickyErr
+	}
 	nonce := encryptedChunkNonce(w.noncePrefix, w.chunkIdx)
 	aad := encryptedChunkAAD(w.aadBase, w.chunkIdx)
 	ciphertext, err := w.enc.SealWithNonceAAD(w.cipherBuf[:0], nonce[:], w.plainBuf, aad)
@@ -338,9 +360,8 @@ func (w *EncryptedShardChunkedWriter) emitChunk() error {
 		return fmt.Errorf("write shard chunk: %w", err)
 	}
 	w.chunkIdx++
-	if w.chunkIdx == 0 {
-		return fmt.Errorf("encrypted shard has too many chunks")
-	}
+	// The counter can no longer wrap to zero: the MaxUint32 guard above
+	// prevents sealing that last index, so chunkIdx == 0 here is unreachable.
 	w.plainBuf = w.plainBuf[:0]
 	return nil
 }

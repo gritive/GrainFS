@@ -125,6 +125,21 @@ func IsEncryptedValue(data []byte) bool {
 	return len(data) >= 3 && data[0] == valueMagic0 && data[1] == valueMagic1 && data[2] == valueVersion2
 }
 
+// HasValueMagic reports whether b carries the value-envelope magic bytes
+// (0xAE 0xE2), regardless of version. Used to distinguish genuine plaintext
+// (no magic) from an encrypted value written by a different/older format
+// version.
+func HasValueMagic(b []byte) bool {
+	return len(b) >= 2 && b[0] == valueMagic0 && b[1] == valueMagic1
+}
+
+// HasBlobMagic reports whether b carries the blob-envelope magic byte (0xAE).
+// Used to detect blobs encrypted by a different/older format version when
+// IsEncryptedBlob returns false (the second byte changed between versions).
+func HasBlobMagic(b []byte) bool {
+	return len(b) >= 1 && b[0] == encMagic0
+}
+
 func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]byte, error) {
 	headerLen := 3 + e.aead.NonceSize()
 	outLen := headerLen + len(plaintext) + e.aead.Overhead()

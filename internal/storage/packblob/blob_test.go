@@ -337,12 +337,19 @@ func TestEncryptedBlobStoreReadsLegacyPlaintextEntry(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
-func TestEncryptedBlobStoreReadsLegacyPlaintextEntryWithEncryptedMagicPrefix(t *testing.T) {
+// TestEncryptedBlobStoreRejectsLegacyPlaintextEntryWithValueMagicPrefix verifies
+// the XAES greenfield boundary: if a blob entry's payload carries the old
+// encrypted-value magic prefix (0xAE 0xE2) but is not flagEncrypted, the
+// reader must return a loud error rather than silently passing the bytes as
+// plaintext. This replaces the pre-XAES pass-through behavior.
+func TestEncryptedBlobStoreRejectsLegacyPlaintextEntryWithValueMagicPrefix(t *testing.T) {
 	dir := t.TempDir()
 	legacy, err := NewBlobStore(dir, 256*1024*1024)
 	require.NoError(t, err)
-	plaintext := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
-	loc, err := legacy.Append("bucket/key", plaintext)
+	// These bytes carry the old encrypted-value magic: they could be a pre-XAES
+	// AES-GCM encrypted value written without flagEncrypted.
+	oldMagicPayload := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
+	loc, err := legacy.Append("bucket/key", oldMagicPayload)
 	require.NoError(t, err)
 	require.NoError(t, legacy.Close())
 
@@ -350,9 +357,9 @@ func TestEncryptedBlobStoreReadsLegacyPlaintextEntryWithEncryptedMagicPrefix(t *
 	require.NoError(t, err)
 	defer encrypted.Close()
 
-	got, err := encrypted.Read(loc)
-	require.NoError(t, err)
-	require.Equal(t, plaintext, got)
+	_, err = encrypted.Read(loc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
 }
 
 func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {
@@ -361,4 +368,27 @@ func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
 	return enc
+}
+
+// TestEncryptedBlobStoreReadsGenuinePlaintext verifies that payload bytes with
+// no magic are still returned as-is when flagEncrypted is not set (legacy
+// unencrypted entries co-existing with an encryptor).
+func TestEncryptedBlobStoreReadsGenuinePlaintext(t *testing.T) {
+	// Write via unencrypted store, read via encrypted store — plaintext must pass through.
+	dir := t.TempDir()
+	plain, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	plaintext := []byte("genuine plaintext, no magic")
+	loc, err := plain.Append("bucket/key-plain", plaintext)
+	require.NoError(t, err)
+	require.NoError(t, plain.Close())
+
+	enc := newPackblobTestEncryptor(t)
+	encrypted, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer encrypted.Close()
+
+	got, err := encrypted.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
 }

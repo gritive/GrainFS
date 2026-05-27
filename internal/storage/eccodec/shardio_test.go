@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -475,6 +476,54 @@ func TestEncryptedShardMultiChunkRoundTrip(t *testing.T) {
 	rangeBuf, err := io.ReadAll(rr)
 	require.NoError(t, err)
 	require.Equal(t, data[rangeOffset:rangeOffset+rangeLen], rangeBuf)
+}
+
+// TestEncryptedShardChunkedWriter_CounterWrapPoisonsWriter verifies Finding 4:
+//
+//  1. Driving the writer to chunkIdx == MaxUint32 causes the NEXT write to
+//     error BEFORE any cipher chunk is sealed (no bytes written to the
+//     underlying buffer for the failing call).
+//  2. After the error the writer is poisoned: a subsequent Write and Close
+//     return the same error without sealing any additional chunk.
+//
+// We inject the near-wrap state directly via the unexported chunkIdx field
+// rather than looping 2^32 times.
+func TestEncryptedShardChunkedWriter_CounterWrapPoisonsWriter(t *testing.T) {
+	enc := testEncryptor(t)
+	aad := []byte("bucket/key/wrap-test")
+
+	var out bytes.Buffer
+	w, err := NewEncryptedShardChunkedWriter(&out, enc, aad, 64)
+	require.NoError(t, err)
+
+	// Inject near-wrap state: chunkIdx == MaxUint32 means the NEXT chunk
+	// would be sealed at index MaxUint32 and then increment to 0 — nonce reuse.
+	// Pre-condition: emit the header first (normal path).
+	require.NoError(t, w.emitHeader())
+	w.headerSent = true
+	w.chunkIdx = math.MaxUint32
+
+	sizeBefore := out.Len()
+
+	// First write to trigger emitChunk at the boundary.
+	chunk := bytes.Repeat([]byte("x"), 64) // exactly chunkSize → triggers flush
+	_, err = w.Write(chunk)
+	require.Error(t, err, "write at MaxUint32 boundary must fail")
+	require.Contains(t, err.Error(), "chunk counter exhausted")
+
+	// No additional bytes should have been written to the underlying buffer.
+	require.Equal(t, sizeBefore, out.Len(), "no cipher bytes must be written after counter exhaustion")
+
+	// Subsequent Write must also return the sticky error.
+	_, err2 := w.Write([]byte("more data"))
+	require.Error(t, err2)
+	require.Equal(t, err.Error(), err2.Error(), "sticky error must be consistent")
+
+	// Closing must return the sticky error too.
+	require.Equal(t, sizeBefore, out.Len(), "buffer must not grow on poisoned Write")
+	err3 := w.Close()
+	require.Error(t, err3)
+	require.Equal(t, err.Error(), err3.Error(), "Close must return the sticky error")
 }
 
 func testEncryptor(t *testing.T) *encrypt.Encryptor {

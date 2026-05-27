@@ -112,6 +112,10 @@ func dataDirHasEntries(path string) bool {
 //   - datawal/        — encrypted WAL records (boot_phases_storage_runtime.go:40)
 //   - blobs/          — packblob, active by default at pack-threshold=65537
 //     (boot_phases_backend.go:48)
+//   - shared-fsm/     — cluster FSM-state BadgerDB with encrypted values
+//     (boot_phases.go:235 bootOpenSharedFSMDB)
+//   - wal/            — logical WAL opened via wal.OpenEncrypted
+//     (boot_phases_forwarders.go:44 bootWALAndForwarders)
 //   - metaDir (= --meta-dir or <dataDir>/meta):
 //   - BadgerDB with encrypted values — the earliest encrypted write on any
 //     deployment (encrypted_badger.go)
@@ -135,6 +139,12 @@ func BulkDataPresent(dataDir string, dataDirs []string, metaDir string) bool {
 		return true
 	}
 	if dataDirHasEntries(filepath.Join(dataDir, "blobs")) {
+		return true
+	}
+	if dataDirHasEntries(filepath.Join(dataDir, "shared-fsm")) {
+		return true
+	}
+	if dataDirHasEntries(filepath.Join(dataDir, "wal")) {
 		return true
 	}
 	return dataDirHasEntries(metaDir)

@@ -97,6 +97,28 @@ func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
 	}))
 }
 
+func TestEncryptedBadgerValueRejectsOldFormatEncrypted(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
+	require.NoError(t, err)
+	defer db.Close()
+
+	enc := testEncryptor(t)
+	key := []byte("obj:bkt/old-format")
+	// Simulate an old-format encrypted value: 0xAE 0xE2 (value magic) + version 0x01 (pre-XAES)
+	oldFormatVal := []byte{0xAE, 0xE2, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, oldFormatVal)
+	}))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
+		return nil
+	}))
+}
+
 func TestEncryptedBadgerValueReadsLegacyPlaintext(t *testing.T) {
 	dir := t.TempDir()
 	db, err := badger.Open(badgerutil.SmallOptions(dir))
