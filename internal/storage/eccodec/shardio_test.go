@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -200,7 +201,7 @@ func TestEncryptedShardChunkedWriter_EmptyShard(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	// Empty shards still emit the 20-byte header so readers can detect the
+	// Empty shards still emit the fixed-size header so readers can detect the
 	// magic and chunk size. No chunk records follow.
 	require.True(t, IsEncryptedShard(out.Bytes()))
 	require.Equal(t, encryptedHeaderLen, out.Len())
@@ -428,6 +429,101 @@ func TestEncryptedShardStream_RejectsOversizedChunkHeader(t *testing.T) {
 	err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, []byte("aad"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid encrypted shard chunk size")
+}
+
+func TestEncryptedShardNonceIs24(t *testing.T) {
+	require.Equal(t, 24, encryptedNonceLen, "XAES-256-GCM requires a 24-byte nonce")
+	require.Equal(t, 20, encryptedNoncePrefixLen, "nonce prefix must be 20 bytes (160-bit random) so prefix+counter = 24")
+}
+
+func TestRejectsPreXAESShard(t *testing.T) {
+	// A byte slice starting with the old GFSENC2 magic must be rejected by
+	// IsEncryptedShard (the new magic is GFSENC3) and by the decode path.
+	oldMagic := []byte("GFSENC2\x00")
+
+	// IsEncryptedShard must return false for the old magic.
+	oldHeader := make([]byte, 32)
+	copy(oldHeader, oldMagic)
+	require.False(t, IsEncryptedShard(oldHeader), "old GFSENC2 magic must not be recognised as a valid encrypted shard")
+
+	// The decode path must return an error, not a mis-decode.
+	enc := testEncryptor(t)
+	err := DecodeEncryptedShard(io.Discard, bytes.NewReader(oldHeader), enc, []byte("aad"))
+	require.Error(t, err, "decode with old GFSENC2 magic must fail")
+}
+
+func TestEncryptedShardMultiChunkRoundTrip(t *testing.T) {
+	enc := testEncryptor(t)
+	// ~3 MiB across multiple 512 KiB chunks to exercise multi-chunk paths.
+	const chunkSize = 512 << 10
+	data := bytes.Repeat([]byte("GrainFS-XAES-nonce-test-"), (3<<20)/24+1)
+	aad := []byte("v3/bucket/key/0")
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, chunkSize))
+	require.True(t, IsEncryptedShard(encoded.Bytes()))
+
+	// Full decode.
+	var got bytes.Buffer
+	require.NoError(t, DecodeEncryptedShard(&got, bytes.NewReader(encoded.Bytes()), enc, aad))
+	require.Equal(t, data, got.Bytes())
+
+	// Sub-range read: skip first chunk, read 200 bytes from the second chunk.
+	const rangeOffset = chunkSize + 100
+	const rangeLen = 200
+	rr, err := NewEncryptedShardRangeReader(bytes.NewReader(encoded.Bytes()), enc, aad, rangeOffset, rangeLen)
+	require.NoError(t, err)
+	rangeBuf, err := io.ReadAll(rr)
+	require.NoError(t, err)
+	require.Equal(t, data[rangeOffset:rangeOffset+rangeLen], rangeBuf)
+}
+
+// TestEncryptedShardChunkedWriter_CounterWrapPoisonsWriter verifies Finding 4:
+//
+//  1. Driving the writer to chunkIdx == MaxUint32 causes the NEXT write to
+//     error BEFORE any cipher chunk is sealed (no bytes written to the
+//     underlying buffer for the failing call).
+//  2. After the error the writer is poisoned: a subsequent Write and Close
+//     return the same error without sealing any additional chunk.
+//
+// We inject the near-wrap state directly via the unexported chunkIdx field
+// rather than looping 2^32 times.
+func TestEncryptedShardChunkedWriter_CounterWrapPoisonsWriter(t *testing.T) {
+	enc := testEncryptor(t)
+	aad := []byte("bucket/key/wrap-test")
+
+	var out bytes.Buffer
+	w, err := NewEncryptedShardChunkedWriter(&out, enc, aad, 64)
+	require.NoError(t, err)
+
+	// Inject near-wrap state: chunkIdx == MaxUint32 means the NEXT chunk
+	// would be sealed at index MaxUint32 and then increment to 0 — nonce reuse.
+	// Pre-condition: emit the header first (normal path).
+	require.NoError(t, w.emitHeader())
+	w.headerSent = true
+	w.chunkIdx = math.MaxUint32
+
+	sizeBefore := out.Len()
+
+	// First write to trigger emitChunk at the boundary.
+	chunk := bytes.Repeat([]byte("x"), 64) // exactly chunkSize → triggers flush
+	_, err = w.Write(chunk)
+	require.Error(t, err, "write at MaxUint32 boundary must fail")
+	require.Contains(t, err.Error(), "chunk counter exhausted")
+
+	// No additional bytes should have been written to the underlying buffer.
+	require.Equal(t, sizeBefore, out.Len(), "no cipher bytes must be written after counter exhaustion")
+
+	// Subsequent Write must also return the sticky error.
+	_, err2 := w.Write([]byte("more data"))
+	require.Error(t, err2)
+	require.Equal(t, err.Error(), err2.Error(), "sticky error must be consistent")
+
+	// Closing must return the sticky error too.
+	require.Equal(t, sizeBefore, out.Len(), "buffer must not grow on poisoned Write")
+	err3 := w.Close()
+	require.Error(t, err3)
+	require.Equal(t, err.Error(), err3.Error(), "Close must return the sticky error")
 }
 
 func testEncryptor(t *testing.T) *encrypt.Encryptor {

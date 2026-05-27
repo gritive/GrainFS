@@ -3,6 +3,7 @@ module github.com/gritive/GrainFS
 go 1.26.3
 
 require (
+	filippo.io/xaes256gcm v0.1.0
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16

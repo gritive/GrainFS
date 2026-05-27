@@ -408,7 +408,7 @@ func readFullAt(f *os.File, buf []byte, off *int64) error {
 }
 
 func (bs *BlobStore) skipReadCRC(flags byte) bool {
-	// AES-GCM authenticates encrypted blob entries, including key, blob id,
+	// XAES-256-GCM authenticates encrypted blob entries, including key, blob id,
 	// offset, and flags via AAD. Recomputing CRC32 over the ciphertext on every
 	// GET duplicates that integrity check on the hot path.
 	return bs.encryptor != nil && flags&flagEncrypted != 0
@@ -739,6 +739,9 @@ func encryptedFlagCandidates(flags byte) []byte {
 
 func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, payload []byte) ([]byte, error) {
 	if bs.encryptor == nil {
+		if encrypt.IsLegacyEncryptedValue(payload) {
+			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
+		}
 		return payload, nil
 	}
 	if flags&flagEncrypted != 0 {
@@ -749,6 +752,9 @@ func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, fla
 		return plain, nil
 	}
 	if !encrypt.IsEncryptedValue(payload) {
+		if encrypt.IsLegacyEncryptedValue(payload) {
+			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
+		}
 		return payload, nil
 	}
 	if err := bs.rejectEncryptedFlagDowngrade(blobID, offset, key, flags, payload); err != nil {

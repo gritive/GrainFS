@@ -24,9 +24,9 @@ type StripePlaintext struct {
 
 // EncryptedShardChunk is what CPUPool emits to DriveActor.
 //
-// Ciphertext is GFSENC2-formatted bytes ready to append to the shard's
-// tmp file. The first chunk for a (PutID, ShardIdx) carries the 20-byte
-// GFSENC2 header; subsequent chunks carry only chunk-frame bytes.
+// Ciphertext is GFSENC3-formatted bytes ready to append to the shard's
+// tmp file. The first chunk for a (PutID, ShardIdx) carries the
+// GFSENC3 header; subsequent chunks carry only chunk-frame bytes.
 type EncryptedShardChunk struct {
 	PutID      uint64
 	StripeIdx  uint32

@@ -792,6 +792,9 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 		if encrypt.IsEncryptedBlob(data) {
 			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 		}
+		if encrypt.IsLegacyEncryptedBlob(data) {
+			return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
+		}
 		return data, nil
 	}
 	decrypted, err := s.encryptor.DecryptWithAAD(data, aad)
@@ -1640,6 +1643,9 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 	}
 	if s.encryptor != nil {
 		if !encrypt.IsEncryptedBlob(data) {
+			if encrypt.IsLegacyEncryptedBlob(data) {
+				return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
+			}
 			if decodedEncoded {
 				return data, nil
 			}
@@ -1657,6 +1663,9 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 	}
 	if encrypt.IsEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+	}
+	if encrypt.IsLegacyEncryptedBlob(data) {
+		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
 	}
 	return data, nil
 }
@@ -1684,6 +1693,9 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, aad []byte) ([]byte, er
 	}
 	if s.encryptor != nil {
 		if !encrypt.IsEncryptedBlob(data) {
+			if encrypt.IsLegacyEncryptedBlob(data) {
+				return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
+			}
 			if decodedEncoded {
 				return data, nil
 			}
@@ -1702,7 +1714,33 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, aad []byte) ([]byte, er
 	if encrypt.IsEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 	}
+	if encrypt.IsLegacyEncryptedBlob(data) {
+		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
+	}
 	return data, nil
+}
+
+// crcShardMagicLen is the length of the eccodec CRC envelope magic
+// ("GFSCRC1\x00"); the inner payload (and thus any inner blob magic) begins at
+// this byte offset within a GFSCRC1-encoded shard file.
+const crcShardMagicLen = 8
+
+// rejectLegacyEncodedShardBlob peeks the 2 inner-payload bytes of a
+// GFSCRC1-encoded shard (at file offset crcShardMagicLen) and returns a loud
+// error if they are the exact pre-XAES EncryptWithAAD blob magic (0xAE 0xE1).
+// The streaming/range fast-paths hand back a reader over the CRC payload
+// without ever decrypting, so without this guard an old encrypted single-blob
+// shard would be streamed out as raw "plaintext" (silent corruption). A short
+// read (shard smaller than the 2-byte probe) is not legacy data, so it passes.
+func rejectLegacyEncodedShardBlob(r io.ReaderAt) error {
+	var inner [2]byte
+	if _, err := r.ReadAt(inner[:], crcShardMagicLen); err != nil {
+		return nil // too short to carry the 2-byte legacy magic → not legacy
+	}
+	if encrypt.IsLegacyEncryptedBlob(inner[:]) {
+		return fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
+	}
+	return nil
 }
 
 // OpenLocalShard opens a local shard as plaintext. New chunked encrypted shards
@@ -1750,6 +1788,10 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 		}}, nil
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
+		if err := rejectLegacyEncodedShardBlob(f); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
@@ -1827,6 +1869,9 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 		return n, nil
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
+		if err := rejectLegacyEncodedShardBlob(f); err != nil {
+			return 0, err
+		}
 		info, err := f.Stat()
 		if err != nil {
 			return 0, err
@@ -1911,6 +1956,10 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 		return &multiReadCloser{Reader: r, close: closeFn}, nil
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
+		if err := rejectLegacyEncodedShardBlob(f); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()

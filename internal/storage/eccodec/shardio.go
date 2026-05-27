@@ -21,6 +21,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -55,7 +56,7 @@ func IsCorruption(err error) bool {
 const footerLen = 4
 
 var shardMagic = []byte("GFSCRC1\x00")
-var encryptedShardMagic = []byte("GFSENC2\x00")
+var encryptedShardMagic = []byte("GFSENC3\x00")
 
 var (
 	encryptedPlainChunkPool = sync.Pool{New: func() any {
@@ -71,10 +72,12 @@ var (
 const (
 	DefaultEncryptedChunkSize = 1 << 20
 	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
-	encryptedNoncePrefixLen   = 8
-	encryptedNonceLen         = 12
-	encryptedHeaderLen        = 8 + 4 + encryptedNoncePrefixLen
-	encryptedChunkHeaderLen   = 8
+	// XAES-256-GCM nonce = 20-byte random prefix || 4-byte big-endian chunk counter.
+	// 160-bit random prefix → ~2^80 cross-shard collision bound.
+	encryptedNoncePrefixLen = 20
+	encryptedNonceLen       = 24 // prefix + counter
+	encryptedHeaderLen      = 8 + 4 + encryptedNoncePrefixLen
+	encryptedChunkHeaderLen = 8
 )
 
 // IsEncodedShard reports whether raw bytes carry the current eccodec magic.
@@ -191,7 +194,7 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	}
 }
 
-// EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC2
+// EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC3
 // on-disk format. Bytes passed to Write are buffered until chunkSize is
 // reached, then emitted as a single encrypted chunk (8-byte chunk header +
 // AEAD-sealed payload). Close flushes any pending bytes as a final partial
@@ -215,6 +218,10 @@ type EncryptedShardChunkedWriter struct {
 	cipherBuf   []byte // reused cipher scratch
 	cipherPtr   *[]byte
 	closed      bool
+	// stickyErr is set when a permanent error (counter wrap, I/O fault) occurs.
+	// Any subsequent Write or Close returns this error without sealing further
+	// chunks, preventing nonce reuse after a chunk-counter wrap.
+	stickyErr error
 }
 
 // NewEncryptedShardChunkedWriter constructs a streaming writer that produces
@@ -260,6 +267,9 @@ func (w *EncryptedShardChunkedWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, fmt.Errorf("encrypted shard chunked writer: write after close")
 	}
+	if w.stickyErr != nil {
+		return 0, w.stickyErr
+	}
 	if !w.headerSent {
 		if err := w.emitHeader(); err != nil {
 			return 0, err
@@ -291,6 +301,11 @@ func (w *EncryptedShardChunkedWriter) Close() error {
 	if w.closed {
 		return nil
 	}
+	if w.stickyErr != nil {
+		w.closed = true
+		w.releasePools()
+		return w.stickyErr
+	}
 	w.closed = true
 	defer w.releasePools()
 	if !w.headerSent {
@@ -319,6 +334,15 @@ func (w *EncryptedShardChunkedWriter) emitHeader() error {
 }
 
 func (w *EncryptedShardChunkedWriter) emitChunk() error {
+	// Guard against chunk-counter wrap BEFORE sealing: sealing at chunkIdx
+	// math.MaxUint32 would produce nonce[prefix||0xFFFFFFFF], and the next
+	// call (if we incremented past it) would reuse nonce[prefix||0x00000000]
+	// — nonce reuse under XAES-256-GCM is catastrophic. Refuse early and
+	// poison the writer so no further chunk can be sealed.
+	if w.chunkIdx == math.MaxUint32 {
+		w.stickyErr = fmt.Errorf("encrypted shard chunk counter exhausted (2^32-1); refusing to seal chunk to prevent nonce reuse")
+		return w.stickyErr
+	}
 	nonce := encryptedChunkNonce(w.noncePrefix, w.chunkIdx)
 	aad := encryptedChunkAAD(w.aadBase, w.chunkIdx)
 	ciphertext, err := w.enc.SealWithNonceAAD(w.cipherBuf[:0], nonce[:], w.plainBuf, aad)
@@ -336,9 +360,8 @@ func (w *EncryptedShardChunkedWriter) emitChunk() error {
 		return fmt.Errorf("write shard chunk: %w", err)
 	}
 	w.chunkIdx++
-	if w.chunkIdx == 0 {
-		return fmt.Errorf("encrypted shard has too many chunks")
-	}
+	// The counter can no longer wrap to zero: the MaxUint32 guard above
+	// prevents sealing that last index, so chunkIdx == 0 here is unreachable.
 	w.plainBuf = w.plainBuf[:0]
 	return nil
 }
@@ -373,7 +396,7 @@ func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	return nil
 }
 
-// NewEncryptedShardReader returns a reader that decrypts a GFSENC2 shard one
+// NewEncryptedShardReader returns a reader that decrypts a GFSENC3 shard one
 // chunk at a time. The encrypted header is consumed before the reader is
 // returned; chunk authentication failures are reported by Read.
 func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte) (io.Reader, error) {
@@ -410,7 +433,7 @@ func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte
 }
 
 // NewEncryptedShardRangeReader returns a plaintext reader for [offset,
-// offset+length) without decrypting earlier chunks. It requires the GFSENC2
+// offset+length) without decrypting earlier chunks. It requires the GFSENC3
 // fixed chunk layout produced by EncodeEncryptedShard.
 func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, offset, length int64) (io.Reader, error) {
 	if enc == nil {

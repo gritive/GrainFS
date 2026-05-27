@@ -17,7 +17,7 @@ import (
 //     internal/storage/bucket.go; the pipeline's ETag hashing therefore
 //     never has to branch on bucket class.
 //   - All placement targets are local (single-node deployment)
-//   - An encryptor is wired (the pipeline writes GFSENC2 only)
+//   - An encryptor is wired (the pipeline writes GFSENC3 only)
 //   - The request is not a multipart part (multipart goes through its
 //     own code path)
 //

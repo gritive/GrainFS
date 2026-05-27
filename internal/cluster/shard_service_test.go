@@ -296,6 +296,81 @@ func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 	require.ErrorIs(t, err, eccodec.ErrCRCMismatch)
 }
 
+// writeLegacyEncodedShard writes a GFSCRC1-encoded shard whose inner payload is
+// a pre-XAES EncryptWithAAD blob (0xAE 0xE1 magic). Such a shard would be
+// streamed back as raw "plaintext" by the CRC fast-paths absent the legacy
+// guard. Returns the on-disk shard path.
+func writeLegacyEncodedShard(t *testing.T, svc *ShardService, bucket, key string, shardIdx int) string {
+	t.Helper()
+	// Inner payload carries the exact old EncryptWithAAD blob magic.
+	legacyBlob := append([]byte{0xAE, 0xE1}, bytes.Repeat([]byte("legacy-cipher"), 64)...)
+	encoded := eccodec.EncodeShard(legacyBlob)
+	path := svc.getShardPath(bucket, key, shardIdx)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, encoded, 0o644))
+	return path
+}
+
+// TestShardService_ReadPaths_RejectLegacyEncodedBlob verifies Finding A: every
+// CRC read fast-path loud-fails when the CRC-decoded payload carries the exact
+// pre-XAES blob magic (0xAE 0xE1) rather than silently returning it as
+// plaintext.
+func TestShardService_ReadPaths_RejectLegacyEncodedBlob(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte("k"), 32))
+	require.NoError(t, err)
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
+	writeLegacyEncodedShard(t, svc, "bkt", "obj", 0)
+
+	const wantMsg = "unsupported/old encrypted-blob format"
+
+	t.Run("ReadLocalShard", func(t *testing.T) {
+		_, err := svc.ReadLocalShard("bkt", "obj", 0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), wantMsg)
+	})
+
+	t.Run("OpenLocalShard", func(t *testing.T) {
+		_, err := svc.OpenLocalShard("bkt", "obj", 0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), wantMsg)
+	})
+
+	t.Run("ReadLocalShardAt", func(t *testing.T) {
+		buf := make([]byte, 8)
+		_, err := svc.ReadLocalShardAt("bkt", "obj", 0, 0, buf)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), wantMsg)
+	})
+
+	t.Run("OpenLocalShardRange", func(t *testing.T) {
+		_, err := svc.OpenLocalShardRange("bkt", "obj", 0, 0, 8)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), wantMsg)
+	})
+}
+
+// TestShardService_ReadPaths_GenuinePlaintextStillPasses verifies that a
+// CRC-encoded shard with a genuine-plaintext payload (no legacy magic) is still
+// returned as-is by the read fast-paths when no encryptor is wired.
+func TestShardService_ReadPaths_GenuinePlaintextStillPasses(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
+
+	plaintext := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+
+	buf := make([]byte, 8)
+	n, err := svc.ReadLocalShardAt("bkt", "obj", 0, 10, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, "abcdefgh", string(buf))
+}
+
 func TestShardService_ReadLocalShardAt_EncodedShard(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), withTestWAL(t))
