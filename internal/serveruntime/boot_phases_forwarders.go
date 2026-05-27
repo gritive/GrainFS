@@ -142,7 +142,8 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	// state.kekStore; the verifier is keyed by the local KEK so VerifyResponse
 	// passes iff the joiner holds the same KEK.
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
-		WithHandshakeVerifier(state.handshakeVerifier)
+		WithHandshakeVerifier(state.handshakeVerifier).
+		WithBootstrapSecretProvider(newBootstrapSecretProvider(state))
 	if state.handshakeVerifier != nil {
 		metaJoinReceiver = metaJoinReceiver.WithClusterID(state.handshakeVerifier.ClusterID())
 	}

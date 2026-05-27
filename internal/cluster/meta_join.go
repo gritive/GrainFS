@@ -72,6 +72,18 @@ type JoinReply struct {
 	PeerSPKIs [][]byte `json:"peer_spkis,omitempty"`
 }
 
+// BootstrapSecretProvider supplies the SECRET plaintext the invite handler
+// seals to a joiner. Defined at the consuming use-site per repo convention;
+// implemented by serveruntime over bootState. cluster.id is intentionally NOT
+// included here — it is public and carried in the InviteBundle. KEKGen is the
+// type already defined in bootstrap_codec.go (W2).
+type BootstrapSecretProvider interface {
+	// BootstrapSecrets returns the SECRET plaintext to seal: the static
+	// encryption.key bytes, EVERY KEK generation in the KEKStore, and the
+	// transport PSK. cluster.id is NOT included (public, in the InviteBundle).
+	BootstrapSecrets() (encryptionKey []byte, kekGens []KEKGen, transportPSK []byte, err error)
+}
+
 type metaJoinDialer func(peer string, payload []byte) ([]byte, error)
 
 type MetaJoinSender struct {
@@ -145,6 +157,10 @@ type MetaJoinReceiver struct {
 	// transcript on the receiver side (sourced from the KEK verifier at boot).
 	// The invite gate requires it to be non-empty.
 	clusterID []byte
+	// secretProvider supplies the bootstrap secrets (encryption.key, all KEK
+	// generations, transport PSK) the invite handler seals to a joiner. Wired
+	// here in W3; consumed by the seal/handler logic in a later task (W7).
+	secretProvider BootstrapSecretProvider
 }
 
 func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
@@ -161,6 +177,15 @@ func (r *MetaJoinReceiver) WithPostJoinHook(fn func(context.Context, JoinRequest
 // MetaChallengeReceiver so the issued-nonce map is shared. §7 T55 (D#15, F#23).
 func (r *MetaJoinReceiver) WithHandshakeVerifier(v *encrypt.HandshakeVerifier) *MetaJoinReceiver {
 	r.verifier = v
+	return r
+}
+
+// WithBootstrapSecretProvider installs the provider that assembles the secret
+// plaintext (encryption.key, KEK generations, transport PSK) the invite handler
+// seals to a joiner. Wired at boot; the seal logic that calls
+// BootstrapSecrets() lands in a later task.
+func (r *MetaJoinReceiver) WithBootstrapSecretProvider(p BootstrapSecretProvider) *MetaJoinReceiver {
+	r.secretProvider = p
 	return r
 }
 

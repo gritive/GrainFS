@@ -54,7 +54,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
 	// 4. Encryption key + IAMApplier.
-	shardEncryptor, err := LoadOrCreateEncryptionKey(
+	shardEncryptor, rawEncryptionKey, err := LoadOrCreateEncryptionKeyWithRaw(
 		opts.EncryptionKeyFile,
 		opts.DataDir,
 		AllowAutoGenerateEncryptionKey(opts.DataDir, opts.RaftAddr),
@@ -106,6 +106,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 
 	// 8. Build Config from options.
 	cfg := optionsToConfig(opts, addr, authOpts, shardEncryptor, iamStore, iamApplier)
+	cfg.RawEncryptionKey = rawEncryptionKey
 
 	// 9. Delegate to existing Run.
 	return Run(ctx, cfg)

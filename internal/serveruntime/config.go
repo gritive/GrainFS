@@ -36,6 +36,11 @@ type Config struct {
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts  []server.Option
 	Encryptor *encrypt.Encryptor
+	// RawEncryptionKey is the raw bytes of the static encryption.key, captured
+	// alongside Encryptor by LoadOrCreateEncryptionKeyWithRaw. Threaded onto
+	// bootState (via cfg) so the zero-CA bootstrap-secret provider can seal the
+	// encryption key to an invite-joining node. Nil when encryption is unwired.
+	RawEncryptionKey []byte
 
 	// IAM (Phase 2): store + applier for cluster IAM state. Both nil in
 	// fully unwired (test/legacy) configurations; cmd/grainfs/serve.go
