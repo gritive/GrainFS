@@ -23,7 +23,25 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
+
+// kindLabel maps an ECShardKind to its metric label. Any unrecognized or zero
+// value returns the literal "unknown" — never panics, never returns empty.
+func kindLabel(k ECShardKind) string {
+	switch k {
+	case ECShardObjectVersion:
+		return "object_version"
+	case ECShardSegment:
+		return "segment"
+	case ECShardCoalesced:
+		return "coalesced"
+	default:
+		return "unknown"
+	}
+}
 
 // ShardPlacementMonitor watches local shard placements and reports missing
 // shards. Zero value is not usable — call NewShardPlacementMonitor.
@@ -196,11 +214,20 @@ func (m *ShardPlacementMonitor) scanRecord(ctx context.Context, t ECShardScanTar
 				}
 				continue
 			}
-			// Non-ENOENT read error — log but don't count as missing (could be
-			// a transient I/O issue; a future scan will catch persistent corruption).
-			m.logger.Warn().Str("bucket", t.Bucket).Str("key", shardKey).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
-			if m.onCorrupt != nil {
-				*corrupt = append(*corrupt, pendingCorruptShard{target: t, shardIdx: shardIdx, err: rerr})
+			// Non-ENOENT read error — classify before deciding what to do.
+			if eccodec.IsCorruption(rerr) {
+				// Confirmed on-disk content corruption (CRC mismatch, structural
+				// decode failure, truncation, AEAD auth failure) → quarantine.
+				m.logger.Warn().Str("bucket", t.Bucket).Str("key", shardKey).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
+				if m.onCorrupt != nil {
+					*corrupt = append(*corrupt, pendingCorruptShard{target: t, shardIdx: shardIdx, err: rerr})
+				}
+			} else {
+				// Transient I/O (EIO/EMFILE/permission/unknown) → node-health
+				// issue, NOT corruption. Log + meter + skip; the next scan
+				// retries. Never quarantine on transient errors.
+				m.logger.Debug().Str("bucket", t.Bucket).Str("key", shardKey).Int("shard_idx", shardIdx).Err(rerr).Msg("transient shard read error during scan — skipping (not quarantining)")
+				metrics.PlacementMonitorTransientReadError.WithLabelValues(kindLabel(t.Kind)).Inc()
 			}
 		}
 	}

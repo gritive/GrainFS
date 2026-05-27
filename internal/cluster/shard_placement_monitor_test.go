@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -237,69 +239,48 @@ func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {
 	assert.Contains(t, err.Error(), "shard service not configured")
 }
 
-func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("chmod 000 has no effect as root")
+// seedCorruptShardKind seeds an object of the given ECShardKind with self as
+// shard-0 owner, writes the local shard, then flips its trailing CRC byte so
+// ReadLocalShard returns an eccodec.IsCorruption error. Returns the expected
+// scan target. Plaintext ShardService (nil encryptor) → plain CRC footer, so a
+// trailing-byte flip breaks the CRC deterministically.
+func seedCorruptShardKind(t *testing.T, backend *DistributedBackend, fsm *FSM, svc *ShardService, dir, self string, kind ECShardKind) ECShardScanTarget {
+	t.Helper()
+	nodes := []string{self, "node-B", "node-C"}
+	var shardKey string
+	var target ECShardScanTarget
+	switch kind {
+	case ECShardObjectVersion:
+		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket: "b", Key: "obj", VersionID: "v1", Size: 10,
+			ContentType: "application/octet-stream", ETag: "etag", ModTime: 1,
+			ECData: 2, ECParity: 1, NodeIDs: nodes,
+		})
+		require.NoError(t, err)
+		require.NoError(t, fsm.Apply(raw))
+		shardKey = "obj/v1"
+		// Object-version targets carry raw object EC fields; the placement is
+		// resolved separately and is NOT echoed back on the target, so the
+		// target's Placement field stays zero-valued here.
+		target = ECShardScanTarget{Kind: ECShardObjectVersion, Bucket: "b", ObjectKey: "obj", VersionID: "v1", ECData: 2, ECParity: 1, NodeIDs: nodes}
+	case ECShardSegment:
+		seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+			ECData: 2, ECParity: 1, NodeIDs: nodes,
+			Segments: []storage.SegmentRef{{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: nodes}},
+		})
+		shardKey = "chunked/segments/seg-ok"
+		target = ECShardScanTarget{Kind: ECShardSegment, Bucket: "b", ObjectKey: "chunked", VersionID: "cv1", ShardKey: shardKey, Placement: PlacementRecord{Nodes: nodes, K: 2, M: 1}}
+	case ECShardCoalesced:
+		seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+			ECData: 2, ECParity: 1, NodeIDs: nodes,
+			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", ShardKey: "chunked/coalesced/c1", ECData: 2, ECParity: 1, NodeIDs: nodes}},
+		})
+		shardKey = "chunked/coalesced/c1"
+		target = ECShardScanTarget{Kind: ECShardCoalesced, Bucket: "b", ObjectKey: "chunked", VersionID: "cv1", ShardKey: shardKey, Placement: PlacementRecord{Nodes: nodes, K: 2, M: 1}}
 	}
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
-	svc, dir := newTestShardService(t)
 
-	const self = "node-A"
-	// Seed an EC segment object with self as shard-0 owner.
-	segNodes := []string{self, "node-B", "node-C"}
-	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
-		ECData: 2, ECParity: 1, NodeIDs: segNodes,
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-0", ECData: 2, ECParity: 1, NodeIDs: segNodes},
-		},
-	})
-
-	// Write the shard then make it unreadable (permission error, not ENOENT).
-	// ShardKey for segment: "obj/segments/seg-0"; path: dir/shards/b/obj/segments/seg-0/shard_0
-	require.NoError(t, svc.WriteLocalShard("b", "obj/segments/seg-0", 0, []byte("data")))
-	shardPath := dir + "/shards/b/obj/segments/seg-0/shard_0"
-	require.NoError(t, os.Chmod(shardPath, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(shardPath, 0o600) })
-
-	// Non-ENOENT error: shard exists on disk but is unreadable.
-	// Scan must not count it as "missing" and must invoke onCorrupt.
-	corruptCalled := 0
-	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
-	monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, err error) {
-		corruptCalled++
-	})
-	missing, err := monitor.Scan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, 0, missing, "unreadable (non-ENOENT) shard must not count as missing")
-	assert.Equal(t, 1, corruptCalled, "non-ENOENT shard error must invoke onCorrupt")
-}
-
-func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
-	svc, dir := newTestShardService(t)
-
-	const self = "node-A"
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "obj",
-		VersionID:   "v1",
-		Size:        10,
-		ContentType: "application/octet-stream",
-		ETag:        "etag",
-		ModTime:     1,
-		ECData:      2,
-		ECParity:    1,
-		NodeIDs:     []string{self, "node-B", "node-C"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
-	require.NoError(t, svc.WriteLocalShard("b", "obj/v1", 0, []byte("payload")))
-
-	shardPath := dir + "/shards/b/obj/v1/shard_0"
+	require.NoError(t, svc.WriteLocalShard("b", shardKey, 0, []byte("payload")))
+	shardPath := dir + "/shards/b/" + shardKey + "/shard_0"
 	f, err := os.OpenFile(shardPath, os.O_RDWR, 0)
 	require.NoError(t, err)
 	_, err = f.Seek(-1, io.SeekEnd)
@@ -307,18 +288,109 @@ func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 	_, err = f.Write([]byte{0xff})
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
+	return target
+}
 
-	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
-	var reported []string
-	monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, err error) {
-		reported = append(reported, fmtShardRef(target.Bucket, target.ObjectKey+"/"+target.VersionID, shardIdx))
-		require.Error(t, err)
-	})
+// Confirmed on-disk corruption (CRC mismatch) → quarantine path (onCorrupt
+// fires) and the transient-read-error metric does NOT increment. Table-driven
+// over all three ECShardKind so corruption classification + routing is covered
+// for each kind.
+func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
+	cases := []struct {
+		name string
+		kind ECShardKind
+	}{
+		{"object_version", ECShardObjectVersion},
+		{"segment", ECShardSegment},
+		{"coalesced", ECShardCoalesced},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			fsm := NewFSM(db, newStateKeyspaceEmpty())
+			backend := &DistributedBackend{db: db, fsm: fsm}
+			svc, dir := newTestShardService(t)
+			const self = "node-A"
 
-	missing, err := monitor.Scan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, 0, missing)
-	assert.Equal(t, []string{"b/obj/v1/0"}, reported)
+			want := seedCorruptShardKind(t, backend, fsm, svc, dir, self, tc.kind)
+
+			metricBefore := testutil.ToFloat64(metrics.PlacementMonitorTransientReadError.WithLabelValues(kindLabel(tc.kind)))
+
+			monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+			var reported []ECShardScanTarget
+			var reportedIdx []int
+			monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, cerr error) {
+				reported = append(reported, target)
+				reportedIdx = append(reportedIdx, shardIdx)
+				require.Error(t, cerr)
+			})
+
+			missing, err := monitor.Scan(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, 0, missing, "corrupt (non-ENOENT) shard must not count as missing")
+			require.Len(t, reported, 1, "confirmed corruption must invoke onCorrupt (quarantine)")
+			assert.Equal(t, []int{0}, reportedIdx)
+			assert.Equal(t, want, reported[0])
+
+			metricAfter := testutil.ToFloat64(metrics.PlacementMonitorTransientReadError.WithLabelValues(kindLabel(tc.kind)))
+			assert.Equal(t, metricBefore, metricAfter, "corruption must NOT increment the transient-read-error metric")
+		})
+	}
+}
+
+// A non-ENOENT, non-corruption read error (the shard file replaced by a
+// directory → EISDIR, deterministic regardless of uid) is a transient/node-
+// health fault: onCorrupt must NOT fire (no quarantine), the shard is skipped,
+// and PlacementMonitorTransientReadError increments by exactly 1 for the kind's
+// label. Table-driven over all three ECShardKind so kindLabel routing is
+// verified per kind.
+func TestShardPlacementMonitor_Scan_TransientReadError(t *testing.T) {
+	cases := []struct {
+		name string
+		kind ECShardKind
+	}{
+		{"object_version", ECShardObjectVersion},
+		{"segment", ECShardSegment},
+		{"coalesced", ECShardCoalesced},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			fsm := NewFSM(db, newStateKeyspaceEmpty())
+			backend := &DistributedBackend{db: db, fsm: fsm}
+			svc, dir := newTestShardService(t)
+			const self = "node-A"
+
+			// Reuse the corrupt-seeding to lay down the object metadata + shard,
+			// then replace the shard FILE with a DIRECTORY of the same name so
+			// os.Open succeeds but the read fails with EISDIR — a transient
+			// error, not corruption, and not ENOENT.
+			want := seedCorruptShardKind(t, backend, fsm, svc, dir, self, tc.kind)
+			shardKey := want.ShardKey
+			if tc.kind == ECShardObjectVersion {
+				shardKey = "obj/v1"
+			}
+			shardPath := dir + "/shards/b/" + shardKey + "/shard_0"
+			require.NoError(t, os.Remove(shardPath))
+			require.NoError(t, os.Mkdir(shardPath, 0o755))
+
+			metricBefore := testutil.ToFloat64(metrics.PlacementMonitorTransientReadError.WithLabelValues(kindLabel(tc.kind)))
+
+			corruptCalled := 0
+			monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+			monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, err error) {
+				corruptCalled++
+			})
+
+			missing, err := monitor.Scan(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, 0, missing, "transient (non-ENOENT) shard error must not count as missing")
+			assert.Equal(t, 0, corruptCalled, "transient error must NOT invoke onCorrupt (no quarantine)")
+
+			metricAfter := testutil.ToFloat64(metrics.PlacementMonitorTransientReadError.WithLabelValues(kindLabel(tc.kind)))
+			assert.Equal(t, float64(1), metricAfter-metricBefore, "transient read error must increment the metric by 1 for the kind label")
+		})
+	}
 }
 
 // A chunked object with an EC segment whose local shard (held by this node) is
@@ -407,61 +479,6 @@ func TestShardPlacementMonitor_Scan_DetectsMissingCoalescedShard(t *testing.T) {
 		VersionID: "cv1",
 		ShardKey:  "chunked/coalesced/c1",
 		Placement: PlacementRecord{Nodes: coalNodes, K: 2, M: 1},
-	}, reported[0])
-}
-
-// A chunked object with an EC segment whose local shard exists on disk but is
-// unreadable (non-ENOENT error) must surface via onCorrupt carrying the
-// ECShardSegment target. Reuses the corruption mechanism from the
-// object-version corrupt test (flip the last byte so the integrity check fails).
-func TestShardPlacementMonitor_Scan_ReportsCorruptSegmentShard(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
-	svc, dir := newTestShardService(t)
-
-	const self = "node-A"
-	segNodes := []string{self, "node-B", "node-C"}
-	seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
-		ECData: 2, ECParity: 1, NodeIDs: segNodes,
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: segNodes},
-		},
-	})
-
-	// Write the segment shard, then corrupt its trailing byte so ReadLocalShard
-	// fails with a non-ENOENT integrity error. ShardKey is "chunked/segments/seg-ok".
-	require.NoError(t, svc.WriteLocalShard("b", "chunked/segments/seg-ok", 0, []byte("payload")))
-	shardPath := dir + "/shards/b/chunked/segments/seg-ok/shard_0"
-	f, err := os.OpenFile(shardPath, os.O_RDWR, 0)
-	require.NoError(t, err)
-	_, err = f.Seek(-1, io.SeekEnd)
-	require.NoError(t, err)
-	_, err = f.Write([]byte{0xff})
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-
-	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
-	var reported []ECShardScanTarget
-	var reportedIdx []int
-	monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, cerr error) {
-		reported = append(reported, target)
-		reportedIdx = append(reportedIdx, shardIdx)
-		require.Error(t, cerr)
-	})
-
-	missing, err := monitor.Scan(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, 0, missing, "corrupt (non-ENOENT) shard must not count as missing")
-	require.Len(t, reported, 1)
-	assert.Equal(t, []int{0}, reportedIdx)
-	assert.Equal(t, ECShardScanTarget{
-		Kind:      ECShardSegment,
-		Bucket:    "b",
-		ObjectKey: "chunked",
-		VersionID: "cv1",
-		ShardKey:  "chunked/segments/seg-ok",
-		Placement: PlacementRecord{Nodes: segNodes, K: 2, M: 1},
 	}, reported[0])
 }
 

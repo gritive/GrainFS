@@ -211,10 +211,11 @@ var (
 	// PlacementMonitorTransientReadError counts non-ENOENT shard reads during a
 	// placement scan that were classified as transient (skipped, not
 	// quarantined); a sustained rate indicates node disk/FD health (EIO/EMFILE),
-	// not object corruption. The "kind" label is "segment" or "coalesced".
+	// not object corruption. The "kind" label is 'object_version', 'segment',
+	// 'coalesced', or 'unknown'.
 	PlacementMonitorTransientReadError = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_placement_monitor_transient_read_error_total",
-		Help: "Counts non-ENOENT shard reads during placement scan that were classified as transient (skipped, not quarantined); a sustained rate indicates node disk/FD health (EIO/EMFILE), not object corruption.",
+		Help: "Counts non-ENOENT shard reads during placement scan that were classified as transient (skipped, not quarantined); a sustained rate indicates node disk/FD health (EIO/EMFILE), not object corruption. The 'kind' label is 'object_version', 'segment', 'coalesced', or 'unknown'.",
 	}, []string{"kind"})
 
 	// DiskUsedPct tracks local disk usage percentage per node.
