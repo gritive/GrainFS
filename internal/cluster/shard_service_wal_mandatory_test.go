@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
@@ -16,7 +17,7 @@ import (
 // ShardService's encryptor (nil for plaintext) to avoid segment mode mismatch.
 func mustTestDataWAL(tb clusterTestTB, dir string, enc *encrypt.Encryptor) DataWALAppender {
 	tb.Helper()
-	w, err := datawal.Open(filepath.Join(dir, "datawal"), enc)
+	w, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = w.Close() })
 	return w

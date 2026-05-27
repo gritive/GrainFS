@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
@@ -21,7 +22,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 	// WAL must live where RecoverDataWAL replays from: filepath.Dir(dataDirs[0])
 	// == shardDir (dataDirs[0] is shardDir/shards). withTestWAL would NOT work.
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(shardDir, nil, WithEncryptor(enc), WithDataWAL(dwal), WithDataWALRepairSink(collector))
@@ -94,7 +95,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.
 	// WAL must live where RecoverDataWAL replays from: filepath.Dir(dataDirs[0])
 	// == shardDir (dataDirs[0] is shardDir/shards).
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(shardDir, nil, WithEncryptor(enc), WithDataWAL(dwal), WithDataWALRepairSink(collector))
@@ -300,7 +301,7 @@ func firstSegmentShardKeyOnDisk(t *testing.T, svc *ShardService) string {
 func TestDataWALStartupRepair_DiscoversAndRepairsMissingCoalescedShard(t *testing.T) {
 	shardDir := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(shardDir, nil, WithEncryptor(enc), WithDataWAL(dwal), WithDataWALRepairSink(collector))

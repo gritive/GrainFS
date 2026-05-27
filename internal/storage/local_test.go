@@ -165,7 +165,7 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 func TestLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	dwal, err := datawal.Open(filepath.Join(root, "datawal"), nil)
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), nil, "datawal")
 	require.NoError(t, err)
 
 	b, err := NewLocalBackendWithDataWAL(root, dwal)
@@ -194,7 +194,7 @@ func TestEncryptedLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(root, "datawal"), enc)
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 
 	b, err := NewEncryptedLocalBackendWithDataWAL(root, enc, dwal)
@@ -1083,7 +1083,7 @@ func TestMultiRootLocalBackend(t *testing.T) {
 
 func TestLocalBackend_DataWALRestoresWriteAtAndTruncate(t *testing.T) {
 	dir := t.TempDir()
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), nil, "datawal")
 	require.NoError(t, err)
 	b, err := NewLocalBackendWithDataWAL(filepath.Join(dir, "objects"), dwal)
 	require.NoError(t, err)
