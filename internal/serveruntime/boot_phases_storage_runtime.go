@@ -361,6 +361,8 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		pipeline := putpipeline.New(putpipeline.Config{
 			DataDirs:  state.shardSvc.DataDirs(),
 			Encryptor: state.cfg.Encryptor,
+			DEKKeeper: state.dekKeeper,
+			ClusterID: state.clusterID,
 			ECConfig:  state.effectiveEC,
 			WAL:       shardServiceWALAdapter{s: state.shardSvc},
 		})
