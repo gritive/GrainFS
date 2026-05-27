@@ -79,8 +79,11 @@ const bulkCipherFormatFile = "encryption.format"
 // writes and requires. "2" = static bulk cipher XAES (#566). "3" = DEK
 // data-sealing cipher is also XAES — bumped because the DEK ciphertext wire
 // format (nonce width) changed and AES-GCM-DEK data is unreadable, so an old
-// dir must loud-fail rather than mis-read.
-const bulkCipherFormatVersion = "3"
+// dir must loud-fail rather than mis-read. "4" = the logical/PITR WAL, packblob,
+// and single-node PUT pipeline sealers moved from the static encryptor to the
+// gen-aware DEK keeper (R1), so a "3" dir's static-sealed data-plane bytes are
+// unreadable by a "4" binary and must loud-fail rather than mis-read.
+const bulkCipherFormatVersion = "4"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
 // ONLY when at-rest encryption is enabled. bulkDataPresent reports whether the
@@ -92,7 +95,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); the DEK data-sealing cipher changed to XAES-256-GCM and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); the data-plane sealers (logical/PITR WAL, packblob, PUT pipeline) moved to the gen-aware DEK and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):

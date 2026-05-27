@@ -10,11 +10,11 @@ import (
 )
 
 // bootLogicalWALOpen opens the logical/PITR WAL. It runs AFTER WaitDEKReady
-// because the WAL is DEK-sealed (commit 2) and wal.OpenEncrypted decrypts
-// existing records during its open scan (wal.go scanMaxSeq). Its sole consumer
-// is the PITR backend wrap (wal.NewBackend) in bootBackendWrap, which runs
-// immediately after this phase. The data WAL is opened separately and earlier
-// in bootShardService and is NOT migrated in R1 (R-FSM owns it).
+// because the WAL is DEK-sealed and wal.OpenEncrypted decrypts existing records
+// during its open scan (wal.go scanMaxSeq). Its sole consumer is the PITR
+// backend wrap (wal.NewBackend) in bootBackendWrap, which runs immediately
+// after this phase. The data WAL is opened separately and earlier in
+// bootShardService and is NOT migrated in R1 (R-FSM owns it).
 //
 // Outputs: state.wal, state.walDir.
 // Cleanup: state.AddCleanup closes the WAL.
@@ -26,15 +26,27 @@ func bootLogicalWALOpen(ctx context.Context, state *bootState) error {
 		return fmt.Errorf("data WAL must be opened before logical WAL")
 	}
 	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
+	// R1: prefer the gen-aware DEK seam. This phase runs after WaitDEKReady, so
+	// when the keeper is present it has an active generation and the 16-byte
+	// clusterID is loaded (wireDEKKeeper).
+	//
+	// GEN-FRAME INVARIANT: the logical/PITR WAL pins its dek_gen at open and
+	// rejects later seals at a different gen, so the DEK sealer is correct ONLY
+	// while the active DEK gen is 0. R1 defers data-DEK rotation (spec decision
+	// #5) and gates encryption.rotate-dek to keep the active gen pinned at 0. A
+	// future rotation slice MUST grow per-segment gen framing here before the
+	// active gen can advance.
 	var sealer wal.RecordSealer
-	if state.cfg.Encryptor != nil {
+	switch {
+	case state.dekKeeper != nil && len(state.clusterID) == 16:
+		sealer = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
+	case state.cfg.Encryptor != nil:
 		var zero [16]byte
 		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
 	}
 	// wal.OpenEncrypted rejects a nil sealer. The encryption-disabled path
-	// (cfg.Encryptor == nil → sealer == nil) must use the plaintext wal.Open
-	// instead. Commit 2 changes only the encrypted branch's adapter
-	// (static → DEK); this nil branch is unaffected.
+	// (no keeper + no static encryptor → sealer == nil) must use the plaintext
+	// wal.Open instead.
 	var w *wal.WAL
 	var err error
 	if sealer != nil {

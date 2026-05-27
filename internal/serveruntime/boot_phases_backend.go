@@ -46,9 +46,15 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	var routed storage.Backend = state.clusterCoord
 	if cfg.PackThreshold > 0 && !cfg.RaftAddrExplicit && cfg.NodeID == "" && !state.joinMode {
 		blobDir := filepath.Join(cfg.DataDir, "blobs")
+		// R1: prefer the gen-aware DEK seam for blob entries. bootBackendWrap runs
+		// after WaitDEKReady + bootLogicalWALOpen, so on the single-node path the
+		// keeper is populated and clusterID is 16 bytes. Encryption-disabled keeps
+		// both nil → packblob falls through to a plaintext blob store.
 		pb, err := packblob.NewPackedBackendWithOptions(routed, blobDir, int64(cfg.PackThreshold), packblob.PackedBackendOptions{
 			Compress:  false,
 			Encryptor: cfg.Encryptor,
+			DEKKeeper: state.dekKeeper,
+			ClusterID: state.clusterID,
 		})
 		if err != nil {
 			return err
