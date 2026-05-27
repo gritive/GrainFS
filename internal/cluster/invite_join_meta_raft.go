@@ -87,8 +87,15 @@ func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki 
 	// registry) with a fresh SPKI is rejected even at the SAME address, preventing
 	// an SPKI takeover that the address/SPKI-owner guards above would miss. Running
 	// this BEFORE any membership mutation leaves the invite unconsumed on reject.
-	if _, ok := m.fsm.NodeByID(nodeID); ok {
-		if owner, ok := m.fsm.peers.spkiOwner(spki); !ok || owner != nodeID {
+	if existing, ok := m.fsm.NodeByID(nodeID); ok {
+		// Genuine idempotent retry requires ALL of: the peer registry binds this
+		// exact (nodeID, spki) from this join's prior attempt AND the existing
+		// member address equals this addr. A same-(nodeID,spki) redeem with a
+		// DIFFERENT advertised address would otherwise add/promote a new raft ID and
+		// ProposeAddNode would rewrite the FSM address while the OLD raft voter stays
+		// in the config — corrupting membership/quorum. So an address move is NOT an
+		// idempotent retry; reject it (the invite stays unconsumed).
+		if owner, ok := m.fsm.peers.spkiOwner(spki); !ok || owner != nodeID || existing.Address != addr {
 			return fmt.Errorf("%w: node %s already a member", errInviteNodeIDTaken, nodeID)
 		}
 	}
