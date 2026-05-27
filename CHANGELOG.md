@@ -10,6 +10,7 @@
   while existing data stays readable at the generation it was written under. A
   key generation that has not yet replicated to a node is treated as a transient
   read condition (retried), never as shard corruption.
+- Packed small-object blob storage (single-node packed backend) now seals entries through the DataEncryptor seam with position-bound AEAD, groundwork for KEK-envelope key rotation of data at rest.
 
 ## [0.0.366.0] - 2026-05-27
 
