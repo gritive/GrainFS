@@ -30,6 +30,11 @@ func runRestartRecoveryOrphanSweepCases(t testing.TB) {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(removeE2EDir, dir)
 
+	// The test pre-populates the data dir before boot. Stamp the current
+	// encryption format marker so the XAES boot guard treats these artifacts as
+	// current-format orphan candidates rather than a pre-XAES data dir.
+	gomega.Expect(os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("2"), 0o600)).To(gomega.Succeed())
+
 	// Plant a stale .tmp file (backdated past the 5-min in-flight guard).
 	staleTmp := filepath.Join(dir, "shards", "b", "k", "0.tmp")
 	gomega.Expect(os.MkdirAll(filepath.Dir(staleTmp), 0o755)).To(gomega.Succeed())

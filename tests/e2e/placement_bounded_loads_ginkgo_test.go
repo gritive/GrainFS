@@ -177,6 +177,11 @@ var _ = ginkgo.Describe("Placement BoundedLoads E2E", ginkgo.Ordered, func() {
 // s3Target. Mirrors the internals of newClusterS3TargetWithExtraArgs but takes
 // ownership of an externally-managed cluster so BeforeAll can control boot.
 func newClusterS3TargetFromCluster(t testing.TB, c *e2eCluster) s3Target {
+	currentLeaderClient := func(t testing.TB) *s3.Client {
+		t.Helper()
+		return c.S3Client(currentE2EClusterLeaderIdx(t, c))
+	}
+
 	return s3Target{
 		name:  "cluster4-bl",
 		nodes: 4,
@@ -189,20 +194,20 @@ func newClusterS3TargetFromCluster(t testing.TB, c *e2eCluster) s3Target {
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t testing.TB, bucket string) {
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4-bl", t.Name(), caseName)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, currentLeaderClient(t))
 			ginkgo.DeferCleanup(func() {
-				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
+				currentLeaderClient(ginkgo.GinkgoTB()).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
 					Bucket: aws.String(name),
 				})
 			})
 			return name
 		},
 		adminSockPath: func() string {
-			return c.dataDirs[c.leaderIdx] + "/admin.sock"
+			return c.dataDirs[currentE2EClusterLeaderIdx(t, c)] + "/admin.sock"
 		},
 		isCluster: true,
 		cluster:   c,

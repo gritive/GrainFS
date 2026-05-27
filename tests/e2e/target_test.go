@@ -54,10 +54,44 @@ type s3Target struct {
 	cluster       *e2eCluster // non-nil for cluster fixtures
 }
 
+var (
+	sharedSingleS3Target  s3Target
+	sharedClusterS3Target s3Target
+)
+
+func initSharedS3Targets(t testing.TB) {
+	t.Helper()
+
+	sharedSingleS3Target = newDedicatedSingleNodeS3Target(t, nil)
+	sharedSingleS3Target.name = "single"
+	sharedSingleCreateBkt := sharedSingleS3Target.createBkt
+	sharedSingleClient := sharedSingleS3Target.pickNode(0)
+	sharedSingleS3Target.uniqueBucket = func(t testing.TB, caseName string) string {
+		name := bucketNameFor("single", t.Name(), caseName)
+		sharedSingleCreateBkt(t, name)
+		ginkgo.DeferCleanup(func() {
+			sharedSingleClient.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+		})
+		return name
+	}
+
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      4,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-S3-OP-KEY",
+		LogPrefix:  "grainfs-s3op-shared",
+		DisableNFS: true,
+		DisableNBD: true,
+	})
+	for i := range c.procs {
+		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+	}
+	sharedClusterS3Target = s3TargetFromCluster(c)
+}
+
 func newSingleNodeS3Target() s3Target {
-	tgt := newDedicatedSingleNodeS3Target(ginkgo.GinkgoTB(), nil)
-	tgt.name = "single"
-	return tgt
+	gomega.Expect(sharedSingleS3Target.pickNode).NotTo(gomega.BeNil(), "shared single-node fixture must be initialized")
+	return sharedSingleS3Target
 }
 
 var bucketSanitizeRE = regexp.MustCompile(`[^a-z0-9-]`)
@@ -68,12 +102,18 @@ func currentE2EClusterLeaderIdx(t testing.TB, c *e2eCluster) int {
 	if start < 0 || start >= len(c.httpURLs) {
 		start = 0
 	}
-	status := getStatusJSON(t, c.httpURLs[start])
-	leaderID, _ := status["leader_id"].(string)
-	for i := range c.httpURLs {
-		if c.nodeID(i) == leaderID {
-			c.leaderIdx = i
-			return i
+	for offset := range c.httpURLs {
+		probeIdx := (start + offset) % len(c.httpURLs)
+		status, err := tryStatusJSON(c.httpURLs[probeIdx])
+		if err != nil {
+			continue
+		}
+		leaderID, _ := status["leader_id"].(string)
+		for i := range c.httpURLs {
+			if c.nodeID(i) == leaderID {
+				c.leaderIdx = i
+				return i
+			}
 		}
 	}
 	return start
@@ -103,16 +143,16 @@ func bucketNameFor(tgtName, testName, caseName string) string {
 
 func newSharedClusterS3Target(t testing.TB) s3Target {
 	t.Helper()
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      4,
-		Mode:       ClusterModeDynamicJoin,
-		ClusterKey: "E2E-S3-OP-KEY",
-		LogPrefix:  "grainfs-s3op",
-		DisableNFS: true,
-	})
-	for i := range c.procs {
-		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+	gomega.Expect(sharedClusterS3Target.pickNode).NotTo(gomega.BeNil(), "shared cluster fixture must be initialized")
+	return sharedClusterS3Target
+}
+
+func s3TargetFromCluster(c *e2eCluster) s3Target {
+	currentLeaderClient := func(t testing.TB) *s3.Client {
+		t.Helper()
+		return c.S3Client(currentE2EClusterLeaderIdx(t, c))
 	}
+
 	return s3Target{
 		name:  "cluster4",
 		nodes: 4,
@@ -125,18 +165,18 @@ func newSharedClusterS3Target(t testing.TB) s3Target {
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t testing.TB, bucket string) {
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, currentLeaderClient(t))
 			ginkgo.DeferCleanup(func() {
-				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+				currentLeaderClient(ginkgo.GinkgoTB()).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
 		},
 		adminSockPath: func() string {
-			return c.dataDirs[currentE2EClusterLeaderIdx(t, c)] + "/admin.sock"
+			return c.dataDirs[currentE2EClusterLeaderIdx(ginkgo.GinkgoTB(), c)] + "/admin.sock"
 		},
 		isCluster: true,
 		cluster:   c,
@@ -169,6 +209,11 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
 	}
 
+	currentLeaderClient := func(t testing.TB) *s3.Client {
+		t.Helper()
+		return c.S3Client(currentE2EClusterLeaderIdx(t, c))
+	}
+
 	return s3Target{
 		name:  "cluster4",
 		nodes: nodes,
@@ -181,13 +226,13 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t testing.TB, bucket string) {
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, currentLeaderClient(t))
 			ginkgo.DeferCleanup(func() {
-				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+				currentLeaderClient(ginkgo.GinkgoTB()).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
 		},
@@ -199,13 +244,9 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 	}
 }
 
-// newDedicatedSingleNodeS3Target boots a per-test single-node grainfs with
-// the given extra args. Use this only for tests that need non-default flags
-// (e.g. --append-size-cap-bytes, alternate EC profile) — vanilla single-node
-// tests should keep using the package-global newSingleNodeS3Target() fixture
-// since it amortises one boot across the whole package. Cluster has the same
-// dedicated/shared split via newClusterS3Target vs newSharedClusterS3Target;
-// this completes the mirror for single.
+// newDedicatedSingleNodeS3Target boots a fresh single-node grainfs with the
+// given extra args. Use it for specs that need isolated ports, data, IAM
+// bootstrap state, server flags, or cleanup.
 //
 // Lifetime: process is launched on call, terminated + tmpdir removed via
 // t.Cleanup. Each call gets its own port + data dir.

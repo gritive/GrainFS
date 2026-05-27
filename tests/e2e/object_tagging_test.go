@@ -34,8 +34,7 @@ func describeObjectTaggingContext(name string, factory func() s3Target) {
 			tb := ginkgo.GinkgoTB()
 			client := tgt.pickNode(0)
 			if tgt.isCluster {
-				probe := tgt.name + "-tag-mp-probe"
-				tgt.createBkt(tb, probe)
+				probe := tgt.uniqueBucket(tb, "tag-mp-probe")
 				ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 				defer cancel()
 				waitForMultipartListingCreate(tb, ctx, client, probe, multipartListingKey, 120*time.Second)

@@ -28,12 +28,17 @@ import (
 
 var (
 	freePortCursor   uint32 = initialFreePortCursor()
+	e2eDefaultHTTPTransport = e2ePooledHTTPTransport()
 	e2eS3HTTPClient         = &http.Client{Transport: e2ePooledHTTPTransport()}
 	e2eRawHTTPClient        = &http.Client{
 		Transport: e2ePooledHTTPTransport(),
 		Timeout:   10 * time.Second,
 	}
 )
+
+func init() {
+	http.DefaultTransport = e2eDefaultHTTPTransport
+}
 
 type e2ePortLease struct {
 	PID int `json:"pid"`
@@ -45,11 +50,6 @@ func keepE2EArtifacts() bool {
 
 func initialFreePortCursor() uint32 {
 	return uint32((time.Now().UnixNano() + int64(os.Getpid()*7919)) % 25000)
-}
-
-func TestMain(m *testing.M) {
-	code := m.Run()
-	os.Exit(code)
 }
 
 func removeE2EDir(path string) error {
@@ -159,10 +159,10 @@ func fetchProfile(url, dest string) error {
 
 func e2ePooledHTTPTransport() *http.Transport {
 	return &http.Transport{
-		MaxIdleConns:        128,
-		MaxIdleConnsPerHost: 16,
-		MaxConnsPerHost:     64,
-		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConns:        4096,
+		MaxIdleConnsPerHost: 128,
+		MaxConnsPerHost:     256,
+		IdleConnTimeout:     2 * time.Minute,
 	}
 }
 
@@ -392,7 +392,7 @@ func waitForPort(t testing.TB, port int, timeout time.Duration) {
 			conn.Close()
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	ginkgo.Fail(fmt.Sprintf("server did not start on port %d within %v", port, timeout))
 }
@@ -414,7 +414,7 @@ func waitForPortsParallel(t testing.TB, ports []int, timeout time.Duration) {
 					conn.Close()
 					return
 				}
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(250 * time.Millisecond)
 			}
 			failed <- p
 		}(port)
@@ -459,7 +459,7 @@ func waitForPortsParallelErrWithProcesses(ports []int, procs []*exec.Cmd, timeou
 					failed <- fmt.Errorf("server process exited before port %d became ready: %s", p, detail)
 					return
 				}
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(250 * time.Millisecond)
 			}
 			failed <- fmt.Errorf("server did not start on port %d within %v", p, timeout)
 		}(port, proc)
@@ -506,7 +506,7 @@ func waitForPortM(port int, timeout time.Duration) error {
 			conn.Close()
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	return fmt.Errorf("server did not start on port %d within %v", port, timeout)
 }

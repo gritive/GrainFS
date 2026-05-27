@@ -27,7 +27,7 @@ func runOrphanSegmentSweepCases(t testing.TB) {
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:         4,
 		ScrubInterval: "500ms",
-		ExtraArgs:     []string{"--scrub-orphan-age=1s"},
+		ExtraArgs:     []string{"--scrub-orphan-age=1s", "--segment-gc-retention=0"},
 		DisableNFS:    true,
 		DisableNBD:    true,
 	})
