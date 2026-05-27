@@ -90,11 +90,15 @@ type ShardService struct {
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
 
-// WithEncryptor wires an AES-256-GCM encryptor into the shard service so that
+// WithEncryptor wires an XAES-256-GCM encryptor into the shard service so that
 // all shards are encrypted at rest. Pass nil to disable encryption.
 func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 	return func(s *ShardService) {
 		s.encryptor = enc
+		// Clear segEnc first so WithEncryptor(nil) fully disables the chunked
+		// GFSENC3 path too (honors the "pass nil to disable" contract even when
+		// a prior option had set segEnc).
+		s.segEnc = nil
 		if enc != nil {
 			// D-seg-ec-struct: EncryptorAdapter over the static key, zero-sentinel
 			// clusterID. Slice C swaps this for a DEKKeeperAdapter + real clusterID.
