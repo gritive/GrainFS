@@ -40,8 +40,9 @@ aws --no-sign-request --endpoint-url "$S3_ENDPOINT" s3 cp file.txt s3://default/
 ```
 
 `--no-sign-request` is intentional here: the first-node bootstrap keeps the
-`default` bucket anonymous until you create the first service account. The flag
-prevents local AWS credentials from hiding whether anonymous access works.
+`default` bucket anonymous until you install an explicit bucket policy for
+`default`. The flag prevents local AWS credentials from hiding whether
+anonymous access works.
 
 ## Add cluster peers
 

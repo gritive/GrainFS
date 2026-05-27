@@ -103,11 +103,6 @@ Work these in order. Do not run them in parallel.
       + §11 decisions log.
 
 - [ ] **§9 Follow-ups** (from F#41/F#41b implementation):
-    - L1 anon-allow bucket scope: `internal/s3auth/authorizer.go:83` returns Allow
-      for anon on any bucket when `iam.anon-enabled=true`. L2/L3 currently catches
-      the leakage, but a future L2/L3 refactor could expose it. The Phase 0 banner
-      only promises `/default`. Tighten L1 to bucket==default. Discovered during
-      T71/F#41b.
     - **F#42 (Pass-1 MEDIUM-1)**: Phase 0 anon Allow paths emit no audit row
       (`request_authz.go:148` gates recordAllow on `AuthEnabled()`). Phase 2
       anon-to-default IS audited via `AnonAllow` flag. Phase 0 long-lived state
@@ -533,3 +528,10 @@ Work these in order. Do not run them in parallel.
 - [ ] Control-plane/data-plane split.
 - [ ] fix(storage/packblob): extend versioning bypass to Suspended state (currently only Enabled bypasses fast path; Suspended buckets on single-node still pack-write under (bucket,key) without versionId="null"). Add e2e cases for Suspended → PUT/DELETE/HEAD by versionId.
 - [ ] feat(scrubber): multi-node/multi-group segment GC fan-out. Orphan-segment GC currently (Plan 3.5) activates only on group-0's distBackend AND, in a cluster, runs only on the raft leader (CaughtUp uses node.ReadIndex → followers get ErrNotLeader → fail-closed skip). Result: single-node is complete; in a multi-node cluster, segments on non-leader nodes' local disks and in non-group-0 data-groups are never reclaimed → latent disk growth. Proper design needs leader-coordinated (or per-node-with-freshness-barrier) deletion across all groups — mirror the EC scrub ecResolver fan-out (boot_phases_scrubber.go) and decide who deletes follower-local raw segments. SegmentOrphanLog already namespaces by groupID. Blocked-by: Plan 3.5 (object-segment-gc-activation) land.
+
+## Completed
+
+- [x] **§9 Follow-up: tighten L1 anonymous allow to default bucket scope**
+  - Removed the global `iam.anon-enabled` anonymous bypass. Anonymous S3 access
+    now flows through default-bucket implicit policy or explicit bucket policy.
+  - **Completed:** v0.0.375.0 (2026-05-28)
