@@ -161,19 +161,13 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	defer bs.mu.Unlock()
 
 	offset := bs.activeOff
-	var aadBuf []byte
-	var sealedBuf []byte
-	if bs.encryptor != nil {
+	if bs.segEnc != nil {
 		flags |= flagEncrypted
-		aadBuf = takeBlobAppendAADBuffer(len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key))
-		sealedBuf = takeBlobAppendSealedBuffer(len(storedPayload) + 64)
-		sealed, err := bs.encryptor.SealValueAADTo(sealedBuf[:0], bs.entryAADTo(aadBuf, bs.activeID, uint64(offset), key, flags), storedPayload)
+		sealed, _, err := bs.segEnc.Seal(encrypt.DomainShard,
+			blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
 		if err != nil {
-			releaseBlobAppendAADBuffer(aadBuf)
-			releaseBlobAppendSealedBuffer(sealedBuf)
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 		}
-		sealedBuf = sealed
 		payload = sealed
 	}
 
@@ -182,19 +176,15 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	// Rotate if this entry would exceed max blob size
 	if bs.activeOff+entrySize > bs.maxSize && bs.activeOff > 0 {
 		if err := bs.rotate(); err != nil {
-			releaseBlobAppendAADBuffer(aadBuf)
-			releaseBlobAppendSealedBuffer(sealedBuf)
 			return BlobLocation{}, err
 		}
 		offset = bs.activeOff
-		if bs.encryptor != nil {
-			sealed, err := bs.encryptor.SealValueAADTo(sealedBuf[:0], bs.entryAADTo(aadBuf, bs.activeID, uint64(offset), key, flags), storedPayload)
+		if bs.segEnc != nil {
+			sealed, _, err := bs.segEnc.Seal(encrypt.DomainShard,
+				blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
 			if err != nil {
-				releaseBlobAppendAADBuffer(aadBuf)
-				releaseBlobAppendSealedBuffer(sealedBuf)
 				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 			}
-			sealedBuf = sealed
 			payload = sealed
 			entrySize = int64(entryOverhead + len(key) + len(payload))
 		}
@@ -204,38 +194,26 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(key)))
 	if _, err := bs.active.Write(header[:]); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.WriteString(key); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	var entryHeader [5]byte
 	entryHeader[0] = flags
 	binary.BigEndian.PutUint32(entryHeader[1:], uint32(len(payload)))
 	if _, err := bs.active.Write(entryHeader[:]); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.Write(payload); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 
 	var crc [4]byte
 	binary.BigEndian.PutUint32(crc[:], blobEntryCRC([]byte(key), flags, payload))
 	if _, err := bs.active.Write(crc[:]); err != nil {
-		releaseBlobAppendAADBuffer(aadBuf)
-		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
-	releaseBlobAppendAADBuffer(aadBuf)
-	releaseBlobAppendSealedBuffer(sealedBuf)
 
 	bs.activeOff += entrySize
 
