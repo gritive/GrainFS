@@ -108,7 +108,11 @@ func TestEncryptWithAAD_AllocsBounded(t *testing.T) {
 	allocs := testing.AllocsPerRun(100, func() {
 		_, _ = e.EncryptWithAAD(plaintext, aad)
 	})
-	assert.LessOrEqual(t, allocs, 1.0, "EncryptWithAAD should allocate exactly 1 (output slice)")
+	// XAES-256-GCM derives a per-call sub-key (AES-CMAC-based KDF over the 24-byte
+	// nonce), which allocates 4 objects per Seal call on the nil-dst path. This is a
+	// known regression vs. the old AES-256-GCM path (1 alloc). Bound is set at 5 to
+	// catch any future regression beyond the inherent XAES CMAC-KDF baseline.
+	assert.LessOrEqual(t, allocs, 5.0, "EncryptWithAAD allocs within XAES baseline (4)")
 }
 
 func TestIsEncryptedBlob(t *testing.T) {
@@ -141,7 +145,7 @@ func TestValueEnvelopeSealToReusesDestination(t *testing.T) {
 	require.NoError(t, err)
 	plaintext := bytes.Repeat([]byte("x"), 64*1024)
 	aad := []byte("local-object:physical:chunk:7")
-	dst := make([]byte, 0, 3+12+len(plaintext)+enc.AEADOverhead())
+	dst := make([]byte, 0, 3+24+len(plaintext)+enc.AEADOverhead())
 
 	sealed, err := enc.SealValueAADTo(dst, aad, plaintext)
 	require.NoError(t, err)
