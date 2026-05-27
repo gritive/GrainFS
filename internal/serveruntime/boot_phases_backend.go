@@ -103,7 +103,12 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// Auto-create "default" bucket only for singleton startup. In cluster mode,
 	// bucket creation is a cluster-wide metadata operation and must be driven by
 	// an explicit client/API action, not repeated independently by every node.
-	if ShouldCreateDefaultBucketOnStartup(state.peers, startupReadOnly) {
+	// A Zero-CA invite-join joiner (W9b) boots with an empty state.peers (it
+	// gates raft via inviteJoinMode, not the legacy .join-pending peers list),
+	// so the len(peers)==0 singleton test would otherwise fire and make the
+	// follower attempt the leader-only reserved-bucket seed — which aborts boot
+	// with "not the leader". Mirror joinMode: a joining node never seeds.
+	if !state.inviteJoinMode && ShouldCreateDefaultBucketOnStartup(state.peers, startupReadOnly) {
 		if err := CreateDefaultBucketWithRetry(ctx, backend, 30*time.Second); err != nil {
 			return fmt.Errorf("create default bucket: %w", err)
 		}
