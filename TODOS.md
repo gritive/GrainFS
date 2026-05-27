@@ -242,11 +242,30 @@ Work these in order. Do not run them in parallel.
   allocated buffer per call (the cipher owns its buffer), so migrating packblob's
   encrypted hot path off its pooled `blobAppendAADPool`/`blobAppendSealedPool` raised the
   per-small-object-PUT allocation count (Append encrypted bound 5→15, Read 8→16 in
-  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local
-  and D-seg-ec. Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
+  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local,
+  D-seg-ec, and now datawal (D-wal-data v0.0.370.0 dropped the per-open pooled buffer in
+  `scanRecords`). Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
   / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
-  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec call sites.
+  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec/datawal call sites.
   Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
+- [ ] **KEK-envelope D-wal: activate generation-aware datawal encryption**. Deferred from
+  D-wal-data (v0.0.370.0). That slice migrated `internal/storage/datawal` to the `RecordSealer`
+  seam but left it on `EncryptorAdapter` (gen=0) with a dedicated zero-sentinel clusterID.
+  To flip to `DEKKeeperAdapter` + the real 16-byte clusterID (mirroring D-seg-ec-activate):
+  inject the keeper-backed adapter into the WAL's **writer AND reader together** (a clusterID
+  divergence breaks all replay via AEAD mismatch); set the header `dek_gen` to the keeper's
+  active generation **at file creation** via a probe-seal — `Seal(DomainWAL, fields, nil)` at
+  segment init to capture the active gen, write it to the header, discard the probe ciphertext
+  (cheaper than widening the seam with `ActiveGen()`). The per-file gen-pin machinery already
+  enforces consistency once the header gen is correct. Same activation applies to D-wal-legacy.
+- [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. D-wal-data binds AAD with a
+  single `"datawal"` namespace constant across all call sites; D-wal-legacy will use one
+  constant too. A frame from one physical WAL dir could AEAD-verify in another with the same
+  namespace+seq. To close cross-WAL frame-swap, give the cluster-shard WAL and the node WAL
+  distinct namespaces (e.g. `"datawal/shard"` vs `"datawal/node"`), which requires auditing
+  which call site (`boot_phases_storage_runtime`, `local.go`, `shard_service.go`) owns which
+  physical dir so the writer and reader of each dir agree. Within-WAL positional binding
+  (namespace+seq+monotonicity) already holds; this only hardens the cross-WAL case.
 - [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
   (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
   source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks
