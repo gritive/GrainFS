@@ -84,7 +84,7 @@ func TestPITRRestore_ReplaysEncryptedWAL(t *testing.T) {
 	_, err = mgr.Create("base")
 	require.NoError(t, err)
 
-	w, err := wal.OpenEncrypted(walDir, enc)
+	w, err := wal.OpenEncrypted(walDir, storage.NewEncryptorAdapter(enc, make([]byte, 16)), "pitr-wal")
 	require.NoError(t, err)
 	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "secret-key", ETag: "secret-etag", Size: 2, VersionID: "v1"})
 	require.NoError(t, w.Close())
