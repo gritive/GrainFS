@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
@@ -77,7 +78,7 @@ func BenchmarkWALAppend(b *testing.B) {
 			payload := make([]byte, size)
 			_, _ = io.ReadFull(rand.Reader, payload)
 			dir := b.TempDir()
-			w, err := datawal.Open(dir, nil)
+			w, err := datawal.Open(dir, nil, "datawal")
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -110,7 +111,7 @@ func BenchmarkWALAppendEncrypted(b *testing.B) {
 			payload := make([]byte, size)
 			_, _ = io.ReadFull(rand.Reader, payload)
 			dir := filepath.Join(b.TempDir(), "datawal")
-			w, err := datawal.Open(dir, enc)
+			w, err := datawal.Open(dir, storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 			if err != nil {
 				b.Fatal(err)
 			}

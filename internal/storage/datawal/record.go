@@ -28,12 +28,28 @@ const (
 const (
 	maxRecordBodyBytes = MaxPayloadBytes + 1<<20
 	maxMetadataBytes   = 1 << 20
-	encryptedRecordAAD = "datawal:record:v1"
 
 	recordBodyFixedBytes = 8 + 8 + 1 + 8 + 8 + 4 + 4 + 4 + sha256.Size + 8
 )
 
 var ErrChecksumMismatch = errors.New("datawal: checksum mismatch")
+
+// RecordSealer is datawal's view of the storage.DataEncryptor seam. datawal
+// cannot import storage (storage imports datawal), so it declares the method
+// set locally; *storage.EncryptorAdapter satisfies it structurally.
+type RecordSealer interface {
+	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
+	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
+}
+
+// walRecordAADFields binds a record to its WAL namespace and sequence so a
+// frame cannot be replayed at another position or in another WAL.
+func walRecordAADFields(namespace string, seq uint64) []encrypt.AADField {
+	return []encrypt.AADField{
+		encrypt.FieldString(namespace),
+		encrypt.FieldUint64(seq),
+	}
+}
 
 type Record struct {
 	Seq       uint64
@@ -91,48 +107,49 @@ func DecodeRecord(r io.Reader) (Record, error) {
 	return unmarshalRecordBody(body, false)
 }
 
-func EncodeEncryptedRecord(w io.Writer, rec Record, enc *encrypt.Encryptor) error {
-	if enc == nil {
-		return fmt.Errorf("datawal: encrypted record requires encryptor")
-	}
-	body, err := marshalRecordBody(rec)
-	if err != nil {
-		return err
-	}
-	defer putBuffer(body)
-
-	// A 1.25 MiB buffer is plenty of space for payload < 1 MiB + metadata + AEAD overhead (~31 bytes)
-	sealedBuf := getBuffer(len(body) + 128)
-	defer putBuffer(sealedBuf)
-
-	sealed, err := enc.SealValueAADTo(sealedBuf[:0], []byte(encryptedRecordAAD), body)
-	clear(body)
-	if err != nil {
-		return fmt.Errorf("datawal: encrypt record: %w", err)
-	}
-	if len(sealed) > maxRecordBodyBytes {
-		clear(sealed)
-		return fmt.Errorf("datawal: encrypted record body too large: %d", len(sealed))
-	}
-	err = writeFrame(w, sealed)
-	clear(sealed)
+func EncodeEncryptedRecord(w io.Writer, rec Record, sealer RecordSealer, namespace string) error {
+	_, err := encodeEncryptedRecordGen(w, rec, sealer, namespace)
 	return err
 }
 
-func DecodeEncryptedRecord(r io.Reader, enc *encrypt.Encryptor) (Record, error) {
-	if enc == nil {
-		return Record{}, fmt.Errorf("datawal: encrypted record requires encryptor")
+// encodeEncryptedRecordGen seals and writes rec, returning the DEK generation
+// the ciphertext was sealed under so the caller can assert it matches the
+// segment's pinned header gen.
+func encodeEncryptedRecordGen(w io.Writer, rec Record, sealer RecordSealer, namespace string) (uint32, error) {
+	if sealer == nil {
+		return 0, fmt.Errorf("datawal: encrypted record requires sealer")
 	}
-	sealed, err := readFrame(r)
+	body, err := marshalRecordBody(rec)
+	if err != nil {
+		return 0, err
+	}
+	defer putBuffer(body)
+
+	sealed, gen, err := sealer.Seal(encrypt.DomainWAL, walRecordAADFields(namespace, rec.Seq), body)
+	clear(body)
+	if err != nil {
+		return 0, fmt.Errorf("datawal: encrypt record: %w", err)
+	}
+	if len(sealed) > maxRecordBodyBytes {
+		clear(sealed)
+		return 0, fmt.Errorf("datawal: encrypted record body too large: %d", len(sealed))
+	}
+	err = writeEncryptedFrame(w, rec.Seq, sealed)
+	clear(sealed)
+	return gen, err
+}
+
+func DecodeEncryptedRecord(r io.Reader, sealer RecordSealer, namespace string, gen uint32) (Record, error) {
+	if sealer == nil {
+		return Record{}, fmt.Errorf("datawal: encrypted record requires sealer")
+	}
+	seq, sealed, err := readEncryptedFrame(r)
 	if err != nil {
 		return Record{}, err
 	}
 	defer clear(sealed)
 
-	bodyBuf := getBuffer(len(sealed))
-	defer putBuffer(bodyBuf)
-
-	body, err := enc.OpenValueAADTo(bodyBuf[:0], []byte(encryptedRecordAAD), sealed)
+	body, err := sealer.Open(encrypt.DomainWAL, walRecordAADFields(namespace, seq), gen, sealed)
 	if err != nil {
 		return Record{}, fmt.Errorf("datawal: decrypt record: %w", err)
 	}
@@ -141,7 +158,40 @@ func DecodeEncryptedRecord(r io.Reader, enc *encrypt.Encryptor) (Record, error) 
 	if err != nil {
 		return Record{}, err
 	}
+	if rec.Seq != seq {
+		return Record{}, fmt.Errorf("datawal: frame seq %d != record seq %d", seq, rec.Seq)
+	}
 	return rec, nil
+}
+
+// writeEncryptedFrame writes [seq:8][len:4][sealed][crc32(sealed):4]. The seq
+// is plaintext so the reader can build the AAD before decrypting; tampering it
+// makes Open fail because seq is bound into the AAD.
+func writeEncryptedFrame(w io.Writer, seq uint64, sealed []byte) error {
+	var prefix [8]byte
+	binary.BigEndian.PutUint64(prefix[:], seq)
+	if err := writeAll(w, prefix[:]); err != nil {
+		return err
+	}
+	return writeFrame(w, sealed)
+}
+
+func readEncryptedFrame(r io.Reader) (uint64, []byte, error) {
+	var prefix [8]byte
+	if _, err := io.ReadFull(r, prefix[:]); err != nil {
+		return 0, nil, err
+	}
+	sealed, err := readFrame(r)
+	if err == io.EOF {
+		// The seq prefix was fully consumed but the frame is missing — this is
+		// a torn record, NOT a clean end-of-file. Translate so scanRecords only
+		// tolerates it on the active tail (allowTruncatedTail).
+		return 0, nil, io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+	return binary.BigEndian.Uint64(prefix[:]), sealed, nil
 }
 
 // PayloadReader returns a reader over the decoded in-memory payload.

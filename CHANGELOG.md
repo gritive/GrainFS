@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.370.0] - 2026-05-28
+
+### Changed
+
+- Data WAL records now seal through the DataEncryptor seam with position-bound AEAD (DomainWAL + WAL namespace + record sequence) and a `dek_gen` file header (DWAL format v2), groundwork for KEK-envelope key rotation of data at rest. Behavior is unchanged under the static encryptor; the on-disk WAL format is a hard break (old v1 segment files are not read).
+
 ## [0.0.369.0] - 2026-05-27
 
 ### Changed
