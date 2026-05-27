@@ -732,6 +732,32 @@ func TestLeaderProposeKEKPrune_RejectsMissingProbeResponses(t *testing.T) {
 	}
 }
 
+// TestLeaderProposeKEKPrune_RejectsNonZeroSnapshotRefCount verifies that the
+// leader refuses to prune a KEK version when any voter reports a nonzero
+// snapshot_ref_count.
+func TestLeaderProposeKEKPrune_RejectsNonZeroSnapshotRefCount(t *testing.T) {
+	voters := []string{"node-0", "node-1"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	fx.probe.leaseSample = func(vs []string, _ uint32) ([]LeaseAttestationSample, error) {
+		out := make([]LeaseAttestationSample, len(vs))
+		for i, v := range vs {
+			src := uint64(0)
+			if v == "node-0" {
+				src = 1 // node-0 has a retained snapshot sealed under this KEK version
+			}
+			out[i] = LeaseAttestationSample{NodeID: v, ObservedAtIndex: 300 + uint64(i), LeaseCount: 0, SnapshotRefCount: src}
+		}
+		return out, nil
+	}
+	err := fx.leader.ProposeKEKPrune(version, "admin@uds")
+	if err == nil {
+		t.Fatal("expected snapshot refusal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "snapshot") {
+		t.Errorf("error should mention snapshot: %v", err)
+	}
+}
+
 // --- Task 11: ProposeKEKRetire tests --------------------------------------
 
 // prepareLeaderForRetire seeds two KEK versions (0 + 1) with v=1 active, leaving

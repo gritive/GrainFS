@@ -28,7 +28,9 @@ import (
 var kekLeaseSnapshotReqMagic = []byte("KLSREQ\x01")
 
 // kekLeaseSnapshotRespMagic guards against misrouted reply payloads.
-var kekLeaseSnapshotRespMagic = []byte("KLSREP\x01")
+// \x02 is the rolling-upgrade guard: a new leader decoding an old \x01 response
+// fails the magic check → probe errors → prune refused until all nodes upgraded.
+var kekLeaseSnapshotRespMagic = []byte("KLSREP\x02")
 
 // KEKLeaseSnapshotReq carries the KEK version to probe.
 type KEKLeaseSnapshotReq struct {
@@ -42,6 +44,7 @@ type KEKLeaseSnapshotResp struct {
 	LeaseCount                uint64
 	ObservedAtRaftCommitIndex uint64
 	NodeID                    string
+	SnapshotRefCount          uint64
 }
 
 // kekLeaseSnapshotDialer abstracts the outbound transport.Call so tests can
@@ -84,16 +87,18 @@ func decodeKEKLeaseSnapshotReq(data []byte) (KEKLeaseSnapshotReq, error) {
 //
 // Layout:
 //
-//	[magic 7B "KLSREP\x01"]
+//	[magic 7B "KLSREP\x02"]
 //	[lease_count uint64 BE]
 //	[observed_at_raft_commit_index uint64 BE]
+//	[snapshot_ref_count uint64 BE]
 //	[node_id_len uint16 BE][node_id bytes]
 func encodeKEKLeaseSnapshotResp(resp KEKLeaseSnapshotResp) []byte {
 	idLen := len(resp.NodeID)
-	out := make([]byte, 0, len(kekLeaseSnapshotRespMagic)+8+8+2+idLen)
+	out := make([]byte, 0, len(kekLeaseSnapshotRespMagic)+8+8+8+2+idLen)
 	out = append(out, kekLeaseSnapshotRespMagic...)
 	out = binary.BigEndian.AppendUint64(out, resp.LeaseCount)
 	out = binary.BigEndian.AppendUint64(out, resp.ObservedAtRaftCommitIndex)
+	out = binary.BigEndian.AppendUint64(out, resp.SnapshotRefCount)
 	out = binary.BigEndian.AppendUint16(out, uint16(idLen))
 	out = append(out, resp.NodeID...)
 	return out
@@ -103,15 +108,17 @@ func encodeKEKLeaseSnapshotResp(resp KEKLeaseSnapshotResp) []byte {
 func decodeKEKLeaseSnapshotResp(data []byte) (KEKLeaseSnapshotResp, error) {
 	magicLen := len(kekLeaseSnapshotRespMagic)
 	if len(data) < magicLen || string(data[:magicLen]) != string(kekLeaseSnapshotRespMagic) {
-		return KEKLeaseSnapshotResp{}, errors.New("kek_lease_snapshot_probe: bad response magic")
+		return KEKLeaseSnapshotResp{}, errors.New("kek_lease_snapshot_probe: bad/old response magic — upgrade all nodes before pruning")
 	}
 	rest := data[magicLen:]
-	if len(rest) < 8+8+2 {
+	if len(rest) < 8+8+8+2 {
 		return KEKLeaseSnapshotResp{}, errors.New("kek_lease_snapshot_probe: response truncated at header")
 	}
 	leaseCount := binary.BigEndian.Uint64(rest[:8])
 	rest = rest[8:]
 	commitIndex := binary.BigEndian.Uint64(rest[:8])
+	rest = rest[8:]
+	snapshotRefCount := binary.BigEndian.Uint64(rest[:8])
 	rest = rest[8:]
 	idLen := int(binary.BigEndian.Uint16(rest))
 	rest = rest[2:]
@@ -121,6 +128,7 @@ func decodeKEKLeaseSnapshotResp(data []byte) (KEKLeaseSnapshotResp, error) {
 	return KEKLeaseSnapshotResp{
 		LeaseCount:                leaseCount,
 		ObservedAtRaftCommitIndex: commitIndex,
+		SnapshotRefCount:          snapshotRefCount,
 		NodeID:                    string(rest[:idLen]),
 	}, nil
 }
@@ -128,19 +136,23 @@ func decodeKEKLeaseSnapshotResp(data []byte) (KEKLeaseSnapshotResp, error) {
 // KEKLeaseSnapshotHandler is the server-side handler for StreamKEKLeaseSnapshotProbe.
 // Register it with: quicTransport.Handle(transport.StreamKEKLeaseSnapshotProbe, h.Handle)
 type KEKLeaseSnapshotHandler struct {
-	nodeID        string
-	tracker       *encrypt.KEKLeaseTracker
-	commitIndexFn func() uint64 // returns the node's current raft applied/commit index
+	nodeID             string
+	tracker            *encrypt.KEKLeaseTracker
+	commitIndexFn      func() uint64 // returns the node's current raft applied index
+	snapshotRefCountFn func(version uint32) (uint64, error)
 }
 
 // NewKEKLeaseSnapshotHandler constructs a handler. commitIndexFn is called at
 // handle time to snapshot the raft index alongside the lease count. Production
-// wires metaRaft.lastApplied.Load (or equivalent); tests inject a fixed value.
-func NewKEKLeaseSnapshotHandler(nodeID string, tracker *encrypt.KEKLeaseTracker, commitIndexFn func() uint64) *KEKLeaseSnapshotHandler {
+// wires metaRaft.LastApplied(); tests inject a fixed value.
+// snapshotRefCountFn counts retained object snapshots sealed under the given
+// KEK version. An error → missing sample → leader refuses (fail closed).
+func NewKEKLeaseSnapshotHandler(nodeID string, tracker *encrypt.KEKLeaseTracker, commitIndexFn func() uint64, snapshotRefCountFn func(version uint32) (uint64, error)) *KEKLeaseSnapshotHandler {
 	return &KEKLeaseSnapshotHandler{
-		nodeID:        nodeID,
-		tracker:       tracker,
-		commitIndexFn: commitIndexFn,
+		nodeID:             nodeID,
+		tracker:            tracker,
+		commitIndexFn:      commitIndexFn,
+		snapshotRefCountFn: snapshotRefCountFn,
 	}
 }
 
@@ -151,10 +163,16 @@ func (h *KEKLeaseSnapshotHandler) Handle(req *transport.Message) *transport.Mess
 		return transport.NewErrorResponse(req, transport.StatusError,
 			fmt.Errorf("kek_lease_snapshot_probe: decode request: %w", err))
 	}
+	cnt, err := h.snapshotRefCountFn(decoded.Version)
+	if err != nil {
+		return transport.NewErrorResponse(req, transport.StatusError,
+			fmt.Errorf("kek_lease_snapshot_probe: snapshot ref scan: %w", err))
+	}
 	resp := KEKLeaseSnapshotResp{
 		LeaseCount:                h.tracker.Count(decoded.Version),
 		ObservedAtRaftCommitIndex: h.commitIndexFn(),
 		NodeID:                    h.nodeID,
+		SnapshotRefCount:          cnt,
 	}
 	return transport.NewResponse(req, encodeKEKLeaseSnapshotResp(resp))
 }

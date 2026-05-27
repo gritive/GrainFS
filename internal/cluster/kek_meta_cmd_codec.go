@@ -260,9 +260,10 @@ func DecodeMetaKEKRetireCmd(data []byte) (KEKRetireCmd, error) {
 // target KEK version is zero, observed at the named raft commit index. The
 // FSM Apply path verifies every entry has lease_count == 0 (Pass-6 C1).
 type LeaseAttestationEntry struct {
-	NodeID          string
-	ObservedAtIndex uint64
-	LeaseCount      uint64
+	NodeID           string
+	ObservedAtIndex  uint64
+	LeaseCount       uint64
+	SnapshotRefCount uint64
 }
 
 // KEKPruneCmd is the decoded in-memory form of a MetaKEKPruneCmd payload.
@@ -318,6 +319,7 @@ func EncodeMetaKEKPruneCmd(cmd KEKPruneCmd) ([]byte, error) {
 		clusterpb.LeaseAttestationEntryAddNodeId(b, nodeOff)
 		clusterpb.LeaseAttestationEntryAddObservedAtIndex(b, entry.ObservedAtIndex)
 		clusterpb.LeaseAttestationEntryAddLeaseCount(b, entry.LeaseCount)
+		clusterpb.LeaseAttestationEntryAddSnapshotRefCount(b, entry.SnapshotRefCount)
 		leaseOffs[i] = clusterpb.LeaseAttestationEntryEnd(b)
 	}
 	clusterpb.MetaKEKPruneCmdStartLeaseAttestationVector(b, len(leaseOffs))
@@ -396,9 +398,10 @@ func DecodeMetaKEKPruneCmd(data []byte) (KEKPruneCmd, error) {
 	for i := 0; i < leaseLen; i++ {
 		if t.LeaseAttestation(&leaseEntry, i) {
 			lease[i] = LeaseAttestationEntry{
-				NodeID:          string(leaseEntry.NodeId()),
-				ObservedAtIndex: leaseEntry.ObservedAtIndex(),
-				LeaseCount:      leaseEntry.LeaseCount(),
+				NodeID:           string(leaseEntry.NodeId()),
+				ObservedAtIndex:  leaseEntry.ObservedAtIndex(),
+				LeaseCount:       leaseEntry.LeaseCount(),
+				SnapshotRefCount: leaseEntry.SnapshotRefCount(),
 			}
 		}
 	}
