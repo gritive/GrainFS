@@ -314,14 +314,19 @@ func (m *Manager) deleteUnlocked(name string) error {
 
 // List returns all volumes.
 func (m *Manager) List() ([]*Volume, error) {
+	return m.ListContext(context.Background())
+}
+
+// ListContext returns all volumes, honoring ctx for backend metadata reads.
+func (m *Manager) ListContext(ctx context.Context) ([]*Volume, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := m.backend.HeadBucket(context.Background(), volumeBucketName); err != nil {
+	if err := m.backend.HeadBucket(ctx, volumeBucketName); err != nil {
 		return nil, nil // no volumes bucket yet
 	}
 
-	objs, err := m.backend.ListObjects(context.Background(), volumeBucketName, metaPrefix, 10000)
+	objs, err := m.backend.ListObjects(ctx, volumeBucketName, metaPrefix, 10000)
 	if err != nil {
 		return nil, fmt.Errorf("list volume metadata: %w", err)
 	}
@@ -331,7 +336,7 @@ func (m *Manager) List() ([]*Volume, error) {
 		if !strings.HasSuffix(obj.Key, "/meta") {
 			continue
 		}
-		rc, _, err := m.backend.GetObject(context.Background(), volumeBucketName, obj.Key)
+		rc, _, err := m.backend.GetObject(ctx, volumeBucketName, obj.Key)
 		if err != nil {
 			continue
 		}

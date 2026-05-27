@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
@@ -128,6 +129,8 @@ type Server struct {
 	icebergCommitSlowThresholdNs atomic.Int64
 
 	eventWorker *eventWorker
+
+	metricsGatherer prometheus.Gatherer
 }
 
 type ServerStorage struct {

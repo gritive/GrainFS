@@ -40,6 +40,8 @@ import (
 func bootHTTPServerAndAdmin(state *bootState) error {
 	cfg := state.cfg
 
+	operatorCollector, operatorGatherer := newOperatorStateMetricsCollector(state)
+	state.srvOpts = append(state.srvOpts, server.WithMetricsGatherer(operatorGatherer))
 	srv := server.New(cfg.Addr, state.backend, state.srvOpts...)
 	state.srv = srv
 
@@ -103,6 +105,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		state.metaRaft,
 		state.cfgStore,
 	)
+	operatorCollector.SetSources(operatorStateSources(state))
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
 	admin.RegisterUI(dataHertz, state.adminDeps)
