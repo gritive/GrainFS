@@ -2,7 +2,6 @@ package encrypt
 
 import (
 	"bytes"
-	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"errors"
@@ -10,6 +9,8 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+
+	"filippo.io/xaes256gcm"
 )
 
 // DEKSize is the size of a Data Encryption Key in bytes (AES-256).
@@ -28,8 +29,8 @@ var ErrDEKGenUnknown = errors.New("DEK generation unknown")
 //   - aead: a cached cipher.AEAD constructed once at insertion time
 //
 // The hot path (Seal/Open, one call per S3 object I/O) does a single map
-// lookup + AEAD operation. It does NOT call aes.NewCipher / cipher.NewGCM
-// — those run only on insertion (NewDEKKeeper, Rotate, LoadFromFSM). This
+// lookup + AEAD operation. It does NOT call xaes256gcm.NewWithManualNonces
+// — that runs only on insertion (NewDEKKeeper, Rotate, LoadFromFSM). This
 // matches the existing Encryptor pattern in this package and saves ~4 heap
 // allocations per object I/O.
 //
@@ -668,13 +669,11 @@ func LoadFromFSM(kek, clusterID []byte, versions map[uint32][]byte, activeKEKVer
 	return k, nil
 }
 
-// newAEAD builds an AES-256-GCM AEAD from a 32-byte key.
+// newAEAD builds an XAES-256-GCM AEAD from a 32-byte key. XAES-256-GCM's
+// 192-bit nonce removes the AES-GCM ~2^32 random-nonce exhaustion cliff while
+// keeping AES-NI speed. Mirrors the static Encryptor (encrypt.go) post-#566.
 func newAEAD(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
+	return xaes256gcm.NewWithManualNonces(key)
 }
 
 // zeroize overwrites a slice with zeros. Called on plaintext DEK material

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.379.0] - 2026-05-28
+
+### Changed
+
+- At-rest encryption: the generation-aware Data Encryption Key (DEK) now seals
+  bulk data with XAES-256-GCM (192-bit nonce) instead of AES-256-GCM. The wider
+  nonce removes the random-nonce exhaustion limit that high-volume clusters could
+  otherwise drift toward, so DEK rotation is now a hygiene and compromise-recovery
+  tool rather than a nonce-driven requirement. The KEK-to-DEK wrap is unchanged.
+
+### Removed
+
+- At-rest format boundary: a data directory written by an older binary (pre-XAES
+  DEK) now refuses to boot instead of silently mis-reading. There is no in-place
+  upgrade path — start a new cluster. This matches the existing static-key XAES
+  boundary.
+
 ## [0.0.378.0] - 2026-05-28
 
 ### Security
