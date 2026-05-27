@@ -68,6 +68,66 @@ func TestPeerRegistry_PromoteUnknownErrors(t *testing.T) {
 	}
 }
 
+func TestPeerRegistry_RegisterMember_NeverDemotes(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("n", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("registerPendingLearner: %v", err)
+	}
+	if err := r.promoteMember("n"); err != nil {
+		t.Fatalf("promoteMember: %v", err)
+	}
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("registerMember: %v", err)
+	}
+	if r.byNodeID["n"].State != peerStateMember {
+		t.Fatal("registerMember must not demote an existing member")
+	}
+}
+
+func TestPeerRegistry_RegisterMember_InsertsAsMember(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("registerMember: %v", err)
+	}
+	e, ok := r.byNodeID["n"]
+	if !ok || e.State != peerStateMember {
+		t.Fatal("registerMember on absent node must insert as member")
+	}
+}
+
+func TestPeerRegistry_RegisterMember_PromotesPendingLearner(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("n", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("registerPendingLearner: %v", err)
+	}
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", true); err != nil {
+		t.Fatalf("registerMember: %v", err)
+	}
+	e := r.byNodeID["n"]
+	if e.State != peerStateMember {
+		t.Fatal("registerMember must upgrade a pending-learner to member")
+	}
+	if !e.PresentsPerNode {
+		t.Fatal("registerMember must record presents_per_node")
+	}
+}
+
+func TestPeerRegistry_RegisterMember_Idempotent(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("first registerMember: %v", err)
+	}
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+		t.Fatalf("second registerMember (idempotent): %v", err)
+	}
+	if len(r.byNodeID) != 1 {
+		t.Fatalf("idempotent re-register must yield a single member, got %d", len(r.byNodeID))
+	}
+	if r.byNodeID["n"].State != peerStateMember {
+		t.Fatal("idempotent re-register must keep member state")
+	}
+}
+
 func TestPeerRegistry_AcceptSet(t *testing.T) {
 	r := newPeerRegistry()
 	_ = r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000")
@@ -75,5 +135,31 @@ func TestPeerRegistry_AcceptSet(t *testing.T) {
 	set := r.acceptSPKIs()
 	if len(set) != 2 {
 		t.Fatalf("acceptSPKIs len %d, want 2 (learners are transport-accepted)", len(set))
+	}
+}
+
+func TestApplyRegisterMember_FiresOnPeersChanged(t *testing.T) {
+	fsm := NewMetaFSM()
+	var got [][32]byte
+	fired := 0
+	fsm.SetOnPeersChanged(func(set [][32]byte) {
+		fired++
+		got = set
+	})
+	data, err := encodeRegisterMemberCmd("n", spki(1), "10.0.0.2:9000", true)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := fsm.applyRegisterMember(data); err != nil {
+		t.Fatalf("applyRegisterMember: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("onPeersChanged fired %d times, want 1", fired)
+	}
+	if len(got) != 1 {
+		t.Fatalf("accept-set len %d, want 1", len(got))
+	}
+	if fsm.Peers().byNodeID["n"].State != peerStateMember {
+		t.Fatal("applied RegisterMember must register as member")
 	}
 }

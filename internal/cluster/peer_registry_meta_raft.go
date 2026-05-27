@@ -24,6 +24,19 @@ func (m *MetaRaft) ProposeRegisterPendingLearner(ctx context.Context, nodeID str
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeRegisterMember proposes non-demoting boot-time self-registration of a
+// peer as member (D-rev3 step 2). Every node self-registers and most are
+// followers, so this uses the generic forwarding Propose path (which forwards
+// to the leader when not leader and blocks until applied) — NOT the leader-only
+// m.node.ProposeWait path. presentsPerNode is recording-only plumbing (Task 7).
+func (m *MetaRaft) ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error {
+	payload, err := encodeRegisterMemberCmd(nodeID, spki, addr, presentsPerNode)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode RegisterMember: %w", err)
+	}
+	return m.Propose(ctx, MetaCmdTypeRegisterMember, payload)
+}
+
 // ProposePromoteMember proposes promotion of a pending-learner to voting member.
 // Caller must be leader.
 func (m *MetaRaft) ProposePromoteMember(ctx context.Context, nodeID string) error {

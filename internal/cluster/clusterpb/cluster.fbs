@@ -519,6 +519,7 @@ enum MetaCmdType : uint8 {
   PromoteMember                = 76, // zero-CA: promote a pending-learner to voting member
   RevokePeer                   = 77, // zero-CA: remove a peer + denylist its SPKI
   InvitePending                = 78, // zero-CA: record a pending invite-join (invite_id, node_id, SPKI, addr)
+  RegisterMember               = 79, // zero-CA: non-demoting boot-time self-registration as member (D-rev3 step2)
 }
 
 table MetaNodeEntry {
@@ -799,6 +800,17 @@ table MetaPromoteMemberCmd {
 }
 table MetaRevokePeerCmd {
   node_id:string;
+}
+
+// MetaRegisterMemberCmd is non-demoting boot-time self-registration (slot 79).
+// Unlike RegisterPendingLearner it inserts/keeps a peer as member, never
+// downgrading an existing member or pending-learner. presents_per_node is
+// recording-only plumbing (Task 7).
+table MetaRegisterMemberCmd {
+  node_id:string;
+  spki:[ubyte];     // 32 bytes
+  address:string;
+  presents_per_node:bool;
 }
 
 // NFSv4 multi-export registry. Per design doc D2/D3/D5.

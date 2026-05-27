@@ -18,6 +18,9 @@ type peerEntry struct {
 	SPKI    [32]byte
 	Address string
 	State   peerState
+	// PresentsPerNode records whether this peer presents a per-node identity
+	// (D-rev3). Recording-only plumbing; Task 7 reads it.
+	PresentsPerNode bool
 }
 
 // peerRegistry is the deterministic membership/SPKI registry applied from the
@@ -62,6 +65,30 @@ func (r *peerRegistry) registerPendingLearner(nodeID string, s [32]byte, addr st
 		return fmt.Errorf("%w: node %s already bound to a different SPKI", errNodeIDRebind, nodeID)
 	}
 	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStatePendingLearner}
+	r.bySPKI[s] = nodeID
+	return nil
+}
+
+// registerMember is non-demoting boot-time self-registration (D-rev3 step 2).
+// If the node is absent it is inserted directly as a member. If it is already
+// present with the SAME (nodeID, SPKI) it is kept/UPGRADED to member — an
+// existing member stays member, a pending-learner is promoted; it is NEVER
+// downgraded. Address and PresentsPerNode are refreshed last-write-wins on an
+// idempotent re-register. The same SPKI-uniqueness and node-id-rebind guards as
+// registerPendingLearner apply. presentsPerNode is recording-only (Task 7).
+func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, presentsPerNode bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, denied := r.deny[s]; denied {
+		return errSPKIDenylisted
+	}
+	if owner, ok := r.bySPKI[s]; ok && owner != nodeID {
+		return fmt.Errorf("%w: owned by %s", errSPKINotUnique, owner)
+	}
+	if existing, ok := r.byNodeID[nodeID]; ok && existing.SPKI != s {
+		return fmt.Errorf("%w: node %s already bound to a different SPKI", errNodeIDRebind, nodeID)
+	}
+	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStateMember, PresentsPerNode: presentsPerNode}
 	r.bySPKI[s] = nodeID
 	return nil
 }
