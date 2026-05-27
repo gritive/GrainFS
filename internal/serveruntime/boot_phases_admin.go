@@ -131,6 +131,16 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 					dataChecker: state.metaRaft.FSM(),
 				}
 				h.POST("/v1/cluster/join", joinH.Handle)
+
+				// Zero-CA W10: invite mint + operator bundle. SeedAddr/SeedSPKI
+				// come from the running join listener (W9a accessors on
+				// bootState); cluster.id from the post-apply FSM.
+				inviteH := &InviteHandler{
+					proposer:     state.metaRaft,
+					clusterID:    state.metaRaft.FSM(),
+					joinListener: state,
+				}
+				h.POST("/v1/cluster/invite/create", inviteH.Handle)
 			}
 		},
 	})

@@ -9,6 +9,7 @@ Available Commands:
   drain           Remove a voter via graceful transfer-leader + remove-peer composite
   events          Show recent cluster audit events
   health          Show aggregated cluster health (quorum, peers, issues)
+  invite          Zero-CA invite tooling (mint one-time join invites)
   join            Join an existing cluster via KEK challenge-response handshake (offline bootstrap)
   peers           List cluster voters with leader and liveness state
   placement       Show object placement summary and detail
