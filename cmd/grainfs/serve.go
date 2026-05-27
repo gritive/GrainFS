@@ -25,6 +25,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().String("public-url", "", "public dashboard base URL (e.g. https://node1:9000); defaults to localhost in `grainfs dashboard` output")
 	cmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	cmd.Flags().String("raft-addr", "", "Raft listen address for cluster communication (required in cluster mode)")
+	cmd.Flags().String("join-listen-addr", "", "Zero-CA QUIC join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host")
 	cmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	cmd.Flags().Int64("cluster-append-forward-buffer-total-bytes", 512*1024*1024,
 		"Total byte budget for AppendObject forward-body reservation pool (default 512 MiB).")

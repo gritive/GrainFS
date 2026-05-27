@@ -40,6 +40,24 @@ func GenerateNodeIdentity(clusterID, nodeID string) (tls.Certificate, [32]byte, 
 	if err != nil {
 		return tls.Certificate{}, [32]byte{}, fmt.Errorf("generate node key: %w", err)
 	}
+	return BuildNodeIdentity(clusterID, nodeID, priv)
+}
+
+// BuildNodeIdentity builds the self-signed node cert for an ALREADY-EXISTING
+// ECDSA key (spec D1/D4 SAN), instead of generating a fresh one. Used by the
+// Zero-CA invite-join resume path: a Phase-1 retry must present the SAME SPKI
+// the leader already bound via ProposeInvitePending, so it reuses the persisted
+// node.key.unsealed key rather than minting a new (mismatching) identity.
+//
+// Returns (cert, spki, err) where spki = sha256(RawSubjectPublicKeyInfo) — a
+// deterministic function of priv's public key.
+func BuildNodeIdentity(clusterID, nodeID string, priv *ecdsa.PrivateKey) (tls.Certificate, [32]byte, error) {
+	if clusterID == "" || nodeID == "" {
+		return tls.Certificate{}, [32]byte{}, errors.New("clusterID and nodeID are required")
+	}
+	if priv == nil {
+		return tls.Certificate{}, [32]byte{}, errors.New("priv is required")
+	}
 
 	sanURI := &url.URL{Scheme: sanScheme, Host: clusterID, Path: "/" + nodeID}
 	now := time.Now().UTC()

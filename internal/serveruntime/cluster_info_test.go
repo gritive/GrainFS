@@ -99,6 +99,7 @@ func (n *clusterInfoRaftNode) AddVoterCtx(context.Context, string, string) error
 func (n *clusterInfoRaftNode) RemoveVoter(string) error        { return nil }
 func (n *clusterInfoRaftNode) AddLearner(string, string) error { return nil }
 func (n *clusterInfoRaftNode) PromoteToVoter(string) error     { return nil }
+func (n *clusterInfoRaftNode) RemoveLearner(string) error      { return nil }
 func (n *clusterInfoRaftNode) TransferLeadership() error       { return nil }
 func (n *clusterInfoRaftNode) ChangeMembership(context.Context, []raft.ServerEntry, []string) error {
 	return nil

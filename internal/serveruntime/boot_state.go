@@ -57,9 +57,21 @@ type bootState struct {
 	// join-pending mode: set by bootValidateConfig when .join-pending file exists.
 	joinMode bool
 	joinAddr string
-	metaDir  string
-	raftDir  string
-	bootID   string
+	// inviteJoinMode: set by maybeInviteJoin (W9b) when this node boots from a
+	// Zero-CA invite bundle (FreshJoin/Resume). It mirrors joinMode's raft gating
+	// (raftPeers=nil, raftCfg.JoinMode, skip Bootstrap), forces isGenesisBoot
+	// false (so the joiner uses NewEmptyDEKKeeper + strict cluster.id load against
+	// the secrets staged from Phase-1), and skips the legacy PerformMetaJoin/KEK
+	// handshake. Phase-2 membership ACK rides the dedicated QUIC join transport.
+	inviteJoinMode bool
+	// inviteJoin carries the Phase-1 outcome (resolved bundle, leaderID, node
+	// SPKI) so the post-boot Phase-2 ACK can redrive DialJoin without re-reading
+	// the bundle env var. Set by maybeInviteJoin; consumed in
+	// bootWALAndForwarders.
+	inviteJoin *inviteJoinState
+	metaDir    string
+	raftDir    string
+	bootID     string
 	// priorState is captured by bootValidateConfig BEFORE bootOpenMetaDB
 	// runs. True if <dataDir>/meta or <dataDir>/raft already contained
 	// data on entry — signals a restart of an existing node (versus a
@@ -219,6 +231,12 @@ type bootState struct {
 	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
+	// joinListener is the Zero-CA QUIC join listener (leader side, W9) serving
+	// the two-phase invite handler on cfg.JoinListenAddr with a persisted stable
+	// cert. Nil in single-node mode. Closed via AddCleanup on shutdown; its
+	// Addr()/SPKI() are exposed to W10 (invite-bundle advertisement) via
+	// JoinListenerAddr()/JoinListenerSPKI().
+	joinListener *transport.JoinListener
 	// coalesceCfg is the cluster-wide coalesce/cap configuration derived from
 	// CLI flags. Stored here so that GroupBackends instantiated after
 	// bootWALAndForwarders (including dynamically created shard groups) can
@@ -278,7 +296,12 @@ type bootState struct {
 // rather than here so the field stays zero-valued in tests that do not opt in
 // to banner emission. See bootPhase0Banner for the consumer.
 func newBootState(cfg Config) *bootState {
-	return &bootState{cfg: cfg}
+	s := &bootState{cfg: cfg}
+	if cfg.InviteJoin != nil {
+		s.inviteJoinMode = true
+		s.inviteJoin = cfg.InviteJoin
+	}
+	return s
 }
 
 // AddCleanup pushes fn onto the cleanup stack. Order matters: cleanups run in

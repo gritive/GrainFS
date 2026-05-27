@@ -469,6 +469,14 @@ func (f *MetaFSM) resolveNodeIDByAddressLocked(addr string) (string, bool) {
 	return "", false
 }
 
+// NodeByID returns the membership entry for a node id, if present.
+func (f *MetaFSM) NodeByID(id string) (MetaNodeEntry, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	n, ok := f.nodes[id]
+	return n, ok
+}
+
 // Nodes returns a copy of current cluster members.
 func (f *MetaFSM) Nodes() []MetaNodeEntry {
 	f.mu.RLock()

@@ -77,7 +77,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// state.joinMode is set by bootValidateConfig (Task 3 populates it from
 	// the .join-pending sentinel file).
 	raftPeers := state.peers
-	if state.joinMode {
+	if state.joinMode || state.inviteJoinMode {
 		raftPeers = nil
 	}
 	raftCfg := raft.DefaultConfig(state.nodeID, raftPeers)
@@ -88,7 +88,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// see internal/raft/v2/types.go JoinMode docstring. Without this gate
 	// the joiner becomes a phantom leader of its own 1-node cluster and
 	// the cluster leader's joint AddVoter wait deadlocks.
-	raftCfg.JoinMode = state.joinMode
+	raftCfg.JoinMode = state.joinMode || state.inviteJoinMode
 
 	// M5 PR 29: raft v2 is the only path. The GRAINFS_RAFT_V2 flag is gone;
 	// v1 (*raft.Node) is unreachable from serveruntime. PR 30 deletes the v1
@@ -103,7 +103,7 @@ func Run(ctx context.Context, cfg Config) error {
 			_ = v2Close()
 		}
 	})
-	if !state.joinMode {
+	if !state.joinMode && !state.inviteJoinMode {
 		if err := v2Node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
 			return fmt.Errorf("raft v2 bootstrap: %w", err)
 		}
@@ -283,6 +283,11 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		log.Info().Str("peer", state.joinAddr).Msg("join complete — pending file removed")
 	}
+
+	// Zero-CA invite-join (W9b): the Phase-2 ACK in bootWALAndForwarders already
+	// cleared the .invite-join-pending sentinel + shredded node.key.unsealed on
+	// success. Nothing left to clean here — the sentinel removal is the resume
+	// barrier, owned by the Phase-2 path.
 
 	bootShutdownDrain(ctx, state)
 	return nil

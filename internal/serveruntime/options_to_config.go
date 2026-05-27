@@ -29,6 +29,7 @@ func optionsToConfig(
 		NodeID:           opts.NodeID,
 		RaftAddr:         opts.RaftAddr,
 		RaftAddrExplicit: opts.RaftAddr != "",
+		JoinListenAddr:   opts.JoinListenAddr,
 		ClusterKey:       opts.ClusterKey,
 		AuthOpts:         authOpts,
 		Encryptor:        encryptor,

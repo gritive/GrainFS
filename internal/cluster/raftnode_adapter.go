@@ -406,6 +406,13 @@ func (a *raftNodeAdapter) PromoteToVoter(id string) error {
 	return translateRaftErr(a.n.PromoteToVoter(id))
 }
 
+// RemoveLearner passes through to v2's single-phase RemoveLearner. Inverse
+// of AddLearner: drops the non-voting observer. Returns raft.ErrNotALearner
+// when id is not a registered learner.
+func (a *raftNodeAdapter) RemoveLearner(id string) error {
+	return translateRaftErr(a.n.RemoveLearner(id))
+}
+
 // TransferLeadership passes through to v2 (Raft §3.10, implemented in
 // v0.0.143.0 / PR #288).
 func (a *raftNodeAdapter) TransferLeadership() error {
