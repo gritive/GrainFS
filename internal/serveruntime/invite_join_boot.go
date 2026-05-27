@@ -540,21 +540,6 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	if state.kekStore == nil {
 		return fmt.Errorf("invite-join Phase-2: KEK store not wired")
 	}
-	// On resume across a process restart st.nodeKeyKEKGen is zero (Phase-1 ran in
-	// a prior process) — recover the gen node.key.enc was actually sealed under
-	// from the sentinel (alongside leaderID/inviteID below) BEFORE loading.
-	if st.nodeKeyKEKGen == 0 {
-		if persisted, ok := readInvitePendingSentinel(state.cfg.DataDir); ok {
-			st.nodeKeyKEKGen = persisted.nodeKeyKEKGen
-		}
-	}
-	// Load node.key.enc under the cluster's ACTIVE KEK gen — the gen Phase-1
-	// sealed it under (NOT a hardcoded gen-0, which a rotated+pruned cluster
-	// would not retain).
-	sealKEK, err := state.kekStore.Get(st.nodeKeyKEKGen)
-	if err != nil {
-		return fmt.Errorf("invite-join Phase-2: get KEK gen %d: %w", st.nodeKeyKEKGen, err)
-	}
 	// Load + migrate the node key to the STATIC encryption.key. Phase-1 sealed
 	// node.key.enc under a prunable KEK gen; if this invite-joined node stays
 	// online through a KEK rotate+prune (meta_fsm_kek_apply unlinks the old gen)
@@ -562,10 +547,33 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	// back-compat migration can no longer decrypt → BRICK. Re-seal under the
 	// static encryption.key NOW (it never rotates/prunes and Phase-1 already
 	// staged it), closing that deferred-migration window from the very first
-	// boot. The migration is idempotent across the crash window between re-seal
-	// and the sentinel clear below: a resume that already re-sealed loads under
-	// encKey directly (no KEK gen needed), so it cannot brick.
-	cert, spki, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey, sealKEK)
+	// boot.
+	//
+	// The old KEK gen is resolved LAZILY (resolveOldKEK below), invoked by the
+	// helper ONLY on the encKey-miss branch. A resume after a successful re-seal
+	// loads node.key.enc under encKey directly and NEVER calls resolveOldKEK — so
+	// a pruned old gen (or a node.key.enc already re-sealed under encKey on a
+	// prior attempt) can no longer brick the resume. A fresh first-join (still
+	// KEK-gen-sealed) falls through to resolveOldKEK + migrate. The migration is
+	// idempotent across the crash window between re-seal and the sentinel clear
+	// below.
+	resolveOldKEK := func() ([]byte, error) {
+		// On resume across a process restart st.nodeKeyKEKGen is zero (Phase-1 ran
+		// in a prior process) — recover the gen node.key.enc was actually sealed
+		// under from the sentinel. Done lazily so an encKey-first load that never
+		// needs the old gen does not depend on the sentinel either.
+		if st.nodeKeyKEKGen == 0 {
+			if persisted, ok := readInvitePendingSentinel(state.cfg.DataDir); ok {
+				st.nodeKeyKEKGen = persisted.nodeKeyKEKGen
+			}
+		}
+		sealKEK, err := state.kekStore.Get(st.nodeKeyKEKGen)
+		if err != nil {
+			return nil, fmt.Errorf("get KEK gen %d: %w", st.nodeKeyKEKGen, err)
+		}
+		return sealKEK, nil
+	}
+	cert, spki, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey, resolveOldKEK)
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2: load node key: %w", err)
 	}
@@ -687,21 +695,29 @@ func appendInviteSealField(out, b []byte) []byte {
 //
 //   - try encKey first: succeeds if a prior Phase-2 (or a crashed resume) already
 //     migrated the key — idempotent, no re-seal needed;
-//   - else try the Phase-1 KEK gen (sealKEK): on success re-seal under encKey
-//     (the prune-proof migration) and delete any stale node.key.gen sidecar.
+//   - else LAZILY resolve the Phase-1 KEK gen (via resolveKEK) and load under it:
+//     on success re-seal under encKey (the prune-proof migration) and delete any
+//     stale node.key.gen sidecar.
 //
-// Trying encKey first makes the migration safe across the crash window between
-// the re-seal and the sentinel clear in bootInviteJoinPhase2: a resume after a
-// successful re-seal loads under encKey directly and never touches the
-// (possibly pruned) KEK gen. The re-seal writes the SAME key bytes returned by
-// LoadNodeKey, so the SPKI is byte-identical (asserted by the caller's tests).
-// When encKey is not 32 bytes (test/dev configs without a static key) the
-// migration is skipped and the key is loaded under sealKEK as before.
-func loadAndMigrateInviteNodeKey(dataDir string, encKey, sealKEK []byte) (tls.Certificate, [32]byte, error) {
+// resolveKEK is invoked ONLY on the encKey-miss branch. This closes the resume
+// prune-brick window: the caller no longer resolves the old KEK gen up-front, so
+// a resume after a successful re-seal (node.key.enc already encKey-sealed) loads
+// under encKey directly and NEVER touches the (possibly pruned) KEK gen —
+// resolveKEK is never called, and its failure (e.g. a pruned gen) is irrelevant.
+// The re-seal writes the SAME key bytes returned by LoadNodeKey, so the SPKI is
+// byte-identical (asserted by the caller's tests). When encKey is not 32 bytes
+// (test/dev configs without a static key) the migration is skipped and the key
+// is loaded under the lazily-resolved KEK as before.
+func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, resolveKEK func() ([]byte, error)) (tls.Certificate, [32]byte, error) {
 	if len(encKey) == 32 {
 		if cert, spki, err := transport.LoadNodeKey(dataDir, encKey); err == nil {
 			return cert, spki, nil
 		}
+	}
+	// encKey load missed (or encKey unusable) — resolve the old KEK gen now.
+	sealKEK, err := resolveKEK()
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, err
 	}
 	cert, spki, err := transport.LoadNodeKey(dataDir, sealKEK)
 	if err != nil {
