@@ -739,6 +739,9 @@ func encryptedFlagCandidates(flags byte) []byte {
 
 func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, payload []byte) ([]byte, error) {
 	if bs.encryptor == nil {
+		if encrypt.IsLegacyEncryptedValue(payload) {
+			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
+		}
 		return payload, nil
 	}
 	if flags&flagEncrypted != 0 {

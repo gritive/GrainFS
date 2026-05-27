@@ -28,6 +28,9 @@ func setBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key,
 
 func openBadgerValue(enc *encrypt.Encryptor, domain string, key, val []byte) ([]byte, error) {
 	if enc == nil {
+		if encrypt.IsLegacyEncryptedValue(val) {
+			return nil, fmt.Errorf("value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
+		}
 		return append([]byte(nil), val...), nil
 	}
 	if !encrypt.IsEncryptedValue(val) {

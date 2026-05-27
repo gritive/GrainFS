@@ -416,3 +416,48 @@ func TestEncryptedBlobStoreReadsPlaintextWithValueMagicButNonLegacyVersion(t *te
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 }
+
+// TestBlobStoreRejectsLegacyValueWithoutEncryptor verifies the bs.encryptor == nil
+// branch loud-fails on an exact legacy value (0xAE 0xE2 0x01) rather than
+// returning it as raw plaintext.
+func TestBlobStoreRejectsLegacyValueWithoutEncryptor(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	// Exact pre-XAES value signature, written as an unencrypted entry.
+	oldMagicPayload := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
+	loc, err := bs.Append("bucket/key-legacy-noenc", oldMagicPayload)
+	require.NoError(t, err)
+	require.NoError(t, bs.Close())
+
+	// Reopen WITHOUT an encryptor.
+	reopened, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	_, err = reopened.Read(loc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
+}
+
+// TestBlobStoreReadsPlaintextWithoutEncryptor verifies the bs.encryptor == nil
+// branch still passes genuine plaintext (incl. value-magic with a non-legacy
+// version) through unchanged.
+func TestBlobStoreReadsPlaintextWithoutEncryptor(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	// Value magic prefix but version byte 0x05 (neither legacy 0x01 nor current 0x02).
+	payload := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
+	loc, err := bs.Append("bucket/key-plain-noenc", payload)
+	require.NoError(t, err)
+	require.NoError(t, bs.Close())
+
+	reopened, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	got, err := reopened.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
