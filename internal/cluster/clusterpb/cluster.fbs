@@ -784,6 +784,7 @@ table MetaInviteMintCmd {
 }
 table MetaInviteConsumeCmd {
   id:string;
+  consumed_at_nanos:long;
 }
 
 // zero-CA: peer registry commands (slots 75-77).

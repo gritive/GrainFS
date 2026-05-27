@@ -36,20 +36,23 @@ func decodeInviteMintCmd(data []byte) (id string, pub ed25519.PublicKey, expiryN
 }
 
 // encodeInviteConsumeCmd serializes an InviteConsume payload.
-func encodeInviteConsumeCmd(id string) ([]byte, error) {
+// consumedAtNanos is stamped at propose time so all replicas apply the same
+// timestamp (FSM determinism; no time.Now() in the apply path).
+func encodeInviteConsumeCmd(id string, consumedAtNanos int64) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(id)
 	clusterpb.MetaInviteConsumeCmdStart(b)
 	clusterpb.MetaInviteConsumeCmdAddId(b, idOff)
+	clusterpb.MetaInviteConsumeCmdAddConsumedAtNanos(b, consumedAtNanos)
 	return fbFinish(b, clusterpb.MetaInviteConsumeCmdEnd(b)), nil
 }
 
-func decodeInviteConsumeCmd(data []byte) (id string, err error) {
+func decodeInviteConsumeCmd(data []byte) (id string, consumedAtNanos int64, err error) {
 	t, e := fbSafe(data, func(d []byte) *clusterpb.MetaInviteConsumeCmd {
 		return clusterpb.GetRootAsMetaInviteConsumeCmd(d, 0)
 	})
 	if e != nil {
-		return "", e
+		return "", 0, e
 	}
-	return string(t.Id()), nil
+	return string(t.Id()), t.ConsumedAtNanos(), nil
 }

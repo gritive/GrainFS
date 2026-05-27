@@ -67,12 +67,14 @@ func (f *MetaFSM) applyInviteMint(data []byte) error {
 }
 
 // applyInviteConsume decodes a MetaInviteConsumeCmd and marks the invite used.
+// The consumed_at_nanos field is stamped at propose time (leader clock) so this
+// apply path is deterministic — ZERO calls to time.Now() here.
 func (f *MetaFSM) applyInviteConsume(data []byte) error {
-	id, err := decodeInviteConsumeCmd(data)
+	id, consumedAtNanos, err := decodeInviteConsumeCmd(data)
 	if err != nil {
 		return fmt.Errorf("meta_fsm: decode InviteConsume: %w", err)
 	}
-	if err := f.invites.applyConsume(id, time.Now()); err != nil {
+	if err := f.invites.applyConsume(id, time.Unix(0, consumedAtNanos)); err != nil {
 		return fmt.Errorf("meta_fsm: InviteConsume %q: %w", id, err)
 	}
 	return nil
