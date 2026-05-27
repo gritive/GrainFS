@@ -23,7 +23,7 @@ func (m *MetaRaft) ProposeInviteMint(ctx context.Context, id string, pub ed25519
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeInviteConsume proposes an InviteConsume command to the cluster,
@@ -43,5 +43,5 @@ func (m *MetaRaft) ProposeInviteConsume(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }

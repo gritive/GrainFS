@@ -21,7 +21,7 @@ func (m *MetaRaft) ProposeRegisterPendingLearner(ctx context.Context, nodeID str
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposePromoteMember proposes promotion of a pending-learner to voting member.
@@ -39,7 +39,7 @@ func (m *MetaRaft) ProposePromoteMember(ctx context.Context, nodeID string) erro
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeRevokePeer proposes removal of a peer and denylisting of its SPKI.
@@ -57,5 +57,5 @@ func (m *MetaRaft) ProposeRevokePeer(ctx context.Context, nodeID string) error {
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
