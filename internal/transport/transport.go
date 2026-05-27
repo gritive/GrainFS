@@ -32,6 +32,9 @@ const (
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 	StreamMetaJoinChallenge       StreamType = 0x16 // New node → meta-Raft leader KEK handshake nonce request (§7 T55)
+	StreamCapabilityProbe         StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
+	StreamKEKDiskSpaceProbe       StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
+	StreamKEKLeaseSnapshotProbe   StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
 )
 
 type StreamClass byte

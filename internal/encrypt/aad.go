@@ -11,16 +11,17 @@ import (
 type AADDomain uint16
 
 const (
-	DomainShard        AADDomain = 0x0001
-	DomainWAL          AADDomain = 0x0002
-	DomainSnapshotBody AADDomain = 0x0003
-	DomainSnapshotDEK  AADDomain = 0x0004
-	DomainJWTKey       AADDomain = 0x0005
-	DomainDEKFSMWrap   AADDomain = 0x0006
-	DomainKEKRotate    AADDomain = 0x0007
-	DomainKEKCatchup   AADDomain = 0x0008
-	DomainNBD          AADDomain = 0x0009
-	DomainIAMAdmin     AADDomain = 0x000A
+	DomainShard              AADDomain = 0x0001
+	DomainWAL                AADDomain = 0x0002
+	DomainSnapshotBody       AADDomain = 0x0003
+	DomainSnapshotDEK        AADDomain = 0x0004
+	DomainJWTKey             AADDomain = 0x0005
+	DomainDEKFSMWrap         AADDomain = 0x0006
+	DomainKEKRotate          AADDomain = 0x0007
+	DomainKEKCatchup         AADDomain = 0x0008
+	DomainNBD                AADDomain = 0x0009
+	DomainIAMAdmin           AADDomain = 0x000A
+	DomainCapabilityAssertV1 AADDomain = 0x000B
 )
 
 const aadMagic = "AAD\x01"

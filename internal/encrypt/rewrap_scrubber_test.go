@@ -72,7 +72,7 @@ func (f *fakeBackend) ReadAtomic(key string) ([]byte, uint32) {
 // the stored record is now at gen 1 and the payload is still decryptable.
 func TestRewrapScrubber_RewritesOldGenRecords(t *testing.T) {
 	kek := make([]byte, KEKSize)
-	keeper, err := NewDEKKeeper(kek)
+	keeper, err := NewDEKKeeper(kek, testClusterID())
 	require.NoError(t, err)
 
 	// Seal a record with gen 0.
@@ -106,7 +106,7 @@ func TestRewrapScrubber_RewritesOldGenRecords(t *testing.T) {
 // never observe a mismatched (payload, gen) pair — i.e. new payload with old gen or vice versa.
 func TestRewrapScrubber_AtomicSwap_NoCorruptMidUpdate(t *testing.T) {
 	kek := make([]byte, KEKSize)
-	keeper, err := NewDEKKeeper(kek)
+	keeper, err := NewDEKKeeper(kek, testClusterID())
 	require.NoError(t, err)
 
 	plain := []byte("atomic swap test payload")

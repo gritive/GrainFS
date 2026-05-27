@@ -8,7 +8,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
-	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 // DEKProposer is the subset of *cluster.MetaRaft needed by DEKPostCommitDispatcher.
@@ -23,7 +22,7 @@ type DEKProposer interface {
 // asynchronously (via goroutines) so the FSM apply loop is never blocked.
 type DEKPostCommitDispatcher struct {
 	proposer     DEKProposer
-	keeper       *encrypt.DEKKeeper
+	isLeader     func() bool
 	scrubberKick func(ctx context.Context, oldGen uint32)
 }
 
@@ -34,13 +33,18 @@ func (d *DEKPostCommitDispatcher) Handle(cmdType clusterpb.MetaCmdType, payload 
 	switch cmdType {
 	case clusterpb.MetaCmdTypeConfigPut:
 		d.handleConfigPut(payload)
-	case clusterpb.MetaCmdTypeDEKRotate:
-		d.handleDEKRotate()
+	case clusterpb.MetaCmdTypeDEKReplicatedRotate:
+		d.handleDEKReplicatedRotate(payload)
 	}
 }
 
 func (d *DEKPostCommitDispatcher) handleConfigPut(payload []byte) {
+	// Leader-only gate: collapse N-node fan-out to a single proposal.
+	// nil isLeader is treated as not-leader (fail-safe).
 	if d.proposer == nil {
+		return
+	}
+	if d.isLeader == nil || !d.isLeader() {
 		return
 	}
 	key, value, err := cluster.DecodeConfigPutPayload(payload)
@@ -72,34 +76,35 @@ func (d *DEKPostCommitDispatcher) handleConfigPut(payload []byte) {
 	}
 }
 
-func (d *DEKPostCommitDispatcher) handleDEKRotate() {
-	if d.scrubberKick == nil || d.keeper == nil {
+func (d *DEKPostCommitDispatcher) handleDEKReplicatedRotate(payload []byte) {
+	if d.scrubberKick == nil {
 		return
 	}
-	newGen, _ := d.keeper.Active()
-	if newGen < 1 {
+	cmd, err := cluster.DecodeDEKReplicatedRotateCmd(payload)
+	if err != nil {
+		log.Warn().Err(err).Msg("dek_post_commit: failed to decode DEKReplicatedRotate payload")
 		return
 	}
-	oldGen := newGen - 1
+	// Gen=0 is the bootstrap sentinel — there is no previous generation to rewrap.
+	if cmd.Gen < 1 {
+		return
+	}
+	oldGen := cmd.Gen - 1
 	go d.scrubberKick(context.Background(), oldGen)
 }
 
 // WireDEKPostCommit constructs a DEKPostCommitDispatcher and registers it as a
 // post-commit hook on fsm. The scrubberKick parameter may be nil (used in §1
 // before the storage-layer adapter is implemented).
-//
-// NOTE: This function exists for future use. It is NOT wired into the real
-// server startup in §1; that wiring happens when the runtime is assembled in a
-// later section.
 func WireDEKPostCommit(
 	fsm *cluster.MetaFSM,
 	proposer DEKProposer,
-	keeper *encrypt.DEKKeeper,
+	isLeader func() bool,
 	scrubberKick func(ctx context.Context, oldGen uint32),
 ) {
 	d := &DEKPostCommitDispatcher{
 		proposer:     proposer,
-		keeper:       keeper,
+		isLeader:     isLeader,
 		scrubberKick: scrubberKick,
 	}
 	fsm.RegisterPostCommit(d.Handle)

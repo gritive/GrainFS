@@ -2,6 +2,8 @@ package encrypt
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -35,14 +37,39 @@ var ErrKEKActiveInUse = errors.New("cannot delete active KEK version")
 // Delete) are admin-rate, not hot-path — a Mutex would suffice, but Get
 // runs on the hot path during DEK operations, hence RWMutex.
 type KEKStore struct {
-	mu     sync.RWMutex
-	keys   map[uint32][]byte
-	active uint32
+	mu               sync.RWMutex
+	keys             map[uint32][]byte
+	active           uint32
+	retiringVersions map[uint32]struct{}
 }
 
 // NewKEKStore creates an empty KEKStore.
 func NewKEKStore() *KEKStore {
-	return &KEKStore{keys: make(map[uint32][]byte)}
+	return &KEKStore{
+		keys:             make(map[uint32][]byte),
+		retiringVersions: make(map[uint32]struct{}),
+	}
+}
+
+// Retire marks the given version as retiring in memory. The key bytes are
+// retained until a subsequent MetaKEKPruneCmd removes them. Returns an error
+// if the version is not loaded.
+func (s *KEKStore) Retire(version uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.keys[version]; !ok {
+		return fmt.Errorf("KEKStore.Retire: version %d not loaded", version)
+	}
+	s.retiringVersions[version] = struct{}{}
+	return nil
+}
+
+// IsRetiring reports whether the given version has been marked as retiring.
+func (s *KEKStore) IsRetiring(version uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.retiringVersions[version]
+	return ok
 }
 
 // Add inserts kek at version. Refuses len(kek) != KEKSize and duplicate
@@ -85,6 +112,30 @@ func (s *KEKStore) ActiveVersion() uint32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.active
+}
+
+// HasVersion reports whether the given version is loaded in the store.
+// Read-locked; safe for concurrent use with hot-path Get.
+func (s *KEKStore) HasVersion(version uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.keys[version]
+	return ok
+}
+
+// SetActiveVersion overrides the active KEK marker to the requested version.
+// Fails if the version is not loaded. Used by MetaKEKRotateCmd FSM Apply to
+// flip the active marker atomically with the in-memory + on-disk install of
+// the rewrapped DEK set (Phase B). Distinct from Add, which only advances
+// active when the new version is strictly greater.
+func (s *KEKStore) SetActiveVersion(version uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.keys[version]; !ok {
+		return fmt.Errorf("KEKStore.SetActiveVersion: version %d not loaded", version)
+	}
+	s.active = version
+	return nil
 }
 
 // ActiveKEK returns the KEK bytes for the active version. Convenience over
@@ -256,6 +307,46 @@ func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 	return s, nil
 }
 
+// RemoveAndUnlink permanently removes a KEK version from disk AND in-memory.
+// Disk operations happen FIRST (unlink + parent-dir fsync); only after disk
+// success is the in-memory entry deleted. This ordering preserves replay
+// safety: if unlink/fsync fails, the in-memory state is left untouched so a
+// subsequent MetaKEKPruneCmd replay (partial-apply branch) can retry
+// deterministically.
+//
+// Refuses to remove the active version (defense-in-depth — the caller is
+// expected to have already gated on Retiring lifecycle state).
+//
+// keysDir is the on-disk directory passed at boot (Phase A: keystore does
+// not own the path). Missing on-disk file is tolerated (ErrNotExist) — a
+// crashed prune that already unlinked but failed to delete in-memory will
+// reach this path on replay.
+func (s *KEKStore) RemoveAndUnlink(keysDir string, version uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version == s.active {
+		return fmt.Errorf("KEKStore.RemoveAndUnlink: cannot remove active version %d", version)
+	}
+	if keysDir != "" {
+		path := filepath.Join(keysDir, strconv.FormatUint(uint64(version), 10)+".key")
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("KEKStore.RemoveAndUnlink: unlink %q: %w", path, err)
+		}
+		if err := fsyncDir(keysDir); err != nil {
+			return fmt.Errorf("KEKStore.RemoveAndUnlink: fsync %q: %w", keysDir, err)
+		}
+	}
+	// Only after successful disk ops: zeroize in-memory bytes and drop the entry.
+	if bytes, ok := s.keys[version]; ok {
+		for i := range bytes {
+			bytes[i] = 0
+		}
+		delete(s.keys, version)
+	}
+	delete(s.retiringVersions, version)
+	return nil
+}
+
 // AddAndPersist writes a KEK version to disk atomically THEN adds it to
 // the in-memory store. Disk-first is critical: if Add succeeds but the
 // disk write later fails, in-memory state would silently diverge from
@@ -345,6 +436,27 @@ func writeKEKFileAtomic(path string, kek []byte) error {
 	return nil
 }
 
+// SealWithActiveKEK encrypts plain using the active KEK directly (NOT the
+// wrapped-DEK keyring). Used by callers that need to sign blobs with cluster
+// trust independently of DEK lifecycle, e.g. capability assertions.
+// Returns nonce(12) + ciphertext + GCM-tag(16).
+func (s *KEKStore) SealWithActiveKEK(plain, aad []byte) ([]byte, error) {
+	kek, err := s.ActiveKEK()
+	if err != nil {
+		return nil, fmt.Errorf("SealWithActiveKEK: %w", err)
+	}
+	return aesgcmSealWithAAD(kek, plain, aad)
+}
+
+// OpenWithActiveKEK is the inverse of SealWithActiveKEK.
+func (s *KEKStore) OpenWithActiveKEK(ct, aad []byte) ([]byte, error) {
+	kek, err := s.ActiveKEK()
+	if err != nil {
+		return nil, fmt.Errorf("OpenWithActiveKEK: %w", err)
+	}
+	return aesgcmOpenWithAAD(kek, ct, aad)
+}
+
 // fsyncDir opens the directory at path and fsyncs it, ensuring that any
 // preceding rename into that directory is durable across crashes. POSIX
 // requires this for the rename to survive a power loss.
@@ -358,4 +470,61 @@ func fsyncDir(path string) error {
 		return fmt.Errorf("fsync dir %q: %w", path, err)
 	}
 	return nil
+}
+
+// WrapSetEntry is one entry in the canonical wrap-set hash input: a DEK
+// generation number paired with its KEK-wrapped DEK bytes. Used by leaders
+// to summarise the FSM's current wrap[] state as a deterministic 32-byte
+// fingerprint for inclusion in MetaKEKRotateCmd.wrap_set_hash.
+type WrapSetEntry struct {
+	Gen  uint32
+	Wrap []byte
+}
+
+// CanonicalWrapSetHash produces a deterministic 32-byte SHA-256 fingerprint
+// over a wrap set. Entries are sorted ascending by gen, then each contributes
+// uint32-big-endian(gen) || sha256(wrap) to the running hash. The inner hash
+// keeps the input length-decoupled (two wraps of different size collide only
+// on full sha256 collision), and the sort gives FSM-replay determinism.
+func CanonicalWrapSetHash(entries []WrapSetEntry) [32]byte {
+	sorted := make([]WrapSetEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Gen < sorted[j].Gen })
+	h := sha256.New()
+	for _, e := range sorted {
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], e.Gen)
+		h.Write(buf[:])
+		inner := sha256.Sum256(e.Wrap)
+		h.Write(inner[:])
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// CanonicalVoterSetHash produces a deterministic 32-byte SHA-256 fingerprint
+// over a raft voter set. The leader stamps both the voter_ids list and this
+// hash into MetaKEKPruneCmd; the FSM Apply path uses the stamped voter_ids
+// directly (determinism — see Pass-12 C1 in the Phase B plan) and cross-checks
+// the hash against canonical encoding of those stamped IDs as a defense-in-depth
+// gate against payload corruption.
+//
+// Canonical encoding: input is copied, sorted ascending (lexicographic), then
+// each ID contributes uint32-big-endian(len(id)) || id_bytes to the running
+// SHA-256. The length prefix prevents concatenation ambiguity between IDs.
+func CanonicalVoterSetHash(voterIDs []string) [32]byte {
+	sorted := make([]string, len(voterIDs))
+	copy(sorted, voterIDs)
+	sort.Strings(sorted)
+	h := sha256.New()
+	var lenBuf [4]byte
+	for _, id := range sorted {
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(id)))
+		h.Write(lenBuf[:])
+		h.Write([]byte(id))
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }

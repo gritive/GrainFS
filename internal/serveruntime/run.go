@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -128,10 +129,22 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootRotationAndAdminAPI(state); err != nil {
 		return err
 	}
+	// Task 11: KEK rotation leader + peer probe handlers + audit sink. MUST
+	// run before bootMetaRaftStart so SetKEKRotationLeader lands before the
+	// leadership watcher (started by Start) reads it.
+	if err := bootKEKRotationLeader(state); err != nil {
+		return err
+	}
 	// §7 T57: bootMetaRaftStart's preApplyLoop callback handles post-Restore
 	// DEK-keeper reconstruction (F#21 / F#22) atomically between Restore and
 	// the apply-loop launch — see rebuildDEKKeeperFromRestore.
 	if err := bootMetaRaftStart(ctx, state, StartRotationSocket); err != nil {
+		return err
+	}
+	// Phase D Task 5: on a fresh genesis boot (single voter), replicate the
+	// locally-generated DEK gen-0 through the ungated bootstrap propose so
+	// joiners install identical bytes. No-op on joiners / restarts (not genesis).
+	if err := bootGenesisDEKBootstrap(ctx, state); err != nil {
 		return err
 	}
 
@@ -203,6 +216,55 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootRecoveryAndScrubber(ctx, state); err != nil {
 		return err
 	}
+
+	// Phase D Task 6: do not accept user-facing encrypted-data traffic until
+	// the active DEK is installed (gen-0 via genesis Apply, or via join replay /
+	// snapshot restore on a joiner). Bounded so a joiner that cannot install
+	// never deadlocks boot — it fails fast instead. Genesis single-node is
+	// ready immediately.
+	if state.dekKeeper != nil {
+		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
+		err := WaitDEKReady(readyCtx, state.dekKeeper)
+		readyCancel()
+		if err != nil {
+			return fmt.Errorf("DEK readiness: %w", err)
+		}
+	}
+
+	// Phase D Task 7: refuse to boot if the replayed raft log contained a
+	// legacy type-48 DEKRotate (pre-Phase-D). Live-log path guard; snapshot
+	// path is covered by LoadFromFSM AAD-unwrap failing during Restore.
+	//
+	// REPLAY-ORDERING BARRIER: applyDEKRotate sets legacyDEKRotateSeen during
+	// the apply loop, which runs ASYNC after MetaRaft.Start() returns. We must
+	// drain the apply loop up to the current COMMITTED index before reading the
+	// flag, or the guard passes silently on an un-replayed legacy log.
+	//
+	// We target CommittedIndex (captured HERE, not at Start). This phase runs
+	// late in boot — after bootMetaRaftStart, the becomeLeader no-op (single
+	// voter), join, and AppendEntries catch-up (follower) have all advanced
+	// commit past the snapshot floor to cover every legacy type-48 entry that
+	// was committed on the pre-Phase-D cluster. Committed entries are exactly
+	// the ones that WILL apply, so waiting on them is sufficient. We do NOT wait
+	// on LastLogIndex: an uncommitted tail (e.g. a former leader that appended
+	// but never replicated before crashing) may be truncated by the new leader
+	// and would otherwise block this drain until the 10s timeout, failing boot
+	// spuriously during leader churn. Bounded: a genuinely stuck apply fails
+	// loud rather than booting divergent.
+	if state.metaRaft != nil {
+		if committed := state.metaRaft.Node().CommittedIndex(); committed > 0 {
+			drainCtx, drainCancel := context.WithTimeout(ctx, 10*time.Second)
+			err := state.metaRaft.WaitApplied(drainCtx, committed)
+			drainCancel()
+			if err != nil {
+				return fmt.Errorf("greenfield DEK boundary: wait for log drain: %w", err)
+			}
+		}
+		if err := state.metaRaft.FSM().CheckGreenfieldDEKBoundary(); err != nil {
+			return fmt.Errorf("greenfield DEK boundary: %w", err)
+		}
+	}
+
 	if err := bootResharderAndDegraded(ctx, state); err != nil {
 		return err
 	}

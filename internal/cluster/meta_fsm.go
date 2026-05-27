@@ -3,9 +3,11 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -79,6 +81,7 @@ const (
 	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
 	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
 	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
+	MetaCmdTypeDEKReplicatedRotate          = clusterpb.MetaCmdTypeDEKReplicatedRotate
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
 	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
 	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
@@ -99,6 +102,11 @@ const (
 	MetaCmdTypeMountSADelete                = clusterpb.MetaCmdTypeMountSADelete
 	MetaCmdTypeMountSAAttachPolicy          = clusterpb.MetaCmdTypeMountSAAttachPolicy
 	MetaCmdTypeMountSADetachPolicy          = clusterpb.MetaCmdTypeMountSADetachPolicy
+	// KEK envelope rotation (Phase B): rotate the cluster KEK in lockstep with
+	// the FSM-deterministic install of the rewrapped DEK set.
+	MetaCmdTypeKEKRotate = clusterpb.MetaCmdTypeKEKRotate
+	MetaCmdTypeKEKRetire = clusterpb.MetaCmdTypeKEKRetire
+	MetaCmdTypeKEKPrune  = clusterpb.MetaCmdTypeKEKPrune
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -225,6 +233,11 @@ type IcebergDeleteTableCmd struct {
 //     single lock (rather than per-map atomics) is the simplest consistency guarantee.
 //   - onBucketAssigned is stored in the same lock to ensure the callback always
 //     sees the freshly updated map state without a separate atomic.
+//
+// LOCK ORDER: f.mu before k.mu (DEKKeeper.mu). Snapshot() acquires f.mu first,
+// then calls DEKKeeper.VersionsAndActive() which acquires keeper.mu. Apply paths
+// that call InstallKEKRotation() hold f.mu and then acquire keeper.mu inside
+// InstallKEKRotation. Never acquire keeper.mu before f.mu.
 type MetaFSM struct {
 	mu                sync.RWMutex
 	nodes             map[string]MetaNodeEntry
@@ -324,6 +337,13 @@ type MetaFSM struct {
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
 
+	// pendingActiveKEKVersion is the active_kek_version field read from the DKVS
+	// trailer during Restore. It names which KEK version the wrapped DEKs were
+	// sealed under at snapshot time. Set alongside pendingDEKVersions (Task 4c);
+	// consumed by rebuildDEKKeeperFromRestore to select the correct unwrap key.
+	// Distinct from activeKEKVersion which is mutated during log replay.
+	pendingActiveKEKVersion uint32
+
 	// activeKEKVersion is the cluster-wide KEK version that current wrap[gen]
 	// entries are sealed under. Phase A pins this to 0 (no rotation yet);
 	// Phase B will mutate it via MetaCmdTypeKEKRotate Apply. Persisted in the
@@ -342,6 +362,245 @@ type MetaFSM struct {
 	// Read on every apply via a single atomic load (no mutex). Register path
 	// uses copy-on-write CAS; see post_commit.go for the contract.
 	postCommitHooks postCommitHooksField
+
+	// lastRotationRequests is a bounded FIFO ring of KEK rotation request
+	// idempotency records. Capped at maxRotationRequestStatusEntries; oldest
+	// evicted on overflow. Insertion-order only — reads must NOT reorder.
+	lastRotationRequests []rotationRequestRecord
+
+	// kekStatuses holds the lifecycle status of each KEK version, sorted by
+	// version ascending. Upserted via SetKEKStatus.
+	kekStatuses []kekStatusRecord
+
+	// keystore is the cluster KEK store. nil until SetKEKStore is called.
+	// MetaCmdTypeKEKRotate Apply uses it to read the active KEK (to unwrap
+	// the proposal's wrapped K_new), persist the new KEK to disk, and flip
+	// the active marker — all under the FSM's lock window.
+	keystore *encrypt.KEKStore
+
+	// clusterID is the 16-byte cluster identity used as AAD context for
+	// KEK rotation envelopes. Set once via SetClusterID before any Apply
+	// reaches a KEK command. Zero-valued until configured.
+	clusterID [16]byte
+
+	// kekDir is the on-disk directory that backs keystore (used by
+	// AddAndPersist during MetaKEKRotateCmd Apply). Empty string disables
+	// disk persistence — useful in unit tests; production wiring sets it
+	// to the same path passed to LoadOrInitKEKStoreDir.
+	kekDir string
+
+	// lastApplyIndex is set by runApplyLoop via applyCmdAtIndex before each
+	// apply, then consumed by KEK rotation handlers for idempotent request
+	// status records. Defaults to 0 in test paths that call applyCmd
+	// directly. Read-and-set only on the apply goroutine; no lock needed.
+	lastApplyIndex uint64
+
+	// halted is set by MarkFatalHalted when a KEK lifecycle Apply encounters
+	// a node-local fatal failure (disk I/O, content-mismatch). Once set, all
+	// subsequent Apply calls short-circuit and Snapshot refuses. The first
+	// error wins (CompareAndSwap); later calls are no-ops.
+	// Lock-free: atomic.Pointer so the halted check can run before f.mu
+	// without ordering hazards.
+	halted atomic.Pointer[error]
+
+	// legacyDEKRotateSeen is set when a legacy type-48 MetaCmdTypeDEKRotate
+	// (nil-payload, pre Phase D) is replayed. The local-random Rotate() it once
+	// drove diverged across nodes and is now a deterministic no-op; the flag
+	// records that this cluster's log predates Phase D so the Task 7 greenfield
+	// startup guard can refuse a non-upgradable boot. Lock-free atomic.Bool.
+	legacyDEKRotateSeen atomic.Bool
+
+	// auditSink is the destination for KEK lifecycle audit lines. nil means
+	// audit writes are no-ops (default). Set via SetAuditSink before the raft
+	// apply loop starts; production wiring (Task 11) points this at an
+	// append-only file; tests inject a *bytes.Buffer.
+	auditSink io.Writer
+}
+
+// RotationStatus is the outcome code stored for each KEK rotation request.
+type RotationStatus uint8
+
+const (
+	RotationStatusApplied   RotationStatus = 0
+	RotationStatusStaleNoOp RotationStatus = 1
+	RotationStatusRejected  RotationStatus = 2
+)
+
+// KEKLifecycleStatus is the lifecycle stage of a KEK version.
+type KEKLifecycleStatus uint8
+
+const (
+	KEKLifecycleActive   KEKLifecycleStatus = 0
+	KEKLifecycleRetiring KEKLifecycleStatus = 1
+	KEKLifecyclePruned   KEKLifecycleStatus = 2
+)
+
+// maxRotationRequestStatusEntries is the FIFO ring capacity.
+const maxRotationRequestStatusEntries = 1024
+
+type rotationRequestRecord struct {
+	requestID  [16]byte
+	status     RotationStatus
+	applyIndex uint64
+}
+
+type kekStatusRecord struct {
+	version           uint32
+	status            KEKLifecycleStatus
+	retireCommitIndex uint64
+}
+
+// RecordRotationRequestStatus appends a rotation request outcome to the FIFO
+// ring. Acquires the write lock. Evicts the oldest entry when the ring is full.
+func (f *MetaFSM) RecordRotationRequestStatus(requestID [16]byte, status RotationStatus, applyIndex uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recordRotationRequestStatusLocked(requestID, status, applyIndex)
+}
+
+func (f *MetaFSM) recordRotationRequestStatusLocked(requestID [16]byte, status RotationStatus, applyIndex uint64) {
+	if len(f.lastRotationRequests) >= maxRotationRequestStatusEntries {
+		f.lastRotationRequests = f.lastRotationRequests[1:]
+	}
+	f.lastRotationRequests = append(f.lastRotationRequests, rotationRequestRecord{
+		requestID:  requestID,
+		status:     status,
+		applyIndex: applyIndex,
+	})
+}
+
+// LookupRotationRequestStatus returns the status of the given request ID,
+// scanning newest-first. Returns (0, false) if not found. Read-only; does NOT
+// reorder entries.
+func (f *MetaFSM) LookupRotationRequestStatus(requestID [16]byte) (RotationStatus, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.lookupRotationRequestStatusLocked(requestID)
+}
+
+func (f *MetaFSM) lookupRotationRequestStatusLocked(requestID [16]byte) (RotationStatus, bool) {
+	for i := len(f.lastRotationRequests) - 1; i >= 0; i-- {
+		if f.lastRotationRequests[i].requestID == requestID {
+			return f.lastRotationRequests[i].status, true
+		}
+	}
+	return 0, false
+}
+
+// SetKEKStatus upserts the lifecycle status for a KEK version. The slice is
+// kept sorted by version ascending. Acquires the write lock.
+func (f *MetaFSM) SetKEKStatus(version uint32, status KEKLifecycleStatus, retireCommitIndex uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, e := range f.kekStatuses {
+		if e.version == version {
+			f.kekStatuses[i].status = status
+			f.kekStatuses[i].retireCommitIndex = retireCommitIndex
+			return
+		}
+	}
+	f.kekStatuses = append(f.kekStatuses, kekStatusRecord{
+		version:           version,
+		status:            status,
+		retireCommitIndex: retireCommitIndex,
+	})
+	sort.Slice(f.kekStatuses, func(i, j int) bool {
+		return f.kekStatuses[i].version < f.kekStatuses[j].version
+	})
+}
+
+// LookupKEKStatus returns the lifecycle status for the given KEK version.
+// Returns (0, 0, 0, false) if not found.
+func (f *MetaFSM) LookupKEKStatus(version uint32) (v uint32, status KEKLifecycleStatus, retireCommitIndex uint64, ok bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for _, e := range f.kekStatuses {
+		if e.version == version {
+			return e.version, e.status, e.retireCommitIndex, true
+		}
+	}
+	return 0, 0, 0, false
+}
+
+// LifecycleKEKVersions returns the sorted list of KEK versions that have a
+// kek_status lifecycle record (retiring/pruned). A pruned version is removed
+// from the keystore but its lifecycle record persists, so the status endpoint
+// can still report it as "pruned" — callers union this with the live keystore
+// versions. Read-only; returns a fresh slice.
+func (f *MetaFSM) LifecycleKEKVersions() []uint32 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]uint32, 0, len(f.kekStatuses))
+	for _, e := range f.kekStatuses {
+		out = append(out, e.version)
+	}
+	return out
+}
+
+// RetiredKEKVersionCount returns the number of KEK store versions whose
+// lifecycle status is retiring or pruned. The active version is never counted
+// (it is "active" regardless of any stale status entry) — this mirrors the
+// active-wins rule used to render per-version status in the admin status JSON,
+// so grainfs_kek_retired_count and the status endpoint agree by construction.
+//
+// A version with no status entry is implicitly "active" (never retired) and is
+// not counted — so a normal rotation V0→V1 with no operator retire reports 0.
+func (f *MetaFSM) RetiredKEKVersionCount() int {
+	store := f.KEKStore()
+	if store == nil {
+		return 0
+	}
+	active := f.ActiveKEKVersion()
+	n := 0
+	for _, v := range store.Versions() {
+		if v == active {
+			continue
+		}
+		if _, status, _, ok := f.LookupKEKStatus(v); ok &&
+			(status == KEKLifecycleRetiring || status == KEKLifecyclePruned) {
+			n++
+		}
+	}
+	return n
+}
+
+// MarkFatalHalted poisons the FSM with err so all subsequent Apply calls
+// and Snapshot calls fail immediately without dispatching. The first error
+// wins; subsequent calls are no-ops. Safe to call from any goroutine.
+func (f *MetaFSM) MarkFatalHalted(err error) {
+	if err == nil {
+		return
+	}
+	e := err
+	f.halted.CompareAndSwap(nil, &e)
+}
+
+// FatalHaltedErr returns the error that halted the FSM, or nil if the FSM
+// has not been poisoned. Safe to call from any goroutine.
+func (f *MetaFSM) FatalHaltedErr() error {
+	if p := f.halted.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetAuditSink wires a writer that receives KEK lifecycle audit lines.
+// Each line is a newline-terminated string written by appendAudit.
+// Pass nil to disable (default). Must be called before the apply loop starts.
+// Production wiring (Task 11) provides an append-only file; tests inject a
+// *bytes.Buffer.
+func (f *MetaFSM) SetAuditSink(w io.Writer) {
+	f.auditSink = w
+}
+
+// appendAudit writes a single audit line (with trailing newline) to the
+// configured sink. No-op when the sink is nil. MUST be called from payload
+// fields only — no time.Now() or any other node-local nondeterministic source.
+func (f *MetaFSM) appendAudit(line string) {
+	if f.auditSink == nil {
+		return
+	}
+	_, _ = fmt.Fprintln(f.auditSink, line)
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -362,6 +621,20 @@ func NewMetaFSM() *MetaFSM {
 		jwtKeyStore:       NewJWTKeyStore(),
 		jwtKeys:           iamjwt.NewKeySet(),
 	}
+}
+
+// applyCmdAtIndex is the production entry point — wraps applyCmd with the
+// raft log entry's index so KEK rotation Apply can stamp deterministic
+// request-status records. Test callers that don't need an index continue to
+// use applyCmd, which passes 0 and means "synthetic / unknown index".
+// Returns the poison error immediately if the FSM has been halted by
+// MarkFatalHalted — no dispatching occurs.
+func (f *MetaFSM) applyCmdAtIndex(data []byte, index uint64) error {
+	if err := f.FatalHaltedErr(); err != nil {
+		return err
+	}
+	f.lastApplyIndex = index
+	return f.applyCmd(data)
 }
 
 // applyCmd decodes a MetaCmd FlatBuffers envelope, mutates state, and fires
@@ -538,8 +811,16 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyMountSADetachPolicy(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeKEKRotate:
+		return f.applyKEKRotate(f.lastApplyIndex, cmd.DataBytes())
+	case clusterpb.MetaCmdTypeKEKRetire:
+		return f.applyKEKRetire(f.lastApplyIndex, cmd.DataBytes())
+	case clusterpb.MetaCmdTypeKEKPrune:
+		return f.applyKEKPrune(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		return f.applyDEKRotate()
+	case clusterpb.MetaCmdTypeDEKReplicatedRotate:
+		return f.applyDEKReplicatedRotate(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKVersionPrune:
 		return f.applyDEKVersionPrune(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeJWTSigningKeyRotate:

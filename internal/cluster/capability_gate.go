@@ -1,13 +1,17 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"sort"
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -18,6 +22,11 @@ type CapabilityGate struct {
 	configID uint64
 	config   raft.Configuration
 	evidence map[compat.NodeID]compat.Evidence
+
+	// direct-RPC path (meta_raft scope only). nil = direct probing disabled.
+	directCfg   *CapabilityGateDirectConfig
+	directCache *directCapabilityCacheEntry // guarded by mu
+	directSF    singleflight.Group          // deduplicates concurrent cache-miss fan-outs
 }
 
 func NewCapabilityGate(registry *compat.Registry, ttl time.Duration) *CapabilityGate {
@@ -29,6 +38,128 @@ func NewCapabilityGate(registry *compat.Registry, ttl time.Duration) *Capability
 		ttl:      ttl,
 		evidence: make(map[compat.NodeID]compat.Evidence),
 	}
+}
+
+// WithDirectProbe wires the direct-RPC capability probing path used by Allow.
+// Must be called before the first Allow call; safe to call at any time (guarded by mu).
+func (g *CapabilityGate) WithDirectProbe(clusterID []byte, kekStore *encrypt.KEKStore, dialer capabilityProbeDialer) *CapabilityGate {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.directCfg = &CapabilityGateDirectConfig{
+		dialer:    dialer,
+		clusterID: append([]byte(nil), clusterID...),
+		kekStore:  kekStore,
+	}
+	return g
+}
+
+// Allow checks whether all current meta-raft voters advertise the capabilities
+// required for op via the direct signed-assertion RPC path. Results are cached
+// by (op, voter_config_hash, active_kek_version) — the cache automatically
+// invalidates on voter config change or KEK rotation.
+//
+// Gossip capabilities (RequireMetaRaftCapability) are diagnostic-only —
+// capability gates use direct RPC via Allow.
+//
+// Returns (plan, nil) if all voters support op; (plan, error) otherwise.
+func (g *CapabilityGate) Allow(ctx context.Context, op compat.Operation) (compat.GatePlan, error) {
+	caps, ok := g.registry.RequiredCapabilitiesForOperation(op)
+	if !ok {
+		// No gate defined for this operation — allowed.
+		return compat.GatePlan{Operation: op}, nil
+	}
+
+	g.mu.RLock()
+	cfg := g.directCfg
+	configID := g.configID
+	config := g.config
+	cache := g.directCache
+	g.mu.RUnlock()
+
+	if cfg == nil {
+		// Direct probe not wired — fall back to gossip evidence.
+		return g.RequireMetaRaftCapability(caps[0], op, time.Now())
+	}
+
+	activeKEKVer := cfg.kekStore.ActiveVersion()
+	cacheKey := directCapabilityCacheKey{
+		op:           op,
+		configID:     configID,
+		activeKEKVer: activeKEKVer,
+	}
+
+	// Return cached result if the key is unchanged.
+	if cache != nil && cache.key == cacheKey {
+		return cache.plan, cache.err
+	}
+
+	// Cache miss: use singleflight to ensure only one fan-out fires per cache key,
+	// even when multiple goroutines reach this point simultaneously.
+	sfKey := fmt.Sprintf("%s|%d|%d", op, configID, activeKEKVer)
+	type sfResult struct {
+		plan compat.GatePlan
+		err  error
+	}
+	v, _, _ := g.directSF.Do(sfKey, func() (interface{}, error) {
+		// Second cache check inside the singleflight: goroutines that arrive here
+		// after an earlier Do completed will find the entry already populated.
+		g.mu.RLock()
+		if entry := g.directCache; entry != nil && entry.key == cacheKey {
+			g.mu.RUnlock()
+			return sfResult{plan: entry.plan, err: entry.err}, nil
+		}
+		g.mu.RUnlock()
+
+		// Probe each voter.
+		plan := compat.GatePlan{
+			Capability: caps[0],
+			Scope:      compat.ScopeMetaRaft,
+			Severity:   compat.SeverityHard,
+			Operation:  op,
+			ConfigID:   configID,
+		}
+		for _, srv := range config.Servers {
+			nodeID := compat.NodeID(srv.ID)
+			plan.Required = append(plan.Required, nodeID)
+		}
+		sort.Slice(plan.Required, func(i, j int) bool { return plan.Required[i] < plan.Required[j] })
+
+		for _, srv := range config.Servers {
+			peerResp, err := GetCapabilities(ctx, srv.ID, cfg.clusterID, cfg.kekStore, cfg.dialer)
+			if err != nil {
+				plan.Unknown = append(plan.Unknown, compat.NodeID(srv.ID))
+				continue
+			}
+			// Check each required capability.
+			capSet := make(map[string]bool, len(peerResp.Capabilities))
+			for _, c := range peerResp.Capabilities {
+				capSet[c] = true
+			}
+			for _, cap := range caps {
+				if !capSet[cap] {
+					plan.Missing = append(plan.Missing, compat.NodeID(srv.ID))
+					break
+				}
+			}
+		}
+		sort.Slice(plan.Missing, func(i, j int) bool { return plan.Missing[i] < plan.Missing[j] })
+		sort.Slice(plan.Unknown, func(i, j int) bool { return plan.Unknown[i] < plan.Unknown[j] })
+
+		var planErr error
+		if !plan.Allowed() {
+			planErr = compat.Reject(plan)
+		}
+
+		// Store result in cache.
+		g.mu.Lock()
+		g.directCache = &directCapabilityCacheEntry{key: cacheKey, plan: plan, err: planErr}
+		g.mu.Unlock()
+
+		return sfResult{plan: plan, err: planErr}, nil
+	})
+
+	res := v.(sfResult)
+	return res.plan, res.err
 }
 
 func (g *CapabilityGate) SetMetaRaftSnapshot(_ uint64, cfg raft.Configuration) {

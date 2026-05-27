@@ -62,6 +62,7 @@ func (n *clusterInfoRaftNode) Term() uint64           { return 1 }
 func (n *clusterInfoRaftNode) IsLeader() bool         { return true }
 func (n *clusterInfoRaftNode) LeaderID() string       { return n.id }
 func (n *clusterInfoRaftNode) CommittedIndex() uint64 { return 0 }
+func (n *clusterInfoRaftNode) LastLogIndex() uint64   { return 0 }
 func (n *clusterInfoRaftNode) Configuration() raft.Configuration {
 	return raft.Configuration{}
 }

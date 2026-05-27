@@ -28,6 +28,7 @@ func (s *applyChCloseStubNode) Term() uint64           { return 0 }
 func (s *applyChCloseStubNode) IsLeader() bool         { return false }
 func (s *applyChCloseStubNode) LeaderID() string       { return "" }
 func (s *applyChCloseStubNode) CommittedIndex() uint64 { return 0 }
+func (s *applyChCloseStubNode) LastLogIndex() uint64   { return 0 }
 func (s *applyChCloseStubNode) Configuration() raft.Configuration {
 	return raft.Configuration{}
 }

@@ -263,7 +263,7 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	kek := make([]byte, encrypt.KEKSize)
 	_, err := rand.Read(kek)
 	require.NoError(t, err)
-	srcKeeper, err := encrypt.NewDEKKeeper(kek)
+	srcKeeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	require.NoError(t, err)
 	src.SetDEKKeeper(srcKeeper)
 	require.NoError(t, srcKeeper.Rotate())
@@ -293,7 +293,7 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	dstCfg := config.NewStore()
 	config.RegisterClusterKeys(dstCfg, config.ReloadHooks{})
 	dst.SetConfigStore(dstCfg)
-	dstKeeper, err := encrypt.NewDEKKeeper(kek)
+	dstKeeper, err := encrypt.NewDEKKeeper(kek, dekTestClusterID())
 	require.NoError(t, err)
 	dst.SetDEKKeeper(dstKeeper)
 

@@ -177,14 +177,10 @@ func (f *MetaFSM) appendConfigSnapshotTrailer(out []byte) ([]byte, error) {
 	return appendSnapshotTrailer(out, cfgPayload, cfgSnapshotTrailerLen, cfgSnapshotTrailerMagic), nil
 }
 
-func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
-	if f.dekKeeper == nil {
-		return out, nil
-	}
-	// VersionsAndActive snapshots both fields under a single RLock so a
-	// concurrent Rotate() can't insert a new gen between the two reads
-	// (TOCTOU: active would reference a gen absent from versions map).
-	dekVersions, dekActive := f.dekKeeper.VersionsAndActive()
+// appendDEKSnapshotTrailer serialises the DKVS trailer using caller-supplied
+// pre-captured values from the locked snapshot window. It does NOT call back
+// into DEKKeeper — callers must pass values captured while holding f.mu (Task 4b).
+func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
 	if len(dekVersions) == 0 {
 		return out, nil
 	}
@@ -235,7 +231,10 @@ func (f *MetaFSM) appendJWTKeySnapshotTrailer(out []byte) []byte {
 	return appendSnapshotTrailer(out, jkeyPayload, jkeySnapshotTrailerLen, jkeySnapshotTrailerMagic)
 }
 
-func (f *MetaFSM) appendSnapshotTrailers(base []byte, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
+// appendSnapshotTrailers serialises all snapshot trailers. dekVersions,
+// dekActive, refCounts, and activeKEKVersion must be pre-captured inside the
+// f.mu+keeper.mu locked window in Snapshot() (Task 4b atomicity guarantee).
+func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
 	out := append([]byte(nil), base...)
 	var err error
 	out, err = f.appendIAMSnapshotTrailer(out)
@@ -246,7 +245,7 @@ func (f *MetaFSM) appendSnapshotTrailers(base []byte, refCounts map[uint32]uint6
 	if err != nil {
 		return nil, err
 	}
-	out, err = f.appendDEKSnapshotTrailer(out, refCounts, activeKEKVersion)
+	out, err = f.appendDEKSnapshotTrailer(out, dekVersions, dekActive, refCounts, activeKEKVersion)
 	if err != nil {
 		return nil, err
 	}
