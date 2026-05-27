@@ -99,3 +99,9 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 이 프로젝트의 태스크 파일은 `TODOS.md` (루트 디렉토리)입니다.
 
 > Coding Behavior Guidelines와 Skill routing은 글로벌 `~/.claude/CLAUDE.md`에서 상속받습니다.
+
+## Deploy
+
+- This repository has no configured production URL for automatic canary checks.
+- `/land-and-deploy` may merge a PR after CI, but production verification is manual until a deploy target and health endpoint are added.
+- When a production URL exists, configure the URL and health endpoint before treating protocol credential strict mode as production-ready.

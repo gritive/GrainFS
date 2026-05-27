@@ -11,7 +11,7 @@ FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
-E2E_TEST_JOBS ?= 1
+E2E_TEST_JOBS ?= 2
 GINKGO ?= go run github.com/onsi/ginkgo/v2/ginkgo
 E2E_GINKGO_PROCS ?= $(E2E_TEST_JOBS)
 E2E_GINKGO_REPORT_ARGS ?= --output-interceptor-mode=none --silence-skips
