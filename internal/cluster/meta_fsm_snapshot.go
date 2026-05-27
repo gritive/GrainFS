@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -631,6 +632,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
+	var newProtocolCredentials []protocred.Credential
+	hasProtocolCredentials := false
+	if len(trailers.pcreData) > 0 {
+		if f.protocolCredentialStore == nil {
+			log.Warn().Int("pcre_len", len(trailers.pcreData)).Msg("meta_fsm: Restore: snapshot contains protocol credentials but store not wired; skipping")
+		} else {
+			rows, err := decodeProtocolCredentialsSnapshot(trailers.pcreData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode protocol credentials: %w", err)
+			}
+			newProtocolCredentials = rows
+			hasProtocolCredentials = true
+		}
+	}
+
 	// JKEY: decode JWT signing keys.
 	// F9: if JKEY data is present but DEK keeper is not wired, the keys cannot be
 	// unwrapped after Restore — fail loud rather than silently leaving jwtKeys empty.
@@ -787,6 +803,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		if f.policyResolver != nil {
 			f.policyResolver.Invalidate(nil, nil)
 		}
+	}
+
+	if hasProtocolCredentials {
+		f.protocolCredentialStore.Restore(newProtocolCredentials)
 	}
 
 	// JKEY commit — both f.jwtKeyStore and f.jwtKeys are updated together.

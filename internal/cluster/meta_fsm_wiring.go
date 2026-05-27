@@ -10,6 +10,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/migration"
+	"github.com/gritive/GrainFS/internal/protocred"
 )
 
 // ClusterConfig returns the cluster-wide policy snapshot. Read-only; consumers
@@ -90,6 +91,14 @@ func (f *MetaFSM) SetMountSAStore(s *mountsastore.Store) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.mountSAStore = s
+}
+
+// SetProtocolCredentialStore wires the protocol credential store into MetaFSM
+// snapshots. Command apply semantics are introduced in the next Phase 1 slice.
+func (f *MetaFSM) SetProtocolCredentialStore(s *protocred.Store) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.protocolCredentialStore = s
 }
 
 // SetMigration wires the migration job store into the MetaFSM. Must be called

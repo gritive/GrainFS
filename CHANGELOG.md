@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.382.0] - 2026-05-28
+
+### Added
+
+- Added the Raft snapshot foundation for durable protocol credentials. Protocol
+  credential stores now expose deterministic snapshot/restore helpers, Meta Raft
+  has FlatBuffers payloads for create/rotate/revoke/stale/last-used commands,
+  and Meta FSM snapshots can carry protocol credential rows without serializing
+  plaintext secrets.
+- Added regression coverage for protocol credential snapshot determinism,
+  malformed FlatBuffers payloads, legacy snapshot restore, and empty snapshot
+  restore clearing stale credential rows.
+
 ## [0.0.381.0] - 2026-05-28
 
 ### Changed

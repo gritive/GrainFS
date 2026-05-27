@@ -519,6 +519,11 @@ enum MetaCmdType : uint8 {
   PromoteMember                = 76, // zero-CA: promote a pending-learner to voting member
   RevokePeer                   = 77, // zero-CA: remove a peer + denylist its SPKI
   InvitePending                = 78, // zero-CA: record a pending invite-join (invite_id, node_id, SPKI, addr)
+  ProtocolCredentialCreate     = 79, // protocol credential: create durable row
+  ProtocolCredentialRotate     = 80, // protocol credential: rotate durable secret hash/hint
+  ProtocolCredentialRevoke     = 81, // protocol credential: mark revoked
+  ProtocolCredentialMarkStale  = 82, // protocol credential: mark stale for policy/resource drift
+  ProtocolCredentialLastUsed   = 83, // protocol credential: update last-used timestamp
 }
 
 table MetaNodeEntry {
@@ -1244,6 +1249,57 @@ table MetaMountSAEntry {
 table MetaIAMPolicyAttachMountSAEntry {
   mount_sa:string;
   policies:[string];
+}
+
+// Protocol credential durable row. Plaintext secrets are intentionally absent.
+table MetaProtocolCredentialEntry {
+  id:string;
+  sa_id:string;
+  protocol:string;
+  resource:string;
+  mode:string;
+  secret_hash:[ubyte];
+  secret_hint:string;
+  created_at_unix_nanos:int64;
+  created_by:string;
+  expires_at_unix_nanos:int64;
+  revoked_at_unix_nanos:int64;
+  last_used_at_unix_nanos:int64;
+}
+
+table MetaProtocolCredentialCreateCmd {
+  request_id:string;
+  row:MetaProtocolCredentialEntry;
+}
+
+table MetaProtocolCredentialRotateCmd {
+  request_id:string;
+  id:string;
+  secret_hash:[ubyte];
+  secret_hint:string;
+  rotated_at_unix_nanos:int64;
+}
+
+table MetaProtocolCredentialRevokeCmd {
+  request_id:string;
+  id:string;
+  revoked_at_unix_nanos:int64;
+}
+
+table MetaProtocolCredentialMarkStaleCmd {
+  request_id:string;
+  id:string;
+  stale_at_unix_nanos:int64;
+  reason:string;
+}
+
+table MetaProtocolCredentialLastUsedCmd {
+  id:string;
+  last_used_at_unix_nanos:int64;
+}
+
+table MetaProtocolCredentialsSnapshot {
+  rows:[MetaProtocolCredentialEntry];
 }
 
 // MountSACreatePayload: create a NFS/9P mount service account.
