@@ -18,7 +18,8 @@ package serveruntime
 //	  - OpenFromPeer the SealedBootstrap with the bindCtx W7 used
 //	    (clusterID‖inviteID‖nodeID‖leaderID), stage every secret on disk
 //	    (encryption.key, keys/<gen>.key, cluster.id), SealNodeKey under the
-//	    cluster KEK gen-0 to keys.d/node.key.enc, shred node.key.unsealed,
+//	    cluster's ACTIVE (highest delivered) KEK gen to keys.d/node.key.enc,
+//	    shred node.key.unsealed,
 //	  - set opts.ClusterKey in memory (transport PSK) so bootValidateConfig
 //	    passes, and persist a .invite-join-pending sentinel so a crash before
 //	    Phase-2 resumes the ACK.
@@ -43,6 +44,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -88,18 +90,24 @@ type inviteJoinState struct {
 	clusterID []byte   // raw 16 bytes
 	leaderID  string   // from Phase-1 reply; component of the seal bindCtx
 	nodeSPKI  [32]byte // joiner's own node identity SPKI (asserted at Phase-2)
+	// nodeKeyKEKGen is the KEK generation node.key.enc was sealed under in
+	// Phase-1 (the highest gen the cluster actually delivered, NOT a hardcoded
+	// gen-0 — a cluster that rotated+pruned gen-0 won't ship it). Phase-2 must
+	// LoadNodeKey under this SAME gen.
+	nodeKeyKEKGen uint32
 }
 
 // inviteJoinDecision is the resume gate's classification.
 type inviteJoinDecision int
 
 const (
-	// inviteNormalBoot: no invite bundle, or all durable + acked → ordinary boot.
+	// inviteNormalBoot: no invite bundle, or artifacts complete + acked → boot.
 	inviteNormalBoot inviteJoinDecision = iota
-	// inviteFreshJoin: bundle present, no persisted invite node key → run Phase-1.
+	// inviteFreshJoin: bundle present and Phase-1 artifacts INCOMPLETE → run (or
+	// re-run, reusing any persisted identity) Phase-1.
 	inviteFreshJoin
-	// inviteResume: bundle present + persisted node key + incomplete (artifacts
-	// missing OR not acked) → skip Phase-1 pull, resume Phase-2 ACK.
+	// inviteResume: bundle present + artifacts complete but NOT acked → skip
+	// Phase-1 pull, resume Phase-2 ACK only.
 	inviteResume
 )
 
@@ -108,25 +116,38 @@ const (
 //   - bundlePresent:         an invite bundle token was supplied (env var set).
 //   - persistedInviteNodeKey: keys.d/node.key.unsealed OR keys.d/node.key.enc
 //     exists (the joiner already generated + persisted its identity in Phase-1).
-//   - artifactsComplete:     encryption.key + cluster.id + keys/0.key +
+//     PRESERVED for the table-test signature only — the decision is now driven
+//     by artifactsComplete, NOT mere key presence (see below).
+//   - artifactsComplete:     encryption.key + cluster.id + a staged KEK gen +
 //     keys.d/node.key.enc all present AND node.key.unsealed absent (Phase-1
 //     staging + seal fully landed).
 //   - acked:                 the .invite-join-pending sentinel is ABSENT (Phase-2
 //     membership ACK completed).
 //
+// The gate is driven by artifactsComplete, NOT persistedInviteNodeKey: a Phase-1
+// crash AFTER persisting node.key.unsealed + the sentinel but BEFORE staging
+// secrets leaves {persisted key, sentinel present, artifacts INCOMPLETE}. Keying
+// Resume on mere key presence would route that state to Phase-2, which then
+// hard-fails (no keys.d/current.key) and BRICKS the node forever. Driving on
+// artifactsComplete instead re-runs Phase-1 (reusing the persisted identity).
+//
 // Classification table:
 //
-//	bundle && !persistedKey                  → FreshJoin
-//	bundle && persistedKey && !(complete&&acked) → Resume
-//	otherwise (incl. !bundle, or all durable)    → NormalBoot
+//	!bundle                          → NormalBoot
+//	bundle && complete && acked      → NormalBoot
+//	bundle && complete && !acked     → Resume (Phase-2 only)
+//	bundle && !complete (any acked)  → FreshJoin (run/re-run Phase-1)
 func classifyInviteJoinResume(bundlePresent, persistedInviteNodeKey, artifactsComplete, acked bool) inviteJoinDecision {
+	_ = persistedInviteNodeKey // signature preserved for the table test; unused by design
 	if !bundlePresent {
 		return inviteNormalBoot
 	}
-	if !persistedInviteNodeKey {
+	if !artifactsComplete {
+		// Includes the previously-bricking case (persisted key but incomplete
+		// staging): re-run Phase-1 rather than resume Phase-2.
 		return inviteFreshJoin
 	}
-	if artifactsComplete && acked {
+	if acked {
 		return inviteNormalBoot
 	}
 	return inviteResume
@@ -136,7 +157,7 @@ func classifyInviteJoinResume(bundlePresent, persistedInviteNodeKey, artifactsCo
 type inviteJoinPaths struct {
 	encryptionKey   string
 	clusterID       string
-	kekGen0         string
+	keysDir         string // keys/ — staged KEK gens live here (any <N>.key)
 	nodeKeyEnc      string
 	nodeKeyUnsealed string
 	pendingSentinel string
@@ -148,7 +169,7 @@ func inviteJoinPathsFor(dataDir string) inviteJoinPaths {
 	return inviteJoinPaths{
 		encryptionKey:   filepath.Join(dataDir, "encryption.key"),
 		clusterID:       filepath.Join(dataDir, nodeconfig.ClusterIDFile),
-		kekGen0:         filepath.Join(keysDir, "0.key"),
+		keysDir:         keysDir,
 		nodeKeyEnc:      filepath.Join(keysD, "node.key.enc"),
 		nodeKeyUnsealed: filepath.Join(keysD, nodeKeyUnsealedFile),
 		pendingSentinel: filepath.Join(dataDir, invitePendingFile),
@@ -160,13 +181,25 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// keysDirHasKEK reports whether keysDir holds at least one canonical <N>.key.
+// Used instead of a hardcoded 0.key check: a cluster that rotated+pruned gen-0
+// stages a higher gen, so the staged KEK file is NOT necessarily 0.key. A read
+// error counts as "no KEK" (matches fileExists's not-present-→-false semantics).
+func keysDirHasKEK(keysDir string) bool {
+	empty, err := encrypt.KeysDirIsEmpty(keysDir)
+	if err != nil {
+		return false
+	}
+	return !empty
+}
+
 // gateInviteJoin reads disk to classify the resume decision for dataDir.
 func gateInviteJoin(dataDir string, bundlePresent bool) inviteJoinDecision {
 	p := inviteJoinPathsFor(dataDir)
 	persistedKey := fileExists(p.nodeKeyUnsealed) || fileExists(p.nodeKeyEnc)
 	artifactsComplete := fileExists(p.encryptionKey) &&
 		fileExists(p.clusterID) &&
-		fileExists(p.kekGen0) &&
+		keysDirHasKEK(p.keysDir) &&
 		fileExists(p.nodeKeyEnc) &&
 		!fileExists(p.nodeKeyUnsealed)
 	acked := !fileExists(p.pendingSentinel)
@@ -263,10 +296,23 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 	keysD := filepath.Join(opts.DataDir, "keys.d")
 
 	// 1. node ECDSA P-256 identity + self-signed leaf (Path A: cert in request).
-	// clusterIDHex is the cert SAN host (GenerateNodeIdentity takes a string).
-	cert, spki, err := transport.GenerateNodeIdentity(bundle.ClusterIDHex, st.nodeID)
-	if err != nil {
-		return fmt.Errorf("generate node identity: %w", err)
+	// REUSE an existing unsealed key if a prior Phase-1 already persisted one: a
+	// re-run must present the SAME SPKI the leader may have already bound via
+	// ProposeInvitePending (a fresh SPKI would mismatch the pending record and be
+	// rejected). Only generate fresh when no unsealed key exists.
+	var cert tls.Certificate
+	var spki [32]byte
+	var err error
+	if priv, ok := readNodeKeyUnsealed(paths.nodeKeyUnsealed); ok {
+		cert, spki, err = transport.BuildNodeIdentity(bundle.ClusterIDHex, st.nodeID, priv)
+		if err != nil {
+			return fmt.Errorf("rebuild node identity from persisted key: %w", err)
+		}
+	} else {
+		cert, spki, err = transport.GenerateNodeIdentity(bundle.ClusterIDHex, st.nodeID)
+		if err != nil {
+			return fmt.Errorf("generate node identity: %w", err)
+		}
 	}
 	priv, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
 	if !ok {
@@ -364,13 +410,28 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 		return err
 	}
 
-	// 8. SealNodeKey under the cluster KEK gen-0 (the active KEK on a non-genesis
-	// boot, == the staged keys/0.key bytes), then shred the unsealed key.
-	kekGen0 := kekForGen(kekGens, 0)
-	if len(kekGen0) == 0 {
-		return fmt.Errorf("bootstrap secrets missing KEK gen-0")
+	// 8. SealNodeKey under the cluster's ACTIVE KEK generation — the highest gen
+	// actually present in the delivered bootstrap. Hardcoding gen-0 bricks join
+	// against a cluster that rotated then pruned gen-0 (BootstrapSecrets only
+	// ships currently-retained gens). Persist the chosen gen so Phase-2 reloads
+	// node.key.enc under the SAME KEK.
+	sealGen, sealKEK, ok := highestKEKGen(kekGens)
+	if !ok {
+		return fmt.Errorf("bootstrap secrets contain no KEK generations")
 	}
-	if err := transport.SealNodeKey(opts.DataDir, kekGen0, cert); err != nil {
+	st.nodeKeyKEKGen = sealGen
+	// Re-persist the sentinel with the chosen gen BEFORE sealing (the step-2 write
+	// predates staging and carries gen 0). Ordering matters for crash safety:
+	//   - crash after this write, before SealNodeKey → no node.key.enc →
+	//     !artifactsComplete → FreshJoin re-runs Phase-1 (reusing the unsealed key);
+	//   - crash after SealNodeKey, before shred → unsealed still present →
+	//     !artifactsComplete → FreshJoin re-seals (atomic temp+rename overwrites);
+	//   - crash after shred → artifactsComplete, sentinel already carries the
+	//     correct gen → Resume → Phase-2 LoadNodeKey under the SAME gen.
+	if err := writeInvitePendingSentinel(opts.DataDir, paths.pendingSentinel, st); err != nil {
+		return err
+	}
+	if err := transport.SealNodeKey(opts.DataDir, sealKEK, cert); err != nil {
 		return fmt.Errorf("seal node key: %w", err)
 	}
 	shredFile(paths.nodeKeyUnsealed)
@@ -405,15 +466,25 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		return fmt.Errorf("invite-join Phase-2: nil state")
 	}
 
-	// The active cluster KEK gen-0 is the KEK node.key.enc was sealed under.
 	if state.kekStore == nil {
 		return fmt.Errorf("invite-join Phase-2: KEK store not wired")
 	}
-	kekGen0, err := state.kekStore.Get(0)
-	if err != nil {
-		return fmt.Errorf("invite-join Phase-2: get KEK gen-0: %w", err)
+	// On resume across a process restart st.nodeKeyKEKGen is zero (Phase-1 ran in
+	// a prior process) — recover the gen node.key.enc was actually sealed under
+	// from the sentinel (alongside leaderID/inviteID below) BEFORE loading.
+	if st.nodeKeyKEKGen == 0 {
+		if persisted, ok := readInvitePendingSentinel(state.cfg.DataDir); ok {
+			st.nodeKeyKEKGen = persisted.nodeKeyKEKGen
+		}
 	}
-	cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, kekGen0)
+	// Load node.key.enc under the cluster's ACTIVE KEK gen — the gen Phase-1
+	// sealed it under (NOT a hardcoded gen-0, which a rotated+pruned cluster
+	// would not retain).
+	sealKEK, err := state.kekStore.Get(st.nodeKeyKEKGen)
+	if err != nil {
+		return fmt.Errorf("invite-join Phase-2: get KEK gen %d: %w", st.nodeKeyKEKGen, err)
+	}
+	cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, sealKEK)
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2: load node key: %w", err)
 	}
@@ -514,14 +585,20 @@ func inviteSealBindContext(clusterID []byte, inviteID, nodeID, leaderID string) 
 	return out
 }
 
-// kekForGen returns the key bytes for generation gen, or nil if absent.
-func kekForGen(gens []cluster.KEKGen, gen uint32) []byte {
+// highestKEKGen returns the highest generation present in gens and its key
+// bytes — the cluster's ACTIVE KEK. KEKStore.Add advances active to the highest
+// gen on load, so the receiver's store will hold this gen after staging. Returns
+// ok=false when gens is empty or every entry has empty key bytes.
+func highestKEKGen(gens []cluster.KEKGen) (gen uint32, key []byte, ok bool) {
 	for _, g := range gens {
-		if g.Gen == gen {
-			return g.Key
+		if len(g.Key) == 0 {
+			continue
+		}
+		if !ok || g.Gen > gen {
+			gen, key, ok = g.Gen, g.Key, true
 		}
 	}
-	return nil
+	return gen, key, ok
 }
 
 // stageInviteSecrets writes encryption.key, every keys/<gen>.key, and cluster.id
@@ -571,6 +648,29 @@ func writeNodeKeyUnsealed(keysD, path string, priv *ecdsa.PrivateKey) error {
 	return nil
 }
 
+// readNodeKeyUnsealed loads the PKCS#8-PEM unsealed node key written by
+// writeNodeKeyUnsealed. Returns ok=false if absent/unreadable/not-ECDSA so the
+// caller falls back to generating a fresh identity.
+func readNodeKeyUnsealed(path string) (*ecdsa.PrivateKey, bool) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, false
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, false
+	}
+	priv, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, false
+	}
+	return priv, true
+}
+
 // shredFile best-effort overwrites + removes a small secret file.
 func shredFile(path string) {
 	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
@@ -587,25 +687,29 @@ func shredFile(path string) {
 // --- resume sentinel (length-prefixed binary, NO JSON) ---------------------
 
 type invitePendingRecord struct {
-	inviteID string
-	leaderID string
-	seedAddr string
-	seedSPKI [32]byte
-	nodeID   string
-	raftAddr string
-	nodeSPKI [32]byte
+	inviteID      string
+	leaderID      string
+	seedAddr      string
+	seedSPKI      [32]byte
+	nodeID        string
+	raftAddr      string
+	nodeSPKI      [32]byte
+	nodeKeyKEKGen uint32
 }
 
 func writeInvitePendingSentinel(dataDir, path string, st *inviteJoinState) error {
 	rec := invitePendingRecord{
-		inviteID: st.inviteID,
-		leaderID: st.leaderID,
-		seedAddr: st.seedAddr,
-		seedSPKI: st.seedSPKI,
-		nodeID:   st.nodeID,
-		raftAddr: st.raftAddr,
-		nodeSPKI: st.nodeSPKI,
+		inviteID:      st.inviteID,
+		leaderID:      st.leaderID,
+		seedAddr:      st.seedAddr,
+		seedSPKI:      st.seedSPKI,
+		nodeID:        st.nodeID,
+		raftAddr:      st.raftAddr,
+		nodeSPKI:      st.nodeSPKI,
+		nodeKeyKEKGen: st.nodeKeyKEKGen,
 	}
+	var genBuf [4]byte
+	binary.BigEndian.PutUint32(genBuf[:], rec.nodeKeyKEKGen)
 	var buf []byte
 	buf = transport.JoinPutField(buf, []byte(rec.inviteID))
 	buf = transport.JoinPutField(buf, []byte(rec.leaderID))
@@ -614,6 +718,7 @@ func writeInvitePendingSentinel(dataDir, path string, st *inviteJoinState) error
 	buf = transport.JoinPutField(buf, []byte(rec.nodeID))
 	buf = transport.JoinPutField(buf, []byte(rec.raftAddr))
 	buf = transport.JoinPutField(buf, rec.nodeSPKI[:])
+	buf = transport.JoinPutField(buf, genBuf[:])
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("write invite sentinel: mkdir: %w", err)
 	}
@@ -629,7 +734,7 @@ func readInvitePendingSentinel(dataDir string) (invitePendingRecord, bool) {
 	if err != nil {
 		return invitePendingRecord{}, false
 	}
-	fields, err := transport.JoinReadFields(bytes.NewReader(data), 7)
+	fields, err := transport.JoinReadFields(bytes.NewReader(data), 8)
 	if err != nil {
 		return invitePendingRecord{}, false
 	}
@@ -641,5 +746,8 @@ func readInvitePendingSentinel(dataDir string) (invitePendingRecord, bool) {
 	rec.nodeID = string(fields[4])
 	rec.raftAddr = string(fields[5])
 	copy(rec.nodeSPKI[:], fields[6])
+	if len(fields[7]) == 4 {
+		rec.nodeKeyKEKGen = binary.BigEndian.Uint32(fields[7])
+	}
 	return rec, true
 }

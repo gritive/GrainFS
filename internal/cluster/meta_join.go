@@ -493,7 +493,7 @@ func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, s
 	// pending record proves the invite was gate-verified at Phase-1; capturedSPKI
 	// proves this ACK comes from the holder of that Phase-1 key (payload fields
 	// alone are forgeable).
-	pendNode, pendSPKI, _, ok := r.meta.LookupPending(req.InviteID)
+	pendNode, pendSPKI, pendAddr, ok := r.meta.LookupPending(req.InviteID)
 	if !ok {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "no pending invite redemption"}
 	}
@@ -503,10 +503,14 @@ func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, s
 	if capturedSPKI != pendSPKI {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "captured SPKI does not match pending redemption"}
 	}
+	// Use the address PERSISTED at Phase-1 (which was bound into the signed invite
+	// transcript), NOT req.Address — a replayed/altered ACK must not be able to
+	// finalize membership for a different (unreachable or attacker-chosen) endpoint
+	// than the one the invite actually authorized.
 	// Stage membership idempotently (JoinViaInvite resumes from the first missing
 	// step). On failure roll back the un-promoted learner.
-	if err := r.meta.JoinViaInvite(ctx, req.NodeID, req.Address, spki, req.InviteID); err != nil {
-		if rbErr := r.meta.RemoveLearner(req.NodeID, req.Address); rbErr != nil {
+	if err := r.meta.JoinViaInvite(ctx, req.NodeID, pendAddr, spki, req.InviteID); err != nil {
+		if rbErr := r.meta.RemoveLearner(req.NodeID, pendAddr); rbErr != nil {
 			log.Warn().Err(rbErr).Str("node_id", req.NodeID).
 				Msg("meta_join: JoinViaInvite rollback RemoveLearner failed")
 		}

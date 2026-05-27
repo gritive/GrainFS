@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"crypto/ecdsa"
 	"net/url"
 	"testing"
 )
@@ -42,6 +43,28 @@ func TestGenerateNodeIdentity_UniqueAndSAN(t *testing.T) {
 	}
 	if gotCluster != clusterID || gotNode != "node-a" {
 		t.Fatalf("NodeIDFromCert = (%q,%q), want (%q,node-a)", gotCluster, gotNode, clusterID)
+	}
+}
+
+// TestBuildNodeIdentity_ReusesKeySameSPKI verifies the invite-join resume path's
+// identity reuse: rebuilding a cert from an EXISTING key yields the SAME SPKI as
+// the original (so a Phase-1 retry presents the SPKI the leader already bound).
+func TestBuildNodeIdentity_ReusesKeySameSPKI(t *testing.T) {
+	clusterID := "11111111-2222-3333-4444-555555555555"
+	c1, spki1, err := GenerateNodeIdentity(clusterID, "node-a")
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	priv, ok := c1.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("PrivateKey is %T, want *ecdsa.PrivateKey", c1.PrivateKey)
+	}
+	_, spki2, err := BuildNodeIdentity(clusterID, "node-a", priv)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if spki1 != spki2 {
+		t.Fatalf("rebuilt SPKI %x != original %x; reused key must yield same SPKI", spki2, spki1)
 	}
 }
 

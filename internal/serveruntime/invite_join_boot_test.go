@@ -22,11 +22,16 @@ func TestClassifyInviteJoinResume(t *testing.T) {
 	}{
 		{"no bundle -> normal", false, false, false, false, inviteNormalBoot},
 		{"no bundle even if durable -> normal", false, true, true, true, inviteNormalBoot},
-		{"bundle, no key -> fresh", true, false, false, false, inviteFreshJoin},
-		{"bundle, key, incomplete -> resume", true, true, false, false, inviteResume},
-		{"bundle, key, complete but not acked -> resume", true, true, true, false, inviteResume},
-		{"bundle, key, complete and acked -> normal", true, true, true, true, inviteNormalBoot},
-		{"bundle, key, acked but incomplete -> resume", true, true, false, true, inviteResume},
+		{"bundle, no key, incomplete -> fresh", true, false, false, false, inviteFreshJoin},
+		// Previously-bricking case: a Phase-1 crash AFTER persisting the node key +
+		// sentinel but BEFORE staging leaves {persistedKey, !complete, !acked}. The
+		// gate MUST re-run Phase-1 (FreshJoin), NOT route to Phase-2 (which would
+		// hard-fail on the missing keys.d/current.key and brick the node forever).
+		{"bundle, key, incomplete, not acked -> fresh (was bricking)", true, true, false, false, inviteFreshJoin},
+		{"bundle, complete but not acked -> resume", true, true, true, false, inviteResume},
+		{"bundle, complete and acked -> normal", true, true, true, true, inviteNormalBoot},
+		// Incomplete dominates acked: re-run Phase-1 rather than resume.
+		{"bundle, key, acked but incomplete -> fresh", true, true, false, true, inviteFreshJoin},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -56,13 +61,43 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("node key present, sentinel present -> resume", func(t *testing.T) {
+	t.Run("node key + sentinel only (no staged secrets) -> fresh", func(t *testing.T) {
+		// Phase-1 crashed after persisting the key + sentinel but before staging:
+		// artifacts incomplete, so re-run Phase-1 (the previously-bricking path).
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
 		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		if got := gateInviteJoin(dir, true); got != inviteFreshJoin {
+			t.Fatalf("got %d want FreshJoin (incomplete staging)", got)
+		}
+	})
+
+	t.Run("all artifacts staged + sentinel present -> resume", func(t *testing.T) {
+		dir := t.TempDir()
+		p := inviteJoinPathsFor(dir)
+		mustWrite(t, p.encryptionKey, []byte("k"))
+		mustWrite(t, p.clusterID, []byte("cid"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
+		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
 		if got := gateInviteJoin(dir, true); got != inviteResume {
 			t.Fatalf("got %d want Resume", got)
+		}
+	})
+
+	t.Run("staged KEK is a non-zero gen (rotated+pruned) -> resume", func(t *testing.T) {
+		// A cluster that rotated+pruned gen-0 ships only a higher gen; the staged
+		// KEK file is e.g. 3.key, not 0.key. artifactsComplete must still hold.
+		dir := t.TempDir()
+		p := inviteJoinPathsFor(dir)
+		mustWrite(t, p.encryptionKey, []byte("k"))
+		mustWrite(t, p.clusterID, []byte("cid"))
+		mustWrite(t, filepath.Join(p.keysDir, "3.key"), []byte("kek3"))
+		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		if got := gateInviteJoin(dir, true); got != inviteResume {
+			t.Fatalf("got %d want Resume (gen-3 staged, no gen-0)", got)
 		}
 	})
 
@@ -71,7 +106,7 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		p := inviteJoinPathsFor(dir)
 		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
-		mustWrite(t, p.kekGen0, []byte("kek0"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
 		// no node.key.unsealed, no sentinel
 		if got := gateInviteJoin(dir, true); got != inviteNormalBoot {
@@ -79,16 +114,16 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("unsealed key present means incomplete -> resume", func(t *testing.T) {
+	t.Run("unsealed key present means incomplete -> fresh", func(t *testing.T) {
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
 		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
-		mustWrite(t, p.kekGen0, []byte("kek0"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
 		mustWrite(t, p.nodeKeyUnsealed, []byte("plain")) // shred didn't complete
-		if got := gateInviteJoin(dir, true); got != inviteResume {
-			t.Fatalf("got %d want Resume (unsealed key still present)", got)
+		if got := gateInviteJoin(dir, true); got != inviteFreshJoin {
+			t.Fatalf("got %d want FreshJoin (unsealed key still present = incomplete)", got)
 		}
 	})
 }
@@ -136,8 +171,12 @@ func TestMaybeInviteJoin_ResumePopulatesClusterKey(t *testing.T) {
 	t.Setenv(inviteBundleEnv, mintTestBundleToken(t))
 	mustWrite(t, filepath.Join(dir, "node-id"), []byte("fixed-node-id\n"))
 
-	// Make the gate classify Resume: persisted node key + pending sentinel.
+	// Make the gate classify Resume: ALL Phase-1 artifacts staged + pending
+	// sentinel (artifacts complete but not yet acked).
 	p := inviteJoinPathsFor(dir)
+	mustWrite(t, p.encryptionKey, []byte("k"))
+	mustWrite(t, p.clusterID, []byte("cid"))
+	mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 	mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
 	mustWrite(t, p.pendingSentinel, []byte("pending"))
 
@@ -202,13 +241,14 @@ func TestInviteSealBindContext(t *testing.T) {
 func TestInvitePendingSentinelRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	st := &inviteJoinState{
-		seedAddr: "seed:7000",
-		seedSPKI: [32]byte{1, 2, 3},
-		inviteID: "invite-123",
-		nodeID:   "node-abc",
-		raftAddr: "10.0.0.1:7000",
-		leaderID: "leader-xyz",
-		nodeSPKI: [32]byte{9, 9, 9},
+		seedAddr:      "seed:7000",
+		seedSPKI:      [32]byte{1, 2, 3},
+		inviteID:      "invite-123",
+		nodeID:        "node-abc",
+		raftAddr:      "10.0.0.1:7000",
+		leaderID:      "leader-xyz",
+		nodeSPKI:      [32]byte{9, 9, 9},
+		nodeKeyKEKGen: 3,
 	}
 	path := filepath.Join(dir, invitePendingFile)
 	if err := writeInvitePendingSentinel(dir, path, st); err != nil {
@@ -221,7 +261,7 @@ func TestInvitePendingSentinelRoundTrip(t *testing.T) {
 	if rec.inviteID != st.inviteID || rec.leaderID != st.leaderID ||
 		rec.seedAddr != st.seedAddr || rec.nodeID != st.nodeID ||
 		rec.raftAddr != st.raftAddr || rec.seedSPKI != st.seedSPKI ||
-		rec.nodeSPKI != st.nodeSPKI {
+		rec.nodeSPKI != st.nodeSPKI || rec.nodeKeyKEKGen != st.nodeKeyKEKGen {
 		t.Fatalf("sentinel round-trip mismatch: %+v vs %+v", rec, st)
 	}
 }
