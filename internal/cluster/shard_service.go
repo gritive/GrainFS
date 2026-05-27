@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
@@ -55,7 +56,9 @@ type shardFileWriter func(path string, payload []byte) error
 type ShardService struct {
 	dataDirs      []string
 	transport     *transport.QUICTransport
-	encryptor     *encrypt.Encryptor
+	encryptor     *encrypt.Encryptor    // retained for the whole-buffer scrubber-repair + legacy single-blob fallback (D-seg-ec-scrub / D-cut)
+	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
+	clusterID     [16]byte              // zero sentinel in D-seg-ec-struct; real ID in slice C
 	addrBook      NodeAddressBook
 	directWriter  shardFileWriter
 	shardPack     *shardPackStore
@@ -90,7 +93,14 @@ type ShardServiceOption func(*ShardService)
 // WithEncryptor wires an AES-256-GCM encryptor into the shard service so that
 // all shards are encrypted at rest. Pass nil to disable encryption.
 func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
-	return func(s *ShardService) { s.encryptor = enc }
+	return func(s *ShardService) {
+		s.encryptor = enc
+		if enc != nil {
+			// D-seg-ec-struct: EncryptorAdapter over the static key, zero-sentinel
+			// clusterID. Slice C swaps this for a DEKKeeperAdapter + real clusterID.
+			s.segEnc = storage.NewEncryptorAdapter(enc, s.clusterID[:])
+		}
+	}
 }
 
 // WithDirectIO enables direct I/O (page-cache bypass) on the local shard
