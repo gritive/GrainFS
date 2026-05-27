@@ -43,6 +43,11 @@ aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/  
 S3 auth is active after you bootstrap the first admin SA
 (`grainfs iam sa create`). Mounts require a Mount SA with an attached policy.
 
+`grainfs credential` is the new shared admin surface for protocol credentials
+across S3, Iceberg, NFS, 9P, and NBD. The current NFS/9P data plane still uses
+the Mount SA path below; protocol-credential enforcement for NFS/9P is a
+follow-up migration.
+
 ### 1. Create a Mount SA
 
 ```bash
