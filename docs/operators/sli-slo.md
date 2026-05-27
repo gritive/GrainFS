@@ -55,6 +55,19 @@ histogram_quantile(0.99,
 - GET Object: P99 ≤ 50ms
 - LIST Objects: P99 ≤ 500ms
 
+**Service-level breakdown:**
+```promql
+histogram_quantile(0.99,
+  sum(rate(grainfs_service_request_duration_seconds_bucket[5m]))
+    by (service, operation, le)
+)
+```
+
+Use the service-level metric when the aggregate API latency SLI breaches and
+you need to isolate whether S3, Iceberg, admin, cluster, dashboard, or metrics
+traffic is responsible. The label contract is documented in the production
+runbook.
+
 ---
 
 ## SLI 3: Data Durability
