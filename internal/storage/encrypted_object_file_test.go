@@ -433,3 +433,83 @@ func TestWriteEncryptedObjectFile_RoundTrip(t *testing.T) {
 		t.Fatal("round-trip mismatch")
 	}
 }
+
+func TestWriteEncryptedObjectFile_EmptyObject_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/empty"
+	f := newFakeDataEncryptor(t) // constant gen 0
+	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(nil), io.Discard)
+	if err != nil {
+		t.Fatalf("write empty: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("empty object size: want 0 got %d", n)
+	}
+	got, err := readEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), 0)
+	if err != nil {
+		t.Fatalf("read empty: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty object read: want 0 bytes got %d", len(got))
+	}
+}
+
+func TestEncryptedObjectFile_ChunkSwap_FailsDecrypt(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/twochunk"
+	f := newFakeDataEncryptor(t)
+	// Two full chunks of DISTINCT plaintext so swapped bodies are detectable.
+	plain := append(bytes.Repeat([]byte("A"), encryptedChunkSize), bytes.Repeat([]byte("B"), encryptedChunkSize)...)
+	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(plain), io.Discard)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := swapFirstTwoEncryptedRecords(path); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+	_, err = readEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), n)
+	if err == nil {
+		t.Fatal("expected decrypt to fail after swapping chunk record bodies (ordinal AAD binding)")
+	}
+}
+
+// swapFirstTwoEncryptedRecords rewrites the file at path with the sealed bodies
+// of its first two records exchanged, leaving each record's own
+// [plainLen][blobLen] header in place. Used to prove the per-chunk ordinal in
+// the AAD is load-bearing: with bodies swapped, chunk 0 decrypts under the
+// chunk-0 ordinal AAD but holds chunk-1's ciphertext, so AEAD verify fails.
+func swapFirstTwoEncryptedRecords(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	pos := encryptedObjectHeaderLen
+
+	readRecord := func(p int) (hdrStart, bodyStart, bodyEnd int, e error) {
+		if p+8 > len(raw) {
+			return 0, 0, 0, io.ErrUnexpectedEOF
+		}
+		blobLen := int(binary.BigEndian.Uint32(raw[p+4 : p+8]))
+		bs := p + 8
+		be := bs + blobLen
+		if be > len(raw) {
+			return 0, 0, 0, io.ErrUnexpectedEOF
+		}
+		return p, bs, be, nil
+	}
+
+	_, b0s, b0e, err := readRecord(pos)
+	if err != nil {
+		return err
+	}
+	_, b1s, b1e, err := readRecord(b0e)
+	if err != nil {
+		return err
+	}
+
+	body0 := append([]byte(nil), raw[b0s:b0e]...)
+	body1 := append([]byte(nil), raw[b1s:b1e]...)
+	copy(raw[b0s:b0e], body1)
+	copy(raw[b1s:b1e], body0)
+	return os.WriteFile(path, raw, 0o644)
+}

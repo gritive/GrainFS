@@ -212,6 +212,10 @@ func (r *encryptedObjectReader) loadNext() error {
 		return err
 	}
 	r.sealedBuf = sealed
+	// Readers append the per-chunk ordinal to a fresh slice each chunk
+	// (the writer reuses a preallocated slice via ordinalIdx). The alloc
+	// is acceptable for this groundwork lane; a zero-alloc reader pass is
+	// deferred to a later optimization.
 	fields := append(append([]encrypt.AADField(nil), r.baseFields...), encrypt.FieldUint32(uint32(r.chunk)))
 	plain, err := r.enc.Open(encrypt.DomainShard, fields, r.gen, sealed)
 	clear(sealed)

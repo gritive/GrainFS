@@ -150,6 +150,10 @@ func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor)
 	if enc != nil {
 		// D-seg-local: EncryptorAdapter over the static key, zero-sentinel
 		// clusterID. D-seg-ec swaps this for a DEKKeeperAdapter + real clusterID.
+		// NOTE: clusterID is bound into every file's AAD, so swapping the
+		// sentinel for a real ID changes the AAD and makes pre-swap files
+		// undecryptable. Safe now (green-field, no production data); D-seg-ec
+		// must wipe/re-encrypt rather than swap in place.
 		b.segEnc = NewEncryptorAdapter(enc, b.clusterID[:])
 	}
 	return b, nil
