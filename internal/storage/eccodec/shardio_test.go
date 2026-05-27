@@ -259,13 +259,25 @@ func BenchmarkEncryptedShardReaderRead5MiB(b *testing.B) {
 	}
 }
 
+// shardChunkOverhead derives the per-chunk ciphertext expansion the seam adds,
+// cipher-agnostic: it seals a 1-byte plaintext and measures len(ct)-1. This
+// tracks the underlying AEAD (AES-256-GCM nonce=12 → 31; XAES-256-GCM nonce=24
+// → 43) so offset arithmetic in tests never hardcodes a cipher-specific value.
+func shardChunkOverhead(t *testing.T, enc ShardEncryptor) int {
+	t.Helper()
+	ct, _, err := enc.Seal(encrypt.DomainShard, shardBaseFields(), []byte("x"))
+	if err != nil {
+		t.Fatalf("seal probe for overhead: %v", err)
+	}
+	return len(ct) - 1
+}
+
 func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {
 	f := newFakeShardEncryptor(t)
 	data := bytes.Repeat([]byte("0123456789abcdef"), 512)
 	fields := shardBaseFields()
 	const chunkSize = 1024
-	// fakeShardEncryptor uses SealValueAADTo → overhead = 3 + 12 + 16 = 31.
-	const overhead = 31
+	overhead := shardChunkOverhead(t, f)
 
 	var encoded bytes.Buffer
 	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), f, fields, chunkSize))
@@ -326,7 +338,7 @@ func TestReadEncryptedShardRangeAt_DoesNotReadSkippedChunks(t *testing.T) {
 	data := bytes.Repeat([]byte("0123456789abcdef"), 512)
 	fields := shardBaseFields()
 	const chunkSize = 1024
-	const overhead = 31
+	overhead := shardChunkOverhead(t, f)
 
 	var encoded bytes.Buffer
 	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), f, fields, chunkSize))

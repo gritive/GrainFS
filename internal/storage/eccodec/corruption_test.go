@@ -407,8 +407,8 @@ func TestIsCorruption_RangePath(t *testing.T) {
 				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, fields, chunkSize))
 				raw := buf.Bytes()
 				// Cut a few bytes into chunk 1 so chunk 0 stays intact.
-				// overhead=31 for fakeShardEncryptor (SealValueAADTo = 3+12+16=31)
-				const overhead = 31
+				// overhead is derived from the cipher (AES-GCM 31 / XAES 43).
+				overhead := shardChunkOverhead(t, enc)
 				cut := encryptedHeaderLen + encryptedChunkHeaderLen + chunkSize + overhead + 2
 				require.Less(t, cut, len(raw), "expected a multi-chunk shard")
 				dst := make([]byte, len(plaintext))
@@ -428,7 +428,7 @@ func TestIsCorruption_RangePath(t *testing.T) {
 				var buf bytes.Buffer
 				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, fields, chunkSize))
 				raw := buf.Bytes()
-				const overhead = 31
+				overhead := shardChunkOverhead(t, enc)
 				cut := encryptedHeaderLen + encryptedChunkHeaderLen + chunkSize + overhead + 2
 				require.Less(t, cut, len(raw), "expected a multi-chunk shard")
 				rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw[:cut]), enc, fields, 0, int64(len(plaintext)))
