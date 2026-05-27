@@ -42,6 +42,7 @@ func newPeerRegistry() *peerRegistry {
 var (
 	errSPKINotUnique  = errors.New("SPKI already registered under another node-id")
 	errSPKIDenylisted = errors.New("SPKI is denylisted")
+	errNodeIDRebind   = errors.New("node-id already registered with a different SPKI")
 )
 
 func (r *peerRegistry) registerPendingLearner(nodeID string, s [32]byte, addr string) error {
@@ -52,6 +53,13 @@ func (r *peerRegistry) registerPendingLearner(nodeID string, s [32]byte, addr st
 	}
 	if owner, ok := r.bySPKI[s]; ok && owner != nodeID {
 		return fmt.Errorf("%w: owned by %s", errSPKINotUnique, owner)
+	}
+	// node-id uniqueness: an invite admits exactly one NEW identity. A node-id
+	// already bound to a DIFFERENT SPKI must not be silently rebound — otherwise
+	// a leaked single-use invite could hijack an existing member's node-id with
+	// an attacker-owned SPKI.
+	if existing, ok := r.byNodeID[nodeID]; ok && existing.SPKI != s {
+		return fmt.Errorf("%w: node %s already bound to a different SPKI", errNodeIDRebind, nodeID)
 	}
 	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStatePendingLearner}
 	r.bySPKI[s] = nodeID
@@ -118,12 +126,10 @@ func (r *peerRegistry) acceptSPKIs() [][32]byte {
 
 // acceptSPKIBytes is acceptSPKIs() as [][]byte (Task 5 JoinReply.PeerSPKIs).
 func (r *peerRegistry) acceptSPKIBytes() [][]byte {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([][]byte, 0, len(r.byNodeID))
-	for _, e := range r.byNodeID {
-		s := e.SPKI
-		out = append(out, append([]byte(nil), s[:]...))
+	spkis := r.acceptSPKIs()
+	out := make([][]byte, len(spkis))
+	for i, s := range spkis {
+		out[i] = append([]byte(nil), s[:]...)
 	}
 	return out
 }

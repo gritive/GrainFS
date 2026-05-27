@@ -18,7 +18,7 @@ type inviteRecord struct {
 // Keyed by invite-id; stores the invite PUBLIC key (private key never reaches
 // the server). All mutations come from applied commands so replicas converge.
 type inviteFSM struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	records map[string]inviteRecord
 }
 
@@ -33,8 +33,8 @@ func (f *inviteFSM) applyMint(id string, pub ed25519.PublicKey, expiryNanos int6
 }
 
 func (f *inviteFSM) lookup(id string, now time.Time) (ed25519.PublicKey, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	r, ok := f.records[id]
 	if !ok || r.used || now.UnixNano() >= r.expiryNanos {
 		return nil, false

@@ -12,7 +12,7 @@ import (
 // so a relayed handshake on a different TLS session fails (spec §4.2B).
 type InviteTranscript struct {
 	ClusterID []byte
-	Nonce     []byte // server-issued
+	Nonce     []byte // joiner-generated; server-issued nonce freshness is deferred (TODO network-path-slice)
 	NodeID    string
 	Address   string
 	SPKI      []byte // sha256(SubjectPublicKeyInfo) of the joiner

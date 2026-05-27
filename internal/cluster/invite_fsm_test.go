@@ -47,3 +47,26 @@ func TestInviteFSM_Expiry(t *testing.T) {
 		t.Fatal("consuming an expired invite must fail")
 	}
 }
+
+func TestInviteFSM_ExactlyAtExpiry(t *testing.T) {
+	fsm := newInviteFSM()
+	id, pub := "inv-c", testPub(t)
+	ttl := 5 * time.Minute
+	now := time.Unix(2000, 0)
+	expiry := now.Add(ttl)
+	fsm.applyMint(id, pub, expiry.UnixNano())
+	// At exactly expiry (now.UnixNano() >= expiryNanos) → invalid.
+	if _, ok := fsm.lookup(id, expiry); ok {
+		t.Fatal("invite at exactly expiry boundary must be invalid (>= check)")
+	}
+	if err := fsm.applyConsume(id, expiry); err == nil {
+		t.Fatal("consuming at exactly expiry must fail")
+	}
+}
+
+func TestInviteFSM_ConsumeUnminted(t *testing.T) {
+	fsm := newInviteFSM()
+	if err := fsm.applyConsume("never-minted", time.Unix(1000, 0)); err == nil {
+		t.Fatal("consuming a never-minted invite must error")
+	}
+}

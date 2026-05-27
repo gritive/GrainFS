@@ -43,6 +43,31 @@ func TestPeerRegistry_Denylist(t *testing.T) {
 	}
 }
 
+func TestPeerRegistry_NodeIDRebindRejected(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000"); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	// Same node-id, DIFFERENT SPKI (the hijack attempt) must be rejected.
+	if err := r.registerPendingLearner("node-a", spki(2), "10.0.0.9:9000"); err == nil {
+		t.Fatal("rebinding an existing node-id to a different SPKI must be rejected")
+	}
+	// Same node-id, SAME SPKI, new address (idempotent re-join) must still succeed.
+	if err := r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9001"); err != nil {
+		t.Fatalf("idempotent re-register (same node+SPKI) must succeed: %v", err)
+	}
+	if r.byNodeID["node-a"].Address != "10.0.0.2:9001" {
+		t.Fatal("address should refresh on idempotent re-register")
+	}
+}
+
+func TestPeerRegistry_PromoteUnknownErrors(t *testing.T) {
+	r := newPeerRegistry()
+	if err := r.promoteMember("ghost"); err == nil {
+		t.Fatal("promoting an unknown node must error")
+	}
+}
+
 func TestPeerRegistry_AcceptSet(t *testing.T) {
 	r := newPeerRegistry()
 	_ = r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000")

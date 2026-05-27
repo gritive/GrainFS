@@ -23,6 +23,10 @@ import (
 
 type JoinStatus string
 
+// metaJoinTimeout is the maximum time a join operation waits for a Raft
+// commit (both the KEK path and the invite path use the same budget).
+const metaJoinTimeout = 60 * time.Second
+
 const (
 	JoinStatusOK            JoinStatus = "ok"
 	JoinStatusAlreadyMember JoinStatus = "already_member"
@@ -201,6 +205,9 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 	// not expose the TLS session). Runs after the leader check, instead of the
 	// KEK gate, when InviteSig is present.
 	if len(joinReq.InviteSig) > 0 {
+		if len(r.clusterID) == 0 {
+			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"})
+		}
 		var spki [32]byte
 		copy(spki[:], joinReq.SPKI)
 		// 1. denylist + SPKI uniqueness.
@@ -250,7 +257,7 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		// 6. staged membership (consumes invite by id in commit1).
 		r.joinMu.Lock()
 		defer r.joinMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
 		defer cancel()
 		if err := r.meta.JoinViaInvite(ctx, joinReq.NodeID, joinReq.Address, spki, joinReq.InviteID); err != nil {
 			return joinMessage(joinReplyFromError(err))
@@ -296,7 +303,7 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
 	defer cancel()
 	if err := r.meta.Join(ctx, joinReq.NodeID, joinReq.Address); err != nil {
 		return joinMessage(joinReplyFromError(err))

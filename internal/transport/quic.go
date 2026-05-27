@@ -328,18 +328,6 @@ func (t *QUICTransport) SwapIdentity(snap *IdentitySnapshot) {
 	t.identity.Store(snap)
 }
 
-// IdentitySnapshotForAccept returns a snapshot that swaps in a new accept set
-// while preserving the currently-presented cert/SPKI. Used by the cluster layer
-// after a membership (peer registry) change so the listener accepts the new
-// peer set live (Phase 1 §0 GetConfigForClient reads identity.Load() per handshake).
-func (t *QUICTransport) IdentitySnapshotForAccept(accept [][32]byte) *IdentitySnapshot {
-	cur := t.identity.Load()
-	if cur == nil {
-		return NewIdentitySnapshot(accept, tls.Certificate{}, [32]byte{})
-	}
-	return NewIdentitySnapshot(accept, cur.PresentCert, cur.PresentSPKI)
-}
-
 // MustNewQUICTransport is NewQUICTransport that panics on error. Intended only
 // for test setup where a configuration mistake should fail loud and fast. NOT
 // for production code paths — production must surface the error to the operator.

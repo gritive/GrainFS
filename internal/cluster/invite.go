@@ -39,6 +39,7 @@ type InviteBundle struct {
 // GRAINFS_INVITE_BUNDLE. (JSON inner form is fine — this is operator-facing,
 // not the node-to-node wire; FlatBuffers governs the wire only.)
 func EncodeInviteBundle(b InviteBundle) string {
+	// Marshal cannot fail for this fixed struct (only []byte/string/[32]byte fields).
 	raw, _ := json.Marshal(b)
 	return base64.RawURLEncoding.EncodeToString(raw)
 }

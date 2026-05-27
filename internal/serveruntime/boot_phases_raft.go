@@ -264,16 +264,15 @@ func bootRotationAndAdminAPI(state *bootState) error {
 	state.metaRaft.FSM().SetOnRotationApplied(func(st cluster.RotationState) {
 		_ = worker.OnPhaseChange(st)
 	})
-	// Rebuild the transport accept-set live after every peer-registry change so
-	// the listener immediately accepts the new peer set (Phase 1 GetConfigForClient
-	// reads identity.Load() per handshake).
-	//
-	// TODO(phase-2-followup): membership vs rotation accept-set union. A concurrent
-	// KEK rotation also drives SwapIdentity with a 2-SPKI window ([OldSPKI,NewSPKI]);
-	// a membership change during a rotation would overwrite that window with the
-	// registry accept set. Union-of-both is out of Phase 2 scope.
 	state.metaRaft.FSM().SetOnPeersChanged(func(accept [][32]byte) {
-		state.quicTransport.SwapIdentity(state.quicTransport.IdentitySnapshotForAccept(accept))
+		// TODO(network-path-slice): wire registry → transport accept-set as a UNION
+		// (registry SPKIs ∪ existing-member PSK-derived SPKIs from bootstrap seeding ∪
+		// live rotation window). The naive IdentitySnapshotForAccept(accept) REPLACES
+		// the accept-set, evicting the steady-state PSK SPKI and partitioning the
+		// cluster on the first invite-join (/review F1 finding, 2026-05-27). Activation
+		// is deferred; the callback stays wired so the FSM→callback path is exercised.
+		log.Debug().Int("registry_spkis", len(accept)).
+			Msg("peer registry changed; transport accept-set rebuild deferred to network-path slice")
 	})
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).

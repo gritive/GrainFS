@@ -195,3 +195,61 @@ func TestJoinReceiver_InvitePath_RejectsSPKICertMismatch(t *testing.T) {
 	require.Equal(t, JoinStatusError, reply.Status)
 	require.Equal(t, "SPKI does not match presented cert", reply.Message)
 }
+
+func TestJoinReceiver_InvitePath_RejectsDenylistedSPKI(t *testing.T) {
+	fx := buildInviteJoinFixture(t)
+	var spki [32]byte
+	copy(spki[:], fx.req.SPKI)
+	fx.coord.registry.denylist(spki)
+
+	reply := handleInvite(t, fx.coord, fx.req)
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusError, reply.Status)
+	require.Contains(t, reply.Message, "SPKI denylisted")
+}
+
+func TestJoinReceiver_InvitePath_RejectsSPKIAlreadyRegisteredByOtherNode(t *testing.T) {
+	fx := buildInviteJoinFixture(t)
+	var spki [32]byte
+	copy(spki[:], fx.req.SPKI)
+	// Pre-register the same SPKI under a different node-id.
+	err := fx.coord.registry.registerPendingLearner("node-other", spki, "10.0.0.99:7001")
+	require.NoError(t, err)
+
+	reply := handleInvite(t, fx.coord, fx.req)
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusError, reply.Status)
+}
+
+func TestJoinReceiver_InvitePath_RejectsExpiredInvite(t *testing.T) {
+	fx := buildInviteJoinFixture(t)
+	// Overwrite the invite with an already-expired one.
+	_, expiredPub, _, err := MintInviteKeypair()
+	require.NoError(t, err)
+	fx.coord.invites.applyMint(fx.inviteID, expiredPub, time.Now().Add(-time.Hour).UnixNano())
+
+	reply := handleInvite(t, fx.coord, fx.req)
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusError, reply.Status)
+}
+
+func TestJoinReceiver_InvitePath_RejectsForgedInviteSig(t *testing.T) {
+	fx := buildInviteJoinFixture(t)
+	// Sign InviteSig with a DIFFERENT ed25519 key than the one minted into the FSM.
+	otherPriv, _, _, err := MintInviteKeypair()
+	require.NoError(t, err)
+	tr := encrypt.InviteTranscript{
+		ClusterID: transcriptClusterID,
+		Nonce:     fx.req.HandshakeNonce,
+		NodeID:    fx.req.NodeID,
+		Address:   fx.req.Address,
+		SPKI:      fx.req.SPKI,
+		Bind:      nil,
+	}
+	fx.req.InviteSig = encrypt.SignInviteTranscript(otherPriv, tr)
+
+	reply := handleInvite(t, fx.coord, fx.req)
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusError, reply.Status)
+	require.Contains(t, reply.Message, "invite signature invalid")
+}
