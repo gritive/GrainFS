@@ -125,6 +125,13 @@ type bootState struct {
 	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ
 	// (ShardService) clusterID are identical. Empty until wireDEKKeeper runs.
 	clusterID []byte
+	// perNodeSPKI is the SPKI of this node's persisted per-node transport
+	// identity (keys.d/node.key.enc), populated by ensureNodeIdentity after the
+	// KEK store is wired (spec §6 D-rev3 step 1). It is the steady identity for
+	// EVERY member (genesis/normal-boot included), not just invite-joiners. The
+	// node does NOT yet present this on the wire — accept-side foundation only.
+	// Task 6 consumes perNodeSPKI for self-registration.
+	perNodeSPKI [32]byte
 	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
 	// A holds a single version (0). Later phases use it for rotation,
 	// prune, and join keystore catch-up. Receivers reach the active version

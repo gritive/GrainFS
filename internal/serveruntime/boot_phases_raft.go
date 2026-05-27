@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -105,6 +106,26 @@ func bootMetaRaftWiring(state *bootState) error {
 	// dek_keeper_wiring_test.go::TestWireDEKKeeper_InjectsAndRegistersHook).
 	if err := wireDEKKeeper(state, metaRaft.FSM()); err != nil {
 		return err
+	}
+
+	// Zero-CA §6 D-rev3 step 1: persist a per-node transport identity for EVERY
+	// member now that the KEK store + clusterID are wired. This seals
+	// keys.d/node.key.enc once (genesis/normal boot included) and reloads it on
+	// later boots, recording the per-node SPKI. The node does NOT yet present
+	// this identity — accept-side foundation only. Task 6 consumes perNodeSPKI.
+	// Skipped when encryption is not wired (nil store) or identity inputs are
+	// missing (test configs); production always has all three.
+	if state.kekStore != nil && len(state.clusterID) > 0 && state.nodeID != "" {
+		spki, err := ensureNodeIdentity(
+			state.cfg.DataDir,
+			hex.EncodeToString(state.clusterID),
+			state.nodeID,
+			state.kekStore,
+		)
+		if err != nil {
+			return fmt.Errorf("ensure per-node transport identity: %w", err)
+		}
+		state.perNodeSPKI = spki
 	}
 
 	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
