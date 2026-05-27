@@ -24,9 +24,11 @@ type StripePlaintext struct {
 
 // EncryptedShardChunk is what CPUPool emits to DriveActor.
 //
-// Ciphertext is GFSENC2-formatted bytes ready to append to the shard's
+// Ciphertext is GFSENC3-formatted bytes ready to append to the shard's
 // tmp file. The first chunk for a (PutID, ShardIdx) carries the 20-byte
-// GFSENC2 header; subsequent chunks carry only chunk-frame bytes.
+// GFSENC3 header; subsequent chunks carry only chunk-frame bytes.
+// Err, when non-nil, signals that seal/write failed for this shard upstream;
+// DriveActor turns it into exactly one failed ShardWriteResult.
 type EncryptedShardChunk struct {
 	PutID      uint64
 	StripeIdx  uint32
@@ -34,6 +36,7 @@ type EncryptedShardChunk struct {
 	Ciphertext []byte
 	Padding    uint32
 	LastInPut  bool
+	Err        error // non-nil ⟹ seal/write failed upstream for this shard; DriveActor turns it into ONE failed ShardWriteResult
 }
 
 // ShardWriteResult is what DriveActor emits to CommitCoord.

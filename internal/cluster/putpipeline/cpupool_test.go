@@ -3,11 +3,11 @@ package putpipeline
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +16,7 @@ func TestCPUPool_RegisterAndDispatch_OneShardPerChannel(t *testing.T) {
 	in := make(chan StripePlaintext, 4)
 	pool := &CPUPool{
 		in:      in,
-		enc:     testEncryptor(t),
+		enc:     testShardEncryptor(t),
 		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		workers: 2,
 	}
@@ -58,7 +58,7 @@ func TestCPUPool_OrderedPerShard_FiveStripes(t *testing.T) {
 	in := make(chan StripePlaintext, 8)
 	pool := &CPUPool{
 		in:      in,
-		enc:     testEncryptor(t),
+		enc:     testShardEncryptor(t),
 		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		workers: 4,
 	}
@@ -94,13 +94,13 @@ func TestCPUPool_OrderedPerShard_FiveStripes(t *testing.T) {
 	}
 }
 
-func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
+func TestCPUPool_ConcatenatedShardIsValidGFSENC3(t *testing.T) {
 	const stripe = 1 << 20
-	enc := testEncryptor(t)
+	shardEnc := testShardEncryptor(t)
 	in := make(chan StripePlaintext, 8)
 	pool := &CPUPool{
 		in:      in,
-		enc:     enc,
+		enc:     shardEnc,
 		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		workers: 4,
 	}
@@ -133,23 +133,115 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
 	}
 
 	// For each shard, concatenate every chunk's ciphertext in stripe
-	// order, then confirm the result is a single decodable GFSENC2
-	// stream under that shard's AAD.
+	// order, then confirm the result is a single decodable GFSENC3
+	// stream under that shard's base fields.
 	for shard := 0; shard < 4; shard++ {
 		var concatenated []byte
 		for got := 0; got < stripes; got++ {
 			select {
 			case chunk := <-shardChans[shard]:
 				require.Equal(t, uint32(got), chunk.StripeIdx)
+				require.NoError(t, chunk.Err, "shard %d stripe %d unexpected error", shard, got)
 				concatenated = append(concatenated, chunk.Ciphertext...)
 			case <-time.After(2 * time.Second):
 				t.Fatalf("shard %d missing chunk for stripe %d", shard, got)
 			}
 		}
-		aad := []byte(fmt.Sprintf("testbucket/testobj/v1/%d", shard))
 		var plain bytes.Buffer
-		err := eccodec.DecodeEncryptedShard(&plain, bytes.NewReader(concatenated), enc, aad)
-		require.NoError(t, err, "shard %d: concatenated chunks are not one valid GFSENC2 stream", shard)
+		err := eccodec.DecodeEncryptedShard(&plain, bytes.NewReader(concatenated), shardEnc, cluster.ShardAADFields("testbucket", "testobj/v1", shard))
+		require.NoError(t, err, "shard %d: concatenated chunks are not one valid GFSENC3 stream", shard)
 		require.NotZero(t, plain.Len(), "shard %d decoded to empty", shard)
+	}
+}
+
+// fakeGenDriftEncryptor simulates a ShardEncryptor that increments gen each
+// call, triggering the gen-pinning check in EncryptedShardChunkedWriter.
+type fakeGenDriftEncryptor struct {
+	enc *encrypt.Encryptor
+	gen uint32
+}
+
+func (f *fakeGenDriftEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	aad := encrypt.BuildAAD(domain, make([]byte, 16), fields...)
+	ct, err := f.enc.SealValueAADTo(nil, aad, plain)
+	if err != nil {
+		return nil, 0, err
+	}
+	g := f.gen
+	f.gen++
+	return ct, g, nil
+}
+
+func (f *fakeGenDriftEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	aad := encrypt.BuildAAD(domain, make([]byte, 16), fields...)
+	return f.enc.OpenValueAADTo(nil, aad, ct)
+}
+
+// TestCPUPool_SealError_PropagatesAsErrChunk drives a PUT through the pool
+// using a gen-drifting encryptor that causes EncryptedShardChunkedWriter to
+// fail on the 2nd chunk (gen-pinning). It verifies:
+// (1) every shard receives exactly one terminal EncryptedShardChunk,
+// (2) at least one shard's chunk has Err != nil (the failing one),
+// (3) no duplicate chunks arrive.
+func TestCPUPool_SealError_PropagatesAsErrChunk(t *testing.T) {
+	// Use large stripes so each shard gets ≥2 chunks (gen drift fires on chunk 1).
+	const stripe = 2 << 20 // 2 MiB; each shard gets ~512 KiB split → at least 1 full chunk + partial
+	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	require.NoError(t, err)
+	driftEnc := &fakeGenDriftEncryptor{enc: enc}
+
+	in := make(chan StripePlaintext, 4)
+	pool := &CPUPool{
+		in:      in,
+		enc:     driftEnc,
+		ecCfg:   cluster.ECConfig{DataShards: 2, ParityShards: 2},
+		workers: 2,
+	}
+	const numShards = 4
+	shardChans := make([]chan EncryptedShardChunk, numShards)
+	sends := make([]chan<- EncryptedShardChunk, numShards)
+	for i := range shardChans {
+		shardChans[i] = make(chan EncryptedShardChunk, 16)
+		sends[i] = shardChans[i]
+	}
+	pool.registerPut(42, "b", "k", 2<<20, sends)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go pool.Run(ctx)
+
+	// Two stripes to exercise mid-stream gen drift on the 2nd stripe's write.
+	for i := 0; i < 2; i++ {
+		data := make([]byte, stripe)
+		in <- StripePlaintext{
+			PutID:     42,
+			StripeIdx: uint32(i),
+			Data:      data,
+			LastInPut: i == 1,
+		}
+	}
+
+	// Drain: each shard must produce exactly one terminal chunk.
+	for shard := 0; shard < numShards; shard++ {
+		var terminal *EncryptedShardChunk
+		deadline := time.After(5 * time.Second)
+	drain:
+		for {
+			select {
+			case chunk := <-shardChans[shard]:
+				if chunk.LastInPut || chunk.Err != nil {
+					if terminal != nil {
+						t.Fatalf("shard %d: got a second terminal chunk (duplicate)", shard)
+					}
+					c := chunk
+					terminal = &c
+					break drain
+				}
+			case <-deadline:
+				t.Fatalf("shard %d: timed out waiting for terminal chunk", shard)
+			}
+		}
+		// terminal must have been set
+		require.NotNil(t, terminal, "shard %d: no terminal chunk", shard)
 	}
 }

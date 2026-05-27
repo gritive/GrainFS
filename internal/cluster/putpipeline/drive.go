@@ -73,6 +73,22 @@ func (d *DriveActor) handle(chunk EncryptedShardChunk) {
 		}
 	}()
 
+	if chunk.Err != nil {
+		d.mu.Lock()
+		state := d.pending[chunk.PutID]
+		d.mu.Unlock()
+		if state != nil {
+			d.failChunk(chunk, state, chunk.Err) // closes+unlinks tmp, dropPending, emits ONE failed result
+		} else {
+			// no tmp opened yet (seal failed on the shard's first stripe): no tmp to clean,
+			// but still drop the drive registry entry so the PUT's state does not leak,
+			// then emit the single terminal result.
+			d.dropPending(chunk.PutID)
+			d.commitCh <- ShardWriteResult{PutID: chunk.PutID, ShardIdx: chunk.ShardIdx, Err: chunk.Err}
+		}
+		return
+	}
+
 	if d.panicOnPut != 0 && chunk.PutID == d.panicOnPut {
 		d.panicOnPut = 0 // panic once, then let the PUT's retry/next PUT proceed
 		panic("test-injected panic")
