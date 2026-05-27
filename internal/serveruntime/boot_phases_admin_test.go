@@ -40,6 +40,28 @@ func TestBootHTTPServerAndAdminWiresBucketWithPolicyProposer(t *testing.T) {
 	require.True(t, state.adminDeps.BucketWithPolicyProp == proposer)
 }
 
+func TestBootHTTPServerAndAdminWiresProtocolCredentials(t *testing.T) {
+	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-protocred-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	backend, err := storage.NewLocalBackend(filepath.Join(dataDir, "objects"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+
+	state := &bootState{
+		cfg: Config{
+			Addr:        "127.0.0.1:0",
+			DataDir:     dataDir,
+			AdminSocket: filepath.Join(dataDir, "admin.sock"),
+		},
+		backend: backend,
+	}
+	t.Cleanup(state.Cleanup)
+
+	require.NoError(t, bootHTTPServerAndAdmin(state))
+	require.NotNil(t, state.adminDeps.ProtocolCredentials)
+}
+
 func TestStorageProtocolStatusFromConfig(t *testing.T) {
 	resp := storageProtocolStatusFromConfig(Config{
 		NFS4Port: 2049,

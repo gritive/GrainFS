@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -53,6 +54,11 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			newIAMPostureChecker(state.cfgStore, nodeconfig.New(state.cfg.DataDir)),
 		)
 	}
+	if state.protocolCredentials == nil {
+		// Foundation slice: protocol credentials are node-local until Raft-backed
+		// persistence and cross-node propagation land before data-plane enforcement.
+		state.protocolCredentials = protocred.NewService(protocred.NewStore())
+	}
 	state.adminDeps = &admin.Deps{
 		Manager:    srv.VolumeManager(),
 		Token:      tokenStore,
@@ -76,6 +82,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		ConfigStore:          state.cfgStore,
 		Buckets:              storage.NewOperations(state.backend),
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
+		ProtocolCredentials:  state.protocolCredentials,
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
 	if state.auditSearcher != nil {
