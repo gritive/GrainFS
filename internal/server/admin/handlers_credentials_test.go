@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
@@ -70,4 +71,121 @@ func TestCredentialHandlersRejectInvalidExpiresAt(t *testing.T) {
 	var ae *admin.Error
 	require.ErrorAs(t, err, &ae)
 	require.Equal(t, "invalid", ae.Code)
+}
+
+func TestCredentialHandlersAuthorizeCreateRotateRevoke(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore(), protocred.WithNow(func() time.Time {
+		return time.Unix(100, 0).UTC()
+	}))
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	d.ProtocolCredAuthz = authz
+
+	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+	require.NoError(t, err)
+	require.Equal(t, credentialAuthCall{
+		saID:     "sa-app",
+		action:   "grainfs:CredentialCreate",
+		resource: "protocol-credential/nbd/volume/devdisk",
+	}, authz.calls[0])
+
+	_, err = admin.RotateCredential(context.Background(), d, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, credentialAuthCall{
+		saID:     "sa-app",
+		action:   "grainfs:CredentialRotate",
+		resource: "protocol-credential/nbd/volume/devdisk",
+	}, authz.calls[1])
+
+	_, err = admin.RevokeCredential(context.Background(), d, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, credentialAuthCall{
+		saID:     "sa-app",
+		action:   "grainfs:CredentialRevoke",
+		resource: "protocol-credential/nbd/volume/devdisk",
+	}, authz.calls[2])
+}
+
+func TestCredentialHandlersDenyCreateBeforeMutation(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "implicit Deny"}
+
+	_, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+	requireCredentialForbidden(t, err)
+
+	listed, err := admin.ListCredentials(context.Background(), d, admin.CredentialListReq{})
+	require.NoError(t, err)
+	require.Empty(t, listed.Credentials)
+}
+
+func TestCredentialHandlersValidateCreateBeforeAuthorize(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny}
+	d.ProtocolCredAuthz = authz
+
+	_, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "bogus", Resource: "volume/devdisk", Mode: "rw",
+	})
+	require.Error(t, err)
+	var ae *admin.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "invalid", ae.Code)
+	require.Empty(t, authz.calls)
+}
+
+func TestCredentialHandlersDenyRotateAndRevokeBeforeMutation(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+
+	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+	require.NoError(t, err)
+
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "explicit Deny"}
+	rotated, err := admin.RotateCredential(context.Background(), d, created.ID)
+	requireCredentialForbidden(t, err)
+	require.Empty(t, rotated.Secret)
+
+	got, err := admin.GetCredential(context.Background(), d, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, created.SecretHint, got.SecretHint)
+
+	_, err = admin.RevokeCredential(context.Background(), d, created.ID)
+	requireCredentialForbidden(t, err)
+	got, err = admin.GetCredential(context.Background(), d, created.ID)
+	require.NoError(t, err)
+	require.Empty(t, got.RevokedAt)
+}
+
+type credentialAuthCall struct {
+	saID     string
+	action   string
+	resource string
+}
+
+type credentialAuthorizerStub struct {
+	decision policy.Decision
+	reason   string
+	calls    []credentialAuthCall
+}
+
+func (s *credentialAuthorizerStub) Authorize(_ context.Context, saID, _ string, ctxReq policy.RequestContext) policy.EvalResult {
+	s.calls = append(s.calls, credentialAuthCall{saID: saID, action: ctxReq.Action, resource: ctxReq.Resource})
+	return policy.EvalResult{Decision: s.decision, Reason: s.reason}
+}
+
+func requireCredentialForbidden(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	var ae *admin.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "forbidden", ae.Code)
+	require.Contains(t, ae.Message, "protocol credential permission denied")
 }

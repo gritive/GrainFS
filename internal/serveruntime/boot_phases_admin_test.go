@@ -8,6 +8,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -58,10 +59,15 @@ func TestBootHTTPServerAndAdminWiresProtocolCredentials(t *testing.T) {
 		},
 		backend: backend,
 	}
+	stores, err := WireIAMPolicyStores(context.Background(), nil, 0)
+	require.NoError(t, err)
+	state.iamPolicyStores = stores
+	state.cfgStore = config.NewStore()
 	t.Cleanup(state.Cleanup)
 
 	require.NoError(t, bootHTTPServerAndAdmin(state))
 	require.NotNil(t, state.adminDeps.ProtocolCredentials)
+	require.NotNil(t, state.adminDeps.ProtocolCredAuthz)
 }
 
 func TestBootHTTPServerAndAdminUsesDurableProtocolCredentialsWhenMetaRaftIsWired(t *testing.T) {
