@@ -220,9 +220,17 @@ func gateInviteJoin(dataDir string, bundlePresent bool) inviteJoinDecision {
 // *inviteJoinState ONLY when this boot is a Zero-CA invite-join (FreshJoin or
 // Resume); the caller threads it onto Config so boot enters inviteJoinMode. On
 // NormalBoot it returns (nil, nil) and is a complete no-op.
-func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState, error) {
+//
+// dataDir is the canonical PRIMARY data dir (DataDirs[0] when multi-drive, else
+// opts.DataDir). ALL on-disk staging/read paths use it — NOT the raw opts.DataDir
+// flag, which may be a comma-separated multi-drive list. This keeps the Phase-1
+// staging dir == Phase-2 read dir (bootInviteJoinPhase2 reads cfg.DataDir) ==
+// cfg.DataDir on multi-disk deployments. opts is still mutated for the in-memory
+// writebacks (NodeID, ClusterKey) and read for non-disk fields (RaftAddr,
+// JoinListenAddr).
+func maybeInviteJoin(ctx context.Context, opts *ServeOptions, dataDir string) (*inviteJoinState, error) {
 	token := os.Getenv(inviteBundleEnv)
-	decision := gateInviteJoin(opts.DataDir, token != "")
+	decision := gateInviteJoin(dataDir, token != "")
 	if decision == inviteNormalBoot {
 		// Stale-bundle no-op resume: a fully-joined node restarted with the
 		// (now-consumed) bundle env still set hits the same --cluster-key gate as
@@ -231,7 +239,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 		// Phase-1 mirrored to keys.d/current.key. ReadCurrent on a truly fresh
 		// dataDir returns ("", nil), so this is a no-op there.
 		if opts.ClusterKey == "" {
-			if psk, err := transport.NewKeystore(opts.DataDir).ReadCurrent(); err == nil && psk != "" {
+			if psk, err := transport.NewKeystore(dataDir).ReadCurrent(); err == nil && psk != "" {
 				opts.ClusterKey = psk
 			}
 		}
@@ -244,7 +252,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 		// (seed addr/SPKI, inviteID, nodeID, raftAddr, KEK gen) is persisted in the
 		// sentinel; the node SPKI + leaderID are reloaded from node.key.enc + the
 		// sentinel at Phase-2. We do NOT decode the bundle here.
-		return inviteJoinResumeFromSentinel(opts)
+		return inviteJoinResumeFromSentinel(opts, dataDir)
 	}
 
 	bundle, err := cluster.DecodeInviteBundle(token)
@@ -260,7 +268,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 	// normal boot (bootValidateConfig) resolves the IDENTICAL id. GenerateNodeID
 	// persists <dataDir>/node-id and is idempotent.
 	if opts.NodeID == "" {
-		id, err := GenerateNodeID(opts.DataDir)
+		id, err := GenerateNodeID(dataDir)
 		if err != nil {
 			return nil, fmt.Errorf("resolve node id: %w", err)
 		}
@@ -286,7 +294,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 	}
 
 	// FreshJoin: run Phase-1 (pull + stage + seal + sentinel).
-	if err := inviteJoinPhase1(ctx, opts, bundle, st); err != nil {
+	if err := inviteJoinPhase1(ctx, opts, dataDir, bundle, st); err != nil {
 		return nil, err
 	}
 	return st, nil
@@ -299,12 +307,12 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 // populates opts.ClusterKey from the transport PSK Phase-1 mirrored to
 // keys.d/current.key, because bootValidateConfig's --cluster-key gate runs
 // BEFORE bootQUICTransport's ResolveClusterKey reads disk.
-func inviteJoinResumeFromSentinel(opts *ServeOptions) (*inviteJoinState, error) {
-	rec, ok := readInvitePendingSentinel(opts.DataDir)
+func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJoinState, error) {
+	rec, ok := readInvitePendingSentinel(dataDir)
 	if !ok {
 		return nil, fmt.Errorf("invite-join resume: sentinel missing or unreadable")
 	}
-	psk, err := transport.NewKeystore(opts.DataDir).ReadCurrent()
+	psk, err := transport.NewKeystore(dataDir).ReadCurrent()
 	if err != nil || psk == "" {
 		return nil, fmt.Errorf("invite-join resume: transport PSK (keys.d/current.key) missing or unreadable: %w", err)
 	}
@@ -330,9 +338,9 @@ func inviteJoinResumeFromSentinel(opts *ServeOptions) (*inviteJoinState, error) 
 
 // inviteJoinPhase1 performs the secret pull + on-disk staging. It mutates st
 // (leaderID, nodeSPKI) and opts (ClusterKey).
-func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.InviteBundle, st *inviteJoinState) error {
-	paths := inviteJoinPathsFor(opts.DataDir)
-	keysD := filepath.Join(opts.DataDir, "keys.d")
+func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, bundle cluster.InviteBundle, st *inviteJoinState) error {
+	paths := inviteJoinPathsFor(dataDir)
+	keysD := filepath.Join(dataDir, "keys.d")
 
 	// 1. node ECDSA P-256 identity + self-signed leaf (Path A: cert in request).
 	// REUSE an existing unsealed key if a prior Phase-1 already persisted one: a
@@ -369,7 +377,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 
 	// 2. write the resume sentinel BEFORE the dial: from here on a crash must
 	// resume Phase-2 rather than restart Phase-1 with a fresh identity.
-	if err := writeInvitePendingSentinel(opts.DataDir, paths.pendingSentinel, st); err != nil {
+	if err := writeInvitePendingSentinel(dataDir, paths.pendingSentinel, st); err != nil {
 		return err
 	}
 
@@ -395,7 +403,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 
 	// 4. advertise this node's OWN join listener (W9a) so a non-leader seed can
 	// later redirect us to the leader (redirect itself is a follow-up task).
-	_, joinListenerSPKI, err := LoadOrCreateJoinListenerCert(opts.DataDir)
+	_, joinListenerSPKI, err := LoadOrCreateJoinListenerCert(dataDir)
 	if err != nil {
 		return fmt.Errorf("load join listener cert: %w", err)
 	}
@@ -445,7 +453,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 	}
 
 	// 7. stage every secret on disk where the normal boot expects them.
-	if err := stageInviteSecrets(opts.DataDir, encKey, kekGens, st.clusterID); err != nil {
+	if err := stageInviteSecrets(dataDir, encKey, kekGens, st.clusterID); err != nil {
 		return err
 	}
 
@@ -471,10 +479,10 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 	//     !artifactsComplete → FreshJoin re-runs (PSK write is idempotent overwrite);
 	//   - crash after shred → artifactsComplete (PSK already durable), sentinel
 	//     carries the correct gen → Resume → Phase-2 LoadNodeKey under the SAME gen.
-	if err := writeInvitePendingSentinel(opts.DataDir, paths.pendingSentinel, st); err != nil {
+	if err := writeInvitePendingSentinel(dataDir, paths.pendingSentinel, st); err != nil {
 		return err
 	}
-	if err := transport.SealNodeKey(opts.DataDir, sealKEK, cert); err != nil {
+	if err := transport.SealNodeKey(dataDir, sealKEK, cert); err != nil {
 		return fmt.Errorf("seal node key: %w", err)
 	}
 
@@ -488,7 +496,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, bundle cluster.In
 	// gate would classify as Resume yet which can no longer rerun Phase-1.
 	opts.ClusterKey = string(psk)
 	if len(psk) > 0 {
-		if err := transport.NewKeystore(opts.DataDir).WriteCurrent(string(psk)); err != nil {
+		if err := transport.NewKeystore(dataDir).WriteCurrent(string(psk)); err != nil {
 			return fmt.Errorf("mirror transport PSK to keystore: %w", err)
 		}
 	}

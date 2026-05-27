@@ -181,7 +181,7 @@ func TestMaybeInviteJoin_NodeIDResolution(t *testing.T) {
 
 	opts := &ServeOptions{DataDir: dir, RaftAddr: "10.0.0.1:7000"}
 	// No bundle env -> NormalBoot, opts untouched, nil state.
-	st, err := maybeInviteJoin(t.Context(), opts)
+	st, err := maybeInviteJoin(t.Context(), opts, dir)
 	if err != nil {
 		t.Fatalf("normal boot err: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestMaybeInviteJoin_RejectsEphemeralRaftAddr(t *testing.T) {
 	t.Setenv(inviteBundleEnv, mintTestBundleToken(t))
 
 	opts := &ServeOptions{DataDir: dir, RaftAddr: "127.0.0.1:0"}
-	_, err := maybeInviteJoin(t.Context(), opts)
+	_, err := maybeInviteJoin(t.Context(), opts, dir)
 	if err == nil {
 		t.Fatal("expected error for ephemeral :0 raft addr")
 	}
@@ -246,7 +246,7 @@ func TestMaybeInviteJoin_ResumePopulatesClusterKey(t *testing.T) {
 	psk := stageResumeArtifacts(t, dir)
 
 	opts := &ServeOptions{DataDir: dir, RaftAddr: "10.0.0.1:7000"}
-	st, err := maybeInviteJoin(t.Context(), opts)
+	st, err := maybeInviteJoin(t.Context(), opts, dir)
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestMaybeInviteJoin_ResumeWithoutBundleEnv(t *testing.T) {
 
 	// No RaftAddr: resume must NOT depend on it (the sentinel carries raftAddr).
 	opts := &ServeOptions{DataDir: dir}
-	st, err := maybeInviteJoin(t.Context(), opts)
+	st, err := maybeInviteJoin(t.Context(), opts, dir)
 	if err != nil {
 		t.Fatalf("resume without bundle env: %v", err)
 	}
@@ -283,6 +283,53 @@ func TestMaybeInviteJoin_ResumeWithoutBundleEnv(t *testing.T) {
 	if st.seedAddr != "seed:7000" || st.inviteID != "invite-123" ||
 		st.nodeID != "fixed-node-id" || st.raftAddr != "10.0.0.1:7000" {
 		t.Fatalf("resume state not reconstructed from sentinel: %+v", st)
+	}
+}
+
+// TestMaybeInviteJoin_MultiDataDirUsesPrimary is the P2 multi-disk regression:
+// when --data is a comma-separated multi-drive list, maybeInviteJoin must stage
+// + read under the PRIMARY dir (DataDirs[0]) — the same dir cfg.DataDir resolves
+// to and Phase-2 reads — NOT the raw "dirA,dirB" opts.DataDir string. We stage
+// resume artifacts under dirA, then drive the resume path with opts.DataDir set
+// to the literal comma string and the primary dataDir param = dirA, and assert
+// the state resolves from dirA with nothing created under the comma string.
+func TestMaybeInviteJoin_MultiDataDirUsesPrimary(t *testing.T) {
+	base := t.TempDir()
+	dirA := filepath.Join(base, "dirA")
+	dirB := filepath.Join(base, "dirB")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(dirA, "node-id"), []byte("fixed-node-id\n"))
+	psk := stageResumeArtifacts(t, dirA) // all Phase-1 artifacts land under dirA
+
+	// Raw --data flag carries both drives; DataDirs[0] is the primary. No bundle
+	// env: the complete-but-unacked sentinel under dirA resumes Phase-2.
+	rawData := dirA + "," + dirB
+	opts := &ServeOptions{DataDir: rawData, DataDirs: []string{dirA, dirB}}
+	primary := opts.DataDirs[0]
+
+	st, err := maybeInviteJoin(t.Context(), opts, primary)
+	if err != nil {
+		t.Fatalf("multi-disk resume: %v", err)
+	}
+	if st == nil {
+		t.Fatal("multi-disk resume should return non-nil state")
+	}
+	// State reconstructed from the sentinel under dirA.
+	if st.nodeID != "fixed-node-id" || st.raftAddr != "10.0.0.1:7000" {
+		t.Fatalf("resume state not read from primary dir sentinel: %+v", st)
+	}
+	// PSK read from dirA/keys.d/current.key (not the comma string).
+	if opts.ClusterKey != psk {
+		t.Fatalf("opts.ClusterKey = %q, want PSK from primary dir", opts.ClusterKey)
+	}
+	// The literal "dirA,dirB" directory must NOT exist (no staging leaked there).
+	if _, err := os.Stat(rawData); !os.IsNotExist(err) {
+		t.Fatalf("literal comma-string dir %q should not exist (got err=%v)", rawData, err)
 	}
 }
 

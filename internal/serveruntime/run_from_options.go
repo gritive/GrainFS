@@ -54,6 +54,16 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
 	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
+	// Compute the canonical primary data dir the same way optionsToConfig does
+	// (cfg.DataDir = cfg.DataDirs[0] when DataDirs is non-empty). opts.DataDir is
+	// the raw --data flag and may be a comma-separated multi-drive list; every
+	// on-disk read/write below MUST target this single primary dir so they agree
+	// with cfg.DataDir (the dir Phase-2 + the resume gate + the rest of boot use).
+	primaryDataDir := opts.DataDir
+	if len(opts.DataDirs) > 0 {
+		primaryDataDir = opts.DataDirs[0]
+	}
+
 	// 3b. Zero-CA invite-join (W9b): when an invite bundle is present and the
 	// resume gate says FreshJoin/Resume, run Phase-1 over the dedicated QUIC join
 	// transport to pull + stage the cluster bootstrap secrets (encryption.key,
@@ -61,28 +71,22 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	// (LoadOrCreateEncryptionKeyWithRaw below). It writes back opts.NodeID and
 	// opts.ClusterKey so the normal boot resolves the identical node id and the
 	// --cluster-key gate passes in-memory. The Phase-2 membership ACK runs
-	// post-boot in bootWALAndForwarders.
-	inviteJoin, err := maybeInviteJoin(ctx, &opts)
+	// post-boot in bootWALAndForwarders. Staging targets primaryDataDir so the
+	// Phase-1 staging dir == Phase-2 read dir == cfg.DataDir on multi-disk.
+	inviteJoin, err := maybeInviteJoin(ctx, &opts, primaryDataDir)
 	if err != nil {
 		return fmt.Errorf("zero-CA invite-join: %w", err)
 	}
 
 	// 4. Encryption key + IAMApplier.
-	// Compute the canonical primary data dir the same way optionsToConfig does
-	// (cfg.DataDir = cfg.DataDirs[0] when DataDirs is non-empty). The guard
-	// marker and metaDir default must be written under this primary dir so they
-	// agree with the rest of the boot sequence.
-	primaryDataDir := opts.DataDir
-	if len(opts.DataDirs) > 0 {
-		primaryDataDir = opts.DataDirs[0]
-	}
 	// WithRaw variant returns the raw key bytes for the zero-CA invite-join
 	// bootstrap-secret provider (sealed to a joiner); identical key-loading
-	// semantics otherwise.
+	// semantics otherwise. Reads from primaryDataDir so it picks up the
+	// encryption.key Phase-1 staged there.
 	shardEncryptor, rawEncryptionKey, err := LoadOrCreateEncryptionKeyWithRaw(
 		opts.EncryptionKeyFile,
-		opts.DataDir,
-		AllowAutoGenerateEncryptionKey(opts.DataDir, opts.RaftAddr),
+		primaryDataDir,
+		AllowAutoGenerateEncryptionKey(primaryDataDir, opts.RaftAddr),
 	)
 	if err != nil {
 		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
@@ -118,19 +122,13 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 		defer func() { _ = otelShutdown(context.Background()) }()
 	}
 
-	// 7. Preflight.
+	// 7. Preflight. Uses primaryDataDir: preflight wants a single concrete path,
+	// not the raw comma-separated --data list (MkdirAll inside checkDataDir would
+	// otherwise interpret the comma string literally and create a nonsensical
+	// nested tree like "/path/d1,/path/d2,/...").
 	addr := fmt.Sprintf(":%d", opts.Port)
-	// opts.DataDir is the raw --data flag (may be a comma-separated multi-drive
-	// list); preflight wants a single concrete path, so use the first drive
-	// when DataDirs is populated. Skipping this lets MkdirAll inside
-	// checkDataDir interpret the comma string literally and create a
-	// nonsensical nested tree like "/path/d1,/path/d2,/...".
-	preflightDataDir := opts.DataDir
-	if len(opts.DataDirs) > 0 {
-		preflightDataDir = opts.DataDirs[0]
-	}
 	if err := server.RunSystemPreflight(server.PreflightConfig{
-		DataDir:  preflightDataDir,
+		DataDir:  primaryDataDir,
 		HTTPAddr: addr,
 	}); err != nil {
 		return err
