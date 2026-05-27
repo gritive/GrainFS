@@ -56,6 +56,66 @@ func TestApplyDEKReplicatedRotate_FollowerInstallsLeaderBytes(t *testing.T) {
 	}
 }
 
+// TestApplyDEKReplicatedRotate_ReplayUnderHistoricalKEK reproduces the
+// leader-rejoin / node-restart self-shutdown bug: after a committed KEK rotate
+// (v0 -> v1), a restarting node boots its DEKKeeper with the ACTIVE KEK (v1),
+// then the raft log replays the gen-0 DEK bootstrap entry whose bytes were
+// sealed under KEK v0 (ActiveKEKVer=0). Unwrapping that entry under v1 fails
+// AES-GCM auth -> fatal KEK apply -> the node halts and never finishes boot.
+//
+// The Apply must unwrap each DEKReplicatedRotate under the KEK version named in
+// the command (cmd.ActiveKEKVer), resolved from the keystore — not under the
+// keeper's current active KEK.
+func TestApplyDEKReplicatedRotate_ReplayUnderHistoricalKEK(t *testing.T) {
+	cid := dekTestClusterID()
+	kek0 := newTestDEKKEK(t)
+	kek1 := newTestDEKKEK(t)
+
+	// Leader sealed the gen-0 bootstrap DEK under KEK v0 (kekVer=0).
+	leaderKeeper, err := encrypt.NewDEKKeeper(kek0, cid)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	lv, _ := leaderKeeper.VersionsAndActive()
+
+	// Restarting node: keeper booted with the ACTIVE KEK = v1, plus a keystore
+	// holding BOTH v0 and v1 (active=1). This mirrors wireDEKKeeper after a
+	// committed v0->v1 KEK rotation.
+	restartKeeper, err := encrypt.NewEmptyDEKKeeper(kek1, cid)
+	if err != nil {
+		t.Fatalf("NewEmptyDEKKeeper: %v", err)
+	}
+	// wireDEKKeeper labels the keeper with the keystore's active KEK version.
+	restartKeeper.SetActiveKEKVersion(1)
+	fsm := newTestMetaFSMWithDEKKeeper(t, restartKeeper)
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, kek0); err != nil {
+		t.Fatalf("store add v0: %v", err)
+	}
+	if err := store.Add(1, kek1); err != nil {
+		t.Fatalf("store add v1: %v", err)
+	}
+	if err := store.SetActiveVersion(1); err != nil {
+		t.Fatalf("store set active 1: %v", err)
+	}
+	fsm.SetKEKStore(store)
+
+	// Replay the gen-0 bootstrap entry as committed at bootstrap: sealed under
+	// KEK v0, ActiveKEKVer=0.
+	cmd := DEKReplicatedRotateCmd{Gen: 0, WrappedDEK: lv[0], ExpectedActiveGen: math.MaxUint32, ActiveKEKVer: 0}
+	enc, err := EncodeDEKReplicatedRotateCmd(cmd)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := fsm.applyDEKReplicatedRotate(1, enc); err != nil {
+		t.Fatalf("replay gen-0 bootstrap under historical KEK v0 must succeed, got: %v", err)
+	}
+	fv, active := restartKeeper.VersionsAndActive()
+	if active != 0 || string(fv[0]) != string(lv[0]) {
+		t.Fatalf("gen-0 not installed after replay (active=%d, has=%v)", active, fv[0] != nil)
+	}
+}
+
 func TestApplyDEKReplicatedRotate_StaleExpectedGenIsNoOp(t *testing.T) {
 	kek := newTestDEKKEK(t)
 	cid := dekTestClusterID()

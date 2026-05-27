@@ -153,6 +153,21 @@ func (k *DEKKeeper) dekWrapAAD(gen, kekVer uint32) []byte {
 // counter reset (freezeSeals) — the idempotent-replay branch does NOT, so a
 // snapshot-tail re-Apply preserves the running count.
 func (k *DEKKeeper) InstallReplicatedDEK(gen uint32, wrapped []byte, kekVer uint32) error {
+	return k.installReplicatedDEK(gen, wrapped, kekVer, nil)
+}
+
+// InstallReplicatedDEKWithKEK is InstallReplicatedDEK but unwraps the bytes
+// under the supplied unwrapKEK instead of the keeper's current active KEK. The
+// FSM uses this on log replay: a DEKReplicatedRotate entry committed before the
+// most recent KEK rotation carries bytes sealed under an OLDER KEK version
+// (cmd.ActiveKEKVer), which the keeper's active KEK can no longer authenticate.
+// unwrapKEK must be the keystore's KEK at kekVer. A nil/empty unwrapKEK falls
+// back to the active KEK (callers that know kekVer == active pass nil).
+func (k *DEKKeeper) InstallReplicatedDEKWithKEK(gen uint32, wrapped []byte, kekVer uint32, unwrapKEK []byte) error {
+	return k.installReplicatedDEK(gen, wrapped, kekVer, unwrapKEK)
+}
+
+func (k *DEKKeeper) installReplicatedDEK(gen uint32, wrapped []byte, kekVer uint32, unwrapKEK []byte) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if existing, ok := k.wrap[gen]; ok {
@@ -162,8 +177,12 @@ func (k *DEKKeeper) InstallReplicatedDEK(gen uint32, wrapped []byte, kekVer uint
 		k.active = gen
 		return nil
 	}
+	kek := k.kek
+	if len(unwrapKEK) != 0 {
+		kek = unwrapKEK
+	}
 	aad := k.dekWrapAAD(gen, kekVer)
-	plain, err := AESGCMOpenWithAAD(k.kek, wrapped, aad)
+	plain, err := AESGCMOpenWithAAD(kek, wrapped, aad)
 	if err != nil {
 		return fmt.Errorf("encrypt: InstallReplicatedDEK gen %d: unwrap: %w", gen, err)
 	}

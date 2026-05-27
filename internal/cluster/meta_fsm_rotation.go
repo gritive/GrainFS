@@ -270,7 +270,28 @@ func (f *MetaFSM) applyDEKReplicatedRotate(applyIndex uint64, data []byte) error
 		}
 	}
 
-	if err := f.dekKeeper.InstallReplicatedDEK(cmd.Gen, cmd.WrappedDEK, cmd.ActiveKEKVer); err != nil {
+	// The keeper unwraps under its ACTIVE KEK by default. On log replay a
+	// bootstrap (gen-0) entry can carry bytes sealed under an OLDER KEK version
+	// than the keeper booted with: after a committed KEK rotate (v0→v1) a
+	// restarting node loads the keeper with active KEK v1, then replays this
+	// gen-0 entry whose bytes are sealed under v0 (cmd.ActiveKEKVer). Resolve
+	// the historical KEK from the keystore so the unwrap authenticates under the
+	// version the bytes were sealed with. (Rotation entries can't hit this: the
+	// precondition above already no-ops when cmd.ActiveKEKVer != curKEKVer.)
+	var unwrapKEK []byte
+	if cmd.ActiveKEKVer != f.dekKeeper.ActiveKEKVersion() && f.keystore != nil {
+		k, err := f.keystore.Get(cmd.ActiveKEKVer)
+		if err != nil {
+			return fatalKEKApply(fmt.Errorf("DEKReplicatedRotate gen %d: resolve KEK v%d: %w", cmd.Gen, cmd.ActiveKEKVer, err))
+		}
+		unwrapKEK = k
+		defer func() {
+			for i := range unwrapKEK {
+				unwrapKEK[i] = 0
+			}
+		}()
+	}
+	if err := f.dekKeeper.InstallReplicatedDEKWithKEK(cmd.Gen, cmd.WrappedDEK, cmd.ActiveKEKVer, unwrapKEK); err != nil {
 		// genuine unwrap failure / same-gen different bytes → KEK or prior state
 		// diverged. Halt rather than silently skew.
 		return fatalKEKApply(fmt.Errorf("DEKReplicatedRotate gen %d: %w", cmd.Gen, err))
