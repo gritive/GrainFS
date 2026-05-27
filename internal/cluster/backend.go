@@ -221,7 +221,6 @@ type internalObjectCacheKey struct {
 
 type internalObjectPath struct {
 	path    string
-	dir     string
 	metaKey []byte
 }
 
@@ -4469,7 +4468,7 @@ func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObje
 		return cached.(internalObjectPath)
 	}
 	path := b.objectPathV(bucket, key, "current")
-	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: b.ks().ObjectMetaKey(bucket, key)}
+	candidate := internalObjectPath{path: path, metaKey: b.ks().ObjectMetaKey(bucket, key)}
 	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
 	return actual.(internalObjectPath)
 }
