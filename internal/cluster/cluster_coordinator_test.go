@@ -1411,13 +1411,13 @@ func TestClusterCoordinator_HeadObject_MissingIndexedObjectReturnsNotFound(t *te
 }
 
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
+	// The plain-file WriteAt/Truncate fast-path has been removed. All internal-bucket
+	// writes now go through the encrypted RMW path. PreferWriteAt always returns false;
+	// Truncate and WriteAt both use GetObject+resize+PutObject via the coordinator.
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
-	// This test exercises the plain-file internal-volume WriteAt/Truncate path.
-	// That path requires a non-encrypted (nil) ShardService. Override the
-	// encrypted svc that newTestGroupBackend installs so encryptedShardStorage()
-	// returns false and PreferWriteAt/Truncate/WriteAt are enabled.
-	gb.SetShardService(nil, nil)
+	// Keep the default encrypted ShardService from newTestGroupBackend.
+	require.NoError(t, gb.CreateBucket(context.Background(), "__grainfs_vfs_default"))
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
@@ -1426,13 +1426,15 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
 	}}
-	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 
 	w, err := wal.Open(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, w.Close()) })
 	wrapped := wal.NewBackend(c, w)
-	require.True(t, wrapped.PreferWriteAt("__grainfs_vfs_default"))
+	// PreferWriteAt is always false now; full writes use PutObject via RMW path.
+	require.False(t, wrapped.PreferWriteAt("__grainfs_vfs_default"))
 	require.False(t, wrapped.PreferWriteAt("photos"))
 
 	require.NoError(t, wrapped.Truncate(context.Background(), "__grainfs_vfs_default", "fio/sparse.bin", 12))
@@ -1445,39 +1447,41 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	obj, err := wrapped.WriteAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 4, []byte("data"))
 	require.NoError(t, err)
 	require.Equal(t, int64(8), obj.Size)
-	require.Empty(t, obj.ETag)
 
 	require.NoError(t, wrapped.Truncate(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 6))
 
 	buf := make([]byte, 8)
 	n, err = wrapped.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 0, buf)
-	require.ErrorIs(t, err, io.EOF)
+	// The encrypted RMW path clips the buffer to obj.Size before reading, so
+	// it returns (6, nil) rather than the (6, io.EOF) the old plain-file path returned.
+	require.NoError(t, err)
 	require.Equal(t, 6, n)
 	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
 }
 
-func TestClusterCoordinator_PreferWriteAtFalseForMultiVoterInternalBucket(t *testing.T) {
+func TestClusterCoordinator_PreferWriteAtAlwaysFalse(t *testing.T) {
+	// PreferWriteAt always returns false now that the plain-file fast-path is removed.
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
 
 	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node", "node-2", "node-3"}, gb))
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 	router := NewRouter(mgr)
 	router.AssignBucket("__grainfs_vfs_default", "group-1")
 	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-		"group-1": {ID: "group-1", PeerIDs: []string{"test-node", "node-2", "node-3"}},
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
 	}}
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
 
-	require.False(t, c.PreferWriteAt("__grainfs_vfs_default"),
-		"multi-voter internal buckets must use PutObject replication, not local-only pwrite")
+	require.False(t, c.PreferWriteAt("__grainfs_vfs_default"))
+	require.False(t, c.PreferWriteAt("photos"))
 }
 
 func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
-	// Plain-file internal-volume path; see TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup.
-	gb.SetShardService(nil, nil)
+	// Keep the default encrypted ShardService from newTestGroupBackend.
+	require.NoError(t, gb.CreateBucket(context.Background(), "__grainfs_vfs_default"))
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
@@ -1486,9 +1490,11 @@ func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *tes
 	meta := NewMetaFSM()
 	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
-		WithObjectIndexProposer(noopObjectIndexProposer{})
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 
+	// Truncate creates a 5-byte zero-filled object via RMW path.
 	require.NoError(t, c.Truncate(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 5))
+	// WriteAt patches bytes 1-3 with "abc" via RMW path.
 	_, err := c.WriteAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 1, []byte("abc"))
 	require.NoError(t, err)
 
