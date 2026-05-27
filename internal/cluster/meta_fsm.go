@@ -107,6 +107,13 @@ const (
 	MetaCmdTypeKEKRotate = clusterpb.MetaCmdTypeKEKRotate
 	MetaCmdTypeKEKRetire = clusterpb.MetaCmdTypeKEKRetire
 	MetaCmdTypeKEKPrune  = clusterpb.MetaCmdTypeKEKPrune
+	// zero-CA invite registry (slots 73-74; 69-72 are kek-envelope-phase-b)
+	MetaCmdTypeInviteMint    = clusterpb.MetaCmdTypeInviteMint
+	MetaCmdTypeInviteConsume = clusterpb.MetaCmdTypeInviteConsume
+
+	MetaCmdTypeRegisterPendingLearner = clusterpb.MetaCmdTypeRegisterPendingLearner
+	MetaCmdTypePromoteMember          = clusterpb.MetaCmdTypePromoteMember
+	MetaCmdTypeRevokePeer             = clusterpb.MetaCmdTypeRevokePeer
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -260,6 +267,14 @@ type MetaFSM struct {
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
 	onRotationApplied func(RotationState) // 매 phase 변경 commit 후 호출; nil 이면 no-op
+
+	// zero-CA invite registry — deterministic single-use + TTL token store.
+	invites *inviteFSM
+
+	// zero-CA peer registry — deterministic membership/SPKI registry. Side-effect
+	// (transport accept-set rebuild) is decoupled via onPeersChanged callback (D16).
+	peers          *peerRegistry
+	onPeersChanged func([][32]byte) // fired after each peer-registry apply; nil = no-op
 
 	// IAM sub-FSM — wired after construction via SetIAM (Phase 1). iamStore is
 	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
@@ -614,6 +629,8 @@ func NewMetaFSM() *MetaFSM {
 		icebergNamespaces: make(map[string]map[string]IcebergNamespaceEntry),
 		icebergTables:     make(map[string]map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
+		invites:           newInviteFSM(),
+		peers:             newPeerRegistry(),
 		iamStore:          iam.NewStore(),
 		activeFeatures:    compat.NewActiveFeatures(),
 		clusterCfg:        NewClusterConfig(),
@@ -710,6 +727,16 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyRotateKeyDrop(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRotateKeyAbort:
 		return f.applyRotateKeyAbort(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeInviteMint:
+		return f.applyInviteMint(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeInviteConsume:
+		return f.applyInviteConsume(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRegisterPendingLearner:
+		return f.applyRegisterPendingLearner(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePromoteMember:
+		return f.applyPromoteMember(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRevokePeer:
+		return f.applyRevokePeer(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeScrubTrigger:
 		return f.applyScrubTrigger(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeIAMSACreate:

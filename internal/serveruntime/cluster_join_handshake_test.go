@@ -16,10 +16,13 @@ package serveruntime
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -307,3 +310,14 @@ func (f *fakeJoinCoord) IsLeader() bool                            { return f.le
 func (f *fakeJoinCoord) LeaderID() string                          { return "leader" }
 func (f *fakeJoinCoord) Join(_ context.Context, _, _ string) error { return nil }
 func (f *fakeJoinCoord) Nodes() []cluster.MetaNodeEntry            { return nil }
+
+// Invite-path stubs: this fake exercises only the KEK handshake path.
+func (f *fakeJoinCoord) IsSPKIDenylisted(_ [32]byte) bool    { return false }
+func (f *fakeJoinCoord) SPKIOwner(_ [32]byte) (string, bool) { return "", false }
+func (f *fakeJoinCoord) AcceptSPKIBytes() [][]byte           { return nil }
+func (f *fakeJoinCoord) LookupInvite(_ string, _ time.Time) (ed25519.PublicKey, bool) {
+	return nil, false
+}
+func (f *fakeJoinCoord) JoinViaInvite(_ context.Context, _, _ string, _ [32]byte, _ string) error {
+	return errors.New("invite path not implemented in this fake")
+}

@@ -1,6 +1,22 @@
 # Changelog
 
-## [0.0.358.0] - 2026-05-27
+## [0.0.359.0] - 2026-05-27
+
+### Added
+
+- Server-side foundation for zero-CA dynamic cluster join via single-use invite
+  tokens. An operator can mint an asymmetric invite (an Ed25519 keypair whose public
+  key is committed to Raft with a TTL, while the private key travels in an opaque
+  operator bundle alongside the cluster id and the seed node's SPKI). The cluster now
+  carries the pieces a brand-new node needs to prove possession of an invite and its
+  own per-node identity: a single-use, TTL-bounded invite registry replicated through
+  Raft; a peer registry that enforces a bijective node-id↔SPKI mapping (rejecting both
+  duplicate SPKIs and attempts to rebind an existing node-id to a different key) plus a
+  denylist; canonical transcript signing/verification (Ed25519 for the invite, ECDSA
+  for the node identity); and a leader-side join path that verifies an invited node and
+  stages it as a non-voting learner before promotion. This is groundwork: the
+  over-the-wire join listener, the joiner-side bundle handling, and the `cluster invite`
+  CLI ship in a follow-up, so there is no end-user-visible join flow yet.
 
 ### Added
 

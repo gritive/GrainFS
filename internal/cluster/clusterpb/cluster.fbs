@@ -513,6 +513,11 @@ enum MetaCmdType : uint8 {
   KEKRetire                    = 70, // KEK: mark prior KEK version retired (Phase B)
   KEKPrune                     = 71, // KEK: prune retired KEK version after voter attestation (Phase B)
   DEKReplicatedRotate          = 72, // DEK: leader-generated KEK-wrapped DEK bytes replicated to all nodes (Phase D)
+  InviteMint                   = 73, // zero-CA: mint a single-use invite token (stores pub key + TTL)
+  InviteConsume                = 74, // zero-CA: consume (invalidate) a minted invite after join
+  RegisterPendingLearner       = 75, // zero-CA: register a pending-learner peer (node-id, SPKI, addr)
+  PromoteMember                = 76, // zero-CA: promote a pending-learner to voting member
+  RevokePeer                   = 77, // zero-CA: remove a peer + denylist its SPKI
 }
 
 table MetaNodeEntry {
@@ -771,6 +776,30 @@ table MetaRotateKeyAbortCmd {
   reason:string;                // "operator" 등
 }
 
+// zero-CA: invite registry commands (slots 73-74).
+table MetaInviteMintCmd {
+  id:string;
+  pub:[ubyte];          // ed25519 public key (32 bytes)
+  expiry_nanos:long;
+}
+table MetaInviteConsumeCmd {
+  id:string;
+  consumed_at_nanos:long;
+}
+
+// zero-CA: peer registry commands (slots 75-77).
+table MetaRegisterPendingLearnerCmd {
+  node_id:string;
+  spki:[ubyte];     // 32 bytes
+  address:string;
+}
+table MetaPromoteMemberCmd {
+  node_id:string;
+}
+table MetaRevokePeerCmd {
+  node_id:string;
+}
+
 // NFSv4 multi-export registry. Per design doc D2/D3/D5.
 // fsid_major = cluster namespace; fsid_minor = monotonic export id;
 // generation increments on every Upsert so Phase 3 FHs from a prior
@@ -928,11 +957,23 @@ enum JoinStatus : byte {
   KEKMismatch   = 9,
 }
 
+// SPKIBytes wraps a single SPKI ([ubyte]) so JoinReply can carry a vector of
+// them (FlatBuffers forbids a direct vector-of-vectors). Zero-CA Phase 2 §4.2.
+table SPKIBytes {
+  value : [ubyte];
+}
+
 table JoinRequest {
   node_id            : string;
   address            : string;
   handshake_nonce    : [ubyte];
   handshake_response : [ubyte];
+  // Invite path (brand-new node, asymmetric — Path A: cert in request).
+  spki       : [ubyte];   // sha256(SubjectPublicKeyInfo) of the joiner
+  cert_der   : [ubyte];   // joiner per-node leaf cert DER (Path A)
+  node_sig   : [ubyte];   // ECDSA over the invite transcript
+  invite_sig : [ubyte];   // Ed25519 over the SAME transcript
+  invite_id  : string;
 }
 
 table JoinReply {
@@ -941,6 +982,7 @@ table JoinReply {
   message     : string;
   leader_id   : string;
   leader_addr : string;
+  peer_spkis  : [SPKIBytes]; // accept-set delivered at commit1 (no KEK)
 }
 
 // ChallengeRequest is sent by a joining node to a peer to obtain a fresh
