@@ -209,6 +209,34 @@ Work these in order. Do not run them in parallel.
 
 ## Deferred Until Triggered
 
+- [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
+  Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
+  generation in segment metadata was cut because the only cheap source
+  (`keeper.Active()` at segment-write time) is not guaranteed to equal the actual
+  per-shard seal gen (gen-pinning is per-shard-stream; rotation-mid-write / remote-node
+  differences), so a recorded value could be silently wrong — a footgun for a prune
+  consumer that trusts it to drop DEK generations (wrong-low → prune a still-referenced
+  DEK → unreadable data). Authoritative per-shard gen already lives in the GFSENC3 header.
+  When reopened: thread the REAL seal gen out of the shard write path through
+  `storage.SegmentRef` + `storagepb.SegmentRef` + `clusterpb.SegmentRef` +
+  `clusterpb.SegmentMetaEntry` + PutObjectMeta/CompleteMultipart codecs +
+  `segmentMetaEntriesToRefs`, AND build the prune consumer that reads it (cross-checking
+  the GFSENC3 header gen). Bundle both so the recorded value is correct before anything trusts it.
+- [ ] **KEK-envelope: write-path `ErrDEKGenUnknown` → retriable 503**. On the EC-shard
+  PUT path, `cpupool.go` → `commit.go` collapses a per-shard `encrypt.ErrDEKGenUnknown`
+  (gen not yet local) into a generic "K shards unreachable" error → likely a 500 on S3
+  PUT. `WaitDEKReady` (run.go:227) gates serving so a normal write never hits an empty
+  keeper, making this unreachable on a serving node today. Reopen as a hardening pass:
+  detect `errors.Is(err, encrypt.ErrDEKGenUnknown)` in the commit coordinator and map it
+  to a retriable 503 (not 500). The READ side already classifies it as transient (slice C).
+- [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
+  D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
+  on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
+  specs were skipped because the e2e harness has no dynamic `AddNode` (4th node post-
+  bootstrap) and no snapshot-restore-boot helper (it has `KillNode`/`RestartNode` only).
+  Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
+  `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK
+  rotation lifecycle" Describe.
 - [ ] **S3 Range GET residual p95/p99**: reopen when product/SLO requires p95
   below 25 ms and p99 below 35 ms, or when FUSE/s3fs/goofys random reads
   reproduce EC read amplification.
