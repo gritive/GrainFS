@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/eccodec"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -132,27 +131,29 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("matches the shard service layout", func() {
-			svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
+			enc := testEncryptor(GinkgoT())
+			svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 3, []byte("payload"))).To(Succeed())
 
 			paths := b.ShardPaths("bkt", "key", "01VID", 4)
-			data, err := os.ReadFile(paths[3])
+			_, err := os.Stat(paths[3])
 			Expect(err).NotTo(HaveOccurred())
-			decoded, err := eccodec.DecodeShard(data)
+			decoded, err := svc.ReadLocalShard("bkt", "key/01VID", 3)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(decoded)).To(Equal("payload"))
 		})
 
 		It("uses the shared shard service root", func() {
 			shardRoot := GinkgoT().TempDir()
-			svc := NewShardService(shardRoot, nil, withTestWAL(GinkgoT()))
+			enc := testEncryptor(GinkgoT())
+			svc := NewShardService(shardRoot, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
 			paths := b.ShardPaths("bkt", "key", "01VID", 1)
-			data, err := os.ReadFile(paths[0])
+			_, err := os.Stat(paths[0])
 			Expect(err).NotTo(HaveOccurred())
-			decoded, err := eccodec.DecodeShard(data)
+			decoded, err := svc.ReadLocalShard("bkt", "key/01VID", 0)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(decoded)).To(Equal("payload"))
 		})

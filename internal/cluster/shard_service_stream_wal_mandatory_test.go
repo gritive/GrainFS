@@ -27,7 +27,8 @@ func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
 func TestWriteLocalShardStream_WithWALReadable(t *testing.T) {
 	tr := transport.MustNewQUICTransport("test-cluster-psk")
 	t.Cleanup(func() { _ = tr.Close() })
-	svc := NewShardService(t.TempDir(), tr, withTestWAL(t))
+	enc := testEncryptor(t)
+	svc := NewShardService(t.TempDir(), tr, WithEncryptor(enc), withTestWALEnc(t, enc))
 
 	plaintext := []byte("streamed shard payload")
 	require.NoError(t, svc.WriteLocalShardStreamContext(context.Background(), "b", "k", 0, bytes.NewReader(plaintext)))

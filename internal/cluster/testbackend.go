@@ -1,12 +1,14 @@
 package cluster
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
@@ -74,12 +76,16 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	}
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	dwal, err := datawal.Open(backend.root+"/datawal", nil)
+	enc, encErr := encrypt.NewEncryptor(bytes.Repeat([]byte("k"), 32))
+	if encErr != nil {
+		t.Fatalf("test encryptor: %v", encErr)
+	}
+	dwal, err := datawal.Open(backend.root+"/datawal", enc)
 	if err != nil {
 		t.Fatalf("open data wal: %v", err)
 	}
 	t.Cleanup(func() { _ = dwal.Close() })
-	svc := NewShardService(backend.root, nil, WithDataWAL(dwal))
+	svc := NewShardService(backend.root, nil, WithEncryptor(enc), WithDataWAL(dwal))
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})

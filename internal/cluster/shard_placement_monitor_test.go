@@ -22,7 +22,8 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 	dir, err := os.MkdirTemp("", "shard-svc-test-*")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	svc := NewShardService(dir, nil, withTestWAL(t))
+	enc := testEncryptor(t)
+	svc := NewShardService(dir, nil, WithEncryptor(enc), withTestWALEnc(t, enc))
 	return svc, dir
 }
 
@@ -240,10 +241,11 @@ func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {
 }
 
 // seedCorruptShardKind seeds an object of the given ECShardKind with self as
-// shard-0 owner, writes the local shard, then flips its trailing CRC byte so
+// shard-0 owner, writes the local shard, then flips its trailing byte so
 // ReadLocalShard returns an eccodec.IsCorruption error. Returns the expected
-// scan target. Plaintext ShardService (nil encryptor) → plain CRC footer, so a
-// trailing-byte flip breaks the CRC deterministically.
+// scan target. The ShardService is encrypted (GFSENC2), so the trailing byte is
+// part of the final AEAD tag — flipping it makes authentication fail, which
+// eccodec classifies as corruption.
 func seedCorruptShardKind(t *testing.T, backend *DistributedBackend, fsm *FSM, svc *ShardService, dir, self string, kind ECShardKind) ECShardScanTarget {
 	t.Helper()
 	nodes := []string{self, "node-B", "node-C"}
