@@ -157,16 +157,25 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("unsealed key present means incomplete -> fresh", func(t *testing.T) {
+	t.Run("all artifacts + leftover unsealed key + not acked -> resume (P1)", func(t *testing.T) {
+		// Crash window: Phase-1 wrote node.key.enc + current.key (durable) but the
+		// shred of node.key.unsealed never completed. ALL durable completion
+		// artifacts exist, so artifactsComplete must hold DESPITE the leftover
+		// unsealed key — otherwise the node re-runs Phase-1 or (without the one-shot
+		// bundle env) boots as a non-member and splits from the cluster. The leftover
+		// key is shredded idempotently on the resume path. Previously this state was
+		// mis-classified FreshJoin because the gate required node.key.unsealed absent.
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
 		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
 		mustWrite(t, p.nodeKeyUnsealed, []byte("plain")) // shred didn't complete
-		if got := gateInviteJoin(dir, true); got != inviteFreshJoin {
-			t.Fatalf("got %d want FreshJoin (unsealed key still present = incomplete)", got)
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		if got := gateInviteJoin(dir, true); got != inviteResume {
+			t.Fatalf("got %d want Resume (all durable artifacts present; leftover unsealed key is irrelevant)", got)
 		}
 	})
 }

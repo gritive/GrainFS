@@ -119,8 +119,11 @@ const (
 //     PRESERVED for the table-test signature only — the decision is now driven
 //     by artifactsComplete, NOT mere key presence (see below).
 //   - artifactsComplete:     encryption.key + cluster.id + a staged KEK gen +
-//     keys.d/node.key.enc all present AND node.key.unsealed absent (Phase-1
-//     staging + seal fully landed).
+//     keys.d/node.key.enc + keys.d/current.key all present (the DURABLE Phase-1
+//     completion artifacts). Defined by their PRESENCE, NOT by the absence of
+//     node.key.unsealed: a crash after current.key but before the shred leaves a
+//     leftover unsealed key while all durable artifacts exist — that state is
+//     complete (resume), and the leftover is shredded idempotently on resume.
 //   - acked:                 the .invite-join-pending sentinel is ABSENT (Phase-2
 //     membership ACK completed).
 //
@@ -206,12 +209,21 @@ func keysDirHasKEK(keysDir string) bool {
 func gateInviteJoin(dataDir string, bundlePresent bool) inviteJoinDecision {
 	p := inviteJoinPathsFor(dataDir)
 	persistedKey := fileExists(p.nodeKeyUnsealed) || fileExists(p.nodeKeyEnc)
+	// artifactsComplete is defined by the DURABLE completion artifacts ONLY, NOT
+	// by the absence of node.key.unsealed. Phase-1 writes node.key.enc (step 8)
+	// BEFORE current.key (step 9), then shreds node.key.unsealed. So:
+	//   - current.key present ⇒ node.key.enc durable (the seal landed first);
+	//   - a crash AFTER current.key but BEFORE the shred leaves node.key.unsealed
+	//     lingering while ALL durable artifacts exist. Gating on
+	//     !fileExists(nodeKeyUnsealed) would mis-route THAT state to FreshJoin and
+	//     (worse, without the one-shot bundle env) to a non-member boot that never
+	//     sends Phase-2 — splitting the node from the cluster. The leftover
+	//     unsealed key is shredded idempotently on the resume path instead.
 	artifactsComplete := fileExists(p.encryptionKey) &&
 		fileExists(p.clusterID) &&
 		keysDirHasKEK(p.keysDir) &&
 		fileExists(p.nodeKeyEnc) &&
-		fileExists(p.currentKey) && // PSK durable: resume-only state can't rerun Phase-1
-		!fileExists(p.nodeKeyUnsealed)
+		fileExists(p.currentKey) // PSK durable ⇒ seal durable; resume can't rerun Phase-1
 	acked := !fileExists(p.pendingSentinel)
 	return classifyInviteJoinResume(bundlePresent, persistedKey, artifactsComplete, acked)
 }
@@ -320,6 +332,11 @@ func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJo
 	if opts.NodeID == "" {
 		opts.NodeID = rec.nodeID
 	}
+	// Idempotent cleanup: a Phase-1 crash AFTER current.key but BEFORE the shred
+	// leaves node.key.unsealed lingering. artifactsComplete no longer requires its
+	// absence, so resume must shred it here so the plaintext key does not linger.
+	// shredFile tolerates an absent file (the common case).
+	shredFile(inviteJoinPathsFor(dataDir).nodeKeyUnsealed)
 	st := &inviteJoinState{
 		seedAddr:      rec.seedAddr,
 		seedSPKI:      rec.seedSPKI,

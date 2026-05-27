@@ -60,9 +60,11 @@ var errInvitePendingMismatch = errors.New("invite already pending for a differen
 
 // applyPending records a Phase-1 pending-redemption binding. The invite must be
 // present, not expired (vs nowNanos), and not yet consumed. On first redemption
-// it binds the invite to (nodeID, spki, addr). A repeat by the SAME (nodeID,
-// spki) is idempotent (no-op success, supports re-retrieval); a repeat by a
-// DIFFERENT identity returns errInvitePendingMismatch. nowNanos is supplied by
+// it binds the invite to (nodeID, spki, addr). A repeat with the SAME (nodeID,
+// spki, addr) is idempotent (no-op success, supports re-retrieval); a repeat
+// where ANY of nodeID, spki, or addr differs returns errInvitePendingMismatch
+// (the addr is part of the match because Phase-2 finalizes membership at the
+// persisted pendingAddr). nowNanos is supplied by
 // the caller (stamped at propose time) — no time.Now() here.
 func (f *inviteFSM) applyPending(id string, nodeID string, spki [32]byte, addr string, nowNanos int64) error {
 	f.mu.Lock()
@@ -72,8 +74,14 @@ func (f *inviteFSM) applyPending(id string, nodeID string, spki [32]byte, addr s
 		return errInviteInvalid
 	}
 	if r.pendingAtNanos != 0 {
-		// Already pending — only the same redeemer may re-pend.
-		if r.pendingNodeID != nodeID || r.pendingSPKI != spki {
+		// Already pending — the idempotent no-op requires (nodeID AND spki AND addr)
+		// all equal. Phase-2 finalizes membership at the persisted pendingAddr, so a
+		// re-redeem with the SAME (nodeID, spki) but a DIFFERENT addr must be rejected
+		// (not silently accepted while keeping the stale addr) — otherwise the joiner
+		// is admitted at an address the cluster can never dial. A legitimate joiner
+		// uses a stable raft addr; an address change between phases needs a fresh
+		// invite.
+		if r.pendingNodeID != nodeID || r.pendingSPKI != spki || r.pendingAddr != addr {
 			return errInvitePendingMismatch
 		}
 		return nil

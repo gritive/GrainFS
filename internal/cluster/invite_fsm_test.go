@@ -138,6 +138,25 @@ func TestInviteFSM_PendingBindFirstRedeemer(t *testing.T) {
 			t.Fatalf("different spki must be rejected with errInvitePendingMismatch, got %v", err)
 		}
 	})
+
+	t.Run("different addr rejected (P2)", func(t *testing.T) {
+		// Same (nodeID, spki) but a re-redeem with a CHANGED addr. Phase-2 finalizes
+		// membership at the persisted pendingAddr, so silently keeping the stale addr
+		// would admit the joiner at an address the cluster can never dial. Reject it;
+		// an address change between phases requires a fresh invite.
+		fsm := mint()
+		if err := fsm.applyPending("inv-p", "node-1", s1, "10.0.0.1:7001", now.UnixNano()); err != nil {
+			t.Fatalf("first applyPending: %v", err)
+		}
+		if err := fsm.applyPending("inv-p", "node-1", s1, "10.0.0.9:7001", now.UnixNano()); !errors.Is(err, errInvitePendingMismatch) {
+			t.Fatalf("different addr must be rejected with errInvitePendingMismatch, got %v", err)
+		}
+		// Stays bound to the first addr.
+		_, _, gotAddr, ok := fsm.lookupPending("inv-p")
+		if !ok || gotAddr != "10.0.0.1:7001" {
+			t.Fatalf("invite must stay bound to first addr after mismatch, got %q", gotAddr)
+		}
+	})
 }
 
 // TestInviteFSM_PendingInvalidStates asserts applyPending rejects an absent,
