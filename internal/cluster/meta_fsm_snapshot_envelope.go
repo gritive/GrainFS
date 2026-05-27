@@ -27,7 +27,8 @@ func (f *MetaFSM) sealSnapshotEnvelope(body []byte) ([]byte, error) {
 	}
 	var sid [16]byte
 	copy(sid[:], id[:])
-	return encrypt.SealSnapshotEnvelope(kek, f.clusterID[:], sid, kekVer, body)
+	cid := f.ClusterID()
+	return encrypt.SealSnapshotEnvelope(kek, cid[:], sid, kekVer, body)
 }
 
 // openSnapshotEnvelope reverses sealSnapshotEnvelope, resolving the KEK version
@@ -46,7 +47,8 @@ func (f *MetaFSM) openSnapshotEnvelope(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("meta_fsm: Restore: resolve KEK v%d: %w", hdr.ActiveKEKVersion(), err)
 	}
-	_, body, err := encrypt.OpenSnapshotEnvelope(kek, f.clusterID[:], data)
+	cid := f.ClusterID()
+	_, body, err := encrypt.OpenSnapshotEnvelope(kek, cid[:], data)
 	if err != nil {
 		return nil, fmt.Errorf("meta_fsm: Restore: open snapshot envelope: %w", err)
 	}
