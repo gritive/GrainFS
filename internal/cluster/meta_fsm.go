@@ -343,6 +343,10 @@ type MetaFSM struct {
 	// Phase 1A snapshots/restores it; Phase 1B wires command apply semantics.
 	protocolCredentialStore *protocred.Store
 
+	// protocolCredentialRequests records applied credential mutation request IDs.
+	// It is snapshotted with credential rows so retry safety survives restore.
+	protocolCredentialRequests map[string]ProtocolCredentialRequestRecord
+
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
 	cfgStore *config.Store
@@ -631,23 +635,24 @@ func (f *MetaFSM) appendAudit(line string) {
 
 func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
-		nodes:             make(map[string]MetaNodeEntry),
-		shardGroups:       make(map[string]ShardGroupEntry),
-		bucketAssignments: make(map[string]string),
-		objectIndex:       make(map[string]ObjectIndexEntry),
-		objectLatest:      make(map[string]string),
-		loadSnapshot:      make(map[string]LoadStatEntry),
-		icebergNamespaces: make(map[string]map[string]IcebergNamespaceEntry),
-		icebergTables:     make(map[string]map[string]IcebergTableEntry),
-		rotation:          NewRotationFSM(),
-		invites:           newInviteFSM(),
-		peers:             newPeerRegistry(),
-		iamStore:          iam.NewStore(),
-		activeFeatures:    compat.NewActiveFeatures(),
-		clusterCfg:        NewClusterConfig(),
-		dekRefCounts:      make(map[uint32]uint64),
-		jwtKeyStore:       NewJWTKeyStore(),
-		jwtKeys:           iamjwt.NewKeySet(),
+		nodes:                      make(map[string]MetaNodeEntry),
+		shardGroups:                make(map[string]ShardGroupEntry),
+		bucketAssignments:          make(map[string]string),
+		objectIndex:                make(map[string]ObjectIndexEntry),
+		objectLatest:               make(map[string]string),
+		loadSnapshot:               make(map[string]LoadStatEntry),
+		icebergNamespaces:          make(map[string]map[string]IcebergNamespaceEntry),
+		icebergTables:              make(map[string]map[string]IcebergTableEntry),
+		rotation:                   NewRotationFSM(),
+		invites:                    newInviteFSM(),
+		peers:                      newPeerRegistry(),
+		iamStore:                   iam.NewStore(),
+		activeFeatures:             compat.NewActiveFeatures(),
+		clusterCfg:                 NewClusterConfig(),
+		dekRefCounts:               make(map[uint32]uint64),
+		jwtKeyStore:                NewJWTKeyStore(),
+		jwtKeys:                    iamjwt.NewKeySet(),
+		protocolCredentialRequests: make(map[string]ProtocolCredentialRequestRecord),
 	}
 }
 
@@ -744,6 +749,16 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyInviteConsume(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeInvitePending:
 		return f.applyInvitePending(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeProtocolCredentialCreate:
+		return f.applyProtocolCredentialCreate(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeProtocolCredentialRotate:
+		return f.applyProtocolCredentialRotate(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeProtocolCredentialRevoke:
+		return f.applyProtocolCredentialRevoke(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeProtocolCredentialMarkStale:
+		return f.applyProtocolCredentialMarkStale(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeProtocolCredentialLastUsed:
+		return f.applyProtocolCredentialLastUsed(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRegisterPendingLearner:
 		return f.applyRegisterPendingLearner(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePromoteMember:

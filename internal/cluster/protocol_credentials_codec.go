@@ -43,6 +43,13 @@ type ProtocolCredentialLastUsedCmd struct {
 	LastUsedAt time.Time
 }
 
+type ProtocolCredentialRequestRecord struct {
+	RequestID    string
+	Operation    string
+	CredentialID string
+	PayloadHash  [sha256.Size]byte
+}
+
 func encodeProtocolCredentialCreateCmd(cmd ProtocolCredentialCreateCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(cmd.RequestID)
@@ -185,10 +192,18 @@ func decodeProtocolCredentialLastUsedCmd(data []byte) (ProtocolCredentialLastUse
 }
 
 func encodeProtocolCredentialsSnapshot(rows []protocred.Credential) ([]byte, error) {
+	return encodeProtocolCredentialsSnapshotState(rows, nil)
+}
+
+func encodeProtocolCredentialsSnapshotState(rows []protocred.Credential, requests []ProtocolCredentialRequestRecord) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	sorted := append([]protocred.Credential(nil), rows...)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].ID < sorted[j].ID
+	})
+	sortedRequests := append([]ProtocolCredentialRequestRecord(nil), requests...)
+	sort.Slice(sortedRequests, func(i, j int) bool {
+		return sortedRequests[i].RequestID < sortedRequests[j].RequestID
 	})
 
 	rowOffs := make([]flatbuffers.UOffsetT, len(sorted))
@@ -200,31 +215,70 @@ func encodeProtocolCredentialsSnapshot(rows []protocred.Credential) ([]byte, err
 		b.PrependUOffsetT(rowOffs[i])
 	}
 	rowsVec := b.EndVector(len(rowOffs))
+
+	requestOffs := make([]flatbuffers.UOffsetT, len(sortedRequests))
+	for i := len(sortedRequests) - 1; i >= 0; i-- {
+		requestOffs[i] = buildProtocolCredentialRequestEntry(b, sortedRequests[i])
+	}
+	clusterpb.MetaProtocolCredentialsSnapshotStartRequestsVector(b, len(requestOffs))
+	for i := len(requestOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(requestOffs[i])
+	}
+	requestsVec := b.EndVector(len(requestOffs))
+
 	clusterpb.MetaProtocolCredentialsSnapshotStart(b)
 	clusterpb.MetaProtocolCredentialsSnapshotAddRows(b, rowsVec)
+	clusterpb.MetaProtocolCredentialsSnapshotAddRequests(b, requestsVec)
 	return fbFinish(b, clusterpb.MetaProtocolCredentialsSnapshotEnd(b)), nil
 }
 
 func decodeProtocolCredentialsSnapshot(data []byte) ([]protocred.Credential, error) {
+	rows, _, err := decodeProtocolCredentialsSnapshotState(data)
+	return rows, err
+}
+
+func decodeProtocolCredentialsSnapshotState(data []byte) ([]protocred.Credential, []ProtocolCredentialRequestRecord, error) {
 	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaProtocolCredentialsSnapshot {
 		return clusterpb.GetRootAsMetaProtocolCredentialsSnapshot(d, 0)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("protocol_credentials_codec: snapshot: %w", err)
+		return nil, nil, fmt.Errorf("protocol_credentials_codec: snapshot: %w", err)
 	}
 	rows := make([]protocred.Credential, snap.RowsLength())
 	var rowFB clusterpb.MetaProtocolCredentialEntry
 	for i := 0; i < snap.RowsLength(); i++ {
 		if !snap.Rows(&rowFB, i) {
-			return nil, fmt.Errorf("protocol_credentials_codec: snapshot row %d decode failed", i)
+			return nil, nil, fmt.Errorf("protocol_credentials_codec: snapshot row %d decode failed", i)
 		}
 		row, err := decodeProtocolCredentialEntry(&rowFB)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		rows[i] = row
 	}
-	return rows, nil
+	requests := make([]ProtocolCredentialRequestRecord, snap.RequestsLength())
+	var reqFB clusterpb.MetaProtocolCredentialRequestEntry
+	for i := 0; i < snap.RequestsLength(); i++ {
+		if !snap.Requests(&reqFB, i) {
+			return nil, nil, fmt.Errorf("protocol_credentials_codec: snapshot request %d decode failed", i)
+		}
+		requests[i] = ProtocolCredentialRequestRecord{
+			RequestID:    string(reqFB.RequestId()),
+			Operation:    string(reqFB.Operation()),
+			CredentialID: string(reqFB.CredentialId()),
+		}
+		if rawHash := reqFB.PayloadHashBytes(); len(rawHash) > 0 {
+			hash, err := decodeSecretHash(rawHash)
+			if err != nil {
+				return nil, nil, fmt.Errorf("protocol_credentials_codec: snapshot request %d: %w", i, err)
+			}
+			requests[i].PayloadHash = hash
+		}
+		if err := validateProtocolCredentialRequestRecord(requests[i]); err != nil {
+			return nil, nil, fmt.Errorf("protocol_credentials_codec: snapshot request %d: %w", i, err)
+		}
+	}
+	return rows, requests, nil
 }
 
 func buildProtocolCredentialEntry(b *flatbuffers.Builder, row protocred.Credential) flatbuffers.UOffsetT {
@@ -236,6 +290,7 @@ func buildProtocolCredentialEntry(b *flatbuffers.Builder, row protocred.Credenti
 	hashOff := b.CreateByteVector(row.SecretHash[:])
 	hintOff := b.CreateString(row.SecretHint)
 	createdByOff := b.CreateString(row.CreatedBy)
+	staleReasonOff := b.CreateString(row.StaleReason)
 
 	clusterpb.MetaProtocolCredentialEntryStart(b)
 	clusterpb.MetaProtocolCredentialEntryAddId(b, idOff)
@@ -250,6 +305,9 @@ func buildProtocolCredentialEntry(b *flatbuffers.Builder, row protocred.Credenti
 	clusterpb.MetaProtocolCredentialEntryAddExpiresAtUnixNanos(b, unixNanosPtr(row.ExpiresAt))
 	clusterpb.MetaProtocolCredentialEntryAddRevokedAtUnixNanos(b, unixNanosPtr(row.RevokedAt))
 	clusterpb.MetaProtocolCredentialEntryAddLastUsedAtUnixNanos(b, unixNanosPtr(row.LastUsedAt))
+	clusterpb.MetaProtocolCredentialEntryAddGeneration(b, row.Generation)
+	clusterpb.MetaProtocolCredentialEntryAddStaleAtUnixNanos(b, unixNanosPtr(row.StaleAt))
+	clusterpb.MetaProtocolCredentialEntryAddStaleReason(b, staleReasonOff)
 	return clusterpb.MetaProtocolCredentialEntryEnd(b)
 }
 
@@ -258,20 +316,52 @@ func decodeProtocolCredentialEntry(row *clusterpb.MetaProtocolCredentialEntry) (
 	if err != nil {
 		return protocred.Credential{}, err
 	}
-	return protocred.Credential{
-		ID:         string(row.Id()),
-		SAID:       string(row.SaId()),
-		Protocol:   protocred.Protocol(row.Protocol()),
-		Resource:   string(row.Resource()),
-		Mode:       protocred.Mode(row.Mode()),
-		SecretHash: hash,
-		SecretHint: string(row.SecretHint()),
-		CreatedAt:  timeFromUnixNanos(row.CreatedAtUnixNanos()),
-		CreatedBy:  string(row.CreatedBy()),
-		ExpiresAt:  timePtrFromUnixNanos(row.ExpiresAtUnixNanos()),
-		RevokedAt:  timePtrFromUnixNanos(row.RevokedAtUnixNanos()),
-		LastUsedAt: timePtrFromUnixNanos(row.LastUsedAtUnixNanos()),
-	}, nil
+	cred := protocred.Credential{
+		ID:          string(row.Id()),
+		SAID:        string(row.SaId()),
+		Protocol:    protocred.Protocol(row.Protocol()),
+		Resource:    string(row.Resource()),
+		Mode:        protocred.Mode(row.Mode()),
+		SecretHash:  hash,
+		SecretHint:  string(row.SecretHint()),
+		CreatedAt:   timeFromUnixNanos(row.CreatedAtUnixNanos()),
+		CreatedBy:   string(row.CreatedBy()),
+		ExpiresAt:   timePtrFromUnixNanos(row.ExpiresAtUnixNanos()),
+		RevokedAt:   timePtrFromUnixNanos(row.RevokedAtUnixNanos()),
+		LastUsedAt:  timePtrFromUnixNanos(row.LastUsedAtUnixNanos()),
+		Generation:  row.Generation(),
+		StaleAt:     timePtrFromUnixNanos(row.StaleAtUnixNanos()),
+		StaleReason: string(row.StaleReason()),
+	}
+	if cred.Generation == 0 {
+		cred.Generation = 1
+	}
+	return cred, nil
+}
+
+func buildProtocolCredentialRequestEntry(b *flatbuffers.Builder, row ProtocolCredentialRequestRecord) flatbuffers.UOffsetT {
+	requestIDOff := b.CreateString(row.RequestID)
+	operationOff := b.CreateString(row.Operation)
+	credentialIDOff := b.CreateString(row.CredentialID)
+	payloadHashOff := b.CreateByteVector(row.PayloadHash[:])
+	clusterpb.MetaProtocolCredentialRequestEntryStart(b)
+	clusterpb.MetaProtocolCredentialRequestEntryAddRequestId(b, requestIDOff)
+	clusterpb.MetaProtocolCredentialRequestEntryAddOperation(b, operationOff)
+	clusterpb.MetaProtocolCredentialRequestEntryAddCredentialId(b, credentialIDOff)
+	clusterpb.MetaProtocolCredentialRequestEntryAddPayloadHash(b, payloadHashOff)
+	return clusterpb.MetaProtocolCredentialRequestEntryEnd(b)
+}
+
+func validateProtocolCredentialRequestRecord(row ProtocolCredentialRequestRecord) error {
+	if row.RequestID == "" || row.CredentialID == "" {
+		return fmt.Errorf("invalid request record")
+	}
+	switch row.Operation {
+	case protocolCredentialRequestCreate, protocolCredentialRequestRotate, protocolCredentialRequestRevoke, protocolCredentialRequestMarkStale:
+		return nil
+	default:
+		return fmt.Errorf("invalid request operation %q", row.Operation)
+	}
 }
 
 func decodeSecretHash(raw []byte) ([sha256.Size]byte, error) {

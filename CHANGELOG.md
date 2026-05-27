@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.383.0] - 2026-05-28
+
+### Added
+
+- Added Meta FSM apply semantics for durable protocol credentials, including
+  retry-safe request IDs for create, rotate, revoke, and stale-marker commands.
+- Added protocol credential request-index snapshot/restore support so duplicate
+  mutation retries remain safe after Raft snapshot install.
+- Added generation and stale metadata fields to persisted protocol credential
+  rows for later policy-revocation and validation-cache work.
+
+### Fixed
+
+- Protocol credential snapshot restore now clears wired credential state when
+  restoring a legacy snapshot without a protocol credential trailer, avoiding
+  stale rows or stale request IDs after snapshot install.
+
 ## [0.0.382.0] - 2026-05-28
 
 ### Added

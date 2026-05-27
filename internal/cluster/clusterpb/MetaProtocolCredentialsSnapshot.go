@@ -61,13 +61,39 @@ func (rcv *MetaProtocolCredentialsSnapshot) RowsLength() int {
 	return 0
 }
 
+func (rcv *MetaProtocolCredentialsSnapshot) Requests(obj *MetaProtocolCredentialRequestEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaProtocolCredentialsSnapshot) RequestsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaProtocolCredentialsSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(2)
 }
 func MetaProtocolCredentialsSnapshotAddRows(builder *flatbuffers.Builder, rows flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(rows), 0)
 }
 func MetaProtocolCredentialsSnapshotStartRowsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaProtocolCredentialsSnapshotAddRequests(builder *flatbuffers.Builder, requests flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(requests), 0)
+}
+func MetaProtocolCredentialsSnapshotStartRequestsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaProtocolCredentialsSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
