@@ -1,10 +1,18 @@
 # Changelog
 
-## [0.0.375.0] - 2026-05-28
+## [0.0.376.0] - 2026-05-28
 
 ### Changed
 
 - Removed the global `iam.anon-enabled` bypass. Anonymous S3 access is now authorized through bucket policy semantics: `s3://default` keeps its implicit anonymous quickstart policy until an explicit bucket policy overrides it, while non-default buckets require explicit anonymous policy. Unsigned `/api/...` requests and Iceberg bearer routes no longer inherit anonymous S3 behavior.
+
+## [0.0.375.0] - 2026-05-28
+
+### Fixed
+
+- Iceberg REST catalog config no longer returns caller S3 access keys or secret
+  keys over plaintext HTTP. HTTP clients still receive catalog defaults and the
+  local S3 endpoint, while HTTPS remains the path for credential handoff.
 
 ## [0.0.374.0] - 2026-05-28
 
