@@ -53,6 +53,14 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
 	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
+	// THROWAWAY zero-CA spike (GRAINFS_ZEROCA_SPIKE=1 only): a secret-less joiner
+	// pulls cluster secrets from the leader via invite + SealToPeer and stages
+	// them on disk BEFORE the earliest secret gate below. No-op when the env
+	// guard is unset, so normal boot is byte-for-byte unchanged.
+	if err := maybeRunSpikeJoiner(&opts); err != nil {
+		return err
+	}
+
 	// 4. Encryption key + IAMApplier.
 	shardEncryptor, err := LoadOrCreateEncryptionKey(
 		opts.EncryptionKeyFile,
@@ -106,6 +114,12 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 
 	// 8. Build Config from options.
 	cfg := optionsToConfig(opts, addr, authOpts, shardEncryptor, iamStore, iamApplier)
+
+	// THROWAWAY zero-CA spike: start the leader secret-delivery listener just
+	// before Run blocks. It reads secrets lazily per-request, so by the time a
+	// joiner dials (after the leader HTTP port is up), wireDEKKeeper inside Run
+	// has already written keys/0.key + cluster.id. No-op without the env guard.
+	maybeStartSpikeLeader(opts)
 
 	// 9. Delegate to existing Run.
 	return Run(ctx, cfg)
