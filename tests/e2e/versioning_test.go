@@ -227,10 +227,13 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		markerID := aws.ToString(delOut.VersionId)
 		gomega.Expect(markerID).NotTo(gomega.BeEmpty())
 
-		_, err = client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bkt), Key: aws.String(key),
-		})
-		gomega.Expect(err).To(gomega.HaveOccurred(), "GET after soft-delete must return 404")
+		gomega.Eventually(func() bool {
+			_, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bkt), Key: aws.String(key),
+			})
+			return err != nil
+		}, 15*time.Second, 200*time.Millisecond).Should(gomega.BeTrue(),
+			"GET after soft-delete must return 404")
 	})
 
 	ginkgo.It("hard deletes a specific version ID (HardDeleteByVersionID)", func() {

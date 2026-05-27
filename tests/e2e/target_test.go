@@ -102,12 +102,18 @@ func currentE2EClusterLeaderIdx(t testing.TB, c *e2eCluster) int {
 	if start < 0 || start >= len(c.httpURLs) {
 		start = 0
 	}
-	status := getStatusJSON(t, c.httpURLs[start])
-	leaderID, _ := status["leader_id"].(string)
-	for i := range c.httpURLs {
-		if c.nodeID(i) == leaderID {
-			c.leaderIdx = i
-			return i
+	for offset := range c.httpURLs {
+		probeIdx := (start + offset) % len(c.httpURLs)
+		status, err := tryStatusJSON(c.httpURLs[probeIdx])
+		if err != nil {
+			continue
+		}
+		leaderID, _ := status["leader_id"].(string)
+		for i := range c.httpURLs {
+			if c.nodeID(i) == leaderID {
+				c.leaderIdx = i
+				return i
+			}
 		}
 	}
 	return start
@@ -142,6 +148,11 @@ func newSharedClusterS3Target(t testing.TB) s3Target {
 }
 
 func s3TargetFromCluster(c *e2eCluster) s3Target {
+	currentLeaderClient := func(t testing.TB) *s3.Client {
+		t.Helper()
+		return c.S3Client(currentE2EClusterLeaderIdx(t, c))
+	}
+
 	return s3Target{
 		name:  "cluster4",
 		nodes: 4,
@@ -154,13 +165,13 @@ func s3TargetFromCluster(c *e2eCluster) s3Target {
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t testing.TB, bucket string) {
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, currentLeaderClient(t))
 			ginkgo.DeferCleanup(func() {
-				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+				currentLeaderClient(ginkgo.GinkgoTB()).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
 		},
@@ -198,6 +209,11 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
 	}
 
+	currentLeaderClient := func(t testing.TB) *s3.Client {
+		t.Helper()
+		return c.S3Client(currentE2EClusterLeaderIdx(t, c))
+	}
+
 	return s3Target{
 		name:  "cluster4",
 		nodes: nodes,
@@ -210,13 +226,13 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t testing.TB, bucket string) {
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, currentLeaderClient(t))
 			ginkgo.DeferCleanup(func() {
-				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+				currentLeaderClient(ginkgo.GinkgoTB()).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
 		},

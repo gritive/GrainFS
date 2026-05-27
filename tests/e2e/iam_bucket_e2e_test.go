@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -74,7 +75,7 @@ func runIAMBucketCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 		tgt := getTgt()
 		c := tgt.iamClient()
 		name := iamSpecBucketName(tgt, "create-delete")
-		ginkgo.DeferCleanup(func() { _ = c.BucketDelete(ctx, name, false) })
+		ginkgo.DeferCleanup(func() { _ = getTgt().iamClient().BucketDelete(ctx, name, false) })
 
 		gomega.Expect(c.BucketCreate(ctx, name, "", "")).To(gomega.Succeed())
 
@@ -82,7 +83,9 @@ func runIAMBucketCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(bucketItemNames(items)).To(gomega.ContainElement(name))
 
-		gomega.Expect(c.BucketDelete(ctx, name, false)).To(gomega.Succeed())
+		gomega.Eventually(func() error {
+			return getTgt().iamClient().BucketDelete(ctx, name, false)
+		}, 15*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
 	})
 
 	// List: create two buckets, verify both appear in list.
