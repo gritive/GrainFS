@@ -27,6 +27,17 @@ type SealedToPeer struct {
 // and plain is sealed with AES-256-GCM binding aad. Bind contextInfo/aad to the
 // transcript identity (clusterID || inviteID || joinerNodeID || leaderNodeID ||
 // kekGenList) so a blob cannot be replayed into a different context.
+//
+// peerPub is intentionally the node's long-term ECDSA P-256 identity key (the
+// same key that signs the invite NodeSig and whose SPKI the invite binds) used
+// here for key agreement via crypto/ecdh. This single-identity-key design is
+// deliberate: the invite gate already verifies and binds exactly this key, so
+// requiring a second, separate ECDH key would add a key the leader must learn
+// and bind. ECDSA/ECDH key reuse is safe on P-256 (no algorithm confusion
+// between ECDSA signing and ECDH agreement); do NOT "fix" this to a separate
+// ECDH key without also reworking the invite binding. The recipient's
+// EphemeralPub is implicitly authenticated: substituting it changes the derived
+// shared secret, so OpenFromPeer's GCM tag fails (see TestSealToPeer_TamperedEphemeralPubFails).
 func SealToPeer(peerPub *ecdsa.PublicKey, plain, contextInfo, aad []byte) (SealedToPeer, error) {
 	peerECDH, err := peerPub.ECDH()
 	if err != nil {

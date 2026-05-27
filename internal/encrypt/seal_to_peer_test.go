@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -74,5 +75,26 @@ func TestSealToPeer_TamperedCiphertextFails(t *testing.T) {
 	blob.Ciphertext[len(blob.Ciphertext)-1] ^= 0xFF
 	if _, err := OpenFromPeer(k, blob, ctx, ctx); err == nil {
 		t.Fatal("expected open with tampered ciphertext to fail, got nil error")
+	}
+}
+
+// TestSealToPeer_TamperedEphemeralPubFails documents that EphemeralPub is
+// implicitly authenticated: replacing it with another valid P-256 point changes
+// the recipient's derived shared secret, so the GCM tag fails to verify. This
+// guards the implicit-binding property the SealToPeer godoc relies on.
+func TestSealToPeer_TamperedEphemeralPubFails(t *testing.T) {
+	k := mustKey(t)
+	ctx := []byte("ctx")
+	blob, err := SealToPeer(&k.PublicKey, []byte("secret"), ctx, ctx)
+	if err != nil {
+		t.Fatalf("SealToPeer: %v", err)
+	}
+	other, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate other ephemeral: %v", err)
+	}
+	blob.EphemeralPub = other.PublicKey().Bytes()
+	if _, err := OpenFromPeer(k, blob, ctx, ctx); err == nil {
+		t.Fatal("expected open with substituted ephemeral pub to fail, got nil error")
 	}
 }
