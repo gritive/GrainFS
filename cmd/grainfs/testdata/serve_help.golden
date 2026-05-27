@@ -78,6 +78,7 @@ Flags:
       --reshard-interval duration                           background EC reshard interval (always on; 0 resets to default 24h) (default 24h0m0s)
       --scrub-interval duration                             EC shard scrub interval (always on; 0 resets to default 24h) (default 24h0m0s)
       --scrub-orphan-age duration                           minimum filesystem mtime age before an orphan raw segment is eligible for sweep (default 5m0s)
+      --segment-gc-retention duration                       grace period before unreferenced raw segment blobs are GC'd (default 24h0m0s)
       --shard-cache-size int                                EC shard cache capacity in bytes (0 disables) (default 1073741824)
       --shard-pack-threshold int                            pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65545) (default 65545)
       --strict-vlog-registry                                fatal on vlog registry smoke mismatch (e2e: true)

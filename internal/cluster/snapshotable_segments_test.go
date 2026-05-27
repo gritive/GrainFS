@@ -94,3 +94,35 @@ func TestListAllObjectsPropagatesCoalesced(t *testing.T) {
 	require.Len(t, found.Coalesced, 1, "Coalesced propagation gap")
 	require.Equal(t, "coalesced-blob-1", found.Coalesced[0].CoalescedID)
 }
+
+// TestListAllObjectsStrictFailsClosedOnCorruptMeta proves the GC known-set fix:
+// a valid object plus an undecodable obj: record. The tolerant ListAllObjects
+// silently skips the corrupt record (returns nil error, 1 object); the strict
+// ListAllObjectsStrict fails closed (returns an error) so the scrubber skips its
+// sweep rather than treating the corrupt object's segments as orphaned.
+func TestListAllObjectsStrictFailsClosedOnCorruptMeta(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+
+	// One valid object so the tolerant path returns 1 (not 0) — a stronger assertion.
+	seedObjectWithSegments(t, b, "bkt", "good", "v1",
+		[]storage.SegmentRef{{BlobID: "chunk-A", Size: 10}}, nil)
+
+	// Inject a properly-keyed obj: record with an undecodable value.
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV("bkt", "corrupt", "v1"), []byte{0xff, 0xff, 0xff})
+	}))
+
+	tolerant, err := b.ListAllObjects()
+	require.NoError(t, err, "tolerant ListAllObjects must skip the corrupt record")
+	var keys []string
+	for _, o := range tolerant {
+		keys = append(keys, o.Key)
+	}
+	require.Equal(t, []string{"good"}, keys, "tolerant must return only the valid object")
+
+	_, err = b.ListAllObjectsStrict()
+	require.Error(t, err, "strict ListAllObjectsStrict must fail closed on corrupt meta")
+	require.Contains(t, err.Error(), "gc known-set")
+}

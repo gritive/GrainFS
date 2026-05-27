@@ -25,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
+	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/wal"
@@ -224,6 +225,11 @@ type bootState struct {
 	lifecycleBackend storage.Backend
 	recoveryReadOnly bool
 	diskCollector    *cluster.DiskCollector
+	// objSnapMgr is the object-level PITR snapshot Manager, created
+	// synchronously by StartAutoSnapshotterWhenReady during the backend phase.
+	// Consumed by bootRecoveryAndScrubber to wire orphan-segment GC (frozen-path
+	// source). Nil when the backend does not implement storage.Snapshotable.
+	objSnapMgr *snapshot.Manager
 
 	// bootSrvOptsAndReceipt
 	srvOpts           []server.Option

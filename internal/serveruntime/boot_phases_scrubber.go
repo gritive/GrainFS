@@ -159,7 +159,17 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	}
 
 	if cfg.ScrubInterval > 0 {
-		sc := scrubber.New(state.distBackend, cfg.ScrubInterval)
+		// Plan 3.5: activate orphan-segment GC. Frozen-path source + orphan-log MUST
+		// wire together (the scrubber's activation constraint). The caught-up gate is
+		// auto-applied: distBackend implements scrubber's caughtUpReporter.
+		// Scope: group-0 distBackend only (single-node complete). Per-group fan-out
+		// for multi-group clusters is a follow-up (see TODOS.md: per-group segment GC).
+		var segGCOpts []scrubber.ScrubberOption
+		if state.objSnapMgr != nil {
+			state.distBackend.SetFrozenSegmentPathSource(state.objSnapMgr.AllFrozenSegmentPaths)
+			segGCOpts = append(segGCOpts, scrubber.WithSegmentOrphanLog(state.distBackend.NewSegmentOrphanLog(), cfg.SegmentGCRetention))
+		}
+		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
 		sc.RegisterSource("replication", replSource, replVerifier)
 		sc.Start(ctx)

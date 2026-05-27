@@ -56,6 +56,7 @@ type ServeOptions struct {
 	// --- Intervals ---
 	ScrubInterval            time.Duration // --scrub-interval
 	ScrubOrphanAge           time.Duration // --scrub-orphan-age
+	SegmentGCRetention       time.Duration // --segment-gc-retention
 	ReshardInterval          time.Duration // --reshard-interval
 	DataGroupRefreshInterval time.Duration // --datagroup-refresh-interval
 	DegradedInterval         time.Duration // --degraded-check-interval

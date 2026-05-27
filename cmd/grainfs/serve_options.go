@@ -70,6 +70,7 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	// Intervals.
 	opts.ScrubInterval, _ = cmd.Flags().GetDuration("scrub-interval")
 	opts.ScrubOrphanAge, _ = cmd.Flags().GetDuration("scrub-orphan-age")
+	opts.SegmentGCRetention, _ = cmd.Flags().GetDuration("segment-gc-retention")
 	opts.ReshardInterval, _ = cmd.Flags().GetDuration("reshard-interval")
 	opts.DataGroupRefreshInterval, _ = cmd.Flags().GetDuration("datagroup-refresh-interval")
 	opts.DegradedInterval, _ = cmd.Flags().GetDuration("degraded-check-interval")

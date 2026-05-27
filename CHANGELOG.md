@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.357.0] - 2026-05-27
+
+### Added
+
+- **Automatic reclamation of orphaned object segment blobs.** The background scrubber now
+  garbage-collects raw segment blobs left behind when large or appendable objects are
+  overwritten or deleted. Previously these orphaned segments accumulated on disk and were
+  never reclaimed. A segment is deleted only when no live object version and no snapshot
+  references it, and only after it has been unreferenced longer than the retention window —
+  so snapshots and point-in-time restores are never affected. In a multi-node cluster this
+  runs on the group-0 leader (single-node deployments reclaim all orphaned segments);
+  broader multi-group fan-out is planned.
+- **`--segment-gc-retention` flag** (default `24h`) sets the grace period before an
+  unreferenced segment blob becomes eligible for deletion. Set it to `0` to drop the
+  time-based grace period (the 5-minute orphan age gate still applies).
+
 ## [0.0.356.0] - 2026-05-27
 
 ### Added
