@@ -404,6 +404,41 @@ func (k *DEKKeeper) RewrapWithAAD(ct []byte, oldGen uint32, aad []byte) ([]byte,
 	return activeAEAD.Seal(nonce, nonce, plain, aad), k.active, nil
 }
 
+// TransitionReseal decrypts ct under the oldGen AEAD with oldAAD and re-seals
+// the plaintext under the ACTIVE AEAD with newAAD. Unlike RewrapWithAAD (which
+// preserves a single AAD across re-wrap), this re-binds the ciphertext to a
+// different AAD domain — used by dedup convergence to move a legacy
+// key-scoped chunk (legacy shard AAD) into the object-independent CAS domain
+// (CASChunkAAD). Open and re-seal share one RLock acquisition and the
+// plaintext is zeroized before return.
+func (k *DEKKeeper) TransitionReseal(ct []byte, oldGen uint32, oldAAD, newAAD []byte) ([]byte, uint32, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	oldAEAD, ok := k.aead[oldGen]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	ns := oldAEAD.NonceSize()
+	if len(ct) < ns {
+		return nil, 0, ErrCiphertextTooShort
+	}
+	plain, err := oldAEAD.Open(nil, ct[:ns], ct[ns:], oldAAD)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer zeroize(plain)
+	activeAEAD, ok := k.aead[k.active]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	nonce := make([]byte, activeAEAD.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, 0, err
+	}
+	k.activeSeals.Add(1)
+	return activeAEAD.Seal(nonce, nonce, plain, newAAD), k.active, nil
+}
+
 // VersionsAndActive returns a deep copy of the wrapped-DEK map AND the active
 // generation under a single RLock acquisition. Snapshot callers MUST use this
 // instead of Versions()+Active() — otherwise a Rotate() between the two calls
