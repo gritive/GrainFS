@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Erasure-coded shard storage now flows through the DataEncryptor seam with a
+  self-describing on-disk header (format version + key generation) and
+  position-bound AEAD, extending the KEK-envelope key-rotation groundwork from
+  object/segment files to cluster EC shards.
+
 ## [0.0.363.0] - 2026-05-27
 
 ### Added
