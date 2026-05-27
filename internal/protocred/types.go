@@ -28,6 +28,7 @@ var (
 	ErrInvalid  = errors.New("protocol credential invalid")
 	ErrNotFound = errors.New("protocol credential not found")
 	ErrRevoked  = errors.New("protocol credential revoked")
+	ErrConflict = errors.New("protocol credential conflict")
 )
 
 type CreateRequest struct {
@@ -51,18 +52,21 @@ type Secret struct {
 }
 
 type Credential struct {
-	ID         string
-	SAID       string
-	Protocol   Protocol
-	Resource   string
-	Mode       Mode
-	SecretHash [sha256.Size]byte
-	SecretHint string
-	CreatedAt  time.Time
-	CreatedBy  string
-	ExpiresAt  *time.Time
-	RevokedAt  *time.Time
-	LastUsedAt *time.Time
+	ID          string
+	SAID        string
+	Protocol    Protocol
+	Resource    string
+	Mode        Mode
+	SecretHash  [sha256.Size]byte
+	SecretHint  string
+	CreatedAt   time.Time
+	CreatedBy   string
+	ExpiresAt   *time.Time
+	RevokedAt   *time.Time
+	LastUsedAt  *time.Time
+	Generation  uint64
+	StaleAt     *time.Time
+	StaleReason string
 }
 
 func validateCreate(req CreateRequest) error {

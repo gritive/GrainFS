@@ -88,9 +88,10 @@ The response includes a one-time `secret` and a protocol-specific
 `grainfs credential rotate <id>` to issue a replacement secret and
 `grainfs credential revoke <id>` to disable a credential.
 
-This release adds the common credential API and CLI foundation. Existing S3,
-Iceberg, NFS, 9P, and NBD data-plane authentication behavior is unchanged until
-each protocol is migrated to enforce these credentials.
+Protocol credential metadata is stored through Meta Raft so create, rotate, and
+revoke state survives node restart and snapshot restore. Existing S3, Iceberg,
+NFS, 9P, and NBD data-plane authentication behavior is unchanged until each
+protocol is migrated to enforce these credentials.
 
 ## S3
 

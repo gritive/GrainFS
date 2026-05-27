@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.0.387.0] - 2026-05-28
+
+### Added
+
+- Added a Meta Raft-backed protocol credential admin service that proposes
+  create, rotate, and revoke mutations through the protocol credential Meta FSM
+  while keeping get/list reads on the local FSM-backed store.
+- Added runtime wiring so protocol credential stores are registered with the
+  Meta FSM before replay and admin handlers use the durable service when
+  Meta Raft is available.
+- Added materialization helpers for one-time protocol credential secrets so
+  existing admin API and CLI responses stay stable while persisted rows flow
+  through Raft.
+
+### Changed
+
+- Updated protocol credential docs and follow-up tracking to reflect that
+  credential metadata is now durable, while protocol data-plane enforcement and
+  IAM authorization hardening remain follow-up work.
+
+## [0.0.386.0] - 2026-05-28
+
+### Added
+
+- Operators can now break down HTTP-facing service performance by stable
+  service and operation labels. `/metrics` exposes request counts, request
+  latency, request bytes, and response bytes for S3, Iceberg, cluster, admin,
+  dashboard, and metrics traffic without bucket, key, access key, or raw path
+  cardinality.
+
+### Changed
+
+- The production runbook now includes PromQL examples for isolating service
+  p99 latency, error rates, and response throughput when a generic latency or
+  error alert fires.
+
+## [0.0.385.0] - 2026-05-28
+
+### Added
+
+- Added Meta FSM apply semantics for durable protocol credentials, including
+  retry-safe request IDs for create, rotate, revoke, and stale-marker commands.
+- Added protocol credential request-index snapshot/restore support so duplicate
+  mutation retries remain safe after Raft snapshot install.
+- Added generation and stale metadata fields to persisted protocol credential
+  rows for later policy-revocation and validation-cache work.
+
+### Fixed
+
+- Protocol credential snapshot restore now clears wired credential state when
+  restoring a legacy snapshot without a protocol credential trailer, avoiding
+  stale rows or stale request IDs after snapshot install.
+
+## [0.0.384.0] - 2026-05-28
+
+### Added
+
+- Added the Raft snapshot foundation for durable protocol credentials. Protocol
+  credential stores now expose deterministic snapshot/restore helpers, Meta Raft
+  has FlatBuffers payloads for create/rotate/revoke/stale/last-used commands,
+  and Meta FSM snapshots can carry protocol credential rows without serializing
+  plaintext secrets.
+- Added regression coverage for protocol credential snapshot determinism,
+  malformed FlatBuffers payloads, legacy snapshot restore, and empty snapshot
+  restore clearing stale credential rows.
+
 ## [0.0.383.0] - 2026-05-28
 
 ### Security

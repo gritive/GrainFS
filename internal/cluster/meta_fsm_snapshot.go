@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -695,6 +696,22 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
+	var newProtocolCredentials []protocred.Credential
+	var newProtocolCredentialRequests []ProtocolCredentialRequestRecord
+	restoreProtocolCredentials := f.protocolCredentialStore != nil
+	if len(trailers.pcreData) > 0 {
+		if !restoreProtocolCredentials {
+			log.Warn().Int("pcre_len", len(trailers.pcreData)).Msg("meta_fsm: Restore: snapshot contains protocol credentials but store not wired; skipping")
+		} else {
+			rows, requests, err := decodeProtocolCredentialsSnapshotState(trailers.pcreData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode protocol credentials: %w", err)
+			}
+			newProtocolCredentials = rows
+			newProtocolCredentialRequests = requests
+		}
+	}
+
 	// JKEY: decode JWT signing keys.
 	// F9: if JKEY data is present but DEK keeper is not wired, the keys cannot be
 	// unwrapped after Restore — fail loud rather than silently leaving jwtKeys empty.
@@ -763,6 +780,13 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			for _, e := range f.objectIndex {
 				f.dekRefCounts[e.DekGen]++
 			}
+		}
+	}
+	if restoreProtocolCredentials {
+		f.protocolCredentialStore.Restore(newProtocolCredentials)
+		f.protocolCredentialRequests = make(map[string]ProtocolCredentialRequestRecord, len(newProtocolCredentialRequests))
+		for _, row := range newProtocolCredentialRequests {
+			f.protocolCredentialRequests[row.RequestID] = row
 		}
 	}
 	cb := f.onBucketAssigned

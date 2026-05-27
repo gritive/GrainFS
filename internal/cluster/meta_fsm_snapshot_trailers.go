@@ -90,8 +90,18 @@ const ipstSnapshotTrailerMagic uint32 = 0x54535049
 // [u32 payload_len][u32 magic]. Always 8 bytes when present.
 const ipstSnapshotTrailerLen = 8
 
+// pcreSnapshotTrailerMagic identifies the PCRE trailer appended after IPST and
+// before JKEY. Hex pairs spell "PCRE" (little-endian uint32 = 0x45524350).
+//
+// Carries protocol credential rows. Plaintext secrets are not serialized.
+const pcreSnapshotTrailerMagic uint32 = 0x45524350
+
+// pcreSnapshotTrailerLen is the on-disk size of the PCRE footer:
+// [u32 payload_len][u32 magic]. Always 8 bytes when present.
+const pcreSnapshotTrailerLen = 8
+
 // jkeySnapshotTrailerMagic identifies the JKEY trailer appended after the IPST
-// trailer (outermost trailer). Hex pairs spell "JKEY"
+// and PCRE trailers (outermost trailer). Hex pairs spell "JKEY"
 // (0x4A=J, 0x4B=K, 0x45=E, 0x59=Y, little-endian uint32 = 0x59454B4A).
 //
 // Carries: JWTKeyStore - current + previous wrapped JWT signing keys.
@@ -122,6 +132,7 @@ type metaSnapshotTrailers struct {
 	cfgData  []byte
 	dekData  []byte
 	ipstData []byte
+	pcreData []byte
 	jkeyData []byte
 }
 
@@ -222,6 +233,27 @@ func (f *MetaFSM) appendPolicyStoresSnapshotTrailer(out []byte) ([]byte, error) 
 	return appendSnapshotTrailer(out, ipstPayload, ipstSnapshotTrailerLen, ipstSnapshotTrailerMagic), nil
 }
 
+func (f *MetaFSM) appendProtocolCredentialsSnapshotTrailer(out []byte) ([]byte, error) {
+	f.mu.RLock()
+	store := f.protocolCredentialStore
+	if store == nil {
+		f.mu.RUnlock()
+		return out, nil
+	}
+	rows := store.Snapshot()
+	requests := make([]ProtocolCredentialRequestRecord, 0, len(f.protocolCredentialRequests))
+	for _, row := range f.protocolCredentialRequests {
+		requests = append(requests, row)
+	}
+	f.mu.RUnlock()
+
+	payload, err := encodeProtocolCredentialsSnapshotState(rows, requests)
+	if err != nil {
+		return nil, fmt.Errorf("meta_fsm: Snapshot: encode protocol credentials: %w", err)
+	}
+	return appendSnapshotTrailer(out, payload, pcreSnapshotTrailerLen, pcreSnapshotTrailerMagic), nil
+}
+
 func (f *MetaFSM) appendJWTKeySnapshotTrailer(out []byte) []byte {
 	jkeyCurrent, jkeyPrevious := f.jwtKeyStore.Snapshot()
 	if jkeyCurrent == nil && jkeyPrevious == nil {
@@ -253,6 +285,10 @@ func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]b
 	if err != nil {
 		return nil, err
 	}
+	out, err = f.appendProtocolCredentialsSnapshotTrailer(out)
+	if err != nil {
+		return nil, err
+	}
 	out = f.appendJWTKeySnapshotTrailer(out)
 	return out, nil
 }
@@ -265,6 +301,10 @@ func peelMetaSnapshotTrailers(data []byte) (metaSnapshotTrailers, error) {
 	// Peel in reverse append order. Each successful peel exposes the next-older
 	// trailer as the end of the remaining byte slice.
 	remaining, out.jkeyData, _, err = peelSnapshotTrailer(remaining, jkeySnapshotTrailerLen, jkeySnapshotTrailerMagic, "JKEY")
+	if err != nil {
+		return out, err
+	}
+	remaining, out.pcreData, _, err = peelSnapshotTrailer(remaining, pcreSnapshotTrailerLen, pcreSnapshotTrailerMagic, "PCRE")
 	if err != nil {
 		return out, err
 	}
