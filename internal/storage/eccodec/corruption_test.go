@@ -2,11 +2,13 @@ package eccodec
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,8 +21,14 @@ type errReader struct{ err error }
 
 func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
 
+// corruptionFields returns a fixed base-fields slice for corruption tests.
+func corruptionFields() []encrypt.AADField {
+	return []encrypt.AADField{encrypt.FieldString("v2/bucket"), encrypt.FieldString("key/0"), encrypt.FieldUint32(0)}
+}
+
 func TestIsCorruption(t *testing.T) {
-	enc := testEncryptor(t)
+	enc := newFakeShardEncryptor(t)
+	fields := corruptionFields()
 
 	tests := []struct {
 		name string
@@ -88,7 +96,7 @@ func TestIsCorruption(t *testing.T) {
 			build: func(t *testing.T) error {
 				bad := make([]byte, encryptedHeaderLen)
 				copy(bad, []byte("NOTMAGIC"))
-				_, err := NewEncryptedShardReader(bytes.NewReader(bad), enc, []byte("aad"))
+				_, err := NewEncryptedShardReader(bytes.NewReader(bad), enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -98,7 +106,7 @@ func TestIsCorruption(t *testing.T) {
 			name: "truncated encrypted header",
 			build: func(t *testing.T) error {
 				// fewer bytes than the fixed header: io.ReadFull -> ErrUnexpectedEOF.
-				_, err := NewEncryptedShardReader(bytes.NewReader(encryptedShardMagic), enc, []byte("aad"))
+				_, err := NewEncryptedShardReader(bytes.NewReader(encryptedShardMagic), enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -107,10 +115,12 @@ func TestIsCorruption(t *testing.T) {
 		{
 			name: "invalid encrypted chunk size in header",
 			build: func(t *testing.T) error {
+				// Build a header with valid magic + format_version but chunk_size=0.
 				var header [encryptedHeaderLen]byte
 				copy(header[:], encryptedShardMagic)
-				// chunkSize left as 0 -> invalid.
-				_, err := NewEncryptedShardReader(bytes.NewReader(header[:]), enc, []byte("aad"))
+				binary.LittleEndian.PutUint16(header[8:10], encryptedShardFormatVersion)
+				// dek_gen=0, chunk_size=0 (invalid), chunk_overhead=0
+				_, err := NewEncryptedShardReader(bytes.NewReader(header[:]), enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -119,10 +129,8 @@ func TestIsCorruption(t *testing.T) {
 		{
 			name: "bad chunk-length encrypted shard",
 			build: func(t *testing.T) error {
-				data := []byte("encrypted shard plaintext content")
-				aad := []byte("v2/bucket/key/0")
 				var encoded bytes.Buffer
-				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, DefaultEncryptedChunkSize))
+				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("encrypted shard plaintext content")), enc, fields, DefaultEncryptedChunkSize))
 				raw := encoded.Bytes()
 				// corrupt the first chunk header's plaintext-length field so it
 				// exceeds chunkSize (structural decode failure).
@@ -130,7 +138,7 @@ func TestIsCorruption(t *testing.T) {
 				raw[encryptedHeaderLen+1] = 0xFF
 				raw[encryptedHeaderLen+2] = 0xFF
 				raw[encryptedHeaderLen+3] = 0xFF
-				err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, aad)
+				err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -139,14 +147,12 @@ func TestIsCorruption(t *testing.T) {
 		{
 			name: "truncated encrypted payload (cut mid-ciphertext)",
 			build: func(t *testing.T) error {
-				data := []byte("encrypted shard plaintext content for truncation")
-				aad := []byte("v2/bucket/key/0")
 				var encoded bytes.Buffer
-				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, DefaultEncryptedChunkSize))
+				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("encrypted shard plaintext content for truncation")), enc, fields, DefaultEncryptedChunkSize))
 				raw := encoded.Bytes()
 				// keep the full chunk header but cut the ciphertext short:
 				// io.ReadFull on the payload -> ErrUnexpectedEOF (truncation).
-				err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw[:len(raw)-4]), enc, aad)
+				err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw[:len(raw)-4]), enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -160,15 +166,13 @@ func TestIsCorruption(t *testing.T) {
 			// Therefore: corruption.
 			name: "byte-tampered encrypted shard (AEAD tag fails)",
 			build: func(t *testing.T) error {
-				data := []byte("encrypted shard plaintext content for tag tampering")
-				aad := []byte("v2/bucket/key/0")
 				var encoded bytes.Buffer
-				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, DefaultEncryptedChunkSize))
+				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("encrypted shard plaintext content for tag tampering")), enc, fields, DefaultEncryptedChunkSize))
 				raw := encoded.Bytes()
 				// flip a byte inside the ciphertext (after header + chunk header)
 				// so the GCM tag check fails without changing any length field.
 				raw[encryptedHeaderLen+encryptedChunkHeaderLen+1] ^= 0xFF
-				err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, aad)
+				err := DecodeEncryptedShard(io.Discard, bytes.NewReader(raw), enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -180,7 +184,7 @@ func TestIsCorruption(t *testing.T) {
 			// transient and does NOT quarantine.
 			name: "transient read fault at codec boundary",
 			build: func(t *testing.T) error {
-				_, err := NewEncryptedShardReader(&errReader{err: errors.New("input/output error")}, enc, []byte("aad"))
+				_, err := NewEncryptedShardReader(&errReader{err: errors.New("input/output error")}, enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -191,15 +195,13 @@ func TestIsCorruption(t *testing.T) {
 			// header) must also stay transient.
 			name: "transient read fault during chunk read",
 			build: func(t *testing.T) error {
-				data := []byte("encrypted shard plaintext content")
-				aad := []byte("v2/bucket/key/0")
 				var encoded bytes.Buffer
-				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, DefaultEncryptedChunkSize))
+				require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("encrypted shard plaintext content")), enc, fields, DefaultEncryptedChunkSize))
 				raw := encoded.Bytes()
 				// serve the header cleanly, then return a synthetic I/O fault
 				// when the chunk header / payload is read.
 				r := &faultAfterReader{data: raw, faultAt: encryptedHeaderLen, err: errors.New("input/output error")}
-				err := DecodeEncryptedShard(io.Discard, r, enc, aad)
+				err := DecodeEncryptedShard(io.Discard, r, enc, fields)
 				require.Error(t, err)
 				return err
 			},
@@ -276,22 +278,22 @@ func (r *faultReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // (NewEncryptedShardRangeReader / ReadEncryptedShardRangeAt) so corruption
 // classification is read-API-independent.
 func TestIsCorruption_RangePath(t *testing.T) {
-	enc := testEncryptor(t)
-	aad := []byte("v2/bucket/key/0")
+	enc := newFakeShardEncryptor(t)
+	fields := corruptionFields()
 	plaintext := bytes.Repeat([]byte("range-read corruption probe "), 64)
 
-	// encodeShard returns a valid GFSENC2 stream for plaintext.
+	// encodeShard returns a valid GFSENC3 stream for plaintext.
 	encodeShard := func(t *testing.T) []byte {
 		t.Helper()
 		var buf bytes.Buffer
-		require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, DefaultEncryptedChunkSize))
+		require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, fields, DefaultEncryptedChunkSize))
 		return buf.Bytes()
 	}
 
 	// readRangeReader drains NewEncryptedShardRangeReader over [0, len).
 	readRangeReader := func(t *testing.T, raw []byte) error {
 		t.Helper()
-		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, aad, 0, int64(len(plaintext)))
+		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, fields, 0, int64(len(plaintext)))
 		if err != nil {
 			return err
 		}
@@ -303,7 +305,7 @@ func TestIsCorruption_RangePath(t *testing.T) {
 	readRangeAt := func(t *testing.T, raw []byte) error {
 		t.Helper()
 		dst := make([]byte, len(plaintext))
-		_, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, aad, 0, dst)
+		_, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, fields, 0, dst)
 		return err
 	}
 
@@ -345,7 +347,7 @@ func TestIsCorruption_RangePath(t *testing.T) {
 				// header reads cleanly; the chunk read hits a synthetic EIO.
 				rr, err := NewEncryptedShardRangeReader(
 					&faultReaderAt{data: raw, faultAt: encryptedHeaderLen, err: errors.New("input/output error")},
-					enc, aad, 0, int64(len(plaintext)))
+					enc, fields, 0, int64(len(plaintext)))
 				require.NoError(t, err)
 				_, err = io.Copy(io.Discard, rr)
 				require.Error(t, err)
@@ -386,7 +388,7 @@ func TestIsCorruption_RangePath(t *testing.T) {
 				dst := make([]byte, len(plaintext))
 				_, err := ReadEncryptedShardRangeAt(
 					&faultReaderAt{data: raw, faultAt: encryptedHeaderLen, err: errors.New("input/output error")},
-					enc, aad, 0, dst)
+					enc, fields, 0, dst)
 				require.Error(t, err)
 				return err
 			},
@@ -402,14 +404,15 @@ func TestIsCorruption_RangePath(t *testing.T) {
 			build: func(t *testing.T) error {
 				const chunkSize = 32
 				var buf bytes.Buffer
-				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, chunkSize))
+				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, fields, chunkSize))
 				raw := buf.Bytes()
 				// Cut a few bytes into chunk 1 so chunk 0 stays intact.
-				fullCipherLen := chunkSize + enc.AEADOverhead()
-				cut := encryptedHeaderLen + encryptedChunkHeaderLen + fullCipherLen + 2
+				// overhead=31 for fakeShardEncryptor (SealValueAADTo = 3+12+16=31)
+				const overhead = 31
+				cut := encryptedHeaderLen + encryptedChunkHeaderLen + chunkSize + overhead + 2
 				require.Less(t, cut, len(raw), "expected a multi-chunk shard")
 				dst := make([]byte, len(plaintext))
-				n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw[:cut]), enc, aad, 0, dst)
+				n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw[:cut]), enc, fields, 0, dst)
 				require.Error(t, err)
 				require.Greater(t, n, 0, "chunk 0 should have been read before truncation")
 				return err
@@ -423,12 +426,12 @@ func TestIsCorruption_RangePath(t *testing.T) {
 			build: func(t *testing.T) error {
 				const chunkSize = 32
 				var buf bytes.Buffer
-				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, chunkSize))
+				require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, fields, chunkSize))
 				raw := buf.Bytes()
-				fullCipherLen := chunkSize + enc.AEADOverhead()
-				cut := encryptedHeaderLen + encryptedChunkHeaderLen + fullCipherLen + 2
+				const overhead = 31
+				cut := encryptedHeaderLen + encryptedChunkHeaderLen + chunkSize + overhead + 2
 				require.Less(t, cut, len(raw), "expected a multi-chunk shard")
-				rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw[:cut]), enc, aad, 0, int64(len(plaintext)))
+				rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw[:cut]), enc, fields, 0, int64(len(plaintext)))
 				require.NoError(t, err)
 				_, err = io.Copy(io.Discard, rr)
 				require.Error(t, err)
@@ -453,26 +456,26 @@ func TestIsCorruption_RangePath(t *testing.T) {
 // clean (n==0) io.EOF. A clean read must return the data; an over-read by one
 // byte must surface a non-IsCorruption error.
 func TestRangePath_HealthyExactMultiple_NotCorruption(t *testing.T) {
-	enc := testEncryptor(t)
-	aad := []byte("v2/bucket/key/0")
+	enc := newFakeShardEncryptor(t)
+	fields := corruptionFields()
 	const chunkSize = 32
 	// Exactly two full chunks, no trailing partial.
 	plaintext := bytes.Repeat([]byte("Q"), 2*chunkSize)
 
 	var buf bytes.Buffer
-	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, aad, chunkSize))
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plaintext), enc, fields, chunkSize))
 	raw := buf.Bytes()
 
 	t.Run("ReadEncryptedShardRangeAt full read", func(t *testing.T) {
 		dst := make([]byte, len(plaintext))
-		n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, aad, 0, dst)
+		n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, fields, 0, dst)
 		require.NoError(t, err)
 		assert.Equal(t, len(plaintext), n)
 		assert.Equal(t, plaintext, dst)
 	})
 
 	t.Run("NewEncryptedShardRangeReader full stream", func(t *testing.T) {
-		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, aad, 0, int64(len(plaintext)))
+		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, fields, 0, int64(len(plaintext)))
 		require.NoError(t, err)
 		got, err := io.ReadAll(rr)
 		require.NoError(t, err)
@@ -485,7 +488,7 @@ func TestRangePath_HealthyExactMultiple_NotCorruption(t *testing.T) {
 		// ReadEncryptedShardRangeAt remaps to io.ErrUnexpectedEOF because some
 		// bytes were already delivered.
 		dst := make([]byte, len(plaintext)+1)
-		n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, aad, 0, dst)
+		n, err := ReadEncryptedShardRangeAt(bytes.NewReader(raw), enc, fields, 0, dst)
 		require.Error(t, err)
 		assert.False(t, IsCorruption(err), "over-read on a healthy shard must not be corruption, err=%v", err)
 		assert.Equal(t, len(plaintext), n)
@@ -494,7 +497,7 @@ func TestRangePath_HealthyExactMultiple_NotCorruption(t *testing.T) {
 
 	t.Run("NewEncryptedShardRangeReader over-range request", func(t *testing.T) {
 		// Range length extends past the true plaintext end of a healthy shard.
-		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, aad, 0, int64(len(plaintext)+8))
+		rr, err := NewEncryptedShardRangeReader(bytes.NewReader(raw), enc, fields, 0, int64(len(plaintext)+8))
 		require.NoError(t, err)
 		got, err := io.ReadAll(rr)
 		// io.ReadAll swallows io.EOF; a clean end-of-stream yields no error and
