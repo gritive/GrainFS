@@ -62,6 +62,31 @@ chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
 </details>
 
 <details>
+<summary>Cluster (zero-CA join)</summary>
+
+A brand-new node can join with no pre-shared secrets — no `scp` of the KEK or
+`cluster.id`, no `--cluster-key` on the joiner. The leader serves a QUIC
+join-listener (started automatically in cluster mode; pass `--join-listen-addr`
+to pin a stable host:port), mints a single-use invite bundle, and seals the
+cluster secrets to the joining node's key during the handshake.
+
+On the leader, mint an invite and copy the printed bundle token:
+
+```bash
+./bin/grainfs cluster invite create --endpoint "$DATA_DIR/admin.sock"
+```
+
+On the joining node, set the token and start `serve` with no cluster secrets:
+
+```bash
+GRAINFS_INVITE_BUNDLE='<bundle-token>' ./bin/grainfs serve \
+  --data ./dataB \
+  --node-id node-b \
+  --raft-addr <nodeB>:7001
+```
+</details>
+
+<details>
 <summary>Auth + Iceberg</summary>
 
 ```bash
@@ -143,6 +168,7 @@ firewall-restricted addresses.
 | --- | --- |
 | Create/list service accounts, keys, and policies | `grainfs iam --endpoint <data>/admin.sock ...` |
 | Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
+| Mint a zero-CA join invite (leader) | `grainfs cluster invite create --endpoint <data>/admin.sock` |
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
 | Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |
