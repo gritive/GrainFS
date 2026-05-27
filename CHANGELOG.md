@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.382.0] - 2026-05-28
+
+### Changed
+
+- Cluster transport now accepts per-node identities alongside the shared cluster key: every node persists a stable per-node certificate (sealed under the static at-rest encryption key) and registers its public-key fingerprint in the replicated peer registry, which is now included in the meta-state snapshot so it survives log compaction. The accept-set is composed (cluster key ∪ key-rotation window ∪ registered per-node fingerprints) without any node changing the certificate it presents, so this rolls out with no flag-day and no change to existing single-node, cluster, or zero-CA join behavior. Foundation for per-node revocation.
+
 ## [0.0.381.0] - 2026-05-28
 
 ### Changed
