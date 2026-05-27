@@ -280,3 +280,16 @@ func requireTimePtrEqual(t *testing.T, want, got *time.Time) {
 	require.NotNil(t, got)
 	require.True(t, got.Equal(*want), "got %s want %s", *got, *want)
 }
+
+// encodeProtocolCredentialsSnapshot / decodeProtocolCredentialsSnapshot are
+// test-only convenience wrappers over the *State variants (the production
+// snapshot path uses the *State functions directly). Kept in _test.go so the
+// unused linter does not flag them as dead production code.
+func encodeProtocolCredentialsSnapshot(rows []protocred.Credential) ([]byte, error) {
+	return encodeProtocolCredentialsSnapshotState(rows, nil)
+}
+
+func decodeProtocolCredentialsSnapshot(data []byte) ([]protocred.Credential, error) {
+	rows, _, err := decodeProtocolCredentialsSnapshotState(data)
+	return rows, err
+}
