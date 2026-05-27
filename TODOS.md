@@ -287,19 +287,11 @@ Work these in order. Do not run them in parallel.
 - [ ] **Iceberg REST high-concurrency Raft ceiling**: reopen when production
   catalog workloads miss SLOs or the consistency spec for reducing proposals is
   clear.
-- [ ] **Iceberg `/v1/config` secret over plaintext HTTP**: the endpoint
-  publishes the caller's `s3.secret-access-key` in the response JSON. SigV4
-  protects request integrity but not response confidentiality, so a
-  caller hitting the catalog over HTTP exposes their secret in cleartext
-  on the wire. Post-Option-B (caller-identity) the blast radius is the
-  caller's own SA, not an org-wide RoleAdmin SA — but a long-lived key
-  shared across roles still leaks. Reopen when TLS terminates upstream of
-  the catalog and operators want a defense-in-depth gate, OR when a
-  caller running HTTP catalog in prod is observed. Options when
-  reopened: (A) `if !c.IsTLS() { return empty overrides }` — fails closed
-  back to 1832×403 if the operator forgot TLS, (B) docs-only flag in
-  `docs/users/audit-iceberg.md`, (C) require an explicit
-  `--iceberg-allow-http-creds` opt-in for dev.
+- [x] **Iceberg `/v1/config` secret over plaintext HTTP**: fixed by making
+  the HTTP handler publish caller S3 credential overrides only for HTTPS
+  requests. Plain HTTP still returns catalog defaults and `s3.endpoint`, but
+  omits `s3.access-key-id`, `s3.secret-access-key`, and
+  `s3.path-style-access`.
 - [ ] **Iceberg Spark/Trino/PyIceberg client coverage**: promote only after
   real-client REST Catalog smoke tests define which client behaviors are
   supported versus DuckDB-only compatibility.

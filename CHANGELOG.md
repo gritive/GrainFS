@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.371.0] - 2026-05-28
+
+### Fixed
+
+- Iceberg REST catalog config no longer returns caller S3 access keys or secret
+  keys over plaintext HTTP. HTTP clients still receive catalog defaults and the
+  local S3 endpoint, while HTTPS remains the path for credential handoff.
+
 ## [0.0.370.0] - 2026-05-28
 
 ### Changed
