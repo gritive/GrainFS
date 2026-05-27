@@ -441,6 +441,42 @@ func TestKEKStore_HasVersion_SetActiveVersion(t *testing.T) {
 	}
 }
 
+func TestDEKOpenSurvivesKEKRewrapUnderXAES(t *testing.T) {
+	kOld := bytes.Repeat([]byte{0xA0}, KEKSize)
+	kNew := bytes.Repeat([]byte{0xA1}, KEKSize)
+	cid := testClusterID()
+	keeper, err := NewDEKKeeper(kOld, cid)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	plain := []byte("bulk-sealed-before-kek-rewrap")
+	ct, gen, err := keeper.Seal(plain)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	_, origWrap := keeper.Active()
+	aad0 := BuildAAD(DomainDEKFSMWrap, cid, FieldUint32(0), FieldUint32(0))
+	plain0, err := AESGCMOpenWithAAD(kOld, origWrap, aad0)
+	if err != nil {
+		t.Fatalf("unwrap gen-0 with kOld: %v", err)
+	}
+	newWrap0, err := AESGCMSealWithAAD(kNew, plain0, aad0)
+	if err != nil {
+		t.Fatalf("reseal gen-0 with kNew: %v", err)
+	}
+	zeroize(plain0)
+	if err := keeper.InstallKEKRotation(kNew, map[uint32][]byte{0: newWrap0}); err != nil {
+		t.Fatalf("InstallKEKRotation: %v", err)
+	}
+	got, err := keeper.Open(ct, gen)
+	if err != nil {
+		t.Fatalf("Open after KEK rewrap: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("post-rewrap open mismatch: got %q want %q", got, plain)
+	}
+}
+
 func TestDEKKeeperUsesXAESNonceWidth(t *testing.T) {
 	kek := make([]byte, 32)
 	for i := range kek {
