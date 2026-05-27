@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.381.0] - 2026-05-28
+
+### Changed
+
+- E2E test runs now default to two Ginkgo workers. Running `make test-e2e`
+  uses the same parallelism that keeps the suite under the 20-minute target,
+  while still allowing callers to override `E2E_TEST_JOBS` when they need a
+  single-worker diagnostic run.
+
 ## [0.0.380.0] - 2026-05-28
 
 ### Changed
