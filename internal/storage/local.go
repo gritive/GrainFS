@@ -35,7 +35,9 @@ type LocalBackend struct {
 	metaDir          string
 	dataRoots        []string
 	db               *badger.DB
-	encryptor        *encrypt.Encryptor
+	encryptor        *encrypt.Encryptor // retained for Badger meta (D-meta)
+	segEnc           DataEncryptor      // object/segment file data-at-rest seam
+	clusterID        [16]byte           // zero sentinel in D-seg-local; real ID in D-seg-ec
 	dataWAL          DataWAL
 	dataWALDir       string
 	replayingDataWAL bool
@@ -138,13 +140,23 @@ func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor)
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &LocalBackend{
+	b := &LocalBackend{
 		metaDir:    metaDir,
 		dataRoots:  dataRoots,
 		db:         db,
 		encryptor:  enc,
 		dataWALDir: filepath.Join(metaDir, "datawal"),
-	}, nil
+	}
+	if enc != nil {
+		// D-seg-local: EncryptorAdapter over the static key, zero-sentinel
+		// clusterID. D-seg-ec swaps this for a DEKKeeperAdapter + real clusterID.
+		// NOTE: clusterID is bound into every file's AAD, so swapping the
+		// sentinel for a real ID changes the AAD and makes pre-swap files
+		// undecryptable. Safe now (green-field, no production data); D-seg-ec
+		// must wipe/re-encrypt rather than swap in place.
+		b.segEnc = NewEncryptorAdapter(enc, b.clusterID[:])
+	}
+	return b, nil
 }
 
 // Close closes the metadata database.
@@ -174,10 +186,6 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(targetRoot, "data", bucket, key)
 }
 
-func encryptedObjectFileDomain(bucket, key string) string {
-	return "local-object-file:" + bucket + "/" + key
-}
-
 // OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
 // object. It does NOT fall back to peers (there are none in solo mode) and
 // returns os.ErrNotExist when the file is missing — the contract scrubber
@@ -192,8 +200,8 @@ func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, erro
 		return rc, err
 	}
 	objPath := b.objectPath(bucket, key)
-	if b.encryptor != nil {
-		return openEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
+	if b.segEnc != nil {
+		return openEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), obj.Size)
 	}
 	return os.Open(objPath)
 }
@@ -382,9 +390,8 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 		if len(obj.Segments) == 1 {
 			seg := obj.Segments[0]
 			segPath := b.segmentPath(bucket, key, seg.BlobID)
-			if b.encryptor != nil {
-				domain := encryptedObjectFileDomain(bucket, key+"/segments/"+seg.BlobID)
-				rc, err := openEncryptedObjectFile(segPath, b.encryptor, domain, seg.Size)
+			if b.segEnc != nil {
+				rc, err := openEncryptedObjectFile(segPath, b.segEnc, segmentFileAADFields(bucket, key, seg.BlobID), seg.Size)
 				if err != nil {
 					return nil, nil, fmt.Errorf("open encrypted segment: %w", err)
 				}
@@ -404,8 +411,8 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 	// Legacy single-file path for objects predating segments (e.g.
 	// __grainfs_volumes Volume Device blocks written via WriteAt). Range
 	// GETs and Volume Device reads keep using ReadAt directly.
-	if b.encryptor != nil {
-		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
+	if b.segEnc != nil {
+		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.segEnc, objectFileAADFields(bucket, key), obj.Size)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open encrypted object: %w", err)
 		}
@@ -603,9 +610,9 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 	}
 	objPath := b.objectPath(bucket, key)
 	var currentSize int64
-	if b.encryptor != nil {
+	if b.segEnc != nil {
 		currentSize = obj.Size
-		if _, err := truncateEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), currentSize, size); err != nil {
+		if _, err := truncateEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), currentSize, size); err != nil {
 			return fmt.Errorf("truncate encrypted object: %w", err)
 		}
 	} else {
@@ -683,14 +690,14 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		tStage = time.Now()
 	}
 
-	if b.encryptor != nil {
+	if b.segEnc != nil {
 		currentSize := int64(0)
 		if existing, err := b.HeadObject(context.Background(), bucket, key); err == nil {
 			currentSize = existing.Size
 		} else if !errors.Is(err, ErrObjectNotFound) {
 			return nil, err
 		}
-		size, etag, err := writeAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), offset, data, currentSize)
+		size, etag, err := writeAtEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), offset, data, currentSize)
 		if err != nil {
 			return nil, fmt.Errorf("encrypted writeat: %w", err)
 		}
@@ -937,8 +944,8 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 	// Legacy single-file path: pre-segment objects (Volume Device blocks).
 	if obj.Segments == nil {
 		objPath := b.objectPath(bucket, key)
-		if b.encryptor != nil {
-			return readAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size, offset, buf)
+		if b.segEnc != nil {
+			return readAtEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), obj.Size, offset, buf)
 		}
 		f, err := os.Open(objPath)
 		if err != nil {
@@ -994,9 +1001,8 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 
 		segPath := b.segmentPath(bucket, key, seg.BlobID)
 		dst := buf[written : written+chunkLen]
-		if b.encryptor != nil {
-			domain := encryptedObjectFileDomain(bucket, key+"/segments/"+seg.BlobID)
-			n, rerr := readAtEncryptedObjectFile(segPath, b.encryptor, domain, seg.Size, intraOff, dst)
+		if b.segEnc != nil {
+			n, rerr := readAtEncryptedObjectFile(segPath, b.segEnc, segmentFileAADFields(bucket, key, seg.BlobID), seg.Size, intraOff, dst)
 			written += n
 			if rerr != nil && rerr != io.EOF {
 				return written, rerr
@@ -1050,7 +1056,7 @@ func (m localDataWALMaterializer) HasReplacement(ctx context.Context, rec datawa
 	}
 
 	path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
-	if m.b.encryptor == nil {
+	if m.b.segEnc == nil {
 		info, err := os.Stat(path)
 		if os.IsNotExist(err) {
 			return false, nil
@@ -1061,7 +1067,7 @@ func (m localDataWALMaterializer) HasReplacement(ctx context.Context, rec datawa
 		return info.Size() == rec.Size, nil
 	}
 
-	rc, err := openEncryptedObjectFile(path, m.b.encryptor, encryptedObjectFileDomain(rec.Bucket, rec.Key+"/segments/"+rec.Target), rec.Size)
+	rc, err := openEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), rec.Size)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -1083,9 +1089,16 @@ func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		if m.b.encryptor != nil {
-			_, err := writeEncryptedObjectFile(path, m.b.encryptor, encryptedObjectFileDomain(rec.Bucket, rec.Key+"/segments/"+rec.Target), bytes.NewReader(rec.Payload), io.Discard)
-			return err
+		if m.b.segEnc != nil {
+			if _, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), bytes.NewReader(rec.Payload), io.Discard); err != nil {
+				// Drop the partial so WAL recovery re-materializes cleanly
+				// instead of trying to decrypt a half-written segment. Mirrors
+				// WriteSegmentBlob's cleanup; matters once D-seg-ec's
+				// DEKKeeperAdapter makes gen-pinning failures reachable.
+				_ = os.Remove(path)
+				return err
+			}
+			return nil
 		}
 		return os.WriteFile(path, rec.Payload, 0o644)
 	case datawal.OpObjectWriteAt:

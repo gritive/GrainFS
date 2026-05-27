@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.363.0] - 2026-05-27
+
+### Added
+
+- Object and segment encrypted-file storage now flows through the DataEncryptor
+  seam with a self-describing on-disk header (format version + key generation)
+  and position-bound AEAD, groundwork for KEK-envelope key rotation of data at
+  rest.
+
 ## [0.0.362.0] - 2026-05-27
 
 ### Added
