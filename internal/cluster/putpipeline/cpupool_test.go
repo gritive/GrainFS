@@ -94,7 +94,7 @@ func TestCPUPool_OrderedPerShard_FiveStripes(t *testing.T) {
 	}
 }
 
-func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
+func TestCPUPool_ConcatenatedShardIsValidGFSENC3(t *testing.T) {
 	const stripe = 1 << 20
 	enc := testEncryptor(t)
 	in := make(chan StripePlaintext, 8)
@@ -133,7 +133,7 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
 	}
 
 	// For each shard, concatenate every chunk's ciphertext in stripe
-	// order, then confirm the result is a single decodable GFSENC2
+	// order, then confirm the result is a single decodable GFSENC3
 	// stream under that shard's AAD.
 	for shard := 0; shard < 4; shard++ {
 		var concatenated []byte
@@ -149,7 +149,7 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC2(t *testing.T) {
 		aad := []byte(fmt.Sprintf("testbucket/testobj/v1/%d", shard))
 		var plain bytes.Buffer
 		err := eccodec.DecodeEncryptedShard(&plain, bytes.NewReader(concatenated), enc, aad)
-		require.NoError(t, err, "shard %d: concatenated chunks are not one valid GFSENC2 stream", shard)
+		require.NoError(t, err, "shard %d: concatenated chunks are not one valid GFSENC3 stream", shard)
 		require.NotZero(t, plain.Len(), "shard %d decoded to empty", shard)
 	}
 }

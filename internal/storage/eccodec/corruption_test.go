@@ -280,7 +280,7 @@ func TestIsCorruption_RangePath(t *testing.T) {
 	aad := []byte("v2/bucket/key/0")
 	plaintext := bytes.Repeat([]byte("range-read corruption probe "), 64)
 
-	// encodeShard returns a valid GFSENC2 stream for plaintext.
+	// encodeShard returns a valid GFSENC3 stream for plaintext.
 	encodeShard := func(t *testing.T) []byte {
 		t.Helper()
 		var buf bytes.Buffer

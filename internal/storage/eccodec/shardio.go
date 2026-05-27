@@ -55,7 +55,7 @@ func IsCorruption(err error) bool {
 const footerLen = 4
 
 var shardMagic = []byte("GFSCRC1\x00")
-var encryptedShardMagic = []byte("GFSENC2\x00")
+var encryptedShardMagic = []byte("GFSENC3\x00")
 
 var (
 	encryptedPlainChunkPool = sync.Pool{New: func() any {
@@ -71,10 +71,12 @@ var (
 const (
 	DefaultEncryptedChunkSize = 1 << 20
 	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
-	encryptedNoncePrefixLen   = 8
-	encryptedNonceLen         = 12
-	encryptedHeaderLen        = 8 + 4 + encryptedNoncePrefixLen
-	encryptedChunkHeaderLen   = 8
+	// XAES-256-GCM nonce = 20-byte random prefix || 4-byte big-endian chunk counter.
+	// 160-bit random prefix → ~2^80 cross-shard collision bound.
+	encryptedNoncePrefixLen = 20
+	encryptedNonceLen       = 24 // prefix + counter
+	encryptedHeaderLen      = 8 + 4 + encryptedNoncePrefixLen
+	encryptedChunkHeaderLen = 8
 )
 
 // IsEncodedShard reports whether raw bytes carry the current eccodec magic.
@@ -191,7 +193,7 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	}
 }
 
-// EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC2
+// EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC3
 // on-disk format. Bytes passed to Write are buffered until chunkSize is
 // reached, then emitted as a single encrypted chunk (8-byte chunk header +
 // AEAD-sealed payload). Close flushes any pending bytes as a final partial
@@ -373,7 +375,7 @@ func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	return nil
 }
 
-// NewEncryptedShardReader returns a reader that decrypts a GFSENC2 shard one
+// NewEncryptedShardReader returns a reader that decrypts a GFSENC3 shard one
 // chunk at a time. The encrypted header is consumed before the reader is
 // returned; chunk authentication failures are reported by Read.
 func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte) (io.Reader, error) {
@@ -410,7 +412,7 @@ func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte
 }
 
 // NewEncryptedShardRangeReader returns a plaintext reader for [offset,
-// offset+length) without decrypting earlier chunks. It requires the GFSENC2
+// offset+length) without decrypting earlier chunks. It requires the GFSENC3
 // fixed chunk layout produced by EncodeEncryptedShard.
 func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, offset, length int64) (io.Reader, error) {
 	if enc == nil {
