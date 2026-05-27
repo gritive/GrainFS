@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
@@ -63,7 +61,7 @@ func putCiphertextBuf(b []byte) {
 // shared seqGate, no broadcast wakeups.
 type CPUPool struct {
 	in      chan StripePlaintext
-	enc     *encrypt.Encryptor
+	enc     eccodec.ShardEncryptor
 	ecCfg   cluster.ECConfig
 	workers int
 
@@ -85,6 +83,7 @@ type putDispatchState struct {
 	encoders   []*shardEncoder
 	shardChans []chan<- EncryptedShardChunk
 	inbox      chan dispatchMsg
+	failed     []bool // failed[i] true after the first error for shard i; guards exactly-one terminal result
 }
 
 // dispatchMsg carries the result of EC split from a worker to the
@@ -109,8 +108,7 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 	header := cluster.ShardHeader(totalSize)
 	for i := 0; i < n; i++ {
 		buf := new(bytes.Buffer)
-		aad := []byte(bucket + "/" + shardKey + "/" + strconv.Itoa(i))
-		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, aad, eccodec.DefaultEncryptedChunkSize)
+		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, cluster.ShardAADFields(bucket, shardKey, i), eccodec.DefaultEncryptedChunkSize)
 		if err != nil {
 			panic(fmt.Sprintf("cpu pool: build shard encoder %d for put %d: %v", i, putID, err))
 		}
@@ -128,6 +126,7 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 		encoders:   encoders,
 		shardChans: shardChans,
 		inbox:      make(chan dispatchMsg, inboxCap),
+		failed:     make([]bool, n),
 	}
 	p.puts.Store(putID, ps)
 
@@ -241,9 +240,7 @@ func (p *CPUPool) runDispatcher(putID uint64, ps *putDispatchState) {
 				break
 			}
 			delete(pending, expected)
-			if err := p.deliverStripe(putID, ps, cur); err != nil {
-				_ = err
-			}
+			p.deliverStripe(putID, ps, cur)
 			expected++
 		}
 	}
@@ -254,18 +251,34 @@ func (p *CPUPool) runDispatcher(putID uint64, ps *putDispatchState) {
 // resulting EncryptedShardChunk on the shard's channel. Called by the
 // per-PUT dispatcher in strict stripeIdx order, so the chunked writer
 // state is consistent without any external locking.
-func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatchMsg) error {
+//
+// On seal/write error for shard i, failed[i] is set to true, the shard's
+// buffer is discarded, and exactly one error-chunk is sent so DriveActor
+// emits exactly one failed ShardWriteResult per shard. Subsequent stripes
+// for a failed shard are skipped — the failed[i] guard prevents duplicate
+// terminal results, preserving the CommitCoord invariant.
+func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatchMsg) {
 	for i, shard := range msg.shards {
-		if i >= len(ps.encoders) {
-			break
+		if i >= len(ps.encoders) || ps.failed[i] {
+			continue // already terminal-failed: never send a 2nd chunk for this shard
 		}
 		enc := ps.encoders[i]
 		if _, err := enc.w.Write(shard); err != nil {
-			return fmt.Errorf("cpu pool: encrypt put %d shard %d: %w", putID, i, err)
+			ps.failed[i] = true
+			enc.buf.Reset() // discard any buffered ciphertext for the failed shard
+			if i < len(ps.shardChans) {
+				ps.shardChans[i] <- EncryptedShardChunk{PutID: putID, StripeIdx: msg.stripeIdx, ShardIdx: i, LastInPut: msg.lastInPut, Err: fmt.Errorf("cpu pool: encrypt put %d shard %d: %w", putID, i, err)}
+			}
+			continue
 		}
 		if msg.lastInPut {
 			if err := enc.w.Close(); err != nil {
-				return fmt.Errorf("cpu pool: close put %d shard %d: %w", putID, i, err)
+				ps.failed[i] = true
+				enc.buf.Reset()
+				if i < len(ps.shardChans) {
+					ps.shardChans[i] <- EncryptedShardChunk{PutID: putID, StripeIdx: msg.stripeIdx, ShardIdx: i, LastInPut: true, Err: fmt.Errorf("cpu pool: close put %d shard %d: %w", putID, i, err)}
+				}
+				continue
 			}
 		}
 		ciphertext := getCiphertextBuf(enc.buf.Len())
@@ -284,5 +297,4 @@ func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatch
 			LastInPut:  msg.lastInPut,
 		}
 	}
-	return nil
 }

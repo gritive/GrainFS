@@ -14,14 +14,12 @@
 package eccodec
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -58,26 +56,18 @@ const footerLen = 4
 var shardMagic = []byte("GFSCRC1\x00")
 var encryptedShardMagic = []byte("GFSENC3\x00")
 
-var (
-	encryptedPlainChunkPool = sync.Pool{New: func() any {
-		b := make([]byte, DefaultEncryptedChunkSize)
-		return &b
-	}}
-	encryptedCipherChunkPool = sync.Pool{New: func() any {
-		b := make([]byte, 0, DefaultEncryptedChunkSize+32)
-		return &b
-	}}
-)
+var encryptedPlainChunkPool = sync.Pool{New: func() any {
+	b := make([]byte, DefaultEncryptedChunkSize)
+	return &b
+}}
 
 const (
 	DefaultEncryptedChunkSize = 1 << 20
 	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
-	// XAES-256-GCM nonce = 20-byte random prefix || 4-byte big-endian chunk counter.
-	// 160-bit random prefix → ~2^80 cross-shard collision bound.
-	encryptedNoncePrefixLen = 20
-	encryptedNonceLen       = 24 // prefix + counter
-	encryptedHeaderLen      = 8 + 4 + encryptedNoncePrefixLen
-	encryptedChunkHeaderLen = 8
+	// GFSENC3 header: magic(8) + format_version(2) + dek_gen(4) + chunk_size(4) + chunk_overhead(2).
+	encryptedShardFormatVersion = uint16(1)
+	encryptedHeaderLen          = 8 + 2 + 4 + 4 + 2
+	encryptedChunkHeaderLen     = 8
 )
 
 // IsEncodedShard reports whether raw bytes carry the current eccodec magic.
@@ -105,7 +95,11 @@ func IsEncryptedShard(raw []byte) bool {
 	return true
 }
 
-func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+// EncodeEncryptedShard streams r into the GFSENC3 format, sealing each chunk
+// via enc under DomainShard with baseFields plus the per-chunk ordinal. All
+// chunks are sealed under one pinned generation (chunk 0's); a later chunk at a
+// different gen fails the write so the header's dek_gen describes every chunk.
+func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) error {
 	if enc == nil {
 		return fmt.Errorf("encrypted shard encode requires encryptor")
 	}
@@ -114,19 +108,6 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 	}
 	if chunkSize > maxEncryptedChunkSize {
 		return fmt.Errorf("encrypted shard chunk size too large: %d", chunkSize)
-	}
-
-	var noncePrefix [encryptedNoncePrefixLen]byte
-	if _, err := io.ReadFull(rand.Reader, noncePrefix[:]); err != nil {
-		return fmt.Errorf("generate nonce prefix: %w", err)
-	}
-
-	var header [encryptedHeaderLen]byte
-	copy(header[:], encryptedShardMagic)
-	binary.LittleEndian.PutUint32(header[len(encryptedShardMagic):], uint32(chunkSize))
-	copy(header[len(encryptedShardMagic)+4:], noncePrefix[:])
-	if _, err := w.Write(header[:]); err != nil {
-		return fmt.Errorf("write encrypted shard header: %w", err)
 	}
 
 	plainPtr := encryptedPlainChunkPool.Get().(*[]byte)
@@ -141,93 +122,95 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 		encryptedPlainChunkPool.Put(plainPtr)
 	}()
 
-	cipherPtr := encryptedCipherChunkPool.Get().(*[]byte)
-	cipherBuf := *cipherPtr
-	if cap(cipherBuf) < chunkSize+enc.AEADOverhead() {
-		cipherBuf = make([]byte, 0, chunkSize+enc.AEADOverhead())
-	}
-	defer func() {
-		*cipherPtr = cipherBuf[:0]
-		encryptedCipherChunkPool.Put(cipherPtr)
-	}()
-
-	chunkIdx := uint32(0)
+	var (
+		chunkIdx      uint32
+		pinnedGen     uint32
+		chunkOverhead uint16
+		headerWritten bool
+	)
 	for {
-		stageStart := time.Now()
 		n, readErr := io.ReadFull(r, plain)
 		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("read shard chunk: %w", readErr)
 		}
 		if n == 0 && errors.Is(readErr, io.EOF) {
-			return nil
+			break
 		}
-		observeEncryptedShardStage("read_chunk", stageStart)
-
-		nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
-		aad := encryptedChunkAAD(aadBase, chunkIdx)
-		stageStart = time.Now()
-		ciphertext, err := enc.SealWithNonceAAD(cipherBuf[:0], nonce[:], plain[:n], aad)
+		sealed, gen, err := enc.Seal(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n])
 		if err != nil {
 			return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
 		}
-		observeEncryptedShardStage("seal_chunk", stageStart)
-
+		over := len(sealed) - n
+		if over < 0 || over > int(^uint16(0)) {
+			return fmt.Errorf("encrypt shard chunk %d: implausible overhead %d", chunkIdx, over)
+		}
+		if chunkIdx == 0 {
+			pinnedGen = gen
+			chunkOverhead = uint16(over)
+			if err := writeEncryptedShardHeader(w, pinnedGen, uint32(chunkSize), chunkOverhead); err != nil {
+				return err
+			}
+			headerWritten = true
+		} else {
+			if gen != pinnedGen {
+				return fmt.Errorf("encrypt shard chunk %d sealed at gen %d, pinned %d", chunkIdx, gen, pinnedGen)
+			}
+			if uint16(over) != chunkOverhead {
+				return fmt.Errorf("encrypt shard chunk %d overhead %d != pinned %d", chunkIdx, over, chunkOverhead)
+			}
+		}
 		var chunkHeader [encryptedChunkHeaderLen]byte
 		binary.LittleEndian.PutUint32(chunkHeader[0:4], uint32(n))
-		binary.LittleEndian.PutUint32(chunkHeader[4:8], uint32(len(ciphertext)))
-		stageStart = time.Now()
+		binary.LittleEndian.PutUint32(chunkHeader[4:8], uint32(len(sealed)))
 		if _, err := w.Write(chunkHeader[:]); err != nil {
 			return fmt.Errorf("write shard chunk header: %w", err)
 		}
-		if _, err := w.Write(ciphertext); err != nil {
+		if _, err := w.Write(sealed); err != nil {
 			return fmt.Errorf("write shard chunk: %w", err)
 		}
-		observeEncryptedShardStage("write_chunk", stageStart)
-
 		chunkIdx++
 		if chunkIdx == 0 {
 			return fmt.Errorf("encrypted shard has too many chunks")
 		}
 		if errors.Is(readErr, io.ErrUnexpectedEOF) || errors.Is(readErr, io.EOF) {
-			return nil
+			break
 		}
 	}
+	if !headerWritten {
+		// Empty shard: still emit a valid header (gen 0, overhead 0) so decode succeeds.
+		if err := writeEncryptedShardHeader(w, pinnedGen, uint32(chunkSize), chunkOverhead); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC3
 // on-disk format. Bytes passed to Write are buffered until chunkSize is
 // reached, then emitted as a single encrypted chunk (8-byte chunk header +
 // AEAD-sealed payload). Close flushes any pending bytes as a final partial
-// chunk. The result is byte-for-byte identical to feeding the same data
-// through EncodeEncryptedShard with the same chunkSize and AAD, so callers
-// can rename a fully-written file straight into a final shard location
-// without re-encoding.
+// chunk. The result is a GFSENC3 stream decodable by DecodeEncryptedShard
+// with the same baseFields.
 //
 // Single-use: NOT safe for concurrent Write calls. Always call Close before
 // reading the underlying writer.
 type EncryptedShardChunkedWriter struct {
-	w           io.Writer
-	enc         *encrypt.Encryptor
-	aadBase     []byte
-	chunkSize   int
-	noncePrefix [encryptedNoncePrefixLen]byte
-	headerSent  bool
-	chunkIdx    uint32
-	plainBuf    []byte // pending plaintext, len ≤ chunkSize
-	plainPtr    *[]byte
-	cipherBuf   []byte // reused cipher scratch
-	cipherPtr   *[]byte
-	closed      bool
-	// stickyErr is set when a permanent error (counter wrap, I/O fault) occurs.
-	// Any subsequent Write or Close returns this error without sealing further
-	// chunks, preventing nonce reuse after a chunk-counter wrap.
-	stickyErr error
+	w             io.Writer
+	enc           ShardEncryptor
+	baseFields    []encrypt.AADField
+	chunkSize     int
+	headerWritten bool
+	pinnedGen     uint32
+	chunkOverhead uint16
+	chunkIdx      uint32
+	plainBuf      []byte // pending plaintext, len ≤ chunkSize
+	plainPtr      *[]byte
+	closed        bool
 }
 
 // NewEncryptedShardChunkedWriter constructs a streaming writer that produces
-// the same on-disk format as EncodeEncryptedShard. The nonce prefix is
-// generated lazily so each constructor call yields a fresh stream.
-func NewEncryptedShardChunkedWriter(w io.Writer, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) (*EncryptedShardChunkedWriter, error) {
+// a GFSENC3 stream decodable by DecodeEncryptedShard with the same baseFields.
+func NewEncryptedShardChunkedWriter(w io.Writer, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) (*EncryptedShardChunkedWriter, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("encrypted shard chunked writer requires encryptor")
 	}
@@ -238,13 +221,10 @@ func NewEncryptedShardChunkedWriter(w io.Writer, enc *encrypt.Encryptor, aadBase
 		return nil, fmt.Errorf("encrypted shard chunk size too large: %d", chunkSize)
 	}
 	out := &EncryptedShardChunkedWriter{
-		w:         w,
-		enc:       enc,
-		aadBase:   append([]byte(nil), aadBase...),
-		chunkSize: chunkSize,
-	}
-	if _, err := io.ReadFull(rand.Reader, out.noncePrefix[:]); err != nil {
-		return nil, fmt.Errorf("generate nonce prefix: %w", err)
+		w:          w,
+		enc:        enc,
+		baseFields: append([]encrypt.AADField(nil), baseFields...),
+		chunkSize:  chunkSize,
 	}
 	out.plainPtr = encryptedPlainChunkPool.Get().(*[]byte)
 	plain := *out.plainPtr
@@ -252,12 +232,6 @@ func NewEncryptedShardChunkedWriter(w io.Writer, enc *encrypt.Encryptor, aadBase
 		plain = make([]byte, 0, chunkSize)
 	}
 	out.plainBuf = plain[:0]
-	out.cipherPtr = encryptedCipherChunkPool.Get().(*[]byte)
-	cipher := *out.cipherPtr
-	if cap(cipher) < chunkSize+enc.AEADOverhead() {
-		cipher = make([]byte, 0, chunkSize+enc.AEADOverhead())
-	}
-	out.cipherBuf = cipher[:0]
 	return out, nil
 }
 
@@ -266,15 +240,6 @@ func NewEncryptedShardChunkedWriter(w io.Writer, enc *encrypt.Encryptor, aadBase
 func (w *EncryptedShardChunkedWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, fmt.Errorf("encrypted shard chunked writer: write after close")
-	}
-	if w.stickyErr != nil {
-		return 0, w.stickyErr
-	}
-	if !w.headerSent {
-		if err := w.emitHeader(); err != nil {
-			return 0, err
-		}
-		w.headerSent = true
 	}
 	written := 0
 	for len(p) > 0 {
@@ -301,67 +266,60 @@ func (w *EncryptedShardChunkedWriter) Close() error {
 	if w.closed {
 		return nil
 	}
-	if w.stickyErr != nil {
-		w.closed = true
-		w.releasePools()
-		return w.stickyErr
-	}
 	w.closed = true
 	defer w.releasePools()
-	if !w.headerSent {
-		if err := w.emitHeader(); err != nil {
-			return err
-		}
-		w.headerSent = true
-	}
 	if len(w.plainBuf) > 0 {
 		if err := w.emitChunk(); err != nil {
 			return err
 		}
 	}
-	return nil
-}
-
-func (w *EncryptedShardChunkedWriter) emitHeader() error {
-	var header [encryptedHeaderLen]byte
-	copy(header[:], encryptedShardMagic)
-	binary.LittleEndian.PutUint32(header[len(encryptedShardMagic):], uint32(w.chunkSize))
-	copy(header[len(encryptedShardMagic)+4:], w.noncePrefix[:])
-	if _, err := w.w.Write(header[:]); err != nil {
-		return fmt.Errorf("write encrypted shard header: %w", err)
+	if !w.headerWritten {
+		// Empty shard: emit a valid header (gen 0, overhead 0).
+		if err := writeEncryptedShardHeader(w.w, 0, uint32(w.chunkSize), 0); err != nil {
+			return err
+		}
+		w.headerWritten = true
 	}
 	return nil
 }
 
 func (w *EncryptedShardChunkedWriter) emitChunk() error {
-	// Guard against chunk-counter wrap BEFORE sealing: sealing at chunkIdx
-	// math.MaxUint32 would produce nonce[prefix||0xFFFFFFFF], and the next
-	// call (if we incremented past it) would reuse nonce[prefix||0x00000000]
-	// — nonce reuse under XAES-256-GCM is catastrophic. Refuse early and
-	// poison the writer so no further chunk can be sealed.
-	if w.chunkIdx == math.MaxUint32 {
-		w.stickyErr = fmt.Errorf("encrypted shard chunk counter exhausted (2^32-1); refusing to seal chunk to prevent nonce reuse")
-		return w.stickyErr
-	}
-	nonce := encryptedChunkNonce(w.noncePrefix, w.chunkIdx)
-	aad := encryptedChunkAAD(w.aadBase, w.chunkIdx)
-	ciphertext, err := w.enc.SealWithNonceAAD(w.cipherBuf[:0], nonce[:], w.plainBuf, aad)
+	sealed, gen, err := w.enc.Seal(encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf)
 	if err != nil {
 		return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
 	}
-	w.cipherBuf = ciphertext
+	over := len(sealed) - len(w.plainBuf)
+	if over < 0 || over > int(^uint16(0)) {
+		return fmt.Errorf("encrypt shard chunk %d: implausible overhead %d", w.chunkIdx, over)
+	}
+	if !w.headerWritten {
+		w.pinnedGen = gen
+		w.chunkOverhead = uint16(over)
+		if err := writeEncryptedShardHeader(w.w, w.pinnedGen, uint32(w.chunkSize), w.chunkOverhead); err != nil {
+			return err
+		}
+		w.headerWritten = true
+	} else {
+		if gen != w.pinnedGen {
+			return fmt.Errorf("encrypt shard chunk %d sealed at gen %d, pinned %d", w.chunkIdx, gen, w.pinnedGen)
+		}
+		if uint16(over) != w.chunkOverhead {
+			return fmt.Errorf("encrypt shard chunk %d overhead %d != pinned %d", w.chunkIdx, over, w.chunkOverhead)
+		}
+	}
 	var chunkHeader [encryptedChunkHeaderLen]byte
 	binary.LittleEndian.PutUint32(chunkHeader[:4], uint32(len(w.plainBuf)))
-	binary.LittleEndian.PutUint32(chunkHeader[4:], uint32(len(ciphertext)))
+	binary.LittleEndian.PutUint32(chunkHeader[4:], uint32(len(sealed)))
 	if _, err := w.w.Write(chunkHeader[:]); err != nil {
 		return fmt.Errorf("write shard chunk header: %w", err)
 	}
-	if _, err := w.w.Write(ciphertext); err != nil {
+	if _, err := w.w.Write(sealed); err != nil {
 		return fmt.Errorf("write shard chunk: %w", err)
 	}
 	w.chunkIdx++
-	// The counter can no longer wrap to zero: the MaxUint32 guard above
-	// prevents sealing that last index, so chunkIdx == 0 here is unreachable.
+	if w.chunkIdx == 0 {
+		return fmt.Errorf("encrypted shard has too many chunks")
+	}
 	w.plainBuf = w.plainBuf[:0]
 	return nil
 }
@@ -374,16 +332,10 @@ func (w *EncryptedShardChunkedWriter) releasePools() {
 		w.plainPtr = nil
 		w.plainBuf = nil
 	}
-	if w.cipherPtr != nil {
-		*w.cipherPtr = w.cipherBuf[:0]
-		encryptedCipherChunkPool.Put(w.cipherPtr)
-		w.cipherPtr = nil
-		w.cipherBuf = nil
-	}
 }
 
-func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadBase []byte) error {
-	er, err := NewEncryptedShardReader(r, enc, aadBase)
+func DecodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField) error {
+	er, err := NewEncryptedShardReader(r, enc, baseFields)
 	if err != nil {
 		return err
 	}
@@ -399,43 +351,28 @@ func DecodeEncryptedShard(w io.Writer, r io.Reader, enc *encrypt.Encryptor, aadB
 // NewEncryptedShardReader returns a reader that decrypts a GFSENC3 shard one
 // chunk at a time. The encrypted header is consumed before the reader is
 // returned; chunk authentication failures are reported by Read.
-func NewEncryptedShardReader(r io.Reader, enc *encrypt.Encryptor, aadBase []byte) (io.Reader, error) {
+func NewEncryptedShardReader(r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField) (io.Reader, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("encrypted shard decode requires encryptor")
 	}
-	var header [encryptedHeaderLen]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		// EOF/ErrUnexpectedEOF here means the file is shorter than the fixed
-		// header the format declares: truncation → corruption. A non-EOF
-		// error is a live I/O fault (EIO etc.) and stays transient.
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, fmt.Errorf("read encrypted shard header: %w: %w", ErrShardCorrupt, err)
-		}
-		return nil, fmt.Errorf("read encrypted shard header: %w", err)
+	gen, chunkSize, overhead, err := readEncryptedShardHeader(r)
+	if err != nil {
+		return nil, err
 	}
-	if !IsEncryptedShard(header[:]) {
-		return nil, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
-	}
-	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
-	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return nil, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
-	}
-	var noncePrefix [encryptedNoncePrefixLen]byte
-	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
-
 	return &encryptedShardReader{
-		r:           r,
-		enc:         enc,
-		aadBase:     aadBase,
-		chunkSize:   chunkSize,
-		noncePrefix: noncePrefix,
+		r:          r,
+		enc:        enc,
+		baseFields: baseFields,
+		gen:        gen,
+		chunkSize:  chunkSize,
+		overhead:   overhead,
 	}, nil
 }
 
 // NewEncryptedShardRangeReader returns a plaintext reader for [offset,
 // offset+length) without decrypting earlier chunks. It requires the GFSENC3
 // fixed chunk layout produced by EncodeEncryptedShard.
-func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, offset, length int64) (io.Reader, error) {
+func NewEncryptedShardRangeReader(r io.ReaderAt, enc ShardEncryptor, baseFields []encrypt.AADField, offset, length int64) (io.Reader, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("encrypted shard decode requires encryptor")
 	}
@@ -445,8 +382,8 @@ func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase
 	if length < 0 {
 		return nil, fmt.Errorf("negative encrypted shard length %d", length)
 	}
-	var header [encryptedHeaderLen]byte
-	if _, err := r.ReadAt(header[:], 0); err != nil {
+	var hdr [encryptedHeaderLen]byte
+	if _, err := r.ReadAt(hdr[:], 0); err != nil {
 		// ReadAt reports io.EOF when the file is shorter than the fixed header
 		// it must read: truncation → corruption. A non-EOF error is a live I/O
 		// fault (EIO etc.) and stays transient.
@@ -455,31 +392,26 @@ func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase
 		}
 		return nil, fmt.Errorf("read encrypted shard header: %w", err)
 	}
-	if !IsEncryptedShard(header[:]) {
-		return nil, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
+	gen, chunkSize, overhead, err := parseEncryptedShardHeader(hdr[:])
+	if err != nil {
+		return nil, err
 	}
-	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
-	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return nil, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
-	}
-	var noncePrefix [encryptedNoncePrefixLen]byte
-	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
 
 	return &encryptedShardRangeReader{
-		r:           r,
-		enc:         enc,
-		aadBase:     aadBase,
-		chunkSize:   chunkSize,
-		noncePrefix: noncePrefix,
-		pos:         offset,
-		remaining:   length,
+		r:          r,
+		enc:        enc,
+		baseFields: baseFields,
+		gen:        gen,
+		chunkSize:  chunkSize,
+		overhead:   overhead,
+		pos:        offset,
+		remaining:  length,
 	}, nil
 }
 
 // ReadEncryptedShardRangeAt decrypts plaintext bytes from an encrypted shard
-// directly into dst. It still authenticates full encrypted chunks, but reuses
-// pooled chunk buffers to avoid per-ReadAt MiB-scale allocation churn.
-func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, offset int64, dst []byte) (int, error) {
+// directly into dst. It authenticates full encrypted chunks.
+func ReadEncryptedShardRangeAt(r io.ReaderAt, enc ShardEncryptor, baseFields []encrypt.AADField, offset int64, dst []byte) (int, error) {
 	if enc == nil {
 		return 0, fmt.Errorf("encrypted shard decode requires encryptor")
 	}
@@ -489,8 +421,8 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	if len(dst) == 0 {
 		return 0, nil
 	}
-	var header [encryptedHeaderLen]byte
-	if _, err := r.ReadAt(header[:], 0); err != nil {
+	var hdr [encryptedHeaderLen]byte
+	if _, err := r.ReadAt(hdr[:], 0); err != nil {
 		// ReadAt reports io.EOF when the file is shorter than the fixed header
 		// it must read: truncation → corruption. A non-EOF error is a live I/O
 		// fault (EIO etc.) and stays transient.
@@ -499,34 +431,15 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 		}
 		return 0, fmt.Errorf("read encrypted shard header: %w", err)
 	}
-	if !IsEncryptedShard(header[:]) {
-		return 0, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
+	gen, chunkSize, overhead, err := parseEncryptedShardHeader(hdr[:])
+	if err != nil {
+		return 0, err
 	}
-	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
-	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
-		return 0, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
-	}
-	var noncePrefix [encryptedNoncePrefixLen]byte
-	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
-
-	plainPtr := encryptedPlainChunkPool.Get().(*[]byte)
-	cipherPtr := encryptedCipherChunkPool.Get().(*[]byte)
-	plainBuf := *plainPtr
-	cipherBuf := *cipherPtr
-	defer func() {
-		if cap(plainBuf) > 0 {
-			clear(plainBuf[:cap(plainBuf)])
-		}
-		*plainPtr = plainBuf[:0]
-		encryptedPlainChunkPool.Put(plainPtr)
-		*cipherPtr = cipherBuf[:0]
-		encryptedCipherChunkPool.Put(cipherPtr)
-	}()
 
 	done := 0
 	pos := offset
 	for done < len(dst) {
-		n, err := readEncryptedShardChunkAt(r, enc, aadBase, noncePrefix, chunkSize, pos, dst[done:], &plainBuf, &cipherBuf)
+		n, err := readEncryptedShardChunkAt(r, enc, baseFields, gen, overhead, chunkSize, pos, dst[done:])
 		done += n
 		pos += int64(n)
 		if err != nil {
@@ -544,7 +457,7 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	return done, nil
 }
 
-func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, noncePrefix [encryptedNoncePrefixLen]byte, chunkSize uint32, pos int64, dst []byte, plainBuf, cipherBuf *[]byte) (int, error) {
+func readEncryptedShardChunkAt(r io.ReaderAt, enc ShardEncryptor, baseFields []encrypt.AADField, gen uint32, overhead uint16, chunkSize uint32, pos int64, dst []byte) (int, error) {
 	chunkSize64 := int64(chunkSize)
 	chunkIdx64 := pos / chunkSize64
 	if chunkIdx64 > int64(^uint32(0)) {
@@ -552,7 +465,7 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	}
 	chunkIdx := uint32(chunkIdx64)
 	inChunk := int(pos % chunkSize64)
-	fullCipherLen := int64(chunkSize) + int64(enc.AEADOverhead())
+	fullCipherLen := int64(chunkSize) + int64(overhead)
 	chunkFileOffset := int64(encryptedHeaderLen) + chunkIdx64*(int64(encryptedChunkHeaderLen)+fullCipherLen)
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
@@ -580,8 +493,8 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	if plainLen > chunkSize {
 		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, chunkIdx, plainLen, chunkSize)
 	}
-	if cipherLen < plainLen || cipherLen > plainLen+uint32(enc.AEADOverhead()) {
-		return 0, fmt.Errorf("%w: invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen)
+	if cipherLen != plainLen+uint32(overhead) {
+		return 0, fmt.Errorf("%w: encrypted shard chunk %d ciphertext length %d != %d+%d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen, overhead)
 	}
 	if inChunk >= int(plainLen) {
 		// Clean end-of-stream at a chunk boundary: NOT corruption. The caller
@@ -589,10 +502,7 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 		return 0, io.EOF
 	}
 
-	if cap(*cipherBuf) < int(cipherLen) {
-		*cipherBuf = make([]byte, cipherLen)
-	}
-	ciphertext := (*cipherBuf)[:cipherLen]
+	ciphertext := make([]byte, cipherLen)
 	if _, err := r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
 		// The header declared cipherLen bytes; a short ReadAt (io.EOF) means the
 		// payload is truncated → corruption. Other errors are transient.
@@ -601,58 +511,39 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 		}
 		return 0, fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
-	nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
-	aad := encryptedChunkAAD(aadBase, chunkIdx)
-	if inChunk == 0 && len(dst) >= int(plainLen) {
-		// AEAD auth failure ⟹ tampered/corrupt bytes. Gating audit (same as the
-		// streaming reader): ShardService.encryptor is a single static
-		// *encrypt.Encryptor built from one --encryption-key-file with no
-		// versioned data-shard keystore or rotation on this read path, and the
-		// AAD is deterministic from bucket/key/shardIdx, so an Open failure on an
-		// owned shard is corruption, not a key-version race. Re-audit if the
-		// Phase B keystore/DEK envelope is ever wired into ShardService.
-		plaintext, err := enc.OpenWithNonceAAD(dst[:0], nonce[:], ciphertext, aad)
-		if err != nil {
-			return 0, fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
-		}
-		if uint32(len(plaintext)) != plainLen {
-			return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
-		}
-		return len(plaintext), nil
-	}
-	if cap(*plainBuf) < int(plainLen) {
-		*plainBuf = make([]byte, plainLen)
-	}
-	plaintext, err := enc.OpenWithNonceAAD((*plainBuf)[:0], nonce[:], ciphertext, aad)
+	// seam Open failure on an owned shard = corruption, not a key-version race;
+	// re-audit when DEKKeeperAdapter is wired in slice C.
+	plaintext, err := enc.Open(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), gen, ciphertext)
 	if err != nil {
 		return 0, fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
 		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
 	}
-	*plainBuf = plaintext
 
 	end := len(plaintext)
 	if max := inChunk + len(dst); max < end {
 		end = max
 	}
-	return copy(dst, plaintext[inChunk:end]), nil
+	n := copy(dst, plaintext[inChunk:end])
+	// Zero the decrypted plaintext (incl. the skipped prefix/suffix) now that the
+	// requested bytes are in dst, so it does not linger in the fresh Open slice.
+	clear(plaintext)
+	return n, nil
 }
 
 type encryptedShardReader struct {
-	r           io.Reader
-	enc         *encrypt.Encryptor
-	aadBase     []byte
-	chunkSize   uint32
-	noncePrefix [encryptedNoncePrefixLen]byte
-	chunkIdx    uint32
-	plain       []byte
-	plainPtr    *[]byte
-	cipherPtr   *[]byte
-	plainBuf    []byte
-	cipherBuf   []byte
-	done        bool
-	closed      bool
+	r          io.Reader
+	enc        ShardEncryptor
+	baseFields []encrypt.AADField
+	chunkSize  uint32
+	gen        uint32
+	overhead   uint16
+	chunkIdx   uint32
+	plain      []byte // current read window into plainFull
+	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
+	done       bool
+	closed     bool
 }
 
 func (r *encryptedShardReader) Read(p []byte) (int, error) {
@@ -677,22 +568,13 @@ func (r *encryptedShardReader) Close() error {
 		return nil
 	}
 	r.closed = true
+	// The seam's Open returns a fresh plaintext slice; zero the full backing
+	// slice (not just the unread window) so decrypted bytes do not linger.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
+	}
 	r.plain = nil
-	if r.plainPtr != nil {
-		if cap(r.plainBuf) > 0 {
-			clear(r.plainBuf[:cap(r.plainBuf)])
-		}
-		*r.plainPtr = r.plainBuf[:0]
-		encryptedPlainChunkPool.Put(r.plainPtr)
-		r.plainPtr = nil
-		r.plainBuf = nil
-	}
-	if r.cipherPtr != nil {
-		*r.cipherPtr = r.cipherBuf[:0]
-		encryptedCipherChunkPool.Put(r.cipherPtr)
-		r.cipherPtr = nil
-		r.cipherBuf = nil
-	}
+	r.plainFull = nil
 	return nil
 }
 
@@ -716,18 +598,10 @@ func (r *encryptedShardReader) loadChunk() error {
 	if plainLen > r.chunkSize {
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, r.chunkIdx, plainLen, r.chunkSize)
 	}
-	if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
-		return fmt.Errorf("%w: invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", ErrShardCorrupt, r.chunkIdx, cipherLen, plainLen)
+	if cipherLen != plainLen+uint32(r.overhead) {
+		return fmt.Errorf("%w: encrypted shard chunk %d ciphertext length %d != %d+%d", ErrShardCorrupt, r.chunkIdx, cipherLen, plainLen, r.overhead)
 	}
-
-	if r.cipherPtr == nil {
-		r.cipherPtr = encryptedCipherChunkPool.Get().(*[]byte)
-		r.cipherBuf = *r.cipherPtr
-	}
-	if cap(r.cipherBuf) < int(cipherLen) {
-		r.cipherBuf = make([]byte, cipherLen)
-	}
-	ciphertext := r.cipherBuf[:cipherLen]
+	ciphertext := make([]byte, cipherLen)
 	if _, err := io.ReadFull(r.r, ciphertext); err != nil {
 		// The header declared cipherLen bytes; a short read means the payload
 		// is truncated → corruption. Other errors are transient I/O faults.
@@ -736,30 +610,20 @@ func (r *encryptedShardReader) loadChunk() error {
 		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
-	nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
-	aad := encryptedChunkAAD(r.aadBase, r.chunkIdx)
-	if r.plainPtr == nil {
-		r.plainPtr = encryptedPlainChunkPool.Get().(*[]byte)
-		r.plainBuf = *r.plainPtr
-	}
-	if cap(r.plainBuf) < int(plainLen) {
-		r.plainBuf = make([]byte, plainLen)
-	}
-	// AEAD auth failure ⟹ tampered/corrupt ciphertext, header, or AAD. Gating
-	// audit: ShardService.encryptor is a single static *encrypt.Encryptor built
-	// from one --encryption-key-file (serveruntime/encryption_key.go); there is
-	// no versioned data-shard keystore or rotation on this read path, and the
-	// AAD is deterministic from bucket/key/shardIdx. So an Open failure on an
-	// owned shard cannot be a key-version race → it is corruption. Re-audit if
-	// the Phase B keystore/DEK envelope is ever wired into ShardService.
-	plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
+	// seam Open failure on an owned shard = corruption, not a key-version race;
+	// re-audit when DEKKeeperAdapter is wired in slice C.
+	plaintext, err := r.enc.Open(encrypt.DomainShard, chunkFields(r.baseFields, r.chunkIdx), r.gen, ciphertext)
 	if err != nil {
 		return fmt.Errorf("decrypt shard chunk %d: %w: %w", r.chunkIdx, ErrShardCorrupt, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, r.chunkIdx, len(plaintext), plainLen)
 	}
-	r.plainBuf = plaintext[:0]
+	// Zero the previous chunk's decrypted plaintext before dropping it.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
+	}
+	r.plainFull = plaintext
 	r.plain = plaintext
 	r.chunkIdx++
 	if r.chunkIdx == 0 {
@@ -769,19 +633,17 @@ func (r *encryptedShardReader) loadChunk() error {
 }
 
 type encryptedShardRangeReader struct {
-	r           io.ReaderAt
-	enc         *encrypt.Encryptor
-	aadBase     []byte
-	chunkSize   uint32
-	noncePrefix [encryptedNoncePrefixLen]byte
-	pos         int64
-	remaining   int64
-	plain       []byte
-	plainPtr    *[]byte
-	cipherPtr   *[]byte
-	plainBuf    []byte
-	cipherBuf   []byte
-	closed      bool
+	r          io.ReaderAt
+	enc        ShardEncryptor
+	baseFields []encrypt.AADField
+	gen        uint32
+	chunkSize  uint32
+	overhead   uint16
+	pos        int64
+	remaining  int64
+	plain      []byte // [inChunk:end] read window into plainFull
+	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
+	closed     bool
 }
 
 func (r *encryptedShardRangeReader) Read(p []byte) (int, error) {
@@ -811,22 +673,13 @@ func (r *encryptedShardRangeReader) Close() error {
 		return nil
 	}
 	r.closed = true
+	// r.plain is only the [inChunk:end] view; zero the full backing slice so the
+	// skipped prefix and trailing suffix of the decrypted chunk are cleared too.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
+	}
 	r.plain = nil
-	if r.plainPtr != nil {
-		if cap(r.plainBuf) > 0 {
-			clear(r.plainBuf[:cap(r.plainBuf)])
-		}
-		*r.plainPtr = r.plainBuf[:0]
-		encryptedPlainChunkPool.Put(r.plainPtr)
-		r.plainPtr = nil
-		r.plainBuf = nil
-	}
-	if r.cipherPtr != nil {
-		*r.cipherPtr = r.cipherBuf[:0]
-		encryptedCipherChunkPool.Put(r.cipherPtr)
-		r.cipherPtr = nil
-		r.cipherBuf = nil
-	}
+	r.plainFull = nil
 	return nil
 }
 
@@ -838,7 +691,7 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	}
 	chunkIdx := uint32(chunkIdx64)
 	inChunk := int(r.pos % chunkSize)
-	fullCipherLen := int64(r.chunkSize) + int64(r.enc.AEADOverhead())
+	fullCipherLen := int64(r.chunkSize) + int64(r.overhead)
 	chunkFileOffset := int64(encryptedHeaderLen) + chunkIdx64*(int64(encryptedChunkHeaderLen)+fullCipherLen)
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
@@ -861,22 +714,15 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	if plainLen > r.chunkSize {
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, chunkIdx, plainLen, r.chunkSize)
 	}
-	if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
-		return fmt.Errorf("%w: invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen)
+	if cipherLen != plainLen+uint32(r.overhead) {
+		return fmt.Errorf("%w: encrypted shard chunk %d ciphertext length %d != %d+%d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen, r.overhead)
 	}
 	if inChunk >= int(plainLen) {
 		// Clean end-of-stream at a chunk boundary: NOT corruption.
 		return io.EOF
 	}
 
-	if r.cipherPtr == nil {
-		r.cipherPtr = encryptedCipherChunkPool.Get().(*[]byte)
-		r.cipherBuf = *r.cipherPtr
-	}
-	if cap(r.cipherBuf) < int(cipherLen) {
-		r.cipherBuf = make([]byte, cipherLen)
-	}
-	ciphertext := r.cipherBuf[:cipherLen]
+	ciphertext := make([]byte, cipherLen)
 	if _, err := r.r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
 		// The header declared cipherLen bytes; a short ReadAt (io.EOF) means the
 		// payload is truncated → corruption. Other errors are transient.
@@ -885,23 +731,9 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
-	nonce := encryptedChunkNonce(r.noncePrefix, chunkIdx)
-	aad := encryptedChunkAAD(r.aadBase, chunkIdx)
-	if r.plainPtr == nil {
-		r.plainPtr = encryptedPlainChunkPool.Get().(*[]byte)
-		r.plainBuf = *r.plainPtr
-	}
-	if cap(r.plainBuf) < int(plainLen) {
-		r.plainBuf = make([]byte, plainLen)
-	}
-	// AEAD auth failure ⟹ tampered/corrupt bytes. Gating audit (same as the
-	// streaming reader): ShardService.encryptor is a single static
-	// *encrypt.Encryptor built from one --encryption-key-file with no versioned
-	// data-shard keystore or rotation on this read path, and the AAD is
-	// deterministic from bucket/key/shardIdx, so an Open failure on an owned
-	// shard is corruption, not a key-version race. Re-audit if the Phase B
-	// keystore/DEK envelope is ever wired into ShardService.
-	plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
+	// seam Open failure on an owned shard = corruption, not a key-version race;
+	// re-audit when DEKKeeperAdapter is wired in slice C.
+	plaintext, err := r.enc.Open(encrypt.DomainShard, chunkFields(r.baseFields, chunkIdx), r.gen, ciphertext)
 	if err != nil {
 		return fmt.Errorf("decrypt shard chunk %d: %w: %w", chunkIdx, ErrShardCorrupt, err)
 	}
@@ -913,18 +745,22 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	if max := inChunk + int(r.remaining); max < end {
 		end = max
 	}
-	r.plainBuf = plaintext[:0]
+	// Zero the previous chunk's decrypted plaintext before dropping it.
+	if len(r.plainFull) > 0 {
+		clear(r.plainFull)
+	}
+	r.plainFull = plaintext
 	r.plain = plaintext[inChunk:end]
 	return nil
 }
 
 // WriteEncryptedShardStreamAtomic writes a chunked encrypted shard from r
 // using the same tmp + sync + rename recipe as WriteShardStreamAtomic.
-func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
-	return writeEncryptedShardStreamAtomic(path, r, enc, aadBase, chunkSize, true)
+func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) error {
+	return writeEncryptedShardStreamAtomic(path, r, enc, baseFields, chunkSize, true)
 }
 
-func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int, mkdir bool) error {
+func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int, mkdir bool) error {
 	stageStart := time.Now()
 	if mkdir {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -942,7 +778,7 @@ func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encr
 		_ = os.Remove(tmp)
 	}
 	stageStart = time.Now()
-	if err := EncodeEncryptedShard(f, r, enc, aadBase, chunkSize); err != nil {
+	if err := EncodeEncryptedShard(f, r, enc, baseFields, chunkSize); err != nil {
 		cleanup()
 		return err
 	}
@@ -968,28 +804,49 @@ func observeEncryptedShardStage(stage string, start time.Time) {
 	metrics.ObjectPutStageDuration.WithLabelValues("encrypted_shard", stage).Observe(time.Since(start).Seconds())
 }
 
-func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) [encryptedNonceLen]byte {
-	var nonce [encryptedNonceLen]byte
-	copy(nonce[:], prefix[:])
-	binary.BigEndian.PutUint32(nonce[encryptedNoncePrefixLen:], chunkIdx)
-	return nonce
+// writeEncryptedShardHeader writes the GFSENC3 fixed header.
+func writeEncryptedShardHeader(w io.Writer, dekGen uint32, chunkSize uint32, chunkOverhead uint16) error {
+	var hdr [encryptedHeaderLen]byte
+	copy(hdr[:], encryptedShardMagic)
+	binary.LittleEndian.PutUint16(hdr[8:10], encryptedShardFormatVersion)
+	binary.LittleEndian.PutUint32(hdr[10:14], dekGen)
+	binary.LittleEndian.PutUint32(hdr[14:18], chunkSize)
+	binary.LittleEndian.PutUint16(hdr[18:20], chunkOverhead)
+	if _, err := w.Write(hdr[:]); err != nil {
+		return fmt.Errorf("write encrypted shard header: %w", err)
+	}
+	return nil
 }
 
-func encryptedChunkAAD(base []byte, chunkIdx uint32) []byte {
-	size := len(encryptedShardMagic) + len(base) + 4
-	var aad []byte
-	var localAAD [256]byte
-	if size <= len(localAAD) {
-		aad = localAAD[:0]
-	} else {
-		aad = make([]byte, 0, size)
+// parseEncryptedShardHeader validates a header already read into hdr and
+// returns (dek_gen, chunk_size, chunk_overhead). Truncation/format errors wrap
+// ErrShardCorrupt; callers that read via io.ReadFull/ReadAt pre-classify EOF.
+func parseEncryptedShardHeader(hdr []byte) (gen uint32, chunkSize uint32, overhead uint16, err error) {
+	if !IsEncryptedShard(hdr) {
+		return 0, 0, 0, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
 	}
-	aad = append(aad, encryptedShardMagic...)
-	aad = append(aad, base...)
-	var idx [4]byte
-	binary.BigEndian.PutUint32(idx[:], chunkIdx)
-	aad = append(aad, idx[:]...)
-	return aad
+	if v := binary.LittleEndian.Uint16(hdr[8:10]); v != encryptedShardFormatVersion {
+		return 0, 0, 0, fmt.Errorf("%w: unsupported encrypted shard format version %d", ErrShardCorrupt, v)
+	}
+	gen = binary.LittleEndian.Uint32(hdr[10:14])
+	chunkSize = binary.LittleEndian.Uint32(hdr[14:18])
+	overhead = binary.LittleEndian.Uint16(hdr[18:20])
+	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
+		return 0, 0, 0, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
+	}
+	return gen, chunkSize, overhead, nil
+}
+
+// readEncryptedShardHeader reads + parses the fixed header from a stream.
+func readEncryptedShardHeader(r io.Reader) (gen uint32, chunkSize uint32, overhead uint16, err error) {
+	var hdr [encryptedHeaderLen]byte
+	if _, e := io.ReadFull(r, hdr[:]); e != nil {
+		if errors.Is(e, io.EOF) || errors.Is(e, io.ErrUnexpectedEOF) {
+			return 0, 0, 0, fmt.Errorf("read encrypted shard header: %w: %w", ErrShardCorrupt, e)
+		}
+		return 0, 0, 0, fmt.Errorf("read encrypted shard header: %w", e)
+	}
+	return parseEncryptedShardHeader(hdr[:])
 }
 
 // EncodeShard appends the versioned CRC envelope around payload.
