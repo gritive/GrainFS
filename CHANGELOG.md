@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.384.0] - 2026-05-28
+## [0.0.385.0] - 2026-05-28
 
 ### Added
 
@@ -15,6 +15,19 @@
 - The production runbook now includes PromQL examples for isolating service
   p99 latency, error rates, and response throughput when a generic latency or
   error alert fires.
+
+## [0.0.384.0] - 2026-05-28
+
+### Added
+
+- Added the Raft snapshot foundation for durable protocol credentials. Protocol
+  credential stores now expose deterministic snapshot/restore helpers, Meta Raft
+  has FlatBuffers payloads for create/rotate/revoke/stale/last-used commands,
+  and Meta FSM snapshots can carry protocol credential rows without serializing
+  plaintext secrets.
+- Added regression coverage for protocol credential snapshot determinism,
+  malformed FlatBuffers payloads, legacy snapshot restore, and empty snapshot
+  restore clearing stale credential rows.
 
 ## [0.0.383.0] - 2026-05-28
 
