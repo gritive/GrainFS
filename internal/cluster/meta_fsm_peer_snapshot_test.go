@@ -74,3 +74,45 @@ func TestMetaFSM_SnapshotRestore_RoundTripsPeers(t *testing.T) {
 	require.True(t, fired, "Restore must fire onPeersChanged")
 	require.Len(t, firedSet, 2, "onPeersChanged must receive the full accept-set")
 }
+
+// TestMetaFSM_SnapshotRestore_CorruptPeers_NoPartialMutation verifies the
+// Finding-B fix: a Restore whose peer vector is corrupt (duplicate SPKI) must
+// fail BEFORE committing any core FSM state, so the target FSM is left
+// un-restored (the meta-raft invariant). Previously peer validation ran AFTER
+// f.nodes/shardGroups/objectIndex were swapped in, leaving partial mutation.
+func TestMetaFSM_SnapshotRestore_CorruptPeers_NoPartialMutation(t *testing.T) {
+	dupSPKI := [32]byte{9, 9, 9}
+
+	// Source FSM: inject TWO peers sharing one SPKI directly into the registry
+	// maps (registerMember rejects duplicate SPKI, so we bypass it to forge a
+	// corrupt snapshot). Snapshot.export() serializes both.
+	f := NewMetaFSM()
+	wireSnapshotKEK(t, f)
+	f.peers.byNodeID["a"] = peerEntry{NodeID: "a", SPKI: dupSPKI, Address: "addr-a", State: peerStateMember}
+	f.peers.byNodeID["b"] = peerEntry{NodeID: "b", SPKI: dupSPKI, Address: "addr-b", State: peerStateMember}
+	f.peers.bySPKI[dupSPKI] = "a"
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	// Target FSM: pre-populate a SENTINEL f.nodes so we can assert it is
+	// UNCHANGED after the failed Restore (no partial mutation of core state).
+	f2 := NewMetaFSM()
+	wireSnapshotKEK(t, f2)
+	sentinel := MetaNodeEntry{ID: "preexisting", Address: "10.0.0.1:7000"}
+	f2.nodes = map[string]MetaNodeEntry{"preexisting": sentinel}
+
+	err = f2.Restore(raft.SnapshotMeta{}, snap)
+	require.Error(t, err, "Restore with duplicate-SPKI peers must fail")
+	require.Contains(t, err.Error(), "duplicate SPKI")
+
+	// Core FSM state must be UNCHANGED — the failed Restore left it un-restored.
+	require.Len(t, f2.nodes, 1, "f.nodes must be untouched after failed Restore")
+	got, ok := f2.nodes["preexisting"]
+	require.True(t, ok, "sentinel node must still be present")
+	require.Equal(t, sentinel, got)
+
+	// Peer registry must also be untouched (commit never ran).
+	_, ok = f2.peers.lookupByNodeID("a")
+	require.False(t, ok, "peer registry must not have been mutated")
+}

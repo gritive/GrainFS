@@ -578,8 +578,8 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	}
 
 	// zero-CA peer registry (Task 5, slot 13): decode every PeerEntry. A missing
-	// vector (legacy pre-Task-5 snapshot) yields an empty slice — importEntries
-	// then clears the registry, matching a fresh node with no membership yet.
+	// vector (legacy pre-Task-5 snapshot) yields an empty slice — the commit then
+	// clears the registry, matching a fresh node with no membership yet.
 	newPeers := make([]peerEntry, 0, snap.PeersLength())
 	var peerFB clusterpb.PeerEntry
 	for i := 0; i < snap.PeersLength(); i++ {
@@ -602,6 +602,17 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			State:           peerState(peerFB.State()),
 			PresentsPerNode: peerFB.PresentsPerNode(),
 		})
+	}
+	// VALIDATE + BUILD the peer indexes HERE, in the decode phase, so a corrupt
+	// peer vector (duplicate node ID / duplicate SPKI / bad state) fails BEFORE
+	// any core FSM state is committed below. Previously peer import ran AFTER
+	// the f.nodes/shardGroups/objectIndex commit, leaving a FAILED Restore with
+	// partially-mutated core state (violating the meta-raft invariant that a
+	// failed Restore leaves the FSM un-restored). The commit phase swaps these
+	// pre-validated maps in via commitPeerIndexes, which cannot fail.
+	newPeersByNodeID, newPeersBySPKI, err := validatePeerEntries(newPeers)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: Restore: peer registry validate: %w", err)
 	}
 
 	// --- DECODE PHASE ---
@@ -786,15 +797,16 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// onRebalancePlan is intentionally NOT called here.
 	// Rebalancer handles resume on next tick by checking ActivePlan().
 
-	// zero-CA peer registry (Task 5): rebuild the registry indexes from the
-	// snapshot, then fire onPeersChanged so the transport composer rebuilds the
-	// accept-set union. Without this, the per-node SPKIs vanish after snapshot
-	// install and the composer silently drops them → partition. The registry has
-	// its own mutex, so importEntries runs outside f.mu. firePeersChanged
+	// zero-CA peer registry (Task 5): swap in the pre-validated registry indexes
+	// (validated in the decode phase above), then fire onPeersChanged so the
+	// transport composer rebuilds the accept-set union. Without this, the
+	// per-node SPKIs vanish after snapshot install and the composer silently
+	// drops them → partition. commitPeerIndexes cannot fail — all validation
+	// (duplicate node ID / SPKI, bad state) ran before any core state committed,
+	// so a corrupt peer vector never leaves partially-mutated FSM state. The
+	// registry has its own mutex, so the swap runs outside f.mu. firePeersChanged
 	// snapshots the callback under RLock and invokes it outside (existing pattern).
-	if err := f.peers.importEntries(newPeers); err != nil {
-		return fmt.Errorf("meta_fsm: Restore: peer registry import: %w", err)
-	}
+	f.peers.commitPeerIndexes(newPeersByNodeID, newPeersBySPKI)
 	f.firePeersChanged()
 
 	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.

@@ -118,46 +118,57 @@ func (r *peerRegistry) export() []peerEntry {
 	return out
 }
 
-// importEntries rebuilds the registry from a snapshot's entries. It REPLACES
-// the byNodeID + bySPKI indexes wholesale (state restore — NOT a register*
-// flow). The deny set is left untouched (it is not part of the snapshot; see
-// Task 5 report). State and PresentsPerNode are preserved verbatim.
+// validatePeerEntries validates a snapshot's peer entries and BUILDS the
+// byNodeID/bySPKI indexes WITHOUT touching the live registry. It REPLACES the
+// indexes wholesale on commit (state restore — NOT a register* flow); the deny
+// set is left untouched (it is not part of the snapshot; see Task 5 report).
+// State and PresentsPerNode are preserved verbatim.
 //
-// Validation: a corrupt meta snapshot is fatal, so importEntries hard-errors on
-// any malformed/inconsistent entry BEFORE mutating the live indexes (build into
-// locals, commit only if every entry passes — otherwise the registry would be
-// left half-cleared). Checks: non-empty node ID; valid State enum; SPKI not
-// zero (a short SPKI copy zero-pads, so zero is the corruption signal — the
-// decode loop in meta_fsm_snapshot.go also rejects wrong-length SPKI upstream);
-// no duplicate node ID; no duplicate SPKI (so bySPKI can never point at two
-// node-ids). Deterministic across nodes: same bytes → same error.
-func (r *peerRegistry) importEntries(entries []peerEntry) error {
+// Validation: a corrupt meta snapshot is fatal, so this hard-errors on any
+// malformed/inconsistent entry. Checks: non-empty node ID; valid State enum;
+// SPKI not zero (a short SPKI copy zero-pads, so zero is the corruption signal —
+// the decode loop in meta_fsm_snapshot.go also rejects wrong-length SPKI
+// upstream); no duplicate node ID; no duplicate SPKI (so bySPKI can never point
+// at two node-ids). Deterministic across nodes: same bytes → same error.
+//
+// The meta-FSM Restore decode phase calls this EARLY so a corrupt peer vector
+// returns an error BEFORE any core FSM state is committed (no partial restore);
+// the commit phase then calls commitPeerIndexes with the pre-validated maps,
+// which cannot fail.
+func validatePeerEntries(entries []peerEntry) (map[string]peerEntry, map[[32]byte]string, error) {
 	byNodeID := make(map[string]peerEntry, len(entries))
 	bySPKI := make(map[[32]byte]string, len(entries))
 	for i, e := range entries {
 		if e.NodeID == "" {
-			return fmt.Errorf("importEntries: entry[%d] has empty node ID", i)
+			return nil, nil, fmt.Errorf("importEntries: entry[%d] has empty node ID", i)
 		}
 		if e.State != peerStatePendingLearner && e.State != peerStateMember {
-			return fmt.Errorf("importEntries: node %s has invalid state %d", e.NodeID, e.State)
+			return nil, nil, fmt.Errorf("importEntries: node %s has invalid state %d", e.NodeID, e.State)
 		}
 		if e.SPKI == ([32]byte{}) {
-			return fmt.Errorf("importEntries: node %s has zero/malformed SPKI", e.NodeID)
+			return nil, nil, fmt.Errorf("importEntries: node %s has zero/malformed SPKI", e.NodeID)
 		}
 		if _, dup := byNodeID[e.NodeID]; dup {
-			return fmt.Errorf("importEntries: duplicate node ID %s", e.NodeID)
+			return nil, nil, fmt.Errorf("importEntries: duplicate node ID %s", e.NodeID)
 		}
 		if owner, dup := bySPKI[e.SPKI]; dup {
-			return fmt.Errorf("importEntries: duplicate SPKI shared by node %s and node %s", owner, e.NodeID)
+			return nil, nil, fmt.Errorf("importEntries: duplicate SPKI shared by node %s and node %s", owner, e.NodeID)
 		}
 		byNodeID[e.NodeID] = e
 		bySPKI[e.SPKI] = e.NodeID
 	}
+	return byNodeID, bySPKI, nil
+}
+
+// commitPeerIndexes swaps pre-validated indexes (from validatePeerEntries) into
+// the live registry under lock. It is the unfailable commit half of the
+// validate/commit split — Restore calls it only after every other section has
+// been committed.
+func (r *peerRegistry) commitPeerIndexes(byNodeID map[string]peerEntry, bySPKI map[[32]byte]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byNodeID = byNodeID
 	r.bySPKI = bySPKI
-	return nil
 }
 
 // spkiOwner returns the node-id that owns an SPKI (Task 5 uses this).

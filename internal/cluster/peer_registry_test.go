@@ -293,16 +293,20 @@ func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newPeerRegistry()
 			// Seed prior state so we can assert it is untouched on error (validate
-			// BEFORE mutating — no half-cleared registry).
-			if err := r.importEntries([]peerEntry{{NodeID: "seed", SPKI: spki(200), Address: "s", State: peerStateMember}}); err != nil {
-				t.Fatalf("seed import: %v", err)
+			// BEFORE mutating — no half-cleared registry). validatePeerEntries only
+			// BUILDS local indexes; commitPeerIndexes swaps them in.
+			seedByNode, seedBySPKI, err := validatePeerEntries([]peerEntry{{NodeID: "seed", SPKI: spki(200), Address: "s", State: peerStateMember}})
+			if err != nil {
+				t.Fatalf("seed validate: %v", err)
 			}
+			r.commitPeerIndexes(seedByNode, seedBySPKI)
 
-			err := r.importEntries(tc.entries)
+			byNodeID, bySPKI, err := validatePeerEntries(tc.entries)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("want success, got error: %v", err)
 				}
+				r.commitPeerIndexes(byNodeID, bySPKI)
 				// Consistency: no SPKI maps to two node-ids.
 				if len(r.bySPKI) != len(tc.entries) {
 					t.Fatalf("bySPKI len %d, want %d", len(r.bySPKI), len(tc.entries))
@@ -320,8 +324,8 @@ func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
 			}
-			// On error the registry must be unchanged (seed still present, no
-			// malformed entry leaked in).
+			// On a validation error the registry must be unchanged (validate never
+			// touched it — seed still present, no malformed entry leaked in).
 			if _, ok := r.lookupByNodeID("seed"); !ok {
 				t.Fatal("registry was mutated on error: seed entry lost")
 			}
