@@ -39,19 +39,17 @@ type ShardPlacementMonitor struct {
 	lastScan         atomic.Int64 // unix nanos
 	lastMissingCount atomic.Int64
 	totalScans       atomic.Uint64
-	onMissing        func(bucket, key string, shardIdx int) // Slice 5 hook
-	onCorrupt        func(bucket, key string, shardIdx int, err error)
+	onMissing        func(target ECShardScanTarget, shardIdx int) // Slice 5 hook
+	onCorrupt        func(target ECShardScanTarget, shardIdx int, err error)
 }
 
 type pendingRepair struct {
-	bucket   string
-	key      string
+	target   ECShardScanTarget
 	shardIdx int
 }
 
 type pendingCorruptShard struct {
-	bucket   string
-	key      string
+	target   ECShardScanTarget
 	shardIdx int
 	err      error
 }
@@ -73,26 +71,30 @@ func NewShardPlacementMonitor(fsm *FSM, resolver PlacementResolver, shardSvc *Sh
 // SetOnMissing registers a callback invoked for every locally-missing shard
 // during a scan. Used by Slice 5 to schedule re-fetch + restore. Thread-safe
 // only if the callback itself is.
-func (m *ShardPlacementMonitor) SetOnMissing(fn func(bucket, key string, shardIdx int)) {
+func (m *ShardPlacementMonitor) SetOnMissing(fn func(target ECShardScanTarget, shardIdx int)) {
 	m.onMissing = fn
 }
 
 // SetOnCorrupt registers a callback invoked for every locally-corrupt shard
 // during a scan. The callback is invoked after the scan transaction closes.
-func (m *ShardPlacementMonitor) SetOnCorrupt(fn func(bucket, key string, shardIdx int, err error)) {
+func (m *ShardPlacementMonitor) SetOnCorrupt(fn func(target ECShardScanTarget, shardIdx int, err error)) {
 	m.onCorrupt = fn
 }
 
-// Scan walks every placement record once, verifies each shard assigned to
-// this node exists on disk, and returns the number of missing shards it
-// found. Callers can hook repair logic via SetOnMissing.
+// Scan enumerates every EC shard to verify via IterECShardScanTargets, checks
+// each shard assigned to this node exists on disk, and returns the number of
+// missing shards it found. Callers can hook repair logic via SetOnMissing.
 //
-// IterShardPlacements passes key=shardKey (object_key+"/"+versionID) as
-// stored by putObjectEC, so shards can be read directly without an
-// additional version lookup.
+// Object-version targets carry the raw object EC fields and are resolved to a
+// shard key + placement via ResolvePlacement (non-EC objects are skipped).
+// Segment/coalesced targets already carry a final ShardKey + Placement and are
+// scanned directly with no resolver call.
 //
-// onMissing callbacks are invoked AFTER the BadgerDB iterator closes so
-// the read transaction does not stay open during potentially long-running
+// If resolver is nil, object-version targets are skipped individually;
+// segment/coalesced targets are unaffected.
+//
+// onMissing/onCorrupt callbacks are invoked AFTER the BadgerDB iterator closes
+// so the read transaction does not stay open during potentially long-running
 // network repair calls.
 func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	if m.shardSvc == nil {
@@ -104,53 +106,56 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	var missing int64
 	seen := make(map[string]struct{})
 
-	if m.resolver != nil {
-		var refs []ObjectMetaRef
-		err := m.fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
-			refs = append(refs, ref)
-			return nil
-		})
-		if err != nil {
-			return 0, fmt.Errorf("scan object metas: %w", err)
+	var targets []ECShardScanTarget
+	if err := m.fsm.IterECShardScanTargets(func(t ECShardScanTarget) error {
+		targets = append(targets, t)
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("scan ec shard targets: %w", err)
+	}
+
+	for _, t := range targets {
+		if ctx.Err() != nil {
+			return int(missing), ctx.Err()
 		}
-		for _, ref := range refs {
-			if ctx.Err() != nil {
-				return int(missing), ctx.Err()
+		switch t.Kind {
+		case ECShardObjectVersion:
+			if m.resolver == nil {
+				continue
 			}
-			resolved, rerr := m.resolver.ResolvePlacement(ctx, ref.Bucket, ref.Key, PlacementMeta{
-				VersionID: ref.VersionID,
-				ECData:    ref.ECData,
-				ECParity:  ref.ECParity,
-				NodeIDs:   ref.NodeIDs,
+			resolved, rerr := m.resolver.ResolvePlacement(ctx, t.Bucket, t.ObjectKey, PlacementMeta{
+				VersionID:        t.VersionID,
+				ECData:           t.ECData,
+				ECParity:         t.ECParity,
+				NodeIDs:          t.NodeIDs,
+				PlacementGroupID: t.PlacementGroupID,
 			})
 			if errors.Is(rerr, ErrNotEC) {
 				continue
 			}
 			if rerr != nil {
-				m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).Err(rerr).Msg("resolve placement during scan failed")
+				m.logger.Warn().Str("bucket", t.Bucket).Str("key", t.ObjectKey).Err(rerr).Msg("resolve placement during scan failed")
 				continue
 			}
-			seen[ref.Bucket+"\x00"+resolved.ShardKey] = struct{}{}
-			m.scanRecord(ctx, ref.Bucket, resolved.ShardKey, resolved.Record, &missing, &repairs, &corrupt)
+			seenKey := t.Bucket + "\x00" + resolved.ShardKey
+			if _, ok := seen[seenKey]; ok {
+				continue
+			}
+			seen[seenKey] = struct{}{}
+			m.scanRecord(ctx, t, resolved.ShardKey, resolved.Record, &missing, &repairs, &corrupt)
+		case ECShardSegment, ECShardCoalesced:
+			seenKey := t.Bucket + "\x00" + t.ShardKey
+			if _, ok := seen[seenKey]; ok {
+				continue
+			}
+			seen[seenKey] = struct{}{}
+			m.scanRecord(ctx, t, t.ShardKey, t.Placement, &missing, &repairs, &corrupt)
 		}
 	}
 
-	err := m.fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if _, ok := seen[bucket+"\x00"+key]; ok {
-			return nil
-		}
-		m.scanRecord(ctx, bucket, key, rec, &missing, &repairs, &corrupt)
-		return nil
-	})
 	m.lastScan.Store(time.Now().UnixNano())
 	m.lastMissingCount.Store(missing)
 	m.totalScans.Add(1)
-	if err != nil {
-		return int(missing), fmt.Errorf("scan placements: %w", err)
-	}
 
 	// Invoke repair callbacks outside the BadgerDB transaction so MVCC versions
 	// are not pinned during network I/O.
@@ -158,19 +163,23 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 		if ctx.Err() != nil {
 			break
 		}
-		m.onMissing(r.bucket, r.key, r.shardIdx)
+		m.onMissing(r.target, r.shardIdx)
 	}
 	for _, c := range corrupt {
 		if ctx.Err() != nil {
 			break
 		}
-		m.onCorrupt(c.bucket, c.key, c.shardIdx, c.err)
+		m.onCorrupt(c.target, c.shardIdx, c.err)
 	}
 
 	return int(missing), nil
 }
 
-func (m *ShardPlacementMonitor) scanRecord(ctx context.Context, bucket, key string, rec PlacementRecord, missing *int64, repairs *[]pendingRepair, corrupt *[]pendingCorruptShard) {
+// scanRecord verifies, for the effective shardKey + placement of target t, that
+// every shard assigned to this node exists on disk. Missing shards are queued
+// into repairs, non-ENOENT read errors into corrupt. The originating target is
+// threaded into the pending entries so callbacks receive it.
+func (m *ShardPlacementMonitor) scanRecord(ctx context.Context, t ECShardScanTarget, shardKey string, rec PlacementRecord, missing *int64, repairs *[]pendingRepair, corrupt *[]pendingCorruptShard) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -178,20 +187,20 @@ func (m *ShardPlacementMonitor) scanRecord(ctx context.Context, bucket, key stri
 		if holder != m.nodeID {
 			continue // someone else's shard; their monitor handles it
 		}
-		if _, rerr := m.shardSvc.ReadLocalShard(bucket, key, shardIdx); rerr != nil {
+		if _, rerr := m.shardSvc.ReadLocalShard(t.Bucket, shardKey, shardIdx); rerr != nil {
 			if os.IsNotExist(rerr) {
 				atomic.AddInt64(missing, 1)
-				m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Msg("missing local shard")
+				m.logger.Warn().Str("bucket", t.Bucket).Str("key", shardKey).Int("shard_idx", shardIdx).Msg("missing local shard")
 				if m.onMissing != nil {
-					*repairs = append(*repairs, pendingRepair{bucket, key, shardIdx})
+					*repairs = append(*repairs, pendingRepair{target: t, shardIdx: shardIdx})
 				}
 				continue
 			}
 			// Non-ENOENT read error — log but don't count as missing (could be
 			// a transient I/O issue; a future scan will catch persistent corruption).
-			m.logger.Warn().Str("bucket", bucket).Str("key", key).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
+			m.logger.Warn().Str("bucket", t.Bucket).Str("key", shardKey).Int("shard_idx", shardIdx).Err(rerr).Msg("shard read error during scan")
 			if m.onCorrupt != nil {
-				*corrupt = append(*corrupt, pendingCorruptShard{bucket: bucket, key: key, shardIdx: shardIdx, err: rerr})
+				*corrupt = append(*corrupt, pendingCorruptShard{target: t, shardIdx: shardIdx, err: rerr})
 			}
 		}
 	}

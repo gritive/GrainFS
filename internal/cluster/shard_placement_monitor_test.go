@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // newTestShardService returns a ShardService rooted at a fresh temp dir.
@@ -25,21 +27,23 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
-
-	// Write a placement where self holds shard 1.
-	nodes := []string{"node-B", self, "node-C"}
-	raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket: "b", Key: "k", NodeIDs: nodes,
+	// Seed an EC segment object: self is shard-0 owner, two peers hold shards 1+2.
+	segNodes := []string{self, "node-B", "node-C"}
+	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: segNodes,
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-0", ECData: 2, ECParity: 1, NodeIDs: segNodes},
+		},
 	})
-	require.NoError(t, fsm.Apply(raw))
 
-	// Create the shard that self is supposed to hold.
-	require.NoError(t, svc.WriteLocalShard("b", "k", 1, []byte("payload")))
+	// Write the local shard that self is responsible for (shard index 0).
+	require.NoError(t, svc.WriteLocalShard("b", "obj/segments/seg-0", 0, []byte("payload")))
 
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	missing, err := monitor.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, missing)
@@ -67,8 +71,10 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	}
 
 	var reported []string
-	monitor.SetOnMissing(func(bucket, key string, shardIdx int) {
-		reported = append(reported, fmtShardRef(bucket, key, shardIdx))
+	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
+		// ShardKey is empty for object-version targets; format from
+		// ObjectKey/VersionID to match the other callbacks. (Never fires here.)
+		reported = append(reported, fmtShardRef(target.Bucket, target.ObjectKey+"/"+target.VersionID, shardIdx))
 	})
 
 	missing, err := monitor.Scan(context.Background())
@@ -101,8 +107,8 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 
 	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	var reported []string
-	monitor.SetOnMissing(func(bucket, key string, shardIdx int) {
-		reported = append(reported, fmtShardRef(bucket, key, shardIdx))
+	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
+		reported = append(reported, fmtShardRef(target.Bucket, target.ObjectKey+"/"+target.VersionID, shardIdx))
 	})
 
 	missing, err := monitor.Scan(context.Background())
@@ -114,17 +120,22 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
-
-	// self is NOT in the placement — monitor should skip every shard.
-	raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket: "b", Key: "k", NodeIDs: []string{"node-B", "node-C"},
+	// Seed an EC segment object where self is NOT in the node list.
+	// The monitor must skip all shards — they belong to peers.
+	peerNodes := []string{"node-B", "node-C", "node-D"}
+	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: peerNodes,
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-peer", ECData: 2, ECParity: 1, NodeIDs: peerNodes},
+		},
 	})
-	require.NoError(t, fsm.Apply(raw))
+	// Do NOT write any local shard — self holds nothing.
 
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	missing, err := monitor.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, missing, "peer-assigned shards should not count as self-missing")
@@ -160,19 +171,24 @@ func TestShardPlacementMonitor_Stats(t *testing.T) {
 func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, _ := newTestShardService(t)
 
-	// Seed ~100 placements so iteration has something to traverse.
-	for i := 0; i < 100; i++ {
-		raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-			Bucket: "b", Key: fmtKey(i), NodeIDs: []string{"node-A"},
+	const self = "node-A"
+	// Seed several EC segment objects so iteration has real targets to traverse.
+	for i := 0; i < 10; i++ {
+		nodes := []string{self, "node-B", "node-C"}
+		seedLatestObjectMetaVersion(t, backend, "b", fmtKey(i), "v1", objectMeta{
+			ECData: 2, ECParity: 1, NodeIDs: nodes,
+			Segments: []storage.SegmentRef{
+				{BlobID: "seg-" + fmtKey(i), ECData: 2, ECParity: 1, NodeIDs: nodes},
+			},
 		})
-		require.NoError(t, fsm.Apply(raw))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
-	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", time.Second)
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	_, err := monitor.Scan(ctx)
 	// Either ctx.Err wraps to non-nil scan error, or scan completes before
 	// first ctx check — both are acceptable. We only assert no panic.
@@ -227,29 +243,37 @@ func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
 	}
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, dir := newTestShardService(t)
 
 	const self = "node-A"
-	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
-
-	raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket: "b", Key: "k", NodeIDs: []string{self},
+	// Seed an EC segment object with self as shard-0 owner.
+	segNodes := []string{self, "node-B", "node-C"}
+	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: segNodes,
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-0", ECData: 2, ECParity: 1, NodeIDs: segNodes},
+		},
 	})
-	require.NoError(t, fsm.Apply(raw))
 
-	// Write shard, then make it unreadable (permission error, not ENOENT).
-	// NewShardService roots data at dir+"/shards/", so the full shard path is:
-	// dir/shards/b/k/shard_0
-	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("data")))
-	shardPath := dir + "/shards/b/k/shard_0"
+	// Write the shard then make it unreadable (permission error, not ENOENT).
+	// ShardKey for segment: "obj/segments/seg-0"; path: dir/shards/b/obj/segments/seg-0/shard_0
+	require.NoError(t, svc.WriteLocalShard("b", "obj/segments/seg-0", 0, []byte("data")))
+	shardPath := dir + "/shards/b/obj/segments/seg-0/shard_0"
 	require.NoError(t, os.Chmod(shardPath, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(shardPath, 0o600) })
 
 	// Non-ENOENT error: shard exists on disk but is unreadable.
-	// Scan must not count it as "missing" and must not panic.
+	// Scan must not count it as "missing" and must invoke onCorrupt.
+	corruptCalled := 0
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+	monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, err error) {
+		corruptCalled++
+	})
 	missing, err := monitor.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, missing, "unreadable (non-ENOENT) shard must not count as missing")
+	assert.Equal(t, 1, corruptCalled, "non-ENOENT shard error must invoke onCorrupt")
 }
 
 func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
@@ -286,8 +310,8 @@ func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 
 	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	var reported []string
-	monitor.SetOnCorrupt(func(bucket, key string, shardIdx int, err error) {
-		reported = append(reported, fmtShardRef(bucket, key, shardIdx))
+	monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, err error) {
+		reported = append(reported, fmtShardRef(target.Bucket, target.ObjectKey+"/"+target.VersionID, shardIdx))
 		require.Error(t, err)
 	})
 
@@ -295,6 +319,150 @@ func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, missing)
 	assert.Equal(t, []string{"b/obj/v1/0"}, reported)
+}
+
+// A chunked object with an EC segment whose local shard (held by this node) is
+// absent on disk must surface via onMissing carrying an ECShardSegment target
+// with the correct ObjectKey/VersionID/ShardKey/Placement and shardIdx.
+func TestShardPlacementMonitor_Scan_DetectsMissingSegmentShard(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
+	svc, _ := newTestShardService(t)
+
+	const self = "node-A"
+	segNodes := []string{self, "node-B", "node-C"}
+	seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+		// Top-level EC fields mirror segment-0; presence of Segments means no
+		// object-version target is emitted for this object.
+		ECData: 2, ECParity: 1, NodeIDs: segNodes,
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: segNodes},
+		},
+	})
+
+	// Do NOT write the local shard — self holds shard 0 of the segment, absent on disk.
+
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+	var reported []ECShardScanTarget
+	var reportedIdx []int
+	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
+		reported = append(reported, target)
+		reportedIdx = append(reportedIdx, shardIdx)
+	})
+
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, missing)
+	require.Len(t, reported, 1)
+	assert.Equal(t, []int{0}, reportedIdx)
+	assert.Equal(t, ECShardScanTarget{
+		Kind:      ECShardSegment,
+		Bucket:    "b",
+		ObjectKey: "chunked",
+		VersionID: "cv1",
+		ShardKey:  "chunked/segments/seg-ok",
+		Placement: PlacementRecord{Nodes: segNodes, K: 2, M: 1},
+	}, reported[0])
+}
+
+// A chunked object with an EC coalesced ref whose local shard (held by this
+// node) is absent on disk must surface via onMissing carrying an
+// ECShardCoalesced target with the AUTHORITATIVE (pre-populated) ShardKey —
+// not a derived one — plus the right Placement and shardIdx.
+func TestShardPlacementMonitor_Scan_DetectsMissingCoalescedShard(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
+	svc, _ := newTestShardService(t)
+
+	const self = "node-A"
+	coalNodes := []string{self, "node-B", "node-C"}
+	seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: coalNodes,
+		Coalesced: []CoalescedShardRef{
+			{CoalescedID: "c1", ShardKey: "chunked/coalesced/c1", ECData: 2, ECParity: 1, NodeIDs: coalNodes},
+		},
+	})
+
+	// Do NOT write the local shard — self holds shard 0 of the coalesced blob.
+
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+	var reported []ECShardScanTarget
+	var reportedIdx []int
+	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
+		reported = append(reported, target)
+		reportedIdx = append(reportedIdx, shardIdx)
+	})
+
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, missing)
+	require.Len(t, reported, 1)
+	assert.Equal(t, []int{0}, reportedIdx)
+	assert.Equal(t, ECShardScanTarget{
+		Kind:      ECShardCoalesced,
+		Bucket:    "b",
+		ObjectKey: "chunked",
+		VersionID: "cv1",
+		ShardKey:  "chunked/coalesced/c1",
+		Placement: PlacementRecord{Nodes: coalNodes, K: 2, M: 1},
+	}, reported[0])
+}
+
+// A chunked object with an EC segment whose local shard exists on disk but is
+// unreadable (non-ENOENT error) must surface via onCorrupt carrying the
+// ECShardSegment target. Reuses the corruption mechanism from the
+// object-version corrupt test (flip the last byte so the integrity check fails).
+func TestShardPlacementMonitor_Scan_ReportsCorruptSegmentShard(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
+	svc, dir := newTestShardService(t)
+
+	const self = "node-A"
+	segNodes := []string{self, "node-B", "node-C"}
+	seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: segNodes,
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: segNodes},
+		},
+	})
+
+	// Write the segment shard, then corrupt its trailing byte so ReadLocalShard
+	// fails with a non-ENOENT integrity error. ShardKey is "chunked/segments/seg-ok".
+	require.NoError(t, svc.WriteLocalShard("b", "chunked/segments/seg-ok", 0, []byte("payload")))
+	shardPath := dir + "/shards/b/chunked/segments/seg-ok/shard_0"
+	f, err := os.OpenFile(shardPath, os.O_RDWR, 0)
+	require.NoError(t, err)
+	_, err = f.Seek(-1, io.SeekEnd)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0xff})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
+	var reported []ECShardScanTarget
+	var reportedIdx []int
+	monitor.SetOnCorrupt(func(target ECShardScanTarget, shardIdx int, cerr error) {
+		reported = append(reported, target)
+		reportedIdx = append(reportedIdx, shardIdx)
+		require.Error(t, cerr)
+	})
+
+	missing, err := monitor.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, missing, "corrupt (non-ENOENT) shard must not count as missing")
+	require.Len(t, reported, 1)
+	assert.Equal(t, []int{0}, reportedIdx)
+	assert.Equal(t, ECShardScanTarget{
+		Kind:      ECShardSegment,
+		Bucket:    "b",
+		ObjectKey: "chunked",
+		VersionID: "cv1",
+		ShardKey:  "chunked/segments/seg-ok",
+		Placement: PlacementRecord{Nodes: segNodes, K: 2, M: 1},
+	}, reported[0])
 }
 
 func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
@@ -322,23 +490,28 @@ func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed 5 missing shards to ensure the repair loop has entries to iterate.
+	// Seed 5 EC segment objects with self as shard-0 owner but NO local shards on
+	// disk — so each will fire onMissing. We only cancel after the first.
 	for i := 0; i < 5; i++ {
-		raw, _ := EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-			Bucket: "b", Key: fmtKey(i), NodeIDs: []string{self},
+		nodes := []string{self, "node-B", "node-C"}
+		seedLatestObjectMetaVersion(t, backend, "b", fmtKey(i), "v1", objectMeta{
+			ECData: 2, ECParity: 1, NodeIDs: nodes,
+			Segments: []storage.SegmentRef{
+				{BlobID: "seg-" + fmtKey(i), ECData: 2, ECParity: 1, NodeIDs: nodes},
+			},
 		})
-		require.NoError(t, fsm.Apply(raw))
 	}
 
-	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
+	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// onMissing cancels the context on the first call, simulating mid-repair cancel.
 	called := 0
-	monitor.SetOnMissing(func(bucket, key string, shardIdx int) {
+	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
 		called++
 		cancel()
 	})

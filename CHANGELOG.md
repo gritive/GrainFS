@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.355.0] - 2026-05-27
+
+### Added
+
+- **Periodic self-heal now covers segment and coalesced EC shards.** The background
+  placement monitor previously detected and repaired only object-version EC shards; it now
+  also proactively reconstructs missing segment (`<key>/segments/<id>`) and coalesced
+  (`<key>/coalesced/<id>`) EC shards for latest-version objects between boots, and quarantines
+  the parent object when such a shard is corrupt. This complements boot-time startup repair
+  (0.0.350.0) and read-time reconstruction, closing the gap where a lost large-object shard was
+  only healed on read or restart. Non-latest-version shards remain covered by read-time
+  reconstruction.
+
+### Changed
+
+- Added the `grainfs_placement_monitor_invalid_ec_ref_total{kind}` metric — counts
+  segment/coalesced refs the monitor skips for malformed placement (a non-zero rate indicates
+  corrupt object metadata). See `docs/operators/runbook.md` and `docs/operators/sli-slo.md`.
+
+## [0.0.354.0] - 2026-05-27
+
+### Added
+
+- Cluster transport gained a per-node identity foundation: a node can generate a
+  unique, random ECDSA P-256 keypair whose certificate carries a
+  node-distinguishing SAN (`grainfs://<cluster-id>/<node-id>`), so node-to-node
+  TLS connections become attributable to a specific node in logs and audits
+  rather than every node presenting the same shared identity. The per-node
+  private key is persisted encrypted at rest under the node KEK (AES-256-GCM).
+  This is groundwork; the existing shared-key transport behavior is unchanged
+  until later phases wire it in.
+
+### Changed
+
+- The cluster transport listener now resolves its TLS identity per inbound
+  handshake, so an identity swap takes effect on new connections without a
+  process restart.
+- Accepted-peer (SPKI) verification uses an O(1) lookup, keeping per-connection
+  identity checks cheap as cluster membership grows.
+
 ## [0.0.352.0] - 2026-05-27
 
 ### Changed

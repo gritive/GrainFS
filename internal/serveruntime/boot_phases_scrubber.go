@@ -20,6 +20,15 @@ import (
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
+// targetLogKey returns the log-friendly key for an EC shard scan target:
+// ObjectKey for object-version targets, ShardKey for segment/coalesced targets.
+func targetLogKey(t cluster.ECShardScanTarget) string {
+	if t.Kind == cluster.ECShardObjectVersion {
+		return t.ObjectKey
+	}
+	return t.ShardKey
+}
+
 // bootRecoveryAndScrubber wires the per-node startup recovery, the scrubber
 // Director (with replication + EC sources), placement monitors, and the
 // scrubber-aware healing emitter.
@@ -174,25 +183,39 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 				gb.SetIncidentRecorder(clusterIncidentRecorder)
 			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), cfg.ScrubInterval)
-			placementMonitor.SetOnMissing(func(bucket, shardKey string, shardIdx int) {
-				objectKey, versionID := splitDataWALStartupRepairShardKey(shardKey)
+			placementMonitor.SetOnMissing(func(target cluster.ECShardScanTarget, shardIdx int) {
 				correlationID := uuid.Must(uuid.NewV7()).String()
 				receiptID := "rcpt-" + correlationID
 				repairReq := cluster.IncidentRepairRequest{
-					Bucket:        bucket,
-					Key:           objectKey,
-					VersionID:     versionID,
+					Bucket:        target.Bucket,
+					Key:           target.ObjectKey,
+					VersionID:     target.VersionID,
 					ShardIdx:      shardIdx,
 					Recorder:      clusterIncidentRecorder,
 					CorrelationID: correlationID,
 				}
+				switch target.Kind {
+				case cluster.ECShardObjectVersion:
+					// plain object-version shard: no ShardKey/Placement needed
+				case cluster.ECShardSegment, cluster.ECShardCoalesced:
+					// Re-verify the shard is still referenced in the current meta
+					// before repairing: coalesce/delete/GC between the monitor's
+					// scan and this deferred callback can de-reference it, and
+					// reconstructing an orphan shard would just fight GC.
+					if !gb.ShardTargetStillReferenced(monitorCtx, target) {
+						log.Info().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", target.ShardKey).Int("shard", shardIdx).Msg("skipping repair of de-referenced shard")
+						return
+					}
+					repairReq.ShardKey = target.ShardKey
+					repairReq.Placement = target.Placement
+				}
 				if err := gb.RepairShardLocalWithIncident(monitorCtx, repairReq); err != nil {
-					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
+					log.Warn().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", targetLogKey(target)).Int("shard", shardIdx).Err(err).Msg("placement monitor repair failed")
 				} else if receiptWiring != nil && receiptWiring.Store() != nil && receiptWiring.KeyStore() != nil {
 					r := &receipt.HealReceipt{
 						ReceiptID:     receiptID,
 						Timestamp:     time.Now().UTC(),
-						Object:        receipt.ObjectRef{Bucket: bucket, Key: objectKey, VersionID: versionID},
+						Object:        receipt.ObjectRef{Bucket: target.Bucket, Key: target.ObjectKey, VersionID: target.VersionID},
 						ShardsLost:    []int32{int32(shardIdx)},
 						ShardsRebuilt: []int32{int32(shardIdx)},
 						EventIDs:      []string{correlationID},
@@ -209,10 +232,16 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 					}
 				}
 			})
-			placementMonitor.SetOnCorrupt(func(bucket, shardKey string, shardIdx int, readErr error) {
-				objectKey, versionID := splitDataWALStartupRepairShardKey(shardKey)
-				if err := gb.QuarantineCorruptShardLocal(bucket, objectKey, versionID, shardIdx, readErr.Error()); err != nil {
-					log.Warn().Str("group", dg.ID()).Str("bucket", bucket).Str("key", shardKey).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
+			placementMonitor.SetOnCorrupt(func(target cluster.ECShardScanTarget, shardIdx int, readErr error) {
+				var err error
+				switch target.Kind {
+				case cluster.ECShardObjectVersion:
+					err = gb.QuarantineCorruptShardLocal(target.Bucket, target.ObjectKey, target.VersionID, shardIdx, readErr.Error())
+				case cluster.ECShardSegment, cluster.ECShardCoalesced:
+					err = gb.QuarantineCorruptShardLocalAtShardKey(target, shardIdx, readErr.Error())
+				}
+				if err != nil {
+					log.Warn().Str("group", dg.ID()).Str("bucket", target.Bucket).Str("key", targetLogKey(target)).Int("shard", shardIdx).Err(err).Msg("placement monitor quarantine failed")
 				}
 			})
 			go placementMonitor.Start(monitorCtx)
