@@ -4,23 +4,29 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// bootWALAndForwarders opens the WAL, builds the v0.0.7.1 PR-D ForwardSender +
+// bootWALAndForwarders builds the v0.0.7.1 PR-D ForwardSender +
 // ForwardReceiver, the meta-propose forward sender/receiver pair, the
 // meta-catalog read sender, the meta-join receiver, and the
 // ClusterCoordinator. Also performs the join-mode meta-join + initial Router
 // sync.
+//
+// R1 (narrow): the logical/PITR WAL (wal.OpenEncrypted) is DEK-sealed and
+// decrypts existing records at open, so it is opened in bootLogicalWALOpen
+// (post-gate, after WaitDEKReady). This phase keeps forwarder + coordinator
+// CONSTRUCTION and the keeper-population catch-up (legacy PerformMetaJoin /
+// invite-Phase-2 bootInviteJoinPhase2 below), which MUST run BEFORE
+// WaitDEKReady so a joiner's empty keeper fills via the meta-raft apply loop
+// before the gate. forwardReceiver.Register STAYS here (the data WAL is
+// already open+recovered in bootShardService and is NOT migrated in R1).
 //
 // Inputs:  state.cfg.DataDir, state.quicTransport, state.metaRaft,
 //
@@ -28,33 +34,14 @@ import (
 //	state.distBackend, state.nodeID, state.raftAddr, state.peers,
 //	state.effectiveEC, state.joinMode.
 //
-// Outputs: state.wal, state.walDir, state.forwardSender, state.forwardReceiver,
+// Outputs: state.forwardSender, state.forwardReceiver,
 //
 //	state.metaForwardSender, state.metaReadSender, state.clusterCoord,
 //	state.seedGroups.
 //
-// Cleanup: state.AddCleanup closes the WAL.
-//
 // Ordering: must run AFTER bootBalancerAndGossip (no direct dep, but matches
-// run.go); MUST run BEFORE bootBackendWrap (which wraps state.distBackend
-// through the wal.Backend).
+// run.go); MUST run BEFORE bootLogicalWALOpen + bootBackendWrap.
 func bootWALAndForwarders(ctx context.Context, state *bootState) error {
-	if state.dataWAL == nil {
-		return fmt.Errorf("data WAL must be opened before logical WAL/forwarders")
-	}
-	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
-	var sealer wal.RecordSealer
-	if state.cfg.Encryptor != nil {
-		var zero [16]byte
-		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
-	}
-	w, err := wal.OpenEncrypted(state.walDir, sealer, "pitr-wal")
-	if err != nil {
-		return fmt.Errorf("open WAL: %w", err)
-	}
-	state.wal = w
-	state.AddCleanup(func() { w.Close() })
-
 	// Seed data groups from cluster size only. Operators no longer choose this:
 	// group count is placement headroom, not a durability policy.
 	clusterSize := 1 + len(state.peers)

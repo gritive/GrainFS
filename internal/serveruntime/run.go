@@ -188,6 +188,24 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootWALAndForwarders(ctx, state); err != nil {
 		return err
 	}
+	// R1 (narrow): gate here — the keeper is now guaranteed populated by the
+	// join / invite catch-up at the end of bootWALAndForwarders (the meta-raft
+	// apply loop, started in bootMetaRaftStart, installs gen-0). Bounded so a
+	// joiner that cannot install fails fast instead of deadlocking.
+	if state.dekKeeper != nil {
+		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
+		err := WaitDEKReady(readyCtx, state.dekKeeper)
+		readyCancel()
+		if err != nil {
+			return fmt.Errorf("DEK readiness: %w", err)
+		}
+	}
+	// Open the DEK-sealed logical/PITR WAL (decrypts existing records on open)
+	// AFTER the gate. Its sole consumer (wal.NewBackend) is in bootBackendWrap,
+	// which follows immediately.
+	if err := bootLogicalWALOpen(ctx, state); err != nil {
+		return err
+	}
 	if err := bootBackendWrap(ctx, state); err != nil {
 		return err
 	}
@@ -212,20 +230,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if err := bootRecoveryAndScrubber(ctx, state); err != nil {
 		return err
-	}
-
-	// Phase D Task 6: do not accept user-facing encrypted-data traffic until
-	// the active DEK is installed (gen-0 via genesis Apply, or via join replay /
-	// snapshot restore on a joiner). Bounded so a joiner that cannot install
-	// never deadlocks boot — it fails fast instead. Genesis single-node is
-	// ready immediately.
-	if state.dekKeeper != nil {
-		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
-		err := WaitDEKReady(readyCtx, state.dekKeeper)
-		readyCancel()
-		if err != nil {
-			return fmt.Errorf("DEK readiness: %w", err)
-		}
 	}
 
 	// Phase D Task 7: refuse to boot if the replayed raft log contained a

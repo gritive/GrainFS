@@ -1,0 +1,51 @@
+package serveruntime
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/wal"
+)
+
+// bootLogicalWALOpen opens the logical/PITR WAL. It runs AFTER WaitDEKReady
+// because the WAL is DEK-sealed (commit 2) and wal.OpenEncrypted decrypts
+// existing records during its open scan (wal.go scanMaxSeq). Its sole consumer
+// is the PITR backend wrap (wal.NewBackend) in bootBackendWrap, which runs
+// immediately after this phase. The data WAL is opened separately and earlier
+// in bootShardService and is NOT migrated in R1 (R-FSM owns it).
+//
+// Outputs: state.wal, state.walDir.
+// Cleanup: state.AddCleanup closes the WAL.
+func bootLogicalWALOpen(ctx context.Context, state *bootState) error {
+	// Invariant (preserved from the former bootWALAndForwarders): the data WAL
+	// must already be open+recovered (bootShardService) before the logical WAL
+	// opens. Self-enforced here so the ordering stays executable.
+	if state.dataWAL == nil {
+		return fmt.Errorf("data WAL must be opened before logical WAL")
+	}
+	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
+	var sealer wal.RecordSealer
+	if state.cfg.Encryptor != nil {
+		var zero [16]byte
+		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
+	}
+	// wal.OpenEncrypted rejects a nil sealer. The encryption-disabled path
+	// (cfg.Encryptor == nil → sealer == nil) must use the plaintext wal.Open
+	// instead. Commit 2 changes only the encrypted branch's adapter
+	// (static → DEK); this nil branch is unaffected.
+	var w *wal.WAL
+	var err error
+	if sealer != nil {
+		w, err = wal.OpenEncrypted(state.walDir, sealer, "pitr-wal")
+	} else {
+		w, err = wal.Open(state.walDir)
+	}
+	if err != nil {
+		return fmt.Errorf("open WAL: %w", err)
+	}
+	state.wal = w
+	state.AddCleanup(func() { w.Close() })
+	return nil
+}
