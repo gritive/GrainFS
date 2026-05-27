@@ -119,17 +119,32 @@ func bootMetaRaftWiring(state *bootState) error {
 	// rotate+prune can no longer brick the node. kekStore is passed only for the
 	// back-compat migration of Phase-2 KEK-gen-sealed keys.
 	if len(state.cfg.RawEncryptionKey) == 32 && len(state.clusterID) > 0 && state.nodeID != "" {
-		spki, err := ensureNodeIdentity(
-			state.cfg.DataDir,
-			hex.EncodeToString(state.clusterID),
-			state.nodeID,
-			state.cfg.RawEncryptionKey,
-			state.kekStore,
-		)
-		if err != nil {
-			return fmt.Errorf("ensure per-node transport identity: %w", err)
+		if state.inviteJoinMode {
+			// Invite-join OWNS node.key.enc this boot: Phase-1 sealed it under a KEK
+			// generation and Phase-2 (bootInviteJoinPhase2) LoadNodeKeys it under that
+			// SAME gen. ensureNodeIdentity must NOT touch it here — its back-compat path
+			// would migrate (re-seal) the KEK-gen-sealed key to the static encryption.key
+			// out from under Phase-2, which would then fail with a GCM auth error. The
+			// NEXT normal boot (inviteJoinMode=false) runs ensureNodeIdentity and migrates
+			// the key to encKey via the back-compat path. Self-register still needs the
+			// SPKI, so source it from the invite-join state (set in Phase-1 / from the
+			// resume sentinel).
+			if state.inviteJoin != nil {
+				state.perNodeSPKI = state.inviteJoin.nodeSPKI
+			}
+		} else {
+			spki, err := ensureNodeIdentity(
+				state.cfg.DataDir,
+				hex.EncodeToString(state.clusterID),
+				state.nodeID,
+				state.cfg.RawEncryptionKey,
+				state.kekStore,
+			)
+			if err != nil {
+				return fmt.Errorf("ensure per-node transport identity: %w", err)
+			}
+			state.perNodeSPKI = spki
 		}
-		state.perNodeSPKI = spki
 	}
 
 	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
