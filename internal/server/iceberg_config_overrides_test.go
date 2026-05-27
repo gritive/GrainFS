@@ -106,3 +106,36 @@ func TestIcebergConfigHandler_SchemeReflection(t *testing.T) {
 	require.NotContains(t, got.Overrides["s3.endpoint"], "https://",
 		"plaintext test server must not be advertised as https")
 }
+
+func TestIcebergConfigHandler_HTTPDoesNotPublishS3Secrets(t *testing.T) {
+	hh := newIAMTestHelper(t)
+	hh.applySACreate(t, "sa-bench")
+	hh.applyKeyCreate(t, "AK-bench", "sa-bench", "SK-bench")
+	base := setupTestServerWithOptions(t,
+		WithIAMStore(hh.store),
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-bench", SecretKey: "SK-bench"}}),
+	)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	s3auth.SignRequest(req, "AK-bench", "SK-bench", "us-east-1")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+
+	var got struct {
+		Defaults  map[string]string `json:"defaults"`
+		Overrides map[string]string `json:"overrides"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+
+	require.NotContains(t, got.Overrides, "s3.access-key-id")
+	require.NotContains(t, got.Overrides, "s3.secret-access-key")
+	require.NotContains(t, got.Overrides, "s3.path-style-access")
+	require.True(t, strings.HasPrefix(got.Overrides["s3.endpoint"], "http://"))
+}
