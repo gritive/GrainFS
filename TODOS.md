@@ -323,28 +323,6 @@ Work these in order. Do not run them in parallel.
   uses) and only quarantine if reconstruction fails. This downgrades most corruption
   events from object isolation to a silent local repair. (`internal/cluster/shard_placement_monitor.go`.)
 
-- [ ] **`ReadLocalShardAt` plain-CRC range reads skip footer-CRC verification [P2]**:
-  The GFSCRC1 (unencrypted, encoded) branch of `ReadLocalShardAt`
-  (`internal/cluster/shard_service.go` ~:1829) range-reads the requested window via
-  `f.ReadAt(buf, 8+offset)` without verifying the trailing footer CRC, so a payload
-  bit-flip inside the requested range returns corrupt bytes with a nil error. This is
-  pre-existing (not introduced by the transient-classification work) and is NOT on the
-  placement-monitor path (the monitor uses full `ReadLocalShard`, which verifies CRC).
-  Verify the footer CRC (or at least the covered range) before returning bytes.
-  RESOLVED-BY (in flight, `feat/unify-volume-shard-path`): the unverified `f.ReadAt(buf, 8+offset)`
-  range path is removed. Range reads now go through `decodeLocalShardBytes`, which for a
-  GFSCRC1-framed shard (still written by scrub repair, wrapping an encrypted blob) calls
-  `eccodec.DecodeShard` — that DOES verify the trailing footer CRC over the whole payload before
-  the bytes are returned, and the inner AEAD then authenticates the range. A shard whose payload
-  was never encrypted is rejected with a clear error. So the [P2] property (CRC verified on every
-  range read) holds. Remove this item when that PR lands.
-
-- [x] **`checkPutObjectExpectedETag` panics on conditional PUT against an encrypted cluster [P1]** —
-  FIXED in the shard-path-unification PR (`feat/unify-volume-shard-path`). NOT separable: the
-  encrypted-test-backend migration surfaced it (`backend_ec_integration_test.go` runs an
-  `ExpectedETag` PUT against the encrypted FSM). `put_object_meta.go` now reads via
-  `f.itemValueCopy(item)` (decrypts) instead of the raw `item.Value()`. Remove this line when the PR lands.
-
 - [ ] **Placement monitor: stream scan targets instead of buffering O(objects+segments) [P3]**:
   `Scan` buffers all `ECShardScanTarget`s before processing; ~1.5 GB peak for 1 M chunked
   objects × 10 segments each. Follow up if production scans show RAM pressure; streaming
