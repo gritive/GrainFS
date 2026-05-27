@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.369.0] - 2026-05-27
+
+### Changed
+
+- Packed small-object blob storage (single-node packed backend) now seals entries through the DataEncryptor seam with position-bound AEAD, groundwork for KEK-envelope key rotation of data at rest.
+
 ## [0.0.368.0] - 2026-05-27
 
 ### Changed

@@ -237,6 +237,23 @@ Work these in order. Do not run them in parallel.
   Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
   `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK
   rotation lifecycle" Describe.
+- [ ] **KEK-envelope: DataEncryptor `SealTo`/`OpenTo` buffer-reusing seam methods**.
+  Deferred from D-seg-pack (v0.0.369.0). The seam's `Seal`/`Open` return a freshly
+  allocated buffer per call (the cipher owns its buffer), so migrating packblob's
+  encrypted hot path off its pooled `blobAppendAADPool`/`blobAppendSealedPool` raised the
+  per-small-object-PUT allocation count (Append encrypted bound 5→15, Read 8→16 in
+  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local
+  and D-seg-ec. Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
+  / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
+  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec call sites.
+  Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
+- [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
+  (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
+  source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks
+  to rotate if compacting the active blob (~522), then `os.Remove`s the old file (~542). A
+  concurrent `Append` can land in the blob after the read pass but before rotation/removal,
+  then `Compact` unlinks it. Reopen: forbid compacting the active blob, or lock+rotate
+  before scanning. Add a concurrent Append-during-Compact regression test.
 - [ ] **S3 Range GET residual p95/p99**: reopen when product/SLO requires p95
   below 25 ms and p99 below 35 ms, or when FUSE/s3fs/goofys random reads
   reproduce EC read amplification.
