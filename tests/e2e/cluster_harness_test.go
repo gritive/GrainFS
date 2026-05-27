@@ -75,9 +75,7 @@ type e2eCluster struct {
 
 func startE2ECluster(t testing.TB, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
-	c := startE2EClusterRaw(t, opts)
-	ginkgo.DeferCleanup(c.Stop)
-	return c
+	return startE2EClusterRaw(t, opts)
 }
 
 func startE2EClusterRaw(t testing.TB, opts e2eClusterOptions) *e2eCluster {
@@ -171,6 +169,7 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 		extraArgs:     append([]string(nil), opts.ExtraArgs...),
 		leaderIdx:     -1,
 	}
+	ginkgo.DeferCleanup(c.Stop)
 	c.procs = make([]*exec.Cmd, opts.Nodes)
 	c.dataDirs = make([]string, opts.Nodes)
 	c.httpPorts = make([]int, opts.Nodes)

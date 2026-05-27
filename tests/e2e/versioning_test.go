@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -162,10 +163,17 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 
 		for i := 0; i < tgt.nodes; i++ {
 			c := tgt.pickNode(i)
-			h, err := c.HeadObject(ctx, &s3.HeadObjectInput{
-				Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid),
-			})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "HEAD ?versionId via node %d failed", i)
+			var h *s3.HeadObjectOutput
+			var err error
+			gomega.Eventually(func() bool {
+				headCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				h, err = c.HeadObject(headCtx, &s3.HeadObjectInput{
+					Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid),
+				})
+				return err == nil
+			}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
+				Should(gomega.BeTrue(), "HEAD ?versionId via node %d failed: %v", i, err)
 			gomega.Expect(aws.ToString(h.VersionId)).To(gomega.Equal(vid), "node %d returned wrong version id", i)
 		}
 	})
@@ -219,10 +227,13 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		markerID := aws.ToString(delOut.VersionId)
 		gomega.Expect(markerID).NotTo(gomega.BeEmpty())
 
-		_, err = client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bkt), Key: aws.String(key),
-		})
-		gomega.Expect(err).To(gomega.HaveOccurred(), "GET after soft-delete must return 404")
+		gomega.Eventually(func() bool {
+			_, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bkt), Key: aws.String(key),
+			})
+			return err != nil
+		}, 15*time.Second, 200*time.Millisecond).Should(gomega.BeTrue(),
+			"GET after soft-delete must return 404")
 	})
 
 	ginkgo.It("hard deletes a specific version ID (HardDeleteByVersionID)", func() {

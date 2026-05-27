@@ -8,13 +8,17 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = ginkgo.AfterEach(func() {
+var _ = ginkgo.AfterSuite(func() {
+	closeE2EIdleConnections()
+})
+
+func closeE2EIdleConnections() {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
 	}
 	closeIdleConnections(e2eS3HTTPClient)
 	closeIdleConnections(e2eRawHTTPClient)
-})
+}
 
 type idleConnectionCloser interface {
 	CloseIdleConnections()
@@ -33,3 +37,7 @@ func TestE2EGinkgo(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
 	ginkgo.RunSpecs(t, "E2E Ginkgo")
 }
+
+var _ = ginkgo.BeforeSuite(func() {
+	initSharedS3Targets(ginkgo.GinkgoTB())
+})

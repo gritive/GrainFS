@@ -116,7 +116,7 @@ func runIAMBootstrapCases(t testing.TB, tgt iamBootstrapTarget) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "ListBuckets")
 
 		// CreateBucket with bucket-admin policy attached to the bootstrap SA.
-		bucket := "f4-bootstrap-bucket-" + tgt.name
+		bucket := bucketNameFor(tgt.name, t.Name(), "f4-bootstrap")
 		createBucketWithAdminPolicyAttachViaUDSAny(t, tgt.dataDirs(), bootstrapSAID, bucket, cli)
 
 		// PutObject.
