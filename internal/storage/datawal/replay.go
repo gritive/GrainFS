@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 const checkpointName = "checkpoint"
@@ -26,7 +24,7 @@ type Materializer interface {
 
 // Recover replays records after max(fromSeq, LoadCheckpoint(dir)) through m and
 // saves the checkpoint to the last replayed sequence after replay completes.
-func Recover(ctx context.Context, dir string, fromSeq uint64, enc *encrypt.Encryptor, m Materializer) error {
+func Recover(ctx context.Context, dir string, fromSeq uint64, sealer RecordSealer, namespace string, m Materializer) error {
 	if m == nil {
 		return fmt.Errorf("datawal: nil materializer")
 	}
@@ -40,7 +38,7 @@ func Recover(ctx context.Context, dir string, fromSeq uint64, enc *encrypt.Encry
 	}
 
 	var lastSeq uint64
-	err = Replay(ctx, dir, startSeq, enc, func(rec Record) error {
+	err = Replay(ctx, dir, startSeq, sealer, namespace, func(rec Record) error {
 		lastSeq = rec.Seq
 		if isReplacementOp(rec.Op) {
 			ok, err := m.HasReplacement(ctx, rec)

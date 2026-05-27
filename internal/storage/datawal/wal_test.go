@@ -15,8 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
+
+func testAdapter(t *testing.T) datawal.RecordSealer {
+	t.Helper()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte("k"), 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return storage.NewEncryptorAdapter(enc, make([]byte, 16))
+}
 
 func TestRecordRoundTrip(t *testing.T) {
 	rec := datawal.Record{
@@ -47,7 +57,7 @@ func TestRecordRoundTrip(t *testing.T) {
 }
 
 func TestWALAppendFlushReplay(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	_, err = w.Append(context.Background(), datawal.Record{
@@ -57,7 +67,7 @@ func TestWALAppendFlushReplay(t *testing.T) {
 	require.NoError(t, w.Flush())
 
 	var got []datawal.Record
-	err = datawal.Replay(context.Background(), w.Dir(), 0, nil, func(rec datawal.Record) error {
+	err = datawal.Replay(context.Background(), w.Dir(), 0, nil, "datawal", func(rec datawal.Record) error {
 		got = append(got, rec)
 		return nil
 	})
@@ -70,7 +80,8 @@ func TestWALAppendFlushReplay(t *testing.T) {
 func TestWALEncryptedRoundTrip(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
-	w, err := datawal.Open(t.TempDir(), enc)
+	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	w, err := datawal.Open(t.TempDir(), s, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "secret", Payload: []byte("plaintext")})
@@ -78,7 +89,7 @@ func TestWALEncryptedRoundTrip(t *testing.T) {
 	require.NoError(t, w.Flush())
 
 	var got []datawal.Record
-	err = datawal.Replay(context.Background(), w.Dir(), 0, enc, func(rec datawal.Record) error {
+	err = datawal.Replay(context.Background(), w.Dir(), 0, s, "datawal", func(rec datawal.Record) error {
 		got = append(got, rec)
 		return nil
 	})
@@ -92,12 +103,13 @@ func TestWALEncryptedRoundTrip(t *testing.T) {
 
 	wrong, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x78}, 32))
 	require.NoError(t, err)
-	err = datawal.Replay(context.Background(), w.Dir(), 0, wrong, func(datawal.Record) error { return nil })
+	wrongAdapter := storage.NewEncryptorAdapter(wrong, make([]byte, 16))
+	err = datawal.Replay(context.Background(), w.Dir(), 0, wrongAdapter, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
 
 func TestReplayStopsAtCleanEOFForTruncatedTail(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpShardPut, Bucket: "b", Key: "k", Target: "0", Payload: []byte("ok")})
 	require.NoError(t, err)
@@ -108,7 +120,7 @@ func TestReplayStopsAtCleanEOFForTruncatedTail(t *testing.T) {
 	require.NoError(t, err)
 
 	var count int
-	err = datawal.Replay(context.Background(), w.Dir(), 0, nil, func(datawal.Record) error {
+	err = datawal.Replay(context.Background(), w.Dir(), 0, nil, "datawal", func(datawal.Record) error {
 		count++
 		return nil
 	})
@@ -134,14 +146,14 @@ func TestRejectsInvalidOpOnEncodeDecodeAndReplay(t *testing.T) {
 	require.Error(t, err)
 
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	require.NoError(t, datawal.AppendRawForTest(dir, raw))
 
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
 
@@ -163,19 +175,19 @@ func TestDecodeRejectsTrailingBytesInCompleteRecord(t *testing.T) {
 	require.Error(t, err)
 
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	require.NoError(t, datawal.AppendRawForTest(dir, raw))
 
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
 
 func TestAppendCopiesPayload(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	payload := []byte("abc")
@@ -184,7 +196,7 @@ func TestAppendCopiesPayload(t *testing.T) {
 	payload[0] = 'z'
 	require.NoError(t, w.Flush())
 
-	err = datawal.Replay(context.Background(), w.Dir(), 0, nil, func(rec datawal.Record) error {
+	err = datawal.Replay(context.Background(), w.Dir(), 0, nil, "datawal", func(rec datawal.Record) error {
 		require.Equal(t, []byte("abc"), rec.Payload)
 		return nil
 	})
@@ -192,7 +204,7 @@ func TestAppendCopiesPayload(t *testing.T) {
 }
 
 func TestReplayFromCheckpointSkipsOldRecords(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	seq1, err := w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "a", Payload: []byte("1")})
@@ -202,7 +214,7 @@ func TestReplayFromCheckpointSkipsOldRecords(t *testing.T) {
 	require.NoError(t, w.Flush())
 
 	var keys []string
-	err = datawal.Replay(context.Background(), w.Dir(), seq1, nil, func(rec datawal.Record) error {
+	err = datawal.Replay(context.Background(), w.Dir(), seq1, nil, "datawal", func(rec datawal.Record) error {
 		keys = append(keys, rec.Key)
 		return nil
 	})
@@ -227,7 +239,7 @@ func (m *recordingMaterializer) HasReplacement(ctx context.Context, rec datawal.
 }
 
 func TestRecoverSkipsExistingReplacementButReplaysPatch(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k", Target: "blob", Payload: []byte("full")})
@@ -237,13 +249,13 @@ func TestRecoverSkipsExistingReplacementButReplaysPatch(t *testing.T) {
 	require.NoError(t, w.Flush())
 
 	m := &recordingMaterializer{existing: map[string]bool{"blob": true}}
-	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, m))
+	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, "datawal", m))
 	require.Len(t, m.applied, 1)
 	require.Equal(t, datawal.OpObjectWriteAt, m.applied[0].Op)
 }
 
 func TestRecoverSavesCheckpointToLastReplayedSeq(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "a", Payload: []byte("1")})
@@ -253,14 +265,14 @@ func TestRecoverSavesCheckpointToLastReplayedSeq(t *testing.T) {
 	require.NoError(t, w.Flush())
 
 	m := &recordingMaterializer{}
-	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, m))
+	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, "datawal", m))
 	checkpoint, err := datawal.LoadCheckpoint(w.Dir())
 	require.NoError(t, err)
 	require.Equal(t, lastSeq, checkpoint)
 }
 
 func TestRecoverHonorsExistingCheckpoint(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	firstSeq, err := w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "old", Payload: []byte("1")})
@@ -271,7 +283,7 @@ func TestRecoverHonorsExistingCheckpoint(t *testing.T) {
 	require.NoError(t, datawal.SaveCheckpoint(w.Dir(), firstSeq))
 
 	m := &recordingMaterializer{}
-	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, m))
+	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, "datawal", m))
 	require.Len(t, m.applied, 1)
 	require.Equal(t, "new", m.applied[0].Key)
 }
@@ -311,7 +323,7 @@ func TestRecordReaderStreamsPayload(t *testing.T) {
 }
 
 func TestAppendReaderRejectsOversizePayload(t *testing.T) {
-	w, err := datawal.Open(t.TempDir(), nil)
+	w, err := datawal.Open(t.TempDir(), nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 
@@ -321,13 +333,13 @@ func TestAppendReaderRejectsOversizePayload(t *testing.T) {
 
 func TestOpenScansRecordsForNextSequence(t *testing.T) {
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	seq1, err := w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "a"})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	w, err = datawal.Open(dir, nil)
+	w, err = datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
 	seq2, err := w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "b"})
@@ -337,21 +349,21 @@ func TestOpenScansRecordsForNextSequence(t *testing.T) {
 
 func TestOpenTruncatesTornTailBeforeAppending(t *testing.T) {
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "first", Payload: []byte("1")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	require.NoError(t, datawal.AppendRawForTest(dir, []byte{0x00, 0x00, 0x00, 0x20, 0xaa, 0xbb}))
 
-	w, err = datawal.Open(dir, nil)
+	w, err = datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "second", Payload: []byte("2")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
 	var keys []string
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(rec datawal.Record) error {
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(rec datawal.Record) error {
 		keys = append(keys, rec.Key)
 		return nil
 	})
@@ -363,21 +375,21 @@ func TestEncryptedWALRejectsNilEncryptor(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, enc)
+	w, err := datawal.Open(dir, storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("secret")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
-	_, err = datawal.Open(dir, nil)
+	_, err = datawal.Open(dir, nil, "datawal")
 	require.Error(t, err)
 }
 
 func TestPlainWALRejectsEncryptorMismatch(t *testing.T) {
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("plain")})
 	require.NoError(t, err)
@@ -385,15 +397,16 @@ func TestPlainWALRejectsEncryptorMismatch(t *testing.T) {
 
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
-	err = datawal.Replay(context.Background(), dir, 0, enc, func(datawal.Record) error { return nil })
+	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	err = datawal.Replay(context.Background(), dir, 0, s, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
-	_, err = datawal.Open(dir, enc)
+	_, err = datawal.Open(dir, s, "datawal")
 	require.Error(t, err)
 }
 
 func TestReplayRejectsMalformedCompleteFrame(t *testing.T) {
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
 	require.NoError(t, err)
@@ -411,7 +424,7 @@ func TestReplayRejectsMalformedCompleteFrame(t *testing.T) {
 	frame.Write(crc[:])
 	require.NoError(t, datawal.AppendRawForTest(dir, frame.Bytes()))
 
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
 
@@ -432,20 +445,20 @@ func TestDecodeRejectsOversizeAggregateMetadata(t *testing.T) {
 	require.Error(t, err)
 
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	require.NoError(t, datawal.AppendRawForTest(dir, raw))
 
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
 
 func TestSegmentDiscoveryRequiresExactName(t *testing.T) {
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, nil)
+	w, err := datawal.Open(dir, nil, "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "real"})
 	require.NoError(t, err)
@@ -455,12 +468,98 @@ func TestSegmentDiscoveryRequiresExactName(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "datawal-0000000002-extra.bin"), []byte("bad"), 0o644))
 
 	var keys []string
-	err = datawal.Replay(context.Background(), dir, 0, nil, func(rec datawal.Record) error {
+	err = datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(rec datawal.Record) error {
 		keys = append(keys, rec.Key)
 		return nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, []string{"real"}, keys)
+}
+
+func TestReplayRejectsReorderedFrames(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, s, "datawal")
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "first", Payload: []byte("1")})
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "second", Payload: []byte("2")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	// Replay succeeds before tampering.
+	require.NoError(t, datawal.Replay(context.Background(), dir, 0, s, "datawal", func(datawal.Record) error { return nil }))
+
+	path := filepath.Join(dir, "datawal-0000000001.bin")
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	// File: [16-byte header][frame1][frame2]. Each encrypted frame is
+	// seq(8) | sealed_len(4) | sealed | crc(4). Parse and physically swap.
+	const headerLen = 16
+	frame1, rest := splitEncryptedFrame(t, raw[headerLen:])
+	frame2, tail := splitEncryptedFrame(t, rest)
+	require.Empty(t, tail)
+
+	var rewritten []byte
+	rewritten = append(rewritten, raw[:headerLen]...)
+	rewritten = append(rewritten, frame2...)
+	rewritten = append(rewritten, frame1...)
+	require.NoError(t, os.WriteFile(path, rewritten, 0o644))
+
+	err = datawal.Replay(context.Background(), dir, 0, s, "datawal", func(datawal.Record) error { return nil })
+	require.Error(t, err)
+}
+
+// splitEncryptedFrame returns the leading encrypted frame
+// (seq(8)|len(4)|sealed|crc(4)) and the remaining bytes.
+func splitEncryptedFrame(t *testing.T, b []byte) (frame, rest []byte) {
+	t.Helper()
+	require.GreaterOrEqual(t, len(b), 12)
+	sealedLen := int(binary.BigEndian.Uint32(b[8:12]))
+	end := 8 + 4 + sealedLen + 4
+	require.GreaterOrEqual(t, len(b), end)
+	return b[:end], b[end:]
+}
+
+func TestReplayWrongNamespaceFails(t *testing.T) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, s, "datawal")
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "k", Payload: []byte("v")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	err = datawal.Replay(context.Background(), dir, 0, s, "other", func(datawal.Record) error { return nil })
+	require.Error(t, err)
+}
+
+func TestPlainModeRoundTripV2(t *testing.T) {
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, nil, "datawal")
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "k", Payload: []byte("v")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	raw, err := os.ReadFile(filepath.Join(dir, "datawal-0000000001.bin"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(raw), 16)
+	require.Equal(t, uint32(2), binary.BigEndian.Uint32(raw[4:8])) // version v2
+	require.Equal(t, byte(1), raw[8])                              // plain mode
+	require.Equal(t, uint32(0), binary.BigEndian.Uint32(raw[12:16]))
+
+	var keys []string
+	require.NoError(t, datawal.Replay(context.Background(), dir, 0, nil, "datawal", func(rec datawal.Record) error {
+		keys = append(keys, rec.Key)
+		return nil
+	}))
+	require.Equal(t, []string{"k"}, keys)
 }
 
 type zeroReader struct{}
