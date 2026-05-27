@@ -75,7 +75,13 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		replayCancel()
 	}
 
-	if !state.joinMode && len(state.metaRaft.FSM().ShardGroups()) == 0 {
+	// Genesis-only seed work. A joiner (legacy joinMode OR zero-CA inviteJoinMode)
+	// must NOT seed shard groups or wait to be its own meta-raft leader — it
+	// follows the existing leader and receives shard groups via replication.
+	// inviteJoinMode skips meta-raft bootstrap (boot_phases_raft.go:326), so its
+	// meta-raft has no local leader; running this block would time out on
+	// WaitForMetaRaftLeader, exactly as legacy joinMode would.
+	if !state.joinMode && !state.inviteJoinMode && len(state.metaRaft.FSM().ShardGroups()) == 0 {
 		if err := WaitForMetaRaftLeader(ctx, state.metaRaft, 15*time.Second); err != nil {
 			return err
 		}

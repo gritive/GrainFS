@@ -181,6 +181,17 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions) (*inviteJoinState,
 	token := os.Getenv(inviteBundleEnv)
 	decision := gateInviteJoin(opts.DataDir, token != "")
 	if decision == inviteNormalBoot {
+		// Stale-bundle no-op resume: a fully-joined node restarted with the
+		// (now-consumed) bundle env still set hits the same --cluster-key gate as
+		// inviteResume — bootValidateConfig runs BEFORE ResolveClusterKey reads
+		// disk, so an empty flag PSK trips ErrEmptyClusterKey. Load the PSK that
+		// Phase-1 mirrored to keys.d/current.key. ReadCurrent on a truly fresh
+		// dataDir returns ("", nil), so this is a no-op there.
+		if opts.ClusterKey == "" {
+			if psk, err := transport.NewKeystore(opts.DataDir).ReadCurrent(); err == nil && psk != "" {
+				opts.ClusterKey = psk
+			}
+		}
 		return nil, nil
 	}
 

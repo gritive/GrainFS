@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -85,20 +86,33 @@ func startInviteJoiner(t testing.TB, nodeID, dataDir, bundle string) *inviteJoin
 		raftPort: freePort(),
 	}
 	n.httpURL = fmt.Sprintf("http://127.0.0.1:%d", n.httpPort)
-	args := []string{
+	env := append(os.Environ(), inviteBundleEnvKey+"="+bundle)
+	startInviteProc(t, n, n.joinerArgs(), env)
+	return n
+}
+
+// restartInviteJoiner terminates the running joiner process and boots a fresh
+// one on the SAME data dir, ports, and (now-consumed) bundle env. Used by the
+// resume/no-op test: an already-joined node restarted with the stale bundle env
+// must classify as a normal boot and stay a voter.
+func restartInviteJoiner(t testing.TB, n *inviteJoinNode, bundle string) {
+	terminateProcess(n.cmd)
+	env := append(os.Environ(), inviteBundleEnvKey+"="+bundle)
+	startInviteProc(t, n, n.joinerArgs(), env)
+}
+
+func (n *inviteJoinNode) joinerArgs() []string {
+	return []string{
 		"serve",
 		"--data", n.dataDir,
 		"--port", fmt.Sprintf("%d", n.httpPort),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
-		"--node-id", nodeID,
+		"--node-id", n.nodeID,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
-	env := append(os.Environ(), inviteBundleEnvKey+"="+bundle)
-	startInviteProc(t, n, args, env)
-	return n
 }
 
 const inviteBundleEnvKey = "GRAINFS_INVITE_BUNDLE"
@@ -204,14 +218,20 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 			gomega.Expect(filepath.Join(joinerDir, "keys.d", "node.key.enc")).To(gomega.BeAnExistingFile())
 		})
 
-		// S3 round-trip THROUGH the joined node is blocked on F3/F4 (the leader-side
-		// cluster-QUIC accept-set UNION for a freshly-joined node, the deferred
-		// SetOnPeersChanged work referenced in invite_join_boot.go Phase-2). Without
-		// it the leader never AppendEntries-replicates the gen-0 DEK to the joiner,
-		// so the joiner reaches voter membership but then exits on the WaitDEKReady
-		// gate (~30s) before its S3 surface can serve a read. Un-skip once F3/F4
-		// lands the dial-back accept-set.
-		ginkgo.PIt("serves an S3 PutObject/GetObject round-trip through the joined node (blocked: F3/F4 gen-0 DEK replication)", func() {
+		// S3 round-trip THROUGH the joined node is deferred on a DISTINCT, newly
+		// surfaced bug (NOT the original "F3/F4 gen-0 DEK replication" claim, which
+		// was wrong). With the meta-raft bootstrap + seed-gate fixes the joiner now
+		// reaches WaitDEKReady, becomes a voter, AND serves writes: a PutObject
+		// through the joiner's own S3 endpoint succeeds (forwarded to the leader and
+		// committed). The READ path, however, fails persistently for the full window
+		// with HTTP 500 "not the leader": the freshly-joined node is a meta-raft
+		// voter but the bucket's DATA-group membership is never extended to include
+		// it, so GetObject routed to the joiner has no local/forwardable replica.
+		// (The legacy dynamic-join path expands data-group membership; the Zero-CA
+		// invite-join does not yet.) Un-skip once invite-join extends data-group
+		// membership to the new voter. Suspect code path: cluster shard-group /
+		// data-group reconfiguration on a freshly-joined node (NOT DEK replication).
+		ginkgo.PIt("serves an S3 PutObject/GetObject round-trip through the joined node (deferred: data-group membership not extended to the new voter — GET routes to a node with no replica, persistent 'not the leader')", func() {
 		})
 	})
 
@@ -299,20 +319,64 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 	})
 
 	ginkgo.Context("RestartNoOp", func() {
-		// The no-op-resume classifier is what this would exercise: a fully-joined
-		// voter restarted with the (now-consumed) bundle env still set must
-		// classify as inviteNormalBoot (artifacts complete + acked) and boot
-		// normally. That restart requires the joiner to FIRST reach a durable,
-		// settled state — which is blocked by F3/F4 (gen-0 DEK never replicates →
-		// the joiner exits on the WaitDEKReady gate ~30s after Phase-2). So the
-		// integration variant is pending. The pure classifier
-		// (classifyInviteJoinResume) is already unit-covered in
-		// serveruntime/invite_join_boot_test.go.
-		//
-		// Mid-Phase-1 crash injection (kill after staging, before ACK) is
-		// intentionally NOT attempted here: it is timing-flaky over the wire and
-		// the resume gate is, again, unit-tested. Un-skip once F3/F4 lands.
-		ginkgo.PIt("an already-joined node restarts with stale bundle env as a no-op and stays a voter (blocked: F3/F4 gen-0 DEK replication)", func() {
+		// A fully-joined voter restarted with the (now-consumed) bundle env still
+		// set must classify as inviteNormalBoot (artifacts complete + acked) and
+		// boot normally — NOT re-redeem the spent invite. It must stay the same
+		// voter and keep serving. (Mid-Phase-1 crash injection is intentionally not
+		// attempted here: it is timing-flaky over the wire; the resume classifier
+		// itself is unit-covered in serveruntime/invite_join_boot_test.go.)
+		ginkgo.It("an already-joined node restarts with stale bundle env as a no-op and stays a voter", func() {
+			t := ginkgo.GinkgoTB()
+			encKeyFile := makeSharedEncryptionKeyFile(t)
+
+			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
+			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
+
+			bundle := mintInvite(t, leader.dataDir)
+
+			joinerDir := shortTempDir(t)
+			joiner := startInviteJoiner(t, "joiner", joinerDir, bundle)
+			waitForVoter(t, leader.httpURL, "joiner", 90*time.Second)
+			waitForPort(t, joiner.httpPort, 60*time.Second)
+
+			// Seed an object through the joiner so we can prove durable state
+			// survives the restart.
+			bucket := "invite-join-resume"
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
+			joinerCli := s3ClientFor(joiner.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(joinerCli, 60*time.Second)).To(gomega.Succeed())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ginkgo.DeferCleanup(cancel)
+			body := []byte("resume payload")
+			key := "resume.txt"
+			gomega.Eventually(func() error {
+				return tryPutObject(ctx, joinerCli, bucket, key, body)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed())
+
+			// Restart the already-joined node with the stale bundle env still set.
+			restartInviteJoiner(t, joiner, bundle)
+			waitForPort(t, joiner.httpPort, 60*time.Second)
+
+			// It must remain the SAME voter (no re-join as a new node) — assert
+			// consistently, not just eventually.
+			gomega.Consistently(func() bool {
+				s := getStatusJSON(t, leader.httpURL)
+				return containsString(stringList(s["peers"]), "joiner")
+			}, 3*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(),
+				"restarted joiner must stay a voter as a normal no-op boot")
+
+			// And it still serves: a fresh PutObject through the restarted joiner
+			// succeeds (IAM SA still recognized, DEK ready, forward-to-leader intact).
+			joinerCli2 := s3ClientFor(joiner.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(joinerCli2, 60*time.Second)).To(gomega.Succeed())
+			gomega.Eventually(func() error {
+				return tryPutObject(ctx, joinerCli2, bucket, "resume-after.txt", body)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed(),
+				"restarted joiner must still serve writes")
 		})
 	})
 })
