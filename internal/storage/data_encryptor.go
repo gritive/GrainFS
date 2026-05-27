@@ -16,6 +16,12 @@ type DataEncryptor interface {
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 }
 
+// buildSeamAAD is the single AAD-construction point shared by every adapter, so
+// the seam's AAD shape can never drift between implementations.
+func buildSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AADField) []byte {
+	return encrypt.BuildAAD(domain, clusterID, fields...)
+}
+
 // EncryptorAdapter implements DataEncryptor over the static encrypt.Encryptor.
 // It always seals at the sentinel generation 0 and ignores the gen argument on
 // Open. clusterID MUST be 16 bytes (BuildAAD panics otherwise).
@@ -31,7 +37,7 @@ func NewEncryptorAdapter(enc *encrypt.Encryptor, clusterID []byte) *EncryptorAda
 }
 
 func (a *EncryptorAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
-	aad := encrypt.BuildAAD(domain, a.clusterID, fields...)
+	aad := buildSeamAAD(a.clusterID, domain, fields)
 	ct, err := a.enc.SealValueAADTo(nil, aad, plain)
 	if err != nil {
 		return nil, 0, err
@@ -40,7 +46,7 @@ func (a *EncryptorAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADFi
 }
 
 func (a *EncryptorAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
-	aad := encrypt.BuildAAD(domain, a.clusterID, fields...)
+	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.enc.OpenValueAADTo(nil, aad, ct)
 }
 
@@ -60,12 +66,12 @@ func NewDEKKeeperAdapter(keeper *encrypt.DEKKeeper, clusterID []byte) *DEKKeeper
 }
 
 func (a *DEKKeeperAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
-	aad := encrypt.BuildAAD(domain, a.clusterID, fields...)
+	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.keeper.SealWithAAD(plain, aad)
 }
 
 func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
-	aad := encrypt.BuildAAD(domain, a.clusterID, fields...)
+	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.keeper.OpenWithAAD(ct, gen, aad)
 }
 
