@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -20,71 +21,62 @@ import (
 // is independent of the string clusterID GenerateNodeIdentity puts in the SAN.
 var transcriptClusterID = []byte("cluster-x-16byt!")
 
-// fakeInviteCoordinator implements metaJoinCoordinator backed by REAL peer
-// registry + invite FSM instances. Its JoinViaInvite records the commit1 state
-// (registerPendingLearner + applyConsume) so the test can assert without Raft.
-type fakeInviteCoordinator struct {
-	registry *peerRegistry
-	invites  *inviteFSM
-	nodes    []MetaNodeEntry
-	joinErr  error
+// fakeBootstrapProvider supplies deterministic bootstrap secrets so the Phase-1
+// seal has a known plaintext to round-trip-decrypt in tests.
+type fakeBootstrapProvider struct {
+	encKey  []byte
+	kekGens []KEKGen
+	psk     []byte
 }
 
-func newFakeInviteCoordinator() *fakeInviteCoordinator {
-	return &fakeInviteCoordinator{registry: newPeerRegistry(), invites: newInviteFSM()}
+func (p *fakeBootstrapProvider) BootstrapSecrets() ([]byte, []KEKGen, []byte, error) {
+	return p.encKey, p.kekGens, p.psk, nil
 }
 
-func (f *fakeInviteCoordinator) IsLeader() bool         { return true }
-func (f *fakeInviteCoordinator) LeaderID() string       { return "leader-1" }
-func (f *fakeInviteCoordinator) Nodes() []MetaNodeEntry { return f.nodes }
-
-func (f *fakeInviteCoordinator) IsSPKIDenylisted(spki [32]byte) bool {
-	return f.registry.isDenylisted(spki)
-}
-func (f *fakeInviteCoordinator) SPKIOwner(spki [32]byte) (string, bool) {
-	return f.registry.spkiOwner(spki)
-}
-func (f *fakeInviteCoordinator) LookupInvite(id string, now time.Time) (ed25519.PublicKey, bool) {
-	return f.invites.lookup(id, now)
-}
-func (f *fakeInviteCoordinator) AcceptSPKIBytes() [][]byte {
-	return f.registry.acceptSPKIBytes()
-}
-
-func (f *fakeInviteCoordinator) Join(ctx context.Context, id, addr string) error {
-	return f.joinErr
-}
-
-func (f *fakeInviteCoordinator) JoinViaInvite(ctx context.Context, nodeID, addr string, spki [32]byte, inviteID string) error {
-	if f.joinErr != nil {
-		return f.joinErr
+func newFakeBootstrapProvider() *fakeBootstrapProvider {
+	return &fakeBootstrapProvider{
+		encKey:  []byte("enc-key-32-bytes-aaaaaaaaaaaaaaaa"),
+		kekGens: []KEKGen{{Gen: 1, Key: []byte("kek-gen-1-key-bytes-padding-aaaaa")}},
+		psk:     []byte("transport-psk-bytes"),
 	}
-	if err := f.registry.registerPendingLearner(nodeID, spki, addr); err != nil {
-		return err
-	}
-	if err := f.invites.applyConsume(inviteID, time.Now()); err != nil {
-		return err
-	}
-	f.nodes = append(f.nodes, MetaNodeEntry{ID: nodeID, Address: addr})
-	return nil
 }
 
-// inviteJoinFixture builds a valid invite-path JoinRequest for node-b.
+// inviteJoinFixture wires a real single-node (or, for membership tests, a paired
+// second node) MetaRaft leader plus a valid invite-path JoinRequest for node-b.
 type inviteJoinFixture struct {
-	coord    *fakeInviteCoordinator
-	req      JoinRequest
-	inviteID string
+	leader     *MetaRaft
+	receiver   *MetaJoinReceiver
+	provider   *fakeBootstrapProvider
+	req        JoinRequest
+	inviteID   string
+	spki       [32]byte
+	joinerKey  *ecdsa.PrivateKey
+	invitePriv ed25519.PrivateKey
 }
 
-func buildInviteJoinFixture(t *testing.T) inviteJoinFixture {
+// buildInviteJoinFixture starts a real single-node MetaRaft leader, mints an
+// invite into its FSM via Raft, and builds a valid invite-path JoinRequest for
+// node-b. joinerRaftAddr is the address the joiner advertises (it must equal the
+// raft transport registration key of node-b for membership to complete; for
+// Phase-1-only tests any value works because no membership is staged).
+func buildInviteJoinFixture(t *testing.T, joinerRaftAddr string) inviteJoinFixture {
 	t.Helper()
-	coord := newFakeInviteCoordinator()
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background(), nil))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond, "leader must elect")
 
-	// Mint an invite and record its public key in the FSM (present, unused,
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Mint an invite via Raft so the FSM records its public key (present, unused,
 	// unexpired). The private key stays with the joiner to sign the transcript.
 	invitePriv, invitePub, inviteID, err := MintInviteKeypair()
 	require.NoError(t, err)
-	coord.invites.applyMint(inviteID, invitePub, time.Now().Add(time.Hour).UnixNano())
+	require.NoError(t, m.ProposeInviteMint(ctx, inviteID, invitePub, time.Now().Add(time.Hour).UnixNano()))
 
 	// Build the joiner per-node identity (cert + SPKI).
 	cert, spki, err := transport.GenerateNodeIdentity("cluster-x", "node-b")
@@ -95,7 +87,7 @@ func buildInviteJoinFixture(t *testing.T) inviteJoinFixture {
 		ClusterID: transcriptClusterID,
 		Nonce:     []byte("joiner-nonce"),
 		NodeID:    "node-b",
-		Address:   "10.0.0.2:7001",
+		Address:   joinerRaftAddr,
 		SPKI:      spki[:],
 		Bind:      nil,
 	}
@@ -103,9 +95,14 @@ func buildInviteJoinFixture(t *testing.T) inviteJoinFixture {
 	nodeSig, err := encrypt.SignNodeTranscript(joinerKey, tr)
 	require.NoError(t, err)
 
+	provider := newFakeBootstrapProvider()
+	receiver := NewMetaJoinReceiver(m).
+		WithClusterID(transcriptClusterID).
+		WithBootstrapSecretProvider(provider)
+
 	req := JoinRequest{
 		NodeID:         "node-b",
-		Address:        "10.0.0.2:7001",
+		Address:        joinerRaftAddr,
 		HandshakeNonce: []byte("joiner-nonce"),
 		SPKI:           spki[:],
 		CertDER:        cert.Leaf.Raw,
@@ -113,56 +110,147 @@ func buildInviteJoinFixture(t *testing.T) inviteJoinFixture {
 		InviteSig:      inviteSig,
 		InviteID:       inviteID,
 	}
-	return inviteJoinFixture{coord: coord, req: req, inviteID: inviteID}
+	return inviteJoinFixture{
+		leader:     m,
+		receiver:   receiver,
+		provider:   provider,
+		req:        req,
+		inviteID:   inviteID,
+		spki:       spki,
+		joinerKey:  joinerKey,
+		invitePriv: invitePriv,
+	}
 }
 
-func handleInvite(t *testing.T, coord *fakeInviteCoordinator, req JoinRequest) *JoinReply {
+func newSingleNodeInviteFixture(t *testing.T) inviteJoinFixture {
+	return buildInviteJoinFixture(t, "10.0.0.2:7001")
+}
+
+// buildTwoNodeInviteFixture starts the leader plus a real second MetaRaft
+// (node-b) registered in the SAME transport fake at the joiner's advertised
+// address, so JoinViaInvite's AddLearner/PromoteToVoter can catch up and
+// commit. It returns the fixture and the started joiner node (kept alive for
+// the test lifetime).
+func buildTwoNodeInviteFixture(t *testing.T) (inviteJoinFixture, *MetaRaft) {
 	t.Helper()
-	receiver := NewMetaJoinReceiver(coord).WithClusterID(transcriptClusterID)
-	payload, err := encodeJoinRequest(req)
+	const joinerAddr = "node-b-addr"
+	fx := buildInviteJoinFixture(t, joinerAddr)
+
+	tr := fx.leader.cfg.Transport
+	joiner, err := NewMetaRaft(MetaRaftConfig{
+		NodeID:    "node-b",
+		RaftID:    joinerAddr,
+		Peers:     []string{"node-0"},
+		JoinMode:  true,
+		DataDir:   t.TempDir(),
+		Transport: tr,
+	})
 	require.NoError(t, err)
-	resp := receiver.Handle(&transport.Message{Type: transport.StreamMetaJoin, Payload: payload})
-	reply, err := decodeJoinReply(resp.Payload)
-	require.NoError(t, err)
-	return reply
+	tr.(*MetaTransportFake).register(joinerAddr, joiner)
+	require.NoError(t, joiner.Start(context.Background(), nil))
+	t.Cleanup(func() { _ = joiner.Close() })
+	return fx, joiner
 }
 
-func TestJoinReceiver_InvitePath_PendingLearnerNoKEK(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-	reply := handleInvite(t, fx.coord, fx.req)
+// --- Phase-1 -----------------------------------------------------------------
+
+func TestHandleJoin_Phase1_Valid_SealsBootstrapNoMembership(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	ctx := context.Background()
+
+	req := fx.req
+	req.JoinPhase = 1
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, req)
 
 	require.True(t, reply.Accepted)
 	require.Equal(t, JoinStatusOK, reply.Status)
+	require.NotEmpty(t, reply.SealedBootstrap, "Phase-1 must return a sealed bootstrap envelope")
 
-	// registry shows node-b as a pending learner (same-package direct read;
-	// no lookupByNodeID accessor until Task 6 wires per-peer dial pinning).
-	e, ok := fx.coord.registry.byNodeID["node-b"]
+	// The joiner can open the sealed bootstrap with its identity key.
+	eph, ct, err := decodeSealedBootstrap(reply.SealedBootstrap)
+	require.NoError(t, err)
+	bind := fx.receiver.sealBindContext(req)
+	plain, err := encrypt.OpenFromPeer(fx.joinerKey, encrypt.SealedToPeer{EphemeralPub: eph, Ciphertext: ct}, bind, bind)
+	require.NoError(t, err)
+	encKey, gens, psk, err := decodeBootstrapSecretsPayload(plain)
+	require.NoError(t, err)
+	require.Equal(t, fx.provider.encKey, encKey)
+	require.Equal(t, fx.provider.psk, psk)
+	require.Len(t, gens, 1)
+	require.Equal(t, uint32(1), gens[0].Gen)
+
+	// pending binding persisted.
+	node, pendSPKI, _, ok := fx.leader.LookupPending(fx.inviteID)
 	require.True(t, ok)
-	require.Equal(t, peerStatePendingLearner, e.State)
+	require.Equal(t, "node-b", node)
+	require.Equal(t, fx.spki, pendSPKI)
 
-	// invite consumed → lookup now false.
-	_, ok = fx.coord.invites.lookup(fx.inviteID, time.Now())
-	require.False(t, ok)
+	// invite NOT yet consumed (Phase-2 consumes it).
+	_, ok = fx.leader.LookupInvite(fx.inviteID, time.Now())
+	require.True(t, ok, "invite must remain redeemable after Phase-1")
 
-	// reply carries the accept-set; there is NO KEK field at all.
-	require.Len(t, reply.PeerSPKIs, 1)
-	require.Equal(t, fx.req.SPKI, reply.PeerSPKIs[0])
+	// NO membership change: node-b must not be in the FSM nodes.
+	require.False(t, fsmHasNode(fx.leader, "node-b"), "Phase-1 must not stage membership")
 }
 
-func TestJoinReceiver_InvitePath_RejectsReusedInvite(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-	first := handleInvite(t, fx.coord, fx.req)
-	require.True(t, first.Accepted)
+func TestHandleJoin_Phase1_CapturedSPKIMismatch_Rejected(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	req := fx.req
+	req.JoinPhase = 1
 
-	second := handleInvite(t, fx.coord, fx.req)
-	require.False(t, second.Accepted)
-	require.Equal(t, JoinStatusError, second.Status)
+	var wrong [32]byte
+	wrong[0] = 0xFF
+	reply := fx.receiver.HandleJoin(context.Background(), wrong, req)
+
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusError, reply.Status)
+	require.Contains(t, reply.Message, "captured SPKI does not match")
 }
 
-func TestJoinReceiver_InvitePath_RejectsForgedNodeSig(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
+func TestHandleJoin_Phase1_ReplayByDifferentIdentity_Rejected(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	ctx := context.Background()
 
-	// Sign NodeSig with a DIFFERENT ecdsa key than the presented cert.
+	// First redeemer binds the invite.
+	first := fx.req
+	first.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, first).Accepted)
+
+	// A DIFFERENT identity node-c re-redeems the SAME invite, signing its own
+	// transcript with the SAME (leaked) invite key the FSM holds. The gate
+	// passes, but ProposeInvitePending must reject the rebind to a different
+	// (nodeID, spki) because the invite is already pending for node-b.
+	cert, spkiC, err := transport.GenerateNodeIdentity("cluster-x", "node-c")
+	require.NoError(t, err)
+	keyC := cert.PrivateKey.(*ecdsa.PrivateKey)
+	tr := encrypt.InviteTranscript{
+		ClusterID: transcriptClusterID,
+		Nonce:     []byte("joiner-nonce-c"),
+		NodeID:    "node-c",
+		Address:   "10.0.0.3:7001",
+		SPKI:      spkiC[:],
+		Bind:      nil,
+	}
+	reqC := JoinRequest{
+		NodeID:         "node-c",
+		Address:        "10.0.0.3:7001",
+		HandshakeNonce: []byte("joiner-nonce-c"),
+		SPKI:           spkiC[:],
+		CertDER:        cert.Leaf.Raw,
+		NodeSig:        mustSignNode(t, keyC, tr),
+		InviteSig:      encrypt.SignInviteTranscript(fx.invitePriv, tr),
+		InviteID:       fx.inviteID,
+		JoinPhase:      1,
+	}
+	reply := fx.receiver.HandleJoin(ctx, spkiC, reqC)
+	require.False(t, reply.Accepted)
+	require.Equal(t, JoinStatusError, reply.Status)
+}
+
+// --- Phase-1 gate rejections (signature / SPKI / invite validity) ------------
+
+func TestHandleJoin_Phase1_RejectsForgedNodeSig(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
 	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	tr := encrypt.InviteTranscript{
@@ -171,71 +259,57 @@ func TestJoinReceiver_InvitePath_RejectsForgedNodeSig(t *testing.T) {
 		NodeID:    fx.req.NodeID,
 		Address:   fx.req.Address,
 		SPKI:      fx.req.SPKI,
-		Bind:      nil,
 	}
-	forged, err := encrypt.SignNodeTranscript(otherKey, tr)
-	require.NoError(t, err)
-	fx.req.NodeSig = forged
+	req := fx.req
+	req.JoinPhase = 1
+	req.NodeSig = mustSignNode(t, otherKey, tr)
 
-	reply := handleInvite(t, fx.coord, fx.req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
 	require.False(t, reply.Accepted)
-	require.Equal(t, JoinStatusError, reply.Status)
+	require.Equal(t, "node signature invalid", reply.Message)
 }
 
-func TestJoinReceiver_InvitePath_RejectsSPKICertMismatch(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-
-	// CertDER from a DIFFERENT identity than the claimed SPKI.
-	otherCert, _, err := transport.GenerateNodeIdentity("cluster-x", "node-c")
+func TestHandleJoin_Phase1_RejectsSPKICertMismatch(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	otherCert, _, err := transport.GenerateNodeIdentity("cluster-x", "node-z")
 	require.NoError(t, err)
-	fx.req.CertDER = otherCert.Leaf.Raw
+	req := fx.req
+	req.JoinPhase = 1
+	req.CertDER = otherCert.Leaf.Raw
 
-	reply := handleInvite(t, fx.coord, fx.req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
 	require.False(t, reply.Accepted)
-	require.Equal(t, JoinStatusError, reply.Status)
 	require.Equal(t, "SPKI does not match presented cert", reply.Message)
 }
 
-func TestJoinReceiver_InvitePath_RejectsDenylistedSPKI(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-	var spki [32]byte
-	copy(spki[:], fx.req.SPKI)
-	fx.coord.registry.denylist(spki)
+func TestHandleJoin_Phase1_RejectsDenylistedSPKI(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	fx.leader.fsm.peers.denylist(fx.spki)
+	req := fx.req
+	req.JoinPhase = 1
 
-	reply := handleInvite(t, fx.coord, fx.req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
 	require.False(t, reply.Accepted)
-	require.Equal(t, JoinStatusError, reply.Status)
 	require.Contains(t, reply.Message, "SPKI denylisted")
 }
 
-func TestJoinReceiver_InvitePath_RejectsSPKIAlreadyRegisteredByOtherNode(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-	var spki [32]byte
-	copy(spki[:], fx.req.SPKI)
-	// Pre-register the same SPKI under a different node-id.
-	err := fx.coord.registry.registerPendingLearner("node-other", spki, "10.0.0.99:7001")
-	require.NoError(t, err)
-
-	reply := handleInvite(t, fx.coord, fx.req)
-	require.False(t, reply.Accepted)
-	require.Equal(t, JoinStatusError, reply.Status)
-}
-
-func TestJoinReceiver_InvitePath_RejectsExpiredInvite(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-	// Overwrite the invite with an already-expired one.
+func TestHandleJoin_Phase1_RejectsExpiredInvite(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	// Re-mint the same invite-id already expired.
 	_, expiredPub, _, err := MintInviteKeypair()
 	require.NoError(t, err)
-	fx.coord.invites.applyMint(fx.inviteID, expiredPub, time.Now().Add(-time.Hour).UnixNano())
+	ctx := context.Background()
+	require.NoError(t, fx.leader.ProposeInviteMint(ctx, fx.inviteID, expiredPub, time.Now().Add(-time.Hour).UnixNano()))
+	req := fx.req
+	req.JoinPhase = 1
 
-	reply := handleInvite(t, fx.coord, fx.req)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, req)
 	require.False(t, reply.Accepted)
-	require.Equal(t, JoinStatusError, reply.Status)
+	require.Equal(t, "invite invalid/used/expired", reply.Message)
 }
 
-func TestJoinReceiver_InvitePath_RejectsForgedInviteSig(t *testing.T) {
-	fx := buildInviteJoinFixture(t)
-	// Sign InviteSig with a DIFFERENT ed25519 key than the one minted into the FSM.
+func TestHandleJoin_Phase1_RejectsForgedInviteSig(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
 	otherPriv, _, _, err := MintInviteKeypair()
 	require.NoError(t, err)
 	tr := encrypt.InviteTranscript{
@@ -244,12 +318,143 @@ func TestJoinReceiver_InvitePath_RejectsForgedInviteSig(t *testing.T) {
 		NodeID:    fx.req.NodeID,
 		Address:   fx.req.Address,
 		SPKI:      fx.req.SPKI,
-		Bind:      nil,
 	}
-	fx.req.InviteSig = encrypt.SignInviteTranscript(otherPriv, tr)
+	req := fx.req
+	req.JoinPhase = 1
+	req.InviteSig = encrypt.SignInviteTranscript(otherPriv, tr)
 
-	reply := handleInvite(t, fx.coord, fx.req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+	require.False(t, reply.Accepted)
+	require.Equal(t, "invite signature invalid", reply.Message)
+}
+
+// --- Phase-2 -----------------------------------------------------------------
+
+func TestHandleJoin_Phase2_ACK_StagesMembershipConsumesInvite(t *testing.T) {
+	fx, joiner := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+
+	hookRan := false
+	fx.receiver = fx.receiver.WithPostJoinHook(func(context.Context, JoinRequest) error {
+		hookRan = true
+		return nil
+	})
+
+	// Phase-1 binds the invite.
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+
+	// Phase-2 ACK from the pending redeemer.
+	p2 := fx.req
+	p2.JoinPhase = 2
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	require.True(t, reply.Accepted, "phase-2 reply: %+v", reply)
+	require.Equal(t, JoinStatusOK, reply.Status)
+	require.True(t, hookRan, "postJoinHook must run on Phase-2")
+
+	// node-b promoted to a voting member + present in FSM nodes.
+	require.True(t, fsmHasNode(fx.leader, "node-b"))
+	require.Equal(t, peerStateMember, fx.leader.fsm.peers.byNodeID["node-b"].State)
+
+	// invite consumed (used).
+	_, ok := fx.leader.LookupInvite(fx.inviteID, time.Now())
+	require.False(t, ok, "invite must be consumed after Phase-2")
+
+	_ = joiner
+}
+
+func TestHandleJoin_Phase2_CapturedSPKIMismatch_Rejected(t *testing.T) {
+	fx, _ := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+
+	p2 := fx.req
+	p2.JoinPhase = 2
+	var wrong [32]byte
+	wrong[0] = 0xAB
+	reply := fx.receiver.HandleJoin(ctx, wrong, p2)
 	require.False(t, reply.Accepted)
 	require.Equal(t, JoinStatusError, reply.Status)
-	require.Contains(t, reply.Message, "invite signature invalid")
+	require.Contains(t, reply.Message, "captured SPKI does not match pending")
+
+	// No membership staged.
+	require.False(t, fsmHasNode(fx.leader, "node-b"))
+}
+
+func TestHandleJoin_Phase2_Idempotent_ResumesToConsume(t *testing.T) {
+	fx, _ := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+
+	p2 := fx.req
+	p2.JoinPhase = 2
+	first := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	require.True(t, first.Accepted)
+
+	// Second Phase-2 invocation simulates a crash-after-membership retry: every
+	// membership step is already applied and the invite is already consumed.
+	// Idempotent JoinViaInvite + consume must still report success.
+	second := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	require.True(t, second.Accepted, "phase-2 retry must resume idempotently: %+v", second)
+
+	// Still exactly one voter member + consumed invite.
+	require.True(t, fsmHasNode(fx.leader, "node-b"))
+	require.Equal(t, peerStateMember, fx.leader.fsm.peers.byNodeID["node-b"].State)
+	_, ok := fx.leader.LookupInvite(fx.inviteID, time.Now())
+	require.False(t, ok)
+}
+
+// TestHandleJoin_Phase2_ResumesFromMembershipAppliedNotConsumed reproduces the
+// exact crash-after-AddNode-before-consume middle state: membership is staged
+// directly (JoinViaInvite) WITHOUT consuming the invite, then Phase-2 is called
+// once. It must resume — keep the membership, run the hook, and consume.
+func TestHandleJoin_Phase2_ResumesFromMembershipAppliedNotConsumed(t *testing.T) {
+	fx, _ := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+
+	// Phase-1 binds the invite.
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+
+	// Simulate the crash middle state: membership fully staged, invite NOT
+	// consumed. (JoinViaInvite is the membership-only half; it does not consume.)
+	require.NoError(t, fx.leader.JoinViaInvite(ctx, "node-b", fx.req.Address, fx.spki, fx.inviteID))
+	require.True(t, fsmHasNode(fx.leader, "node-b"))
+	_, stillRedeemable := fx.leader.LookupInvite(fx.inviteID, time.Now())
+	require.True(t, stillRedeemable, "precondition: invite not yet consumed")
+
+	// Phase-2 ACK resumes: membership idempotently re-applied, invite consumed.
+	p2 := fx.req
+	p2.JoinPhase = 2
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	require.True(t, reply.Accepted, "phase-2 must resume from middle state: %+v", reply)
+	require.Equal(t, peerStateMember, fx.leader.fsm.peers.byNodeID["node-b"].State)
+	_, ok := fx.leader.LookupInvite(fx.inviteID, time.Now())
+	require.False(t, ok, "invite must be consumed after the resuming Phase-2")
+}
+
+// --- helpers -----------------------------------------------------------------
+
+func fsmHasNode(m *MetaRaft, id string) bool {
+	for _, n := range m.fsm.Nodes() {
+		if n.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func mustSignNode(t *testing.T, key *ecdsa.PrivateKey, tr encrypt.InviteTranscript) []byte {
+	t.Helper()
+	sig, err := encrypt.SignNodeTranscript(key, tr)
+	require.NoError(t, err)
+	return sig
 }

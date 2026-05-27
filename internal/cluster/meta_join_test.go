@@ -206,6 +206,17 @@ func (f *fakeJoinCoordinator) JoinViaInvite(ctx context.Context, nodeID, addr st
 	return f.Join(ctx, nodeID, addr)
 }
 
+// Two-phase invite-join stubs (W7). These fakes exercise only the KEK/legacy
+// paths, so the two-phase methods are unused no-ops.
+func (f *fakeJoinCoordinator) ProposeInvitePending(context.Context, string, string, [32]byte, string) error {
+	return nil
+}
+func (f *fakeJoinCoordinator) LookupPending(string) (string, [32]byte, string, bool) {
+	return "", [32]byte{}, "", false
+}
+func (f *fakeJoinCoordinator) ProposeInviteConsume(context.Context, string) error { return nil }
+func (f *fakeJoinCoordinator) RemoveLearner(string, string) error                 { return nil }
+
 func (f *fakeJoinCoordinator) JoinCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

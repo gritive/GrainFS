@@ -321,3 +321,18 @@ func (f *fakeJoinCoord) LookupInvite(_ string, _ time.Time) (ed25519.PublicKey, 
 func (f *fakeJoinCoord) JoinViaInvite(_ context.Context, _, _ string, _ [32]byte, _ string) error {
 	return errors.New("invite path not implemented in this fake")
 }
+
+// Two-phase invite-join stubs (W7): this fake exercises only the KEK handshake
+// path, so these are unused no-ops.
+func (f *fakeJoinCoord) ProposeInvitePending(context.Context, string, string, [32]byte, string) error {
+	return errors.New("invite path not implemented in this fake")
+}
+func (f *fakeJoinCoord) LookupPending(string) (string, [32]byte, string, bool) {
+	return "", [32]byte{}, "", false
+}
+func (f *fakeJoinCoord) ProposeInviteConsume(context.Context, string) error {
+	return errors.New("invite path not implemented in this fake")
+}
+func (f *fakeJoinCoord) RemoveLearner(string, string) error {
+	return errors.New("invite path not implemented in this fake")
+}
