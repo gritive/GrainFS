@@ -94,7 +94,7 @@ func (f *MetaFSM) SetMountSAStore(s *mountsastore.Store) {
 }
 
 // SetProtocolCredentialStore wires the protocol credential store into MetaFSM
-// snapshots. Command apply semantics are introduced in the next Phase 1 slice.
+// apply and snapshot paths.
 func (f *MetaFSM) SetProtocolCredentialStore(s *protocred.Store) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

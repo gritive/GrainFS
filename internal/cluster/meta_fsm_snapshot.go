@@ -697,17 +697,18 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	}
 
 	var newProtocolCredentials []protocred.Credential
-	hasProtocolCredentials := false
+	var newProtocolCredentialRequests []ProtocolCredentialRequestRecord
+	restoreProtocolCredentials := f.protocolCredentialStore != nil
 	if len(trailers.pcreData) > 0 {
-		if f.protocolCredentialStore == nil {
+		if !restoreProtocolCredentials {
 			log.Warn().Int("pcre_len", len(trailers.pcreData)).Msg("meta_fsm: Restore: snapshot contains protocol credentials but store not wired; skipping")
 		} else {
-			rows, err := decodeProtocolCredentialsSnapshot(trailers.pcreData)
+			rows, requests, err := decodeProtocolCredentialsSnapshotState(trailers.pcreData)
 			if err != nil {
 				return fmt.Errorf("meta_fsm: Restore: decode protocol credentials: %w", err)
 			}
 			newProtocolCredentials = rows
-			hasProtocolCredentials = true
+			newProtocolCredentialRequests = requests
 		}
 	}
 
@@ -779,6 +780,13 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			for _, e := range f.objectIndex {
 				f.dekRefCounts[e.DekGen]++
 			}
+		}
+	}
+	if restoreProtocolCredentials {
+		f.protocolCredentialStore.Restore(newProtocolCredentials)
+		f.protocolCredentialRequests = make(map[string]ProtocolCredentialRequestRecord, len(newProtocolCredentialRequests))
+		for _, row := range newProtocolCredentialRequests {
+			f.protocolCredentialRequests[row.RequestID] = row
 		}
 	}
 	cb := f.onBucketAssigned
@@ -867,10 +875,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		if f.policyResolver != nil {
 			f.policyResolver.Invalidate(nil, nil)
 		}
-	}
-
-	if hasProtocolCredentials {
-		f.protocolCredentialStore.Restore(newProtocolCredentials)
 	}
 
 	// JKEY commit — both f.jwtKeyStore and f.jwtKeys are updated together.

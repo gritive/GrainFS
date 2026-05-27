@@ -179,8 +179,40 @@ func (rcv *MetaProtocolCredentialEntry) MutateLastUsedAtUnixNanos(n int64) bool 
 	return rcv._tab.MutateInt64Slot(26, n)
 }
 
+func (rcv *MetaProtocolCredentialEntry) Generation() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaProtocolCredentialEntry) MutateGeneration(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(28, n)
+}
+
+func (rcv *MetaProtocolCredentialEntry) StaleAtUnixNanos() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaProtocolCredentialEntry) MutateStaleAtUnixNanos(n int64) bool {
+	return rcv._tab.MutateInt64Slot(30, n)
+}
+
+func (rcv *MetaProtocolCredentialEntry) StaleReason() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MetaProtocolCredentialEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(12)
+	builder.StartObject(15)
 }
 func MetaProtocolCredentialEntryAddId(builder *flatbuffers.Builder, id flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(id), 0)
@@ -220,6 +252,15 @@ func MetaProtocolCredentialEntryAddRevokedAtUnixNanos(builder *flatbuffers.Build
 }
 func MetaProtocolCredentialEntryAddLastUsedAtUnixNanos(builder *flatbuffers.Builder, lastUsedAtUnixNanos int64) {
 	builder.PrependInt64Slot(11, lastUsedAtUnixNanos, 0)
+}
+func MetaProtocolCredentialEntryAddGeneration(builder *flatbuffers.Builder, generation uint64) {
+	builder.PrependUint64Slot(12, generation, 0)
+}
+func MetaProtocolCredentialEntryAddStaleAtUnixNanos(builder *flatbuffers.Builder, staleAtUnixNanos int64) {
+	builder.PrependInt64Slot(13, staleAtUnixNanos, 0)
+}
+func MetaProtocolCredentialEntryAddStaleReason(builder *flatbuffers.Builder, staleReason flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(staleReason), 0)
 }
 func MetaProtocolCredentialEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
