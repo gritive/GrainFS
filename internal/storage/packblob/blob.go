@@ -408,7 +408,7 @@ func readFullAt(f *os.File, buf []byte, off *int64) error {
 }
 
 func (bs *BlobStore) skipReadCRC(flags byte) bool {
-	// AES-GCM authenticates encrypted blob entries, including key, blob id,
+	// XAES-256-GCM authenticates encrypted blob entries, including key, blob id,
 	// offset, and flags via AAD. Recomputing CRC32 over the ciphertext on every
 	// GET duplicates that integrity check on the hot path.
 	return bs.encryptor != nil && flags&flagEncrypted != 0

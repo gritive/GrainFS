@@ -9,7 +9,7 @@ import (
 // SegmentedReader stitches multiple segment blobs into a single byte stream,
 // supporting Range reads. Opens each segment lazily as the read offset advances.
 // For encrypted backends, each segment is decrypted independently (its own
-// AES-GCM nonce lives in the blob header).
+// XAES-256-GCM nonce lives in the blob header).
 type SegmentedReader struct {
 	backend  *LocalBackend
 	bucket   string
