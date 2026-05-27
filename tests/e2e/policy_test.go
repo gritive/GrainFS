@@ -71,12 +71,14 @@ func runBucketPolicyCases(getTgt func() s3Target) {
 		raw := adminPolicyGet(tb, tgt, bucket)
 		gomega.Expect(string(raw)).To(gomega.ContainSubstring("s3:GetObject"))
 
-		got, err := cli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-			Bucket: aws.String(bucket),
-		})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(got.Policy).NotTo(gomega.BeNil())
-		gomega.Expect(*got.Policy).To(gomega.ContainSubstring("s3:GetObject"))
+		gomega.Eventually(func(g gomega.Gomega) {
+			got, err := cli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
+				Bucket: aws.String(bucket),
+			})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(got.Policy).NotTo(gomega.BeNil())
+			g.Expect(*got.Policy).To(gomega.ContainSubstring("s3:GetObject"))
+		}, 15*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
 	})
 
 	ginkgo.It("rejects invalid policy JSON (InvalidJSON)", func() {
@@ -134,12 +136,14 @@ func runBucketPolicyCases(getTgt func() s3Target) {
 			adminPolicyDelete(ginkgo.GinkgoTB(), tgt, bucket)
 		})
 
-		req, err := http.NewRequest(http.MethodGet, tgt.endpoint(0)+"/"+bucket+"/secret.txt", nil)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		resp, err := http.DefaultClient.Do(req)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		resp.Body.Close()
-		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
+		gomega.Eventually(func(g gomega.Gomega) {
+			req, err := http.NewRequest(http.MethodGet, tgt.endpoint(0)+"/"+bucket+"/secret.txt", nil)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			resp, err := http.DefaultClient.Do(req)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			resp.Body.Close()
+			g.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
+		}, 15*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
 	})
 }
 

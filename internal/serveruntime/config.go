@@ -32,10 +32,26 @@ type Config struct {
 	RaftAddr         string
 	RaftAddrExplicit bool
 	ClusterKey       string
+	// JoinListenAddr is the bind address for the Zero-CA QUIC join listener
+	// (two-phase invite handler, leader side). Empty derives a kernel-picked
+	// port on the raft-addr host; the resolved address is advertised in the
+	// invite bundle (W10).
+	JoinListenAddr string
 
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts  []server.Option
 	Encryptor *encrypt.Encryptor
+	// RawEncryptionKey is the raw bytes of the static encryption.key, captured
+	// alongside Encryptor by LoadOrCreateEncryptionKeyWithRaw. Threaded onto
+	// bootState (via cfg) so the zero-CA bootstrap-secret provider can seal the
+	// encryption key to an invite-joining node. Nil when encryption is unwired.
+	RawEncryptionKey []byte
+
+	// InviteJoin carries the Zero-CA invite-join Phase-1 outcome (W9b) when this
+	// node booted from an invite bundle (FreshJoin/Resume). Nil on every other
+	// boot. Threaded onto bootState by newBootState so the raft gating, the
+	// isGenesisBoot decision, and the post-boot Phase-2 ACK can see it.
+	InviteJoin *inviteJoinState
 
 	// IAM (Phase 2): store + applier for cluster IAM state. Both nil in
 	// fully unwired (test/legacy) configurations; cmd/grainfs/serve.go

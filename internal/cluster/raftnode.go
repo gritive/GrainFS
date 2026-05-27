@@ -99,6 +99,11 @@ type RaftNode interface {
 	// error to callers so they can retry once the learner drains.
 	PromoteToVoter(id string) error
 
+	// RemoveLearner proposes dropping a non-voting observer from the cluster
+	// (inverse of AddLearner). Returns ErrNotALearner when id is not a
+	// registered learner. Used to roll back an un-promoted learner.
+	RemoveLearner(id string) error
+
 	// TransferLeadership initiates a leadership transfer to another voter.
 	TransferLeadership() error
 

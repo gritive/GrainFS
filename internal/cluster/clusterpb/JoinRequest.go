@@ -269,8 +269,62 @@ func (rcv *JoinRequest) InviteId() []byte {
 	return nil
 }
 
+func (rcv *JoinRequest) JoinPhase() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) MutateJoinPhase(n byte) bool {
+	return rcv._tab.MutateByteSlot(22, n)
+}
+
+func (rcv *JoinRequest) JoinerJoinListenerAddr() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *JoinRequest) JoinerJoinListenerSpki(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) JoinerJoinListenerSpkiLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *JoinRequest) JoinerJoinListenerSpkiBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *JoinRequest) MutateJoinerJoinListenerSpki(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
 func JoinRequestStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(12)
 }
 func JoinRequestAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
@@ -316,6 +370,18 @@ func JoinRequestStartInviteSigVector(builder *flatbuffers.Builder, numElems int)
 }
 func JoinRequestAddInviteId(builder *flatbuffers.Builder, inviteId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(inviteId), 0)
+}
+func JoinRequestAddJoinPhase(builder *flatbuffers.Builder, joinPhase byte) {
+	builder.PrependByteSlot(9, joinPhase, 0)
+}
+func JoinRequestAddJoinerJoinListenerAddr(builder *flatbuffers.Builder, joinerJoinListenerAddr flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(joinerJoinListenerAddr), 0)
+}
+func JoinRequestAddJoinerJoinListenerSpki(builder *flatbuffers.Builder, joinerJoinListenerSpki flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(joinerJoinListenerSpki), 0)
+}
+func JoinRequestStartJoinerJoinListenerSpkiVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
 }
 func JoinRequestEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

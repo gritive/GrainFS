@@ -1,7 +1,8 @@
 // Object-level S3 API e2e (target table-driven).
 //
 // The same case set runs against a single-node fixture and a 4-node cluster
-// fixture. Bucket names are prefixed with tgt.name to avoid collisions.
+// fixture. Bucket names are derived from t.Name()+case via tgt.uniqueBucket
+// to avoid state leaks across specs sharing one fixture.
 package e2e
 
 import (
@@ -57,8 +58,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-putget"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-putget")
 
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(bucket),
@@ -87,8 +87,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-head"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-head")
 
 		client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
@@ -110,8 +109,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-headnf"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-headnf")
 
 		_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
@@ -129,8 +127,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-del"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-del")
 
 		client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
@@ -156,8 +153,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-delnone"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-delnone")
 
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bucket),
@@ -184,8 +180,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-getnone"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-getnone")
 
 		_, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
@@ -199,8 +194,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-overwrite"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-overwrite")
 
 		client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
@@ -230,8 +224,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-nested"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-nested")
 
 		client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
@@ -255,8 +248,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-list"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-list")
 
 		for _, kv := range []struct{ key, val string }{
 			{"docs/a.txt", "a"},
@@ -282,8 +274,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-prefix"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-prefix")
 
 		for _, kv := range []struct{ key, val string }{
 			{"docs/a.txt", "a"},
@@ -313,8 +304,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-obj-large"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "obj-large")
 
 		data := bytes.Repeat([]byte("X"), 5*1024*1024) // 5MB
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
@@ -341,8 +331,7 @@ func runObjectCases(getTgt func() s3Target) {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
-		bucket := tgt.name + "-form-upload"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "form-upload")
 
 		// Simulate a browser form upload via multipart/form-data POST. The
 		// server can accept HTTP before the bucket assignment path is writable,

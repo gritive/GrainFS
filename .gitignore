@@ -19,3 +19,4 @@ receipts/
 benchmarks/scratch/
 .auth-redesign-notes.txt*
 BENCH.md
+.claude/

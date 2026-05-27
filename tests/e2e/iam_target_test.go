@@ -94,11 +94,18 @@ func newSharedClusterIAMAdminTarget(t testing.TB) iamAdminTarget {
 	t.Helper()
 	tgt := newSharedClusterS3Target(t)
 	c := tgt.cluster
+	adminSockPath := func() string {
+		return c.dataDirs[currentE2EClusterLeaderIdx(t, c)] + "/admin.sock"
+	}
+	currentLeaderClient := func(t testing.TB) *s3.Client {
+		t.Helper()
+		return c.S3Client(currentE2EClusterLeaderIdx(t, c))
+	}
 	return iamAdminTarget{
 		name:  "cluster4",
 		nodes: 4,
 		adminSockPath: func() string {
-			return c.dataDirs[c.leaderIdx] + "/admin.sock"
+			return adminSockPath()
 		},
 		pickNode: func(i int) *s3.Client {
 			return c.S3Client(i % 4)
@@ -113,7 +120,7 @@ func newSharedClusterIAMAdminTarget(t testing.TB) iamAdminTarget {
 		secretKey: c.secretKey,
 		uniqueSA: func(t testing.TB, caseName string) (string, string, string) {
 			t.Helper()
-			sock := c.dataDirs[c.leaderIdx] + "/admin.sock"
+			sock := adminSockPath()
 			name := "sa-" + sanitizeForBucket(caseName)
 			out := iamCreateSA(t, sock, name)
 			t.Cleanup(func() {
@@ -124,9 +131,9 @@ func newSharedClusterIAMAdminTarget(t testing.TB) iamAdminTarget {
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			t.Helper()
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, currentLeaderClient(t))
 			t.Cleanup(func() {
-				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+				currentLeaderClient(t).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
 		},

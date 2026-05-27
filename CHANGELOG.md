@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.0.375.0] - 2026-05-28
+
+### Fixed
+
+- Iceberg REST catalog config no longer returns caller S3 access keys or secret
+  keys over plaintext HTTP. HTTP clients still receive catalog defaults and the
+  local S3 endpoint, while HTTPS remains the path for credential handoff.
+
+## [0.0.374.0] - 2026-05-28
+
+### Added
+
+- Zero-CA cluster join: a brand-new node can join an existing cluster over QUIC with no pre-shared secrets. An operator mints a single-use, time-limited invite with `grainfs cluster invite create` and hands the joining node the resulting bundle (via `GRAINFS_INVITE_BUNDLE`). The node dials the leader's dedicated join listener, proves its identity, and the leader seals the cluster secrets (data encryption key, all key-encryption-key generations, transport key) directly to the joiner's public key — so the bundle itself never carries an at-rest secret and a leaked bundle exposes nothing beyond a single join attempt. Once joined the node becomes a full voter and serves S3 reads and writes immediately. Invites are single-use and reject cross-cluster replay.
+
+## [0.0.373.0] - 2026-05-28
+
+### Changed
+
+- Full e2e runs now execute directly through Ginkgo with one shared single-node
+  fixture and one shared four-node cluster fixture per worker process, removing
+  the legacy `test-e2e` wrapper and `TestMain`/`TestCase` harness path that made
+  the suite spend most of its time bootstrapping servers.
+- Shared-fixture S3 specs now create unique bucket names from the spec and case
+  name, so long-lived single-node and cluster fixtures do not leak state between
+  specs.
+- E2E HTTP traffic now keeps pooled clients alive across shared-fixture specs and
+  uses the shared raw HTTP client for presigned URL and metrics calls, reducing
+  local port churn during the long S3 workflow matrix.
+- Dedicated cluster fixtures now register cleanup as soon as bootstrap begins,
+  so startup failures or interrupted tests clean up partially started servers.
+- The single-node multipart concurrent download parity case now runs a lighter
+  local concurrency shape while the cluster case keeps the forwarded fan-in
+  workload, preserving the cluster regression signal without masking it behind
+  single-node resource pressure.
+- The audit Iceberg leader-flap e2e now writes after re-election against a
+  writable endpoint and filters audit rows by PUT method, avoiding a race with
+  the old leader's shutdown drain.
+
 ## [0.0.372.0] - 2026-05-28
 
 ### Changed

@@ -116,12 +116,22 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 
 func getStatusJSON(t testing.TB, base string) map[string]any {
 	t.Helper()
-	resp, err := e2eRawHTTPClient.Get(base + "/api/cluster/status")
+	out, err := tryStatusJSON(base)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	return out
+}
+
+func tryStatusJSON(base string) (map[string]any, error) {
+	resp, err := e2eRawHTTPClient.Get(base + "/api/cluster/status")
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	out := map[string]any{}
-	gomega.Expect(json.NewDecoder(resp.Body).Decode(&out)).To(gomega.Succeed())
-	return out
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func getEventLog(t testing.TB, base string) []map[string]any {

@@ -563,6 +563,106 @@ func (n *Node) handleAddLearner(cmd command) {
 	n.maybeAdvanceCommitIndex()
 }
 
+// handleRemoveLearner appends a single-phase ConfChange entry that drops an
+// existing non-voting observer (M6.0 Path B inverse of handleAddLearner).
+// Quorum math is unchanged; voter slices are unchanged; the removed learner
+// stops being addressed by broadcastHeartbeat (replicaSet excludes it once
+// currentConfig drops it). Used to roll back an un-promoted learner.
+//
+// Validation:
+//   - Must be Leader (ErrNotLeader).
+//   - At most one in-flight membership change (same gate as AddLearner).
+//   - id MUST currently be a learner (ErrNotALearner otherwise — a voter id
+//     or an unknown id is not a learner and the removal would be a no-op).
+func (n *Node) handleRemoveLearner(cmd command) {
+	reply := cmd.ccReply
+	if n.st.state != Leader {
+		reply <- confChangeResult{err: ErrNotLeader}
+		return
+	}
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.appendedConfigIndex > n.st.commitIndex {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.currentConfig.joint {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	id := cmd.learnerID
+	if id == "" {
+		reply <- confChangeResult{err: fmt.Errorf("raftv2: RemoveLearner: empty id")}
+		return
+	}
+	if !n.st.currentConfig.isLearner(id) {
+		reply <- confChangeResult{err: ErrNotALearner}
+		return
+	}
+
+	// Build the resulting effective config (Cnew snapshot for the wire):
+	// voters unchanged, learners minus the target.
+	voters := append([]string(nil), n.st.currentConfig.voters...)
+	learners := make([]confLearner, 0, len(n.st.currentConfig.learners))
+	for lid, laddr := range n.st.currentConfig.learners {
+		if lid == id {
+			continue
+		}
+		learners = append(learners, confLearner{ID: lid, Address: laddr})
+	}
+
+	entryIdx := n.st.lastLogIndex() + 1
+	entry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   entryIdx,
+		Type:    LogEntryConfChange,
+		Command: encodeConfChange(ConfChangeRemoveLearner, id, "", voters, learners),
+	}
+	if err := n.st.log.Append([]LogEntry{entry}); err != nil {
+		panic("raftv2: handleRemoveLearner: Append: " + err.Error())
+	}
+
+	// Push prior config onto history BEFORE swapping so truncation can
+	// revert exactly (mirrors handleAddLearner).
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: entryIdx,
+		prev:     prev,
+	})
+	next := prev
+	next.voters = append([]string(nil), prev.voters...)
+	next.oldVoters = append([]string(nil), prev.oldVoters...)
+	next.learners = prev.cloneLearners()
+	delete(next.learners, id)
+	if len(next.learners) == 0 {
+		next.learners = nil
+	}
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = entryIdx
+	n.st.invalidatePeerSet()
+
+	// Tear down replication tracking for the removed learner — inverse of
+	// handleAddLearner's seeding. Stale entries are benign for quorum math
+	// (which consults currentConfig, not the maps) but leaving them risks
+	// addressing a node no longer in replicaSet.
+	if n.st.matchIndex != nil {
+		delete(n.st.matchIndex, id)
+		delete(n.st.nextIndex, id)
+		delete(n.st.peerInFlight, id)
+		delete(n.st.peerLastRound, id)
+	}
+
+	n.st.pendingSingleConf = &pendingSingleConf{idx: entryIdx, reply: reply}
+
+	n.publish()
+	n.broadcastHeartbeat()
+
+	// Solo-voter shortcut: drive commit advance inline so the reply fires now.
+	n.maybeAdvanceCommitIndex()
+}
+
 // handlePromote is the entry point for PromoteToVoter (Path B two-entry
 // sequence). Validates the target is a learner and caught up, then
 // appends a single-phase PromoteStage1 entry. The chain finishes when

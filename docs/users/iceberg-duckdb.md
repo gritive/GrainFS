@@ -34,6 +34,10 @@ section below). DuckDB iceberg extension versions before 1.5.2 do not support
 There is no anonymous discovery path: `GET /iceberg/v1/config` also requires
 SigV4.
 
+`GET /iceberg/v1/config` returns data-plane S3 credential overrides only when
+the catalog request uses HTTPS. Plain HTTP responses still include the warehouse
+and local `s3.endpoint`, but omit reusable S3 secrets.
+
 ## Start `GrainFS`
 
 ```sh

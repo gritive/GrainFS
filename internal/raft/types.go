@@ -40,8 +40,8 @@ var (
 	// entries behind the leader's commit index. Callers should wait for
 	// the learner to drain and retry.
 	ErrLearnerNotCaughtUp = errors.New("raft: learner not caught up to leader commit")
-	// ErrNotALearner is returned by PromoteToVoter when the target id is
-	// not registered as a learner in the live configuration.
+	// ErrNotALearner is returned by PromoteToVoter and RemoveLearner when the
+	// target id is not registered as a learner in the live configuration.
 	ErrNotALearner = errors.New("raft: target is not a learner")
 	// ErrAlreadyLearner is returned by AddLearner when id is already
 	// either a voter or a learner.
