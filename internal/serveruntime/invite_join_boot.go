@@ -555,7 +555,17 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2: get KEK gen %d: %w", st.nodeKeyKEKGen, err)
 	}
-	cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, sealKEK)
+	// Load + migrate the node key to the STATIC encryption.key. Phase-1 sealed
+	// node.key.enc under a prunable KEK gen; if this invite-joined node stays
+	// online through a KEK rotate+prune (meta_fsm_kek_apply unlinks the old gen)
+	// before any restart, that gen disappears and the eventual restart's
+	// back-compat migration can no longer decrypt → BRICK. Re-seal under the
+	// static encryption.key NOW (it never rotates/prunes and Phase-1 already
+	// staged it), closing that deferred-migration window from the very first
+	// boot. The migration is idempotent across the crash window between re-seal
+	// and the sentinel clear below: a resume that already re-sealed loads under
+	// encKey directly (no KEK gen needed), so it cannot brick.
+	cert, spki, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey, sealKEK)
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2: load node key: %w", err)
 	}
@@ -669,6 +679,49 @@ func appendInviteSealField(out, b []byte) []byte {
 	binary.BigEndian.PutUint32(l[:], uint32(len(b)))
 	out = append(out, l[:]...)
 	return append(out, b...)
+}
+
+// loadAndMigrateInviteNodeKey loads keys.d/node.key.enc and guarantees it is
+// sealed under the STATIC encryption.key (encKey) on return. It mirrors
+// reloadNodeIdentity's order:
+//
+//   - try encKey first: succeeds if a prior Phase-2 (or a crashed resume) already
+//     migrated the key — idempotent, no re-seal needed;
+//   - else try the Phase-1 KEK gen (sealKEK): on success re-seal under encKey
+//     (the prune-proof migration) and delete any stale node.key.gen sidecar.
+//
+// Trying encKey first makes the migration safe across the crash window between
+// the re-seal and the sentinel clear in bootInviteJoinPhase2: a resume after a
+// successful re-seal loads under encKey directly and never touches the
+// (possibly pruned) KEK gen. The re-seal writes the SAME key bytes returned by
+// LoadNodeKey, so the SPKI is byte-identical (asserted by the caller's tests).
+// When encKey is not 32 bytes (test/dev configs without a static key) the
+// migration is skipped and the key is loaded under sealKEK as before.
+func loadAndMigrateInviteNodeKey(dataDir string, encKey, sealKEK []byte) (tls.Certificate, [32]byte, error) {
+	if len(encKey) == 32 {
+		if cert, spki, err := transport.LoadNodeKey(dataDir, encKey); err == nil {
+			return cert, spki, nil
+		}
+	}
+	cert, spki, err := transport.LoadNodeKey(dataDir, sealKEK)
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, err
+	}
+	if len(encKey) == 32 {
+		preSPKI := spki
+		if err := transport.SealNodeKey(dataDir, encKey, cert); err != nil {
+			return tls.Certificate{}, [32]byte{}, fmt.Errorf("re-seal node key under encryption key: %w", err)
+		}
+		// SPKI is the public half of the SAME key bytes — re-seal only re-wraps
+		// the ciphertext, never the key, so this must hold.
+		if spki != preSPKI {
+			return tls.Certificate{}, [32]byte{}, fmt.Errorf("node SPKI changed across re-seal (key bytes must be identical)")
+		}
+		if err := deleteNodeKeyGen(dataDir); err != nil {
+			return tls.Certificate{}, [32]byte{}, err
+		}
+	}
+	return cert, spki, nil
 }
 
 // highestKEKGen returns the highest generation present in gens and its key

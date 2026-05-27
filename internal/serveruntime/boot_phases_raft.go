@@ -124,11 +124,12 @@ func bootMetaRaftWiring(state *bootState) error {
 			// generation and Phase-2 (bootInviteJoinPhase2) LoadNodeKeys it under that
 			// SAME gen. ensureNodeIdentity must NOT touch it here — its back-compat path
 			// would migrate (re-seal) the KEK-gen-sealed key to the static encryption.key
-			// out from under Phase-2, which would then fail with a GCM auth error. The
-			// NEXT normal boot (inviteJoinMode=false) runs ensureNodeIdentity and migrates
-			// the key to encKey via the back-compat path. Self-register still needs the
-			// SPKI, so source it from the invite-join state (set in Phase-1 / from the
-			// resume sentinel).
+			// out from under Phase-2's KEK-gen load, which would then fail with a GCM auth
+			// error. Phase-2 itself performs the migration to the static encryption.key at
+			// close-out (loadAndMigrateInviteNodeKey), so the back-compat path in
+			// ensureNodeIdentity is now only a safety net for legacy keys sealed before
+			// that change. Self-register still needs the SPKI, so source it from the
+			// invite-join state (set in Phase-1 / from the resume sentinel).
 			if state.inviteJoin != nil {
 				state.perNodeSPKI = state.inviteJoin.nodeSPKI
 			}

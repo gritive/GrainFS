@@ -466,3 +466,53 @@ func mintTestBundleToken(t *testing.T) string {
 		SeedAddr:     "seed:7000",
 	})
 }
+
+// TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey verifies the Finding-A fix:
+// a node.key.enc sealed under a (prunable) KEK gen is migrated to the STATIC
+// encryption.key at Phase-2 close-out. After migration the key decrypts under
+// encKey alone (KEK gen no longer needed), the SPKI is byte-identical, and the
+// helper is idempotent across a resume (encKey-first load).
+func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
+	dir := t.TempDir()
+	encKey := bytes.Repeat([]byte{0xCD}, 32)
+	sealKEK := bytes.Repeat([]byte{0x42}, 32)
+
+	cert, wantSPKI, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
+	if err != nil {
+		t.Fatalf("GenerateNodeIdentity: %v", err)
+	}
+	// Phase-1 seal: under the KEK gen only.
+	if err := transport.SealNodeKey(dir, sealKEK, cert); err != nil {
+		t.Fatalf("SealNodeKey under KEK gen: %v", err)
+	}
+	// Pre-migration: must NOT decrypt under encKey yet.
+	if _, _, err := transport.LoadNodeKey(dir, encKey); err == nil {
+		t.Fatal("node.key.enc unexpectedly decrypts under encKey before migration")
+	}
+
+	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, sealKEK)
+	if err != nil {
+		t.Fatalf("loadAndMigrateInviteNodeKey: %v", err)
+	}
+	if gotSPKI != wantSPKI {
+		t.Fatalf("SPKI changed across re-seal: got %x want %x", gotSPKI, wantSPKI)
+	}
+	if gotCert.PrivateKey == nil {
+		t.Fatal("returned cert has nil private key")
+	}
+	// Post-migration: now decrypts under the STATIC encryption.key alone.
+	if _, spki, err := transport.LoadNodeKey(dir, encKey); err != nil {
+		t.Fatalf("node.key.enc does not decrypt under encKey after migration: %v", err)
+	} else if spki != wantSPKI {
+		t.Fatalf("post-migration SPKI mismatch: got %x want %x", spki, wantSPKI)
+	}
+
+	// Idempotent resume: a second call (e.g. after a crash before the sentinel
+	// clear) must succeed via the encKey-first path even with a bogus KEK gen.
+	bogusKEK := bytes.Repeat([]byte{0x99}, 32)
+	if _, spki, err := loadAndMigrateInviteNodeKey(dir, encKey, bogusKEK); err != nil {
+		t.Fatalf("idempotent resume failed: %v", err)
+	} else if spki != wantSPKI {
+		t.Fatalf("resume SPKI mismatch: got %x want %x", spki, wantSPKI)
+	}
+}
