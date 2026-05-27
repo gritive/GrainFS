@@ -80,8 +80,8 @@ func (r *SegmentedReader) openCurrent() error {
 	seg := r.segments[r.curIdx]
 	path := r.backend.segmentPath(r.bucket, r.key, seg.BlobID)
 	var rc io.ReadCloser
-	if r.backend.encryptor != nil {
-		f, err := openEncryptedObjectFile(path, r.backend.encryptor, encryptedObjectFileDomain(r.bucket, r.key+"/segments/"+seg.BlobID), seg.Size)
+	if r.backend.segEnc != nil {
+		f, err := openEncryptedObjectFile(path, r.backend.segEnc, segmentFileAADFields(r.bucket, r.key, seg.BlobID), seg.Size)
 		if err != nil {
 			return err
 		}

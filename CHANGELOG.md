@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.362.0] - 2026-05-27
+## [0.0.364.0] - 2026-05-27
 
 ### Changed
 
@@ -10,6 +10,26 @@
   boundary:** the on-disk bulk-encryption format changed. A cluster encrypted with a
   previous version cannot be upgraded in place — a node refuses to start on a
   pre-XAES encrypted data dir with a clear error; set up a new cluster.
+
+## [0.0.363.0] - 2026-05-27
+
+### Added
+
+- Object and segment encrypted-file storage now flows through the DataEncryptor
+  seam with a self-describing on-disk header (format version + key generation)
+  and position-bound AEAD, groundwork for KEK-envelope key rotation of data at
+  rest.
+
+## [0.0.362.0] - 2026-05-27
+
+### Added
+
+- Storage gained a `DataEncryptor` seam — one interface for data-at-rest
+  encrypt/decrypt with two implementations: one over the existing static key and
+  one over the generation-aware KEK envelope. This is groundwork for migrating
+  segment, WAL, and snapshot encryption onto the rotating KEK envelope; nothing
+  in the write or read path uses the seam yet, so current behavior is unchanged
+  until later phases wire it in.
 
 ## [0.0.361.0] - 2026-05-27
 
