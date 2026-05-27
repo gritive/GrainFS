@@ -86,7 +86,12 @@ func (a *raftNodeAdapter) Configuration() raft.Configuration {
 			Suffrage: s.Suffrage,
 		}
 	}
-	return raft.Configuration{Servers: servers}
+	return raft.Configuration{
+		Servers:   servers,
+		Joint:     cfg.Joint,
+		OldVoters: append([]string(nil), cfg.OldVoters...),
+		NewVoters: append([]string(nil), cfg.NewVoters...),
+	}
 }
 
 // Peers derives peer addresses from Configuration(), filtering out self.
