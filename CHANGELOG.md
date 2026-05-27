@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.0.379.0] - 2026-05-28
+
+### Changed
+
+- At-rest encryption: the generation-aware Data Encryption Key (DEK) now seals
+  bulk data with XAES-256-GCM (192-bit nonce) instead of AES-256-GCM. The wider
+  nonce removes the random-nonce exhaustion limit that high-volume clusters could
+  otherwise drift toward, so DEK rotation is now a hygiene and compromise-recovery
+  tool rather than a nonce-driven requirement. The KEK-to-DEK wrap is unchanged.
+
+### Removed
+
+- At-rest format boundary: a data directory written by an older binary (pre-XAES
+  DEK) now refuses to boot instead of silently mis-reading. There is no in-place
+  upgrade path — start a new cluster. This matches the existing static-key XAES
+  boundary.
+
+## [0.0.378.0] - 2026-05-28
+
+### Security
+
+- Raft cluster-metadata snapshots are now encrypted at rest. The snapshot body
+  (object index, bucket assignments, node/group layout, IAM and JWT key material)
+  is sealed with a per-snapshot key wrapped by the cluster KEK, so metadata
+  snapshots on disk are no longer stored in plaintext. Snapshots written by older
+  versions are still readable during the upgrade window and are re-encrypted on
+  the next snapshot. A failed snapshot restore now halts the node loudly instead
+  of silently continuing with un-restored state.
+
+## [0.0.377.0] - 2026-05-28
+
+### Added
+
+- Added a unified protocol credential foundation so operators can create, list,
+  inspect, rotate, and revoke protocol-scoped credentials for service accounts
+  across S3, Iceberg, NFS, 9P, and NBD without changing current data-plane
+  authentication behavior.
+- Added `grainfs credential` commands for create/list/get/rotate/revoke, including
+  one-time secret output and protocol-specific connection hints such as NBD export
+  names.
+- Added trusted admin UDS API endpoints under `/v1/credentials` and runtime wiring
+  for the node-local credential service.
+- Added tests for the credential domain, admin handlers, CLI client behavior,
+  runtime wiring, and IAM namespace parsing.
+
+### Changed
+
+- Documented the protocol credential migration path and clarified that this
+  release is control-plane groundwork; existing protocol clients continue using
+  their current authentication flows until enforcement lands in follow-up work.
+
+### Fixed
+
+- Kept MountSA policy attachment strict by rejecting credential-management and
+  volume-attach actions while still allowing those action names in normal IAM
+  policy parsing.
+- Removed stale lint failures left by the merged base branch so the build gate
+  passes on the combined branch.
+
+### Removed
+
+- Removed an obsolete repository memory note that had been moved out of this tree.
+
+## [0.0.376.0] - 2026-05-28
+
+### Changed
+
+- Removed the global `iam.anon-enabled` bypass. Anonymous S3 access is now authorized through bucket policy semantics: `s3://default` keeps its implicit anonymous quickstart policy until an explicit bucket policy overrides it, while non-default buckets require explicit anonymous policy. Unsigned `/api/...` requests and Iceberg bearer routes no longer inherit anonymous S3 behavior.
+
+## [0.0.375.0] - 2026-05-28
+
+### Fixed
+
+- Iceberg REST catalog config no longer returns caller S3 access keys or secret
+  keys over plaintext HTTP. HTTP clients still receive catalog defaults and the
+  local S3 endpoint, while HTTPS remains the path for credential handoff.
+
 ## [0.0.374.0] - 2026-05-28
 
 ### Added

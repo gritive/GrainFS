@@ -189,10 +189,9 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 			// F#41b: when Layer 1 returned the default-bucket implicit-anon
 			// allow (D#2), the Phase 0 banner contract ("any client can
 			// read/write s3://default") requires that the ACL gate not deny
-			// anonymous access. Other anon-allow paths (iam.anon-enabled on
-			// non-default buckets) and authenticated-private cases stay
-			// gated by ACL — the carve-out is scoped to the specific reason
-			// emitted by authorizer.go:79.
+			// anonymous access. Authenticated-private cases stay gated by ACL —
+			// the carve-out is scoped to the specific reason emitted by
+			// authorizer.go.
 			if detail.Reason == ReasonDefaultBucketImplicitAnon {
 				lat := elapsedUS(t0)
 				if authEnabled {

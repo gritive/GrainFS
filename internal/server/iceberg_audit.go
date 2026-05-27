@@ -50,33 +50,6 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 	s.appendFinalizedAuditEvent(context.Background(), normalizeAuditEvent(ev))
 }
 
-// emitIcebergAuditAnonAllow emits an audit.s3 anon_allow row for an Iceberg
-// request that was short-circuited by iam.anon-enabled=true. Called after the
-// downstream handler returns.
-func (s *Server) emitIcebergAuditAnonAllow(ctx context.Context, c *app.RequestContext, action string, start time.Time) {
-	if !s.auditSinkConfigured() {
-		return
-	}
-	status := int32(c.Response.StatusCode())
-	if status == 0 {
-		status = int32(http.StatusOK)
-	}
-	ev := normalizeAuditEvent(audit.S3Event{
-		Ts:         start.UnixMicro(),
-		EventID:    uuid.NewString(),
-		NodeID:     s.auditNodeID,
-		RequestID:  RequestIDFromContext(ctx),
-		SAID:       audit.AnonSAID,
-		SourceIP:   s.authoritativeClientIP(c),
-		Method:     auditString8(string(c.Method())),
-		Operation:  action,
-		Status:     status,
-		AuthStatus: "anon_allow",
-		LatencyMs:  int32(time.Since(start).Milliseconds()),
-	})
-	s.appendFinalizedAuditEvent(context.Background(), ev)
-}
-
 // emitIcebergAuditDeny emits an audit.s3 deny row for a bearer-gated Iceberg
 // request that was rejected. Called synchronously before the response is
 // finalized (the status code passed in is the one written to the response).

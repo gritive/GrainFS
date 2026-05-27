@@ -153,8 +153,7 @@ var p9AnonHTTPClient = &http.Client{
 }
 
 // anonHTTPClient returns an *http.Client with no credentials.
-// Use for anon (no Authorization header) S3 ops against /default in both
-// Phase 0 (anon-enabled=true) and Phase 2 (default-bucket implicit anon allow).
+// Use for anon (no Authorization header) S3 ops against /default.
 func anonHTTPClient() *http.Client {
 	return p9AnonHTTPClient
 }

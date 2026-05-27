@@ -153,10 +153,15 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 		}
 	}
 
-	// Take a real snapshot (which includes ref_counts).
-	snapBytes, err := fsm1.Snapshot()
+	// Take a real snapshot (which includes ref_counts), then decrypt the Phase
+	// D-snap envelope to operate on the plaintext trailer bytes.
+	sealedSnap, err := fsm1.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
+	}
+	snapBytes, err := fsm1.openSnapshotEnvelope(sealedSnap)
+	if err != nil {
+		t.Fatalf("openSnapshotEnvelope: %v", err)
 	}
 
 	// Strip the real DKVS trailer and replace it with a legacy one (nil refCounts).
@@ -192,7 +197,13 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 		t.Fatalf("LoadFromFSM: %v", err)
 	}
 	fsm2 := newTestMetaFSMWithDEKKeeper(t, keeper2)
-	if err := fsm2.Restore(raft.SnapshotMeta{}, legacySnap); err != nil {
+	// Re-seal the rewritten plaintext under the same KEK/clusterID so Restore
+	// can decrypt it (fsm1 and fsm2 share K0 + dekTestClusterID).
+	sealedLegacy, err := fsm1.sealSnapshotEnvelope(legacySnap)
+	if err != nil {
+		t.Fatalf("sealSnapshotEnvelope (legacy): %v", err)
+	}
+	if err := fsm2.Restore(raft.SnapshotMeta{}, sealedLegacy); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
@@ -215,10 +226,10 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 func TestSnapshot_GCFGTrailerByteDeterminism(t *testing.T) {
 	// Encode the same config map 16 times; every output must be identical.
 	entries := map[string]string{
-		"audit.deny-only":    "true",
-		"trusted-proxy.cidr": "10.0.0.0/8,192.168.0.0/16",
-		"cluster.read-only":  "false",
-		"iam.anon-enabled":   "false",
+		"audit.deny-only":                   "true",
+		"trusted-proxy.cidr":                "10.0.0.0/8,192.168.0.0/16",
+		"cluster.read-only":                 "false",
+		"iam.allow-anonymous-bucket-policy": "true",
 	}
 	first, err := encodeMetaConfigSnapshot(entries)
 	if err != nil {

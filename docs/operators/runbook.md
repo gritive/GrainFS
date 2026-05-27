@@ -982,8 +982,8 @@ grainfs audit query "
 
 ### TLS posture gate for authenticated clusters
 
-When S3 auth is enabled (`iam.anon-enabled=false`), GrainFS refuses to start
-NFS/9P listeners unless at least one of the following is true:
+For network-exposed deployments, run NFS/9P behind a private network boundary
+or TLS-terminating proxy. Recommended hardening:
 
 - A TLS certificate is on disk (`<data>/tls/cert.pem`), or
 - `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
@@ -1030,10 +1030,11 @@ before an operator attempts a rotation.
 
 ## DEK rotation cadence
 
-Each DEK encrypts object data under AES-256-GCM with a random 96-bit nonce. A
-single DEK can safely produce about 2^32 seals before the nonce-collision
-probability exceeds 2^-32. Above that bound, a repeated nonce under the same key
-would leak plaintext relationships, so the DEK must be rotated.
+Each DEK encrypts object data under XAES-256-GCM with a 192-bit nonce. The
+extended nonce makes random-nonce collision negligible at any practical seal
+volume, so there is no nonce-exhaustion cliff forcing rotation. The per-generation
+seal count below is a cumulative-usage signal for rotation hygiene and
+compromise-recovery, not a hard limit.
 
 GrainFS tracks seals per active DEK generation and surfaces a risk band in
 `grainfs encrypt kek status` (the `dek_generations` section, `nonce=` column)
@@ -1058,9 +1059,9 @@ max(grainfs_kek_seal_count) >= 1000000000  # alert
 at scrape time, so these alerts fire autonomously without any polling of the
 `grainfs encrypt kek status` admin endpoint.
 
-The seal count is keyed by DEK generation because AES-GCM nonce exhaustion is
-per-DEK-key. A KEK rotation re-wraps the existing DEKs without changing the DEK
-keys, so the per-DEK nonce count PERSISTS across a KEK rotation; it resets only
+The seal count is keyed by DEK generation because seal volume is per-DEK-key. A
+KEK rotation re-wraps the existing DEKs without changing the DEK keys, so the
+per-DEK seal count PERSISTS across a KEK rotation; it resets only
 when a new DEK generation is installed (`grainfs dek rotate`). The reported band
 therefore reflects true cumulative nonce usage for each DEK generation.
 

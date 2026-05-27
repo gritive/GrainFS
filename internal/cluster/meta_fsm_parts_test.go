@@ -59,6 +59,7 @@ func TestBuildObjectIndexEntry_CopiesPartsFromObject(t *testing.T) {
 
 func TestMetaFSM_SnapshotRestore_PreservesParts(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	entry := ObjectIndexEntry{
 		Bucket: "b", Key: "k", VersionID: "v", PlacementGroupID: "g",
 		Size: 12, ETag: "e",
@@ -74,6 +75,7 @@ func TestMetaFSM_SnapshotRestore_PreservesParts(t *testing.T) {
 	require.NoError(t, err)
 
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
 
 	got, ok := dst.ObjectIndexVersion("b", "k", "v")

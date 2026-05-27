@@ -24,20 +24,10 @@ var icebergClaimsKey = icebergClaimsKeyType{}
 // authMiddleware handles them).
 //
 // When jwtKeys is nil the wrapper is a transparent no-op (JWT not configured).
-// Emits one audit.s3 row per bearer-gated request (allow, deny, anon_allow).
+// Emits one audit.s3 row per bearer-gated request (allow or deny).
 func (s *Server) icebergGuarded(action string, h app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		start := time.Now()
-
-		// Anon short-circuit FIRST — before even inspecting the Authorization header.
-		// When iam.anon-enabled=true the entire bearer gate is bypassed.
-		if s.bearerCfg != nil {
-			if anon, ok := s.bearerCfg.GetBool("iam.anon-enabled"); ok && anon {
-				h(ctx, c)
-				s.emitIcebergAuditAnonAllow(ctx, c, action, start)
-				return
-			}
-		}
 
 		authHeader := string(c.GetHeader("Authorization"))
 		if !hasBearerPrefix(authHeader) {
@@ -64,8 +54,6 @@ func (s *Server) icebergGuarded(action string, h app.HandlerFunc) app.HandlerFun
 // icebergAuthnCheck validates the bearer token and policy.
 // Returns (*Claims, *EvalResult, authzLatencyUS, true) on success,
 // (nil, nil, 0, false) on failure (response written and deny audit emitted).
-// Anon short-circuit is handled by the caller (icebergGuarded) before this is invoked.
-//
 // authzLatencyUS is the microsecond duration of policyAuthorizer.Authorize() only,
 // matching the S3 audit envelope semantics for authz_latency_us. It is zero on all
 // pre-policy deny paths (bad token, warehouse mismatch) because the policy layer
@@ -168,7 +156,7 @@ type warehouseProvider interface {
 	Warehouse() string
 }
 
-// anonConfigReader is a minimal ConfigReader used in tests to simulate iam.anon-enabled.
+// anonConfigReader is a minimal ConfigReader used in tests.
 type anonConfigReader map[string]bool
 
 func (a anonConfigReader) GetBool(key string) (bool, bool) {

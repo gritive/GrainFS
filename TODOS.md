@@ -15,29 +15,38 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 Work these in order. Do not run them in parallel.
 
-- [ ] **Static bulk-data encryption key: rotation + nonce-exhaustion lifecycle (design)**
-   - Trust risk: ALL bulk data (objects, EC shards, data-WAL, badger values) is
-     encrypted with one static `<dataDir>/encryption.key` via `encrypt.Encryptor`
-     using RANDOM 96-bit nonces (`encrypt.go` `io.ReadFull(rand.Reader, nonce)`),
-     and that key is NEVER rotated, has NO seal counter, NO metric. On a long-lived
-     high-volume cluster the per-key seal count accrues toward the NIST SP 800-38D
-     random-nonce cap (2^32) with no signal and no remediation — a silent AES-GCM
-     nonce-collision cliff (confidentiality + integrity loss).
-   - Context: the KEK/DEK envelope subsystem (#36–62, v0.0.356.0) governs ONLY JWT
-     signing secrets (`iam/jwt/jwt.go` is the sole `DEKKeeper.Seal`/`DekGen`
-     key-selection consumer); it does NOT protect bulk data. `ObjectIndexEntry.DekGen`
-     is recorded + ref-counted but is NOT used to select a key for object decryption
-     (storage uses the static `b.encryptor`) — a half-built object→DEK bridge.
-   - Options to weigh in design: (a) add seal-count + metric + rotation lifecycle to
-     the static key; (b) migrate bulk data onto the gen-based DEK and reuse the
-     existing KEK-rotation/replication/seal-counter machinery (finish the DekGen
-     bridge). Either is a real subsystem, not a patch.
-   - Signal: per-key seal count, nonce-budget metric, rotation/re-encrypt status.
-   - Verification: high-volume seal-count accounting test; rotation re-encrypt or
-     envelope-migration correctness across all storage layers + EC shards.
-   - Boundary: design first (brainstorm). Surfaced 2026-05-27 by /review-forever
-     killing the mis-targeted auto-DEK-rotation plan (DEK seal volume is JWT-only,
-     never reaches the threshold). See [[project-grains-at-rest-two-key-systems]].
+- [ ] **DEK data-sealing cipher → XAES-256-GCM (ACTIVE — feat/dek-data-xaes-cipher)**
+   - Trust risk: Phase D (#568/#571) activated gen-aware at-rest encryption on the
+     data plane (objects/EC/data-WAL via `DEKKeeperAdapter` when a DEKKeeper is
+     present — the default). But the DEK's data-sealing AEAD is still **AES-256-GCM
+     with a random 96-bit nonce** (`dek.go:672` `newAEAD` → `cipher.NewGCM`), so
+     routing bulk data through it **re-introduced the 2^32 nonce-collision cliff**
+     that #566 removed for the static key. High-volume clusters drift toward silent
+     confidentiality/integrity loss with no remediation.
+   - Fix: swap `newAEAD` to `xaes256gcm.NewWithManualNonces` (mirror of #566;
+     `go.mod` already has `filippo.io/xaes256gcm`; KEK→DEK wrap stays AES-GCM).
+     Nonce auto-widens to 24B via `aead.NonceSize()`. Bump the on-disk format
+     guard so a pre-XAES-DEK data dir **loud-fails on boot** (greenfield, no
+     in-place re-encrypt — no production clusters yet).
+   - Verification: round-trip + nonce-width tests; greenfield loud-fail regression;
+     KEK-rotation-across-XAES-DEK (open data sealed under old/new gen after rotate);
+     dual single+cluster e2e. See [[project-grains-at-rest-two-key-systems]].
+
+- [ ] **At-rest unification remainder (deferred — Phase D track)**
+   - Phase D already migrated the data plane; these stay on the static
+     `encrypt.Encryptor` and complete the single KEK→DEK hierarchy:
+     (a) **BadgerDB metadata** — `encrypted_badger.go` still uses `*encrypt.Encryptor`
+     (bare ciphertext, no gen frame); needs a gen-carrying value frame.
+     (b) **IAM credential at-rest** — `SecretKeyEnc` in `AccessKey`/`BucketUpstream`
+     sealed via `*encrypt.Encryptor` (`iam/fsm.go`); needs gen in raft payload +
+     snapshot (orthogonal to #579 protocol-credential auth unification).
+     (c) **Retire static key** — `--encryption-key-file` flag + `EncryptorAdapter`
+     fallback still present; can only be removed after every `cfg.Encryptor`
+     consumer (cluster-config secrets, alerts, server/object snapshot, IAM admin)
+     has a DEK replacement. ADR for the cipher-unification + greenfield boundary.
+   - Boundary: fold into the existing Phase D roadmap rather than a parallel spec.
+     Full design + 4-pass codex review in the (gitignored) unified-at-rest-key
+     spec. See [[project-grains-at-rest-two-key-systems]].
 
 - [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
@@ -103,11 +112,6 @@ Work these in order. Do not run them in parallel.
       + §11 decisions log.
 
 - [ ] **§9 Follow-ups** (from F#41/F#41b implementation):
-    - L1 anon-allow bucket scope: `internal/s3auth/authorizer.go:83` returns Allow
-      for anon on any bucket when `iam.anon-enabled=true`. L2/L3 currently catches
-      the leakage, but a future L2/L3 refactor could expose it. The Phase 0 banner
-      only promises `/default`. Tighten L1 to bucket==default. Discovered during
-      T71/F#41b.
     - **F#42 (Pass-1 MEDIUM-1)**: Phase 0 anon Allow paths emit no audit row
       (`request_authz.go:148` gates recordAllow on `AuthEnabled()`). Phase 2
       anon-to-default IS audited via `AnonAllow` flag. Phase 0 long-lived state
@@ -229,6 +233,26 @@ Work these in order. Do not run them in parallel.
   keeper, making this unreachable on a serving node today. Reopen as a hardening pass:
   detect `errors.Is(err, encrypt.ErrDEKGenUnknown)` in the commit coordinator and map it
   to a retriable 503 (not 500). The READ side already classifies it as transient (slice C).
+- [ ] **InstallSnapshot Restore failure should fatal-halt, not log-and-advance**.
+  `meta_raft.go` apply-loop `LogEntrySnapshot` case logs a `Restore` error then
+  advances `lastApplied` to the entry index regardless. A joiner that receives an
+  InstallSnapshot it cannot open (now reachable via D-snap envelope-open failure:
+  unknown KEK version, wrong cluster, or corruption) continues with un-restored FSM
+  state but an advanced applied index → silent divergence. Pre-existing pattern;
+  D-snap adds a new crypto failure mode to it. Surfaced by /review adversarial pass
+  (2026-05-28). Fix: treat envelope-open / Restore failure on InstallSnapshot as a
+  fatal halt (mirror the existing `ErrFSMKEKFatal` path) rather than log-and-advance.
+- [ ] **KEK-envelope Phase D-snap Slice 2: encrypt object metadata snapshots**.
+  Slice 1 (Raft meta-FSM snapshot body) landed via `encrypt.SealSnapshotEnvelope`
+  (per-snapshot ephemeral DEK + KEK wrap, `internal/encrypt/snapshot_envelope.go`).
+  The object metadata snapshots in `internal/snapshot/` (PITR; `format.go` writes
+  zstd JSON in the clear) are still plaintext. Reopen: wire the KEK/KEKStore into
+  `snapshot.Manager` (currently `serveruntime/snapshot.go:36` passes only
+  `*encrypt.Encryptor` via `NewManagerWithEncryptor`), then seal the snapshot body
+  through the existing `SealSnapshotEnvelope` primitive in `writeSnapshot`/decrypt in
+  `readSnapshot`. Object snapshots are restored post-boot so the KEK is always
+  available; the AAD has no raft_index/term. Needed before D-cut's "all data under
+  DEK" boot-refuse can be consistent. See [[project-grains-at-rest-two-key-systems]].
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
@@ -296,19 +320,11 @@ Work these in order. Do not run them in parallel.
 - [ ] **Iceberg REST high-concurrency Raft ceiling**: reopen when production
   catalog workloads miss SLOs or the consistency spec for reducing proposals is
   clear.
-- [ ] **Iceberg `/v1/config` secret over plaintext HTTP**: the endpoint
-  publishes the caller's `s3.secret-access-key` in the response JSON. SigV4
-  protects request integrity but not response confidentiality, so a
-  caller hitting the catalog over HTTP exposes their secret in cleartext
-  on the wire. Post-Option-B (caller-identity) the blast radius is the
-  caller's own SA, not an org-wide RoleAdmin SA — but a long-lived key
-  shared across roles still leaks. Reopen when TLS terminates upstream of
-  the catalog and operators want a defense-in-depth gate, OR when a
-  caller running HTTP catalog in prod is observed. Options when
-  reopened: (A) `if !c.IsTLS() { return empty overrides }` — fails closed
-  back to 1832×403 if the operator forgot TLS, (B) docs-only flag in
-  `docs/users/audit-iceberg.md`, (C) require an explicit
-  `--iceberg-allow-http-creds` opt-in for dev.
+- [x] **Iceberg `/v1/config` secret over plaintext HTTP**: fixed by making
+  the HTTP handler publish caller S3 credential overrides only for HTTPS
+  requests. Plain HTTP still returns catalog defaults and `s3.endpoint`, but
+  omits `s3.access-key-id`, `s3.secret-access-key`, and
+  `s3.path-style-access`.
 - [ ] **Iceberg Spark/Trino/PyIceberg client coverage**: promote only after
   real-client REST Catalog smoke tests define which client behaviors are
   supported versus DuckDB-only compatibility.
@@ -318,13 +334,12 @@ Work these in order. Do not run them in parallel.
   reopen when their telemetry triggers fire.
 - [ ] **Incident store scope index / `ScanObjects(bucket, keyPrefix)`**: reopen
   when measured margins fail or a concrete caller needs prefix scope.
-- [ ] **NFSv4 / NBD auth integration with SA model**: reopen after the
-  S3+Iceberg IAM redesign (admin-UDS-only bucket lifecycle, 2-tier
-  None/Read/Write, OAuth2 bearer for Iceberg) lands. Today NFSv4 relies on
-  AUTH_SYS / RPCSEC_GSS and NBD on TLS X.509 / LAN trust. Decide how (or
-  whether) mount-time credentials map onto SA + per-bucket Grant, and how
-  NFS uid/gid is reconciled with `(SA, Bucket, Role)`. Out of scope for the
-  current IAM grilling.
+- [ ] **Protocol credential data-plane enforcement**: the shared
+  `grainfs credential` admin API/CLI foundation exists for S3, Iceberg, NFS,
+  9P, and NBD. Follow up by persisting credentials through Raft, checking IAM
+  permissions on create/rotate/revoke, enforcing NBD `volume@secret` attach,
+  and migrating NFS/9P from MountSA-only auth onto protocol credentials without
+  losing uid/gid audit context.
 
 ## NFSv4 RFC 8881 Follow-Ups
 
@@ -533,3 +548,10 @@ Work these in order. Do not run them in parallel.
 - [ ] Control-plane/data-plane split.
 - [ ] fix(storage/packblob): extend versioning bypass to Suspended state (currently only Enabled bypasses fast path; Suspended buckets on single-node still pack-write under (bucket,key) without versionId="null"). Add e2e cases for Suspended → PUT/DELETE/HEAD by versionId.
 - [ ] feat(scrubber): multi-node/multi-group segment GC fan-out. Orphan-segment GC currently (Plan 3.5) activates only on group-0's distBackend AND, in a cluster, runs only on the raft leader (CaughtUp uses node.ReadIndex → followers get ErrNotLeader → fail-closed skip). Result: single-node is complete; in a multi-node cluster, segments on non-leader nodes' local disks and in non-group-0 data-groups are never reclaimed → latent disk growth. Proper design needs leader-coordinated (or per-node-with-freshness-barrier) deletion across all groups — mirror the EC scrub ecResolver fan-out (boot_phases_scrubber.go) and decide who deletes follower-local raw segments. SegmentOrphanLog already namespaces by groupID. Blocked-by: Plan 3.5 (object-segment-gc-activation) land.
+
+## Completed
+
+- [x] **§9 Follow-up: tighten L1 anonymous allow to default bucket scope**
+  - Removed the global `iam.anon-enabled` anonymous bypass. Anonymous S3 access
+    now flows through default-bucket implicit policy or explicit bucket policy.
+  - **Completed:** v0.0.375.0 (2026-05-28)

@@ -80,6 +80,7 @@ func seedIPSTState(t *testing.T, f *MetaFSM) {
 // survive a Snapshot → Restore round-trip on a fresh MetaFSM.
 func TestMetaFSM_IPSTSnapshot_RoundTrip(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	wireIPSTStores(src)
 	seedIPSTState(t, src)
 
@@ -88,17 +89,23 @@ func TestMetaFSM_IPSTSnapshot_RoundTrip(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	// Verify the IPST trailer is present at the end.
-	if len(snap) < ipstSnapshotTrailerLen {
-		t.Fatalf("snapshot too small to contain IPST trailer: %d bytes", len(snap))
+	// Phase D-snap: trailer magic lives in the encrypted body — decrypt first.
+	plain, err := src.openSnapshotEnvelope(snap)
+	if err != nil {
+		t.Fatalf("openSnapshotEnvelope: %v", err)
 	}
-	gotMagic := binary.LittleEndian.Uint32(snap[len(snap)-4:])
+	// Verify the IPST trailer is present at the end of the plaintext.
+	if len(plain) < ipstSnapshotTrailerLen {
+		t.Fatalf("snapshot too small to contain IPST trailer: %d bytes", len(plain))
+	}
+	gotMagic := binary.LittleEndian.Uint32(plain[len(plain)-4:])
 	if gotMagic != ipstSnapshotTrailerMagic {
 		t.Fatalf("last 4 bytes magic = 0x%08X, want 0x%08X (IPST)", gotMagic, ipstSnapshotTrailerMagic)
 	}
 
 	// Restore into a fresh FSM with fresh stores.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	ps2, gs2, as2, bp2 := wireIPSTStores(dst)
 
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
@@ -191,14 +198,20 @@ func TestMetaFSM_IPSTSnapshot_RoundTrip(t *testing.T) {
 func TestMetaFSM_IPSTSnapshot_LegacySnapshot_NoIPST(t *testing.T) {
 	// Build a snapshot from an FSM that has NO policy stores wired.
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	snap, err := src.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot (no stores): %v", err)
 	}
 
+	// Phase D-snap: decrypt to inspect the plaintext trailer region.
+	plain, err := src.openSnapshotEnvelope(snap)
+	if err != nil {
+		t.Fatalf("openSnapshotEnvelope: %v", err)
+	}
 	// Sanity: no IPST trailer (stores were nil).
-	if len(snap) >= ipstSnapshotTrailerLen {
-		magic := binary.LittleEndian.Uint32(snap[len(snap)-4:])
+	if len(plain) >= ipstSnapshotTrailerLen {
+		magic := binary.LittleEndian.Uint32(plain[len(plain)-4:])
 		if magic == ipstSnapshotTrailerMagic {
 			t.Fatal("expected no IPST trailer on FSM with nil stores, but found one")
 		}
@@ -206,6 +219,7 @@ func TestMetaFSM_IPSTSnapshot_LegacySnapshot_NoIPST(t *testing.T) {
 
 	// Restore into a fresh FSM that HAS stores wired.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	ps2, gs2, as2, bp2 := wireIPSTStores(dst)
 
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
@@ -227,6 +241,7 @@ func TestMetaFSM_IPSTSnapshot_LegacySnapshot_NoIPST(t *testing.T) {
 func TestMetaFSM_IPSTSnapshot_NilStores_WarnOnly(t *testing.T) {
 	// Source FSM with stores wired and populated.
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	wireIPSTStores(src)
 	seedIPSTState(t, src)
 
@@ -237,6 +252,7 @@ func TestMetaFSM_IPSTSnapshot_NilStores_WarnOnly(t *testing.T) {
 
 	// Restore into FSM with NO stores wired — must not error.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore to nil-store FSM: %v", err)
 	}
@@ -249,6 +265,7 @@ func TestMetaFSM_IPSTSnapshot_NilStores_WarnOnly(t *testing.T) {
 // caught. This is the integration coverage the §3 review-forever Pass flagged.
 func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	// IPST: 4 IAM policy stores.
 	wireIPSTStores(src)
 	seedIPSTState(t, src)
@@ -257,7 +274,7 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	srcCfg := config.NewStore()
 	config.RegisterClusterKeys(srcCfg, config.ReloadHooks{})
 	src.SetConfigStore(srcCfg)
-	require.NoError(t, srcCfg.Set(context.Background(), "iam.anon-enabled", "false"))
+	require.NoError(t, srcCfg.Set(context.Background(), "trusted-proxy.cidr", "10.0.0.0/8"))
 
 	// DKVS: DEK keeper with a rotation so at least one extra generation exists.
 	kek := make([]byte, encrypt.KEKSize)
@@ -271,9 +288,13 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	snap, err := src.Snapshot()
 	require.NoError(t, err)
 
+	// Phase D-snap: trailers live in the encrypted body — decrypt to inspect.
+	plain, err := src.openSnapshotEnvelope(snap)
+	require.NoError(t, err)
+
 	// IPST is outermost — the last 4 bytes must be IPST magic.
-	require.GreaterOrEqual(t, len(snap), ipstSnapshotTrailerLen)
-	gotMagic := binary.LittleEndian.Uint32(snap[len(snap)-4:])
+	require.GreaterOrEqual(t, len(plain), ipstSnapshotTrailerLen)
+	gotMagic := binary.LittleEndian.Uint32(plain[len(plain)-4:])
 	require.Equal(t, ipstSnapshotTrailerMagic, gotMagic, "last 4 bytes must be IPST magic")
 
 	// Both GCFG + DKVS magic bytes must appear in the snapshot. We don't
@@ -282,13 +303,14 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	// order survive all 4 trailers being present together.
 	gcfgMagicBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(gcfgMagicBytes, cfgSnapshotTrailerMagic)
-	require.True(t, bytes.Contains(snap, gcfgMagicBytes), "GCFG trailer magic must appear in snapshot")
+	require.True(t, bytes.Contains(plain, gcfgMagicBytes), "GCFG trailer magic must appear in snapshot")
 	dkvsMagicBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(dkvsMagicBytes, dekSnapshotTrailerMagic)
-	require.True(t, bytes.Contains(snap, dkvsMagicBytes), "DKVS trailer magic must appear in snapshot")
+	require.True(t, bytes.Contains(plain, dkvsMagicBytes), "DKVS trailer magic must appear in snapshot")
 
 	// Restore into a fresh FSM with the SAME shape of stores wired.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	dstPs, _, _, _ := wireIPSTStores(dst)
 	dstCfg := config.NewStore()
 	config.RegisterClusterKeys(dstCfg, config.ReloadHooks{})
@@ -306,9 +328,9 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	require.NotEmpty(t, doc)
 
 	// GCFG: the config key must be restored into the cfgStore.
-	got, ok := dstCfg.GetBool("iam.anon-enabled")
-	require.True(t, ok, "GCFG trailer: iam.anon-enabled key must be restored")
-	require.False(t, got, "GCFG trailer: iam.anon-enabled value must be false")
+	got, ok := dstCfg.GetString("trusted-proxy.cidr")
+	require.True(t, ok, "GCFG trailer: trusted-proxy.cidr key must be restored")
+	require.Equal(t, "10.0.0.0/8", got, "GCFG trailer: trusted-proxy.cidr value must be restored")
 
 	// DKVS: the meta_fsm.Restore path stores DEK versions into pendingDEKVersions
 	// (the runtime then constructs a new keeper via encrypt.LoadFromFSM). The
@@ -320,6 +342,7 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 // but empty produces a snapshot that restores to empty stores (no ghost entries).
 func TestMetaFSM_IPSTSnapshot_EmptyStores(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	wireIPSTStores(src)
 
 	snap, err := src.Snapshot()
@@ -327,16 +350,22 @@ func TestMetaFSM_IPSTSnapshot_EmptyStores(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	// IPST trailer must be present (stores are wired, even if empty).
-	if len(snap) < ipstSnapshotTrailerLen {
-		t.Fatalf("snapshot too small: %d bytes", len(snap))
+	// Phase D-snap: decrypt to inspect the plaintext trailer region.
+	plain, err := src.openSnapshotEnvelope(snap)
+	if err != nil {
+		t.Fatalf("openSnapshotEnvelope: %v", err)
 	}
-	magic := binary.LittleEndian.Uint32(snap[len(snap)-4:])
+	// IPST trailer must be present (stores are wired, even if empty).
+	if len(plain) < ipstSnapshotTrailerLen {
+		t.Fatalf("snapshot too small: %d bytes", len(plain))
+	}
+	magic := binary.LittleEndian.Uint32(plain[len(plain)-4:])
 	if magic != ipstSnapshotTrailerMagic {
 		t.Fatalf("expected IPST trailer magic, got 0x%08X", magic)
 	}
 
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	ps2, _, _, _ := wireIPSTStores(dst)
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)

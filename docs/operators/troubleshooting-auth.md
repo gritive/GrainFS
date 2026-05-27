@@ -32,7 +32,7 @@ Common gotchas:
 
 ## "401" on Iceberg client request
 
-1. `iam.anon-enabled=false` and no bearer present → 401 by middleware. Mint a token:
+1. No bearer present → 401 by middleware. Mint a token:
    ```bash
    curl -X POST http://host:9000/iceberg/v1/oauth/tokens \
      -d grant_type=client_credentials \
@@ -52,9 +52,9 @@ grainfs status --json | jq .jwt_keys
 
 The bearer's `warehouse` claim ≠ the warehouse you targeted via `?warehouse=` or path. One token = one warehouse. Mint a fresh token with the right `scope`.
 
-## "STARTUP REFUSED — auth required + no TLS cert + no trusted proxy"
+## TLS Hardening For Authenticated Traffic
 
-`iam.anon-enabled=false` was applied without satisfying the TLS posture. Choose one:
+For network-exposed authenticated traffic, choose one:
 
 ```bash
 # Option A: place cert on every node, then SIGHUP

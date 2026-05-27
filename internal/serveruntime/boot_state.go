@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -159,22 +160,15 @@ type bootState struct {
 	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
 	// start (so any snapshot Restore has already populated cfgStore).
 	refreshProxyCIDR func(string)
-	// anonBannerSeedPrev re-seeds the internal prev atomic.Bool inside the
-	// composeAnonHookWithBanner closure. Called from the config.Store
-	// post-restore callback (F26) so runtime Restores keep the hook's
-	// comparison baseline in sync with the restored iam.anon-enabled value.
-	anonBannerSeedPrev func(bool)
 	// proxyTrust validates Forwarded / X-Forwarded-* headers when the request
 	// arrives from a trusted upstream (trusted-proxy.cidr). Built at raft-phase
 	// wire time so its SetCIDRs is also driven by OnTrustedProxyCIDR. Passed
 	// into server.New via WithProxyTrust. §5 T45.
 	proxyTrust *server.ProxyTrust
 
-	// bannerWriter is the destination for the §5 T46 Phase 0 anonymous-access
-	// banner (startup) and the "s3://default remains public" INFO banner
-	// (anon true→false flip). Set to os.Stdout in production via
-	// newBootState; tests that exercise bootPhase0Banner / the composed
-	// OnAnonEnabledChange hook substitute a *bytes.Buffer.
+	// bannerWriter is the destination for the §5 T46 default bucket anonymous
+	// access banner. Set to os.Stdout in production via newBootState; tests
+	// that exercise bootPhase0Banner substitute a *bytes.Buffer.
 	bannerWriter io.Writer
 
 	// Storage runtime (populated by storage phases — bootShardService,
@@ -286,10 +280,11 @@ type bootState struct {
 	auditOutbox *audit.Outbox
 
 	// bootHTTPServerAndAdmin
-	srv        *server.Server
-	tokenStore *dashboard.TokenStore
-	adminDeps  *admin.Deps
-	adminSrv   *admin.Server
+	srv                 *server.Server
+	tokenStore          *dashboard.TokenStore
+	adminDeps           *admin.Deps
+	adminSrv            *admin.Server
+	protocolCredentials *protocred.Service
 
 	// bootRecoveryAndScrubber
 	scrubDirector *scrubber.Director

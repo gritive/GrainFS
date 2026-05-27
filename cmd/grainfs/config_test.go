@@ -87,7 +87,7 @@ func TestCLI_ConfigList_OnlySetByDefault(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `[
 			{"key":"audit.deny-only","value":"true","kind":"bool","default":"false","set":true,"description":""},
-			{"key":"iam.anon-enabled","value":"true","kind":"bool","default":"true","set":false,"description":""}
+			{"key":"iam.allow-anonymous-bucket-policy","value":"false","kind":"bool","default":"false","set":false,"description":""}
 		]`)
 	})
 	sock := startFakeAdminUDS(t, mux)
@@ -125,7 +125,7 @@ func TestCLI_ConfigList_AllShowsCatalog(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `[
 			{"key":"audit.deny-only","value":"false","kind":"bool","default":"false","set":false,"description":"When true, all requests are logged but none are denied"},
-			{"key":"iam.anon-enabled","value":"true","kind":"bool","default":"true","set":false,"description":"Allow anonymous (unauthenticated) S3 access"},
+			{"key":"iam.allow-anonymous-bucket-policy","value":"false","kind":"bool","default":"false","set":false,"description":"Allow anonymous access via bucket-level IAM policies"},
 			{"key":"trusted-proxy.cidr","value":"","kind":"string","default":"","set":false,"description":"Trusted proxy CIDR range"},
 			{"key":"jwt.signing-key-rotate","value":"","kind":"trigger","default":"","set":false,"description":"Rotate the JWT signing key"}
 		]`)
@@ -155,7 +155,7 @@ func TestCLI_ConfigList_AllShowsCatalog(t *testing.T) {
 			keys[k] = true
 		}
 	}
-	for _, want := range []string{"audit.deny-only", "iam.anon-enabled", "trusted-proxy.cidr", "jwt.signing-key-rotate"} {
+	for _, want := range []string{"audit.deny-only", "iam.allow-anonymous-bucket-policy", "trusted-proxy.cidr", "jwt.signing-key-rotate"} {
 		if !keys[want] {
 			t.Errorf("missing key %q in --all output", want)
 		}

@@ -46,13 +46,24 @@ func fsmWithWrappedDEKs(t *testing.T, kek []byte) *cluster.MetaFSM {
 		require.NoError(t, keeper.InstallReplicatedDEK(gen, w, kv), "InstallReplicatedDEK")
 	}
 
+	// Snapshot() now seals the body in a KEK envelope (Phase D-snap), so the
+	// source needs a KEKStore (to seal) and the restore target needs one (to
+	// open). Both share the deterministic restore clusterID so the envelope AAD
+	// reconstructs. The wraps were sealed at the default KEK version 0.
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(0, kek), "KEKStore.Add(0)")
+
 	src := cluster.NewMetaFSM()
+	src.SetClusterID(restoreTestClusterID())
+	src.SetKEKStore(store)
 	src.SetDEKKeeper(keeper)
 
 	snap, err := src.Snapshot()
 	require.NoError(t, err, "Snapshot")
 
 	dst := cluster.NewMetaFSM()
+	dst.SetClusterID(restoreTestClusterID())
+	dst.SetKEKStore(store)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap), "Restore")
 
 	pending, _ := dst.PendingDEKVersions()
@@ -179,7 +190,16 @@ func fsmWithWrappedDEKsAtKEKVersion(t *testing.T, kek []byte, kekVersion uint32)
 		require.NoError(t, keeper.InstallReplicatedDEK(gen, w, kv))
 	}
 
+	// Phase D-snap: Snapshot() seals under store.ActiveVersion(); the restore
+	// target opens via the envelope header's KEK version. Wire both FSMs with a
+	// store whose active version is kekVersion holding kek, plus the clusterID.
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(kekVersion, kek))
+	require.NoError(t, store.SetActiveVersion(kekVersion))
+
 	src := cluster.NewMetaFSM()
+	src.SetClusterID(restoreTestClusterID())
+	src.SetKEKStore(store)
 	src.SetDEKKeeper(keeper)
 	src.SetActiveKEKVersion(kekVersion)
 
@@ -187,6 +207,8 @@ func fsmWithWrappedDEKsAtKEKVersion(t *testing.T, kek []byte, kekVersion uint32)
 	require.NoError(t, err)
 
 	dst := cluster.NewMetaFSM()
+	dst.SetClusterID(restoreTestClusterID())
+	dst.SetKEKStore(store)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
 
 	pending, _ := dst.PendingDEKVersions()

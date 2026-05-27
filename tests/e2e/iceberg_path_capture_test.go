@@ -138,8 +138,7 @@ func runIcebergPathCaptureOutboundTokenPathExactMatch(t testing.TB, tgt *iceberg
 // exists under the catalog base. We accept 200 (anon allowed), 401 (bearer
 // required), or 403 (SigV4 fallthrough with no signature) — the contract
 // under test is the path string, not the auth posture. This keeps the
-// assertion fixture-independent across Phase 0 (anon-enabled) and Phase 2
-// (anon-disabled) auth postures.
+// assertion fixture-independent across bootstrap states.
 //
 // A 404 here would mean /v1 is not a path prefix under /iceberg, i.e. the
 // catalog base has drifted to include /v1.

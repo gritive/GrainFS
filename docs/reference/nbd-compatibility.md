@@ -31,3 +31,4 @@ coverage. Unit-test-only coverage is not enough.
 | Replies         | Structured read reply          | Partial       | qemu/libnbd interop is not claimed.                                                      |
 | Metadata        | `base:allocation` block status | Partial       | qemu/libnbd interop is not claimed.                                                      |
 | Headers         | Extended headers               | Not supported | Parser exists, but basic negotiation returns `NBD_REP_ERR_UNSUP` until interop is fixed. |
+| Security        | Protocol credential enforcement | Not supported | `grainfs credential create --protocol nbd` exists as admin-plane foundation, but NBD still selects volumes by export name only. Restrict access with bind address, firewall, or private network. |

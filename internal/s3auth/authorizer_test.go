@@ -21,7 +21,7 @@ func (s *stubCfg) GetBool(k string) (bool, bool) {
 	return v, ok
 }
 
-func newTestAuthorizer(t *testing.T, anon, allowAnonBucket bool) (*Authorizer, *policystore.InMemoryStore, *policyattach.InMemoryStore, *bucketpolicy.InMemoryStore) {
+func newTestAuthorizer(t *testing.T, _ bool, allowAnonBucket bool) (*Authorizer, *policystore.InMemoryStore, *policyattach.InMemoryStore, *bucketpolicy.InMemoryStore) {
 	t.Helper()
 	ps := policystore.NewInMemoryStore()
 	gs := group.NewInMemoryStore()
@@ -30,7 +30,6 @@ func newTestAuthorizer(t *testing.T, anon, allowAnonBucket bool) (*Authorizer, *
 	adapter := &policy.StoreAdapter{Policies: ps, Attach: pa, Groups: gs, Buckets: bp}
 	res := policy.NewResolver(adapter, 100*time.Millisecond)
 	cfg := &stubCfg{vals: map[string]bool{
-		"iam.anon-enabled":                  anon,
 		"iam.allow-anonymous-bucket-policy": allowAnonBucket,
 	}}
 	return NewAuthorizer(res, cfg), ps, pa, bp
@@ -47,10 +46,10 @@ func TestAuthorize_AdminUDSOnlyDeniedOnDataPlane(t *testing.T) {
 }
 
 func TestAuthorize_AnonInternalBucketDenied(t *testing.T) {
-	a, _, _, _ := newTestAuthorizer(t, true /* anon-enabled */, false)
+	a, _, _, _ := newTestAuthorizer(t, true, false)
 	r := a.Authorize(context.Background(), "" /* anon */, "_grainfs", policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::_grainfs/x"})
 	if r.Decision != policy.DecisionDeny {
-		t.Fatalf("anon to _grainfs should be denied even with anon-enabled, got %v", r.Decision)
+		t.Fatalf("anon to _grainfs should be denied, got %v", r.Decision)
 	}
 }
 
@@ -70,11 +69,11 @@ func TestAuthorize_SAInternalBucketDenied(t *testing.T) {
 	}
 }
 
-func TestAuthorize_AnonEnabledShortCircuit(t *testing.T) {
+func TestAuthorize_AnonNonDefaultWithoutPolicyDenied(t *testing.T) {
 	a, _, _, _ := newTestAuthorizer(t, true, false)
 	r := a.Authorize(context.Background(), "", "userbucket", policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::userbucket/x"})
-	if r.Decision != policy.DecisionAllow {
-		t.Fatalf("anon-enabled should Allow ordinary action, got %v: %s", r.Decision, r.Reason)
+	if r.Decision != policy.DecisionDeny {
+		t.Fatalf("anonymous non-default bucket access without policy should Deny, got %v: %s", r.Decision, r.Reason)
 	}
 }
 
@@ -158,7 +157,6 @@ func TestAuthorize_DefaultBucketHasBucketPolicyTransientErr_FailClosed(t *testin
 	store := &errStore{err: transientErr}
 	res := policy.NewResolver(store, 100*time.Millisecond)
 	cfg := &stubCfg{vals: map[string]bool{
-		"iam.anon-enabled":                  true, // Phase 0: anon enabled — would Allow if fall-through
 		"iam.allow-anonymous-bucket-policy": false,
 	}}
 	a := NewAuthorizer(res, cfg)

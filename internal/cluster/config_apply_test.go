@@ -14,6 +14,7 @@ func newTestMetaFSMWithConfigStore(t *testing.T, store *config.Store) *MetaFSM {
 	t.Helper()
 	f := NewMetaFSM()
 	f.SetConfigStore(store)
+	wireTestKEK(t, f)
 	return f
 }
 

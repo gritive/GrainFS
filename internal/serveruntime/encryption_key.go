@@ -74,7 +74,13 @@ func LoadOrCreateEncryptionKeyWithRaw(keyFile, dataDir string, allowAutoGenerate
 }
 
 const bulkCipherFormatFile = "encryption.format"
-const bulkCipherFormatXAES = "2"
+
+// bulkCipherFormatVersion is the on-disk at-rest format version this binary
+// writes and requires. "2" = static bulk cipher XAES (#566). "3" = DEK
+// data-sealing cipher is also XAES — bumped because the DEK ciphertext wire
+// format (nonce width) changed and AES-GCM-DEK data is unreadable, so an old
+// dir must loud-fail rather than mis-read.
+const bulkCipherFormatVersion = "3"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
 // ONLY when at-rest encryption is enabled. bulkDataPresent reports whether the
@@ -85,13 +91,13 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	b, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatXAES {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); do not downgrade or cross-upgrade", got, bulkCipherFormatFile, bulkCipherFormatXAES)
+		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); the DEK data-sealing cipher changed to XAES-256-GCM and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):
 		if bulkDataPresent {
-			return fmt.Errorf("data dir %s was encrypted with the pre-XAES (AES-GCM) bulk format; in-place upgrade is not supported — create a new cluster (see CHANGELOG XAES boundary)", dataDir)
+			return fmt.Errorf("data dir %s holds bulk data in a pre-XAES-DEK format; in-place upgrade is not supported — create a new cluster (see CHANGELOG XAES-DEK boundary)", dataDir)
 		}
 		// The guard runs before preflight creates the data dir, so on a fresh
 		// (multi-root) boot dataDir may not exist yet. The dir is about to be
@@ -99,7 +105,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 		if err := os.MkdirAll(dataDir, 0o700); err != nil {
 			return fmt.Errorf("create data dir %s: %w", dataDir, err)
 		}
-		if err := os.WriteFile(path, []byte(bulkCipherFormatXAES), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(bulkCipherFormatVersion), 0o600); err != nil {
 			return fmt.Errorf("write %s: %w", bulkCipherFormatFile, err)
 		}
 		return nil

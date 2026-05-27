@@ -30,6 +30,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerConfig(g, d)
 	registerBucket(g, d)
 	registerNfsExports(g, d)
+	registerCredentials(g, d)
 	registerAudit(g, d)
 	registerStatus(g, d)
 	registerIceberg(g, d)
@@ -89,4 +90,12 @@ func registerResource(g router, d *Deps) {
 func registerDashboard(g router, d *Deps) {
 	g.GET(routePathDashboardToken, wrapZero(d, GetDashboardToken))
 	g.POST(routePathDashboardRotate, wrapZero(d, RotateDashboardToken))
+}
+
+func registerCredentials(g router, d *Deps) {
+	g.POST(routePathCredentials, wrapBody[CredentialCreateReq, CredentialResp](d, CreateCredential))
+	g.GET(routePathCredentials, listCredentialsHandler(d))
+	g.GET(routePathCredential, credentialGetHandler(d))
+	g.POST(routePathCredentialRotate, credentialRotateHandler(d))
+	g.DELETE(routePathCredential, credentialRevokeHandler(d))
 }

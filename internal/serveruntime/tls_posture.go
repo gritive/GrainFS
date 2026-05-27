@@ -1,87 +1,25 @@
-// §5 T44: TLS posture gate.
-//
-// Refuses to start (and refuses runtime flips) when the cluster lands in a
-// posture where authenticated requests would traverse plaintext: anon disabled,
-// no server TLS cert, and no trusted-proxy CIDR carrying client identity from
-// a TLS-terminating front-end.
-//
-// Determinism split — boot vs. reload hook:
-//
-//   - Boot path (bootTLSPostureGate) checks all three: anon, on-disk cert,
-//     trusted-proxy.cidr. Per-node cert presence is fine here because each
-//     node makes its own start/refuse decision locally.
-//
-//   - iam.anon-enabled reload hook checks only anon + trusted-proxy.cidr.
-//     The cert check is INTENTIONALLY OMITTED: MetaCmdConfigPut is replicated
-//     via raft and applied on every node, so an apply-time error from one
-//     follower (cert missing) while the leader's apply succeeds (cert present)
-//     would leave the cluster's anon setting silently diverged — log entry
-//     committed in raft, value rolled back locally on the failing follower.
-//     The "cert deployed unevenly" case is caught instead by that node's
-//     bootTLSPostureGate the next time it boots. Failing at the right place.
-//
-// Lock note: the iam.anon-enabled reload hook fires from inside
-// config.Store.Set while the store's write lock is held, so the hook MUST NOT
-// call cfg.GetBool / cfg.GetString (they take RLock → self-deadlock).
-// trusted-proxy.cidr is tracked in a closure-captured atomic.Pointer[string]
-// kept fresh by a sibling OnTrustedProxyCIDR hook.
+// §5 T44: TLS posture helpers.
 package serveruntime
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 )
 
-// enforceTLSPostureValues is the pure boot-path form. Returns nil when anon is
-// enabled, or a cert is on disk, or a trusted-proxy CIDR is set. The error
-// message names all three remediation options.
-func enforceTLSPostureValues(anon bool, certPath, keyPath, proxyCIDR string) error {
-	if anon {
-		return nil
-	}
-	if _, err := os.Stat(certPath); err == nil {
-		return nil
-	}
-	if proxyCIDR != "" {
-		return nil
-	}
-	return fmt.Errorf("auth required + no TLS cert + no trusted proxy. "+
-		"Place cert at %s + %s, OR "+
-		"set GRAINFS_TLS_CERT/KEY, OR "+
-		"`grainfs config set trusted-proxy.cidr <cidr>`",
-		certPath, keyPath)
-}
-
-// enforceTLSPosture is the boot-path wrapper. Reads anon + trusted-proxy.cidr
-// from cfg (under RLock — safe at boot, no Set in flight) and the cert paths
-// from nc. Call only from outside config.Store.Set.
+// enforceTLSPosture is retained as a boot hook, but no longer gates startup on
+// the removed iam.anon-enabled key. TLS requirements are now operator policy,
+// not a side effect of first service-account bootstrap.
 func enforceTLSPosture(cfg *config.Store, nc *nodeconfig.NodeConfig) error {
-	if cfg == nil || nc == nil {
-		return nil
-	}
-	anon, _ := cfg.GetBool("iam.anon-enabled")
-	proxy, _ := cfg.GetString("trusted-proxy.cidr")
-	return enforceTLSPostureValues(anon, nc.TLSCertPath(), nc.TLSKeyPath(), proxy)
+	return nil
 }
 
-// reloadHookPostureCheck is the cluster-deterministic form used by the
-// iam.anon-enabled reload hook. Does NOT touch the filesystem — see the
-// "Determinism split" note in the package doc-comment for why.
+// reloadHookPostureCheck is retained for older tests and callers. With the
+// global anonymous switch removed, config reloads no longer reject TLS posture.
 func reloadHookPostureCheck(anon bool, proxyCIDR string) error {
-	if anon {
-		return nil
-	}
-	if proxyCIDR != "" {
-		return nil
-	}
-	return fmt.Errorf("auth required + no trusted proxy. " +
-		"Set GRAINFS_TLS_CERT/KEY and restart, OR " +
-		"`grainfs config set trusted-proxy.cidr <cidr>`")
+	return nil
 }
 
 // bootTLSPostureGate runs enforceTLSPosture as a boot phase. Wired in Run()
@@ -94,30 +32,15 @@ func bootTLSPostureGate(state *bootState) error {
 	return enforceTLSPosture(state.cfgStore, nc)
 }
 
-// iamPostureChecker adapts enforceTLSPosture to the iam.PostureChecker
-// interface. F#26-tls-posture: the AdminAPI calls CheckAnonOff before the
-// FIRST SA create on an empty store and rejects the RPC if the local TLS
-// posture would refuse the implied iam.anon-enabled → false flip.
-//
-// Local-posture check is correct here because all admin RPCs land on a single
-// node's UDS; raft replication of SA happens after this gate. The cluster-wide
-// reload hook (reloadHookPostureCheck) remains the authoritative cluster gate.
+// iamPostureChecker preserves the AdminAPI dependency shape. SA creation no
+// longer flips a global anonymous config key, so the check is a no-op.
 type iamPostureChecker struct {
 	cfg *config.Store
 	nc  *nodeconfig.NodeConfig
 }
 
 func (p *iamPostureChecker) CheckAnonOff(_ context.Context) error {
-	// Simulate the post-flip posture: pin anon=false and reuse
-	// enforceTLSPostureValues so the operator gets the same three-knob
-	// remediation message the boot gate / reload hook would produce.
-	// Live posture's anon is still true in Phase 0 — using enforceTLSPosture
-	// directly would always return nil here.
-	if p.cfg == nil || p.nc == nil {
-		return nil
-	}
-	proxy, _ := p.cfg.GetString("trusted-proxy.cidr")
-	return enforceTLSPostureValues(false, p.nc.TLSCertPath(), p.nc.TLSKeyPath(), proxy)
+	return nil
 }
 
 // newIAMPostureChecker builds the adapter wired into AdminAPI at boot.
@@ -125,8 +48,8 @@ func newIAMPostureChecker(cfg *config.Store, nc *nodeconfig.NodeConfig) *iamPost
 	return &iamPostureChecker{cfg: cfg, nc: nc}
 }
 
-// wireTLSPostureHooks builds the OnAnonEnabledChange + OnTrustedProxyCIDR pair
-// that keep the runtime posture gate live.
+// wireTLSPostureHooks builds compatibility posture hooks plus the
+// OnTrustedProxyCIDR hook that keeps the runtime proxy snapshot live.
 //
 // The trusted-proxy.cidr value is captured in a *atomic.Pointer[string] so the
 // anon-change hook can read it without taking the store's RLock (it fires

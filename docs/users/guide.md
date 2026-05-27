@@ -68,6 +68,30 @@ grainfs iam key create <sa_id>
 grainfs iam key revoke <sa_id> <old_access_key>
 ```
 
+## Protocol credentials
+
+`grainfs credential` is the shared admin surface for protocol-scoped
+credentials. It creates a credential for one service account, protocol,
+resource, and access mode:
+
+```bash
+grainfs credential create \
+  --sa <sa_id> \
+  --protocol nbd \
+  --resource volume/v1 \
+  --mode rw
+```
+
+The response includes a one-time `secret` and a protocol-specific
+`connection_hint`. Credentials do not expire by default; pass
+`--expires-at <RFC3339>` when you want a planned rotation deadline. Use
+`grainfs credential rotate <id>` to issue a replacement secret and
+`grainfs credential revoke <id>` to disable a credential.
+
+This release adds the common credential API and CLI foundation. Existing S3,
+Iceberg, NFS, 9P, and NBD data-plane authentication behavior is unchanged until
+each protocol is migrated to enforce these credentials.
+
 ## S3
 
 Use path-style S3 clients against the configured HTTP port:
@@ -159,6 +183,7 @@ NBD requires a Linux client.
 
 ```bash
 grainfs volume create v1 --size 10Gi
+grainfs credential create --sa <sa_id> --protocol nbd --resource volume/v1 --mode rw
 
 sudo modprobe nbd
 sudo nbd-client localhost 10809 /dev/nbd0 -N v1

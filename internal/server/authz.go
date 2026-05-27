@@ -31,7 +31,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			return
 		}
 
-		if isBucketFormPost(c) {
+		if routeIsS3Path(path) && isBucketFormPost(c) {
 			c.Next(ctx)
 			return
 		}
