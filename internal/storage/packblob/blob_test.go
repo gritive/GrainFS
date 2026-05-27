@@ -183,7 +183,10 @@ func TestEncryptedBlobStoreAppendKeepsAllocationBound(t *testing.T) {
 		_, err := bs.Append(key, payload)
 		require.NoError(t, err)
 	})
-	require.LessOrEqual(t, allocs, 2.0)
+	// XAES-256-GCM derives a per-call sub-key (deriveKey + aes.NewCipher +
+	// cipher.NewGCM), adding ~3 allocations vs plain AES-256-GCM. Upper bound
+	// updated from 2 → 5 to reflect the XAES nonce-expansion overhead.
+	require.LessOrEqual(t, allocs, 5.0)
 }
 
 func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
@@ -200,7 +203,9 @@ func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, payload, got)
 	})
-	require.LessOrEqual(t, allocs, 4.0)
+	// XAES-256-GCM adds ~3 allocs per Open (sub-key derivation). Upper bound
+	// updated from 4 → 8 to reflect the XAES nonce-expansion overhead.
+	require.LessOrEqual(t, allocs, 8.0)
 }
 
 func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
@@ -332,12 +337,19 @@ func TestEncryptedBlobStoreReadsLegacyPlaintextEntry(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
-func TestEncryptedBlobStoreReadsLegacyPlaintextEntryWithEncryptedMagicPrefix(t *testing.T) {
+// TestEncryptedBlobStoreRejectsLegacyPlaintextEntryWithValueMagicPrefix verifies
+// the XAES greenfield boundary: if a blob entry's payload carries the old
+// encrypted-value magic prefix (0xAE 0xE2) but is not flagEncrypted, the
+// reader must return a loud error rather than silently passing the bytes as
+// plaintext. This replaces the pre-XAES pass-through behavior.
+func TestEncryptedBlobStoreRejectsLegacyPlaintextEntryWithValueMagicPrefix(t *testing.T) {
 	dir := t.TempDir()
 	legacy, err := NewBlobStore(dir, 256*1024*1024)
 	require.NoError(t, err)
-	plaintext := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
-	loc, err := legacy.Append("bucket/key", plaintext)
+	// These bytes carry the old encrypted-value magic: they could be a pre-XAES
+	// AES-GCM encrypted value written without flagEncrypted.
+	oldMagicPayload := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
+	loc, err := legacy.Append("bucket/key", oldMagicPayload)
 	require.NoError(t, err)
 	require.NoError(t, legacy.Close())
 
@@ -345,9 +357,9 @@ func TestEncryptedBlobStoreReadsLegacyPlaintextEntryWithEncryptedMagicPrefix(t *
 	require.NoError(t, err)
 	defer encrypted.Close()
 
-	got, err := encrypted.Read(loc)
-	require.NoError(t, err)
-	require.Equal(t, plaintext, got)
+	_, err = encrypted.Read(loc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
 }
 
 func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {
@@ -356,4 +368,96 @@ func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
 	return enc
+}
+
+// TestEncryptedBlobStoreReadsGenuinePlaintext verifies that payload bytes with
+// no magic are still returned as-is when flagEncrypted is not set (legacy
+// unencrypted entries co-existing with an encryptor).
+func TestEncryptedBlobStoreReadsGenuinePlaintext(t *testing.T) {
+	// Write via unencrypted store, read via encrypted store — plaintext must pass through.
+	dir := t.TempDir()
+	plain, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	plaintext := []byte("genuine plaintext, no magic")
+	loc, err := plain.Append("bucket/key-plain", plaintext)
+	require.NoError(t, err)
+	require.NoError(t, plain.Close())
+
+	enc := newPackblobTestEncryptor(t)
+	encrypted, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer encrypted.Close()
+
+	got, err := encrypted.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+// TestEncryptedBlobStoreReadsPlaintextWithValueMagicButNonLegacyVersion verifies
+// the precise-match decision: plaintext that happens to start with the value
+// magic (0xAE 0xE2) but does NOT carry the exact pre-XAES version byte 0x01
+// must still pass through as-is. Only the exact legacy signature rejects.
+func TestEncryptedBlobStoreReadsPlaintextWithValueMagicButNonLegacyVersion(t *testing.T) {
+	dir := t.TempDir()
+	plain, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	// Value magic prefix but version byte 0x05 (neither legacy 0x01 nor current 0x02).
+	payload := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
+	loc, err := plain.Append("bucket/key-nonlegacy", payload)
+	require.NoError(t, err)
+	require.NoError(t, plain.Close())
+
+	enc := newPackblobTestEncryptor(t)
+	encrypted, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer encrypted.Close()
+
+	got, err := encrypted.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+// TestBlobStoreRejectsLegacyValueWithoutEncryptor verifies the bs.encryptor == nil
+// branch loud-fails on an exact legacy value (0xAE 0xE2 0x01) rather than
+// returning it as raw plaintext.
+func TestBlobStoreRejectsLegacyValueWithoutEncryptor(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	// Exact pre-XAES value signature, written as an unencrypted entry.
+	oldMagicPayload := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
+	loc, err := bs.Append("bucket/key-legacy-noenc", oldMagicPayload)
+	require.NoError(t, err)
+	require.NoError(t, bs.Close())
+
+	// Reopen WITHOUT an encryptor.
+	reopened, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	_, err = reopened.Read(loc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
+}
+
+// TestBlobStoreReadsPlaintextWithoutEncryptor verifies the bs.encryptor == nil
+// branch still passes genuine plaintext (incl. value-magic with a non-legacy
+// version) through unchanged.
+func TestBlobStoreReadsPlaintextWithoutEncryptor(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	// Value magic prefix but version byte 0x05 (neither legacy 0x01 nor current 0x02).
+	payload := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
+	loc, err := bs.Append("bucket/key-plain-noenc", payload)
+	require.NoError(t, err)
+	require.NoError(t, bs.Close())
+
+	reopened, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	got, err := reopened.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
 }

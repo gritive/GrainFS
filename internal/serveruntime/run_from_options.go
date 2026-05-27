@@ -6,6 +6,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // pprof endpoints registered on DefaultServeMux when PprofPort > 0
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -54,6 +55,19 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
 	// 4. Encryption key + IAMApplier.
+	// Compute the canonical primary data dir the same way optionsToConfig does
+	// (cfg.DataDir = cfg.DataDirs[0] when DataDirs is non-empty). The guard
+	// marker and metaDir default must be written under this primary dir so they
+	// agree with the rest of the boot sequence.
+	// NOTE: LoadOrCreateEncryptionKey still uses opts.DataDir (not primaryDataDir)
+	// for the encryption.key path, because the key is typically co-located with the
+	// original --data flag and changing that path here could break single-dir
+	// deployments. Aligning the key-file path to DataDirs[0] is tracked as a
+	// follow-up audit item.
+	primaryDataDir := opts.DataDir
+	if len(opts.DataDirs) > 0 {
+		primaryDataDir = opts.DataDirs[0]
+	}
 	shardEncryptor, err := LoadOrCreateEncryptionKey(
 		opts.EncryptionKeyFile,
 		opts.DataDir,
@@ -61,6 +75,13 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	)
 	if err != nil {
 		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
+	}
+	metaDir := opts.MetaDir
+	if metaDir == "" {
+		metaDir = filepath.Join(primaryDataDir, "meta")
+	}
+	if err := EnsureBulkCipherFormat(primaryDataDir, BulkDataPresent(primaryDataDir, opts.DataDirs, metaDir)); err != nil {
+		return fmt.Errorf("encryption format guard: %w", err)
 	}
 	iamApplier := iam.NewApplier(iamStore, shardEncryptor)
 

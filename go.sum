@@ -1,3 +1,5 @@
+filippo.io/xaes256gcm v0.1.0 h1:+opP7dqsAyc513rQG6/60HoO5brPrXvV6RPX02bRh8I=
+filippo.io/xaes256gcm v0.1.0/go.mod h1:Gk/PXkMGgPPCL6rxHXTcZeKwWG5dNVpav7sGVLugTp0=
 github.com/andybalholm/brotli v1.2.1 h1:R+f5xP285VArJDRgowrfb9DqL18yVK0gKAW/F+eTWro=
 github.com/andybalholm/brotli v1.2.1/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apache/arrow-go/v18 v18.6.0 h1:GX/Jyd3R7mCLiECAwY9FWbbaYblie2WXBSz4Sw8fNpM=

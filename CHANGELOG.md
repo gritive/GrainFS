@@ -9,6 +9,17 @@
   position-bound AEAD, extending the KEK-envelope key-rotation groundwork from
   object/segment files to cluster EC shards.
 
+## [0.0.364.0] - 2026-05-27
+
+### Changed
+
+- **At-rest bulk encryption now uses XAES-256-GCM** (192-bit nonce) instead of
+  AES-256-GCM, removing the AES-GCM random-nonce exhaustion limit on long-lived
+  high-volume clusters while keeping AES-NI performance. **Breaking / greenfield
+  boundary:** the on-disk bulk-encryption format changed. A cluster encrypted with a
+  previous version cannot be upgraded in place — a node refuses to start on a
+  pre-XAES encrypted data dir with a clear error; set up a new cluster.
+
 ## [0.0.363.0] - 2026-05-27
 
 ### Added

@@ -1,38 +1,36 @@
 package encrypt
 
 import (
-	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"fmt"
 	"io"
+
+	"filippo.io/xaes256gcm"
 )
 
-// Encryptor handles AES-256-GCM encryption/decryption for at-rest data.
+// Encryptor handles XAES-256-GCM encryption/decryption for at-rest data.
 type Encryptor struct {
 	aead cipher.AEAD
 }
 
-// NewEncryptor creates a new AES-256-GCM encryptor from a 32-byte key.
+// NewEncryptor creates a new XAES-256-GCM encryptor from a 32-byte key.
+// XAES-256-GCM uses a 192-bit (24-byte) nonce, eliminating the 2^32 random-
+// nonce exhaustion cliff of plain AES-256-GCM while preserving AES-NI speed.
 func NewEncryptor(key []byte) (*Encryptor, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("encryption key must be 32 bytes, got %d", len(key))
 	}
 
-	block, err := aes.NewCipher(key)
+	aead, err := xaes256gcm.NewWithManualNonces(key)
 	if err != nil {
-		return nil, fmt.Errorf("create cipher: %w", err)
-	}
-
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("create GCM: %w", err)
+		return nil, fmt.Errorf("create XAES-256-GCM: %w", err)
 	}
 
 	return &Encryptor{aead: aead}, nil
 }
 
-// Encrypt encrypts plaintext using AES-256-GCM.
+// Encrypt encrypts plaintext using XAES-256-GCM.
 // Returns nonce + ciphertext + tag.
 func (e *Encryptor) Encrypt(plaintext []byte) ([]byte, error) {
 	nonce := make([]byte, e.aead.NonceSize())
@@ -65,7 +63,8 @@ func (e *Encryptor) Decrypt(data []byte) ([]byte, error) {
 
 // encMagic is a 2-byte header prepended by EncryptWithAAD to identify
 // encrypted blobs and enable downgrade detection.
-const encMagic0, encMagic1 = byte(0xAE), byte(0xE1)
+// 0xE3 = XAES era; 0xE1 = pre-XAES AES-GCM, rejected.
+const encMagic0, encMagic1 = byte(0xAE), byte(0xE3)
 
 // IsEncryptedBlob reports whether data was produced by EncryptWithAAD.
 // Used to detect encrypted shards when the encryptor is nil (downgrade guard).
@@ -73,17 +72,18 @@ func IsEncryptedBlob(data []byte) bool {
 	return len(data) >= 2 && data[0] == encMagic0 && data[1] == encMagic1
 }
 
-// EncryptWithAAD encrypts plaintext using AES-256-GCM with Additional
+// EncryptWithAAD encrypts plaintext using XAES-256-GCM with Additional
 // Authenticated Data. The AAD binds the ciphertext to its storage location so
 // that moving an encrypted shard to a different position causes decryption to
-// fail. Output format: magic(2) + nonce(12) + ciphertext + tag(16).
+// fail. Output format: magic(2) + nonce(24) + ciphertext + tag(16).
 func (e *Encryptor) EncryptWithAAD(plaintext, aad []byte) ([]byte, error) {
-	// Single allocation: magic(2) + nonce(12) + plaintext + tag(16).
+	// Single allocation: magic(2) + nonce(24) + plaintext + tag(16).
 	// nonce is a sub-slice of out (already heap-allocated), so no 2nd alloc.
-	out := make([]byte, 2+12, 2+12+len(plaintext)+16)
+	ns := e.aead.NonceSize()
+	out := make([]byte, 2+ns, 2+ns+len(plaintext)+e.aead.Overhead())
 	out[0] = encMagic0
 	out[1] = encMagic1
-	nonce := out[2:14]
+	nonce := out[2 : 2+ns]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
@@ -115,13 +115,37 @@ func (e *Encryptor) DecryptWithAAD(data, aad []byte) ([]byte, error) {
 }
 
 const (
-	valueMagic0   = byte(0xAE)
-	valueMagic1   = byte(0xE2)
-	valueVersion1 = byte(0x01)
+	valueMagic0 = byte(0xAE)
+	valueMagic1 = byte(0xE2)
+	// 0x02 = XAES; 0x01 = pre-XAES, rejected.
+	valueVersion2 = byte(0x02)
 )
 
 func IsEncryptedValue(data []byte) bool {
-	return len(data) >= 3 && data[0] == valueMagic0 && data[1] == valueMagic1 && data[2] == valueVersion1
+	return len(data) >= 3 && data[0] == valueMagic0 && data[1] == valueMagic1 && data[2] == valueVersion2
+}
+
+// valueVersion1 is the pre-XAES (AES-256-GCM) value-envelope version byte.
+// The current version is valueVersion2 (0x02).
+const valueVersion1 = byte(0x01)
+
+// IsLegacyEncryptedValue reports whether b is an exact pre-XAES value envelope:
+// value magic (0xAE 0xE2) + old version byte 0x01. Used to LOUD-FAIL on old
+// encrypted data at the XAES greenfield boundary while letting genuine
+// plaintext (any bytes not matching this exact signature) pass through.
+func IsLegacyEncryptedValue(b []byte) bool {
+	return len(b) >= 3 && b[0] == valueMagic0 && b[1] == valueMagic1 && b[2] == valueVersion1
+}
+
+// legacyEncMagic1 is the pre-XAES EncryptWithAAD blob magic second byte.
+// The current blob magic is encMagic1 (0xE3).
+const legacyEncMagic1 = byte(0xE1)
+
+// IsLegacyEncryptedBlob reports whether b is an exact pre-XAES EncryptWithAAD
+// blob: magic 0xAE 0xE1. Used to LOUD-FAIL on old encrypted shard/blob data at
+// the XAES greenfield boundary while letting genuine plaintext pass through.
+func IsLegacyEncryptedBlob(b []byte) bool {
+	return len(b) >= 2 && b[0] == encMagic0 && b[1] == legacyEncMagic1
 }
 
 func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]byte, error) {
@@ -133,7 +157,7 @@ func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]
 	out := dst[:headerLen]
 	out[0] = valueMagic0
 	out[1] = valueMagic1
-	out[2] = valueVersion1
+	out[2] = valueVersion2
 	nonce := out[3 : 3+e.aead.NonceSize()]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
@@ -191,4 +215,11 @@ func (e *Encryptor) OpenWithNonceAAD(dst, nonce, ciphertext, aad []byte) ([]byte
 
 func (e *Encryptor) AEADOverhead() int {
 	return e.aead.Overhead()
+}
+
+// NonceSize returns the AEAD nonce width in bytes (24 for XAES-256-GCM).
+// Callers sizing buffers for the sealed value/blob layout
+// (magic + nonce + ciphertext + tag) should use this instead of a literal.
+func (e *Encryptor) NonceSize() int {
+	return e.aead.NonceSize()
 }

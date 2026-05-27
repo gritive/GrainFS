@@ -97,6 +97,101 @@ func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
 	}))
 }
 
+func TestEncryptedBadgerValueRejectsOldFormatEncrypted(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
+	require.NoError(t, err)
+	defer db.Close()
+
+	enc := testEncryptor(t)
+	key := []byte("obj:bkt/old-format")
+	// Simulate an old-format encrypted value: 0xAE 0xE2 (value magic) + version 0x01 (pre-XAES)
+	oldFormatVal := []byte{0xAE, 0xE2, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, oldFormatVal)
+	}))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
+		return nil
+	}))
+}
+
+// TestEncryptedBadgerValueReadsPlaintextWithValueMagicButNonLegacyVersion
+// verifies the precise-match decision: a value starting with the value magic
+// (0xAE 0xE2) but NOT the exact legacy version byte 0x01 must pass through as
+// plaintext rather than loud-failing.
+func TestEncryptedBadgerValueReadsPlaintextWithValueMagicButNonLegacyVersion(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
+	require.NoError(t, err)
+	defer db.Close()
+
+	enc := testEncryptor(t)
+	key := []byte("obj:bkt/non-legacy-magic")
+	// Value magic prefix but version 0x05 (neither legacy 0x01 nor current 0x02).
+	val := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, val)
+	}))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		got, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		require.NoError(t, err)
+		require.Equal(t, val, got)
+		return nil
+	}))
+}
+
+// TestEncryptedBadgerValueRejectsOldFormatEncryptedWithoutEncryptor verifies the
+// enc == nil branch loud-fails on an exact legacy value rather than returning it
+// as raw plaintext.
+func TestEncryptedBadgerValueRejectsOldFormatEncryptedWithoutEncryptor(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
+	require.NoError(t, err)
+	defer db.Close()
+
+	key := []byte("obj:bkt/old-format-noenc")
+	oldFormatVal := []byte{0xAE, 0xE2, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, oldFormatVal)
+	}))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := getBadgerValue(txn, nil, "badger:meta:object", key)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
+		return nil
+	}))
+}
+
+// TestEncryptedBadgerValueReadsPlaintextWithoutEncryptor verifies the enc == nil
+// branch still passes genuine plaintext (incl. value-magic with a non-legacy
+// version) through unchanged.
+func TestEncryptedBadgerValueReadsPlaintextWithoutEncryptor(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
+	require.NoError(t, err)
+	defer db.Close()
+
+	key := []byte("obj:bkt/plain-noenc")
+	// Value magic prefix but version 0x05 (neither legacy 0x01 nor current 0x02).
+	val := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, val)
+	}))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		got, err := getBadgerValue(txn, nil, "badger:meta:object", key)
+		require.NoError(t, err)
+		require.Equal(t, val, got)
+		return nil
+	}))
+}
+
 func TestEncryptedBadgerValueReadsLegacyPlaintext(t *testing.T) {
 	dir := t.TempDir()
 	db, err := badger.Open(badgerutil.SmallOptions(dir))
