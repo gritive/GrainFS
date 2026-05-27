@@ -53,6 +53,19 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
 	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
+	// 3b. Zero-CA invite-join (W9b): when an invite bundle is present and the
+	// resume gate says FreshJoin/Resume, run Phase-1 over the dedicated QUIC join
+	// transport to pull + stage the cluster bootstrap secrets (encryption.key,
+	// KEK generations, cluster.id, transport PSK) BEFORE the earliest secret gate
+	// (LoadOrCreateEncryptionKeyWithRaw below). It writes back opts.NodeID and
+	// opts.ClusterKey so the normal boot resolves the identical node id and the
+	// --cluster-key gate passes in-memory. The Phase-2 membership ACK runs
+	// post-boot in bootWALAndForwarders.
+	inviteJoin, err := maybeInviteJoin(ctx, &opts)
+	if err != nil {
+		return fmt.Errorf("zero-CA invite-join: %w", err)
+	}
+
 	// 4. Encryption key + IAMApplier.
 	shardEncryptor, rawEncryptionKey, err := LoadOrCreateEncryptionKeyWithRaw(
 		opts.EncryptionKeyFile,
@@ -107,6 +120,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	// 8. Build Config from options.
 	cfg := optionsToConfig(opts, addr, authOpts, shardEncryptor, iamStore, iamApplier)
 	cfg.RawEncryptionKey = rawEncryptionKey
+	cfg.InviteJoin = inviteJoin
 
 	// 9. Delegate to existing Run.
 	return Run(ctx, cfg)

@@ -47,6 +47,12 @@ type Config struct {
 	// encryption key to an invite-joining node. Nil when encryption is unwired.
 	RawEncryptionKey []byte
 
+	// InviteJoin carries the Zero-CA invite-join Phase-1 outcome (W9b) when this
+	// node booted from an invite bundle (FreshJoin/Resume). Nil on every other
+	// boot. Threaded onto bootState by newBootState so the raft gating, the
+	// isGenesisBoot decision, and the post-boot Phase-2 ACK can see it.
+	InviteJoin *inviteJoinState
+
 	// IAM (Phase 2): store + applier for cluster IAM state. Both nil in
 	// fully unwired (test/legacy) configurations; cmd/grainfs/serve.go
 	// always provides them in production.

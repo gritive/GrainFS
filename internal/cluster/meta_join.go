@@ -626,6 +626,19 @@ func joinStatusFromFB(s clusterpb.JoinStatus) JoinStatus {
 	}
 }
 
+// EncodeJoinRequest serializes a JoinRequest to the magic-prefixed FlatBuffers
+// blob carried in one length-prefixed join-wire field. Used by the W9b joiner
+// to drive Phase-1/Phase-2 over transport.DialJoin.
+func EncodeJoinRequest(req JoinRequest) ([]byte, error) {
+	return encodeJoinRequest(req)
+}
+
+// DecodeJoinReply parses the FlatBuffers JoinReply blob the leader writes back.
+// Used by the W9b joiner.
+func DecodeJoinReply(data []byte) (*JoinReply, error) {
+	return decodeJoinReply(data)
+}
+
 func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 	b := newMetaJoinBuilder()
 	defer releaseMetaJoinBuilder(b)

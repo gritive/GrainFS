@@ -222,6 +222,18 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
+	// Zero-CA invite-join (W9b): post-boot Phase-2 ACK. Placed in the SAME window
+	// as the legacy join (after bootMetaRaftStart, before run.go's WaitDEKReady
+	// gate) so the joiner finalizes raft membership and starts catching up the
+	// log — including the gen-0 DEK — before the DEK-readiness gate runs. The
+	// node key was sealed under the cluster KEK gen-0 (now staged + loaded by
+	// wireDEKKeeper), so LoadNodeKey here succeeds.
+	if state.inviteJoinMode {
+		if err := bootInviteJoinPhase2(ctx, state); err != nil {
+			return err
+		}
+	}
+
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	return nil
 }

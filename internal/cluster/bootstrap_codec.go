@@ -88,6 +88,19 @@ func decodeBootstrapSecretsPayload(data []byte) (encKey []byte, gens []KEKGen, p
 	return encKey, gens, psk, nil
 }
 
+// DecodeBootstrapSecretsPayload is the exported wrapper the W9b joiner uses to
+// decode the INNER plaintext after OpenFromPeer. Mirrors the leader-side encode
+// (encodeBootstrapSecretsPayload).
+func DecodeBootstrapSecretsPayload(data []byte) (encKey []byte, gens []KEKGen, psk []byte, err error) {
+	return decodeBootstrapSecretsPayload(data)
+}
+
+// DecodeSealedBootstrap is the exported wrapper the W9b joiner uses to decode
+// the outer SealedToPeer envelope carried in JoinReply.sealed_bootstrap.
+func DecodeSealedBootstrap(data []byte) (ephemeralPub, ciphertext []byte, err error) {
+	return decodeSealedBootstrap(data)
+}
+
 // encodeSealedBootstrap serializes the outer envelope (wire form of
 // encrypt.SealedToPeer) carried in JoinReply.sealed_bootstrap.
 func encodeSealedBootstrap(ephemeralPub, ciphertext []byte) []byte {
