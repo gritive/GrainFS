@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.379.1] - 2026-05-28
+## [0.0.381.0] - 2026-05-28
 
 ### Changed
 
@@ -8,6 +8,18 @@
   uses the same parallelism that keeps the suite under the 20-minute target,
   while still allowing callers to override `E2E_TEST_JOBS` when they need a
   single-worker diagnostic run.
+
+## [0.0.380.0] - 2026-05-28
+
+### Changed
+
+- Multi-Raft e2e failures now include actionable S3/object context such as the
+  operation, node index, data directory, HTTP URL, bucket, and object key. This
+  keeps later release-readiness failures tied to the node and object that failed
+  instead of leaving only a generic assertion message.
+- Documented the current deploy reality for agents: this repository has no
+  configured production URL or automatic canary endpoint, so `/land-and-deploy`
+  still requires manual production verification until those settings exist.
 
 ## [0.0.379.0] - 2026-05-28
 

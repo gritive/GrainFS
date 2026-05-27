@@ -724,12 +724,34 @@ func runMultiRaftShardingPerGroupPersistence(t testing.TB) {
 	t.Log("per-group persistence ok: object survived restart and routed GET returned committed payload")
 }
 
-func requireMRPutObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string, data []byte) {
+func mrS3ObjectDiagnosticContext(operation string, c *mrCluster, nodeIdx int, bucket, key, raftGroup string) string {
+	parts := []string{fmt.Sprintf("operation=%s", operation)}
+	if nodeIdx >= 0 {
+		parts = append(parts, fmt.Sprintf("node=%d", nodeIdx))
+	}
+	if c != nil && nodeIdx >= 0 && nodeIdx < len(c.dataDirs) {
+		parts = append(parts, fmt.Sprintf("dataDir=%s", c.dataDirs[nodeIdx]))
+	}
+	if c != nil && nodeIdx >= 0 && nodeIdx < len(c.httpURLs) {
+		parts = append(parts, fmt.Sprintf("httpURL=%s", c.httpURLs[nodeIdx]))
+	}
+	parts = append(parts, fmt.Sprintf("bucket=%s", bucket))
+	if key != "" {
+		parts = append(parts, fmt.Sprintf("objectKey=%s", key))
+	}
+	if raftGroup != "" {
+		parts = append(parts, fmt.Sprintf("raftGroup=%s", raftGroup))
+	}
+	return strings.Join(parts, " ")
+}
+
+func requireMRPutObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, c *mrCluster, nodeIdx int, bucket, key string, data []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
 	var headSize int64 = -1
 	var versionID string
+	diag := mrS3ObjectDiagnosticContext("PutObject", c, nodeIdx, bucket, key, "")
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		versionID, lastErr = tryPutObjectVersioned(ctx, client, bucket, key, data)
@@ -750,8 +772,8 @@ func requireMRPutObjectEventually(t testing.TB, ctx context.Context, client *s3.
 		time.Sleep(2 * time.Second)
 	}
 	ginkgo.Fail(fmt.Sprintf(
-		"PutObject %s/%s never became readable with committed body: lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
-		bucket, key, lastErr, versionID, headSize, len(got), string(got),
+		"PutObject never became readable with committed body: %s lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
+		diag, lastErr, versionID, headSize, len(got), string(got),
 	))
 }
 
@@ -761,7 +783,7 @@ func requireMRPutObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, 
 	var got []byte
 	var headSize int64 = -1
 	var versionID string
-	var lastNode int
+	lastNode := -1
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		for i, endpoint := range c.liveURLs() {
@@ -785,9 +807,10 @@ func requireMRPutObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, 
 		}
 		time.Sleep(2 * time.Second)
 	}
+	diag := mrS3ObjectDiagnosticContext("PutObject", c, lastNode, bucket, key, "")
 	ginkgo.Fail(fmt.Sprintf(
-		"PutObject %s/%s never became readable with committed body: lastNode=%d lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
-		bucket, key, lastNode, lastErr, versionID, headSize, len(got), string(got),
+		"PutObject never became readable with committed body: %s lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
+		diag, lastErr, versionID, headSize, len(got), string(got),
 	))
 }
 
@@ -822,24 +845,25 @@ func requireMRCreateBucketEventually(t testing.TB, ctx context.Context, c *mrClu
 	})
 }
 
-func requireMRGetObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string, want []byte) {
+func requireMRGetObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, c *mrCluster, nodeIdx int, bucket, key string, want []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
+	diag := mrS3ObjectDiagnosticContext("GetObject", c, nodeIdx, bucket, key, "")
 	gomega.Eventually(func() bool {
 		got, lastErr = getObjectBytes(ctx, client, bucket, key)
 		return lastErr == nil && bytes.Equal(got, want)
 	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).
 		Should(gomega.BeTrue(),
-			"GetObject %s/%s never returned committed object: lastErr=%v got=%q",
-			bucket, key, lastErr, string(got))
+			"GetObject never returned committed object: %s lastErr=%v got=%q",
+			diag, lastErr, string(got))
 }
 
 func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
 	t.Helper()
 	var lastErr error
 	var got []byte
-	var lastNode int
+	lastNode := -1
 	gomega.Eventually(func() bool {
 		for i, endpoint := range c.liveURLs() {
 			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
@@ -853,8 +877,8 @@ func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, 
 		return false
 	}).WithTimeout(90*time.Second).WithPolling(2*time.Second).
 		Should(gomega.BeTrue(),
-			"GetObject %s/%s never returned committed object from any node: lastNode=%d lastErr=%v got=%q",
-			bucket, key, lastNode, lastErr, string(got))
+			"GetObject never returned committed object from any node: %s lastErr=%v got=%q",
+			mrS3ObjectDiagnosticContext("GetObject", c, lastNode, bucket, key, ""), lastErr, string(got))
 }
 
 // ----- TestMultiRaftShardingCrossNodeDispatchE2E -------------------------
@@ -879,7 +903,7 @@ func runMultiRaftShardingCrossNodeDispatch(t testing.TB) {
 	}
 	writeCLI := ecS3Client(c.httpURLs[writeNodeIdx], c.accessKey, c.secretKey)
 	const body = "cross-node-dispatch-test-data"
-	requireMRPutObjectEventually(t, ctx, writeCLI, "cross-node-test", "dispatch-key", []byte(body))
+	requireMRPutObjectEventually(t, ctx, writeCLI, c, writeNodeIdx, "cross-node-test", "dispatch-key", []byte(body))
 
 	// Verify object is readable via any node (routing consistency).
 	readCLI := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
@@ -907,7 +931,7 @@ func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 	leaderClient := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 	const existingKey = "before-target-loss"
 	const existingBody = "still-readable-after-one-target-loss"
-	requireMRPutObjectEventually(t, ctx, leaderClient, bucket, existingKey, []byte(existingBody))
+	requireMRPutObjectEventually(t, ctx, leaderClient, c, c.leaderIdx, bucket, existingKey, []byte(existingBody))
 
 	killIdx := 0
 	if killIdx == c.leaderIdx {
@@ -932,12 +956,18 @@ func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(string(readBody)).To(gomega.Equal(existingBody))
 
-	requireS3PutEventually503(t, ctx, leaderClient, bucket, "leader-after-target-loss")
-	requireS3PutEventually503(t, ctx, ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey), bucket, "forwarded-after-target-loss")
+	requireS3PutEventually503WithContext(t, ctx, leaderClient, c, c.leaderIdx, bucket, "leader-after-target-loss")
+	requireS3PutEventually503WithContext(t, ctx, ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey), c, forwardIdx, bucket, "forwarded-after-target-loss")
 }
 
 func requireS3PutEventually503(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string) {
 	t.Helper()
+	requireS3PutEventually503WithContext(t, ctx, client, nil, -1, bucket, key)
+}
+
+func requireS3PutEventually503WithContext(t testing.TB, ctx context.Context, client *s3.Client, c *mrCluster, nodeIdx int, bucket, key string) {
+	t.Helper()
+	diag := mrS3ObjectDiagnosticContext("PutObject", c, nodeIdx, bucket, key, "")
 	gomega.Eventually(func() bool {
 		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
 		defer cancelPut()
@@ -954,7 +984,7 @@ func requireS3PutEventually503(t testing.TB, ctx context.Context, client *s3.Cli
 		errStr := err.Error()
 		return strings.Contains(errStr, "503") || strings.Contains(errStr, "ServiceUnavailable")
 	}).WithTimeout(45*time.Second).WithPolling(time.Second).
-		Should(gomega.BeTrue(), "expected missing topology placement target to surface as S3 503")
+		Should(gomega.BeTrue(), "expected missing topology placement target to surface as S3 503: %s", diag)
 }
 
 // ----- TestMultiRaftShardingGroupLeaderFailoverE2E ------------------------
@@ -973,7 +1003,7 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 
 	const body = "failover-test-data"
-	requireMRPutObjectEventually(t, ctx, cli, "failover-test", "failover-key", []byte(body))
+	requireMRPutObjectEventually(t, ctx, cli, c, c.leaderIdx, "failover-test", "failover-key", []byte(body))
 
 	// Find which node hosts the leader for the assigned group (simplification:
 	// we kill the leader node process; whichever group loses leader
@@ -999,7 +1029,7 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	// block new writes instead of silently accepting under-replicated data.
 	writeIdx := (killIdx + 1) % len(c.httpURLs)
 	newCLI := ecS3Client(c.httpURLs[writeIdx], c.accessKey, c.secretKey)
-	requireS3PutEventually503(t, readCtx, newCLI, "failover-test", "failover-key-2")
+	requireS3PutEventually503WithContext(t, readCtx, newCLI, c, writeIdx, "failover-test", "failover-key-2")
 	t.Log("group leader failover ok: committed data readable, new writes blocked while target is missing")
 }
 
@@ -1026,7 +1056,7 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 		Body:   bytes.NewReader([]byte(s3Body)),
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	requireMRGetObjectEventually(t, ctx, cli, nfs4Bucket, "s3-file.txt", []byte(s3Body))
+	requireMRGetObjectEventually(t, ctx, cli, c, 0, nfs4Bucket, "s3-file.txt", []byte(s3Body))
 	headOut, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(nfs4Bucket),
 		Key:    aws.String("s3-file.txt"),
@@ -1044,7 +1074,7 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
-	requireMRGetObjectEventually(t, ctx, cli, nfs4Bucket, "nfs-file.txt", []byte(nfsBody))
+	requireMRGetObjectEventually(t, ctx, cli, c, 0, nfs4Bucket, "nfs-file.txt", []byte(nfsBody))
 
 	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
@@ -1291,7 +1321,7 @@ func runTwoNodeAvailabilityTrap(t testing.TB) {
 	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 
 	// Write should succeed with both nodes alive.
-	requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
+	requireMRPutObjectEventually(t, ctx, cli, c, c.leaderIdx, bucket, "before-kill", []byte("alive"))
 
 	// Kill the non-leader node to break metaRaft quorum (needs 2/2).
 	followerIdx := 1 - c.leaderIdx
