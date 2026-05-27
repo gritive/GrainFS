@@ -10,8 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -187,9 +190,16 @@ func (m *Manager) List() ([]*Snapshot, error) {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.zst") {
 			continue
 		}
-		snap, err := m.readSnapshot(filepath.Join(m.dir, e.Name()))
+		path := filepath.Join(m.dir, e.Name())
+		snap, err := m.readSnapshot(path)
 		if err != nil {
-			continue // skip corrupt files
+			// Best-effort listing: skip files we cannot open, but make the skip
+			// observable. With envelopes "unreadable" can mean an unresolvable KEK
+			// version, an auth failure, or tampering — not just benign corruption.
+			// PITRRestore cross-checks for such skipped files and fails closed.
+			metrics.SnapshotOpenErrorsTotal.Inc()
+			log.Warn().Err(err).Str("file", e.Name()).Msg("snapshot: List: skipping unreadable snapshot file")
+			continue
 		}
 		snaps = append(snaps, snap)
 	}

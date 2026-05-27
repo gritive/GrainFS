@@ -1,9 +1,11 @@
 package snapshot
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -76,4 +78,42 @@ func TestSnapshotEnvelope_RestoreAcrossKEKRotation(t *testing.T) {
 	got, err := m.readSnapshot(m.path(3))
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), got.Seq)
+}
+
+// TestPITRRestore_FailsClosedOnUnreadableNewerSnapshot regression-tests the
+// code-gate fix: List() silently skips an unreadable (e.g. wrong-KEK) snapshot,
+// so PITRRestore must refuse rather than restore from an older base when a newer
+// snapshot on disk cannot be opened.
+func TestPITRRestore_FailsClosedOnUnreadableNewerSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store := encrypt.NewKEKStore()
+	k1 := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
+	require.NoError(t, store.Add(1, k1))
+	var cid [16]byte
+	cid[0] = 0xAB
+	m, err := NewManagerWithEncryptor(dir, &testBackend{}, "", nil, store, cid)
+	require.NoError(t, err)
+
+	// seq 1: a normal sealed snapshot this manager can read.
+	require.NoError(t, m.writeSnapshot(m.path(1), &Snapshot{Seq: 1, Timestamp: time.Now().Add(-time.Hour)}))
+
+	// seq 2 (newer): sealed under a DIFFERENT key at the same KEK version, so the
+	// manager resolves v1 to k1 and AEAD-open fails → List() skips it.
+	framed, err := encodeSnapshotFramed(&Snapshot{Seq: 2, Timestamp: time.Now().Add(-30 * time.Minute)})
+	require.NoError(t, err)
+	var sid [16]byte
+	sid[0] = 0x02
+	sealed, err := encrypt.SealSnapshotEnvelope(bytes.Repeat([]byte{0x99}, encrypt.KEKSize), cid[:], sid, 1, framed)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(m.path(2), sealed, 0o644))
+
+	// Sanity: List() drops the unreadable seq 2.
+	snaps, err := m.List()
+	require.NoError(t, err)
+	require.Len(t, snaps, 1)
+
+	// PITR to now: base would be seq 1, but seq 2 is a newer unreadable snapshot.
+	_, err = m.PITRRestore(time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unreadable")
 }

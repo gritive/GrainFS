@@ -46,6 +46,8 @@ var _ = ginkgo.Describe("Snapshot at-rest encryption", func() {
 			for _, path := range matches {
 				raw, readErr := os.ReadFile(path)
 				gomega.Expect(readErr).NotTo(gomega.HaveOccurred(), "read snapshot file %s", path)
+				gomega.Expect(len(raw)).To(gomega.BeNumerically(">=", 4),
+					"snapshot file %s shorter than the envelope magic", path)
 				gomega.Expect(raw[:4]).To(gomega.Equal([]byte("GSNE")),
 					"snapshot file %s must start with GSNE envelope magic", path)
 				gomega.Expect(bytes.Contains(raw, []byte("confidential-object-key"))).To(gomega.BeFalse(),
@@ -53,7 +55,11 @@ var _ = ginkgo.Describe("Snapshot at-rest encryption", func() {
 			}
 		})
 
-		ginkgo.It("restores from a sealed snapshot", func() {
+		// Note: full restore-through-envelope (open the sealed body, replay WAL) is
+		// covered by the unit tests (RoundTrip, RestoreAcrossKEKRotation) and by the
+		// PITR suite, which now runs against enveloped snapshots. This case asserts
+		// the live read path still works once a sealed snapshot has been taken.
+		ginkgo.It("keeps objects readable after a sealed snapshot is taken", func() {
 			t := ginkgo.GinkgoTB()
 			ctx := context.Background()
 			client := tgt.pickNode(0)

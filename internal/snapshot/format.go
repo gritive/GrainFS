@@ -173,3 +173,26 @@ func maxSnapshotSeqFromFilenames(dir string) (uint64, error) {
 	}
 	return maxSeq, nil
 }
+
+// currentSnapshotSeqsFromFilenames returns the seqs of all current-format
+// (.json.zst) snapshot files on disk WITHOUT decrypting them. PITRRestore uses
+// it to detect snapshots that List() skipped because they could not be opened
+// (e.g. an unresolvable KEK version), so it can fail closed rather than restore
+// from a possibly-stale base.
+func currentSnapshotSeqsFromFilenames(dir string) ([]uint64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot dir: %w", err)
+	}
+	var seqs []uint64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.zst") {
+			continue
+		}
+		seqText := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "snapshot-"), ".json.zst")
+		if seq, err := strconv.ParseUint(seqText, 10, 64); err == nil {
+			seqs = append(seqs, seq)
+		}
+	}
+	return seqs, nil
+}

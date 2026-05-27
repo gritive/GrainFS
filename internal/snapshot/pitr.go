@@ -40,6 +40,32 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 		return nil, ErrNoSnapshotBefore
 	}
 
+	// Fail closed if a snapshot newer than the chosen base exists on disk but
+	// List() could not open it (e.g. an unresolvable KEK version, auth failure,
+	// or tampering). Such a file might be the rightful base for targetTime;
+	// silently restoring from an older base — with WAL possibly trimmed past it —
+	// would reconstruct the wrong point in time. seq is monotonic with creation,
+	// so any unreadable seq > base.Seq is a later snapshot we cannot rule out.
+	readable := make(map[uint64]struct{}, len(snaps))
+	for _, s := range snaps {
+		readable[s.Seq] = struct{}{}
+	}
+	onDisk, err := currentSnapshotSeqsFromFilenames(m.dir)
+	if err != nil {
+		return nil, fmt.Errorf("scan snapshot files: %w", err)
+	}
+	// Benign race: a snapshot that finishes its .tmp→.json.zst rename between
+	// List() and the scan below will be seen here but not in `readable`, causing a
+	// spurious fail-closed. That is the intended side of the tradeoff (operator
+	// retries) — do NOT "fix" this back to a silent skip.
+	for _, seq := range onDisk {
+		if seq > base.Seq {
+			if _, ok := readable[seq]; !ok {
+				return nil, fmt.Errorf("pitr: refusing restore: snapshot %d is newer than base %d but unreadable (KEK/decrypt/corruption) — base may be stale", seq, base.Seq)
+			}
+		}
+	}
+
 	// Build version map from base snapshot.
 	objects := make(map[string]storage.SnapshotObject, len(base.Objects))
 	for _, o := range base.Objects {
