@@ -1288,6 +1288,9 @@ table MetaProtocolCredentialEntry {
   expires_at_unix_nanos:int64;
   revoked_at_unix_nanos:int64;
   last_used_at_unix_nanos:int64;
+  generation:uint64;
+  stale_at_unix_nanos:int64;
+  stale_reason:string;
 }
 
 table MetaProtocolCredentialCreateCmd {
@@ -1323,6 +1326,14 @@ table MetaProtocolCredentialLastUsedCmd {
 
 table MetaProtocolCredentialsSnapshot {
   rows:[MetaProtocolCredentialEntry];
+  requests:[MetaProtocolCredentialRequestEntry];
+}
+
+table MetaProtocolCredentialRequestEntry {
+  request_id:string;
+  operation:string;
+  credential_id:string;
+  payload_hash:[ubyte];
 }
 
 // MountSACreatePayload: create a NFS/9P mount service account.

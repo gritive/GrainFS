@@ -234,11 +234,20 @@ func (f *MetaFSM) appendPolicyStoresSnapshotTrailer(out []byte) ([]byte, error) 
 }
 
 func (f *MetaFSM) appendProtocolCredentialsSnapshotTrailer(out []byte) ([]byte, error) {
-	if f.protocolCredentialStore == nil {
+	f.mu.RLock()
+	store := f.protocolCredentialStore
+	if store == nil {
+		f.mu.RUnlock()
 		return out, nil
 	}
-	rows := f.protocolCredentialStore.Snapshot()
-	payload, err := encodeProtocolCredentialsSnapshot(rows)
+	rows := store.Snapshot()
+	requests := make([]ProtocolCredentialRequestRecord, 0, len(f.protocolCredentialRequests))
+	for _, row := range f.protocolCredentialRequests {
+		requests = append(requests, row)
+	}
+	f.mu.RUnlock()
+
+	payload, err := encodeProtocolCredentialsSnapshotState(rows, requests)
 	if err != nil {
 		return nil, fmt.Errorf("meta_fsm: Snapshot: encode protocol credentials: %w", err)
 	}
