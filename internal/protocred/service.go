@@ -3,6 +3,7 @@ package protocred
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"sort"
 	"strings"
@@ -93,6 +94,31 @@ func (s *Service) Get(id string) (Credential, error) {
 		return Credential{}, ErrNotFound
 	}
 	return cloneCredential(item), nil
+}
+
+func (s *Service) Authenticate(req AuthenticateRequest) (Credential, error) {
+	if req.Secret == "" || !validProtocol(req.Protocol) || !validMode(req.Mode) || !validResource(req.Resource) {
+		return Credential{}, ErrInvalid
+	}
+	secretHash := sha256.Sum256([]byte(req.Secret))
+	items := s.store.list(ListFilter{Protocol: req.Protocol})
+	now := s.now()
+	for _, item := range items {
+		if subtle.ConstantTimeCompare(secretHash[:], item.SecretHash[:]) != 1 {
+			continue
+		}
+		if item.Resource != req.Resource || item.Mode != req.Mode {
+			return Credential{}, ErrInvalid
+		}
+		if item.RevokedAt != nil {
+			return Credential{}, ErrRevoked
+		}
+		if item.ExpiresAt != nil && !now.Before(*item.ExpiresAt) {
+			return Credential{}, ErrExpired
+		}
+		return cloneCredential(item), nil
+	}
+	return Credential{}, ErrNotFound
 }
 
 func (s *Service) Rotate(id string) (Secret, error) {

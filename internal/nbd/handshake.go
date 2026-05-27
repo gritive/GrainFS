@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -32,8 +34,30 @@ type metaContextRequest struct {
 	contexts []string
 }
 
-func (s *Server) exportNameMatches(name string) bool {
-	return name == "" || name == s.volName
+func (s *Server) authorizeExportName(name string) error {
+	if s.credentials == nil {
+		if name == "" || name == s.volName {
+			return nil
+		}
+		return fmt.Errorf("unknown export: %q", name)
+	}
+	volumeName, secret, ok := strings.Cut(name, "@")
+	if !ok || volumeName == "" || secret == "" {
+		return fmt.Errorf("nbd export requires volume@secret")
+	}
+	if volumeName != s.volName {
+		return fmt.Errorf("unknown export: %q", volumeName)
+	}
+	_, err := s.credentials.Authenticate(protocred.AuthenticateRequest{
+		Protocol: protocred.ProtocolNBD,
+		Resource: "volume/" + volumeName,
+		Mode:     protocred.ModeRW,
+		Secret:   secret,
+	})
+	if err != nil {
+		return fmt.Errorf("invalid nbd protocol credential: %w", err)
+	}
+	return nil
 }
 
 func parseClientFlags(flags uint32) (handshakeState, error) {
@@ -92,7 +116,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 
 		switch optType {
 		case nbdOptExportName:
-			if !s.exportNameMatches(string(optData)) {
+			if err := s.authorizeExportName(string(optData)); err != nil {
 				return handshakeState{}, fmt.Errorf("unknown export: %q", string(optData))
 			}
 			state.exportName = s.volName
@@ -106,7 +130,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if !s.exportNameMatches(req.name) {
+			if err := s.authorizeExportName(req.name); err != nil {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
@@ -139,7 +163,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if !s.exportNameMatches(req.name) {
+			if err := s.authorizeExportName(req.name); err != nil {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
@@ -168,7 +192,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if !s.exportNameMatches(req.name) {
+			if err := s.authorizeExportName(req.name); err != nil {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}
@@ -200,7 +224,7 @@ func (s *Server) newstyleHandshake(conn net.Conn, vol *volume.Volume) (handshake
 				}
 				continue
 			}
-			if !s.exportNameMatches(req.name) {
+			if err := s.authorizeExportName(req.name); err != nil {
 				if err := s.sendOptReply(conn, optType, nbdRepErrUnknown, nil); err != nil {
 					return handshakeState{}, err
 				}

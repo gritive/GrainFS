@@ -111,6 +111,7 @@ type ProtocolCredentialService interface {
 	Create(protocred.CreateRequest) (protocred.Secret, error)
 	List(protocred.ListFilter) []protocred.Credential
 	Get(id string) (protocred.Credential, error)
+	Authenticate(protocred.AuthenticateRequest) (protocred.Credential, error)
 	Rotate(id string) (protocred.Secret, error)
 	Revoke(id string) error
 }
