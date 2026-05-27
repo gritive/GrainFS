@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.370.0] - 2026-05-28
+
+### Changed
+
+- Full e2e runs now use the Ginkgo runner directly, with one shared single-node
+  fixture and one shared four-node cluster fixture per worker process. This
+  removes the previous per-test bootstrap loop that made full e2e runs exceed
+  an hour while preserving dedicated fixtures for specs that intentionally need
+  isolated server state.
+- Shared-fixture e2e specs now create unique bucket names from the spec name and
+  case name, avoiding cross-spec state pollution when buckets live for the
+  duration of the shared server.
+- E2E HTTP clients now use larger pooled transports and close idle connections
+  before and after each spec, reducing local connection churn during the long S3
+  workflow matrix.
+- The single-node multipart concurrent download parity case now runs a lighter
+  local concurrency shape while the cluster case keeps the full forwarded fan-in
+  workload, so full-suite resource pressure no longer masks the cluster
+  regression signal.
+- The audit Iceberg leader-flap e2e now writes after re-election against a
+  writable endpoint and filters audit rows by PUT method, avoiding a race with
+  the old leader's shutdown drain.
+
 ## [0.0.369.0] - 2026-05-27
 
 ### Changed
@@ -94,20 +117,6 @@
   file-descriptor health, not at the objects. Corruption is now classified consistently
   whether a shard is read in full or by byte range.
 
-### Changed
-
-- Full e2e runs now use the Ginkgo runner directly, with one shared single-node
-  fixture and one shared four-node cluster fixture per worker process. This
-  removes the previous per-test bootstrap loop that made full e2e runs exceed
-  an hour while preserving dedicated fixtures for specs that intentionally need
-  isolated server state.
-- Shared-fixture e2e specs now create unique bucket names from the spec name and
-  case name, avoiding cross-spec state pollution when buckets live for the
-  duration of the shared server.
-- E2E HTTP clients now use larger pooled transports and close idle connections
-  once per suite, reducing local connection churn during the long S3 workflow
-  matrix.
-
 ### Fixed
 
 - **A node now boots cleanly when it restarts after a cluster KEK rotation.** Previously a
@@ -128,13 +137,6 @@
   re-wraps the DEK without changing its key) and resets only when a new DEK generation is
   installed — previously it reset on KEK rotation, under-reporting cumulative nonce usage
   and risking a missed warn/alert threshold.
-- The single-node multipart concurrent download parity case now runs a lighter
-  local concurrency shape while the cluster case keeps the full forwarded fan-in
-  workload, so full-suite resource pressure no longer masks the cluster
-  regression signal.
-- The audit Iceberg leader-flap e2e now writes after re-election against a
-  writable endpoint and filters audit rows by PUT method, avoiding a race with
-  the old leader's shutdown drain.
 
 ## [0.0.359.0] - 2026-05-27
 
