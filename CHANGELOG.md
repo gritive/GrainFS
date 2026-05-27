@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.387.0] - 2026-05-28
+
+### Added
+
+- Added a Meta Raft-backed protocol credential admin service that proposes
+  create, rotate, and revoke mutations through the protocol credential Meta FSM
+  while keeping get/list reads on the local FSM-backed store.
+- Added runtime wiring so protocol credential stores are registered with the
+  Meta FSM before replay and admin handlers use the durable service when
+  Meta Raft is available.
+- Added materialization helpers for one-time protocol credential secrets so
+  existing admin API and CLI responses stay stable while persisted rows flow
+  through Raft.
+
+### Changed
+
+- Updated protocol credential docs and follow-up tracking to reflect that
+  credential metadata is now durable, while protocol data-plane enforcement and
+  IAM authorization hardening remain follow-up work.
+
 ## [0.0.386.0] - 2026-05-28
 
 ### Added

@@ -36,16 +36,27 @@ func NewService(store *Store, opts ...Option) *Service {
 }
 
 func (s *Service) Create(req CreateRequest) (Secret, error) {
-	if err := validateCreate(req); err != nil {
+	item, secret, err := MaterializeCreate(req, s.now())
+	if err != nil {
 		return Secret{}, err
+	}
+	s.store.put(item)
+	return secret, nil
+}
+
+// MaterializeCreate builds the persisted row and one-time plaintext secret for
+// a credential create operation without mutating a store.
+func MaterializeCreate(req CreateRequest, now time.Time) (Credential, Secret, error) {
+	if err := validateCreate(req); err != nil {
+		return Credential{}, Secret{}, err
 	}
 	idRand, err := randomString(12)
 	if err != nil {
-		return Secret{}, err
+		return Credential{}, Secret{}, err
 	}
 	secretRand, err := randomString(32)
 	if err != nil {
-		return Secret{}, err
+		return Credential{}, Secret{}, err
 	}
 	id := "pc_" + idRand
 	secret := "pcsec_" + secretRand
@@ -57,13 +68,12 @@ func (s *Service) Create(req CreateRequest) (Secret, error) {
 		Mode:       req.Mode,
 		SecretHash: sha256.Sum256([]byte(secret)),
 		SecretHint: secretHint(secret),
-		CreatedAt:  s.now(),
+		CreatedAt:  now.UTC(),
 		CreatedBy:  req.CreatedBy,
 		ExpiresAt:  cloneTime(req.ExpiresAt),
 		Generation: 1,
 	}
-	s.store.put(item)
-	return Secret{ID: id, Secret: secret, ConnectionHint: connectionHint(item, secret)}, nil
+	return item, Secret{ID: id, Secret: secret, ConnectionHint: connectionHint(item, secret)}, nil
 }
 
 func (s *Service) List(filter ListFilter) []Credential {
@@ -90,20 +100,35 @@ func (s *Service) Rotate(id string) (Secret, error) {
 	if !ok {
 		return Secret{}, ErrNotFound
 	}
-	if item.RevokedAt != nil {
-		return Secret{}, ErrRevoked
-	}
-	secretRand, err := randomString(32)
+	hash, hint, secret, err := MaterializeRotate(item)
 	if err != nil {
 		return Secret{}, err
 	}
-	secret := "pcsec_" + secretRand
-	updated, _ := s.store.update(id, func(item Credential) Credential {
-		item.SecretHash = sha256.Sum256([]byte(secret))
-		item.SecretHint = secretHint(secret)
+	_, _ = s.store.update(id, func(item Credential) Credential {
+		item.SecretHash = hash
+		item.SecretHint = hint
 		return item
 	})
-	return Secret{ID: id, Secret: secret, ConnectionHint: connectionHint(updated, secret)}, nil
+	return secret, nil
+}
+
+// MaterializeRotate builds the next secret material for an existing credential
+// without mutating a store.
+func MaterializeRotate(item Credential) ([sha256.Size]byte, string, Secret, error) {
+	if item.RevokedAt != nil {
+		return [sha256.Size]byte{}, "", Secret{}, ErrRevoked
+	}
+	secretRand, err := randomString(32)
+	if err != nil {
+		return [sha256.Size]byte{}, "", Secret{}, err
+	}
+	secret := "pcsec_" + secretRand
+	hash := sha256.Sum256([]byte(secret))
+	hint := secretHint(secret)
+	updated := item
+	updated.SecretHash = hash
+	updated.SecretHint = hint
+	return hash, hint, Secret{ID: item.ID, Secret: secret, ConnectionHint: connectionHint(updated, secret)}, nil
 }
 
 func (s *Service) Revoke(id string) error {

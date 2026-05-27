@@ -280,11 +280,12 @@ type bootState struct {
 	auditOutbox *audit.Outbox
 
 	// bootHTTPServerAndAdmin
-	srv                 *server.Server
-	tokenStore          *dashboard.TokenStore
-	adminDeps           *admin.Deps
-	adminSrv            *admin.Server
-	protocolCredentials *protocred.Service
+	srv                     *server.Server
+	tokenStore              *dashboard.TokenStore
+	adminDeps               *admin.Deps
+	adminSrv                *admin.Server
+	protocolCredentialStore *protocred.Store
+	protocolCredentials     admin.ProtocolCredentialService
 
 	// bootRecoveryAndScrubber
 	scrubDirector *scrubber.Director

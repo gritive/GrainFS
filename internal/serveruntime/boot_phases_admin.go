@@ -55,9 +55,15 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		)
 	}
 	if state.protocolCredentials == nil {
-		// Foundation slice: protocol credentials are node-local until Raft-backed
-		// persistence and cross-node propagation land before data-plane enforcement.
-		state.protocolCredentials = protocred.NewService(protocred.NewStore())
+		if state.metaRaft != nil {
+			if state.protocolCredentialStore == nil {
+				state.protocolCredentialStore = protocred.NewStore()
+				state.metaRaft.FSM().SetProtocolCredentialStore(state.protocolCredentialStore)
+			}
+			state.protocolCredentials = cluster.NewProtocolCredentialService(state.protocolCredentialStore, state.metaRaft.Propose)
+		} else {
+			state.protocolCredentials = protocred.NewService(protocred.NewStore())
+		}
 	}
 	state.adminDeps = &admin.Deps{
 		Manager:    srv.VolumeManager(),
