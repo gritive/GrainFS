@@ -99,8 +99,20 @@ func (rcv *MetaInvitePendingCmd) Address() []byte {
 	return nil
 }
 
+func (rcv *MetaInvitePendingCmd) PendingAtNanos() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaInvitePendingCmd) MutatePendingAtNanos(n int64) bool {
+	return rcv._tab.MutateInt64Slot(12, n)
+}
+
 func MetaInvitePendingCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func MetaInvitePendingCmdAddInviteId(builder *flatbuffers.Builder, inviteId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(inviteId), 0)
@@ -116,6 +128,9 @@ func MetaInvitePendingCmdStartSpkiVector(builder *flatbuffers.Builder, numElems 
 }
 func MetaInvitePendingCmdAddAddress(builder *flatbuffers.Builder, address flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(address), 0)
+}
+func MetaInvitePendingCmdAddPendingAtNanos(builder *flatbuffers.Builder, pendingAtNanos int64) {
+	builder.PrependInt64Slot(4, pendingAtNanos, 0)
 }
 func MetaInvitePendingCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -1020,10 +1020,11 @@ table BootstrapSecretsPayload {
 // MetaInvitePendingCmd records a pending invite-join (raft cmd data — wrap
 // with encodeMetaCmd to get the MetaCmd envelope). Zero-CA network path.
 table MetaInvitePendingCmd {
-  invite_id : string;
-  node_id   : string;
-  spki      : [ubyte];
-  address   : string;
+  invite_id        : string;
+  node_id          : string;
+  spki             : [ubyte];
+  address          : string;
+  pending_at_nanos : long;  // stamped at propose time (FSM determinism)
 }
 
 // ChallengeRequest is sent by a joining node to a peer to obtain a fresh

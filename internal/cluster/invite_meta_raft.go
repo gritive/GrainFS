@@ -26,6 +26,26 @@ func (m *MetaRaft) ProposeInviteMint(ctx context.Context, id string, pub ed25519
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeInvitePending proposes an InvitePending command, recording the Phase-1
+// binding of a single-use invite to the first (nodeID, SPKI) that redeems it.
+// The timestamp is stamped here so all replicas apply the same value — time.Now()
+// must not be called in the FSM apply path. Caller must be leader.
+func (m *MetaRaft) ProposeInvitePending(ctx context.Context, inviteID, nodeID string, spki [32]byte, addr string) error {
+	payload, err := encodeInvitePendingCmd(inviteID, nodeID, spki, addr, time.Now().UnixNano())
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode InvitePending: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeInvitePending, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitAppliedResult(ctx, idx)
+}
+
 // ProposeInviteConsume proposes an InviteConsume command to the cluster,
 // marking the invite single-use slot as spent. Caller must be leader.
 // The current timestamp is stamped into the command here so that all replicas

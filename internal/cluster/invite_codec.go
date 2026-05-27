@@ -60,7 +60,9 @@ func decodeInviteConsumeCmd(data []byte) (id string, consumedAtNanos int64, err 
 // encodeInvitePendingCmd serializes an InvitePending payload (raft cmd data —
 // wrap with encodeMetaCmd to get the MetaCmd envelope). Records a pending
 // invite-join: invite_id, joiner node_id, joiner SPKI, and dial address.
-func encodeInvitePendingCmd(inviteID, nodeID string, spki [32]byte, addr string) ([]byte, error) {
+// pendingAtNanos is stamped at propose time so all replicas apply the same
+// timestamp (FSM determinism; no time.Now() in the apply path).
+func encodeInvitePendingCmd(inviteID, nodeID string, spki [32]byte, addr string, pendingAtNanos int64) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(inviteID)
 	nodeOff := b.CreateString(nodeID)
@@ -71,20 +73,21 @@ func encodeInvitePendingCmd(inviteID, nodeID string, spki [32]byte, addr string)
 	clusterpb.MetaInvitePendingCmdAddNodeId(b, nodeOff)
 	clusterpb.MetaInvitePendingCmdAddSpki(b, spkiOff)
 	clusterpb.MetaInvitePendingCmdAddAddress(b, addrOff)
+	clusterpb.MetaInvitePendingCmdAddPendingAtNanos(b, pendingAtNanos)
 	return fbFinish(b, clusterpb.MetaInvitePendingCmdEnd(b)), nil
 }
 
-func decodeInvitePendingCmd(data []byte) (inviteID, nodeID string, spki [32]byte, addr string, err error) {
+func decodeInvitePendingCmd(data []byte) (inviteID, nodeID string, spki [32]byte, addr string, pendingAtNanos int64, err error) {
 	t, e := fbSafe(data, func(d []byte) *clusterpb.MetaInvitePendingCmd {
 		return clusterpb.GetRootAsMetaInvitePendingCmd(d, 0)
 	})
 	if e != nil {
-		return "", "", [32]byte{}, "", e
+		return "", "", [32]byte{}, "", 0, e
 	}
 	rawSPKI := t.SpkiBytes()
 	if len(rawSPKI) != 32 {
-		return "", "", [32]byte{}, "", fmt.Errorf("invite_codec: spki must be 32 bytes, got %d", len(rawSPKI))
+		return "", "", [32]byte{}, "", 0, fmt.Errorf("invite_codec: spki must be 32 bytes, got %d", len(rawSPKI))
 	}
 	copy(spki[:], rawSPKI)
-	return string(t.InviteId()), string(t.NodeId()), spki, string(t.Address()), nil
+	return string(t.InviteId()), string(t.NodeId()), spki, string(t.Address()), t.PendingAtNanos(), nil
 }

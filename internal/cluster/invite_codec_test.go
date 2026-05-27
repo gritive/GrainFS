@@ -124,12 +124,13 @@ func TestCodecRoundTrip_InvitePending(t *testing.T) {
 	nodeID := "node-pending-rt"
 	s := spki(9)
 	addr := "10.0.2.3:7002"
+	pendingAt := time.Now().UnixNano()
 
-	data, err := encodeInvitePendingCmd(inviteID, nodeID, s, addr)
+	data, err := encodeInvitePendingCmd(inviteID, nodeID, s, addr, pendingAt)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	gotInvite, gotNode, gotSPKI, gotAddr, err := decodeInvitePendingCmd(data)
+	gotInvite, gotNode, gotSPKI, gotAddr, gotPendingAt, err := decodeInvitePendingCmd(data)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -144,6 +145,9 @@ func TestCodecRoundTrip_InvitePending(t *testing.T) {
 	}
 	if gotAddr != addr {
 		t.Errorf("addr: got %q, want %q", gotAddr, addr)
+	}
+	if gotPendingAt != pendingAt {
+		t.Errorf("pendingAt: got %d, want %d", gotPendingAt, pendingAt)
 	}
 }
 
@@ -163,7 +167,7 @@ func TestCodecDecode_InvitePendingWrongSPKILength(t *testing.T) {
 	clusterpb.MetaInvitePendingCmdAddAddress(b, addrOff)
 	data := fbFinish(b, clusterpb.MetaInvitePendingCmdEnd(b))
 
-	if _, _, _, _, err := decodeInvitePendingCmd(data); err == nil {
+	if _, _, _, _, _, err := decodeInvitePendingCmd(data); err == nil {
 		t.Fatal("decodeInvitePendingCmd with 17-byte SPKI must error")
 	}
 }

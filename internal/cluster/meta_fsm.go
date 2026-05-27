@@ -110,6 +110,7 @@ const (
 	// zero-CA invite registry (slots 73-74; 69-72 are kek-envelope-phase-b)
 	MetaCmdTypeInviteMint    = clusterpb.MetaCmdTypeInviteMint
 	MetaCmdTypeInviteConsume = clusterpb.MetaCmdTypeInviteConsume
+	MetaCmdTypeInvitePending = clusterpb.MetaCmdTypeInvitePending
 
 	MetaCmdTypeRegisterPendingLearner = clusterpb.MetaCmdTypeRegisterPendingLearner
 	MetaCmdTypePromoteMember          = clusterpb.MetaCmdTypePromoteMember
@@ -731,6 +732,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyInviteMint(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeInviteConsume:
 		return f.applyInviteConsume(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeInvitePending:
+		return f.applyInvitePending(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRegisterPendingLearner:
 		return f.applyRegisterPendingLearner(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePromoteMember:
