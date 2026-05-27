@@ -314,12 +314,14 @@ Work these in order. Do not run them in parallel.
   format version that encodes segment refs, preserve old replay compatibility,
   and add PITR coverage for a chunked object created after the snapshot point.
 
-- [ ] **Placement monitor: classify transient vs corruption errors before quarantine [P1]**:
-  `scanRecord` treats any non-ENOENT `ReadLocalShard` error as corrupt → quarantines the
-  parent object. A transient FS fault (EIO/EMFILE/EBUSY) is misclassified; with segment
-  scanning this now affects N× more objects (one bad node-day → mass false isolation).
-  Needs `ReadLocalShard` to surface typed errors, or an N-strikes counter in the monitor.
-  (Pre-existing for object-version; amplified by segment/coalesced coverage.)
+- [ ] **Placement monitor: repair a corrupt LOCAL shard from peers instead of quarantining [P2]**:
+  `scanRecord` now correctly classifies confirmed corruption (CRC/structural/AEAD) and
+  still quarantines the **whole parent object** at object granularity — the on-corruption
+  semantics were intentionally left unchanged in the transient-classification PR. But a
+  single corrupt local shard is usually recoverable: with 4+2 EC and enough surviving
+  peers, reconstruct the bad shard in place (same path the missing-shard repair already
+  uses) and only quarantine if reconstruction fails. This downgrades most corruption
+  events from object isolation to a silent local repair. (`internal/cluster/shard_placement_monitor.go`.)
 
 - [ ] **Placement monitor: stream scan targets instead of buffering O(objects+segments) [P3]**:
   `Scan` buffers all `ECShardScanTarget`s before processing; ~1.5 GB peak for 1 M chunked
