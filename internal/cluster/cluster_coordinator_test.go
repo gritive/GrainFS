@@ -1413,6 +1413,11 @@ func TestClusterCoordinator_HeadObject_MissingIndexedObjectReturnsNotFound(t *te
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
+	// This test exercises the plain-file internal-volume WriteAt/Truncate path.
+	// That path requires a non-encrypted (nil) ShardService. Override the
+	// encrypted svc that newTestGroupBackend installs so encryptedShardStorage()
+	// returns false and PreferWriteAt/Truncate/WriteAt are enabled.
+	gb.SetShardService(nil, nil)
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
@@ -1471,6 +1476,8 @@ func TestClusterCoordinator_PreferWriteAtFalseForMultiVoterInternalBucket(t *tes
 func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
+	// Plain-file internal-volume path; see TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup.
+	gb.SetShardService(nil, nil)
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))

@@ -79,6 +79,10 @@ var _ = Describe("Backend bucket integration", func() {
 	})
 
 	It("updates partial write metadata when truncating internal buckets", func() {
+		// WriteAt/Truncate use the plain-file internal-volume path; that path is
+		// gated on encryptedShardStorage()==false. Clear the shard service so the
+		// test exercises the real file-system path without encrypted-shard gating.
+		b.SetShardService(nil, nil)
 		Expect(b.CreateBucket(ctx, "__grainfs_vfs_default")).To(Succeed())
 		_, err := b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("0123456789"))
 		Expect(err).NotTo(HaveOccurred())
@@ -99,6 +103,8 @@ var _ = Describe("Backend bucket integration", func() {
 	})
 
 	It("hard-deletes internal bucket object metadata before rewriting", func() {
+		// Plain-file internal-volume path; see truncating internal buckets test.
+		b.SetShardService(nil, nil)
 		Expect(b.CreateBucket(ctx, "__grainfs_vfs_default")).To(Succeed())
 		_, err := b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("old"))
 		Expect(err).NotTo(HaveOccurred())

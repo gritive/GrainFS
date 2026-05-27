@@ -190,6 +190,11 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrub
 			return scrubber.ShardIntegrityResult{Payload: data, Status: status}, nil
 		}
 	}
+	// path is not under any shardSvc data-dir (checked by shardServiceKeyFromPath
+	// above): fall back to the CRC-framed / legacy-raw path.
+	// CRC-framed shards written by WriteShard may carry an encrypted inner
+	// payload (when shardSvc is set); legacy raw shards have no magic header and
+	// must NOT be passed through DecryptPayload.
 	status := scrubber.ShardIntegrityUnverifiedLegacy
 	data := raw
 	if eccodec.IsEncodedShard(raw) {
@@ -198,12 +203,13 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrub
 			return scrubber.ShardIntegrityResult{}, err
 		}
 		status = scrubber.ShardIntegrityVerified
-	}
-	if b.shardSvc != nil {
-		aad := shardAAD(bucket, key, path)
-		data, err = b.shardSvc.DecryptPayload(data, aad)
-		if err != nil {
-			return scrubber.ShardIntegrityResult{}, err
+		// The inner payload is encrypted iff WriteShard encrypted it.
+		if b.shardSvc != nil {
+			aad := shardAAD(bucket, key, path)
+			data, err = b.shardSvc.DecryptPayload(data, aad)
+			if err != nil {
+				return scrubber.ShardIntegrityResult{}, err
+			}
 		}
 	}
 	return scrubber.ShardIntegrityResult{Payload: data, Status: status}, nil
