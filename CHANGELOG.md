@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.360.0] - 2026-05-27
+
+### Fixed
+
+- **A node now boots cleanly when it restarts after a cluster KEK rotation.** Previously a
+  node that restarted after a committed KEK rotation failed to start: replaying the
+  replicated DEK bootstrap log entry tried to unwrap it under the *current* KEK version
+  instead of the version it was originally sealed under, so AES-GCM authentication failed
+  and the node halted before it could serve. The DEK replay now unwraps each entry under
+  the historical KEK version recorded with it. Affects any multi-node encrypted cluster
+  that has rotated its KEK at least once.
+
+### Changed
+
+- **Breaking (advisory surfaces):** the `grainfs_kek_seal_count` Prometheus label changed
+  from `kek_version` to `dek_generation`, and the `GET /v1/encrypt/kek/status` response
+  moved `seal_count` / `nonce_collision_risk` off the per-KEK-version rows into a new
+  top-level `dek_generations` array (plus an `active_dek_generation` field). AES-GCM nonce
+  exhaustion is per-DEK-key, so the seal count now persists across a KEK rotation (which
+  re-wraps the DEK without changing its key) and resets only when a new DEK generation is
+  installed — previously it reset on KEK rotation, under-reporting cumulative nonce usage
+  and risking a missed warn/alert threshold.
+
 ## [0.0.359.0] - 2026-05-27
 
 ### Added
@@ -71,15 +94,6 @@
   boundary:** the DEK wrap format has changed. A pre-existing encrypted multi-node cluster
   cannot upgrade in place — set up a new cluster. Single-node encrypted deployments are
   not affected by this boundary.
-- **Nonce-collision seal counter is keyed by DEK generation, not KEK version.** AES-GCM
-  nonce exhaustion is per-DEK-key, so the seal count now persists across a KEK rotation
-  (which re-wraps the DEK without changing its key) and resets only when a new DEK
-  generation is installed. Previously the count reset on KEK rotation, under-reporting
-  cumulative nonce usage and risking a missed warn/alert threshold. **Breaking (advisory
-  surfaces):** the `grainfs_kek_seal_count` Prometheus label changed from `kek_version` to
-  `dek_generation`, and the `GET /v1/encrypt/kek/status` response moved `seal_count` /
-  `nonce_collision_risk` off the per-KEK-version rows into a new top-level
-  `dek_generations` array (plus an `active_dek_generation` field).
 
 ## [0.0.355.0] - 2026-05-27
 
