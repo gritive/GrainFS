@@ -51,7 +51,7 @@ func BenchmarkSealValueAADTo(b *testing.B) {
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20, 4 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
 			plaintext := benchmarkPayload(size)
-			dst := make([]byte, 0, 3+12+len(plaintext)+enc.AEADOverhead())
+			dst := make([]byte, 0, 3+24+len(plaintext)+enc.AEADOverhead())
 			b.SetBytes(int64(len(plaintext)))
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -99,7 +99,7 @@ func BenchmarkOpenValueAAD(b *testing.B) {
 
 func BenchmarkSealWithNonceAAD(b *testing.B) {
 	enc := benchmarkEncryptor(b)
-	nonce := bytes.Repeat([]byte{0x24}, 12)
+	nonce := bytes.Repeat([]byte{0x24}, 24)
 	aad := []byte("bench:value")
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20, 4 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {

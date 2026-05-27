@@ -339,11 +339,13 @@ func readLatestObjectMeta(b *DistributedBackend, bucket, key string) (string, ob
 		if err != nil {
 			return err
 		}
-		return item.Value(func(v []byte) error {
-			var decodeErr error
-			meta, decodeErr = unmarshalObjectMeta(v)
-			return decodeErr
-		})
+		v, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		var decodeErr error
+		meta, decodeErr = unmarshalObjectMeta(v)
+		return decodeErr
 	})).To(Succeed())
 	return latestVersionID, meta
 }
@@ -356,11 +358,13 @@ func readObjectMetaVersion(b *DistributedBackend, bucket, key, versionID string)
 		if err != nil {
 			return err
 		}
-		return item.Value(func(v []byte) error {
-			var decodeErr error
-			meta, decodeErr = unmarshalObjectMeta(v)
-			return decodeErr
-		})
+		v, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		var decodeErr error
+		meta, decodeErr = unmarshalObjectMeta(v)
+		return decodeErr
 	})).To(Succeed())
 	return meta
 }

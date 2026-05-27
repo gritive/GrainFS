@@ -53,7 +53,8 @@ var _ = Describe("Incident repair integration", func() {
 
 	It("records verified when a concurrent repair already restored the shard", func() {
 		dir := GinkgoT().TempDir()
-		svc := NewShardService(dir, nil, withTestWAL(GinkgoT()))
+		enc := testEncryptor(GinkgoT())
+		svc := NewShardService(dir, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
 		nodes := []string{"test-node", "other-a", "other-b", "other-c", "other-d", "other-e"}
 		b.SetShardService(svc, nodes)
 		seedPlacementMeta(GinkgoT(), b, "b", "k", "v1", nodes, 4, 2)

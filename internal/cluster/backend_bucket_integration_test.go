@@ -78,16 +78,17 @@ var _ = Describe("Backend bucket integration", func() {
 		Expect(got).To(Equal(policy))
 	})
 
-	It("updates partial write metadata when truncating internal buckets", func() {
+	It("round-trips internal bucket objects via PutObject/GetObject", func() {
+		// The plain-file WriteAt/Truncate fast-path has been removed. Internal bucket
+		// objects now go through the encrypted PutObject path on all backends.
 		Expect(b.CreateBucket(ctx, "__grainfs_vfs_default")).To(Succeed())
-		_, err := b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("0123456789"))
+		_, err := b.PutObject(ctx, "__grainfs_vfs_default", "dir/file.bin",
+			bytes.NewReader([]byte("0123456789")), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-
-		Expect(b.Truncate(ctx, "__grainfs_vfs_default", "dir/file.bin", 4)).To(Succeed())
 
 		obj, err := b.HeadObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.Size).To(Equal(int64(4)))
+		Expect(obj.Size).To(Equal(int64(10)))
 
 		body, _, err := b.GetObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
 		Expect(err).NotTo(HaveOccurred())
@@ -95,15 +96,19 @@ var _ = Describe("Backend bucket integration", func() {
 		closeErr := body.Close()
 		Expect(readErr).NotTo(HaveOccurred())
 		Expect(closeErr).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal("0123"))
+		Expect(string(got)).To(Equal("0123456789"))
 	})
 
-	It("hard-deletes internal bucket object metadata before rewriting", func() {
+	It("round-trips internal bucket object metadata across delete and rewrite", func() {
+		// The plain-file WriteAt fast-path has been removed. Internal bucket objects
+		// now go through the encrypted PutObject path on all backends.
 		Expect(b.CreateBucket(ctx, "__grainfs_vfs_default")).To(Succeed())
-		_, err := b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("old"))
+		_, err := b.PutObject(ctx, "__grainfs_vfs_default", "dir/file.bin",
+			bytes.NewReader([]byte("old")), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(b.DeleteObject(ctx, "__grainfs_vfs_default", "dir/file.bin")).To(Succeed())
-		_, err = b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("new"))
+		_, err = b.PutObject(ctx, "__grainfs_vfs_default", "dir/file.bin",
+			bytes.NewReader([]byte("new")), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
 		obj, err := b.HeadObject(ctx, "__grainfs_vfs_default", "dir/file.bin")

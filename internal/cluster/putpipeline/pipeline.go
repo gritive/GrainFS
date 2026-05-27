@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
 // Config bundles the wiring a Pipeline needs.
@@ -109,9 +110,14 @@ func New(cfg Config) *Pipeline {
 			skipFsync: skipDriveFsync,
 		}
 	}
+	var shardEnc eccodec.ShardEncryptor
+	if cfg.Encryptor != nil {
+		var zeroClusterID [16]byte // D-seg-ec-struct sentinel; slice C threads the real ID HERE and in ShardService together (clusterID coupling hazard)
+		shardEnc = storage.NewEncryptorAdapter(cfg.Encryptor, zeroClusterID[:])
+	}
 	p.cpu = &CPUPool{
 		in:      p.stripeCh,
-		enc:     cfg.Encryptor,
+		enc:     shardEnc,
 		ecCfg:   cfg.ECConfig,
 		workers: runtime.GOMAXPROCS(0),
 	}

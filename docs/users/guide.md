@@ -202,7 +202,7 @@ See `../reference/9p-compatibility.md` for the supported 9P surface.
 
 ## Encryption Key Rotation
 
-GrainFS encrypts data at rest with AES-256-GCM. The active Key Encryption Key (KEK) wraps
+GrainFS encrypts bulk data at rest with XAES-256-GCM. The active Key Encryption Key (KEK) wraps
 per-node Data Encryption Keys (DEKs). On a cluster, DEK material is leader-driven and
 Raft-replicated so every node shares the same active DEK. Use `grainfs encrypt kek` to
 manage the KEK lifecycle.

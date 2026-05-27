@@ -41,9 +41,15 @@ func (f *FSM) openValue(key []byte, raw []byte) ([]byte, error) {
 		if encrypt.IsEncryptedValue(raw) {
 			return nil, fmt.Errorf("cluster fsm value is encrypted but encryptor is not wired")
 		}
+		if encrypt.IsLegacyEncryptedValue(raw) {
+			return nil, fmt.Errorf("cluster fsm value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
+		}
 		return raw, nil
 	}
 	if !encrypt.IsEncryptedValue(raw) {
+		if encrypt.IsLegacyEncryptedValue(raw) {
+			return nil, fmt.Errorf("cluster fsm value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
+		}
 		return raw, nil
 	}
 	return enc.OpenValueAAD(fsmValueAAD(key), raw)

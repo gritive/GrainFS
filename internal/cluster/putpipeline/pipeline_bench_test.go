@@ -15,7 +15,7 @@ func benchPipeline(b *testing.B, size int) {
 	dirs := []string{b.TempDir(), b.TempDir(), b.TempDir(), b.TempDir()}
 	p := New(Config{
 		DataDirs:    dirs,
-		Encryptor:   testEncryptor(b),
+		Encryptor:   testEncryptorRaw(b),
 		ECConfig:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		StripeBytes: 1 << 20,
 	})
@@ -58,7 +58,7 @@ func benchPipelineParallel(b *testing.B, size int) {
 	dirs := []string{b.TempDir(), b.TempDir(), b.TempDir(), b.TempDir()}
 	p := New(Config{
 		DataDirs:    dirs,
-		Encryptor:   testEncryptor(b),
+		Encryptor:   testEncryptorRaw(b),
 		ECConfig:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		StripeBytes: 1 << 20,
 	})

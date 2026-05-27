@@ -108,7 +108,11 @@ func TestEncryptWithAAD_AllocsBounded(t *testing.T) {
 	allocs := testing.AllocsPerRun(100, func() {
 		_, _ = e.EncryptWithAAD(plaintext, aad)
 	})
-	assert.LessOrEqual(t, allocs, 1.0, "EncryptWithAAD should allocate exactly 1 (output slice)")
+	// XAES-256-GCM derives a per-call sub-key (AES-CMAC-based KDF over the 24-byte
+	// nonce), which allocates 4 objects per Seal call on the nil-dst path. This is a
+	// known regression vs. the old AES-256-GCM path (1 alloc). Bound is set at 5 to
+	// catch any future regression beyond the inherent XAES CMAC-KDF baseline.
+	assert.LessOrEqual(t, allocs, 5.0, "EncryptWithAAD allocs within XAES baseline (4)")
 }
 
 func TestIsEncryptedBlob(t *testing.T) {
@@ -141,7 +145,7 @@ func TestValueEnvelopeSealToReusesDestination(t *testing.T) {
 	require.NoError(t, err)
 	plaintext := bytes.Repeat([]byte("x"), 64*1024)
 	aad := []byte("local-object:physical:chunk:7")
-	dst := make([]byte, 0, 3+12+len(plaintext)+enc.AEADOverhead())
+	dst := make([]byte, 0, 3+24+len(plaintext)+enc.AEADOverhead())
 
 	sealed, err := enc.SealValueAADTo(dst, aad, plaintext)
 	require.NoError(t, err)
@@ -175,4 +179,29 @@ func TestValueEnvelopeRejectsPlaintext(t *testing.T) {
 	require.False(t, IsEncryptedValue([]byte("plain")))
 	_, err = enc.OpenValueAAD([]byte("badger:meta:object"), []byte("plain"))
 	require.Error(t, err)
+}
+
+func TestIsLegacyEncryptedValue(t *testing.T) {
+	// Exact pre-XAES value envelope: 0xAE 0xE2 0x01
+	require.True(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2, 0x01, 0x00})) // old version 1
+	// Current XAES value envelope (0x02) is NOT legacy.
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2, 0x02, 0x00}))
+	// Value magic with an unrelated version byte must pass through (not legacy).
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2, 0x05, 0x00}))
+	require.False(t, IsLegacyEncryptedValue([]byte("plaintext")))      // no magic
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE2}))       // too short
+	require.False(t, IsLegacyEncryptedValue([]byte{}))                 // empty
+	require.False(t, IsLegacyEncryptedValue([]byte{0xAE, 0xE3, 0x01})) // blob magic, not value
+}
+
+func TestIsLegacyEncryptedBlob(t *testing.T) {
+	// Exact pre-XAES EncryptWithAAD blob: 0xAE 0xE1
+	require.True(t, IsLegacyEncryptedBlob([]byte{0xAE, 0xE1, 0x00})) // old blob format
+	// Current XAES blob magic (0xE3) is NOT legacy.
+	require.False(t, IsLegacyEncryptedBlob([]byte{0xAE, 0xE3, 0x00}))
+	// Value magic (0xE2) is not the blob magic.
+	require.False(t, IsLegacyEncryptedBlob([]byte{0xAE, 0xE2, 0x01}))
+	require.False(t, IsLegacyEncryptedBlob([]byte("plaintext"))) // no magic
+	require.False(t, IsLegacyEncryptedBlob([]byte{0xAE}))        // too short
+	require.False(t, IsLegacyEncryptedBlob([]byte{}))            // empty
 }

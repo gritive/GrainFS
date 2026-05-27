@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.366.0] - 2026-05-27
+
+### Fixed
+
+- Single-node servers with at-rest encryption (the default) could not truncate
+  internal-bucket objects: NFS/9P SETATTR-size on a volume file failed with an
+  "encrypted shard storage" error. Truncate now routes through the encrypted
+  read-modify-write path, so it works the same on single-node and multi-node.
+
+### Changed
+
+- Internal volumes now use the same encrypted shard path as regular objects. The
+  legacy unencrypted (plain-payload) shard write path and the internal-bucket
+  block-device fast-paths (in-place WriteAt/Truncate) were removed; at-rest
+  encryption is now mandatory for the shard service. Encrypted shards still read
+  back unchanged — including both the chunked (GFSENC2) format and the single-blob
+  format written by scrub repair. Only a shard whose payload was never encrypted is
+  rejected, with a clear error; no released cluster has such shards.
+
+## [0.0.365.0] - 2026-05-27
+
+### Added
+
+- Erasure-coded shard storage now flows through the DataEncryptor seam with a
+  self-describing on-disk header (format version + key generation) and
+  position-bound AEAD, extending the KEK-envelope key-rotation groundwork from
+  object/segment files to cluster EC shards.
+
+## [0.0.364.0] - 2026-05-27
+
+### Changed
+
+- **At-rest bulk encryption now uses XAES-256-GCM** (192-bit nonce) instead of
+  AES-256-GCM, removing the AES-GCM random-nonce exhaustion limit on long-lived
+  high-volume clusters while keeping AES-NI performance. **Breaking / greenfield
+  boundary:** the on-disk bulk-encryption format changed. A cluster encrypted with a
+  previous version cannot be upgraded in place — a node refuses to start on a
+  pre-XAES encrypted data dir with a clear error; set up a new cluster.
+
 ## [0.0.363.0] - 2026-05-27
 
 ### Added

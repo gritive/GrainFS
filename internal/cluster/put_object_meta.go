@@ -37,15 +37,17 @@ func (f *FSM) checkPutObjectExpectedETag(txn *badger.Txn, bucket, key, expectedE
 	if err != nil {
 		return fmt.Errorf("put object meta CAS: read current meta: %w", err)
 	}
-	return item.Value(func(val []byte) error {
-		current, err := unmarshalObjectMeta(val)
-		if err != nil {
-			return fmt.Errorf("put object meta CAS: decode current meta: %w", err)
-		}
-		if current.ETag != expectedETag {
-			return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
-				bucket, key, current.ETag, expectedETag)
-		}
-		return nil
-	})
+	val, err := f.itemValueCopy(item)
+	if err != nil {
+		return fmt.Errorf("put object meta CAS: read current meta value: %w", err)
+	}
+	current, err := unmarshalObjectMeta(val)
+	if err != nil {
+		return fmt.Errorf("put object meta CAS: decode current meta: %w", err)
+	}
+	if current.ETag != expectedETag {
+		return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
+			bucket, key, current.ETag, expectedETag)
+	}
+	return nil
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -72,32 +71,9 @@ func (ex blockIOExecutor) executeDirectAction(
 	data := p[action.DataStart : action.DataStart+action.CanWrite]
 
 	if isFullBlock {
-		preferWriteAt := ex.objects.PreferWriteAt(volumeBucketName)
-		if volumeTraceEnabled {
-			log.Debug().Bool("prefer_writeat", preferWriteAt).Msg("BlockIO direct full-block write")
-		}
-		if preferWriteAt {
-			tStart := time.Now()
-			if _, ok, err := ex.objects.WriteAt(ctx, volumeBucketName, action.Key, 0, data); ok {
-				if volumeTraceEnabled {
-					log.Debug().Bool("ok", ok).Dur("total", time.Since(tStart)).Msg("BlockIO direct WriteAt")
-				}
-				if err != nil {
-					return fmt.Errorf("write block %d: %w", action.BlkNum, err)
-				}
-				if action.IsNew {
-					*newBlocks++
-				}
-				return nil
-			}
-		}
-		tStart := time.Now()
 		if _, err := ex.objects.PutObject(ctx, volumeBucketName, action.Key,
 			bytes.NewReader(data), "application/octet-stream"); err != nil {
 			return fmt.Errorf("write block %d: %w", action.BlkNum, err)
-		}
-		if volumeTraceEnabled {
-			log.Debug().Dur("total", time.Since(tStart)).Msg("BlockIO direct PutObject")
 		}
 	} else {
 		blkData := ex.getBlkBuf(vol.BlockSize)
@@ -140,25 +116,6 @@ func (ex blockIOExecutor) executeDirectAsync(
 	data := p[action.DataStart : action.DataStart+action.CanWrite]
 
 	if isFullBlock {
-		preferWriteAt := ex.objects.PreferWriteAt(volumeBucketName)
-		if volumeTraceEnabled {
-			log.Debug().Bool("prefer_writeat", preferWriteAt).Msg("BlockIO async full-block write")
-		}
-		if preferWriteAt {
-			tStart := time.Now()
-			if _, ok, err := ex.objects.WriteAt(ctx, volumeBucketName, action.Key, 0, data); ok {
-				if volumeTraceEnabled {
-					log.Debug().Bool("ok", ok).Dur("total", time.Since(tStart)).Msg("BlockIO async WriteAt")
-				}
-				if err != nil {
-					return fmt.Errorf("write block %d: %w", action.BlkNum, err)
-				}
-				if action.IsNew {
-					*newBlocks++
-				}
-				return nil
-			}
-		}
 		_, commitFn, err := ex.deferred.PutObjectAsync(ctx, volumeBucketName, action.Key,
 			bytes.NewReader(data), "application/octet-stream")
 		if err != nil {

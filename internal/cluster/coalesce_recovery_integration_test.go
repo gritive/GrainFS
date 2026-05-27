@@ -32,7 +32,8 @@ var _ = Describe("Coalesce recovery integration", func() {
 	configureDistributedEC := func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
-		svc := NewShardService(b.root, nil, withTestWAL(GinkgoT()))
+		enc := testEncryptor(GinkgoT())
+		svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
 		b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr})
 	}
 
