@@ -345,15 +345,14 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 
 	_, err = svc.ReadLocalShard("bkt", "obj", 0)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decrypt shard")
+	assert.Contains(t, err.Error(), "not supported")
 }
 
-// TestShardService_ReadLocalShard_LegacyAEADCorruption seeds a legacy single-blob
-// encrypted shard (the scrubber repair / pre-v0.0.62.0 format:
-// eccodec.EncodeShard(encryptor.EncryptWithAAD(...))) whose inner AEAD tag fails
-// while the outer CRC footer stays valid, and confirms ReadLocalShard surfaces it
-// as corruption so the placement monitor quarantines instead of skipping.
-func TestShardService_ReadLocalShard_LegacyAEADCorruption(t *testing.T) {
+// TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt confirms that
+// GFSCRC1-encoded shards (legacy format no longer supported) and unrecognized
+// raw bytes are rejected as corruption so the placement monitor quarantines
+// instead of skipping.
+func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) {
 	key := bytes.Repeat([]byte("k"), 32)
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
@@ -370,6 +369,7 @@ func TestShardService_ReadLocalShard_LegacyAEADCorruption(t *testing.T) {
 		require.NoError(t, err)
 		// Flip a ciphertext byte BEFORE the CRC envelope is applied, so the outer
 		// CRC matches the tampered payload (valid) but the inner AEAD tag fails.
+		// A GFSCRC1-encoded shard is rejected before AEAD decryption is attempted.
 		blob[len(blob)/2] ^= 0xFF
 		raw := eccodec.EncodeShard(blob)
 
@@ -379,14 +379,13 @@ func TestShardService_ReadLocalShard_LegacyAEADCorruption(t *testing.T) {
 
 		_, err = svc.ReadLocalShard(bucket, objKey, 0)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "decrypt shard")
-		assert.True(t, eccodec.IsCorruption(err), "AEAD failure must classify as corruption: %v", err)
+		assert.Contains(t, err.Error(), "not supported")
+		assert.True(t, eccodec.IsCorruption(err), "legacy shard must classify as corruption: %v", err)
 	})
 
 	t.Run("structural missing magic", func(t *testing.T) {
 		// Bytes with no outer CRC envelope and no encrypted-blob magic header:
-		// encryption is enabled but the stored shard is not in any recognized
-		// format → structural format corruption.
+		// the stored shard is not in any recognized format → rejected as corrupt.
 		raw := bytes.Repeat([]byte("X"), 64)
 
 		rawPath := filepath.Join(dir, "shards", bucket, "structural", "shard_0")
@@ -395,8 +394,8 @@ func TestShardService_ReadLocalShard_LegacyAEADCorruption(t *testing.T) {
 
 		_, err := svc.ReadLocalShard(bucket, "structural", 0)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not an encrypted blob")
-		assert.True(t, eccodec.IsCorruption(err), "missing magic must classify as corruption: %v", err)
+		assert.Contains(t, err.Error(), "not supported")
+		assert.True(t, eccodec.IsCorruption(err), "unrecognized format must classify as corruption: %v", err)
 	})
 }
 
