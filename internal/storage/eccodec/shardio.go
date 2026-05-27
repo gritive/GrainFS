@@ -55,7 +55,7 @@ func IsCorruption(err error) bool {
 const footerLen = 4
 
 var shardMagic = []byte("GFSCRC1\x00")
-var encryptedShardMagic = []byte("GFSENC2\x00")
+var encryptedShardMagic = []byte("GFSENC3\x00")
 
 var (
 	encryptedPlainChunkPool = sync.Pool{New: func() any {
@@ -71,10 +71,13 @@ var (
 const (
 	DefaultEncryptedChunkSize = 1 << 20
 	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
-	encryptedNoncePrefixLen   = 8
-	encryptedNonceLen         = 12
-	encryptedHeaderLen        = 8 + 4 + encryptedNoncePrefixLen
-	encryptedChunkHeaderLen   = 8
+	// GFSENC3 header: magic(8) + format_version(2) + dek_gen(4) + chunk_size(4) + chunk_overhead(2).
+	encryptedShardFormatVersion = uint16(1)
+	encryptedHeaderLen          = 8 + 2 + 4 + 4 + 2
+	encryptedChunkHeaderLen     = 8
+	// Legacy nonce-prefix helpers kept until Tasks 2-4 remove their last references.
+	encryptedNoncePrefixLen = 8
+	encryptedNonceLen       = 12
 )
 
 // IsEncodedShard reports whether raw bytes carry the current eccodec magic.
@@ -943,6 +946,51 @@ func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encr
 
 func observeEncryptedShardStage(stage string, start time.Time) {
 	metrics.ObjectPutStageDuration.WithLabelValues("encrypted_shard", stage).Observe(time.Since(start).Seconds())
+}
+
+// writeEncryptedShardHeader writes the GFSENC3 fixed header.
+func writeEncryptedShardHeader(w io.Writer, dekGen uint32, chunkSize uint32, chunkOverhead uint16) error {
+	var hdr [encryptedHeaderLen]byte
+	copy(hdr[:], encryptedShardMagic)
+	binary.LittleEndian.PutUint16(hdr[8:10], encryptedShardFormatVersion)
+	binary.LittleEndian.PutUint32(hdr[10:14], dekGen)
+	binary.LittleEndian.PutUint32(hdr[14:18], chunkSize)
+	binary.LittleEndian.PutUint16(hdr[18:20], chunkOverhead)
+	if _, err := w.Write(hdr[:]); err != nil {
+		return fmt.Errorf("write encrypted shard header: %w", err)
+	}
+	return nil
+}
+
+// parseEncryptedShardHeader validates a header already read into hdr and
+// returns (dek_gen, chunk_size, chunk_overhead). Truncation/format errors wrap
+// ErrShardCorrupt; callers that read via io.ReadFull/ReadAt pre-classify EOF.
+func parseEncryptedShardHeader(hdr []byte) (gen uint32, chunkSize uint32, overhead uint16, err error) {
+	if !IsEncryptedShard(hdr) {
+		return 0, 0, 0, fmt.Errorf("%w: not an encrypted shard", ErrShardCorrupt)
+	}
+	if v := binary.LittleEndian.Uint16(hdr[8:10]); v != encryptedShardFormatVersion {
+		return 0, 0, 0, fmt.Errorf("%w: unsupported encrypted shard format version %d", ErrShardCorrupt, v)
+	}
+	gen = binary.LittleEndian.Uint32(hdr[10:14])
+	chunkSize = binary.LittleEndian.Uint32(hdr[14:18])
+	overhead = binary.LittleEndian.Uint16(hdr[18:20])
+	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
+		return 0, 0, 0, fmt.Errorf("%w: invalid encrypted shard chunk size: %d", ErrShardCorrupt, chunkSize)
+	}
+	return gen, chunkSize, overhead, nil
+}
+
+// readEncryptedShardHeader reads + parses the fixed header from a stream.
+func readEncryptedShardHeader(r io.Reader) (gen uint32, chunkSize uint32, overhead uint16, err error) {
+	var hdr [encryptedHeaderLen]byte
+	if _, e := io.ReadFull(r, hdr[:]); e != nil {
+		if errors.Is(e, io.EOF) || errors.Is(e, io.ErrUnexpectedEOF) {
+			return 0, 0, 0, fmt.Errorf("read encrypted shard header: %w: %w", ErrShardCorrupt, e)
+		}
+		return 0, 0, 0, fmt.Errorf("read encrypted shard header: %w", e)
+	}
+	return parseEncryptedShardHeader(hdr[:])
 }
 
 func encryptedChunkNonce(prefix [encryptedNoncePrefixLen]byte, chunkIdx uint32) [encryptedNonceLen]byte {

@@ -430,6 +430,28 @@ func TestEncryptedShardStream_RejectsOversizedChunkHeader(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid encrypted shard chunk size")
 }
 
+func TestEncryptedShardHeader_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeEncryptedShardHeader(&buf, 7, DefaultEncryptedChunkSize, 31); err != nil {
+		t.Fatalf("writeEncryptedShardHeader: %v", err)
+	}
+	gen, chunkSize, overhead, err := readEncryptedShardHeader(&buf)
+	if err != nil {
+		t.Fatalf("readEncryptedShardHeader: %v", err)
+	}
+	if gen != 7 || chunkSize != DefaultEncryptedChunkSize || overhead != 31 {
+		t.Fatalf("header mismatch: gen=%d size=%d overhead=%d", gen, chunkSize, overhead)
+	}
+}
+
+func TestEncryptedShardHeader_RejectsLegacyGFSENC2(t *testing.T) {
+	legacy := append([]byte("GFSENC2\x00"), make([]byte, 12)...) // old magic + old header bytes
+	_, _, _, err := readEncryptedShardHeader(bytes.NewReader(legacy))
+	if err == nil {
+		t.Fatal("expected legacy GFSENC2 magic to be rejected")
+	}
+}
+
 func testEncryptor(t *testing.T) *encrypt.Encryptor {
 	t.Helper()
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
