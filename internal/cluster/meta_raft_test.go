@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -231,6 +234,10 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 	dir := t.TempDir()
 	m, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
 	require.NoError(t, err)
+	// Phase D-snap: meta-FSM snapshots are KEK-enveloped; NewMetaRaft does not
+	// wire a KEK store (production does so in dek_keeper_wiring), so wire a
+	// deterministic test KEK here so Snapshot()/Restore() can seal/open.
+	wireTestKEK(t, m.fsm)
 	require.NoError(t, m.Bootstrap())
 	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
@@ -250,6 +257,8 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 
 	restarted, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
 	require.NoError(t, err)
+	// Same deterministic KEK so the restart can decrypt the snapshot envelope.
+	wireTestKEK(t, restarted.fsm)
 	t.Cleanup(func() { _ = restarted.Close() })
 	require.NoError(t, restarted.Start(context.Background(), nil))
 
@@ -261,6 +270,107 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+// snapshotApplyFakeNode is a minimal RaftNode that feeds a pre-loaded
+// LogEntrySnapshot to MetaRaft.runApplyLoop and otherwise stays inert. It
+// isolates the apply-loop snapshot path from the eager Start()-time restore:
+// LatestSnapshot() returns nil so Start() skips its own restore, and ApplyCh()
+// delivers the buffered snapshot entry directly into the apply loop.
+type snapshotApplyFakeNode struct {
+	RaftNode
+	ch chan raft.LogEntry
+}
+
+func (n *snapshotApplyFakeNode) Start()                                  {}
+func (n *snapshotApplyFakeNode) Close()                                  {}
+func (n *snapshotApplyFakeNode) IsLeader() bool                          { return false }
+func (n *snapshotApplyFakeNode) LatestSnapshot() (*raft.Snapshot, error) { return nil, nil }
+func (n *snapshotApplyFakeNode) Configuration() raft.Configuration       { return raft.Configuration{} }
+func (n *snapshotApplyFakeNode) ApplyCh() <-chan raft.LogEntry           { return n.ch }
+
+// TestMetaRaft_SnapshotRestoreFailure_HaltsApplyLoop is a regression test for the
+// apply loop's LogEntrySnapshot path (meta_raft.go runApplyLoop): a snapshot
+// whose Restore FAILS must halt the loop (MarkFatalHalted) instead of silently
+// advancing lastApplied while leaving the FSM un-restored — which would diverge
+// FSM state from what Raft believes was applied.
+//
+// We seal a snapshot (containing node-1) under the canonical 0xA0 test KEK, then
+// drive a target FSM wired with a DIFFERENT KEK at the same version 0 (same
+// clusterID). The snapshot envelope's per-snapshot DEK is wrapped under the
+// sealing KEK, so unwrapping with the wrong KEK fails AEAD authentication →
+// Restore returns an error → the apply loop must MarkFatalHalted and stop.
+//
+// The snapshot is fed straight into the apply loop via a fake node's ApplyCh
+// (the eager Start()-time restore is bypassed by returning a nil LatestSnapshot)
+// so the test exercises exactly the loop's LogEntrySnapshot case.
+func TestMetaRaft_SnapshotRestoreFailure_HaltsApplyLoop(t *testing.T) {
+	// Build a sealed snapshot blob from a source FSM holding node-1, sealed under
+	// the canonical 0xA0 test KEK / byte(i+1) clusterID.
+	src := NewMetaFSM()
+	wireTestKEK(t, src)
+	addPayload, err := encodeMetaAddNodeCmd(MetaNodeEntry{ID: "node-1", Address: "addr-1", Role: 0})
+	require.NoError(t, err)
+	addCmd, err := encodeMetaCmd(MetaCmdTypeAddNode, addPayload)
+	require.NoError(t, err)
+	require.NoError(t, src.applyCmdAtIndex(addCmd, 1))
+	require.True(t, hasNode(src.Nodes(), "node-1"), "precondition: source FSM has node-1")
+	snapBytes, err := src.Snapshot()
+	require.NoError(t, err)
+
+	// Target FSM: same clusterID, but a DIFFERENT KEK at version 0 → Restore of
+	// the above envelope fails AEAD.
+	var clusterID [16]byte
+	for i := range clusterID {
+		clusterID[i] = byte(i + 1)
+	}
+	wrongKEK := make([]byte, encrypt.KEKSize)
+	_, err = rand.Read(wrongKEK)
+	require.NoError(t, err)
+	require.False(t, bytes.Equal(wrongKEK, bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)))
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(0, wrongKEK))
+	target := NewMetaFSM()
+	target.SetClusterID(clusterID[:])
+	target.SetKEKStore(store)
+
+	// Pre-load the snapshot entry into the fake node's ApplyCh before Start.
+	ch := make(chan raft.LogEntry, 1)
+	ch <- raft.LogEntry{Index: 7, Term: 1, Type: raft.LogEntrySnapshot, Command: snapBytes}
+	node := &snapshotApplyFakeNode{ch: ch}
+
+	m := &MetaRaft{
+		node:           node,
+		fsm:            target,
+		capabilityGate: NewCapabilityGate(compat.DefaultRegistry, time.Minute),
+		done:           make(chan struct{}),
+		applyNotify:    make(chan struct{}),
+		applyErrs:      make(map[uint64]error),
+	}
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Start(context.Background(), nil))
+
+	// The apply loop must mark the FSM fatal-halted when Restore fails.
+	require.Eventually(t, func() bool {
+		return m.FSM().FatalHaltedErr() != nil
+	}, 2*time.Second, 20*time.Millisecond,
+		"apply loop must halt the FSM when snapshot Restore fails")
+
+	// And the snapshot's state must NOT have been silently applied: node-1 must
+	// be absent from the un-restored target FSM.
+	assert.False(t, hasNode(m.FSM().Nodes(), "node-1"),
+		"snapshot state must not be silently applied after Restore failure")
+}
+
+// hasNode reports whether nodes contains an entry with the given id.
+func hasNode(nodes []MetaNodeEntry, id string) bool {
+	for _, n := range nodes {
+		if n.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMetaRaft_Close_StopsApplyLoop(t *testing.T) {

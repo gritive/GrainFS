@@ -117,6 +117,7 @@ func TestApplyMountSAAttachDetachPolicy(t *testing.T) {
 func TestSnapshotRestore_MountSAIncluded(t *testing.T) {
 	// Source FSM: wire IPST stores + MountSA store.
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	wireIPSTStores(src)
 	srcMountStore := newTestMountSAStore(t)
 	src.SetMountSAStore(srcMountStore)
@@ -136,6 +137,7 @@ func TestSnapshotRestore_MountSAIncluded(t *testing.T) {
 
 	// Restore into a fresh FSM.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	wireIPSTStores(dst)
 	dstMountStore := newTestMountSAStore(t)
 	dstAttachStore := policyattach.NewInMemoryStore()
@@ -168,6 +170,7 @@ func TestSnapshotRestore_MountSAIncluded(t *testing.T) {
 // with MountSA entries into an FSM that has no mountSAStore wired returns no error.
 func TestSnapshotRestore_MountSANilStore_WarnOnly(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	wireIPSTStores(src)
 	srcMountStore := newTestMountSAStore(t)
 	src.SetMountSAStore(srcMountStore)
@@ -180,6 +183,7 @@ func TestSnapshotRestore_MountSANilStore_WarnOnly(t *testing.T) {
 
 	// Restore into FSM with no mountSAStore wired — must not error.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	wireIPSTStores(dst)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
 }

@@ -77,6 +77,7 @@ func TestMetaFSM_Apply_NoOp(t *testing.T) {
 
 func TestMetaFSM_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-1", "addr-1:7001", 0)))
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-2", "addr-2:7001", 1)))
 
@@ -85,6 +86,7 @@ func TestMetaFSM_Snapshot_Restore(t *testing.T) {
 	require.NotEmpty(t, snap)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	nodes := f2.Nodes()
@@ -219,6 +221,7 @@ func TestMetaFSM_OnShardGroupAdded_AsyncCallbackDoesNotBlockApply(t *testing.T) 
 
 func TestMetaFSM_ShardGroups_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-0", "10.0.0.1:7001", 0)))
 	require.NoError(t, f.applyCmd(makePutShardGroupCmd(t, "group-0", []string{"node-0"})))
 
@@ -227,6 +230,7 @@ func TestMetaFSM_ShardGroups_Snapshot_Restore(t *testing.T) {
 	require.NotEmpty(t, snap)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	assert.Len(t, f2.Nodes(), 1)
@@ -378,6 +382,7 @@ func TestMetaFSM_ObjectIndexDeleteVersionRecomputesLatest(t *testing.T) {
 
 func TestMetaFSM_ObjectIndexSnapshotRestore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	entry := ObjectIndexEntry{
 		Bucket: "b", Key: "k", VersionID: "v1",
 		PlacementGroupID: "group-2",
@@ -394,6 +399,7 @@ func TestMetaFSM_ObjectIndexSnapshotRestore(t *testing.T) {
 	snap, err := f.Snapshot()
 	require.NoError(t, err)
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	latest, ok := f2.ObjectIndexLatest("b", "k")
@@ -403,6 +409,7 @@ func TestMetaFSM_ObjectIndexSnapshotRestore(t *testing.T) {
 
 func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))
 	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "videos", "group-1")))
 
@@ -411,6 +418,7 @@ func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	require.NotEmpty(t, snap)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	assignments := f2.BucketAssignments()
@@ -486,6 +494,7 @@ func makeIcebergDeleteTableCmd(t *testing.T, requestID string, ident icebergcata
 
 func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "ns-1", []string{"analytics"}, map[string]string{"owner": "eng"})))
 	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "tbl-1", icebergcatalog.Identifier{
 		Namespace: []string{"analytics"},
@@ -507,6 +516,7 @@ func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 	require.NotContains(t, string(snap), "current-snapshot-id", "metadata JSON bodies must not be snapshotted into meta-Raft")
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	restored, ok := f2.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.True(t, ok)
@@ -583,6 +593,7 @@ func TestMetaFSM_OnBucketAssigned_CallbackFired(t *testing.T) {
 
 func TestMetaFSM_Restore_FiresOnBucketAssignedCallback(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-0")))
 	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "videos", "group-1")))
 
@@ -590,6 +601,7 @@ func TestMetaFSM_Restore_FiresOnBucketAssignedCallback(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	got := make(map[string]string)
 	f2.SetOnBucketAssigned(func(bucket, groupID string) {
 		got[bucket] = groupID
@@ -718,6 +730,7 @@ func TestMetaFSM_OnRebalancePlan_CallbackFired(t *testing.T) {
 
 func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	entries := []LoadStatEntry{{NodeID: "n1", DiskUsedPct: 75.0}}
 	require.NoError(t, f.applyCmd(makeSetLoadSnapshotCmd(t, entries)))
 
@@ -725,6 +738,7 @@ func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	ls := f2.LoadSnapshot()
 	assert.InDelta(t, 75.0, ls["n1"].DiskUsedPct, 0.01)
@@ -732,6 +746,7 @@ func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
 
 func TestMetaFSM_ActivePlan_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	plan := RebalancePlan{PlanID: "plan-99", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
 	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
 
@@ -739,6 +754,7 @@ func TestMetaFSM_ActivePlan_Snapshot_Restore(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	assert.Equal(t, "plan-99", f2.ActivePlanID())
 }
@@ -1010,6 +1026,7 @@ func TestApplyNfsExportBucketDeleteCascadeDeletesExportAfterBucket(t *testing.T)
 
 func TestMetaFSM_NfsExportsSnapshotRestore(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
 	require.NoError(t, err)
 	f.SetExportStore(store)
@@ -1024,6 +1041,7 @@ func TestMetaFSM_NfsExportsSnapshotRestore(t *testing.T) {
 	restoredStore, err := nfsexport.OpenStore(newTestLifecycleDB(t))
 	require.NoError(t, err)
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	f2.SetExportStore(restoredStore)
 	calls := 0
 	f2.SetOnNfsExportChange(func() { calls++ })
@@ -1037,6 +1055,7 @@ func TestMetaFSM_NfsExportsSnapshotRestore(t *testing.T) {
 
 func TestMetaFSM_RestoreLegacySnapshotKeepsNfsExports(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
 	require.NoError(t, err)
 	f.SetExportStore(store)
@@ -1048,7 +1067,11 @@ func TestMetaFSM_RestoreLegacySnapshotKeepsNfsExports(t *testing.T) {
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	b.Finish(root)
 
-	require.NoError(t, f.Restore(raft.SnapshotMeta{}, append([]byte(nil), b.FinishedBytes()...)))
+	// Phase D-snap: Restore decrypts the envelope first; seal the raw FB so the
+	// trailer-less ("legacy") body reaches the inner restore path.
+	sealed, err := f.sealSnapshotEnvelope(append([]byte(nil), b.FinishedBytes()...))
+	require.NoError(t, err)
+	require.NoError(t, f.Restore(raft.SnapshotMeta{}, sealed))
 	after, ok := store.Get("b1")
 	require.True(t, ok)
 	require.Equal(t, before, after)
@@ -1071,6 +1094,7 @@ func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {
 // correctly re-keys into the per-warehouse nested maps.
 func TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses(t *testing.T) {
 	f := NewMetaFSM()
+	wireTestKEK(t, f)
 
 	// Create entries in two warehouses.
 	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmdWH(t, "ns-a-1", "wh-a", []string{"analytics"}, nil)))
@@ -1083,6 +1107,7 @@ func TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
+	wireTestKEK(t, f2)
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	// wh-a: namespace and table present.
@@ -1107,9 +1132,14 @@ func TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses(t *testing.T) {
 // written by a pre-T38 node (iceberg_schema_version=0 with iceberg entries)
 // causes a hard error on Restore rather than silently misrouting data.
 func TestMetaCatalog_Restore_FailsLoudly_OnOldFormat(t *testing.T) {
-	snap := buildLegacyIcebergSnapshot(t)
+	rawFB := buildLegacyIcebergSnapshot(t)
 	f := NewMetaFSM()
-	err := f.Restore(raft.SnapshotMeta{}, snap)
+	wireTestKEK(t, f)
+	// Phase D-snap: Restore decrypts the envelope first; seal the raw legacy FB
+	// so the restore reaches the inner iceberg_schema_version check.
+	snap, err := f.sealSnapshotEnvelope(rawFB)
+	require.NoError(t, err)
+	err = f.Restore(raft.SnapshotMeta{}, snap)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "iceberg_schema_version=0")
 }
@@ -1215,6 +1245,7 @@ func TestFSM_LookupNoMutationOnRead(t *testing.T) {
 
 func TestFSM_Snapshot_RoundTrip_RotationStatusAndKEKStatus(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	var rid1, rid2 [16]byte
 	rid1[0] = 0x01
 	rid2[0] = 0x02
@@ -1227,6 +1258,7 @@ func TestFSM_Snapshot_RoundTrip_RotationStatusAndKEKStatus(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	if err := dst.Restore(raft.SnapshotMeta{}, buf); err != nil {
 		t.Fatalf("restore: %v", err)
 	}

@@ -157,6 +157,7 @@ func TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret(t *testing.T) {
 
 func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	src.SetEncryptor(newIAMTestEncryptor(t)) // gate for AlertWebhookSecretWrapped
 	require.NoError(t, src.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
 		BalancerImbalanceTriggerPct: ptrFloat(33.0),
@@ -173,6 +174,7 @@ func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
 	// Restore on a fresh FSM — outer ClusterConfig handle must remain valid
 	// after Restore (A3: ReplaceSnap, not pointer assignment).
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	cfgHandle := dst.ClusterConfig()
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, buf))
 
@@ -196,6 +198,7 @@ func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
 // collapse to "default" after restore.
 func TestMetaFSM_Snapshot_Restore_ClusterConfig_ExplicitEmptyWebhook(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	require.NoError(t, src.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
 		AlertWebhook: ptrString(""),
 	})))
@@ -205,6 +208,7 @@ func TestMetaFSM_Snapshot_Restore_ClusterConfig_ExplicitEmptyWebhook(t *testing.
 	require.NoError(t, err)
 
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, buf))
 	require.Equal(t, "explicit", dst.ClusterConfig().SourceForKey("alert-webhook"))
 	require.Equal(t, "", dst.ClusterConfig().AlertWebhook())

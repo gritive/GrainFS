@@ -28,6 +28,7 @@ func newTestFSMWithDEK(t *testing.T) (*MetaFSM, *encrypt.DEKKeeper) {
 	// both bind to the keeper's clusterID; the FSM clusterID matches it).
 	fsm.SetClusterID(dekTestClusterID())
 	fsm.SetDEKKeeper(keeper)
+	wireTestKEKStoreOnly(t, fsm)
 	return fsm, keeper
 }
 
@@ -110,8 +111,10 @@ func TestMetaFSM_JKEY_Roundtrip(t *testing.T) {
 	snap, err := src.Snapshot()
 	require.NoError(t, err)
 
-	// Restore into a new FSM with the same DEK keeper.
+	// Restore into a new FSM with the same DEK keeper. wireTestKEK sets the
+	// matching clusterID (byte(i+1) == dekTestClusterID) + K0 so the envelope opens.
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	dst.SetDEKKeeper(src.dekKeeper)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
 
@@ -131,10 +134,12 @@ func TestMetaFSM_JKEY_Roundtrip(t *testing.T) {
 // with no JWT keys restores cleanly and leaves the key store empty.
 func TestMetaFSM_LegacySnapshot_NoJKEY(t *testing.T) {
 	src := NewMetaFSM()
+	wireTestKEK(t, src)
 	snap, err := src.Snapshot()
 	require.NoError(t, err)
 
 	dst := NewMetaFSM()
+	wireTestKEK(t, dst)
 	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
 
 	gotCurrent, gotPrevious := dst.jwtKeyStore.Snapshot()

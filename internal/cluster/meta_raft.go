@@ -942,10 +942,17 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 					Servers: m.node.Configuration().Servers,
 				}
 				if err := m.fsm.Restore(meta, entry.Command); err != nil {
-					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM snapshot restore error")
-				} else {
-					m.lastSnapshotIndex = entry.Index
+					// A failed snapshot Restore must NOT advance lastApplied: the FSM
+					// is left un-restored while Raft would otherwise believe the
+					// snapshot applied, silently diverging state. Halt the apply loop
+					// like the ErrFSMKEKFatal command path above. D-snap's envelope
+					// adds new restore failure modes (unknown KEK version, cluster-id
+					// mismatch, corrupt/legacy envelope) that make this reachable.
+					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FATAL FSM snapshot restore error — halting apply loop to prevent silent FSM divergence")
+					m.fsm.MarkFatalHalted(err)
+					return
 				}
+				m.lastSnapshotIndex = entry.Index
 			}
 			m.lastApplied.Store(entry.Index)
 			m.applyNotifyMu.Lock()

@@ -26,6 +26,7 @@ func newTestMetaFSMWithDEKKeeper(t *testing.T, keeper *encrypt.DEKKeeper) *MetaF
 	f := NewMetaFSM()
 	f.SetClusterID(dekTestClusterID())
 	f.SetDEKKeeper(keeper)
+	wireTestKEKStoreOnly(t, f)
 	return f
 }
 
@@ -193,8 +194,11 @@ func TestSnapshot_DEKVersionTrailerRoundTrip(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	// Restore into a fresh FSM (no keeper wired yet).
+	// Restore into a fresh FSM (no keeper wired yet). wireTestKEK gives the
+	// matching clusterID (byte(i+1) == dekTestClusterID) + K0 so the envelope
+	// opens.
 	fsm2 := NewMetaFSM()
+	wireTestKEK(t, fsm2)
 	if err := fsm2.Restore(raft.SnapshotMeta{}, snapBytes); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -246,6 +250,7 @@ func TestMetaFSM_Snapshot_PreservesActiveKEKVersion(t *testing.T) {
 	}
 
 	fsm2 := NewMetaFSM()
+	wireTestKEK(t, fsm2)
 	if err := fsm2.Restore(raft.SnapshotMeta{}, snapBytes); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -258,12 +263,14 @@ func TestSnapshot_DEKVersionTrailer_AbsentWhenNoKeeper(t *testing.T) {
 	// Snapshot with no DEKKeeper wired should not contain a DKVS trailer.
 	// Restore into a fresh FSM should leave PendingDEKVersions empty.
 	fsm1 := NewMetaFSM()
+	wireTestKEK(t, fsm1)
 	snapBytes, err := fsm1.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
 	fsm2 := NewMetaFSM()
+	wireTestKEK(t, fsm2)
 	if err := fsm2.Restore(raft.SnapshotMeta{}, snapBytes); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
