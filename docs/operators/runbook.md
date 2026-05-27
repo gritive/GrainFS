@@ -1077,25 +1077,28 @@ KEK removal is two-phase: `grainfs encrypt kek retire --version N` marks an old
 KEK version draining, then `grainfs encrypt kek prune --version N` permanently
 removes it once every voter attests no active lease holds it.
 
-> **Do not prune a KEK version while any retained snapshot was sealed under it.**
-> Both cluster-metadata snapshots (Raft FSM) and object-metadata snapshots (PITR,
-> `<data>/snapshots/snapshot-*.json.zst`) embed a per-snapshot ephemeral DEK
-> wrapped by the KEK version active at snapshot time. Data DEKs are rewrapped
-> automatically before a KEK version is retired; **object snapshots are not** —
-> they are sealed once and never rewrapped on rotation. Pruning the KEK version
-> makes every snapshot sealed under it permanently unreadable on restore.
+> **Prune-refusal for object snapshots is now ENFORCED.** `grainfs encrypt kek prune`
+> refuses if any voter reports a retained object-metadata snapshot
+> (`<data>/snapshots/snapshot-*.json.zst`) sealed under the target version. The error
+> names the blocking node and count, e.g.:
+> `KEKPrune: node 127.0.0.1:7001 has 2 retained object snapshot(s) sealed under version 1`
 >
-> Before pruning version N:
+> Both cluster-metadata (Raft FSM) and object-metadata snapshots embed a per-snapshot
+> ephemeral DEK wrapped by the KEK version active at snapshot time. Data DEKs are
+> rewrapped automatically before retire; **object snapshots are not** — they are sealed
+> once and never rewrapped. Pruning the KEK version while a snapshot references it
+> would make that snapshot permanently unreadable on restore.
+>
+> Pre-prune checklist (defense-in-depth; the automatic guard below catches remaining cases):
 > 1. Confirm `grainfs_snapshot_legacy_plaintext_reads_total` has been flat at zero
 >    across a full snapshot cycle (runtime signal that all active snapshots are
 >    enveloped — necessary but not sufficient alone).
-> 2. Verify your snapshot retention policy: if you keep snapshots older than the
->    last KEK rotation, those snapshots reference the old version. Either delete
->    them or keep version N loaded until they expire.
-> 3. Then prune: `grainfs encrypt kek prune --version N`.
->
-> This is an operator responsibility — GrainFS does not yet enforce prune-refusal
-> based on snapshot references (P1 follow-up).
+> 2. Review your snapshot retention policy: if you keep snapshots older than the last
+>    KEK rotation, those snapshots reference the old version. Delete them or let them
+>    expire before pruning.
+> 3. Then prune: `grainfs encrypt kek prune --version N`. The cluster automatically
+>    refuses prune if any voter still holds a snapshot sealed under version N — delete
+>    the snapshot and retry.
 
 > **Prune may need retries on a busy cluster.** Prune validates the voter set
 > against the raft committed index at probe time and rejects if the committed
