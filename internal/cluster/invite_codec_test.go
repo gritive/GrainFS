@@ -118,6 +118,56 @@ func TestCodecRoundTrip_RevokePeer(t *testing.T) {
 	}
 }
 
+// TestCodecRoundTrip_InvitePending encodes and decodes an InvitePending command.
+func TestCodecRoundTrip_InvitePending(t *testing.T) {
+	inviteID := "inv-pending-rt"
+	nodeID := "node-pending-rt"
+	s := spki(9)
+	addr := "10.0.2.3:7002"
+
+	data, err := encodeInvitePendingCmd(inviteID, nodeID, s, addr)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	gotInvite, gotNode, gotSPKI, gotAddr, err := decodeInvitePendingCmd(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if gotInvite != inviteID {
+		t.Errorf("inviteID: got %q, want %q", gotInvite, inviteID)
+	}
+	if gotNode != nodeID {
+		t.Errorf("nodeID: got %q, want %q", gotNode, nodeID)
+	}
+	if gotSPKI != s {
+		t.Error("spki mismatch")
+	}
+	if gotAddr != addr {
+		t.Errorf("addr: got %q, want %q", gotAddr, addr)
+	}
+}
+
+// TestCodecDecode_InvitePendingWrongSPKILength asserts that decodeInvitePendingCmd
+// rejects a payload whose spki field is not exactly 32 bytes.
+func TestCodecDecode_InvitePendingWrongSPKILength(t *testing.T) {
+	b := clusterBuilderPool.Get()
+	idOff := b.CreateString("inv-bad-spki")
+	nodeOff := b.CreateString("node-bad-spki")
+	shortSPKI := make([]byte, 17) // wrong length — triggers the len!=32 guard
+	spkiOff := b.CreateByteVector(shortSPKI)
+	addrOff := b.CreateString("addr")
+	clusterpb.MetaInvitePendingCmdStart(b)
+	clusterpb.MetaInvitePendingCmdAddInviteId(b, idOff)
+	clusterpb.MetaInvitePendingCmdAddNodeId(b, nodeOff)
+	clusterpb.MetaInvitePendingCmdAddSpki(b, spkiOff)
+	clusterpb.MetaInvitePendingCmdAddAddress(b, addrOff)
+	data := fbFinish(b, clusterpb.MetaInvitePendingCmdEnd(b))
+
+	if _, _, _, _, err := decodeInvitePendingCmd(data); err == nil {
+		t.Fatal("decodeInvitePendingCmd with 17-byte SPKI must error")
+	}
+}
+
 // TestCodecDecode_InviteMintWrongPubLength asserts that decodeInviteMintCmd
 // rejects a payload whose pub field is not exactly ed25519.PublicKeySize bytes.
 func TestCodecDecode_InviteMintWrongPubLength(t *testing.T) {

@@ -56,3 +56,35 @@ func decodeInviteConsumeCmd(data []byte) (id string, consumedAtNanos int64, err 
 	}
 	return string(t.Id()), t.ConsumedAtNanos(), nil
 }
+
+// encodeInvitePendingCmd serializes an InvitePending payload (raft cmd data —
+// wrap with encodeMetaCmd to get the MetaCmd envelope). Records a pending
+// invite-join: invite_id, joiner node_id, joiner SPKI, and dial address.
+func encodeInvitePendingCmd(inviteID, nodeID string, spki [32]byte, addr string) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	idOff := b.CreateString(inviteID)
+	nodeOff := b.CreateString(nodeID)
+	spkiOff := b.CreateByteVector(spki[:])
+	addrOff := b.CreateString(addr)
+	clusterpb.MetaInvitePendingCmdStart(b)
+	clusterpb.MetaInvitePendingCmdAddInviteId(b, idOff)
+	clusterpb.MetaInvitePendingCmdAddNodeId(b, nodeOff)
+	clusterpb.MetaInvitePendingCmdAddSpki(b, spkiOff)
+	clusterpb.MetaInvitePendingCmdAddAddress(b, addrOff)
+	return fbFinish(b, clusterpb.MetaInvitePendingCmdEnd(b)), nil
+}
+
+func decodeInvitePendingCmd(data []byte) (inviteID, nodeID string, spki [32]byte, addr string, err error) {
+	t, e := fbSafe(data, func(d []byte) *clusterpb.MetaInvitePendingCmd {
+		return clusterpb.GetRootAsMetaInvitePendingCmd(d, 0)
+	})
+	if e != nil {
+		return "", "", [32]byte{}, "", e
+	}
+	rawSPKI := t.SpkiBytes()
+	if len(rawSPKI) != 32 {
+		return "", "", [32]byte{}, "", fmt.Errorf("invite_codec: spki must be 32 bytes, got %d", len(rawSPKI))
+	}
+	copy(spki[:], rawSPKI)
+	return string(t.InviteId()), string(t.NodeId()), spki, string(t.Address()), nil
+}

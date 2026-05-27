@@ -518,6 +518,7 @@ enum MetaCmdType : uint8 {
   RegisterPendingLearner       = 75, // zero-CA: register a pending-learner peer (node-id, SPKI, addr)
   PromoteMember                = 76, // zero-CA: promote a pending-learner to voting member
   RevokePeer                   = 77, // zero-CA: remove a peer + denylist its SPKI
+  InvitePending                = 78, // zero-CA: record a pending invite-join (invite_id, node_id, SPKI, addr)
 }
 
 table MetaNodeEntry {
@@ -974,6 +975,10 @@ table JoinRequest {
   node_sig   : [ubyte];   // ECDSA over the invite transcript
   invite_sig : [ubyte];   // Ed25519 over the SAME transcript
   invite_id  : string;
+  // Network-path fields (APPENDED — preserve field ids).
+  join_phase                 : uint8;  // 0=legacy KEK, 1=invite Phase-1, 2=invite Phase-2 ACK
+  joiner_join_listener_addr  : string; // joiner's join listener dial address
+  joiner_join_listener_spki  : [ubyte];// joiner's join listener SPKI
 }
 
 table JoinReply {
@@ -983,6 +988,42 @@ table JoinReply {
   leader_id   : string;
   leader_addr : string;
   peer_spkis  : [SPKIBytes]; // accept-set delivered at commit1 (no KEK)
+  // Network-path fields (APPENDED — preserve field ids).
+  sealed_bootstrap : [ubyte];  // serialized SealedBootstrap envelope
+  leader_join_addr : string;   // leader's join listener dial address
+  leader_join_spki : [ubyte];  // leader's join listener SPKI
+}
+
+// SealedBootstrap is the outer envelope (wire form of encrypt.SealedToPeer)
+// carried in JoinReply.sealed_bootstrap. The ciphertext seals a marshaled
+// BootstrapSecretsPayload via SealToPeer; the joiner OpenFromPeer-s it.
+table SealedBootstrap {
+  ephemeral_pub : [ubyte];
+  ciphertext    : [ubyte];
+}
+
+// KEKGen is a single KEK generation (generation number + raw key bytes).
+table KEKGen {
+  gen : uint32;
+  key : [ubyte];
+}
+
+// BootstrapSecretsPayload is the INNER plaintext that Phase-1 marshals →
+// SealToPeer → SealedBootstrap.ciphertext; the joiner OpenFromPeer →
+// unmarshals it to obtain cluster secrets.
+table BootstrapSecretsPayload {
+  encryption_key  : [ubyte];
+  kek_generations : [KEKGen];
+  transport_psk   : [ubyte];
+}
+
+// MetaInvitePendingCmd records a pending invite-join (raft cmd data — wrap
+// with encodeMetaCmd to get the MetaCmd envelope). Zero-CA network path.
+table MetaInvitePendingCmd {
+  invite_id : string;
+  node_id   : string;
+  spki      : [ubyte];
+  address   : string;
 }
 
 // ChallengeRequest is sent by a joining node to a peer to obtain a fresh
