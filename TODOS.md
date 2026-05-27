@@ -331,6 +331,16 @@ Work these in order. Do not run them in parallel.
   pre-existing (not introduced by the transient-classification work) and is NOT on the
   placement-monitor path (the monitor uses full `ReadLocalShard`, which verifies CRC).
   Verify the footer CRC (or at least the covered range) before returning bytes.
+  RESOLVED-BY (in flight): `docs/superpowers/plans/2026-05-27-unify-internal-volume-shard-path.md`
+  removes the plain GFSCRC1 path entirely (production is always encrypted), so the
+  unverified branch ceases to exist; the encrypted GFSENC2 path verifies per-chunk AEAD
+  on range reads. Remove this item when that PR lands.
+
+- [x] **`checkPutObjectExpectedETag` panics on conditional PUT against an encrypted cluster [P1]** —
+  FIXED in the shard-path-unification PR (`feat/unify-volume-shard-path`). NOT separable: the
+  encrypted-test-backend migration surfaced it (`backend_ec_integration_test.go` runs an
+  `ExpectedETag` PUT against the encrypted FSM). `put_object_meta.go` now reads via
+  `f.itemValueCopy(item)` (decrypts) instead of the raw `item.Value()`. Remove this line when the PR lands.
 
 - [ ] **Placement monitor: stream scan targets instead of buffering O(objects+segments) [P3]**:
   `Scan` buffers all `ECShardScanTarget`s before processing; ~1.5 GB peak for 1 M chunked
