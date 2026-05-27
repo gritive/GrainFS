@@ -15,14 +15,50 @@ import (
 )
 
 const (
-	encryptedObjectMagic = "GFOBJENC1"
-	encryptedChunkSize   = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
+	encryptedObjectMagic         = "GFOBJENC2"
+	encryptedObjectFormatVersion = uint16(1)
+	encryptedChunkSize           = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
 )
 
 func encryptedChunkAADBytes(dst []byte, domain string, chunk uint64) []byte {
 	dst = append(dst[:0], domain...)
 	dst = append(dst, ":chunk:"...)
 	return strconv.AppendUint(dst, chunk, 10)
+}
+
+// writeEncryptedObjectHeader writes the GFOBJENC2 file header: magic,
+// format_version, and the dek_gen all chunks in the file were sealed under.
+func writeEncryptedObjectHeader(w io.Writer, dekGen uint32) error {
+	if _, err := w.Write([]byte(encryptedObjectMagic)); err != nil {
+		return fmt.Errorf("write encrypted object magic: %w", err)
+	}
+	var hdr [6]byte
+	binary.BigEndian.PutUint16(hdr[0:2], encryptedObjectFormatVersion)
+	binary.BigEndian.PutUint32(hdr[2:6], dekGen)
+	if _, err := w.Write(hdr[:]); err != nil {
+		return fmt.Errorf("write encrypted object header: %w", err)
+	}
+	return nil
+}
+
+// readEncryptedObjectHeader validates the magic + format_version and returns
+// the dek_gen the file's chunks were sealed under.
+func readEncryptedObjectHeader(r io.Reader) (uint32, error) {
+	magic := make([]byte, len(encryptedObjectMagic))
+	if _, err := io.ReadFull(r, magic); err != nil {
+		return 0, fmt.Errorf("read encrypted object magic: %w", err)
+	}
+	if string(magic) != encryptedObjectMagic {
+		return 0, fmt.Errorf("invalid encrypted object magic")
+	}
+	var hdr [6]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return 0, fmt.Errorf("read encrypted object header: %w", err)
+	}
+	if v := binary.BigEndian.Uint16(hdr[0:2]); v != encryptedObjectFormatVersion {
+		return 0, fmt.Errorf("unsupported encrypted object format version %d", v)
+	}
+	return binary.BigEndian.Uint32(hdr[2:6]), nil
 }
 
 // writeEncryptedObjectFile streams r into the encrypted on-disk format at

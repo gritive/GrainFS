@@ -267,6 +267,28 @@ func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
+func TestEncryptedObjectHeader_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeEncryptedObjectHeader(&buf, 7); err != nil {
+		t.Fatalf("writeEncryptedObjectHeader: %v", err)
+	}
+	gen, err := readEncryptedObjectHeader(&buf)
+	if err != nil {
+		t.Fatalf("readEncryptedObjectHeader: %v", err)
+	}
+	if gen != 7 {
+		t.Fatalf("dek_gen mismatch: want 7 got %d", gen)
+	}
+}
+
+func TestEncryptedObjectHeader_RejectsLegacyMagic(t *testing.T) {
+	legacy := append([]byte("GFOBJENC1"), 0x00, 0x00)
+	_, err := readEncryptedObjectHeader(bytes.NewReader(legacy))
+	if err == nil {
+		t.Fatal("expected legacy magic to be rejected")
+	}
+}
+
 // corruptByteAt flips one byte at the given offset in the file at path.
 // Used to simulate on-disk ciphertext tampering for AEAD-verify regression
 // tests.
