@@ -441,6 +441,35 @@ func TestKEKStore_HasVersion_SetActiveVersion(t *testing.T) {
 	}
 }
 
+func TestDEKKeeperUsesXAESNonceWidth(t *testing.T) {
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i)
+	}
+	clusterID := make([]byte, 16)
+	k, err := NewDEKKeeper(kek, clusterID)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	plain := []byte("bulk-payload-under-dek")
+	ct, gen, err := k.Seal(plain)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	const xaesNonce, gcmTag = 24, 16
+	if len(ct) != xaesNonce+len(plain)+gcmTag {
+		t.Fatalf("ciphertext len %d, want %d (24B nonce + %d plain + 16B tag) — DEK is not XAES",
+			len(ct), xaesNonce+len(plain)+gcmTag, len(plain))
+	}
+	got, err := k.Open(ct, gen)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("round-trip mismatch: got %q want %q", got, plain)
+	}
+}
+
 func TestCanonicalWrapSetHash_DeterministicAndOrderInvariant(t *testing.T) {
 	a := []WrapSetEntry{
 		{Gen: 1, Wrap: []byte("w1")},
