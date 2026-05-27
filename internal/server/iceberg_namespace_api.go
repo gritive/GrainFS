@@ -35,21 +35,19 @@ func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 	if p, ok := store.(s3URLPrefixProvider); ok {
 		s3Prefix = p.S3URLPrefix()
 	}
-	overrides := s.icebergS3CredOverrides(ctx, s3Prefix)
-	if len(overrides) > 0 {
-		// Publish the same host:port the client just connected to as
-		// s3.endpoint. iceberg-go's REST catalog reads this to build
-		// its data-plane S3 client; without it the client falls back
-		// to the AWS public endpoint and our local parquet reads
-		// return 403 InvalidAccessKeyId. Mirror the scheme the client
-		// used so an HTTPS caller doesn't get downgraded to plaintext.
-		if host := string(c.Request.Host()); host != "" {
-			scheme := string(c.Request.Scheme())
-			if scheme == "" {
-				scheme = "http"
-			}
-			overrides["s3.endpoint"] = scheme + "://" + host
-		}
+	scheme := string(c.Request.Scheme())
+	if scheme == "" {
+		scheme = "http"
+	}
+	overrides := map[string]string{}
+	if scheme == "https" {
+		overrides = s.icebergS3CredOverrides(ctx, s3Prefix)
+	}
+	// Publish the same host:port the client just connected to as s3.endpoint.
+	// Mirror the scheme the client used so an HTTPS caller doesn't get
+	// downgraded to plaintext.
+	if host := string(c.Request.Host()); host != "" {
+		overrides["s3.endpoint"] = scheme + "://" + host
 	}
 	c.JSON(consts.StatusOK, map[string]map[string]string{
 		"defaults":  {"warehouse": wh},
@@ -57,14 +55,15 @@ func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// icebergS3CredOverrides publishes the *caller's own* IAM access_key /
-// secret_key in the Iceberg REST `/v1/config` "overrides" map so that
-// iceberg-go's REST client can build a data-plane S3 client that reads
-// parquet footers during transaction.AddFiles. Without these the client
-// falls back to the ambient AWS credential chain and gets `403
-// InvalidAccessKeyId` long before any CommitTable hits this server
-// (observed in warp iceberg `sustained`: 1832/1870 ops failed, 0 commits
-// reached the server).
+// icebergS3CredOverrides builds the *caller's own* IAM access_key / secret_key
+// overrides for the Iceberg REST `/v1/config` response. The handler only calls
+// this on HTTPS requests; plaintext HTTP responses must not publish reusable S3
+// secret material. On HTTPS, iceberg-go's REST client uses these overrides to
+// build a data-plane S3 client that reads parquet footers during
+// transaction.AddFiles. Without them the client falls back to the ambient AWS
+// credential chain and gets `403 InvalidAccessKeyId` long before any
+// CommitTable hits this server (observed in warp iceberg `sustained`:
+// 1832/1870 ops failed, 0 commits reached the server).
 //
 // The bucket is parsed from the catalog's warehouse location (e.g.
 // `s3://grainfs-tables/warehouse` → `grainfs-tables`). The caller's
