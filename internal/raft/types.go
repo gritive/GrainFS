@@ -114,9 +114,12 @@ type ServerEntry struct {
 	Suffrage ServerSuffrage
 }
 
-// Configuration is a point-in-time view of the cluster's voter set.
+// Configuration is a point-in-time view of the cluster's membership.
 type Configuration struct {
-	Servers []Server
+	Servers   []Server
+	Joint     bool
+	OldVoters []string
+	NewVoters []string
 }
 
 type Event struct{}

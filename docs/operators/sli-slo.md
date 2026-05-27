@@ -140,10 +140,14 @@ avg(grainfs_node_recovery_duration_seconds)
 - Availability < 99.5% for 15 minutes
 - P99 latency > 200ms for 15 minutes
 - Node unhealthy for > 5 minutes
+- Cluster quorum unavailable (`min(grainfs_cluster_quorum_available) == 0`)
+- Any volume is not healthy (`sum(grainfs_volumes_by_health{health!="healthy"}) > 0`)
 
 **SEV3 (Address within 1 hour):**
 - P99 latency > 100ms for 30 minutes
 - Disk usage > 80% (`grainfs_disk_used_pct{node_id="..."} > 80`)
+- Raft apply lag is sustained on any node/group (`max(grainfs_raft_apply_lag) by (node_id, group) > 0`)
+- Operator state scrape errors are increasing (`sum(increase(grainfs_operator_state_scrape_errors_total[15m])) > 0`)
 - AppendObject forward buffer rejection ratio > 1% over 5 min
   (`rate(grainfs_cluster_append_forward_buffer_rejected_total[5m]) > 0.01 * rate(grainfs_http_requests_total{handler="append_object"}[5m])`)
 - Orphan segment tombstone backlog growing for 3+ scrub cycles
@@ -223,6 +227,27 @@ incident/receipt path.
   (not quarantined). A sustained rate is a **node** disk/FD health signal, not a
   per-object corruption signal; investigate the node, not the objects.
 
+### Operator state metrics (reference)
+
+These aggregate gauges support first-response checks without high-cardinality
+resource labels:
+
+- `grainfs_server_up{node_id}` and `grainfs_server_info{node_id,version}` — process
+  visibility for each scraped node.
+- `grainfs_cluster_members{state}` — member counts by bounded voter/learner and
+  health state.
+- `grainfs_cluster_quorum_available` — `1` when healthy voters can satisfy the
+  current Raft voter majority.
+- `grainfs_raft_role{node_id,group,role}`, `grainfs_raft_term{node_id,group}`,
+  `grainfs_raft_commit_index{node_id,group}`, `grainfs_raft_applied_index{node_id,group}`,
+  and `grainfs_raft_apply_lag{node_id,group}` — current state for bounded groups
+  `meta` and primary `data`.
+- `grainfs_buckets_by_state{state}` — user bucket count and list-error state.
+- `grainfs_volumes_by_health{health}`, `grainfs_volume_capacity_bytes_total`, and
+  `grainfs_volume_allocated_bytes_total` — aggregate volume health and size.
+- `grainfs_operator_state_scrape_errors_total{source}` — scrape-time read failures
+  for optional state sources.
+
 ---
 
 ## Pre-Flight Checklist (Before "Production Ready")
@@ -239,8 +264,8 @@ make test-network-fault
 # 3. E2E smoke tests
 make test-smoke
 
-# 4. Verify current SLO compliance
-curl http://localhost:9000/metrics | grainfs_slo_compliance == 1
+# 4. Verify current operator state
+curl -s http://localhost:9000/metrics | grep -E 'grainfs_(server_up|cluster_quorum_available|volumes_by_health)'
 ```
 
 ---

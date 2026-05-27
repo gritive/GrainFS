@@ -187,6 +187,9 @@ func (m *MetaRaft) IsLeader() bool { return m.node.IsLeader() }
 // LeaderID returns the current meta-Raft leader hint, if known.
 func (m *MetaRaft) LeaderID() string { return m.node.LeaderID() }
 
+// LastApplied returns the highest meta-Raft log index applied to the FSM.
+func (m *MetaRaft) LastApplied() uint64 { return m.lastApplied.Load() }
+
 // TransferLeadership delegates to the underlying raft node. Returns
 // raft.ErrNotLeader when not the leader and raft.ErrNoPeers when there
 // are no peers to transfer to. Used by the cluster admin CLI's

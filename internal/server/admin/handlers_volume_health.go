@@ -42,6 +42,12 @@ func fetchAndAnnotateHealth(ctx context.Context, d *Deps, vols []VolumeInfo) {
 	annotateVolumeHealth(vols, all, replicas)
 }
 
+// AnnotateVolumeHealthForMetrics reuses the admin health composer for aggregate
+// scrape-time metrics without re-listing volume metadata.
+func AnnotateVolumeHealthForMetrics(ctx context.Context, d *Deps, vols []VolumeInfo) {
+	fetchAndAnnotateHealth(ctx, d, vols)
+}
+
 // fetchReplicaSummaries calls the optional VolumePlacement source and returns
 // nil on absence or error. Pulled into its own helper so handlers stay simple
 // and the silent-on-error contract is named.
