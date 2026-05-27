@@ -34,9 +34,8 @@ import (
 //
 // Receipts are pre-seeded into each node's BadgerDB before the node starts
 // (Slice 2 does not emit receipts from the scrubber yet; that wiring lands in
-// Slice 3). Primary HTTP requests use AWS SigV4; the final case documents
-// the current Phase 0 anonymous-read behavior while iam.anon-enabled remains
-// true.
+// Slice 3). Primary HTTP requests use AWS SigV4; unsigned API receipt reads
+// must be rejected.
 //
 // The test sets --heal-receipt-window=1 so only the most recent receipt on
 // node C is gossiped. The older one must resolve via broadcast fallback —
@@ -47,7 +46,6 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		signer    *v4.Signer
 		creds     aws.Credentials
 		httpURL   func(int) string
-		sockA     string
 		idLocalA  string
 		idCHot    string
 		idCOld    string
@@ -83,7 +81,6 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 			dataDirs[i] = d
 			ginkgo.DeferCleanup(removeE2EDir, d)
 		}
-		sockA = filepath.Join(dataDirs[0], "admin.sock")
 		encKeyFile := makeSharedEncryptionKeyFile(t)
 
 		// ReceiptIDs used across the test — literal ids make log output readable.
@@ -203,20 +200,14 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		gomega.Expect(status).To(gomega.Equal(http.StatusNotFound), "missing receipt must return 404, got body=%s", body)
 	})
 
-	ginkgo.It("allows unauthenticated reads while Phase 0 anonymous mode is enabled", func() {
-		// D#3 + F#16: the bootstrap SA create above auto-flipped iam.anon-enabled
-		// to false. Re-enabling anon is an operator-supported path (meta_fsm.go
-		// "Subsequent SA creates leave the flag untouched"), so verify the
-		// heal-receipt unsigned read still works once anon is back on.
-		gomega.Expect(setConfigViaUDS(sockA, "iam.anon-enabled", "true")).To(gomega.Succeed())
-
+	ginkgo.It("denies unauthenticated receipt reads", func() {
 		resp, err := http.Get(httpURL(0) + "/api/receipts/" + idLocalA)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		body, err := io.ReadAll(resp.Body)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK), "unsigned request should follow Phase 0 anonymous mode; body=%s", body)
-		gomega.Expect(string(body)).To(gomega.ContainSubstring(idLocalA))
+		gomega.Expect([]int{http.StatusUnauthorized, http.StatusForbidden}).To(gomega.ContainElement(resp.StatusCode),
+			"unsigned receipt request must be denied; body=%s", body)
 	})
 })
 

@@ -10,9 +10,8 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 )
 
-// stubAnonCfg is a minimal ConfigReader test stub. It serves only the
-// "iam.anon-enabled" key via an atomic.Bool so the test can flip it
-// during the test body without locks.
+// stubAnonCfg is a minimal ConfigReader test stub. The old global anonymous
+// config key is gone, so flips here must not affect established bindings.
 type stubAnonCfg struct {
 	anonEnabled atomic.Bool
 }
@@ -24,9 +23,6 @@ func newStubAnonCfg(initial bool) *stubAnonCfg {
 }
 
 func (c *stubAnonCfg) GetBool(key string) (bool, bool) {
-	if key == "iam.anon-enabled" {
-		return c.anonEnabled.Load(), true
-	}
 	return false, false
 }
 
@@ -34,9 +30,7 @@ func (c *stubAnonCfg) flip(v bool) {
 	c.anonEnabled.Store(v)
 }
 
-// TestAnonSession_FlipAtPhase2_NextOpRejected — anon mount, first GETATTR ok,
-// flip iam.anon-enabled to false, next GETATTR returns NFS4ERR_ACCESS.
-func TestAnonSession_FlipAtPhase2_NextOpRejected(t *testing.T) {
+func TestAnonSession_ConfigFlipDoesNotRevokeBinding(t *testing.T) {
 	msaStore := newTestMountSAStore(t) // empty pool
 
 	cfg := newStubAnonCfg(true)
@@ -60,20 +54,17 @@ func TestAnonSession_FlipAtPhase2_NextOpRejected(t *testing.T) {
 		currentPath: "/default",
 	}
 
-	// First GETATTR succeeds (anon-enabled=true).
+	// First GETATTR succeeds.
 	res := d.opGetAttr(nil)
-	require.Equal(t, NFS4_OK, res.Status, "first GETATTR must succeed while anon-enabled=true")
+	require.Equal(t, NFS4_OK, res.Status, "first GETATTR must succeed")
 
-	// Phase 2 flip: anon disabled.
 	cfg.flip(false)
 
-	// Next GETATTR must be rejected.
 	res = d.opGetAttr(nil)
-	assert.Equal(t, NFS4ERR_ACCESS, res.Status, "next GETATTR must be ACCESS after flip")
+	assert.Equal(t, NFS4_OK, res.Status, "removed anon config must not revoke established binding")
 }
 
-// TestAnonSession_NoFlip_OpsContinue — anon mount, multiple ops succeed
-// while anon-enabled stays true.
+// TestAnonSession_NoFlip_OpsContinue — anon mount, multiple ops succeed.
 func TestAnonSession_NoFlip_OpsContinue(t *testing.T) {
 	msaStore := newTestMountSAStore(t)
 
@@ -99,15 +90,13 @@ func TestAnonSession_NoFlip_OpsContinue(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		res := d.opGetAttr(nil)
-		require.Equal(t, NFS4_OK, res.Status, "GETATTR #%d must succeed while anon-enabled=true", i)
+		require.Equal(t, NFS4_OK, res.Status, "GETATTR #%d must succeed", i)
 		res = d.opAccess(nil)
-		require.Equal(t, NFS4_OK, res.Status, "ACCESS #%d must succeed while anon-enabled=true", i)
+		require.Equal(t, NFS4_OK, res.Status, "ACCESS #%d must succeed", i)
 	}
 }
 
-// TestNonAnonSession_FlipAtPhase2_OpsContinue — mount-sa-bound session is
-// unaffected by the iam.anon-enabled flip.
-func TestNonAnonSession_FlipAtPhase2_OpsContinue(t *testing.T) {
+func TestNonAnonSession_ConfigFlipOpsContinue(t *testing.T) {
 	msaStore := newTestMountSAStore(t)
 	require.NoError(t, msaStore.ApplyCreate(
 		mountsastore.MountSA{Name: "alice-mount", NumericUID: 200001}))
@@ -136,7 +125,7 @@ func TestNonAnonSession_FlipAtPhase2_OpsContinue(t *testing.T) {
 	res := d.opGetAttr(nil)
 	require.Equal(t, NFS4_OK, res.Status)
 
-	// Flip anon-enabled false.
+	// Flip the inert legacy test config.
 	cfg.flip(false)
 
 	// Mount-SA-bound session must continue.

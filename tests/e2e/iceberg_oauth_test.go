@@ -72,9 +72,8 @@ func describeIcebergOAuthContext(name string, factory func(testing.TB) *icebergT
 // required for S3 access when SigV4 succeeds.
 //
 // The spec-original "AnonPhase0" anon-PUT-to-default-bucket assertion is
-// covered separately by Task 71 (Phase 0 magical-moment quickstart) which
-// boots a fresh iam.anon-enabled=true fixture; this case does not duplicate
-// that scope.
+// covered separately by Task 71 (Phase 0 magical-moment quickstart); this case
+// does not duplicate that scope.
 func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	bucket := tgt.uniqueWarehouse(t, "sigv4-nobearer")

@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"sort"
@@ -746,22 +745,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		if f.iamApplier == nil {
 			return fmt.Errorf("meta_fsm: IAM applier not configured")
 		}
-		wasEmpty := f.iamStore.IsEmpty()
 		if err := f.iamApplier.ApplySACreate(cmd.DataBytes()); err != nil {
 			return err
-		}
-		// D#3 + F#16: first SA create atomically flips iam.anon-enabled → false.
-		// Subsequent SA creates leave the flag untouched so an operator who
-		// re-enables anon stays in control. ApplySACreate is idempotent on
-		// duplicate sa_id (returns nil without inserting), so we guard the
-		// store is actually non-empty after the call.
-		if wasEmpty && f.cfgStore != nil && !f.iamStore.IsEmpty() {
-			if err := f.cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
-				log.Warn().Err(err).Msg("meta_fsm: failed to flip iam.anon-enabled on first SA create")
-				// Don't fail the apply — the SA is committed. Operator can re-set manually.
-			} else if f.policyResolver != nil {
-				f.policyResolver.Invalidate(nil, nil)
-			}
 		}
 		return nil
 	case clusterpb.MetaCmdTypeIAMSADelete:

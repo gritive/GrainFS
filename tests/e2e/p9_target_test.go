@@ -190,8 +190,7 @@ func drainP9(f p9.File, maxBytes int) ([]byte, error) {
 // ensureBootstrapped guarantees the target's admin UDS has an admin SA
 // (Phase 2). For cluster targets this is a no-op (cluster fixture bootstraps
 // at start). For single-node Phase 0 targets, this seeds trusted-proxy.cidr
-// and creates the first SA, which atomically flips iam.anon-enabled to false
-// (Phase 2 magical-moment transition — F#26).
+// and creates the first SA.
 func ensureBootstrapped(t testing.TB, tgt *p9Target) {
 	t.Helper()
 	if tgt.isCluster {

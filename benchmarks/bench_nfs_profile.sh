@@ -94,9 +94,8 @@ sleep "$NFS_SERVER_WARMUP_SLEEP"
 
 echo ""
 echo "=== preparing bucket export ($BUCKET) ==="
-# NFS bench measures NFS server perf, not S3/IAM auth — keep anon-mode (default)
-# so mount works without mount-SA. v0.0.311.0 added a mount-SA gate that the
-# first SA create flips on; skipping bootstrap leaves iam.anon-enabled=true.
+# NFS bench measures NFS server perf, not S3/IAM auth. Skip service-account
+# bootstrap so the export is exercised through the anonymous mount path.
 bench_create_bucket_admin_retry "$BINARY" "$DATA_DIR" "$BUCKET"
 "$BINARY" nfs export add "$BUCKET" --endpoint "$DATA_DIR/admin.sock" || true
 

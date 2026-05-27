@@ -289,7 +289,7 @@ func TestRequestAuthorizer_PreLoad_AnonAllowRoutesToRecordAnonAllow(t *testing.T
 	r := NewRequestAuthorizer(
 		stubStore{enabled: true},
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) {
-			return true, AuthzDetail{AnonAllow: true, Reason: "iam.anon-enabled=true"}
+			return true, AuthzDetail{AnonAllow: true, Reason: ReasonDefaultBucketImplicitAnon}
 		},
 		stubPolicy{allow: true},
 		audit,

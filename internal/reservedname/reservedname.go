@@ -14,7 +14,7 @@ func IsInternalBucket(bucket string) bool {
 }
 
 // DefaultBucketName is the auto-created bucket that allows anonymous access
-// regardless of iam.anon-enabled. Tested in tests/e2e/phase0_quickstart_test.go.
+// regardless of cluster bootstrap state. Tested in tests/e2e/phase0_quickstart_test.go.
 //
 // This constant is the single source of truth shared by the two trust-boundary
 // sites that gate anon access to /default:

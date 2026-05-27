@@ -12,7 +12,6 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -25,7 +24,7 @@ type objectFile struct {
 	meta        *storage.Object
 	exportStore exportGetter // nil = no gate
 	binding     fhBinding    // inherited from the bucketFile that produced this file
-	cfg         ConfigReader // inherited; nil = no anon flip gate
+	cfg         ConfigReader // inherited compatibility reader; anonymous access is policy-driven
 
 	dirtyLoaded bool
 	dirty       bool
@@ -40,24 +39,11 @@ func (f *objectFile) isReadOnly() bool {
 	return ok && cfg.ReadOnly
 }
 
-// anonRejected mirrors bucketFile.anonRejected for objectFile. See the
-// bucketFile method for the full contract, including the FU#6 carve-out for
-// the "default" bucket's D#2 implicit-anon promise.
+// anonRejected mirrors bucketFile.anonRejected for objectFile. The global
+// anonymous transition no longer exists, so established anonymous 9P bindings
+// are not revoked by cluster config state.
 func (f *objectFile) anonRejected() bool {
-	if f.cfg == nil {
-		return false
-	}
-	if f.binding.saID != "" {
-		return false
-	}
-	if f.bucket == reservedname.DefaultBucketName {
-		return false
-	}
-	anon, ok := f.cfg.GetBool("iam.anon-enabled")
-	if !ok {
-		return false
-	}
-	return !anon
+	return false
 }
 
 const maxFallbackObjectSize = 64 << 20

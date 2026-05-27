@@ -51,6 +51,41 @@ func TestAuthRejectsUnsigned(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+func TestAuthRejectsUnsignedAPIMutation(t *testing.T) {
+	base := setupTestServerWithOptions(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}),
+	)
+
+	body := bytes.NewBufferString(`{"raft_addr":"127.0.0.1:7001","peers":"127.0.0.1:7001","cluster_key":"x"}`)
+	resp, err := http.Post(base+"/api/cluster/join", "application/json", body)
+	require.NoError(t, err, "request")
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestAuthRejectsUnsignedAPIMutationMultipart(t *testing.T) {
+	base := setupTestServerWithOptions(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}),
+	)
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	require.NoError(t, w.WriteField("raft_addr", "127.0.0.1:7001"))
+	require.NoError(t, w.WriteField("peers", "127.0.0.1:7001"))
+	require.NoError(t, w.WriteField("cluster_key", "x"))
+	require.NoError(t, w.Close())
+
+	req, err := http.NewRequest(http.MethodPost, base+"/api/cluster/join", &body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "request")
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 func TestAuthAcceptsValidSignature(t *testing.T) {
 	// D#8: CreateBucket is admin-UDS-only. Pre-create via backend; verify signed
 	// object PUT still works.

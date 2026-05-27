@@ -982,8 +982,8 @@ grainfs audit query "
 
 ### TLS posture gate for authenticated clusters
 
-When S3 auth is enabled (`iam.anon-enabled=false`), GrainFS refuses to start
-NFS/9P listeners unless at least one of the following is true:
+For network-exposed deployments, run NFS/9P behind a private network boundary
+or TLS-terminating proxy. Recommended hardening:
 
 - A TLS certificate is on disk (`<data>/tls/cert.pem`), or
 - `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
