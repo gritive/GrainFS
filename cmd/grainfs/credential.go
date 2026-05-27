@@ -14,8 +14,8 @@ var credentialCmd = &cobra.Command{
 var credentialCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a protocol credential",
-	Example: `  grainfs credential create --sa sa_app --protocol nbd --resource vol1 --mode rw
-  grainfs credential create --sa sa_app --protocol s3 --resource bucket1 --mode ro --expires-at 2026-06-01T00:00:00Z`,
+	Example: `  grainfs credential create --sa sa_app --protocol nbd --resource volume/vol1 --mode rw
+  grainfs credential create --sa sa_app --protocol s3 --resource bucket/bucket1 --mode ro --expires-at 2026-06-01T00:00:00Z`,
 	RunE: runCredentialCreate,
 }
 
@@ -58,7 +58,7 @@ func init() {
 
 	credentialCreateCmd.Flags().String("sa", "", "service account id")
 	credentialCreateCmd.Flags().String("protocol", "", "protocol: s3, iceberg, nfs, 9p, or nbd")
-	credentialCreateCmd.Flags().String("resource", "", "resource name: bucket, warehouse, or volume")
+	credentialCreateCmd.Flags().String("resource", "", "resource id: bucket/<name>, catalog/<name>, or volume/<name>")
 	credentialCreateCmd.Flags().String("mode", "", "access mode: ro or rw")
 	credentialCreateCmd.Flags().String("expires-at", "", "optional RFC3339 expiration time")
 	credentialListCmd.Flags().String("sa", "", "filter by service account id")

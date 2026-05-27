@@ -22,7 +22,7 @@ func TestRunCreatePostsCredentialAndPrintsSecret(t *testing.T) {
 			"id":"pc_123",
 			"sa_id":"sa_app",
 			"protocol":"nbd",
-			"resource":"vol1",
+			"resource":"volume/vol1",
 			"mode":"rw",
 			"secret":"pcsec_once",
 			"connection_hint":{"export_name":"vol1@pcsec_once"}
@@ -42,11 +42,11 @@ func TestRunCreatePostsCredentialAndPrintsSecret(t *testing.T) {
 		BaseOptions: BaseOptions{Endpoint: "ignored.sock", Stdout: &out},
 		SAID:        "sa_app",
 		Protocol:    "nbd",
-		Resource:    "vol1",
+		Resource:    "volume/vol1",
 		Mode:        "rw",
 	})
 	require.NoError(t, err)
-	require.Equal(t, CreateReq{SAID: "sa_app", Protocol: "nbd", Resource: "vol1", Mode: "rw"}, got)
+	require.Equal(t, CreateReq{SAID: "sa_app", Protocol: "nbd", Resource: "volume/vol1", Mode: "rw"}, got)
 	require.Contains(t, out.String(), "id:              pc_123")
 	require.Contains(t, out.String(), "secret:          pcsec_once")
 	require.Contains(t, out.String(), "connection_hint: export_name=vol1@pcsec_once")
@@ -59,7 +59,7 @@ func TestClientListSendsFilters(t *testing.T) {
 		require.Equal(t, "sa_app", r.URL.Query().Get("sa_id"))
 		require.Equal(t, "nbd", r.URL.Query().Get("protocol"))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"credentials":[{"id":"pc_123","sa_id":"sa_app","protocol":"nbd","resource":"vol1","mode":"rw"}]}`))
+		_, _ = w.Write([]byte(`{"credentials":[{"id":"pc_123","sa_id":"sa_app","protocol":"nbd","resource":"volume/vol1","mode":"rw"}]}`))
 	}))
 	t.Cleanup(srv.Close)
 

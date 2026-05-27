@@ -78,7 +78,7 @@ resource, and access mode:
 grainfs credential create \
   --sa <sa_id> \
   --protocol nbd \
-  --resource v1 \
+  --resource volume/v1 \
   --mode rw
 ```
 
@@ -183,7 +183,7 @@ NBD requires a Linux client.
 
 ```bash
 grainfs volume create v1 --size 10Gi
-grainfs credential create --sa <sa_id> --protocol nbd --resource v1 --mode rw
+grainfs credential create --sa <sa_id> --protocol nbd --resource volume/v1 --mode rw
 
 sudo modprobe nbd
 sudo nbd-client localhost 10809 /dev/nbd0 -N v1
