@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.358.0] - 2026-05-27
+
+### Added
+
+- Encryption gained an object-independent domain for content-addressed (CAS) chunks:
+  a dedicated AAD domain tag plus a content-locator-keyed AAD builder, so a single
+  stored copy of a deduplicated chunk can be decrypted by every object that references
+  it, regardless of which bucket or key it came from. A transition primitive can
+  re-seal a chunk from its legacy object-scoped binding into the CAS domain under the
+  active key generation. This is groundwork for background deduplication; nothing in
+  the write or read path uses it yet, so current behavior is unchanged until later
+  phases wire it in.
+
 ## [0.0.357.0] - 2026-05-27
 
 ### Added
