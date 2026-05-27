@@ -150,5 +150,54 @@ func bootKEKRotationLeader(state *bootState) error {
 		Str("audit_log", auditPath).
 		Str("keystore_dir", keystoreDir).
 		Msg("KEK rotation leader wired")
+
+	// 6. Wire the CapabilityGate direct-RPC signed-assertion path. Without this
+	//    CapabilityGate.Allow falls back to gossip evidence; the signed
+	//    GetCapabilities RPC (cluster-KEK-verified, AAD-bound) would stay dead
+	//    code in production. The gate's Allow call is the AUTHORITATIVE entry
+	//    gate for KEK rotate/retire/prune (clusteradmin EncryptionKEKHandler
+	//    .checkGate → gate.Allow, before ProposeKEKRotate). The propose-time
+	//    re-check in meta_raft.validateGatePlanForProposal stays gossip-based on
+	//    purpose: it is a cheap "voter config still current + capability still
+	//    advertised" staleness probe (ValidatePlanStillCurrent + Require-
+	//    MetaRaftCapability), not the primary gate. Leaving it as-is avoids a
+	//    second signed fan-out on the already-Allow-gated propose path.
+	//
+	//    Guarded by the kekStore != nil prerequisite above: when encryption is
+	//    off there is no cluster KEK to sign/verify assertions, so the gate
+	//    correctly stays on gossip.
+	if err := wireCapabilityGateDirectProbe(state, raftServerID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// wireCapabilityGateDirectProbe registers the StreamCapabilityProbe handler on
+// the shared QUIC transport and populates the CapabilityGate's direct signed-
+// assertion path. Extracted from bootKEKRotationLeader so the wiring contract
+// is directly unit-testable (capability_gate_wiring_test.go). The handler and
+// the gate's per-voter probe target MUST use the SAME raft ServerID
+// (raftServerID = MetaRaft.Node().ID()) — the gate's Allow loop dials
+// srv.ID (raft voter IDs) and the handler refuses requests whose
+// ExpectedServerID does not match its own serverID.
+func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error {
+	if state.capabilityGate == nil {
+		return nil
+	}
+	clusterID := state.handshakeVerifier.ClusterID()
+
+	handler := cluster.NewCapabilityProbeHandler(
+		raftServerID,
+		state.cfg.Version,
+		clusterID,
+		state.kekStore,
+		state.metaRaft.FSM(),
+	)
+	state.quicTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+
+	dialer := cluster.NewQUICCapabilityProbeDialer(state.quicTransport)
+	state.capabilityGate.WithDirectProbe(clusterID, state.kekStore, dialer)
+
+	log.Info().Str("server_id", raftServerID).Msg("capability gate direct-RPC signed-assertion path wired")
 	return nil
 }
