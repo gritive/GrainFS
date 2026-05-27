@@ -78,6 +78,32 @@ func TestListBuckets(t *testing.T) {
 	require.Len(t, buckets, 2)
 }
 
+func TestLocalBackend_DEKKeeperSegEnc_RoundTrip(t *testing.T) {
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x88}, encrypt.KEKSize), bytes.Repeat([]byte{0x99}, 16))
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	b, err := NewLocalBackendWithDEKKeeper(t.TempDir(), keeper, bytes.Repeat([]byte{0x99}, 16))
+	if err != nil {
+		t.Fatalf("NewLocalBackendWithDEKKeeper: %v", err)
+	}
+	defer b.Close()
+
+	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"), "CreateBucket")
+
+	data := []byte("hello dek")
+	_, err = b.PutObject(context.Background(), "test-bucket", "greeting.txt", bytes.NewReader(data), "text/plain")
+	require.NoError(t, err, "PutObject")
+
+	rc, _, err := b.GetObject(context.Background(), "test-bucket", "greeting.txt")
+	require.NoError(t, err, "GetObject")
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err, "ReadAll")
+	require.Equal(t, data, got)
+}
+
 func TestPutAndGetObject(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")
