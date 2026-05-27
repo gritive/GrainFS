@@ -21,7 +21,7 @@ ATTACH 'warehouse' AS grainfs_iceberg (
 
 The DuckDB 1.5.2+ iceberg extension supports these options for REST Catalog attach:
 
-- `AUTHORIZATION_TYPE`: GrainFS requires `sigv4`. `none` is no longer accepted on `/iceberg/*` after the v0.0.255.0 BREAKING change. `oauth2` is also accepted by DuckDB but GrainFS does not implement an OAuth2 token endpoint.
+- `AUTHORIZATION_TYPE`: GrainFS accepts `sigv4` and `oauth2`. `none` is no longer accepted on `/iceberg/*` after the v0.0.255.0 BREAKING change. For OAuth2 setup, see [`docs/users/oauth2-iceberg-quickstart.md`](../users/oauth2-iceberg-quickstart.md).
 - `SIGV4_REGION`: signing region (GrainFS uses `us-east-1`).
 - `SIGV4_SERVICE`: signing service (GrainFS uses `s3` to share scope with the S3 endpoint).
 - Credentials come from a separate `CREATE SECRET ... TYPE s3` statement; the iceberg extension picks them up automatically when `AUTHORIZATION_TYPE 'sigv4'` is in effect.

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.371.0] - 2026-05-28
+
+### Fixed
+
+- OAuth token issuance now evaluates `aws:SourceIp` against the direct peer by default and the existing trusted-proxy validator when served through the Iceberg gateway, preventing spoofed `X-Forwarded-For` headers from bypassing service-account location policies.
+
 ## [0.0.370.0] - 2026-05-28
 
 ### Changed
