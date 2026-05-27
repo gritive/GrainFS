@@ -120,18 +120,44 @@ func (r *peerRegistry) export() []peerEntry {
 
 // importEntries rebuilds the registry from a snapshot's entries. It REPLACES
 // the byNodeID + bySPKI indexes wholesale (state restore — NOT a register*
-// flow, so the uniqueness/rebind guards are intentionally bypassed). The deny
-// set is left untouched (it is not part of the snapshot; see Task 5 report).
-// State and PresentsPerNode are preserved verbatim.
-func (r *peerRegistry) importEntries(entries []peerEntry) {
+// flow). The deny set is left untouched (it is not part of the snapshot; see
+// Task 5 report). State and PresentsPerNode are preserved verbatim.
+//
+// Validation: a corrupt meta snapshot is fatal, so importEntries hard-errors on
+// any malformed/inconsistent entry BEFORE mutating the live indexes (build into
+// locals, commit only if every entry passes — otherwise the registry would be
+// left half-cleared). Checks: non-empty node ID; valid State enum; SPKI not
+// zero (a short SPKI copy zero-pads, so zero is the corruption signal — the
+// decode loop in meta_fsm_snapshot.go also rejects wrong-length SPKI upstream);
+// no duplicate node ID; no duplicate SPKI (so bySPKI can never point at two
+// node-ids). Deterministic across nodes: same bytes → same error.
+func (r *peerRegistry) importEntries(entries []peerEntry) error {
+	byNodeID := make(map[string]peerEntry, len(entries))
+	bySPKI := make(map[[32]byte]string, len(entries))
+	for i, e := range entries {
+		if e.NodeID == "" {
+			return fmt.Errorf("importEntries: entry[%d] has empty node ID", i)
+		}
+		if e.State != peerStatePendingLearner && e.State != peerStateMember {
+			return fmt.Errorf("importEntries: node %s has invalid state %d", e.NodeID, e.State)
+		}
+		if e.SPKI == ([32]byte{}) {
+			return fmt.Errorf("importEntries: node %s has zero/malformed SPKI", e.NodeID)
+		}
+		if _, dup := byNodeID[e.NodeID]; dup {
+			return fmt.Errorf("importEntries: duplicate node ID %s", e.NodeID)
+		}
+		if owner, dup := bySPKI[e.SPKI]; dup {
+			return fmt.Errorf("importEntries: duplicate SPKI shared by node %s and node %s", owner, e.NodeID)
+		}
+		byNodeID[e.NodeID] = e
+		bySPKI[e.SPKI] = e.NodeID
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.byNodeID = make(map[string]peerEntry, len(entries))
-	r.bySPKI = make(map[[32]byte]string, len(entries))
-	for _, e := range entries {
-		r.byNodeID[e.NodeID] = e
-		r.bySPKI[e.SPKI] = e.NodeID
-	}
+	r.byNodeID = byNodeID
+	r.bySPKI = bySPKI
+	return nil
 }
 
 // spkiOwner returns the node-id that owns an SPKI (Task 5 uses this).

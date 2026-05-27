@@ -1,6 +1,9 @@
 package cluster
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func spki(b byte) [32]byte { var s [32]byte; s[0] = b; return s }
 
@@ -226,5 +229,105 @@ func TestApplyRegisterMember_FiresOnPeersChanged(t *testing.T) {
 	}
 	if fsm.Peers().byNodeID["n"].State != peerStateMember {
 		t.Fatal("applied RegisterMember must register as member")
+	}
+}
+
+func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
+	good := func() []peerEntry {
+		return []peerEntry{
+			{NodeID: "n1", SPKI: spki(1), Address: "10.0.0.1:9000", State: peerStateMember},
+			{NodeID: "n2", SPKI: spki(2), Address: "10.0.0.2:9000", State: peerStatePendingLearner},
+		}
+	}
+
+	cases := []struct {
+		name    string
+		entries []peerEntry
+		wantErr string
+	}{
+		{
+			name:    "valid entries import cleanly",
+			entries: good(),
+			wantErr: "",
+		},
+		{
+			name: "zero/malformed SPKI (31-byte copy zero-pads)",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: [32]byte{}, Address: "a", State: peerStateMember},
+			},
+			wantErr: "zero/malformed SPKI",
+		},
+		{
+			name: "two entries same SPKI different node-id",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: spki(7), Address: "a", State: peerStateMember},
+				{NodeID: "n2", SPKI: spki(7), Address: "b", State: peerStateMember},
+			},
+			wantErr: "duplicate SPKI",
+		},
+		{
+			name: "two entries same node-id",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: spki(1), Address: "a", State: peerStateMember},
+				{NodeID: "n1", SPKI: spki(2), Address: "b", State: peerStateMember},
+			},
+			wantErr: "duplicate node ID",
+		},
+		{
+			name: "empty node ID",
+			entries: []peerEntry{
+				{NodeID: "", SPKI: spki(1), Address: "a", State: peerStateMember},
+			},
+			wantErr: "empty node ID",
+		},
+		{
+			name: "invalid state enum",
+			entries: []peerEntry{
+				{NodeID: "n1", SPKI: spki(1), Address: "a", State: peerState(99)},
+			},
+			wantErr: "invalid state",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newPeerRegistry()
+			// Seed prior state so we can assert it is untouched on error (validate
+			// BEFORE mutating — no half-cleared registry).
+			if err := r.importEntries([]peerEntry{{NodeID: "seed", SPKI: spki(200), Address: "s", State: peerStateMember}}); err != nil {
+				t.Fatalf("seed import: %v", err)
+			}
+
+			err := r.importEntries(tc.entries)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want success, got error: %v", err)
+				}
+				// Consistency: no SPKI maps to two node-ids.
+				if len(r.bySPKI) != len(tc.entries) {
+					t.Fatalf("bySPKI len %d, want %d", len(r.bySPKI), len(tc.entries))
+				}
+				for s, owner := range r.bySPKI {
+					if got := r.byNodeID[owner].SPKI; got != s {
+						t.Fatalf("bySPKI[%x]=%s but byNodeID[%s].SPKI=%x (inconsistent)", s[:2], owner, owner, got[:2])
+					}
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+			// On error the registry must be unchanged (seed still present, no
+			// malformed entry leaked in).
+			if _, ok := r.lookupByNodeID("seed"); !ok {
+				t.Fatal("registry was mutated on error: seed entry lost")
+			}
+			if len(r.byNodeID) != 1 {
+				t.Fatalf("registry mutated on error: byNodeID len %d, want 1 (seed only)", len(r.byNodeID))
+			}
+		})
 	}
 }

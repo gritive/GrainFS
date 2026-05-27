@@ -577,6 +577,13 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		if !snap.Peers(&peerFB, i) {
 			return fmt.Errorf("meta_fsm: Restore: peers[%d] decode failed", i)
 		}
+		// SPKI MUST be exactly 32 bytes. copy() into [32]byte would silently
+		// truncate/zero-pad a malformed length, so reject BEFORE the copy — a
+		// corrupt meta snapshot is fatal, matching the decode-failure convention
+		// above (deterministic across nodes: same bytes → same hard-error).
+		if n := len(peerFB.SpkiBytes()); n != 32 {
+			return fmt.Errorf("meta_fsm: Restore: peers[%d] SPKI length %d, want 32", i, n)
+		}
 		var spki [32]byte
 		copy(spki[:], peerFB.SpkiBytes())
 		newPeers = append(newPeers, peerEntry{
@@ -776,7 +783,9 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// install and the composer silently drops them → partition. The registry has
 	// its own mutex, so importEntries runs outside f.mu. firePeersChanged
 	// snapshots the callback under RLock and invokes it outside (existing pattern).
-	f.peers.importEntries(newPeers)
+	if err := f.peers.importEntries(newPeers); err != nil {
+		return fmt.Errorf("meta_fsm: Restore: peer registry import: %w", err)
+	}
 	f.firePeersChanged()
 
 	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
