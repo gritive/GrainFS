@@ -1937,16 +1937,6 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	if storage.IsInternalBucket(bucket) {
-		f, err := os.Open(b.currentInternalObjectPath(bucket, key).path)
-		if err == nil {
-			defer f.Close()
-			return f.ReadAt(buf, offset)
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return 0, err
-		}
-	}
 
 	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
@@ -4482,29 +4472,6 @@ func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObje
 	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: b.ks().ObjectMetaKey(bucket, key)}
 	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
 	return actual.(internalObjectPath)
-}
-
-func (b *DistributedBackend) currentInternalObjectPath(bucket, key string) internalObjectPath {
-	objPath := b.internalObjectPath(bucket, key)
-	_ = b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.ks().LatestKey(bucket, key))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			versionID := string(v)
-			if versionID == "" {
-				return nil
-			}
-			objPath = internalObjectPath{
-				path:    objPath.path,
-				dir:     objPath.dir,
-				metaKey: b.ks().ObjectMetaKeyV(bucket, key, versionID),
-			}
-			return nil
-		})
-	})
-	return objPath
 }
 
 // objectPath returns the legacy-unversioned local path for a full-object copy.
