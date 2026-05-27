@@ -113,13 +113,17 @@ func bootMetaRaftWiring(state *bootState) error {
 	// keys.d/node.key.enc once (genesis/normal boot included) and reloads it on
 	// later boots, recording the per-node SPKI. The node does NOT yet present
 	// this identity — accept-side foundation only. Task 6 consumes perNodeSPKI.
-	// Skipped when encryption is not wired (nil store) or identity inputs are
-	// missing (test configs); production always has all three.
-	if state.kekStore != nil && len(state.clusterID) > 0 && state.nodeID != "" {
+	// Skipped when the static encryption key is not wired (test configs) or
+	// identity inputs are missing; production always has all three. node.key.enc
+	// is sealed under the static encryption.key (never rotates/prunes), so a KEK
+	// rotate+prune can no longer brick the node. kekStore is passed only for the
+	// back-compat migration of Phase-2 KEK-gen-sealed keys.
+	if len(state.cfg.RawEncryptionKey) == 32 && len(state.clusterID) > 0 && state.nodeID != "" {
 		spki, err := ensureNodeIdentity(
 			state.cfg.DataDir,
 			hex.EncodeToString(state.clusterID),
 			state.nodeID,
+			state.cfg.RawEncryptionKey,
 			state.kekStore,
 		)
 		if err != nil {
