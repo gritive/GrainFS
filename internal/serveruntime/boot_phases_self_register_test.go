@@ -2,11 +2,23 @@ package serveruntime
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// erroringRegistrar always fails ProposeRegisterMember and records that it was
+// called, so the non-fatal error path can be asserted as actually exercised.
+type erroringRegistrar struct {
+	called bool
+}
+
+func (e *erroringRegistrar) ProposeRegisterMember(_ context.Context, _ string, _ [32]byte, _ string, _ bool) error {
+	e.called = true
+	return errors.New("propose failed: leader churn")
+}
 
 // recordingRegistrar captures ProposeRegisterMember calls for assertions.
 type recordingRegistrar struct {
@@ -61,5 +73,14 @@ func TestSelfRegisterMember_ProposesOwnSPKI(t *testing.T) {
 		require.NoError(t, selfRegisterMember(context.Background(), reg, "node-a", spki, "10.0.0.1:7000"))
 		require.Len(t, reg.calls, 2)
 		assert.Equal(t, reg.calls[0], reg.calls[1])
+	})
+
+	t.Run("propose error is NON-FATAL (logged, boot continues)", func(t *testing.T) {
+		reg := &erroringRegistrar{}
+		// selfRegisterMemberNonFatal must swallow the propose error so boot does
+		// not abort: a follower restart during leader churn must not boot-loop.
+		err := selfRegisterMemberNonFatal(context.Background(), reg, "node-a", spki, "10.0.0.1:7000")
+		require.NoError(t, err, "self-registration must be non-fatal")
+		require.True(t, reg.called, "error path must have been exercised (propose attempted)")
 	})
 }

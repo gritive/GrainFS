@@ -50,9 +50,31 @@ func selfRegisterMember(ctx context.Context, mr memberSelfRegistrar, nodeID stri
 // forwarder so a follower's Propose reaches the leader) AND after invite-join
 // Phase-2 membership promotion (also inside bootWALAndForwarders). Wired last
 // in run.go's post-join sequence, after bootNodeServices.
+//
+// NON-FATAL: a propose failure (leader churn, transient forwarder failure, leader
+// outage) must NOT boot-loop the node. Self-registration is best-effort and
+// recoverable — the node is still reachable via PSK (the PSK SPKI stays in the
+// accept-set), it just isn't in the per-node accept-set union yet, which is
+// harmless in the foundation. So we log at warn and CONTINUE boot on error.
+// TODO(phase3-revocation): bounded post-boot retry.
 func bootSelfRegisterMember(ctx context.Context, state *bootState) error {
 	if state.metaRaft == nil {
-		return selfRegisterMember(ctx, nil, state.nodeID, state.perNodeSPKI, state.raftAddr)
+		return selfRegisterMemberNonFatal(ctx, nil, state.nodeID, state.perNodeSPKI, state.raftAddr)
 	}
-	return selfRegisterMember(ctx, state.metaRaft, state.nodeID, state.perNodeSPKI, state.raftAddr)
+	return selfRegisterMemberNonFatal(ctx, state.metaRaft, state.nodeID, state.perNodeSPKI, state.raftAddr)
+}
+
+// selfRegisterMemberNonFatal wraps selfRegisterMember and swallows any propose
+// error (logging it at warn) so boot continues. It is the boot-fatal/non-fatal
+// boundary, kept on the memberSelfRegistrar interface so it is unit-testable with
+// an erroring stub. It ALWAYS returns nil; the only error selfRegisterMember can
+// raise is a propose failure, which is best-effort/recoverable.
+func selfRegisterMemberNonFatal(ctx context.Context, mr memberSelfRegistrar, nodeID string, spki [32]byte, addr string) error {
+	if err := selfRegisterMember(ctx, mr, nodeID, spki, addr); err != nil {
+		log.Warn().
+			Err(err).
+			Str("node_id", nodeID).
+			Msg("zero-ca: self-registration failed; continuing boot (best-effort, PSK-bridged)")
+	}
+	return nil
 }
