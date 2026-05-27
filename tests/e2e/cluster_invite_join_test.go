@@ -218,20 +218,59 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 			gomega.Expect(filepath.Join(joinerDir, "keys.d", "node.key.enc")).To(gomega.BeAnExistingFile())
 		})
 
-		// S3 round-trip THROUGH the joined node is deferred on a DISTINCT, newly
-		// surfaced bug (NOT the original "F3/F4 gen-0 DEK replication" claim, which
-		// was wrong). With the meta-raft bootstrap + seed-gate fixes the joiner now
-		// reaches WaitDEKReady, becomes a voter, AND serves writes: a PutObject
-		// through the joiner's own S3 endpoint succeeds (forwarded to the leader and
-		// committed). The READ path, however, fails persistently for the full window
-		// with HTTP 500 "not the leader": the freshly-joined node is a meta-raft
-		// voter but the bucket's DATA-group membership is never extended to include
-		// it, so GetObject routed to the joiner has no local/forwardable replica.
-		// (The legacy dynamic-join path expands data-group membership; the Zero-CA
-		// invite-join does not yet.) Un-skip once invite-join extends data-group
-		// membership to the new voter. Suspect code path: cluster shard-group /
-		// data-group reconfiguration on a freshly-joined node (NOT DEK replication).
-		ginkgo.PIt("serves an S3 PutObject/GetObject round-trip through the joined node (deferred: data-group membership not extended to the new voter — GET routes to a node with no replica, persistent 'not the leader')", func() {
+		// Full S3 round-trip THROUGH the invite-joined node. Both write and read
+		// are routed to the joiner's own S3 endpoint. PutObject through the joiner
+		// works (forwarded to the group leader). GetObject through the joiner still
+		// returns HTTP 500 "not the leader": the router-sync parity fix makes the
+		// joiner AWARE of bucket→group assignments, but the invite-join Phase-2 path
+		// does not yet extend DATA-GROUP membership for the new voter (the joiner is
+		// a meta-raft voter but not a member/leader of any data group, and no
+		// read-forward fallback fires on this path). Un-skip once invite-join Phase-2
+		// expands data-group membership (the addJoinedNodeToLegacyDataRaft /
+		// expandShardGroupsForJoinedNode equivalent that actually lands the joiner in
+		// the data group). NOT a DEK/F3/F4 issue — DEK readiness now passes.
+		ginkgo.PIt("serves an S3 PutObject/GetObject round-trip through the joined node (blocked: invite-join data-group membership)", func() {
+			t := ginkgo.GinkgoTB()
+			encKeyFile := makeSharedEncryptionKeyFile(t)
+
+			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
+			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
+
+			bundle := mintInvite(t, leader.dataDir)
+
+			joinerDir := shortTempDir(t)
+			joiner := startInviteJoiner(t, "joiner", joinerDir, bundle)
+			waitForVoter(t, leader.httpURL, "joiner", 90*time.Second)
+			waitForPort(t, joiner.httpPort, 60*time.Second)
+
+			bucket := "invite-join-roundtrip"
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
+
+			joinerCli := s3ClientFor(joiner.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(joinerCli, 60*time.Second)).To(gomega.Succeed())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			body := []byte("invite-join round-trip payload")
+			key := "roundtrip.txt"
+
+			// PUT through the joiner (forwarded to the group leader, committed).
+			gomega.Eventually(func() error {
+				return tryPutObject(ctx, joinerCli, bucket, key, body)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed(),
+				"PutObject through the invite-joined node must succeed")
+
+			// GET through the joiner: the router sync (invite-join Phase-2 parity
+			// fix) completes asynchronously during boot, so poll until the read
+			// resolves and returns the bytes that were PUT.
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, joinerCli, bucket, key)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
+				"GetObject through the invite-joined node must return the PUT bytes")
 		})
 	})
 

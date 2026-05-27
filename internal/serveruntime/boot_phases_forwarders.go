@@ -232,6 +232,16 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		if err := bootInviteJoinPhase2(ctx, state); err != nil {
 			return err
 		}
+		// Parity with the legacy joinMode branch above: after membership lands,
+		// wait for the shard-group assignments to replay into this node's FSM,
+		// then sync the cluster router so reads routed THROUGH this joiner resolve
+		// to the right group leader. Without this the joiner is a voter but its
+		// router has no bucket assignments, so GETs return "not the leader".
+		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+			return err
+		}
+		state.clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
+		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
