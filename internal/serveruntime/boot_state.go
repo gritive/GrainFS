@@ -108,6 +108,11 @@ type bootState struct {
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
+	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
+	// restore) rebuildDEKKeeperFromRestore, threaded as the single source into
+	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ
+	// (ShardService) clusterID are identical. Empty until wireDEKKeeper runs.
+	clusterID []byte
 	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
 	// A holds a single version (0). Later phases use it for rotation,
 	// prune, and join keystore catch-up. Receivers reach the active version

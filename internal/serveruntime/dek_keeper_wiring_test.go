@@ -234,6 +234,22 @@ func TestWireDEKKeeper_SetsFSMClusterID(t *testing.T) {
 	require.True(t, bytes.Equal(got[:], persisted), "FSM clusterID %x != persisted cluster.id %x", got[:], persisted)
 }
 
+// TestWireDEKKeeper_StoresClusterID pins slice C: wireDEKKeeper must store the
+// loaded 16-byte cluster.id on bootState.clusterID so the data-plane WRITE
+// (putpipeline) and READ (ShardService) sides bind the identical clusterID.
+func TestWireDEKKeeper_StoresClusterID(t *testing.T) {
+	dir := t.TempDir()
+	state := &bootState{cfg: Config{DataDir: dir}}
+	fsm := cluster.NewMetaFSM()
+
+	if err := wireDEKKeeper(state, fsm); err != nil {
+		t.Fatalf("wireDEKKeeper: %v", err)
+	}
+	if len(state.clusterID) != 16 {
+		t.Fatalf("expected state.clusterID 16 bytes, got %d", len(state.clusterID))
+	}
+}
+
 // TestWireDEKKeeper_FreshBootStillAutoGenerates pins the fresh-boot
 // behavior unchanged by the P3-H1 fix: priorState=false, no join, no
 // peers → keys/0.key and cluster.id auto-generate.

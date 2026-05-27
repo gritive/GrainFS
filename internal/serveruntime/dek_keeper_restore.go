@@ -89,6 +89,7 @@ func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 	fsm.SetClusterID(clusterID)
 	fsm.SetDEKKeeper(keeper)
 	state.dekKeeper = keeper
+	state.clusterID = clusterID // keep the single-source clusterID in lockstep with the swapped keeper
 	return nil
 }
 
