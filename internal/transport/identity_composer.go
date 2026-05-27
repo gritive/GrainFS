@@ -24,13 +24,6 @@ func newIdentityComposer(base [32]byte, swap func(*IdentitySnapshot)) *identityC
 	return &identityComposer{base: base, presentSPKI: base, swap: swap}
 }
 
-func (c *identityComposer) setBase(s [32]byte) { c.mu.Lock(); c.base = s; c.recompute(); c.mu.Unlock() }
-func (c *identityComposer) setRotationWindow(w [][32]byte) {
-	c.mu.Lock()
-	c.rotation = w
-	c.recompute()
-	c.mu.Unlock()
-}
 func (c *identityComposer) setRegistry(r [][32]byte) {
 	c.mu.Lock()
 	c.registry = r
@@ -40,6 +33,21 @@ func (c *identityComposer) setRegistry(r [][32]byte) {
 func (c *identityComposer) setPresent(cert tls.Certificate, spki [32]byte) {
 	c.mu.Lock()
 	c.presentCert, c.presentSPKI = cert, spki
+	c.recompute()
+	c.mu.Unlock()
+}
+
+// applyRotation sets the rotation window, present cert/SPKI, and (when newBase
+// is non-nil) the base in ONE locked section followed by a SINGLE recompute.
+// Combining the mutations under one lock guarantees no intermediate recompute
+// drops acceptance of the just-presented cert (spec §6 D-rev3 step 3).
+func (c *identityComposer) applyRotation(window [][32]byte, cert tls.Certificate, spki [32]byte, newBase *[32]byte) {
+	c.mu.Lock()
+	c.rotation = window
+	c.presentCert, c.presentSPKI = cert, spki
+	if newBase != nil {
+		c.base = *newBase
+	}
 	c.recompute()
 	c.mu.Unlock()
 }

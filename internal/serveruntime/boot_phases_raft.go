@@ -271,14 +271,11 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		_ = worker.OnPhaseChange(st)
 	})
 	state.metaRaft.FSM().SetOnPeersChanged(func(accept [][32]byte) {
-		// TODO(network-path-slice): wire registry → transport accept-set as a UNION
-		// (registry SPKIs ∪ existing-member PSK-derived SPKIs from bootstrap seeding ∪
-		// live rotation window). The naive IdentitySnapshotForAccept(accept) REPLACES
-		// the accept-set, evicting the steady-state PSK SPKI and partitioning the
-		// cluster on the first invite-join (/review F1 finding, 2026-05-27). Activation
-		// is deferred; the callback stays wired so the FSM→callback path is exercised.
-		log.Debug().Int("registry_spkis", len(accept)).
-			Msg("peer registry changed; transport accept-set rebuild deferred to network-path slice")
+		// Feed the peer-registry SPKIs into the transport's identity composer as
+		// a delta. The composer recomputes base PSK ∪ rotation window ∪ registry,
+		// so the registry never clobbers the steady-state PSK SPKI or a live
+		// rotation window (spec §6 D-rev3 step 3).
+		state.quicTransport.UpdateRegistryAccept(accept)
 	})
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).

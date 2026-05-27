@@ -1,17 +1,20 @@
 package transport
 
-import "testing"
+import (
+	"crypto/tls"
+	"testing"
+)
 
 func sp(b byte) [32]byte { var s [32]byte; s[0] = b; return s }
 
 func TestComposer_UnionAndNoClobber(t *testing.T) {
 	var swapped *IdentitySnapshot
 	c := newIdentityComposer(sp(1), func(snap *IdentitySnapshot) { swapped = snap })
-	c.setBase(sp(1))
+	c.setPresent(tls.Certificate{}, sp(1))
 	if !swapped.Accepts(sp(1)) {
 		t.Fatal("base PSK must be accepted")
 	}
-	c.setRotationWindow([][32]byte{sp(1), sp(2)})
+	c.applyRotation([][32]byte{sp(1), sp(2)}, tls.Certificate{}, sp(1), nil)
 	if !swapped.Accepts(sp(1)) || !swapped.Accepts(sp(2)) {
 		t.Fatal("rotation window must not clobber base")
 	}
