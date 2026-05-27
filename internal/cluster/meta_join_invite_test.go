@@ -134,8 +134,9 @@ func TestJoinReceiver_InvitePath_PendingLearnerNoKEK(t *testing.T) {
 	require.True(t, reply.Accepted)
 	require.Equal(t, JoinStatusOK, reply.Status)
 
-	// registry shows node-b as a pending learner.
-	e, ok := fx.coord.registry.lookupByNodeID("node-b")
+	// registry shows node-b as a pending learner (same-package direct read;
+	// no lookupByNodeID accessor until Task 6 wires per-peer dial pinning).
+	e, ok := fx.coord.registry.byNodeID["node-b"]
 	require.True(t, ok)
 	require.Equal(t, peerStatePendingLearner, e.State)
 

@@ -9,14 +9,16 @@ func TestPeerRegistry_RegisterPromoteLookup(t *testing.T) {
 	if err := r.registerPendingLearner("node-a", spki(1), "10.0.0.2:9000"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	e, ok := r.lookupByNodeID("node-a")
+	// Same-package test reads the registry map directly (no production
+	// lookupByNodeID accessor until Task 6 wires per-peer dial pinning).
+	e, ok := r.byNodeID["node-a"]
 	if !ok || e.State != peerStatePendingLearner {
 		t.Fatal("expected pending-learner entry")
 	}
 	if err := r.promoteMember("node-a"); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
-	e, _ = r.lookupByNodeID("node-a")
+	e = r.byNodeID["node-a"]
 	if e.State != peerStateMember {
 		t.Fatal("expected member state after promote")
 	}

@@ -70,13 +70,6 @@ func (r *peerRegistry) promoteMember(nodeID string) error {
 	return nil
 }
 
-func (r *peerRegistry) lookupByNodeID(nodeID string) (peerEntry, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	e, ok := r.byNodeID[nodeID]
-	return e, ok
-}
-
 // spkiOwner returns the node-id that owns an SPKI (Task 5 uses this).
 func (r *peerRegistry) spkiOwner(s [32]byte) (string, bool) {
 	r.mu.RLock()
