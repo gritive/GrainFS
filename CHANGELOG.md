@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.378.0] - 2026-05-28
+
+### Security
+
+- Raft cluster-metadata snapshots are now encrypted at rest. The snapshot body
+  (object index, bucket assignments, node/group layout, IAM and JWT key material)
+  is sealed with a per-snapshot key wrapped by the cluster KEK, so metadata
+  snapshots on disk are no longer stored in plaintext. Snapshots written by older
+  versions are still readable during the upgrade window and are re-encrypted on
+  the next snapshot. A failed snapshot restore now halts the node loudly instead
+  of silently continuing with un-restored state.
+
 ## [0.0.377.0] - 2026-05-28
 
 ### Added
