@@ -59,8 +59,7 @@ func countAutoSnaps(t *testing.T, mgr *snapshot.Manager) int {
 
 func TestAutoSnapshotter_CreatesSnapshotOnInterval(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -81,8 +80,7 @@ func TestAutoSnapshotter_CreatesSnapshotOnInterval(t *testing.T) {
 
 func TestAutoSnapshotter_RespectsRetention(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -108,8 +106,7 @@ func TestAutoSnapshotter_RespectsRetention(t *testing.T) {
 // Regression for Known Issue #2.
 func TestAutoSnapshotter_PruneOld_PreservesManual(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	// Create 2 manual snapshots
 	for i := 0; i < 2; i++ {
@@ -147,8 +144,7 @@ func TestAutoSnapshotter_PruneOld_PreservesManual(t *testing.T) {
 // (from before the reason field was populated) are treated as auto snapshots.
 func TestAutoSnapshotter_LegacyReason(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	// Create 3 "legacy" snapshots with empty reason (simulated by passing "")
 	for i := 0; i < 3; i++ {
@@ -169,8 +165,7 @@ func TestAutoSnapshotter_LegacyReason(t *testing.T) {
 // snapshots is never touched by prune, even far exceeding maxRetain.
 func TestAutoSnapshotter_AllManual_NoOp(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	for i := 0; i < 5; i++ {
 		_, err := mgr.Create("manual")
@@ -188,8 +183,7 @@ func TestAutoSnapshotter_AllManual_NoOp(t *testing.T) {
 
 func TestAutoSnapshotter_StopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	pol := newFakePolicy(50*time.Millisecond, 10)
@@ -215,8 +209,7 @@ func TestAutoSnapshotter_StopsOnContextCancel(t *testing.T) {
 // - interval=20ms resumes producing
 func TestAutoSnapshotter_HotReloadInterval(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -257,8 +250,7 @@ func TestAutoSnapshotter_HotReloadInterval(t *testing.T) {
 // at runtime causes the next prune cycle to drop excess auto snapshots.
 func TestAutoSnapshotter_HotReloadRetain(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, &mockSnapshotable{}, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

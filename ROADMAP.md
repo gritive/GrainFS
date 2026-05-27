@@ -80,6 +80,8 @@ into the shared storage and cluster layers.
 - Bucket policy CRUD and S3 authorization.
 - Service accounts, access keys, grants, and bucket-scoped upstream credentials.
 - Mandatory local at-rest encryption.
+- Cluster-metadata and object-metadata snapshots sealed at rest via per-snapshot
+  DEK + KEK envelope (Phase D-snap Slice 1 + Slice 2, v0.0.378.0+).
 - Rate limiting and no-plaintext-secret checks.
 
 ### Performance

@@ -13,10 +13,21 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/klauspost/compress/zstd"
 )
+
+// testSnapshotKEK returns a test KEKStore and cluster ID for server snapshot tests.
+func testSnapshotKEK(t *testing.T) (snapshot.KEKSource, [16]byte) {
+	t.Helper()
+	store := encrypt.NewKEKStore()
+	require.NoError(t, store.Add(1, make([]byte, encrypt.KEKSize)))
+	var cid [16]byte
+	cid[0] = 0x5A
+	return store, cid
+}
 
 func TestRestoreSnapshotUnsupportedFormatReturnsConflict(t *testing.T) {
 	dataDir := t.TempDir()
@@ -30,7 +41,8 @@ func TestRestoreSnapshotUnsupportedFormatReturnsConflict(t *testing.T) {
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, backend, WithDataDir(dataDir))
+	kek, cid := testSnapshotKEK(t)
+	srv := New(addr, backend, WithDataDir(dataDir), WithSnapshotKEK(kek, cid))
 	go srv.Run() //nolint:errcheck
 	t.Cleanup(func() {
 		shutdownTestServer(t, srv)
@@ -60,7 +72,8 @@ func TestRestoreLegacyGzipSnapshotReturnsConflict(t *testing.T) {
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, backend, WithDataDir(dataDir))
+	kek, cid := testSnapshotKEK(t)
+	srv := New(addr, backend, WithDataDir(dataDir), WithSnapshotKEK(kek, cid))
 	go srv.Run() //nolint:errcheck
 	t.Cleanup(func() {
 		shutdownTestServer(t, srv)
@@ -80,6 +93,8 @@ func TestRestoreLegacyGzipSnapshotReturnsConflict(t *testing.T) {
 func writeFutureSnapshotAPIFile(t *testing.T, path string) {
 	t.Helper()
 
+	// Write a legacy plaintext GFSNAP01 file with a future minReader version
+	// (bypasses envelope — exercises the legacy read-compat shim).
 	f, err := os.Create(path)
 	require.NoError(t, err)
 	_, err = f.Write([]byte("GFSNAP01"))

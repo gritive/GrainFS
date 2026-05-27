@@ -8,6 +8,7 @@ import (
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -20,6 +21,13 @@ func WithDataDir(dir string) Option {
 func WithSnapshotEncryptor(enc *encrypt.Encryptor) Option {
 	return func(s *Server) {
 		s.snapshotEnc = enc
+	}
+}
+
+func WithSnapshotKEK(kek snapshot.KEKSource, clusterID [16]byte) Option {
+	return func(s *Server) {
+		s.snapshotKEK = kek
+		s.snapshotClusterID = clusterID
 	}
 }
 

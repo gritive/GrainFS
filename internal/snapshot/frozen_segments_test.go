@@ -11,10 +11,7 @@ import (
 // TestAllFrozenSegmentPaths_EmptyDir verifies that an empty snapshot directory
 // returns a non-nil map (safe for callers to range over) and no error.
 func TestAllFrozenSegmentPaths_EmptyDir(t *testing.T) {
-	m, err := NewManager(t.TempDir(), nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := NewTestManager(t, t.TempDir(), nil, "")
 	got, err := m.AllFrozenSegmentPaths()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -26,17 +23,14 @@ func TestAllFrozenSegmentPaths_EmptyDir(t *testing.T) {
 
 func TestAllFrozenSegmentPaths_PathFormAndGrouping(t *testing.T) {
 	dir := t.TempDir()
-	m, err := NewManager(dir, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := NewTestManager(t, dir, nil, "")
 	seg := storage.SegmentRef{BlobID: "01HXYZ-raw-segment"}
 	snap := &Snapshot{
 		Seq:     1,
 		Buckets: []string{"b1"},
 		Objects: []storage.SnapshotObject{{Bucket: "b1", Key: "dir/obj", VersionID: "v1", Segments: []storage.SegmentRef{seg}}},
 	}
-	if err := writeSnapshot(m.path(1), snap); err != nil {
+	if err := m.writeSnapshot(m.path(1), snap); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,10 +46,7 @@ func TestAllFrozenSegmentPaths_PathFormAndGrouping(t *testing.T) {
 
 func TestAllFrozenSegmentPaths_CorruptDescriptorFailsClosed(t *testing.T) {
 	dir := t.TempDir()
-	m, err := NewManager(dir, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := NewTestManager(t, dir, nil, "")
 	// write a file matching the descriptor name pattern but with garbage content
 	if err := os.WriteFile(filepath.Join(dir, "snapshot-7.json.zst"), []byte("not-a-valid-zst-descriptor"), 0o644); err != nil {
 		t.Fatal(err)
@@ -67,16 +58,13 @@ func TestAllFrozenSegmentPaths_CorruptDescriptorFailsClosed(t *testing.T) {
 
 func TestAllFrozenSegmentPaths_DedupAcrossSnapshots(t *testing.T) {
 	dir := t.TempDir()
-	m, err := NewManager(dir, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := NewTestManager(t, dir, nil, "")
 	seg := storage.SegmentRef{BlobID: "shared-blob"}
 	obj := storage.SnapshotObject{Bucket: "b1", Key: "k", VersionID: "v1", Segments: []storage.SegmentRef{seg}}
-	if err := writeSnapshot(m.path(1), &Snapshot{Seq: 1, Buckets: []string{"b1"}, Objects: []storage.SnapshotObject{obj}}); err != nil {
+	if err := m.writeSnapshot(m.path(1), &Snapshot{Seq: 1, Buckets: []string{"b1"}, Objects: []storage.SnapshotObject{obj}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSnapshot(m.path(2), &Snapshot{Seq: 2, Buckets: []string{"b1"}, Objects: []storage.SnapshotObject{obj}}); err != nil {
+	if err := m.writeSnapshot(m.path(2), &Snapshot{Seq: 2, Buckets: []string{"b1"}, Objects: []storage.SnapshotObject{obj}}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := m.AllFrozenSegmentPaths()

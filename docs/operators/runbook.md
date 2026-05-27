@@ -1077,14 +1077,25 @@ KEK removal is two-phase: `grainfs encrypt kek retire --version N` marks an old
 KEK version draining, then `grainfs encrypt kek prune --version N` permanently
 removes it once every voter attests no active lease holds it.
 
-> **Do not prune a KEK version that a retained snapshot still depends on.** A
-> snapshot taken before a KEK rotation has its DEK wraps sealed under the KEK
-> version active at snapshot time. After a later KEK rotation the live keystore
-> is re-wrapped under the new version, but an OLD snapshot you keep for disaster
-> recovery still references the older KEK. Pruning that KEK makes the old
-> snapshot unrestorable. Confirm no retained snapshot references version N
-> before pruning it. (Phase B does not lease-track snapshot references — this is
-> an operator responsibility.)
+> **Do not prune a KEK version while any retained snapshot was sealed under it.**
+> Both cluster-metadata snapshots (Raft FSM) and object-metadata snapshots (PITR,
+> `<data>/snapshots/snapshot-*.json.zst`) embed a per-snapshot ephemeral DEK
+> wrapped by the KEK version active at snapshot time. Data DEKs are rewrapped
+> automatically before a KEK version is retired; **object snapshots are not** —
+> they are sealed once and never rewrapped on rotation. Pruning the KEK version
+> makes every snapshot sealed under it permanently unreadable on restore.
+>
+> Before pruning version N:
+> 1. Confirm `grainfs_snapshot_legacy_plaintext_reads_total` has been flat at zero
+>    across a full snapshot cycle (runtime signal that all active snapshots are
+>    enveloped — necessary but not sufficient alone).
+> 2. Verify your snapshot retention policy: if you keep snapshots older than the
+>    last KEK rotation, those snapshots reference the old version. Either delete
+>    them or keep version N loaded until they expire.
+> 3. Then prune: `grainfs encrypt kek prune --version N`.
+>
+> This is an operator responsibility — GrainFS does not yet enforce prune-refusal
+> based on snapshot references (P1 follow-up).
 
 > **Prune may need retries on a busy cluster.** Prune validates the voter set
 > against the raft committed index at probe time and rejects if the committed

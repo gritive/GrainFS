@@ -23,6 +23,8 @@ func StartAutoSnapshotterWhenReady(
 	backend storage.Backend,
 	cfg *cluster.ClusterConfig,
 	enc *encrypt.Encryptor,
+	kek snapshot.KEKSource,
+	clusterID [16]byte,
 	readinessTimeout time.Duration,
 ) (*snapshot.Manager, error) {
 	snapshotable, ok := backend.(storage.Snapshotable)
@@ -33,7 +35,7 @@ func StartAutoSnapshotterWhenReady(
 	if err := waitForSnapshotBackendReady(ctx, snapshotable, readinessTimeout); err != nil {
 		return nil, err
 	}
-	objSnapMgr, err := snapshot.NewManagerWithEncryptor(filepath.Join(dataDir, "snapshots"), snapshotable, walDir, enc)
+	objSnapMgr, err := snapshot.NewManagerWithEncryptor(filepath.Join(dataDir, "snapshots"), snapshotable, walDir, enc, kek, clusterID)
 	if err != nil {
 		return nil, err
 	}

@@ -27,7 +27,7 @@ func (m *Manager) AllFrozenSegmentPaths() (map[string][]string, error) {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.zst") {
 			continue
 		}
-		snap, err := readSnapshot(filepath.Join(m.dir, e.Name()))
+		snap, err := m.readSnapshot(filepath.Join(m.dir, e.Name()))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue // descriptor rotated away mid-scan; not corruption

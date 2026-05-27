@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.383.0] - 2026-05-28
+
+### Security
+
+- Object-metadata snapshots (the PITR snapshot files under `<data>/snapshots/`)
+  are now sealed at rest with a per-snapshot ephemeral data key wrapped by the
+  cluster KEK, the same envelope used for cluster-metadata snapshots. Object
+  keys, bucket layout, and version history no longer appear in plaintext in
+  snapshot files. Snapshots written by older builds are still read during the
+  upgrade window and re-sealed on the next snapshot.
+
+### Changed
+
+- Point-in-time restore now refuses to run when a snapshot newer than its chosen
+  base cannot be opened (for example, its KEK version is unavailable), instead of
+  silently restoring from an older base. Snapshot files that cannot be opened are
+  counted in `grainfs_snapshot_open_errors_total`.
+
 ## [0.0.382.0] - 2026-05-28
 
 ### Changed

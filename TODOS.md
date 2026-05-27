@@ -242,17 +242,26 @@ Work these in order. Do not run them in parallel.
   D-snap adds a new crypto failure mode to it. Surfaced by /review adversarial pass
   (2026-05-28). Fix: treat envelope-open / Restore failure on InstallSnapshot as a
   fatal halt (mirror the existing `ErrFSMKEKFatal` path) rather than log-and-advance.
-- [ ] **KEK-envelope Phase D-snap Slice 2: encrypt object metadata snapshots**.
-  Slice 1 (Raft meta-FSM snapshot body) landed via `encrypt.SealSnapshotEnvelope`
-  (per-snapshot ephemeral DEK + KEK wrap, `internal/encrypt/snapshot_envelope.go`).
-  The object metadata snapshots in `internal/snapshot/` (PITR; `format.go` writes
-  zstd JSON in the clear) are still plaintext. Reopen: wire the KEK/KEKStore into
-  `snapshot.Manager` (currently `serveruntime/snapshot.go:36` passes only
-  `*encrypt.Encryptor` via `NewManagerWithEncryptor`), then seal the snapshot body
-  through the existing `SealSnapshotEnvelope` primitive in `writeSnapshot`/decrypt in
-  `readSnapshot`. Object snapshots are restored post-boot so the KEK is always
-  available; the AAD has no raft_index/term. Needed before D-cut's "all data under
-  DEK" boot-refuse can be consistent. See [[project-grains-at-rest-two-key-systems]].
+- [ ] **KEK-prune-refusal for object snapshots [P1]**. The cluster KEK retire
+  FSM (`internal/cluster/meta_fsm_kek_apply.go` `RemoveAndUnlink`) must refuse to
+  prune a KEK version still referenced by a retained object snapshot (Phase D-snap
+  Slice 2 D8). DEKs are rewrapped before retire; object snapshots are not, so
+  pruning silently destroys restore capability. Options: prune-refusal scan, or
+  rewrap-on-rotation.
+- [ ] **Pre-existing: two object-snapshot writers can collide on seq [P2]**. The
+  serveruntime auto-snapshotter and the server HTTP create/restore/delete handler
+  are independent `snapshot.Manager` instances over the same `<dataDir>/snapshots`
+  directory. Both seed `nextSeq` independently from filenames at construction and
+  increment locally; concurrent `Create()` calls from both can produce the same
+  sequence number. Predates Phase D-snap.
+- [ ] **Unify object-snapshot Manager wiring [P3]**. `serveruntime.objSnapMgr` and
+  `server.s.snapMgr` are independent instances over `<dataDir>/snapshots`. Unifying
+  them into a single shared instance would eliminate the two-writer seq-collision
+  risk (above) and simplify KEK wiring.
+- [ ] **Phase D-snap D-cut (object)**: remove `snapshot.openSnapshotBlob` legacy
+  plaintext passthrough and add a boot-time scan that refuses startup if any
+  plaintext snapshot file remains. The `grainfs_snapshot_legacy_plaintext_reads_total`
+  counter is a runtime signal, not sufficient alone. Mirrors meta-FSM D-cut.
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read

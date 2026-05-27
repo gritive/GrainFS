@@ -45,8 +45,7 @@ func TestSnapshot_PreservesBucketMeta(t *testing.T) {
 			{Name: "b2", VersioningState: "Suspended"},
 		},
 	}
-	mgr, err := snapshot.NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, backend, "")
 
 	snap, err := mgr.Create("test")
 	require.NoError(t, err)
@@ -73,8 +72,7 @@ func TestSnapshot_OldFormat_BackwardCompat(t *testing.T) {
 			{Name: "pre-existing", VersioningState: "Enabled"},
 		},
 	}
-	mgr, err := snapshot.NewManager(dir, backend, "")
-	require.NoError(t, err)
+	mgr := snapshot.NewTestManager(t, dir, backend, "")
 
 	snap, err := mgr.Create("test")
 	require.NoError(t, err)

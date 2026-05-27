@@ -10,8 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -30,25 +33,27 @@ type RefSink interface {
 
 // Manager manages snapshot creation, listing, restore, and deletion.
 type Manager struct {
-	dir     string
-	backend storage.Snapshotable
-	nextSeq atomic.Uint64
-	walDir  string // optional: path to WAL directory for PITR
-	walEnc  *encrypt.Encryptor
-	refs    RefSink
+	dir       string
+	backend   storage.Snapshotable
+	nextSeq   atomic.Uint64
+	walDir    string // optional: path to WAL directory for PITR
+	walEnc    *encrypt.Encryptor
+	refs      RefSink
+	kek       KEKSource
+	clusterID [16]byte
 }
 
 // NewManager creates a Manager backed by the given snapshotable backend.
 // snapshotDir is the directory where snapshot files are stored.
 // walDir is optional: if non-empty, enables PITR via WAL replay.
-func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string) (*Manager, error) {
-	return NewManagerWithEncryptor(snapshotDir, backend, walDir, nil)
+func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string, kek KEKSource, clusterID [16]byte) (*Manager, error) {
+	return NewManagerWithEncryptor(snapshotDir, backend, walDir, nil, kek, clusterID)
 }
 
 // NewManagerWithRefSink is NewManagerWithEncryptor plus a chunk-ref sink so
 // snapshot freeze pins (AddRef) and delete unpins (RemoveRef) the frozen chunks.
-func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor, refs RefSink) (*Manager, error) {
-	m, err := NewManagerWithEncryptor(snapshotDir, backend, walDir, enc)
+func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor, kek KEKSource, clusterID [16]byte, refs RefSink) (*Manager, error) {
+	m, err := NewManagerWithEncryptor(snapshotDir, backend, walDir, enc, kek, clusterID)
 	if err != nil {
 		return nil, err
 	}
@@ -58,26 +63,20 @@ func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, wal
 
 // NewManagerWithEncryptor creates a Manager that can replay encrypted WAL
 // entries during PITR when walDir is configured.
-func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor) (*Manager, error) {
+func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor, kek KEKSource, clusterID [16]byte) (*Manager, error) {
+	if kek == nil {
+		return nil, fmt.Errorf("snapshot: NewManager: KEK source required")
+	}
+	if clusterID == ([16]byte{}) {
+		return nil, fmt.Errorf("snapshot: NewManager: cluster id must be non-zero")
+	}
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
-	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir, walEnc: enc}
-	// Seed nextSeq from existing snapshots
-	snaps, err := m.List()
+	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir, walEnc: enc, kek: kek, clusterID: clusterID}
+	maxSeq, err := maxSnapshotSeqFromFilenames(snapshotDir)
 	if err != nil {
 		return nil, err
-	}
-	var maxSeq uint64
-	for _, s := range snaps {
-		if s.Seq > maxSeq {
-			maxSeq = s.Seq
-		}
-	}
-	if legacyMax, err := maxLegacySnapshotSeq(snapshotDir); err != nil {
-		return nil, err
-	} else if legacyMax > maxSeq {
-		maxSeq = legacyMax
 	}
 	m.nextSeq.Store(maxSeq)
 	return m, nil
@@ -134,7 +133,7 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 	// Atomic write: write to .tmp then rename
 	tmpPath := m.path(seq) + ".tmp"
 	finalPath := m.path(seq)
-	if err := writeSnapshot(tmpPath, snap); err != nil {
+	if err := m.writeSnapshot(tmpPath, snap); err != nil {
 		os.Remove(tmpPath)
 		return nil, fmt.Errorf("write snapshot: %w", err)
 	}
@@ -191,9 +190,16 @@ func (m *Manager) List() ([]*Snapshot, error) {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.zst") {
 			continue
 		}
-		snap, err := readSnapshot(filepath.Join(m.dir, e.Name()))
+		path := filepath.Join(m.dir, e.Name())
+		snap, err := m.readSnapshot(path)
 		if err != nil {
-			continue // skip corrupt files
+			// Best-effort listing: skip files we cannot open, but make the skip
+			// observable. With envelopes "unreadable" can mean an unresolvable KEK
+			// version, an auth failure, or tampering — not just benign corruption.
+			// PITRRestore cross-checks for such skipped files and fails closed.
+			metrics.SnapshotOpenErrorsTotal.Inc()
+			log.Warn().Err(err).Str("file", e.Name()).Msg("snapshot: List: skipping unreadable snapshot file")
+			continue
 		}
 		snaps = append(snaps, snap)
 	}
@@ -209,7 +215,7 @@ func (m *Manager) List() ([]*Snapshot, error) {
 // so versioning/EC flags match the snapshot instant. Old-format snapshots
 // (BucketMeta == nil) leave bucket state untouched for backward compat.
 func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.StaleBlob, err error) {
-	snap, err := readSnapshot(m.path(seq))
+	snap, err := m.readSnapshot(m.path(seq))
 	if err != nil {
 		if os.IsNotExist(err) {
 			if _, legacyErr := os.Stat(m.legacyPath(seq)); legacyErr == nil {
@@ -218,6 +224,9 @@ func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.S
 			return 0, nil, ErrNotFound
 		}
 		return 0, nil, fmt.Errorf("read snapshot %d: %w", seq, err)
+	}
+	if snap.Seq != seq {
+		return 0, nil, fmt.Errorf("snapshot %d: sealed seq %d mismatch", seq, snap.Seq)
 	}
 	if len(snap.BucketMeta) > 0 {
 		if bs, ok := m.backend.(storage.BucketSnapshotable); ok {
@@ -242,7 +251,7 @@ func (m *Manager) Delete(seq uint64) error {
 	// Capture frozen chunks before removing the descriptor so we can unpin after.
 	var pinned []chunkref.ChunkID
 	if m.refs != nil {
-		if snap, err := readSnapshot(p); err == nil {
+		if snap, err := m.readSnapshot(p); err == nil {
 			for i := range snap.Objects {
 				for _, c := range snap.Objects[i].ChunkLocators() {
 					pinned = append(pinned, chunkref.ChunkID(c))
@@ -274,28 +283,6 @@ func (m *Manager) path(seq uint64) string {
 
 func (m *Manager) legacyPath(seq uint64) string {
 	return filepath.Join(m.dir, "snapshot-"+strconv.FormatUint(seq, 10)+".json.gz")
-}
-
-func maxLegacySnapshotSeq(snapshotDir string) (uint64, error) {
-	entries, err := os.ReadDir(snapshotDir)
-	if err != nil {
-		return 0, fmt.Errorf("read snapshot dir: %w", err)
-	}
-	var maxSeq uint64
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.gz") {
-			continue
-		}
-		seqText := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "snapshot-"), ".json.gz")
-		seq, err := strconv.ParseUint(seqText, 10, 64)
-		if err != nil {
-			continue
-		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
-	}
-	return maxSeq, nil
 }
 
 // ErrNotFound indicates the snapshot does not exist.

@@ -53,10 +53,7 @@ func TestCreatePinsChunksViaSnapshotManifest(t *testing.T) {
 	backend := newFakeSnapshotableWithObjects([]storage.SnapshotObject{
 		{Bucket: "bkt", Key: "k", Segments: []storage.SegmentRef{{BlobID: "chunk-A"}}},
 	})
-	m, err := NewManagerWithRefSink(t.TempDir(), backend, "", nil, sink)
-	if err != nil {
-		t.Fatalf("new manager: %v", err)
-	}
+	m := NewTestManagerRefSink(t, t.TempDir(), backend, "", sink)
 	snap, err := m.Create("test")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -72,7 +69,7 @@ func TestDeleteUnpinsChunks(t *testing.T) {
 	backend := newFakeSnapshotableWithObjects([]storage.SnapshotObject{
 		{Bucket: "bkt", Key: "k", Segments: []storage.SegmentRef{{BlobID: "chunk-A"}}},
 	})
-	m, _ := NewManagerWithRefSink(t.TempDir(), backend, "", nil, sink)
+	m := NewTestManagerRefSink(t, t.TempDir(), backend, "", sink)
 	snap, _ := m.Create("test")
 	if err := m.Delete(snap.Seq); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -87,10 +84,7 @@ func TestNilRefSinkIsNoop(t *testing.T) {
 	backend := newFakeSnapshotableWithObjects([]storage.SnapshotObject{
 		{Bucket: "bkt", Key: "k", Segments: []storage.SegmentRef{{BlobID: "chunk-A"}}},
 	})
-	m, err := NewManagerWithRefSink(t.TempDir(), backend, "", nil, nil)
-	if err != nil {
-		t.Fatalf("new manager: %v", err)
-	}
+	m := NewTestManagerRefSink(t, t.TempDir(), backend, "", nil)
 	snap, err := m.Create("test")
 	if err != nil {
 		t.Fatalf("create with nil sink must not panic: %v", err)
