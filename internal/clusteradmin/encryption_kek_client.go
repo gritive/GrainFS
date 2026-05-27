@@ -6,21 +6,30 @@ import (
 	"fmt"
 )
 
-// KEKVersionStatus is the wire shape returned by GET /v1/encrypt/kek/status.
-// Mirrors EncryptionKEKHandler's kekVersionStatus; kept here so the CLI
-// and any non-handler callers have a typed home.
+// KEKVersionStatus is the wire shape of a per-KEK-version row in GET
+// /v1/encrypt/kek/status. Mirrors EncryptionKEKHandler's kekVersionStatus.
 type KEKVersionStatus struct {
-	Version            uint32 `json:"version"`
-	Status             string `json:"status"`
+	Version    uint32 `json:"version"`
+	Status     string `json:"status"`
+	LeaseCount uint64 `json:"lease_count"`
+}
+
+// DEKGenerationStatus is the wire shape of a per-DEK-generation row in GET
+// /v1/encrypt/kek/status. Seal-count / nonce-collision diagnostics are keyed by
+// DEK generation (AES-GCM nonce exhaustion is per-DEK-key), not KEK version.
+type DEKGenerationStatus struct {
+	Generation         uint32 `json:"generation"`
+	Active             bool   `json:"active"`
 	SealCount          uint64 `json:"seal_count"`
-	LeaseCount         uint64 `json:"lease_count"`
 	NonceCollisionRisk string `json:"nonce_collision_risk"`
 }
 
 // KEKStatus is the wire shape returned by GET /v1/encrypt/kek/status.
 type KEKStatus struct {
-	ActiveVersion uint32             `json:"active_version"`
-	Versions      []KEKVersionStatus `json:"versions"`
+	ActiveVersion       uint32                `json:"active_version"`
+	ActiveDEKGeneration uint32                `json:"active_dek_generation"`
+	Versions            []KEKVersionStatus    `json:"versions"`
+	DEKGenerations      []DEKGenerationStatus `json:"dek_generations"`
 }
 
 // EncryptKEKRotate issues POST /v1/encrypt/kek/rotate with the fixed

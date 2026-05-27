@@ -5,7 +5,7 @@
 //	POST /v1/encrypt/kek/rotate   {"confirm": "rotate-now"}
 //	POST /v1/encrypt/kek/retire   {"version": <V>, "confirm": "delete-permanently-<V>"}
 //	POST /v1/encrypt/kek/prune    {"version": <V>, "confirm": "delete-permanently-<V>"}
-//	GET  /v1/encrypt/kek/status   → {active_version, versions:[{version, status}]}
+//	GET  /v1/encrypt/kek/status   → {active_version, active_dek_generation, versions:[{version, status, lease_count}], dek_generations:[{generation, active, seal_count, nonce_collision_risk}]}
 //
 // UDS-only: enforcement is architectural — `RegisterEncryptionKEKRoutes` is
 // only called from the admin-UDS Hertz wiring (boot_phases_admin.go). The
@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -59,9 +60,15 @@ type KEKStatusReader interface {
 	// kek_status) still appears as "pruned".
 	KEKStoreVersions() []uint32
 	LookupKEKStatus(version uint32) (v uint32, status cluster.KEKLifecycleStatus, retireCommitIndex uint64, ok bool)
-	// SealCount returns the number of active-AEAD seals attributed to the KEK
-	// version (running count for the active version; frozen value otherwise).
-	SealCount(version uint32) uint64
+	// ActiveDEKGeneration returns the active DEK generation — the key the live
+	// seal counter belongs to. Distinct from ActiveKEKVersion (a KEK rotation
+	// re-wraps the DEK without advancing the DEK gen).
+	ActiveDEKGeneration() uint32
+	// SealCountSnapshot returns the per-DEK-generation seal counts (live count
+	// for the active gen, frozen value for each retired gen). AES-GCM nonce
+	// exhaustion is per-DEK-key, so the nonce-collision band is reported per
+	// DEK generation, not per KEK version.
+	SealCountSnapshot() map[uint32]uint64
 	// LeaseCount returns the in-flight KEK lease count for the version. Phase
 	// B has no acquire sites, so this is 0 in practice (Phase D wires it).
 	LeaseCount(version uint32) uint64
@@ -95,16 +102,28 @@ type versionConfirmRequest struct {
 
 // kekStatusResponse is the body returned by GET /v1/encrypt/kek/status. The
 // wire field names are stable (consumed by the CLI and operator tooling).
+//
+// Seal-count / nonce-collision diagnostics live at the top level under
+// dek_generations, NOT on the per-KEK-version rows: AES-GCM nonce exhaustion is
+// per-DEK-key, and after a KEK rotation the KEK↔DEK mapping is no longer 1:1.
 type kekStatusResponse struct {
-	ActiveVersion uint32             `json:"active_version"`
-	Versions      []kekVersionStatus `json:"versions"`
+	ActiveVersion       uint32             `json:"active_version"`
+	ActiveDEKGeneration uint32             `json:"active_dek_generation"`
+	Versions            []kekVersionStatus `json:"versions"`
+	DEKGenerations      []dekGenStatus     `json:"dek_generations"`
 }
 
 type kekVersionStatus struct {
-	Version            uint32 `json:"version"`
-	Status             string `json:"status"`
+	Version    uint32 `json:"version"`
+	Status     string `json:"status"`
+	LeaseCount uint64 `json:"lease_count"`
+}
+
+// dekGenStatus carries the per-DEK-generation nonce-collision diagnostic.
+type dekGenStatus struct {
+	Generation         uint32 `json:"generation"`
+	Active             bool   `json:"active"`
 	SealCount          uint64 `json:"seal_count"`
-	LeaseCount         uint64 `json:"lease_count"`
 	NonceCollisionRisk string `json:"nonce_collision_risk"`
 }
 
@@ -236,18 +255,34 @@ func (h *EncryptionKEKHandler) ServeStatus(w http.ResponseWriter, _ *http.Reques
 		return
 	}
 	versions := h.reader.KEKStoreVersions()
+	activeGen := h.reader.ActiveDEKGeneration()
 	out := kekStatusResponse{
-		ActiveVersion: h.reader.ActiveKEKVersion(),
-		Versions:      make([]kekVersionStatus, 0, len(versions)),
+		ActiveVersion:       h.reader.ActiveKEKVersion(),
+		ActiveDEKGeneration: activeGen,
+		Versions:            make([]kekVersionStatus, 0, len(versions)),
 	}
 	for _, v := range versions {
-		seals := h.reader.SealCount(v)
 		out.Versions = append(out.Versions, kekVersionStatus{
-			Version:            v,
-			Status:             lifecycleStatusString(h.reader, v, out.ActiveVersion),
-			SealCount:          seals,
-			LeaseCount:         h.reader.LeaseCount(v),
-			NonceCollisionRisk: nonceCollisionRisk(seals),
+			Version:    v,
+			Status:     lifecycleStatusString(h.reader, v, out.ActiveVersion),
+			LeaseCount: h.reader.LeaseCount(v),
+		})
+	}
+
+	// Per-DEK-generation nonce-collision diagnostics, sorted ascending.
+	seals := h.reader.SealCountSnapshot()
+	gens := make([]uint32, 0, len(seals))
+	for g := range seals {
+		gens = append(gens, g)
+	}
+	sort.Slice(gens, func(i, j int) bool { return gens[i] < gens[j] })
+	out.DEKGenerations = make([]dekGenStatus, 0, len(gens))
+	for _, g := range gens {
+		out.DEKGenerations = append(out.DEKGenerations, dekGenStatus{
+			Generation:         g,
+			Active:             g == activeGen,
+			SealCount:          seals[g],
+			NonceCollisionRisk: nonceCollisionRisk(seals[g]),
 		})
 	}
 

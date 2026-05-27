@@ -81,17 +81,25 @@ import (
 
 // kekVersionStatusE2E mirrors clusteradmin.KEKVersionStatus on the wire.
 type kekVersionStatusE2E struct {
-	Version            uint32 `json:"version"`
-	Status             string `json:"status"`
+	Version    uint32 `json:"version"`
+	Status     string `json:"status"`
+	LeaseCount uint64 `json:"lease_count"`
+}
+
+// dekGenerationStatusE2E mirrors clusteradmin.DEKGenerationStatus on the wire.
+type dekGenerationStatusE2E struct {
+	Generation         uint32 `json:"generation"`
+	Active             bool   `json:"active"`
 	SealCount          uint64 `json:"seal_count"`
-	LeaseCount         uint64 `json:"lease_count"`
 	NonceCollisionRisk string `json:"nonce_collision_risk"`
 }
 
 // kekStatusE2E mirrors clusteradmin.KEKStatus on the wire.
 type kekStatusE2E struct {
-	ActiveVersion uint32                `json:"active_version"`
-	Versions      []kekVersionStatusE2E `json:"versions"`
+	ActiveVersion       uint32                   `json:"active_version"`
+	ActiveDEKGeneration uint32                   `json:"active_dek_generation"`
+	Versions            []kekVersionStatusE2E    `json:"versions"`
+	DEKGenerations      []dekGenerationStatusE2E `json:"dek_generations"`
 }
 
 func (s kekStatusE2E) version(v uint32) (kekVersionStatusE2E, bool) {
