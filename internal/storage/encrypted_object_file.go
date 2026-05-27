@@ -44,7 +44,7 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 	}
 
 	buf := make([]byte, encryptedChunkSize)
-	sealedBuf := make([]byte, 0, 3+12+encryptedChunkSize+enc.AEADOverhead())
+	sealedBuf := make([]byte, 0, 3+enc.NonceSize()+encryptedChunkSize+enc.AEADOverhead())
 	aadBuf := make([]byte, 0, len(domain)+len(":chunk:")+20)
 	var size int64
 	var chunk uint64

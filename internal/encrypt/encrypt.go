@@ -193,3 +193,10 @@ func (e *Encryptor) OpenWithNonceAAD(dst, nonce, ciphertext, aad []byte) ([]byte
 func (e *Encryptor) AEADOverhead() int {
 	return e.aead.Overhead()
 }
+
+// NonceSize returns the AEAD nonce width in bytes (24 for XAES-256-GCM).
+// Callers sizing buffers for the sealed value/blob layout
+// (magic + nonce + ciphertext + tag) should use this instead of a literal.
+func (e *Encryptor) NonceSize() int {
+	return e.aead.NonceSize()
+}
