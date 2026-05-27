@@ -15,29 +15,38 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 Work these in order. Do not run them in parallel.
 
-- [ ] **Static bulk-data encryption key: rotation + nonce-exhaustion lifecycle (design)**
-   - Trust risk: ALL bulk data (objects, EC shards, data-WAL, badger values) is
-     encrypted with one static `<dataDir>/encryption.key` via `encrypt.Encryptor`
-     using RANDOM 96-bit nonces (`encrypt.go` `io.ReadFull(rand.Reader, nonce)`),
-     and that key is NEVER rotated, has NO seal counter, NO metric. On a long-lived
-     high-volume cluster the per-key seal count accrues toward the NIST SP 800-38D
-     random-nonce cap (2^32) with no signal and no remediation — a silent AES-GCM
-     nonce-collision cliff (confidentiality + integrity loss).
-   - Context: the KEK/DEK envelope subsystem (#36–62, v0.0.356.0) governs ONLY JWT
-     signing secrets (`iam/jwt/jwt.go` is the sole `DEKKeeper.Seal`/`DekGen`
-     key-selection consumer); it does NOT protect bulk data. `ObjectIndexEntry.DekGen`
-     is recorded + ref-counted but is NOT used to select a key for object decryption
-     (storage uses the static `b.encryptor`) — a half-built object→DEK bridge.
-   - Options to weigh in design: (a) add seal-count + metric + rotation lifecycle to
-     the static key; (b) migrate bulk data onto the gen-based DEK and reuse the
-     existing KEK-rotation/replication/seal-counter machinery (finish the DekGen
-     bridge). Either is a real subsystem, not a patch.
-   - Signal: per-key seal count, nonce-budget metric, rotation/re-encrypt status.
-   - Verification: high-volume seal-count accounting test; rotation re-encrypt or
-     envelope-migration correctness across all storage layers + EC shards.
-   - Boundary: design first (brainstorm). Surfaced 2026-05-27 by /review-forever
-     killing the mis-targeted auto-DEK-rotation plan (DEK seal volume is JWT-only,
-     never reaches the threshold). See [[project-grains-at-rest-two-key-systems]].
+- [ ] **DEK data-sealing cipher → XAES-256-GCM (ACTIVE — feat/dek-data-xaes-cipher)**
+   - Trust risk: Phase D (#568/#571) activated gen-aware at-rest encryption on the
+     data plane (objects/EC/data-WAL via `DEKKeeperAdapter` when a DEKKeeper is
+     present — the default). But the DEK's data-sealing AEAD is still **AES-256-GCM
+     with a random 96-bit nonce** (`dek.go:672` `newAEAD` → `cipher.NewGCM`), so
+     routing bulk data through it **re-introduced the 2^32 nonce-collision cliff**
+     that #566 removed for the static key. High-volume clusters drift toward silent
+     confidentiality/integrity loss with no remediation.
+   - Fix: swap `newAEAD` to `xaes256gcm.NewWithManualNonces` (mirror of #566;
+     `go.mod` already has `filippo.io/xaes256gcm`; KEK→DEK wrap stays AES-GCM).
+     Nonce auto-widens to 24B via `aead.NonceSize()`. Bump the on-disk format
+     guard so a pre-XAES-DEK data dir **loud-fails on boot** (greenfield, no
+     in-place re-encrypt — no production clusters yet).
+   - Verification: round-trip + nonce-width tests; greenfield loud-fail regression;
+     KEK-rotation-across-XAES-DEK (open data sealed under old/new gen after rotate);
+     dual single+cluster e2e. See [[project-grains-at-rest-two-key-systems]].
+
+- [ ] **At-rest unification remainder (deferred — Phase D track)**
+   - Phase D already migrated the data plane; these stay on the static
+     `encrypt.Encryptor` and complete the single KEK→DEK hierarchy:
+     (a) **BadgerDB metadata** — `encrypted_badger.go` still uses `*encrypt.Encryptor`
+     (bare ciphertext, no gen frame); needs a gen-carrying value frame.
+     (b) **IAM credential at-rest** — `SecretKeyEnc` in `AccessKey`/`BucketUpstream`
+     sealed via `*encrypt.Encryptor` (`iam/fsm.go`); needs gen in raft payload +
+     snapshot (orthogonal to #579 protocol-credential auth unification).
+     (c) **Retire static key** — `--encryption-key-file` flag + `EncryptorAdapter`
+     fallback still present; can only be removed after every `cfg.Encryptor`
+     consumer (cluster-config secrets, alerts, server/object snapshot, IAM admin)
+     has a DEK replacement. ADR for the cipher-unification + greenfield boundary.
+   - Boundary: fold into the existing Phase D roadmap rather than a parallel spec.
+     Full design + 4-pass codex review in the (gitignored) unified-at-rest-key
+     spec. See [[project-grains-at-rest-two-key-systems]].
 
 - [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
