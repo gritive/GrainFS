@@ -537,8 +537,6 @@ type encryptedShardReader struct {
 	overhead   uint16
 	chunkIdx   uint32
 	plain      []byte
-	plainPtr   *[]byte
-	plainBuf   []byte
 	done       bool
 	closed     bool
 }
@@ -565,16 +563,12 @@ func (r *encryptedShardReader) Close() error {
 		return nil
 	}
 	r.closed = true
-	r.plain = nil
-	if r.plainPtr != nil {
-		if cap(r.plainBuf) > 0 {
-			clear(r.plainBuf[:cap(r.plainBuf)])
-		}
-		*r.plainPtr = r.plainBuf[:0]
-		encryptedPlainChunkPool.Put(r.plainPtr)
-		r.plainPtr = nil
-		r.plainBuf = nil
+	// The seam's Open returns a fresh plaintext slice; zero it before releasing
+	// so decrypted bytes do not linger in the heap.
+	if len(r.plain) > 0 {
+		clear(r.plain)
 	}
+	r.plain = nil
 	return nil
 }
 
@@ -637,8 +631,6 @@ type encryptedShardRangeReader struct {
 	pos        int64
 	remaining  int64
 	plain      []byte
-	plainPtr   *[]byte
-	plainBuf   []byte
 	closed     bool
 }
 
@@ -669,16 +661,12 @@ func (r *encryptedShardRangeReader) Close() error {
 		return nil
 	}
 	r.closed = true
-	r.plain = nil
-	if r.plainPtr != nil {
-		if cap(r.plainBuf) > 0 {
-			clear(r.plainBuf[:cap(r.plainBuf)])
-		}
-		*r.plainPtr = r.plainBuf[:0]
-		encryptedPlainChunkPool.Put(r.plainPtr)
-		r.plainPtr = nil
-		r.plainBuf = nil
+	// The seam's Open returns a fresh plaintext slice; zero it before releasing
+	// so decrypted bytes do not linger in the heap.
+	if len(r.plain) > 0 {
+		clear(r.plain)
 	}
+	r.plain = nil
 	return nil
 }
 

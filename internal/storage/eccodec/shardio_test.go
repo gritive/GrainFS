@@ -286,7 +286,7 @@ func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {
 	assert.Equal(t, data[offset:offset+length], got)
 }
 
-func TestEncryptedShardRangeReader_CloseReleasesChunkBuffers(t *testing.T) {
+func TestEncryptedShardRangeReader_CloseReleasesPlaintext(t *testing.T) {
 	f := newFakeShardEncryptor(t)
 	data := bytes.Repeat([]byte("0123456789abcdef"), 512)
 	fields := shardBaseFields()
@@ -300,12 +300,13 @@ func TestEncryptedShardRangeReader_CloseReleasesChunkBuffers(t *testing.T) {
 	rangeReader := reader.(*encryptedShardRangeReader)
 	_, err = io.ReadAll(reader)
 	require.NoError(t, err)
-	// plainBuf may be nil if no pooled buffer was allocated (seam returns fresh slices).
 
+	// Close nils the live plaintext slice (after zeroing it) so decrypted bytes
+	// do not linger in the heap.
 	closer, ok := reader.(io.Closer)
 	require.True(t, ok)
 	require.NoError(t, closer.Close())
-	require.Nil(t, rangeReader.plainBuf)
+	require.Nil(t, rangeReader.plain)
 }
 
 func TestReadEncryptedShardRangeAt_DoesNotReadSkippedChunks(t *testing.T) {
@@ -613,13 +614,6 @@ func swapFirstTwoEncryptedShardChunks(t *testing.T, raw []byte) []byte {
 		out[sealed0Start+i], out[sealed1Start+i] = out[sealed1Start+i], out[sealed0Start+i]
 	}
 	return out
-}
-
-func testEncryptor(t *testing.T) *encrypt.Encryptor {
-	t.Helper()
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
-	require.NoError(t, err)
-	return enc
 }
 
 type rangeGuardReaderAt struct {
