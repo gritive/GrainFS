@@ -336,10 +336,12 @@ Work these in order. Do not run them in parallel.
   when measured margins fail or a concrete caller needs prefix scope.
 - [ ] **Protocol credential data-plane enforcement**: the shared
   `grainfs credential` admin API/CLI foundation exists for S3, Iceberg, NFS,
-  9P, and NBD. Follow up by persisting credentials through Raft, checking IAM
-  permissions on create/rotate/revoke, enforcing NBD `volume@secret` attach,
-  and migrating NFS/9P from MountSA-only auth onto protocol credentials without
-  losing uid/gid audit context.
+  9P, and NBD, and the Meta Raft codec/FSM/snapshot foundation now exists for
+  durable credential rows and mutation request IDs. Follow up by wiring the
+  runtime admin service to the Raft-backed store, checking IAM permissions on
+  create/rotate/revoke, enforcing NBD `volume@secret` attach, and migrating
+  NFS/9P from MountSA-only auth onto protocol credentials without losing uid/gid
+  audit context.
 
 ## NFSv4 RFC 8881 Follow-Ups
 
