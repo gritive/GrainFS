@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.388.0] - 2026-05-28
+
+### Security
+
+- Protocol credential create, rotate, and revoke now check the target service
+  account's IAM policy before mutating credential state. The admin API evaluates
+  `grainfs:CredentialCreate`, `grainfs:CredentialRotate`, and
+  `grainfs:CredentialRevoke` against
+  `protocol-credential/<protocol>/<resource>`.
+
+### Changed
+
+- Updated protocol credential user documentation and follow-up tracking to
+  reflect that IAM permission gating has landed, while NBD and NFS/9P
+  data-plane enforcement remain follow-up work.
+
 ## [0.0.387.0] - 2026-05-28
 
 ### Added
