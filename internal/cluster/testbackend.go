@@ -10,6 +10,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
@@ -80,7 +81,8 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	if encErr != nil {
 		t.Fatalf("test encryptor: %v", encErr)
 	}
-	dwal, err := datawal.Open(backend.root+"/datawal", enc)
+	var zero [16]byte
+	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewEncryptorAdapter(enc, zero[:]), "datawal")
 	if err != nil {
 		t.Fatalf("open data wal: %v", err)
 	}
