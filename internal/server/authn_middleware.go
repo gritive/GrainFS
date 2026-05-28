@@ -267,19 +267,6 @@ func icebergMethodAllowsRO(method string) bool {
 	return method == "GET" || method == "HEAD"
 }
 
-func icebergWarehouseFromRequest(c *app.RequestContext) string {
-	if c == nil {
-		return "warehouse"
-	}
-	if wh := string(c.QueryArgs().Peek("warehouse")); wh != "" {
-		return wh
-	}
-	if wh := c.Param("warehouse"); wh != "" {
-		return wh
-	}
-	return "warehouse"
-}
-
 func icebergResourceForProtocolCredential(c *app.RequestContext, item protocred.Credential) string {
 	if c != nil {
 		if wh := string(c.QueryArgs().Peek("warehouse")); wh != "" {

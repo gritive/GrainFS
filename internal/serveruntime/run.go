@@ -147,6 +147,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootGenesisDEKBootstrap(ctx, state); err != nil {
 		return err
 	}
+	bootStreamRouterShell(state)
 
 	recordStartupDecision := func(decision badgerrole.Decision) {
 		recordBadgerStartupDecision(state, decision)
@@ -172,12 +173,9 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	// Open the DEK-sealed logical/PITR WAL (decrypts existing records on open)
-	// AFTER the gate. Its sole consumer (wal.NewBackend) is in bootBackendWrap,
-	// which follows immediately.
+	// AFTER the gate. Its consumer (wal.NewBackend) is in bootBackendWrap,
+	// after the routed backend is fully constructed.
 	if err := bootLogicalWALOpen(ctx, state); err != nil {
-		return err
-	}
-	if err := bootBackendWrap(ctx, state); err != nil {
 		return err
 	}
 
@@ -192,10 +190,16 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootOwnedGroupsAndEC(ctx, state, recordStartupDecision); err != nil {
 		return err
 	}
+	if err := bootClusterCoordinatorRouting(state); err != nil {
+		return err
+	}
 
 	// PR 6: snapshot + apply-loop.
 	if err := bootSnapshotAndApplyLoop(state); err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
+	}
+	if err := bootBackendWrap(ctx, state); err != nil {
+		return err
 	}
 	// §5 T45: reconcile the trusted-proxy.cidr atomic snapshot once after raft
 	// start. Snapshot Restore does NOT fire reload hooks, so if the node booted

@@ -72,8 +72,9 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	// WAL still not opened — proves WALAndForwarders has not yet run.
 	assert.Nil(t, state.wal, "WAL not opened before its phase")
 
-	// 2. Forwarders + join — constructs forwarder/coordinator wiring + keeper
-	//    population; does NOT open the logical WAL (R1: moved to
+	// 2. Forwarders + join — constructs forwarder wiring + keeper
+	//    population; does NOT touch distBackend/ClusterCoordinator and does NOT
+	//    open the logical WAL (R1: moved to
 	//    bootLogicalWALOpen, which runs post-gate).
 	require.NoError(t, bootWALAndForwardersPart1(ctx, state))
 	assert.Nil(t, state.wal, "logical WAL NOT opened in forwarders phase (post-gate, R1)")
@@ -82,7 +83,7 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	assert.NotNil(t, state.forwardReceiver, "ForwardReceiver after phase")
 	assert.NotNil(t, state.metaForwardSender, "MetaForwardSender after phase")
 	assert.NotNil(t, state.metaReadSender, "MetaReadSender after phase")
-	assert.NotNil(t, state.clusterCoord, "ClusterCoordinator after phase")
+	assert.Nil(t, state.clusterCoord, "ClusterCoordinator waits for distBackend")
 	// seedGroups is max(clusterSize*4, 8); single-node cluster -> 8.
 	assert.GreaterOrEqual(t, state.seedGroups, 8, "seedGroups computed")
 
