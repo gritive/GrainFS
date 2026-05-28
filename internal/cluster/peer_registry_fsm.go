@@ -1,6 +1,10 @@
 package cluster
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+	"sort"
+)
 
 // Peers returns the peer registry sub-FSM.
 func (f *MetaFSM) Peers() *peerRegistry { return f.peers }
@@ -29,6 +33,65 @@ func (f *MetaFSM) SetOnClusterKeyDropped(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.onClusterKeyDropped = fn
+}
+
+// SetOnPresentFlip wires the side-effect callback fired on the first
+// false→true BeginPresentFlip Apply, and on Restore of a snapshot whose
+// present_flip_begun bit is true (PR-2a §8c). The callback instructs the
+// transport to PRESENT the per-node cert. Set before MetaRaft.Start().
+func (f *MetaFSM) SetOnPresentFlip(fn func()) {
+	f.mu.Lock()
+	f.onPresentFlip = fn
+	f.mu.Unlock()
+}
+
+// PresentFlipBegun reports whether the present-flip has been committed in the
+// raft log (i.e., BeginPresentFlip has been applied). Safe for concurrent use.
+func (f *MetaFSM) PresentFlipBegun() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.presentFlipBegun
+}
+
+// SetPresentFlipBegunForTest directly sets the presentFlipBegun field.
+// Test-only: used to seed the field before Snapshot() in round-trip tests.
+func (f *MetaFSM) SetPresentFlipBegunForTest(v bool) {
+	f.mu.Lock()
+	f.presentFlipBegun = v
+	f.mu.Unlock()
+}
+
+// PeerSPKIs returns a sorted snapshot of all registered peer SPKIs. Safe for
+// concurrent use. Used by the invite-join Phase-1 leader to populate
+// peer_spkis in the sealed bootstrap (PR-2a §8f M1).
+func (f *MetaFSM) PeerSPKIs() [][32]byte {
+	out := f.peers.acceptSPKIs()
+	sort.Slice(out, func(i, j int) bool {
+		return bytes.Compare(out[i][:], out[j][:]) < 0
+	})
+	return out
+}
+
+// PeerNodeIDToSPKI returns a snapshot of the nodeID→SPKI map for all
+// registered peers. Safe for concurrent use.
+func (f *MetaFSM) PeerNodeIDToSPKI() map[string][32]byte {
+	return f.peers.nodeIDToSPKI()
+}
+
+// PeerRaftAddrToSPKI returns a snapshot of the raftAddr→SPKI map for all
+// registered peers. Use this (not PeerNodeIDToSPKI) when cross-referencing
+// a voter list from EffectiveConfiguration — production raft server IDs are
+// QUIC addresses, not node UUIDs. Safe for concurrent use.
+func (f *MetaFSM) PeerRaftAddrToSPKI() map[string][32]byte {
+	return f.peers.raftAddrToSPKI()
+}
+
+// ClusterKeyDropped reports whether the cluster-key-drop has been committed
+// in the raft log. Safe for concurrent use.
+func (f *MetaFSM) ClusterKeyDropped() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.clusterKeyDropped
 }
 
 // firePeersChanged snapshots the callback under lock then invokes it with the

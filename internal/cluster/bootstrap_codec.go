@@ -14,37 +14,6 @@ type KEKGen struct {
 	Key []byte
 }
 
-// encodeBootstrapSecretsPayload serializes the INNER plaintext that Phase-1
-// seals via encrypt.SealToPeer (the joiner OpenFromPeer-s + decodes it). All
-// fields are optional; empty slices encode as absent vectors.
-func encodeBootstrapSecretsPayload(encKey []byte, gens []KEKGen, psk []byte) []byte {
-	b := clusterBuilderPool.Get()
-
-	var encKeyOff flatbuffers.UOffsetT
-	if len(encKey) > 0 {
-		encKeyOff = b.CreateByteVector(encKey)
-	}
-	var pskOff flatbuffers.UOffsetT
-	if len(psk) > 0 {
-		pskOff = b.CreateByteVector(psk)
-	}
-
-	// Build child KEKGen tables BEFORE the parent Start (nested-vector rule).
-	gensOff := buildKEKGensVector(b, gens)
-
-	clusterpb.BootstrapSecretsPayloadStart(b)
-	if encKeyOff != 0 {
-		clusterpb.BootstrapSecretsPayloadAddEncryptionKey(b, encKeyOff)
-	}
-	if gensOff != 0 {
-		clusterpb.BootstrapSecretsPayloadAddKekGenerations(b, gensOff)
-	}
-	if pskOff != 0 {
-		clusterpb.BootstrapSecretsPayloadAddTransportPsk(b, pskOff)
-	}
-	return fbFinish(b, clusterpb.BootstrapSecretsPayloadEnd(b))
-}
-
 func decodeBootstrapSecretsPayload(data []byte) (encKey []byte, gens []KEKGen, psk []byte, err error) {
 	t, e := fbSafe(data, func(d []byte) *clusterpb.BootstrapSecretsPayload {
 		return clusterpb.GetRootAsBootstrapSecretsPayload(d, 0)

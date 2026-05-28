@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -49,27 +50,27 @@ const nodeKeyEncFile = "node.key.enc"
 // It NEVER regenerates when node.key.enc exists: a fresh key changes the SPKI
 // and the registry node-id-rebind guard would reject the later re-registration
 // (partition).
-func ensureNodeIdentity(dataDir, clusterID, nodeID string, encKey []byte, kekStore *encrypt.KEKStore) (spki [32]byte, err error) {
+func ensureNodeIdentity(dataDir, clusterID, nodeID string, encKey []byte, kekStore *encrypt.KEKStore) (cert tls.Certificate, spki [32]byte, err error) {
 	if len(encKey) != 32 {
-		return [32]byte{}, fmt.Errorf("ensureNodeIdentity: encryption key must be 32 bytes, got %d", len(encKey))
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: encryption key must be 32 bytes, got %d", len(encKey))
 	}
 
 	encPath := filepath.Join(dataDir, "keys.d", nodeKeyEncFile)
 	if _, statErr := os.Stat(encPath); statErr == nil {
 		return reloadNodeIdentity(dataDir, encKey, kekStore)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return [32]byte{}, fmt.Errorf("ensureNodeIdentity: stat node key: %w", statErr)
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: stat node key: %w", statErr)
 	}
 
 	// Absent: generate + seal under the static encryption.key.
-	cert, spki, err := transport.GenerateNodeIdentity(clusterID, nodeID)
+	cert, spki, err = transport.GenerateNodeIdentity(clusterID, nodeID)
 	if err != nil {
-		return [32]byte{}, fmt.Errorf("ensureNodeIdentity: generate identity: %w", err)
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: generate identity: %w", err)
 	}
 	if err := transport.SealNodeKey(dataDir, encKey, cert); err != nil {
-		return [32]byte{}, fmt.Errorf("ensureNodeIdentity: seal node key: %w", err)
+		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: seal node key: %w", err)
 	}
-	return spki, nil
+	return cert, spki, nil
 }
 
 // reloadNodeIdentity loads an existing node.key.enc. It first tries the static
@@ -77,9 +78,9 @@ func ensureNodeIdentity(dataDir, clusterID, nodeID string, encKey []byte, kekSto
 // KEK gens (back-compat for keys an invite-join sealed under a gen before the
 // static-key seal existed); on a gen hit it re-seals under encKey, deletes any
 // stale node.key.gen, and returns the SPKI.
-func reloadNodeIdentity(dataDir string, encKey []byte, kekStore *encrypt.KEKStore) ([32]byte, error) {
-	if _, spki, err := transport.LoadNodeKey(dataDir, encKey); err == nil {
-		return spki, nil
+func reloadNodeIdentity(dataDir string, encKey []byte, kekStore *encrypt.KEKStore) (tls.Certificate, [32]byte, error) {
+	if cert, spki, err := transport.LoadNodeKey(dataDir, encKey); err == nil {
+		return cert, spki, nil
 	}
 
 	// Back-compat: the key may have been sealed under a KEK gen (Phase 2). Try
@@ -99,16 +100,16 @@ func reloadNodeIdentity(dataDir string, encKey []byte, kekStore *encrypt.KEKStor
 			// Migrate: re-seal under the static encryption.key so future boots
 			// load it directly and never depend on a prunable KEK gen.
 			if err := transport.SealNodeKey(dataDir, encKey, cert); err != nil {
-				return [32]byte{}, fmt.Errorf("ensureNodeIdentity: re-seal node key under encryption key: %w", err)
+				return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: re-seal node key under encryption key: %w", err)
 			}
 			if err := deleteNodeKeyGen(dataDir); err != nil {
-				return [32]byte{}, err
+				return tls.Certificate{}, [32]byte{}, err
 			}
-			return spki, nil
+			return cert, spki, nil
 		}
 	}
 	// NEVER regenerate: a fresh key changes the SPKI and partitions the node.
-	return [32]byte{}, errors.New("ensureNodeIdentity: node.key.enc present but neither the encryption key nor any retained KEK gen could decrypt it")
+	return tls.Certificate{}, [32]byte{}, errors.New("ensureNodeIdentity: node.key.enc present but neither the encryption key nor any retained KEK gen could decrypt it")
 }
 
 // deleteNodeKeyGen removes a leftover keys.d/node.key.gen sidecar from the

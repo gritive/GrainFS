@@ -165,6 +165,10 @@ type metaJoinCoordinator interface {
 	LookupPending(inviteID string) (nodeID string, spki [32]byte, addr string, ok bool)
 	ProposeInviteConsume(ctx context.Context, inviteID string) error
 	RemoveLearner(nodeID, addr string) error
+	// PeerSPKIs and ClusterKeyDropped supply the FSM state needed to populate
+	// peer_spkis in the sealed bootstrap for invite-join joiners (PR-2a §8f M1).
+	PeerSPKIs() [][32]byte
+	ClusterKeyDropped() bool
 }
 
 type MetaJoinReceiver struct {
@@ -479,7 +483,11 @@ func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, s
 	if err != nil {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "bootstrap secrets: " + err.Error()}
 	}
-	payload := encodeBootstrapSecretsPayload(encKey, kekGens, psk)
+	// Populate peer_spkis from the FSM registry so the joiner can pre-seed its
+	// accept-set before Listen (PR-2a §8f M1). clusterKeyDropped stays false
+	// in PR-2a — the cluster key is NOT yet dropped (safe-to-leave-merged
+	// invariant). Empty peerSPKIs is tolerated on the joiner side (M5).
+	payload := EncodeBootstrapSecretsPayloadWithCutover(encKey, kekGens, psk, r.meta.PeerSPKIs(), r.meta.ClusterKeyDropped())
 	bindCtx := r.sealBindContext(req)
 	blob, err := encrypt.SealToPeer(ecPub, payload, bindCtx, bindCtx)
 	if err != nil {

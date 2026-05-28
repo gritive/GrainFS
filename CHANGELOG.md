@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.403.0] - 2026-05-28
+
+### Added
+
+- Cluster-wide live TLS certificate cutover: leader can now orchestrate a two-phase
+  present-flip (`PreparePresentFlip` → applied-index barrier → `BeginPresentFlip`) so
+  every cluster node atomically transitions from the shared CA certificate to its own
+  per-node certificate without restart.
+- Applied-index barrier RPC (`StreamAppliedIndexProbe`) lets the leader confirm every
+  voter has applied raft entries up to a target index before proposing `BeginPresentFlip`.
+- Invite-joiner nodes now persist peer SPKIs from the join handshake so they can resume
+  after a restart even before the cluster-wide flip is complete.
+- `PeerRaftAddrToSPKI()` on MetaFSM exposes the QUIC-address-keyed SPKI map, used by
+  `RunPresentFlip` to verify voter⊆registry before the cutover is proposed.
+
 ## [0.0.402.0] - 2026-05-28
 
 ### Security

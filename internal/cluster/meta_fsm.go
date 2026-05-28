@@ -122,6 +122,8 @@ const (
 	MetaCmdTypeProtocolCredentialRevoke    = clusterpb.MetaCmdTypeProtocolCredentialRevoke
 	MetaCmdTypeProtocolCredentialMarkStale = clusterpb.MetaCmdTypeProtocolCredentialMarkStale
 	MetaCmdTypeProtocolCredentialLastUsed  = clusterpb.MetaCmdTypeProtocolCredentialLastUsed
+	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip // zero-CA cutover: PR-2a §8c
+	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip   // zero-CA cutover: PR-2a §8c
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -291,6 +293,16 @@ type MetaFSM struct {
 	// fired once on Restore of a dropped=true snapshot.
 	clusterKeyDropped   bool
 	onClusterKeyDropped func() // fired on Restore of a dropped snapshot; nil = no-op
+
+	// presentFlipBegun is set by BeginPresentFlip Apply and persisted via
+	// MetaStateSnapshot slot 15 (PR-2a §8c step 4). Once true, the node's
+	// transport must PRESENT its per-node cert. The side effect is decoupled
+	// via the onPresentFlip callback fired OUTSIDE f.mu.
+	presentFlipBegun bool
+
+	// onPresentFlip fires on the first false→true Apply transition and on
+	// Restore when the snapshot has the bit set. nil = no-op.
+	onPresentFlip func()
 
 	// IAM sub-FSM — wired after construction via SetIAM (Phase 1). iamStore is
 	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
@@ -879,6 +891,21 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyJWTSigningKeyRotate(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeJWTSigningKeyPrune:
 		return f.applyJWTSigningKeyPrune(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePreparePresentFlip:
+		// PR-2a §8c step 2: pure FSM state mark, no transport side effect.
+		// Commit index of this entry is the barrier target.
+		return nil
+	case clusterpb.MetaCmdTypeBeginPresentFlip:
+		// PR-2a §8c step 4: UNCONDITIONAL flip on every voter.
+		f.mu.Lock()
+		wasSet := f.presentFlipBegun
+		f.presentFlipBegun = true
+		cb := f.onPresentFlip
+		f.mu.Unlock()
+		if !wasSet && cb != nil {
+			cb() // OUTSIDE f.mu
+		}
+		return nil
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")

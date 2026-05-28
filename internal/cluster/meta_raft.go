@@ -208,6 +208,12 @@ func (m *MetaRaft) WaitApplied(ctx context.Context, index uint64) error {
 // Callers must set callbacks before Start() to avoid a data race with the apply loop.
 func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }
 
+// PeerSPKIs delegates to the FSM peer registry (metaJoinCoordinator, PR-2a §8f).
+func (m *MetaRaft) PeerSPKIs() [][32]byte { return m.fsm.PeerSPKIs() }
+
+// ClusterKeyDropped delegates to the FSM (metaJoinCoordinator, PR-2a §8f).
+func (m *MetaRaft) ClusterKeyDropped() bool { return m.fsm.ClusterKeyDropped() }
+
 // SetTransport wires a MetaTransport into the Raft node after construction.
 // Must be called before Start.
 func (m *MetaRaft) SetTransport(t MetaTransport) {

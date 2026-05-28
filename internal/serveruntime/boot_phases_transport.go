@@ -48,6 +48,13 @@ func bootQUICTransport(ctx context.Context, state *bootState) error {
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.
 	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 64})
+	// M3: pre-seed peer SPKIs from the invite-join bootstrap so the joiner
+	// accepts incumbents' per-node certs from the first inbound handshake
+	// (PR-2a §8f). No-op on normal (non-invite) boot and when peer_spkis is
+	// empty (rolling-upgrade compat — old leader omitted the field, M5).
+	if state.inviteJoin != nil && len(state.inviteJoin.peerSPKIs) > 0 {
+		quicTransport.SeedInitialPeerSPKIs(state.inviteJoin.peerSPKIs)
+	}
 	if err := quicTransport.Listen(ctx, state.raftAddr); err != nil {
 		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", state.raftAddr, err, state.raftAddr)
 	}

@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -135,7 +136,7 @@ func bootMetaRaftWiring(state *bootState) error {
 				state.perNodeSPKI = state.inviteJoin.nodeSPKI
 			}
 		} else {
-			spki, err := ensureNodeIdentity(
+			cert, spki, err := ensureNodeIdentity(
 				state.cfg.DataDir,
 				hex.EncodeToString(state.clusterID),
 				state.nodeID,
@@ -145,6 +146,7 @@ func bootMetaRaftWiring(state *bootState) error {
 			if err != nil {
 				return fmt.Errorf("ensure per-node transport identity: %w", err)
 			}
+			state.perNodeCert = cert
 			state.perNodeSPKI = spki
 		}
 	}
@@ -276,6 +278,37 @@ func bootDataGroupRouter(state *bootState) error {
 // bootRotationAndAdminAPI registers the cluster-key rotation worker callbacks
 // on the meta-FSM and constructs the IAM AdminAPI (when IAM is configured).
 //
+// presentFlipTarget narrows the QUICTransport surface for the onPresentFlip
+// callback — keeps the wiring testable with a small fake (PR-2a §8c step 5).
+type presentFlipTarget interface {
+	FlipPresent(cert tls.Certificate, spki [32]byte)
+}
+
+// buildOnPresentFlipCallback returns a callback that reads bootState fields
+// at INVOCATION time (pointer-capture) and flips the transport's presented cert.
+// Returns nil when tr is nil (single-node path has no transport).
+//
+// PR-2a §8c step 5 + F4 user decision: calls FlipPresent ONLY (no
+// RecycleConns — existing conns stay on cluster cert; recycle is PR-2b).
+func buildOnPresentFlipCallback(st *bootState, tr presentFlipTarget) func() {
+	if tr == nil {
+		return nil
+	}
+	return func() {
+		if st.perNodeCert.Certificate == nil {
+			// perNodeCert is nil in invite-join mode until bootInviteJoinPhase2
+			// sets it. In normal operation, BeginPresentFlip can only be applied
+			// AFTER the node is a voter (Phase 2 complete), so this branch
+			// should not trigger. If it does, the cluster-wide flip proceeds but
+			// THIS node still presents the old CA cert — operators must re-run
+			// the cutover or restart the node.
+			log.Error().Msg("onPresentFlip: perNodeCert not loaded at flip time — node will not flip; restart to recover")
+			return
+		}
+		tr.FlipPresent(st.perNodeCert, st.perNodeSPKI)
+	}
+}
+
 // Like bootDataGroupRouter, this MUST run BEFORE bootMetaRaftStart: the apply
 // loop must not fire any RotationApplied event before the worker callback is
 // registered, or the first phase change is lost.
@@ -305,6 +338,23 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		state.quicTransport.SetDropped()
 		log.Info().Msg("zero-CA: cluster_key_dropped restored; transport base dropped")
 	})
+	// PR-2a §8c step 5: lazy present-flip — FlipPresent only, no RecycleConns.
+	if cb := buildOnPresentFlipCallback(state, state.quicTransport); cb != nil {
+		state.metaRaft.FSM().SetOnPresentFlip(func() {
+			cb()
+			log.Info().Msg("present-flip applied: transport now presents per-node cert")
+		})
+	}
+	// PR-2a §8b: applied-index probe handler for the leader's barrier fan-out.
+	state.quicTransport.Handle(transport.StreamAppliedIndexProbe,
+		func(req *transport.Message) *transport.Message {
+			respPayload, err := cluster.HandleAppliedIndexProbe(req.Payload, state.nodeID, state.metaRaft.LastApplied)
+			if err != nil {
+				log.Warn().Err(err).Msg("applied-index probe: bad request")
+				return nil
+			}
+			return &transport.Message{Type: transport.StreamAppliedIndexProbe, Payload: respPayload}
+		})
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).
 	if _, activeSPKI, err := transport.DeriveClusterIdentity(state.transportPSK); err == nil {

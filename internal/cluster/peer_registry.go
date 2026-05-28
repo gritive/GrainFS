@@ -224,6 +224,33 @@ func (r *peerRegistry) acceptSPKIs() [][32]byte {
 	return out
 }
 
+// nodeIDToSPKI returns a snapshot of the nodeID→SPKI mapping for all peers.
+func (r *peerRegistry) nodeIDToSPKI() map[string][32]byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string][32]byte, len(r.byNodeID))
+	for id, e := range r.byNodeID {
+		out[id] = e.SPKI
+	}
+	return out
+}
+
+// raftAddrToSPKI returns a snapshot of the raftAddr→SPKI mapping for all peers.
+// Production raft server IDs are QUIC addresses (MetaRaftConfig.RaftID), so
+// callers that receive a voter list from EffectiveConfiguration must use this
+// map (not nodeIDToSPKI) to cross-reference voters with their SPKIs.
+func (r *peerRegistry) raftAddrToSPKI() map[string][32]byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string][32]byte, len(r.byNodeID))
+	for _, e := range r.byNodeID {
+		if e.Address != "" {
+			out[e.Address] = e.SPKI
+		}
+	}
+	return out
+}
+
 // acceptSPKIBytes is acceptSPKIs() as [][]byte (Task 5 JoinReply.PeerSPKIs).
 func (r *peerRegistry) acceptSPKIBytes() [][]byte {
 	spkis := r.acceptSPKIs()

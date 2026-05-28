@@ -35,6 +35,7 @@ const (
 	StreamCapabilityProbe         StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
 	StreamKEKDiskSpaceProbe       StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
 	StreamKEKLeaseSnapshotProbe   StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
+	StreamAppliedIndexProbe       StreamType = 0x1A // Leader → voter applied-index barrier probe (PR-2a §8b); req/resp magic-tagged binary
 )
 
 type StreamClass byte

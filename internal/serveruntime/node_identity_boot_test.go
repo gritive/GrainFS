@@ -46,7 +46,7 @@ func TestEnsureNodeIdentity_GeneratesAndPersistsWhenAbsent(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
 
-	spki, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
+	_, spki, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity: %v", err)
 	}
@@ -72,11 +72,11 @@ func TestEnsureNodeIdentity_ReusesPersisted(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
 
-	first, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
+	_, first, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
 	if err != nil {
 		t.Fatalf("first ensureNodeIdentity: %v", err)
 	}
-	second, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
+	_, second, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
 	if err != nil {
 		t.Fatalf("second ensureNodeIdentity: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestEnsureNodeIdentity_BackCompatKEKGenSealed(t *testing.T) {
 		t.Fatalf("write legacy node.key.gen: %v", err)
 	}
 
-	got, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, got, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestEnsureNodeIdentity_NeverRegeneratesOnDecryptFailure(t *testing.T) {
 	}
 
 	store := newNIKEKStore(t, 0, 1)
-	if _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
+	if _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
 		t.Fatal("expected error when nothing decrypts, got nil")
 	}
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
