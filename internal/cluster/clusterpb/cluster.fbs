@@ -1281,6 +1281,8 @@ table MetaIAMPolicyAttachMountSAEntry {
 }
 
 // Protocol credential durable row. Plaintext secrets are intentionally absent.
+// secret_enc is an encrypted envelope used by SigV4 protocols that need the
+// original secret to verify request signatures.
 table MetaProtocolCredentialEntry {
   id:string;
   sa_id:string;
@@ -1297,6 +1299,7 @@ table MetaProtocolCredentialEntry {
   generation:uint64;
   stale_at_unix_nanos:int64;
   stale_reason:string;
+  secret_enc:[ubyte];
 }
 
 table MetaProtocolCredentialCreateCmd {
@@ -1310,6 +1313,7 @@ table MetaProtocolCredentialRotateCmd {
   secret_hash:[ubyte];
   secret_hint:string;
   rotated_at_unix_nanos:int64;
+  secret_enc:[ubyte];
 }
 
 table MetaProtocolCredentialRevokeCmd {

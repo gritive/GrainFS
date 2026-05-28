@@ -5,6 +5,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/iam"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -31,6 +32,14 @@ func WithVerifier(v *s3auth.CachingVerifier) Option {
 func WithIAMStore(store *iam.Store) Option {
 	return func(s *Server) {
 		s.iamStore = store
+	}
+}
+
+func WithProtocolCredentialAuth(store *protocred.Store, envelope protocred.SecretEnvelope) Option {
+	return func(s *Server) {
+		if store != nil && envelope != nil {
+			s.protocolCredAuth = newProtocolCredentialAuth(store, envelope)
+		}
 	}
 }
 

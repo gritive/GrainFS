@@ -360,18 +360,11 @@ Work these in order. Do not run them in parallel.
   reopen when their telemetry triggers fire.
 - [ ] **Incident store scope index / `ScanObjects(bucket, keyPrefix)`**: reopen
   when measured margins fail or a concrete caller needs prefix scope.
-- [ ] **Protocol credential data-plane enforcement**: the shared
-  `grainfs credential` admin API/CLI foundation exists for S3, Iceberg, NFS,
-  9P, and NBD, credential metadata is persisted through Meta Raft, and
-  create/rotate/revoke now check IAM permissions for the target service
-  account. NBD now enforces `volume@secret` attach when protocol credentials
-  are wired, and NFS/9P now accept protocol credential attach hints while
-  preserving the validator's strict stale/revoked/expired decisions and SAID
-  audit context. The attach validator foundation now centralizes strict/compat
-  stale decisions and bounded attach caching, and IAM policy detach/body
-  changes now mark dependent protocol credentials stale. Follow up by extending
-  protocol credential enforcement to S3/Iceberg auth paths and adding real
-  client smoke coverage for NFS/9P credential mounts.
+- [ ] **Protocol credential real-client smoke coverage**: protocol credential
+  data-plane enforcement is wired for S3, Iceberg, NBD, NFS, and 9P server
+  paths. Follow up by adding real client smoke coverage for S3/Iceberg
+  protocol credentials and NFS/9P credential mounts before promoting broader
+  compatibility claims.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

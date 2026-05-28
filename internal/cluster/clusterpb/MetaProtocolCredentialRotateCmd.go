@@ -111,8 +111,42 @@ func (rcv *MetaProtocolCredentialRotateCmd) MutateRotatedAtUnixNanos(n int64) bo
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *MetaProtocolCredentialRotateCmd) SecretEnc(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *MetaProtocolCredentialRotateCmd) SecretEncLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MetaProtocolCredentialRotateCmd) SecretEncBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *MetaProtocolCredentialRotateCmd) MutateSecretEnc(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
 func MetaProtocolCredentialRotateCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func MetaProtocolCredentialRotateCmdAddRequestId(builder *flatbuffers.Builder, requestId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(requestId), 0)
@@ -131,6 +165,12 @@ func MetaProtocolCredentialRotateCmdAddSecretHint(builder *flatbuffers.Builder, 
 }
 func MetaProtocolCredentialRotateCmdAddRotatedAtUnixNanos(builder *flatbuffers.Builder, rotatedAtUnixNanos int64) {
 	builder.PrependInt64Slot(4, rotatedAtUnixNanos, 0)
+}
+func MetaProtocolCredentialRotateCmdAddSecretEnc(builder *flatbuffers.Builder, secretEnc flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(secretEnc), 0)
+}
+func MetaProtocolCredentialRotateCmdStartSecretEncVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
 }
 func MetaProtocolCredentialRotateCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

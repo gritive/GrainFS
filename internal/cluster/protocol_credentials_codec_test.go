@@ -35,6 +35,7 @@ func TestProtocolCredentialCommandCodecsRoundTrip(t *testing.T) {
 		Generation:  4,
 		StaleAt:     &used,
 		StaleReason: "policy_detached",
+		SecretEnc:   []byte("sealed-secret"),
 	}
 
 	createBytes, err := encodeProtocolCredentialCreateCmd(ProtocolCredentialCreateCmd{
@@ -52,6 +53,7 @@ func TestProtocolCredentialCommandCodecsRoundTrip(t *testing.T) {
 		ID:         row.ID,
 		SecretHash: hash,
 		SecretHint: "pcsec...new",
+		SecretEnc:  []byte("sealed-new-secret"),
 		RotatedAt:  used,
 	})
 	require.NoError(t, err)
@@ -61,6 +63,7 @@ func TestProtocolCredentialCommandCodecsRoundTrip(t *testing.T) {
 	require.Equal(t, row.ID, gotRotate.ID)
 	require.Equal(t, hash, gotRotate.SecretHash)
 	require.Equal(t, "pcsec...new", gotRotate.SecretHint)
+	require.Equal(t, []byte("sealed-new-secret"), gotRotate.SecretEnc)
 	require.True(t, gotRotate.RotatedAt.Equal(used))
 
 	revokeBytes, err := encodeProtocolCredentialRevokeCmd(ProtocolCredentialRevokeCmd{
@@ -131,6 +134,7 @@ func TestProtocolCredentialSnapshotCodecDeterministicAndRoundTrips(t *testing.T)
 		CreatedBy:  "admin-a",
 		ExpiresAt:  &exp,
 		Generation: 1,
+		SecretEnc:  []byte("sealed-a"),
 	}
 	b := protocred.Credential{
 		ID:          "pc_b",
@@ -147,6 +151,7 @@ func TestProtocolCredentialSnapshotCodecDeterministicAndRoundTrips(t *testing.T)
 		Generation:  3,
 		StaleAt:     &used,
 		StaleReason: "policy_changed",
+		SecretEnc:   []byte("sealed-b"),
 	}
 
 	encodedAB, err := encodeProtocolCredentialsSnapshot([]protocred.Credential{a, b})
@@ -269,6 +274,7 @@ func requireCredentialEqual(t *testing.T, want, got protocred.Credential) {
 	require.Equal(t, want.Generation, got.Generation)
 	requireTimePtrEqual(t, want.StaleAt, got.StaleAt)
 	require.Equal(t, want.StaleReason, got.StaleReason)
+	require.Equal(t, want.SecretEnc, got.SecretEnc)
 }
 
 func requireTimePtrEqual(t *testing.T, want, got *time.Time) {

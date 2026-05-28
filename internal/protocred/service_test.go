@@ -1,12 +1,38 @@
 package protocred
 
 import (
+	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+type testSecretEnvelope struct {
+	sealedAAD []byte
+	openedAAD []byte
+}
+
+func (e *testSecretEnvelope) SealProtocolCredentialSecret(aad []byte, plaintext string) ([]byte, error) {
+	e.sealedAAD = append([]byte(nil), aad...)
+	out := append([]byte("sealed:"), base64.RawStdEncoding.EncodeToString([]byte(plaintext))...)
+	return out, nil
+}
+
+func (e *testSecretEnvelope) OpenProtocolCredentialSecret(aad []byte, ciphertext []byte) (string, error) {
+	e.openedAAD = append([]byte(nil), aad...)
+	encoded, ok := bytes.CutPrefix(ciphertext, []byte("sealed:"))
+	if !ok {
+		return "", ErrInvalid
+	}
+	plain, err := base64.RawStdEncoding.DecodeString(string(encoded))
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
 
 func TestServiceCreateGetListAndHints(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
@@ -46,6 +72,52 @@ func TestServiceCreateGetListAndHints(t *testing.T) {
 	require.Equal(t, secret.ID, items[0].ID)
 }
 
+func TestServiceEnvelopeStoresRecoverableSecretWithoutLeakingPlaintext(t *testing.T) {
+	now := time.Unix(101, 0).UTC()
+	envelope := &testSecretEnvelope{}
+	svc := NewService(NewStore(), WithNow(func() time.Time { return now }), WithSecretEnvelope(envelope))
+
+	secret, err := svc.Create(CreateRequest{
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/default", Mode: ModeRW,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, secret.Secret)
+	require.NotEmpty(t, envelope.sealedAAD)
+
+	item, err := svc.Get(secret.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, item.SecretEnc)
+	require.NotContains(t, item.SecretHint, secret.Secret)
+	require.NotContains(t, string(item.SecretEnc), secret.Secret)
+
+	listed := svc.List(ListFilter{Protocol: ProtocolS3})
+	require.Len(t, listed, 1)
+	require.Equal(t, item.SecretEnc, listed[0].SecretEnc)
+	require.NotContains(t, listed[0].SecretHint, secret.Secret)
+
+	opened, openedItem, err := svc.OpenSecret(secret.ID)
+	require.NoError(t, err)
+	require.Equal(t, secret.Secret, opened)
+	require.Equal(t, secret.ID, openedItem.ID)
+	require.Equal(t, envelope.sealedAAD, envelope.openedAAD)
+}
+
+func TestServiceOpenSecretRejectsMissingEnvelopeOrCiphertext(t *testing.T) {
+	store := NewStore()
+	svc := NewService(store)
+	secret, err := svc.Create(CreateRequest{
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/default", Mode: ModeRW,
+	})
+	require.NoError(t, err)
+
+	_, _, err = svc.OpenSecret(secret.ID)
+	require.ErrorIs(t, err, ErrInvalid)
+
+	withEnvelope := NewService(store, WithSecretEnvelope(&testSecretEnvelope{}))
+	_, _, err = withEnvelope.OpenSecret(secret.ID)
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
 func TestMaterializeCreateMatchesServiceCreateShape(t *testing.T) {
 	now := time.Unix(123, 0).UTC()
 	expires := now.Add(time.Hour)
@@ -78,6 +150,25 @@ func TestServiceRotateAndRevoke(t *testing.T) {
 	require.NotNil(t, item.RevokedAt)
 	_, err = svc.Rotate(first.ID)
 	require.Error(t, err)
+}
+
+func TestServiceRotateRefreshesEncryptedSecret(t *testing.T) {
+	envelope := &testSecretEnvelope{}
+	svc := NewService(NewStore(), WithSecretEnvelope(envelope))
+	first, err := svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/default", Mode: ModeRO})
+	require.NoError(t, err)
+	before, err := svc.Get(first.ID)
+	require.NoError(t, err)
+
+	second, err := svc.Rotate(first.ID)
+	require.NoError(t, err)
+	after, err := svc.Get(first.ID)
+	require.NoError(t, err)
+	require.NotEqual(t, before.SecretEnc, after.SecretEnc)
+
+	opened, _, err := svc.OpenSecret(first.ID)
+	require.NoError(t, err)
+	require.Equal(t, second.Secret, opened)
 }
 
 func TestServiceAuthenticate(t *testing.T) {

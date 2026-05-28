@@ -110,6 +110,14 @@ revoke now require the target service account to be allowed for
 }
 ```
 
+S3 and Iceberg accept protocol credentials as SigV4 access keys. S3 credentials
+are scoped to one bucket (`--protocol s3 --resource bucket/<bucket>`); Iceberg
+credentials are scoped to one catalog (`--protocol iceberg --resource
+catalog/<warehouse>`). Use the returned `id` as the SigV4 access key and the
+one-time `secret` as the SigV4 secret key. Read-only credentials allow read
+operations only. S3 `CopyObject` is limited to same-bucket copies for protocol
+credentials.
+
 NBD, NFS, and 9P attach paths enforce protocol credentials when credential
 storage is wired. NBD uses `connection_hint.export_name` (`volume@secret`),
 NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`), and 9P

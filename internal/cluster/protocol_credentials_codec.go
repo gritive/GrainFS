@@ -23,6 +23,7 @@ type ProtocolCredentialRotateCmd struct {
 	SecretHash [sha256.Size]byte
 	SecretHint string
 	RotatedAt  time.Time
+	SecretEnc  []byte
 }
 
 type ProtocolCredentialRevokeCmd struct {
@@ -87,12 +88,16 @@ func encodeProtocolCredentialRotateCmd(cmd ProtocolCredentialRotateCmd) ([]byte,
 	idOff := b.CreateString(cmd.ID)
 	hashOff := b.CreateByteVector(cmd.SecretHash[:])
 	hintOff := b.CreateString(cmd.SecretHint)
+	encOff := b.CreateByteVector(cmd.SecretEnc)
 	clusterpb.MetaProtocolCredentialRotateCmdStart(b)
 	clusterpb.MetaProtocolCredentialRotateCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaProtocolCredentialRotateCmdAddId(b, idOff)
 	clusterpb.MetaProtocolCredentialRotateCmdAddSecretHash(b, hashOff)
 	clusterpb.MetaProtocolCredentialRotateCmdAddSecretHint(b, hintOff)
 	clusterpb.MetaProtocolCredentialRotateCmdAddRotatedAtUnixNanos(b, unixNanos(cmd.RotatedAt))
+	if len(cmd.SecretEnc) > 0 {
+		clusterpb.MetaProtocolCredentialRotateCmdAddSecretEnc(b, encOff)
+	}
 	return fbFinish(b, clusterpb.MetaProtocolCredentialRotateCmdEnd(b)), nil
 }
 
@@ -113,6 +118,7 @@ func decodeProtocolCredentialRotateCmd(data []byte) (ProtocolCredentialRotateCmd
 		SecretHash: hash,
 		SecretHint: string(t.SecretHint()),
 		RotatedAt:  timeFromUnixNanos(t.RotatedAtUnixNanos()),
+		SecretEnc:  cloneBytes(t.SecretEncBytes()),
 	}, nil
 }
 
@@ -285,6 +291,7 @@ func buildProtocolCredentialEntry(b *flatbuffers.Builder, row protocred.Credenti
 	modeOff := b.CreateString(string(row.Mode))
 	hashOff := b.CreateByteVector(row.SecretHash[:])
 	hintOff := b.CreateString(row.SecretHint)
+	encOff := b.CreateByteVector(row.SecretEnc)
 	createdByOff := b.CreateString(row.CreatedBy)
 	staleReasonOff := b.CreateString(row.StaleReason)
 
@@ -304,6 +311,9 @@ func buildProtocolCredentialEntry(b *flatbuffers.Builder, row protocred.Credenti
 	clusterpb.MetaProtocolCredentialEntryAddGeneration(b, row.Generation)
 	clusterpb.MetaProtocolCredentialEntryAddStaleAtUnixNanos(b, unixNanosPtr(row.StaleAt))
 	clusterpb.MetaProtocolCredentialEntryAddStaleReason(b, staleReasonOff)
+	if len(row.SecretEnc) > 0 {
+		clusterpb.MetaProtocolCredentialEntryAddSecretEnc(b, encOff)
+	}
 	return clusterpb.MetaProtocolCredentialEntryEnd(b)
 }
 
@@ -328,6 +338,7 @@ func decodeProtocolCredentialEntry(row *clusterpb.MetaProtocolCredentialEntry) (
 		Generation:  row.Generation(),
 		StaleAt:     timePtrFromUnixNanos(row.StaleAtUnixNanos()),
 		StaleReason: string(row.StaleReason()),
+		SecretEnc:   cloneBytes(row.SecretEncBytes()),
 	}
 	if cred.Generation == 0 {
 		cred.Generation = 1

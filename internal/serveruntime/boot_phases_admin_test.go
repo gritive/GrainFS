@@ -70,6 +70,35 @@ func TestBootHTTPServerAndAdminWiresProtocolCredentials(t *testing.T) {
 	require.NotNil(t, state.adminDeps.ProtocolCredAuthz)
 }
 
+func TestBootHTTPServerAndAdminReusesStandaloneProtocolCredentialStore(t *testing.T) {
+	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-protocred-standalone-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	backend, err := storage.NewLocalBackend(filepath.Join(dataDir, "objects"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+
+	store := protocred.NewStore()
+	state := &bootState{
+		cfg: Config{
+			Addr:        "127.0.0.1:0",
+			DataDir:     dataDir,
+			AdminSocket: filepath.Join(dataDir, "admin.sock"),
+		},
+		backend:                 backend,
+		protocolCredentialStore: store,
+	}
+	stores, err := WireIAMPolicyStores(context.Background(), nil, 0)
+	require.NoError(t, err)
+	state.iamPolicyStores = stores
+	state.cfgStore = config.NewStore()
+	t.Cleanup(state.Cleanup)
+
+	require.NoError(t, bootHTTPServerAndAdmin(state))
+	require.Same(t, store, state.protocolCredentialStore)
+	require.NotNil(t, state.adminDeps.ProtocolCredentials)
+}
+
 func TestBootHTTPServerAndAdminUsesDurableProtocolCredentialsWhenMetaRaftIsWired(t *testing.T) {
 	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-protocred-durable-")
 	require.NoError(t, err)
