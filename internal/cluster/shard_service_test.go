@@ -75,6 +75,25 @@ func TestShardServiceAcceptsDEKKeeperWithoutStaticEncryptor(t *testing.T) {
 	require.Equal(t, keeper, svc.DEKKeeper())
 }
 
+func TestEncodeEncryptedShardBufferRoundTripsViaDEK(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x75}, encrypt.KEKSize)
+	clusterID := bytes.Repeat([]byte{0x76}, 16)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
+
+	plain := bytes.Repeat([]byte("shard-bytes"), 1000)
+	enc, err := svc.EncodeEncryptedShardBuffer("bucket", "key", 2, plain)
+	require.NoError(t, err)
+	require.True(t, eccodec.IsEncryptedShard(enc), "must be GFSENC3 ciphertext, not plaintext")
+	require.False(t, bytes.Contains(enc, plain[:64]), "plaintext run must not appear in ciphertext")
+
+	// Round-trips through the normal read decoder.
+	var out bytes.Buffer
+	require.NoError(t, eccodec.DecodeEncryptedShard(&out, bytes.NewReader(enc), svc.segEnc, ShardAADFields("bucket", "key", 2)))
+	require.Equal(t, plain, out.Bytes())
+}
+
 // TestShardService_Encryption verifies that shards written with an encryptor
 // are NOT stored as plaintext on disk, and can be decrypted on read.
 func TestShardService_Encryption(t *testing.T) {
