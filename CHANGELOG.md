@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.420.0] - 2026-05-29
+
+### Security
+
+- Moved `keys.d/node.key.enc` steady-state sealing for normal boot and
+  invite Phase-2 from static `encryption.key` to the active KEK generation,
+  with `keys.d/node.key.gen` retained as the durable generation pointer.
+
+### Changed
+
+- Kept legacy static-key-sealed node identities as a one-way migration path
+  that immediately rewraps the identity under the active KEK generation.
+
+### Tests
+
+- Added node identity and invite Phase-2 coverage for active-KEK rewrap,
+  missing sidecar refusal, pruned generation refusal, and legacy static-key
+  migration.
+
 ## [0.0.419.0] - 2026-05-29
 
 ### Added

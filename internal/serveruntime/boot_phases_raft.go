@@ -117,21 +117,18 @@ func bootMetaRaftWiring(state *bootState) error {
 	// this identity — accept-side foundation only. Task 6 consumes perNodeSPKI.
 	// Skipped when the static encryption key is not wired (test configs) or
 	// identity inputs are missing; production always has all three. node.key.enc
-	// is sealed under the static encryption.key (never rotates/prunes), so a KEK
-	// rotate+prune can no longer brick the node. kekStore is passed only for the
-	// back-compat migration of Phase-2 KEK-gen-sealed keys.
+	// is sealed under the active KEK generation and tracked by keys.d/node.key.gen
+	// so normal boot can re-seal during rotation and fail closed after prune.
 	if len(state.cfg.RawEncryptionKey) == 32 && len(state.clusterID) > 0 && state.nodeID != "" {
 		if state.inviteJoinMode {
 			// Invite-join OWNS node.key.enc this boot: Phase-1 sealed it under a KEK
 			// generation and Phase-2 (bootInviteJoinPhase2) LoadNodeKeys it under that
 			// SAME gen. ensureNodeIdentity must NOT touch it here — its back-compat path
-			// would migrate (re-seal) the KEK-gen-sealed key to the static encryption.key
-			// out from under Phase-2's KEK-gen load, which would then fail with a GCM auth
-			// error. Phase-2 itself performs the migration to the static encryption.key at
-			// close-out (loadAndMigrateInviteNodeKey), so the back-compat path in
-			// ensureNodeIdentity is now only a safety net for legacy keys sealed before
-			// that change. Self-register still needs the SPKI, so source it from the
-			// invite-join state (set in Phase-1 / from the resume sentinel).
+			// might re-seal under a different active generation out from under Phase-2's
+			// recorded generation load. Phase-2 owns the active-generation re-seal at
+			// close-out (loadAndMigrateInviteNodeKey). Self-register still needs the
+			// SPKI, so source it from the invite-join state (set in Phase-1 / from the
+			// resume sentinel).
 			if state.inviteJoin != nil {
 				state.perNodeSPKI = state.inviteJoin.nodeSPKI
 			}
