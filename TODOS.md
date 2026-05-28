@@ -32,6 +32,10 @@ Work these in order. Do not run them in parallel.
      (sigv4 verify locked at ≤60 alloc/op). 3-node cluster cache-invalidation
      e2e deferred (no 3-node IAM harness yet); single-node restart e2e
      covers the snapshot/restore path end-to-end.
+     **R-FSM — data-group FSM + data WAL static→DEK.** SHIPPED in current branch.
+     Data-group FSM values now use a `GFMV` frame carrying `dek_gen`; boot and
+     recovery data WAL sealers prefer the live `DEKKeeperAdapter`. Format
+     version 5→6.
      **R3 — Retire static key.** After every `cfg.Encryptor` consumer
      (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
      replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,
@@ -45,12 +49,46 @@ Work these in order. Do not run them in parallel.
      Design path: `docs/superpowers/specs/2026-05-28-at-rest-dcut-bootstrap-envelope-design.md`
      splits this into bootstrap-envelope, KEK-gen node identity seal,
      prune-evidence gate, and final static-key removal slices.
+     **KEK-gen node identity seal shipped:** normal boot and invite Phase-2
+     now keep `node.key.enc` sealed under the active KEK generation and persist
+     `keys.d/node.key.gen`.
+     **Prune-evidence gate shipped in current branch:** self-register publishes
+     each voter's `node_key_kek_gen`, and KEK prune now refuses while any voter
+     lacks evidence or still reports a generation at/below the prune target.
      Remaining D-cut work is final static-key removal.
+     Slice A shipped in current branch: new invite bootstrap payloads no longer
+     encode `BootstrapSecretsPayload.encryption_key`; legacy decode remains for
+     pre-format-7 payloads; post-drop invite joiners now load the KEK-sealed
+     node key from staged disk KEKs before QUIC Listen.
+     Prep slice in progress: persist `keys.d/node.key.gen` for invite Phase-1
+     node-key seals so follow-up D-cut slices can identify the generation that
+     wrapped `node.key.enc`.
+   - [x] D-meta: migrate cluster-config alert webhook secret wrapping from static
+     `EncryptWithAAD` to a DEK seam with persisted `dek_gen`. SHIPPED in current
+     branch: new PATCH writes use `DomainClusterConfigSecret`; existing static
+     ciphertexts require PATCHing a fresh `alert-webhook-secret` before static
+     key removal.
    - [ ] Data-DEK rotation: persist non-zero `dek_gen` for every
      ciphertext-bearing format before enabling `encryption.rotate-dek`.
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
      See [[project-grains-at-rest-two-key-systems]].
+
+- [x] **Raft log store at-rest encryption (object-metadata plaintext gap) — design**
+   - Trust risk: live object metadata (bucket/key/size/etag/placement) persists as
+     raft log entries written **plaintext** to a Badger store opened with
+     `badgerutil.SmallOptions` (no `WithEncryptionKey`; `raftfactory.go:75`,
+     `logstore_badger.go:439` raw `txn.Set`). Snapshots ARE DEK+KEK-sealed (#580),
+     but log entries between snapshots are not. Never sealed by either key system.
+   - Boundary: **separate spec** (distinct from static→DEK unification).
+     Design-heavy — raft determinism (FSM apply must stay deterministic on
+     plaintext) favors Badger native encryption at the storage layer (below
+     replication). The design rejects active-DEK-as-store-key because meta/data
+     raft stores open before DEK restore, and instead uses a node-local
+     raft-store master key sealed under the KEK store. See
+     `docs/superpowers/specs/2026-05-28-raft-log-store-at-rest-encryption-design.md`
+     and
+     `docs/superpowers/plans/2026-05-28-raft-log-store-at-rest-encryption-plan.md`.
 
 - [ ] **Raft log store at-rest encryption — implementation**
    - Implement the plan in
@@ -112,10 +150,11 @@ Work these in order. Do not run them in parallel.
   tokens fail before mutation, while existing no-bearer admin UDS behavior is
   preserved.
 
-- [ ] **OIDC federated IAM Slice 6**: expand typed actor adoption beyond
-  protocol credential routes, add first-class admin authz/audit rows for
-  federated allow/deny decisions, and decide whether the next architecture slice
-  is broader admin route policy or the external PDP adapter.
+- [ ] **OIDC federated IAM Slice 7**: decide and implement the next broader
+  admin route policy boundary: either a central admin route/action registry for
+  IAM policy/group/SA/config/dashboard-token routes or the external PDP adapter
+  boundary. Preserve no-bearer admin UDS behavior unless the route explicitly
+  opts into actor authz.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
@@ -291,18 +330,18 @@ Work these in order. Do not run them in parallel.
   plaintext snapshot file remains. The `grainfs_snapshot_legacy_plaintext_reads_total`
   counter is a runtime signal, not sufficient alone. Mirrors meta-FSM D-cut.
 - [ ] **KEK prune-refusal: absolute closure of the in-flight snapshot-write window [P3]**.
-  The prune guard scans retained `.json.zst` + in-flight `.json.zst.tmp` and uses the
-  APPLIED raft index for attestation freshness, which closes the race to a
-  sub-millisecond in-memory-seal window (a `Create()` that captured the retiring KEK
-  version but has not yet written its `.tmp` while the same node has already applied
-  retire). For absolute closure, `snapshot.Manager.Create` could acquire a short
-  `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
-  surface as `lease_count > 0`. Very low priority — the current window is practically
-  unreachable.
+   The prune guard scans retained `.json.zst` + in-flight `.json.zst.tmp` and uses the
+   APPLIED raft index for attestation freshness, which closes the race to a
+   sub-millisecond in-memory-seal window (a `Create()` that captured the retiring KEK
+   version but has not yet written its `.tmp` while the same node has already applied
+   retire). For absolute closure, `snapshot.Manager.Create` could acquire a short
+   `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
+   surface as `lease_count > 0`. Very low priority — the current window is practically
+   unreachable.
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
-  D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
-  on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
-  specs were skipped because the e2e harness has no dynamic `AddNode` (4th node post-
+   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
+   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
+   specs were skipped because the e2e harness has no dynamic `AddNode` (4th node post-
   bootstrap) and no snapshot-restore-boot helper (it has `KillNode`/`RestartNode` only).
   Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
   `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK

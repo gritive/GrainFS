@@ -38,6 +38,7 @@ type Deps struct {
 	NfsExports           NfsExportService          // optional; nil disables NFS export admin endpoints
 	ProtocolCredentials  ProtocolCredentialService // optional; nil disables protocol credential endpoints
 	ProtocolCredAuthz    CredentialAuthorizer      // required when ProtocolCredentials is configured; nil fails closed
+	AdminAuthz           CredentialAuthorizer      // optional; bearer actor authz for selected admin routes
 	ActorAuth            ActorAuthenticator        // optional; bearer actor auth for selected admin routes
 	IcebergConfig        IcebergConfigService      // optional; nil disables iceberg config endpoint
 	AuditQuery           AuditQueryService         // optional; nil disables audit admin endpoints

@@ -136,6 +136,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		ProtocolCredentials:  state.protocolCredentials,
 		ProtocolCredAuthz:    protocolCredentialAuthorizer(state),
+		AdminAuthz:           adminAuthorizer(state),
 		ActorAuth:            newOIDCActorAuthenticator(state.cfgStore),
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
@@ -261,6 +262,10 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 }
 
 func protocolCredentialAuthorizer(state *bootState) admin.CredentialAuthorizer {
+	return adminAuthorizer(state)
+}
+
+func adminAuthorizer(state *bootState) admin.CredentialAuthorizer {
 	if state.iamPolicyStores == nil || state.iamPolicyStores.Resolver == nil || state.cfgStore == nil {
 		return nil
 	}
