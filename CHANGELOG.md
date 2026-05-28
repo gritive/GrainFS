@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.395.0] - 2026-05-28
+## [0.0.398.0] - 2026-05-28
 
 ### Security
 
@@ -8,6 +8,24 @@
   group-attached IAM policy is detached from their service account, and when a
   dependent custom policy body changes. The stale marker is applied through the
   Meta FSM using the Raft apply index for deterministic replay.
+
+## [0.0.397.0] - 2026-05-28
+
+### Changed
+
+- docs: marked `internal/storage/LocalBackend` (and `local.go`/`multipart.go`/`append.go`/`encrypted_badger.go`) as test-fixture-only per ADR-0015. No runtime change; production storage path remains `ClusterCoordinator → DistributedBackend`.
+
+## [0.0.396.0] - 2026-05-28
+
+### Fixed
+
+- Object-snapshot writes no longer collide on sequence numbers: the
+  background auto-snapshotter and the admin HTTP snapshot endpoints now
+  share a single `snapshot.Manager` instead of each constructing their
+  own. Concurrent `Create`/`Restore`/`Delete`/`List`/`PITRRestore`/
+  `AllFrozenSegmentPaths` calls are now serialized through a mutex so
+  two writers can no longer produce duplicate sequence numbers under
+  load.
 
 ## [0.0.394.0] - 2026-05-28
 
