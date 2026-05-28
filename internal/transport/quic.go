@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -353,6 +354,63 @@ func (t *QUICTransport) UpdateRegistryAccept(spkis [][32]byte) {
 // just-presented cert. Called by the rotation worker per phase transition.
 func (t *QUICTransport) ApplyRotation(window [][32]byte, present tls.Certificate, presentSPKI [32]byte, newBase *[32]byte) {
 	t.composer.applyRotation(window, present, presentSPKI, newBase)
+}
+
+// FlipPresent pins this transport's PRESENTED identity to its per-node cert
+// (spec §8 H4'-PR1). DORMANT in PR-1 — no production caller; PR-2's flip wiring
+// calls it then RecycleConns.
+func (t *QUICTransport) FlipPresent(cert tls.Certificate, spki [32]byte) {
+	t.composer.setPinPresent(cert, spki)
+}
+
+// RecycleConns closes every live legacy + mux QUIC connection so peers
+// re-handshake under the current presented identity (spec §8 H7). Bounded
+// jitter avoids a synchronized cluster-wide re-handshake storm. DORMANT in
+// PR-1 — PR-2 triggers it.
+func (t *QUICTransport) RecycleConns() {
+	t.mu.Lock()
+	legacy := make([]*quic.Conn, 0, len(t.conns))
+	for addr, c := range t.conns {
+		legacy = append(legacy, c)
+		delete(t.conns, addr)
+	}
+	mux := make([]*quic.Conn, 0, len(t.muxConns))
+	for addr, c := range t.muxConns {
+		mux = append(mux, c)
+		delete(t.muxConns, addr)
+	}
+	t.mu.Unlock()
+
+	closeJittered := func(c *quic.Conn) {
+		if j := recycleJitter(); j > 0 {
+			select {
+			case <-time.After(j):
+			case <-t.ctx.Done():
+			}
+		}
+		_ = c.CloseWithError(0, "identity recycled")
+	}
+	for _, c := range legacy {
+		go closeJittered(c)
+	}
+	for _, c := range mux {
+		go closeJittered(c)
+	}
+}
+
+// SetDropped removes the cluster-key base from the accept-set (spec §8 H3/H4').
+// DORMANT in PR-1 — boot consults a never-true snapshot bit; PR-2 calls it live.
+func (t *QUICTransport) SetDropped() {
+	t.composer.setDropped()
+}
+
+// recycleJitter returns 0..250ms to de-synchronize cluster-wide reconnects.
+func recycleJitter() time.Duration {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	return time.Duration(binary.BigEndian.Uint16(b[:])%251) * time.Millisecond
 }
 
 // MustNewQUICTransport is NewQUICTransport that panics on error. Intended only

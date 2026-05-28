@@ -240,6 +240,22 @@ Work these in order. Do not run them in parallel.
 
 ## Deferred Until Triggered
 
+- [ ] **Zero-CA cutover PR-2 (live per-node present-flip + cluster-key drop) + revocation slice**.
+  PR-1 (this slice) landed the inert plumbing: composer `pinPresent`/`dropped` modes,
+  `QUICTransport.FlipPresent`/`RecycleConns`/`SetDropped` (dormant), monotone
+  `presents_per_node`, the persisted `cluster_key_dropped` snapshot bit (slot 14) +
+  boot-consult, and `BootstrapSecretsPayload.peer_spkis`/`cluster_key_dropped` wire fields.
+  Nothing flips/drops live yet. PR-2 must add: a NEW follower-applied-index barrier RPC
+  (leader waits until every voter `lastApplied >= prepareIndex` — the config-stamp alone
+  does NOT prevent a lagging voter from rejecting a flipped peer; this is load-bearing),
+  `PreparePresentFlip`+`BeginPresentFlip` raft commands (config/voter-set stamped), flip
+  wiring (`SetOnPresentFlip` → `FlipPresent`+`RecycleConns`+record `presents_per_node=true`),
+  a config-stamped `DropClusterKeyAccept` that sets `dropped=true`, the post-drop join
+  SEMANTICS (joiner presents per-node-only + seeds accept from `peer_spkis`,
+  `invite_join_boot.go:613`), orchestration + CLI `cluster complete-cutover`, and e2e.
+  THEN the revocation slice: `RevokeNode` (registry remove + denylist + `RemoveVoter` +
+  `ClosePeer` + invite-burn) + P1#1 stale-pending fix + deny-map snapshot + CLI
+  `cluster revoke-node` + e2e. Design: spec §6-§8 (gitignored design doc).
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source

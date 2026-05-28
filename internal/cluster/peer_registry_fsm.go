@@ -20,6 +20,17 @@ func (f *MetaFSM) SetOnPeersChanged(fn func([][32]byte)) {
 	f.onPeersChanged = fn
 }
 
+// SetOnClusterKeyDropped wires the side-effect callback fired once when Restore
+// decodes a snapshot whose cluster_key_dropped bit is true (spec §8 H3). The
+// callback drops the transport's cluster-key base on this node. Called from the
+// FSM apply goroutine; set before MetaRaft.Start(). Dormant in PR-1 (no snapshot
+// carries true).
+func (f *MetaFSM) SetOnClusterKeyDropped(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onClusterKeyDropped = fn
+}
+
 // firePeersChanged snapshots the callback under lock then invokes it with the
 // current accept-set OUTSIDE the lock (the callback mutates transport state).
 //
