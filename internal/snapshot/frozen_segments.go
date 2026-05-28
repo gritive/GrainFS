@@ -17,6 +17,9 @@ import (
 // (skips its sweep) rather than sweeping against an incomplete known-set. Does
 // NOT use Manager.List(), which silently skips corrupt files.
 func (m *Manager) AllFrozenSegmentPaths() (map[string][]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot dir: %w", err)

@@ -24,7 +24,10 @@ type PITRResult struct {
 // It finds the nearest snapshot at or before targetTime, restores it,
 // then replays WAL entries up to targetTime.
 func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
-	snaps, err := m.List()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snaps, err := m.listLocked()
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots: %w", err)
 	}
