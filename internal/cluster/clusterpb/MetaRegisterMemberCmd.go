@@ -103,8 +103,20 @@ func (rcv *MetaRegisterMemberCmd) MutatePresentsPerNode(n bool) bool {
 	return rcv._tab.MutateBoolSlot(10, n)
 }
 
+func (rcv *MetaRegisterMemberCmd) NodeKeyKekGen() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaRegisterMemberCmd) MutateNodeKeyKekGen(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(12, n)
+}
+
 func MetaRegisterMemberCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func MetaRegisterMemberCmdAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
@@ -120,6 +132,9 @@ func MetaRegisterMemberCmdAddAddress(builder *flatbuffers.Builder, address flatb
 }
 func MetaRegisterMemberCmdAddPresentsPerNode(builder *flatbuffers.Builder, presentsPerNode bool) {
 	builder.PrependBoolSlot(3, presentsPerNode, false)
+}
+func MetaRegisterMemberCmdAddNodeKeyKekGen(builder *flatbuffers.Builder, nodeKeyKekGen uint32) {
+	builder.PrependUint32Slot(4, nodeKeyKekGen, 0)
 }
 func MetaRegisterMemberCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -292,6 +292,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		clusterpb.PeerEntryAddAddress(b, addrOff)
 		clusterpb.PeerEntryAddState(b, byte(p.State))
 		clusterpb.PeerEntryAddPresentsPerNode(b, p.PresentsPerNode)
+		clusterpb.PeerEntryAddNodeKeyKekGen(b, p.NodeKeyKEKGen)
 		peerOffs[i] = clusterpb.PeerEntryEnd(b)
 	}
 	clusterpb.MetaStateSnapshotStartPeersVector(b, len(peerOffs))
@@ -627,6 +628,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			Address:         string(peerFB.Address()),
 			State:           peerState(peerFB.State()),
 			PresentsPerNode: peerFB.PresentsPerNode(),
+			NodeKeyKEKGen:   peerFB.NodeKeyKekGen(),
 		})
 	}
 	// VALIDATE + BUILD the peer indexes HERE, in the decode phase, so a corrupt

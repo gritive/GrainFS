@@ -621,6 +621,10 @@ func (l *KEKRotationLeader) ProposeKEKPrune(version uint32, actor string) error 
 	}
 	voterHash := encrypt.CanonicalVoterSetHash(sortedVoters)
 
+	if err := l.fsm.peers.validateVoterNodeKeyKEKGens(sortedVoters, version); err != nil {
+		return fmt.Errorf("KEKPrune: node-key evidence: %w", err)
+	}
+
 	// 6. Probe every voter for an in-flight lease snapshot. Probe MUST attempt
 	//    each voter (including local node) and return exactly one sample per
 	//    voter on success.

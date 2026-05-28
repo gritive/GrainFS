@@ -95,6 +95,7 @@ func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInv
 	quicTransport.SetDropped()
 	state.perNodeCert = cert
 	state.perNodeSPKI = spki
+	state.perNodeKeyKEKGen = state.inviteJoin.nodeKeyKEKGen
 	log.Info().Msg("post-drop invite-join: per-node cert pinned before Listen")
 	return nil
 }

@@ -62,14 +62,14 @@ func TestPeerRegistry_Denylist(t *testing.T) {
 func TestPeerRegistry_RemoveReturnsEntryAndDenylistRejectsRejoin(t *testing.T) {
 	r := newPeerRegistry()
 	s := spki(9)
-	require.NoError(t, r.registerMember("node-9", s, "127.0.0.1:7009", true))
+	require.NoError(t, r.registerMember("node-9", s, "127.0.0.1:7009", true, 0))
 	got, ok := r.remove("node-9")
 	require.True(t, ok)
 	require.Equal(t, s, got.SPKI)
 	require.Equal(t, "127.0.0.1:7009", got.Address)
 
 	r.denylist(got.SPKI)
-	require.ErrorIs(t, r.registerMember("node-9", s, "127.0.0.1:7009", true), errSPKIDenylisted)
+	require.ErrorIs(t, r.registerMember("node-9", s, "127.0.0.1:7009", true, 0), errSPKIDenylisted)
 }
 
 func TestPeerRegistry_NodeIDRebindRejected(t *testing.T) {
@@ -105,7 +105,7 @@ func TestPeerRegistry_RegisterMember_NeverDemotes(t *testing.T) {
 	if err := r.promoteMember("n"); err != nil {
 		t.Fatalf("promoteMember: %v", err)
 	}
-	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false, 0); err != nil {
 		t.Fatalf("registerMember: %v", err)
 	}
 	if r.byNodeID["n"].State != peerStateMember {
@@ -115,7 +115,7 @@ func TestPeerRegistry_RegisterMember_NeverDemotes(t *testing.T) {
 
 func TestPeerRegistry_RegisterMember_InsertsAsMember(t *testing.T) {
 	r := newPeerRegistry()
-	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false, 0); err != nil {
 		t.Fatalf("registerMember: %v", err)
 	}
 	e, ok := r.byNodeID["n"]
@@ -129,7 +129,7 @@ func TestPeerRegistry_RegisterMember_PromotesPendingLearner(t *testing.T) {
 	if err := r.registerPendingLearner("n", spki(1), "10.0.0.2:9000"); err != nil {
 		t.Fatalf("registerPendingLearner: %v", err)
 	}
-	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", true); err != nil {
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", true, 0); err != nil {
 		t.Fatalf("registerMember: %v", err)
 	}
 	e := r.byNodeID["n"]
@@ -143,10 +143,10 @@ func TestPeerRegistry_RegisterMember_PromotesPendingLearner(t *testing.T) {
 
 func TestPeerRegistry_RegisterMember_Idempotent(t *testing.T) {
 	r := newPeerRegistry()
-	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false, 0); err != nil {
 		t.Fatalf("first registerMember: %v", err)
 	}
-	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false); err != nil {
+	if err := r.registerMember("n", spki(1), "10.0.0.2:9000", false, 0); err != nil {
 		t.Fatalf("second registerMember (idempotent): %v", err)
 	}
 	if len(r.byNodeID) != 1 {
@@ -171,7 +171,7 @@ func TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists(t *testing.T) {
 	}
 
 	// A member registered with presentsPerNode=false records false.
-	if err := r.registerMember("member-off", spki(2), "10.0.0.3:9000", false); err != nil {
+	if err := r.registerMember("member-off", spki(2), "10.0.0.3:9000", false, 0); err != nil {
 		t.Fatalf("registerMember(false): %v", err)
 	}
 	if r.byNodeID["member-off"].PresentsPerNode {
@@ -179,7 +179,7 @@ func TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists(t *testing.T) {
 	}
 
 	// A member registered with presentsPerNode=true records true.
-	if err := r.registerMember("member-on", spki(3), "10.0.0.4:9000", true); err != nil {
+	if err := r.registerMember("member-on", spki(3), "10.0.0.4:9000", true, 0); err != nil {
 		t.Fatalf("registerMember(true): %v", err)
 	}
 	if !r.byNodeID["member-on"].PresentsPerNode {
@@ -198,7 +198,7 @@ func TestPeerEntry_PresentsPerNode_DefaultsFalseAndPersists(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fsm := NewMetaFSM()
-			data, err := encodeRegisterMemberCmd(tc.nodeID, spki(tc.spkiByte), "10.0.0.5:9000", tc.presentsPerNode)
+			data, err := encodeRegisterMemberCmd(tc.nodeID, spki(tc.spkiByte), "10.0.0.5:9000", tc.presentsPerNode, 4)
 			if err != nil {
 				t.Fatalf("encode: %v", err)
 			}
@@ -230,7 +230,7 @@ func TestApplyRegisterMember_FiresOnPeersChanged(t *testing.T) {
 		fired++
 		got = set
 	})
-	data, err := encodeRegisterMemberCmd("n", spki(1), "10.0.0.2:9000", true)
+	data, err := encodeRegisterMemberCmd("n", spki(1), "10.0.0.2:9000", true, 0)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestApplyRevokePeer_BurnsPendingInviteAndDenylistsRegisteredPeer(t *testing
 	s := spki(12)
 	fsm.invites.applyMint("inv-12", testPub(t), now.Add(time.Hour).UnixNano())
 	require.NoError(t, fsm.invites.applyPending("inv-12", "node-12", s, "127.0.0.1:7012", now.UnixNano()))
-	require.NoError(t, fsm.Peers().registerMember("node-12", s, "127.0.0.1:7012", true))
+	require.NoError(t, fsm.Peers().registerMember("node-12", s, "127.0.0.1:7012", true, 0))
 	fired := 0
 	fsm.SetOnPeersChanged(func([][32]byte) { fired++ })
 	payload, err := encodeRevokePeerCmd("node-12")
@@ -264,7 +264,7 @@ func TestApplyRevokePeer_BurnsPendingInviteAndDenylistsRegisteredPeer(t *testing
 
 	require.Equal(t, 1, fired)
 	require.True(t, fsm.Peers().isDenylisted(s))
-	require.ErrorIs(t, fsm.Peers().registerMember("node-12", s, "127.0.0.1:7012", true), errSPKIDenylisted)
+	require.ErrorIs(t, fsm.Peers().registerMember("node-12", s, "127.0.0.1:7012", true, 0), errSPKIDenylisted)
 	_, ok := fsm.Peers().lookupByNodeID("node-12")
 	require.False(t, ok)
 	_, _, _, ok = fsm.invites.lookupPending("inv-12")
@@ -288,7 +288,7 @@ func TestApplyRevokePeer_DenylistsAndBurnsPhase1OnlyPendingNode(t *testing.T) {
 
 	require.Equal(t, 1, fired)
 	require.True(t, fsm.Peers().isDenylisted(s))
-	require.ErrorIs(t, fsm.Peers().registerMember("node-pending", s, "127.0.0.1:7013", true), errSPKIDenylisted)
+	require.ErrorIs(t, fsm.Peers().registerMember("node-pending", s, "127.0.0.1:7013", true, 0), errSPKIDenylisted)
 	_, _, _, ok := fsm.invites.lookupPending("inv-13")
 	require.False(t, ok)
 	_, ok = fsm.invites.lookup("inv-13", now)
@@ -442,8 +442,8 @@ func TestRegisterMember_PresentsPerNode_Monotone(t *testing.T) {
 	r := newPeerRegistry()
 	var spki [32]byte
 	spki[0] = 0xAB
-	require.NoError(t, r.registerMember("n1", spki, "addr1", true))  // recorded true
-	require.NoError(t, r.registerMember("n1", spki, "addr1", false)) // restart self-register: false
+	require.NoError(t, r.registerMember("n1", spki, "addr1", true, 0))  // recorded true
+	require.NoError(t, r.registerMember("n1", spki, "addr1", false, 0)) // restart self-register: false
 	require.True(t, r.byNodeID["n1"].PresentsPerNode, "presents_per_node monotone: true must not regress")
 }
 
@@ -451,27 +451,48 @@ func TestRegisterMember_PresentsPerNode_FalseToTrue(t *testing.T) {
 	r := newPeerRegistry()
 	var spki [32]byte
 	spki[0] = 0xCD
-	require.NoError(t, r.registerMember("n2", spki, "addr2", false))
-	require.NoError(t, r.registerMember("n2", spki, "addr2", true)) // false->true applies
+	require.NoError(t, r.registerMember("n2", spki, "addr2", false, 0))
+	require.NoError(t, r.registerMember("n2", spki, "addr2", true, 0)) // false->true applies
 	require.True(t, r.byNodeID["n2"].PresentsPerNode)
+}
+
+func TestRegisterMember_NodeKeyKEKGen_Monotone(t *testing.T) {
+	r := newPeerRegistry()
+	var spki [32]byte
+	spki[0] = 0xEF
+	require.NoError(t, r.registerMember("n3", spki, "addr3", true, 7))
+	require.NoError(t, r.registerMember("n3", spki, "addr3", true, 5))
+	require.Equal(t, uint32(7), r.byNodeID["n3"].NodeKeyKEKGen, "node_key_kek_gen must not regress")
+	require.NoError(t, r.registerMember("n3", spki, "addr3", true, 9))
+	require.Equal(t, uint32(9), r.byNodeID["n3"].NodeKeyKEKGen, "newer node_key_kek_gen must apply")
+}
+
+func TestValidateVoterNodeKeyKEKGens(t *testing.T) {
+	r := newPeerRegistry()
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true, 4))
+	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", true, 2))
+
+	require.NoError(t, r.validateVoterNodeKeyKEKGens([]string{"127.0.0.1:1001"}, 3))
+	require.Error(t, r.validateVoterNodeKeyKEKGens([]string{"127.0.0.1:1002"}, 3))
+	require.Error(t, r.validateVoterNodeKeyKEKGens([]string{"127.0.0.1:1003"}, 3))
 }
 
 func TestAllVotersPresentsPerNode_TrueWhenAll(t *testing.T) {
 	r := newPeerRegistry()
-	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true))
-	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", true))
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true, 0))
+	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", true, 0))
 	require.True(t, r.allVotersPresentsPerNode([]string{"127.0.0.1:1001", "127.0.0.1:1002"}))
 }
 
 func TestAllVotersPresentsPerNode_FalseWhenOneMissing(t *testing.T) {
 	r := newPeerRegistry()
-	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true))
-	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", false))
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true, 0))
+	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", false, 0))
 	require.False(t, r.allVotersPresentsPerNode([]string{"127.0.0.1:1001", "127.0.0.1:1002"}))
 }
 
 func TestAllVotersPresentsPerNode_FalseWhenVoterUnregistered(t *testing.T) {
 	r := newPeerRegistry()
-	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true))
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true, 0))
 	require.False(t, r.allVotersPresentsPerNode([]string{"127.0.0.1:1001", "127.0.0.1:1002"}))
 }

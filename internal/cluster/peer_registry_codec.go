@@ -36,8 +36,8 @@ func decodeRegisterPendingLearnerCmd(data []byte) (nodeID string, spki [32]byte,
 }
 
 // encodeRegisterMemberCmd serializes a RegisterMember payload (non-demoting
-// boot-time self-registration). presentsPerNode is recording-only (Task 7).
-func encodeRegisterMemberCmd(nodeID string, spki [32]byte, addr string, presentsPerNode bool) ([]byte, error) {
+// boot-time self-registration).
+func encodeRegisterMemberCmd(nodeID string, spki [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(nodeID)
 	spkiOff := b.CreateByteVector(spki[:])
@@ -47,22 +47,23 @@ func encodeRegisterMemberCmd(nodeID string, spki [32]byte, addr string, presents
 	clusterpb.MetaRegisterMemberCmdAddSpki(b, spkiOff)
 	clusterpb.MetaRegisterMemberCmdAddAddress(b, addrOff)
 	clusterpb.MetaRegisterMemberCmdAddPresentsPerNode(b, presentsPerNode)
+	clusterpb.MetaRegisterMemberCmdAddNodeKeyKekGen(b, nodeKeyKEKGen)
 	return fbFinish(b, clusterpb.MetaRegisterMemberCmdEnd(b)), nil
 }
 
-func decodeRegisterMemberCmd(data []byte) (nodeID string, spki [32]byte, addr string, presentsPerNode bool, err error) {
+func decodeRegisterMemberCmd(data []byte) (nodeID string, spki [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32, err error) {
 	t, e := fbSafe(data, func(d []byte) *clusterpb.MetaRegisterMemberCmd {
 		return clusterpb.GetRootAsMetaRegisterMemberCmd(d, 0)
 	})
 	if e != nil {
-		return "", [32]byte{}, "", false, e
+		return "", [32]byte{}, "", false, 0, e
 	}
 	raw := t.SpkiBytes()
 	if len(raw) != 32 {
-		return "", [32]byte{}, "", false, fmt.Errorf("peer_registry_codec: spki must be 32 bytes, got %d", len(raw))
+		return "", [32]byte{}, "", false, 0, fmt.Errorf("peer_registry_codec: spki must be 32 bytes, got %d", len(raw))
 	}
 	copy(spki[:], raw)
-	return string(t.NodeId()), spki, string(t.Address()), t.PresentsPerNode(), nil
+	return string(t.NodeId()), spki, string(t.Address()), t.PresentsPerNode(), t.NodeKeyKekGen(), nil
 }
 
 // encodePromoteMemberCmd serializes a PromoteMember payload.

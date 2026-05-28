@@ -599,7 +599,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 			st.nodeKeyKEKGen = persisted.nodeKeyKEKGen
 		}
 	}
-	cert, spki, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey, state.kekStore, st.nodeKeyKEKGen, st.nodeKeyKEKGen != 0)
+	cert, spki, nodeKeyKEKGen, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey, state.kekStore, st.nodeKeyKEKGen, st.nodeKeyKEKGen != 0)
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2: load node key: %w", err)
 	}
@@ -612,6 +612,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	// PR-2a F5/F3 fix: store cert; T5 onPresentFlip callback needs it.
 	state.perNodeCert = cert
 	state.perNodeSPKI = spki
+	state.perNodeKeyKEKGen = nodeKeyKEKGen
 
 	// Resolve leaderID: prefer the Phase-1 value, fall back to the persisted
 	// sentinel (resume across process restart).
@@ -722,53 +723,54 @@ func appendInviteSealField(out, b []byte) []byte {
 // sealed under the active KEK generation on return. node.key.gen is the primary
 // generation record; fallbackGen exists for same-process Phase-2 state and the
 // invite pending sentinel on older resumes.
-func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, kekStore *encrypt.KEKStore, fallbackGen uint32, fallbackOK bool) (tls.Certificate, [32]byte, error) {
+func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, kekStore *encrypt.KEKStore, fallbackGen uint32, fallbackOK bool) (tls.Certificate, [32]byte, uint32, error) {
 	activeGen, activeKEK, err := activeNodeKeyKEK(kekStore)
 	if err != nil {
-		return tls.Certificate{}, [32]byte{}, err
+		return tls.Certificate{}, [32]byte{}, 0, err
 	}
 
 	sealedGen, ok := readNodeKeyGen(dataDir)
 	if !ok {
 		if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-			return tls.Certificate{}, [32]byte{}, migrateErr
+			return tls.Certificate{}, [32]byte{}, 0, migrateErr
 		} else if migrated {
-			return cert, spki, nil
+			return cert, spki, activeGen, nil
 		}
 		if fallbackOK {
 			sealedGen = fallbackGen
 		} else {
-			return tls.Certificate{}, [32]byte{}, errors.New("node.key.gen missing for invite node key")
+			return tls.Certificate{}, [32]byte{}, 0, errors.New("node.key.gen missing for invite node key")
 		}
 	}
 	sealKEK, err := kekStore.Get(sealedGen)
 	if err != nil {
 		if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-			return tls.Certificate{}, [32]byte{}, migrateErr
+			return tls.Certificate{}, [32]byte{}, 0, migrateErr
 		} else if migrated {
-			return cert, spki, nil
+			return cert, spki, activeGen, nil
 		}
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("get node key KEK gen %d: %w", sealedGen, err)
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("get node key KEK gen %d: %w", sealedGen, err)
 	}
 	cert, spki, err := transport.LoadNodeKey(dataDir, sealKEK)
 	if err != nil {
 		if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-			return tls.Certificate{}, [32]byte{}, migrateErr
+			return tls.Certificate{}, [32]byte{}, 0, migrateErr
 		} else if migrated {
-			return cert, spki, nil
+			return cert, spki, activeGen, nil
 		}
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("load invite node key sealed under KEK gen %d: %w", sealedGen, err)
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("load invite node key sealed under KEK gen %d: %w", sealedGen, err)
 	}
 	if sealedGen != activeGen {
 		if err := sealNodeKeyAtGen(dataDir, activeGen, activeKEK, cert); err != nil {
-			return tls.Certificate{}, [32]byte{}, fmt.Errorf("re-seal invite node key under active KEK gen %d: %w", activeGen, err)
+			return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("re-seal invite node key under active KEK gen %d: %w", activeGen, err)
 		}
+		return cert, spki, activeGen, nil
 	} else if !ok {
 		if err := writeNodeKeyGen(dataDir, activeGen); err != nil {
-			return tls.Certificate{}, [32]byte{}, err
+			return tls.Certificate{}, [32]byte{}, 0, err
 		}
 	}
-	return cert, spki, nil
+	return cert, spki, sealedGen, nil
 }
 
 func writeNodeKeyGen(dataDir string, gen uint32) error {

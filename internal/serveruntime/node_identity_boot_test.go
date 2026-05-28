@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -47,10 +49,11 @@ func TestEnsureNodeIdentity_GeneratesAndPersistsWhenAbsent(t *testing.T) {
 	encKey := testNIEncKey()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, spki, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, spki, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity: %v", err)
 	}
+	require.Equal(t, store.ActiveVersion(), gotGen)
 	if spki == ([32]byte{}) {
 		t.Fatal("expected non-zero SPKI")
 	}
@@ -83,7 +86,7 @@ func TestEnsureNodeIdentity_ReusesPersisted(t *testing.T) {
 	encKey := testNIEncKey()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, first, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, first, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("first ensureNodeIdentity: %v", err)
 	}
@@ -91,7 +94,7 @@ func TestEnsureNodeIdentity_ReusesPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read node.key.enc: %v", err)
 	}
-	_, second, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, second, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("second ensureNodeIdentity: %v", err)
 	}
@@ -126,10 +129,11 @@ func TestEnsureNodeIdentity_ReSealsOlderKEKGenToActive(t *testing.T) {
 		t.Fatalf("writeNodeKeyGen: %v", err)
 	}
 
-	_, got, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, got, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity: %v", err)
 	}
+	require.Equal(t, store.ActiveVersion(), gotGen)
 	if got != want {
 		t.Fatalf("SPKI mismatch: got %x want %x", got, want)
 	}
@@ -164,10 +168,11 @@ func TestEnsureNodeIdentity_MigratesLegacyStaticSealedToActiveKEK(t *testing.T) 
 		t.Fatalf("SealNodeKey under encKey: %v", err)
 	}
 
-	_, got, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, got, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity: %v", err)
 	}
+	require.Equal(t, store.ActiveVersion(), gotGen)
 	if got != want {
 		t.Fatalf("SPKI mismatch: got %x want %x", got, want)
 	}
@@ -210,7 +215,7 @@ func TestEnsureNodeIdentity_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
 	}
 
 	store := newNIKEKStore(t, 0, 1, 2)
-	if _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
+	if _, _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
 		t.Fatal("expected error when KEK-sealed key lacks sidecar, got nil")
 	}
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
@@ -246,7 +251,7 @@ func TestEnsureNodeIdentity_NeverRegeneratesOnPrunedRecordedGen(t *testing.T) {
 	}
 
 	store := newNIKEKStore(t, 0, 1)
-	if _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
+	if _, _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
 		t.Fatal("expected error when recorded KEK gen is pruned, got nil")
 	}
 	after, err := os.ReadFile(nodeKeyEncPath(dir))

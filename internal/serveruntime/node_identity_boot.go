@@ -41,71 +41,72 @@ const nodeKeyEncFile = "node.key.enc"
 // It NEVER regenerates when node.key.enc exists: a fresh key changes the SPKI
 // and the registry node-id-rebind guard would reject the later re-registration
 // (partition).
-func ensureNodeIdentity(dataDir, clusterID, nodeID string, encKey []byte, kekStore *encrypt.KEKStore) (cert tls.Certificate, spki [32]byte, err error) {
+func ensureNodeIdentity(dataDir, clusterID, nodeID string, encKey []byte, kekStore *encrypt.KEKStore) (cert tls.Certificate, spki [32]byte, nodeKeyKEKGen uint32, err error) {
 	if len(encKey) != 32 {
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: encryption key must be 32 bytes, got %d", len(encKey))
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: encryption key must be 32 bytes, got %d", len(encKey))
 	}
 	activeGen, activeKEK, err := activeNodeKeyKEK(kekStore)
 	if err != nil {
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: %w", err)
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: %w", err)
 	}
 
 	encPath := filepath.Join(dataDir, "keys.d", nodeKeyEncFile)
 	if _, statErr := os.Stat(encPath); statErr == nil {
 		return reloadNodeIdentity(dataDir, encKey, kekStore, activeGen, activeKEK)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: stat node key: %w", statErr)
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: stat node key: %w", statErr)
 	}
 
 	// Absent: generate + seal under the active KEK generation.
 	cert, spki, err = transport.GenerateNodeIdentity(clusterID, nodeID)
 	if err != nil {
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: generate identity: %w", err)
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: generate identity: %w", err)
 	}
 	if err := sealNodeKeyAtGen(dataDir, activeGen, activeKEK, cert); err != nil {
-		return tls.Certificate{}, [32]byte{}, fmt.Errorf("ensureNodeIdentity: seal node key: %w", err)
+		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: seal node key: %w", err)
 	}
-	return cert, spki, nil
+	return cert, spki, activeGen, nil
 }
 
 // reloadNodeIdentity loads an existing node.key.enc. node.key.gen is the
 // canonical KEK-generation pointer; the static encKey path exists only to
 // migrate directories written by the previous static-key slice.
-func reloadNodeIdentity(dataDir string, encKey []byte, kekStore *encrypt.KEKStore, activeGen uint32, activeKEK []byte) (tls.Certificate, [32]byte, error) {
+func reloadNodeIdentity(dataDir string, encKey []byte, kekStore *encrypt.KEKStore, activeGen uint32, activeKEK []byte) (tls.Certificate, [32]byte, uint32, error) {
 	if sealedGen, ok := readNodeKeyGen(dataDir); ok {
 		kek, err := kekStore.Get(sealedGen)
 		if err != nil {
 			if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-				return tls.Certificate{}, [32]byte{}, migrateErr
+				return tls.Certificate{}, [32]byte{}, 0, migrateErr
 			} else if migrated {
-				return cert, spki, nil
+				return cert, spki, activeGen, nil
 			}
-			return tls.Certificate{}, [32]byte{}, fmt.Errorf("load node key KEK gen %d: %w", sealedGen, err)
+			return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("load node key KEK gen %d: %w", sealedGen, err)
 		}
 		cert, spki, err := transport.LoadNodeKey(dataDir, kek)
 		if err != nil {
 			if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-				return tls.Certificate{}, [32]byte{}, migrateErr
+				return tls.Certificate{}, [32]byte{}, 0, migrateErr
 			} else if migrated {
-				return cert, spki, nil
+				return cert, spki, activeGen, nil
 			}
-			return tls.Certificate{}, [32]byte{}, fmt.Errorf("load node key sealed under KEK gen %d: %w", sealedGen, err)
+			return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("load node key sealed under KEK gen %d: %w", sealedGen, err)
 		}
 		if sealedGen != activeGen {
 			if err := sealNodeKeyAtGen(dataDir, activeGen, activeKEK, cert); err != nil {
-				return tls.Certificate{}, [32]byte{}, fmt.Errorf("re-seal node key under active KEK gen %d: %w", activeGen, err)
+				return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("re-seal node key under active KEK gen %d: %w", activeGen, err)
 			}
+			return cert, spki, activeGen, nil
 		}
-		return cert, spki, nil
+		return cert, spki, sealedGen, nil
 	}
 
 	if cert, spki, migrated, err := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); err != nil {
-		return tls.Certificate{}, [32]byte{}, err
+		return tls.Certificate{}, [32]byte{}, 0, err
 	} else if migrated {
-		return cert, spki, nil
+		return cert, spki, activeGen, nil
 	}
 	// NEVER regenerate: a fresh key changes the SPKI and partitions the node.
-	return tls.Certificate{}, [32]byte{}, errors.New("ensureNodeIdentity: node.key.enc present but no usable node.key.gen or static-key migration path could decrypt it")
+	return tls.Certificate{}, [32]byte{}, 0, errors.New("ensureNodeIdentity: node.key.enc present but no usable node.key.gen or static-key migration path could decrypt it")
 }
 
 func activeNodeKeyKEK(kekStore *encrypt.KEKStore) (uint32, []byte, error) {
