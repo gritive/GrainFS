@@ -68,6 +68,7 @@ func TestBootHTTPServerAndAdminWiresProtocolCredentials(t *testing.T) {
 	require.NoError(t, bootHTTPServerAndAdmin(state))
 	require.NotNil(t, state.adminDeps.ProtocolCredentials)
 	require.NotNil(t, state.adminDeps.ProtocolCredAuthz)
+	require.NotNil(t, state.adminDeps.AdminAuthz)
 	require.NotNil(t, state.adminDeps.ActorAuth)
 }
 

@@ -19,6 +19,10 @@ var (
 func bucketGetPolicyHandler(d *Deps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		name := c.Param("name")
+		if err := authorizeBucketPolicyActor(ctx, d, name, bucketPolicyActionRead); err != nil {
+			writeError(c, err)
+			return
+		}
 		resp, err := AdminGetBucketPolicy(ctx, d, name)
 		if err != nil {
 			writeError(c, err)
@@ -74,6 +78,10 @@ func bucketSetPolicyHandler(d *Deps) app.HandlerFunc {
 			writeError(c, NewInvalid("policy field is required"))
 			return
 		}
+		if err := authorizeBucketPolicyActor(ctx, d, name, bucketPolicyActionWrite); err != nil {
+			writeError(c, err)
+			return
+		}
 		if err := AdminSetBucketPolicy(ctx, d, name, req); err != nil {
 			writeError(c, err)
 			return
@@ -85,6 +93,10 @@ func bucketSetPolicyHandler(d *Deps) app.HandlerFunc {
 func bucketDeletePolicyHandler(d *Deps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		name := c.Param("name")
+		if err := authorizeBucketPolicyActor(ctx, d, name, bucketPolicyActionDelete); err != nil {
+			writeError(c, err)
+			return
+		}
 		if err := AdminDeleteBucketPolicy(ctx, d, name); err != nil {
 			writeError(c, err)
 			return

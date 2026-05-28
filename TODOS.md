@@ -150,10 +150,11 @@ Work these in order. Do not run them in parallel.
   tokens fail before mutation, while existing no-bearer admin UDS behavior is
   preserved.
 
-- [ ] **OIDC federated IAM Slice 6**: expand typed actor adoption beyond
-  protocol credential routes, add first-class admin authz/audit rows for
-  federated allow/deny decisions, and decide whether the next architecture slice
-  is broader admin route policy or the external PDP adapter.
+- [ ] **OIDC federated IAM Slice 7**: decide and implement the next broader
+  admin route policy boundary: either a central admin route/action registry for
+  IAM policy/group/SA/config/dashboard-token routes or the external PDP adapter
+  boundary. Preserve no-bearer admin UDS behavior unless the route explicitly
+  opts into actor authz.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
@@ -329,18 +330,18 @@ Work these in order. Do not run them in parallel.
   plaintext snapshot file remains. The `grainfs_snapshot_legacy_plaintext_reads_total`
   counter is a runtime signal, not sufficient alone. Mirrors meta-FSM D-cut.
 - [ ] **KEK prune-refusal: absolute closure of the in-flight snapshot-write window [P3]**.
-  The prune guard scans retained `.json.zst` + in-flight `.json.zst.tmp` and uses the
-  APPLIED raft index for attestation freshness, which closes the race to a
-  sub-millisecond in-memory-seal window (a `Create()` that captured the retiring KEK
-  version but has not yet written its `.tmp` while the same node has already applied
-  retire). For absolute closure, `snapshot.Manager.Create` could acquire a short
-  `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
-  surface as `lease_count > 0`. Very low priority — the current window is practically
-  unreachable.
+   The prune guard scans retained `.json.zst` + in-flight `.json.zst.tmp` and uses the
+   APPLIED raft index for attestation freshness, which closes the race to a
+   sub-millisecond in-memory-seal window (a `Create()` that captured the retiring KEK
+   version but has not yet written its `.tmp` while the same node has already applied
+   retire). For absolute closure, `snapshot.Manager.Create` could acquire a short
+   `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
+   surface as `lease_count > 0`. Very low priority — the current window is practically
+   unreachable.
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
-  D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
-  on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
-  specs were skipped because the e2e harness has no dynamic `AddNode` (4th node post-
+   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
+   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
+   specs were skipped because the e2e harness has no dynamic `AddNode` (4th node post-
   bootstrap) and no snapshot-restore-boot helper (it has `KillNode`/`RestartNode` only).
   Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
   `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK
