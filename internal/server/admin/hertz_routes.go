@@ -88,8 +88,17 @@ func registerResource(g router, d *Deps) {
 }
 
 func registerDashboard(g router, d *Deps) {
-	g.GET(routePathDashboardToken, wrapZero(d, GetDashboardToken))
-	g.POST(routePathDashboardRotate, wrapZero(d, RotateDashboardToken))
+	actor := adminActorMiddleware(d)
+	tokenReadAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:AdminDashboardTokenRead",
+		resource: adminDashboardTokenResource,
+	})
+	tokenRotateAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:AdminDashboardTokenRotate",
+		resource: adminDashboardTokenRotateResource,
+	})
+	g.GET(routePathDashboardToken, actor, tokenReadAuthz, wrapZero(d, GetDashboardToken))
+	g.POST(routePathDashboardRotate, actor, tokenRotateAuthz, wrapZero(d, RotateDashboardToken))
 }
 
 func registerCredentials(g router, d *Deps) {

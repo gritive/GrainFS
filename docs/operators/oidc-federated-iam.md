@@ -6,7 +6,7 @@ OIDC principals can be evaluated by the same policy engine as service accounts.
 Selected admin operations use a typed actor when one is present in request
 context, so group policies attached to mapped OIDC groups can authorize
 credential create, read, list, rotate, revoke, bucket-policy decisions, and
-read-only IAM admin inspection.
+IAM/config/dashboard admin decisions on opted-in routes.
 
 ## Operator Flow
 
@@ -74,10 +74,10 @@ bearer token fail closed if the actor is unauthenticated, the admin authorizer
 is unavailable, or the mapped OIDC principal and groups do not have an explicit
 allow.
 
-Admin action allows must name the credential, bucket-policy, or IAM admin action
-family explicitly. Broad data-access policies that use `Action: "*"` do not
-grant `grainfs:Credential*`, `grainfs:BucketPolicy*`, or `grainfs:IAM*` admin
-privileges.
+Admin action allows must name the credential, bucket-policy, IAM, or generic
+admin action family explicitly. Broad data-access policies that use
+`Action: "*"` or `Action: "grainfs:*"` do not grant `grainfs:Credential*`,
+`grainfs:BucketPolicy*`, `grainfs:IAM*`, or `grainfs:Admin*` privileges.
 
 Example policy for a mapped OIDC group:
 
@@ -138,6 +138,52 @@ It also covers IAM policy and group mutation routes:
 - `DELETE /v1/iam/group/:name/policy/:policy` evaluates
   `grainfs:IAMGroupPolicyDetach` on `iam/group/:name/policy/:policy`.
 
+It also covers mount-SA and bucket-upstream admin routes:
+
+- `GET /v1/iam/mount-sa` evaluates `grainfs:IAMMountSAList` on
+  `iam/mount-sa/*`.
+- `GET /v1/iam/mount-sa/:name` evaluates `grainfs:IAMMountSARead` on
+  `iam/mount-sa/:name`.
+- `POST /v1/iam/mount-sa` evaluates `grainfs:IAMMountSAWrite` on
+  `iam/mount-sa/:name`, with `:name` read from the JSON body.
+- `DELETE /v1/iam/mount-sa/:name` evaluates `grainfs:IAMMountSADelete` on
+  `iam/mount-sa/:name`.
+- `PUT /v1/iam/mount-sa/:name/policy/:policy` evaluates
+  `grainfs:IAMMountSAPolicyAttach` on
+  `iam/mount-sa/:name/policy/:policy`.
+- `DELETE /v1/iam/mount-sa/:name/policy/:policy` evaluates
+  `grainfs:IAMMountSAPolicyDetach` on
+  `iam/mount-sa/:name/policy/:policy`.
+- `GET /v1/upstreams` evaluates `grainfs:IAMBucketUpstreamList` on
+  `iam/upstream/*`.
+- `GET /v1/buckets/:bucket/upstream` evaluates
+  `grainfs:IAMBucketUpstreamRead` on `iam/upstream/:bucket`.
+- `PUT /v1/upstreams` evaluates `grainfs:IAMBucketUpstreamWrite` on
+  `iam/upstream/:bucket`, with `:bucket` read from the JSON body.
+- `DELETE /v1/buckets/:bucket/upstream` evaluates
+  `grainfs:IAMBucketUpstreamDelete` on `iam/upstream/:bucket`.
+- `POST /v1/migration/cutover` evaluates
+  `grainfs:IAMBucketUpstreamCutover` on `iam/upstream/:bucket/cutover`, with
+  `:bucket` read from the JSON body.
+
+Config and dashboard-token admin routes use the generic admin action namespace:
+
+- `GET /v1/config` evaluates `grainfs:AdminConfigList` on
+  `admin/config/*`.
+- `GET /v1/config/:key` evaluates `grainfs:AdminConfigRead` on
+  `admin/config/:key`.
+- `PUT /v1/config/:key` evaluates `grainfs:AdminConfigWrite` on
+  `admin/config/:key`.
+- `DELETE /v1/config/:key` evaluates `grainfs:AdminConfigDelete` on
+  `admin/config/:key`.
+- `GET /v1/dashboard/token` evaluates `grainfs:AdminDashboardTokenRead` on
+  `admin/dashboard/token`.
+- `POST /v1/dashboard/token/rotate` evaluates
+  `grainfs:AdminDashboardTokenRotate` on `admin/dashboard/token/rotate`.
+
+Dashboard-token routes remain admin-UDS only and are not mounted under
+`/ui/api`.
+
 Requests without a bearer token keep the existing admin UDS behavior. Requests
 with a bearer token fail closed if the actor is unauthenticated, the admin
 authorizer is unavailable, or policy evaluation denies the route action.
@@ -172,14 +218,25 @@ Example policy for a mapped OIDC group:
         "grainfs:IAMGroupMemberWrite",
         "grainfs:IAMGroupMemberDelete",
         "grainfs:IAMGroupPolicyAttach",
-        "grainfs:IAMGroupPolicyDetach"
+        "grainfs:IAMGroupPolicyDetach",
+        "grainfs:IAMMountSA*",
+        "grainfs:IAMBucketUpstream*",
+        "grainfs:AdminConfig*",
+        "grainfs:AdminDashboardToken*"
       ],
       "Resource": [
         "iam/sa/*",
         "iam/policy/*",
         "iam/policy/*/attach/sa/*",
         "iam/group/*",
-        "iam/group/*/policy/*"
+        "iam/group/*/policy/*",
+        "iam/mount-sa/*",
+        "iam/mount-sa/*/policy/*",
+        "iam/upstream/*",
+        "iam/upstream/*/cutover",
+        "admin/config/*",
+        "admin/dashboard/token",
+        "admin/dashboard/token/rotate"
       ]
     }
   ]
@@ -193,8 +250,8 @@ Example policy for a mapped OIDC group:
 - Missing or malformed groups claim: the actor has no mapped group policies.
 - Policy attached to the target service account only: federated actors are
   denied unless their direct principal ID or mapped groups also carry policy.
-- Authorizer not configured: bearer actor credential, bucket policy, and IAM
-  admin operations fail closed.
+- Authorizer not configured: bearer actor credential, bucket policy, IAM, config,
+  and dashboard-token admin operations fail closed.
 - Self-effective-policy guard not configured: bearer actor IAM mutation routes
   fail closed.
 - OIDC issuers not configured: bearer-token credential requests fail with `401`;
@@ -203,6 +260,6 @@ Example policy for a mapped OIDC group:
 
 ## Current Boundary
 
-HTTP bearer-token actors are wired for protocol credential, bucket policy, and
-IAM admin routes. Mount-SA/upstream routes, config/dashboard route adoption, and
-an external PDP adapter remain separate follow-ups.
+HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
+mount-SA, bucket-upstream, config, and dashboard-token admin routes. An external
+PDP adapter remains a separate future option.

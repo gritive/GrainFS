@@ -2,9 +2,11 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
 )
@@ -102,6 +104,60 @@ func iamGroupPolicyResource(c *app.RequestContext) string {
 		return "iam/group/" + name + "/policy/" + policyName
 	}
 	return "iam/group/*/policy/*"
+}
+
+func iamMountSAResource(c *app.RequestContext) string {
+	if name := c.Param("name"); name != "" {
+		return "iam/mount-sa/" + name
+	}
+	var req CreateMountSAReq
+	if body := c.Request.Body(); len(body) > 0 && json.Unmarshal(body, &req) == nil && req.Name != "" {
+		return "iam/mount-sa/" + req.Name
+	}
+	return "iam/mount-sa/*"
+}
+
+func iamMountSAPolicyResource(c *app.RequestContext) string {
+	name := c.Param("name")
+	policyName := c.Param("policy")
+	if name != "" && policyName != "" {
+		return "iam/mount-sa/" + name + "/policy/" + policyName
+	}
+	return "iam/mount-sa/*/policy/*"
+}
+
+func iamBucketUpstreamResource(c *app.RequestContext) string {
+	if bucket := c.Param("bucket"); bucket != "" {
+		return "iam/upstream/" + bucket
+	}
+	var req iam.BucketUpstreamPutRequest
+	if body := c.Request.Body(); len(body) > 0 && json.Unmarshal(body, &req) == nil && req.Bucket != "" {
+		return "iam/upstream/" + req.Bucket
+	}
+	return "iam/upstream/*"
+}
+
+func iamBucketUpstreamCutoverResource(c *app.RequestContext) string {
+	var req iam.BucketUpstreamCutoverRequest
+	if body := c.Request.Body(); len(body) > 0 && json.Unmarshal(body, &req) == nil && req.Bucket != "" {
+		return "iam/upstream/" + req.Bucket + "/cutover"
+	}
+	return "iam/upstream/*/cutover"
+}
+
+func adminConfigResource(c *app.RequestContext) string {
+	if key := c.Param("key"); key != "" {
+		return "admin/config/" + key
+	}
+	return "admin/config/*"
+}
+
+func adminDashboardTokenResource(_ *app.RequestContext) string {
+	return "admin/dashboard/token"
+}
+
+func adminDashboardTokenRotateResource(_ *app.RequestContext) string {
+	return "admin/dashboard/token/rotate"
 }
 
 func denyPolicyIfSelfEffective(ctx context.Context, c *app.RequestContext, d *Deps, actor principal.Principal) *Error {

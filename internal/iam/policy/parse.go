@@ -129,6 +129,9 @@ func validResource(r string) bool {
 	if validIAMAdminResource(r) {
 		return true
 	}
+	if validGrainFSAdminResource(r) {
+		return true
+	}
 	if !strings.HasPrefix(r, "arn:aws:s3:::") {
 		return false
 	}
@@ -175,7 +178,7 @@ func validIAMAdminResource(r string) bool {
 	parts := strings.Split(r, "/")
 	if len(parts) == 3 {
 		switch parts[1] {
-		case "policy", "sa", "group":
+		case "policy", "sa", "group", "mount-sa", "upstream":
 		default:
 			return false
 		}
@@ -186,6 +189,29 @@ func validIAMAdminResource(r string) bool {
 	}
 	if len(parts) == 5 && parts[1] == "group" && parts[3] == "policy" {
 		return parts[2] != "" && parts[4] != ""
+	}
+	if len(parts) == 5 && parts[1] == "mount-sa" && parts[3] == "policy" {
+		return parts[2] != "" && parts[4] != ""
+	}
+	if len(parts) == 4 && parts[1] == "upstream" && parts[3] == "cutover" {
+		return parts[2] != ""
+	}
+	return false
+}
+
+func validGrainFSAdminResource(r string) bool {
+	if !strings.HasPrefix(r, "admin/") {
+		return false
+	}
+	parts := strings.Split(r, "/")
+	if len(parts) == 3 && parts[1] == "config" {
+		return parts[2] != ""
+	}
+	if len(parts) == 3 && parts[1] == "dashboard" && parts[2] == "token" {
+		return true
+	}
+	if len(parts) == 4 && parts[1] == "dashboard" && parts[2] == "token" && parts[3] == "rotate" {
+		return true
 	}
 	return false
 }

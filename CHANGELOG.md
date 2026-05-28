@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.432.0] - 2026-05-29
+
+### Security
+
+- Extended bearer-actor admin authorization to mount-SA, bucket-upstream,
+  config, and dashboard-token admin routes while preserving no-bearer admin UDS
+  behavior.
+- Required `grainfs:Admin*` actions to be granted explicitly; broad
+  `Action: "*"` and `Action: "grainfs:*"` policies no longer grant generic
+  admin config/dashboard actions.
+
+### Changed
+
+- Added policy parser and segment-scoped matcher support for
+  `iam/mount-sa/*`, `iam/upstream/*`, `admin/config/*`, and
+  `admin/dashboard/token*` admin resources.
+- Documented the completed OIDC federated IAM route boundary and removed the
+  completed follow-up from `TODOS.md`.
+
+### Tests
+
+- Added route coverage for bearer allow/deny, missing-authorizer fail-closed,
+  malformed-bearer rejection, and no-bearer fallback across the newly protected
+  admin route families.
+- Added parser and matcher coverage for the new admin resource shapes and
+  explicit `grainfs:Admin*` action matching.
+
 ## [0.0.431.0] - 2026-05-29
 
 ### Changed
