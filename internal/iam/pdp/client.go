@@ -78,8 +78,7 @@ func (e *DenyError) Error() string {
 
 // Client talks HTTP/JSON to the external PDP over a Unix socket.
 type Client struct {
-	cfg Config
-	hc  *http.Client
+	hc *http.Client
 }
 
 // NewClient builds a Client whose HTTP transport dials the configured Unix
@@ -92,7 +91,6 @@ func NewClient(cfg Config) *Client {
 		},
 	}
 	return &Client{
-		cfg: cfg,
 		hc: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -102,20 +100,21 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
+// Close releases idle keep-alive connections held by the client's transport.
+// The decorator calls it when the cached client is replaced (endpoint
+// hot-reload) so stale connections to the old socket don't leak.
+func (c *Client) Close() {
+	c.hc.CloseIdleConnections()
+}
+
 // Authorize POSTs the request to the PDP and classifies the outcome:
 //   - allow:   (DecisionAllow, "", nil)
 //   - deny:    (DecisionDeny, "", *DenyError{Reason})  — authoritative, NOT a failure
 //   - failure: ("", errType, err)                      — timeout/transport/status/decode/invalid
 //
-// The client owns the per-request timeout (cfg.Timeout), so callers may pass a
-// background context.
+// The caller owns the per-request deadline: Authorize uses the passed ctx
+// as-is and applies no timeout of its own.
 func (c *Client) Authorize(ctx context.Context, req Request) (string, string, error) {
-	if c.cfg.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.cfg.Timeout)
-		defer cancel()
-	}
-
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", ErrTypeTransport, fmt.Errorf("pdp: marshal request: %w", err)
@@ -143,6 +142,11 @@ func (c *Client) Authorize(ctx context.Context, req Request) (string, string, er
 
 	var r response
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(&r); err != nil {
+		// A deadline firing mid body-read/decode surfaces here; classify it as a
+		// timeout rather than a malformed response.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return "", ErrTypeTimeout, fmt.Errorf("pdp: request timed out: %w", err)
+		}
 		return "", ErrTypeDecode, fmt.Errorf("pdp: decode response: %w", err)
 	}
 

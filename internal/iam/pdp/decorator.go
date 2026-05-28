@@ -118,14 +118,22 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	fp := string(cfg.FailurePolicy)
 	client := d.clientFor(cfg)
 
+	// The decorator owns the per-request deadline so a runtime iam.pdp.timeout
+	// change takes effect without rebuilding the cached client. Deriving callCtx
+	// from the FRESH cfg here (not in the client) is what makes the timeout
+	// track hot-reload.
+	callCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
 	start := time.Now()
-	_, errType, err := client.Authorize(ctx, req)
+	_, errType, err := client.Authorize(callCtx, req)
 	metrics.PDPRequestDuration.Observe(time.Since(start).Seconds())
 
 	// Caller-canceled takes precedence over the failure policy: a fail-open
-	// config must not turn an abandoned request into an allow. The client owns
-	// its own child timeout, so the inbound ctx is canceled only if the caller
-	// gave up.
+	// config must not turn an abandoned request into an allow. We check the
+	// ORIGINAL inbound ctx (not callCtx): a client-timeout fires callCtx while
+	// the inbound ctx stays live, so it falls through to the failure policy
+	// below; only a genuine inbound cancel/deadline lands here.
 	if ctx.Err() != nil {
 		cancelErrType := ErrTypeTransport
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -167,6 +175,11 @@ func (d *Decorator) clientFor(cfg Config) *Client {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.client == nil || d.clientSock != cfg.SocketPath {
+		if d.client != nil {
+			// Endpoint changed: release the old client's idle keep-alive
+			// connections so hot-reloading the socket doesn't leak FDs.
+			d.client.Close()
+		}
 		d.client = NewClient(cfg)
 		d.clientSock = cfg.SocketPath
 	}

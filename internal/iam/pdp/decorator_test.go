@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
@@ -141,6 +143,65 @@ func TestDecoratorCanceledCtxDeniesEvenFailOpen(t *testing.T) {
 	got := d.AuthorizePrincipal(ctx, principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionDeny, got.Decision)
 	require.Contains(t, got.Reason, "request canceled")
+}
+
+// mutableCfg is a ConfigReader whose value can be swapped between requests to
+// simulate an iam.pdp hot-reload.
+type mutableCfg struct {
+	mu  sync.Mutex
+	val string
+}
+
+func (m *mutableCfg) set(v string) {
+	m.mu.Lock()
+	m.val = v
+	m.mu.Unlock()
+}
+
+func (m *mutableCfg) GetString(key string) (string, bool) {
+	if key != ConfigKey {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.val, true
+}
+
+// TestDecoratorTimeoutHotReload proves the per-request timeout tracks a config
+// change against the SAME socket (same cached client). The PDP sleeps ~150ms.
+// First request: 1s timeout (fail-open) -> allow. Second request: 20ms timeout
+// against the same socket -> the client deadline fires -> fail-open allow but
+// with the timeout error_type path, demonstrating the new deadline took effect
+// without a client rebuild.
+func TestDecoratorTimeoutHotReload(t *testing.T) {
+	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	cfg := &mutableCfg{}
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+
+	timeoutCfg := func(d string) string {
+		b, _ := json.Marshal(map[string]any{
+			"enabled": true, "endpoint": "unix://" + sock,
+			"failure_policy": "open", "timeout": d,
+		})
+		return string(b)
+	}
+
+	// Generous timeout: PDP answers in time -> plain allow (no fail-open marker).
+	cfg.set(timeoutCfg("1s"))
+	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Equal(t, policy.DecisionAllow, got.Decision)
+	require.NotContains(t, got.Reason, "pdp_skipped_fail_open")
+
+	// Same socket (client is cached), tighter timeout -> deadline fires ->
+	// fail-open allow with the fail-open marker. If the client still owned the
+	// construction-time 1s deadline this would not time out.
+	cfg.set(timeoutCfg("20ms"))
+	got = d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Equal(t, policy.DecisionAllow, got.Decision)
+	require.Contains(t, got.Reason, "pdp_skipped_fail_open")
 }
 
 func TestDecoratorAuthorizeMapsServiceAccount(t *testing.T) {

@@ -88,7 +88,10 @@ func TestClientTimeout(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	c := NewClient(Config{Enabled: true, SocketPath: sock, Timeout: 50 * time.Millisecond, FailurePolicy: FailureClosed})
-	_, etype, err := c.Authorize(context.Background(), Request{SchemaVersion: 1})
+	// The caller owns the deadline now: the client no longer applies cfg.Timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, etype, err := c.Authorize(ctx, Request{SchemaVersion: 1})
 	require.Error(t, err)
 	require.Equal(t, ErrTypeTimeout, etype)
 }
