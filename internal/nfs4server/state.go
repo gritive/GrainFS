@@ -22,6 +22,7 @@ type stateBinding struct {
 	//   "(pending)" — bucket fh issued, mount-SA vs anon not yet resolved
 	//   "<name>"    — mount-SA confirmed (grainfs:NFSMount allowed)
 	saID       string
+	readOnly   bool
 	generation uint64
 }
 
@@ -137,19 +138,23 @@ func (sm *StateManager) BindFHGeneration(fh FileHandle, bucket string, generatio
 	sm.fhMu.Lock()
 	defer sm.fhMu.Unlock()
 	existing := sm.fhBind[fh]
-	sm.fhBind[fh] = stateBinding{bucket: bucket, saID: existing.saID, generation: generation}
+	sm.fhBind[fh] = stateBinding{bucket: bucket, saID: existing.saID, readOnly: existing.readOnly, generation: generation}
 }
 
 // BindFHWithSAID sets or updates the saID for fh. Used by the 2-phase lazy
 // binding in opLookup (D#5): the bucket fh is issued with saID="(pending)",
 // then the next LOOKUP resolves it to "" (anon) or "<mount-sa-name>".
 func (sm *StateManager) BindFHWithSAID(fh FileHandle, bucket, saID string, generation uint64) {
+	sm.BindFHWithBinding(fh, bucket, saID, false, generation)
+}
+
+func (sm *StateManager) BindFHWithBinding(fh FileHandle, bucket, saID string, readOnly bool, generation uint64) {
 	if bucket == "" {
 		return
 	}
 	sm.fhMu.Lock()
 	defer sm.fhMu.Unlock()
-	sm.fhBind[fh] = stateBinding{bucket: bucket, saID: saID, generation: generation}
+	sm.fhBind[fh] = stateBinding{bucket: bucket, saID: saID, readOnly: readOnly, generation: generation}
 }
 
 func (sm *StateManager) FHBinding(fh FileHandle) (stateBinding, bool) {

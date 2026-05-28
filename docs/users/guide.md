@@ -110,8 +110,11 @@ revoke now require the target service account to be allowed for
 }
 ```
 
-Existing S3, Iceberg, NFS, 9P, and NBD data-plane authentication behavior is
-unchanged until each protocol is migrated to enforce these credentials.
+NBD, NFS, and 9P attach paths enforce protocol credentials when credential
+storage is wired. NBD uses `connection_hint.export_name` (`volume@secret`),
+NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`), and 9P
+uses `connection_hint.aname` (`credential-id:secret@bucket`). Read-only
+credentials mount successfully but reject mutation operations.
 
 ## S3
 
@@ -223,8 +226,8 @@ See `../reference/nbd-compatibility.md`.
 ## 9P
 
 Enable the 9P server with `--9p-port` and `--9p-bind`. The server is
-unauthenticated, so keep the default loopback bind unless the network is
-trusted.
+authenticated through Mount SAs or protocol credentials when IAM credential
+storage is wired. Keep the default loopback bind unless the network is trusted.
 
 ```bash
 grainfs serve \
@@ -240,8 +243,10 @@ From a Linux client:
 ```bash
 sudo modprobe 9p 9pnet 9pnet_virtio
 sudo mkdir -p /mnt/grainfs-9p
+grainfs credential create --sa <sa_id> --protocol 9p --resource bucket/mybucket --mode ro
+# Save the returned connection_hint.aname, for example: pc_...:pcsec_...@mybucket
 sudo mount -t 9p \
-  -o trans=tcp,port=5640,version=9p2000.L,msize=262144,aname=/mybucket \
+  -o trans=tcp,port=5640,version=9p2000.L,msize=262144,aname='<connection_hint.aname>' \
   127.0.0.1 /mnt/grainfs-9p
 ```
 

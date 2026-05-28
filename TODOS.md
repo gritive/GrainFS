@@ -361,12 +361,13 @@ Work these in order. Do not run them in parallel.
   9P, and NBD, credential metadata is persisted through Meta Raft, and
   create/rotate/revoke now check IAM permissions for the target service
   account. NBD now enforces `volume@secret` attach when protocol credentials
-  are wired. The attach validator foundation now centralizes strict/compat
+  are wired, and NFS/9P now accept protocol credential attach hints while
+  preserving the validator's strict stale/revoked/expired decisions and SAID
+  audit context. The attach validator foundation now centralizes strict/compat
   stale decisions and bounded attach caching, and IAM policy detach/body
-  changes now mark dependent protocol credentials stale. Follow up by wiring
-  protocol attach paths through that validator and migrating NFS/9P from
-  MountSA-only auth onto protocol credentials without losing uid/gid audit
-  context.
+  changes now mark dependent protocol credentials stale. Follow up by extending
+  protocol credential enforcement to S3/Iceberg auth paths and adding real
+  client smoke coverage for NFS/9P credential mounts.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

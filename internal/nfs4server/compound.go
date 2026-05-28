@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/pool"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -462,7 +463,7 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 	// When the IAM gate is wired (server.mountSAStore != nil) and the current fh
 	// is a bucket-level pending fh (saID="(pending)"), this LOOKUP is the
 	// resolution step: determine if 'name' is a mount-SA or an anon file path.
-	if d.server != nil && d.server.mountSAStore != nil {
+	if d.server != nil && (d.server.mountSAStore != nil || d.server.protocolCredentials != nil) {
 		if binding, ok := d.state.FHBinding(d.currentFH); ok && binding.saID == fhSAIDPending {
 			return d.opLookupResolvePending(name, childPath, childBucket, childKey, binding)
 		}
@@ -508,7 +509,7 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 		gen := d.server.exportGeneration(childBucket)
 		// When mount-SA store is wired: issue bucket fh with saID="(pending)" so the
 		// next LOOKUP can resolve whether this is a mount-SA path or anon access.
-		if d.server.mountSAStore != nil && childKey == "" {
+		if (d.server.mountSAStore != nil || d.server.protocolCredentials != nil) && childKey == "" {
 			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
 		} else {
 			// T12 propagation fix: a fresh subdir fh must inherit the parent's
@@ -519,7 +520,7 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 			// parent's saID explicitly when it is set.
 			parentBind, ok := d.state.FHBinding(d.currentFH)
 			if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
-				d.state.BindFHWithSAID(fh, childBucket, parentBind.saID, gen)
+				d.state.BindFHWithBinding(fh, childBucket, parentBind.saID, parentBind.readOnly, gen)
 			} else {
 				d.state.BindFHGeneration(fh, childBucket, gen)
 			}
@@ -552,43 +553,49 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 	ctx := context.Background()
 	gen := d.server.exportGeneration(childBucket)
 
-	if _, ok := d.server.mountSAStore.Get(name); ok {
-		// mount-SA hit: evaluate grainfs:NFSMount for this SA.
-		if d.server.authorizer != nil {
-			res := d.server.authorizer.Authorize(ctx, name, childBucket, nfsMountReqCtx)
-			if res.Decision != decisionAllow {
-				log.Debug().Str("saID", name).Str("bucket", childBucket).
-					Str("reason", res.Reason).Msg("nfs4: NFSMount denied")
-				if d.server.auditHook != nil {
-					d.server.auditHook(audit.S3Event{
-						Ts:         time.Now().UnixMicro(),
-						SAID:       name,
-						SourceIP:   d.clientAddr,
-						Bucket:     childBucket,
-						AuthStatus: "deny",
-						Source:     "nfs4",
-					})
+	if _, handled, res := d.resolveProtocolCredentialLookup(ctx, name, childPath, childBucket, gen); handled {
+		return res
+	}
+
+	if d.server.mountSAStore != nil {
+		if _, ok := d.server.mountSAStore.Get(name); ok {
+			// mount-SA hit: evaluate grainfs:NFSMount for this SA.
+			if d.server.authorizer != nil {
+				res := d.server.authorizer.Authorize(ctx, name, childBucket, nfsMountReqCtx)
+				if res.Decision != decisionAllow {
+					log.Debug().Str("saID", name).Str("bucket", childBucket).
+						Str("reason", res.Reason).Msg("nfs4: NFSMount denied")
+					if d.server.auditHook != nil {
+						d.server.auditHook(audit.S3Event{
+							Ts:         time.Now().UnixMicro(),
+							SAID:       name,
+							SourceIP:   d.clientAddr,
+							Bucket:     childBucket,
+							AuthStatus: "deny",
+							Source:     "nfs4",
+						})
+					}
+					return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
 				}
-				return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
 			}
+			// Confirmed mount-SA binding.
+			fh := d.state.GetOrCreateFH(childPath)
+			d.state.BindFHWithSAID(fh, childBucket, name, gen)
+			d.currentFH = fh
+			d.currentPath = childPath
+			log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP mount-SA confirmed")
+			if d.server.auditHook != nil {
+				d.server.auditHook(audit.S3Event{
+					Ts:         time.Now().UnixMicro(),
+					SAID:       name,
+					SourceIP:   d.clientAddr,
+					Bucket:     childBucket,
+					AuthStatus: "allow",
+					Source:     "nfs4",
+				})
+			}
+			return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 		}
-		// Confirmed mount-SA binding.
-		fh := d.state.GetOrCreateFH(childPath)
-		d.state.BindFHWithSAID(fh, childBucket, name, gen)
-		d.currentFH = fh
-		d.currentPath = childPath
-		log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP mount-SA confirmed")
-		if d.server.auditHook != nil {
-			d.server.auditHook(audit.S3Event{
-				Ts:         time.Now().UnixMicro(),
-				SAID:       name,
-				SourceIP:   d.clientAddr,
-				Bucket:     childBucket,
-				AuthStatus: "allow",
-				Source:     "nfs4",
-			})
-		}
-		return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 	}
 
 	// Pool miss: check if it's a real backend file/dir (anon path).
@@ -641,6 +648,63 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 }
 
+func (d *Dispatcher) resolveProtocolCredentialLookup(ctx context.Context, token, childPath, bucket string, gen uint64) (stateBinding, bool, OpResult) {
+	if d.server.protocolCredentials == nil || !strings.Contains(token, ":") {
+		return stateBinding{}, false, OpResult{}
+	}
+	credentialID, secret, ok := strings.Cut(token, ":")
+	if !ok || credentialID == "" || secret == "" {
+		return stateBinding{}, true, OpResult{OpCode: OpLookup, Status: NFS4ERR_NOENT}
+	}
+	decision, err := validateProtocolCredentialAttach(ctx, d.server.protocolCredentials, protocred.ProtocolNFS, bucket, credentialID, secret)
+	if err != nil {
+		if d.server.auditHook != nil {
+			d.server.auditHook(audit.S3Event{
+				Ts:         time.Now().UnixMicro(),
+				SAID:       decision.SAID,
+				SourceIP:   d.clientAddr,
+				Bucket:     bucket,
+				AuthStatus: "deny",
+				Source:     "nfs4",
+			})
+		}
+		return stateBinding{}, true, OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+	}
+	fh := d.state.GetOrCreateFH(childPath)
+	readOnly := decision.Mode == protocred.ModeRO
+	d.state.BindFHWithBinding(fh, bucket, decision.SAID, readOnly, gen)
+	d.currentFH = fh
+	d.currentPath = childPath
+	if d.server.auditHook != nil {
+		d.server.auditHook(audit.S3Event{
+			Ts:         time.Now().UnixMicro(),
+			SAID:       decision.SAID,
+			SourceIP:   d.clientAddr,
+			Bucket:     bucket,
+			AuthStatus: "allow",
+			Source:     "nfs4",
+		})
+	}
+	return stateBinding{bucket: bucket, saID: decision.SAID, readOnly: readOnly, generation: gen}, true, OpResult{OpCode: OpLookup, Status: NFS4_OK}
+}
+
+func validateProtocolCredentialAttach(ctx context.Context, validator protocolCredentialValidator, protocol protocred.Protocol, bucket, credentialID, secret string) (protocred.AttachDecision, error) {
+	req := protocred.AttachRequest{
+		Protocol:        protocol,
+		Resource:        "bucket/" + bucket,
+		CredentialID:    credentialID,
+		PresentedSecret: secret,
+		RequestedMode:   protocred.ModeRW,
+		Strict:          true,
+	}
+	decision, err := validator.ValidateAttach(ctx, req)
+	if err == nil {
+		return decision, nil
+	}
+	req.RequestedMode = protocred.ModeRO
+	return validator.ValidateAttach(ctx, req)
+}
+
 func (d *Dispatcher) opCreate(data []byte) OpResult {
 	if d.anonRejected(d.currentFH) {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ACCESS}
@@ -673,7 +737,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 		// binding (anon "" vs mount-SA "<name>").
 		parentBind, ok := d.state.FHBinding(d.currentFH)
 		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
-			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
+			d.state.BindFHWithBinding(fh, bucket, parentBind.saID, parentBind.readOnly, gen)
 		} else {
 			d.state.BindFHGeneration(fh, bucket, gen)
 		}
@@ -1005,6 +1069,9 @@ func (d *Dispatcher) invalidatePath(p string) {
 func (d *Dispatcher) isPathReadOnly(p string) bool {
 	if d.server == nil {
 		return false
+	}
+	if binding, ok := d.state.FHBinding(d.currentFH); ok && binding.readOnly {
+		return true
 	}
 	bucket, _ := extractBucketAndKey(p)
 	return d.server.isExportReadOnly(bucket)
@@ -1494,7 +1561,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 		// binding (anon "" vs mount-SA "<name>").
 		parentBind, ok := d.state.FHBinding(d.currentFH)
 		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
-			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
+			d.state.BindFHWithBinding(fh, bucket, parentBind.saID, parentBind.readOnly, gen)
 		} else {
 			d.state.BindFHGeneration(fh, bucket, gen)
 		}

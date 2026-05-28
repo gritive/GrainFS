@@ -22,11 +22,12 @@ type objectKeyWalker interface {
 	WalkObjectKeys(ctx context.Context, bucket, prefix string, fn func(string) error) error
 }
 
-// fhBinding records the mount-SA binding established during Walk's IAM gate.
-// saID is empty for anonymous access; bucket identifies the mounted bucket.
+// fhBinding records the principal binding established during Walk's auth gate.
+// saID is empty for anonymous access; readOnly is true for RO protocol credentials.
 type fhBinding struct {
-	saID   string
-	bucket string
+	saID     string
+	bucket   string
+	readOnly bool
 }
 
 type bucketFile struct {
@@ -41,6 +42,9 @@ type bucketFile struct {
 }
 
 func (f *bucketFile) isReadOnly() bool {
+	if f.binding.readOnly {
+		return true
+	}
 	if f.exportStore == nil {
 		return false
 	}

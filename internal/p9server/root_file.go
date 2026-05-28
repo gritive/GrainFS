@@ -12,6 +12,7 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -29,12 +30,13 @@ var p9AttachReqCtx = policy.RequestContext{
 
 type rootFile struct {
 	noopFile
-	backend      storage.Backend
-	locks        *objectLocks
-	mountSAStore *mountsastore.Store
-	authorizer   p9Authorizer
-	exportStore  exportGetter
-	cfg          ConfigReader
+	backend             storage.Backend
+	locks               *objectLocks
+	mountSAStore        *mountsastore.Store
+	authorizer          p9Authorizer
+	protocolCredentials protocolCredentialValidator
+	exportStore         exportGetter
+	cfg                 ConfigReader
 	// T15 NFS§C: audit hook. When non-nil, called after every grainfs:9PAttach
 	// allow/deny decision. nil = no audit emit (backward compat).
 	auditHook func(audit.S3Event)
@@ -60,7 +62,7 @@ type rootFile struct {
 //   - bucket not found                          → ENOENT
 func (f *rootFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &rootFile{backend: f.backend, locks: f.locks, mountSAStore: f.mountSAStore, authorizer: f.authorizer, exportStore: f.exportStore, cfg: f.cfg, auditHook: f.auditHook}, nil
+		return nil, &rootFile{backend: f.backend, locks: f.locks, mountSAStore: f.mountSAStore, authorizer: f.authorizer, protocolCredentials: f.protocolCredentials, exportStore: f.exportStore, cfg: f.cfg, auditHook: f.auditHook}, nil
 	}
 	bucket, binding, err := f.resolveFirstComponent(names[0])
 	if err != nil {
@@ -84,8 +86,8 @@ func (f *rootFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 func (f *rootFile) resolveFirstComponent(component string) (bucket string, binding fhBinding, err error) {
 	ctx := context.Background()
 
-	// No IAM gate: backward-compatible path — names[0] is a raw bucket name.
-	if f.mountSAStore == nil {
+	// No auth gate: backward-compatible path — names[0] is a raw bucket name.
+	if f.mountSAStore == nil && f.protocolCredentials == nil {
 		if err := f.backend.HeadBucket(ctx, component); err != nil {
 			return "", fhBinding{}, syscall.ENOENT
 		}
@@ -107,7 +109,17 @@ func (f *rootFile) resolveFirstComponent(component string) (bucket string, bindi
 		return "", fhBinding{}, syscall.ENOENT
 	}
 
+	if binding, ok, err := f.resolveProtocolCredential(ctx, protocred.Protocol9P, bkt, saID); ok || err != nil {
+		if err != nil {
+			return "", fhBinding{}, err
+		}
+		return bkt, binding, nil
+	}
+
 	// Mount-SA path: pool lookup.
+	if f.mountSAStore == nil {
+		return "", fhBinding{}, syscall.ENOENT
+	}
 	if _, ok := f.mountSAStore.Get(saID); !ok {
 		// Pool miss → ENOENT (not EACCES — mount-SA existence leak avoidance).
 		log.Debug().Str("saID", saID).Str("bucket", bkt).Msg("p9: Walk mount-SA pool miss")
@@ -184,6 +196,59 @@ func (f *rootFile) resolveAnon(ctx context.Context, bucket string) (string, fhBi
 		})
 	}
 	return bucket, fhBinding{saID: "", bucket: bucket}, nil
+}
+
+func (f *rootFile) resolveProtocolCredential(ctx context.Context, protocol protocred.Protocol, bucket, token string) (fhBinding, bool, error) {
+	if f.protocolCredentials == nil || !strings.Contains(token, ":") {
+		return fhBinding{}, false, nil
+	}
+	credentialID, secret, ok := strings.Cut(token, ":")
+	if !ok || credentialID == "" || secret == "" {
+		return fhBinding{}, true, syscall.ENOENT
+	}
+	if err := f.backend.HeadBucket(ctx, bucket); err != nil {
+		return fhBinding{}, true, syscall.ENOENT
+	}
+	decision, err := validateProtocolCredentialAttach(ctx, f.protocolCredentials, protocol, bucket, credentialID, secret)
+	if err != nil {
+		if f.auditHook != nil {
+			f.auditHook(audit.S3Event{
+				Ts:         time.Now().UnixMicro(),
+				SAID:       decision.SAID,
+				Bucket:     bucket,
+				AuthStatus: "deny",
+				Source:     "9p",
+			})
+		}
+		return fhBinding{}, true, syscall.EACCES
+	}
+	if f.auditHook != nil {
+		f.auditHook(audit.S3Event{
+			Ts:         time.Now().UnixMicro(),
+			SAID:       decision.SAID,
+			Bucket:     bucket,
+			AuthStatus: "allow",
+			Source:     "9p",
+		})
+	}
+	return fhBinding{saID: decision.SAID, bucket: bucket, readOnly: decision.Mode == protocred.ModeRO}, true, nil
+}
+
+func validateProtocolCredentialAttach(ctx context.Context, validator protocolCredentialValidator, protocol protocred.Protocol, bucket, credentialID, secret string) (protocred.AttachDecision, error) {
+	req := protocred.AttachRequest{
+		Protocol:        protocol,
+		Resource:        "bucket/" + bucket,
+		CredentialID:    credentialID,
+		PresentedSecret: secret,
+		RequestedMode:   protocred.ModeRW,
+		Strict:          true,
+	}
+	decision, err := validator.ValidateAttach(ctx, req)
+	if err == nil {
+		return decision, nil
+	}
+	req.RequestedMode = protocred.ModeRO
+	return validator.ValidateAttach(ctx, req)
 }
 
 func (f *rootFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {

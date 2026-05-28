@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -34,8 +35,9 @@ type Server struct {
 	// When non-nil, opLookup performs 2-phase lazy binding (D#5):
 	//   /<bucket>/<mount-sa> → evaluate grainfs:NFSMount
 	//   /<bucket>            → evaluate grainfs:NFSMount with anon saID
-	mountSAStore *mountsastore.Store
-	authorizer   nfsAuthorizer
+	mountSAStore        *mountsastore.Store
+	authorizer          nfsAuthorizer
+	protocolCredentials protocolCredentialValidator
 
 	// cfg is retained for compatibility with serveruntime wiring. Anonymous
 	// access is decided at mount time, not by a global config flip.
@@ -64,6 +66,10 @@ type nfsAuthorizer interface {
 	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
 }
 
+type protocolCredentialValidator interface {
+	ValidateAttach(context.Context, protocred.AttachRequest) (protocred.AttachDecision, error)
+}
+
 // ServerOption configures a Server.
 type ServerOption func(*Server)
 
@@ -77,6 +83,10 @@ func WithMountSAStore(s *mountsastore.Store) ServerOption {
 // The concrete *s3auth.Authorizer satisfies nfsAuthorizer; tests may inject stubs.
 func WithNFS4Authorizer(a nfsAuthorizer) ServerOption {
 	return func(srv *Server) { srv.authorizer = a }
+}
+
+func WithProtocolCredentialValidator(v protocolCredentialValidator) ServerOption {
+	return func(srv *Server) { srv.protocolCredentials = v }
 }
 
 // WithConfigReader wires the config store for compatibility with serveruntime.

@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -28,6 +29,10 @@ type exportGetter interface {
 // Defined here so tests can inject stubs without a full policy store.
 type p9Authorizer interface {
 	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
+}
+
+type protocolCredentialValidator interface {
+	ValidateAttach(context.Context, protocred.AttachRequest) (protocred.AttachDecision, error)
 }
 
 // ConfigReader is the small slice of the config store that the 9P server
@@ -81,6 +86,10 @@ func WithConfigReader(c ConfigReader) ServerOption {
 // nil keeps the previous behaviour (no audit emit).
 func WithAuditHook(hook func(audit.S3Event)) ServerOption {
 	return func(a *attacher) { a.auditHook = hook }
+}
+
+func WithProtocolCredentialValidator(v protocolCredentialValidator) ServerOption {
+	return func(a *attacher) { a.protocolCredentials = v }
 }
 
 // NewServer creates a 9P server backed by backend.
@@ -204,23 +213,25 @@ func (c *trackedConn) Close() error {
 }
 
 type attacher struct {
-	backend      storage.Backend
-	locks        *objectLocks
-	mountSAStore *mountsastore.Store
-	authorizer   p9Authorizer
-	exportStore  exportGetter
-	cfg          ConfigReader
-	auditHook    func(audit.S3Event)
+	backend             storage.Backend
+	locks               *objectLocks
+	mountSAStore        *mountsastore.Store
+	authorizer          p9Authorizer
+	protocolCredentials protocolCredentialValidator
+	exportStore         exportGetter
+	cfg                 ConfigReader
+	auditHook           func(audit.S3Event)
 }
 
 func (a *attacher) Attach() (p9.File, error) {
 	return &rootFile{
-		backend:      a.backend,
-		locks:        a.locks,
-		mountSAStore: a.mountSAStore,
-		authorizer:   a.authorizer,
-		exportStore:  a.exportStore,
-		cfg:          a.cfg,
-		auditHook:    a.auditHook,
+		backend:             a.backend,
+		locks:               a.locks,
+		mountSAStore:        a.mountSAStore,
+		authorizer:          a.authorizer,
+		protocolCredentials: a.protocolCredentials,
+		exportStore:         a.exportStore,
+		cfg:                 a.cfg,
+		auditHook:           a.auditHook,
 	}, nil
 }

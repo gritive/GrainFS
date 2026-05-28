@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/p9server"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -98,11 +99,12 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 // AuditHook is called synchronously after every grainfs:NFSMount /
 // grainfs:9PAttach allow/deny decision (T15 NFS§C). nil = no audit emit.
 type NodeServicesIAMConfig struct {
-	MountSAStore *mountsastore.Store
-	Authorizer   *s3auth.Authorizer
-	CfgStore     *config.Store
-	AuditHook    func(audit.S3Event)
-	NBDAuth      nbd.CredentialAuthenticator
+	MountSAStore        *mountsastore.Store
+	Authorizer          *s3auth.Authorizer
+	CfgStore            *config.Store
+	AuditHook           func(audit.S3Event)
+	NBDAuth             nbd.CredentialAuthenticator
+	ProtocolCredentials *protocred.AttachValidator
 }
 
 // StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
@@ -159,6 +161,9 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			if iamCfg != nil && iamCfg.AuditHook != nil {
 				nfs4Opts = append(nfs4Opts, nfs4server.WithAuditHook(iamCfg.AuditHook))
 			}
+			if iamCfg != nil && iamCfg.ProtocolCredentials != nil {
+				nfs4Opts = append(nfs4Opts, nfs4server.WithProtocolCredentialValidator(iamCfg.ProtocolCredentials))
+			}
 			svc.nfs4Srv = nfs4server.NewServer(backend, nfs4Opts...)
 			go func() {
 				if err := svc.nfs4Srv.Serve(ln); err != nil {
@@ -208,6 +213,9 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			}
 			if iamCfg != nil && iamCfg.AuditHook != nil {
 				p9Opts = append(p9Opts, p9server.WithAuditHook(iamCfg.AuditHook))
+			}
+			if iamCfg != nil && iamCfg.ProtocolCredentials != nil {
+				p9Opts = append(p9Opts, p9server.WithProtocolCredentialValidator(iamCfg.ProtocolCredentials))
 			}
 			svc.p9Srv = p9server.NewServer(backend, p9Opts...)
 			go func() {

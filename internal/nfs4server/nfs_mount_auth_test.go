@@ -11,6 +11,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -133,6 +134,63 @@ func TestNFSLookup_MountSAHit_Allowed(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "alice-mount", b.saID)
 	assert.Equal(t, "default", b.bucket)
+}
+
+func TestNFSLookup_ProtocolCredential_Allowed(t *testing.T) {
+	msaStore := newTestMountSAStore(t)
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "sa-app", Protocol: protocred.ProtocolNFS, Resource: "bucket/default", Mode: protocred.ModeRW,
+	})
+	require.NoError(t, err)
+
+	srv := NewServer(nil,
+		WithMountSAStore(msaStore),
+		WithProtocolCredentialValidator(protocred.NewAttachValidator(store)),
+	)
+	srv.SetExportsForTest(bucketExport("default"))
+	d := newAuthDispatcher(srv)
+
+	res := d.opLookup([]byte("default"))
+	require.Equal(t, NFS4_OK, res.Status, "bucket LOOKUP")
+
+	res = d.opLookup([]byte(secret.ID + ":" + secret.Secret))
+	require.Equal(t, NFS4_OK, res.Status, "protocol credential LOOKUP must succeed")
+
+	b, ok := d.state.FHBinding(d.currentFH)
+	require.True(t, ok)
+	assert.Equal(t, "sa-app", b.saID)
+	assert.Equal(t, "default", b.bucket)
+	assert.False(t, b.readOnly)
+}
+
+func TestNFSLookup_ProtocolCredentialRO_BindsReadOnly(t *testing.T) {
+	msaStore := newTestMountSAStore(t)
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "sa-app", Protocol: protocred.ProtocolNFS, Resource: "bucket/default", Mode: protocred.ModeRO,
+	})
+	require.NoError(t, err)
+
+	srv := NewServer(nil,
+		WithMountSAStore(msaStore),
+		WithProtocolCredentialValidator(protocred.NewAttachValidator(store)),
+	)
+	srv.SetExportsForTest(bucketExport("default"))
+	d := newAuthDispatcher(srv)
+
+	res := d.opLookup([]byte("default"))
+	require.Equal(t, NFS4_OK, res.Status)
+
+	res = d.opLookup([]byte(secret.ID + ":" + secret.Secret))
+	require.Equal(t, NFS4_OK, res.Status)
+	b, ok := d.state.FHBinding(d.currentFH)
+	require.True(t, ok)
+	assert.Equal(t, "sa-app", b.saID)
+	assert.True(t, b.readOnly)
+	assert.True(t, d.isPathReadOnly(d.currentPath))
 }
 
 // TestNFSLookup_MountSAHit_Denied checks that a denied mount-SA returns
