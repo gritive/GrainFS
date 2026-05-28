@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -105,6 +106,14 @@ var _ = ginkgo.Describe("Cluster scrubber", func() {
 				info, err := os.Stat(victimShard)
 				return err == nil && info.Size() > 0
 			}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "scrubber did not restore shard 0")
+
+			// The repaired shard must be GFSENC3 ciphertext at rest (DEK-sealed),
+			// not plaintext — proves the scrubber-repair write path seals via the
+			// DEK seam. A plaintext run from the random payload must not appear.
+			raw, err := os.ReadFile(victimShard)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(eccodec.IsEncryptedShard(raw)).To(gomega.BeTrue(), "repaired shard must be GFSENC3 ciphertext")
+			gomega.Expect(bytes.Contains(raw, payload[:4096])).To(gomega.BeFalse(), "plaintext run must not be on disk")
 
 			// GET must still round-trip byte-identical.
 			out, err := client.GetObject(ctx, &s3.GetObjectInput{
