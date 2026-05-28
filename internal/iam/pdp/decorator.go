@@ -85,14 +85,17 @@ func (d *Decorator) AuthorizePrincipal(ctx context.Context, p principal.Principa
 func (d *Decorator) chain(ctx context.Context, actor principal.Principal, targetSA string, inner policy.EvalResult, ctxReq policy.RequestContext) policy.EvalResult {
 	raw, ok := d.cfg.GetString(ConfigKey)
 	if !ok {
-		return inner // unconfigured: pure pass-through
+		d.releaseClient() // unconfigured: free any client left over from when it was enabled
+		return inner      // unconfigured: pure pass-through
 	}
 	cfg, err := ParseConfig([]byte(raw))
 	if err != nil {
 		log.Warn().Err(err).Str("event", "iam.pdp").Msg("iam.pdp: invalid config, treating as disabled")
+		d.releaseClient()
 		return inner
 	}
 	if !cfg.Enabled {
+		d.releaseClient()
 		return inner
 	}
 
@@ -184,6 +187,18 @@ func (d *Decorator) clientFor(cfg Config) *Client {
 		d.clientSock = cfg.SocketPath
 	}
 	return d.client
+}
+
+// releaseClient closes and drops the cached client (used when PDP is disabled so
+// a hot enable->disable frees the idle unix-socket connection). Idempotent.
+func (d *Decorator) releaseClient() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.client != nil {
+		d.client.Close()
+		d.client = nil
+		d.clientSock = ""
+	}
 }
 
 // audit emits the path-agnostic PDP decision audit line. Request fields are

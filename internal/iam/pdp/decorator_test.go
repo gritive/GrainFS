@@ -204,6 +204,29 @@ func TestDecoratorTimeoutHotReload(t *testing.T) {
 	require.Contains(t, got.Reason, "pdp_skipped_fail_open")
 }
 
+// TestDecoratorReleasesClientWhenDisabled proves a hot enable->disable frees the
+// cached unix-socket client. The first (enabled) request builds and caches the
+// client; the second request, with {"enabled":false}, must release it so the
+// idle keep-alive connection does not linger until process exit.
+func TestDecoratorReleasesClientWhenDisabled(t *testing.T) {
+	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	cfg := &mutableCfg{}
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+
+	// Enabled request builds and caches the client.
+	cfg.set(decoCfg(sock, "closed"))
+	d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.NotNil(t, d.client)
+
+	// Disabled request must release the cached client.
+	cfg.set(`{"enabled":false}`)
+	d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Nil(t, d.client)
+	require.Empty(t, d.clientSock)
+}
+
 func TestDecoratorAuthorizeMapsServiceAccount(t *testing.T) {
 	var got Request
 	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
