@@ -455,6 +455,53 @@ func mustRead(t *testing.T, path string) []byte {
 	return data
 }
 
+func TestNodeKeyGenSidecar_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := writeNodeKeyGen(dir, 3); err != nil {
+		t.Fatalf("writeNodeKeyGen: %v", err)
+	}
+	got, ok := readNodeKeyGen(dir)
+	if !ok {
+		t.Fatal("readNodeKeyGen: not found")
+	}
+	if got != 3 {
+		t.Fatalf("gen=%d want 3", got)
+	}
+	info, err := os.Stat(filepath.Join(dir, "keys.d", nodeKeyGenFile))
+	if err != nil {
+		t.Fatalf("stat node.key.gen: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%o want 0600", info.Mode().Perm())
+	}
+}
+
+func TestNodeKeyGenSidecar_RejectsMissingMalformedAndNonCanonical(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := readNodeKeyGen(dir); ok {
+		t.Fatal("missing sidecar decoded successfully")
+	}
+
+	cases := map[string]string{
+		"empty":      "",
+		"alpha":      "abc",
+		"leading0":   "03",
+		"plus":       "+3",
+		"newline":    "3\n",
+		"overflow32": "4294967296",
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWrite(t, filepath.Join(dir, "keys.d", nodeKeyGenFile), []byte(data))
+			if _, ok := readNodeKeyGen(dir); ok {
+				t.Fatalf("malformed sidecar %q decoded successfully", data)
+			}
+		})
+	}
+}
+
 // mintTestBundleToken builds a minimal valid InviteBundle token for gate tests.
 func mintTestBundleToken(t *testing.T) string {
 	t.Helper()
@@ -488,6 +535,9 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
 	if err := transport.SealNodeKey(dir, sealKEK, cert); err != nil {
 		t.Fatalf("SealNodeKey under KEK gen: %v", err)
 	}
+	if err := writeNodeKeyGen(dir, 3); err != nil {
+		t.Fatalf("writeNodeKeyGen: %v", err)
+	}
 	// Pre-migration: must NOT decrypt under encKey yet.
 	if _, _, err := transport.LoadNodeKey(dir, encKey); err == nil {
 		t.Fatal("node.key.enc unexpectedly decrypts under encKey before migration")
@@ -509,6 +559,9 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
 	} else if spki != wantSPKI {
 		t.Fatalf("post-migration SPKI mismatch: got %x want %x", spki, wantSPKI)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "keys.d", nodeKeyGenFile)); !os.IsNotExist(err) {
+		t.Fatalf("node.key.gen must be deleted after static-key migration, err=%v", err)
+	}
 
 	// Idempotent resume: a second call (e.g. after a crash before the sentinel
 	// clear) must succeed via the encKey-first path even with a bogus KEK gen.
@@ -517,6 +570,19 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
 		t.Fatalf("idempotent resume failed: %v", err)
 	} else if spki != wantSPKI {
 		t.Fatalf("resume SPKI mismatch: got %x want %x", spki, wantSPKI)
+	}
+
+	if err := writeNodeKeyGen(dir, 3); err != nil {
+		t.Fatalf("writeNodeKeyGen stale sidecar: %v", err)
+	}
+	if _, _, err := loadAndMigrateInviteNodeKey(dir, encKey, func() ([]byte, error) {
+		t.Fatal("encKey-first cleanup must not resolve KEK")
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("encKey-first cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keys.d", nodeKeyGenFile)); !os.IsNotExist(err) {
+		t.Fatalf("stale node.key.gen must be deleted on encKey-first resume, err=%v", err)
 	}
 }
 

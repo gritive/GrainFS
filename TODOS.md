@@ -53,6 +53,9 @@ Work these in order. Do not run them in parallel.
      encode `BootstrapSecretsPayload.encryption_key`; legacy decode remains for
      pre-format-7 payloads; post-drop invite joiners now load the KEK-sealed
      node key from staged disk KEKs before QUIC Listen.
+     Prep slice in progress: persist `keys.d/node.key.gen` for invite Phase-1
+     node-key seals so follow-up D-cut slices can identify the generation that
+     wrapped `node.key.enc`.
    - [x] D-meta: migrate cluster-config alert webhook secret wrapping from static
      `EncryptWithAAD` to a DEK seam with persisted `dek_gen`. SHIPPED in current
      branch: new PATCH writes use `DomainClusterConfigSecret`; existing static

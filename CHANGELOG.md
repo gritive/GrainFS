@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.418.0] - 2026-05-28
+## [0.0.419.0] - 2026-05-29
 
 ### Added
 
@@ -17,6 +17,24 @@
   disabled unless issuers are configured.
 - Updated the OIDC federated IAM operator guide and follow-up tracking for the
   remaining broader admin route and external PDP architecture work.
+
+## [0.0.418.0] - 2026-05-28
+
+### Security
+
+- Persisted `keys.d/node.key.gen` during Zero-CA invite Phase-1 node-key
+  sealing so later D-cut slices can identify the KEK generation that wrapped
+  `node.key.enc`.
+
+### Changed
+
+- Kept the no-static-key invite bootstrap contract intact while recording the
+  invite node-key generation sidecar needed for the next KEK-gen identity slice.
+
+### Tests
+
+- Added coverage for node-key generation sidecar encoding, malformed sidecar
+  rejection, and cleanup after invite node-key static-key migration.
 
 ## [0.0.417.0] - 2026-05-28
 
