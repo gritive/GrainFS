@@ -75,17 +75,18 @@ func BenchmarkResolveSA(b *testing.B) {
 		ak := fmt.Sprintf("AKGFBENCH%016d", i)
 		aks[i] = ak
 		plaintext := fmt.Sprintf("secret-%d-very-long-padding-padding-padding", i)
-		wrapped, err := WrapSecret(enc, sa.ID, plaintext)
+		wrapped, gen, err := WrapSecret(enc, sa.ID, ak, plaintext)
 		if err != nil {
 			b.Fatal(err)
 		}
 		k := AccessKey{
-			AccessKey:    ak,
-			SecretKey:    plaintext,
-			SecretKeyEnc: wrapped,
-			SAID:         sa.ID,
-			Status:       KeyStatusActive,
-			CreatedAt:    time.Now(),
+			AccessKey:       ak,
+			SecretKey:       plaintext,
+			SecretKeyEnc:    wrapped,
+			SecretKeyDEKGen: gen,
+			SAID:            sa.ID,
+			Status:          KeyStatusActive,
+			CreatedAt:       time.Now(),
 		}
 		if err := ap.ApplyKeyCreate(buildKeyCreatePayload(k)); err != nil {
 			b.Fatal(err)

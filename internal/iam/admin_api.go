@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // SACreateRequest is the JSON body for POST /admin/iam/sa.
@@ -65,12 +66,38 @@ type PostureChecker interface {
 type AdminAPI struct {
 	store    *Store
 	proposer Proposer
-	enc      *encrypt.Encryptor
-	posture  PostureChecker // optional; nil = skip first-SA pre-check (legacy/test default)
+	enc      atomic.Pointer[storage.DataEncryptor] // nil until SetEncryptor; swapped after DEK keeper is ready
+	posture  PostureChecker                        // optional; nil = skip first-SA pre-check (legacy/test default)
 }
 
-func NewAdminAPI(store *Store, proposer Proposer, enc *encrypt.Encryptor) *AdminAPI {
-	return &AdminAPI{store: store, proposer: proposer, enc: enc}
+// NewAdminAPI returns an AdminAPI bound to the given Store and Proposer. The
+// encryptor may be nil at construction; SetEncryptor wires it once the
+// DEKKeeper is ready (post-Restore / post-wireDEKKeeper). Write paths
+// (CreateSA/CreateKey/PutBucketUpstream) return a loud error if the encryptor
+// is unset.
+func NewAdminAPI(store *Store, proposer Proposer, enc storage.DataEncryptor) *AdminAPI {
+	a := &AdminAPI{store: store, proposer: proposer}
+	if enc != nil {
+		a.enc.Store(&enc)
+	}
+	return a
+}
+
+// Encryptor returns the currently installed DataEncryptor, or nil if none has
+// been wired yet. Read-only accessor; consumers do not own the returned value.
+func (a *AdminAPI) Encryptor() storage.DataEncryptor {
+	p := a.enc.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// SetEncryptor installs the live DataEncryptor. Boot helpers (wireIAMEncryptor)
+// call this once the DEKKeeper is at its final value (after any restore-time
+// reassignment). Idempotent — last write wins via atomic.Pointer.Store.
+func (a *AdminAPI) SetEncryptor(de storage.DataEncryptor) {
+	a.enc.Store(&de)
 }
 
 // SetPostureChecker installs the optional PostureChecker.
@@ -96,15 +123,26 @@ func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateR
 		ID: NewUUIDv7(), Name: req.Name, Description: req.Description,
 		CreatedAt: now, CreatedBy: PrincipalFromContext(ctx),
 	}
-	if err := a.proposer.ProposeSACreate(ctx, sa); err != nil {
-		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "propose SA: " + err.Error()}
+	// R2 code-gate codex P2: check encryptor + wrap the secret BEFORE the SA
+	// raft propose. If we proposed the SA first and then errored on a nil
+	// encryptor, the cluster would already hold a keyless SA — a retry then
+	// races against a duplicate-SA error and leaves a dangling principal.
+	// Failing before any propose keeps cluster state consistent.
+	enc := a.Encryptor()
+	if enc == nil {
+		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "iam: admin api: encryptor not set (boot ordering bug — see wireIAMEncryptor)"}
 	}
-	wrapped, err := WrapSecret(a.enc, sa.ID, secretKey)
+	wrapped, gen, err := WrapSecret(enc, sa.ID, accessKey, secretKey)
 	if err != nil {
 		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "wrap secret: " + err.Error()}
 	}
+	// Encryptor check + wrap succeeded — NOW we can propose the SA and key
+	// without risk of a half-created cluster state (codex P2).
+	if err := a.proposer.ProposeSACreate(ctx, sa); err != nil {
+		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "propose SA: " + err.Error()}
+	}
 	k := AccessKey{
-		AccessKey: accessKey, SecretKey: secretKey, SecretKeyEnc: wrapped,
+		AccessKey: accessKey, SecretKey: secretKey, SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 		SAID: sa.ID, Status: KeyStatusActive, CreatedAt: now,
 	}
 	if err := a.proposer.ProposeKeyCreate(ctx, k); err != nil {
@@ -272,12 +310,16 @@ func (a *AdminAPI) CreateKey(ctx context.Context, saID string, req KeyCreateRequ
 		return KeyCreateResponse{}, &adminapi.Error{Code: "invalid", Message: err.Error()}
 	}
 	accessKey, secretKey := genCredentialPair()
-	wrapped, err := WrapSecret(a.enc, saID, secretKey)
+	enc := a.Encryptor()
+	if enc == nil {
+		return KeyCreateResponse{}, &adminapi.Error{Code: "internal", Message: "iam: admin api: encryptor not set (boot ordering bug — see wireIAMEncryptor)"}
+	}
+	wrapped, gen, err := WrapSecret(enc, saID, accessKey, secretKey)
 	if err != nil {
 		return KeyCreateResponse{}, &adminapi.Error{Code: "internal", Message: "wrap: " + err.Error()}
 	}
 	k := AccessKey{
-		AccessKey: accessKey, SecretKey: secretKey, SecretKeyEnc: wrapped,
+		AccessKey: accessKey, SecretKey: secretKey, SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 		SAID: saID, Status: KeyStatusActive, CreatedAt: time.Now().UTC(),
 		ExpiresAt: req.ExpiresAt, BucketScope: scope,
 	}
@@ -381,13 +423,20 @@ func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutR
 	if req.AccessKey == "" || req.SecretKey == "" {
 		return &adminapi.Error{Code: "invalid", Message: "access_key and secret_key required"}
 	}
-	wrapped, err := WrapSecret(a.enc, "bucket-upstream:"+req.Bucket, req.SecretKey)
+	enc := a.Encryptor()
+	if enc == nil {
+		return &adminapi.Error{Code: "internal", Message: "iam: admin api: encryptor not set (boot ordering bug — see wireIAMEncryptor)"}
+	}
+	// codex P2: bind access_key into the AAD so a tampered payload that swaps
+	// access_key without re-wrapping secret_key_enc fails AEAD verify rather
+	// than silently accepting a mismatched (access_key, secret_key) pair.
+	wrapped, gen, err := WrapSecret(enc, "bucket-upstream:"+req.Bucket, req.AccessKey, req.SecretKey)
 	if err != nil {
 		return &adminapi.Error{Code: "internal", Message: "wrap secret: " + err.Error()}
 	}
 	u := BucketUpstream{
 		Bucket: req.Bucket, Endpoint: req.UpstreamURL, AccessKey: req.AccessKey,
-		SecretKey: req.SecretKey, SecretKeyEnc: wrapped,
+		SecretKey: req.SecretKey, SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 		CreatedAt: time.Now().UTC(), CreatedBy: PrincipalFromContext(ctx),
 	}
 	if err := a.proposer.ProposeBucketUpstreamPut(ctx, u); err != nil {

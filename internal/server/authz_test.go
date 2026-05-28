@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestS3ActionEnum(t *testing.T) {
@@ -104,7 +105,7 @@ func (c *captureAuditEmitter) lastReason() string {
 type iamTestHelper struct {
 	store   *iam.Store
 	applier *iam.Applier
-	enc     *encrypt.Encryptor
+	enc     storage.DataEncryptor
 }
 
 func newIAMTestHelper(t *testing.T) *iamTestHelper {
@@ -112,9 +113,11 @@ func newIAMTestHelper(t *testing.T) *iamTestHelper {
 	key := bytes.Repeat([]byte{0xab}, 32)
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
+	clusterID := bytes.Repeat([]byte{0xcd}, 16)
+	de := storage.NewEncryptorAdapter(enc, clusterID)
 	store := iam.NewStore()
-	ap := iam.NewApplier(store, enc)
-	return &iamTestHelper{store: store, applier: ap, enc: enc}
+	ap := iam.NewApplier(store, de)
+	return &iamTestHelper{store: store, applier: ap, enc: de}
 }
 
 func (h *iamTestHelper) applySACreate(t *testing.T, saID string) {
@@ -137,8 +140,9 @@ func (h *iamTestHelper) applySACreate(t *testing.T, saID string) {
 
 func (h *iamTestHelper) applyKeyCreateScoped(t *testing.T, ak, saID, secret string, scope []string) {
 	t.Helper()
-	wrapped, err := iam.WrapSecret(h.enc, saID, secret)
+	wrapped, gen, err := iam.WrapSecret(h.enc, saID, ak, secret)
 	require.NoError(t, err)
+	_ = gen // EncryptorAdapter always returns 0; KeyCreatePayload defaults to 0
 
 	b := flatbuffers.NewBuilder(256)
 	akOff := b.CreateString(ak)
@@ -166,8 +170,9 @@ func (h *iamTestHelper) applyKeyCreateScoped(t *testing.T, ak, saID, secret stri
 
 func (h *iamTestHelper) applyKeyCreate(t *testing.T, ak, saID, secret string) {
 	t.Helper()
-	wrapped, err := iam.WrapSecret(h.enc, saID, secret)
+	wrapped, gen, err := iam.WrapSecret(h.enc, saID, ak, secret)
 	require.NoError(t, err)
+	_ = gen
 
 	b := flatbuffers.NewBuilder(128)
 	akOff := b.CreateString(ak)

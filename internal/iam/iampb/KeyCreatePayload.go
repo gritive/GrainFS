@@ -132,8 +132,20 @@ func (rcv *KeyCreatePayload) BucketScopeLength() int {
 	return 0
 }
 
+func (rcv *KeyCreatePayload) SecretKeyDekGen() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *KeyCreatePayload) MutateSecretKeyDekGen(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(16, n)
+}
+
 func KeyCreatePayloadStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(7)
 }
 func KeyCreatePayloadAddAccessKey(builder *flatbuffers.Builder, accessKey flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(accessKey), 0)
@@ -158,6 +170,9 @@ func KeyCreatePayloadAddBucketScope(builder *flatbuffers.Builder, bucketScope fl
 }
 func KeyCreatePayloadStartBucketScopeVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func KeyCreatePayloadAddSecretKeyDekGen(builder *flatbuffers.Builder, secretKeyDekGen uint32) {
+	builder.PrependUint32Slot(6, secretKeyDekGen, 0)
 }
 func KeyCreatePayloadEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

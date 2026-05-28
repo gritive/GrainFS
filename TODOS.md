@@ -22,12 +22,16 @@ Work these in order. Do not run them in parallel.
      **SHIPPED v0.0.393.0 (PR #596)** — DEK-sealed logical-WAL/packblob/PUT-pipeline
      under the gen-aware DEK; `encryption.rotate-dek` gated; at-rest format 3→4.
      Data-WAL stayed on the static encryptor (deferred to R-FSM below).
-     **R2 — IAM credentials static→DEK.** Migrate `WrapSecret`/`UnwrapSecret`
-     (`iam/encrypt.go`) + `iam/fsm.go` Applier off `*encrypt.Encryptor` onto the
-     `DataEncryptor` seam, gen in raft payload + snapshot. Cipher is ALREADY XAES
-     (key-migration, not a cipher swap); fix stale `// AES-256-GCM` comments at
-     `iam/types.go:54/73/80`. Preserve in-memory plaintext cache. Cluster
-     cache-invalidation e2e. Depends on R1.
+     **R2 — IAM credentials static→DEK.** SHIPPED v0.0.401.0 (this PR). IAM
+     SA secret_key + BucketUpstream secret_key migrated onto the `DataEncryptor`
+     seam under a new `DomainIAMCredential` AAD that binds (sa_id, access_key).
+     Gen threaded through raft payload + snapshot. Two-pass decode in
+     `MetaFSM.Restore` (TransientReadOnlyDEK) so DEK-sealed credentials
+     decrypt before the live keeper is wired. Format version 4→5. Stale
+     `// AES-256-GCM` comments fixed. In-memory plaintext cache preserved
+     (sigv4 verify locked at ≤60 alloc/op). 3-node cluster cache-invalidation
+     e2e deferred (no 3-node IAM harness yet); single-node restart e2e
+     covers the snapshot/restore path end-to-end.
      **R3 — Retire static key.** After every `cfg.Encryptor` consumer
      (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
      replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,

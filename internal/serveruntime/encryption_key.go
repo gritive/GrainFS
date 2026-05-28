@@ -82,8 +82,13 @@ const bulkCipherFormatFile = "encryption.format"
 // dir must loud-fail rather than mis-read. "4" = the logical/PITR WAL, packblob,
 // and single-node PUT pipeline sealers moved from the static encryptor to the
 // gen-aware DEK keeper (R1), so a "3" dir's static-sealed data-plane bytes are
-// unreadable by a "4" binary and must loud-fail rather than mis-read.
-const bulkCipherFormatVersion = "4"
+// unreadable by a "4" binary and must loud-fail rather than mis-read. "5" = IAM
+// credentials (SA secret keys, BucketUpstream secrets) migrated to the DEK seam
+// under DomainIAMCredential AAD (R2). Pre-"5" IAM ciphertext used the static
+// *encrypt.Encryptor with raw saID AAD; "5" binary uses the DataEncryptor seam
+// with BuildAAD(DomainIAMCredential, clusterID, FieldString(saID), FieldString(accessKey))
+// and cannot read pre-"5" IAM bytes. Greenfield only.
+const bulkCipherFormatVersion = "5"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
 // ONLY when at-rest encryption is enabled. bulkDataPresent reports whether the
@@ -95,7 +100,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); the data-plane sealers (logical/PITR WAL, packblob, PUT pipeline) moved to the gen-aware DEK and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); IAM credentials migrated to the gen-aware DEK seam (R2) and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):

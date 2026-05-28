@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -153,4 +154,75 @@ func TestDEKKeeperAdapter_OldGenOpensAfterRotate(t *testing.T) {
 
 func TestDEKKeeperAdapter_ImplementsDataEncryptor(t *testing.T) {
 	var _ DataEncryptor = (*DEKKeeperAdapter)(nil)
+}
+
+// TestTransientDataEncryptor_OpensSameCiphertextAsLiveAdapter — the key
+// invariant for MetaFSM.Restore: a transient adapter Open returns the same
+// plaintext the live DEKKeeperAdapter would after boot wiring.
+func TestTransientDataEncryptor_OpensSameCiphertextAsLiveAdapter(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
+	clusterID := testSeamClusterID()
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	if err := keeper.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	live := NewDEKKeeperAdapter(keeper, clusterID)
+	fields := []encrypt.AADField{encrypt.FieldString("sa"), encrypt.FieldString("AK")}
+	ct, gen, err := live.Seal(encrypt.DomainIAMCredential, fields, []byte("creds"))
+	if err != nil {
+		t.Fatalf("live Seal: %v", err)
+	}
+
+	// Build a KEKStore at the same version the keeper currently wraps under
+	// (Phase A pins to 0; Rotate does not advance it).
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, kek); err != nil {
+		t.Fatalf("KEKStore.Add: %v", err)
+	}
+	versions, active := keeper.VersionsAndActive()
+	transient, err := encrypt.NewTransientReadOnlyDEK(clusterID, versions, active, 0, store)
+	if err != nil {
+		t.Fatalf("NewTransientReadOnlyDEK: %v", err)
+	}
+	a := NewTransientDataEncryptor(transient, clusterID)
+	got, err := a.Open(encrypt.DomainIAMCredential, fields, gen, ct)
+	if err != nil {
+		t.Fatalf("transient Open: %v", err)
+	}
+	if !bytes.Equal(got, []byte("creds")) {
+		t.Fatalf("plaintext mismatch: got %q", got)
+	}
+}
+
+// TestTransientDataEncryptor_SealIsRefused guards the read-only invariant
+// at the adapter boundary: Seal must return encrypt.ErrTransientReadOnly so
+// any caller that tries to mutate state during Restore hard-fails.
+func TestTransientDataEncryptor_SealIsRefused(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
+	clusterID := testSeamClusterID()
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, kek); err != nil {
+		t.Fatalf("KEKStore.Add: %v", err)
+	}
+	versions, active := keeper.VersionsAndActive()
+	transient, err := encrypt.NewTransientReadOnlyDEK(clusterID, versions, active, 0, store)
+	if err != nil {
+		t.Fatalf("NewTransientReadOnlyDEK: %v", err)
+	}
+	a := NewTransientDataEncryptor(transient, clusterID)
+	_, _, err = a.Seal(encrypt.DomainIAMCredential, nil, []byte("nope"))
+	if !errors.Is(err, encrypt.ErrTransientReadOnly) {
+		t.Fatalf("Seal must return ErrTransientReadOnly, got %v", err)
+	}
+}
+
+func TestTransientDataEncryptor_ImplementsDataEncryptor(t *testing.T) {
+	var _ DataEncryptor = (*TransientDataEncryptor)(nil)
 }

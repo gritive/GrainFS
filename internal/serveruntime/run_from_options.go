@@ -98,7 +98,13 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	if err := EnsureBulkCipherFormat(primaryDataDir, BulkDataPresent(primaryDataDir, opts.DataDirs, metaDir)); err != nil {
 		return fmt.Errorf("encryption format guard: %w", err)
 	}
-	iamApplier := iam.NewApplier(iamStore, shardEncryptor)
+	// R2: IAM applier is constructed with no DataEncryptor here; the live
+	// DEKKeeperAdapter is wired by wireIAMEncryptor(state) in boot_phases_raft.go
+	// once the DEK keeper is at its final value (post-wireDEKKeeper, after any
+	// restore-time reassignment). The apply loop is gated by WaitDEKReady, so
+	// no apply runs before the encryptor is installed.
+	_ = shardEncryptor // shardEncryptor still feeds other paths via state.cfg.Encryptor
+	iamApplier := iam.NewApplier(iamStore, nil)
 
 	// 5. pprof.
 	if opts.PprofPort > 0 {
