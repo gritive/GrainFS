@@ -40,6 +40,9 @@ func (s *Store) list(filter ListFilter) []Credential {
 		if filter.Protocol != "" && item.Protocol != filter.Protocol {
 			continue
 		}
+		if filter.Resource != "" && item.Resource != filter.Resource {
+			continue
+		}
 		out = append(out, item)
 	}
 	return out

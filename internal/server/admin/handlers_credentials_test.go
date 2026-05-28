@@ -18,6 +18,7 @@ func TestCredentialHandlersCreateListGetRotateRevoke(t *testing.T) {
 	d.ProtocolCredentials = protocred.NewService(protocred.NewStore(), protocred.WithNow(func() time.Time {
 		return time.Unix(100, 0).UTC()
 	}))
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
 		SAID: "node-a", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
@@ -108,6 +109,36 @@ func TestCredentialHandlersAuthorizeCreateRotateRevoke(t *testing.T) {
 	}, authz.calls[2])
 }
 
+func TestCredentialHandlersAuthorizeGetAndList(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore(), protocred.WithNow(func() time.Time {
+		return time.Unix(100, 0).UTC()
+	}))
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	d.ProtocolCredAuthz = authz
+
+	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+	require.NoError(t, err)
+
+	_, err = admin.GetCredential(context.Background(), d, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, credentialAuthCall{
+		saID:     "sa-app",
+		action:   "grainfs:CredentialRead",
+		resource: "protocol-credential/nbd/volume/devdisk",
+	}, authz.calls[1])
+
+	_, err = admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nbd", Resource: "volume/devdisk"})
+	require.NoError(t, err)
+	require.Equal(t, credentialAuthCall{
+		saID:     "sa-app",
+		action:   "grainfs:CredentialList",
+		resource: "protocol-credential/nbd/volume/devdisk",
+	}, authz.calls[2])
+}
+
 func TestCredentialHandlersDenyCreateBeforeMutation(t *testing.T) {
 	d := newDeps(t)
 	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
@@ -142,6 +173,7 @@ func TestCredentialHandlersValidateCreateBeforeAuthorize(t *testing.T) {
 func TestCredentialHandlersDenyRotateAndRevokeBeforeMutation(t *testing.T) {
 	d := newDeps(t)
 	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
 		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
@@ -153,15 +185,47 @@ func TestCredentialHandlersDenyRotateAndRevokeBeforeMutation(t *testing.T) {
 	requireCredentialForbidden(t, err)
 	require.Empty(t, rotated.Secret)
 
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 	got, err := admin.GetCredential(context.Background(), d, created.ID)
 	require.NoError(t, err)
 	require.Equal(t, created.SecretHint, got.SecretHint)
 
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "explicit Deny"}
 	_, err = admin.RevokeCredential(context.Background(), d, created.ID)
 	requireCredentialForbidden(t, err)
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 	got, err = admin.GetCredential(context.Background(), d, created.ID)
 	require.NoError(t, err)
 	require.Empty(t, got.RevokedAt)
+}
+
+func TestCredentialHandlersDenyGetAndListBeforeRead(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
+
+	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+	require.NoError(t, err)
+
+	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "implicit Deny"}
+	_, err = admin.GetCredential(context.Background(), d, created.ID)
+	requireCredentialForbidden(t, err)
+
+	listed, err := admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nbd", Resource: "volume/devdisk"})
+	requireCredentialForbidden(t, err)
+	require.Empty(t, listed.Credentials)
+}
+
+func TestCredentialHandlersFailClosedWhenAuthorizerMissing(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+
+	_, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+	requireCredentialForbidden(t, err)
 }
 
 type credentialAuthCall struct {

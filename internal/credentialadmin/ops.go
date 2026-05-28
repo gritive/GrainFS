@@ -53,7 +53,7 @@ func RunList(ctx context.Context, opts ListOptions) error {
 	}
 	ctx, cancel := withTimeout(ctx, opts.Timeout)
 	defer cancel()
-	resp, err := c.List(ctx, opts.SAID, opts.Protocol)
+	resp, err := c.ListFiltered(ctx, opts.SAID, opts.Protocol, opts.Resource)
 	if err != nil {
 		return err
 	}

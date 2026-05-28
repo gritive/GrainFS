@@ -13,6 +13,8 @@ const (
 	protocolCredentialActionCreate = "grainfs:CredentialCreate"
 	protocolCredentialActionRotate = "grainfs:CredentialRotate"
 	protocolCredentialActionRevoke = "grainfs:CredentialRevoke"
+	protocolCredentialActionGet    = "grainfs:CredentialRead"
+	protocolCredentialActionList   = "grainfs:CredentialList"
 )
 
 func CreateCredential(ctx context.Context, d *Deps, req CredentialCreateReq) (CredentialResp, error) {
@@ -51,10 +53,16 @@ func ListCredentials(ctx context.Context, d *Deps, req CredentialListReq) (Crede
 	if d.ProtocolCredentials == nil {
 		return CredentialListResp{}, NewUnsupported("protocol credential admin not configured on this node", nil)
 	}
-	items := d.ProtocolCredentials.List(protocred.ListFilter{SAID: req.SAID, Protocol: protocred.ParseProtocol(req.Protocol)})
-	out := make([]CredentialResp, len(items))
-	for i, item := range items {
-		out[i] = credentialResp(item, protocred.Secret{})
+	if d.ProtocolCredAuthz == nil {
+		return CredentialListResp{}, NewForbidden("protocol credential permission denied: authorizer not configured")
+	}
+	items := d.ProtocolCredentials.List(protocred.ListFilter{SAID: req.SAID, Protocol: protocred.ParseProtocol(req.Protocol), Resource: req.Resource})
+	out := make([]CredentialResp, 0, len(items))
+	for _, item := range items {
+		if err := authorizeProtocolCredential(ctx, d, item.SAID, item.Protocol, item.Resource, protocolCredentialActionList); err != nil {
+			return CredentialListResp{}, err
+		}
+		out = append(out, credentialResp(item, protocred.Secret{}))
 	}
 	return CredentialListResp{Credentials: out}, nil
 }
@@ -66,6 +74,9 @@ func GetCredential(ctx context.Context, d *Deps, id string) (CredentialResp, err
 	item, err := d.ProtocolCredentials.Get(id)
 	if err != nil {
 		return CredentialResp{}, credentialError(err)
+	}
+	if err := authorizeProtocolCredential(ctx, d, item.SAID, item.Protocol, item.Resource, protocolCredentialActionGet); err != nil {
+		return CredentialResp{}, err
 	}
 	return credentialResp(item, protocred.Secret{}), nil
 }
@@ -111,7 +122,7 @@ func RevokeCredential(ctx context.Context, d *Deps, id string) (CredentialRevoke
 
 func authorizeProtocolCredential(ctx context.Context, d *Deps, saID string, protocol protocred.Protocol, resource, action string) *Error {
 	if d.ProtocolCredAuthz == nil {
-		return nil
+		return NewForbidden("protocol credential permission denied: authorizer not configured")
 	}
 	result := d.ProtocolCredAuthz.Authorize(ctx, saID, "", policy.RequestContext{
 		Action:   action,
