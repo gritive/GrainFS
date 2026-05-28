@@ -28,6 +28,7 @@ var (
 	ErrInvalid  = errors.New("protocol credential invalid")
 	ErrNotFound = errors.New("protocol credential not found")
 	ErrRevoked  = errors.New("protocol credential revoked")
+	ErrExpired  = errors.New("protocol credential expired")
 	ErrConflict = errors.New("protocol credential conflict")
 )
 
@@ -38,6 +39,13 @@ type CreateRequest struct {
 	Mode      Mode
 	ExpiresAt *time.Time
 	CreatedBy string
+}
+
+type AuthenticateRequest struct {
+	Protocol Protocol
+	Resource string
+	Mode     Mode
+	Secret   string
 }
 
 type ListFilter struct {

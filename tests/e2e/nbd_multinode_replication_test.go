@@ -32,8 +32,9 @@ var _ = ginkgo.Describe("NBD multinode replication", func() {
 			ginkgo.DeferCleanup(cancel)
 			c.GrantAdminOnBuckets("__grainfs_volumes")
 			ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
+			exportName := ensureE2ENBDCredential(t, ctx, c.dataDirs[c.leaderIdx]+"/admin.sock", c.saID, "default")
 
-			client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
+			client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), exportName)
 			ginkgo.DeferCleanup(client.Close)
 
 			body := []byte("nbd-byte-level-replication-payload")

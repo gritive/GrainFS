@@ -100,6 +100,7 @@ fi
 bench_wait_admin_socket "$DATA_DIR" 100 0.2
 echo "--- Creating NBD export volume ---"
 "$BINARY" volume create default --size "$VOL_SIZE" --endpoint "$DATA_DIR/admin.sock" >/dev/null
+NBD_EXPORT_NAME=$(bench_create_nbd_export_name "$BINARY" "$DATA_DIR/admin.sock" default)
 bench_wait_tcp_port "127.0.0.1" "$NBD_PORT" "NBD listener" 50 0.2
 
 # ─── 2. Connect nbd-client in Colima ────────────────────────────────────────
@@ -107,7 +108,7 @@ echo ""
 echo "--- Connecting nbd-client in Colima ---"
 bench_colima_ssh sudo modprobe nbd max_part=0 2>/dev/null || true
 bench_colima_ssh sudo nbd-client -d "$NBD_DEV" 2>/dev/null || true  # clean stale
-bench_colima_ssh sudo nbd-client "$HOST_IP" "$NBD_PORT" "$NBD_DEV" -b 4096 -N default
+bench_colima_ssh sudo nbd-client "$HOST_IP" "$NBD_PORT" "$NBD_DEV" -b 4096 -N "$NBD_EXPORT_NAME"
 echo "OK: nbd-client connected ($NBD_DEV)"
 
 # Start CPU profile *after* NBD handshake so fio workload is captured.

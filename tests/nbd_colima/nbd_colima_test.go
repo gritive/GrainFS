@@ -24,6 +24,7 @@ var (
 	nbdVolSize     = envOrDefault("NBD_VOL_SIZE", "64MiB")
 	nbdDev         = envOrDefault("NBD_DEV", "/dev/nbd0")
 	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	nbdExportName  string
 )
 
 func envOrDefault(key, def string) string {
@@ -62,7 +63,7 @@ func withNBDDevice(t *testing.T, fn func(dev string)) {
 	// Connect.
 	runColimaSSH(t, "sudo", "nbd-client",
 		colimaHostIP, colimaNBDPort, nbdDev,
-		"-b", "4096", "-N", "default",
+		"-b", "4096", "-N", nbdExportName,
 	)
 	t.Logf("nbd-client connected: %s → %s:%s", nbdDev, colimaHostIP, colimaNBDPort)
 
@@ -143,8 +144,48 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	adminSock := dataDir + "/admin.sock"
+	out, err := exec.Command(binary, "iam", "sa", "create", "colima-nbd", "--endpoint", adminSock).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create colima NBD SA failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	saID := parseSAID(string(out))
+	if saID == "" {
+		fmt.Fprintf(os.Stderr, "create colima NBD SA did not return sa_id:\n%s\n", out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	if err := grantNBDCredentialPolicy(binary, adminSock, saID); err != nil {
+		fmt.Fprintf(os.Stderr, "grant colima NBD credential policy failed: %v\n", err)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
 	if out, err := exec.Command(binary, "volume", "create", "default", "--size", nbdVolSize, "--endpoint", adminSock).CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "create default NBD volume failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	out, err = exec.Command(binary, "credential", "create",
+		"--sa", saID,
+		"--protocol", "nbd",
+		"--resource", "volume/default",
+		"--mode", "rw",
+		"--endpoint", adminSock,
+	).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create default NBD credential failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	nbdExportName = parseCredentialExportName(string(out))
+	if nbdExportName == "" {
+		fmt.Fprintf(os.Stderr, "create default NBD credential did not return export_name:\n%s\n", out)
 		cmd.Process.Kill()
 		os.RemoveAll(dataDir)
 		os.Exit(1)
@@ -157,6 +198,46 @@ func TestMain(m *testing.M) {
 	cmd.Wait()
 	os.RemoveAll(dataDir)
 	os.Exit(code)
+}
+
+func parseCredentialExportName(out string) string {
+	for _, field := range strings.Fields(out) {
+		if strings.HasPrefix(field, "export_name=") {
+			return strings.TrimPrefix(field, "export_name=")
+		}
+	}
+	return ""
+}
+
+func parseSAID(out string) string {
+	for _, field := range strings.Fields(out) {
+		if strings.HasPrefix(field, "sa_id:") {
+			return strings.TrimPrefix(field, "sa_id:")
+		}
+	}
+	return ""
+}
+
+func grantNBDCredentialPolicy(binary, adminSock, saID string) error {
+	policyFile, err := os.CreateTemp("", "grainfs-nbd-credential-policy-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(policyFile.Name()) //nolint:errcheck
+	_, err = fmt.Fprint(policyFile, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["grainfs:CredentialCreate"],"Resource":["protocol-credential/nbd/volume/default"]}]}`)
+	if closeErr := policyFile.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if out, err := exec.Command(binary, "iam", "policy", "put", "colima-nbd-credential", "--file", policyFile.Name(), "--endpoint", adminSock).CombinedOutput(); err != nil {
+		return fmt.Errorf("policy put: %w: %s", err, out)
+	}
+	if out, err := exec.Command(binary, "iam", "policy", "attach", "colima-nbd-credential", "--sa", saID, "--endpoint", adminSock).CombinedOutput(); err != nil {
+		return fmt.Errorf("policy attach: %w: %s", err, out)
+	}
+	return nil
 }
 
 // TestNBD_PatternWriteRead writes two distinct 4KB patterns and reads them back.

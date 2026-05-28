@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/pool"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -22,6 +23,10 @@ import (
 type ReadIndexer interface {
 	ReadIndex(ctx context.Context) (uint64, error)
 	WaitApplied(ctx context.Context, index uint64) error
+}
+
+type CredentialAuthenticator interface {
+	Authenticate(protocred.AuthenticateRequest) (protocred.Credential, error)
 }
 
 const (
@@ -130,6 +135,7 @@ type Server struct {
 	largeBufPool *pool.Pool[[]byte]
 	hugeBufPool  *pool.Pool[[]byte]
 	readIndexer  ReadIndexer // nil = no gate (single-node / non-distributed)
+	credentials  CredentialAuthenticator
 }
 
 // NewServer creates a new NBD server for the named volume.
@@ -146,6 +152,13 @@ func NewServer(mgr *volume.Manager, volName string) *Server {
 // SetReadIndexer wires a ReadIndexer so NBD reads are linearizable.
 func (s *Server) SetReadIndexer(ri ReadIndexer) {
 	s.readIndexer = ri
+}
+
+// SetCredentialAuthenticator wires protocol credential enforcement for NBD
+// attach. Nil preserves the legacy export-name-only behavior for tests and
+// runtimes that have not wired protocol credentials.
+func (s *Server) SetCredentialAuthenticator(auth CredentialAuthenticator) {
+	s.credentials = auth
 }
 
 // ListenAndServe starts the NBD server on the given address.

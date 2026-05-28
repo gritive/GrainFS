@@ -66,6 +66,10 @@ func (s *ProtocolCredentialService) Get(id string) (protocred.Credential, error)
 	return protocred.NewService(s.store).Get(id)
 }
 
+func (s *ProtocolCredentialService) Authenticate(req protocred.AuthenticateRequest) (protocred.Credential, error) {
+	return protocred.NewService(s.store).Authenticate(req)
+}
+
 func (s *ProtocolCredentialService) Rotate(id string) (protocred.Secret, error) {
 	if s.propose == nil {
 		return protocred.Secret{}, protocred.ErrInvalid
