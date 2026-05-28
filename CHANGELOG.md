@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.399.1] - 2026-05-28
+
+### Security
+
+- NBD, NFS, and 9P attach paths now use the protocol credential attach
+  validator when credential storage is wired, so stale, revoked, expired, or
+  mismatched credentials are rejected in strict mode.
+- Read-only NFS and 9P protocol credentials now bind the mounted file handle as
+  read-only and reject mutations with `NFS4ERR_ROFS` / 9P `EROFS`.
+
+### Changed
+
+- NFS protocol credential connection hints now mount as
+  `bucket/credential-id:secret`, and 9P hints now mount as
+  `credential-id:secret@bucket`, while existing Mount SA attach paths remain
+  supported.
+
 ## [0.0.399.0] - 2026-05-28
 
 ### Changed
