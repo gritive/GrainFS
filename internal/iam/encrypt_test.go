@@ -23,6 +23,12 @@ func staticTestEncryptor(t testing.TB) storage.DataEncryptor {
 	return storage.NewEncryptorAdapter(enc, clusterID)
 }
 
+// newTestEncryptor is a back-compat alias for the many test sites that still
+// reference it. Kept until T5/T6 finish updating admin_api/snapshot tests.
+func newTestEncryptor(t testing.TB) storage.DataEncryptor {
+	return staticTestEncryptor(t)
+}
+
 func TestWrapUnwrapSecret_RoundTrip(t *testing.T) {
 	de := staticTestEncryptor(t)
 	ct, gen, err := WrapSecret(de, "sa-1", "AKIA-A", "secret123")

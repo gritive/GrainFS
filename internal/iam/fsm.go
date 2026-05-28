@@ -2,12 +2,13 @@ package iam
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // Applier wraps a Store and decrypts/decodes FlatBuffers IAM payloads, then
@@ -15,20 +16,39 @@ import (
 // the meta-FSM apply switch.
 type Applier struct {
 	store *Store
-	enc   *encrypt.Encryptor
+	enc   atomic.Pointer[storage.DataEncryptor] // nil until SetEncryptor; swapped after DEK keeper is ready
 }
 
-// NewApplier returns an Applier bound to the given Store and Encryptor.
-// Both must be non-nil; the Encryptor decrypts secret_key_enc payloads.
-func NewApplier(store *Store, enc *encrypt.Encryptor) *Applier {
-	return &Applier{store: store, enc: enc}
+// NewApplier returns an Applier bound to the given Store. The encryptor may
+// be nil at construction; SetEncryptor wires it once the DEKKeeper is ready
+// (post-Restore / post-wireDEKKeeper). Apply paths return a loud error if
+// the encryptor is unset.
+func NewApplier(store *Store, enc storage.DataEncryptor) *Applier {
+	a := &Applier{store: store}
+	if enc != nil {
+		a.enc.Store(&enc)
+	}
+	return a
 }
 
-// Encryptor returns the underlying Encryptor used for decrypting secret_key_enc
-// payloads. Read-only accessor — used by MetaFSM snapshot/restore plumbing
-// to thread the encryption key into iam.ReadSnapshot without re-plumbing it
-// through SetIAM.
-func (a *Applier) Encryptor() *encrypt.Encryptor { return a.enc }
+// Encryptor returns the currently installed DataEncryptor, or nil if none has
+// been wired yet. Read-only accessor; consumers do not own the returned value.
+func (a *Applier) Encryptor() storage.DataEncryptor {
+	p := a.enc.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// SetEncryptor installs the live DataEncryptor. Boot helpers (wireIAMEncryptor)
+// call this once the DEKKeeper is at its final value (after any restore-time
+// reassignment). Idempotent — last write wins via atomic.Pointer.Store, which
+// lets the restore-branch's late call override the fresh-branch's earlier call
+// when both fire.
+func (a *Applier) SetEncryptor(de storage.DataEncryptor) {
+	a.enc.Store(&de)
+}
 
 // SAExists reports whether a ServiceAccount with the given ID exists in the store.
 func (a *Applier) SAExists(saID string) bool {
@@ -69,15 +89,17 @@ func (a *Applier) ApplySADelete(payload []byte) error {
 	return nil
 }
 
-// ApplyKeyCreate decrypts SecretKeyEnc with AAD = sa_id and inserts the
-// AccessKey. Wrong AAD or tampered ciphertext returns an error.
+// ApplyKeyCreate decrypts SecretKeyEnc with AAD bound to (sa_id, access_key,
+// dek_gen) and inserts the AccessKey. Wrong AAD or tampered ciphertext
+// returns an error.
 // This is the legacy type-23 path; BucketScope is always nil regardless of payload.
 func (a *Applier) ApplyKeyCreate(payload []byte) error {
 	p := iampb.GetRootAsKeyCreatePayload(payload, 0)
 	encBytes := readEncBytes(p)
 	return a.applyKeyCreateInternal(
 		string(p.SaId()), string(p.AccessKey()),
-		encBytes, time.Unix(0, p.CreatedAtUnixNs()), readExpires(p),
+		encBytes, p.SecretKeyDekGen(),
+		time.Unix(0, p.CreatedAtUnixNs()), readExpires(p),
 		nil, // legacy type 23: scope always nil
 	)
 }
@@ -89,7 +111,8 @@ func (a *Applier) ApplyKeyCreateScoped(payload []byte) error {
 	encBytes := readEncBytes(p)
 	return a.applyKeyCreateInternal(
 		string(p.SaId()), string(p.AccessKey()),
-		encBytes, time.Unix(0, p.CreatedAtUnixNs()), readExpires(p),
+		encBytes, p.SecretKeyDekGen(),
+		time.Unix(0, p.CreatedAtUnixNs()), readExpires(p),
 		readScope(p),
 	)
 }
@@ -97,7 +120,7 @@ func (a *Applier) ApplyKeyCreateScoped(payload []byte) error {
 // applyKeyCreateInternal is the shared implementation for ApplyKeyCreate and
 // ApplyKeyCreateScoped. Noops (return nil) on missing SA to keep raft replay
 // deterministic.
-func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
+func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, gen uint32, createdAt time.Time, expires *time.Time, scope []string) error {
 	if saID == "" || ak == "" {
 		return fmt.Errorf("iam: KeyCreate missing sa_id or access_key")
 	}
@@ -117,19 +140,24 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 		}
 		scope = normalized
 	}
-	plain, err := UnwrapSecret(a.enc, saID, encBytes)
+	enc := a.Encryptor()
+	if enc == nil {
+		return fmt.Errorf("iam: applier: encryptor not set (boot ordering bug — see wireIAMEncryptor)")
+	}
+	plain, err := UnwrapSecret(enc, saID, ak, gen, encBytes)
 	if err != nil {
 		return fmt.Errorf("iam: KeyCreate decrypt: %w", err)
 	}
 	a.store.applyKeyCreate(AccessKey{
-		AccessKey:    ak,
-		SecretKey:    plain,
-		SecretKeyEnc: encBytes,
-		SAID:         saID,
-		Status:       KeyStatusActive,
-		CreatedAt:    createdAt,
-		ExpiresAt:    expires,
-		BucketScope:  scope,
+		AccessKey:       ak,
+		SecretKey:       plain,
+		SecretKeyEnc:    encBytes,
+		SecretKeyDEKGen: gen,
+		SAID:            saID,
+		Status:          KeyStatusActive,
+		CreatedAt:       createdAt,
+		ExpiresAt:       expires,
+		BucketScope:     scope,
 	})
 	return nil
 }
@@ -138,23 +166,28 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 // Unlike applyKeyCreateInternal, it skips scope validation because snapshot
 // restore reads SA → Keys in order.
 // Validation already happened at issue time; persisted state is trusted.
-func (a *Applier) applyKeyCreateFromSnapshot(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
+func (a *Applier) applyKeyCreateFromSnapshot(saID, ak string, encBytes []byte, gen uint32, createdAt time.Time, expires *time.Time, scope []string) error {
 	if saID == "" || ak == "" {
 		return fmt.Errorf("iam: snapshot restore: KeyCreate missing sa_id or access_key")
 	}
-	plain, err := UnwrapSecret(a.enc, saID, encBytes)
+	enc := a.Encryptor()
+	if enc == nil {
+		return fmt.Errorf("iam: applier: encryptor not set (boot ordering bug — see wireIAMEncryptor)")
+	}
+	plain, err := UnwrapSecret(enc, saID, ak, gen, encBytes)
 	if err != nil {
 		return fmt.Errorf("iam: snapshot restore: KeyCreate decrypt: %w", err)
 	}
 	a.store.applyKeyCreate(AccessKey{
-		AccessKey:    ak,
-		SecretKey:    plain,
-		SecretKeyEnc: encBytes,
-		SAID:         saID,
-		Status:       KeyStatusActive,
-		CreatedAt:    createdAt,
-		ExpiresAt:    expires,
-		BucketScope:  scope,
+		AccessKey:       ak,
+		SecretKey:       plain,
+		SecretKeyEnc:    encBytes,
+		SecretKeyDEKGen: gen,
+		SAID:            saID,
+		Status:          KeyStatusActive,
+		CreatedAt:       createdAt,
+		ExpiresAt:       expires,
+		BucketScope:     scope,
 	})
 	return nil
 }
@@ -216,7 +249,14 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 		return fmt.Errorf("iam: BucketUpstreamPut bucket length out of range (3-63), got %d", len(bucket))
 	}
 	encBytes := readBucketUpstreamEncBytes(p)
-	plain, err := UnwrapSecret(a.enc, "bucket-upstream:"+bucket, encBytes)
+	enc := a.Encryptor()
+	if enc == nil {
+		return fmt.Errorf("iam: applier: encryptor not set (boot ordering bug — see wireIAMEncryptor)")
+	}
+	gen := p.SecretKeyDekGen()
+	// bucket-upstream wraps use accessKey="" per WrapSecret convention; saID
+	// is namespace-prefixed to be disjoint from sa_id AAD space (A2).
+	plain, err := UnwrapSecret(enc, "bucket-upstream:"+bucket, "", gen, encBytes)
 	if err != nil {
 		return fmt.Errorf("iam: BucketUpstreamPut decrypt: %w", err)
 	}
@@ -228,14 +268,15 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 		return fmt.Errorf("iam: BucketUpstreamPut invalid status %q", status)
 	}
 	a.store.applyBucketUpstreamPut(BucketUpstream{
-		Bucket:       bucket,
-		Endpoint:     string(p.Endpoint()),
-		AccessKey:    string(p.AccessKey()),
-		SecretKey:    plain,
-		SecretKeyEnc: encBytes,
-		CreatedAt:    time.Unix(0, p.CreatedAtUnixNs()),
-		CreatedBy:    string(p.CreatedBy()),
-		Status:       status,
+		Bucket:          bucket,
+		Endpoint:        string(p.Endpoint()),
+		AccessKey:       string(p.AccessKey()),
+		SecretKey:       plain,
+		SecretKeyEnc:    encBytes,
+		SecretKeyDEKGen: gen,
+		CreatedAt:       time.Unix(0, p.CreatedAtUnixNs()),
+		CreatedBy:       string(p.CreatedBy()),
+		Status:          status,
 	})
 	return nil
 }

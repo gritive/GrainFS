@@ -7,6 +7,8 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
 
@@ -124,7 +126,7 @@ func TestApplier_KeyCreate_DecryptsSecret(t *testing.T) {
 
 	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
 
-	wrapped, err := WrapSecret(enc, "sa-1", "secret-alice")
+	wrapped, _, err := WrapSecret(enc, "sa-1", "AK1", "secret-alice")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -147,7 +149,7 @@ func TestApplier_KeyCreate_AADMismatchFails(t *testing.T) {
 
 	// SA must exist so the apply path reaches the decrypt step.
 	_ = ap.ApplySACreate(buildSACreate(t, "sa-B", "bob", time.Unix(1, 0)))
-	wrappedForA, _ := WrapSecret(enc, "sa-A", "secret")
+	wrappedForA, _, _ := WrapSecret(enc, "sa-A", "AK1", "secret")
 	if err := ap.ApplyKeyCreate(buildKeyCreate(t, "AK1", "sa-B", wrappedForA, time.Unix(2, 0), 0)); err == nil {
 		t.Fatal("expected AAD mismatch error, got nil")
 	}
@@ -159,7 +161,7 @@ func TestApplier_KeyRevoke(t *testing.T) {
 	ap := NewApplier(s, enc)
 	// SA must exist so the key is actually stored before revoking.
 	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
-	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
+	wrapped, _, _ := WrapSecret(enc, "sa-1", "AK1", "secret")
 	_ = ap.ApplyKeyCreate(buildKeyCreate(t, "AK1", "sa-1", wrapped, time.Unix(2, 0), 0))
 	if err := ap.ApplyKeyRevoke(buildKeyRevoke(t, "AK1")); err != nil {
 		t.Fatalf("ApplyKeyRevoke: %v", err)
@@ -206,7 +208,7 @@ func TestApplyKeyCreateScoped_Happy(t *testing.T) {
 
 	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
 
-	wrapped, err := WrapSecret(enc, "sa-1", "secret")
+	wrapped, _, err := WrapSecret(enc, "sa-1", "AK1", "secret")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -230,7 +232,7 @@ func TestApplyKeyCreate_LegacyType23_NilScope(t *testing.T) {
 
 	_ = ap.ApplySACreate(buildSACreate(t, "sa-1", "alice", time.Unix(1, 0)))
 
-	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
+	wrapped, _, _ := WrapSecret(enc, "sa-1", "AK_LEGACY", "secret")
 	// Use legacy buildKeyCreate (no scope field)
 	payload := buildKeyCreate(t, "AK_LEGACY", "sa-1", wrapped, time.Unix(2, 0), 0)
 	if err := ap.ApplyKeyCreate(payload); err != nil {
@@ -251,7 +253,7 @@ func TestApplyBucketUpstreamPut_RoundTripDecryptsSecret(t *testing.T) {
 	ap := NewApplier(s, enc)
 
 	// A2: AAD prefix is "bucket-upstream:" + bucket
-	wrapped, err := WrapSecret(enc, "bucket-upstream:shared", "upstream-secret-plain")
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "", "upstream-secret-plain")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -284,7 +286,7 @@ func TestApplyBucketUpstreamPut_RoundTripsStatus(t *testing.T) {
 	s := NewStore()
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
-	wrapped, err := WrapSecret(enc, "bucket-upstream:shared", "sk")
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "", "sk")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -313,7 +315,7 @@ func TestApplyBucketUpstreamStatusSet(t *testing.T) {
 	s := NewStore()
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
-	wrapped, err := WrapSecret(enc, "bucket-upstream:shared", "sk")
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "", "sk")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -350,7 +352,7 @@ func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
 		t.Fatalf("ApplyBucketUpstreamDelete on empty store: %v", err)
 	}
 
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:buc1", "s")
+	wrapped, _, _ := WrapSecret(enc, "bucket-upstream:buc1", "", "s")
 	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 	})); err != nil {
@@ -371,7 +373,7 @@ func TestApplyBucketUpstreamPut_RejectsEmptyBucket(t *testing.T) {
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
 
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:", "s")
+	wrapped, _, _ := WrapSecret(enc, "bucket-upstream:", "", "s")
 	err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 		Bucket: "", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 	}))
@@ -387,7 +389,7 @@ func TestApplyBucketUpstreamPut_RejectsSentinelBuckets(t *testing.T) {
 	ap := NewApplier(s, enc)
 
 	for _, sentinel := range []string{"*", "__system__"} {
-		wrapped, _ := WrapSecret(enc, "bucket-upstream:"+sentinel, "s")
+		wrapped, _, _ := WrapSecret(enc, "bucket-upstream:"+sentinel, "", "s")
 		err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 			Bucket: sentinel, Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 		}))
@@ -404,7 +406,7 @@ func TestApplyBucketUpstreamPut_WrongAADFailsDecrypt(t *testing.T) {
 	ap := NewApplier(s, enc)
 
 	// Wrap with WRONG AAD (using bare bucket name without prefix — this should fail at apply).
-	wrapped, _ := WrapSecret(enc, "shared", "secret")
+	wrapped, _, _ := WrapSecret(enc, "shared", "", "secret")
 
 	err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 		Bucket: "shared", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
@@ -416,4 +418,33 @@ func TestApplyBucketUpstreamPut_WrongAADFailsDecrypt(t *testing.T) {
 	if !strings.Contains(err.Error(), "decrypt") {
 		t.Fatalf("expected decrypt-path error, got: %v", err)
 	}
+}
+
+// TestApplier_NilEncryptorObservable: Applier built without an encryptor
+// returns nil from Encryptor() — boot wiring observes "not set yet".
+func TestApplier_NilEncryptorObservable(t *testing.T) {
+	a := NewApplier(NewStore(), nil)
+	require.Nil(t, a.Encryptor(), "encryptor nil until SetEncryptor")
+}
+
+// TestApplier_SetEncryptorIsObservable: SetEncryptor installs the live
+// DataEncryptor and Encryptor() returns the same value.
+func TestApplier_SetEncryptorIsObservable(t *testing.T) {
+	a := NewApplier(NewStore(), nil)
+	de := staticTestEncryptor(t)
+	a.SetEncryptor(de)
+	require.True(t, de == a.Encryptor(), "Encryptor() returns the value set via SetEncryptor")
+}
+
+// TestApplier_SetEncryptorIdempotent: last write wins via atomic.Pointer.Store,
+// which lets the restore-branch's late call override the fresh-branch's earlier
+// call when both fire during boot.
+func TestApplier_SetEncryptorIdempotent(t *testing.T) {
+	a := NewApplier(NewStore(), nil)
+	de1 := staticTestEncryptor(t)
+	de2 := staticTestEncryptor(t)
+	a.SetEncryptor(de1)
+	a.SetEncryptor(de2)
+	require.True(t, de2 == a.Encryptor(), "last write wins")
+	require.False(t, de1 == a.Encryptor(), "first value replaced")
 }
