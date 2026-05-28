@@ -126,6 +126,34 @@ func TestDEKKeeperAdapter_WrongAADFails(t *testing.T) {
 	}
 }
 
+func TestDEKKeeperAdapter_CopiesClusterID(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
+	clusterID := testSeamClusterID()
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	wantClusterID := append([]byte(nil), clusterID...)
+	a := NewDEKKeeperAdapter(keeper, clusterID)
+	for i := range clusterID {
+		clusterID[i] = 0xFF
+	}
+	opener := NewDEKKeeperAdapter(keeper, wantClusterID)
+
+	fields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldUint32(3)}
+	ct, gen, err := a.Seal(encrypt.DomainShard, fields, []byte("payload"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	got, err := opener.Open(encrypt.DomainShard, fields, gen, ct)
+	if err != nil {
+		t.Fatalf("Open after caller clusterID mutation: %v", err)
+	}
+	if !bytes.Equal(got, []byte("payload")) {
+		t.Fatalf("plaintext mismatch: got %q", got)
+	}
+}
+
 func TestDEKKeeperAdapter_OldGenOpensAfterRotate(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
 	keeper, err := encrypt.NewDEKKeeper(kek, testSeamClusterID())

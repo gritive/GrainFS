@@ -91,7 +91,9 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 			require.NoError(t, err)
 			raw, err := item.ValueCopy(nil)
 			require.NoError(t, err)
-			require.True(t, encrypt.IsEncryptedValue(raw))
+			_, _, ok, err := decodeFSMValueFrameV2(raw)
+			require.NoError(t, err)
+			require.True(t, ok)
 			require.NotContains(t, string(raw), tc.forbidden)
 
 			plain, err := fsm.itemValueCopy(item)
@@ -128,7 +130,9 @@ func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		require.True(t, encrypt.IsEncryptedValue(raw))
+		_, _, ok, err := decodeFSMValueFrameV2(raw)
+		require.NoError(t, err)
+		require.True(t, ok)
 		raw[len(raw)-1] ^= 0x01
 		return txn.Set(metaKey, raw)
 	}))

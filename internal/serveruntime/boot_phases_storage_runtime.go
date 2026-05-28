@@ -38,10 +38,9 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	// before bootStreamRouter registers QUIC handlers that would otherwise
 	// surface partially-recovered state to peers.
 	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
-	var sealer datawal.RecordSealer
-	if state.cfg.Encryptor != nil {
-		var zero [16]byte
-		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
+	sealer, err := dataWALSealerForState(state)
+	if err != nil {
+		return err
 	}
 	dw, err := datawal.Open(state.dataWALDir, sealer, "datawal")
 	if err != nil {
@@ -150,6 +149,21 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		}
 	}
 	return nil
+}
+
+func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
+	switch {
+	case state.dekKeeper != nil:
+		if len(state.clusterID) != 16 {
+			return nil, fmt.Errorf("data WAL DEK sealer requires 16-byte clusterID, got %d", len(state.clusterID))
+		}
+		return storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID), nil
+	case state.cfg.Encryptor != nil:
+		var zero [16]byte
+		return storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:]), nil
+	default:
+		return nil, nil
+	}
 }
 
 // bootStreamRouter sets up the QUIC stream multiplexer (Raft RPCs on the
