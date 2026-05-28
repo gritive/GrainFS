@@ -93,8 +93,14 @@ Work these in order. Do not run them in parallel.
     - Full GrainFS-only audit on the protocol-credential control plane (pre-existing
       gap; Slice 1 added only the PDP-outcome `iam.pdp` audit).
     - Admin peercred/UDS path is intentionally NOT PDP-gated (local socket trust).
-    - Decorator client cache is keyed by socket path; a timeout-only hot-reload keeps
-      the old client timeout until the socket path changes (failure_policy IS read fresh).
+    - **`target_sa` is empty for bearer/OIDC credential ops.** The decorator only
+      sets `context.target_sa` when the actor principal is a service account; a
+      bearer actor minting/rotating/revoking a credential for some SA does not
+      expose the target SA to the PDP (the handler has `saID` but
+      `AuthorizePrincipal` does not receive it). To close: thread the target SA from
+      `authorizeProtocolCredential` into the decorator via request context (e.g. a
+      `WithActorTarget` ctx value) — expands beyond the decorator-only boundary into
+      `handlers_credentials.go`. Documented as a Slice-1 limitation (spec P2a).
   Spec: `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`
   "External PDP Adapter — Slice 5 Detailed Design".
 
