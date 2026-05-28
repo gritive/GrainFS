@@ -47,17 +47,18 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 func TestBuildKeyCreatePayloadDoesNotContainPlaintextSecret(t *testing.T) {
 	enc := newTestEncryptor(t)
 	const secret = "plain-secret-that-must-never-be-persisted"
-	wrapped, err := WrapSecret(enc, "sa-1", secret)
+	wrapped, gen, err := WrapSecret(enc, "sa-1", "AK", secret)
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
 
 	payload := buildKeyCreatePayload(AccessKey{
-		AccessKey:    "AK",
-		SAID:         "sa-1",
-		SecretKey:    secret,
-		SecretKeyEnc: wrapped,
-		CreatedAt:    time.Unix(1, 0),
+		AccessKey:       "AK",
+		SAID:            "sa-1",
+		SecretKey:       secret,
+		SecretKeyEnc:    wrapped,
+		SecretKeyDEKGen: gen,
+		CreatedAt:       time.Unix(1, 0),
 	})
 
 	if bytes.Contains(payload, []byte(secret)) {

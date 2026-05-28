@@ -2,18 +2,24 @@ package iam
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestSnapshot_Roundtrip(t *testing.T) {
 	enc := newTestEncryptor(t)
 	src := NewStore()
 	src.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice", CreatedAt: time.Unix(1, 0)})
-	wrapped, _ := WrapSecret(enc, "sa-1", "secret-alice")
+	wrapped, gen, _ := WrapSecret(enc, "sa-1", "AK1", "secret-alice")
 	src.applyKeyCreate(AccessKey{
-		AccessKey: "AK1", SecretKey: "secret-alice", SecretKeyEnc: wrapped,
+		AccessKey: "AK1", SecretKey: "secret-alice", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 		SAID: "sa-1", Status: KeyStatusActive, CreatedAt: time.Unix(2, 0),
 	})
 
@@ -46,11 +52,11 @@ func TestSnapshot_Roundtrip(t *testing.T) {
 func TestSnapshot_SecretKeyNotInPlaintextOnDisk(t *testing.T) {
 	enc := newTestEncryptor(t)
 	src := NewStore()
-	wrapped, _ := WrapSecret(enc, "sa-1", "very-secret-token-xyz")
+	wrapped, gen, _ := WrapSecret(enc, "sa-1", "AK", "very-secret-token-xyz")
 	src.applySACreate(ServiceAccount{ID: "sa-1"})
 	src.applyKeyCreate(AccessKey{
 		AccessKey: "AK", SAID: "sa-1",
-		SecretKey: "very-secret-token-xyz", SecretKeyEnc: wrapped,
+		SecretKey: "very-secret-token-xyz", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 		Status: KeyStatusActive,
 	})
 
@@ -83,18 +89,19 @@ func TestSnapshot_PreservesBucketScope(t *testing.T) {
 	enc := newTestEncryptor(t)
 	src := NewStore()
 	src.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice", CreatedAt: time.Unix(1, 0)})
-	wrapped, err := WrapSecret(enc, "sa-1", "secret-scoped")
+	wrapped, gen, err := WrapSecret(enc, "sa-1", "AK_S", "secret-scoped")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
 	src.applyKeyCreate(AccessKey{
-		AccessKey:    "AK_S",
-		SecretKey:    "secret-scoped",
-		SecretKeyEnc: wrapped,
-		SAID:         "sa-1",
-		Status:       KeyStatusActive,
-		CreatedAt:    time.Unix(2, 0),
-		BucketScope:  []string{"logs"},
+		AccessKey:       "AK_S",
+		SecretKey:       "secret-scoped",
+		SecretKeyEnc:    wrapped,
+		SecretKeyDEKGen: gen,
+		SAID:            "sa-1",
+		Status:          KeyStatusActive,
+		CreatedAt:       time.Unix(2, 0),
+		BucketScope:     []string{"logs"},
 	})
 
 	var buf bytes.Buffer
@@ -118,15 +125,16 @@ func TestSnapshot_PreservesBucketScope(t *testing.T) {
 func TestSnapshot_RevokedKeyStatusPreserved(t *testing.T) {
 	enc := newTestEncryptor(t)
 	src := NewStore()
-	wrapped, _ := WrapSecret(enc, "sa-1", "secret")
+	wrappedLive, genLive, _ := WrapSecret(enc, "sa-1", "AK-LIVE", "secret")
+	wrappedRev, genRev, _ := WrapSecret(enc, "sa-1", "AK-REVOKED", "secret")
 	src.applySACreate(ServiceAccount{ID: "sa-1"})
 	src.applyKeyCreate(AccessKey{
 		AccessKey: "AK-LIVE", SAID: "sa-1", SecretKey: "secret",
-		SecretKeyEnc: wrapped, Status: KeyStatusActive,
+		SecretKeyEnc: wrappedLive, SecretKeyDEKGen: genLive, Status: KeyStatusActive,
 	})
 	src.applyKeyCreate(AccessKey{
 		AccessKey: "AK-REVOKED", SAID: "sa-1", SecretKey: "secret",
-		SecretKeyEnc: wrapped, Status: KeyStatusActive,
+		SecretKeyEnc: wrappedRev, SecretKeyDEKGen: genRev, Status: KeyStatusActive,
 	})
 	src.applyKeyRevoke("AK-REVOKED")
 
@@ -166,17 +174,17 @@ func TestSnapshot_BucketUpstream_TrailerAppendRoundtrip(t *testing.T) {
 	enc := newTestEncryptor(t)
 
 	// A2: AAD = "bucket-upstream:"+bucket
-	wrapped1, _ := WrapSecret(enc, "bucket-upstream:shared", "secret-A")
-	wrapped2, _ := WrapSecret(enc, "bucket-upstream:archive", "secret-B")
+	wrapped1, gen1, _ := WrapSecret(enc, "bucket-upstream:shared", "", "secret-A")
+	wrapped2, gen2, _ := WrapSecret(enc, "bucket-upstream:archive", "", "secret-B")
 	src.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "shared", Endpoint: "http://up1:9000", AccessKey: "AK1",
-		SecretKey: "secret-A", SecretKeyEnc: wrapped1,
+		SecretKey: "secret-A", SecretKeyEnc: wrapped1, SecretKeyDEKGen: gen1,
 		CreatedAt: time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC),
 		CreatedBy: "sa-admin",
 	})
 	src.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "archive", Endpoint: "http://up2:9000", AccessKey: "AK2",
-		SecretKey: "secret-B", SecretKeyEnc: wrapped2,
+		SecretKey: "secret-B", SecretKeyEnc: wrapped2, SecretKeyDEKGen: gen2,
 		CreatedAt: time.Date(2026, 5, 8, 1, 0, 0, 0, time.UTC),
 		CreatedBy: "sa-admin",
 	})
@@ -213,9 +221,9 @@ func TestSnapshot_BucketUpstream_TrailerAppendRoundtrip(t *testing.T) {
 func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 	src := NewStore()
 	enc := newTestEncryptor(t)
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:buc1", "s1")
+	wrapped, gen, _ := WrapSecret(enc, "bucket-upstream:buc1", "", "s1")
 	src.applyBucketUpstreamPut(BucketUpstream{
-		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
+		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 	})
 
 	var buf bytes.Buffer
@@ -230,4 +238,83 @@ func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 	if _, ok := dst.LookupBucketUpstream("buc1"); !ok {
 		t.Fatal("LookupBucketUpstream(b1) missing after restore")
 	}
+}
+
+// fakeDEKEncryptor wraps a real DataEncryptor and returns a CALLER-FIXED gen
+// on Seal, so this round-trip test proves the gen really survives via the
+// payload bytes (not by accident through EncryptorAdapter's gen=0).
+type fakeDEKEncryptor struct {
+	inner storage.DataEncryptor
+	gen   uint32
+}
+
+func (f *fakeDEKEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	ct, _, err := f.inner.Seal(domain, fields, plain)
+	return ct, f.gen, err
+}
+
+func (f *fakeDEKEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	if gen != f.gen {
+		return nil, fmt.Errorf("fakeDEKEncryptor: expected gen %d, got %d", f.gen, gen)
+	}
+	return f.inner.Open(domain, fields, 0, ct)
+}
+
+func TestSnapshot_DEKGenSurvivesAccessKeyRoundTrip(t *testing.T) {
+	de := &fakeDEKEncryptor{inner: staticTestEncryptor(t), gen: 7}
+
+	src := NewStore()
+	ct, gen, err := WrapSecret(de, "sa-1", "AKIA-1", "secret123")
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), gen, "fake returns non-zero gen")
+
+	src.applyKeyCreate(AccessKey{
+		AccessKey:       "AKIA-1",
+		SecretKey:       "secret123",
+		SecretKeyEnc:    ct,
+		SecretKeyDEKGen: gen,
+		SAID:            "sa-1",
+		Status:          KeyStatusActive,
+	})
+
+	var buf bytes.Buffer
+	require.NoError(t, WriteSnapshot(&buf, src))
+
+	dst := NewStore()
+	require.NoError(t, ReadSnapshot(&buf, dst, de))
+
+	k, ok := dst.LookupKey("AKIA-1")
+	require.True(t, ok)
+	require.Equal(t, uint32(7), k.SecretKeyDEKGen, "gen survives FB payload + Apply path")
+	require.Equal(t, "secret123", k.SecretKey, "in-memory plaintext rehydrated via UnwrapSecret")
+}
+
+func TestSnapshot_DEKGenSurvivesBucketUpstreamRoundTrip(t *testing.T) {
+	de := &fakeDEKEncryptor{inner: staticTestEncryptor(t), gen: 11}
+
+	src := NewStore()
+	bucketSAID := "bucket-upstream:my-bucket"
+	ct, gen, err := WrapSecret(de, bucketSAID, "", "upstream-secret")
+	require.NoError(t, err)
+
+	src.applyBucketUpstreamPut(BucketUpstream{
+		Bucket:          "my-bucket",
+		Endpoint:        "http://example",
+		AccessKey:       "AK1",
+		SecretKey:       "upstream-secret",
+		SecretKeyEnc:    ct,
+		SecretKeyDEKGen: gen,
+		Status:          BucketUpstreamStatusActive,
+	})
+
+	var buf bytes.Buffer
+	require.NoError(t, WriteSnapshot(&buf, src))
+
+	dst := NewStore()
+	require.NoError(t, ReadSnapshot(&buf, dst, de))
+
+	u, ok := dst.LookupBucketUpstream("my-bucket")
+	require.True(t, ok)
+	require.Equal(t, uint32(11), u.SecretKeyDEKGen)
+	require.Equal(t, "upstream-secret", u.SecretKey)
 }

@@ -3,14 +3,14 @@ package iam
 import (
 	"context"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // fakeProposer captures each Propose* call as a string so tests can
 // assert the dispatch sequence without spinning up Raft.
 type fakeProposer struct {
 	store        *Store
-	enc          *encrypt.Encryptor
+	enc          storage.DataEncryptor
 	calls        []string
 	dispatched   []string
 	saCreateErr  error // if non-nil, ProposeSACreate returns this
