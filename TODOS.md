@@ -49,6 +49,10 @@ Work these in order. Do not run them in parallel.
      Design path: `docs/superpowers/specs/2026-05-28-at-rest-dcut-bootstrap-envelope-design.md`
      splits this into bootstrap-envelope, KEK-gen node identity seal,
      prune-evidence gate, and final static-key removal slices.
+     **KEK-gen node identity seal shipped in current branch:** normal boot and
+     invite Phase-2 now keep `node.key.enc` sealed under the active KEK
+     generation and persist `keys.d/node.key.gen`. Remaining D-cut work is
+     prune evidence and final static-key removal.
      Slice A shipped in current branch: new invite bootstrap payloads no longer
      encode `BootstrapSecretsPayload.encryption_key`; legacy decode remains for
      pre-format-7 payloads; post-drop invite joiners now load the KEK-sealed

@@ -45,8 +45,9 @@ func nodeKeyGenPath(dataDir string) string {
 func TestEnsureNodeIdentity_GeneratesAndPersistsWhenAbsent(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
+	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, spki, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
+	_, spki, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity: %v", err)
 	}
@@ -56,41 +57,60 @@ func TestEnsureNodeIdentity_GeneratesAndPersistsWhenAbsent(t *testing.T) {
 	if _, err := os.Stat(nodeKeyEncPath(dir)); err != nil {
 		t.Fatalf("node.key.enc not written: %v", err)
 	}
-	// The static-key path must NOT write the legacy sidecar.
-	if _, err := os.Stat(nodeKeyGenPath(dir)); !os.IsNotExist(err) {
-		t.Fatalf("node.key.gen must not be written, err=%v", err)
+	gen, ok := readNodeKeyGen(dir)
+	if !ok {
+		t.Fatal("node.key.gen not written")
 	}
-	// The sealed key must decrypt under the static encryption key.
-	if _, reloaded, err := transport.LoadNodeKey(dir, encKey); err != nil {
-		t.Fatalf("LoadNodeKey under encKey: %v", err)
+	if gen != store.ActiveVersion() {
+		t.Fatalf("node.key.gen=%d want active %d", gen, store.ActiveVersion())
+	}
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		t.Fatalf("ActiveKEK: %v", err)
+	}
+	if _, reloaded, err := transport.LoadNodeKey(dir, activeKEK); err != nil {
+		t.Fatalf("LoadNodeKey under active KEK: %v", err)
 	} else if reloaded != spki {
 		t.Fatalf("reloaded SPKI %x != %x", reloaded, spki)
+	}
+	if _, _, err := transport.LoadNodeKey(dir, encKey); err == nil {
+		t.Fatal("node.key.enc unexpectedly decrypts under static encryption key")
 	}
 }
 
 func TestEnsureNodeIdentity_ReusesPersisted(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
+	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, first, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
+	_, first, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("first ensureNodeIdentity: %v", err)
 	}
-	_, second, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, nil)
+	before, err := os.ReadFile(nodeKeyEncPath(dir))
+	if err != nil {
+		t.Fatalf("read node.key.enc: %v", err)
+	}
+	_, second, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
 	if err != nil {
 		t.Fatalf("second ensureNodeIdentity: %v", err)
 	}
 	if first != second {
 		t.Fatalf("SPKI changed across calls: %x != %x", first, second)
 	}
+	after, err := os.ReadFile(nodeKeyEncPath(dir))
+	if err != nil {
+		t.Fatalf("read node.key.enc after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("node.key.enc changed despite already using active KEK")
+	}
 }
 
-func TestEnsureNodeIdentity_BackCompatKEKGenSealed(t *testing.T) {
+func TestEnsureNodeIdentity_ReSealsOlderKEKGenToActive(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
-	// An invite-join (Phase 2) sealed the key under KEK gen 2 and left a
-	// node.key.gen sidecar. The cluster retains gens 0,1,2.
-	store := newNIKEKStore(t, 0, 1, 2)
+	store := newNIKEKStore(t, 0, 1, 2, 3)
 	kek2, err := store.Get(2)
 	if err != nil {
 		t.Fatalf("Get(2): %v", err)
@@ -102,9 +122,8 @@ func TestEnsureNodeIdentity_BackCompatKEKGenSealed(t *testing.T) {
 	if err := transport.SealNodeKey(dir, kek2, cert); err != nil {
 		t.Fatalf("SealNodeKey: %v", err)
 	}
-	// Simulate a leftover legacy sidecar from the Phase-2 seal.
-	if err := os.WriteFile(nodeKeyGenPath(dir), []byte("2\n"), 0o600); err != nil {
-		t.Fatalf("write legacy node.key.gen: %v", err)
+	if err := writeNodeKeyGen(dir, 2); err != nil {
+		t.Fatalf("writeNodeKeyGen: %v", err)
 	}
 
 	_, got, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
@@ -114,24 +133,65 @@ func TestEnsureNodeIdentity_BackCompatKEKGenSealed(t *testing.T) {
 	if got != want {
 		t.Fatalf("SPKI mismatch: got %x want %x", got, want)
 	}
-	// Migration: the key now decrypts under the static encryption key.
-	if _, migrated, err := transport.LoadNodeKey(dir, encKey); err != nil {
-		t.Fatalf("post-migration LoadNodeKey under encKey: %v", err)
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		t.Fatalf("ActiveKEK: %v", err)
+	}
+	if _, migrated, err := transport.LoadNodeKey(dir, activeKEK); err != nil {
+		t.Fatalf("post-migration LoadNodeKey under active KEK: %v", err)
 	} else if migrated != want {
 		t.Fatalf("migrated SPKI %x != %x", migrated, want)
 	}
-	// The stale sidecar must be deleted.
-	if _, err := os.Stat(nodeKeyGenPath(dir)); !os.IsNotExist(err) {
-		t.Fatalf("stale node.key.gen must be deleted, err=%v", err)
+	gen, ok := readNodeKeyGen(dir)
+	if !ok {
+		t.Fatal("node.key.gen not written after active re-seal")
+	}
+	if gen != store.ActiveVersion() {
+		t.Fatalf("node.key.gen=%d want active %d", gen, store.ActiveVersion())
 	}
 }
 
-func TestEnsureNodeIdentity_NeverRegeneratesOnDecryptFailure(t *testing.T) {
+func TestEnsureNodeIdentity_MigratesLegacyStaticSealedToActiveKEK(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
-	// Seal under a gen whose KEK the store does NOT hold (gen 2), and use a
-	// static encKey that also does not match. Neither encKey nor any retained
-	// gen (0,1) can decrypt → must error, must not overwrite.
+	store := newNIKEKStore(t, 0, 1, 2)
+
+	cert, want, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
+	if err != nil {
+		t.Fatalf("GenerateNodeIdentity: %v", err)
+	}
+	if err := transport.SealNodeKey(dir, encKey, cert); err != nil {
+		t.Fatalf("SealNodeKey under encKey: %v", err)
+	}
+
+	_, got, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	if err != nil {
+		t.Fatalf("ensureNodeIdentity: %v", err)
+	}
+	if got != want {
+		t.Fatalf("SPKI mismatch: got %x want %x", got, want)
+	}
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		t.Fatalf("ActiveKEK: %v", err)
+	}
+	if _, migrated, err := transport.LoadNodeKey(dir, activeKEK); err != nil {
+		t.Fatalf("post-migration LoadNodeKey under active KEK: %v", err)
+	} else if migrated != want {
+		t.Fatalf("migrated SPKI %x != %x", migrated, want)
+	}
+	gen, ok := readNodeKeyGen(dir)
+	if !ok {
+		t.Fatal("node.key.gen not written after static migration")
+	}
+	if gen != store.ActiveVersion() {
+		t.Fatalf("node.key.gen=%d want active %d", gen, store.ActiveVersion())
+	}
+}
+
+func TestEnsureNodeIdentity_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
+	dir := t.TempDir()
+	encKey := testNIEncKey()
 	sealStore := newNIKEKStore(t, 2)
 	kek2, err := sealStore.Get(2)
 	if err != nil {
@@ -149,9 +209,9 @@ func TestEnsureNodeIdentity_NeverRegeneratesOnDecryptFailure(t *testing.T) {
 		t.Fatalf("read node.key.enc: %v", err)
 	}
 
-	store := newNIKEKStore(t, 0, 1)
+	store := newNIKEKStore(t, 0, 1, 2)
 	if _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
-		t.Fatal("expected error when nothing decrypts, got nil")
+		t.Fatal("expected error when KEK-sealed key lacks sidecar, got nil")
 	}
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
 	if err != nil {
@@ -159,5 +219,41 @@ func TestEnsureNodeIdentity_NeverRegeneratesOnDecryptFailure(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("node.key.enc was overwritten on decrypt failure")
+	}
+}
+
+func TestEnsureNodeIdentity_NeverRegeneratesOnPrunedRecordedGen(t *testing.T) {
+	dir := t.TempDir()
+	encKey := testNIEncKey()
+	sealStore := newNIKEKStore(t, 2)
+	kek2, err := sealStore.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2): %v", err)
+	}
+	cert, _, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
+	if err != nil {
+		t.Fatalf("GenerateNodeIdentity: %v", err)
+	}
+	if err := transport.SealNodeKey(dir, kek2, cert); err != nil {
+		t.Fatalf("SealNodeKey: %v", err)
+	}
+	if err := writeNodeKeyGen(dir, 2); err != nil {
+		t.Fatalf("writeNodeKeyGen: %v", err)
+	}
+	before, err := os.ReadFile(nodeKeyEncPath(dir))
+	if err != nil {
+		t.Fatalf("read node.key.enc: %v", err)
+	}
+
+	store := newNIKEKStore(t, 0, 1)
+	if _, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store); err == nil {
+		t.Fatal("expected error when recorded KEK gen is pruned, got nil")
+	}
+	after, err := os.ReadFile(nodeKeyEncPath(dir))
+	if err != nil {
+		t.Fatalf("read node.key.enc after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("node.key.enc was overwritten on pruned recorded gen")
 	}
 }

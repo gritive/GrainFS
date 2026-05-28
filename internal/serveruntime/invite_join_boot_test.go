@@ -3,7 +3,6 @@ package serveruntime
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -517,15 +516,14 @@ func mintTestBundleToken(t *testing.T) string {
 	})
 }
 
-// TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey verifies the Finding-A fix:
-// a node.key.enc sealed under a (prunable) KEK gen is migrated to the STATIC
-// encryption.key at Phase-2 close-out. After migration the key decrypts under
-// encKey alone (KEK gen no longer needed), the SPKI is byte-identical, and the
-// helper is idempotent across a resume (encKey-first load).
-func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
+func TestLoadAndMigrateInviteNodeKey_ReSealsOlderKEKGenToActive(t *testing.T) {
 	dir := t.TempDir()
 	encKey := bytes.Repeat([]byte{0xCD}, 32)
-	sealKEK := bytes.Repeat([]byte{0x42}, 32)
+	store := newNIKEKStore(t, 0, 3, 4)
+	sealKEK, err := store.Get(3)
+	if err != nil {
+		t.Fatalf("Get(3): %v", err)
+	}
 
 	cert, wantSPKI, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
 	if err != nil {
@@ -543,7 +541,7 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
 		t.Fatal("node.key.enc unexpectedly decrypts under encKey before migration")
 	}
 
-	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, func() ([]byte, error) { return sealKEK, nil })
+	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true)
 	if err != nil {
 		t.Fatalf("loadAndMigrateInviteNodeKey: %v", err)
 	}
@@ -553,80 +551,102 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsUnderEncKey(t *testing.T) {
 	if gotCert.PrivateKey == nil {
 		t.Fatal("returned cert has nil private key")
 	}
-	// Post-migration: now decrypts under the STATIC encryption.key alone.
-	if _, spki, err := transport.LoadNodeKey(dir, encKey); err != nil {
-		t.Fatalf("node.key.enc does not decrypt under encKey after migration: %v", err)
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		t.Fatalf("ActiveKEK: %v", err)
+	}
+	if _, spki, err := transport.LoadNodeKey(dir, activeKEK); err != nil {
+		t.Fatalf("node.key.enc does not decrypt under active KEK after migration: %v", err)
 	} else if spki != wantSPKI {
 		t.Fatalf("post-migration SPKI mismatch: got %x want %x", spki, wantSPKI)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "keys.d", nodeKeyGenFile)); !os.IsNotExist(err) {
-		t.Fatalf("node.key.gen must be deleted after static-key migration, err=%v", err)
+	if gen, ok := readNodeKeyGen(dir); !ok {
+		t.Fatal("node.key.gen must remain after KEK migration")
+	} else if gen != store.ActiveVersion() {
+		t.Fatalf("node.key.gen=%d want active %d", gen, store.ActiveVersion())
 	}
 
 	// Idempotent resume: a second call (e.g. after a crash before the sentinel
-	// clear) must succeed via the encKey-first path even with a bogus KEK gen.
-	bogusKEK := bytes.Repeat([]byte{0x99}, 32)
-	if _, spki, err := loadAndMigrateInviteNodeKey(dir, encKey, func() ([]byte, error) { return bogusKEK, nil }); err != nil {
+	// clear) must succeed via node.key.gen even if fallback state is stale.
+	if _, spki, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true); err != nil {
 		t.Fatalf("idempotent resume failed: %v", err)
 	} else if spki != wantSPKI {
 		t.Fatalf("resume SPKI mismatch: got %x want %x", spki, wantSPKI)
 	}
-
-	if err := writeNodeKeyGen(dir, 3); err != nil {
-		t.Fatalf("writeNodeKeyGen stale sidecar: %v", err)
-	}
-	if _, _, err := loadAndMigrateInviteNodeKey(dir, encKey, func() ([]byte, error) {
-		t.Fatal("encKey-first cleanup must not resolve KEK")
-		return nil, nil
-	}); err != nil {
-		t.Fatalf("encKey-first cleanup failed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "keys.d", nodeKeyGenFile)); !os.IsNotExist(err) {
-		t.Fatalf("stale node.key.gen must be deleted on encKey-first resume, err=%v", err)
-	}
 }
 
-// TestLoadAndMigrateInviteNodeKey_EncKeyFirst_SkipsKEKResolver verifies the
-// Finding-A fix: when node.key.enc is ALREADY sealed under the static
-// encryption.key, loadAndMigrateInviteNodeKey loads it via the encKey-first path
-// and NEVER invokes the lazy KEK resolver. So a resume after a prior re-seal
-// (or against a cluster that rotated+pruned the old KEK gen) succeeds even when
-// the resolver would FAIL — the resolver's failure is irrelevant. This closes
-// the resume prune-brick window the eager caller-side kekStore.Get(oldGen)
-// previously opened.
-func TestLoadAndMigrateInviteNodeKey_EncKeyFirst_SkipsKEKResolver(t *testing.T) {
+func TestLoadAndMigrateInviteNodeKey_MigratesLegacyStaticSealedToActiveKEK(t *testing.T) {
 	dir := t.TempDir()
 	encKey := bytes.Repeat([]byte{0xCD}, 32)
+	store := newNIKEKStore(t, 0, 1, 2)
 
 	cert, wantSPKI, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
 	if err != nil {
 		t.Fatalf("GenerateNodeIdentity: %v", err)
 	}
-	// Seal DIRECTLY under the static encryption.key (the post-migration state).
 	if err := transport.SealNodeKey(dir, encKey, cert); err != nil {
 		t.Fatalf("SealNodeKey under encKey: %v", err)
 	}
 
-	// A resolver that always fails (simulates a pruned old KEK gen). It must
-	// NEVER be called on the encKey-first path.
-	resolverCalled := false
-	resolver := func() ([]byte, error) {
-		resolverCalled = true
-		return nil, fmt.Errorf("old KEK gen pruned")
+	if err := writeNodeKeyGen(dir, 3); err != nil {
+		t.Fatalf("writeNodeKeyGen stale sidecar: %v", err)
 	}
-
-	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, resolver)
+	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false)
 	if err != nil {
-		t.Fatalf("loadAndMigrateInviteNodeKey under encKey-first must succeed even with a failing resolver: %v", err)
-	}
-	if resolverCalled {
-		t.Fatal("KEK resolver was invoked on the encKey-first path; it must be lazy and skipped")
+		t.Fatalf("loadAndMigrateInviteNodeKey static migration: %v", err)
 	}
 	if gotSPKI != wantSPKI {
 		t.Fatalf("SPKI mismatch: got %x want %x", gotSPKI, wantSPKI)
 	}
 	if gotCert.PrivateKey == nil {
 		t.Fatal("returned cert has nil private key")
+	}
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		t.Fatalf("ActiveKEK: %v", err)
+	}
+	if _, spki, err := transport.LoadNodeKey(dir, activeKEK); err != nil {
+		t.Fatalf("node.key.enc does not decrypt under active KEK after static migration: %v", err)
+	} else if spki != wantSPKI {
+		t.Fatalf("post-migration SPKI mismatch: got %x want %x", spki, wantSPKI)
+	}
+	if gen, ok := readNodeKeyGen(dir); !ok {
+		t.Fatal("node.key.gen must be written after static migration")
+	} else if gen != store.ActiveVersion() {
+		t.Fatalf("node.key.gen=%d want active %d", gen, store.ActiveVersion())
+	}
+}
+
+func TestLoadAndMigrateInviteNodeKey_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
+	dir := t.TempDir()
+	encKey := bytes.Repeat([]byte{0xCD}, 32)
+	store := newNIKEKStore(t, 0, 1, 2)
+	kek2, err := store.Get(2)
+	if err != nil {
+		t.Fatalf("Get(2): %v", err)
+	}
+
+	cert, _, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
+	if err != nil {
+		t.Fatalf("GenerateNodeIdentity: %v", err)
+	}
+	if err := transport.SealNodeKey(dir, kek2, cert); err != nil {
+		t.Fatalf("SealNodeKey under KEK gen 2: %v", err)
+	}
+	before, err := os.ReadFile(nodeKeyEncPath(dir))
+	if err != nil {
+		t.Fatalf("read node.key.enc: %v", err)
+	}
+
+	if _, _, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false); err == nil {
+		t.Fatal("expected missing node.key.gen to fail")
+	}
+	after, err := os.ReadFile(nodeKeyEncPath(dir))
+	if err != nil {
+		t.Fatalf("read node.key.enc after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("node.key.enc was overwritten after missing sidecar failure")
 	}
 }
 
