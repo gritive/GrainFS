@@ -71,7 +71,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	// (LoadOrCreateEncryptionKeyWithRaw below). It writes back opts.NodeID and
 	// opts.ClusterKey so the normal boot resolves the identical node id and the
 	// --cluster-key gate passes in-memory. The Phase-2 membership ACK runs
-	// post-boot in bootWALAndForwarders. Staging targets primaryDataDir so the
+	// post-boot in bootWALAndForwardersPart1. Staging targets primaryDataDir so the
 	// Phase-1 staging dir == Phase-2 read dir == cfg.DataDir on multi-disk.
 	inviteJoin, err := maybeInviteJoin(ctx, &opts, primaryDataDir)
 	if err != nil {
