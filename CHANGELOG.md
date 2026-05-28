@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.405.0] - 2026-05-28
+
+### Added
+
+- Added a normalized IAM principal scaffold for service accounts, mount SAs,
+  protocol credentials, and future OIDC subjects/groups.
+- Added `grainfs credential list --resource` and matching admin API/client
+  filtering so protocol credential inventory can be scoped by resource.
+
+### Security
+
+- Protocol credential `get` and `list` now require IAM authorization with
+  `grainfs:CredentialRead` and `grainfs:CredentialList`.
+- Protocol credential admin authorization now fails closed when a credential
+  authorizer is missing instead of bypassing the IAM policy gate.
+
+### Changed
+
+- Tracked the next OIDC federated IAM slice for issuer configuration, JWKS
+  validation, and normalized OIDC principal creation.
+
 ## [0.0.404.0] - 2026-05-28
 
 ### Added

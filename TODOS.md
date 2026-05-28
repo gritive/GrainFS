@@ -90,6 +90,10 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
+- [ ] **OIDC federated IAM Slice 2**: implement OIDC issuer config, JWKS
+  strict/grace validation, and normalized OIDC principal creation. Source spec:
+  `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`.
+
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
     - Maintainability M#2: extract `peelTrailer(data, magic, trailerLen)` helper in
