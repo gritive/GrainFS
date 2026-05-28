@@ -144,6 +144,7 @@ func (l *TrafficLimiter) Acquire(ctx context.Context, st StreamType) (func(), er
 
 // StreamRouter routes incoming messages to different handlers based on StreamType.
 type StreamRouter struct {
+	mu           sync.RWMutex
 	handlers     map[StreamType]StreamHandler
 	bodyHandlers map[StreamType]StreamBodyHandler
 	readHandlers map[StreamType]StreamReadHandler
@@ -160,24 +161,32 @@ func NewStreamRouter() *StreamRouter {
 
 // Handle registers a handler for a specific stream type.
 func (r *StreamRouter) Handle(st StreamType, h StreamHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.handlers[st] = h
 }
 
 // HandleBody registers a handler that receives the framed request payload plus
 // any remaining bytes on the same stream as a streaming body.
 func (r *StreamRouter) HandleBody(st StreamType, h StreamBodyHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.bodyHandlers[st] = h
 }
 
 // HandleRead registers a handler that writes a framed metadata response and
 // then streams any returned body bytes on the same stream.
 func (r *StreamRouter) HandleRead(st StreamType, h StreamReadHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.readHandlers[st] = h
 }
 
 // Dispatch finds the handler for the message's stream type and calls it.
 func (r *StreamRouter) Dispatch(req *Message) *Message {
+	r.mu.RLock()
 	h, ok := r.handlers[req.Type]
+	r.mu.RUnlock()
 	if !ok {
 		return nil
 	}
@@ -186,18 +195,24 @@ func (r *StreamRouter) Dispatch(req *Message) *Message {
 
 // Lookup returns the handler for the given stream type, if registered.
 func (r *StreamRouter) Lookup(st StreamType) (StreamHandler, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	h, ok := r.handlers[st]
 	return h, ok
 }
 
 // LookupBody returns the streaming body handler for the stream type, if any.
 func (r *StreamRouter) LookupBody(st StreamType) (StreamBodyHandler, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	h, ok := r.bodyHandlers[st]
 	return h, ok
 }
 
 // LookupRead returns the streaming read handler for the stream type, if any.
 func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	h, ok := r.readHandlers[st]
 	return h, ok
 }

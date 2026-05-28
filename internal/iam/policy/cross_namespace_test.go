@@ -102,7 +102,21 @@ func TestParse_Accepts9PAttachAction(t *testing.T) {
 }
 
 func TestParse_AcceptsProtocolCredentialActions(t *testing.T) {
-	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":["grainfs:CredentialCreate","grainfs:CredentialRotate","grainfs:CredentialRevoke","grainfs:VolumeAttach"],"Resource":"*"}]}`)
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":["grainfs:CredentialCreate","grainfs:CredentialRotate","grainfs:CredentialRevoke","grainfs:VolumeAttach"],"Resource":"protocol-credential/s3/bucket/photos"}]}`)
 	_, err := Parse(doc)
 	require.NoError(t, err, "Parse should accept protocol credential grainfs actions")
+}
+
+func TestParse_RejectsMalformedProtocolCredentialResource(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/s3"}]}`)
+	_, err := Parse(doc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "malformed ARN")
+}
+
+func TestParse_RejectsWrongProtocolCredentialResourceKind(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/s3/volume/photos"}]}`)
+	_, err := Parse(doc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "malformed ARN")
 }

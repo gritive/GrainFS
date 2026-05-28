@@ -89,7 +89,7 @@ func Parse(raw []byte) (*Document, error) {
 			}
 		}
 		for _, r := range st.Resource {
-			if !validARN(r) {
+			if !validResource(r) {
 				return nil, fmt.Errorf("statement %d: %w: %s", i, ErrMalformedARN, r)
 			}
 		}
@@ -119,8 +119,11 @@ func validAction(a string) bool {
 	return allowedActionNamespaces[parts[0]]
 }
 
-func validARN(r string) bool {
+func validResource(r string) bool {
 	if r == "*" {
+		return true
+	}
+	if validProtocolCredentialResource(r) {
 		return true
 	}
 	if !strings.HasPrefix(r, "arn:aws:s3:::") {
@@ -128,4 +131,20 @@ func validARN(r string) bool {
 	}
 	rest := strings.TrimPrefix(r, "arn:aws:s3:::")
 	return rest != ""
+}
+
+func validProtocolCredentialResource(r string) bool {
+	if !strings.HasPrefix(r, "protocol-credential/") {
+		return false
+	}
+	parts := strings.Split(r, "/")
+	if len(parts) != 4 {
+		return false
+	}
+	switch parts[1] + "/" + parts[2] {
+	case "s3/bucket", "iceberg/catalog", "nbd/volume", "nfs/bucket", "9p/bucket":
+	default:
+		return false
+	}
+	return parts[3] != ""
 }

@@ -15,9 +15,9 @@ import (
 
 // bootWALAndForwardersPart1 builds the v0.0.7.1 PR-D ForwardSender +
 // ForwardReceiver, the meta-propose forward sender/receiver pair, the
-// meta-catalog read sender, the meta-join receiver, and the
-// ClusterCoordinator. Also performs the join-mode meta-join + initial Router
-// sync.
+// meta-catalog read sender, and the meta-join receiver. The ClusterCoordinator
+// is wired later by bootClusterCoordinatorRouting after the distributed backend
+// exists. Also performs the join-mode meta-join + initial Router sync.
 //
 // R1 (narrow): the logical/PITR WAL (wal.OpenEncrypted) is DEK-sealed and
 // decrypts existing records at open, so it is opened in bootLogicalWALOpen
@@ -36,13 +36,12 @@ import (
 //
 // Outputs: state.forwardSender, state.forwardReceiver,
 //
-//	state.metaForwardSender, state.metaReadSender, state.clusterCoord,
-//	state.seedGroups.
+//	state.metaForwardSender, state.metaReadSender, state.seedGroups.
 //
 // Ordering: R-FSM-α moves this BEFORE WaitDEKReady (so the keeper-population
 // catch-up runs pre-gate) and BEFORE bootShardService (handler registration
 // happens later in bootRegisterForwardHandlers). MUST run BEFORE
-// bootLogicalWALOpen + bootBackendWrap.
+// bootLogicalWALOpen + bootClusterCoordinatorRouting + bootBackendWrap.
 func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// Seed data groups from cluster size only. Operators no longer choose this:
 	// group count is placement headroom, not a durability policy.
@@ -124,9 +123,6 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		return state.metaForwardSender.SendWithGate(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data, plan)
 	})
 
-	state.distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
-		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-	}))
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
 		WithGateRefresh(func() { refreshCapabilityGate(state) })
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
@@ -171,39 +167,9 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}
 	state.metaReadSender = cluster.NewMetaCatalogReadSender(metaReadDialer)
 
-	state.clusterCoord = cluster.NewClusterCoordinator(
-		state.distBackend, // base for cluster-wide ops (CreateBucket, etc.)
-		state.dgMgr,       // local owned groups (self-leader shortcut)
-		state.clusterRouter,
-		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
-		state.nodeID,   // selfID for leader check
-	).WithForwardSender(state.forwardSender).
-		WithNodeAddressResolver(metaRaft.FSM()).
-		WithSelfPeerAlias(state.raftAddr).
-		WithECConfig(state.effectiveEC).
-		WithObjectIndexProposer(indexProposer).
-		WithCapabilityGate(state.capabilityGate)
-	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
-		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
-		MaxPerRequest: state.cfg.AppendForwardBufferMaxPerRequest,
-	})
-
 	coalesceCfg := cluster.DefaultCoalesceConfig()
 	coalesceCfg.SizeCapBytes = state.cfg.AppendSizeCapBytes
-	state.distBackend.SetCoalesceConfig(coalesceCfg)
-	state.distBackend.SetScrubOrphanAge(state.cfg.ScrubOrphanAge)
-	// Propagate the cap to any GroupBackend instances already registered in
-	// dgMgr (groups 1-N created by bootOwnedGroupsAndEC before this phase
-	// ran). Without this they would keep the default 5 TiB cap.
-	for _, dg := range state.dgMgr.All() {
-		if gb := dg.Backend(); gb != nil {
-			gb.SetCoalesceConfig(coalesceCfg)
-		}
-	}
 	state.coalesceCfg = coalesceCfg
-
-	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
-	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 
 	if state.joinMode {
 		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr, state.kekStore, state.handshakeVerifier.ClusterID()); err != nil {
@@ -238,6 +204,60 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
+	log.Info().Msg("v0.0.7.1 PR-D: forwarders wired — live multi-raft routing pending backend construction")
+	return nil
+}
+
+func bootClusterCoordinatorRouting(state *bootState) error {
+	if state.distBackend == nil {
+		return fmt.Errorf("bootClusterCoordinatorRouting: distBackend is nil — bootOwnedGroupsAndEC must run first")
+	}
+	if state.forwardSender == nil {
+		return fmt.Errorf("bootClusterCoordinatorRouting: forwardSender is nil — bootWALAndForwardersPart1 must run first")
+	}
+	if state.metaForwardSender == nil {
+		return fmt.Errorf("bootClusterCoordinatorRouting: metaForwardSender is nil — bootWALAndForwardersPart1 must run first")
+	}
+	metaRaft := state.metaRaft
+	peers := state.peers
+
+	state.distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
+		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	}))
+
+	indexProposer := cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
+		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
+		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	})
+
+	state.clusterCoord = cluster.NewClusterCoordinator(
+		state.distBackend, // base for cluster-wide ops (CreateBucket, etc.)
+		state.dgMgr,       // local owned groups (self-leader shortcut)
+		state.clusterRouter,
+		metaRaft.FSM(), // ShardGroupSource (PeerIDs, leader hints)
+		state.nodeID,   // selfID for leader check
+	).WithForwardSender(state.forwardSender).
+		WithNodeAddressResolver(metaRaft.FSM()).
+		WithSelfPeerAlias(state.raftAddr).
+		WithECConfig(state.effectiveEC).
+		WithObjectIndexProposer(indexProposer).
+		WithCapabilityGate(state.capabilityGate)
+	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
+		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
+		MaxPerRequest: state.cfg.AppendForwardBufferMaxPerRequest,
+	})
+
+	state.distBackend.SetCoalesceConfig(state.coalesceCfg)
+	state.distBackend.SetScrubOrphanAge(state.cfg.ScrubOrphanAge)
+	for _, dg := range state.dgMgr.All() {
+		if gb := dg.Backend(); gb != nil {
+			gb.SetCoalesceConfig(state.coalesceCfg)
+		}
+	}
+
+	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
+	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	return nil
 }
