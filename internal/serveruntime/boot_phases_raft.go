@@ -115,10 +115,9 @@ func bootMetaRaftWiring(state *bootState) error {
 		if state.inviteJoinMode {
 			// Invite-join OWNS node.key.enc this boot: Phase-1 sealed it under a KEK
 			// generation and Phase-2 (bootInviteJoinPhase2) LoadNodeKeys it under that
-			// SAME gen. ensureNodeIdentity must NOT touch it here — its back-compat path
-			// might re-seal under a different active generation out from under Phase-2's
-			// recorded generation load. Phase-2 owns the active-generation re-seal at
-			// close-out (loadAndMigrateInviteNodeKey). Self-register still needs the
+			// SAME gen. ensureNodeIdentity must NOT touch it here; Phase-2 owns the
+			// active-generation re-seal at close-out (loadAndMigrateInviteNodeKey).
+			// Self-register still needs the
 			// SPKI, so source it from the invite-join state (set in Phase-1 / from the
 			// resume sentinel).
 			if state.inviteJoin != nil {

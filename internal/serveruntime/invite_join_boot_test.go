@@ -81,10 +81,9 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("all artifacts staged + sentinel present -> resume", func(t *testing.T) {
+	t.Run("all zero-CA artifacts staged + sentinel present -> resume", func(t *testing.T) {
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
-		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -117,13 +116,12 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		require.Equal(t, inviteResume, gateInviteJoin(dir, false))
 	})
 
-	t.Run("all artifacts staged + sentinel present + NO bundle -> resume (P2)", func(t *testing.T) {
+	t.Run("all zero-CA artifacts staged + sentinel present + NO bundle -> resume (P2)", func(t *testing.T) {
 		// The bundle env is one-shot: a restart that does not re-set it must still
 		// resume the Phase-2 ACK from the complete-but-unacked sentinel, NOT boot as
 		// a non-member on the staged secrets.
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
-		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -139,7 +137,6 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		// KEK file is e.g. 3.key, not 0.key. artifactsComplete must still hold.
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
-		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "3.key"), []byte("kek3"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -150,7 +147,7 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("all secrets staged but PSK (current.key) missing -> fresh (P2)", func(t *testing.T) {
+	t.Run("all zero-CA secrets staged but PSK (current.key) missing -> fresh (P2)", func(t *testing.T) {
 		// Crash window: node.key.enc written + node.key.unsealed shredded, but the
 		// transport PSK never reached keys.d/current.key. Without current.key in the
 		// completeness gate this would classify as Resume, which then hard-fails
@@ -158,7 +155,6 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		// Phase-1. The gate must keep it FreshJoin instead.
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
-		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -172,7 +168,6 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 	t.Run("all artifacts durable + no sentinel -> normal", func(t *testing.T) {
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
-		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -193,7 +188,6 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		// mis-classified FreshJoin because the gate required node.key.unsealed absent.
 		dir := t.TempDir()
 		p := inviteJoinPathsFor(dir)
-		mustWrite(t, p.encryptionKey, []byte("k"))
 		mustWrite(t, p.clusterID, []byte("cid"))
 		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -247,7 +241,6 @@ func TestMaybeInviteJoin_RejectsEphemeralRaftAddr(t *testing.T) {
 func stageResumeArtifacts(t *testing.T, dir string) string {
 	t.Helper()
 	p := inviteJoinPathsFor(dir)
-	mustWrite(t, p.encryptionKey, []byte("k"))
 	mustWrite(t, p.clusterID, []byte("cid"))
 	mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
 	mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
@@ -368,17 +361,16 @@ func TestMaybeInviteJoin_MultiDataDirUsesPrimary(t *testing.T) {
 	}
 }
 
-// TestStageInviteSecrets writes every KEK secret where normal boot reads it,
-// and ignores legacy static encryption keys carried by pre-format-7 payloads.
+// TestStageInviteSecrets writes every KEK secret where normal boot reads it
+// without creating a legacy static encryption key.
 func TestStageInviteSecrets(t *testing.T) {
 	dir := t.TempDir()
-	encKey := []byte("encryption-key-bytes")
 	clusterID := []byte("0123456789abcdef") // 16 bytes
 	gens := []cluster.KEKGen{
 		{Gen: 0, Key: []byte("kek-gen-0")},
 		{Gen: 1, Key: []byte("kek-gen-1")},
 	}
-	if err := stageInviteSecrets(dir, encKey, gens, clusterID); err != nil {
+	if err := stageInviteSecrets(dir, gens, clusterID); err != nil {
 		t.Fatalf("stageInviteSecrets: %v", err)
 	}
 
@@ -403,7 +395,7 @@ func TestStageInviteSecretsSkipsEncryptionKeyWhenBootstrapOmitsIt(t *testing.T) 
 		{Gen: 1, Key: []byte("kek-gen-1")},
 	}
 
-	require.NoError(t, stageInviteSecrets(dir, nil, gens, clusterID))
+	require.NoError(t, stageInviteSecrets(dir, gens, clusterID))
 	require.NoFileExists(t, filepath.Join(dir, "encryption.key"))
 	require.Equal(t, clusterID, mustRead(t, filepath.Join(dir, nodeconfig.ClusterIDFile)))
 
