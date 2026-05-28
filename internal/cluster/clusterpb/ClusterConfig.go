@@ -237,20 +237,19 @@ func (rcv *ClusterConfig) MutateAlertWebhookSecretWrapped(j int, n byte) bool {
 	return false
 }
 
-func (rcv *ClusterConfig) DiskWarnFrac(obj *DoubleBox) *DoubleBox {
+func (rcv *ClusterConfig) AlertWebhookSecretDekGen() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(DoubleBox)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
 	}
-	return nil
+	return 0
 }
 
-func (rcv *ClusterConfig) DiskCriticalFrac(obj *DoubleBox) *DoubleBox {
+func (rcv *ClusterConfig) MutateAlertWebhookSecretDekGen(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(32, n)
+}
+
+func (rcv *ClusterConfig) DiskWarnFrac(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -263,8 +262,21 @@ func (rcv *ClusterConfig) DiskCriticalFrac(obj *DoubleBox) *DoubleBox {
 	return nil
 }
 
-func (rcv *ClusterConfig) SnapshotIntervalNs(obj *Int64Box) *Int64Box {
+func (rcv *ClusterConfig) DiskCriticalFrac(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(DoubleBox)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *ClusterConfig) SnapshotIntervalNs(obj *Int64Box) *Int64Box {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
@@ -277,7 +289,7 @@ func (rcv *ClusterConfig) SnapshotIntervalNs(obj *Int64Box) *Int64Box {
 }
 
 func (rcv *ClusterConfig) SnapshotRetain(obj *Int32Box) *Int32Box {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
@@ -290,19 +302,6 @@ func (rcv *ClusterConfig) SnapshotRetain(obj *Int32Box) *Int32Box {
 }
 
 func (rcv *ClusterConfig) WeightedHrwEnabled(obj *BoolBox) *BoolBox {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
-	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(BoolBox)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
-	}
-	return nil
-}
-
-func (rcv *ClusterConfig) BoundedLoadsEnabled(obj *BoolBox) *BoolBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -315,12 +314,12 @@ func (rcv *ClusterConfig) BoundedLoadsEnabled(obj *BoolBox) *BoolBox {
 	return nil
 }
 
-func (rcv *ClusterConfig) BoundedLoadsC(obj *DoubleBox) *DoubleBox {
+func (rcv *ClusterConfig) BoundedLoadsEnabled(obj *BoolBox) *BoolBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(44))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
-			obj = new(DoubleBox)
+			obj = new(BoolBox)
 		}
 		obj.Init(rcv._tab.Bytes, x)
 		return obj
@@ -328,7 +327,7 @@ func (rcv *ClusterConfig) BoundedLoadsC(obj *DoubleBox) *DoubleBox {
 	return nil
 }
 
-func (rcv *ClusterConfig) BoundedLoadsCLow(obj *DoubleBox) *DoubleBox {
+func (rcv *ClusterConfig) BoundedLoadsC(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(46))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -341,8 +340,21 @@ func (rcv *ClusterConfig) BoundedLoadsCLow(obj *DoubleBox) *DoubleBox {
 	return nil
 }
 
-func (rcv *ClusterConfig) BoundedLoadsMaxStaleTtlNs(obj *Int64Box) *Int64Box {
+func (rcv *ClusterConfig) BoundedLoadsCLow(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(48))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(DoubleBox)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *ClusterConfig) BoundedLoadsMaxStaleTtlNs(obj *Int64Box) *Int64Box {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
@@ -355,7 +367,7 @@ func (rcv *ClusterConfig) BoundedLoadsMaxStaleTtlNs(obj *Int64Box) *Int64Box {
 }
 
 func ClusterConfigStart(builder *flatbuffers.Builder) {
-	builder.StartObject(23)
+	builder.StartObject(24)
 }
 func ClusterConfigAddRev(builder *flatbuffers.Builder, rev uint64) {
 	builder.PrependUint64Slot(0, rev, 0)
@@ -402,32 +414,35 @@ func ClusterConfigAddAlertWebhookSecretWrapped(builder *flatbuffers.Builder, ale
 func ClusterConfigStartAlertWebhookSecretWrappedVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
+func ClusterConfigAddAlertWebhookSecretDekGen(builder *flatbuffers.Builder, alertWebhookSecretDekGen uint32) {
+	builder.PrependUint32Slot(14, alertWebhookSecretDekGen, 0)
+}
 func ClusterConfigAddDiskWarnFrac(builder *flatbuffers.Builder, diskWarnFrac flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(diskWarnFrac), 0)
+	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(diskWarnFrac), 0)
 }
 func ClusterConfigAddDiskCriticalFrac(builder *flatbuffers.Builder, diskCriticalFrac flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(diskCriticalFrac), 0)
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(diskCriticalFrac), 0)
 }
 func ClusterConfigAddSnapshotIntervalNs(builder *flatbuffers.Builder, snapshotIntervalNs flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(snapshotIntervalNs), 0)
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(snapshotIntervalNs), 0)
 }
 func ClusterConfigAddSnapshotRetain(builder *flatbuffers.Builder, snapshotRetain flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(snapshotRetain), 0)
+	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(snapshotRetain), 0)
 }
 func ClusterConfigAddWeightedHrwEnabled(builder *flatbuffers.Builder, weightedHrwEnabled flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(weightedHrwEnabled), 0)
+	builder.PrependUOffsetTSlot(19, flatbuffers.UOffsetT(weightedHrwEnabled), 0)
 }
 func ClusterConfigAddBoundedLoadsEnabled(builder *flatbuffers.Builder, boundedLoadsEnabled flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(19, flatbuffers.UOffsetT(boundedLoadsEnabled), 0)
+	builder.PrependUOffsetTSlot(20, flatbuffers.UOffsetT(boundedLoadsEnabled), 0)
 }
 func ClusterConfigAddBoundedLoadsC(builder *flatbuffers.Builder, boundedLoadsC flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(20, flatbuffers.UOffsetT(boundedLoadsC), 0)
+	builder.PrependUOffsetTSlot(21, flatbuffers.UOffsetT(boundedLoadsC), 0)
 }
 func ClusterConfigAddBoundedLoadsCLow(builder *flatbuffers.Builder, boundedLoadsCLow flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(21, flatbuffers.UOffsetT(boundedLoadsCLow), 0)
+	builder.PrependUOffsetTSlot(22, flatbuffers.UOffsetT(boundedLoadsCLow), 0)
 }
 func ClusterConfigAddBoundedLoadsMaxStaleTtlNs(builder *flatbuffers.Builder, boundedLoadsMaxStaleTtlNs flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(22, flatbuffers.UOffsetT(boundedLoadsMaxStaleTtlNs), 0)
+	builder.PrependUOffsetTSlot(23, flatbuffers.UOffsetT(boundedLoadsMaxStaleTtlNs), 0)
 }
 func ClusterConfigEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.410.0] - 2026-05-28
+## [0.0.412.0] - 2026-05-28
 
 ### Fixed
 
@@ -16,6 +16,23 @@
 - Added focused multi-node E2E coverage proving a cluster can complete cutover,
   mint a new invite, accept a post-drop joiner without reviving the old shared
   transport PSK, and serve S3 reads and writes through that joiner.
+
+## [0.0.408.0] - 2026-05-28
+
+### Security
+
+- Cluster-config alert webhook secrets now seal through the generation-aware
+  DEK/KEK at-rest seam and persist `dek_gen` in both raft patch payloads and
+  snapshots.
+- Alert delivery now opens the live webhook signing secret with
+  `DomainClusterConfigSecret`, removing the static `EncryptWithAAD` dependency
+  from new cluster-config secret writes.
+
+### Changed
+
+- Tracked the remaining static-key removal work separately: existing static
+  webhook ciphertexts should be refreshed with a new `alert-webhook-secret`
+  before the static key is removed entirely.
 
 ## [0.0.407.0] - 2026-05-28
 

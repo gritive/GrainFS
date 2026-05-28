@@ -17,6 +17,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
@@ -74,18 +75,18 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// flag-derived fields (AlertWebhook, AlertSecret) are bootstrap seeds for
 	// ClusterConfig and are scheduled for removal in a follow-up task.
 	//
-	// Pass the encryptor as a typed nil-safe interface — assigning a typed
-	// (*encrypt.Encryptor)(nil) directly to an interface parameter would
-	// produce a non-nil interface holding a nil pointer, defeating the
-	// `enc == nil` guard inside the dispatcher.
-	var alertDecrypter alerts.SecretDecrypter
-	if cfg.Encryptor != nil {
-		alertDecrypter = cfg.Encryptor
+	// Pass the DEK-backed data encryptor as a typed nil-safe interface —
+	// assigning a typed nil directly to an interface parameter would produce a
+	// non-nil interface holding a nil pointer, defeating the `enc == nil` guard
+	// inside the dispatcher.
+	var alertDecrypter alerts.SecretOpener
+	if state.dekKeeper != nil {
+		alertDecrypter = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
 	}
 	state.clusterAlerts = server.NewAlertsStateWithConfig(
 		state.metaRaft.FSM().ClusterConfig(),
 		alertDecrypter,
-		cluster.ClusterConfigAlertSecretAAD,
+		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
 		alerts.Options{},
 		alerts.DegradedConfig{},
 		"cluster",

@@ -19,6 +19,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // startDispatcherInternal is the internal-package version of the helper used in
@@ -34,19 +35,23 @@ func startDispatcherInternal(t *testing.T, d *Dispatcher) {
 	})
 }
 
-// stubDecrypter always returns the configured error.
-type stubDecrypter struct{ err error }
+// stubOpener always returns the configured error.
+type stubOpener struct{ err error }
 
-func (s *stubDecrypter) DecryptWithAAD(_, _ []byte) ([]byte, error) { return nil, s.err }
+func (s *stubOpener) Open(_ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
+	return nil, s.err
+}
 
 // stubCfg returns a fixed URL + a fixed wrapped-secret.
 type stubCfg struct {
 	url     string
 	wrapped []byte
+	dekGen  uint32
 }
 
 func (s *stubCfg) AlertWebhook() string              { return s.url }
 func (s *stubCfg) AlertWebhookSecretWrapped() []byte { return s.wrapped }
+func (s *stubCfg) AlertWebhookSecretDEKGen() uint32  { return s.dekGen }
 
 func TestWebhook_DecryptFailure_EmitsMetricAndLogUnsigned(t *testing.T) {
 	metrics.WebhookSignatureDecryptFailureTotal.Reset()
@@ -65,10 +70,10 @@ func TestWebhook_DecryptFailure_EmitsMetricAndLogUnsigned(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	cfg := &stubCfg{url: srv.URL, wrapped: []byte("ciphertext")}
-	dec := &stubDecrypter{err: errors.New("key not found")}
+	dec := &stubOpener{err: errors.New("key not found")}
 
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
-	d := NewDispatcherWithConfig(cfg, dec, []byte("aad"),
+	d := NewDispatcherWithConfig(cfg, dec, nil,
 		Options{Clock: func() time.Time { return now }, MaxRetries: 0, DedupWindow: 0},
 		nil, "degraded")
 	startDispatcherInternal(t, d)
@@ -101,10 +106,10 @@ func TestWebhook_DecryptFailure_LogRateLimited_MetricNotRateLimited(t *testing.T
 	t.Cleanup(srv.Close)
 
 	cfg := &stubCfg{url: srv.URL, wrapped: []byte("ciphertext")}
-	dec := &stubDecrypter{err: errors.New("aad mismatch")}
+	dec := &stubOpener{err: errors.New("aad mismatch")}
 
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
-	d := NewDispatcherWithConfig(cfg, dec, []byte("aad"),
+	d := NewDispatcherWithConfig(cfg, dec, nil,
 		Options{Clock: func() time.Time { return now }, MaxRetries: 0, DedupWindow: 0},
 		nil, "degraded")
 	startDispatcherInternal(t, d)
@@ -129,8 +134,8 @@ func TestWebhook_DecryptFailure_LogRateLimited_MetricNotRateLimited(t *testing.T
 }
 
 // TestWebhook_DecryptFailure_RealEncryptorClassification verifies the
-// production path: a real *encrypt.Encryptor configured with one key
-// receives a blob wrapped under a DIFFERENT key. AEAD tag verification
+// production path: a real DEKKeeperAdapter configured with one DEK receives a
+// blob sealed under a DIFFERENT DEK. AEAD tag verification
 // fails ("decrypt: cipher: message authentication failed"), which
 // classifyDecryptErr should bucket as "aad_mismatch" (not "other").
 //
@@ -145,20 +150,21 @@ func TestWebhook_DecryptFailure_RealEncryptorClassification(t *testing.T) {
 	log.Logger = zerolog.New(io.Discard).With().Logger()
 	t.Cleanup(func() { log.Logger = prevLogger })
 
-	keyA := bytes.Repeat([]byte{0xab}, 32)
-	keyB := bytes.Repeat([]byte{0xcd}, 32)
-	encA, err := encrypt.NewEncryptor(keyA)
+	clusterID := bytes.Repeat([]byte{0x33}, 16)
+	keeperA, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xab}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
-	encB, err := encrypt.NewEncryptor(keyB)
+	keeperB, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xcd}, encrypt.KEKSize), clusterID)
+	require.NoError(t, err)
+	encA := storage.NewDEKKeeperAdapter(keeperA, clusterID)
+	encB := storage.NewDEKKeeperAdapter(keeperB, clusterID)
+
+	fields := []encrypt.AADField{encrypt.FieldString("v1.1-hardening-test")}
+	wrappedUnderA, gen, err := encA.Seal(encrypt.DomainClusterConfigSecret, fields, []byte("secret"))
 	require.NoError(t, err)
 
-	aad := []byte("v1.1-hardening-test")
-	wrappedUnderA, err := encA.EncryptWithAAD([]byte("secret"), aad)
-	require.NoError(t, err)
-
-	// Sanity-check: the real DecryptWithAAD on encB with a blob wrapped under
+	// Sanity-check: the real Open on encB with a blob wrapped under
 	// encA fails. Capture the error so we can assert classification.
-	_, derr := encB.DecryptWithAAD(wrappedUnderA, aad)
+	_, derr := encB.Open(encrypt.DomainClusterConfigSecret, fields, gen, wrappedUnderA)
 	require.Error(t, derr, "expected decrypt under a different key to fail")
 	require.Equal(t, "aad_mismatch", classifyDecryptErr(derr),
 		"AEAD tag failure should classify as aad_mismatch, got %q (err=%v)", classifyDecryptErr(derr), derr)
@@ -169,9 +175,9 @@ func TestWebhook_DecryptFailure_RealEncryptorClassification(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cfg := &stubCfg{url: srv.URL, wrapped: wrappedUnderA}
+	cfg := &stubCfg{url: srv.URL, wrapped: wrappedUnderA, dekGen: gen}
 	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
-	d := NewDispatcherWithConfig(cfg, encB, aad,
+	d := NewDispatcherWithConfig(cfg, encB, fields,
 		Options{Clock: func() time.Time { return now }, MaxRetries: 0, DedupWindow: 0},
 		nil, "cluster")
 	startDispatcherInternal(t, d)

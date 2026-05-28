@@ -174,7 +174,11 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				// transparently leader-forwards on followers via the existing
 				// forward path (see meta_raft.proposeOrForward).
 				proposer := &cluster.ClusterConfigProposer{Propose: state.metaRaft.Propose}
-				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), proposer, state.cfg.Encryptor)
+				var clusterConfigSecretEnc storage.DataEncryptor
+				if state.dekKeeper != nil {
+					clusterConfigSecretEnc = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
+				}
+				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), proposer, clusterConfigSecretEnc)
 
 				// KEK envelope admin endpoints (Task 11). Routes register
 				// unconditionally so operators always see a well-formed 503

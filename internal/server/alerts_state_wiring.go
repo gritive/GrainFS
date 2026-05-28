@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -26,18 +27,18 @@ func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.De
 //
 // alertKind is forwarded to the underlying Dispatcher and surfaces as the
 // alert_kind label on WebhookSignatureDecryptFailureTotal so operators can
-// tell which AlertsState saw stale wrapped secrets after a rotate-key.
+// tell which AlertsState saw stale wrapped secrets after DEK rotation.
 func NewAlertsStateWithConfig(
 	cfg alerts.AlertCfgReader,
-	enc alerts.SecretDecrypter,
-	secretAAD []byte,
+	enc alerts.SecretOpener,
+	secretFields []encrypt.AADField,
 	opts alerts.Options,
 	trackerCfg alerts.DegradedConfig,
 	alertKind string,
 ) *AlertsState {
 	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
 		opts.OnResult = s.onResult
-		return alerts.NewDispatcherWithConfig(cfg, enc, secretAAD, opts, nil, alertKind)
+		return alerts.NewDispatcherWithConfig(cfg, enc, secretFields, opts, nil, alertKind)
 	})
 }
 

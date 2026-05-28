@@ -145,6 +145,7 @@ func EncodeClusterConfigPatchInner(p ClusterConfigPatch) ([]byte, error) {
 	}
 	if wrappedOff != 0 {
 		clusterpb.MetaClusterConfigPatchCmdAddAlertWebhookSecretWrapped(b, wrappedOff)
+		clusterpb.MetaClusterConfigPatchCmdAddAlertWebhookSecretDekGen(b, p.AlertWebhookSecretDEKGen)
 	}
 	if diskWarnOff != 0 {
 		clusterpb.MetaClusterConfigPatchCmdAddDiskWarnFrac(b, diskWarnOff)
@@ -251,6 +252,7 @@ func DecodeClusterConfigPatchCmd(data []byte) (ClusterConfigPatch, error) {
 		cp := make([]byte, len(raw))
 		copy(cp, raw)
 		p.AlertWebhookSecretWrapped = cp
+		p.AlertWebhookSecretDEKGen = t.AlertWebhookSecretDekGen()
 	}
 	if b := t.DiskWarnFrac(nil); b != nil {
 		v := b.V()
@@ -409,6 +411,7 @@ func serializeClusterConfig(c *ClusterConfig) []byte {
 	}
 	if wrappedOff != 0 {
 		clusterpb.ClusterConfigAddAlertWebhookSecretWrapped(b, wrappedOff)
+		clusterpb.ClusterConfigAddAlertWebhookSecretDekGen(b, s.alertWebhookSecretDEKGen)
 	}
 	if diskWarnOff != 0 {
 		clusterpb.ClusterConfigAddDiskWarnFrac(b, diskWarnOff)
@@ -509,6 +512,7 @@ func deserializeClusterConfig(buf []byte) (*clusterConfigSnap, error) {
 		cp := make([]byte, len(raw))
 		copy(cp, raw)
 		snap.alertWebhookSecretWrapped = cp
+		snap.alertWebhookSecretDEKGen = t.AlertWebhookSecretDekGen()
 	}
 	if b := t.DiskWarnFrac(nil); b != nil {
 		v := b.V()

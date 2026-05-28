@@ -46,8 +46,11 @@ Work these in order. Do not run them in parallel.
      DEK/KEK-safe bootstrap envelope.
    - [ ] D-cut: move `node.key.enc` away from static `encryption.key` without
      making KEK prune able to brick restarted nodes.
-   - [ ] D-meta: migrate cluster-config alert webhook secret wrapping from static
-     `EncryptWithAAD` to a DEK seam with persisted `dek_gen`.
+   - [x] D-meta: migrate cluster-config alert webhook secret wrapping from static
+     `EncryptWithAAD` to a DEK seam with persisted `dek_gen`. SHIPPED in current
+     branch: new PATCH writes use `DomainClusterConfigSecret`; existing static
+     ciphertexts require PATCHing a fresh `alert-webhook-secret` before static
+     key removal.
    - [ ] Data-DEK rotation: persist non-zero `dek_gen` for every
      ciphertext-bearing format before enabling `encryption.rotate-dek`.
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
