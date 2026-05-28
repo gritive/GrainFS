@@ -87,14 +87,6 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
-- [ ] **OIDC federated IAM follow-up: IAM mutation/group bearer boundary**.
-  Policy write/attach and group membership routes can change an actor's
-  effective policies, so do not bearer-enable them until an
-  own-effective-policy/self-escalation guard is designed and tested. Candidate
-  routes: `PUT/DELETE /v1/iam/policy/:name`,
-  `PUT/DELETE /v1/iam/policy/:name/attach/sa/:said`, and
-  `PUT/DELETE /v1/iam/group/...`.
-
 - [ ] **OIDC federated IAM follow-up: remaining admin route/PDP boundary**.
   Decide whether to extend the central admin route/action registry to mount-SA,
   bucket-upstream, config, and dashboard-token routes or introduce the external

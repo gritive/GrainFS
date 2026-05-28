@@ -173,13 +173,19 @@ func validIAMAdminResource(r string) bool {
 		return false
 	}
 	parts := strings.Split(r, "/")
-	if len(parts) != 3 {
-		return false
+	if len(parts) == 3 {
+		switch parts[1] {
+		case "policy", "sa", "group":
+		default:
+			return false
+		}
+		return parts[2] != ""
 	}
-	switch parts[1] {
-	case "policy", "sa":
-	default:
-		return false
+	if len(parts) == 6 && parts[1] == "policy" && parts[3] == "attach" && parts[4] == "sa" {
+		return parts[2] != "" && parts[5] != ""
 	}
-	return parts[2] != ""
+	if len(parts) == 5 && parts[1] == "group" && parts[3] == "policy" {
+		return parts[2] != "" && parts[4] != ""
+	}
+	return false
 }

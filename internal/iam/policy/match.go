@@ -103,7 +103,24 @@ func matchResource(pattern, req string) bool {
 	if pattern == "*" {
 		return true
 	}
+	if strings.HasPrefix(pattern, "iam/") && strings.HasPrefix(req, "iam/") {
+		return matchIAMAdminResource(pattern, req)
+	}
 	return wildcardMatch(pattern, req)
+}
+
+func matchIAMAdminResource(pattern, req string) bool {
+	patternParts := strings.Split(pattern, "/")
+	reqParts := strings.Split(req, "/")
+	if len(patternParts) != len(reqParts) {
+		return false
+	}
+	for i := range patternParts {
+		if !wildcardMatch(patternParts[i], reqParts[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func matchCondition(cond map[string]map[string]StringOrSlice, ctx RequestContext) bool {

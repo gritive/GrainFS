@@ -27,6 +27,56 @@ func registerIAM(g router, d *Deps) {
 		action:   "grainfs:IAMPolicyList",
 		resource: iamPolicyResource,
 	})
+	policyWriteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicyWrite",
+		resource: iamPolicyResource,
+		guard:    denyPolicyIfSelfEffective,
+	})
+	policyDeleteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicyDelete",
+		resource: iamPolicyResource,
+		guard:    denyPolicyIfSelfEffective,
+	})
+	policyAttachSAAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicyAttach",
+		resource: iamPolicyAttachSAResource,
+		guard:    denyDirectSelfPolicyAttach,
+	})
+	policyDetachSAAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicyDetach",
+		resource: iamPolicyAttachSAResource,
+		guard:    denyDirectSelfPolicyAttach,
+	})
+	groupWriteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMGroupWrite",
+		resource: iamGroupResource,
+		guard:    denyGroupIfSelfEffective,
+	})
+	groupDeleteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMGroupDelete",
+		resource: iamGroupResource,
+		guard:    denyGroupIfSelfEffective,
+	})
+	groupMemberWriteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMGroupMemberWrite",
+		resource: iamGroupResource,
+		guard:    denyDirectSelfGroupMember,
+	})
+	groupMemberDeleteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMGroupMemberDelete",
+		resource: iamGroupResource,
+		guard:    denyDirectSelfGroupMember,
+	})
+	groupPolicyAttachAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMGroupPolicyAttach",
+		resource: iamGroupPolicyResource,
+		guard:    denyGroupIfSelfEffective,
+	})
+	groupPolicyDetachAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMGroupPolicyDetach",
+		resource: iamGroupPolicyResource,
+		guard:    denyGroupIfSelfEffective,
+	})
 	// SA
 	g.POST(routePathIAMSA, wrapBody[iam.SACreateRequest, iam.SACreateResponse](d, CreateSA))
 	g.GET(routePathIAMSA, actor, saListAuthz, wrapZero(d, ListSA))
@@ -37,21 +87,21 @@ func registerIAM(g router, d *Deps) {
 	g.DELETE(routePathIAMSAKeyByAK, iamRevokeKeyHandler(d))
 	// Policy — simulate must be registered before :name to avoid param capture
 	g.POST(routePathIAMPolicySimulate, actor, policySimulateAuthz, iamPolicySimulateHandler(d))
-	g.PUT(routePathIAMPolicyByName, iamPolicyPutHandler(d))
+	g.PUT(routePathIAMPolicyByName, actor, policyWriteAuthz, iamPolicyPutHandler(d))
 	g.GET(routePathIAMPolicyByName, actor, policyReadAuthz, iamPolicyGetHandler(d))
-	g.DELETE(routePathIAMPolicyByName, iamPolicyDeleteHandler(d))
+	g.DELETE(routePathIAMPolicyByName, actor, policyDeleteAuthz, iamPolicyDeleteHandler(d))
 	g.GET(routePathIAMPolicy, actor, policyListAuthz, iamPolicyListHandler(d))
-	g.PUT(routePathIAMPolicyAttachSA, iamPolicyAttachSAHandler(d))
-	g.DELETE(routePathIAMPolicyAttachSA, iamPolicyDetachSAHandler(d))
+	g.PUT(routePathIAMPolicyAttachSA, actor, policyAttachSAAuthz, iamPolicyAttachSAHandler(d))
+	g.DELETE(routePathIAMPolicyAttachSA, actor, policyDetachSAAuthz, iamPolicyDetachSAHandler(d))
 	// Group (create/delete/member/policy-attach)
 	// More-specific sub-paths (:name/member/:said, :name/policy/:policy) must be
 	// registered before the bare :name handler to prevent param capture.
-	g.PUT(routePathIAMGroupMember, iamGroupMemberPutHandler(d))
-	g.DELETE(routePathIAMGroupMember, iamGroupMemberDeleteHandler(d))
-	g.PUT(routePathIAMGroupPolicyAttach, iamGroupPolicyAttachHandler(d))
-	g.DELETE(routePathIAMGroupPolicyAttach, iamGroupPolicyDetachHandler(d))
-	g.PUT(routePathIAMGroupByName, iamGroupPutHandler(d))
-	g.DELETE(routePathIAMGroupByName, iamGroupDeleteHandler(d))
+	g.PUT(routePathIAMGroupMember, actor, groupMemberWriteAuthz, iamGroupMemberPutHandler(d))
+	g.DELETE(routePathIAMGroupMember, actor, groupMemberDeleteAuthz, iamGroupMemberDeleteHandler(d))
+	g.PUT(routePathIAMGroupPolicyAttach, actor, groupPolicyAttachAuthz, iamGroupPolicyAttachHandler(d))
+	g.DELETE(routePathIAMGroupPolicyAttach, actor, groupPolicyDetachAuthz, iamGroupPolicyDetachHandler(d))
+	g.PUT(routePathIAMGroupByName, actor, groupWriteAuthz, iamGroupPutHandler(d))
+	g.DELETE(routePathIAMGroupByName, actor, groupDeleteAuthz, iamGroupDeleteHandler(d))
 	// MountSA (create/delete/policy-attach/detach + list/get)
 	// Policy sub-path (:name/policy/:policy) must be registered before bare :name.
 	g.PUT(routePathIAMMountSAPolicyAttach, iamMountSAPolicyAttachHandler(d))

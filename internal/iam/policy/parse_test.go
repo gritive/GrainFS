@@ -1,54 +1,64 @@
 package policy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestParse_AcceptsMinimal(t *testing.T) {
 	doc := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::a/*"}]}`)
 	p, err := Parse(doc)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(p.Statement) != 1 {
-		t.Fatalf("statements = %d", len(p.Statement))
-	}
-	if p.Statement[0].Effect != EffectAllow {
-		t.Fatalf("effect = %v", p.Statement[0].Effect)
-	}
+	require.NoError(t, err)
+	require.Len(t, p.Statement, 1)
+	require.Equal(t, EffectAllow, p.Statement[0].Effect)
 }
 
 func TestParse_AcceptsAbsentVersion(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}`)
-	if _, err := Parse(doc); err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	_, err := Parse(doc)
+	require.NoError(t, err)
 }
 
 func TestParse_RejectsNotAction(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","NotAction":"s3:GetObject","Resource":"*"}]}`)
 	_, err := Parse(doc)
-	if err == nil || err.Error() == "" {
-		t.Fatal("expected rejection for NotAction")
-	}
+	require.Error(t, err)
+	require.NotEmpty(t, err.Error())
 }
 
 func TestParse_RejectsUnsupportedConditionKey(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{"StringEquals":{"aws:UserAgent":"x"}}}]}`)
 	_, err := Parse(doc)
-	if err == nil {
-		t.Fatal("expected rejection for aws:UserAgent")
-	}
+	require.Error(t, err)
 }
 
 func TestParse_RejectsMalformedARN(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"notanarn"}]}`)
-	if _, err := Parse(doc); err == nil {
-		t.Fatal("expected ARN rejection")
-	}
+	_, err := Parse(doc)
+	require.Error(t, err)
 }
 
 func TestParse_AcceptsBothCondKeys(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::a","Condition":{"IpAddress":{"aws:SourceIp":"10.0.0.0/8"},"StringLike":{"s3:prefix":"logs/*"}}}]}`)
-	if _, err := Parse(doc); err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	_, err := Parse(doc)
+	require.NoError(t, err)
+}
+
+func TestParse_AcceptsIAMGroupAdminResource(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:IAMGroupPolicyAttach","Resource":"iam/group/oidc:example:admins"}]}`)
+	_, err := Parse(doc)
+	require.NoError(t, err)
+}
+
+func TestParse_AcceptsIAMPolicyAttachAdminResource(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:IAMPolicyAttach","Resource":"iam/policy/storage-admin/attach/sa/sa-app"}]}`)
+	_, err := Parse(doc)
+	require.NoError(t, err)
+}
+
+func TestParse_AcceptsIAMGroupPolicyAdminResource(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:IAMGroupPolicyAttach","Resource":"iam/group/storage-admins/policy/storage-admin"}]}`)
+	_, err := Parse(doc)
+	require.NoError(t, err)
 }
