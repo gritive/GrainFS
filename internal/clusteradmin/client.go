@@ -157,6 +157,42 @@ func RunCompleteCutover(ctx context.Context, opts CompleteCutoverOptions) error 
 	return nil
 }
 
+// RevokeNodeResponse is returned by POST /v1/cluster/revoke-node.
+type RevokeNodeResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Error   string `json:"error"`
+}
+
+// RevokeNode issues POST /v1/cluster/revoke-node on the admin socket.
+func (c *Client) RevokeNode(ctx context.Context, nodeID string) error {
+	var out RevokeNodeResponse
+	if err := c.Post(ctx, "/v1/cluster/revoke-node", map[string]string{"node_id": nodeID}, &out); err != nil {
+		return err
+	}
+	if out.Error != "" {
+		return fmt.Errorf("server: %s", out.Error)
+	}
+	return nil
+}
+
+// RevokeNodeOptions configures RunRevokeNode.
+type RevokeNodeOptions struct {
+	Endpoint string
+	NodeID   string
+	Out      io.Writer
+}
+
+// RunRevokeNode is the thin-runner entry point for
+// `grainfs cluster revoke-node`.
+func RunRevokeNode(ctx context.Context, opts RevokeNodeOptions) error {
+	if err := NewClient(opts.Endpoint).RevokeNode(ctx, opts.NodeID); err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.Out, "Zero-CA node revoked: %s\n", opts.NodeID)
+	return nil
+}
+
 // Health fetches GET /v1/cluster/health (typed parse).
 func (c *Client) Health(ctx context.Context) (*Health, error) {
 	var h Health

@@ -223,3 +223,40 @@ func TestInviteFSM_PendingThenConsume(t *testing.T) {
 		t.Fatal("second consume must fail (already used)")
 	}
 }
+
+func TestInviteFSM_BurnPendingForNodeConsumesMatchingPending(t *testing.T) {
+	f := newInviteFSM()
+	pub := ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))
+	now := time.Unix(10, 0)
+	s := spki(7)
+	f.applyMint("inv-1", pub, now.Add(time.Hour).UnixNano())
+	if err := f.applyPending("inv-1", "node-2", s, "127.0.0.1:7002", now.UnixNano()); err != nil {
+		t.Fatalf("applyPending: %v", err)
+	}
+
+	if got := f.burnPendingForNode("node-2", s); got != 1 {
+		t.Fatalf("burnPendingForNode burned %d, want 1", got)
+	}
+	if _, ok := f.lookup("inv-1", now); ok {
+		t.Fatal("burned pending invite must not be redeemable")
+	}
+	if _, _, _, ok := f.lookupPending("inv-1"); ok {
+		t.Fatal("burned pending invite must no longer complete Phase-2")
+	}
+}
+
+func TestInviteFSM_PendingSPKIsForNodeFindsPhase1OnlyNode(t *testing.T) {
+	f := newInviteFSM()
+	pub := ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))
+	now := time.Unix(10, 0)
+	s := spki(8)
+	f.applyMint("inv-2", pub, now.Add(time.Hour).UnixNano())
+	if err := f.applyPending("inv-2", "node-pending", s, "127.0.0.1:7008", now.UnixNano()); err != nil {
+		t.Fatalf("applyPending: %v", err)
+	}
+
+	got := f.pendingSPKIsForNode("node-pending")
+	if len(got) != 1 || got[0] != s {
+		t.Fatalf("pendingSPKIsForNode = %v, want [%v]", got, s)
+	}
+}

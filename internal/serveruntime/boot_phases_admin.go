@@ -229,6 +229,13 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 					},
 				}
 				h.POST("/v1/cluster/complete-cutover", wrapStdlibNoParam(completeCutoverH.ServeHTTP))
+
+				revokeNodeH := &RevokeNodeHandler{
+					RunRevoke: func(ctx context.Context, nodeID string) error {
+						return state.metaRaft.RevokeNode(ctx, nodeID, state.quicTransport.ClosePeer)
+					},
+				}
+				h.POST("/v1/cluster/revoke-node", wrapStdlibNoParam(revokeNodeH.ServeHTTP))
 			}
 		},
 	})

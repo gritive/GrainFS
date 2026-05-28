@@ -166,9 +166,19 @@ func (f *MetaFSM) applyRevokePeer(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: decode RevokePeer: %w", err)
 	}
-	if spki, ok := f.peers.remove(nodeID); ok {
-		f.peers.denylist(spki)
+	changed := false
+	if entry, ok := f.peers.remove(nodeID); ok {
+		f.peers.denylist(entry.SPKI)
+		f.invites.burnPendingForNode(nodeID, entry.SPKI)
+		changed = true
 	}
-	f.firePeersChanged()
+	for _, spki := range f.invites.pendingSPKIsForNode(nodeID) {
+		f.peers.denylist(spki)
+		f.invites.burnPendingForNode(nodeID, spki)
+		changed = true
+	}
+	if changed {
+		f.firePeersChanged()
+	}
 	return nil
 }
