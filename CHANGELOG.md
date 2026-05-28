@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.422.0] - 2026-05-29
+## [0.0.424.0] - 2026-05-29
 
 ### Security
 
@@ -28,6 +28,24 @@
   behavior.
 - Added IAM namespace compatibility tests for bucket policy admin actions and
   regression coverage for denied empty protocol credential lists.
+
+## [0.0.423.0] - 2026-05-29
+
+### Security
+
+- Hardened the KEK lease snapshot probe response codec so oversized node IDs
+  are rejected before `node_id_len` is written to the wire.
+- KEK lease snapshot responses now fail closed when bytes remain after the
+  declared node ID, preventing ambiguous trailing data from being accepted.
+
+### Changed
+
+- Removed the completed KEK lease-probe wire codec follow-up from `TODOS.md`.
+
+### Tests
+
+- Added focused codec coverage for oversized node IDs and trailing response
+  bytes, plus kept the production lease-snapshot probe fan-out path covered.
 
 ## [0.0.421.0] - 2026-05-29
 
