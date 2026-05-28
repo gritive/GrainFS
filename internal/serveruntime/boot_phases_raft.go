@@ -298,6 +298,13 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		// rotation window (spec §6 D-rev3 step 3).
 		state.quicTransport.UpdateRegistryAccept(accept)
 	})
+	// Persisted drop bit (spec §8 H3): if a restored snapshot says the cluster
+	// key was dropped (a PR-2 feature; ALWAYS false in PR-1), drop the
+	// cluster-key base on this node too. Dormant in PR-1 — no snapshot carries true.
+	state.metaRaft.FSM().SetOnClusterKeyDropped(func() {
+		state.quicTransport.SetDropped()
+		log.Info().Msg("zero-CA: cluster_key_dropped restored; transport base dropped")
+	})
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).
 	if _, activeSPKI, err := transport.DeriveClusterIdentity(state.transportPSK); err == nil {
