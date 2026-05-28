@@ -3,6 +3,8 @@ package cluster
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func spki(b byte) [32]byte { var s [32]byte; s[0] = b; return s }
@@ -334,4 +336,22 @@ func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRegisterMember_PresentsPerNode_Monotone(t *testing.T) {
+	r := newPeerRegistry()
+	var spki [32]byte
+	spki[0] = 0xAB
+	require.NoError(t, r.registerMember("n1", spki, "addr1", true))  // recorded true
+	require.NoError(t, r.registerMember("n1", spki, "addr1", false)) // restart self-register: false
+	require.True(t, r.byNodeID["n1"].PresentsPerNode, "presents_per_node monotone: true must not regress")
+}
+
+func TestRegisterMember_PresentsPerNode_FalseToTrue(t *testing.T) {
+	r := newPeerRegistry()
+	var spki [32]byte
+	spki[0] = 0xCD
+	require.NoError(t, r.registerMember("n2", spki, "addr2", false))
+	require.NoError(t, r.registerMember("n2", spki, "addr2", true)) // false->true applies
+	require.True(t, r.byNodeID["n2"].PresentsPerNode)
 }

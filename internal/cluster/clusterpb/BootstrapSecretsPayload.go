@@ -129,8 +129,40 @@ func (rcv *BootstrapSecretsPayload) MutateTransportPsk(j int, n byte) bool {
 	return false
 }
 
+func (rcv *BootstrapSecretsPayload) PeerSpkis(obj *SPKIBytes, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *BootstrapSecretsPayload) PeerSpkisLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *BootstrapSecretsPayload) ClusterKeyDropped() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *BootstrapSecretsPayload) MutateClusterKeyDropped(n bool) bool {
+	return rcv._tab.MutateBoolSlot(12, n)
+}
+
 func BootstrapSecretsPayloadStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(5)
 }
 func BootstrapSecretsPayloadAddEncryptionKey(builder *flatbuffers.Builder, encryptionKey flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(encryptionKey), 0)
@@ -149,6 +181,15 @@ func BootstrapSecretsPayloadAddTransportPsk(builder *flatbuffers.Builder, transp
 }
 func BootstrapSecretsPayloadStartTransportPskVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
+}
+func BootstrapSecretsPayloadAddPeerSpkis(builder *flatbuffers.Builder, peerSpkis flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(peerSpkis), 0)
+}
+func BootstrapSecretsPayloadStartPeerSpkisVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func BootstrapSecretsPayloadAddClusterKeyDropped(builder *flatbuffers.Builder, clusterKeyDropped bool) {
+	builder.PrependBoolSlot(4, clusterKeyDropped, false)
 }
 func BootstrapSecretsPayloadEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
