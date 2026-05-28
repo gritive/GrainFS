@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.391.0] - 2026-05-28
+
+### Changed
+
+- Internal: zero-CA cluster-key cutover scaffolding — transport identity composer
+  pin/drop modes, dormant conn-recycle API, monotone per-node readiness, a
+  persisted `cluster_key_dropped` snapshot bit, and forward-compat bootstrap wire
+  fields. No user-facing behavior change; the live per-node cutover ships in a
+  follow-up.
+
 ## [0.0.390.0] - 2026-05-28
 
 ### Security
