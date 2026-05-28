@@ -78,6 +78,14 @@ func (f *MetaFSM) PeerNodeIDToSPKI() map[string][32]byte {
 	return f.peers.nodeIDToSPKI()
 }
 
+// PeerRaftAddrToSPKI returns a snapshot of the raftAddr→SPKI map for all
+// registered peers. Use this (not PeerNodeIDToSPKI) when cross-referencing
+// a voter list from EffectiveConfiguration — production raft server IDs are
+// QUIC addresses, not node UUIDs. Safe for concurrent use.
+func (f *MetaFSM) PeerRaftAddrToSPKI() map[string][32]byte {
+	return f.peers.raftAddrToSPKI()
+}
+
 // ClusterKeyDropped reports whether the cluster-key-drop has been committed
 // in the raft log. Safe for concurrent use.
 func (f *MetaFSM) ClusterKeyDropped() bool {

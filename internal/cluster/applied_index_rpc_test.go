@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func TestWaitVotersApplied_AllReady(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := WaitVotersApplied(ctx, 50, []string{"A", "B", "self"}, "self",
-		func() uint64 { return 50 }, dialer, 10*time.Millisecond)
+		func() uint64 { return 50 }, dialer, nil, 10*time.Millisecond)
 	require.NoError(t, err)
 }
 
@@ -92,7 +93,7 @@ func TestWaitVotersApplied_LaggingSelfShortcut(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := WaitVotersApplied(ctx, 100, []string{"A", "self"}, "self", localFn, dialer, 20*time.Millisecond)
+	err := WaitVotersApplied(ctx, 100, []string{"A", "self"}, "self", localFn, dialer, nil, 20*time.Millisecond)
 	require.NoError(t, err)
 	require.Equal(t, 0, selfCalls, "dialer must not be called for self")
 }
@@ -108,7 +109,27 @@ func TestWaitVotersApplied_TimeoutOnLaggard(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	err := WaitVotersApplied(ctx, 100, []string{"fast", "slow"}, "self",
-		func() uint64 { return 100 }, dialer, 20*time.Millisecond)
+		func() uint64 { return 100 }, dialer, nil, 20*time.Millisecond)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "slow")
+}
+
+func TestWaitVotersApplied_CheckNodeID_Mismatch(t *testing.T) {
+	// checkNodeID returns error when the response nodeID doesn't match the
+	// voter address mapping — simulates a wrong-peer response.
+	dialer := func(_ context.Context, peer string, _ []byte) ([]byte, error) {
+		return encodeAppliedIndexResp(AppliedIndexResp{NodeID: "wrong-node", LastApplied: 100}), nil
+	}
+	checker := func(voter, nodeID string) error {
+		if nodeID == "wrong-node" {
+			return fmt.Errorf("applied_index_probe: peer %s returned unexpected nodeID %q", voter, nodeID)
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := WaitVotersApplied(ctx, 100, []string{"peer-addr"}, "self",
+		func() uint64 { return 100 }, dialer, checker, 20*time.Millisecond)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong-node")
 }

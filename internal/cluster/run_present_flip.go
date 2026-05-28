@@ -23,7 +23,10 @@ import (
 // QUICTransport. Production wires:
 //
 //	Voters:           NewMetaRaftConfigReader(metaRaft).EffectiveConfiguration
-//	RegistrySPKIs:    func() map[string][32]byte { return metaFSM.PeerNodeIDToSPKI() }
+//	RegistrySPKIs:    func() map[string][32]byte { return metaFSM.PeerRaftAddrToSPKI() }
+//	  NOTE: EffectiveConfiguration returns raft server IDs (= QUIC addresses in
+//	  production, set via MetaRaftConfig.RaftID). RegistrySPKIs MUST use the same
+//	  key space — PeerRaftAddrToSPKI(), NOT PeerNodeIDToSPKI().
 //	ProposeWithIndex: func(ctx, typ, payload) (uint64, error) that wraps
 //	                  encodeMetaCmd(typ, payload) + m.node.ProposeWait(ctx, env)
 //	WaitVoters:       func(ctx, idx, voters) error that wraps WaitVotersApplied
@@ -36,8 +39,19 @@ type PresentFlipDeps struct {
 }
 
 // RunPresentFlip executes the cutover flow described in §8c + §8e.
-func RunPresentFlip(ctx context.Context, deps PresentFlipDeps, _ time.Duration) error {
+func RunPresentFlip(ctx context.Context, deps PresentFlipDeps, timeout time.Duration) error {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	voters, configIdx := deps.Voters()
+
+	// §8e: refuse on empty voter set — raft not yet initialized or config unreadable.
+	if len(voters) == 0 {
+		return fmt.Errorf("RunPresentFlip: empty voter set — raft configuration not initialized")
+	}
 
 	// §8e single-node refuse.
 	if len(voters) == 1 && voters[0] == deps.SelfID {

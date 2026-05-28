@@ -10,6 +10,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRunPresentFlip_EmptyVoterSetRefuse(t *testing.T) {
+	deps := PresentFlipDeps{
+		SelfID: "node-A",
+		Voters: func() ([]string, uint64) { return []string{}, 0 },
+		RegistrySPKIs: func() map[string][32]byte {
+			t.Fatal("RegistrySPKIs must NOT be called on empty voter set")
+			return nil
+		},
+		ProposeWithIndex: func(_ context.Context, _ MetaCmdType, _ []byte) (uint64, error) {
+			t.Fatal("ProposeWithIndex must NOT be called on empty voter set")
+			return 0, nil
+		},
+		WaitVoters: func(_ context.Context, _ uint64, _ []string) error {
+			t.Fatal("WaitVoters must NOT be called on empty voter set")
+			return nil
+		},
+	}
+	err := RunPresentFlip(context.Background(), deps, time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty voter set")
+}
+
 func TestRunPresentFlip_SingleNodeRefuse(t *testing.T) {
 	deps := PresentFlipDeps{
 		SelfID:        "node-A",

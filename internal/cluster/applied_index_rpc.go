@@ -98,6 +98,11 @@ type AppliedIndexDialer func(ctx context.Context, peer string, payload []byte) (
 // an error naming the slowest voter on context cancel (fail-safe — the caller
 // MUST NOT propose Begin on error).
 //
+// checkNodeID, if non-nil, is called with (voterAddr, resp.NodeID) for each
+// remote response. Return a non-nil error to reject a response — use this to
+// verify that the responder's identity matches the expected peer. Pass nil to
+// skip verification (transport-level TLS auth alone suffices in most cases).
+//
 // pollInterval bounds re-request cadence per voter. 100ms is a sane default
 // vs meta-raft heartbeat 150ms (well below).
 func WaitVotersApplied(
@@ -107,6 +112,7 @@ func WaitVotersApplied(
 	selfID string,
 	localLastApplied func() uint64,
 	dialer AppliedIndexDialer,
+	checkNodeID func(voter, nodeID string) error,
 	pollInterval time.Duration,
 ) error {
 	if pollInterval <= 0 {
@@ -133,6 +139,13 @@ func WaitVotersApplied(
 					r, perr := decodeAppliedIndexResp(resp)
 					if perr != nil {
 						err = perr
+					} else if checkNodeID != nil {
+						if cerr := checkNodeID(v, r.NodeID); cerr != nil {
+							// Identity mismatch: fail-fast, do not retry.
+							return cerr
+						} else {
+							la = r.LastApplied
+						}
 					} else {
 						la = r.LastApplied
 					}

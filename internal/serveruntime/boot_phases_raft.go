@@ -296,7 +296,13 @@ func buildOnPresentFlipCallback(st *bootState, tr presentFlipTarget) func() {
 	}
 	return func() {
 		if st.perNodeCert.Certificate == nil {
-			log.Warn().Msg("onPresentFlip: bootState.perNodeCert empty at invocation — skipping flip")
+			// perNodeCert is nil in invite-join mode until bootInviteJoinPhase2
+			// sets it. In normal operation, BeginPresentFlip can only be applied
+			// AFTER the node is a voter (Phase 2 complete), so this branch
+			// should not trigger. If it does, the cluster-wide flip proceeds but
+			// THIS node still presents the old CA cert — operators must re-run
+			// the cutover or restart the node.
+			log.Error().Msg("onPresentFlip: perNodeCert not loaded at flip time — node will not flip; restart to recover")
 			return
 		}
 		tr.FlipPresent(st.perNodeCert, st.perNodeSPKI)
