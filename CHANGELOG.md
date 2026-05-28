@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.415.0] - 2026-05-28
+
+### Added
+
+- Added `data_groups` to cluster health output so operators can see
+  per-data-group Raft leader, term, commit, log, and peer replication lag
+  without reconstructing state from server logs.
+- Added health issue reporting for unwired, leaderless, and lagging data groups,
+  plus unit, golden-wire, and e2e coverage for the new health surface.
+
+### Changed
+
+- Updated the operator runbook with a `data_groups` cluster-health check for
+  diagnosing data-Raft group leadership and replication progress.
+
 ## [0.0.413.1] - 2026-05-28
 
 ### Added
