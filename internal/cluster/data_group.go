@@ -103,6 +103,74 @@ func (m *DataGroupManager) LeaderIDs() map[string]string {
 	return out
 }
 
+// DataGroupRaftHealth is an immutable operator-facing snapshot of one data
+// group's local Raft progress. Server packages map this internal shape to
+// closed wire structs in adminapi.
+type DataGroupRaftHealth struct {
+	GroupID        string
+	PeerIDs        []string
+	LocalState     string
+	LeaderID       string
+	Term           uint64
+	CommitIndex    uint64
+	LastLogIndex    uint64
+	PeerMatchIndex map[string]uint64
+	MaxPeerLag     uint64
+	Issues         []string
+}
+
+// RaftHealthSnapshot returns a deterministic snapshot of every known data
+// group. Placeholder/unwired groups are included so operators can see topology
+// that has not reached the data-Raft layer yet.
+func (m *DataGroupManager) RaftHealthSnapshot() []DataGroupRaftHealth {
+	snap := m.snap.Load()
+	out := make([]DataGroupRaftHealth, 0, len(snap.all))
+	for _, dg := range snap.all {
+		if dg == nil {
+			continue
+		}
+		row := DataGroupRaftHealth{
+			GroupID: dg.id,
+			PeerIDs: append([]string(nil), dg.peerIDs...),
+		}
+		if dg.backend == nil || dg.backend.Node() == nil {
+			row.Issues = append(row.Issues, "unwired")
+			out = append(out, row)
+			continue
+		}
+		node := dg.backend.Node()
+		row.LocalState = node.State().String()
+		row.LeaderID = node.LeaderID()
+		row.Term = node.Term()
+		row.CommitIndex = node.CommittedIndex()
+		row.LastLogIndex = node.LastLogIndex()
+		if row.LeaderID == "" {
+			row.Issues = append(row.Issues, "leaderless")
+		}
+		if len(dg.peerIDs) > 0 {
+			row.PeerMatchIndex = make(map[string]uint64, len(dg.peerIDs))
+			for _, peer := range dg.peerIDs {
+				match, ok := node.PeerMatchIndex(peer)
+				if !ok {
+					continue
+				}
+				row.PeerMatchIndex[peer] = match
+				if row.CommitIndex > match {
+					lag := row.CommitIndex - match
+					if lag > row.MaxPeerLag {
+						row.MaxPeerLag = lag
+					}
+				}
+			}
+			if row.MaxPeerLag > 0 {
+				row.Issues = append(row.Issues, "peer_lag")
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 // GroupForBucket resolves a bucket to its DataGroup via the supplied router.
 // Returns (nil, false) if router is nil, the bucket has no assignment and no
 // default group is set, or the assigned group has been removed from the manager.

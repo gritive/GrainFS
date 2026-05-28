@@ -1,14 +1,33 @@
 {
-  "mode": "cluster",
+  "data_groups": {
+    "groups": [
+      {
+        "commit_index": 1204,
+        "group_id": "g1",
+        "last_log_index": 1204,
+        "leader_id": "n1",
+        "local_state": "Leader",
+        "peer_ids": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "peer_match_index": {
+          "n1": 1204,
+          "n2": 1204,
+          "n3": 1204
+        },
+        "term": 7
+      }
+    ],
+    "healthy": 1,
+    "lagging": 0,
+    "leaderless": 0,
+    "total": 1
+  },
   "degraded": false,
   "leader_id": "n1",
-  "term": 7,
-  "quorum": {
-    "voters_total": 3,
-    "alive_count": 3,
-    "required": 2,
-    "healthy": true
-  },
+  "mode": "cluster",
   "peers": [
     {
       "peer_id": "n1",
@@ -16,13 +35,20 @@
     },
     {
       "peer_id": "n2",
-      "state": "live",
-      "raft_addr": "10.0.0.2:7001"
+      "raft_addr": "10.0.0.2:7001",
+      "state": "live"
     },
     {
       "peer_id": "n3",
-      "state": "live",
-      "raft_addr": "10.0.0.3:7001"
+      "raft_addr": "10.0.0.3:7001",
+      "state": "live"
     }
-  ]
+  ],
+  "quorum": {
+    "alive_count": 3,
+    "healthy": true,
+    "required": 2,
+    "voters_total": 3
+  },
+  "term": 7
 }

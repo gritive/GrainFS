@@ -32,5 +32,21 @@ func deriveIssues(h Health, hasConfiguredPeers bool) []string {
 	if h.Degraded {
 		issues = append(issues, "EC degraded mode")
 	}
+	if h.DataGroups != nil {
+		for _, g := range h.DataGroups.Groups {
+			for _, issue := range g.Issues {
+				switch issue {
+				case "unwired":
+					issues = append(issues, fmt.Sprintf("data group %s unwired", g.GroupID))
+				case "leaderless":
+					issues = append(issues, fmt.Sprintf("data group %s leaderless", g.GroupID))
+				case "peer_lag":
+					issues = append(issues, fmt.Sprintf("data group %s peer replication lag %d", g.GroupID, g.MaxPeerLag))
+				default:
+					issues = append(issues, fmt.Sprintf("data group %s %s", g.GroupID, issue))
+				}
+			}
+		}
+	}
 	return issues
 }

@@ -406,12 +406,13 @@ func (r *RaftClusterInfo) LivePeers() []string {
 // type-asserted mini-interfaces formerly used by the server package.
 func (r *RaftClusterInfo) Snapshot() cluster.ClusterStatus {
 	return cluster.ClusterStatus{
-		PeerSnapshot:      r.PeerSnapshot(),
-		PeerAddrs:         r.PeerAddrs(),
-		PeerStates:        r.PeerStates(),
-		BucketAssignments: r.BucketAssignments(),
-		ShardGroups:       r.ShardGroups(),
-		ShardGroupLeaders: r.ShardGroupLeaders(),
+		PeerSnapshot:        r.PeerSnapshot(),
+		PeerAddrs:           r.PeerAddrs(),
+		PeerStates:          r.PeerStates(),
+		BucketAssignments:   r.BucketAssignments(),
+		ShardGroups:         r.ShardGroups(),
+		ShardGroupLeaders:   r.ShardGroupLeaders(),
+		DataGroupRaftHealth: r.DataGroupRaftHealth(),
 	}
 }
 
@@ -540,6 +541,13 @@ func (r *RaftClusterInfo) ShardGroupLeaders() map[string]string {
 		out[groupID] = leaderID
 	}
 	return out
+}
+
+func (r *RaftClusterInfo) DataGroupRaftHealth() []cluster.DataGroupRaftHealth {
+	if r.dgMgr == nil {
+		return nil
+	}
+	return r.dgMgr.RaftHealthSnapshot()
 }
 
 func (r *RaftClusterInfo) ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
@@ -31,6 +32,46 @@ func TestMapPeerHealthRows_KnownAndUnknownStates(t *testing.T) {
 	require.Equal(t, "configured", got[4].State)
 	// Unknown future state passes through verbatim — visible to operators.
 	require.Equal(t, "future_state", got[5].State)
+}
+
+func TestBuildClusterHealth_IncludesDataGroupRaftHealth(t *testing.T) {
+	info := &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		term:     7,
+		leaderID: "n1",
+		peers:    []string{"n2", "n3"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n2", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+			{PeerID: "n3", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive},
+		},
+		status: cluster.ClusterStatus{
+			DataGroupRaftHealth: []cluster.DataGroupRaftHealth{
+				{
+					GroupID:        "group-1",
+					PeerIDs:        []string{"n1", "n2", "n3"},
+					LocalState:     "Follower",
+					LeaderID:       "n2",
+					Term:           8,
+					CommitIndex:    1204,
+					LastLogIndex:   1204,
+					PeerMatchIndex: map[string]uint64{"n1": 1204, "n2": 1204, "n3": 1200},
+					MaxPeerLag:     4,
+					Issues:         []string{"peer_lag"},
+				},
+			},
+		},
+	}
+
+	h := buildClusterHealth(info, false)
+	require.NotNil(t, h.DataGroups)
+	require.Equal(t, 1, h.DataGroups.Total)
+	require.Equal(t, 0, h.DataGroups.Healthy)
+	require.Equal(t, 1, h.DataGroups.Lagging)
+	require.Len(t, h.DataGroups.Groups, 1)
+	require.Equal(t, "group-1", h.DataGroups.Groups[0].GroupID)
+	require.Equal(t, uint64(4), h.DataGroups.Groups[0].MaxPeerLag)
 }
 
 func TestDeriveIssues_LocalMode_WithConfiguredPeers(t *testing.T) {
@@ -110,4 +151,34 @@ func TestDeriveIssues_DegradedFlag(t *testing.T) {
 	}
 	issues := deriveIssues(h, true)
 	require.Contains(t, issues, "EC degraded mode")
+}
+
+func TestDeriveIssues_DataGroupLeaderless(t *testing.T) {
+	h := Health{
+		Mode:   "cluster",
+		Quorum: QuorumInfo{VotersTotal: 3, AliveCount: 3, Required: 2, Healthy: true},
+		DataGroups: &adminapi.DataGroupHealthSummary{
+			Total:      1,
+			Leaderless: 1,
+			Groups: []adminapi.DataGroupHealthRow{
+				{GroupID: "group-2", Issues: []string{"leaderless"}},
+			},
+		},
+	}
+	require.Contains(t, deriveIssues(h, true), "data group group-2 leaderless")
+}
+
+func TestDeriveIssues_DataGroupPeerLag(t *testing.T) {
+	h := Health{
+		Mode:   "cluster",
+		Quorum: QuorumInfo{VotersTotal: 3, AliveCount: 3, Required: 2, Healthy: true},
+		DataGroups: &adminapi.DataGroupHealthSummary{
+			Total:   1,
+			Lagging: 1,
+			Groups: []adminapi.DataGroupHealthRow{
+				{GroupID: "group-3", MaxPeerLag: 421, Issues: []string{"peer_lag"}},
+			},
+		},
+	}
+	require.Contains(t, deriveIssues(h, true), "data group group-3 peer replication lag 421")
 }

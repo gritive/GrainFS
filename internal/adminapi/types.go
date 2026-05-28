@@ -417,13 +417,14 @@ type ShardGroup struct {
 
 // Health mirrors GET /v1/cluster/health.
 type Health struct {
-	Mode     string          `json:"mode"`
-	Degraded bool            `json:"degraded"`
-	LeaderID string          `json:"leader_id,omitempty"`
-	Term     uint64          `json:"term,omitempty"`
-	Quorum   QuorumInfo      `json:"quorum"`
-	Peers    []PeerHealthRow `json:"peers,omitempty"`
-	Issues   []string        `json:"issues,omitempty"`
+	Mode       string                  `json:"mode"`
+	Degraded   bool                    `json:"degraded"`
+	LeaderID   string                  `json:"leader_id,omitempty"`
+	Term       uint64                  `json:"term,omitempty"`
+	Quorum     QuorumInfo              `json:"quorum"`
+	Peers      []PeerHealthRow         `json:"peers,omitempty"`
+	DataGroups *DataGroupHealthSummary `json:"data_groups,omitempty"`
+	Issues     []string                `json:"issues,omitempty"`
 }
 
 // QuorumInfo summarises voter health for Health.Quorum.
@@ -439,6 +440,29 @@ type PeerHealthRow struct {
 	PeerID   string `json:"peer_id"`
 	State    string `json:"state"`
 	RaftAddr string `json:"raft_addr,omitempty"`
+}
+
+// DataGroupHealthSummary summarises data-Raft group progress for Health.
+type DataGroupHealthSummary struct {
+	Total      int                  `json:"total"`
+	Healthy    int                  `json:"healthy"`
+	Leaderless int                  `json:"leaderless"`
+	Lagging    int                  `json:"lagging"`
+	Groups     []DataGroupHealthRow `json:"groups,omitempty"`
+}
+
+// DataGroupHealthRow is one data-Raft group health row.
+type DataGroupHealthRow struct {
+	GroupID        string            `json:"group_id"`
+	PeerIDs        []string          `json:"peer_ids,omitempty"`
+	LocalState     string            `json:"local_state,omitempty"`
+	LeaderID       string            `json:"leader_id,omitempty"`
+	Term           uint64            `json:"term,omitempty"`
+	CommitIndex    uint64            `json:"commit_index,omitempty"`
+	LastLogIndex   uint64            `json:"last_log_index,omitempty"`
+	PeerMatchIndex map[string]uint64 `json:"peer_match_index,omitempty"`
+	MaxPeerLag     uint64            `json:"max_peer_lag,omitempty"`
+	Issues         []string          `json:"issues,omitempty"`
 }
 
 // PlacementReport mirrors GET /v1/cluster/placement.

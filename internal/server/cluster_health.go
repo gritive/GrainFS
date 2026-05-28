@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // Health, QuorumInfo, PeerHealthRow are the wire types for GET /v1/cluster/health.
@@ -45,8 +46,10 @@ func buildClusterHealth(info ClusterInfo, degraded bool) Health {
 		peers := info.Peers()
 		hasConfiguredPeers = len(peers) > 0
 
+		snap := info.Snapshot()
+
 		// Prefer typed peer_snapshot evidence when available.
-		rows := info.Snapshot().PeerSnapshot
+		rows := snap.PeerSnapshot
 		if len(rows) > 0 {
 			h.Peers = mapPeerHealthRows(rows)
 		} else {
@@ -74,7 +77,56 @@ func buildClusterHealth(info ClusterInfo, degraded bool) Health {
 			Required:    required,
 			Healthy:     aliveCount >= required,
 		}
+		h.DataGroups = mapDataGroupHealthRows(snap.DataGroupRaftHealth)
 	}
 	h.Issues = deriveIssues(h, hasConfiguredPeers)
 	return h
+}
+
+func mapDataGroupHealthRows(rows []cluster.DataGroupRaftHealth) *adminapi.DataGroupHealthSummary {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := &adminapi.DataGroupHealthSummary{
+		Total:  len(rows),
+		Groups: make([]adminapi.DataGroupHealthRow, 0, len(rows)),
+	}
+	for _, r := range rows {
+		row := adminapi.DataGroupHealthRow{
+			GroupID:        r.GroupID,
+			PeerIDs:        append([]string(nil), r.PeerIDs...),
+			LocalState:     r.LocalState,
+			LeaderID:       r.LeaderID,
+			Term:           r.Term,
+			CommitIndex:    r.CommitIndex,
+			LastLogIndex:   r.LastLogIndex,
+			PeerMatchIndex: cloneUint64Map(r.PeerMatchIndex),
+			MaxPeerLag:     r.MaxPeerLag,
+			Issues:         append([]string(nil), r.Issues...),
+		}
+		if len(r.Issues) == 0 {
+			out.Healthy++
+		}
+		for _, issue := range r.Issues {
+			switch issue {
+			case "leaderless", "unwired":
+				out.Leaderless++
+			case "peer_lag":
+				out.Lagging++
+			}
+		}
+		out.Groups = append(out.Groups, row)
+	}
+	return out
+}
+
+func cloneUint64Map(in map[string]uint64) map[string]uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
