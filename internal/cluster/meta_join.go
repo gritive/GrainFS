@@ -237,20 +237,6 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 		// task and is intentionally NOT implemented here.
 		return joinMessage(r.notLeaderReply())
 	}
-	// Invite admission path (zero-CA Phase 2, §4.2). A brand-new node with no
-	// pre-shared KEK presents an invite signature + its per-node ECDSA cert.
-	// Path A: the leaf cert DER travels IN the request (the join handler does
-	// not expose the TLS session). The two-phase flow (W7) is delegated to
-	// HandleJoin. This in-process Handle entry has no TLS session, so it passes
-	// the CLAIMED SPKI as the captured SPKI; W9's JoinListener calls HandleJoin
-	// directly with the real TLS-captured SPKI.
-	if len(joinReq.InviteSig) > 0 {
-		var captured [32]byte
-		copy(captured[:], joinReq.SPKI)
-		ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
-		defer cancel()
-		return joinMessage(r.HandleJoin(ctx, captured, joinReq))
-	}
 	// KEK handshake gate. Runs after the leader check so non-leaders return
 	// JoinStatusNotLeader without consuming a nonce on the leader's verifier
 	// (saves nonce churn on follower retries). §7 T55 (D#15, F#23).
@@ -315,7 +301,7 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 //   - Phase-2 (req.JoinPhase==2): match the ACK against the pending binding AND
 //     capturedSPKI, stage membership (idempotently), run the post-join hook, and
 //     consume the invite. On membership failure, leave pending state retryable.
-func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte, req JoinRequest) JoinReply {
+func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte, bind []byte, req JoinRequest) JoinReply {
 	if len(r.clusterID) == 0 {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"}
 	}
@@ -336,7 +322,7 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 	default:
 		// Phase-1 (and any legacy invite request that omits join_phase): gate +
 		// seal, no membership.
-		return r.handleJoinPhase1(ctx, capturedSPKI, spki, req)
+		return r.handleJoinPhase1(ctx, capturedSPKI, spki, bind, req)
 	}
 }
 
@@ -347,7 +333,7 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 // direction, carrying the magic-prefixed FlatBuffers JoinRequest/JoinReply blob.
 // stream is typically a *quic.Stream (io.ReadWriteCloser); the caller owns
 // closing the underlying connection.
-func (r *MetaJoinReceiver) HandleJoinStream(ctx context.Context, peerSPKI [32]byte, stream io.ReadWriteCloser) {
+func (r *MetaJoinReceiver) HandleJoinStream(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 	defer func() { _ = stream.Close() }()
 	fields, err := transport.JoinReadFields(stream, 1)
 	if err != nil {
@@ -368,7 +354,7 @@ func (r *MetaJoinReceiver) HandleJoinStream(ctx context.Context, peerSPKI [32]by
 		r.writeJoinReply(stream, r.notLeaderReply())
 		return
 	}
-	r.writeJoinReply(stream, r.HandleJoin(ctx, peerSPKI, req))
+	r.writeJoinReply(stream, r.HandleJoin(ctx, peerSPKI, bind, req))
 }
 
 // notLeaderReply builds the JoinStatusNotLeader reply with the best-effort
@@ -407,7 +393,7 @@ func (r *MetaJoinReceiver) writeJoinReply(w io.Writer, reply JoinReply) {
 // gateInvite runs the invite admission gate shared by Phase-1 (and re-checked
 // before membership at Phase-2). It returns the joiner's ECDSA identity key on
 // success, or a populated rejection reply (ok=false).
-func (r *MetaJoinReceiver) gateInvite(spki [32]byte, req JoinRequest) (*ecdsa.PublicKey, JoinReply, bool) {
+func (r *MetaJoinReceiver) gateInvite(spki [32]byte, bind []byte, req JoinRequest) (*ecdsa.PublicKey, JoinReply, bool) {
 	// 1. denylist + SPKI uniqueness.
 	if r.meta.IsSPKIDenylisted(spki) {
 		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "SPKI denylisted"}, false
@@ -432,18 +418,21 @@ func (r *MetaJoinReceiver) gateInvite(spki [32]byte, req JoinRequest) (*ecdsa.Pu
 	if !ok {
 		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "non-ECDSA node key"}, false
 	}
-	// 4. rebuild canonical transcript. Bind is empty — Path A defers the
-	// TLS-exporter channel binding; the nonce is joiner-generated, carried in
-	// HandshakeNonce, and bound by both signatures.
-	// TODO(phase-2-followup): Path A deferred TLS-exporter channel binding
-	// (Bind) + server-issued nonce freshness; see design doc.
+	// 4. Mandatory TLS-exporter channel binding: the transcript both peers signed
+	// is bound to this join-listener TLS session. A mismatched bind fails
+	// signature verification below; an absent/short bind is rejected here so a
+	// direct/fake caller of this internal API cannot supply a degenerate value.
+	// Enforce the EXACT exporter length, not merely non-empty.
+	if len(bind) != transport.JoinBindingLen {
+		return nil, JoinReply{Accepted: false, Status: JoinStatusError, Message: "channel binding required"}, false
+	}
 	tr := encrypt.InviteTranscript{
 		ClusterID: r.clusterID,
 		Nonce:     req.HandshakeNonce,
 		NodeID:    req.NodeID,
 		Address:   req.Address,
 		SPKI:      req.SPKI,
-		Bind:      nil,
+		Bind:      bind,
 	}
 	// 5. verify BOTH signatures over the same transcript.
 	if !encrypt.VerifyInviteTranscript(invitePub, tr, req.InviteSig) {
@@ -455,8 +444,8 @@ func (r *MetaJoinReceiver) gateInvite(spki [32]byte, req JoinRequest) (*ecdsa.Pu
 	return ecPub, JoinReply{}, true
 }
 
-func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, spki [32]byte, req JoinRequest) JoinReply {
-	ecPub, reject, ok := r.gateInvite(spki, req)
+func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, spki [32]byte, bind []byte, req JoinRequest) JoinReply {
+	ecPub, reject, ok := r.gateInvite(spki, bind, req)
 	if !ok {
 		return reject
 	}
