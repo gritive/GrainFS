@@ -100,3 +100,39 @@ func TestRunDropClusterKey_ProposeErrorPropagates(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "leader not available")
 }
+
+func TestJoinViaInviteWaitsForMembershipLock(t *testing.T) {
+	m := &MetaRaft{
+		node: &dropLockStubNode{},
+		fsm:  NewMetaFSM(),
+	}
+	m.membershipMu.Lock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- m.JoinViaInvite(context.Background(), "node-B", "addr-B", [32]byte{0xBB}, "invite-1")
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("JoinViaInvite returned while membership lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	m.membershipMu.Unlock()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not leader")
+	case <-time.After(time.Second):
+		t.Fatal("JoinViaInvite did not continue after membership lock was released")
+	}
+}
+
+type dropLockStubNode struct {
+	applyChCloseStubNode
+}
+
+func (s *dropLockStubNode) ProposeWait(context.Context, []byte) (uint64, error) {
+	return 0, fmt.Errorf("not leader")
+}
