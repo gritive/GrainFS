@@ -35,7 +35,7 @@ func TestMetaRaftRevokeNode_PendingOnlyBurnsAndDenylists(t *testing.T) {
 	}))
 
 	require.True(t, m.IsSPKIDenylisted(s))
-	_, _, _, ok := m.LookupPending("inv-pending")
+	_, _, _, ok := m.LookupPending("inv-pending", time.Now())
 	require.False(t, ok, "revoke must burn stale Phase-1 pending redemption")
 }
 

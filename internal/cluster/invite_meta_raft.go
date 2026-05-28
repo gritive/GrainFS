@@ -51,7 +51,11 @@ func (m *MetaRaft) ProposeInvitePending(ctx context.Context, inviteID, nodeID st
 // The current timestamp is stamped into the command here so that all replicas
 // apply the same value — time.Now() must not be called in the FSM apply path.
 func (m *MetaRaft) ProposeInviteConsume(ctx context.Context, id string) error {
-	payload, err := encodeInviteConsumeCmd(id, time.Now().UnixNano())
+	return m.ProposeInviteConsumeAt(ctx, id, time.Now())
+}
+
+func (m *MetaRaft) ProposeInviteConsumeAt(ctx context.Context, id string, consumedAt time.Time) error {
+	payload, err := encodeInviteConsumeCmd(id, consumedAt.UnixNano())
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode InviteConsume: %w", err)
 	}

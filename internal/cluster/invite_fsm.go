@@ -23,6 +23,19 @@ type inviteRecord struct {
 	pendingAtNanos int64
 }
 
+const (
+	// MaxInviteTTL bounds how long a minted invite can keep admission authority
+	// and how long expired/used invite records may remain retained for retry
+	// idempotency before deterministic FSM pruning removes them.
+	MaxInviteTTL = 24 * time.Hour
+
+	// MaxActiveInvites bounds replicated invite state so a faulty admin client
+	// cannot grow every replica's FSM heap without limit.
+	MaxActiveInvites = 4096
+)
+
+var errInviteLimitExceeded = errors.New("invite registry limit exceeded")
+
 // inviteFSM is the deterministic invite registry applied from the Raft log.
 // Keyed by invite-id; stores the invite PUBLIC key (private key never reaches
 // the server). All mutations come from applied commands so replicas converge.
@@ -35,10 +48,15 @@ func newInviteFSM() *inviteFSM {
 	return &inviteFSM{records: make(map[string]inviteRecord)}
 }
 
-func (f *inviteFSM) applyMint(id string, pub ed25519.PublicKey, expiryNanos int64) {
+func (f *inviteFSM) applyMint(id string, pub ed25519.PublicKey, expiryNanos int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pruneLocked(expiryNanos - int64(MaxInviteTTL))
+	if _, exists := f.records[id]; !exists && len(f.records) >= MaxActiveInvites {
+		return errInviteLimitExceeded
+	}
 	f.records[id] = inviteRecord{pub: append(ed25519.PublicKey(nil), pub...), expiryNanos: expiryNanos}
+	return nil
 }
 
 func (f *inviteFSM) lookup(id string, now time.Time) (ed25519.PublicKey, bool) {
@@ -69,6 +87,7 @@ var errInvitePendingMismatch = errors.New("invite already pending for a differen
 func (f *inviteFSM) applyPending(id string, nodeID string, spki [32]byte, addr string, nowNanos int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pruneLocked(nowNanos)
 	r, ok := f.records[id]
 	if !ok || r.used || nowNanos >= r.expiryNanos {
 		return errInviteInvalid
@@ -96,14 +115,22 @@ func (f *inviteFSM) applyPending(id string, nodeID string, spki [32]byte, addr s
 
 // lookupPending returns the bound (nodeID, spki, addr) when the invite has a
 // Phase-1 pending-redemption record; ok is false otherwise.
-func (f *inviteFSM) lookupPending(id string) (nodeID string, spki [32]byte, addr string, ok bool) {
+func (f *inviteFSM) lookupPending(id string, now time.Time) (nodeID string, spki [32]byte, addr string, ok bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	r, present := f.records[id]
-	if !present || r.pendingAtNanos == 0 {
+	if !present || r.pendingAtNanos == 0 || now.UnixNano() >= r.expiryNanos {
 		return "", [32]byte{}, "", false
 	}
 	return r.pendingNodeID, r.pendingSPKI, r.pendingAddr, true
+}
+
+func (f *inviteFSM) pruneLocked(nowNanos int64) {
+	for id, r := range f.records {
+		if nowNanos >= r.expiryNanos {
+			delete(f.records, id)
+		}
+	}
 }
 
 func (f *inviteFSM) pendingSPKIsForNode(nodeID string) [][32]byte {
@@ -149,6 +176,7 @@ func (f *inviteFSM) burnPendingForNode(nodeID string, spki [32]byte) int {
 func (f *inviteFSM) applyConsume(id string, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pruneLocked(now.UnixNano())
 	r, ok := f.records[id]
 	if !ok || r.used || now.UnixNano() >= r.expiryNanos {
 		return errInviteInvalid
@@ -164,7 +192,9 @@ func (f *MetaFSM) applyInviteMint(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: decode InviteMint: %w", err)
 	}
-	f.invites.applyMint(id, pub, expiryNanos)
+	if err := f.invites.applyMint(id, pub, expiryNanos); err != nil {
+		return fmt.Errorf("meta_fsm: InviteMint %q: %w", id, err)
+	}
 	return nil
 }
 

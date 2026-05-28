@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 
@@ -178,7 +179,7 @@ func TestHandleJoin_Phase1_Valid_SealsBootstrapNoMembership(t *testing.T) {
 	require.Equal(t, uint32(1), gens[0].Gen)
 
 	// pending binding persisted.
-	node, pendSPKI, _, ok := fx.leader.LookupPending(fx.inviteID)
+	node, pendSPKI, _, ok := fx.leader.LookupPending(fx.inviteID, time.Now())
 	require.True(t, ok)
 	require.Equal(t, "node-b", node)
 	require.Equal(t, fx.spki, pendSPKI)
@@ -401,6 +402,52 @@ func TestHandleJoin_Phase2_CapturedSPKIMismatch_Rejected(t *testing.T) {
 
 	// No membership staged.
 	require.False(t, fsmHasNode(fx.leader, "node-b"))
+}
+
+func TestHandleJoin_Phase2_RejectsExpiredPendingInvite(t *testing.T) {
+	fx, _ := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+
+	fx.leader.fsm.invites.mu.Lock()
+	rec := fx.leader.fsm.invites.records[fx.inviteID]
+	rec.expiryNanos = time.Now().Add(-time.Second).UnixNano()
+	fx.leader.fsm.invites.records[fx.inviteID] = rec
+	fx.leader.fsm.invites.mu.Unlock()
+
+	p2 := fx.req
+	p2.JoinPhase = 2
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	require.False(t, reply.Accepted, "expired pending invite must not complete membership")
+	require.Equal(t, JoinStatusError, reply.Status)
+	require.Contains(t, reply.Message, "invite invalid/used/expired")
+	require.False(t, fsmHasNode(fx.leader, "node-b"))
+}
+
+func TestHandleJoin_Phase2_JoinFailureDoesNotRollbackLearner(t *testing.T) {
+	fx, _ := buildTwoNodeInviteFixture(t)
+	ctx := context.Background()
+
+	p1 := fx.req
+	p1.JoinPhase = 1
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+
+	originalMeta := fx.receiver.meta
+	fake := &phase2FailCoordinator{
+		metaJoinCoordinator: originalMeta,
+		joinErr:             errors.New("promote failed after learner add"),
+	}
+	fx.receiver.meta = fake
+
+	p2 := fx.req
+	p2.JoinPhase = 2
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	require.False(t, reply.Accepted)
+	require.Contains(t, reply.Message, "promote failed")
+	require.False(t, fake.removeLearnerCalled, "Phase-2 failure must stay retryable instead of best-effort rollback")
 }
 
 func TestHandleJoin_Phase2_Idempotent_ResumesToConsume(t *testing.T) {
@@ -689,4 +736,19 @@ func mustSignNode(t *testing.T, key *ecdsa.PrivateKey, tr encrypt.InviteTranscri
 	sig, err := encrypt.SignNodeTranscript(key, tr)
 	require.NoError(t, err)
 	return sig
+}
+
+type phase2FailCoordinator struct {
+	metaJoinCoordinator
+	joinErr             error
+	removeLearnerCalled bool
+}
+
+func (f *phase2FailCoordinator) JoinViaInvite(context.Context, string, string, [32]byte, string) error {
+	return f.joinErr
+}
+
+func (f *phase2FailCoordinator) RemoveLearner(string, string) error {
+	f.removeLearnerCalled = true
+	return errors.New("rollback failed")
 }

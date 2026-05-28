@@ -51,12 +51,10 @@ func (m *MetaRaft) AcceptSPKIBytes() [][]byte { return m.fsm.peers.acceptSPKIByt
 //   - PromoteToVoter: ErrNotALearner (already promoted to voter) → continue.
 //   - ProposePromoteMember / ProposeAddNode overwrite FSM state → idempotent.
 //
-// Rollback policy: a transient AddLearner / promotion failure is NOT the
-// joiner's fault, so the handler rolls back with RemoveLearner + dropping the
-// pending registry entry instead of denylisting the SPKI (which would
-// permanently burn a legitimate identity). Denylisting is reserved for genuine
-// revocation (Phase 3). The handler performs the rollback; on failure here we
-// return the error so the handler can RemoveLearner.
+// Failure policy: a transient AddLearner / promotion failure is NOT the
+// joiner's fault, so the handler leaves the pending redemption retryable instead
+// of denylisting the SPKI or attempting best-effort rollback. Denylisting is
+// reserved for genuine revocation.
 func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki [32]byte, inviteID string) error {
 	m.membershipMu.Lock()
 	defer m.membershipMu.Unlock()
@@ -75,7 +73,7 @@ func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki 
 	// Tolerate the already-present states ONLY when the existing entry at that
 	// address (and that SPKI) belongs to THIS pending join (same nodeID). Running
 	// this before AddLearner also keeps handleJoinPhase2's unconditional
-	// RemoveLearner rollback a harmless no-op on rejection.
+	// rejection side-effect free.
 	if existing, ok := m.fsm.ResolveNodeIDByAddress(addr); ok && existing != nodeID {
 		return fmt.Errorf("%w: address %s owned by node %s", errInviteAddressTaken, addr, existing)
 	}
@@ -123,8 +121,8 @@ func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki 
 // LookupPending returns the (nodeID, spki, addr) bound to a Phase-1
 // pending-redemption invite record; ok is false if the invite has no pending
 // binding. Used by the two-phase join handler to validate a Phase-2 ACK.
-func (m *MetaRaft) LookupPending(inviteID string) (nodeID string, spki [32]byte, addr string, ok bool) {
-	return m.fsm.invites.lookupPending(inviteID)
+func (m *MetaRaft) LookupPending(inviteID string, now time.Time) (nodeID string, spki [32]byte, addr string, ok bool) {
+	return m.fsm.invites.lookupPending(inviteID, now)
 }
 
 // RemoveLearner drops an un-promoted learner from the raft membership. Used by

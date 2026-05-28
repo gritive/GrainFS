@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.437.0] - 2026-05-29
+
+### Security
+
+- Bounded Zero-CA invite lifetime and replicated invite registry growth.
+- Required pending Zero-CA invite redemptions to remain unexpired through
+  Phase-2 membership completion.
+- Kept failed Phase-2 membership staging retryable instead of attempting a
+  best-effort learner rollback that could leave ambiguous partial state.
+
+### Changed
+
+- Reduced invite-join boot gate KEK directory scanning to chunked directory
+  reads that stop at the first canonical KEK file.
+- Documented the Zero-CA operator join, cutover, and revocation flow.
+
+### Tests
+
+- Added regression coverage for invite registry retention bounds, expired
+  pending Phase-2 rejection, retryable Phase-2 staging failure, TTL
+  normalization, and KEK directory detection.
+
 ## [0.0.436.0] - 2026-05-29
 
 ### Security

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"fmt"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -60,6 +61,16 @@ type inviteCreateErrorResponse struct {
 // defaultInviteTTL is the invite lifetime applied when the request omits one.
 const defaultInviteTTL = time.Hour
 
+func normalizeInviteTTL(ttl time.Duration) (time.Duration, error) {
+	if ttl <= 0 {
+		return defaultInviteTTL, nil
+	}
+	if ttl > cluster.MaxInviteTTL {
+		return 0, fmt.Errorf("invite ttl %s exceeds max %s", ttl, cluster.MaxInviteTTL)
+	}
+	return ttl, nil
+}
+
 // InviteHandler serves POST /v1/cluster/invite/create on the admin UDS. On the
 // leader it mints a one-time Ed25519 invite keypair, records the PUBLIC key +
 // TTL in meta-raft (ProposeInviteMint), and returns the InviteBundle token
@@ -110,9 +121,10 @@ func (h *InviteHandler) Handle(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	ttl := time.Duration(req.TTLNanos)
-	if ttl <= 0 {
-		ttl = defaultInviteTTL
+	ttl, err := normalizeInviteTTL(time.Duration(req.TTLNanos))
+	if err != nil {
+		c.JSON(consts.StatusBadRequest, inviteCreateErrorResponse{Error: err.Error()})
+		return
 	}
 	expiry := time.Now().Add(ttl).UnixNano()
 	if err := h.proposer.ProposeInviteMint(ctx, id, pub, expiry); err != nil {

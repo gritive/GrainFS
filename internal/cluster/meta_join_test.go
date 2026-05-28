@@ -212,13 +212,16 @@ func (f *fakeJoinCoordinator) JoinViaInvite(ctx context.Context, nodeID, addr st
 func (f *fakeJoinCoordinator) ProposeInvitePending(context.Context, string, string, [32]byte, string) error {
 	return nil
 }
-func (f *fakeJoinCoordinator) LookupPending(string) (string, [32]byte, string, bool) {
+func (f *fakeJoinCoordinator) LookupPending(string, time.Time) (string, [32]byte, string, bool) {
 	return "", [32]byte{}, "", false
 }
 func (f *fakeJoinCoordinator) ProposeInviteConsume(context.Context, string) error { return nil }
-func (f *fakeJoinCoordinator) RemoveLearner(string, string) error                 { return nil }
-func (f *fakeJoinCoordinator) PeerSPKIs() [][32]byte                              { return nil }
-func (f *fakeJoinCoordinator) ClusterKeyDropped() bool                            { return false }
+func (f *fakeJoinCoordinator) ProposeInviteConsumeAt(context.Context, string, time.Time) error {
+	return nil
+}
+func (f *fakeJoinCoordinator) RemoveLearner(string, string) error { return nil }
+func (f *fakeJoinCoordinator) PeerSPKIs() [][32]byte              { return nil }
+func (f *fakeJoinCoordinator) ClusterKeyDropped() bool            { return false }
 
 func (f *fakeJoinCoordinator) JoinCalls() int {
 	f.mu.Lock()

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -49,6 +50,36 @@ func TestInviteFSM_Expiry(t *testing.T) {
 	}
 }
 
+func TestInviteFSM_PrunesExpiredRecordsDuringTimestampedApply(t *testing.T) {
+	fsm := newInviteFSM()
+	now := time.Unix(1000, 0)
+	fsm.applyMint("old", testPub(t), now.Add(-time.Minute).UnixNano())
+	fsm.applyMint("fresh", testPub(t), now.Add(time.Hour).UnixNano())
+	if err := fsm.applyPending("fresh", "node-fresh", spki(99), "10.0.0.99:7001", now.UnixNano()); err != nil {
+		t.Fatalf("applyPending fresh: %v", err)
+	}
+	if _, ok := fsm.records["old"]; ok {
+		t.Fatal("expired invite must be pruned during timestamped apply")
+	}
+	if _, ok := fsm.records["fresh"]; !ok {
+		t.Fatal("fresh invite must remain")
+	}
+}
+
+func TestInviteFSM_RejectsMintAboveRetainedInviteLimit(t *testing.T) {
+	fsm := newInviteFSM()
+	now := time.Unix(1000, 0)
+	pub := testPub(t)
+	for i := 0; i < MaxActiveInvites; i++ {
+		if err := fsm.applyMint("inv-"+strconv.Itoa(i), pub, now.Add(time.Hour).UnixNano()); err != nil {
+			t.Fatalf("mint %d: %v", i, err)
+		}
+	}
+	if err := fsm.applyMint("too-many", pub, now.Add(time.Hour).UnixNano()); !errors.Is(err, errInviteLimitExceeded) {
+		t.Fatalf("mint above limit = %v, want errInviteLimitExceeded", err)
+	}
+}
+
 func TestInviteFSM_ExactlyAtExpiry(t *testing.T) {
 	fsm := newInviteFSM()
 	id, pub := "inv-c", testPub(t)
@@ -90,7 +121,7 @@ func TestInviteFSM_PendingBindFirstRedeemer(t *testing.T) {
 		if err := fsm.applyPending("inv-p", "node-1", s1, "10.0.0.1:7001", now.UnixNano()); err != nil {
 			t.Fatalf("first applyPending: %v", err)
 		}
-		gotNode, gotSPKI, gotAddr, ok := fsm.lookupPending("inv-p")
+		gotNode, gotSPKI, gotAddr, ok := fsm.lookupPending("inv-p", now)
 		if !ok {
 			t.Fatal("lookupPending must report bound after applyPending")
 		}
@@ -108,7 +139,7 @@ func TestInviteFSM_PendingBindFirstRedeemer(t *testing.T) {
 		if err := fsm.applyPending("inv-p", "node-1", s1, "10.0.0.1:7001", now.Add(time.Second).UnixNano()); err != nil {
 			t.Fatalf("idempotent applyPending: %v", err)
 		}
-		gotNode, gotSPKI, _, ok := fsm.lookupPending("inv-p")
+		gotNode, gotSPKI, _, ok := fsm.lookupPending("inv-p", now)
 		if !ok || gotNode != "node-1" || gotSPKI != s1 {
 			t.Fatal("binding must be unchanged after idempotent re-pend")
 		}
@@ -123,7 +154,7 @@ func TestInviteFSM_PendingBindFirstRedeemer(t *testing.T) {
 			t.Fatalf("different node must be rejected with errInvitePendingMismatch, got %v", err)
 		}
 		// Stays bound to first redeemer.
-		gotNode, _, _, ok := fsm.lookupPending("inv-p")
+		gotNode, _, _, ok := fsm.lookupPending("inv-p", now)
 		if !ok || gotNode != "node-1" {
 			t.Fatal("invite must stay bound to first redeemer after mismatch")
 		}
@@ -152,7 +183,7 @@ func TestInviteFSM_PendingBindFirstRedeemer(t *testing.T) {
 			t.Fatalf("different addr must be rejected with errInvitePendingMismatch, got %v", err)
 		}
 		// Stays bound to the first addr.
-		_, _, gotAddr, ok := fsm.lookupPending("inv-p")
+		_, _, gotAddr, ok := fsm.lookupPending("inv-p", now)
 		if !ok || gotAddr != "10.0.0.1:7001" {
 			t.Fatalf("invite must stay bound to first addr after mismatch, got %q", gotAddr)
 		}
@@ -171,7 +202,7 @@ func TestInviteFSM_PendingInvalidStates(t *testing.T) {
 		if err := fsm.applyPending("never-minted", "n", s, "a", now.UnixNano()); err == nil {
 			t.Fatal("applyPending on absent invite must error")
 		}
-		if _, _, _, ok := fsm.lookupPending("never-minted"); ok {
+		if _, _, _, ok := fsm.lookupPending("never-minted", now); ok {
 			t.Fatal("lookupPending on absent invite must report not-pending")
 		}
 	})
@@ -198,10 +229,22 @@ func TestInviteFSM_PendingInvalidStates(t *testing.T) {
 	t.Run("minted-but-not-pending reports not-pending", func(t *testing.T) {
 		fsm := newInviteFSM()
 		fsm.applyMint("inv-fresh", testPub(t), now.Add(10*time.Minute).UnixNano())
-		if _, _, _, ok := fsm.lookupPending("inv-fresh"); ok {
+		if _, _, _, ok := fsm.lookupPending("inv-fresh", now); ok {
 			t.Fatal("freshly minted (not yet pending) invite must report not-pending")
 		}
 	})
+}
+
+func TestInviteFSM_LookupPendingRejectsExpiredBinding(t *testing.T) {
+	now := time.Unix(6000, 0)
+	fsm := newInviteFSM()
+	fsm.applyMint("inv-exp-pending", testPub(t), now.Add(time.Minute).UnixNano())
+	if err := fsm.applyPending("inv-exp-pending", "node-1", spki(6), "10.0.0.1:7001", now.UnixNano()); err != nil {
+		t.Fatalf("applyPending: %v", err)
+	}
+	if _, _, _, ok := fsm.lookupPending("inv-exp-pending", now.Add(2*time.Minute)); ok {
+		t.Fatal("expired pending invite must not authorize Phase-2")
+	}
 }
 
 // TestInviteFSM_PendingThenConsume asserts that consuming a pending invite
@@ -240,7 +283,7 @@ func TestInviteFSM_BurnPendingForNodeConsumesMatchingPending(t *testing.T) {
 	if _, ok := f.lookup("inv-1", now); ok {
 		t.Fatal("burned pending invite must not be redeemable")
 	}
-	if _, _, _, ok := f.lookupPending("inv-1"); ok {
+	if _, _, _, ok := f.lookupPending("inv-1", now); ok {
 		t.Fatal("burned pending invite must no longer complete Phase-2")
 	}
 }

@@ -327,10 +327,13 @@ func (f *fakeJoinCoord) JoinViaInvite(_ context.Context, _, _ string, _ [32]byte
 func (f *fakeJoinCoord) ProposeInvitePending(context.Context, string, string, [32]byte, string) error {
 	return errors.New("invite path not implemented in this fake")
 }
-func (f *fakeJoinCoord) LookupPending(string) (string, [32]byte, string, bool) {
+func (f *fakeJoinCoord) LookupPending(string, time.Time) (string, [32]byte, string, bool) {
 	return "", [32]byte{}, "", false
 }
 func (f *fakeJoinCoord) ProposeInviteConsume(context.Context, string) error {
+	return errors.New("invite path not implemented in this fake")
+}
+func (f *fakeJoinCoord) ProposeInviteConsumeAt(context.Context, string, time.Time) error {
 	return errors.New("invite path not implemented in this fake")
 }
 func (f *fakeJoinCoord) RemoveLearner(string, string) error {
