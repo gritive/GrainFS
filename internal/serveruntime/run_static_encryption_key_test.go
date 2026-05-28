@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -27,6 +28,22 @@ func TestLoadStaticEncryptionKeyForRun_AllowsStaticKeylessMemberRestart(t *testi
 
 	enc, raw, err := loadStaticEncryptionKeyForRun(
 		ServeOptions{DataDir: dir, RaftAddr: "127.0.0.1:7000"},
+		dir,
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.Nil(t, enc)
+	require.Nil(t, raw)
+}
+
+func TestLoadStaticEncryptionKeyForRun_AllowsStaticKeylessMemberRestartWithFlagClusterKey(t *testing.T) {
+	dir := t.TempDir()
+	stageStaticKeylessMemberArtifacts(t, dir)
+	require.NoError(t, os.Remove(filepath.Join(dir, "keys.d", "current.key")))
+
+	enc, raw, err := loadStaticEncryptionKeyForRun(
+		ServeOptions{DataDir: dir, RaftAddr: "127.0.0.1:7000", ClusterKey: "recovery-psk"},
 		dir,
 		nil,
 	)

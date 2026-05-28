@@ -13,7 +13,7 @@ func loadStaticEncryptionKeyForRun(opts ServeOptions, primaryDataDir string, inv
 	if encryptionKeyPath == "" {
 		encryptionKeyPath = filepath.Join(primaryDataDir, "encryption.key")
 	}
-	if opts.EncryptionKeyFile == "" && !fileExists(encryptionKeyPath) && (inviteJoin != nil || staticKeylessClusterBootReady(primaryDataDir)) {
+	if opts.EncryptionKeyFile == "" && !fileExists(encryptionKeyPath) && (inviteJoin != nil || staticKeylessClusterBootReady(primaryDataDir, opts.ClusterKey)) {
 		log.Info().
 			Str("component", "server").
 			Msg("static encryption key absent for zero-CA member; continuing with KEK-backed boot")
@@ -26,11 +26,11 @@ func loadStaticEncryptionKeyForRun(opts ServeOptions, primaryDataDir string, inv
 	)
 }
 
-func staticKeylessClusterBootReady(dataDir string) bool {
+func staticKeylessClusterBootReady(dataDir, clusterKey string) bool {
 	p := inviteJoinPathsFor(dataDir)
 	return fileExists(p.clusterID) &&
 		keysDirHasKEK(p.keysDir) &&
 		fileExists(p.nodeKeyEnc) &&
 		fileExists(filepath.Join(dataDir, "keys.d", nodeKeyGenFile)) &&
-		fileExists(p.currentKey)
+		(fileExists(p.currentKey) || clusterKey != "")
 }
