@@ -479,6 +479,25 @@ func waitForShardGroupCount(t testing.TB, dataDir string, minGroups int, timeout
 		Should(gomega.BeTrue(), "expected >= %d shard groups in %s", minGroups, dataDir)
 }
 
+func waitForDataGroupHealth(t testing.TB, dataDir string, minGroups int, timeout time.Duration) *clusteradmin.Health {
+	t.Helper()
+	sock := filepath.Join(dataDir, "admin.sock")
+	cli := clusteradmin.NewClient(sock)
+	var last *clusteradmin.Health
+	gomega.Eventually(func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		health, err := cli.Health(ctx)
+		if err != nil || health.DataGroups == nil {
+			return false
+		}
+		last = health
+		return health.DataGroups.Total >= minGroups && len(health.DataGroups.Groups) >= minGroups
+	}).WithTimeout(timeout).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "expected >= %d data-group health rows in %s", minGroups, dataDir)
+	return last
+}
+
 // ----- TestMultiRaftShardingBootE2E --------------------------------------
 // Verify 5-process boot with automatic seed groups results in:
 //   - All processes alive
@@ -1005,6 +1024,10 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	const body = "failover-test-data"
 	requireMRPutObjectEventually(t, ctx, cli, c, c.leaderIdx, "failover-test", "failover-key", []byte(body))
 
+	beforeHealth := waitForDataGroupHealth(t, c.dataDirs[c.leaderIdx], 1, 30*time.Second)
+	gomega.Expect(beforeHealth.DataGroups.Total).To(gomega.BeNumerically(">=", 1))
+	gomega.Expect(beforeHealth.DataGroups.Healthy).To(gomega.BeNumerically(">=", 1))
+
 	// Find which node hosts the leader for the assigned group (simplification:
 	// we kill the leader node process; whichever group loses leader
 	// should recover quickly within 1-2 election timeouts).
@@ -1024,6 +1047,7 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
 	ginkgo.DeferCleanup(readCancel)
 	requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, "failover-test", "failover-key", []byte(body))
+	waitForDataGroupHealth(t, c.dataDirs[(killIdx+1)%len(c.dataDirs)], 1, 30*time.Second)
 
 	// With full-target placement, losing one of three placement targets must
 	// block new writes instead of silently accepting under-replicated data.

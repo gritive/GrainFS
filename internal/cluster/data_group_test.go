@@ -3,6 +3,7 @@ package cluster
 import (
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,9 +85,92 @@ func TestDataGroupManager_LeaderIDs(t *testing.T) {
 	require.Equal(t, map[string]string{"group-1": "node-1"}, mgr.LeaderIDs())
 }
 
+func TestDataGroupManager_RaftHealthSnapshot_UnwiredGroupVisible(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-placeholder", []string{"node-0", "node-1"}))
+
+	got := mgr.RaftHealthSnapshot()
+	require.Len(t, got, 1)
+	require.Equal(t, "group-placeholder", got[0].GroupID)
+	require.Equal(t, []string{"node-0", "node-1"}, got[0].PeerIDs)
+	require.Contains(t, got[0].Issues, "unwired")
+}
+
+func TestDataGroupManager_RaftHealthSnapshot_HealthyGroup(t *testing.T) {
+	mgr := NewDataGroupManager()
+	node := &dataGroupHealthNode{
+		id:           "node-0",
+		state:        raft.Follower,
+		term:         8,
+		leaderID:     "node-1",
+		commitIndex:  1204,
+		lastLogIndex: 1204,
+		match:        map[string]uint64{"node-0": 1204, "node-1": 1204},
+	}
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-0", "node-1"}, &GroupBackend{
+		DistributedBackend: &DistributedBackend{node: node},
+	}))
+
+	got := mgr.RaftHealthSnapshot()
+	require.Len(t, got, 1)
+	require.Equal(t, "group-1", got[0].GroupID)
+	require.Equal(t, "Follower", got[0].LocalState)
+	require.Equal(t, "node-1", got[0].LeaderID)
+	require.Equal(t, uint64(8), got[0].Term)
+	require.Equal(t, uint64(1204), got[0].CommitIndex)
+	require.Equal(t, uint64(1204), got[0].LastLogIndex)
+	require.Equal(t, uint64(0), got[0].MaxPeerLag)
+	require.Empty(t, got[0].Issues)
+}
+
+func TestDataGroupManager_RaftHealthSnapshot_LeaderlessAndPeerLag(t *testing.T) {
+	mgr := NewDataGroupManager()
+	node := &dataGroupHealthNode{
+		id:           "node-0",
+		state:        raft.Follower,
+		term:         9,
+		commitIndex:  50,
+		lastLogIndex: 51,
+		match:        map[string]uint64{"node-0": 50, "node-1": 44},
+	}
+	mgr.Add(NewDataGroupWithBackend("group-2", []string{"node-0", "node-1"}, &GroupBackend{
+		DistributedBackend: &DistributedBackend{node: node},
+	}))
+
+	got := mgr.RaftHealthSnapshot()
+	require.Len(t, got, 1)
+	require.Equal(t, "group-2", got[0].GroupID)
+	require.Contains(t, got[0].Issues, "leaderless")
+	require.Contains(t, got[0].Issues, "peer_lag")
+	require.Equal(t, uint64(6), got[0].MaxPeerLag)
+	require.Equal(t, map[string]uint64{"node-0": 50, "node-1": 44}, got[0].PeerMatchIndex)
+}
+
 type dataGroupLeaderNode struct {
 	RaftNode
 	leaderID string
 }
 
 func (n *dataGroupLeaderNode) LeaderID() string { return n.leaderID }
+
+type dataGroupHealthNode struct {
+	RaftNode
+	id           string
+	state        raft.NodeState
+	term         uint64
+	leaderID     string
+	commitIndex  uint64
+	lastLogIndex uint64
+	match        map[string]uint64
+}
+
+func (n *dataGroupHealthNode) ID() string             { return n.id }
+func (n *dataGroupHealthNode) State() raft.NodeState  { return n.state }
+func (n *dataGroupHealthNode) Term() uint64           { return n.term }
+func (n *dataGroupHealthNode) LeaderID() string       { return n.leaderID }
+func (n *dataGroupHealthNode) CommittedIndex() uint64 { return n.commitIndex }
+func (n *dataGroupHealthNode) LastLogIndex() uint64   { return n.lastLogIndex }
+func (n *dataGroupHealthNode) PeerMatchIndex(peer string) (uint64, bool) {
+	v, ok := n.match[peer]
+	return v, ok
+}

@@ -477,6 +477,17 @@ curl http://localhost:9000/metrics | grep '^grainfs_execution_cluster_'
 Watch queue depth, retries, timeouts, worker failures, aggregation failures, and
 job duration before treating cluster scrub admission or completion as healthy.
 
+For multi-Raft deployments, also inspect data-group Raft health:
+
+```bash
+curl http://localhost:9000/v1/cluster/health | jq '.data_groups'
+```
+
+`leaderless > 0` means at least one data group has no observed leader. `lagging > 0`
+means at least one group has follower replication lag. Check `groups[].issues`
+for the concrete per-group reason, such as `leaderless`, `unwired`, or
+`peer_lag`, before debugging object write failures from logs.
+
 ---
 
 ## Rollback Procedure

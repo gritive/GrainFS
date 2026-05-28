@@ -28,6 +28,18 @@ func (g goldenFixtureCluster) Snapshot() cluster.ClusterStatus {
 	snap.ShardGroups = []cluster.ShardGroupEntry{
 		{ID: "g1", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
+	snap.DataGroupRaftHealth = []cluster.DataGroupRaftHealth{
+		{
+			GroupID:        "g1",
+			PeerIDs:        []string{"n1", "n2", "n3"},
+			LocalState:     "Leader",
+			LeaderID:       "n1",
+			Term:           7,
+			CommitIndex:    1204,
+			LastLogIndex:   1204,
+			PeerMatchIndex: map[string]uint64{"n1": 1204, "n2": 1204, "n3": 1204},
+		},
+	}
 	return snap
 }
 

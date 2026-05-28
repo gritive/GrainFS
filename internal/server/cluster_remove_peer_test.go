@@ -36,6 +36,7 @@ type fakeClusterInfo struct {
 	peerAddrs  map[string]string
 	peerStates map[string]string
 	snapshot   []cluster.PeerLivenessRow
+	status     cluster.ClusterStatus
 }
 
 func (f *fakeClusterInfo) NodeID() string      { return f.nodeID }
@@ -53,11 +54,16 @@ func (f *fakeClusterInfo) Snapshot() cluster.ClusterStatus {
 	for k, v := range f.peerStates {
 		peerStates[k] = v
 	}
-	return cluster.ClusterStatus{
+	status := cluster.ClusterStatus{
 		PeerSnapshot: append([]cluster.PeerLivenessRow(nil), f.snapshot...),
 		PeerAddrs:    peerAddrs,
 		PeerStates:   peerStates,
 	}
+	status.BucketAssignments = f.status.BucketAssignments
+	status.ShardGroups = append([]cluster.ShardGroupEntry(nil), f.status.ShardGroups...)
+	status.ShardGroupLeaders = f.status.ShardGroupLeaders
+	status.DataGroupRaftHealth = append([]cluster.DataGroupRaftHealth(nil), f.status.DataGroupRaftHealth...)
+	return status
 }
 func (f *fakeClusterInfo) ObjectIndexSummary(string) cluster.ObjectIndexSummary {
 	return cluster.ObjectIndexSummary{}

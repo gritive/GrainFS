@@ -41,6 +41,19 @@ func TestRaftClusterInfo_BuildsPeerSnapshot(t *testing.T) {
 	}, info.PeerSnapshot())
 }
 
+func TestRaftClusterInfo_SnapshotIncludesDataGroupRaftHealth(t *testing.T) {
+	node := &clusterInfoRaftNode{id: "node-0"}
+	groups := cluster.NewDataGroupManager()
+	groups.Add(cluster.NewDataGroup("group-1", []string{"node-0", "node-1"}))
+	info := NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{}).WithDataGroups(groups)
+
+	snap := info.Snapshot()
+
+	require.Len(t, snap.DataGroupRaftHealth, 1)
+	require.Equal(t, "group-1", snap.DataGroupRaftHealth[0].GroupID)
+	require.Contains(t, snap.DataGroupRaftHealth[0].Issues, "unwired")
+}
+
 type fakeClusterInfoAddressBook struct {
 	nodes []cluster.MetaNodeEntry
 }

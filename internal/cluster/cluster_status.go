@@ -13,10 +13,11 @@ package cluster
 // PlacementReport) take parameters and remain dedicated methods on
 // ClusterInfo, not snapshot fields.
 type ClusterStatus struct {
-	PeerSnapshot      []PeerLivenessRow
-	PeerAddrs         map[string]string
-	PeerStates        map[string]string
-	BucketAssignments map[string]string
-	ShardGroups       []ShardGroupEntry
-	ShardGroupLeaders map[string]string
+	PeerSnapshot        []PeerLivenessRow
+	PeerAddrs           map[string]string
+	PeerStates          map[string]string
+	BucketAssignments   map[string]string
+	ShardGroups         []ShardGroupEntry
+	ShardGroupLeaders   map[string]string
+	DataGroupRaftHealth []DataGroupRaftHealth
 }
