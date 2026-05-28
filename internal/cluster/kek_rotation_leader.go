@@ -76,9 +76,10 @@ type PeerKEKProbe interface {
 // LeaseAttestationSample is the leader-side view of a single voter's
 // KEKLeaseSnapshotResp — flattened to the fields the FSM cmd actually carries.
 type LeaseAttestationSample struct {
-	NodeID          string
-	ObservedAtIndex uint64
-	LeaseCount      uint64
+	NodeID           string
+	ObservedAtIndex  uint64
+	LeaseCount       uint64
+	SnapshotRefCount uint64
 }
 
 // RaftConfigReader exposes the effective raft configuration (the committed
@@ -648,6 +649,9 @@ func (l *KEKRotationLeader) ProposeKEKPrune(version uint32, actor string) error 
 		attestationByNode[s.NodeID] = s
 		if s.LeaseCount != 0 {
 			return fmt.Errorf("KEKPrune: node %s lease_count=%d > 0 — version still in use", s.NodeID, s.LeaseCount)
+		}
+		if s.SnapshotRefCount != 0 {
+			return fmt.Errorf("KEKPrune: node %s has %d retained object snapshot(s) sealed under version %d (or unreadable) — delete or let them expire before pruning", s.NodeID, s.SnapshotRefCount, version)
 		}
 	}
 	attestations := make([]LeaseAttestationEntry, 0, len(sortedVoters))

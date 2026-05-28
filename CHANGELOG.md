@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.390.0] - 2026-05-28
+## [0.0.391.0] - 2026-05-28
 
 ### Security
 
@@ -14,6 +14,17 @@
   credentials before connecting `nbd-client`.
 - Updated NBD operator documentation and follow-up tracking now that NBD
   data-plane credential enforcement has landed.
+
+## [0.0.390.0] - 2026-05-28
+
+### Security
+
+- `grainfs encrypt kek prune` now refuses to remove a KEK version that any node
+  still has a retained object-metadata snapshot sealed under, and names the node
+  and count in the error. Previously this was an operator responsibility only;
+  pruning such a version made those snapshots permanently unreadable. The check
+  runs as part of the existing per-voter prune attestation, so it covers every
+  node's local snapshots, not just the leader's.
 
 ## [0.0.389.0] - 2026-05-28
 
