@@ -58,6 +58,11 @@ func ListCredentials(ctx context.Context, d *Deps, req CredentialListReq) (Crede
 		return CredentialListResp{}, NewForbidden("protocol credential permission denied: authorizer not configured")
 	}
 	items := d.ProtocolCredentials.List(protocred.ListFilter{SAID: req.SAID, Protocol: protocred.ParseProtocol(req.Protocol), Resource: req.Resource})
+	if len(items) == 0 {
+		if err := authorizeEmptyProtocolCredentialList(ctx, d, protocred.ParseProtocol(req.Protocol), req.Resource); err != nil {
+			return CredentialListResp{}, err
+		}
+	}
 	out := make([]CredentialResp, 0, len(items))
 	for _, item := range items {
 		if err := authorizeProtocolCredential(ctx, d, item.SAID, item.Protocol, item.Resource, protocolCredentialActionList); err != nil {
@@ -66,6 +71,32 @@ func ListCredentials(ctx context.Context, d *Deps, req CredentialListReq) (Crede
 		out = append(out, credentialResp(item, protocred.Secret{}))
 	}
 	return CredentialListResp{Credentials: out}, nil
+}
+
+func authorizeEmptyProtocolCredentialList(ctx context.Context, d *Deps, protocol protocred.Protocol, resource string) *Error {
+	actor, ok := ActorPrincipalFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	if d.ProtocolCredAuthz == nil {
+		return NewForbidden("protocol credential permission denied: authorizer not configured")
+	}
+	reqResource := "*"
+	if protocol != "" && resource != "" {
+		reqResource = protocolCredentialPolicyResource(protocol, resource)
+	}
+	result := d.ProtocolCredAuthz.AuthorizePrincipal(ctx, actor, "", policy.RequestContext{
+		Action:   protocolCredentialActionList,
+		Resource: reqResource,
+	})
+	if result.Decision == policy.DecisionAllow {
+		return nil
+	}
+	msg := "protocol credential permission denied"
+	if result.Reason != "" {
+		msg += ": " + result.Reason
+	}
+	return NewForbidden(msg)
 }
 
 func GetCredential(ctx context.Context, d *Deps, id string) (CredentialResp, error) {

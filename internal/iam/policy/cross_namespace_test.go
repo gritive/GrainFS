@@ -89,6 +89,18 @@ func TestValidateS3SAPolicyAttach_AllowsIcebergAction(t *testing.T) {
 	require.NoError(t, ValidateForS3SAAttach(policyJSON))
 }
 
+func TestValidateS3SAPolicyAttach_AllowsBucketPolicyAdminActions(t *testing.T) {
+	policyJSON := `{"Statement":[{"Effect":"Allow","Action":["grainfs:BucketPolicyRead","grainfs:BucketPolicyWrite","grainfs:BucketPolicyDelete"],"Resource":"arn:aws:s3:::logs"}]}`
+	require.NoError(t, ValidateForS3SAAttach(policyJSON))
+}
+
+func TestValidateMountSAPolicyAttach_RejectsBucketPolicyAdminAction(t *testing.T) {
+	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"grainfs:BucketPolicyWrite","Resource":"arn:aws:s3:::logs"}]}`
+	err := ValidateForMountSAAttach(policyJSON)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "grainfs:BucketPolicyWrite")
+}
+
 func TestParse_AcceptsGrainfsAction(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"arn:aws:s3:::bucket-x"}]}`)
 	_, err := Parse(doc)

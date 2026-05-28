@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.421.0] - 2026-05-29
+
+### Security
+
+- Added OIDC bearer actor authorization to bucket policy admin routes with
+  `grainfs:BucketPolicyRead`, `grainfs:BucketPolicyWrite`, and
+  `grainfs:BucketPolicyDelete` decisions on bucket ARN resources.
+- Closed the protocol credential empty-list gap so federated actors still need
+  `grainfs:CredentialList` permission when a scoped list returns no rows.
+
+### Changed
+
+- Wired the admin runtime to reuse the IAM policy authorizer for selected admin
+  route checks and emit structured `admin_authz` decision logs without logging
+  raw bearer tokens.
+- Updated OIDC federated IAM operator docs and follow-up tracking for the
+  remaining broader admin route policy boundary and PDP adapter decision.
+
+### Tests
+
+- Added HTTP route coverage for bucket policy bearer allow/deny, malformed
+  bearer rejection, no-bearer UDS fallback, and fail-closed missing authorizer
+  behavior.
+- Added IAM namespace compatibility tests for bucket policy admin actions and
+  regression coverage for denied empty protocol credential lists.
+
 ## [0.0.420.0] - 2026-05-29
 
 ### Security

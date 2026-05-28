@@ -147,10 +147,20 @@ Work these in order. Do not run them in parallel.
   tokens fail before mutation, while existing no-bearer admin UDS behavior is
   preserved.
 
-- [ ] **OIDC federated IAM Slice 6**: expand typed actor adoption beyond
+- [x] **OIDC federated IAM Slice 6**: expand typed actor adoption beyond
   protocol credential routes, add first-class admin authz/audit rows for
   federated allow/deny decisions, and decide whether the next architecture slice
-  is broader admin route policy or the external PDP adapter.
+  is broader admin route policy or the external PDP adapter. SHIPPED in current
+  branch: bucket policy admin routes accept optional OIDC bearer actors,
+  authorize `grainfs:BucketPolicyRead/Write/Delete` against bucket ARN
+  resources, emit structured `admin_authz` decision rows, and close the bearer
+  credential-list empty-result fail-closed gap.
+
+- [ ] **OIDC federated IAM Slice 7**: decide and implement the next broader
+  admin route policy boundary: either a central admin route/action registry for
+  IAM policy/group/SA/config/dashboard-token routes or the external PDP adapter
+  boundary. Preserve no-bearer admin UDS behavior unless the route explicitly
+  opts into actor authz.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):

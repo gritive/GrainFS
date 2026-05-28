@@ -8,7 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
-func credentialActorMiddleware(d *Deps) app.HandlerFunc {
+func adminActorMiddleware(d *Deps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		authHeader := string(c.Request.Header.Get("Authorization"))
 		if authHeader == "" {
@@ -43,6 +43,10 @@ func credentialActorMiddleware(d *Deps) app.HandlerFunc {
 		}
 		c.Next(WithActorPrincipal(ctx, actor))
 	}
+}
+
+func credentialActorMiddleware(d *Deps) app.HandlerFunc {
+	return adminActorMiddleware(d)
 }
 
 func parseBearerToken(s string) (string, bool) {
