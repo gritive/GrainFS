@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +34,7 @@ type RefSink interface {
 
 // Manager manages snapshot creation, listing, restore, and deletion.
 type Manager struct {
+	mu        sync.Mutex
 	dir       string
 	backend   storage.Snapshotable
 	nextSeq   atomic.Uint64
@@ -84,6 +86,9 @@ func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, w
 
 // Create takes a snapshot of the current metadata state.
 func (m *Manager) Create(reason string) (*Snapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	objects, err := m.backend.ListAllObjects()
 	if err != nil {
 		return nil, fmt.Errorf("list objects: %w", err)
@@ -181,6 +186,14 @@ func (m *Manager) unpinObjects(seq uint64, objects []storage.SnapshotObject) {
 
 // List returns all available snapshots sorted by seq ascending.
 func (m *Manager) List() ([]*Snapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.listLocked()
+}
+
+// listLocked is the body of List without acquiring the mutex.
+// Callers must hold m.mu.
+func (m *Manager) listLocked() ([]*Snapshot, error) {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot dir: %w", err)
@@ -215,6 +228,9 @@ func (m *Manager) List() ([]*Snapshot, error) {
 // so versioning/EC flags match the snapshot instant. Old-format snapshots
 // (BucketMeta == nil) leave bucket state untouched for backward compat.
 func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.StaleBlob, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	snap, err := m.readSnapshot(m.path(seq))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -247,6 +263,9 @@ func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.S
 // snapshot-domain refs). The reverse order could unpin chunks a still-live
 // descriptor needs — data loss.
 func (m *Manager) Delete(seq uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	p := m.path(seq)
 	// Capture frozen chunks before removing the descriptor so we can unpin after.
 	var pinned []chunkref.ChunkID

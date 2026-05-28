@@ -285,16 +285,6 @@ Work these in order. Do not run them in parallel.
   D-snap adds a new crypto failure mode to it. Surfaced by /review adversarial pass
   (2026-05-28). Fix: treat envelope-open / Restore failure on InstallSnapshot as a
   fatal halt (mirror the existing `ErrFSMKEKFatal` path) rather than log-and-advance.
-- [ ] **Pre-existing: two object-snapshot writers can collide on seq [P2]**. The
-  serveruntime auto-snapshotter and the server HTTP create/restore/delete handler
-  are independent `snapshot.Manager` instances over the same `<dataDir>/snapshots`
-  directory. Both seed `nextSeq` independently from filenames at construction and
-  increment locally; concurrent `Create()` calls from both can produce the same
-  sequence number. Predates Phase D-snap.
-- [ ] **Unify object-snapshot Manager wiring [P3]**. `serveruntime.objSnapMgr` and
-  `server.s.snapMgr` are independent instances over `<dataDir>/snapshots`. Unifying
-  them into a single shared instance would eliminate the two-writer seq-collision
-  risk (above) and simplify KEK wiring.
 - [ ] **Phase D-snap D-cut (object)**: remove `snapshot.openSnapshotBlob` legacy
   plaintext passthrough and add a boot-time scan that refuses startup if any
   plaintext snapshot file remains. The `grainfs_snapshot_legacy_plaintext_reads_total`

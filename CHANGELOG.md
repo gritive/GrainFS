@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.396.0] - 2026-05-28
+
+### Fixed
+
+- Object-snapshot writes no longer collide on sequence numbers: the
+  background auto-snapshotter and the admin HTTP snapshot endpoints now
+  share a single `snapshot.Manager` instead of each constructing their
+  own. Concurrent `Create`/`Restore`/`Delete`/`List`/`PITRRestore`/
+  `AllFrozenSegmentPaths` calls are now serialized through a mutex so
+  two writers can no longer produce duplicate sequence numbers under
+  load.
+
 ## [0.0.394.0] - 2026-05-28
 
 ### Added

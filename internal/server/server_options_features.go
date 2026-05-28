@@ -31,6 +31,17 @@ func WithSnapshotKEK(kek snapshot.KEKSource, clusterID [16]byte) Option {
 	}
 }
 
+// WithSnapshotManager injects a pre-built snapshot Manager so the server shares
+// the exact instance the serveruntime auto-snapshotter uses, rather than building
+// its own. Unifies nextSeq allocation + method serialization across the
+// auto-snapshotter and the HTTP create/restore/delete handlers. When set,
+// initSnapshotManager skips self-construction.
+func WithSnapshotManager(mgr *snapshot.Manager) Option {
+	return func(s *Server) {
+		s.snapMgr = mgr
+	}
+}
+
 func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
 	return func(s *Server) {
 		s.scrubber = sc

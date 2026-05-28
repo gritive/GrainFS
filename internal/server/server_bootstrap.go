@@ -126,6 +126,13 @@ func (s *Server) wireBroadcastLogger() {
 }
 
 func (s *Server) initSnapshotManager(ss ServerStorage) {
+	// An injected Manager (WithSnapshotManager — production shares the
+	// serveruntime auto-snapshotter's instance) is authoritative; do NOT build a
+	// second Manager over the same dir (that re-introduces the two-writer
+	// nextSeq seq-collision this wiring exists to prevent).
+	if s.snapMgr != nil {
+		return
+	}
 	if s.dataDir == "" {
 		return
 	}
