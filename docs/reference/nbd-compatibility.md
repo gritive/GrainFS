@@ -21,7 +21,7 @@ coverage. Unit-test-only coverage is not enough.
 | Client platform | Linux kernel NBD client        | Supported     |                                                                                          |
 | Client platform | macOS native NBD client        | Not supported | macOS has no native kernel NBD client path.                                              |
 | Negotiation     | Fixed newstyle                 | Supported     |                                                                                          |
-| Negotiation     | Export-name selection          | Supported     | Volumes are selected by name with `nbd-client -N <volume>`.                              |
+| Negotiation     | Export-name selection          | Supported     | Volumes are selected with protocol credential export names: `nbd-client -N <volume>@<secret>`. |
 | Negotiation     | `OPT_INFO` / `OPT_GO`          | Partial       | qemu/libnbd interop is not claimed.                                                      |
 | Discovery       | `NBD_INFO_BLOCK_SIZE`          | Partial       | qemu/libnbd interop is not claimed.                                                      |
 | Commands        | READ                           | Supported     |                                                                                          |
@@ -31,4 +31,4 @@ coverage. Unit-test-only coverage is not enough.
 | Replies         | Structured read reply          | Partial       | qemu/libnbd interop is not claimed.                                                      |
 | Metadata        | `base:allocation` block status | Partial       | qemu/libnbd interop is not claimed.                                                      |
 | Headers         | Extended headers               | Not supported | Parser exists, but basic negotiation returns `NBD_REP_ERR_UNSUP` until interop is fixed. |
-| Security        | Protocol credential enforcement | Not supported | `grainfs credential create --protocol nbd` exists as admin-plane foundation, but NBD still selects volumes by export name only. Restrict access with bind address, firewall, or private network. |
+| Security        | Protocol credential enforcement | Supported     | When protocol credentials are wired, NBD attach requires a valid, unexpired, non-revoked `volume@secret` export name for the selected volume. |

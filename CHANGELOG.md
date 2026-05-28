@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.392.0] - 2026-05-28
+
+### Security
+
+- NBD now enforces protocol credential export names when credential storage is
+  wired into node services. Clients must attach with a valid, unexpired, and
+  non-revoked `volume@secret` export name for the bound volume.
+
+### Changed
+
+- Updated NBD e2e, Colima, and benchmark harnesses to create protocol
+  credentials before connecting `nbd-client`.
+- Updated NBD operator documentation and follow-up tracking now that NBD
+  data-plane credential enforcement has landed.
+
 ## [0.0.391.0] - 2026-05-28
 
 ### Changed

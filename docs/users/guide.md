@@ -205,9 +205,10 @@ NBD requires a Linux client.
 ```bash
 grainfs volume create v1 --size 10Gi
 grainfs credential create --sa <sa_id> --protocol nbd --resource volume/v1 --mode rw
+# Save the returned connection_hint.export_name, for example: v1@pcsec_...
 
 sudo modprobe nbd
-sudo nbd-client localhost 10809 /dev/nbd0 -N v1
+sudo nbd-client localhost 10809 /dev/nbd0 -N 'v1@<secret>'
 
 sudo mkfs.ext4 /dev/nbd0
 sudo mkdir -p /mnt/nbd-v1

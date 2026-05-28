@@ -37,6 +37,7 @@ type s3Target struct {
 	endpoint  func(i int) string
 	accessKey string
 	secretKey string
+	saID      string
 	dataDir   string
 	nfsPort   int
 	nbdPort   int
@@ -164,6 +165,7 @@ func s3TargetFromCluster(c *e2eCluster) s3Target {
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
+		saID:      c.saID,
 		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
@@ -225,6 +227,7 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
+		saID:      c.saID,
 		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, currentLeaderClient(t))
 		},
@@ -309,6 +312,7 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 		},
 		accessKey: ak,
 		secretKey: sk,
+		saID:      admin.SAID,
 		dataDir:   dir,
 		nfsPort:   nfsPort,
 		nbdPort:   nbdPort,

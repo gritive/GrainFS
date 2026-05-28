@@ -205,6 +205,12 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 			}
 		}
 	}
+	if state.protocolCredentials != nil {
+		if iamCfg == nil {
+			iamCfg = &NodeServicesIAMConfig{}
+		}
+		iamCfg.NBDAuth = state.protocolCredentials
+	}
 	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
