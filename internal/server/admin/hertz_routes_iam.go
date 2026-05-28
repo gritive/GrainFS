@@ -6,20 +6,41 @@ func registerIAM(g router, d *Deps) {
 	if !routeFeatureRoutesVisible(d, routeFeatureIAM) {
 		return
 	}
+	actor := adminActorMiddleware(d)
+	saListAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMServiceAccountList",
+		resource: iamSAResource,
+	})
+	saReadAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMServiceAccountRead",
+		resource: iamSAResource,
+	})
+	policySimulateAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicySimulate",
+		resource: iamPolicyResource,
+	})
+	policyReadAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicyRead",
+		resource: iamPolicyResource,
+	})
+	policyListAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:IAMPolicyList",
+		resource: iamPolicyResource,
+	})
 	// SA
 	g.POST(routePathIAMSA, wrapBody[iam.SACreateRequest, iam.SACreateResponse](d, CreateSA))
-	g.GET(routePathIAMSA, wrapZero(d, ListSA))
-	g.GET(routePathIAMSAByID, iamGetSAHandler(d))
+	g.GET(routePathIAMSA, actor, saListAuthz, wrapZero(d, ListSA))
+	g.GET(routePathIAMSAByID, actor, saReadAuthz, iamGetSAHandler(d))
 	g.DELETE(routePathIAMSAByID, iamDeleteSAHandler(d))
 	// Key
 	g.POST(routePathIAMSAKey, iamCreateKeyHandler(d))
 	g.DELETE(routePathIAMSAKeyByAK, iamRevokeKeyHandler(d))
 	// Policy — simulate must be registered before :name to avoid param capture
-	g.POST(routePathIAMPolicySimulate, iamPolicySimulateHandler(d))
+	g.POST(routePathIAMPolicySimulate, actor, policySimulateAuthz, iamPolicySimulateHandler(d))
 	g.PUT(routePathIAMPolicyByName, iamPolicyPutHandler(d))
-	g.GET(routePathIAMPolicyByName, iamPolicyGetHandler(d))
+	g.GET(routePathIAMPolicyByName, actor, policyReadAuthz, iamPolicyGetHandler(d))
 	g.DELETE(routePathIAMPolicyByName, iamPolicyDeleteHandler(d))
-	g.GET(routePathIAMPolicy, iamPolicyListHandler(d))
+	g.GET(routePathIAMPolicy, actor, policyListAuthz, iamPolicyListHandler(d))
 	g.PUT(routePathIAMPolicyAttachSA, iamPolicyAttachSAHandler(d))
 	g.DELETE(routePathIAMPolicyAttachSA, iamPolicyDetachSAHandler(d))
 	// Group (create/delete/member/policy-attach)

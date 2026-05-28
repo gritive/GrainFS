@@ -1,12 +1,19 @@
 package admin_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
 
@@ -58,6 +65,30 @@ func newRouteTestDeps() *admin.Deps {
 	return &admin.Deps{IAM: &stubIAMService{}}
 }
 
+type routeIAMService struct {
+	stubIAMService
+	listSACalls int
+	getSACalls  int
+}
+
+func (s *routeIAMService) ListSA(_ context.Context) ([]iam.SAListItem, error) {
+	s.listSACalls++
+	return []iam.SAListItem{{
+		SAID:      "sa-app",
+		Name:      "app",
+		CreatedAt: time.Unix(100, 0).UTC(),
+	}}, nil
+}
+
+func (s *routeIAMService) GetSA(_ context.Context, saID string) (iam.SAGetResponse, error) {
+	s.getSACalls++
+	return iam.SAGetResponse{
+		SAID:      saID,
+		Name:      "app",
+		CreatedAt: time.Unix(100, 0).UTC(),
+	}, nil
+}
+
 // TestRegisterIAMUI_NoPolicyRoutes asserts that the /ui/api surface does NOT
 // expose policy mutation endpoints. A dashboard-token holder must not be able
 // to attach Resource:* policies to any SA.
@@ -81,9 +112,7 @@ func TestRegisterIAMUI_NoPolicyRoutes(t *testing.T) {
 	for _, tc := range paths {
 		resp := doRouteTestRequest(t, tc.method, base+tc.path, nil)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("%s %s: want 404/405, got %d", tc.method, tc.path, resp.StatusCode)
-		}
+		require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode, "%s %s", tc.method, tc.path)
 	}
 }
 
@@ -109,9 +138,7 @@ func TestRegisterIAMUI_NoGroupRoutes(t *testing.T) {
 	for _, tc := range paths {
 		resp := doRouteTestRequest(t, tc.method, base+tc.path, nil)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("%s %s: want 404/405, got %d", tc.method, tc.path, resp.StatusCode)
-		}
+		require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode, "%s %s", tc.method, tc.path)
 	}
 }
 
@@ -126,9 +153,7 @@ func TestRegisterIAMUI_SARoutePresent(t *testing.T) {
 	resp.Body.Close()
 	// The stub IAM service will cause the handler to return an error status,
 	// but the route must exist (not 404). Any non-404 confirms the route is wired.
-	if resp.StatusCode == http.StatusNotFound {
-		t.Errorf("GET /ui/api/iam/sa: want route registered (non-404), got 404")
-	}
+	require.NotEqual(t, http.StatusNotFound, resp.StatusCode)
 }
 
 // TestRegisterIAM_HasPolicyAndGroup confirms that the full UDS surface (via
@@ -158,8 +183,129 @@ func TestRegisterIAM_HasPolicyAndGroup(t *testing.T) {
 	for _, tc := range paths {
 		resp := doRouteTestRequest(t, tc.method, base+tc.path, nil)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound {
-			t.Errorf("%s %s: UDS router must have this route, got 404", tc.method, tc.path)
-		}
+		require.NotEqual(t, http.StatusNotFound, resp.StatusCode, "%s %s", tc.method, tc.path)
 	}
+}
+
+func TestIAMReadRoutesUseBearerActorAuthz(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	iamSvc := &routeIAMService{}
+	policySvc := &fakePolicyService{}
+	actor := principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", []string{"oidc:example:storage-admins"})
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        iamSvc,
+		IAMPolicy:  policySvc,
+		ActorAuth:  &actorAuthStub{principal: actor},
+		AdminAuthz: authz,
+	})
+	start()
+
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa", "Bearer route-token", nil, http.StatusOK)
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa/sa-app", "Bearer route-token", nil, http.StatusOK)
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/policy", "Bearer route-token", nil, http.StatusOK)
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/policy/storage-admin", "Bearer route-token", nil, http.StatusNotFound)
+	body := bytes.NewBufferString(`{"sa_id":"sa-app","action":"s3:GetObject","resource":"arn:aws:s3:::logs/a"}`)
+	doRouteTestRequestAuth(t, http.MethodPost, base+"/v1/iam/policy/simulate", "Bearer route-token", body, http.StatusOK)
+
+	require.Len(t, authz.calls, 5)
+	gotActions := []string{
+		authz.calls[0].action,
+		authz.calls[1].action,
+		authz.calls[2].action,
+		authz.calls[3].action,
+		authz.calls[4].action,
+	}
+	wantActions := []string{
+		"grainfs:IAMServiceAccountList",
+		"grainfs:IAMServiceAccountRead",
+		"grainfs:IAMPolicyList",
+		"grainfs:IAMPolicyRead",
+		"grainfs:IAMPolicySimulate",
+	}
+	require.Equal(t, wantActions, gotActions)
+	for i := range authz.calls {
+		require.Equal(t, actor, authz.calls[i].principal)
+	}
+	gotResources := []string{
+		authz.calls[0].resource,
+		authz.calls[1].resource,
+		authz.calls[2].resource,
+		authz.calls[3].resource,
+		authz.calls[4].resource,
+	}
+	wantResources := []string{
+		"iam/sa/*",
+		"iam/sa/sa-app",
+		"iam/policy/*",
+		"iam/policy/storage-admin",
+		"iam/policy/*",
+	}
+	require.Equal(t, wantResources, gotResources)
+}
+
+func TestIAMReadRoutesDenyBearerBeforeHandler(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	iamSvc := &routeIAMService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "implicit Deny"}
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        iamSvc,
+		ActorAuth:  &actorAuthStub{principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil)},
+		AdminAuthz: authz,
+	})
+	start()
+
+	raw := doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa", "Bearer route-token", nil, http.StatusForbidden)
+
+	require.Zero(t, iamSvc.listSACalls)
+	require.Contains(t, string(raw), "implicit Deny")
+}
+
+func TestIAMReadRoutesRejectMalformedBearerBeforeFallback(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	iamSvc := &routeIAMService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        iamSvc,
+		ActorAuth:  &actorAuthStub{principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil)},
+		AdminAuthz: authz,
+	})
+	start()
+
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa", "Bearer\tbad-token", nil, http.StatusUnauthorized)
+
+	require.Zero(t, iamSvc.listSACalls)
+	require.Empty(t, authz.calls)
+}
+
+func TestIAMReadRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	iamSvc := &routeIAMService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny}
+	admin.RegisterIAMOnly(h, &admin.Deps{IAM: iamSvc, AdminAuthz: authz})
+	start()
+
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa", "", nil, http.StatusOK)
+
+	require.Equal(t, 1, iamSvc.listSACalls)
+	require.Empty(t, authz.calls)
+}
+
+func doRouteTestRequestAuth(t *testing.T, method, url, bearer string, body io.Reader, wantStatus int) []byte {
+	t.Helper()
+	req, err := http.NewRequest(method, url, body)
+	require.NoError(t, err)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "%s %s", method, url)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, wantStatus, resp.StatusCode, "%s %s body=%s", method, url, string(raw))
+	return raw
 }
