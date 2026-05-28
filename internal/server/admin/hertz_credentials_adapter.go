@@ -12,6 +12,7 @@ func listCredentialsHandler(d *Deps) app.HandlerFunc {
 		resp, err := ListCredentials(ctx, d, CredentialListReq{
 			SAID:     string(c.Query("sa_id")),
 			Protocol: string(c.Query("protocol")),
+			Resource: string(c.Query("resource")),
 		})
 		if err != nil {
 			writeError(c, err)

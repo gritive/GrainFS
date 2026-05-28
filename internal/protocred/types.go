@@ -51,6 +51,7 @@ type AuthenticateRequest struct {
 type ListFilter struct {
 	SAID     string
 	Protocol Protocol
+	Resource string
 }
 
 type Secret struct {

@@ -35,6 +35,7 @@ type ListOptions struct {
 	BaseOptions
 	SAID     string
 	Protocol string
+	Resource string
 }
 
 type GetOptions struct {

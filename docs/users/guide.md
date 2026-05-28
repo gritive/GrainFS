@@ -101,6 +101,8 @@ revoke now require the target service account to be allowed for
       "Effect": "Allow",
       "Action": [
         "grainfs:CredentialCreate",
+        "grainfs:CredentialList",
+        "grainfs:CredentialRead",
         "grainfs:CredentialRotate",
         "grainfs:CredentialRevoke"
       ],
@@ -123,6 +125,12 @@ storage is wired. NBD uses `connection_hint.export_name` (`volume@secret`),
 NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`), and 9P
 uses `connection_hint.aname` (`credential-id:secret@bucket`). Read-only
 credentials mount successfully but reject mutation operations.
+
+List inventory can be narrowed to the same resource scope:
+
+```bash
+grainfs credential list --protocol nbd --resource volume/v1 --endpoint ./tmp/admin.sock
+```
 
 ## S3
 
