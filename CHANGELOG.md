@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.413.2] - 2026-05-28
+
+### Security
+
+- Added `grainfs cluster revoke-node` and the matching admin UDS endpoint to
+  remove a Zero-CA node identity, denylist its transport SPKI, burn matching
+  pending invites, remove the voter, and close cached QUIC connections.
+- Persisted the per-node transport denylist in meta-state snapshots so revoked
+  identities stay rejected after log compaction and restore.
+
+### Added
+
+- Added focused unit and multi-node E2E coverage for registered-node
+  revocation, Phase-1-only pending invite revocation, snapshot restore, CLI and
+  admin client wiring, and post-drop rejoin rejection with the same node ID.
+
 ## [0.0.413.1] - 2026-05-28
 
 ### Added

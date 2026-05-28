@@ -15,6 +15,7 @@ Available Commands:
   peers            List cluster voters with leader and liveness state
   placement        Show object placement summary and detail
   remove-peer      Remove a voter from the meta-Raft cluster (joint consensus)
+  revoke-node      Revoke a Zero-CA node identity and remove it from the cluster
   rotate-key       Rolling cluster-key rotation (zero-downtime)
   status           Show cluster status (leader, term, peers)
   transfer-leader  Trigger immediate leadership transfer to another voter

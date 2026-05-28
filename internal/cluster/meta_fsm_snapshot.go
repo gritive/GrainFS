@@ -108,10 +108,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// zero-CA peer registry (Task 5): export under the same RLock window so the
 	// serialized accept-set is consistent with the rest of the snapshot.
 	peersCopy := f.peers.export()
-	// zero-CA cutover drop bit (slot 14, H3): capture under the same RLock so the
+	denyCopy := f.peers.exportDenylist()
+	// zero-CA cutover drop bit (slot 15, H3): capture under the same RLock so the
 	// serialized bit is consistent with the rest of the snapshot.
 	droppedCopy := f.clusterKeyDropped
-	// zero-CA present-flip bit (slot 15, PR-2a §8c): capture alongside drop bit
+	// zero-CA present-flip bit (slot 16, PR-2a §8c): capture alongside drop bit
 	// for consistency.
 	presentFlipBegunCopy := f.presentFlipBegun
 	// Task 4b: capture DEKKeeper wraps inside the same lock window as
@@ -299,6 +300,19 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	peersVec := b.EndVector(len(peerOffs))
 
+	denyOffs := make([]flatbuffers.UOffsetT, len(denyCopy))
+	for i := len(denyCopy) - 1; i >= 0; i-- {
+		vec := b.CreateByteVector(denyCopy[i][:])
+		clusterpb.SPKIBytesStart(b)
+		clusterpb.SPKIBytesAddValue(b, vec)
+		denyOffs[i] = clusterpb.SPKIBytesEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartRevokedPeerSpkisVector(b, len(denyOffs))
+	for i := len(denyOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(denyOffs[i])
+	}
+	denyVec := b.EndVector(len(denyOffs))
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -316,6 +330,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)
 	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
 	clusterpb.MetaStateSnapshotAddPeers(b, peersVec)
+	clusterpb.MetaStateSnapshotAddRevokedPeerSpkis(b, denyVec)
 	clusterpb.MetaStateSnapshotAddClusterKeyDropped(b, droppedCopy)
 	clusterpb.MetaStateSnapshotAddPresentFlipBegun(b, presentFlipBegunCopy)
 	root := clusterpb.MetaStateSnapshotEnd(b)
@@ -626,7 +641,26 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: peer registry validate: %w", err)
 	}
 
-	// zero-CA cutover drop bit (slot 14, H3): decode into a local here so the
+	newDenyEntries := make([][32]byte, 0, snap.RevokedPeerSpkisLength())
+	var denyFB clusterpb.SPKIBytes
+	for i := 0; i < snap.RevokedPeerSpkisLength(); i++ {
+		if !snap.RevokedPeerSpkis(&denyFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: revoked_peer_spkis[%d] decode failed", i)
+		}
+		raw := denyFB.ValueBytes()
+		if len(raw) != 32 {
+			return fmt.Errorf("meta_fsm: Restore: revoked_peer_spkis[%d] SPKI length %d, want 32", i, len(raw))
+		}
+		var spki [32]byte
+		copy(spki[:], raw)
+		newDenyEntries = append(newDenyEntries, spki)
+	}
+	newDeny, err := validateDenylistEntries(newDenyEntries)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: Restore: denylist validate: %w", err)
+	}
+
+	// zero-CA cutover drop bit (slot 15, H3): decode into a local here so the
 	// commit + callback-fire below use the captured value, never a field read
 	// outside the lock. Legacy snapshots default false (FlatBuffer default).
 	droppedDecoded := snap.ClusterKeyDropped()
@@ -940,6 +974,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// IPST commit); a late failure there must NOT have rebuilt the transport
 	// accept-set for a Restore that ultimately fails. The JKEY commit just above
 	// is documented atomic/no-error, so nothing after this point can err.
+	f.peers.commitDenylist(newDeny)
 	f.peers.commitPeerIndexes(newPeersByNodeID, newPeersBySPKI)
 	f.firePeersChanged()
 

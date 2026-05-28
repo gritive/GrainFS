@@ -38,6 +38,17 @@ func TestQUICTransport_RecycleConns_NoConns_NoError(t *testing.T) {
 	tr.mu.RUnlock()
 }
 
+func TestQUICTransport_ClosePeer_NoConns_NoError(t *testing.T) {
+	tr, err := NewQUICTransport("test-psk-close-peer")
+	require.NoError(t, err)
+	defer tr.Close()
+	tr.ClosePeer("127.0.0.1:7999")
+	tr.mu.RLock()
+	require.Empty(t, tr.conns)
+	require.Empty(t, tr.muxConns)
+	tr.mu.RUnlock()
+}
+
 func TestQUICTransport_SetDropped_ExcludesBase(t *testing.T) {
 	tr, err := NewQUICTransport("test-psk-dropped")
 	require.NoError(t, err)

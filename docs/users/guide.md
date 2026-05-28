@@ -337,6 +337,13 @@ Remove a dead peer:
 grainfs cluster remove-peer <node-id> --yes
 ```
 
+Revoke a Zero-CA node identity so the same node ID and transport certificate
+cannot rejoin:
+
+```bash
+grainfs cluster revoke-node <node-id>
+```
+
 Force removal is a disaster-recovery step:
 
 ```bash

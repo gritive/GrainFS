@@ -127,9 +127,8 @@ func (r *peerRegistry) export() []peerEntry {
 
 // validatePeerEntries validates a snapshot's peer entries and BUILDS the
 // byNodeID/bySPKI indexes WITHOUT touching the live registry. It REPLACES the
-// indexes wholesale on commit (state restore — NOT a register* flow); the deny
-// set is left untouched (it is not part of the snapshot; see Task 5 report).
-// State and PresentsPerNode are preserved verbatim.
+// indexes wholesale on commit (state restore — NOT a register* flow). State and
+// PresentsPerNode are preserved verbatim.
 //
 // Validation: a corrupt meta snapshot is fatal, so this hard-errors on any
 // malformed/inconsistent entry. Checks: non-empty node ID; valid State enum;
@@ -178,6 +177,36 @@ func (r *peerRegistry) commitPeerIndexes(byNodeID map[string]peerEntry, bySPKI m
 	r.bySPKI = bySPKI
 }
 
+func (r *peerRegistry) exportDenylist() [][32]byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([][32]byte, 0, len(r.deny))
+	for s := range r.deny {
+		out = append(out, s)
+	}
+	return out
+}
+
+func validateDenylistEntries(entries [][32]byte) (map[[32]byte]struct{}, error) {
+	deny := make(map[[32]byte]struct{}, len(entries))
+	for i, s := range entries {
+		if s == ([32]byte{}) {
+			return nil, fmt.Errorf("importDenylist: entry[%d] has zero/malformed SPKI", i)
+		}
+		if _, dup := deny[s]; dup {
+			return nil, fmt.Errorf("importDenylist: duplicate SPKI at entry[%d]", i)
+		}
+		deny[s] = struct{}{}
+	}
+	return deny, nil
+}
+
+func (r *peerRegistry) commitDenylist(deny map[[32]byte]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deny = deny
+}
+
 // spkiOwner returns the node-id that owns an SPKI (Task 5 uses this).
 func (r *peerRegistry) spkiOwner(s [32]byte) (string, bool) {
 	r.mu.RLock()
@@ -199,17 +228,17 @@ func (r *peerRegistry) denylist(s [32]byte) {
 	r.deny[s] = struct{}{}
 }
 
-// remove deletes a node's entry (Phase 3 revoke). Returns the removed SPKI.
-func (r *peerRegistry) remove(nodeID string) ([32]byte, bool) {
+// remove deletes a node's entry (Phase 3 revoke). Returns the removed entry.
+func (r *peerRegistry) remove(nodeID string) (peerEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.byNodeID[nodeID]
 	if !ok {
-		return [32]byte{}, false
+		return peerEntry{}, false
 	}
 	delete(r.byNodeID, nodeID)
 	delete(r.bySPKI, e.SPKI)
-	return e.SPKI, true
+	return e, true
 }
 
 // acceptSPKIs returns every registered SPKI (pending-learner AND member) — the

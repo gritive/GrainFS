@@ -176,6 +176,19 @@ func runCompleteCutover(t testing.TB, leaderDataDir string) {
 	}
 }
 
+func runRevokeNode(t testing.TB, leaderDataDir, nodeID string) {
+	t.Helper()
+	sock := filepath.Join(leaderDataDir, "admin.sock")
+	cmd := exec.Command(getBinary(), "cluster", "--endpoint", sock, "revoke-node", nodeID)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("revoke-node %s must succeed; err=%v out:\n%s", nodeID, err, string(out))
+	}
+	if !strings.Contains(string(out), "Zero-CA node revoked: "+nodeID) {
+		t.Fatalf("revoke-node output missing success line:\n%s", string(out))
+	}
+}
+
 // parseBundleToken extracts the bundle token printed by RunInviteCreate: the
 // non-empty line following "Set this on the joining node as ...".
 func parseBundleToken(t testing.TB, output string) string {
@@ -333,6 +346,44 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return getObjectBytes(ctx, postDropCli, bucket, key)
 			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
 				"GetObject through the post-drop invite-joined node must return the PUT bytes")
+		})
+
+		ginkgo.It("revokes a post-drop joined node and rejects rejoin with the same node-id", func() {
+			t := ginkgo.GinkgoTB()
+			encKeyFile := makeSharedEncryptionKeyFile(t)
+
+			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			_, _ = bootstrapAdminViaUDS(t, leader.dataDir)
+
+			preDropBundle := mintInvite(t, leader.dataDir)
+			preDropJoiner := startInviteJoiner(t, "pre-drop-revoker", shortTempDir(t), preDropBundle)
+			waitForVoter(t, leader.httpURL, "pre-drop-revoker", 90*time.Second)
+			waitForPort(t, preDropJoiner.httpPort, 60*time.Second)
+
+			runCompleteCutover(t, leader.dataDir)
+
+			bundle := mintInvite(t, leader.dataDir)
+			joinerDir := shortTempDir(t)
+			joiner := startInviteJoiner(t, "revoked-joiner", joinerDir, bundle)
+			waitForVoter(t, leader.httpURL, "revoked-joiner", 90*time.Second)
+			waitForPort(t, joiner.httpPort, 60*time.Second)
+
+			runRevokeNode(t, leader.dataDir, "revoked-joiner")
+			terminateProcess(joiner.cmd)
+
+			replayBundle := mintInvite(t, leader.dataDir)
+			replay := startInviteJoiner(t, "revoked-joiner", shortTempDir(t), replayBundle)
+			gomega.Eventually(func() bool {
+				exited, _ := processExited(replay.cmd)
+				return exited
+			}, 60*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(),
+				"revoked joiner must fail when trying to rejoin with the same node-id")
+
+			gomega.Consistently(func() bool {
+				s := getStatusJSON(t, leader.httpURL)
+				return containsString(stringList(s["peers"]), "revoked-joiner")
+			}, 2*time.Second, 500*time.Millisecond).Should(gomega.BeFalse(),
+				"revoked node must not rejoin")
 		})
 	})
 

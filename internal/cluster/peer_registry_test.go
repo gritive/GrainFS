@@ -3,6 +3,7 @@ package cluster
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +57,19 @@ func TestPeerRegistry_Denylist(t *testing.T) {
 	if err := r.registerPendingLearner("node-x", spki(9), "10.0.0.9:9000"); err == nil {
 		t.Fatal("registering a denylisted SPKI must fail")
 	}
+}
+
+func TestPeerRegistry_RemoveReturnsEntryAndDenylistRejectsRejoin(t *testing.T) {
+	r := newPeerRegistry()
+	s := spki(9)
+	require.NoError(t, r.registerMember("node-9", s, "127.0.0.1:7009", true))
+	got, ok := r.remove("node-9")
+	require.True(t, ok)
+	require.Equal(t, s, got.SPKI)
+	require.Equal(t, "127.0.0.1:7009", got.Address)
+
+	r.denylist(got.SPKI)
+	require.ErrorIs(t, r.registerMember("node-9", s, "127.0.0.1:7009", true), errSPKIDenylisted)
 }
 
 func TestPeerRegistry_NodeIDRebindRejected(t *testing.T) {
@@ -234,6 +248,65 @@ func TestApplyRegisterMember_FiresOnPeersChanged(t *testing.T) {
 	}
 }
 
+func TestApplyRevokePeer_BurnsPendingInviteAndDenylistsRegisteredPeer(t *testing.T) {
+	fsm := NewMetaFSM()
+	now := time.Unix(10, 0)
+	s := spki(12)
+	fsm.invites.applyMint("inv-12", testPub(t), now.Add(time.Hour).UnixNano())
+	require.NoError(t, fsm.invites.applyPending("inv-12", "node-12", s, "127.0.0.1:7012", now.UnixNano()))
+	require.NoError(t, fsm.Peers().registerMember("node-12", s, "127.0.0.1:7012", true))
+	fired := 0
+	fsm.SetOnPeersChanged(func([][32]byte) { fired++ })
+	payload, err := encodeRevokePeerCmd("node-12")
+	require.NoError(t, err)
+
+	require.NoError(t, fsm.applyRevokePeer(payload))
+
+	require.Equal(t, 1, fired)
+	require.True(t, fsm.Peers().isDenylisted(s))
+	require.ErrorIs(t, fsm.Peers().registerMember("node-12", s, "127.0.0.1:7012", true), errSPKIDenylisted)
+	_, ok := fsm.Peers().lookupByNodeID("node-12")
+	require.False(t, ok)
+	_, _, _, ok = fsm.invites.lookupPending("inv-12")
+	require.False(t, ok)
+	_, ok = fsm.invites.lookup("inv-12", now)
+	require.False(t, ok)
+}
+
+func TestApplyRevokePeer_DenylistsAndBurnsPhase1OnlyPendingNode(t *testing.T) {
+	fsm := NewMetaFSM()
+	now := time.Unix(10, 0)
+	s := spki(13)
+	fsm.invites.applyMint("inv-13", testPub(t), now.Add(time.Hour).UnixNano())
+	require.NoError(t, fsm.invites.applyPending("inv-13", "node-pending", s, "127.0.0.1:7013", now.UnixNano()))
+	fired := 0
+	fsm.SetOnPeersChanged(func([][32]byte) { fired++ })
+	payload, err := encodeRevokePeerCmd("node-pending")
+	require.NoError(t, err)
+
+	require.NoError(t, fsm.applyRevokePeer(payload))
+
+	require.Equal(t, 1, fired)
+	require.True(t, fsm.Peers().isDenylisted(s))
+	require.ErrorIs(t, fsm.Peers().registerMember("node-pending", s, "127.0.0.1:7013", true), errSPKIDenylisted)
+	_, _, _, ok := fsm.invites.lookupPending("inv-13")
+	require.False(t, ok)
+	_, ok = fsm.invites.lookup("inv-13", now)
+	require.False(t, ok)
+}
+
+func TestApplyRevokePeer_UnknownNodeIsIdempotentNoCallback(t *testing.T) {
+	fsm := NewMetaFSM()
+	fired := 0
+	fsm.SetOnPeersChanged(func([][32]byte) { fired++ })
+	payload, err := encodeRevokePeerCmd("ghost")
+	require.NoError(t, err)
+
+	require.NoError(t, fsm.applyRevokePeer(payload))
+
+	require.Equal(t, 0, fired)
+}
+
 func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
 	good := func() []peerEntry {
 		return []peerEntry{
@@ -336,6 +409,33 @@ func TestImportEntries_RejectsDuplicateAndMalformed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateDenylistEntries_RejectsDuplicateAndMalformed(t *testing.T) {
+	valid, err := validateDenylistEntries([][32]byte{spki(1), spki(2)})
+	require.NoError(t, err)
+	require.Len(t, valid, 2)
+
+	_, err = validateDenylistEntries([][32]byte{{}})
+	require.ErrorContains(t, err, "zero/malformed SPKI")
+
+	_, err = validateDenylistEntries([][32]byte{spki(3), spki(3)})
+	require.ErrorContains(t, err, "duplicate SPKI")
+}
+
+func TestPeerRegistry_ExportCommitDenylist(t *testing.T) {
+	r := newPeerRegistry()
+	r.denylist(spki(4))
+	r.denylist(spki(5))
+
+	deny, err := validateDenylistEntries(r.exportDenylist())
+	require.NoError(t, err)
+	dst := newPeerRegistry()
+	dst.commitDenylist(deny)
+
+	require.True(t, dst.isDenylisted(spki(4)))
+	require.True(t, dst.isDenylisted(spki(5)))
+	require.False(t, dst.isDenylisted(spki(6)))
 }
 
 func TestRegisterMember_PresentsPerNode_Monotone(t *testing.T) {

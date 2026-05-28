@@ -106,6 +106,46 @@ func (f *inviteFSM) lookupPending(id string) (nodeID string, spki [32]byte, addr
 	return r.pendingNodeID, r.pendingSPKI, r.pendingAddr, true
 }
 
+func (f *inviteFSM) pendingSPKIsForNode(nodeID string) [][32]byte {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	seen := make(map[[32]byte]struct{})
+	out := make([][32]byte, 0)
+	for _, r := range f.records {
+		if r.used || r.pendingAtNanos == 0 || r.pendingNodeID != nodeID {
+			continue
+		}
+		if _, ok := seen[r.pendingSPKI]; ok {
+			continue
+		}
+		seen[r.pendingSPKI] = struct{}{}
+		out = append(out, r.pendingSPKI)
+	}
+	return out
+}
+
+func (f *inviteFSM) burnPendingForNode(nodeID string, spki [32]byte) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	burned := 0
+	for id, r := range f.records {
+		if r.used || r.pendingAtNanos == 0 {
+			continue
+		}
+		if r.pendingNodeID != nodeID && r.pendingSPKI != spki {
+			continue
+		}
+		r.used = true
+		r.pendingNodeID = ""
+		r.pendingSPKI = [32]byte{}
+		r.pendingAddr = ""
+		r.pendingAtNanos = 0
+		f.records[id] = r
+		burned++
+	}
+	return burned
+}
+
 func (f *inviteFSM) applyConsume(id string, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
