@@ -35,12 +35,19 @@ func (c *Client) Create(ctx context.Context, req CreateReq) (Credential, error) 
 }
 
 func (c *Client) List(ctx context.Context, saID, protocol string) (ListResp, error) {
+	return c.ListFiltered(ctx, saID, protocol, "")
+}
+
+func (c *Client) ListFiltered(ctx context.Context, saID, protocol, resource string) (ListResp, error) {
 	q := url.Values{}
 	if saID != "" {
 		q.Set("sa_id", saID)
 	}
 	if protocol != "" {
 		q.Set("protocol", protocol)
+	}
+	if resource != "" {
+		q.Set("resource", resource)
 	}
 	path := "/v1/credentials"
 	if encoded := q.Encode(); encoded != "" {

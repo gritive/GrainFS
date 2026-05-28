@@ -212,6 +212,7 @@ type CredentialCreateReq struct {
 type CredentialListReq struct {
 	SAID     string `json:"sa_id,omitempty"`
 	Protocol string `json:"protocol,omitempty"`
+	Resource string `json:"resource,omitempty"`
 }
 
 type CredentialResp struct {

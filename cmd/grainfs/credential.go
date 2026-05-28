@@ -22,7 +22,7 @@ var credentialCreateCmd = &cobra.Command{
 var credentialListCmd = &cobra.Command{
 	Use:     "list",
 	Short:   "List protocol credentials",
-	Example: `  grainfs credential list --sa sa_app --protocol nbd`,
+	Example: `  grainfs credential list --sa sa_app --protocol nbd --resource volume/vol1`,
 	RunE:    runCredentialList,
 }
 
@@ -63,6 +63,7 @@ func init() {
 	credentialCreateCmd.Flags().String("expires-at", "", "optional RFC3339 expiration time")
 	credentialListCmd.Flags().String("sa", "", "filter by service account id")
 	credentialListCmd.Flags().String("protocol", "", "filter by protocol")
+	credentialListCmd.Flags().String("resource", "", "filter by resource id: bucket/<name>, catalog/<name>, or volume/<name>")
 
 	credentialCmd.AddCommand(
 		credentialCreateCmd,
@@ -104,10 +105,12 @@ func runCredentialCreate(cmd *cobra.Command, args []string) error {
 func runCredentialList(cmd *cobra.Command, args []string) error {
 	saID, _ := cmd.Flags().GetString("sa")
 	protocol, _ := cmd.Flags().GetString("protocol")
+	resource, _ := cmd.Flags().GetString("resource")
 	return credentialadmin.RunList(cmd.Context(), credentialadmin.ListOptions{
 		BaseOptions: credentialBaseOptionsFromCmd(cmd),
 		SAID:        saID,
 		Protocol:    protocol,
+		Resource:    resource,
 	})
 }
 

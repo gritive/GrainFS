@@ -72,6 +72,19 @@ func TestServiceCreateGetListAndHints(t *testing.T) {
 	require.Equal(t, secret.ID, items[0].ID)
 }
 
+func TestServiceListFiltersByResource(t *testing.T) {
+	store := NewStore()
+	svc := NewService(store)
+	_, err := svc.Create(CreateRequest{SAID: "sa-a", Protocol: ProtocolNBD, Resource: "volume/one", Mode: ModeRW})
+	require.NoError(t, err)
+	_, err = svc.Create(CreateRequest{SAID: "sa-a", Protocol: ProtocolNBD, Resource: "volume/two", Mode: ModeRW})
+	require.NoError(t, err)
+
+	got := svc.List(ListFilter{Protocol: ProtocolNBD, Resource: "volume/two"})
+	require.Len(t, got, 1)
+	require.Equal(t, "volume/two", got[0].Resource)
+}
+
 func TestServiceEnvelopeStoresRecoverableSecretWithoutLeakingPlaintext(t *testing.T) {
 	now := time.Unix(101, 0).UTC()
 	envelope := &testSecretEnvelope{}
