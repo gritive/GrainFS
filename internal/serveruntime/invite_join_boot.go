@@ -346,14 +346,16 @@ func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJo
 	// shredFile tolerates an absent file (the common case).
 	shredFile(inviteJoinPathsFor(dataDir).nodeKeyUnsealed)
 	st := &inviteJoinState{
-		seedAddr:      rec.seedAddr,
-		seedSPKI:      rec.seedSPKI,
-		inviteID:      rec.inviteID,
-		nodeID:        rec.nodeID,
-		raftAddr:      rec.raftAddr,
-		leaderID:      rec.leaderID,
-		nodeSPKI:      rec.nodeSPKI,
-		nodeKeyKEKGen: rec.nodeKeyKEKGen,
+		seedAddr:          rec.seedAddr,
+		seedSPKI:          rec.seedSPKI,
+		inviteID:          rec.inviteID,
+		nodeID:            rec.nodeID,
+		raftAddr:          rec.raftAddr,
+		leaderID:          rec.leaderID,
+		nodeSPKI:          rec.nodeSPKI,
+		nodeKeyKEKGen:     rec.nodeKeyKEKGen,
+		peerSPKIs:         rec.peerSPKIs,
+		clusterKeyDropped: rec.clusterKeyDropped,
 		// clusterID stays nil: Phase-2 does not use it (the seal was opened in
 		// Phase-1). FreshJoin needs it; resume does not.
 	}
