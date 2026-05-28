@@ -50,7 +50,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -525,6 +527,9 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	if err := transport.SealNodeKey(dataDir, sealKEK, cert); err != nil {
 		return fmt.Errorf("seal node key: %w", err)
 	}
+	if err := writeNodeKeyGen(dataDir, sealGen); err != nil {
+		return err
+	}
 
 	// 9. set a transport construction key in memory so bootValidateConfig's
 	// --cluster-key gate passes, and mirror it to keys.d/current.key for crash
@@ -762,6 +767,9 @@ func appendInviteSealField(out, b []byte) []byte {
 func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, resolveKEK func() ([]byte, error)) (tls.Certificate, [32]byte, error) {
 	if len(encKey) == 32 {
 		if cert, spki, err := transport.LoadNodeKey(dataDir, encKey); err == nil {
+			if err := deleteNodeKeyGen(dataDir); err != nil {
+				return tls.Certificate{}, [32]byte{}, err
+			}
 			return cert, spki, nil
 		}
 	}
@@ -789,6 +797,61 @@ func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, resolveKEK func(
 		}
 	}
 	return cert, spki, nil
+}
+
+func writeNodeKeyGen(dataDir string, gen uint32) error {
+	keysDir := filepath.Join(dataDir, "keys.d")
+	if err := os.MkdirAll(keysDir, 0o700); err != nil {
+		return fmt.Errorf("write node key gen: mkdir: %w", err)
+	}
+	path := filepath.Join(keysDir, nodeKeyGenFile)
+	tmp := path + ".tmp"
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("write node key gen: create tmp: %w", err)
+	}
+	if _, err := f.Write([]byte(strconv.FormatUint(uint64(gen), 10))); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write node key gen: write: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write node key gen: fsync: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("write node key gen: close: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("write node key gen: rename: %w", err)
+	}
+	d, err := os.Open(keysDir)
+	if err != nil {
+		return fmt.Errorf("write node key gen: open dir: %w", err)
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+func readNodeKeyGen(dataDir string) (uint32, bool) {
+	path := filepath.Join(dataDir, "keys.d", nodeKeyGenFile)
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 {
+		return 0, false
+	}
+	s := string(raw)
+	v, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	if strconv.FormatUint(v, 10) != s {
+		return 0, false
+	}
+	return uint32(v), true
 }
 
 // highestKEKGen returns the highest generation present in gens and its key
