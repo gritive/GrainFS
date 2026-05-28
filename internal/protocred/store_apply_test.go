@@ -51,6 +51,13 @@ func TestStoreApplyRotateRevokeStaleAndLastUsed(t *testing.T) {
 	if rotated.SecretHash != newHash || rotated.SecretHint != "rotated-hint" || rotated.Generation != 2 {
 		t.Fatalf("rotated = %+v", rotated)
 	}
+	rotated, err = store.ApplyRotateWithSecretEnc(row.ID, sha256.Sum256([]byte("rotated-enc")), "rotated-enc-hint", []byte("sealed-rotated"))
+	if err != nil {
+		t.Fatalf("ApplyRotateWithSecretEnc: %v", err)
+	}
+	if string(rotated.SecretEnc) != "sealed-rotated" || rotated.SecretHint != "rotated-enc-hint" || rotated.Generation != 3 {
+		t.Fatalf("rotated with enc = %+v", rotated)
+	}
 
 	used := row.CreatedAt.Add(2 * time.Hour)
 	if _, err := store.ApplyLastUsed(row.ID, used); err != nil {

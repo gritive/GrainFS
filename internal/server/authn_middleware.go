@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -132,6 +133,51 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			}
 		}
 
+		if s.protocolCredAuth != nil {
+			if accessKey := s3auth.AccessKeyFromRequest(r); accessKey != "" {
+				if item, ok := s.protocolCredAuth.credential(accessKey); ok {
+					var nextCtx context.Context
+					var failure *authnFailure
+					switch {
+					case isS3Path && item.Protocol == protocred.ProtocolS3:
+						req := s3AuthzRequestFromHertz(c)
+						if protocolCredentialCrossBucketCopy(c, bucket) {
+							nextCtx, failure = ctx, &authnFailure{
+								status:  consts.StatusForbidden,
+								code:    "AccessDenied",
+								message: "protocol credential is not valid for copy source bucket",
+								reason:  "protocol_credential_resource_mismatch",
+							}
+						} else {
+							nextCtx, failure = s.protocolCredAuth.authenticate(ctx, r, protocred.ProtocolS3, "bucket/"+bucket, s3authActionAllowsRO(req.Action))
+						}
+					case isIceberg && item.Protocol == protocred.ProtocolIceberg:
+						nextCtx, failure = s.protocolCredAuth.authenticate(ctx, r, protocred.ProtocolIceberg, icebergResourceForProtocolCredential(c, item), icebergMethodAllowsRO(method))
+					default:
+						nextCtx, failure = ctx, &authnFailure{
+							status:  consts.StatusForbidden,
+							code:    "AccessDenied",
+							message: "protocol credential is not valid for this protocol",
+							reason:  "protocol_credential_protocol_mismatch",
+						}
+					}
+					if failure != nil {
+						s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
+						if isIceberg {
+							writeIcebergError(c, 401, "NotAuthorizedException", failure.message)
+						} else {
+							writeXMLError(c, failure.status, failure.code, failure.message)
+						}
+						c.Abort()
+						return
+					}
+					ctx = nextCtx
+					c.Next(ctx)
+					return
+				}
+			}
+		}
+
 		nextCtx, failure := s.authenticateSignedRequest(ctx, r)
 		if failure != nil {
 			s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
@@ -187,6 +233,63 @@ func hasBearerPrefix(s string) bool {
 // returns the remaining token. Callers must have checked hasBearerPrefix first.
 func trimBearerPrefix(s string) string {
 	return s[7:]
+}
+
+func s3authActionAllowsRO(action s3auth.S3Action) bool {
+	switch action {
+	case s3auth.GetObject,
+		s3auth.HeadObject,
+		s3auth.ListBucket,
+		s3auth.GetBucketVersioning,
+		s3auth.ListBucketVersions,
+		s3auth.GetObjectRetention,
+		s3auth.GetBucketObjectLockConfiguration,
+		s3auth.GetBucketLifecycleConfiguration:
+		return true
+	default:
+		return false
+	}
+}
+
+func protocolCredentialCrossBucketCopy(c *app.RequestContext, dstBucket string) bool {
+	if string(c.Method()) != "PUT" {
+		return false
+	}
+	raw := string(c.GetHeader("x-amz-copy-source"))
+	if raw == "" {
+		return false
+	}
+	src, ok := parseCopySource(raw)
+	return ok && src.Bucket != dstBucket
+}
+
+func icebergMethodAllowsRO(method string) bool {
+	return method == "GET" || method == "HEAD"
+}
+
+func icebergWarehouseFromRequest(c *app.RequestContext) string {
+	if c == nil {
+		return "warehouse"
+	}
+	if wh := string(c.QueryArgs().Peek("warehouse")); wh != "" {
+		return wh
+	}
+	if wh := c.Param("warehouse"); wh != "" {
+		return wh
+	}
+	return "warehouse"
+}
+
+func icebergResourceForProtocolCredential(c *app.RequestContext, item protocred.Credential) string {
+	if c != nil {
+		if wh := string(c.QueryArgs().Peek("warehouse")); wh != "" {
+			return "catalog/" + wh
+		}
+		if wh := c.Param("warehouse"); wh != "" {
+			return "catalog/" + wh
+		}
+	}
+	return item.Resource
 }
 
 // isLocalhostAddr reports whether addr (typically from c.RemoteAddr().String(),

@@ -17,27 +17,40 @@ type ProtocolCredentialProposeFunc func(context.Context, MetaCmdType, []byte) er
 // ProtocolCredentialService keeps protocol credential reads local while routing
 // mutations through Meta Raft.
 type ProtocolCredentialService struct {
-	store   *protocred.Store
-	propose ProtocolCredentialProposeFunc
-	now     func() time.Time
+	store    *protocred.Store
+	propose  ProtocolCredentialProposeFunc
+	now      func() time.Time
+	envelope protocred.SecretEnvelope
 }
 
-func NewProtocolCredentialService(store *protocred.Store, propose ProtocolCredentialProposeFunc) *ProtocolCredentialService {
+type ProtocolCredentialServiceOption func(*ProtocolCredentialService)
+
+func WithProtocolCredentialSecretEnvelope(envelope protocred.SecretEnvelope) ProtocolCredentialServiceOption {
+	return func(s *ProtocolCredentialService) {
+		s.envelope = envelope
+	}
+}
+
+func NewProtocolCredentialService(store *protocred.Store, propose ProtocolCredentialProposeFunc, opts ...ProtocolCredentialServiceOption) *ProtocolCredentialService {
 	if store == nil {
 		store = protocred.NewStore()
 	}
-	return &ProtocolCredentialService{
+	s := &ProtocolCredentialService{
 		store:   store,
 		propose: propose,
 		now:     func() time.Time { return time.Now().UTC() },
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *ProtocolCredentialService) Create(req protocred.CreateRequest) (protocred.Secret, error) {
 	if s.propose == nil {
 		return protocred.Secret{}, protocred.ErrInvalid
 	}
-	row, secret, err := protocred.MaterializeCreate(req, s.now())
+	row, secret, err := protocred.MaterializeCreateWithEnvelope(req, s.now(), s.envelope)
 	if err != nil {
 		return protocred.Secret{}, err
 	}
@@ -59,15 +72,15 @@ func (s *ProtocolCredentialService) Create(req protocred.CreateRequest) (protocr
 }
 
 func (s *ProtocolCredentialService) List(filter protocred.ListFilter) []protocred.Credential {
-	return protocred.NewService(s.store).List(filter)
+	return protocred.NewService(s.store, protocred.WithSecretEnvelope(s.envelope)).List(filter)
 }
 
 func (s *ProtocolCredentialService) Get(id string) (protocred.Credential, error) {
-	return protocred.NewService(s.store).Get(id)
+	return protocred.NewService(s.store, protocred.WithSecretEnvelope(s.envelope)).Get(id)
 }
 
 func (s *ProtocolCredentialService) Authenticate(req protocred.AuthenticateRequest) (protocred.Credential, error) {
-	return protocred.NewService(s.store).Authenticate(req)
+	return protocred.NewService(s.store, protocred.WithSecretEnvelope(s.envelope)).Authenticate(req)
 }
 
 func (s *ProtocolCredentialService) Rotate(id string) (protocred.Secret, error) {
@@ -78,7 +91,7 @@ func (s *ProtocolCredentialService) Rotate(id string) (protocred.Secret, error) 
 	if err != nil {
 		return protocred.Secret{}, err
 	}
-	hash, hint, secret, err := protocred.MaterializeRotate(item)
+	hash, hint, enc, secret, err := protocred.MaterializeRotateWithEnvelope(item, s.envelope)
 	if err != nil {
 		return protocred.Secret{}, err
 	}
@@ -92,6 +105,7 @@ func (s *ProtocolCredentialService) Rotate(id string) (protocred.Secret, error) 
 		SecretHash: hash,
 		SecretHint: hint,
 		RotatedAt:  s.now(),
+		SecretEnc:  enc,
 	})
 	if err != nil {
 		return protocred.Secret{}, err

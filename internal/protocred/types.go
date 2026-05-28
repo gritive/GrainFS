@@ -67,6 +67,7 @@ type Credential struct {
 	Mode        Mode
 	SecretHash  [sha256.Size]byte
 	SecretHint  string
+	SecretEnc   []byte
 	CreatedAt   time.Time
 	CreatedBy   string
 	ExpiresAt   *time.Time
@@ -127,4 +128,26 @@ func cloneTime(t *time.Time) *time.Time {
 	}
 	copy := *t
 	return &copy
+}
+
+type SecretEnvelope interface {
+	SealProtocolCredentialSecret(aad []byte, plaintext string) ([]byte, error)
+	OpenProtocolCredentialSecret(aad []byte, ciphertext []byte) (string, error)
+}
+
+func SecretAAD(item Credential) []byte {
+	out := make([]byte, 0, len(item.ID)+len(item.SAID)+len(item.Protocol)+len(item.Resource)+len(item.Mode)+32)
+	out = append(out, "grainfs-protocol-credential-secret-v1"...)
+	out = appendAADField(out, item.ID)
+	out = appendAADField(out, item.SAID)
+	out = appendAADField(out, string(item.Protocol))
+	out = appendAADField(out, item.Resource)
+	out = appendAADField(out, string(item.Mode))
+	return out
+}
+
+func appendAADField(out []byte, s string) []byte {
+	out = append(out, 0)
+	out = append(out, s...)
+	return out
 }

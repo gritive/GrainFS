@@ -15,8 +15,21 @@ locations.
 ## Authentication
 
 GrainFS Iceberg REST Catalog requires SigV4 on every endpoint, the same SigV4
-the S3 endpoint uses. Configure your Iceberg client with the `access_key` and
-`secret_key` of a bootstrapped ServiceAccount (`grainfs iam sa create ...`).
+the S3 endpoint uses. Configure your Iceberg client with either the
+`access_key` and `secret_key` of a bootstrapped ServiceAccount
+(`grainfs iam sa create ...`) or an Iceberg protocol credential created for one
+catalog:
+
+```sh
+grainfs credential create \
+  --sa <sa_id> \
+  --protocol iceberg \
+  --resource catalog/warehouse \
+  --mode ro
+```
+
+For a protocol credential, use the returned credential `id` as the SigV4
+access key and the one-time `secret` as the SigV4 secret key.
 
 For `apache/iceberg-go`, `pyiceberg`, or the Trino REST connector:
 

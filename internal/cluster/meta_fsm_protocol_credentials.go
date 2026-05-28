@@ -53,7 +53,7 @@ func (f *MetaFSM) applyProtocolCredentialRotate(payload []byte) error {
 	if err != nil || replay {
 		return err
 	}
-	_, err = f.protocolCredentialStore.ApplyRotate(cmd.ID, cmd.SecretHash, cmd.SecretHint)
+	_, err = f.protocolCredentialStore.ApplyRotateWithSecretEnc(cmd.ID, cmd.SecretHash, cmd.SecretHint, cmd.SecretEnc)
 	if err != nil {
 		return err
 	}
@@ -164,6 +164,7 @@ func protocolCredentialRotateDigest(cmd ProtocolCredentialRotateCmd) [sha256.Siz
 	writeDigestString(h, cmd.ID)
 	h.Write(cmd.SecretHash[:])
 	writeDigestString(h, cmd.SecretHint)
+	writeDigestBytes(h, cmd.SecretEnc)
 	writeDigestInt64(h, unixNanos(cmd.RotatedAt))
 	return sha256.Sum256(h.Sum(nil))
 }
@@ -193,6 +194,7 @@ func writeDigestCredential(h interface{ Write([]byte) (int, error) }, row protoc
 	writeDigestString(h, string(row.Mode))
 	_, _ = h.Write(row.SecretHash[:])
 	writeDigestString(h, row.SecretHint)
+	writeDigestBytes(h, row.SecretEnc)
 	writeDigestInt64(h, unixNanos(row.CreatedAt))
 	writeDigestString(h, row.CreatedBy)
 	writeDigestInt64(h, unixNanosPtr(row.ExpiresAt))
@@ -201,6 +203,11 @@ func writeDigestCredential(h interface{ Write([]byte) (int, error) }, row protoc
 	writeDigestUint64(h, row.Generation)
 	writeDigestInt64(h, unixNanosPtr(row.StaleAt))
 	writeDigestString(h, row.StaleReason)
+}
+
+func writeDigestBytes(h interface{ Write([]byte) (int, error) }, b []byte) {
+	writeDigestUint64(h, uint64(len(b)))
+	_, _ = h.Write(b)
 }
 
 func writeDigestString(h interface{ Write([]byte) (int, error) }, s string) {

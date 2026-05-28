@@ -109,6 +109,10 @@ func (s *Store) ApplyCreate(row Credential) (Credential, error) {
 
 // ApplyRotate replaces secret material for an existing, non-revoked row.
 func (s *Store) ApplyRotate(id string, hash [sha256.Size]byte, hint string) (Credential, error) {
+	return s.ApplyRotateWithSecretEnc(id, hash, hint, nil)
+}
+
+func (s *Store) ApplyRotateWithSecretEnc(id string, hash [sha256.Size]byte, hint string, enc []byte) (Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, ok := s.items[id]
@@ -120,6 +124,7 @@ func (s *Store) ApplyRotate(id string, hash [sha256.Size]byte, hint string) (Cre
 	}
 	item.SecretHash = hash
 	item.SecretHint = hint
+	item.SecretEnc = cloneBytes(enc)
 	item.Generation++
 	s.items[id] = item
 	return cloneCredential(item), nil
@@ -183,6 +188,7 @@ func credentialsEqual(a, b Credential) bool {
 		a.Mode == b.Mode &&
 		a.SecretHash == b.SecretHash &&
 		a.SecretHint == b.SecretHint &&
+		string(a.SecretEnc) == string(b.SecretEnc) &&
 		a.CreatedAt.Equal(b.CreatedAt) &&
 		a.CreatedBy == b.CreatedBy &&
 		timePtrEqual(a.ExpiresAt, b.ExpiresAt) &&

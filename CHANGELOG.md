@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.402.0] - 2026-05-28
+
+### Security
+
+- S3 and Iceberg can now authenticate protocol credentials through SigV4 while
+  keeping protocol credential secrets encrypted at rest.
+- S3 protocol credentials are enforced against their scoped bucket, including
+  stale/revoked/expired checks, read-only mode rejection, wrong-bucket
+  rejection, and fail-closed cross-bucket `CopyObject` source handling.
+- Iceberg protocol credentials are enforced against their scoped catalog and
+  carry the validated warehouse into catalog handlers, including requests that
+  omit `warehouse` after the initial config call.
+
+### Changed
+
+- Protocol credential create and rotate commands now persist encrypted secret
+  envelopes through Meta Raft snapshots and replay, so S3/Iceberg SigV4 can
+  derive signing keys without storing plaintext protocol secrets.
+- User and compatibility docs now describe S3/Iceberg protocol credential usage
+  and the remaining real-client smoke coverage follow-up.
+
 ## [0.0.401.0] - 2026-05-28
 
 ### Security
