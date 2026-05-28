@@ -27,6 +27,7 @@ Use these when you are deploying, monitoring, recovering, or running drills.
 | --- | --- | --- |
 | Deploy and operate a production node or cluster | [Production runbook](operators/runbook.md) | How-to / runbook |
 | Track service objectives | [SLI/SLO](operators/sli-slo.md) | Reference |
+| Operate federated IAM authorization | [OIDC federated IAM](operators/oidc-federated-iam.md) | How-to / explanation |
 | Operate NFS exports | [NFS export lifecycle](operators/nfs-export-lifecycle.md), [NFS debug](operators/nfs-debug.md) | How-to |
 | Operate the balancer | [Balancer operations](operators/balancer.md) | How-to |
 | Roll back managed Badger paths | [Badger managed-mode rollback](operators/badger-managed-mode-rollback.md) | How-to |

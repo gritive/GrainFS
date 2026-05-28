@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/reservedname"
 )
 
@@ -79,6 +80,30 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 		}
 	}
 	in, err := a.resolver.Effective(ctx, saID, bucket, ctxReq.PrincipalType)
+	if err != nil {
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: " + err.Error(), ConditionContext: cc}
+	}
+	in.Ctx = ctxReq
+	allowAnon, _ := a.cfg.GetBool("iam.allow-anonymous-bucket-policy")
+	in.AllowAnonBucket = allowAnon
+	return policy.Evaluate(in)
+}
+
+// AuthorizePrincipal returns the policy.Evaluate result for a typed IAM
+// principal. Service-account principals deliberately delegate to Authorize so
+// legacy anonymous/default-bucket and S3-SA behavior stays byte-for-byte aligned.
+func (a *Authorizer) AuthorizePrincipal(ctx context.Context, p principal.Principal, bucket string, ctxReq policy.RequestContext) policy.EvalResult {
+	if p.Kind == principal.KindServiceAccount {
+		return a.Authorize(ctx, p.ID, bucket, ctxReq)
+	}
+	cc := policy.ConditionContextFromRequest(ctxReq)
+	if adminUDSOnlyActions[ctxReq.Action] {
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "admin-UDS-only action (D#8)", ConditionContext: cc}
+	}
+	if reservedname.IsInternalBucket(bucket) {
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (data plane is admin-UDS-only)", ConditionContext: cc}
+	}
+	in, err := a.resolver.EffectivePrincipal(ctx, p, bucket)
 	if err != nil {
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: " + err.Error(), ConditionContext: cc}
 	}

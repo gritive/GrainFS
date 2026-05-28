@@ -125,10 +125,16 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
-- [ ] **OIDC federated IAM Slice 4**: use `AuthorizePrincipal` in selected
+- [x] **OIDC federated IAM Slice 4**: use `AuthorizePrincipal` in selected
   admin/protocol routes, add OIDC actor support, and document operator flows
-  and failure modes. Source spec:
-  `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`.
+  and failure modes. SHIPPED in current branch: `s3auth.Authorizer` exposes
+  `AuthorizePrincipal`; protocol credential admin handlers evaluate typed actor
+  principals from context and fall back to the target service account for
+  existing UDS/CLI flows.
+
+- [ ] **OIDC federated IAM Slice 5**: add admin/protocol HTTP bearer-token
+  middleware for OIDC actors, expand `AuthorizePrincipal` adoption to additional
+  admin/protocol routes, and add end-to-end denied/allowed audit examples.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
