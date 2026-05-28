@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/compat"
 )
 
@@ -638,4 +640,27 @@ func TestAdminAPI_BucketUpstream_CutoverGateRejectReturnsConflict(t *testing.T) 
 	if !strings.Contains(w.Body.String(), "migration_cutover_v1") {
 		t.Fatalf("public error missing capability: %s", w.Body.String())
 	}
+}
+
+func TestAdminAPI_NilEncryptorObservable(t *testing.T) {
+	a := NewAdminAPI(NewStore(), newFakeProposer(), nil)
+	require.Nil(t, a.Encryptor(), "encryptor nil until SetEncryptor")
+}
+
+func TestAdminAPI_SetEncryptorIsObservable(t *testing.T) {
+	a := NewAdminAPI(NewStore(), newFakeProposer(), nil)
+	de := staticTestEncryptor(t)
+	a.SetEncryptor(de)
+	got := a.Encryptor()
+	require.NotNil(t, got)
+	require.True(t, de == got, "Encryptor() returns the installed value")
+}
+
+func TestAdminAPI_SetEncryptorIdempotent(t *testing.T) {
+	a := NewAdminAPI(NewStore(), newFakeProposer(), nil)
+	de1 := staticTestEncryptor(t)
+	de2 := staticTestEncryptor(t)
+	a.SetEncryptor(de1)
+	a.SetEncryptor(de2)
+	require.True(t, de2 == a.Encryptor(), "last write wins")
 }
