@@ -48,6 +48,26 @@ func TestRunDropClusterKey_DCut4GateNotMet(t *testing.T) {
 	require.False(t, proposed.Load())
 }
 
+func TestRunDropClusterKey_VoterSetChangedBeforePropose(t *testing.T) {
+	var calls atomic.Int32
+	var proposed atomic.Bool
+	deps := DropClusterKeyDeps{
+		SelfID: "node-A",
+		Voters: func() ([]string, uint64) {
+			if calls.Add(1) == 1 {
+				return []string{"node-A", "node-B"}, 2
+			}
+			return []string{"node-A", "node-B", "node-C"}, 3
+		},
+		AllVPN:  func([]string) bool { return true },
+		Propose: func(context.Context, MetaCmdType, []byte) error { proposed.Store(true); return nil },
+	}
+	err := RunDropClusterKey(context.Background(), deps, time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "voter set changed")
+	require.False(t, proposed.Load())
+}
+
 func TestRunDropClusterKey_HappyPath(t *testing.T) {
 	var dropProposed atomic.Bool
 	deps := DropClusterKeyDeps{

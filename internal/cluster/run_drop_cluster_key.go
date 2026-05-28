@@ -15,9 +15,9 @@ type DropClusterKeyDeps struct {
 }
 
 // RunDropClusterKey executes PR-2b's one-way cluster-key drop flow: read the
-// stamped voter set, verify D-cut4 (all voters present per-node certs), then
-// propose DropClusterKeyAccept(87). Any precondition failure returns before
-// proposing.
+// stamped voter set, verify D-cut4 (all voters present per-node certs), re-read
+// the voter set, then propose DropClusterKeyAccept(87). Any precondition
+// failure returns before proposing.
 func RunDropClusterKey(ctx context.Context, deps DropClusterKeyDeps, timeout time.Duration) error {
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -44,6 +44,10 @@ func RunDropClusterKey(ctx context.Context, deps DropClusterKeyDeps, timeout tim
 	if !deps.AllVPN(voters) {
 		return fmt.Errorf("RunDropClusterKey: D-cut4 gate not satisfied")
 	}
+	currentVoters, _ := deps.Voters()
+	if !voterSetsEqual(voters, currentVoters) {
+		return fmt.Errorf("RunDropClusterKey: voter set changed during D-cut4 gate (%v -> %v) — retry after membership is stable", voters, currentVoters)
+	}
 
 	payload, err := encodeDropClusterKeyAcceptCmd(DropClusterKeyStamp{
 		Voters:      append([]string(nil), voters...),
@@ -56,4 +60,21 @@ func RunDropClusterKey(ctx context.Context, deps DropClusterKeyDeps, timeout tim
 		return fmt.Errorf("RunDropClusterKey: propose: %w", err)
 	}
 	return nil
+}
+
+// DropClusterKey runs the complete-cutover flow while holding the meta-raft
+// membership lock. That prevents a concurrent invite-join promotion from
+// changing the voter set between the D-cut4 gate and the irreversible drop
+// proposal.
+func (m *MetaRaft) DropClusterKey(ctx context.Context, selfID string, timeout time.Duration) error {
+	m.membershipMu.Lock()
+	defer m.membershipMu.Unlock()
+
+	raftConfig := NewMetaRaftConfigReader(m)
+	return RunDropClusterKey(ctx, DropClusterKeyDeps{
+		SelfID:  selfID,
+		Voters:  raftConfig.EffectiveConfiguration,
+		AllVPN:  m.FSM().AllVotersPresentsPerNode,
+		Propose: m.Propose,
+	}, timeout)
 }

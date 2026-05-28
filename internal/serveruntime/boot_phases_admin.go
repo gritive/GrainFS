@@ -199,17 +199,9 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				}
 				h.POST("/v1/cluster/invite/create", inviteH.Handle)
 
-				raftConfig := cluster.NewMetaRaftConfigReader(state.metaRaft)
 				completeCutoverH := &CompleteCutoverHandler{
 					RunDrop: func(ctx context.Context) error {
-						return cluster.RunDropClusterKey(ctx, cluster.DropClusterKeyDeps{
-							SelfID: state.nodeID,
-							Voters: raftConfig.EffectiveConfiguration,
-							AllVPN: state.metaRaft.FSM().AllVotersPresentsPerNode,
-							Propose: func(ctx context.Context, typ cluster.MetaCmdType, payload []byte) error {
-								return state.metaRaft.Propose(ctx, typ, payload)
-							},
-						}, 60*time.Second)
+						return state.metaRaft.DropClusterKey(ctx, state.nodeID, 60*time.Second)
 					},
 				}
 				h.POST("/v1/cluster/complete-cutover", wrapStdlibNoParam(completeCutoverH.ServeHTTP))

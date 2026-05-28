@@ -78,6 +78,10 @@ type MetaRaft struct {
 
 	capabilityGate *CapabilityGate
 
+	// membershipMu serializes meta-raft voter-set changes with irreversible
+	// cutover operations that gate on a stable voter snapshot.
+	membershipMu sync.Mutex
+
 	// lastApplied is read atomically from waitApplied (hot path).
 	// applyNotifyMu protects applyNotify channel swaps only.
 	lastApplied   atomic.Uint64
@@ -330,6 +334,9 @@ func (m *MetaRaft) Close() error {
 // raft membership API, and records it in the FSM. If FSM registration fails
 // after promotion, best-effort cleanup removes the promoted voter by address.
 func (m *MetaRaft) Join(ctx context.Context, id, addr string) error {
+	m.membershipMu.Lock()
+	defer m.membershipMu.Unlock()
+
 	raftID := addr
 	if raftID == "" {
 		raftID = id
