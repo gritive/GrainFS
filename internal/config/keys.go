@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	iamoidc "github.com/gritive/GrainFS/internal/iam/oidc"
+	iampdp "github.com/gritive/GrainFS/internal/iam/pdp"
 )
 
 // ReloadHooks carries optional subsystem callbacks that fire when a cluster-wide
@@ -40,6 +41,15 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 		Desc:    "OIDC issuer configuration JSON for federated IAM authentication",
 		Validate: func(raw string) error {
 			_, err := iamoidc.ParseIssuerConfigs([]byte(raw))
+			return err
+		},
+	})
+
+	s.Register("iam.pdp", StringSpec{
+		Default: `{"enabled":false}`,
+		Desc:    "External PDP adapter configuration JSON (disabled by default)",
+		Validate: func(raw string) error {
+			_, err := iampdp.ParseConfig([]byte(raw))
 			return err
 		},
 	})
