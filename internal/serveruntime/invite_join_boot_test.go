@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -636,31 +638,28 @@ func TestInviteNodeKeySealKey_PreDropUsesHighestKEK(t *testing.T) {
 	}
 
 	gen, key, err := inviteNodeKeySealKey(encKey, gens, false)
-	if err != nil {
-		t.Fatalf("inviteNodeKeySealKey: %v", err)
-	}
-	if gen != 3 {
-		t.Fatalf("gen=%d want 3", gen)
-	}
-	if !bytes.Equal(key, gens[1].Key) {
-		t.Fatal("pre-drop seal key did not use highest KEK generation")
-	}
+	require.NoError(t, err)
+	require.Equal(t, uint32(3), gen)
+	require.Equal(t, gens[1].Key, key, "pre-drop seal key did not use highest KEK generation")
 }
 
-func TestInviteNodeKeySealKey_PostDropUsesStaticEncryptionKey(t *testing.T) {
+func TestInviteNodeKeySealKey_PostDropUsesHighestKEK(t *testing.T) {
 	encKey := bytes.Repeat([]byte{0xCD}, 32)
 	gens := []cluster.KEKGen{
 		{Gen: 3, Key: bytes.Repeat([]byte{0x03}, 32)},
 	}
 
 	gen, key, err := inviteNodeKeySealKey(encKey, gens, true)
-	if err != nil {
-		t.Fatalf("inviteNodeKeySealKey: %v", err)
-	}
-	if gen != 0 {
-		t.Fatalf("gen=%d want 0 sentinel marker for encKey-first load", gen)
-	}
-	if !bytes.Equal(key, encKey) {
-		t.Fatal("post-drop seal key must use static encryption key before QUIC Listen")
-	}
+	require.NoError(t, err)
+	require.Equal(t, uint32(3), gen)
+	require.Equal(t, gens[0].Key, key, "post-drop seal key did not use highest KEK generation")
+}
+
+func TestInviteNodeKeySealKey_PostDropLegacyFallsBackToStaticEncryptionKey(t *testing.T) {
+	encKey := bytes.Repeat([]byte{0xCD}, 32)
+
+	gen, key, err := inviteNodeKeySealKey(encKey, nil, true)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), gen, "legacy sentinel marker")
+	require.Equal(t, encKey, key, "post-drop legacy fallback must use static encryption key")
 }

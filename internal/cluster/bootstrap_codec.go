@@ -73,13 +73,11 @@ func decodeKEKGens(t *clusterpb.BootstrapSecretsPayload) []KEKGen {
 
 // EncodeBootstrapSecretsPayloadWithCutover serializes the INNER plaintext plus
 // the zero-CA cutover wire fields (member per-node SPKI set + cluster_key_dropped
-// bit). PR-1 only wires the fields; the post-cutover joiner consumes them in PR-2.
-func EncodeBootstrapSecretsPayloadWithCutover(encKey []byte, gens []KEKGen, psk []byte, peerSPKIs [][32]byte, clusterKeyDropped bool) []byte {
+// bit). New payloads intentionally omit the legacy encryption_key field; decoders
+// still read it for old payloads until the format-7 cut.
+func EncodeBootstrapSecretsPayloadWithCutover(gens []KEKGen, psk []byte, peerSPKIs [][32]byte, clusterKeyDropped bool) []byte {
 	b := clusterBuilderPool.Get()
-	var encKeyOff, pskOff flatbuffers.UOffsetT
-	if len(encKey) > 0 {
-		encKeyOff = b.CreateByteVector(encKey)
-	}
+	var pskOff flatbuffers.UOffsetT
 	if len(psk) > 0 {
 		pskOff = b.CreateByteVector(psk)
 	}
@@ -102,9 +100,6 @@ func EncodeBootstrapSecretsPayloadWithCutover(encKey []byte, gens []KEKGen, psk 
 	}
 
 	clusterpb.BootstrapSecretsPayloadStart(b)
-	if encKeyOff != 0 {
-		clusterpb.BootstrapSecretsPayloadAddEncryptionKey(b, encKeyOff)
-	}
 	if gensOff != 0 {
 		clusterpb.BootstrapSecretsPayloadAddKekGenerations(b, gensOff)
 	}

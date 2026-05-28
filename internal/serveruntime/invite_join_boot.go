@@ -17,9 +17,8 @@ package serveruntime
 //	  - DialJoin(SeedAddr, SeedSPKI, nodeCert) and send JoinRequest{JoinPhase:1},
 //	  - OpenFromPeer the SealedBootstrap with the bindCtx W7 used
 //	    (clusterID‖inviteID‖nodeID‖leaderID), stage every secret on disk
-//	    (encryption.key, keys/<gen>.key, cluster.id), SealNodeKey to
-//	    keys.d/node.key.enc (pre-drop: active KEK gen; post-drop: static
-//	    encryption.key so the cert can be loaded before QUIC Listen), shred
+//	    (keys/<gen>.key, cluster.id, and legacy encryption.key when present),
+//	    SealNodeKey to keys.d/node.key.enc under the active KEK gen, shred
 //	    node.key.unsealed,
 //	  - set opts.ClusterKey in memory (transport PSK) so bootValidateConfig
 //	    passes, and persist a .invite-join-pending sentinel so a crash before
@@ -496,11 +495,10 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 		return err
 	}
 
-	// 8. SealNodeKey where the next boot phase can open it. Pre-drop joins use
-	// the cluster's ACTIVE KEK generation because Phase-2 runs after wireDEKKeeper
-	// installs KEKs. Post-drop joins must present the per-node cert BEFORE QUIC
-	// Listen, so bootQUICTransport opens node.key.enc earlier; seal directly under
-	// the static encryption.key in that case.
+	// 8. SealNodeKey where the next boot phase can open it. Use the cluster's
+	// ACTIVE KEK generation. Post-drop joins present the per-node cert before
+	// QUIC Listen, so bootQUICTransport loads this same KEK directly from disk
+	// before wireDEKKeeper has populated state.kekStore.
 	sealGen, sealKEK, err := inviteNodeKeySealKey(encKey, kekGens, clusterKeyDropped)
 	if err != nil {
 		return err
@@ -567,14 +565,11 @@ func stageInviteJoinTransportKey(dataDir string, opts *ServeOptions, psk []byte,
 }
 
 func inviteNodeKeySealKey(encKey []byte, kekGens []cluster.KEKGen, clusterKeyDropped bool) (uint32, []byte, error) {
-	if clusterKeyDropped {
-		if len(encKey) != 32 {
-			return 0, nil, fmt.Errorf("post-drop invite-join: encryption key must be 32 bytes, got %d", len(encKey))
-		}
-		return 0, encKey, nil
-	}
 	sealGen, sealKEK, ok := highestKEKGen(kekGens)
 	if !ok {
+		if clusterKeyDropped && len(encKey) == 32 {
+			return 0, encKey, nil
+		}
 		return 0, nil, fmt.Errorf("bootstrap secrets contain no KEK generations")
 	}
 	return sealGen, sealKEK, nil
