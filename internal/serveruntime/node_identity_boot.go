@@ -26,8 +26,9 @@ const nodeKeyEncFile = "node.key.enc"
 // persists the identity so Task 6 (self-register) can bind the SPKI.
 //
 // node.key.enc is sealed under the active KEK generation, with node.key.gen as
-// the durable generation pointer. encKey is retained only for one-way migration
-// from directories that were sealed under the old static encryption.key path.
+// the durable generation pointer. encKey is optional and retained only for
+// one-way migration from directories that were sealed under the old static
+// encryption.key path.
 //
 // Behavior:
 //   - node.key.enc ABSENT: generate a fresh identity, seal under active KEK,
@@ -42,9 +43,6 @@ const nodeKeyEncFile = "node.key.enc"
 // and the registry node-id-rebind guard would reject the later re-registration
 // (partition).
 func ensureNodeIdentity(dataDir, clusterID, nodeID string, encKey []byte, kekStore *encrypt.KEKStore) (cert tls.Certificate, spki [32]byte, nodeKeyKEKGen uint32, err error) {
-	if len(encKey) != 32 {
-		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: encryption key must be 32 bytes, got %d", len(encKey))
-	}
 	activeGen, activeKEK, err := activeNodeKeyKEK(kekStore)
 	if err != nil {
 		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("ensureNodeIdentity: %w", err)

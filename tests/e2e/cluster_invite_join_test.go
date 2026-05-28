@@ -237,10 +237,9 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 			// join ALPN, and the Phase-2 membership ACK — all landed.
 			waitForVoter(t, leader.httpURL, "joiner", 90*time.Second)
 
-			// Phase-1 must have staged the secret material on the joiner: the
-			// encryption key (opened from the sealed bootstrap) and the sealed
-			// node identity key. Both are written to disk before the Phase-2 ACK.
-			gomega.Expect(filepath.Join(joinerDir, "encryption.key")).To(gomega.BeAnExistingFile())
+			// Phase-1 must stage KEK-sealed identity material without recreating
+			// the legacy static encryption key on the joiner.
+			gomega.Expect(filepath.Join(joinerDir, "encryption.key")).NotTo(gomega.BeAnExistingFile())
 			gomega.Expect(filepath.Join(joinerDir, "keys.d", "node.key.enc")).To(gomega.BeAnExistingFile())
 		})
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.424.0] - 2026-05-29
+
+### Security
+
+- Removed the steady-state node identity boot dependency on the legacy static
+  `encryption.key`; normal boot now generates and reloads `keys.d/node.key.enc`
+  using the active KEK generation when no static key is present.
+
+### Changed
+
+- Kept `RawEncryptionKey` as optional migration material only for old
+  static-key-sealed node identities.
+- Fresh invite-join staging no longer creates `<dataDir>/encryption.key` when
+  the bootstrap payload omits the legacy static key.
+
+### Tests
+
+- Added KEK-only node identity generation/reload coverage, plus invite staging
+  coverage that asserts fresh bootstrap payloads leave `encryption.key` absent.
+- Updated the Zero-CA invite-join E2E expectation to require a KEK-sealed
+  `node.key.enc` without recreating the static encryption key.
+
 ## [0.0.423.0] - 2026-05-29
 
 ### Security

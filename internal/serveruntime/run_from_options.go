@@ -79,15 +79,10 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	}
 
 	// 4. Encryption key + IAMApplier.
-	// WithRaw variant returns the raw key bytes for the zero-CA invite-join
-	// bootstrap-secret provider (sealed to a joiner); identical key-loading
-	// semantics otherwise. Reads from primaryDataDir so it picks up the
-	// encryption.key Phase-1 staged there.
-	shardEncryptor, rawEncryptionKey, err := LoadOrCreateEncryptionKeyWithRaw(
-		opts.EncryptionKeyFile,
-		primaryDataDir,
-		AllowAutoGenerateEncryptionKey(primaryDataDir, opts.RaftAddr),
-	)
+	// The legacy static encryption key is optional for Zero-CA invite joins once
+	// Phase-1 stages KEK/DEK-backed node identity material. Existing static-key
+	// clusters still load the file when present.
+	shardEncryptor, rawEncryptionKey, err := loadStaticEncryptionKeyForRun(opts, primaryDataDir, inviteJoin)
 	if err != nil {
 		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
 	}
