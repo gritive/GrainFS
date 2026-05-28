@@ -115,8 +115,20 @@ func (rcv *PeerEntry) MutatePresentsPerNode(n bool) bool {
 	return rcv._tab.MutateBoolSlot(12, n)
 }
 
+func (rcv *PeerEntry) NodeKeyKekGen() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PeerEntry) MutateNodeKeyKekGen(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(14, n)
+}
+
 func PeerEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func PeerEntryAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
@@ -135,6 +147,9 @@ func PeerEntryAddState(builder *flatbuffers.Builder, state byte) {
 }
 func PeerEntryAddPresentsPerNode(builder *flatbuffers.Builder, presentsPerNode bool) {
 	builder.PrependBoolSlot(4, presentsPerNode, false)
+}
+func PeerEntryAddNodeKeyKekGen(builder *flatbuffers.Builder, nodeKeyKekGen uint32) {
+	builder.PrependUint32Slot(5, nodeKeyKekGen, 0)
 }
 func PeerEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

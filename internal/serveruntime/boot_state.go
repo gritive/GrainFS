@@ -134,6 +134,10 @@ type bootState struct {
 	// node does NOT yet present this on the wire — accept-side foundation only.
 	// Task 6 consumes perNodeSPKI for self-registration.
 	perNodeSPKI [32]byte
+	// perNodeKeyKEKGen is the KEK generation that currently seals
+	// keys.d/node.key.enc after any boot-time re-seal. Self-registration
+	// publishes it so KEK prune can avoid bricking restarted voters.
+	perNodeKeyKEKGen uint32
 	// perNodeCert is this node's per-node identity TLS certificate,
 	// populated alongside perNodeSPKI (PR-2a §8d F5 fix). The Task-5
 	// onPresentFlip callback closure captures BOTH cert and SPKI to call

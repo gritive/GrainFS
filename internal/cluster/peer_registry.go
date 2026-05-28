@@ -21,6 +21,10 @@ type peerEntry struct {
 	// PresentsPerNode records whether this peer presents a per-node identity
 	// (D-rev3). Recording-only plumbing; Task 7 reads it.
 	PresentsPerNode bool
+	// NodeKeyKEKGen records the KEK generation sealing keys.d/node.key.enc.
+	// KEK prune refuses while a voter reports a generation at or below the
+	// prune target.
+	NodeKeyKEKGen uint32
 }
 
 // peerRegistry is the deterministic membership/SPKI registry applied from the
@@ -74,10 +78,11 @@ func (r *peerRegistry) registerPendingLearner(nodeID string, s [32]byte, addr st
 // present with the SAME (nodeID, SPKI) it is kept/UPGRADED to member — an
 // existing member stays member, a pending-learner is promoted; it is NEVER
 // downgraded. Address is refreshed last-write-wins on an idempotent
-// re-register; PresentsPerNode is monotone (never true->false). The same
-// SPKI-uniqueness and node-id-rebind guards as
-// registerPendingLearner apply. presentsPerNode is recording-only (Task 7).
-func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, presentsPerNode bool) error {
+// re-register; PresentsPerNode is monotone (never true->false) and
+// NodeKeyKEKGen is monotone (never regresses to an older sealing generation).
+// The same SPKI-uniqueness and node-id-rebind guards as registerPendingLearner
+// apply.
+func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, denied := r.deny[s]; denied {
@@ -95,7 +100,10 @@ func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, pr
 	if existing, ok := r.byNodeID[nodeID]; ok && existing.PresentsPerNode {
 		presentsPerNode = true
 	}
-	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStateMember, PresentsPerNode: presentsPerNode}
+	if existing, ok := r.byNodeID[nodeID]; ok && existing.NodeKeyKEKGen > nodeKeyKEKGen {
+		nodeKeyKEKGen = existing.NodeKeyKEKGen
+	}
+	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStateMember, PresentsPerNode: presentsPerNode, NodeKeyKEKGen: nodeKeyKEKGen}
 	r.bySPKI[s] = nodeID
 	return nil
 }
@@ -277,6 +285,31 @@ func (r *peerRegistry) allVotersPresentsPerNode(voters []string) bool {
 		}
 	}
 	return true
+}
+
+// validateVoterNodeKeyKEKGens verifies every current voter has peer-registry
+// evidence proving its local node.key.enc is sealed under a generation that
+// survives pruning pruneVersion. Voters are raft addresses.
+func (r *peerRegistry) validateVoterNodeKeyKEKGens(voters []string, pruneVersion uint32) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, addr := range voters {
+		found := false
+		for _, e := range r.byNodeID {
+			if e.Address != addr {
+				continue
+			}
+			found = true
+			if e.NodeKeyKEKGen <= pruneVersion {
+				return fmt.Errorf("voter %s node_key_kek_gen=%d <= prune version %d", addr, e.NodeKeyKEKGen, pruneVersion)
+			}
+			break
+		}
+		if !found {
+			return fmt.Errorf("missing node-key KEK generation evidence from voter %s", addr)
+		}
+	}
+	return nil
 }
 
 // nodeIDToSPKI returns a snapshot of the nodeID→SPKI mapping for all peers.

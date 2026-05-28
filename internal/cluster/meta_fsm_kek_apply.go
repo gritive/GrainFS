@@ -523,6 +523,9 @@ func (f *MetaFSM) applyKEKPrune(applyIndex uint64, payload []byte) error {
 		if err := validatePruneAttestation(cmd, retireIdx); err != nil {
 			return fmt.Errorf("KEKPrune: partial-apply recovery: %w", err)
 		}
+		if err := f.peers.validateVoterNodeKeyKEKGens(cmd.VoterIDs, cmd.Version); err != nil {
+			return fmt.Errorf("KEKPrune: partial-apply recovery: node-key evidence: %w", err)
+		}
 		f.SetKEKStatus(cmd.Version, KEKLifecyclePruned, applyIndex)
 		f.RecordRotationRequestStatus(cmd.RequestID, RotationStatusApplied, applyIndex)
 		f.auditAppendKEKPrune(cmd, applyIndex)
@@ -554,6 +557,9 @@ func (f *MetaFSM) applyKEKPrune(applyIndex uint64, payload []byte) error {
 	// 3b. Full attestation validation.
 	if err := validatePruneAttestation(cmd, retireIdx); err != nil {
 		return fmt.Errorf("KEKPrune: %w", err)
+	}
+	if err := f.peers.validateVoterNodeKeyKEKGens(cmd.VoterIDs, cmd.Version); err != nil {
+		return fmt.Errorf("KEKPrune: node-key evidence: %w", err)
 	}
 
 	// 4. Disk-first state mutation. RemoveAndUnlink performs os.Remove +

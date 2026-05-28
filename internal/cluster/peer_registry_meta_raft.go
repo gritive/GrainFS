@@ -28,9 +28,9 @@ func (m *MetaRaft) ProposeRegisterPendingLearner(ctx context.Context, nodeID str
 // peer as member (D-rev3 step 2). Every node self-registers and most are
 // followers, so this uses the generic forwarding Propose path (which forwards
 // to the leader when not leader and blocks until applied) — NOT the leader-only
-// m.node.ProposeWait path. presentsPerNode is recording-only plumbing (Task 7).
-func (m *MetaRaft) ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error {
-	payload, err := encodeRegisterMemberCmd(nodeID, spki, addr, presentsPerNode)
+// m.node.ProposeWait path.
+func (m *MetaRaft) ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32) error {
+	payload, err := encodeRegisterMemberCmd(nodeID, spki, addr, presentsPerNode, nodeKeyKEKGen)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode RegisterMember: %w", err)
 	}

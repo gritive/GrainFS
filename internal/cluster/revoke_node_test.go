@@ -42,7 +42,7 @@ func TestMetaRaftRevokeNode_PendingOnlyBurnsAndDenylists(t *testing.T) {
 func TestMetaRaftRevokeNode_RegisteredMemberRemovesVoterAndClosesPeer(t *testing.T) {
 	fsm := NewMetaFSM()
 	memberSPKI := spki(0xB3)
-	require.NoError(t, fsm.peers.registerMember("node-member", memberSPKI, "127.0.0.1:7023", true))
+	require.NoError(t, fsm.peers.registerMember("node-member", memberSPKI, "127.0.0.1:7023", true, 0))
 
 	m := &MetaRaft{
 		fsm:         fsm,

@@ -821,6 +821,7 @@ table MetaRegisterMemberCmd {
   spki:[ubyte];     // 32 bytes
   address:string;
   presents_per_node:bool;
+  node_key_kek_gen:uint32;
 }
 
 // NFSv4 multi-export registry. Per design doc D2/D3/D5.
@@ -885,6 +886,7 @@ table PeerEntry {
   address:string;
   state:ubyte;
   presents_per_node:bool;
+  node_key_kek_gen:uint32;
 }
 
 table MetaStateSnapshot {

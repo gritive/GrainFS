@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/stretchr/testify/require"
 )
 
 // kekRotateTestFixture wires the FSM with a KEKStore, DEKKeeper, clusterID,
@@ -628,6 +629,11 @@ func newKEKPruneTestFixture(t *testing.T) *kekPruneTestFixture {
 		t.Fatalf("Retire(3): %v", err)
 	}
 	f.fsm.SetKEKStatus(3, KEKLifecycleRetiring, f.retireIdx)
+	for i, voter := range f.voters {
+		if err := f.fsm.peers.registerMember(voter, spki(byte(0x50+i)), voter, true, 4); err != nil {
+			t.Fatalf("seed node-key evidence for %s: %v", voter, err)
+		}
+	}
 
 	// Minimal DEKKeeper so Snapshot works if exercised. DEK wraps are AAD-bound;
 	// FSM clusterID is zero here (no rotation exercised) — seal under a zero
@@ -812,6 +818,7 @@ func TestFSM_Apply_KEKPrune_PartialApplyRecovery(t *testing.T) {
 func TestFSM_Apply_KEKPrune_MissingVoter_Rejects(t *testing.T) {
 	fx := newKEKPruneTestFixture(t)
 	fx.voters = []string{"node-0", "node-1", "node-2"}
+	require.NoError(t, fx.fsm.peers.registerMember("node-2", spki(0x52), "node-2", true, 4))
 	atts := []LeaseAttestationEntry{
 		{NodeID: "node-0", ObservedAtIndex: 200, LeaseCount: 0},
 		{NodeID: "node-1", ObservedAtIndex: 201, LeaseCount: 0},
@@ -934,6 +941,30 @@ func TestFSM_Apply_KEKPrune_NonZeroSnapshotRefCount_Rejects(t *testing.T) {
 	if !strings.Contains(err.Error(), "snapshot_ref_count") {
 		t.Errorf("expected 'snapshot_ref_count' in error, got: %v", err)
 	}
+}
+
+func TestFSM_Apply_KEKPrune_MissingNodeKeyEvidence_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	_, _ = fx.fsm.peers.remove("node-1")
+	cmd := fx.buildValidPruneCmd(3, fx.happyAttestations(), [16]byte{0x82})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 286)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "node-key evidence")
+	require.Contains(t, err.Error(), "node-1")
+}
+
+func TestFSM_Apply_KEKPrune_StaleNodeKeyEvidence_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	_, _ = fx.fsm.peers.remove("node-1")
+	require.NoError(t, fx.fsm.peers.registerMember("node-1", spki(0x51), "node-1", true, 3))
+	cmd := fx.buildValidPruneCmd(3, fx.happyAttestations(), [16]byte{0x83})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 287)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "node_key_kek_gen")
 }
 
 // TestEncodeDecodeMetaKEKPruneCmd_SnapshotRefCount_RoundTrip verifies that

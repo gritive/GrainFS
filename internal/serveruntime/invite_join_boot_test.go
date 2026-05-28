@@ -541,10 +541,11 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsOlderKEKGenToActive(t *testing.T) {
 		t.Fatal("node.key.enc unexpectedly decrypts under encKey before migration")
 	}
 
-	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true)
+	gotCert, gotSPKI, gotGen, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true)
 	if err != nil {
 		t.Fatalf("loadAndMigrateInviteNodeKey: %v", err)
 	}
+	require.Equal(t, store.ActiveVersion(), gotGen)
 	if gotSPKI != wantSPKI {
 		t.Fatalf("SPKI changed across re-seal: got %x want %x", gotSPKI, wantSPKI)
 	}
@@ -568,10 +569,12 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsOlderKEKGenToActive(t *testing.T) {
 
 	// Idempotent resume: a second call (e.g. after a crash before the sentinel
 	// clear) must succeed via node.key.gen even if fallback state is stale.
-	if _, spki, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true); err != nil {
+	if _, spki, gotGen, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true); err != nil {
 		t.Fatalf("idempotent resume failed: %v", err)
 	} else if spki != wantSPKI {
 		t.Fatalf("resume SPKI mismatch: got %x want %x", spki, wantSPKI)
+	} else {
+		require.Equal(t, store.ActiveVersion(), gotGen)
 	}
 }
 
@@ -591,10 +594,11 @@ func TestLoadAndMigrateInviteNodeKey_MigratesLegacyStaticSealedToActiveKEK(t *te
 	if err := writeNodeKeyGen(dir, 3); err != nil {
 		t.Fatalf("writeNodeKeyGen stale sidecar: %v", err)
 	}
-	gotCert, gotSPKI, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false)
+	gotCert, gotSPKI, gotGen, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false)
 	if err != nil {
 		t.Fatalf("loadAndMigrateInviteNodeKey static migration: %v", err)
 	}
+	require.Equal(t, store.ActiveVersion(), gotGen)
 	if gotSPKI != wantSPKI {
 		t.Fatalf("SPKI mismatch: got %x want %x", gotSPKI, wantSPKI)
 	}
@@ -638,7 +642,7 @@ func TestLoadAndMigrateInviteNodeKey_RejectsMissingSidecarForKEKSealedKey(t *tes
 		t.Fatalf("read node.key.enc: %v", err)
 	}
 
-	if _, _, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false); err == nil {
+	if _, _, _, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false); err == nil {
 		t.Fatal("expected missing node.key.gen to fail")
 	}
 	after, err := os.ReadFile(nodeKeyEncPath(dir))

@@ -119,17 +119,18 @@ func TestCodecRoundTrip_RevokePeer(t *testing.T) {
 }
 
 // TestCodecRoundTrip_RegisterMember encodes and decodes a RegisterMember
-// command, including the presents_per_node bool.
+// command, including the presents_per_node bool and node_key_kek_gen evidence.
 func TestCodecRoundTrip_RegisterMember(t *testing.T) {
 	nodeID := "node-member-rt"
 	s := spki(11)
 	addr := "10.0.3.4:7003"
+	const nodeKeyKEKGen uint32 = 7
 
-	data, err := encodeRegisterMemberCmd(nodeID, s, addr, true)
+	data, err := encodeRegisterMemberCmd(nodeID, s, addr, true, nodeKeyKEKGen)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	gotNode, gotSPKI, gotAddr, gotPresents, err := decodeRegisterMemberCmd(data)
+	gotNode, gotSPKI, gotAddr, gotPresents, gotNodeKeyKEKGen, err := decodeRegisterMemberCmd(data)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -144,6 +145,9 @@ func TestCodecRoundTrip_RegisterMember(t *testing.T) {
 	}
 	if !gotPresents {
 		t.Error("presents_per_node: got false, want true")
+	}
+	if gotNodeKeyKEKGen != nodeKeyKEKGen {
+		t.Errorf("node_key_kek_gen: got %d, want %d", gotNodeKeyKEKGen, nodeKeyKEKGen)
 	}
 }
 

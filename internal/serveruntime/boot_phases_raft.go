@@ -133,7 +133,7 @@ func bootMetaRaftWiring(state *bootState) error {
 				state.perNodeSPKI = state.inviteJoin.nodeSPKI
 			}
 		} else {
-			cert, spki, err := ensureNodeIdentity(
+			cert, spki, nodeKeyKEKGen, err := ensureNodeIdentity(
 				state.cfg.DataDir,
 				hex.EncodeToString(state.clusterID),
 				state.nodeID,
@@ -145,6 +145,7 @@ func bootMetaRaftWiring(state *bootState) error {
 			}
 			state.perNodeCert = cert
 			state.perNodeSPKI = spki
+			state.perNodeKeyKEKGen = nodeKeyKEKGen
 		}
 	}
 
@@ -284,7 +285,7 @@ type presentFlipTarget interface {
 // presentsPerNodeWriter is the consumer-side slice of *cluster.MetaRaft used
 // by onPresentFlip to mark this node as presenting its per-node cert.
 type presentsPerNodeWriter interface {
-	ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error
+	ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32) error
 }
 
 // buildOnPresentFlipCallbackWithRegistrar returns a callback that flips the
@@ -311,7 +312,7 @@ func buildOnPresentFlipCallbackWithRegistrar(st *bootState, tr presentFlipTarget
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := reg.ProposeRegisterMember(ctx, st.nodeID, st.perNodeSPKI, st.raftAddr, true); err != nil {
+			if err := reg.ProposeRegisterMember(ctx, st.nodeID, st.perNodeSPKI, st.raftAddr, true, st.perNodeKeyKEKGen); err != nil {
 				log.Warn().Err(err).Msg("onPresentFlip: presentsPerNode registration failed (non-fatal); D-cut4 gate may be delayed")
 			}
 		}()
