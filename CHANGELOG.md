@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.409.0] - 2026-05-28
+
+### Added
+
+- Added an OIDC issuer configuration model and registered
+  `iam.oidc.issuers` for cluster config validation.
+- Added an OIDC JWT authenticator foundation that verifies RS256 signatures,
+  issuer, audience, expiry, not-before, issued-at, subject, and configured
+  group claims before returning a normalized OIDC principal.
+- Added a JWKS cache with strict and grace failure policies, unknown-`kid`
+  refresh throttling, redirect rejection, duplicate-`kid` rejection, and stale
+  refresh race protection.
+
+### Security
+
+- OIDC group mapping now rejects empty, path-like, oversized, or whitespace
+  group claim values and rejects duplicate issuer group prefixes.
+- OIDC principal IDs hash issuer and subject so externally controlled `sub`
+  values do not enter durable policy/cache keys.
+- Config snapshot restore now applies string validators, so invalid
+  `iam.oidc.issuers` snapshots are dropped instead of restored.
+
+### Changed
+
+- Updated OIDC federated IAM follow-up tracking from Slice 2 to Slice 3 policy
+  resolution work.
+
 ## [0.0.407.0] - 2026-05-28
 
 ### Security
