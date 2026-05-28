@@ -32,10 +32,24 @@ Work these in order. Do not run them in parallel.
      (sigv4 verify locked at ≤60 alloc/op). 3-node cluster cache-invalidation
      e2e deferred (no 3-node IAM harness yet); single-node restart e2e
      covers the snapshot/restore path end-to-end.
+     **R-FSM — data-group FSM + data WAL static→DEK.** SHIPPED in current branch.
+     Data-group FSM values now use a `GFMV` frame carrying `dek_gen`; boot and
+     recovery data WAL sealers prefer the live `DEKKeeperAdapter`. Format
+     version 5→6.
      **R3 — Retire static key.** After every `cfg.Encryptor` consumer
      (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
      replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,
      `EncryptorAdapter`. ADR for cipher-unification + greenfield boundary.
+   - [ ] D-cut: remove static `encryption.key` from production protection paths
+     after redesigning invite/bootstrap secret transfer and node identity sealing.
+   - [ ] D-cut: replace `Config.RawEncryptionKey` bootstrap-secret payload with a
+     DEK/KEK-safe bootstrap envelope.
+   - [ ] D-cut: move `node.key.enc` away from static `encryption.key` without
+     making KEK prune able to brick restarted nodes.
+   - [ ] D-meta: migrate cluster-config alert webhook secret wrapping from static
+     `EncryptWithAAD` to a DEK seam with persisted `dek_gen`.
+   - [ ] Data-DEK rotation: persist non-zero `dek_gen` for every
+     ciphertext-bearing format before enabling `encryption.rotate-dek`.
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
      See [[project-grains-at-rest-two-key-systems]].

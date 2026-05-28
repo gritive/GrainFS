@@ -23,9 +23,11 @@ var restoreCrashAfterDrop func()
 
 // FSM applies committed Raft log entries to BadgerDB metadata store.
 type FSM struct {
-	db   *badger.DB
-	keys *stateKeyspace
-	enc  *encrypt.Encryptor
+	db        *badger.DB
+	keys      *stateKeyspace
+	enc       *encrypt.Encryptor
+	clusterID [16]byte
+	dekKeeper *encrypt.DEKKeeper
 
 	// Guards onMigrateShard, commitNotifier, and coalesceCfg against concurrent
 	// Set* calls + Apply.
