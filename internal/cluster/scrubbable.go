@@ -269,14 +269,16 @@ func (b *DistributedBackend) ReadShardIntegrity(bucket, key, path string) (scrub
 func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) error {
 	unlock := b.acquireShardWriteLock(bucket, key)
 	defer unlock()
-	payload := data
-	if b.shardSvc != nil {
-		var err error
-		aad := shardAAD(bucket, key, path)
-		payload, err = b.shardSvc.EncryptPayload(data, aad)
-		if err != nil {
-			return fmt.Errorf("encrypt shard: %w", err)
-		}
+	if b.shardSvc == nil {
+		return fmt.Errorf("write shard: shard service required")
+	}
+	shardKey, shardIdx, ok := b.shardServiceKeyFromPath(bucket, path)
+	if !ok {
+		return fmt.Errorf("write shard: path %q is not under a shard data dir", path)
+	}
+	encoded, err := b.shardSvc.EncodeEncryptedShardBuffer(bucket, shardKey, shardIdx, data)
+	if err != nil {
+		return fmt.Errorf("encrypt shard: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
@@ -286,7 +288,7 @@ func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) e
 	if err != nil {
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
-	if _, err := f.Write(eccodec.EncodeShard(payload)); err != nil {
+	if _, err := f.Write(encoded); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write tmp shard: %w", err)

@@ -159,7 +159,7 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("round-trips shard writes and reads", func() {
-			path := filepath.Join(GinkgoT().TempDir(), "nested", "shard_0")
+			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			payload := []byte("ec-shard-payload-0x42")
 
 			Expect(b.WriteShard("bkt", "k", path, payload)).To(Succeed())
@@ -169,7 +169,7 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("verifies encoded shard integrity", func() {
-			path := filepath.Join(GinkgoT().TempDir(), "shard_0")
+			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			payload := []byte("encoded-payload")
 			Expect(b.WriteShard("bkt", "k", path, payload)).To(Succeed())
 
@@ -226,8 +226,8 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("overwrites shards atomically without leftover temp files", func() {
-			dir := GinkgoT().TempDir()
-			path := filepath.Join(dir, "shard_0")
+			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
+			dir := filepath.Dir(path)
 
 			Expect(b.WriteShard("bkt", "k", path, []byte("v1"))).To(Succeed())
 			Expect(b.WriteShard("bkt", "k", path, []byte("v2"))).To(Succeed())
