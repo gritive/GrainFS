@@ -9,6 +9,10 @@ func EncodeJoinRequestForTest(req JoinRequest) ([]byte, error) {
 	return encodeJoinRequest(req)
 }
 
+func EncodeJoinReplyForTest(reply JoinReply) ([]byte, error) {
+	return encodeJoinReply(reply)
+}
+
 func DecodeJoinReplyForTest(data []byte) (*JoinReply, error) {
 	return decodeJoinReply(data)
 }
