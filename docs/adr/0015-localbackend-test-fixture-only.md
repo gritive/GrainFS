@@ -22,10 +22,13 @@ backend. Audit on 2026-05-28 established that it is no longer one:
    `NewMultiRootLocalBackendWithDataWAL`, `NewLocalBackendWithDataWAL`,
    `NewEncryptedLocalBackendWithDataWAL`, `NewLocalBackendWithDEKKeeper`).
 
-2. **Wide test-fixture usage.** Approximately 75 external `*_test.go` files across
-   `internal/server`, `internal/nfs4server`, `internal/cluster`, `internal/volume`,
-   `internal/vfs`, `internal/nbd`, etc. instantiate `LocalBackend`. Many `*_test.go`
-   files inside `internal/storage/` also depend on its package-private surface.
+2. **Wide test-fixture usage.** 60+ external `*_test.go` files (61 on
+   2026-05-28) across `internal/server` (30), `internal/nfs4server` (10),
+   `internal/nbd`, `internal/volume`, `internal/vfs`, `internal/serveruntime`,
+   `internal/scrubber`, `internal/p9server`, `internal/migration`,
+   `internal/cluster`, `internal/startuprecovery`, and `internal/server/admin`
+   instantiate `LocalBackend`. Many `*_test.go` files inside `internal/storage/`
+   also depend on its package-private surface.
    Removing or relocating the type would force a ~100-file import rewrite plus a
    same-package unexported-access export pass.
 
