@@ -19,7 +19,9 @@ func (m *MetaRaft) CompleteCutover(ctx context.Context, dialer AppliedIndexDiale
 		defer cancel()
 	}
 
-	m.membershipMu.Lock()
+	if err := m.lockCutoverMembership(ctx); err != nil {
+		return err
+	}
 	defer m.membershipMu.Unlock()
 
 	raftConfig := NewMetaRaftConfigReader(m)
@@ -51,6 +53,21 @@ func (m *MetaRaft) cutoverSelfID() string {
 		return m.cfg.RaftID
 	}
 	return m.cfg.NodeID
+}
+
+func (m *MetaRaft) lockCutoverMembership(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if m.membershipMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("CompleteCutover: acquire membership lock: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func waitAllVotersPresentPerNode(ctx context.Context, voters func() ([]string, uint64), all func([]string) bool, poll time.Duration) error {

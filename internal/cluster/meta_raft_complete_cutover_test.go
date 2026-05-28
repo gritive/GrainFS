@@ -27,6 +27,20 @@ func TestMetaRaftCompleteCutoverRequiresProbeDialer(t *testing.T) {
 	}
 }
 
+func TestMetaRaftCompleteCutoverLockHonorsTimeout(t *testing.T) {
+	m := &MetaRaft{cfg: MetaRaftConfig{NodeID: "node-a", RaftID: "node-a"}}
+	m.membershipMu.Lock()
+	defer m.membershipMu.Unlock()
+
+	err := m.CompleteCutover(context.Background(), func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("dialer must not be called when membership lock is unavailable")
+		return nil, nil
+	}, 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout acquiring membership lock")
+	}
+}
+
 func TestWaitAllVotersPresentPerNodeWaitsUntilReady(t *testing.T) {
 	var returned atomic.Bool
 	go func() {
