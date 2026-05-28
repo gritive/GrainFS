@@ -2,8 +2,11 @@ package serveruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
@@ -19,6 +22,37 @@ import (
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// CompleteCutoverHandler handles POST /v1/cluster/complete-cutover.
+type CompleteCutoverHandler struct {
+	RunDrop func(ctx context.Context) error
+}
+
+func (h *CompleteCutoverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.RunDrop == nil {
+		writeCompleteCutoverJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "complete-cutover unavailable"})
+		return
+	}
+	if err := h.RunDrop(r.Context()); err != nil {
+		code := http.StatusInternalServerError
+		msg := err.Error()
+		if strings.Contains(msg, "D-cut4") || strings.Contains(msg, "single-node") || strings.Contains(msg, "empty voter") {
+			code = http.StatusBadRequest
+		}
+		writeCompleteCutoverJSON(w, code, map[string]string{"error": msg})
+		return
+	}
+	writeCompleteCutoverJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": "cluster key dropped",
+	})
+}
+
+func writeCompleteCutoverJSON(w http.ResponseWriter, code int, body map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(body)
+}
 
 // bootHTTPServerAndAdmin constructs the data-plane server.Server, wires the
 // dashboard token middleware + admin UI routes onto its Hertz engine, and
@@ -164,6 +198,13 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 					joinListener: state,
 				}
 				h.POST("/v1/cluster/invite/create", inviteH.Handle)
+
+				completeCutoverH := &CompleteCutoverHandler{
+					RunDrop: func(ctx context.Context) error {
+						return state.metaRaft.DropClusterKey(ctx, state.nodeID, 60*time.Second)
+					},
+				}
+				h.POST("/v1/cluster/complete-cutover", wrapStdlibNoParam(completeCutoverH.ServeHTTP))
 			}
 		},
 	})

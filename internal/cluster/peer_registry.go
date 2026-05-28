@@ -224,6 +224,32 @@ func (r *peerRegistry) acceptSPKIs() [][32]byte {
 	return out
 }
 
+// allVotersPresentsPerNode reports whether every voter in the given list has a
+// registered entry with PresentsPerNode=true. Voters are raft addresses, the
+// same key space as raftAddrToSPKI. Missing voters or false readiness fail the
+// D-cut4 gate before DropClusterKeyAccept.
+func (r *peerRegistry) allVotersPresentsPerNode(voters []string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, addr := range voters {
+		found := false
+		for _, e := range r.byNodeID {
+			if e.Address != addr {
+				continue
+			}
+			if !e.PresentsPerNode {
+				return false
+			}
+			found = true
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // nodeIDToSPKI returns a snapshot of the nodeID→SPKI mapping for all peers.
 func (r *peerRegistry) nodeIDToSPKI() map[string][32]byte {
 	r.mu.RLock()

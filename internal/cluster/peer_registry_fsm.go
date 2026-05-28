@@ -94,6 +94,13 @@ func (f *MetaFSM) ClusterKeyDropped() bool {
 	return f.clusterKeyDropped
 }
 
+// AllVotersPresentsPerNode reports whether every voter in the given list has a
+// registered registry entry with PresentsPerNode=true. Voters are raft server
+// IDs, which are QUIC addresses in production.
+func (f *MetaFSM) AllVotersPresentsPerNode(voters []string) bool {
+	return f.peers.allVotersPresentsPerNode(voters)
+}
+
 // firePeersChanged snapshots the callback under lock then invokes it with the
 // current accept-set OUTSIDE the lock (the callback mutates transport state).
 //

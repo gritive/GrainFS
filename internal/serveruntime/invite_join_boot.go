@@ -523,19 +523,15 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 		return fmt.Errorf("seal node key: %w", err)
 	}
 
-	// 9. set the transport PSK in memory so bootValidateConfig's --cluster-key
-	// gate passes (PSK is the hex cluster-key string, applied verbatim), and
-	// mirror it to keys.d/current.key. This MUST happen BEFORE shredding the
-	// unsealed node key: a resume boot (which leaves opts.ClusterKey empty) reads
-	// the PSK from disk, and inviteJoinResumeFromSentinel hard-fails without it.
-	// Writing the PSK before the shred guarantees no crash window can leave
-	// {node.key.enc present, unsealed absent, current.key missing} — a state the
-	// gate would classify as Resume yet which can no longer rerun Phase-1.
-	opts.ClusterKey = string(psk)
-	if len(psk) > 0 {
-		if err := transport.NewKeystore(dataDir).WriteCurrent(string(psk)); err != nil {
-			return fmt.Errorf("mirror transport PSK to keystore: %w", err)
-		}
+	// 9. set a transport construction key in memory so bootValidateConfig's
+	// --cluster-key gate passes, and mirror it to keys.d/current.key for crash
+	// resume. In a post-drop cluster the leader intentionally omits the revoked
+	// cluster PSK; use a local random placeholder instead. bootQUICTransport
+	// immediately calls FlipPresent+SetDropped for post-drop joiners, so this
+	// placeholder is never accepted by peers and never reintroduces the dropped
+	// cluster-key SPKI.
+	if err := stageInviteJoinTransportKey(dataDir, opts, psk, clusterKeyDropped); err != nil {
+		return err
 	}
 	shredFile(paths.nodeKeyUnsealed)
 
@@ -544,6 +540,24 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 		Str("leader_id", reply.LeaderID).
 		Str("seed", bundle.SeedAddr).
 		Msg("zero-CA invite-join: Phase-1 complete (secrets staged, identity sealed); Phase-2 ACK pending")
+	return nil
+}
+
+func stageInviteJoinTransportKey(dataDir string, opts *ServeOptions, psk []byte, clusterKeyDropped bool) error {
+	transportKey := string(psk)
+	if transportKey == "" && clusterKeyDropped {
+		generated, err := GenerateEphemeralClusterKey()
+		if err != nil {
+			return fmt.Errorf("post-drop invite-join: generate local transport placeholder: %w", err)
+		}
+		transportKey = generated
+	}
+	opts.ClusterKey = transportKey
+	if transportKey != "" {
+		if err := transport.NewKeystore(dataDir).WriteCurrent(transportKey); err != nil {
+			return fmt.Errorf("mirror transport key to keystore: %w", err)
+		}
+	}
 	return nil
 }
 

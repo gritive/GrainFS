@@ -527,6 +527,7 @@ enum MetaCmdType : uint8 {
   ProtocolCredentialLastUsed   = 84, // protocol credential: update last-used timestamp
   PreparePresentFlip           = 85, // zero-CA cutover: leader stamps voter set, records Prepare (PR-2a §8c)
   BeginPresentFlip             = 86, // zero-CA cutover: all voters flip present cert to per-node identity (PR-2a §8c)
+  DropClusterKeyAccept         = 87, // zero-CA cutover: irreversibly drops cluster-key from accept-set (PR-2b §8 H2)
 }
 
 table MetaNodeEntry {
@@ -1466,6 +1467,14 @@ table PreparePresentFlipCmd {
 // BeginPresentFlipCmd (cmd 86): all voters unconditionally flip present cert to
 // per-node identity and set MetaStateSnapshot.present_flip_begun = true.
 table BeginPresentFlipCmd {
+  stamped_voters:[string];
+  stamped_config_index:uint64;
+}
+
+// DropClusterKeyAcceptCmd (cmd 87): config-stamped command that sets
+// cluster_key_dropped=true on every node. Apply-side strict config-stamp check
+// (H2, PR-2b) rejects drops targeting a stale voter set. Idempotent.
+table DropClusterKeyAcceptCmd {
   stamped_voters:[string];
   stamped_config_index:uint64;
 }

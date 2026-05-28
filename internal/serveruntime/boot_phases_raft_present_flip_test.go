@@ -1,9 +1,15 @@
 package serveruntime
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -27,7 +33,7 @@ func TestOnPresentFlipCallback_CallsFlipPresentOnly(t *testing.T) {
 		onRecycle: func() { recycleCalls.Add(1) },
 	}
 
-	cb := buildOnPresentFlipCallback(st, tr)
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, nil)
 	require.NotNil(t, cb)
 	cb()
 
@@ -40,7 +46,7 @@ func TestOnPresentFlipCallback_CallsFlipPresentOnly(t *testing.T) {
 
 func TestOnPresentFlipCallback_NilTransport(t *testing.T) {
 	st := &bootState{}
-	cb := buildOnPresentFlipCallback(st, nil)
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, nil, nil)
 	require.Nil(t, cb, "single-node path: nil transport must return nil callback")
 }
 
@@ -51,10 +57,90 @@ func TestOnPresentFlipCallback_EmptyCertSkips(t *testing.T) {
 		onFlip: func(c tls.Certificate, s [32]byte) { flipCalled.Store(true) },
 	}
 
-	cb := buildOnPresentFlipCallback(st, tr)
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, nil)
 	require.NotNil(t, cb)
 	cb() // must not panic and must not call FlipPresent
 	require.False(t, flipCalled.Load(), "empty perNodeCert must skip FlipPresent")
+}
+
+func TestBuildOnPresentFlipCallback_ProposesPresentsPerNode(t *testing.T) {
+	cert := tls.Certificate{Certificate: [][]byte{{0x01}}}
+	spki := [32]byte{0xAB}
+	st := &bootState{
+		nodeID:      "node-A",
+		raftAddr:    "127.0.0.1:4001",
+		perNodeCert: cert,
+		perNodeSPKI: spki,
+	}
+
+	var flipCalled atomic.Bool
+	tr := &fakeFlipTransport{
+		onFlip: func(tls.Certificate, [32]byte) {
+			flipCalled.Store(true)
+		},
+	}
+	reg := newRecordingPresentRegistrar(nil)
+
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, reg)
+	require.NotNil(t, cb)
+	cb()
+
+	require.True(t, flipCalled.Load(), "FlipPresent must be called")
+	reg.wait(t)
+	require.Equal(t, "node-A", reg.nodeID)
+	require.Equal(t, spki, reg.spki)
+	require.Equal(t, "127.0.0.1:4001", reg.addr)
+	require.True(t, reg.presentsPerNode, "presentsPerNode must be true")
+}
+
+func TestBuildOnPresentFlipCallback_RegistrarErrorNonFatal(t *testing.T) {
+	st := &bootState{
+		nodeID:      "node-A",
+		raftAddr:    "127.0.0.1:4001",
+		perNodeCert: tls.Certificate{Certificate: [][]byte{{0x01}}},
+		perNodeSPKI: [32]byte{0xAB},
+	}
+	tr := &fakeFlipTransport{}
+	reg := newRecordingPresentRegistrar(fmt.Errorf("leader unavailable"))
+
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, reg)
+	require.NotNil(t, cb)
+	require.NotPanics(t, cb)
+	reg.wait(t)
+}
+
+func TestOnClusterKeyDropped_CallsSetDroppedAndRecycle(t *testing.T) {
+	tr := &fakeDropTransport{}
+	cb := buildOnClusterKeyDroppedCallback(tr)
+	require.NotNil(t, cb)
+
+	cb()
+
+	require.True(t, tr.droppedCalled.Load(), "SetDropped must be called")
+	require.True(t, tr.recycleCalled.Load(), "RecycleConns must be called")
+}
+
+func TestApplyPostDropInviteJoinIdentity_FlipsAndDrops(t *testing.T) {
+	dir := t.TempDir()
+	encKey := []byte("0123456789abcdef0123456789abcdef")
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	require.NoError(t, transport.SealNodeKey(dir, encKey, tls.Certificate{PrivateKey: priv}))
+
+	state := &bootState{
+		cfg: Config{
+			DataDir:          dir,
+			RawEncryptionKey: encKey,
+		},
+		inviteJoin: &inviteJoinState{clusterKeyDropped: true},
+	}
+	tr := &fakeDropTransport{}
+
+	require.NoError(t, applyPostDropInviteJoinIdentity(state, tr))
+	require.True(t, tr.flipCalled.Load(), "FlipPresent must be called before Listen")
+	require.True(t, tr.droppedCalled.Load(), "SetDropped must be called before Listen")
+	require.NotNil(t, state.perNodeCert.Certificate)
+	require.NotEqual(t, [32]byte{}, state.perNodeSPKI)
 }
 
 type fakeFlipTransport struct {
@@ -71,6 +157,60 @@ func (f *fakeFlipTransport) RecycleConns() {
 	if f.onRecycle != nil {
 		f.onRecycle()
 	}
+}
+
+type recordingPresentRegistrar struct {
+	called          atomic.Bool
+	done            chan struct{}
+	nodeID          string
+	spki            [32]byte
+	addr            string
+	presentsPerNode bool
+	err             error
+}
+
+func newRecordingPresentRegistrar(err error) *recordingPresentRegistrar {
+	return &recordingPresentRegistrar{done: make(chan struct{}), err: err}
+}
+
+func (r *recordingPresentRegistrar) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ProposeRegisterMember")
+	}
+}
+
+func (r *recordingPresentRegistrar) ProposeRegisterMember(_ context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error {
+	r.called.Store(true)
+	r.nodeID = nodeID
+	r.spki = spki
+	r.addr = addr
+	r.presentsPerNode = presentsPerNode
+	close(r.done)
+	return r.err
+}
+
+type fakeDropTransport struct {
+	fakeFlipTransport
+	flipCalled    atomic.Bool
+	droppedCalled atomic.Bool
+	recycleCalled atomic.Bool
+}
+
+func (f *fakeDropTransport) FlipPresent(c tls.Certificate, s [32]byte) {
+	f.flipCalled.Store(true)
+	f.fakeFlipTransport.FlipPresent(c, s)
+}
+
+func (f *fakeDropTransport) SetDropped() {
+	f.droppedCalled.Store(true)
+}
+
+func (f *fakeDropTransport) RecycleConns() {
+	f.recycleCalled.Store(true)
+	f.fakeFlipTransport.RecycleConns()
 }
 
 var _ presentFlipTarget = (*fakeFlipTransport)(nil)

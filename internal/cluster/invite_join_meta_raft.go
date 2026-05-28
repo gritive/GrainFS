@@ -58,6 +58,9 @@ func (m *MetaRaft) AcceptSPKIBytes() [][]byte { return m.fsm.peers.acceptSPKIByt
 // revocation (Phase 3). The handler performs the rollback; on failure here we
 // return the error so the handler can RemoveLearner.
 func (m *MetaRaft) JoinViaInvite(ctx context.Context, nodeID, addr string, spki [32]byte, inviteID string) error {
+	m.membershipMu.Lock()
+	defer m.membershipMu.Unlock()
+
 	raftID := addr
 	if raftID == "" {
 		raftID = nodeID

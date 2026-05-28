@@ -122,8 +122,9 @@ const (
 	MetaCmdTypeProtocolCredentialRevoke    = clusterpb.MetaCmdTypeProtocolCredentialRevoke
 	MetaCmdTypeProtocolCredentialMarkStale = clusterpb.MetaCmdTypeProtocolCredentialMarkStale
 	MetaCmdTypeProtocolCredentialLastUsed  = clusterpb.MetaCmdTypeProtocolCredentialLastUsed
-	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip // zero-CA cutover: PR-2a §8c
-	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip   // zero-CA cutover: PR-2a §8c
+	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip   // zero-CA cutover: PR-2a §8c
+	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip     // zero-CA cutover: PR-2a §8c
+	MetaCmdTypeDropClusterKeyAccept        = clusterpb.MetaCmdTypeDropClusterKeyAccept // zero-CA cutover: PR-2b §8 H2
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -906,11 +907,34 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 			cb() // OUTSIDE f.mu
 		}
 		return nil
+	case clusterpb.MetaCmdTypeDropClusterKeyAccept:
+		return f.applyDropClusterKeyAccept(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
 	}
+}
+
+// applyDropClusterKeyAccept applies cmd 87. The leader-side orchestration
+// performs the voter-set / D-cut4 checks before proposing; Apply must remain
+// deterministic and depend only on the committed log payload. On acceptance, it
+// sets clusterKeyDropped=true and fires onClusterKeyDropped outside f.mu once.
+func (f *MetaFSM) applyDropClusterKeyAccept(data []byte) error {
+	if _, err := decodeDropClusterKeyAcceptCmd(data); err != nil {
+		return fmt.Errorf("meta_fsm: DropClusterKeyAccept: decode: %w", err)
+	}
+
+	f.mu.Lock()
+	wasDropped := f.clusterKeyDropped
+	f.clusterKeyDropped = true
+	cb := f.onClusterKeyDropped
+	f.mu.Unlock()
+
+	if !wasDropped && cb != nil {
+		cb()
+	}
+	return nil
 }
 
 // --- encoding helpers ---
