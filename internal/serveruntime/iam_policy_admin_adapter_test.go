@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -64,6 +65,13 @@ func TestIAMPolicyAdminAdapter_RejectsOIDCPrincipalIDMismatch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected mismatch error")
+	}
+	var ae *admin.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected admin error, got %T: %v", err, err)
+	}
+	if ae.Code != "invalid" {
+		t.Fatalf("code = %q, want invalid", ae.Code)
 	}
 }
 

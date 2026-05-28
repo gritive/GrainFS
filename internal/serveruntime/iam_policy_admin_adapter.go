@@ -97,12 +97,12 @@ func simulatePrincipal(req admin.PolicySimulateRequest) (principal.Principal, er
 		if req.Issuer != "" && req.Subject != "" {
 			expected := oidcPrincipalID(req.Issuer, req.Subject)
 			if req.PrincipalID != expected {
-				return principal.Principal{}, fmt.Errorf("oidc principal_id mismatch: got %q want %q", req.PrincipalID, expected)
+				return principal.Principal{}, admin.NewInvalid(fmt.Sprintf("oidc principal_id mismatch: got %q want %q", req.PrincipalID, expected))
 			}
 		}
 		return principal.OIDC(req.Issuer, req.Subject, req.PrincipalID, req.Groups), nil
 	default:
-		return principal.Principal{}, fmt.Errorf("unsupported principal_kind %q", req.PrincipalKind)
+		return principal.Principal{}, admin.NewInvalid(fmt.Sprintf("unsupported principal_kind %q", req.PrincipalKind))
 	}
 }
 
