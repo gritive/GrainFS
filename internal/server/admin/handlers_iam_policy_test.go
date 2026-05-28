@@ -12,6 +12,7 @@ import (
 // fakePolicyService satisfies admin.IAMPolicyService without any real storage.
 type fakePolicyService struct {
 	proposed []clusterpb.MetaCmdType
+	simReqs  []admin.PolicySimulateRequest
 }
 
 func (f *fakePolicyService) Propose(_ context.Context, cmdType clusterpb.MetaCmdType, _ []byte) error {
@@ -27,7 +28,8 @@ func (f *fakePolicyService) PolicyList(_ context.Context) ([]string, error) {
 	return nil, nil
 }
 
-func (f *fakePolicyService) Simulate(_ context.Context, _, _, _ string) (admin.PolicySimulateResult, error) {
+func (f *fakePolicyService) Simulate(_ context.Context, req admin.PolicySimulateRequest) (admin.PolicySimulateResult, error) {
+	f.simReqs = append(f.simReqs, req)
 	return admin.PolicySimulateResult{}, nil
 }
 
@@ -60,5 +62,77 @@ func TestPutPolicy_CustomNameAllowed(t *testing.T) {
 	}
 	if len(svc.proposed) != 1 {
 		t.Fatalf("expected 1 Propose call, got %d", len(svc.proposed))
+	}
+}
+
+func TestSimulatePolicyRejectsMissingPrincipal(t *testing.T) {
+	d := &admin.Deps{IAMPolicy: &fakePolicyService{}}
+	_, err := admin.SimulatePolicy(context.Background(), d, admin.PolicySimulateRequest{
+		Action:   "s3:GetObject",
+		Resource: "arn:aws:s3:::bucket/key",
+	})
+	assertAdminCode(t, err, "invalid")
+}
+
+func TestSimulatePolicyRejectsAmbiguousPrincipal(t *testing.T) {
+	d := &admin.Deps{IAMPolicy: &fakePolicyService{}}
+	_, err := admin.SimulatePolicy(context.Background(), d, admin.PolicySimulateRequest{
+		SAID:          "sa-1",
+		PrincipalKind: "oidc",
+		PrincipalID:   "oidc:issuer:user",
+		Action:        "s3:GetObject",
+		Resource:      "arn:aws:s3:::bucket/key",
+	})
+	assertAdminCode(t, err, "invalid")
+}
+
+func TestSimulatePolicyRejectsIncompletePrincipal(t *testing.T) {
+	d := &admin.Deps{IAMPolicy: &fakePolicyService{}}
+	_, err := admin.SimulatePolicy(context.Background(), d, admin.PolicySimulateRequest{
+		PrincipalKind: "oidc",
+		Action:        "s3:GetObject",
+		Resource:      "arn:aws:s3:::bucket/key",
+	})
+	assertAdminCode(t, err, "invalid")
+}
+
+func TestSimulatePolicyRejectsUnsupportedPrincipalKind(t *testing.T) {
+	d := &admin.Deps{IAMPolicy: &fakePolicyService{}}
+	_, err := admin.SimulatePolicy(context.Background(), d, admin.PolicySimulateRequest{
+		PrincipalKind: "user",
+		PrincipalID:   "user-1",
+		Action:        "s3:GetObject",
+		Resource:      "arn:aws:s3:::bucket/key",
+	})
+	assertAdminCode(t, err, "invalid")
+}
+
+func TestSimulatePolicyPassesLegacySARequest(t *testing.T) {
+	svc := &fakePolicyService{}
+	d := &admin.Deps{IAMPolicy: svc}
+	_, err := admin.SimulatePolicy(context.Background(), d, admin.PolicySimulateRequest{
+		SAID:     "sa-1",
+		Action:   "s3:GetObject",
+		Resource: "arn:aws:s3:::bucket/key",
+	})
+	if err != nil {
+		t.Fatalf("SimulatePolicy: %v", err)
+	}
+	if len(svc.simReqs) != 1 || svc.simReqs[0].SAID != "sa-1" {
+		t.Fatalf("legacy request not delegated: %#v", svc.simReqs)
+	}
+}
+
+func assertAdminCode(t *testing.T, err error, code string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var ae *admin.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected *admin.Error, got %T: %v", err, err)
+	}
+	if ae.Code != code {
+		t.Fatalf("code = %q, want %q", ae.Code, code)
 	}
 }

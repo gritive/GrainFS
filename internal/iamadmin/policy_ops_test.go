@@ -221,3 +221,45 @@ func TestRunPolicySimulate_Text(t *testing.T) {
 		t.Errorf("output = %q", out.String())
 	}
 }
+
+func TestRunPolicySimulate_OIDCRequest(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/policy/simulate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s", r.Method)
+		}
+		var req PolicySimulateRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.SAID != "" || req.PrincipalKind != "oidc" || req.PrincipalID != "oidc:issuer:user" {
+			t.Errorf("req principal = %+v", req)
+		}
+		if req.Issuer != "https://idp.example.com/" || req.Subject != "user@example.com" {
+			t.Errorf("req oidc fields = %+v", req)
+		}
+		if len(req.Groups) != 1 || req.Groups[0] != "oidc:example:data-eng" {
+			t.Errorf("req groups = %+v", req.Groups)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"effect":"Allow","matched_policy":"oidc-read","reason":"explicit Allow","principal_kind":"oidc","principal_id":"oidc:issuer:user","groups":["oidc:example:data-eng"]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var out bytes.Buffer
+	err := RunPolicySimulate(context.Background(), PolicySimulateOptions{
+		BaseOptions:   BaseOptions{Endpoint: srv.URL, Stdout: &out},
+		PrincipalKind: "oidc",
+		PrincipalID:   "oidc:issuer:user",
+		Issuer:        "https://idp.example.com/",
+		Subject:       "user@example.com",
+		Groups:        []string{"oidc:example:data-eng"},
+		Action:        "s3:GetObject",
+		Resource:      "arn:aws:s3:::my-bucket/key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Allow") {
+		t.Errorf("output = %q", out.String())
+	}
+}

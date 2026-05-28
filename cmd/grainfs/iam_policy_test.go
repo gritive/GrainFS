@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -251,6 +252,75 @@ func TestCLI_PolicySimulate(t *testing.T) {
 	rootCmd.SetContext(context.Background())
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("simulate: %v\noutput: %s", err, out.String())
+	}
+	if s := out.String(); !strings.Contains(s, "Allow") {
+		t.Errorf("output missing 'Allow':\n%s", s)
+	}
+}
+
+func TestCLI_PolicySimulateOIDC(t *testing.T) {
+	resetSimulateFlags := func() {
+		for _, name := range []string{"sa", "principal-kind", "principal-id", "issuer", "subject", "group", "action", "resource"} {
+			f := iamPolicySimulateCmd.Flags().Lookup(name)
+			if f != nil {
+				_ = f.Value.Set(f.DefValue)
+				f.Changed = false
+			}
+		}
+	}
+	resetSimulateFlags()
+	t.Cleanup(resetSimulateFlags)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/policy/simulate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			SAID          string   `json:"sa_id"`
+			PrincipalKind string   `json:"principal_kind"`
+			PrincipalID   string   `json:"principal_id"`
+			Issuer        string   `json:"issuer"`
+			Subject       string   `json:"subject"`
+			Groups        []string `json:"groups"`
+			Action        string   `json:"action"`
+			Resource      string   `json:"resource"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if req.SAID != "" || req.PrincipalKind != "oidc" || req.PrincipalID != "oidc:issuer:user" {
+			t.Errorf("principal fields = %+v", req)
+		}
+		if req.Issuer != "https://idp.example.com/" || req.Subject != "user@example.com" {
+			t.Errorf("oidc fields = %+v", req)
+		}
+		if len(req.Groups) != 1 || req.Groups[0] != "oidc:example:data-eng" {
+			t.Errorf("groups = %+v", req.Groups)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"effect":"Allow","matched_policy":"oidc-read","reason":"explicit Allow"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{
+		"iam", "--endpoint", sock,
+		"policy", "simulate",
+		"--principal-kind", "oidc",
+		"--principal-id", "oidc:issuer:user",
+		"--issuer", "https://idp.example.com/",
+		"--subject", "user@example.com",
+		"--group", "oidc:example:data-eng",
+		"--action", "s3:GetObject",
+		"--resource", "arn:aws:s3:::my-bucket/key",
+	})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("simulate oidc: %v\noutput: %s", err, out.String())
 	}
 	if s := out.String(); !strings.Contains(s, "Allow") {
 		t.Errorf("output missing 'Allow':\n%s", s)
