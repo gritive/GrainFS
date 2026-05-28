@@ -30,6 +30,7 @@ func TestEvaluateAdminAllowRequiresExplicitAction(t *testing.T) {
 		"grainfs:BucketPolicyWrite",
 		"grainfs:CredentialList",
 		"grainfs:IAMPolicyRead",
+		"grainfs:AdminConfigWrite",
 	} {
 		t.Run(action, func(t *testing.T) {
 			got := Evaluate(EvalInput{
@@ -65,6 +66,12 @@ func TestEvaluateAdminAllowAcceptsExplicitAdminWildcard(t *testing.T) {
 			pattern:  "grainfs:IAMPolicy*",
 			action:   "grainfs:IAMPolicyRead",
 			resource: "iam/policy/storage-admin",
+		},
+		{
+			name:     "admin config",
+			pattern:  "grainfs:Admin*",
+			action:   "grainfs:AdminConfigWrite",
+			resource: "admin/config/oidc.enabled",
 		},
 	}
 	for _, tc := range tests {
@@ -102,6 +109,20 @@ func TestEvaluateAdminDenyStillAcceptsGlobalWildcard(t *testing.T) {
 	require.Equal(t, DecisionDeny, got.Decision, "global wildcard deny should still deny admin actions")
 }
 
+func TestEvaluateAdminAllowRejectsGrainFSWildcard(t *testing.T) {
+	got := Evaluate(EvalInput{
+		PrincipalPolicies: []*Document{{
+			Statement: []Statement{{
+				Effect:   EffectAllow,
+				Action:   StringOrSlice{"grainfs:*"},
+				Resource: StringOrSlice{"admin/config/oidc.enabled"},
+			}},
+		}},
+		Ctx: RequestContext{Action: "grainfs:AdminConfigWrite", Resource: "admin/config/oidc.enabled"},
+	})
+	require.Equal(t, DecisionDeny, got.Decision)
+}
+
 func TestMatchResource_PrefixBoundary(t *testing.T) {
 	// F#10: arn:aws:s3:::analytics/logs/* must NOT match analytics/logsx/secret
 	require.False(t, matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logsx/secret"))
@@ -114,6 +135,14 @@ func TestMatchResource_IAMAdminWildcardIsSegmentScoped(t *testing.T) {
 	require.True(t, matchResource("iam/policy/*/attach/sa/*", "iam/policy/storage-admin/attach/sa/sa-app"))
 	require.False(t, matchResource("iam/group/*", "iam/group/admins/policy/storage-admin"))
 	require.True(t, matchResource("iam/group/*/policy/*", "iam/group/admins/policy/storage-admin"))
+}
+
+func TestMatchResource_GrainFSAdminWildcardIsSegmentScoped(t *testing.T) {
+	require.True(t, matchResource("admin/config/*", "admin/config/oidc.enabled"))
+	require.False(t, matchResource("admin/config/*", "admin/config/oidc/enabled"))
+	require.True(t, matchResource("admin/dashboard/token", "admin/dashboard/token"))
+	require.False(t, matchResource("admin/dashboard/token", "admin/dashboard/token/rotate"))
+	require.True(t, matchResource("admin/dashboard/token/*", "admin/dashboard/token/rotate"))
 }
 
 func TestEvaluateIAMMutationRequiresNestedResourceGrant(t *testing.T) {

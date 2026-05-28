@@ -13,10 +13,27 @@ func registerConfig(g router, d *Deps) {
 	if d == nil || d.ConfigProposer == nil || d.ConfigStore == nil {
 		return
 	}
-	g.GET(routePathConfig, configListHandler(d))
-	g.GET(routePathConfigByKey, configGetHandler(d))
-	g.PUT(routePathConfigByKey, configSetHandler(d))
-	g.DELETE(routePathConfigByKey, configUnsetHandler(d))
+	actor := adminActorMiddleware(d)
+	configListAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:AdminConfigList",
+		resource: adminConfigResource,
+	})
+	configReadAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:AdminConfigRead",
+		resource: adminConfigResource,
+	})
+	configWriteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:AdminConfigWrite",
+		resource: adminConfigResource,
+	})
+	configDeleteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
+		action:   "grainfs:AdminConfigDelete",
+		resource: adminConfigResource,
+	})
+	g.GET(routePathConfig, actor, configListAuthz, configListHandler(d))
+	g.GET(routePathConfigByKey, actor, configReadAuthz, configGetHandler(d))
+	g.PUT(routePathConfigByKey, actor, configWriteAuthz, configSetHandler(d))
+	g.DELETE(routePathConfigByKey, actor, configDeleteAuthz, configUnsetHandler(d))
 }
 
 func configListHandler(d *Deps) app.HandlerFunc {

@@ -80,12 +80,6 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
-- [ ] **OIDC federated IAM follow-up: remaining admin route/PDP boundary**.
-  Decide whether to extend the central admin route/action registry to mount-SA,
-  bucket-upstream, config, and dashboard-token routes or introduce the external
-  PDP adapter first. Preserve no-bearer admin UDS behavior unless the route
-  explicitly opts into actor authz.
-
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
     - Maintainability M#2: extract `peelTrailer(data, magic, trailerLen)` helper in

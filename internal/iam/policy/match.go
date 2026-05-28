@@ -64,13 +64,17 @@ func explicitAdminAllowAction(pattern, req string) bool {
 	if strings.HasPrefix(req, "grainfs:IAM") {
 		return strings.HasPrefix(pattern, "grainfs:IAM") && wildcardMatch(pattern, req)
 	}
+	if strings.HasPrefix(req, "grainfs:Admin") {
+		return strings.HasPrefix(pattern, "grainfs:Admin") && wildcardMatch(pattern, req)
+	}
 	return wildcardMatch(pattern, req)
 }
 
 func requiresExplicitAdminAllowAction(action string) bool {
 	return strings.HasPrefix(action, "grainfs:BucketPolicy") ||
 		strings.HasPrefix(action, "grainfs:Credential") ||
-		strings.HasPrefix(action, "grainfs:IAM")
+		strings.HasPrefix(action, "grainfs:IAM") ||
+		strings.HasPrefix(action, "grainfs:Admin")
 }
 
 // wildcardMatch implements the standard `*`-glob with iterative two-pointer backtrack.
@@ -104,12 +108,15 @@ func matchResource(pattern, req string) bool {
 		return true
 	}
 	if strings.HasPrefix(pattern, "iam/") && strings.HasPrefix(req, "iam/") {
-		return matchIAMAdminResource(pattern, req)
+		return matchSegmentedAdminResource(pattern, req)
+	}
+	if strings.HasPrefix(pattern, "admin/") && strings.HasPrefix(req, "admin/") {
+		return matchSegmentedAdminResource(pattern, req)
 	}
 	return wildcardMatch(pattern, req)
 }
 
-func matchIAMAdminResource(pattern, req string) bool {
+func matchSegmentedAdminResource(pattern, req string) bool {
 	patternParts := strings.Split(pattern, "/")
 	reqParts := strings.Split(req, "/")
 	if len(patternParts) != len(reqParts) {

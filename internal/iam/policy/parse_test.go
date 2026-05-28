@@ -62,3 +62,23 @@ func TestParse_AcceptsIAMGroupPolicyAdminResource(t *testing.T) {
 	_, err := Parse(doc)
 	require.NoError(t, err)
 }
+
+func TestParse_AcceptsRemainingAdminRouteResources(t *testing.T) {
+	for _, resource := range []string{
+		"iam/mount-sa/*",
+		"iam/mount-sa/alice-mount/policy/NFSMountOnly",
+		"iam/upstream/*",
+		"iam/upstream/logs",
+		"iam/upstream/*/cutover",
+		"admin/config/*",
+		"admin/config/oidc.enabled",
+		"admin/dashboard/token",
+		"admin/dashboard/token/rotate",
+	} {
+		t.Run(resource, func(t *testing.T) {
+			doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:Admin*","Resource":"` + resource + `"}]}`)
+			_, err := Parse(doc)
+			require.NoError(t, err)
+		})
+	}
+}
