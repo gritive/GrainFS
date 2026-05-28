@@ -32,7 +32,7 @@ func TestOnPresentFlipCallback_CallsFlipPresentOnly(t *testing.T) {
 		onRecycle: func() { recycleCalls.Add(1) },
 	}
 
-	cb := buildOnPresentFlipCallback(st, tr)
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, nil)
 	require.NotNil(t, cb)
 	cb()
 
@@ -45,7 +45,7 @@ func TestOnPresentFlipCallback_CallsFlipPresentOnly(t *testing.T) {
 
 func TestOnPresentFlipCallback_NilTransport(t *testing.T) {
 	st := &bootState{}
-	cb := buildOnPresentFlipCallback(st, nil)
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, nil, nil)
 	require.Nil(t, cb, "single-node path: nil transport must return nil callback")
 }
 
@@ -56,7 +56,7 @@ func TestOnPresentFlipCallback_EmptyCertSkips(t *testing.T) {
 		onFlip: func(c tls.Certificate, s [32]byte) { flipCalled.Store(true) },
 	}
 
-	cb := buildOnPresentFlipCallback(st, tr)
+	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, nil)
 	require.NotNil(t, cb)
 	cb() // must not panic and must not call FlipPresent
 	require.False(t, flipCalled.Load(), "empty perNodeCert must skip FlipPresent")

@@ -290,16 +290,6 @@ type presentsPerNodeWriter interface {
 	ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error
 }
 
-// buildOnPresentFlipCallback returns a callback that reads bootState fields
-// at INVOCATION time (pointer-capture) and flips the transport's presented cert.
-// Returns nil when tr is nil (single-node path has no transport).
-//
-// PR-2a §8c step 5 + F4 user decision: calls FlipPresent ONLY (no
-// RecycleConns — existing conns stay on cluster cert; recycle is PR-2b).
-func buildOnPresentFlipCallback(st *bootState, tr presentFlipTarget) func() {
-	return buildOnPresentFlipCallbackWithRegistrar(st, tr, nil)
-}
-
 // buildOnPresentFlipCallbackWithRegistrar returns a callback that flips the
 // transport's presented cert, then best-effort registers presentsPerNode=true.
 func buildOnPresentFlipCallbackWithRegistrar(st *bootState, tr presentFlipTarget, reg presentsPerNodeWriter) func() {
