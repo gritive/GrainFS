@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.414.0] - 2026-05-28
+
+### Added
+
+- Operators can now simulate IAM policy decisions for federated OIDC
+  principals, including issuer, subject, normalized principal ID, and mapped
+  external group claims.
+- The IAM policy resolver can now materialize effective policy sets for typed
+  principals, resolving OIDC direct principal attachments and external group
+  policy attachments together.
+- `grainfs iam policy simulate` now accepts `--principal-kind`,
+  `--principal-id`, `--issuer`, `--subject`, and repeatable `--group` flags
+  while preserving the existing `--sa` path.
+
+### Security
+
+- OIDC simulation rejects mismatched issuer/subject-derived principal IDs, so
+  simulated authorization matches the normalized identity produced by real OIDC
+  authentication.
+- Federated principal cache entries now include principal kind, normalized ID,
+  sorted group claims, and bucket, with invalidation covering direct-principal
+  and bucket-policy mutations.
+
+### Changed
+
+- Updated OIDC federated IAM follow-up tracking from Slice 3 to Slice 4 data
+  plane and admin actor adoption work.
+
 ## [0.0.413.1] - 2026-05-28
 
 ### Added
