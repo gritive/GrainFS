@@ -38,8 +38,8 @@ func RunDropClusterKey(ctx context.Context, deps DropClusterKeyDeps, timeout tim
 	if len(voters) == 0 {
 		return fmt.Errorf("RunDropClusterKey: empty voter set")
 	}
-	if len(voters) == 1 && voters[0] == deps.SelfID {
-		return fmt.Errorf("RunDropClusterKey: refusing on single-node cluster (voters=[%s])", deps.SelfID)
+	if len(voters) == 1 {
+		return fmt.Errorf("RunDropClusterKey: refusing on single-node cluster (voters=[%s])", voters[0])
 	}
 	if !deps.AllVPN(voters) {
 		return fmt.Errorf("RunDropClusterKey: D-cut4 gate not satisfied")
