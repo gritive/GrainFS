@@ -254,9 +254,11 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 		return fmt.Errorf("iam: applier: encryptor not set (boot ordering bug — see wireIAMEncryptor)")
 	}
 	gen := p.SecretKeyDekGen()
-	// bucket-upstream wraps use accessKey="" per WrapSecret convention; saID
-	// is namespace-prefixed to be disjoint from sa_id AAD space (A2).
-	plain, err := UnwrapSecret(enc, "bucket-upstream:"+bucket, "", gen, encBytes)
+	accessKey := string(p.AccessKey())
+	// bucket-upstream wraps bind (saID="bucket-upstream:"+bucket, accessKey)
+	// into the AAD so a tampered payload that swaps access_key without
+	// re-wrapping fails AEAD verify (codex P2).
+	plain, err := UnwrapSecret(enc, "bucket-upstream:"+bucket, accessKey, gen, encBytes)
 	if err != nil {
 		return fmt.Errorf("iam: BucketUpstreamPut decrypt: %w", err)
 	}

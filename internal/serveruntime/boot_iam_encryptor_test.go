@@ -16,10 +16,10 @@ import (
 // missing either path would silently use the wrong encryptor for
 // new credentials. Mirrors the production order:
 //
-//   1. iam.NewApplier(store, nil)          — applier holds nil encryptor
-//   2. iam.NewAdminAPI(store, prop, nil)   — admin holds nil encryptor
-//   3. wireDEKKeeper populates state.dekKeeper
-//   4. wireIAMEncryptor(state) swaps the live DEKKeeperAdapter into BOTH
+//  1. iam.NewApplier(store, nil)          — applier holds nil encryptor
+//  2. iam.NewAdminAPI(store, prop, nil)   — admin holds nil encryptor
+//  3. wireDEKKeeper populates state.dekKeeper
+//  4. wireIAMEncryptor(state) swaps the live DEKKeeperAdapter into BOTH
 func TestWireIAMEncryptor_InstallsOnBothApplierAndAdminAPI(t *testing.T) {
 	state := &bootState{}
 	state.cfg.IAMStore = iam.NewStore()

@@ -173,9 +173,9 @@ func TestSnapshot_BucketUpstream_TrailerAppendRoundtrip(t *testing.T) {
 	src := NewStore()
 	enc := newTestEncryptor(t)
 
-	// A2: AAD = "bucket-upstream:"+bucket
-	wrapped1, gen1, _ := WrapSecret(enc, "bucket-upstream:shared", "", "secret-A")
-	wrapped2, gen2, _ := WrapSecret(enc, "bucket-upstream:archive", "", "secret-B")
+	// A2: AAD = "bucket-upstream:"+bucket; codex P2 binds access_key too.
+	wrapped1, gen1, _ := WrapSecret(enc, "bucket-upstream:shared", "AK1", "secret-A")
+	wrapped2, gen2, _ := WrapSecret(enc, "bucket-upstream:archive", "AK2", "secret-B")
 	src.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "shared", Endpoint: "http://up1:9000", AccessKey: "AK1",
 		SecretKey: "secret-A", SecretKeyEnc: wrapped1, SecretKeyDEKGen: gen1,
@@ -221,7 +221,7 @@ func TestSnapshot_BucketUpstream_TrailerAppendRoundtrip(t *testing.T) {
 func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 	src := NewStore()
 	enc := newTestEncryptor(t)
-	wrapped, gen, _ := WrapSecret(enc, "bucket-upstream:buc1", "", "s1")
+	wrapped, gen, _ := WrapSecret(enc, "bucket-upstream:buc1", "AK", "s1")
 	src.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 	})
@@ -294,7 +294,7 @@ func TestSnapshot_DEKGenSurvivesBucketUpstreamRoundTrip(t *testing.T) {
 
 	src := NewStore()
 	bucketSAID := "bucket-upstream:my-bucket"
-	ct, gen, err := WrapSecret(de, bucketSAID, "", "upstream-secret")
+	ct, gen, err := WrapSecret(de, bucketSAID, "AK1", "upstream-secret")
 	require.NoError(t, err)
 
 	src.applyBucketUpstreamPut(BucketUpstream{

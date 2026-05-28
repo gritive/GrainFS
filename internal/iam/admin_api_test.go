@@ -410,8 +410,8 @@ func TestAdminAPI_BucketUpstream_PutHappyPath(t *testing.T) {
 	if len(got.SecretKeyEnc) == 0 {
 		t.Error("SecretKeyEnc empty — wrap not performed")
 	}
-	// A2: AAD = "bucket-upstream:"+bucket. Verify by unwrapping with the prefixed AAD.
-	unwrapped, err := UnwrapSecret(enc, "bucket-upstream:shared", "", got.SecretKeyDEKGen, got.SecretKeyEnc)
+	// A2: AAD = "bucket-upstream:"+bucket; codex P2: AAD also binds access_key.
+	unwrapped, err := UnwrapSecret(enc, "bucket-upstream:shared", "AKUP", got.SecretKeyDEKGen, got.SecretKeyEnc)
 	if err != nil {
 		t.Fatalf("unwrap with AAD=bucket-upstream:shared: %v", err)
 	}

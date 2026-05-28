@@ -252,8 +252,10 @@ func TestApplyBucketUpstreamPut_RoundTripDecryptsSecret(t *testing.T) {
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
 
-	// A2: AAD prefix is "bucket-upstream:" + bucket
-	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "", "upstream-secret-plain")
+	// A2: AAD prefix is "bucket-upstream:" + bucket. Codex P2 (R2 code-gate):
+	// AAD now also binds access_key. Wrap site must mirror what production
+	// ApplyBucketUpstreamPut decodes from the payload.
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "AKUP", "upstream-secret-plain")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -286,7 +288,7 @@ func TestApplyBucketUpstreamPut_RoundTripsStatus(t *testing.T) {
 	s := NewStore()
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
-	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "", "sk")
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "ak", "sk")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -315,7 +317,7 @@ func TestApplyBucketUpstreamStatusSet(t *testing.T) {
 	s := NewStore()
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
-	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "", "sk")
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:shared", "ak", "sk")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
@@ -352,7 +354,7 @@ func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
 		t.Fatalf("ApplyBucketUpstreamDelete on empty store: %v", err)
 	}
 
-	wrapped, _, _ := WrapSecret(enc, "bucket-upstream:buc1", "", "s")
+	wrapped, _, _ := WrapSecret(enc, "bucket-upstream:buc1", "AK", "s")
 	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 		Bucket: "buc1", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 	})); err != nil {
@@ -373,7 +375,7 @@ func TestApplyBucketUpstreamPut_RejectsEmptyBucket(t *testing.T) {
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
 
-	wrapped, _, _ := WrapSecret(enc, "bucket-upstream:", "", "s")
+	wrapped, _, _ := WrapSecret(enc, "bucket-upstream:", "AK", "s")
 	err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 		Bucket: "", Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 	}))
@@ -389,7 +391,7 @@ func TestApplyBucketUpstreamPut_RejectsSentinelBuckets(t *testing.T) {
 	ap := NewApplier(s, enc)
 
 	for _, sentinel := range []string{"*", "__system__"} {
-		wrapped, _, _ := WrapSecret(enc, "bucket-upstream:"+sentinel, "", "s")
+		wrapped, _, _ := WrapSecret(enc, "bucket-upstream:"+sentinel, "AK", "s")
 		err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(BucketUpstream{
 			Bucket: sentinel, Endpoint: "http://x", AccessKey: "AK", SecretKeyEnc: wrapped,
 		}))

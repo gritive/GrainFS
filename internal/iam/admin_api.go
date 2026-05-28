@@ -123,9 +123,11 @@ func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateR
 		ID: NewUUIDv7(), Name: req.Name, Description: req.Description,
 		CreatedAt: now, CreatedBy: PrincipalFromContext(ctx),
 	}
-	if err := a.proposer.ProposeSACreate(ctx, sa); err != nil {
-		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "propose SA: " + err.Error()}
-	}
+	// R2 code-gate codex P2: check encryptor + wrap the secret BEFORE the SA
+	// raft propose. If we proposed the SA first and then errored on a nil
+	// encryptor, the cluster would already hold a keyless SA — a retry then
+	// races against a duplicate-SA error and leaves a dangling principal.
+	// Failing before any propose keeps cluster state consistent.
 	enc := a.Encryptor()
 	if enc == nil {
 		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "iam: admin api: encryptor not set (boot ordering bug — see wireIAMEncryptor)"}
@@ -133,6 +135,11 @@ func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateR
 	wrapped, gen, err := WrapSecret(enc, sa.ID, accessKey, secretKey)
 	if err != nil {
 		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "wrap secret: " + err.Error()}
+	}
+	// Encryptor check + wrap succeeded — NOW we can propose the SA and key
+	// without risk of a half-created cluster state (codex P2).
+	if err := a.proposer.ProposeSACreate(ctx, sa); err != nil {
+		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "propose SA: " + err.Error()}
 	}
 	k := AccessKey{
 		AccessKey: accessKey, SecretKey: secretKey, SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
@@ -420,7 +427,10 @@ func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutR
 	if enc == nil {
 		return &adminapi.Error{Code: "internal", Message: "iam: admin api: encryptor not set (boot ordering bug — see wireIAMEncryptor)"}
 	}
-	wrapped, gen, err := WrapSecret(enc, "bucket-upstream:"+req.Bucket, "", req.SecretKey)
+	// codex P2: bind access_key into the AAD so a tampered payload that swaps
+	// access_key without re-wrapping secret_key_enc fails AEAD verify rather
+	// than silently accepting a mismatched (access_key, secret_key) pair.
+	wrapped, gen, err := WrapSecret(enc, "bucket-upstream:"+req.Bucket, req.AccessKey, req.SecretKey)
 	if err != nil {
 		return &adminapi.Error{Code: "internal", Message: "wrap secret: " + err.Error()}
 	}
