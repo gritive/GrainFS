@@ -16,6 +16,11 @@ import (
 const MaxPayloadBytes = 64 << 20
 
 const (
+	NamespaceNode  = "datawal/node"
+	NamespaceShard = "datawal/shard"
+)
+
+const (
 	OpSegmentPut byte = iota + 1
 	OpObjectWriteAt
 	OpObjectTruncate

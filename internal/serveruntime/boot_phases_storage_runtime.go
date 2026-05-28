@@ -42,7 +42,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	if err != nil {
 		return err
 	}
-	dw, err := datawal.Open(state.dataWALDir, sealer, "datawal")
+	dw, err := datawal.Open(state.dataWALDir, sealer, datawal.NamespaceShard)
 	if err != nil {
 		return fmt.Errorf("open data WAL: %w", err)
 	}

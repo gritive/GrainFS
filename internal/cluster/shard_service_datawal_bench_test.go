@@ -44,7 +44,7 @@ func BenchmarkShardServiceWriteLocalShardStream_DataWAL_5MiB(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			dir := b.TempDir()
-			dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
+			dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
 			require.NoError(b, err)
 			b.Cleanup(func() { _ = dwal.Close() })
 

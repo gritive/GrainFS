@@ -565,13 +565,13 @@ func TestReplayWrongNamespaceFails(t *testing.T) {
 	require.NoError(t, err)
 	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, s, "datawal")
+	w, err := datawal.Open(dir, s, datawal.NamespaceShard)
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "k", Payload: []byte("v")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	err = datawal.Replay(context.Background(), dir, 0, s, "other", func(datawal.Record) error { return nil })
+	err = datawal.Replay(context.Background(), dir, 0, s, datawal.NamespaceNode, func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
 

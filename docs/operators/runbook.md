@@ -1156,9 +1156,11 @@ trigger is intentionally rejected (`grainfs config set encryption.rotate-dek now
 returns a "deferred — not supported in this release" error) — the append-only
 at-rest writers pin the DEK generation at open. Data WAL segment creation now
 persists the active generation in its encrypted segment header, but live rotation
-still needs a rollover or seal-under-pinned-generation boundary, and every
-ciphertext-bearing lane must have equivalent generation framing before rotation is
-re-enabled. Because
+still needs a rollover or seal-under-pinned-generation boundary. Node-local data
+WALs and cluster-shard data WALs use distinct AEAD namespaces (`datawal/node`
+and `datawal/shard`), so frames cannot be swapped between those physical WAL
+families even when sequence numbers match. Every remaining ciphertext-bearing
+lane must have equivalent generation framing before rotation is re-enabled. Because
 XAES removed the nonce-exhaustion cliff, the seal count below is **observability
 only** (cumulative-usage / compromise-recovery signal), not an action threshold.
 **KEK rotation** (`cluster rotate-key`, which re-wraps the existing DEKs without

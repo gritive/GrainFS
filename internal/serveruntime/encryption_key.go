@@ -27,8 +27,9 @@ const bulkCipherFormatFile = "encryption.format"
 // "7" = Zero-CA bootstrap/node identity no longer uses the legacy static
 // encryption.key as boot glue; node.key.enc must be recoverable through KEK
 // generation evidence. "8" = raft v2 Badger log stores are encrypted at rest
-// by a node-local raft-store key sealed under the cluster KEK. Greenfield only.
-const bulkCipherFormatVersion = "8"
+// by a node-local raft-store key sealed under the cluster KEK. "9" = encrypted
+// data WAL node/shard AEAD namespace separation. Greenfield only.
+const bulkCipherFormatVersion = "9"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
 // ONLY when at-rest encryption is enabled. bulkDataPresent reports whether the
@@ -40,7 +41,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); raft log store encryption was enabled and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); data WAL namespace separation was enabled and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):

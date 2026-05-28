@@ -17,7 +17,7 @@ import (
 // ShardService's encryptor (nil for plaintext) to avoid segment mode mismatch.
 func mustTestDataWAL(tb clusterTestTB, dir string, enc *encrypt.Encryptor) DataWALAppender {
 	tb.Helper()
-	w, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
+	w, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = w.Close() })
 	return w

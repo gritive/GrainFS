@@ -1073,7 +1073,7 @@ func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
 		var zero [16]byte
 		sealer = NewEncryptorAdapter(b.encryptor, zero[:])
 	}
-	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, "datawal", localDataWALMaterializer{b: b})
+	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, datawal.NamespaceNode, localDataWALMaterializer{b: b})
 }
 
 type localDataWALMaterializer struct {
