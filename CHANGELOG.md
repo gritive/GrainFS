@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.394.0] - 2026-05-28
+
+### Added
+
+- Added a protocol credential attach validator for data-plane attach paths. It
+  returns structured attach decisions, supports strict versus compatibility
+  stale handling, caps allow/deny cache lifetimes, and invalidates cached
+  decisions when credential generation or service-account disabled state
+  changes.
+
 ## [0.0.393.0] - 2026-05-28
 
 ### Changed
