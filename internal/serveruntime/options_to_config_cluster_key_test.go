@@ -20,7 +20,7 @@ func TestClusterKey_Empty_ReturnsError(t *testing.T) {
 		DataDir:    dataDir,
 		ClusterKey: "", // empty cluster-key triggers the guard
 	}
-	cfg := optionsToConfig(opts, ":9000", nil, nil, nil, nil)
+	cfg := optionsToConfig(opts, ":9000", nil, nil, nil)
 	err := Run(ctx, cfg)
 
 	if err == nil {

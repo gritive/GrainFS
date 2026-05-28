@@ -139,7 +139,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithEventStore(eventstore.New(state.db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
-		server.WithSnapshotEncryptor(state.cfg.Encryptor),
 		server.WithSnapshotKEK(state.kekStore, [16]byte(state.clusterID)),
 	}
 	// Share the auto-snapshotter's Manager (built in bootBackendWrap, which runs

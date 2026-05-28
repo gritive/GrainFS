@@ -16,7 +16,7 @@ var _ = ginkgo.Describe("R1 DEK boot ordering", ginkgo.Ordered, func() {
 
 		ginkgo.BeforeAll(func() {
 			// startE2ECluster brings up genesis + joiners with a shared encryption
-			// key file (makeSharedEncryptionKeyFile), so at-rest encryption is ON.
+			// DEK metadata is bootstrapped from the data directory, so at-rest encryption is ON.
 			// It registers DeferCleanup(c.Stop) internally.
 			c = startE2ECluster(ginkgo.GinkgoTB(), e2eClusterOptions{Nodes: 3})
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

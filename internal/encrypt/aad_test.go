@@ -82,6 +82,7 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		DomainJWTKey, DomainDEKFSMWrap, DomainKEKRotate, DomainKEKCatchup,
 		DomainNBD, DomainIAMAdmin, DomainCapabilityAssertV1, DomainCASChunk,
 		DomainIAMCredential, DomainFSMValue, DomainClusterConfigSecret,
+		DomainProtocolCredential,
 	}
 	seen := make(map[uint16]struct{}, len(domains))
 	for _, d := range domains {
@@ -91,7 +92,7 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		seen[uint16(d)] = struct{}{}
 		_ = BuildAAD(d, clusterID) // exercise BuildAAD with every domain
 	}
-	require.Len(t, seen, 15)
+	require.Len(t, seen, 16)
 }
 
 func TestBuildAAD_FieldBytesDefensiveCopy(t *testing.T) {

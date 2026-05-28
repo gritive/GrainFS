@@ -29,9 +29,6 @@ CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-30}"
 PROFILE_DIR="benchmarks/profiles/9p-single-$(date +%Y%m%d-%H%M%S)"
 
 DATA_DIR=$(mktemp -d "grainfs-9p-bench-XXXX" -p /tmp)
-BENCH_ENCRYPTION_KEY_FILE="${BENCH_ENCRYPTION_KEY_FILE:-$DATA_DIR/encryption.key}"
-export BENCH_ENCRYPTION_KEY_FILE
-bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
 
 SERVER_PID=""
 mkdir -p "$PROFILE_DIR"

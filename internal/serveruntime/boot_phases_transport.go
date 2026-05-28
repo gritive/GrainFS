@@ -101,11 +101,6 @@ func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInv
 }
 
 func loadPostDropInviteNodeKey(state *bootState) (tls.Certificate, [32]byte, error) {
-	if len(state.cfg.RawEncryptionKey) == 32 {
-		if cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey); err == nil {
-			return cert, spki, nil
-		}
-	}
 	kek, err := loadInviteNodeKeyKEKFromDisk(state.cfg.DataDir, state.inviteJoin.nodeKeyKEKGen)
 	if err != nil {
 		return tls.Certificate{}, [32]byte{}, err

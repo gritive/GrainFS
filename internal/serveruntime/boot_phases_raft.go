@@ -94,13 +94,6 @@ func bootMetaRaftWiring(state *bootState) error {
 	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil {
 		metaRaft.FSM().SetIAM(state.cfg.IAMStore, state.cfg.IAMApplier)
 	}
-	// Cluster-config PATCH with alert-webhook-secret requires the encryptor on
-	// the FSM (apply-side gate, Task 7). Nil test configurations reject such
-	// patches with "encryption disabled".
-	if state.cfg.Encryptor != nil {
-		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
-	}
-
 	// C2 §1 gap fix: construct the cluster DEK Keeper from the node KEK and
 	// inject it into the FSM. Without this wireDEKKeeper call, DEKRotate /
 	// DEKVersionPrune MetaCmds are silent no-ops at apply time. Extracted as a
@@ -117,8 +110,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	// this identity — accept-side foundation only. Task 6 consumes perNodeSPKI.
 	// Skipped when identity inputs are missing. node.key.enc is sealed under the
 	// active KEK generation and tracked by keys.d/node.key.gen so normal boot can
-	// re-seal during rotation and fail closed after prune. RawEncryptionKey is
-	// optional legacy migration material, not a steady-state boot prerequisite.
+	// re-seal during rotation and fail closed after prune.
 	if len(state.clusterID) > 0 && state.nodeID != "" {
 		if state.inviteJoinMode {
 			// Invite-join OWNS node.key.enc this boot: Phase-1 sealed it under a KEK
@@ -137,7 +129,6 @@ func bootMetaRaftWiring(state *bootState) error {
 				state.cfg.DataDir,
 				hex.EncodeToString(state.clusterID),
 				state.nodeID,
-				state.cfg.RawEncryptionKey,
 				state.kekStore,
 			)
 			if err != nil {

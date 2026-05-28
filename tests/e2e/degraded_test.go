@@ -53,8 +53,6 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 				dataDirs[i] = d
 				ginkgo.DeferCleanup(removeE2EDir, d)
 			}
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
 			startNode := func(i int) *exec.Cmd {
 				cmd := exec.Command(binary, "serve",
 					"--data", dataDirs[i],
@@ -62,7 +60,6 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 					"--node-id", raftAddr(i),
 					"--raft-addr", raftAddr(i),
 					"--cluster-key", clusterKey,
-					"--encryption-key-file", encKeyFile,
 					"--nfs4-port", "0",
 					"--nbd-port", "0",
 					"--scrub-interval", "0",

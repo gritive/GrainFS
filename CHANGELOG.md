@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.428.0] - 2026-05-29
+
+### Security
+
+- Removed the legacy static at-rest encryption key boot path from production
+  runtime wiring. Fresh nodes now rely on KEK/DEK metadata for shard, WAL,
+  protocol credential, node identity, and invite bootstrap protection.
+- Removed `--encryption-key-file` from `grainfs serve` and fail closed on
+  pre-format-7 static-key boot glue instead of silently regenerating raw keys.
+
+### Changed
+
+- Rewired protocol credential secret envelopes onto the generation-aware DEK
+  seam with a dedicated AAD domain.
+- Updated e2e, compat, colima, and benchmark harnesses to stop passing static
+  encryption key files.
+- Kept the lower-level legacy `encrypt.Encryptor` adapters for remaining
+  package-level seams and tests; `TODOS.md` now tracks only that residual R3
+  cleanup.
+
+### Tests
+
+- Added coverage that `ShardService` accepts a DEK keeper without the legacy
+  static encryptor.
+- Updated serve option/help tests, node identity/invite tests, and at-rest
+  format tests for the format-7 static-key cut.
+
 ## [0.0.427.0] - 2026-05-29
 
 ### Security

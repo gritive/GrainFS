@@ -1,7 +1,6 @@
 package serveruntime
 
 import (
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/server"
 )
@@ -10,13 +9,12 @@ import (
 // Field-for-field identical: every Config field is set from the matching
 // ServeOptions field.
 //
-// Pre-resolved arguments (addr, authOpts, encryptor, iamStore, iamApplier)
+// Pre-resolved arguments (addr, authOpts, iamStore, iamApplier)
 // sit upstream of cobra and are passed through unchanged.
 func optionsToConfig(
 	opts ServeOptions,
 	addr string,
 	authOpts []server.Option,
-	encryptor *encrypt.Encryptor,
 	iamStore *iam.Store,
 	iamApplier *iam.Applier,
 ) Config {
@@ -32,7 +30,6 @@ func optionsToConfig(
 		JoinListenAddr:   opts.JoinListenAddr,
 		ClusterKey:       opts.ClusterKey,
 		AuthOpts:         authOpts,
-		Encryptor:        encryptor,
 		IAMStore:         iamStore,
 		IAMApplier:       iamApplier,
 	}

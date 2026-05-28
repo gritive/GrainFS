@@ -128,17 +128,20 @@ func TestOnClusterKeyDropped_CallsSetDroppedAndRecycle(t *testing.T) {
 
 func TestApplyPostDropInviteJoinIdentity_FlipsAndDrops(t *testing.T) {
 	dir := t.TempDir()
-	encKey := []byte("0123456789abcdef0123456789abcdef")
+	kek := bytes.Repeat([]byte{0x21}, 32)
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	require.NoError(t, transport.SealNodeKey(dir, encKey, tls.Certificate{PrivateKey: priv}))
+	require.NoError(t, transport.SealNodeKey(dir, kek, tls.Certificate{PrivateKey: priv}))
+	keysDir := filepath.Join(dir, "keys")
+	require.NoError(t, os.MkdirAll(keysDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(keysDir, "3.key"), kek, 0o600))
 
 	state := &bootState{
-		cfg: Config{
-			DataDir:          dir,
-			RawEncryptionKey: encKey,
+		cfg: Config{DataDir: dir},
+		inviteJoin: &inviteJoinState{
+			clusterKeyDropped: true,
+			nodeKeyKEKGen:     3,
 		},
-		inviteJoin: &inviteJoinState{clusterKeyDropped: true},
 	}
 	tr := &fakeDropTransport{}
 

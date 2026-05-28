@@ -43,11 +43,11 @@ type inviteJoinNode struct {
 
 const inviteJoinClusterKey = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 
-// startInviteLeader boots a genesis leader: --cluster-key + encryption-key +
+// startInviteLeader boots a genesis leader: --cluster-key +
 // stable --raft-addr + explicit --join-listen-addr. clusterMode is always true,
 // so the Zero-CA join listener starts even on a single node, letting it mint
 // invites.
-func startInviteLeader(t testing.TB, encKeyFile, clusterKey string) *inviteJoinNode {
+func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 	n := &inviteJoinNode{
 		nodeID:   "leader",
 		dataDir:  shortTempDir(t),
@@ -64,7 +64,6 @@ func startInviteLeader(t testing.TB, encKeyFile, clusterKey string) *inviteJoinN
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
 		"--node-id", n.nodeID,
 		"--cluster-key", clusterKey,
-		"--encryption-key-file", encKeyFile,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",
@@ -76,7 +75,7 @@ func startInviteLeader(t testing.TB, encKeyFile, clusterKey string) *inviteJoinN
 }
 
 // startInviteJoiner boots a secret-less node with GRAINFS_INVITE_BUNDLE set and
-// NO --cluster-key / --encryption-key-file. extraEnv lets the resume test reuse
+// NO --cluster-key. extraEnv lets the resume test reuse
 // a populated data dir.
 func startInviteJoiner(t testing.TB, nodeID, dataDir, bundle string) *inviteJoinNode {
 	n := &inviteJoinNode{
@@ -221,9 +220,7 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 	ginkgo.Context("HappyPath", func() {
 		ginkgo.It("a secret-less node joins via invite and becomes a voter", func() {
 			t := ginkgo.GinkgoTB()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
-			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			leader := startInviteLeader(t, inviteJoinClusterKey)
 			_, _ = bootstrapAdminViaUDS(t, leader.dataDir)
 
 			bundle := mintInvite(t, leader.dataDir)
@@ -253,9 +250,7 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 		// need its own data-group membership; it forwards reads to the group leader.
 		ginkgo.It("serves an S3 PutObject/GetObject round-trip through the joined node", func() {
 			t := ginkgo.GinkgoTB()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
-			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			leader := startInviteLeader(t, inviteJoinClusterKey)
 			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
 			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
@@ -297,9 +292,7 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 
 		ginkgo.It("runs complete-cutover and accepts a post-drop invite-join without a shared PSK", func() {
 			t := ginkgo.GinkgoTB()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
-			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			leader := startInviteLeader(t, inviteJoinClusterKey)
 			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
 			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
@@ -349,9 +342,7 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 
 		ginkgo.It("revokes a post-drop joined node and rejects rejoin with the same node-id", func() {
 			t := ginkgo.GinkgoTB()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
-			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			leader := startInviteLeader(t, inviteJoinClusterKey)
 			_, _ = bootstrapAdminViaUDS(t, leader.dataDir)
 
 			preDropBundle := mintInvite(t, leader.dataDir)
@@ -389,9 +380,7 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 	ginkgo.Context("SingleUse", func() {
 		ginkgo.It("rejects replay of the same bundle from a different node", func() {
 			t := ginkgo.GinkgoTB()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
-			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			leader := startInviteLeader(t, inviteJoinClusterKey)
 			_, _ = bootstrapAdminViaUDS(t, leader.dataDir)
 			bundle := mintInvite(t, leader.dataDir)
 
@@ -424,16 +413,13 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 	ginkgo.Context("CrossClusterIsolation", func() {
 		ginkgo.It("rejects a bundle minted on cluster A against cluster B", func() {
 			t := ginkgo.GinkgoTB()
-			encA := makeSharedEncryptionKeyFile(t)
-			encB := makeSharedEncryptionKeyFile(t)
-
-			leaderA := startInviteLeader(t, encA, inviteJoinClusterKey)
+			leaderA := startInviteLeader(t, inviteJoinClusterKey)
 			_, _ = bootstrapAdminViaUDS(t, leaderA.dataDir)
 			bundleA := mintInvite(t, leaderA.dataDir)
 
 			// Different cluster key → different cluster identity.
 			keyB := strings.Repeat("b", 64)
-			leaderB := startInviteLeader(t, encB, keyB)
+			leaderB := startInviteLeader(t, keyB)
 			_, _ = bootstrapAdminViaUDS(t, leaderB.dataDir)
 			bundleB := mintInvite(t, leaderB.dataDir)
 
@@ -478,9 +464,7 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 		// itself is unit-covered in serveruntime/invite_join_boot_test.go.)
 		ginkgo.It("an already-joined node restarts with stale bundle env as a no-op and stays a voter", func() {
 			t := ginkgo.GinkgoTB()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
-			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			leader := startInviteLeader(t, inviteJoinClusterKey)
 			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
 			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID

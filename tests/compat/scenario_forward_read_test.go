@@ -37,10 +37,8 @@ func TestForwardRead(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(dataDir) })
 
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
 	// Phase 1: start with previous binary, write data.
-	cmd1 := startGrainfsNode(t, prev, dataDir, prevHTTP, prevRaft, encKeyFile)
+	cmd1 := startGrainfsNode(t, prev, dataDir, prevHTTP, prevRaft)
 	require.NoError(t, waitForPort(prevHTTP, 60*time.Second), "wait for prev node HTTP port")
 	time.Sleep(2 * time.Second)
 
@@ -64,7 +62,7 @@ func TestForwardRead(t *testing.T) {
 	terminateProcess(cmd1)
 
 	// Phase 2: restart on the same data dir with the current binary.
-	cmd2 := startGrainfsNode(t, cur, dataDir, curHTTP, curRaft, encKeyFile)
+	cmd2 := startGrainfsNode(t, cur, dataDir, curHTTP, curRaft)
 	t.Cleanup(func() { terminateProcess(cmd2) })
 	require.NoError(t, waitForPort(curHTTP, 60*time.Second), "wait for cur node HTTP port")
 	time.Sleep(2 * time.Second)
@@ -84,7 +82,7 @@ func TestForwardRead(t *testing.T) {
 
 // startGrainfsNode starts a single grainfs node and returns the running Cmd.
 // The caller is responsible for calling terminateProcess when done.
-func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort int, encKeyFile string) *exec.Cmd {
+func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort int) *exec.Cmd {
 	t.Helper()
 	if _, err := os.Stat(binary); err != nil {
 	}
@@ -107,7 +105,6 @@ func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort i
 		"--node-id", "n1",
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--cluster-key", "COMPAT-KEY",
-		"--encryption-key-file", encKeyFile,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",

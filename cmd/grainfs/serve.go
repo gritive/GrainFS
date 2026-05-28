@@ -33,7 +33,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 		"Max bytes any single AppendObject forward request may reserve (default 64 MiB).")
 	cmd.Flags().Int64("append-size-cap-bytes", 5*1024*1024*1024*1024,
 		"Per-object total size cap for AppendObject in bytes (default 5 TiB, S3 PutObject parity).")
-	cmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated only for solo bootstrap if omitted)")
 	cmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	cmd.Flags().String("nfs-write-buffer-dir", "", "directory for NFS write coalescing buffer files (empty = derive from --data)")
 	cmd.Flags().Duration("nfs-write-buffer-idle", 30*time.Second, "idle timeout before write buffer auto-flushes (0 = disable buffering)")

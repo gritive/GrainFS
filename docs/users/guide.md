@@ -38,7 +38,9 @@ Common serve options:
 | `--nfs4-port` | NFSv4 port; use `0` to disable. |
 | `--nbd-port` | NBD port; use `0` to disable. |
 | `--9p-bind`, `--9p-port` | 9P2000.L bind address and port. |
-| `--encryption-key-file` | 32-byte at-rest encryption key file. Required for cluster/join mode. |
+
+At-rest encryption is always enabled and bootstraps from the KEK/DEK metadata
+under the data directory; there is no separate static encryption-key flag.
 
 ## Bootstrap IAM
 

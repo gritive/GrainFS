@@ -64,16 +64,11 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 
 	binary := getBinary()
 
-	// Shared encryption key — restart on the same dataDir requires the
-	// IAM secrets to round-trip across processes.
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
 	// Step 1: Start in no-peers mode, create some data
 	port1 := freePort()
 	cmd1 := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port1),
-		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
@@ -128,7 +123,6 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 	cmd2 := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port2),
-		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),

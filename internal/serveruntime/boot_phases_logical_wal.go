@@ -37,9 +37,6 @@ func bootLogicalWALOpen(ctx context.Context, state *bootState) error {
 	switch {
 	case state.dekKeeper != nil && len(state.clusterID) == 16:
 		sealer = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
-	case state.cfg.Encryptor != nil:
-		var zero [16]byte
-		sealer = storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:])
 	}
 	// wal.OpenEncrypted rejects a nil sealer. The encryption-disabled path
 	// (no keeper + no static encryptor → sealer == nil) must use the plaintext

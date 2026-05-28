@@ -502,14 +502,13 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	// ACTIVE KEK generation. Post-drop joins present the per-node cert before
 	// QUIC Listen, so bootQUICTransport loads this same KEK directly from disk
 	// before wireDEKKeeper has populated state.kekStore.
-	sealGen, sealKEK, err := inviteNodeKeySealKey(encKey, kekGens, clusterKeyDropped)
+	sealGen, sealKEK, err := inviteNodeKeySealKey(kekGens)
 	if err != nil {
 		return err
 	}
 	st.nodeKeyKEKGen = sealGen
-	// Re-persist the sentinel with the chosen gen BEFORE sealing (the step-2 write
-	// predates staging and carries gen 0). For post-drop joins gen 0 is the
-	// encKey-first marker, not a KEK generation. Ordering matters for crash
+	// Re-persist the sentinel with the chosen KEK gen BEFORE sealing (the step-2
+	// write predates staging and carries gen 0). Ordering matters for crash
 	// safety (durable artifacts are cluster.id, retained KEKs, node.key.enc, and
 	// keys.d/current.key; a leftover unsealed key is shredded on resume):
 	//   - crash after this write, before SealNodeKey → no node.key.enc →
@@ -569,12 +568,9 @@ func stageInviteJoinTransportKey(dataDir string, opts *ServeOptions, psk []byte,
 	return nil
 }
 
-func inviteNodeKeySealKey(encKey []byte, kekGens []cluster.KEKGen, clusterKeyDropped bool) (uint32, []byte, error) {
+func inviteNodeKeySealKey(kekGens []cluster.KEKGen) (uint32, []byte, error) {
 	sealGen, sealKEK, ok := highestKEKGen(kekGens)
 	if !ok {
-		if clusterKeyDropped && len(encKey) == 32 {
-			return 0, encKey, nil
-		}
 		return 0, nil, fmt.Errorf("bootstrap secrets contain no KEK generations")
 	}
 	return sealGen, sealKEK, nil
@@ -598,7 +594,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 			st.nodeKeyKEKGen = persisted.nodeKeyKEKGen
 		}
 	}
-	cert, spki, nodeKeyKEKGen, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey, state.kekStore, st.nodeKeyKEKGen, st.nodeKeyKEKGen != 0)
+	cert, spki, nodeKeyKEKGen, err := loadAndMigrateInviteNodeKey(state.cfg.DataDir, state.kekStore, st.nodeKeyKEKGen, st.nodeKeyKEKGen != 0)
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2: load node key: %w", err)
 	}
@@ -722,7 +718,7 @@ func appendInviteSealField(out, b []byte) []byte {
 // sealed under the active KEK generation on return. node.key.gen is the primary
 // generation record; fallbackGen exists for same-process Phase-2 state and the
 // invite pending sentinel on older resumes.
-func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, kekStore *encrypt.KEKStore, fallbackGen uint32, fallbackOK bool) (tls.Certificate, [32]byte, uint32, error) {
+func loadAndMigrateInviteNodeKey(dataDir string, kekStore *encrypt.KEKStore, fallbackGen uint32, fallbackOK bool) (tls.Certificate, [32]byte, uint32, error) {
 	activeGen, activeKEK, err := activeNodeKeyKEK(kekStore)
 	if err != nil {
 		return tls.Certificate{}, [32]byte{}, 0, err
@@ -730,11 +726,6 @@ func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, kekStore *encryp
 
 	sealedGen, ok := readNodeKeyGen(dataDir)
 	if !ok {
-		if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-			return tls.Certificate{}, [32]byte{}, 0, migrateErr
-		} else if migrated {
-			return cert, spki, activeGen, nil
-		}
 		if fallbackOK {
 			sealedGen = fallbackGen
 		} else {
@@ -743,20 +734,10 @@ func loadAndMigrateInviteNodeKey(dataDir string, encKey []byte, kekStore *encryp
 	}
 	sealKEK, err := kekStore.Get(sealedGen)
 	if err != nil {
-		if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-			return tls.Certificate{}, [32]byte{}, 0, migrateErr
-		} else if migrated {
-			return cert, spki, activeGen, nil
-		}
 		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("get node key KEK gen %d: %w", sealedGen, err)
 	}
 	cert, spki, err := transport.LoadNodeKey(dataDir, sealKEK)
 	if err != nil {
-		if cert, spki, migrated, migrateErr := tryMigrateStaticNodeKey(dataDir, encKey, activeGen, activeKEK); migrateErr != nil {
-			return tls.Certificate{}, [32]byte{}, 0, migrateErr
-		} else if migrated {
-			return cert, spki, activeGen, nil
-		}
 		return tls.Certificate{}, [32]byte{}, 0, fmt.Errorf("load invite node key sealed under KEK gen %d: %w", sealedGen, err)
 	}
 	if sealedGen != activeGen {
@@ -844,16 +825,12 @@ func highestKEKGen(gens []cluster.KEKGen) (gen uint32, key []byte, ok bool) {
 }
 
 // stageInviteSecrets writes every keys/<gen>.key and cluster.id (raw 16 bytes)
-// where normal boot expects them. encKey is a legacy bootstrap field; new
-// payloads omit it, and fresh invite joins must not create encryption.key.
+// where normal boot expects them. encKey is a legacy bootstrap field retained
+// only for decode compatibility; staging intentionally ignores it so fresh
+// invite joins never create encryption.key.
 func stageInviteSecrets(dataDir string, encKey []byte, kekGens []cluster.KEKGen, clusterID []byte) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("stage secrets: mkdir data: %w", err)
-	}
-	if len(encKey) > 0 {
-		if err := os.WriteFile(filepath.Join(dataDir, "encryption.key"), encKey, 0o600); err != nil {
-			return fmt.Errorf("stage secrets: encryption.key: %w", err)
-		}
 	}
 	if len(clusterID) > 0 {
 		if err := os.WriteFile(filepath.Join(dataDir, nodeconfig.ClusterIDFile), clusterID, 0o600); err != nil {

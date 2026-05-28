@@ -235,7 +235,6 @@ func startSingleKEKNode(t testing.TB) (string, string) {
 	dir := shortTempDir(t)
 	httpPort := freePort()
 	raftPort := freePort()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ginkgo.DeferCleanup(cancel)
@@ -249,7 +248,6 @@ func startSingleKEKNode(t testing.TB) (string, string) {
 		"--cluster-key", strings.Repeat("a", 64),
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

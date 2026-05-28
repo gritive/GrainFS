@@ -35,7 +35,6 @@ Flags:
   -d, --data string                                         data directory (comma-separated for multi-root) (default "./data")
       --datagroup-refresh-interval duration                 how often to scan for new DataGroups and start reshard managers (0 = only scan at startup) (default 1m0s)
       --degraded-check-interval duration                    EC degraded-mode liveness check interval (default 30s)
-      --encryption-key-file string                          path to 32-byte encryption key file (auto-generated only for solo bootstrap if omitted)
       --fd-classification-cap int                           max open file descriptors to classify by category per sample (default 512)
       --fd-critical-threshold float                         FD used fraction (0-1) at which a critical incident fires (default 0.9)
       --fd-eta-window duration                              positive-trend ETA window for predictive FD warnings (default 30m0s)

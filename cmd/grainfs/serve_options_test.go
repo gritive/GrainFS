@@ -31,7 +31,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--cluster-append-forward-buffer-total-bytes", "16777216",
 		"--cluster-append-forward-buffer-max-per-request", "1048576",
 		"--append-size-cap-bytes", "67108864",
-		"--encryption-key-file", "/tmp/sentinel.key",
 		"--nfs4-port", "12049",
 		"--nfs-write-buffer-dir", "/tmp/nfs-writebuf",
 		"--nfs-write-buffer-idle", "15s",
@@ -107,7 +106,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "sentinel-node", opts.NodeID)
 	require.Equal(t, "sentinel-raft:7000", opts.RaftAddr)
 	require.Equal(t, "sentinel-cluster-key", opts.ClusterKey)
-	require.Equal(t, "/tmp/sentinel.key", opts.EncryptionKeyFile)
 
 	// Cluster transport tuning.
 	require.Equal(t, int64(16777216), opts.AppendForwardBufferTotalBytes)
