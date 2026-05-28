@@ -97,26 +97,19 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
-- [x] **OIDC federated IAM Slice 4**: use `AuthorizePrincipal` in selected
-  admin/protocol routes, add OIDC actor support, and document operator flows
-  and failure modes. SHIPPED in current branch: `s3auth.Authorizer` exposes
-  `AuthorizePrincipal`; protocol credential admin handlers evaluate typed actor
-  principals from context and fall back to the target service account for
-  existing UDS/CLI flows.
+- [ ] **OIDC federated IAM follow-up: IAM mutation/group bearer boundary**.
+  Policy write/attach and group membership routes can change an actor's
+  effective policies, so do not bearer-enable them until an
+  own-effective-policy/self-escalation guard is designed and tested. Candidate
+  routes: `PUT/DELETE /v1/iam/policy/:name`,
+  `PUT/DELETE /v1/iam/policy/:name/attach/sa/:said`, and
+  `PUT/DELETE /v1/iam/group/...`.
 
-- [x] **OIDC federated IAM Slice 5**: add admin/protocol HTTP bearer-token
-  middleware for OIDC actors, expand `AuthorizePrincipal` adoption to additional
-  admin/protocol routes, and add end-to-end denied/allowed audit examples.
-  SHIPPED in current branch: `/v1/credentials*` routes authenticate optional
-  bearer OIDC actors before protocol credential authorization; invalid bearer
-  tokens fail before mutation, while existing no-bearer admin UDS behavior is
-  preserved.
-
-- [ ] **OIDC federated IAM Slice 7**: decide and implement the next broader
-  admin route policy boundary: either a central admin route/action registry for
-  IAM policy/group/SA/config/dashboard-token routes or the external PDP adapter
-  boundary. Preserve no-bearer admin UDS behavior unless the route explicitly
-  opts into actor authz.
+- [ ] **OIDC federated IAM follow-up: remaining admin route/PDP boundary**.
+  Decide whether to extend the central admin route/action registry to mount-SA,
+  bucket-upstream, config, and dashboard-token routes or introduce the external
+  PDP adapter first. Preserve no-bearer admin UDS behavior unless the route
+  explicitly opts into actor authz.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):

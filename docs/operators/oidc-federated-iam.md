@@ -5,7 +5,8 @@
 OIDC principals can be evaluated by the same policy engine as service accounts.
 Selected admin operations use a typed actor when one is present in request
 context, so group policies attached to mapped OIDC groups can authorize
-credential create, read, list, rotate, revoke, and bucket-policy decisions.
+credential create, read, list, rotate, revoke, bucket-policy decisions, and
+read-only IAM admin inspection.
 
 ## Operator Flow
 
@@ -73,9 +74,10 @@ bearer token fail closed if the actor is unauthenticated, the admin authorizer
 is unavailable, or the mapped OIDC principal and groups do not have an explicit
 allow.
 
-Admin action allows must name the credential or bucket-policy action family
-explicitly. Broad data-access policies that use `Action: "*"` do not grant
-`grainfs:Credential*` or `grainfs:BucketPolicy*` admin privileges.
+Admin action allows must name the credential, bucket-policy, or IAM admin action
+family explicitly. Broad data-access policies that use `Action: "*"` do not
+grant `grainfs:Credential*`, `grainfs:BucketPolicy*`, or `grainfs:IAM*` admin
+privileges.
 
 Example policy for a mapped OIDC group:
 
@@ -100,6 +102,51 @@ Bearer actor allow and deny decisions emit structured `admin_authz` log rows
 with normalized principal kind/id, action, resource, decision, policy match, and
 reason. Raw JWTs are never logged.
 
+## Read-only IAM Admin Flow
+
+Bearer-token actor adoption covers read-only IAM admin inspection routes:
+
+- `GET /v1/iam/sa` evaluates `grainfs:IAMServiceAccountList` on `iam/sa/*`.
+- `GET /v1/iam/sa/:id` evaluates `grainfs:IAMServiceAccountRead` on
+  `iam/sa/:id`.
+- `GET /v1/iam/policy` evaluates `grainfs:IAMPolicyList` on `iam/policy/*`.
+- `GET /v1/iam/policy/:name` evaluates `grainfs:IAMPolicyRead` on
+  `iam/policy/:name`.
+- `POST /v1/iam/policy/simulate` evaluates `grainfs:IAMPolicySimulate` on
+  `iam/policy/*`.
+
+Requests without a bearer token keep the existing admin UDS behavior. Requests
+with a bearer token fail closed if the actor is unauthenticated, the admin
+authorizer is unavailable, or policy evaluation denies the route action.
+
+IAM mutation routes are intentionally not bearer-enabled in this slice. Policy
+write/attach and group membership changes can modify the caller's effective
+permissions, so those routes require a separate self-escalation guard design.
+
+Example read-only policy for a mapped OIDC group:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "grainfs:IAMServiceAccountList",
+        "grainfs:IAMServiceAccountRead",
+        "grainfs:IAMPolicyList",
+        "grainfs:IAMPolicyRead",
+        "grainfs:IAMPolicySimulate"
+      ],
+      "Resource": [
+        "iam/sa/*",
+        "iam/policy/*"
+      ]
+    }
+  ]
+}
+```
+
 ## Failure Modes
 
 - Issuer, audience, or key mismatch: token authentication fails before
@@ -107,14 +154,15 @@ reason. Raw JWTs are never logged.
 - Missing or malformed groups claim: the actor has no mapped group policies.
 - Policy attached to the target service account only: federated actors are
   denied unless their direct principal ID or mapped groups also carry policy.
-- Authorizer not configured: bearer actor credential and bucket policy admin
-  operations fail closed.
+- Authorizer not configured: bearer actor credential, bucket policy, and
+  read-only IAM admin operations fail closed.
 - OIDC issuers not configured: bearer-token credential requests fail with `401`;
   requests without bearer tokens continue through the existing admin UDS path.
 - Unsupported actor principal kind: authorization denies with a resolver error.
 
 ## Current Boundary
 
-HTTP bearer-token actors are wired for protocol credential and bucket policy
-admin routes. Broader IAM policy/group/SA/config/dashboard route adoption and an
-external PDP adapter remain separate follow-ups.
+HTTP bearer-token actors are wired for protocol credential, bucket policy, and
+read-only IAM admin routes. IAM mutation/group routes, mount-SA/upstream routes,
+config/dashboard route adoption, and an external PDP adapter remain separate
+follow-ups.

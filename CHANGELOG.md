@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.427.0] - 2026-05-29
+
+### Security
+
+- Allowed OIDC bearer actors to call read-only IAM admin routes for service
+  account reads, policy reads, policy lists, and policy simulation when their
+  IAM policies explicitly grant the matching `grainfs:IAM*` action.
+- Kept broad `Action: "*"` policies from granting IAM admin permissions; IAM
+  admin allows must name the `grainfs:IAM*` action family explicitly.
+
+### Changed
+
+- Preserved the existing no-bearer admin UDS behavior for IAM routes while
+  adding fail-closed authorization checks only when a bearer actor is present.
+- Documented the current read-only IAM admin boundary and the remaining
+  mutation/group and broader admin-route follow-ups.
+
+### Tests
+
+- Added route coverage for bearer allow/deny, malformed bearer rejection, and
+  no-bearer fallback on the read-only IAM admin surface.
+- Added IAM policy parser and evaluator coverage for `iam/sa/*`,
+  `iam/policy/*`, and explicit `grainfs:IAM*` action matching.
+
 ## [0.0.426.0] - 2026-05-29
 
 ### Fixed

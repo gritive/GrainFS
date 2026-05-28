@@ -132,6 +132,28 @@ func TestParse_AcceptsProtocolCredentialPartialFilterResources(t *testing.T) {
 	}
 }
 
+func TestParse_AcceptsIAMAdminResources(t *testing.T) {
+	for _, resource := range []string{
+		"iam/policy/*",
+		"iam/policy/storage-admin",
+		"iam/sa/*",
+		"iam/sa/sa-app",
+	} {
+		t.Run(resource, func(t *testing.T) {
+			doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:IAMPolicyRead","Resource":"` + resource + `"}]}`)
+			_, err := Parse(doc)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestParse_RejectsMalformedIAMAdminResource(t *testing.T) {
+	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:IAMPolicyRead","Resource":"iam/policy"}]}`)
+	_, err := Parse(doc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "malformed ARN")
+}
+
 func TestParse_RejectsMalformedProtocolCredentialResource(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/s3"}]}`)
 	_, err := Parse(doc)

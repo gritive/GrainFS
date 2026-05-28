@@ -61,11 +61,16 @@ func explicitAdminAllowAction(pattern, req string) bool {
 	if strings.HasPrefix(req, "grainfs:Credential") {
 		return strings.HasPrefix(pattern, "grainfs:Credential") && wildcardMatch(pattern, req)
 	}
+	if strings.HasPrefix(req, "grainfs:IAM") {
+		return strings.HasPrefix(pattern, "grainfs:IAM") && wildcardMatch(pattern, req)
+	}
 	return wildcardMatch(pattern, req)
 }
 
 func requiresExplicitAdminAllowAction(action string) bool {
-	return strings.HasPrefix(action, "grainfs:BucketPolicy") || strings.HasPrefix(action, "grainfs:Credential")
+	return strings.HasPrefix(action, "grainfs:BucketPolicy") ||
+		strings.HasPrefix(action, "grainfs:Credential") ||
+		strings.HasPrefix(action, "grainfs:IAM")
 }
 
 // wildcardMatch implements the standard `*`-glob with iterative two-pointer backtrack.

@@ -126,6 +126,9 @@ func validResource(r string) bool {
 	if validProtocolCredentialResource(r) {
 		return true
 	}
+	if validIAMAdminResource(r) {
+		return true
+	}
 	if !strings.HasPrefix(r, "arn:aws:s3:::") {
 		return false
 	}
@@ -163,4 +166,20 @@ func validProtocolCredentialResource(r string) bool {
 		return false
 	}
 	return parts[3] != ""
+}
+
+func validIAMAdminResource(r string) bool {
+	if !strings.HasPrefix(r, "iam/") {
+		return false
+	}
+	parts := strings.Split(r, "/")
+	if len(parts) != 3 {
+		return false
+	}
+	switch parts[1] {
+	case "policy", "sa":
+	default:
+		return false
+	}
+	return parts[2] != ""
 }

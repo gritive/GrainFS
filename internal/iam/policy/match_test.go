@@ -1,6 +1,10 @@
 package policy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestMatchAction_ExactAndWildcard(t *testing.T) {
 	tests := []struct {
@@ -17,9 +21,7 @@ func TestMatchAction_ExactAndWildcard(t *testing.T) {
 		{"iceberg:*Table", "iceberg:ListTables", false},
 	}
 	for _, c := range tests {
-		if got := matchAction(c.pattern, c.req); got != c.want {
-			t.Errorf("matchAction(%q, %q) = %v, want %v", c.pattern, c.req, got, c.want)
-		}
+		require.Equal(t, c.want, matchAction(c.pattern, c.req), "matchAction(%q, %q)", c.pattern, c.req)
 	}
 }
 
@@ -27,6 +29,7 @@ func TestEvaluateAdminAllowRequiresExplicitAction(t *testing.T) {
 	for _, action := range []string{
 		"grainfs:BucketPolicyWrite",
 		"grainfs:CredentialList",
+		"grainfs:IAMPolicyRead",
 	} {
 		t.Run(action, func(t *testing.T) {
 			got := Evaluate(EvalInput{
@@ -39,26 +42,45 @@ func TestEvaluateAdminAllowRequiresExplicitAction(t *testing.T) {
 				}},
 				Ctx: RequestContext{Action: action, Resource: "*"},
 			})
-			if got.Decision != DecisionDeny {
-				t.Fatalf("global wildcard should not allow %s, got %s", action, got.Decision)
-			}
+			require.Equal(t, DecisionDeny, got.Decision, "global wildcard should not allow %s", action)
 		})
 	}
 }
 
 func TestEvaluateAdminAllowAcceptsExplicitAdminWildcard(t *testing.T) {
-	got := Evaluate(EvalInput{
-		PrincipalPolicies: []*Document{{
-			Statement: []Statement{{
-				Effect:   EffectAllow,
-				Action:   StringOrSlice{"grainfs:BucketPolicy*"},
-				Resource: StringOrSlice{"arn:aws:s3:::logs"},
-			}},
-		}},
-		Ctx: RequestContext{Action: "grainfs:BucketPolicyWrite", Resource: "arn:aws:s3:::logs"},
-	})
-	if got.Decision != DecisionAllow {
-		t.Fatalf("explicit bucket policy wildcard should allow, got %s", got.Decision)
+	tests := []struct {
+		name     string
+		pattern  string
+		action   string
+		resource string
+	}{
+		{
+			name:     "bucket policy",
+			pattern:  "grainfs:BucketPolicy*",
+			action:   "grainfs:BucketPolicyWrite",
+			resource: "arn:aws:s3:::logs",
+		},
+		{
+			name:     "iam policy",
+			pattern:  "grainfs:IAMPolicy*",
+			action:   "grainfs:IAMPolicyRead",
+			resource: "iam/policy/storage-admin",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Evaluate(EvalInput{
+				PrincipalPolicies: []*Document{{
+					Statement: []Statement{{
+						Effect:   EffectAllow,
+						Action:   StringOrSlice{tc.pattern},
+						Resource: StringOrSlice{tc.resource},
+					}},
+				}},
+				Ctx: RequestContext{Action: tc.action, Resource: tc.resource},
+			})
+			require.Equal(t, DecisionAllow, got.Decision)
+		})
 	}
 }
 
@@ -77,41 +99,27 @@ func TestEvaluateAdminDenyStillAcceptsGlobalWildcard(t *testing.T) {
 		}},
 		Ctx: RequestContext{Action: "grainfs:BucketPolicyWrite", Resource: "arn:aws:s3:::logs"},
 	})
-	if got.Decision != DecisionDeny {
-		t.Fatalf("global wildcard deny should still deny admin actions, got %s", got.Decision)
-	}
+	require.Equal(t, DecisionDeny, got.Decision, "global wildcard deny should still deny admin actions")
 }
 
 func TestMatchResource_PrefixBoundary(t *testing.T) {
 	// F#10: arn:aws:s3:::analytics/logs/* must NOT match analytics/logsx/secret
-	if matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logsx/secret") {
-		t.Fatal("logs/* must not match logsx/secret")
-	}
-	if !matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logs/2026-05.json") {
-		t.Fatal("logs/* must match logs/2026-05.json")
-	}
+	require.False(t, matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logsx/secret"))
+	require.True(t, matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logs/2026-05.json"))
 }
 
 func TestMatchCondition_SourceIpAllow(t *testing.T) {
 	cond := map[string]map[string]StringOrSlice{
 		"IpAddress": {"aws:SourceIp": []string{"10.0.0.0/8"}},
 	}
-	if !matchCondition(cond, RequestContext{SourceIP: "10.1.2.3"}) {
-		t.Fatal("10.1.2.3 should match 10.0.0.0/8")
-	}
-	if matchCondition(cond, RequestContext{SourceIP: "192.168.0.1"}) {
-		t.Fatal("192.168.0.1 should not match 10.0.0.0/8")
-	}
+	require.True(t, matchCondition(cond, RequestContext{SourceIP: "10.1.2.3"}))
+	require.False(t, matchCondition(cond, RequestContext{SourceIP: "192.168.0.1"}))
 }
 
 func TestMatchCondition_S3PrefixOnListOnly(t *testing.T) {
 	cond := map[string]map[string]StringOrSlice{
 		"StringLike": {"s3:prefix": []string{"logs/*"}},
 	}
-	if matchCondition(cond, RequestContext{Action: "s3:GetObject"}) {
-		t.Fatal("s3:prefix on GetObject should NOT match (missing key)")
-	}
-	if !matchCondition(cond, RequestContext{Action: "s3:ListBucket", Prefix: "logs/2026"}) {
-		t.Fatal("s3:prefix logs/* should match prefix logs/2026 on ListBucket")
-	}
+	require.False(t, matchCondition(cond, RequestContext{Action: "s3:GetObject"}))
+	require.True(t, matchCondition(cond, RequestContext{Action: "s3:ListBucket", Prefix: "logs/2026"}))
 }
