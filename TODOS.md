@@ -120,9 +120,6 @@ Work these in order. Do not run them in parallel.
 - [ ] **Auth redesign DX follow-ups** (from `docs/superpowers/specs/2026-05-19-auth-redesign.md`
   Codex review, medium+cosmetic tier). All single-PR-sized, ship after the main
   redesign lands:
-    - [ ] `grainfs iam explain --sa X --s3 put s3://bucket/key` — request-shaped
-      simulator that maps a natural sentence onto the underlying
-      `(action, resource, condition)` tuple. Wraps `grainfs iam policy simulate`.
     - [ ] `grainfs iceberg secret duckdb --warehouse X --sa Y` and `grainfs
       iceberg catalog spark|trino --warehouse X --sa Y` — emit copy-paste config
       blocks per client. Reduces per-warehouse-token UX tax.

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.435.0] - 2026-05-29
+
+### Added
+
+- Added `grainfs iam explain --sa <id> --s3 <verb> <s3://bucket[/key]>` to
+  translate request-shaped S3 operations into IAM simulator action/resource
+  inputs.
+
+### Changed
+
+- Documented IAM explain usage in the user guide and removed the completed
+  follow-up from `TODOS.md`.
+
+### Tests
+
+- Added iamadmin and CLI coverage for explain request mapping, text output,
+  JSON output, and simulator request wiring.
+
 ## [0.0.434.0] - 2026-05-29
 
 ### Security

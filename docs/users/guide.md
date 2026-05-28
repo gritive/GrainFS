@@ -63,6 +63,16 @@ grainfs iam policy attach readwrite --sa <sa_id> --i-know
 grainfs iam bucket create mybucket --attach-sa <sa_id> --attach-policy readwrite
 ```
 
+Explain a request-shaped S3 decision before testing with a real client:
+
+```bash
+grainfs iam explain --sa <sa_id> --s3 put s3://mybucket/path/to/object
+grainfs iam explain --sa <sa_id> --s3 ls s3://mybucket
+```
+
+The command prints the derived IAM action and resource, then runs the same
+server-side simulator used by `grainfs iam policy simulate`.
+
 Rotate an access key with a client rollover window:
 
 ```bash

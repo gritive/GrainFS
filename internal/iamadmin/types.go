@@ -136,6 +136,13 @@ type PolicySimulateOptions struct {
 	Resource      string
 }
 
+type ExplainOptions struct {
+	BaseOptions
+	SAID   string
+	S3Verb string
+	S3URI  string
+}
+
 // PolicySimulateRequest is the wire type sent to POST /v1/iam/policy/simulate.
 type PolicySimulateRequest struct {
 	SAID          string   `json:"sa_id"`
@@ -159,6 +166,11 @@ type PolicySimulateResponse struct {
 	Issuer        string   `json:"issuer,omitempty"`
 	Subject       string   `json:"subject,omitempty"`
 	Groups        []string `json:"groups,omitempty"`
+}
+
+type ExplainResponse struct {
+	Request    PolicySimulateRequest  `json:"request"`
+	Simulation PolicySimulateResponse `json:"simulation"`
 }
 
 // --- Group ---
