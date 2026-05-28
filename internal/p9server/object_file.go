@@ -32,6 +32,9 @@ type objectFile struct {
 }
 
 func (f *objectFile) isReadOnly() bool {
+	if f.binding.readOnly {
+		return true
+	}
 	if f.exportStore == nil {
 		return false
 	}

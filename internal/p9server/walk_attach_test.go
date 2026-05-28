@@ -16,6 +16,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/protocred"
 )
 
 // newTestBadger opens an in-memory BadgerDB and closes it on t.Cleanup.
@@ -103,6 +104,60 @@ func TestWalk_AnameMountSAHit_OK(t *testing.T) {
 	require.Equal(t, "default", bf.bucket)
 	require.Equal(t, "alice-mount", bf.binding.saID)
 	require.Equal(t, "default", bf.binding.bucket)
+}
+
+func TestWalk_AnameProtocolCredential_OK(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "default"))
+
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "sa-app", Protocol: protocred.Protocol9P, Resource: "bucket/default", Mode: protocred.ModeRW,
+	})
+	require.NoError(t, err)
+	root := &rootFile{
+		backend:             backend,
+		locks:               newObjectLocks(),
+		mountSAStore:        newStubMountSAStore(t),
+		protocolCredentials: protocred.NewAttachValidator(store),
+	}
+
+	qids, file, err := root.Walk([]string{secret.ID + ":" + secret.Secret + "@default"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	bf, ok := file.(*bucketFile)
+	require.True(t, ok)
+	require.Equal(t, "default", bf.bucket)
+	require.Equal(t, "sa-app", bf.binding.saID)
+	require.False(t, bf.binding.readOnly)
+}
+
+func TestWalk_AnameProtocolCredentialRO_BindsReadOnly(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "default"))
+
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "sa-app", Protocol: protocred.Protocol9P, Resource: "bucket/default", Mode: protocred.ModeRO,
+	})
+	require.NoError(t, err)
+	root := &rootFile{
+		backend:             backend,
+		locks:               newObjectLocks(),
+		mountSAStore:        newStubMountSAStore(t),
+		protocolCredentials: protocred.NewAttachValidator(store),
+	}
+
+	_, file, err := root.Walk([]string{secret.ID + ":" + secret.Secret + "@default"})
+	require.NoError(t, err)
+	bf, ok := file.(*bucketFile)
+	require.True(t, ok)
+	require.True(t, bf.binding.readOnly)
+	require.True(t, bf.isReadOnly())
 }
 
 // TestWalk_AnameMountSAMiss_ENOENT verifies that names[0]="typo@default" where

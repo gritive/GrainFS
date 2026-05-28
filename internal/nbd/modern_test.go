@@ -258,12 +258,13 @@ func setupStructuredNBD(t *testing.T) (net.Conn, *Server) {
 }
 
 func TestNBDProtocolCredentialAllowsVolumeSecretExport(t *testing.T) {
-	creds := protocred.NewService(protocred.NewStore())
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
 	secret, err := creds.Create(protocred.CreateRequest{
 		SAID: "node-a", Protocol: protocred.ProtocolNBD, Resource: "volume/nbd-test", Mode: protocred.ModeRW,
 	})
 	require.NoError(t, err)
-	conn, _ := setupRawNBDConnWithAuth(t, creds)
+	conn, _ := setupRawNBDConnWithAuth(t, protocred.NewAttachValidator(store))
 
 	completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
 	writeOptExportName(t, conn, "nbd-test@"+secret.Secret)
@@ -272,7 +273,8 @@ func TestNBDProtocolCredentialAllowsVolumeSecretExport(t *testing.T) {
 }
 
 func TestNBDProtocolCredentialRejectsMissingOrInvalidSecret(t *testing.T) {
-	creds := protocred.NewService(protocred.NewStore())
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
 	secret, err := creds.Create(protocred.CreateRequest{
 		SAID: "node-a", Protocol: protocred.ProtocolNBD, Resource: "volume/nbd-test", Mode: protocred.ModeRW,
 	})
@@ -280,7 +282,7 @@ func TestNBDProtocolCredentialRejectsMissingOrInvalidSecret(t *testing.T) {
 	require.NoError(t, creds.Revoke(secret.ID))
 
 	for _, name := range []string{"nbd-test", "nbd-test@wrong", "other@" + secret.Secret, "nbd-test@" + secret.Secret} {
-		conn, _ := setupRawNBDConnWithAuth(t, creds)
+		conn, _ := setupRawNBDConnWithAuth(t, protocred.NewAttachValidator(store))
 		completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
 		writeOptExportName(t, conn, name)
 		_, err := readOptionReplyHeader(conn)
@@ -290,13 +292,29 @@ func TestNBDProtocolCredentialRejectsMissingOrInvalidSecret(t *testing.T) {
 }
 
 func TestNBDProtocolCredentialRejectsInfoBeforeAttach(t *testing.T) {
-	creds := protocred.NewService(protocred.NewStore())
-	conn, _ := setupRawNBDConnWithAuth(t, creds)
+	conn, _ := setupRawNBDConnWithAuth(t, protocred.NewAttachValidator(protocred.NewStore()))
 
 	completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
 	writeOptInfo(t, conn, "nbd-test", []uint16{nbdInfoExport})
 	reply := readOptionReply(t, conn)
 	require.Equal(t, nbdRepErrUnknown, reply.typ)
+}
+
+func TestNBDProtocolCredentialRejectsStaleCredential(t *testing.T) {
+	store := protocred.NewStore()
+	creds := protocred.NewService(store)
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "node-a", Protocol: protocred.ProtocolNBD, Resource: "volume/nbd-test", Mode: protocred.ModeRW,
+	})
+	require.NoError(t, err)
+	_, err = store.ApplyMarkStale(secret.ID, time.Now().UTC(), "policy_detached")
+	require.NoError(t, err)
+
+	conn, _ := setupRawNBDConnWithAuth(t, protocred.NewAttachValidator(store))
+	completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
+	writeOptExportName(t, conn, "nbd-test@"+secret.Secret)
+	_, err = readOptionReplyHeader(conn)
+	require.Error(t, err, "stale NBD credential should close the connection in strict mode")
 }
 
 func setupBlockStatusNBD(t *testing.T) (net.Conn, *Server) {

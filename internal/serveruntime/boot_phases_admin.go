@@ -65,7 +65,8 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			}
 			state.protocolCredentials = cluster.NewProtocolCredentialService(state.protocolCredentialStore, state.metaRaft.Propose)
 		} else {
-			state.protocolCredentials = protocred.NewService(protocred.NewStore())
+			state.protocolCredentialStore = protocred.NewStore()
+			state.protocolCredentials = protocred.NewService(state.protocolCredentialStore)
 		}
 	}
 	state.adminDeps = &admin.Deps{

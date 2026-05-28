@@ -26,7 +26,7 @@ type ReadIndexer interface {
 }
 
 type CredentialAuthenticator interface {
-	Authenticate(protocred.AuthenticateRequest) (protocred.Credential, error)
+	ValidateAttach(context.Context, protocred.AttachRequest) (protocred.AttachDecision, error)
 }
 
 const (

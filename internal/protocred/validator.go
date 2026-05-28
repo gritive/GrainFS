@@ -118,11 +118,19 @@ func (v *AttachValidator) ValidateAttach(ctx context.Context, req AttachRequest)
 	}
 
 	now := v.now()
+	secretHash := sha256.Sum256([]byte(req.PresentedSecret))
+	if req.CredentialID == "" {
+		id, err := v.credentialIDForSecret(req, secretHash)
+		if err != nil {
+			return AttachDecision{Allowed: false, Reason: attachReasonForLookupErr(err)}, err
+		}
+		req.CredentialID = id
+	}
 	key := attachCacheKey{
 		protocol: req.Protocol,
 		resource: req.Resource,
 		id:       req.CredentialID,
-		secret:   sha256.Sum256([]byte(req.PresentedSecret)),
+		secret:   secretHash,
 		mode:     req.RequestedMode,
 		strict:   req.Strict,
 	}
@@ -133,6 +141,31 @@ func (v *AttachValidator) ValidateAttach(ctx context.Context, req AttachRequest)
 	decision, err := v.evaluate(req, key.secret, now)
 	v.storeDecision(key, decision, now)
 	return decision, err
+}
+
+func (v *AttachValidator) credentialIDForSecret(req AttachRequest, secretHash [sha256.Size]byte) (string, error) {
+	items := v.store.list(ListFilter{Protocol: req.Protocol})
+	for _, item := range items {
+		if subtle.ConstantTimeCompare(secretHash[:], item.SecretHash[:]) != 1 {
+			continue
+		}
+		if item.Resource != req.Resource || item.Mode != req.RequestedMode {
+			return "", ErrInvalid
+		}
+		return item.ID, nil
+	}
+	return "", ErrNotFound
+}
+
+func attachReasonForLookupErr(err error) string {
+	switch err {
+	case ErrInvalid:
+		return AttachReasonInvalid
+	case ErrNotFound:
+		return AttachReasonNotFound
+	default:
+		return AttachReasonInvalid
+	}
 }
 
 func (v *AttachValidator) cachedDecision(key attachCacheKey, now time.Time) (AttachDecision, bool) {
@@ -231,8 +264,7 @@ func (v *AttachValidator) storeDecision(key attachCacheKey, decision AttachDecis
 }
 
 func validAttachRequest(req AttachRequest) bool {
-	return req.CredentialID != "" &&
-		req.PresentedSecret != "" &&
+	return req.PresentedSecret != "" &&
 		validProtocol(req.Protocol) &&
 		validMode(req.RequestedMode) &&
 		validResource(req.Resource)

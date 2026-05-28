@@ -1,6 +1,7 @@
 package nbd
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -48,11 +49,12 @@ func (s *Server) authorizeExportName(name string) error {
 	if volumeName != s.volName {
 		return fmt.Errorf("unknown export: %q", volumeName)
 	}
-	_, err := s.credentials.Authenticate(protocred.AuthenticateRequest{
-		Protocol: protocred.ProtocolNBD,
-		Resource: "volume/" + volumeName,
-		Mode:     protocred.ModeRW,
-		Secret:   secret,
+	_, err := s.credentials.ValidateAttach(context.Background(), protocred.AttachRequest{
+		Protocol:        protocred.ProtocolNBD,
+		Resource:        "volume/" + volumeName,
+		PresentedSecret: secret,
+		RequestedMode:   protocred.ModeRW,
+		Strict:          true,
 	})
 	if err != nil {
 		return fmt.Errorf("invalid nbd protocol credential: %w", err)

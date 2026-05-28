@@ -31,6 +31,20 @@ func TestAttachValidatorAllowsMatchingCredential(t *testing.T) {
 	require.Equal(t, secret.ID, decision.CredentialID)
 }
 
+func TestAttachValidatorAllowsSecretOnlyCredentialLookup(t *testing.T) {
+	now := time.Unix(350, 0).UTC()
+	store, secret := validatorStoreWithCredential(t, now, nil)
+	validator := NewAttachValidator(store, WithValidatorNow(func() time.Time { return now }))
+
+	req := attachReq(secret, secret.Secret)
+	req.CredentialID = ""
+	decision, err := validator.ValidateAttach(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.Equal(t, AttachReasonAllowed, decision.Reason)
+	require.Equal(t, secret.ID, decision.CredentialID)
+}
+
 func TestAttachValidatorRejectsRevokedExpiredWrongSecretAndSADisabled(t *testing.T) {
 	now := time.Unix(400, 0).UTC()
 	expiredAt := now.Add(-time.Second)

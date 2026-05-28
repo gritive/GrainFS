@@ -175,9 +175,9 @@ func connectionHint(item Credential, secret string) map[string]string {
 	case ProtocolNBD:
 		return map[string]string{"export_name": name + "@" + secret}
 	case ProtocolNFS:
-		return map[string]string{"mount_path": name + "/" + item.ID}
+		return map[string]string{"mount_path": name + "/" + item.ID + ":" + secret}
 	case Protocol9P:
-		return map[string]string{"aname": item.ID + "@" + name}
+		return map[string]string{"aname": item.ID + ":" + secret + "@" + name}
 	case ProtocolS3:
 		return map[string]string{"access_key_id": item.ID}
 	case ProtocolIceberg:

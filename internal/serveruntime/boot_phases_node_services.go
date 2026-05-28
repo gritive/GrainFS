@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -205,11 +206,14 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 			}
 		}
 	}
-	if state.protocolCredentials != nil {
+	var protocolCredentialValidator *protocred.AttachValidator
+	if state.protocolCredentialStore != nil {
+		protocolCredentialValidator = protocred.NewAttachValidator(state.protocolCredentialStore)
 		if iamCfg == nil {
 			iamCfg = &NodeServicesIAMConfig{}
 		}
-		iamCfg.NBDAuth = state.protocolCredentials
+		iamCfg.NBDAuth = protocolCredentialValidator
+		iamCfg.ProtocolCredentials = protocolCredentialValidator
 	}
 	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)

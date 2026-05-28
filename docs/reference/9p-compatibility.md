@@ -24,7 +24,7 @@ coverage. Unit-test-only coverage is not enough.
 | Client platform | macOS native 9P mount | Not supported |  |
 | Mount root | `aname=/` bucket listing | Supported | Root mount lists buckets as directories. |
 | Mount root | `aname=/bucket` direct bucket mount | Supported | Bucket mount exposes objects at the mount root. |
-| Security | Per-client 9P authentication | Not supported | The server is unauthenticated; restrict access with bind address, firewall, or private network. |
+| Security | Protocol credential attach | Partial | When protocol credentials are wired, `aname=<credential-id>:<secret>@<bucket>` requires a valid, unexpired, non-revoked 9P credential for the bucket. |
 
 ## File Operation Semantics
 
