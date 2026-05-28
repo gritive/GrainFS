@@ -31,6 +31,32 @@ func (f *MetaFSM) SetOnClusterKeyDropped(fn func()) {
 	f.onClusterKeyDropped = fn
 }
 
+// SetOnPresentFlip wires the side-effect callback fired on the first
+// false→true BeginPresentFlip Apply, and on Restore of a snapshot whose
+// present_flip_begun bit is true (PR-2a §8c). The callback instructs the
+// transport to PRESENT the per-node cert. Set before MetaRaft.Start().
+func (f *MetaFSM) SetOnPresentFlip(fn func()) {
+	f.mu.Lock()
+	f.onPresentFlip = fn
+	f.mu.Unlock()
+}
+
+// PresentFlipBegun reports whether the present-flip has been committed in the
+// raft log (i.e., BeginPresentFlip has been applied). Safe for concurrent use.
+func (f *MetaFSM) PresentFlipBegun() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.presentFlipBegun
+}
+
+// SetPresentFlipBegunForTest directly sets the presentFlipBegun field.
+// Test-only: used to seed the field before Snapshot() in round-trip tests.
+func (f *MetaFSM) SetPresentFlipBegunForTest(v bool) {
+	f.mu.Lock()
+	f.presentFlipBegun = v
+	f.mu.Unlock()
+}
+
 // firePeersChanged snapshots the callback under lock then invokes it with the
 // current accept-set OUTSIDE the lock (the callback mutates transport state).
 //

@@ -109,6 +109,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// zero-CA cutover drop bit (slot 14, H3): capture under the same RLock so the
 	// serialized bit is consistent with the rest of the snapshot.
 	droppedCopy := f.clusterKeyDropped
+	// zero-CA present-flip bit (slot 15, PR-2a §8c): capture alongside drop bit
+	// for consistency.
+	presentFlipBegunCopy := f.presentFlipBegun
 	// Task 4b: capture DEKKeeper wraps inside the same lock window as
 	// activeKEKVersion. LOCK ORDER: f.mu → keeper.mu (VersionsAndActive
 	// acquires keeper.mu). Releasing f.mu first and then calling
@@ -312,6 +315,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
 	clusterpb.MetaStateSnapshotAddPeers(b, peersVec)
 	clusterpb.MetaStateSnapshotAddClusterKeyDropped(b, droppedCopy)
+	clusterpb.MetaStateSnapshotAddPresentFlipBegun(b, presentFlipBegunCopy)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -772,6 +776,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.lastRotationRequests = newLastRotationRequests
 	f.kekStatuses = newKEKStatuses
 	f.clusterKeyDropped = droppedDecoded
+	f.presentFlipBegun = snap.PresentFlipBegun()
 	if hasDEKData {
 		f.pendingDEKVersions = newDEKVersions
 		f.pendingDEKActive = newDEKActive
@@ -924,6 +929,15 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.mu.RLock()
 		cb := f.onClusterKeyDropped
 		f.mu.RUnlock()
+		if cb != nil {
+			cb()
+		}
+	}
+	// PR-2a §8c step 5 (F2 spec-gate fix): fire outside f.mu when bit restored.
+	if snap.PresentFlipBegun() {
+		f.mu.Lock()
+		cb := f.onPresentFlip
+		f.mu.Unlock()
 		if cb != nil {
 			cb()
 		}
