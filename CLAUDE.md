@@ -105,3 +105,18 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 - This repository has no configured production URL for automatic canary checks.
 - `/land-and-deploy` may merge a PR after CI, but production verification is manual until a deploy target and health endpoint are added.
 - When a production URL exists, configure the URL and health endpoint before treating protocol credential strict mode as production-ready.
+
+## Deploy Configuration (configured by /setup-deploy)
+- Platform: none
+- Production URL: none
+- Deploy workflow: none
+- Deploy status command: none
+- Merge method: squash
+- Project type: CLI / single-binary server
+- Post-deploy health check: manual
+
+### Custom deploy hooks
+- Pre-merge: none
+- Deploy trigger: manual outside this repository
+- Deploy status: manual
+- Health check: manual
