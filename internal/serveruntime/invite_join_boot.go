@@ -17,9 +17,10 @@ package serveruntime
 //	  - DialJoin(SeedAddr, SeedSPKI, nodeCert) and send JoinRequest{JoinPhase:1},
 //	  - OpenFromPeer the SealedBootstrap with the bindCtx W7 used
 //	    (clusterID‖inviteID‖nodeID‖leaderID), stage every secret on disk
-//	    (encryption.key, keys/<gen>.key, cluster.id), SealNodeKey under the
-//	    cluster's ACTIVE (highest delivered) KEK gen to keys.d/node.key.enc,
-//	    shred node.key.unsealed,
+//	    (encryption.key, keys/<gen>.key, cluster.id), SealNodeKey to
+//	    keys.d/node.key.enc (pre-drop: active KEK gen; post-drop: static
+//	    encryption.key so the cert can be loaded before QUIC Listen), shred
+//	    node.key.unsealed,
 //	  - set opts.ClusterKey in memory (transport PSK) so bootValidateConfig
 //	    passes, and persist a .invite-join-pending sentinel so a crash before
 //	    Phase-2 resumes the ACK.
@@ -100,8 +101,9 @@ type inviteJoinState struct {
 	// accept-set before Listen so the joiner can accept incumbents' per-node
 	// certs from the first inbound handshake (M3/M4).
 	peerSPKIs [][32]byte
-	// clusterKeyDropped mirrors the same field from the sealed bootstrap
-	// (PR-2a §8f M2). Always false in PR-2a (cluster key is not yet dropped).
+	// clusterKeyDropped mirrors the same field from the sealed bootstrap.
+	// Post-drop invite joiners use it to avoid reviving the shared transport PSK
+	// and to seal node.key.enc under the static encryption key.
 	clusterKeyDropped bool
 }
 
@@ -494,26 +496,29 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 		return err
 	}
 
-	// 8. SealNodeKey under the cluster's ACTIVE KEK generation — the highest gen
-	// actually present in the delivered bootstrap. Hardcoding gen-0 bricks join
-	// against a cluster that rotated then pruned gen-0 (BootstrapSecrets only
-	// ships currently-retained gens). Persist the chosen gen so Phase-2 reloads
-	// node.key.enc under the SAME KEK.
-	sealGen, sealKEK, ok := highestKEKGen(kekGens)
-	if !ok {
-		return fmt.Errorf("bootstrap secrets contain no KEK generations")
+	// 8. SealNodeKey where the next boot phase can open it. Pre-drop joins use
+	// the cluster's ACTIVE KEK generation because Phase-2 runs after wireDEKKeeper
+	// installs KEKs. Post-drop joins must present the per-node cert BEFORE QUIC
+	// Listen, so bootQUICTransport opens node.key.enc earlier; seal directly under
+	// the static encryption.key in that case.
+	sealGen, sealKEK, err := inviteNodeKeySealKey(encKey, kekGens, clusterKeyDropped)
+	if err != nil {
+		return err
 	}
 	st.nodeKeyKEKGen = sealGen
 	// Re-persist the sentinel with the chosen gen BEFORE sealing (the step-2 write
-	// predates staging and carries gen 0). Ordering matters for crash safety
-	// (artifactsComplete requires node.key.enc present + node.key.unsealed absent +
-	// keys.d/current.key present):
+	// predates staging and carries gen 0). For post-drop joins gen 0 is the
+	// encKey-first marker, not a KEK generation. Ordering matters for crash
+	// safety (durable artifacts are encryption.key, cluster.id, retained KEKs,
+	// node.key.enc, and keys.d/current.key; a leftover unsealed key is shredded on
+	// resume):
 	//   - crash after this write, before SealNodeKey → no node.key.enc →
 	//     !artifactsComplete → FreshJoin re-runs Phase-1 (reusing the unsealed key);
 	//   - crash after SealNodeKey, before PSK write → unsealed still present →
 	//     !artifactsComplete → FreshJoin re-seals (atomic temp+rename overwrites);
 	//   - crash after PSK write, before shred → unsealed still present →
-	//     !artifactsComplete → FreshJoin re-runs (PSK write is idempotent overwrite);
+	//     artifactsComplete → Resume shreds the leftover unsealed key and runs
+	//     Phase-2;
 	//   - crash after shred → artifactsComplete (PSK already durable), sentinel
 	//     carries the correct gen → Resume → Phase-2 LoadNodeKey under the SAME gen.
 	if err := writeInvitePendingSentinel(dataDir, paths.pendingSentinel, st); err != nil {
@@ -545,7 +550,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 func stageInviteJoinTransportKey(dataDir string, opts *ServeOptions, psk []byte, clusterKeyDropped bool) error {
 	transportKey := string(psk)
-	if transportKey == "" && clusterKeyDropped {
+	if clusterKeyDropped {
 		generated, err := GenerateEphemeralClusterKey()
 		if err != nil {
 			return fmt.Errorf("post-drop invite-join: generate local transport placeholder: %w", err)
@@ -559,6 +564,20 @@ func stageInviteJoinTransportKey(dataDir string, opts *ServeOptions, psk []byte,
 		}
 	}
 	return nil
+}
+
+func inviteNodeKeySealKey(encKey []byte, kekGens []cluster.KEKGen, clusterKeyDropped bool) (uint32, []byte, error) {
+	if clusterKeyDropped {
+		if len(encKey) != 32 {
+			return 0, nil, fmt.Errorf("post-drop invite-join: encryption key must be 32 bytes, got %d", len(encKey))
+		}
+		return 0, encKey, nil
+	}
+	sealGen, sealKEK, ok := highestKEKGen(kekGens)
+	if !ok {
+		return 0, nil, fmt.Errorf("bootstrap secrets contain no KEK generations")
+	}
+	return sealGen, sealKEK, nil
 }
 
 // bootInviteJoinPhase2 finalizes membership AFTER the meta-raft transport + raft
