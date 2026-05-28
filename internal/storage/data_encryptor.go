@@ -76,3 +76,35 @@ func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADFi
 }
 
 var _ DataEncryptor = (*DEKKeeperAdapter)(nil)
+
+// TransientDataEncryptor wraps an encrypt.TransientReadOnlyDEK to satisfy
+// the DataEncryptor seam during MetaFSM.Restore. It is used to decrypt
+// DEK-sealed trailers (e.g. IAM credentials) BEFORE the live DEKKeeper is
+// wired by boot. Seal is unsupported — see encrypt.ErrTransientReadOnly:
+// sealing through this view would write ciphertext under a stale
+// generation map and silently break gen tracking.
+//
+// clusterID is bound into the AAD via encrypt.BuildAAD, matching
+// DEKKeeperAdapter so a transient adapter and a live adapter Open the same
+// ciphertext.
+type TransientDataEncryptor struct {
+	inner     *encrypt.TransientReadOnlyDEK
+	clusterID []byte
+}
+
+// NewTransientDataEncryptor wraps t. clusterID MUST be 16 bytes (BuildAAD
+// panics otherwise).
+func NewTransientDataEncryptor(t *encrypt.TransientReadOnlyDEK, clusterID []byte) *TransientDataEncryptor {
+	return &TransientDataEncryptor{inner: t, clusterID: clusterID}
+}
+
+func (a *TransientDataEncryptor) Seal(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte) ([]byte, uint32, error) {
+	return nil, 0, encrypt.ErrTransientReadOnly
+}
+
+func (a *TransientDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	aad := buildSeamAAD(a.clusterID, domain, fields)
+	return a.inner.OpenWithAAD(ct, gen, aad)
+}
+
+var _ DataEncryptor = (*TransientDataEncryptor)(nil)

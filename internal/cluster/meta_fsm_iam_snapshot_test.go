@@ -11,11 +11,13 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// newIAMTestEncryptor builds a deterministic 32-byte AES-256-GCM key
-// suitable for IAM snapshot round-trip tests.
-func newIAMTestEncryptor(t *testing.T) *encrypt.Encryptor {
+// newIAMRawEncryptor returns a *encrypt.Encryptor (legacy raw form) for FSM
+// state that still consumes one (alert webhook etc.). IAM-specific paths use
+// newIAMTestEncryptor (returns storage.DataEncryptor) after R2.
+func newIAMRawEncryptor(t *testing.T) *encrypt.Encryptor {
 	t.Helper()
 	key := bytes.Repeat([]byte{0xab}, 32)
 	enc, err := encrypt.NewEncryptor(key)
@@ -23,6 +25,35 @@ func newIAMTestEncryptor(t *testing.T) *encrypt.Encryptor {
 		t.Fatalf("NewEncryptor: %v", err)
 	}
 	return enc
+}
+
+// newIAMTestEncryptor returns a storage.DataEncryptor suitable for IAM
+// snapshot round-trip tests. Wraps a deterministic *encrypt.Encryptor in the
+// static EncryptorAdapter (gen always 0).
+func newIAMTestEncryptor(t *testing.T) storage.DataEncryptor {
+	t.Helper()
+	clusterID := bytes.Repeat([]byte{0xcd}, 16)
+	return storage.NewEncryptorAdapter(newIAMRawEncryptor(t), clusterID)
+}
+
+// wireTestKEKAndDEK wires both a KEKStore (K0 active) and a DEKKeeper (gen 0
+// active) into fsm, then returns a DataEncryptor backed by the DEKKeeper.
+// Use this for IAM-on-DEK tests so the snapshot embeds a DEK trailer that
+// Restore's two-pass decode can use (R2). The clusterID is the standard
+// byte(i+1) used by wireTestKEK so independent FSMs are interchangeable.
+func wireTestKEKAndDEK(t *testing.T, fsm *MetaFSM) storage.DataEncryptor {
+	t.Helper()
+	wireTestKEK(t, fsm) // installs KEKStore + clusterID
+	var clusterID [16]byte
+	for i := range clusterID {
+		clusterID[i] = byte(i + 1)
+	}
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xA0}, encrypt.KEKSize), clusterID[:])
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	fsm.SetDEKKeeper(keeper)
+	return storage.NewDEKKeeperAdapter(keeper, clusterID[:])
 }
 
 // buildSACreatePayloadForTest mirrors iam.buildSACreatePayload (unexported).
@@ -43,6 +74,10 @@ func buildSACreatePayloadForTest(saID, name string, ts time.Time) []byte {
 }
 
 func buildKeyCreatePayloadForTest(ak, saID string, encBytes []byte, ts time.Time) []byte {
+	return buildKeyCreatePayloadForTestWithGen(ak, saID, encBytes, 0, ts)
+}
+
+func buildKeyCreatePayloadForTestWithGen(ak, saID string, encBytes []byte, gen uint32, ts time.Time) []byte {
 	b := flatbuffers.NewBuilder(128)
 	akOff := b.CreateString(ak)
 	saOff := b.CreateString(saID)
@@ -52,6 +87,7 @@ func buildKeyCreatePayloadForTest(ak, saID string, encBytes []byte, ts time.Time
 	iampb.KeyCreatePayloadAddSecretKeyEnc(b, encOff)
 	iampb.KeyCreatePayloadAddSaId(b, saOff)
 	iampb.KeyCreatePayloadAddCreatedAtUnixNs(b, ts.UnixNano())
+	iampb.KeyCreatePayloadAddSecretKeyDekGen(b, gen)
 	b.Finish(iampb.KeyCreatePayloadEnd(b))
 	return b.FinishedBytes()
 }
@@ -65,35 +101,37 @@ func buildKeyCreatePayloadForTest(ak, saID string, encBytes []byte, ts time.Time
 // LogGCInterval) then truncated the IAM raft entries → restart restored a
 // permissive cluster despite operators having set up SAs/keys.
 func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
-	enc := newIAMTestEncryptor(t)
 	store := iam.NewStore()
-	applier := iam.NewApplier(store, enc)
+	applier := iam.NewApplier(store, nil)
+
+	f := NewMetaFSM()
+	enc := wireTestKEKAndDEK(t, f)
+	applier.SetEncryptor(enc)
+	f.SetIAM(store, applier)
 
 	// Seed IAM via the apply path (mirrors raft commit).
 	now := time.Unix(1700000000, 0).UTC()
 	if err := applier.ApplySACreate(buildSACreatePayloadForTest("sa-test", "test", now)); err != nil {
 		t.Fatalf("ApplySACreate: %v", err)
 	}
-	wrapped, err := iam.WrapSecret(enc, "sa-test", "the-secret-xyz")
+	wrapped, gen, err := iam.WrapSecret(enc, "sa-test", "AKTEST123", "the-secret-xyz")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
-	if err := applier.ApplyKeyCreate(buildKeyCreatePayloadForTest("AKTEST123", "sa-test", wrapped, now)); err != nil {
+	if err := applier.ApplyKeyCreate(buildKeyCreatePayloadForTestWithGen("AKTEST123", "sa-test", wrapped, gen, now)); err != nil {
 		t.Fatalf("ApplyKeyCreate: %v", err)
 	}
-
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	f.SetIAM(store, applier)
 
 	snap, err := f.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	// Restore into a fresh FSM with a fresh Store but the same encryptor.
+	// Restore into a fresh FSM with a fresh Store; applier on the destination
+	// has NO encryptor yet (mimics boot order: keeper rebuilt during
+	// Restore via the transient adapter, then SetEncryptor wires the live one).
 	store2 := iam.NewStore()
-	applier2 := iam.NewApplier(store2, enc)
+	applier2 := iam.NewApplier(store2, nil)
 	f2 := NewMetaFSM()
 	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)
@@ -117,10 +155,10 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 // taken from an FSM whose iamStore is empty still round-trips cleanly,
 // and does not flip auth_enabled or invent any SAs on restore.
 func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
-	enc := newIAMTestEncryptor(t)
 	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	f.SetIAM(iam.NewStore(), iam.NewApplier(iam.NewStore(), enc))
+	enc := wireTestKEKAndDEK(t, f)
+	applier := iam.NewApplier(iam.NewStore(), enc)
+	f.SetIAM(iam.NewStore(), applier)
 
 	snap, err := f.Snapshot()
 	if err != nil {
@@ -128,7 +166,7 @@ func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 	}
 
 	store2 := iam.NewStore()
-	applier2 := iam.NewApplier(store2, enc)
+	applier2 := iam.NewApplier(store2, nil)
 	f2 := NewMetaFSM()
 	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)
@@ -148,24 +186,26 @@ func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 // (regression guard: the old Reset+ReadSnapshot path was functionally
 // equivalent but could error post-commit; RestoreFrom is error-free).
 func TestMetaFSM_Restore_IAM_AtomicCommit(t *testing.T) {
-	enc := newIAMTestEncryptor(t)
 	store := iam.NewStore()
-	applier := iam.NewApplier(store, enc)
+	applier := iam.NewApplier(store, nil)
+
+	f := NewMetaFSM()
+	enc := wireTestKEKAndDEK(t, f)
+	applier.SetEncryptor(enc)
+	f.SetIAM(store, applier)
+
 	now := time.Unix(1700000001, 0).UTC()
 	if err := applier.ApplySACreate(buildSACreatePayloadForTest("sa-atomic", "atomic-test", now)); err != nil {
 		t.Fatalf("ApplySACreate: %v", err)
 	}
-	wrapped, err := iam.WrapSecret(enc, "sa-atomic", "super-secret")
+	wrapped, gen, err := iam.WrapSecret(enc, "sa-atomic", "AKATOMIC1", "super-secret")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
 	}
-	if err := applier.ApplyKeyCreate(buildKeyCreatePayloadForTest("AKATOMIC1", "sa-atomic", wrapped, now)); err != nil {
+	if err := applier.ApplyKeyCreate(buildKeyCreatePayloadForTestWithGen("AKATOMIC1", "sa-atomic", wrapped, gen, now)); err != nil {
 		t.Fatalf("ApplyKeyCreate: %v", err)
 	}
 
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	f.SetIAM(store, applier)
 	snap, err := f.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -174,7 +214,7 @@ func TestMetaFSM_Restore_IAM_AtomicCommit(t *testing.T) {
 	// Restore into a fresh FSM. RestoreFrom must commit iamTempStore in one
 	// atomic pointer swap — no second parse, no error path.
 	store2 := iam.NewStore()
-	applier2 := iam.NewApplier(store2, enc)
+	applier2 := iam.NewApplier(store2, nil)
 	f2 := NewMetaFSM()
 	wireTestKEK(t, f2)
 	f2.SetIAM(store2, applier2)

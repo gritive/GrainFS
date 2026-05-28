@@ -137,7 +137,7 @@ func TestMetaFSM_Apply_ClusterConfigPatch_EmitsAuditLog(t *testing.T) {
 // of the raw bytes.
 func TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret(t *testing.T) {
 	f := NewMetaFSM()
-	f.SetEncryptor(newIAMTestEncryptor(t)) // gate for AlertWebhookSecretWrapped
+	f.SetEncryptor(newIAMRawEncryptor(t)) // gate for AlertWebhookSecretWrapped
 
 	var buf bytes.Buffer
 	prev := log.Logger
@@ -158,7 +158,7 @@ func TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret(t *testing.T) {
 func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
 	src := NewMetaFSM()
 	wireTestKEK(t, src)
-	src.SetEncryptor(newIAMTestEncryptor(t)) // gate for AlertWebhookSecretWrapped
+	src.SetEncryptor(newIAMRawEncryptor(t)) // gate for AlertWebhookSecretWrapped
 	require.NoError(t, src.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
 		BalancerImbalanceTriggerPct: ptrFloat(33.0),
 		AlertWebhook:                ptrString("https://hooks.example/sr"),
