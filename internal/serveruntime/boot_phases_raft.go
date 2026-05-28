@@ -311,11 +311,13 @@ func buildOnPresentFlipCallbackWithRegistrar(st *bootState, tr presentFlipTarget
 		if reg == nil {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := reg.ProposeRegisterMember(ctx, st.nodeID, st.perNodeSPKI, st.raftAddr, true); err != nil {
-			log.Warn().Err(err).Msg("onPresentFlip: presentsPerNode registration failed (non-fatal); D-cut4 gate may be delayed")
-		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := reg.ProposeRegisterMember(ctx, st.nodeID, st.perNodeSPKI, st.raftAddr, true); err != nil {
+				log.Warn().Err(err).Msg("onPresentFlip: presentsPerNode registration failed (non-fatal); D-cut4 gate may be delayed")
+			}
+		}()
 	}
 }
 
@@ -361,7 +363,6 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		// rotation window (spec §6 D-rev3 step 3).
 		state.quicTransport.UpdateRegistryAccept(accept)
 	})
-	state.metaRaft.FSM().SetRaftConfigReader(cluster.NewMetaRaftConfigReader(state.metaRaft))
 	// Persisted drop bit (spec §8 H3): if a restored snapshot says the cluster
 	// key was dropped (a PR-2 feature; ALWAYS false in PR-1), drop the
 	// cluster-key base on this node too. Dormant in PR-1 — no snapshot carries true.

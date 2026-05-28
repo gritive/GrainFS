@@ -193,6 +193,26 @@ func TestHandleJoin_Phase1_Valid_SealsBootstrapNoMembership(t *testing.T) {
 	require.False(t, fsmHasNode(fx.leader, "node-b"), "Phase-1 must not stage membership")
 }
 
+func TestHandleJoin_Phase1_PostDropOmitsTransportPSK(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	fx.leader.fsm.clusterKeyDropped = true
+
+	req := fx.req
+	req.JoinPhase = 1
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+
+	require.True(t, reply.Accepted)
+	eph, ct, err := decodeSealedBootstrap(reply.SealedBootstrap)
+	require.NoError(t, err)
+	bind := fx.receiver.sealBindContext(req)
+	plain, err := encrypt.OpenFromPeer(fx.joinerKey, encrypt.SealedToPeer{EphemeralPub: eph, Ciphertext: ct}, bind, bind)
+	require.NoError(t, err)
+	_, _, psk, _, dropped, err := DecodeBootstrapSecretsPayloadWithCutover(plain)
+	require.NoError(t, err)
+	require.True(t, dropped)
+	require.Empty(t, psk, "post-drop bootstrap must not send the revoked cluster transport PSK")
+}
+
 func TestHandleJoin_Phase1_CapturedSPKIMismatch_Rejected(t *testing.T) {
 	fx := newSingleNodeInviteFixture(t)
 	req := fx.req

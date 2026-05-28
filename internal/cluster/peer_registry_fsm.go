@@ -45,14 +45,6 @@ func (f *MetaFSM) SetOnPresentFlip(fn func()) {
 	f.mu.Unlock()
 }
 
-// SetRaftConfigReader wires the voter-reader used by DropClusterKeyAccept
-// Apply for the H2 strict config-stamp check (PR-2b). nil disables the check.
-func (f *MetaFSM) SetRaftConfigReader(rdr RaftConfigReader) {
-	f.mu.Lock()
-	f.raftConfigReader = rdr
-	f.mu.Unlock()
-}
-
 // PresentFlipBegun reports whether the present-flip has been committed in the
 // raft log (i.e., BeginPresentFlip has been applied). Safe for concurrent use.
 func (f *MetaFSM) PresentFlipBegun() bool {

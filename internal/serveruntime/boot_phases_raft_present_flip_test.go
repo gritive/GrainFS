@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -78,14 +79,14 @@ func TestBuildOnPresentFlipCallback_ProposesPresentsPerNode(t *testing.T) {
 			flipCalled.Store(true)
 		},
 	}
-	reg := &recordingPresentRegistrar{}
+	reg := newRecordingPresentRegistrar(nil)
 
 	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, reg)
 	require.NotNil(t, cb)
 	cb()
 
 	require.True(t, flipCalled.Load(), "FlipPresent must be called")
-	require.True(t, reg.called.Load(), "ProposeRegisterMember must be called")
+	reg.wait(t)
 	require.Equal(t, "node-A", reg.nodeID)
 	require.Equal(t, spki, reg.spki)
 	require.Equal(t, "127.0.0.1:4001", reg.addr)
@@ -100,12 +101,12 @@ func TestBuildOnPresentFlipCallback_RegistrarErrorNonFatal(t *testing.T) {
 		perNodeSPKI: [32]byte{0xAB},
 	}
 	tr := &fakeFlipTransport{}
-	reg := &recordingPresentRegistrar{err: fmt.Errorf("leader unavailable")}
+	reg := newRecordingPresentRegistrar(fmt.Errorf("leader unavailable"))
 
 	cb := buildOnPresentFlipCallbackWithRegistrar(st, tr, reg)
 	require.NotNil(t, cb)
 	require.NotPanics(t, cb)
-	require.True(t, reg.called.Load(), "non-fatal errors should still prove the propose was attempted")
+	reg.wait(t)
 }
 
 func TestOnClusterKeyDropped_CallsSetDroppedAndRecycle(t *testing.T) {
@@ -160,11 +161,25 @@ func (f *fakeFlipTransport) RecycleConns() {
 
 type recordingPresentRegistrar struct {
 	called          atomic.Bool
+	done            chan struct{}
 	nodeID          string
 	spki            [32]byte
 	addr            string
 	presentsPerNode bool
 	err             error
+}
+
+func newRecordingPresentRegistrar(err error) *recordingPresentRegistrar {
+	return &recordingPresentRegistrar{done: make(chan struct{}), err: err}
+}
+
+func (r *recordingPresentRegistrar) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ProposeRegisterMember")
+	}
 }
 
 func (r *recordingPresentRegistrar) ProposeRegisterMember(_ context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error {
@@ -173,6 +188,7 @@ func (r *recordingPresentRegistrar) ProposeRegisterMember(_ context.Context, nod
 	r.spki = spki
 	r.addr = addr
 	r.presentsPerNode = presentsPerNode
+	close(r.done)
 	return r.err
 }
 

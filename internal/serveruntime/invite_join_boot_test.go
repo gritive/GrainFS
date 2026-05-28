@@ -561,3 +561,44 @@ func TestLoadAndMigrateInviteNodeKey_EncKeyFirst_SkipsKEKResolver(t *testing.T) 
 		t.Fatal("returned cert has nil private key")
 	}
 }
+
+func TestStageInviteJoinTransportKey_PreDropPersistsDeliveredPSK(t *testing.T) {
+	dir := t.TempDir()
+	opts := &ServeOptions{}
+
+	if err := stageInviteJoinTransportKey(dir, opts, []byte("delivered-psk"), false); err != nil {
+		t.Fatalf("stageInviteJoinTransportKey: %v", err)
+	}
+	if opts.ClusterKey != "delivered-psk" {
+		t.Fatalf("ClusterKey = %q, want delivered PSK", opts.ClusterKey)
+	}
+	disk, err := transport.NewKeystore(dir).ReadCurrent()
+	if err != nil {
+		t.Fatalf("ReadCurrent: %v", err)
+	}
+	if disk != "delivered-psk" {
+		t.Fatalf("disk key = %q, want delivered PSK", disk)
+	}
+}
+
+func TestStageInviteJoinTransportKey_PostDropUsesLocalPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	opts := &ServeOptions{}
+
+	if err := stageInviteJoinTransportKey(dir, opts, nil, true); err != nil {
+		t.Fatalf("stageInviteJoinTransportKey: %v", err)
+	}
+	if opts.ClusterKey == "" {
+		t.Fatal("ClusterKey is empty, want local placeholder")
+	}
+	if opts.ClusterKey == "delivered-psk" {
+		t.Fatal("ClusterKey unexpectedly reused delivered PSK")
+	}
+	disk, err := transport.NewKeystore(dir).ReadCurrent()
+	if err != nil {
+		t.Fatalf("ReadCurrent: %v", err)
+	}
+	if disk != opts.ClusterKey {
+		t.Fatalf("disk key = %q, want ClusterKey %q", disk, opts.ClusterKey)
+	}
+}

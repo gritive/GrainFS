@@ -483,11 +483,15 @@ func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, s
 	if err != nil {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "bootstrap secrets: " + err.Error()}
 	}
+	clusterKeyDropped := r.meta.ClusterKeyDropped()
+	if clusterKeyDropped {
+		psk = nil
+	}
 	// Populate peer_spkis from the FSM registry so the joiner can pre-seed its
-	// accept-set before Listen (PR-2a §8f M1). clusterKeyDropped stays false
-	// in PR-2a — the cluster key is NOT yet dropped (safe-to-leave-merged
-	// invariant). Empty peerSPKIs is tolerated on the joiner side (M5).
-	payload := EncodeBootstrapSecretsPayloadWithCutover(encKey, kekGens, psk, r.meta.PeerSPKIs(), r.meta.ClusterKeyDropped())
+	// accept-set before Listen (PR-2a §8f M1). After PR-2b's drop, do not send
+	// the revoked cluster transport PSK to a new joiner; it must present its
+	// per-node cert from the first normal transport handshake.
+	payload := EncodeBootstrapSecretsPayloadWithCutover(encKey, kekGens, psk, r.meta.PeerSPKIs(), clusterKeyDropped)
 	bindCtx := r.sealBindContext(req)
 	blob, err := encrypt.SealToPeer(ecPub, payload, bindCtx, bindCtx)
 	if err != nil {
