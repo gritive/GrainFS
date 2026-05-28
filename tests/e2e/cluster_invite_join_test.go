@@ -163,6 +163,19 @@ func mintInvite(t testing.TB, leaderDataDir string) string {
 	return parseBundleToken(t, string(out))
 }
 
+func runCompleteCutover(t testing.TB, leaderDataDir string) {
+	t.Helper()
+	sock := filepath.Join(leaderDataDir, "admin.sock")
+	cmd := exec.Command(getBinary(), "cluster", "--endpoint", sock, "complete-cutover")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("complete-cutover must succeed in one call; err=%v out:\n%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "Zero-CA cutover complete") {
+		t.Fatalf("complete-cutover output missing success line:\n%s", string(out))
+	}
+}
+
 // parseBundleToken extracts the bundle token printed by RunInviteCreate: the
 // non-empty line following "Set this on the joining node as ...".
 func parseBundleToken(t testing.TB, output string) string {
@@ -268,6 +281,58 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return getObjectBytes(ctx, joinerCli, bucket, key)
 			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
 				"GetObject through the invite-joined node must return the PUT bytes")
+		})
+
+		ginkgo.It("runs complete-cutover and accepts a post-drop invite-join without a shared PSK", func() {
+			t := ginkgo.GinkgoTB()
+			encKeyFile := makeSharedEncryptionKeyFile(t)
+
+			leader := startInviteLeader(t, encKeyFile, inviteJoinClusterKey)
+			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
+			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
+
+			preDropBundle := mintInvite(t, leader.dataDir)
+			preDropDir := shortTempDir(t)
+			preDropJoiner := startInviteJoiner(t, "pre-drop-joiner", preDropDir, preDropBundle)
+			waitForVoter(t, leader.httpURL, "pre-drop-joiner", 90*time.Second)
+			waitForPort(t, preDropJoiner.httpPort, 60*time.Second)
+
+			runCompleteCutover(t, leader.dataDir)
+
+			postDropBundle := mintInvite(t, leader.dataDir)
+			postDropDir := shortTempDir(t)
+			postDropJoiner := startInviteJoiner(t, "post-drop-joiner", postDropDir, postDropBundle)
+			waitForVoter(t, leader.httpURL, "post-drop-joiner", 90*time.Second)
+			waitForPort(t, postDropJoiner.httpPort, 60*time.Second)
+
+			currentKey, err := os.ReadFile(filepath.Join(postDropDir, "keys.d", "current.key"))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "post-drop joiner must stage a local transport placeholder")
+			gomega.Expect(strings.TrimSpace(string(currentKey))).NotTo(gomega.Equal(inviteJoinClusterKey),
+				"post-drop invite-join must not stage the revoked shared transport PSK")
+			gomega.Expect(filepath.Join(postDropDir, "keys.d", "node.key.enc")).To(gomega.BeAnExistingFile())
+
+			bucket := "post-drop-invite-join"
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
+
+			postDropCli := s3ClientFor(postDropJoiner.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(postDropCli, 60*time.Second)).To(gomega.Succeed())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			body := []byte("post-drop invite-join payload")
+			key := "post-drop.txt"
+			gomega.Eventually(func() error {
+				return tryPutObject(ctx, postDropCli, bucket, key, body)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed(),
+				"PutObject through the post-drop invite-joined node must succeed")
+
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, postDropCli, bucket, key)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
+				"GetObject through the post-drop invite-joined node must return the PUT bytes")
 		})
 	})
 
