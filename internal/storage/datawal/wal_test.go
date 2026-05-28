@@ -28,6 +28,18 @@ func testAdapter(t *testing.T) datawal.RecordSealer {
 	return storage.NewEncryptorAdapter(enc, make([]byte, 16))
 }
 
+func testDEKKeeperAdapterAtGen(t *testing.T, gen uint32) datawal.RecordSealer {
+	t.Helper()
+	kek := bytes.Repeat([]byte{0x51}, encrypt.KEKSize)
+	clusterID := bytes.Repeat([]byte{0xC1}, 16)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	for range gen {
+		require.NoError(t, keeper.Rotate())
+	}
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
+}
+
 func TestRecordRoundTrip(t *testing.T) {
 	rec := datawal.Record{
 		Seq:       42,
@@ -106,6 +118,30 @@ func TestWALEncryptedRoundTrip(t *testing.T) {
 	wrongAdapter := storage.NewEncryptorAdapter(wrong, make([]byte, 16))
 	err = datawal.Replay(context.Background(), w.Dir(), 0, wrongAdapter, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
+}
+
+func TestEncryptedWALNewSegmentPinsActiveDEKGeneration(t *testing.T) {
+	sealer := testDEKKeeperAdapterAtGen(t, 1)
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, sealer, "datawal")
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k", Payload: []byte("plaintext")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	raw, err := os.ReadFile(filepath.Join(dir, "datawal-0000000001.bin"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(raw), 16)
+	require.Equal(t, byte(2), raw[8])
+	require.Equal(t, uint32(1), binary.BigEndian.Uint32(raw[12:16]))
+
+	var got []datawal.Record
+	require.NoError(t, datawal.Replay(context.Background(), dir, 0, sealer, "datawal", func(rec datawal.Record) error {
+		got = append(got, rec)
+		return nil
+	}))
+	require.Len(t, got, 1)
+	require.Equal(t, []byte("plaintext"), got[0].Payload)
 }
 
 func TestReplayStopsAtCleanEOFForTruncatedTail(t *testing.T) {

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.434.0] - 2026-05-29
+
+### Security
+
+- Persisted the actual active DEK generation in new encrypted data WAL segment
+  headers by probe-sealing before header creation.
+
+### Changed
+
+- Clarified the remaining live data WAL rotation boundary before
+  `encryption.rotate-dek` can be re-enabled.
+
+### Tests
+
+- Added coverage for opening a new encrypted data WAL after the active DEK
+  generation has advanced and replaying the resulting segment.
+
 ## [0.0.433.0] - 2026-05-29
 
 ### Security
