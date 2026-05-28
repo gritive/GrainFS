@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.401.0] - 2026-05-28
+
+### Security
+
+- IAM service account credentials (secret keys) are now sealed with a per-cluster DEK instead of the static bulk-cipher key. Each secret key ciphertext is bound to both the service account ID and the access key via AAD, preventing cross-key replay attacks. The DEK generation is threaded through raft payloads and snapshots so credentials survive cluster restart, key rotation, and snapshot restore without re-encryption. Requires at-rest format version 5; nodes running an older binary will refuse to open the new format.
+
 ## [0.0.400.0] - 2026-05-28
 
 ### Changed
