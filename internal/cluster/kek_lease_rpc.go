@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -92,8 +93,11 @@ func decodeKEKLeaseSnapshotReq(data []byte) (KEKLeaseSnapshotReq, error) {
 //	[observed_at_raft_commit_index uint64 BE]
 //	[snapshot_ref_count uint64 BE]
 //	[node_id_len uint16 BE][node_id bytes]
-func encodeKEKLeaseSnapshotResp(resp KEKLeaseSnapshotResp) []byte {
+func encodeKEKLeaseSnapshotResp(resp KEKLeaseSnapshotResp) ([]byte, error) {
 	idLen := len(resp.NodeID)
+	if idLen > math.MaxUint16 {
+		return nil, fmt.Errorf("kek_lease_snapshot_probe: node_id too long: %d > %d", idLen, math.MaxUint16)
+	}
 	out := make([]byte, 0, len(kekLeaseSnapshotRespMagic)+8+8+8+2+idLen)
 	out = append(out, kekLeaseSnapshotRespMagic...)
 	out = binary.BigEndian.AppendUint64(out, resp.LeaseCount)
@@ -101,7 +105,7 @@ func encodeKEKLeaseSnapshotResp(resp KEKLeaseSnapshotResp) []byte {
 	out = binary.BigEndian.AppendUint64(out, resp.SnapshotRefCount)
 	out = binary.BigEndian.AppendUint16(out, uint16(idLen))
 	out = append(out, resp.NodeID...)
-	return out
+	return out, nil
 }
 
 // decodeKEKLeaseSnapshotResp deserialises a wire payload produced by encodeKEKLeaseSnapshotResp.
@@ -124,6 +128,9 @@ func decodeKEKLeaseSnapshotResp(data []byte) (KEKLeaseSnapshotResp, error) {
 	rest = rest[2:]
 	if len(rest) < idLen {
 		return KEKLeaseSnapshotResp{}, fmt.Errorf("kek_lease_snapshot_probe: response truncated at node_id (need %d, have %d)", idLen, len(rest))
+	}
+	if len(rest) != idLen {
+		return KEKLeaseSnapshotResp{}, fmt.Errorf("kek_lease_snapshot_probe: response has trailing bytes after node_id (node_id_len %d, trailing %d)", idLen, len(rest)-idLen)
 	}
 	return KEKLeaseSnapshotResp{
 		LeaseCount:                leaseCount,
@@ -174,7 +181,12 @@ func (h *KEKLeaseSnapshotHandler) Handle(req *transport.Message) *transport.Mess
 		NodeID:                    h.nodeID,
 		SnapshotRefCount:          cnt,
 	}
-	return transport.NewResponse(req, encodeKEKLeaseSnapshotResp(resp))
+	payload, err := encodeKEKLeaseSnapshotResp(resp)
+	if err != nil {
+		return transport.NewErrorResponse(req, transport.StatusError,
+			fmt.Errorf("kek_lease_snapshot_probe: encode response: %w", err))
+	}
+	return transport.NewResponse(req, payload)
 }
 
 // GetKEKLeaseSnapshot sends a probe to a peer and returns its response.

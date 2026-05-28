@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -125,5 +126,31 @@ func TestKEKLeaseRPC_OldMagicRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "upgrade all nodes") {
 		t.Errorf("error message should mention upgrade: %v", err)
+	}
+}
+
+func TestKEKLeaseRPC_ResponseEncodeRejectsOversizedNodeID(t *testing.T) {
+	_, err := encodeKEKLeaseSnapshotResp(KEKLeaseSnapshotResp{
+		NodeID: strings.Repeat("n", int(math.MaxUint16)+1),
+	})
+	if err == nil {
+		t.Fatal("encodeKEKLeaseSnapshotResp accepted node_id longer than uint16")
+	}
+}
+
+func TestKEKLeaseRPC_ResponseDecodeRejectsTrailingBytes(t *testing.T) {
+	payload, err := encodeKEKLeaseSnapshotResp(KEKLeaseSnapshotResp{
+		LeaseCount:                1,
+		ObservedAtRaftCommitIndex: 2,
+		SnapshotRefCount:          3,
+		NodeID:                    "node-a",
+	})
+	if err != nil {
+		t.Fatalf("encodeKEKLeaseSnapshotResp: %v", err)
+	}
+	payload = append(payload, 0xff)
+	_, err = decodeKEKLeaseSnapshotResp(payload)
+	if err == nil {
+		t.Fatal("decodeKEKLeaseSnapshotResp accepted trailing bytes")
 	}
 }
