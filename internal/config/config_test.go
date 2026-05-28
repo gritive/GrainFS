@@ -142,6 +142,7 @@ func TestRegisterClusterKeys_AllPresent(t *testing.T) {
 
 	expected := []string{
 		"iam.allow-anonymous-bucket-policy",
+		"iam.oidc.issuers",
 		"trusted-proxy.cidr",
 		"jwt.signing-key-rotate",
 		"jwt.signing-key-prune",
@@ -154,6 +155,28 @@ func TestRegisterClusterKeys_AllPresent(t *testing.T) {
 	for _, k := range expected {
 		assert.True(t, keys[k], "expected key %q to be registered", k)
 	}
+}
+
+func TestOIDCIssuersConfigValidation(t *testing.T) {
+	s := config.NewStore()
+	config.RegisterClusterKeys(s, config.ReloadHooks{})
+	valid := `[{"name":"example","issuer_url":"https://idp.example.com/","audience":"grainfs","jwks_url":"https://idp.example.com/.well-known/jwks.json","groups_claim":"groups","group_prefix":"oidc:example:"}]`
+	require.NoError(t, s.Set(context.Background(), "iam.oidc.issuers", valid))
+
+	err := s.Set(context.Background(), "iam.oidc.issuers", `[{"name":"bad","issuer_url":"http://idp.example.com/"}]`)
+	require.Error(t, err)
+	require.ErrorIs(t, err, config.ErrInvalidValue)
+}
+
+func TestOIDCIssuersConfigRestoreDropsInvalidSnapshot(t *testing.T) {
+	s := config.NewStore()
+	config.RegisterClusterKeys(s, config.ReloadHooks{})
+
+	s.Restore(map[string]string{"iam.oidc.issuers": `[{"name":"bad","issuer_url":"http://idp.example.com/"}]`})
+
+	got, ok := s.GetString("iam.oidc.issuers")
+	require.True(t, ok)
+	require.Equal(t, "[]", got)
 }
 
 // TestRegisterClusterKeys_RotateDEKDeferred: encryption.rotate-dek stays

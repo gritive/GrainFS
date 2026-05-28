@@ -3,6 +3,8 @@ package config
 import (
 	"context"
 	"fmt"
+
+	iamoidc "github.com/gritive/GrainFS/internal/iam/oidc"
 )
 
 // ReloadHooks carries optional subsystem callbacks that fire when a cluster-wide
@@ -30,6 +32,15 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 				return nil
 			}
 			return h.OnAllowAnonBucketPolicy(ctx, v)
+		},
+	})
+
+	s.Register("iam.oidc.issuers", StringSpec{
+		Default: "[]",
+		Desc:    "OIDC issuer configuration JSON for federated IAM authentication",
+		Validate: func(raw string) error {
+			_, err := iamoidc.ParseIssuerConfigs([]byte(raw))
+			return err
 		},
 	})
 
