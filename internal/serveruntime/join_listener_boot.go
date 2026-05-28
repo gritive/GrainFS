@@ -40,10 +40,10 @@ func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) err
 		return err
 	}
 	addr := resolveJoinListenAddr(state.cfg.JoinListenAddr, state.raftAddr)
-	handler := func(handlerCtx context.Context, peerSPKI [32]byte, stream *quic.Stream) {
+	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
 		ctx, cancel := context.WithTimeout(handlerCtx, joinListenerHandlerTimeout)
 		defer cancel()
-		receiver.HandleJoinStream(ctx, peerSPKI, stream)
+		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)
 	}
 	ln, err := transport.NewJoinListener(addr, cert, handler)
 	if err != nil {
