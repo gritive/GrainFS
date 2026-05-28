@@ -80,6 +80,24 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
+- [ ] **External PDP adapter — deferred slices** (Slice 1 SHIPPED: local-unix-socket-only,
+  disabled-by-default, chain/deny-override, fail-closed default + opt-in fail-open,
+  admin + protocol-credential paths, Prometheus `grainfs_iam_pdp_*` + `iam.pdp` audit).
+  Remaining:
+    - Remote `https://` transport + bearer token (delivered via admin UDS + a
+      `grainfs iam pdp` CLI, DEK-sealed like other IAM secrets) + mTLS + active SSRF
+      egress filtering.
+    - Decision cache (positive/negative TTL) + grace mode.
+    - S3/Iceberg data-plane PDP enforcement (needs a `WithPolicyAuthorizer` interface
+      seam + latency/cache design).
+    - Full GrainFS-only audit on the protocol-credential control plane (pre-existing
+      gap; Slice 1 added only the PDP-outcome `iam.pdp` audit).
+    - Admin peercred/UDS path is intentionally NOT PDP-gated (local socket trust).
+    - Decorator client cache is keyed by socket path; a timeout-only hot-reload keeps
+      the old client timeout until the socket path changes (failure_policy IS read fresh).
+  Spec: `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`
+  "External PDP Adapter — Slice 5 Detailed Design".
+
 - [ ] **Zero-CA invite join protocol binding hardening**
     - Bind the signed invite transcript to the concrete TLS session with a TLS
       exporter value instead of leaving `InviteTranscript.Bind` empty.

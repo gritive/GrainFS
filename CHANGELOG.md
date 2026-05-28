@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add an optional External PDP (Policy Decision Point) adapter for IAM admin and
+  protocol-credential operations. Disabled by default. When enabled via the
+  `iam.pdp` config key, GrainFS consults a local PDP over a Unix socket and a
+  request is allowed only if both GrainFS IAM and the PDP allow it (deny-override).
+  Fail-closed by default; opt-in fail-open. Exposes `grainfs_iam_pdp_*` metrics.
+
 ## [0.0.437.0] - 2026-05-29
 
 ### Security
