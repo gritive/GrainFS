@@ -13,17 +13,27 @@ import (
 
 // PolicySimulateResult is returned by IAMPolicyService.Simulate.
 type PolicySimulateResult struct {
-	Effect        string `json:"effect"`
-	MatchedPolicy string `json:"matched_policy"`
-	MatchedSID    string `json:"matched_sid"`
-	Reason        string `json:"reason"`
+	Effect        string   `json:"effect"`
+	MatchedPolicy string   `json:"matched_policy"`
+	MatchedSID    string   `json:"matched_sid"`
+	Reason        string   `json:"reason"`
+	PrincipalKind string   `json:"principal_kind,omitempty"`
+	PrincipalID   string   `json:"principal_id,omitempty"`
+	Issuer        string   `json:"issuer,omitempty"`
+	Subject       string   `json:"subject,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
 }
 
 // PolicySimulateRequest is the wire body for POST /v1/iam/policy/simulate.
 type PolicySimulateRequest struct {
-	SAID     string `json:"sa_id"`
-	Action   string `json:"action"`
-	Resource string `json:"resource"`
+	SAID          string   `json:"sa_id"`
+	PrincipalKind string   `json:"principal_kind,omitempty"`
+	PrincipalID   string   `json:"principal_id,omitempty"`
+	Issuer        string   `json:"issuer,omitempty"`
+	Subject       string   `json:"subject,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+	Action        string   `json:"action"`
+	Resource      string   `json:"resource"`
 }
 
 // IAMPolicyService is the optional dependency that exposes policy CRUD via Raft.
@@ -36,7 +46,7 @@ type IAMPolicyService interface {
 	// PolicyList returns the names of all stored policies.
 	PolicyList(ctx context.Context) ([]string, error)
 	// Simulate evaluates a hypothetical request. Returns 501 if unimplemented.
-	Simulate(ctx context.Context, saID, action, resource string) (PolicySimulateResult, error)
+	Simulate(ctx context.Context, req PolicySimulateRequest) (PolicySimulateResult, error)
 }
 
 // PutPolicy stores or updates a custom policy document via Raft.
@@ -184,8 +194,23 @@ func SimulatePolicy(ctx context.Context, d *Deps, req PolicySimulateRequest) (Po
 	if d.IAMPolicy == nil {
 		return PolicySimulateResult{}, NewInternal("iam policy admin disabled")
 	}
-	if req.SAID == "" || req.Action == "" || req.Resource == "" {
-		return PolicySimulateResult{}, NewInvalid("sa_id, action, and resource are required")
+	if req.Action == "" || req.Resource == "" {
+		return PolicySimulateResult{}, NewInvalid("action and resource are required")
 	}
-	return d.IAMPolicy.Simulate(ctx, req.SAID, req.Action, req.Resource)
+	hasSA := req.SAID != ""
+	hasPrincipal := req.PrincipalKind != "" || req.PrincipalID != "" || req.Issuer != "" || req.Subject != "" || len(req.Groups) > 0
+	if hasSA && hasPrincipal {
+		return PolicySimulateResult{}, NewInvalid("exactly one of sa_id or principal fields is required")
+	}
+	if !hasSA {
+		if req.PrincipalKind == "" || req.PrincipalID == "" {
+			return PolicySimulateResult{}, NewInvalid("principal_kind and principal_id are required")
+		}
+		switch req.PrincipalKind {
+		case "sa", "mount_sa", "oidc", "protocol_credential":
+		default:
+			return PolicySimulateResult{}, NewInvalid("unsupported principal_kind")
+		}
+	}
+	return d.IAMPolicy.Simulate(ctx, req)
 }
