@@ -41,6 +41,21 @@ func TestParseConfig(t *testing.T) {
 		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","failure_policy":"maybe"}`))
 		require.Error(t, err)
 	})
+	t.Run("rejects relative unix socket path", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix://relative.sock"}`))
+		require.Error(t, err)
+	})
+	t.Run("rejects non-positive timeout", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","timeout":"0s"}`))
+		require.Error(t, err)
+		_, err = ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","timeout":"-1s"}`))
+		require.Error(t, err)
+	})
+	t.Run("empty bytes parses as disabled", func(t *testing.T) {
+		c, err := ParseConfig([]byte(""))
+		require.NoError(t, err)
+		require.False(t, c.Enabled)
+	})
 	t.Run("disabled with empty endpoint still parses (disabled = inert)", func(t *testing.T) {
 		c, err := ParseConfig([]byte(`{"enabled":false,"endpoint":""}`))
 		require.NoError(t, err)
