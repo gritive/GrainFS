@@ -1,4 +1,13 @@
-# ADR 0007: Topology-Derived Durability Policy
+# ADR 0016: Topology-Derived Durability Policy
+
+> **Renumbered 2026-05-28** from 0007 to resolve a duplicate numbering collision
+> with `0007-iam-foundation.md`. Both ADRs landed 2026-05-08; this one was technically
+> first (v0.0.94.0, PR #234) but accumulated zero external "ADR 0007" references,
+> while IAM Foundation (v0.0.98.0, PR #237) accumulated 6 external lines across
+> 3 ADRs — `0008-drop-access-key-flag.md` (4 lines including the `Supersedes`
+> declaration), `0011-bucket-lifecycle-policy-fsm-command.md` (Related line), and
+> `0014-storage-operations-capability-plan-cache.md` (line 105). The IAM ADR keeps
+> the number; this one moves to the next free slot.
 
 ## Status
 
