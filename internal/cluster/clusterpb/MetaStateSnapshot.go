@@ -332,8 +332,20 @@ func (rcv *MetaStateSnapshot) MutateClusterKeyDropped(n bool) bool {
 	return rcv._tab.MutateBoolSlot(32, n)
 }
 
+func (rcv *MetaStateSnapshot) PresentFlipBegun() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) MutatePresentFlipBegun(n bool) bool {
+	return rcv._tab.MutateBoolSlot(34, n)
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(15)
+	builder.StartObject(16)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -415,6 +427,9 @@ func MetaStateSnapshotStartPeersVector(builder *flatbuffers.Builder, numElems in
 }
 func MetaStateSnapshotAddClusterKeyDropped(builder *flatbuffers.Builder, clusterKeyDropped bool) {
 	builder.PrependBoolSlot(14, clusterKeyDropped, false)
+}
+func MetaStateSnapshotAddPresentFlipBegun(builder *flatbuffers.Builder, presentFlipBegun bool) {
+	builder.PrependBoolSlot(15, presentFlipBegun, false)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

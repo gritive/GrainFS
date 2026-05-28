@@ -122,6 +122,8 @@ const (
 	MetaCmdTypeProtocolCredentialRevoke    = clusterpb.MetaCmdTypeProtocolCredentialRevoke
 	MetaCmdTypeProtocolCredentialMarkStale = clusterpb.MetaCmdTypeProtocolCredentialMarkStale
 	MetaCmdTypeProtocolCredentialLastUsed  = clusterpb.MetaCmdTypeProtocolCredentialLastUsed
+	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip // zero-CA cutover: PR-2a §8c
+	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip   // zero-CA cutover: PR-2a §8c
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.

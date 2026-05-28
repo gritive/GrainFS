@@ -525,6 +525,8 @@ enum MetaCmdType : uint8 {
   ProtocolCredentialRevoke     = 82, // protocol credential: mark revoked
   ProtocolCredentialMarkStale  = 83, // protocol credential: mark stale for policy/resource drift
   ProtocolCredentialLastUsed   = 84, // protocol credential: update last-used timestamp
+  PreparePresentFlip           = 85, // zero-CA cutover: leader stamps voter set, records Prepare (PR-2a §8c)
+  BeginPresentFlip             = 86, // zero-CA cutover: all voters flip present cert to per-node identity (PR-2a §8c)
 }
 
 table MetaNodeEntry {
@@ -898,6 +900,7 @@ table MetaStateSnapshot {
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
   peers:[PeerEntry];                                        // zero-CA peer registry: slot 13 (Task 5, codex P1)
   cluster_key_dropped:bool = false;                        // zero-CA cutover: slot 14 (H3); PR-2 sets it, PR-1 always false
+  present_flip_begun:bool = false;                         // zero-CA cutover: slot 15 (PR-2a §8c); set by BeginPresentFlip(86) Apply
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's
@@ -1444,4 +1447,21 @@ table MetaKEKPruneCmd {
   request_id:[ubyte];
   requested_at_unix_nanos:int64;
   cluster_state_at_propose:ClusterStateAtPropose;
+}
+
+// ─── Zero-CA present-flip commands (PR-2a §8c) ───────────────────────────────
+
+// PreparePresentFlipCmd (cmd 85): leader records the voter set + raft config
+// index at prepare time.  Apply marks a transient FSM flag; the commit index
+// serves as the barrier target for the applied-index barrier (Task 1 / §8b).
+table PreparePresentFlipCmd {
+  stamped_voters:[string];
+  stamped_config_index:uint64;
+}
+
+// BeginPresentFlipCmd (cmd 86): all voters unconditionally flip present cert to
+// per-node identity and set MetaStateSnapshot.present_flip_begun = true.
+table BeginPresentFlipCmd {
+  stamped_voters:[string];
+  stamped_config_index:uint64;
 }
