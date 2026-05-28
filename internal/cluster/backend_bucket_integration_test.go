@@ -68,7 +68,9 @@ var _ = Describe("Backend bucket integration", func() {
 			if err != nil {
 				return err
 			}
-			Expect(encrypt.IsEncryptedValue(raw)).To(BeTrue())
+			_, _, ok, err := decodeFSMValueFrameV2(raw)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
 			Expect(string(raw)).NotTo(ContainSubstring("secret-policy-resource"))
 			return nil
 		})).To(Succeed())

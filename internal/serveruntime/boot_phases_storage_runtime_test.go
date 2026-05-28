@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 
 	"go.uber.org/goleak"
 )
@@ -68,6 +71,21 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootRotationAndAdminAPI(state))
 	require.NoError(t, bootMetaRaftStart(ctx, state, nil))
 	return ctx, state
+}
+
+func TestBootShardServiceDataWALPrefersDEKKeeper(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir()})
+	kek := bytes.Repeat([]byte{0x61}, encrypt.KEKSize)
+	clusterID := bytes.Repeat([]byte{0x62}, 16)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	state.dekKeeper = keeper
+	state.clusterID = clusterID
+	state.cfg.Encryptor = newTestEncryptor(t)
+
+	sealer, err := dataWALSealerForState(state)
+	require.NoError(t, err)
+	require.IsType(t, &storage.DEKKeeperAdapter{}, sealer)
 }
 
 func TestRuntimeTopologyNodesPrefersJoinedMetaNodes(t *testing.T) {

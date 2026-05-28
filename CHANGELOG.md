@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.405.0] - 2026-05-28
+## [0.0.406.0] - 2026-05-28
 
 ### Added
 
@@ -20,6 +20,14 @@
 
 - Tracked the next OIDC federated IAM slice for issuer configuration, JWKS
   validation, and normalized OIDC principal creation.
+
+## [0.0.405.0] - 2026-05-28
+
+### Security
+
+- Data-group FSM values and data WAL records now use the generation-aware
+  DEK/KEK at-rest envelope. The on-disk at-rest format marker is bumped to
+  `6`; older greenfield markers are rejected instead of being opened in place.
 
 ## [0.0.404.0] - 2026-05-28
 

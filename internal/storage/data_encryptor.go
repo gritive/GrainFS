@@ -33,7 +33,7 @@ type EncryptorAdapter struct {
 // NewEncryptorAdapter wraps enc so it satisfies DataEncryptor. clusterID is
 // bound into every AAD via encrypt.BuildAAD.
 func NewEncryptorAdapter(enc *encrypt.Encryptor, clusterID []byte) *EncryptorAdapter {
-	return &EncryptorAdapter{enc: enc, clusterID: clusterID}
+	return &EncryptorAdapter{enc: enc, clusterID: append([]byte(nil), clusterID...)}
 }
 
 func (a *EncryptorAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
@@ -62,7 +62,7 @@ type DEKKeeperAdapter struct {
 
 // NewDEKKeeperAdapter wraps keeper so it satisfies DataEncryptor.
 func NewDEKKeeperAdapter(keeper *encrypt.DEKKeeper, clusterID []byte) *DEKKeeperAdapter {
-	return &DEKKeeperAdapter{keeper: keeper, clusterID: clusterID}
+	return &DEKKeeperAdapter{keeper: keeper, clusterID: append([]byte(nil), clusterID...)}
 }
 
 func (a *DEKKeeperAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
@@ -95,7 +95,7 @@ type TransientDataEncryptor struct {
 // NewTransientDataEncryptor wraps t. clusterID MUST be 16 bytes (BuildAAD
 // panics otherwise).
 func NewTransientDataEncryptor(t *encrypt.TransientReadOnlyDEK, clusterID []byte) *TransientDataEncryptor {
-	return &TransientDataEncryptor{inner: t, clusterID: clusterID}
+	return &TransientDataEncryptor{inner: t, clusterID: append([]byte(nil), clusterID...)}
 }
 
 func (a *TransientDataEncryptor) Seal(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte) ([]byte, uint32, error) {

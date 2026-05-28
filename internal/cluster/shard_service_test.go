@@ -49,6 +49,19 @@ func TestShardService_LocalWriteAndRead(t *testing.T) {
 	assert.Equal(t, "hello shard", string(data))
 }
 
+func TestShardServiceDataWALRecoveryPrefersDEKKeeper(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x71}, encrypt.KEKSize)
+	clusterID := bytes.Repeat([]byte{0x72}, 16)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	enc := testEncryptor(t)
+	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(keeper, clusterID))
+
+	sealer, err := svc.dataWALRecoverySealer()
+	require.NoError(t, err)
+	require.IsType(t, &storage.DEKKeeperAdapter{}, sealer)
+}
+
 // TestShardService_Encryption verifies that shards written with an encryptor
 // are NOT stored as plaintext on disk, and can be decrypted on read.
 func TestShardService_Encryption(t *testing.T) {
