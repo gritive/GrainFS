@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.431.0] - 2026-05-29
+
+### Changed
+
+- Removed the completed Zero-CA revocation follow-up from `TODOS.md` so the
+  task file tracks only active or deferred work.
+
 ## [0.0.430.0] - 2026-05-29
 
 ### Security
