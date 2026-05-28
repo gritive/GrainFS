@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -117,6 +118,9 @@ func WaitVotersApplied(
 	}
 	for len(pending) > 0 {
 		for v := range pending {
+			if ctx.Err() != nil {
+				break
+			}
 			var la uint64
 			var err error
 			if v == selfID {
@@ -144,11 +148,11 @@ func WaitVotersApplied(
 		}
 		select {
 		case <-ctx.Done():
-			waiting := ""
+			var names []string
 			for v := range pending {
-				waiting += v + ","
+				names = append(names, v)
 			}
-			return fmt.Errorf("applied_index_probe: timeout waiting for voters [%s] to reach index %d: %w", waiting, target, ctx.Err())
+			return fmt.Errorf("applied_index_probe: timeout waiting for voters [%s] to reach index %d: %w", strings.Join(names, ","), target, ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}

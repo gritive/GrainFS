@@ -476,22 +476,15 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	}
 	// M2: switch decoder to DecodeBootstrapSecretsPayloadWithCutover so
 	// peer_spkis and clusterKeyDropped are extracted and staged (PR-2a §8f).
-	// Falls back gracefully when an old-encoder leader omits these fields (M5).
+	// Legacy payloads (old-encoder leader without cutover fields) decode cleanly:
+	// FlatBuffers returns empty SPKI set + false for absent fields (M5).
 	encKey, kekGens, psk, peerSPKIs, clusterKeyDropped, err := cluster.DecodeBootstrapSecretsPayloadWithCutover(plain)
 	if err != nil {
-		// The old (pre-PR-2a) encoding lacks the cutover trailer; tolerate it.
-		var encKey2 []byte
-		var kekGens2 []cluster.KEKGen
-		var psk2 []byte
-		encKey2, kekGens2, psk2, err = cluster.DecodeBootstrapSecretsPayload(plain)
-		if err != nil {
-			return fmt.Errorf("decode bootstrap secrets: %w", err)
-		}
-		encKey, kekGens, psk = encKey2, kekGens2, psk2
-		log.Warn().Msg("invite-join: peer_spkis absent (old leader encoder); joiner accept-set will use PSK base only")
-	} else if len(peerSPKIs) == 0 {
-		// Leader sent the new format but with no peers (rolling upgrade, M5).
-		log.Warn().Msg("invite-join: peer_spkis empty in bootstrap; joiner accept-set will use PSK base only")
+		return fmt.Errorf("decode bootstrap secrets: %w", err)
+	}
+	if len(peerSPKIs) == 0 {
+		// Old-encoder leader or rolling-upgrade scenario (M5): peer_spkis absent.
+		log.Warn().Msg("invite-join: peer_spkis empty in bootstrap; joiner accept-set will use PSK base only (rolling-upgrade compat)")
 	}
 	st.peerSPKIs = peerSPKIs
 	st.clusterKeyDropped = clusterKeyDropped

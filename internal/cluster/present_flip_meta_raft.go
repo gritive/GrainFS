@@ -82,10 +82,13 @@ func encodePresentFlipStampCmd(stamp PresentFlipStamp) ([]byte, error) {
 	return b.FinishedBytes(), nil
 }
 
-// decodePresentFlipStampCmd reverses encodePresentFlipStampCmd. Used by the
-// FSM Apply for both cmd 85 and cmd 86.
+// decodePresentFlipStampCmd reverses encodePresentFlipStampCmd. The FSM Apply
+// branches for PreparePresentFlip and BeginPresentFlip are UNCONDITIONAL per
+// spec §8c (stamp is not verified on Apply). This function is used in tests and
+// reserved for a future audit path; golangci-lint runs with tests:false so the
+// nolint annotation is required.
 //
-//nolint:unused // FSM Apply wiring lands in Task 3; referenced by present_flip_meta_raft_test.go.
+//nolint:unused // referenced only by tests (golangci-lint tests:false); reserved for future audit path.
 func decodePresentFlipStampCmd(payload []byte) (PresentFlipStamp, error) {
 	t := clusterpb.GetRootAsPreparePresentFlipCmd(payload, 0)
 	out := PresentFlipStamp{ConfigIndex: t.StampedConfigIndex()}
