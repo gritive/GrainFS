@@ -51,9 +51,11 @@ const JoinALPN = "grainfs-join-v1"
 const joinMaxFrame = 1 << 20
 
 // JoinHandler is invoked once per accepted join connection with the peer's
-// captured SPKI (sha256 of the presented leaf cert's RawSubjectPublicKeyInfo)
-// and the connection's first accepted stream. The handler owns the stream.
-type JoinHandler func(ctx context.Context, peerSPKI [32]byte, stream *quic.Stream)
+// captured SPKI (sha256 of the presented leaf cert's RawSubjectPublicKeyInfo),
+// the RFC 5705 channel-binding value derived from this connection's TLS session
+// (binds the invite transcript to this exact handshake), and the connection's
+// first accepted stream. The handler owns the stream.
+type JoinHandler func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream)
 
 // JoinListener is a dedicated QUIC listener for the Zero-CA join handshake.
 type JoinListener struct {
@@ -147,21 +149,29 @@ func (l *JoinListener) handleConn(conn *quic.Conn) {
 	}
 	peerSPKI := sha256.Sum256(state.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
 
+	bind, err := ExportJoinBinding(state.TLS)
+	if err != nil {
+		_ = conn.CloseWithError(quicAppErrCode, "join binding unavailable")
+		return
+	}
+
+	// single AcceptStream, no loop: one request per join connection (replay-safe)
 	stream, err := conn.AcceptStream(l.ctx)
 	if err != nil {
 		_ = conn.CloseWithError(quicAppErrCode, "accept stream failed")
 		return
 	}
-	l.handler(l.ctx, peerSPKI, stream)
+	l.handler(l.ctx, peerSPKI, bind, stream)
 }
 
 // DialJoin dials a JoinListener at addr, presenting clientCert as the joiner's
 // node identity, and pins the leader: the client TLS VerifyPeerCertificate
 // REJECTS unless sha256(leaf.RawSubjectPublicKeyInfo) == expectedServerSPKI
 // (relay/MITM defense — client-side verification is reliably enforced). It
-// returns the opened stream plus a func that closes the connection; the caller
-// owns both.
-func DialJoin(ctx context.Context, addr string, expectedServerSPKI [32]byte, clientCert tls.Certificate) (*quic.Stream, func() error, error) {
+// returns the opened stream, the RFC 5705 channel-binding value for this TLS
+// session (which the joiner signs into its invite transcript), plus a func that
+// closes the connection; the caller owns the stream and the closer.
+func DialJoin(ctx context.Context, addr string, expectedServerSPKI [32]byte, clientCert tls.Certificate) (*quic.Stream, []byte, func() error, error) {
 	clientTLS := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		NextProtos:   []string{JoinALPN},
@@ -186,15 +196,20 @@ func DialJoin(ctx context.Context, addr string, expectedServerSPKI [32]byte, cli
 
 	conn, err := quic.DialAddr(ctx, addr, clientTLS, defaultQUICConfig())
 	if err != nil {
-		return nil, nil, fmt.Errorf("join dial %s: %w", addr, err)
+		return nil, nil, nil, fmt.Errorf("join dial %s: %w", addr, err)
+	}
+	bind, err := ExportJoinBinding(conn.ConnectionState().TLS)
+	if err != nil {
+		_ = conn.CloseWithError(quicAppErrCode, "join binding unavailable")
+		return nil, nil, nil, fmt.Errorf("join dial %s: channel binding: %w", addr, err)
 	}
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		_ = conn.CloseWithError(quicAppErrCode, "open stream failed")
-		return nil, nil, fmt.Errorf("join dial %s: open stream: %w", addr, err)
+		return nil, nil, nil, fmt.Errorf("join dial %s: open stream: %w", addr, err)
 	}
 	closeConn := func() error { return conn.CloseWithError(quicAppErrCode, "join done") }
-	return stream, closeConn, nil
+	return stream, bind, closeConn, nil
 }
 
 // certSPKI returns sha256 of the certificate leaf's RawSubjectPublicKeyInfo.

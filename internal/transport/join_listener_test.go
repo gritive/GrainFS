@@ -53,7 +53,7 @@ func TestJoinListenerCapturesUnknownPeerSPKI(t *testing.T) {
 		spki [32]byte
 	}
 	got := make(chan captured, 1)
-	handler := func(_ context.Context, peerSPKI [32]byte, stream *quic.Stream) {
+	handler := func(_ context.Context, peerSPKI [32]byte, _ []byte, stream *quic.Stream) {
 		got <- captured{spki: peerSPKI}
 		_ = stream.Close()
 	}
@@ -67,7 +67,7 @@ func TestJoinListenerCapturesUnknownPeerSPKI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	stream, closeConn, err := DialJoin(ctx, ln.Addr(), ln.SPKI(), clientCert)
+	stream, _, closeConn, err := DialJoin(ctx, ln.Addr(), ln.SPKI(), clientCert)
 	if err != nil {
 		t.Fatalf("DialJoin: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestDialJoinRejectsWrongServerSPKI(t *testing.T) {
 	clientCert, _ := newTestJoinCert(t, "join-joiner")
 	_, wrongSPKI := newTestJoinCert(t, "not-the-leader")
 
-	handler := func(_ context.Context, _ [32]byte, stream *quic.Stream) {
+	handler := func(_ context.Context, _ [32]byte, _ []byte, stream *quic.Stream) {
 		_ = stream.Close()
 	}
 	ln, err := NewJoinListener("127.0.0.1:0", serverCert, handler)
@@ -107,7 +107,7 @@ func TestDialJoinRejectsWrongServerSPKI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, closeConn, err := DialJoin(ctx, ln.Addr(), wrongSPKI, clientCert)
+	_, _, closeConn, err := DialJoin(ctx, ln.Addr(), wrongSPKI, clientCert)
 	if err == nil {
 		if closeConn != nil {
 			_ = closeConn()
