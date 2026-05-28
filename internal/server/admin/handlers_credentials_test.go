@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
@@ -87,25 +88,25 @@ func TestCredentialHandlersAuthorizeCreateRotateRevoke(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
-		saID:     "sa-app",
-		action:   "grainfs:CredentialCreate",
-		resource: "protocol-credential/nbd/volume/devdisk",
+		principal: principal.ServiceAccount("sa-app"),
+		action:    "grainfs:CredentialCreate",
+		resource:  "protocol-credential/nbd/volume/devdisk",
 	}, authz.calls[0])
 
 	_, err = admin.RotateCredential(context.Background(), d, created.ID)
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
-		saID:     "sa-app",
-		action:   "grainfs:CredentialRotate",
-		resource: "protocol-credential/nbd/volume/devdisk",
+		principal: principal.ServiceAccount("sa-app"),
+		action:    "grainfs:CredentialRotate",
+		resource:  "protocol-credential/nbd/volume/devdisk",
 	}, authz.calls[1])
 
 	_, err = admin.RevokeCredential(context.Background(), d, created.ID)
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
-		saID:     "sa-app",
-		action:   "grainfs:CredentialRevoke",
-		resource: "protocol-credential/nbd/volume/devdisk",
+		principal: principal.ServiceAccount("sa-app"),
+		action:    "grainfs:CredentialRevoke",
+		resource:  "protocol-credential/nbd/volume/devdisk",
 	}, authz.calls[2])
 }
 
@@ -125,18 +126,43 @@ func TestCredentialHandlersAuthorizeGetAndList(t *testing.T) {
 	_, err = admin.GetCredential(context.Background(), d, created.ID)
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
-		saID:     "sa-app",
-		action:   "grainfs:CredentialRead",
-		resource: "protocol-credential/nbd/volume/devdisk",
+		principal: principal.ServiceAccount("sa-app"),
+		action:    "grainfs:CredentialRead",
+		resource:  "protocol-credential/nbd/volume/devdisk",
 	}, authz.calls[1])
 
 	_, err = admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nbd", Resource: "volume/devdisk"})
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
-		saID:     "sa-app",
-		action:   "grainfs:CredentialList",
-		resource: "protocol-credential/nbd/volume/devdisk",
+		principal: principal.ServiceAccount("sa-app"),
+		action:    "grainfs:CredentialList",
+		resource:  "protocol-credential/nbd/volume/devdisk",
 	}, authz.calls[2])
+}
+
+func TestCredentialHandlersAuthorizeOIDCActorInsteadOfTargetSA(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	d.ProtocolCredAuthz = authz
+	ctx := admin.WithActorPrincipal(context.Background(), principal.OIDC(
+		"https://idp.example.com/",
+		"alice",
+		"oidc:example:alice",
+		[]string{"oidc:example:storage-admins"},
+	))
+
+	_, err := admin.CreateCredential(ctx, d, admin.CredentialCreateReq{
+		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+	})
+
+	require.NoError(t, err)
+	require.Len(t, authz.calls, 1)
+	require.Equal(t, principal.KindOIDC, authz.calls[0].principal.Kind)
+	require.Equal(t, "oidc:example:alice", authz.calls[0].principal.ID)
+	require.Equal(t, []string{"oidc:example:storage-admins"}, authz.calls[0].principal.Groups)
+	require.Equal(t, "grainfs:CredentialCreate", authz.calls[0].action)
+	require.Equal(t, "protocol-credential/nbd/volume/devdisk", authz.calls[0].resource)
 }
 
 func TestCredentialHandlersDenyCreateBeforeMutation(t *testing.T) {
@@ -229,9 +255,9 @@ func TestCredentialHandlersFailClosedWhenAuthorizerMissing(t *testing.T) {
 }
 
 type credentialAuthCall struct {
-	saID     string
-	action   string
-	resource string
+	principal principal.Principal
+	action    string
+	resource  string
 }
 
 type credentialAuthorizerStub struct {
@@ -241,7 +267,12 @@ type credentialAuthorizerStub struct {
 }
 
 func (s *credentialAuthorizerStub) Authorize(_ context.Context, saID, _ string, ctxReq policy.RequestContext) policy.EvalResult {
-	s.calls = append(s.calls, credentialAuthCall{saID: saID, action: ctxReq.Action, resource: ctxReq.Resource})
+	s.calls = append(s.calls, credentialAuthCall{principal: principal.ServiceAccount(saID), action: ctxReq.Action, resource: ctxReq.Resource})
+	return policy.EvalResult{Decision: s.decision, Reason: s.reason}
+}
+
+func (s *credentialAuthorizerStub) AuthorizePrincipal(_ context.Context, p principal.Principal, _ string, ctxReq policy.RequestContext) policy.EvalResult {
+	s.calls = append(s.calls, credentialAuthCall{principal: p, action: ctxReq.Action, resource: ctxReq.Resource})
 	return policy.EvalResult{Decision: s.decision, Reason: s.reason}
 }
 
