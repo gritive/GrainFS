@@ -15,20 +15,23 @@ func TestMetaFSMProtocolCredentialSnapshotRoundTrip(t *testing.T) {
 	now := time.Date(2026, 5, 28, 1, 2, 3, 4, time.UTC)
 	exp := now.Add(time.Hour)
 	used := now.Add(2 * time.Hour)
+	stale := now.Add(3 * time.Hour)
 
 	srcStore := protocred.NewStore()
 	srcStore.Restore([]protocred.Credential{
 		{
-			ID:         "pc_b",
-			SAID:       "sa_b",
-			Protocol:   protocred.ProtocolNBD,
-			Resource:   "volume/b",
-			Mode:       protocred.ModeRW,
-			SecretHash: sha256.Sum256([]byte("b")),
-			SecretHint: "hint-b",
-			CreatedAt:  now.Add(time.Minute),
-			CreatedBy:  "admin-b",
-			LastUsedAt: &used,
+			ID:          "pc_b",
+			SAID:        "sa_b",
+			Protocol:    protocred.ProtocolNBD,
+			Resource:    "volume/b",
+			Mode:        protocred.ModeRW,
+			SecretHash:  sha256.Sum256([]byte("b")),
+			SecretHint:  "hint-b",
+			CreatedAt:   now.Add(time.Minute),
+			CreatedBy:   "admin-b",
+			LastUsedAt:  &used,
+			StaleAt:     &stale,
+			StaleReason: "policy_changed",
 		},
 		{
 			ID:         "pc_a",
@@ -66,6 +69,9 @@ func TestMetaFSMProtocolCredentialSnapshotRoundTrip(t *testing.T) {
 	require.True(t, rows[0].ExpiresAt.Equal(exp))
 	require.NotNil(t, rows[1].LastUsedAt)
 	require.True(t, rows[1].LastUsedAt.Equal(used))
+	require.NotNil(t, rows[1].StaleAt)
+	require.True(t, rows[1].StaleAt.Equal(stale))
+	require.Equal(t, "policy_changed", rows[1].StaleReason)
 }
 
 func TestMetaFSMProtocolCredentialLegacySnapshotWithoutTrailerLeavesStoreEmpty(t *testing.T) {

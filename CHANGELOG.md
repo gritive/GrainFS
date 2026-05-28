@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.398.0] - 2026-05-28
+
+### Security
+
+- Protocol credentials are now marked stale when a directly attached or
+  group-attached IAM policy is detached from their service account, and when a
+  dependent custom policy body changes. The stale marker is applied through the
+  Meta FSM using the Raft apply index for deterministic replay.
+
 ## [0.0.397.0] - 2026-05-28
 
 ### Changed
