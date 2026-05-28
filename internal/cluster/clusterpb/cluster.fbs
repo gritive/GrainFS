@@ -1414,6 +1414,7 @@ table LeaseAttestationEntry {
   node_id:string;
   observed_at_index:uint64;
   lease_count:uint64;
+  snapshot_ref_count:uint64;
 }
 
 // MetaKEKPruneCmd permanently removes a Retiring KEK version after every voter

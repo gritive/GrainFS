@@ -917,6 +917,53 @@ func TestFSM_Apply_KEKPrune_NonZeroLeaseCount_Rejects(t *testing.T) {
 	}
 }
 
+// TestFSM_Apply_KEKPrune_NonZeroSnapshotRefCount_Rejects verifies that the
+// FSM apply re-check rejects a MetaKEKPruneCmd whose attestation has
+// snapshot_ref_count > 0 (defense in depth, payload-only — no filesystem read).
+func TestFSM_Apply_KEKPrune_NonZeroSnapshotRefCount_Rejects(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	atts := fx.happyAttestations()
+	atts[0].SnapshotRefCount = 1 // node-0 reports a retained snapshot
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x81})
+	envelope := fx.encodeAndWrap(cmd)
+
+	err := fx.fsm.applyCmdAtIndex(envelope, 285)
+	if err == nil {
+		t.Fatalf("expected snapshot_ref_count>0 reject, got nil")
+	}
+	if !strings.Contains(err.Error(), "snapshot_ref_count") {
+		t.Errorf("expected 'snapshot_ref_count' in error, got: %v", err)
+	}
+}
+
+// TestEncodeDecodeMetaKEKPruneCmd_SnapshotRefCount_RoundTrip verifies that
+// SnapshotRefCount survives encode → decode for KEKPruneCmd.
+func TestEncodeDecodeMetaKEKPruneCmd_SnapshotRefCount_RoundTrip(t *testing.T) {
+	fx := newKEKPruneTestFixture(t)
+	atts := []LeaseAttestationEntry{
+		{NodeID: "node-0", ObservedAtIndex: 300, LeaseCount: 0, SnapshotRefCount: 7},
+		{NodeID: "node-1", ObservedAtIndex: 301, LeaseCount: 0, SnapshotRefCount: 0},
+	}
+	cmd := fx.buildValidPruneCmd(3, atts, [16]byte{0x82})
+	payload, err := EncodeMetaKEKPruneCmd(cmd)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := DecodeMetaKEKPruneCmd(payload)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.LeaseAttestation) != 2 {
+		t.Fatalf("attestation count = %d, want 2", len(got.LeaseAttestation))
+	}
+	if got.LeaseAttestation[0].SnapshotRefCount != 7 {
+		t.Errorf("node-0 snapshot_ref_count = %d, want 7", got.LeaseAttestation[0].SnapshotRefCount)
+	}
+	if got.LeaseAttestation[1].SnapshotRefCount != 0 {
+		t.Errorf("node-1 snapshot_ref_count = %d, want 0", got.LeaseAttestation[1].SnapshotRefCount)
+	}
+}
+
 // --- Task 10: Audit determinism tests ---
 
 // cloneKEKRotateFixtureFSM creates a second MetaFSM seeded with the same

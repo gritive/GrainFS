@@ -141,6 +141,9 @@ func decodeProtocolCredentialRevokeCmd(data []byte) (ProtocolCredentialRevokeCmd
 	}, nil
 }
 
+// nolint:unused // MarkStale/LastUsed decode+apply are live; the propose-side
+// service wiring (encode caller) lands in a protocol-credential follow-up. Tests
+// exercise this encoder today.
 func encodeProtocolCredentialMarkStaleCmd(cmd ProtocolCredentialMarkStaleCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(cmd.RequestID)
@@ -169,6 +172,8 @@ func decodeProtocolCredentialMarkStaleCmd(data []byte) (ProtocolCredentialMarkSt
 	}, nil
 }
 
+// nolint:unused // see encodeProtocolCredentialMarkStaleCmd — propose-side
+// service wiring lands in a protocol-credential follow-up; tests exercise it.
 func encodeProtocolCredentialLastUsedCmd(cmd ProtocolCredentialLastUsedCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	idOff := b.CreateString(cmd.ID)
@@ -189,10 +194,6 @@ func decodeProtocolCredentialLastUsedCmd(data []byte) (ProtocolCredentialLastUse
 		ID:         string(t.Id()),
 		LastUsedAt: timeFromUnixNanos(t.LastUsedAtUnixNanos()),
 	}, nil
-}
-
-func encodeProtocolCredentialsSnapshot(rows []protocred.Credential) ([]byte, error) {
-	return encodeProtocolCredentialsSnapshotState(rows, nil)
 }
 
 func encodeProtocolCredentialsSnapshotState(rows []protocred.Credential, requests []ProtocolCredentialRequestRecord) ([]byte, error) {
@@ -230,11 +231,6 @@ func encodeProtocolCredentialsSnapshotState(rows []protocred.Credential, request
 	clusterpb.MetaProtocolCredentialsSnapshotAddRows(b, rowsVec)
 	clusterpb.MetaProtocolCredentialsSnapshotAddRequests(b, requestsVec)
 	return fbFinish(b, clusterpb.MetaProtocolCredentialsSnapshotEnd(b)), nil
-}
-
-func decodeProtocolCredentialsSnapshot(data []byte) ([]protocred.Credential, error) {
-	rows, _, err := decodeProtocolCredentialsSnapshotState(data)
-	return rows, err
 }
 
 func decodeProtocolCredentialsSnapshotState(data []byte) ([]protocred.Credential, []ProtocolCredentialRequestRecord, error) {

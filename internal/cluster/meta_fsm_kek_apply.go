@@ -624,6 +624,12 @@ func validatePruneAttestation(cmd KEKPruneCmd, retireIdx uint64) error {
 		if att.LeaseCount != 0 {
 			return fmt.Errorf("node %s lease_count=%d > 0", att.NodeID, att.LeaseCount)
 		}
+		// Replicated attestation re-check (defense in depth). Reads the cmd payload
+		// ONLY — object snapshots are node-local, so a filesystem read here would
+		// diverge across nodes. Never add a filesystem fallback.
+		if att.SnapshotRefCount != 0 {
+			return fmt.Errorf("node %s snapshot_ref_count=%d > 0 — version still referenced by a retained (or unreadable) snapshot", att.NodeID, att.SnapshotRefCount)
+		}
 	}
 	for nodeID := range expectedVoters {
 		if _, hit := seen[nodeID]; !hit {

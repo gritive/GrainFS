@@ -33,6 +33,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
+	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -87,6 +88,14 @@ func bootKEKRotationLeader(state *bootState) error {
 	state.metaRaft.FSM().SetAuditSink(auditFile)
 	state.AddCleanup(func() { _ = auditFile.Close() })
 
+	// snapshotsDir is the node-local directory where object snapshots are stored.
+	// snapshot.CountSnapshotsSealedUnderKEK scans this directory to count
+	// snapshots that reference a given KEK version (prune refusal guard).
+	snapshotsDir := filepath.Join(state.cfg.DataDir, "snapshots")
+	snapRefCount := func(version uint32) (uint64, error) {
+		return snapshot.CountSnapshotsSealedUnderKEK(snapshotsDir, version)
+	}
+
 	// 2. Peer probe RPC handlers. Register on the shared QUIC transport so a
 	//    leader's GetKEKDiskSpace / GetKEKLeaseSnapshot reaches this node as a
 	//    voter.
@@ -94,8 +103,8 @@ func bootKEKRotationLeader(state *bootState) error {
 		cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */).Handle)
 	state.quicTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
 		cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
-			return state.metaRaft.Node().CommittedIndex()
-		}).Handle)
+			return state.metaRaft.LastApplied()
+		}, snapRefCount).Handle)
 
 	// 3. Production PeerKEKProbe with self-shortcut. Self-call computes the
 	//    disk-space + lease values directly (no wire codec roundtrip) so the
@@ -122,10 +131,15 @@ func bootKEKRotationLeader(state *bootState) error {
 			}, nil
 		},
 		func(version uint32) (cluster.KEKLeaseSnapshotResp, error) {
+			cnt, err := snapRefCount(version)
+			if err != nil {
+				return cluster.KEKLeaseSnapshotResp{}, err
+			}
 			return cluster.KEKLeaseSnapshotResp{
 				NodeID:                    selfID,
 				LeaseCount:                leaseTracker.Count(version),
-				ObservedAtRaftCommitIndex: mr.Node().CommittedIndex(),
+				ObservedAtRaftCommitIndex: mr.LastApplied(),
+				SnapshotRefCount:          cnt,
 			}, nil
 		},
 	)

@@ -73,8 +73,20 @@ func (rcv *LeaseAttestationEntry) MutateLeaseCount(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(8, n)
 }
 
+func (rcv *LeaseAttestationEntry) SnapshotRefCount() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *LeaseAttestationEntry) MutateSnapshotRefCount(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(10, n)
+}
+
 func LeaseAttestationEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func LeaseAttestationEntryAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
@@ -84,6 +96,9 @@ func LeaseAttestationEntryAddObservedAtIndex(builder *flatbuffers.Builder, obser
 }
 func LeaseAttestationEntryAddLeaseCount(builder *flatbuffers.Builder, leaseCount uint64) {
 	builder.PrependUint64Slot(2, leaseCount, 0)
+}
+func LeaseAttestationEntryAddSnapshotRefCount(builder *flatbuffers.Builder, snapshotRefCount uint64) {
+	builder.PrependUint64Slot(3, snapshotRefCount, 0)
 }
 func LeaseAttestationEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
