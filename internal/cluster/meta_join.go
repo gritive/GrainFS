@@ -185,9 +185,8 @@ type MetaJoinReceiver struct {
 	// transcript on the receiver side (sourced from the KEK verifier at boot).
 	// The invite gate requires it to be non-empty.
 	clusterID []byte
-	// secretProvider supplies the bootstrap secrets (encryption.key, all KEK
-	// generations, transport PSK) the invite handler seals to a joiner. Wired
-	// here in W3; consumed by the seal/handler logic in a later task (W7).
+	// secretProvider supplies the bootstrap secrets (KEK generations and
+	// transport PSK) the invite handler seals to a joiner.
 	secretProvider BootstrapSecretProvider
 }
 
@@ -209,9 +208,8 @@ func (r *MetaJoinReceiver) WithHandshakeVerifier(v *encrypt.HandshakeVerifier) *
 }
 
 // WithBootstrapSecretProvider installs the provider that assembles the secret
-// plaintext (encryption.key, KEK generations, transport PSK) the invite handler
-// seals to a joiner. Wired at boot; the seal logic that calls
-// BootstrapSecrets() lands in a later task.
+// plaintext (KEK generations and transport PSK) the invite handler seals to a
+// joiner.
 func (r *MetaJoinReceiver) WithBootstrapSecretProvider(p BootstrapSecretProvider) *MetaJoinReceiver {
 	r.secretProvider = p
 	return r

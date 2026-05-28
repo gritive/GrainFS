@@ -74,7 +74,8 @@ func decodeKEKGens(t *clusterpb.BootstrapSecretsPayload) []KEKGen {
 // EncodeBootstrapSecretsPayloadWithCutover serializes the INNER plaintext plus
 // the zero-CA cutover wire fields (member per-node SPKI set + cluster_key_dropped
 // bit). New payloads intentionally omit the legacy encryption_key field; decoders
-// still read it for old payloads until the format-7 cut.
+// expose it only so legacy wire-codec tests can verify old payloads. Format-7
+// joiners reject a non-empty encryption_key field.
 func EncodeBootstrapSecretsPayloadWithCutover(gens []KEKGen, psk []byte, peerSPKIs [][32]byte, clusterKeyDropped bool) []byte {
 	b := clusterBuilderPool.Get()
 	var pskOff flatbuffers.UOffsetT

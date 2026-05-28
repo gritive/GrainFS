@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.430.0] - 2026-05-29
+
+### Security
+
+- Tightened the Zero-CA greenfield boundary so invite joiners reject retired
+  static `encryption_key` bootstrap payloads instead of accepting them as
+  ignored compatibility material.
+
+### Changed
+
+- Removed `encryption.key` from the invite-join resume artifact model and kept
+  Phase-1 staging limited to KEK generations plus `cluster.id`.
+- Clarified bootstrap envelope and shard-service wording around KEK/DEK-backed
+  sealing without the legacy static encryptor.
+
+### Tests
+
+- Added coverage for constructing `ShardService` with a DEK keeper and no
+  static encryptor.
+- Updated restart recovery e2e fixtures to stamp the current format-7 marker.
+
 ## [0.0.429.0] - 2026-05-29
 
 ### Security

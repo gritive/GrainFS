@@ -23,7 +23,7 @@ import (
 // Zero-CA over-the-wire invite-join e2e (WIRE slice, W11).
 //
 // Proves a secret-less node boots from only a GRAINFS_INVITE_BUNDLE token,
-// becomes a meta-raft VOTER, and serves S3 (staged encryption.key works).
+// becomes a meta-raft VOTER, and serves S3 using staged KEK material.
 // Also covers single-use invite redemption, cross-cluster isolation, and the
 // resume/no-op classification on restart.
 

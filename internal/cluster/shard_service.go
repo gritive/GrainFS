@@ -235,7 +235,7 @@ func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, op
 	// segEnc is the chunked-EC data-at-rest seam. Production sets it from the
 	// generation-aware DEK keeper; legacy tests may still set it via WithEncryptor.
 	if s.segEnc == nil {
-		panic("cluster.NewShardService: data encryptor is mandatory (at-rest encryption is always on); use WithShardDEKKeeper")
+		panic("cluster.NewShardService: at-rest sealer is mandatory; use WithEncryptor or WithShardDEKKeeper")
 	}
 	return s
 }

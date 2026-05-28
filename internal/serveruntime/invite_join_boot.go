@@ -17,7 +17,7 @@ package serveruntime
 //	  - DialJoin(SeedAddr, SeedSPKI, nodeCert) and send JoinRequest{JoinPhase:1},
 //	  - OpenFromPeer the SealedBootstrap with the bindCtx W7 used
 //	    (clusterID‖inviteID‖nodeID‖leaderID), stage every secret on disk
-//	    (keys/<gen>.key, cluster.id, and legacy encryption.key when present),
+//	    (keys/<gen>.key and cluster.id),
 //	    SealNodeKey to keys.d/node.key.enc under the active KEK gen, shred
 //	    node.key.unsealed,
 //	  - set opts.ClusterKey in memory (transport PSK) so bootValidateConfig
@@ -178,7 +178,6 @@ func classifyInviteJoinResume(bundlePresent, persistedInviteNodeKey, artifactsCo
 
 // inviteJoinPaths bundles the on-disk locations the gate + staging touch.
 type inviteJoinPaths struct {
-	encryptionKey   string
 	clusterID       string
 	keysDir         string // keys/ — staged KEK gens live here (any <N>.key)
 	nodeKeyEnc      string
@@ -191,7 +190,6 @@ func inviteJoinPathsFor(dataDir string) inviteJoinPaths {
 	keysDir := nodeconfig.New(dataDir).KEKDir()
 	keysD := filepath.Join(dataDir, "keys.d")
 	return inviteJoinPaths{
-		encryptionKey:   filepath.Join(dataDir, "encryption.key"),
 		clusterID:       filepath.Join(dataDir, nodeconfig.ClusterIDFile),
 		keysDir:         keysDir,
 		nodeKeyEnc:      filepath.Join(keysD, "node.key.enc"),
@@ -486,6 +484,9 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	if err != nil {
 		return fmt.Errorf("decode bootstrap secrets: %w", err)
 	}
+	if len(encKey) != 0 {
+		return fmt.Errorf("decode bootstrap secrets: retired static encryption key field is not supported")
+	}
 	if len(peerSPKIs) == 0 {
 		// Old-encoder leader or rolling-upgrade scenario (M5): peer_spkis absent.
 		log.Warn().Msg("invite-join: peer_spkis empty in bootstrap; joiner accept-set will use PSK base only (rolling-upgrade compat)")
@@ -494,7 +495,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	st.clusterKeyDropped = clusterKeyDropped
 
 	// 7. stage every secret on disk where the normal boot expects them.
-	if err := stageInviteSecrets(dataDir, encKey, kekGens, st.clusterID); err != nil {
+	if err := stageInviteSecrets(dataDir, kekGens, st.clusterID); err != nil {
 		return err
 	}
 
@@ -825,10 +826,8 @@ func highestKEKGen(gens []cluster.KEKGen) (gen uint32, key []byte, ok bool) {
 }
 
 // stageInviteSecrets writes every keys/<gen>.key and cluster.id (raw 16 bytes)
-// where normal boot expects them. encKey is a legacy bootstrap field retained
-// only for decode compatibility; staging intentionally ignores it so fresh
-// invite joins never create encryption.key.
-func stageInviteSecrets(dataDir string, encKey []byte, kekGens []cluster.KEKGen, clusterID []byte) error {
+// where normal boot expects them. Fresh invite joins never create encryption.key.
+func stageInviteSecrets(dataDir string, kekGens []cluster.KEKGen, clusterID []byte) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("stage secrets: mkdir data: %w", err)
 	}

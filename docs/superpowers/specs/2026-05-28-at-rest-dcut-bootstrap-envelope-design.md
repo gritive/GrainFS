@@ -1,7 +1,7 @@
 # At-Rest D-Cut Bootstrap Envelope Design
 
 **Date:** 2026-05-28
-**Status:** Draft for D-cut implementation planning
+**Status:** Implemented for Zero-CA boot glue; broader static data-path removal remains R3
 
 ## Problem
 
@@ -80,8 +80,9 @@ carrier:
 - keep `transport_psk` until the cluster-key drop is complete,
 - keep `peer_spkis`,
 - keep `cluster_key_dropped`,
-- stop setting `encryption_key` in new encoders while keeping the FlatBuffers
-  field readable for legacy payloads until the format-7 cut,
+- stop setting `encryption_key` in new encoders; keep the FlatBuffers field
+  readable only for codec compatibility tests, while format-7 joiners reject
+  non-empty values,
 - add no DEK plaintext field.
 
 The joiner obtains DEK material through normal meta-raft replay after Phase-2
@@ -130,9 +131,8 @@ This is greenfield-only, matching the existing D-track approach. The final code
 slice that stops writing/reading static `encryption.key` must bump
 `encryption.format` from `6` to `7` and loud-fail older directories.
 
-Read compatibility for existing tracked tests can be temporary during the
-transition, but production boot in format `7` must not require
-`Config.RawEncryptionKey`.
+Production boot in format `7` does not require `Config.RawEncryptionKey` and
+rejects retired Zero-CA static-key bootstrap material instead of migrating it.
 
 ## Implementation Slices
 
@@ -141,7 +141,8 @@ transition, but production boot in format `7` must not require
 - Change `BootstrapSecretProvider.BootstrapSecrets` to return only
   `(kekGens, transportPSK)`.
 - Stop encoding `BootstrapSecretsPayload.encryption_key` in new payloads.
-- Keep decode compatibility for legacy payloads until the format-7 cut.
+- Keep decode compatibility for legacy codec tests, but reject non-empty
+  `encryption_key` at the format-7 joiner boundary.
 - Update `meta_join_invite` and bootstrap codec tests to assert new payloads
   have no encryption key while old payloads still decode.
 
