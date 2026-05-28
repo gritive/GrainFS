@@ -93,6 +93,9 @@ func bootKEKRotationLeader(state *bootState) error {
 	// snapshots that reference a given KEK version (prune refusal guard).
 	snapshotsDir := filepath.Join(state.cfg.DataDir, "snapshots")
 	snapRefCount := func(version uint32) (uint64, error) {
+		if err := checkRaftStoreKeyPruneRef(state, version); err != nil {
+			return 0, err
+		}
 		return snapshot.CountSnapshotsSealedUnderKEK(snapshotsDir, version)
 	}
 

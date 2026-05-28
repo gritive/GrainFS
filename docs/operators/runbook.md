@@ -1121,6 +1121,12 @@ space to perform a KEK rotation: the leader writes the new `keys/<V>.key` and
 re-wraps every live DEK before committing the raft command. The leader probes
 every voter's keystore partition before accepting a rotation.
 
+Each node also keeps `<dataDir>/keys.d/raft-store.key.enc`, a node-local
+sidecar that seals the Badger encryption key for that node's raft v2 stores.
+Back up `keys/`, `keys.d/raft-store.key.enc`, `cluster.id`, `raft/`, and
+`meta_raft/` together for node-level restore. Restoring encrypted raft logs
+without the matching raft-store sidecar is unsupported.
+
 If `grainfs_keystore_disk_free_bytes < 65536` on any node, the rotation propose
 is rejected and the response names the offending node id. New writes and reads
 continue to work — only rotation is blocked.
@@ -1219,6 +1225,12 @@ removes it once every voter attests no active lease holds it.
 > 3. Then prune: `grainfs encrypt kek prune --version N`. The cluster automatically
 >    refuses prune if any voter still holds a snapshot sealed under version N — delete
 >    the snapshot and retry.
+
+> **Prune-refusal for raft-store keys is also enforced.** If a node's
+> `keys.d/raft-store.key.enc` is still sealed under the target KEK version,
+> prune fails with an error naming the raft-store sidecar. KEK rotation rewraps
+> this sidecar automatically; retry prune after the rotation has applied on all
+> voters.
 
 > **Prune may need retries on a busy cluster.** Prune validates the voter set
 > against the raft committed index at probe time and rejects if the committed

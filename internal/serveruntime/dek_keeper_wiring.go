@@ -42,7 +42,10 @@ func isGenesisBoot(state *bootState) bool {
 	return !(state.joinMode || state.inviteJoinMode || len(state.peers) > 0 || state.priorState)
 }
 
-func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
+func loadKEKStoreAndClusterID(state *bootState) error {
+	if state.kekStore != nil && len(state.clusterID) == 16 {
+		return nil
+	}
 	// Phase A no longer honors GRAINFS_KEK_SOURCE — the keystore is always
 	// at <dataDir>/keys/<V>.key (configurable via GRAINFS_KEK_DIR for tests).
 	// Surface a clear error if an operator still sets the legacy env var,
@@ -89,12 +92,6 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 		return fmt.Errorf("wireDEKKeeper: load keystore %s: %w", keysDir, err)
 	}
 
-	activeKEK, err := store.ActiveKEK()
-	if err != nil {
-		return fmt.Errorf("wireDEKKeeper: active KEK: %w", err)
-	}
-	defer zeroizeKEKCopy(activeKEK)
-
 	// cluster.id load mode: strict when join mode OR prior state exists,
 	// so a missing cluster.id on a restart surfaces as
 	// ErrClusterIDMissing rather than silently regenerating a fresh UUID
@@ -113,6 +110,24 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 			return fmt.Errorf("wireDEKKeeper: cluster.id: %w", err)
 		}
 	}
+	state.kekStore = store
+	state.clusterID = clusterID
+	return nil
+}
+
+func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
+	if err := loadKEKStoreAndClusterID(state); err != nil {
+		return err
+	}
+
+	store := state.kekStore
+	clusterID := state.clusterID
+	keysDir := nodeconfig.New(state.cfg.DataDir).KEKDir()
+	activeKEK, err := store.ActiveKEK()
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: active KEK: %w", err)
+	}
+	defer zeroizeKEKCopy(activeKEK)
 
 	// Genesis vs non-genesis DEK keeper (Phase D Task 5). Only the genesis node
 	// (fresh single-voter init) is the sole source of truth for gen-0 — it
@@ -158,7 +173,6 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	// delete the on-disk file. (Caught by the Task 15 e2e lifecycle suite.)
 	fsm.SetKEKDir(keysDir)
 	state.dekKeeper = keeper
-	state.kekStore = store
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
 	// Single source for the data-plane AAD clusterID (slice C). bootShardService
 	// and bootOwnedGroupsAndEC read this so the EC-shard WRITE (putpipeline) and

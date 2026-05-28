@@ -1,6 +1,7 @@
 package badgerutil
 
 import (
+	"fmt"
 	"sync/atomic"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -8,12 +9,14 @@ import (
 )
 
 const (
-	SmallMemTableSize     int64 = 2 << 20
-	SmallMaxBatchSize     int64 = (15 * SmallMemTableSize) / 100
-	SmallBlockCacheSize   int64 = 0
-	SmallValueThreshold   int64 = 256 << 10
-	SmallValueLogFileSize int64 = 16 << 20
-	SmallNumMemtables           = 2
+	SmallMemTableSize           int64 = 2 << 20
+	SmallMaxBatchSize           int64 = (15 * SmallMemTableSize) / 100
+	SmallBlockCacheSize         int64 = 0
+	RaftEncryptedBlockCacheSize int64 = 2 << 20
+	RaftEncryptedIndexCacheSize int64 = 2 << 20
+	SmallValueThreshold         int64 = 256 << 10
+	SmallValueLogFileSize       int64 = 16 << 20
+	SmallNumMemtables                 = 2
 )
 
 // valueThresholdOverride, when > 0, forces every DB opened via SmallOptions
@@ -59,4 +62,16 @@ func RaftLogOptions(path string, syncWrites bool) badger.Options {
 	return SmallOptions(path).
 		WithSyncWrites(syncWrites).
 		WithNumVersionsToKeep(1)
+}
+
+func RaftLogEncryptedOptions(path string, syncWrites bool, key []byte) (badger.Options, error) {
+	switch len(key) {
+	case 16, 24, 32:
+	default:
+		return badger.Options{}, fmt.Errorf("raft log encryption key len = %d, want encryption key length 16, 24, or 32", len(key))
+	}
+	return RaftLogOptions(path, syncWrites).
+		WithBlockCacheSize(RaftEncryptedBlockCacheSize).
+		WithIndexCacheSize(RaftEncryptedIndexCacheSize).
+		WithEncryptionKey(key), nil
 }

@@ -42,13 +42,6 @@ Work these in order. Do not run them in parallel.
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
      See [[project-grains-at-rest-two-key-systems]].
 
-- [ ] **Raft log store at-rest encryption — implementation**
-   - Implement the plan in
-     `docs/superpowers/plans/2026-05-28-raft-log-store-at-rest-encryption-plan.md`.
-   - Verification: encrypted raft log reopen test, wrong-key rejection, KEK
-     rewrap/prune safety, single-node restart, multi-node follower restart, and
-     raw-file plaintext object-key inspection.
-
 - [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
      during an outage.

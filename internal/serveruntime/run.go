@@ -49,6 +49,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootOpenSharedFSMDB(state); err != nil {
 		return err
 	}
+	if err := bootRaftStoreKey(state); err != nil {
+		return fmt.Errorf("raft store key: %w", err)
+	}
 
 	// PR 3: transport.
 	if err := bootQUICTransport(ctx, state); err != nil {
@@ -94,7 +97,9 @@ func Run(ctx context.Context, cfg Config) error {
 	// v1 (*raft.Node) is unreachable from serveruntime. PR 30 deletes the v1
 	// package outright. Durable LogStore + StableStore + SnapshotStore live
 	// in <raftDir>/raft-v2/.
-	v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntime(raftCfg, state.raftDir)
+	v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntimeWithStoreOptions(raftCfg, state.raftDir, cluster.RaftV2StoreOptions{
+		EncryptionKey: state.raftStoreKey,
+	})
 	if err != nil {
 		return fmt.Errorf("raft v2 init: %w", err)
 	}

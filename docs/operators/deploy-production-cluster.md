@@ -25,6 +25,7 @@ install -d -m 0700 "$DATA_DIR"
 
 - `<data>/keys/0.key` (mode 0600) is auto-generated on first start — this is the active KEK file in the versioned keystore
 - `<data>/cluster.id` (16-byte UUID v7) is generated at first-cluster boot and binds the cluster identity into the join handshake
+- `<data>/keys.d/raft-store.key.enc` is generated on each node and seals that node's local raft v2 Badger encryption key under the cluster KEK
 - `--cluster-key` is required even for the first single-node bootstrap
 - `default` bucket is auto-created with anonymous read/write access
 - `_grainfs` reserved bucket + `_grainfs/audit/evaluations` Iceberg table seeded
@@ -74,6 +75,12 @@ chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
   --bind-addr node-b:7001 \
   --cluster-key "$CLUSTER_KEY"
 ```
+
+Do not copy `<dataDir>/keys.d/raft-store.key.enc` from another node during a
+fresh join. It is node-local and is generated when the joining node first opens
+its raft v2 stores. For backup/restore of an existing node, restore that
+node's own `keys.d/raft-store.key.enc` together with `keys/`, `cluster.id`,
+`raft/`, and `meta_raft/`.
 
 After the join succeeds, start the new node with the same data directory,
 node ID, Raft address, and cluster key:
@@ -167,7 +174,8 @@ By default, the first node auto-generates `<data>/keys/0.key`. The contents
 must be identical on every node — stage the file out-of-band (e.g. `scp` from
 a healthy peer) before starting a joining node. Do not replace the KEK after
 data exists unless you are restoring the same 32-byte cluster KEK; GrainFS
-does not currently expose a separate KEK rotation flow.
+also keeps each node's raft-store sidecar sealed under the active KEK and
+rewraps it after KEK rotation.
 
 ### DEK rotation
 
