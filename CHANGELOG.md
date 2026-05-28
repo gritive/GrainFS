@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.416.0] - 2026-05-28
+
+### Added
+
+- Protocol credential admin authorization can now evaluate typed IAM
+  principals with `AuthorizePrincipal`, including federated OIDC actors and
+  mapped external group policies.
+- Added an operator guide for OIDC federated IAM flows, common denial modes, and
+  the current admin/protocol route adoption boundary.
+
+### Changed
+
+- Protocol credential create, read, list, rotate, and revoke handlers now prefer
+  an actor principal from request context and fall back to the target service
+  account for existing admin UDS and CLI flows.
+- Updated the documentation index and IAM follow-up tracking for the remaining
+  bearer-token middleware and broader route adoption slice.
+
 ## [0.0.415.1] - 2026-05-28
 
 ### Changed

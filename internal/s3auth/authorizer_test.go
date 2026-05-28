@@ -7,11 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 )
 
 type stubCfg struct{ vals map[string]bool }
@@ -93,6 +96,46 @@ func TestAuthorize_SAWithReadonlyPolicy(t *testing.T) {
 	if r.Decision != policy.DecisionAllow {
 		t.Fatalf("sa-1 readonly should Allow GetObject, got %v: %s", r.Decision, r.Reason)
 	}
+}
+
+func TestAuthorizePrincipal_OIDCGroupPolicyAllows(t *testing.T) {
+	a, ps, pa, _ := newTestAuthorizer(t, false, false)
+	require.NoError(t, ps.Put(context.Background(), "credential-admin", []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/nbd/volume/devdisk"}]}`), true))
+	require.NoError(t, pa.AttachToGroup(context.Background(), "oidc:example:storage-admins", "credential-admin"))
+
+	actor := principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", []string{"oidc:example:storage-admins"})
+	got := a.AuthorizePrincipal(context.Background(), actor, "", policy.RequestContext{
+		Action:   "grainfs:CredentialCreate",
+		Resource: "protocol-credential/nbd/volume/devdisk",
+	})
+
+	require.Equal(t, policy.DecisionAllow, got.Decision, got.Reason)
+	require.NotEmpty(t, got.ConditionContext)
+}
+
+func TestAuthorizePrincipal_ServiceAccountMatchesAuthorize(t *testing.T) {
+	a, ps, pa, _ := newTestAuthorizer(t, false, false)
+	require.NoError(t, ps.Put(context.Background(), "readonly", []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`), true))
+	require.NoError(t, pa.AttachToSA(context.Background(), "sa-1", "readonly"))
+
+	req := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/x"}
+	legacy := a.Authorize(context.Background(), "sa-1", "b", req)
+	typed := a.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa-1"), "b", req)
+
+	require.Equal(t, legacy.Decision, typed.Decision)
+	require.Equal(t, legacy.Reason, typed.Reason)
+}
+
+func TestAuthorizePrincipal_UnsupportedKindDeny(t *testing.T) {
+	a, _, _, _ := newTestAuthorizer(t, false, false)
+	got := a.AuthorizePrincipal(context.Background(), principal.Principal{Kind: "unknown", ID: "x"}, "", policy.RequestContext{
+		Action:   "grainfs:CredentialCreate",
+		Resource: "protocol-credential/nbd/volume/devdisk",
+	})
+
+	require.Equal(t, policy.DecisionDeny, got.Decision)
+	require.Contains(t, got.Reason, "unsupported principal kind")
+	require.NotEmpty(t, got.ConditionContext)
 }
 
 func TestAuthorize_DefaultBucketImplicitAnon(t *testing.T) {

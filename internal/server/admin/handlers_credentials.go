@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/protocred"
 )
 
@@ -124,7 +125,11 @@ func authorizeProtocolCredential(ctx context.Context, d *Deps, saID string, prot
 	if d.ProtocolCredAuthz == nil {
 		return NewForbidden("protocol credential permission denied: authorizer not configured")
 	}
-	result := d.ProtocolCredAuthz.Authorize(ctx, saID, "", policy.RequestContext{
+	actor, ok := ActorPrincipalFromContext(ctx)
+	if !ok {
+		actor = principal.ServiceAccount(saID)
+	}
+	result := d.ProtocolCredAuthz.AuthorizePrincipal(ctx, actor, "", policy.RequestContext{
 		Action:   action,
 		Resource: protocolCredentialPolicyResource(protocol, resource),
 	})
