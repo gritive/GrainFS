@@ -583,6 +583,9 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		return fmt.Errorf("invite-join Phase-2: loaded node SPKI does not match Phase-1 identity")
 	}
 	st.nodeSPKI = spki
+	// PR-2a F5/F3 fix: store cert; T5 onPresentFlip callback needs it.
+	state.perNodeCert = cert
+	state.perNodeSPKI = spki
 
 	// Resolve leaderID: prefer the Phase-1 value, fall back to the persisted
 	// sentinel (resume across process restart).

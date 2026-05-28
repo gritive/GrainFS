@@ -135,7 +135,7 @@ func bootMetaRaftWiring(state *bootState) error {
 				state.perNodeSPKI = state.inviteJoin.nodeSPKI
 			}
 		} else {
-			spki, err := ensureNodeIdentity(
+			cert, spki, err := ensureNodeIdentity(
 				state.cfg.DataDir,
 				hex.EncodeToString(state.clusterID),
 				state.nodeID,
@@ -145,6 +145,7 @@ func bootMetaRaftWiring(state *bootState) error {
 			if err != nil {
 				return fmt.Errorf("ensure per-node transport identity: %w", err)
 			}
+			state.perNodeCert = cert
 			state.perNodeSPKI = spki
 		}
 	}

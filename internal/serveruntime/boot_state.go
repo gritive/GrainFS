@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 
 	"github.com/dgraph-io/badger/v4"
@@ -133,6 +134,11 @@ type bootState struct {
 	// node does NOT yet present this on the wire — accept-side foundation only.
 	// Task 6 consumes perNodeSPKI for self-registration.
 	perNodeSPKI [32]byte
+	// perNodeCert is this node's per-node identity TLS certificate,
+	// populated alongside perNodeSPKI (PR-2a §8d F5 fix). The Task-5
+	// onPresentFlip callback closure captures BOTH cert and SPKI to call
+	// QUICTransport.FlipPresent.
+	perNodeCert tls.Certificate
 	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
 	// A holds a single version (0). Later phases use it for rotation,
 	// prune, and join keystore catch-up. Receivers reach the active version
