@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- Zero-CA cluster invite-join now binds the signed invite transcript to the
+  join TLS session (RFC 5705 exporter), rejecting any relayed or replayed
+  handshake presented on a different connection.
+
 ## [0.0.437.0] - 2026-05-29
 
 ### Security

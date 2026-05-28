@@ -80,13 +80,54 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
-- [ ] **Zero-CA invite join protocol binding hardening**
-    - Bind the signed invite transcript to the concrete TLS session with a TLS
-      exporter value instead of leaving `InviteTranscript.Bind` empty.
-    - Replace the client-only join nonce with a leader-issued freshness challenge
-      or add a leader-side replay cache/window. Keep the current SPKI pinning and
-      pending redemption binding as the baseline; this item is the next protocol
-      hardening slice, not a regression in the present key ownership checks.
+- [ ] **Zero-CA cutover/revocation follow-ups** (2026-05-29 re-review of the merged
+  revocation + complete-cutover slices; zero-CA is greenfield so none of these are
+  migration concerns):
+    - **[P3] H4' — incomplete drop under an in-flight transport rotation**.
+      `internal/transport/identity_composer.go:88` still carries `TODO(PR-2)`: when
+      `dropped=true`, `recompute()` excludes the base PSK but still appends
+      `c.rotation`. If `DropClusterKeyAccept` applies while a transport KEK-rotation
+      window is open, the cluster-key-derived `{OldSPKI, NewSPKI}`
+      (`internal/cluster/rotation_worker.go:88,104`) remain in the accept-set until
+      the next steady recompute clears the window (`rotation_worker.go:143` sets
+      window=nil), transiently defeating the drop's purpose. Latent today because
+      transport KEK rotation is gated on cluster-wide KEK distribution (Phase B);
+      it becomes a live hole the moment rotation is enabled. Fix one of: filter
+      cluster-key-derived SPKIs out of the rotation set when `dropped`, refuse
+      `DropClusterKeyAccept` while a rotation window is open, or force a steady
+      recompute on drop. Add a unit test that drops mid-window and asserts the
+      old/new cluster SPKIs are not accepted.
+    - **[P3] Stale "DORMANT/SUPPORT-ONLY in PR-1" comments on now-live code**.
+      Cluster-key drop, present-flip, and conn-recycle are wired live
+      (`internal/serveruntime/boot_phases_raft.go:302,330`,
+      `boot_phases_transport.go:95`), but the transport surface still annotates
+      itself as PR-1 dormant / no-live-caller:
+      `internal/transport/identity_composer.go:46-48,57-59`,
+      `internal/transport/quic.go:386` (FlipPresent), `:394` (RecycleConns),
+      `:446` (SetDropped). Misleading on security-critical accept-set code — a
+      future reader could remove "dead" wiring. Refresh comments to name the live
+      callers.
+    - **[P3] Orphaned join-redirect TODOs (operability)**. A joiner that contacts a
+      follower gets `JoinStatusNotLeader` but no leader address to retry against:
+      `internal/cluster/meta_join.go:234` `TODO(W7b/W9)` (return
+      leader_join_addr/leader_join_spki from member state) and
+      `internal/serveruntime/invite_admin.go:96` `TODO(W7b)` (FSM-resolve redirect to
+      auto-forward the invite-admin call to the leader). Not a security gap; a
+      usability rough edge for multi-node join.
+      NOTE: the redirect MUST be "joiner re-dials the leader directly", NOT
+      "follower byte-proxies the join stream" — channel binding (RFC 5705
+      exporter) is session-local, so a proxy gives joiner and leader different
+      exporters and every bound join fails verification.
+    - **[P3] Revoke cleans meta-raft voters only, not data-group voters**.
+      `MetaRaft.RevokeNode` (`internal/cluster/revoke_node.go:44`) calls
+      `m.node.RemoveVoter` on the meta-raft alone; per-data-group raft membership is
+      untouched. Full eviction therefore relies on the transport backstop
+      (`ClosePeer` drops the live mux + SPKI denylist + cluster-key drop excludes the
+      revoked SPKI from the accept-set). Precondition: before the cluster key is
+      dropped the base PSK is still accepted, so a revoked node could in principle
+      re-dial and resume as a lingering data-group voter. Verify whether revoke
+      should also remove the node from data-group voter sets, or document that full
+      eviction is only guaranteed post-drop.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
