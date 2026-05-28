@@ -2,9 +2,13 @@ package policy
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/iam/principal"
 )
 
 // Store is the data access contract the Resolver depends on.
@@ -55,6 +59,12 @@ func cacheKey(ptype PrincipalType, sa, bucket string) string {
 		prefix = "s|"
 	}
 	return prefix + sa + "|" + bucket
+}
+
+func principalCacheKey(p principal.Principal, bucket string) string {
+	groups := p.GroupNames()
+	sort.Strings(groups)
+	return "p|" + string(p.Kind) + "|" + p.ID + "|" + strings.Join(groups, "\x00") + "|" + bucket
 }
 
 // Effective returns the union of principal-attached and bucket policies for
@@ -132,6 +142,86 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string, ptype Pri
 	}, nil
 }
 
+// EffectivePrincipal returns the effective policy input for a typed IAM
+// principal. OIDC principals use direct attachments by normalized principal ID
+// plus external group-name attachments from token claims.
+func (r *Resolver) EffectivePrincipal(ctx context.Context, p principal.Principal, bucket string) (EvalInput, error) {
+	switch p.Kind {
+	case principal.KindServiceAccount:
+		return r.Effective(ctx, p.ID, bucket, PrincipalTypeS3)
+	case principal.KindMountSA:
+		return r.Effective(ctx, p.ID, bucket, PrincipalTypeMount)
+	case principal.KindProtocolCredential:
+		return r.Effective(ctx, p.ID, bucket, PrincipalTypeS3)
+	case principal.KindOIDC:
+		return r.effectiveOIDC(ctx, p, bucket)
+	default:
+		return EvalInput{}, fmt.Errorf("unsupported principal kind %q", p.Kind)
+	}
+}
+
+func (r *Resolver) effectiveOIDC(ctx context.Context, p principal.Principal, bucket string) (EvalInput, error) {
+	k := principalCacheKey(p, bucket)
+	r.mu.Lock()
+	if e, ok := r.cache[k]; ok && time.Now().Before(e.expires) {
+		r.mu.Unlock()
+		return EvalInput{
+			PrincipalPolicies:    e.pp,
+			PrincipalPolicyNames: e.ppNames,
+			ResourcePolicy:       e.bp,
+			ResourcePolicyBucket: bucket,
+			Principal:            p.ID,
+		}, nil
+	}
+	r.mu.Unlock()
+
+	names, err := r.store.SAPolicies(ctx, p.ID)
+	if err != nil {
+		return EvalInput{}, err
+	}
+	for _, g := range p.GroupNames() {
+		gp, err := r.store.GroupPolicies(ctx, g)
+		if err != nil {
+			return EvalInput{}, err
+		}
+		names = append(names, gp...)
+	}
+	pp, ppNames, bp, err := r.resolveDocs(ctx, names, bucket)
+	if err != nil {
+		return EvalInput{}, err
+	}
+	r.mu.Lock()
+	r.cache[k] = cacheEntry{expires: time.Now().Add(r.ttl), pp: pp, ppNames: ppNames, bp: bp}
+	r.mu.Unlock()
+	return EvalInput{
+		PrincipalPolicies:    pp,
+		PrincipalPolicyNames: ppNames,
+		ResourcePolicy:       bp,
+		ResourcePolicyBucket: bucket,
+		Principal:            p.ID,
+	}, nil
+}
+
+func (r *Resolver) resolveDocs(ctx context.Context, names []string, bucket string) ([]*Document, []string, *Document, error) {
+	var pp []*Document
+	var ppNames []string
+	for _, n := range names {
+		d, err := r.store.PolicyDoc(ctx, n)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if d != nil {
+			pp = append(pp, d)
+			ppNames = append(ppNames, n)
+		}
+	}
+	bp, err := r.store.BucketPolicy(ctx, bucket)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return pp, ppNames, bp, nil
+}
+
 // HasBucketPolicy reports whether an explicit bucket policy exists for bucket.
 // Implicit policies (e.g. the "default" bucket's anon Allow per spec D#2) are
 // NOT counted — only explicit operator-attached policies via BucketPolicyPut.
@@ -168,21 +258,30 @@ func (r *Resolver) Invalidate(saIDs, buckets []string) {
 		buSet[b] = true
 	}
 	for k := range r.cache {
-		// key format: "<typePrefix>|<saID>|<bucket>" where typePrefix is one
-		// character ("s" or "m"). Strip prefix before splitting on '|'.
-		rest := k
-		if i := strings.IndexByte(rest, '|'); i >= 0 {
-			rest = rest[i+1:]
-		} else {
+		principalID, bucket, ok := parseCacheKey(k)
+		if !ok {
 			continue
 		}
-		i := strings.IndexByte(rest, '|')
-		if i < 0 {
-			continue
-		}
-		sa, bu := rest[:i], rest[i+1:]
-		if saSet[sa] || buSet[bu] {
+		if saSet[principalID] || buSet[bucket] {
 			delete(r.cache, k)
 		}
+	}
+}
+
+func parseCacheKey(k string) (principalID, bucket string, ok bool) {
+	parts := strings.SplitN(k, "|", 5)
+	if len(parts) < 3 {
+		return "", "", false
+	}
+	switch parts[0] {
+	case "s", "m":
+		return parts[1], parts[2], true
+	case "p":
+		if len(parts) != 5 {
+			return "", "", false
+		}
+		return parts[2], parts[4], true
+	default:
+		return "", "", false
 	}
 }
