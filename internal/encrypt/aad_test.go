@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildAAD_ShardDomain(t *testing.T) {
@@ -16,19 +18,11 @@ func TestBuildAAD_ShardDomain(t *testing.T) {
 		FieldUint32(chunkIdx),
 	)
 
-	if !bytes.HasPrefix(aad, []byte("AAD\x01")) {
-		t.Fatalf("missing magic prefix; got %x", aad[:4])
-	}
+	require.Truef(t, bytes.HasPrefix(aad, []byte("AAD\x01")), "missing magic prefix; got %x", aad[:4])
 	gotDomain := binary.BigEndian.Uint16(aad[4:6])
-	if gotDomain != uint16(DomainShard) {
-		t.Errorf("domain = %#x, want %#x", gotDomain, uint16(DomainShard))
-	}
-	if !bytes.Equal(aad[6:22], clusterID) {
-		t.Errorf("cluster_id mismatch")
-	}
-	if aad[22] != 2 {
-		t.Errorf("num_fields = %d, want 2", aad[22])
-	}
+	require.Equal(t, uint16(DomainShard), gotDomain)
+	require.Equal(t, clusterID, aad[6:22])
+	require.Equal(t, byte(2), aad[22])
 }
 
 func TestBuildAAD_AllDomainsUnique(t *testing.T) {
@@ -50,13 +44,11 @@ func TestBuildAAD_AllDomainsUnique(t *testing.T) {
 		{DomainFSMValue, "fsm_value"},
 	} {
 		if prev, ok := seen[uint16(dom.tag)]; ok {
-			t.Errorf("duplicate domain_tag %#x for %s and %s", uint16(dom.tag), prev, dom.name)
+			require.Failf(t, "duplicate domain tag", "duplicate domain_tag %#x for %s and %s", uint16(dom.tag), prev, dom.name)
 		}
 		seen[uint16(dom.tag)] = dom.name
 		aad := BuildAAD(dom.tag, clusterID)
-		if len(aad) < 4+2+16+1 {
-			t.Errorf("AAD for %s too short: %d bytes", dom.name, len(aad))
-		}
+		require.GreaterOrEqualf(t, len(aad), 4+2+16+1, "AAD for %s too short", dom.name)
 	}
 }
 
@@ -69,23 +61,16 @@ func TestBuildAAD_FieldKinds(t *testing.T) {
 		FieldUint32(0xDEADBEEF),
 		FieldUint64(0x0102030405060708),
 	)
-	if aad[22] != 5 {
-		t.Fatalf("num_fields = %d, want 5", aad[22])
-	}
+	require.Equal(t, byte(5), aad[22])
 	last8 := aad[len(aad)-8:]
 	expected := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
-	if !bytes.Equal(last8, expected) {
-		t.Errorf("uint64 BE encoding wrong: %x", last8)
-	}
+	require.Equal(t, expected, last8)
 }
 
 func TestBuildAAD_RejectClusterIDWrongLen(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("expected panic for cluster_id len != 16")
-		}
-	}()
-	BuildAAD(DomainShard, []byte{0x01})
+	require.Panics(t, func() {
+		BuildAAD(DomainShard, []byte{0x01})
+	})
 }
 
 func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
@@ -96,19 +81,17 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		DomainShard, DomainWAL, DomainSnapshotBody, DomainSnapshotDEK,
 		DomainJWTKey, DomainDEKFSMWrap, DomainKEKRotate, DomainKEKCatchup,
 		DomainNBD, DomainIAMAdmin, DomainCapabilityAssertV1, DomainCASChunk,
-		DomainIAMCredential, DomainFSMValue,
+		DomainIAMCredential, DomainFSMValue, DomainClusterConfigSecret,
 	}
 	seen := make(map[uint16]struct{}, len(domains))
 	for _, d := range domains {
 		if _, dup := seen[uint16(d)]; dup {
-			t.Errorf("duplicate domain_tag %#x", uint16(d))
+			require.Failf(t, "duplicate domain tag", "duplicate domain_tag %#x", uint16(d))
 		}
 		seen[uint16(d)] = struct{}{}
 		_ = BuildAAD(d, clusterID) // exercise BuildAAD with every domain
 	}
-	if len(seen) != 14 {
-		t.Errorf("expected 14 unique domains, got %d", len(seen))
-	}
+	require.Len(t, seen, 15)
 }
 
 func TestBuildAAD_FieldBytesDefensiveCopy(t *testing.T) {
@@ -129,7 +112,5 @@ func TestBuildAAD_FieldBytesDefensiveCopy(t *testing.T) {
 	// post-mutation value.
 	last3 := aad[len(aad)-3:]
 	want := []byte{0x01, 0x02, 0x03}
-	if !bytes.Equal(last3, want) {
-		t.Errorf("FieldBytes did not defensively copy: got %x, want %x", last3, want)
-	}
+	require.Equal(t, want, last3)
 }

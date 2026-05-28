@@ -19,6 +19,7 @@ import (
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // recordingReceiver captures every webhook delivery for later assertion.
@@ -91,17 +92,18 @@ func expectedSignature(secret string, body []byte) string {
 // different between the two sends, so the default DedupWindow does not
 // suppress the second delivery.
 func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
-	key := bytes.Repeat([]byte{0x42}, 32)
-	enc, err := encrypt.NewEncryptor(key)
+	clusterID := bytes.Repeat([]byte{0x42}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x24}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
+	enc := storage.NewDEKKeeperAdapter(keeper, clusterID)
 
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(enc) // required before any patch carrying AlertWebhookSecretWrapped
+	fsm.SetDEKKeeper(keeper) // required before any patch carrying AlertWebhookSecretWrapped
 
 	state := NewAlertsStateWithConfig(
 		fsm.ClusterConfig(),
 		enc,
-		cluster.ClusterConfigAlertSecretAAD,
+		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
 		alerts.Options{DedupWindow: 0, MaxRetries: 0},
 		alerts.DegradedConfig{},
 		"hot-reload-test",
@@ -121,7 +123,11 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 
 	// Phase 1: wire webhook to rcv1 + secret-v1.
 	secret1 := "secret-v1"
-	wrapped1, err := enc.EncryptWithAAD([]byte(secret1), cluster.ClusterConfigAlertSecretAAD)
+	wrapped1, gen1, err := enc.Seal(
+		encrypt.DomainClusterConfigSecret,
+		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
+		[]byte(secret1),
+	)
 	require.NoError(t, err)
 	// ClusterConfig validator requires https:// or http://localhost; httptest
 	// emits http://127.0.0.1:PORT, so rewrite the host to satisfy the gate.
@@ -129,6 +135,7 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 	require.NoError(t, fsm.ApplyClusterConfigPatchForTest(cluster.ClusterConfigPatch{
 		AlertWebhook:              &url1,
 		AlertWebhookSecretWrapped: wrapped1,
+		AlertWebhookSecretDEKGen:  gen1,
 	}))
 
 	a1 := alerts.Alert{Type: "test", Severity: alerts.SeverityWarning, Resource: "r1", Message: "first alert", Time: time.Now()}
@@ -139,12 +146,17 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 
 	// Phase 2: rotate to rcv2 + secret-v2 — same FSM, different patch.
 	secret2 := "secret-v2-rotated"
-	wrapped2, err := enc.EncryptWithAAD([]byte(secret2), cluster.ClusterConfigAlertSecretAAD)
+	wrapped2, gen2, err := enc.Seal(
+		encrypt.DomainClusterConfigSecret,
+		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
+		[]byte(secret2),
+	)
 	require.NoError(t, err)
 	url2 := strings.Replace(rcv2.srv.URL, "127.0.0.1", "localhost", 1)
 	require.NoError(t, fsm.ApplyClusterConfigPatchForTest(cluster.ClusterConfigPatch{
 		AlertWebhook:              &url2,
 		AlertWebhookSecretWrapped: wrapped2,
+		AlertWebhookSecretDEKGen:  gen2,
 	}))
 
 	a2 := alerts.Alert{Type: "test", Severity: alerts.SeverityWarning, Resource: "r2", Message: "second alert", Time: time.Now()}

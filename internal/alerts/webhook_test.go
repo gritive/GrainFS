@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 // receivedRequest captures one inbound webhook delivery for assertions.
@@ -234,6 +235,7 @@ type fakeAlertCfg struct {
 	mu      sync.Mutex
 	url     string
 	wrapped []byte
+	dekGen  uint32
 }
 
 func (f *fakeAlertCfg) AlertWebhook() string {
@@ -248,6 +250,12 @@ func (f *fakeAlertCfg) AlertWebhookSecretWrapped() []byte {
 	return f.wrapped
 }
 
+func (f *fakeAlertCfg) AlertWebhookSecretDEKGen() uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dekGen
+}
+
 func (f *fakeAlertCfg) setURL(s string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -256,12 +264,12 @@ func (f *fakeAlertCfg) setURL(s string) {
 
 // fakeDecrypter returns plaintext unchanged so tests can pin a known secret
 // without spinning up a real Encryptor.
-type fakeDecrypter struct {
+type fakeOpener struct {
 	plaintext []byte
 	err       error
 }
 
-func (f *fakeDecrypter) DecryptWithAAD(_, _ []byte) ([]byte, error) {
+func (f *fakeOpener) Open(_ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -297,14 +305,14 @@ func TestWebhook_HotReload_URL(t *testing.T) {
 }
 
 // TestWebhook_HotReload_Secret locks in that the live wrapped secret is read
-// (and unwrapped via the SecretDecrypter) on each Send so a secret rotation
+// (and opened via the SecretOpener) on each Send so a secret rotation
 // lands without a restart.
 func TestWebhook_HotReload_Secret(t *testing.T) {
 	srv, captured, mu := stubReceiver(t, http.StatusOK)
 	cfg := &fakeAlertCfg{url: srv.URL}
-	dec := &fakeDecrypter{plaintext: []byte("rotated-secret")}
+	dec := &fakeOpener{plaintext: []byte("rotated-secret")}
 
-	d := alerts.NewDispatcherWithConfig(cfg, dec, []byte("aad"), alerts.Options{}, nil, "test")
+	d := alerts.NewDispatcherWithConfig(cfg, dec, nil, alerts.Options{}, nil, "test")
 	startDispatcher(t, d)
 
 	// No wrapped secret yet → no signature header (matches static empty-secret).

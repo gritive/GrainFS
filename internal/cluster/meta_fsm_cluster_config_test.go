@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -20,6 +21,13 @@ func buildClusterConfigPatchCmd(t *testing.T, p ClusterConfigPatch) []byte {
 	data, err := EncodeClusterConfigPatchCmd(p)
 	require.NoError(t, err)
 	return data
+}
+
+func newClusterConfigDEKTestFSM(t *testing.T) *MetaFSM {
+	t.Helper()
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xab}, encrypt.KEKSize), dekTestClusterID())
+	require.NoError(t, err)
+	return newTestMetaFSMWithDEKKeeper(t, keeper)
 }
 
 func TestMetaFSM_Apply_ClusterConfigPatch_SetsValueAndBumpsRev(t *testing.T) {
@@ -136,8 +144,7 @@ func TestMetaFSM_Apply_ClusterConfigPatch_EmitsAuditLog(t *testing.T) {
 // carries AlertWebhookSecretWrapped, the audit log emits "<redacted>" instead
 // of the raw bytes.
 func TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret(t *testing.T) {
-	f := NewMetaFSM()
-	f.SetEncryptor(newIAMRawEncryptor(t)) // gate for AlertWebhookSecretWrapped
+	f := newClusterConfigDEKTestFSM(t)
 
 	var buf bytes.Buffer
 	prev := log.Logger
@@ -156,13 +163,12 @@ func TestMetaFSM_Apply_ClusterConfigPatch_RedactsSecret(t *testing.T) {
 }
 
 func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
-	src := NewMetaFSM()
-	wireTestKEK(t, src)
-	src.SetEncryptor(newIAMRawEncryptor(t)) // gate for AlertWebhookSecretWrapped
+	src := newClusterConfigDEKTestFSM(t)
 	require.NoError(t, src.applyCmd(buildClusterConfigPatchCmd(t, ClusterConfigPatch{
 		BalancerImbalanceTriggerPct: ptrFloat(33.0),
 		AlertWebhook:                ptrString("https://hooks.example/sr"),
 		AlertWebhookSecretWrapped:   []byte{0xde, 0xad, 0xbe, 0xef},
+		AlertWebhookSecretDEKGen:    7,
 		DiskCriticalFrac:            ptrFloat(0.85),
 	})))
 
@@ -184,6 +190,7 @@ func TestMetaFSM_Snapshot_Restore_ClusterConfig(t *testing.T) {
 	require.InDelta(t, 33.0, cfg.BalancerImbalanceTriggerPct(), 0.0001)
 	require.Equal(t, "https://hooks.example/sr", cfg.AlertWebhook())
 	require.Equal(t, []byte{0xde, 0xad, 0xbe, 0xef}, cfg.AlertWebhookSecretWrapped())
+	require.Equal(t, uint32(7), cfg.AlertWebhookSecretDEKGen())
 	require.InDelta(t, 0.85, cfg.DiskCriticalFrac(), 0.0001)
 	// Unchanged values still default
 	require.InDelta(t, DefaultClusterDiskWarnFrac, cfg.DiskWarnFrac(), 0.0001)

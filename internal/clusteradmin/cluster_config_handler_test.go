@@ -13,6 +13,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // fakeProposer simulates leader-side raft by applying the encoded patch
@@ -27,12 +28,13 @@ func (p *fakeProposer) ProposeClusterConfigPatch(patch cluster.ClusterConfigPatc
 	return p.fsm.ApplyClusterConfigPatchForTest(patch)
 }
 
-func newTestEncryptor(t *testing.T) *encrypt.Encryptor {
+func newTestDataEncryptor(t *testing.T, fsm *cluster.MetaFSM) storage.DataEncryptor {
 	t.Helper()
-	key := bytes.Repeat([]byte{0xab}, 32)
-	enc, err := encrypt.NewEncryptor(key)
+	clusterID := bytes.Repeat([]byte{0xcd}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xab}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
-	return enc
+	fsm.SetDEKKeeper(keeper)
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 func TestClusterConfigHandler_Get_Empty(t *testing.T) {
@@ -78,9 +80,8 @@ func ptrFloat(v float64) *float64 { return &v }
 
 func TestClusterConfigHandler_Patch_SetsTrigger(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(newTestEncryptor(t))
 	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	h := NewClusterConfigHandler(fsm, prop, nil)
 	body := `{"balancer-imbalance-trigger-pct": 27.5}`
 	req := httptest.NewRequest("PATCH", "/v1/cluster/config", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -93,9 +94,8 @@ func TestClusterConfigHandler_Patch_SetsTrigger(t *testing.T) {
 
 func TestClusterConfigHandler_Patch_ValidationError(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(newTestEncryptor(t))
 	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	h := NewClusterConfigHandler(fsm, prop, nil)
 	body := `{"balancer-imbalance-trigger-pct": 200}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/cluster/config", strings.NewReader(body)))
@@ -105,13 +105,12 @@ func TestClusterConfigHandler_Patch_ValidationError(t *testing.T) {
 
 func TestClusterConfigHandler_Patch_CAS_Mismatch(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(newTestEncryptor(t))
 	require.NoError(t, fsm.ApplyClusterConfigPatchForTest(cluster.ClusterConfigPatch{
 		BalancerImbalanceTriggerPct: ptrFloat(25.0),
 	}))
 	// fsm rev == 1
 	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	h := NewClusterConfigHandler(fsm, prop, nil)
 	req := httptest.NewRequest("PATCH", "/v1/cluster/config", strings.NewReader(`{"balancer-imbalance-trigger-pct":30}`))
 	req.Header.Set("If-Match-Rev", "7")
 	rec := httptest.NewRecorder()
@@ -130,11 +129,32 @@ func TestClusterConfigHandler_Patch_SecretNoEncryption_Forbidden(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "encryption")
 }
 
+func TestClusterConfigHandler_Patch_SecretUsesDEK(t *testing.T) {
+	fsm := cluster.NewMetaFSM()
+	de := newTestDataEncryptor(t, fsm)
+	prop := &fakeProposer{fsm: fsm}
+	h := NewClusterConfigHandler(fsm, prop, de)
+	body := `{"alert-webhook":"https://hooks.example/x","alert-webhook-secret":"shh"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/cluster/config", strings.NewReader(body)))
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	require.NotEmpty(t, fsm.ClusterConfig().AlertWebhookSecretWrapped())
+	require.Equal(t, uint32(0), fsm.ClusterConfig().AlertWebhookSecretDEKGen())
+
+	plain, err := de.Open(
+		encrypt.DomainClusterConfigSecret,
+		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
+		fsm.ClusterConfig().AlertWebhookSecretDEKGen(),
+		fsm.ClusterConfig().AlertWebhookSecretWrapped(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("shh"), plain)
+}
+
 func TestClusterConfigHandler_SnapshotKeys(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(newTestEncryptor(t))
 	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	h := NewClusterConfigHandler(fsm, prop, nil)
 
 	// PATCH: set both snapshot keys.
 	body := `{"snapshot-interval":"15m","snapshot-retain":5}`
@@ -166,9 +186,8 @@ func TestClusterConfigHandler_SnapshotKeys(t *testing.T) {
 
 func TestClusterConfigHandler_SnapshotKeys_InvalidDuration(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(newTestEncryptor(t))
 	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	h := NewClusterConfigHandler(fsm, prop, nil)
 	body := `{"snapshot-interval":"not-a-duration"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v1/cluster/config", strings.NewReader(body)))
@@ -178,12 +197,11 @@ func TestClusterConfigHandler_SnapshotKeys_InvalidDuration(t *testing.T) {
 
 func TestClusterConfigHandler_Patch_Reset(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
-	fsm.SetEncryptor(newTestEncryptor(t))
 	require.NoError(t, fsm.ApplyClusterConfigPatchForTest(cluster.ClusterConfigPatch{
 		BalancerImbalanceTriggerPct: ptrFloat(35.0),
 	}))
 	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	h := NewClusterConfigHandler(fsm, prop, nil)
 	body := `{"reset_keys":["balancer-imbalance-trigger-pct"]}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/cluster/config", strings.NewReader(body)))
