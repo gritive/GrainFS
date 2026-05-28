@@ -46,6 +46,9 @@ Work these in order. Do not run them in parallel.
      DEK/KEK-safe bootstrap envelope.
    - [ ] D-cut: move `node.key.enc` away from static `encryption.key` without
      making KEK prune able to brick restarted nodes.
+     Design path: `docs/superpowers/specs/2026-05-28-at-rest-dcut-bootstrap-envelope-design.md`
+     splits this into bootstrap-envelope, KEK-gen node identity seal,
+     prune-evidence gate, and final static-key removal slices.
    - [x] D-meta: migrate cluster-config alert webhook secret wrapping from static
      `EncryptWithAAD` to a DEK seam with persisted `dek_gen`. SHIPPED in current
      branch: new PATCH writes use `DomainClusterConfigSecret`; existing static
