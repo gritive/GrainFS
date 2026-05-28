@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.397.0] - 2026-05-28
+
+### Changed
+
+- docs: marked `internal/storage/LocalBackend` (and `local.go`/`multipart.go`/`append.go`/`encrypted_badger.go`) as test-fixture-only per ADR-0015. No runtime change; production storage path remains `ClusterCoordinator → DistributedBackend`.
+
 ## [0.0.396.0] - 2026-05-28
 
 ### Fixed

@@ -1,3 +1,14 @@
+// TEST-FIXTURE ONLY — not part of the production storage path.
+//
+// LocalBackend has zero production callers (audited 2026-05-28). It is a unit-test
+// fixture used by 60+ external *_test.go files and many in-package tests. The
+// production storage path is ClusterCoordinator → DistributedBackend (see
+// boot_phases_storage_runtime.go). Do not add a non-test caller for any symbol
+// declared in this file or in its companions (local.go, multipart.go, append.go,
+// encrypted_badger.go) without revisiting ADR-0015.
+//
+// See: docs/adr/0015-localbackend-test-fixture-only.md
+
 package storage
 
 import (

@@ -15,32 +15,13 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 Work these in order. Do not run them in parallel.
 
-- [ ] **DEK data-sealing cipher → XAES-256-GCM (ACTIVE — feat/dek-data-xaes-cipher)**
-   - Trust risk: Phase D (#568/#571) activated gen-aware at-rest encryption on the
-     data plane (objects/EC/data-WAL via `DEKKeeperAdapter` when a DEKKeeper is
-     present — the default). But the DEK's data-sealing AEAD is still **AES-256-GCM
-     with a random 96-bit nonce** (`dek.go:672` `newAEAD` → `cipher.NewGCM`), so
-     routing bulk data through it **re-introduced the 2^32 nonce-collision cliff**
-     that #566 removed for the static key. High-volume clusters drift toward silent
-     confidentiality/integrity loss with no remediation.
-   - Fix: swap `newAEAD` to `xaes256gcm.NewWithManualNonces` (mirror of #566;
-     `go.mod` already has `filippo.io/xaes256gcm`; KEK→DEK wrap stays AES-GCM).
-     Nonce auto-widens to 24B via `aead.NonceSize()`. Bump the on-disk format
-     guard so a pre-XAES-DEK data dir **loud-fails on boot** (greenfield, no
-     in-place re-encrypt — no production clusters yet).
-   - Verification: round-trip + nonce-width tests; greenfield loud-fail regression;
-     KEK-rotation-across-XAES-DEK (open data sealed under old/new gen after rotate);
-     dual single+cluster e2e. See [[project-grains-at-rest-two-key-systems]].
-
 - [ ] **At-rest unification remainder — static→DEK (Phase D track, re-grounded 2026-05-28)**
    - Phase D migrated the EC shard data plane onto the DEK; these remain on the
      static `encrypt.Encryptor` and complete the single KEK→DEK hierarchy:
-     **R1 — Move DEK-ready gate + wire boot data-plane sealer to DEK.** Move
-     `WaitDEKReady` (`run.go:224`) before `bootShardService`/datawal open
-     (`run.go:156`, `datawal/wal.go:57`) + boot-ordering regression (cluster
-     join/restart); swap `boot_phases_storage_runtime.go:44` +
-     `boot_phases_forwarders.go:49` data-WAL sealer `NewEncryptorAdapter` →
-     `NewDEKKeeperAdapter`. Bench gate. (Original Slice 3 only partially landed.)
+     **R1 — Move DEK-ready gate + wire boot data-plane sealer to DEK.**
+     **SHIPPED v0.0.393.0 (PR #596)** — DEK-sealed logical-WAL/packblob/PUT-pipeline
+     under the gen-aware DEK; `encryption.rotate-dek` gated; at-rest format 3→4.
+     Data-WAL stayed on the static encryptor (deferred to R-FSM below).
      **R2 — IAM credentials static→DEK.** Migrate `WrapSecret`/`UnwrapSecret`
      (`iam/encrypt.go`) + `iam/fsm.go` Applier off `*encrypt.Encryptor` onto the
      `DataEncryptor` seam, gen in raft payload + snapshot. Cipher is ALREADY XAES
@@ -54,14 +35,6 @@ Work these in order. Do not run them in parallel.
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
      See [[project-grains-at-rest-two-key-systems]].
-
-- [ ] **Remove dead `encrypted_badger.go` / `storage.LocalBackend`**
-   - `internal/storage/local.go` + `encrypted_badger.go` have **no production
-     caller** (constructors + tests only — the live serve path uses cluster
-     execution + raft meta-FSM; single = 1-node raft). NOT the live
-     metadata-at-rest path; the original at-rest "Slice 4" wrongly targeted it.
-   - Boundary: surgical dead-code removal once confirmed no embedding consumer
-     depends on it; not part of the static→DEK unification.
 
 - [ ] **Raft log store at-rest encryption (object-metadata plaintext gap) — design**
    - Trust risk: live object metadata (bucket/key/size/etag/placement) persists as
