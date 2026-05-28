@@ -8,12 +8,7 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-func TestBootstrapSecretProviderReturnsAllSecrets(t *testing.T) {
-	encKey := make([]byte, 32)
-	for i := range encKey {
-		encKey[i] = byte(0xA0 + i)
-	}
-
+func TestBootstrapSecretProviderReturnsBootstrapSecretsWithoutStaticKey(t *testing.T) {
 	kek0 := make([]byte, encrypt.KEKSize)
 	kek1 := make([]byte, encrypt.KEKSize)
 	for i := range kek0 {
@@ -26,16 +21,14 @@ func TestBootstrapSecretProviderReturnsAllSecrets(t *testing.T) {
 	require.NoError(t, store.Add(1, kek1))
 
 	state := &bootState{
-		cfg:          Config{RawEncryptionKey: encKey},
 		transportPSK: "cluster-psk",
 		kekStore:     store,
 	}
 
 	p := newBootstrapSecretProvider(state)
-	gotEnc, gotGens, gotPSK, err := p.BootstrapSecrets()
+	gotGens, gotPSK, err := p.BootstrapSecrets()
 	require.NoError(t, err)
 
-	require.Equal(t, encKey, gotEnc)
 	require.Equal(t, []byte("cluster-psk"), gotPSK)
 
 	require.Len(t, gotGens, 2)
@@ -47,6 +40,6 @@ func TestBootstrapSecretProviderReturnsAllSecrets(t *testing.T) {
 
 func TestBootstrapSecretProviderErrorsWithoutKEKStore(t *testing.T) {
 	p := newBootstrapSecretProvider(&bootState{cfg: Config{}})
-	_, _, _, err := p.BootstrapSecrets()
+	_, _, err := p.BootstrapSecrets()
 	require.Error(t, err)
 }

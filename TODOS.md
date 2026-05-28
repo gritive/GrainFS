@@ -49,6 +49,10 @@ Work these in order. Do not run them in parallel.
      Design path: `docs/superpowers/specs/2026-05-28-at-rest-dcut-bootstrap-envelope-design.md`
      splits this into bootstrap-envelope, KEK-gen node identity seal,
      prune-evidence gate, and final static-key removal slices.
+     Slice A shipped in current branch: new invite bootstrap payloads no longer
+     encode `BootstrapSecretsPayload.encryption_key`; legacy decode remains for
+     pre-format-7 payloads; post-drop invite joiners now load the KEK-sealed
+     node key from staged disk KEKs before QUIC Listen.
    - [x] D-meta: migrate cluster-config alert webhook secret wrapping from static
      `EncryptWithAAD` to a DEK seam with persisted `dek_gen`. SHIPPED in current
      branch: new PATCH writes use `DomainClusterConfigSecret`; existing static

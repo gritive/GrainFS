@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -83,7 +87,7 @@ func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInv
 	if state == nil || quicTransport == nil || state.inviteJoin == nil || !state.inviteJoin.clusterKeyDropped {
 		return nil
 	}
-	cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey)
+	cert, spki, err := loadPostDropInviteNodeKey(state)
 	if err != nil {
 		return fmt.Errorf("post-drop invite-join: load per-node cert: %w", err)
 	}
@@ -93,6 +97,31 @@ func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInv
 	state.perNodeSPKI = spki
 	log.Info().Msg("post-drop invite-join: per-node cert pinned before Listen")
 	return nil
+}
+
+func loadPostDropInviteNodeKey(state *bootState) (tls.Certificate, [32]byte, error) {
+	if len(state.cfg.RawEncryptionKey) == 32 {
+		if cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey); err == nil {
+			return cert, spki, nil
+		}
+	}
+	kek, err := loadInviteNodeKeyKEKFromDisk(state.cfg.DataDir, state.inviteJoin.nodeKeyKEKGen)
+	if err != nil {
+		return tls.Certificate{}, [32]byte{}, err
+	}
+	return transport.LoadNodeKey(state.cfg.DataDir, kek)
+}
+
+func loadInviteNodeKeyKEKFromDisk(dataDir string, gen uint32) ([]byte, error) {
+	path := filepath.Join(nodeconfig.New(dataDir).KEKDir(), fmt.Sprintf("%d.key", gen))
+	kek, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read KEK gen %d: %w", gen, err)
+	}
+	if len(kek) != encrypt.KEKSize {
+		return nil, fmt.Errorf("KEK gen %d len = %d, want %d", gen, len(kek), encrypt.KEKSize)
+	}
+	return kek, nil
 }
 
 // bootPeerConnections opens a QUIC connection to each peer. Connection
