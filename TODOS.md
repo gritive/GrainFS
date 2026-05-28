@@ -265,23 +265,20 @@ Work these in order. Do not run them in parallel.
   / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
   + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec/datawal call sites.
   Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
-- [ ] **KEK-envelope D-wal: activate generation-aware datawal encryption**. Deferred from
-  D-wal-data (v0.0.370.0). That slice migrated `internal/storage/datawal` to the `RecordSealer`
-  seam but left it on `EncryptorAdapter` (gen=0) with a dedicated zero-sentinel clusterID.
-  To flip to `DEKKeeperAdapter` + the real 16-byte clusterID (mirroring D-seg-ec-activate):
-  inject the keeper-backed adapter into the WAL's **writer AND reader together** (a clusterID
-  divergence breaks all replay via AEAD mismatch); set the header `dek_gen` to the keeper's
-  active generation **at file creation** via a probe-seal — `Seal(DomainWAL, fields, nil)` at
-  segment init to capture the active gen, write it to the header, discard the probe ciphertext
-  (cheaper than widening the seam with `ActiveGen()`). The per-file gen-pin machinery already
-  enforces consistency once the header gen is correct. Same activation applies to D-wal-legacy.
-  **Legacy-WAL caveat (codex, D-wal-legacy code gate):** `internal/storage/wal` writes via the
-  async `AppendAsync` path — `lastSeq` advances at submit time and the background goroutine logs
-  and DROPS on seal error. Under a real gen>0 DEKKeeper, a header-gen-vs-seal-gen mismatch would
-  silently lose PITR entries (worse than datawal's synchronous error return). The probe-seal-
-  before-header-write design prevents the mismatch by construction (header gen == actual seal
-  gen → never mismatches); the activation slice MUST use it, not write header gen=0 and hope
-  later writes match. (Unreachable in the dormant slice: `EncryptorAdapter.Seal` returns gen 0.)
+- [ ] **KEK-envelope D-wal: live DEK rotation segment rollover [P1]**.
+  D-wal-data now opens production writer/recovery paths with `DEKKeeperAdapter`
+  and new encrypted `internal/storage/datawal` segments probe-seal before header
+  write so `dek_gen` records the actual active generation. Rotation is still
+  deferred because a currently-open segment pins one generation in its header
+  while `DEKKeeperAdapter.Seal` always uses the live active generation. Before
+  enabling `encryption.rotate-dek`, add a rotation boundary: either roll/close
+  active data WAL segments on DEK rotation or add a seal-under-specific-generation
+  API so appends keep using the header-pinned generation until rollover.
+  **Legacy-WAL caveat (codex, D-wal-legacy code gate):** `internal/storage/wal`
+  writes via the async `AppendAsync` path — `lastSeq` advances at submit time and
+  the background goroutine logs and DROPS on seal error. Apply the same
+  probe-before-header rule plus a non-dropping rotation boundary there before
+  moving legacy PITR WAL to a real gen>0 DEK sealer.
 - [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. The legacy↔datawal half is
   done: D-wal-legacy (storage/wal) uses namespace `"pitr-wal"` while D-wal-data (datawal) uses
   `"datawal"`, so a frame from one WAL family will not AEAD-verify in the other. What remains is

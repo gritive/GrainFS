@@ -1154,8 +1154,11 @@ compromise-recovery, not a hard limit.
 **Data-DEK rotation is deferred in this release.** The `encryption.rotate-dek`
 trigger is intentionally rejected (`grainfs config set encryption.rotate-dek now`
 returns a "deferred — not supported in this release" error) — the append-only
-at-rest writers pin the DEK generation at open, and per-segment generation framing
-for every lane lands in a later release before rotation is re-enabled. Because
+at-rest writers pin the DEK generation at open. Data WAL segment creation now
+persists the active generation in its encrypted segment header, but live rotation
+still needs a rollover or seal-under-pinned-generation boundary, and every
+ciphertext-bearing lane must have equivalent generation framing before rotation is
+re-enabled. Because
 XAES removed the nonce-exhaustion cliff, the seal count below is **observability
 only** (cumulative-usage / compromise-recovery signal), not an action threshold.
 **KEK rotation** (`cluster rotate-key`, which re-wraps the existing DEKs without
