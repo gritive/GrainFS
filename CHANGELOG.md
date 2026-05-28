@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.413.1] - 2026-05-28
+
+### Added
+
+- Added the raft log store at-rest encryption design and implementation plan.
+  The plan closes the remaining plaintext raft-command copy of object metadata
+  by using Badger native encryption with a node-local raft-store master key
+  sealed under the cluster KEK store.
+
+### Changed
+
+- Updated `TODOS.md` to mark the raft log encryption design slice complete and
+  track the implementation as the next explicit follow-up.
+
 ## [0.0.413.0] - 2026-05-28
 
 ### Added
