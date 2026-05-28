@@ -358,11 +358,13 @@ Work these in order. Do not run them in parallel.
   reopen when their telemetry triggers fire.
 - [ ] **Incident store scope index / `ScanObjects(bucket, keyPrefix)`**: reopen
   when measured margins fail or a concrete caller needs prefix scope.
-- [ ] **Protocol credential real-client smoke coverage**: protocol credential
-  data-plane enforcement is wired for S3, Iceberg, NBD, NFS, and 9P server
-  paths. Follow up by adding real client smoke coverage for S3/Iceberg
-  protocol credentials and NFS/9P credential mounts before promoting broader
-  compatibility claims.
+- [ ] **Protocol credential remaining real-client smoke coverage**: protocol
+  credential data-plane enforcement is wired for S3, Iceberg, NBD, NFS, and 9P
+  server paths. S3 now has MinIO `mc` single-node and cluster real-client smoke
+  coverage; Iceberg now has DuckDB REST Catalog single-node real-client smoke
+  coverage. Follow up by adding Iceberg cluster real-client smoke once the
+  static MR cluster fixture is stable, plus NBD/qemu-libnbd and NFS/9P
+  credential mount smoke coverage before promoting broader compatibility claims.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

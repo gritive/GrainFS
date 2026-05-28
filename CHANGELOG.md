@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.404.0] - 2026-05-28
+
+### Added
+
+- Added real-client protocol credential smoke coverage for S3 and Iceberg:
+  MinIO `mc` now exercises bucket-scoped S3 protocol credentials on
+  single-node and Cluster4Node fixtures, and DuckDB now attaches to the
+  Iceberg REST catalog with a catalog-scoped SigV4 protocol credential on
+  single-node.
+
+### Changed
+
+- S3 protocol credential SigV4 compatibility is now marked supported, while
+  Iceberg protocol credential compatibility documents its new single-node
+  DuckDB REST Catalog coverage and the remaining cluster follow-up.
+- Updated protocol credential follow-up tracking to leave only Iceberg cluster,
+  NBD/qemu-libnbd, and NFS/9P mount smoke coverage.
+
+### Fixed
+
+- IAM policy parsing now accepts exact protocol credential resources such as
+  `protocol-credential/s3/bucket/<name>` and
+  `protocol-credential/iceberg/catalog/<name>`, so scoped
+  `grainfs:CredentialCreate` / `grainfs:CredentialRevoke` policies can be used
+  instead of wildcard grants.
+- Split server boot routing so the ClusterCoordinator is wired only after the
+  distributed backend exists, while the QUIC StreamRouter can safely accept
+  early meta/join handlers during boot.
+
 ## [0.0.403.0] - 2026-05-28
 
 ### Added
