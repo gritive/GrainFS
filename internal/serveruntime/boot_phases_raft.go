@@ -360,9 +360,13 @@ func bootRotationAndAdminAPI(state *bootState) error {
 	// Build the AdminAPI wired against the meta-FSM proposer. Only when IAM
 	// dependencies are wired. First-SA bootstrap is performed via admin UDS
 	// POST /v1/iam/sa (see docs/operators/runbook.md).
-	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil && state.cfg.Encryptor != nil {
+	//
+	// R2: NewAdminAPI is constructed with a nil DataEncryptor; the live
+	// DEKKeeperAdapter is wired by wireIAMEncryptor(state) below once the
+	// DEK keeper is at its final value (after any restore-time reassignment).
+	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil {
 		state.iamProposer = &iam.MetaProposer{Propose: state.metaRaft.Propose}
-		state.iamAdminAPI = iam.NewAdminAPI(state.cfg.IAMStore, state.iamProposer, state.cfg.Encryptor)
+		state.iamAdminAPI = iam.NewAdminAPI(state.cfg.IAMStore, state.iamProposer, nil)
 		// F#26-tls-posture: gate the first SA create on local TLS posture so
 		// the admin UDS rejects with a remediation hint instead of letting
 		// the FSM-level anon flip silently fail. cfgStore is populated by
@@ -373,6 +377,13 @@ func bootRotationAndAdminAPI(state *bootState) error {
 			)
 		}
 	}
+
+	// R2: install the live DEKKeeperAdapter into BOTH the IAM applier and
+	// admin API now that the DEK keeper is wired and the AdminAPI exists.
+	// Idempotent — restore-branch may reassign state.dekKeeper later (see
+	// dek_keeper_restore.go), which fires wireIAMEncryptor again with the
+	// restored keeper.
+	wireIAMEncryptor(state)
 	return nil
 }
 

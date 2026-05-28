@@ -35,7 +35,7 @@ import (
 //
 // Outputs: state.backend, state.recoveryReadOnly, state.diskCollector.
 //
-// Phase ordering: must run AFTER bootWALAndForwarders and BEFORE any code that
+// Phase ordering: must run AFTER bootWALAndForwardersPart1 and BEFORE any code that
 // reads state.backend (HTTP server, scrubber sources, node services).
 func bootBackendWrap(ctx context.Context, state *bootState) error {
 	cfg := state.cfg

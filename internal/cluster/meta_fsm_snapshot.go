@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
@@ -20,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // Snapshot serializes current state as FlatBuffers MetaStateSnapshot.
@@ -633,42 +635,13 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// Decode all trailers into local variables BEFORE touching any f.* field.
 	// If any decode fails, Restore returns an error with f.* completely untouched.
 
-	// IAM: validate by decoding into a temporary store; commit via RestoreFrom later.
-	// (F17: iamEnc is no longer needed at commit time — RestoreFrom swaps the state
-	// pointer atomically without re-parsing the snapshot bytes.)
-	var iamTempStore *iam.Store
-	if len(trailers.iamData) > 0 {
-		if f.iamStore == nil || f.iamApplier == nil {
-			log.Warn().Int("iam_len", len(trailers.iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
-		} else {
-			enc := f.iamApplier.Encryptor()
-			if enc == nil {
-				log.Warn().Msg("meta_fsm: Restore: IAM applier has no encryptor; skipping IAM restore")
-			} else {
-				tmp := iam.NewStore()
-				if err := iam.ReadSnapshot(bytes.NewReader(trailers.iamData), tmp, enc); err != nil {
-					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
-				}
-				iamTempStore = tmp
-			}
-		}
-	}
-
-	// GCFG: decode config values.
-	var newCfgValues map[string]string
-	if len(trailers.cfgData) > 0 {
-		if f.cfgStore == nil {
-			log.Warn().Int("cfg_len", len(trailers.cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
-		} else {
-			values, err := decodeMetaConfigSnapshot(trailers.cfgData)
-			if err != nil {
-				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
-			}
-			newCfgValues = values
-		}
-	}
-
-	// DKVS: decode DEK version snapshot.
+	// DKVS: decode DEK version snapshot FIRST (R2 two-pass decode). The IAM
+	// trailer below is sealed under the DEK post-R2, but the live DEKKeeper
+	// is not wired until AFTER Restore returns (boot_phases_raft.go). We
+	// build a transient read-only DataEncryptor from the DEK versions just
+	// decoded, then use it to decrypt the IAM trailer. Codex P0: gate on
+	// hasDEKData, NOT newDEKActive>0 — gen 0 is the legitimate
+	// genesis-bootstrap active gen.
 	var (
 		newDEKVersions      map[uint32][]byte
 		newDEKActive        uint32
@@ -686,6 +659,55 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newDEKRefs = refs
 		newActiveKEKVersion = activeKEK
 		hasDEKData = true
+	}
+
+	// IAM: validate by decoding into a temporary store; commit via RestoreFrom later.
+	// (F17: iamEnc is no longer needed at commit time — RestoreFrom swaps the state
+	// pointer atomically without re-parsing the snapshot bytes.)
+	//
+	// R2 two-pass decode: when there is IAM data to decrypt, build a transient
+	// read-only DataEncryptor from the DEK versions just decoded above. The
+	// transient is constructed lazily here (not eagerly above) so a snapshot
+	// with DEK metadata but no IAM payload doesn't force the destination FSM
+	// to know the source's activeKEK version (regression: that would break
+	// snapshots taken on a cluster mid-KEK-rotation if the destination only
+	// has the older KEK wired).
+	var iamTempStore *iam.Store
+	if len(trailers.iamData) > 0 {
+		if f.iamStore == nil || f.iamApplier == nil {
+			log.Warn().Int("iam_len", len(trailers.iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
+		} else if !hasDEKData {
+			// IAM trailer present but no DEK trailer — corrupt snapshot.
+			// Format guard refuses pre-R2 dirs at boot, so this combination
+			// should be unreachable in honest operation. Hard-fail rather
+			// than warn-skip (which would silently lose IAM state).
+			return fmt.Errorf("meta_fsm: Restore: IAM trailer present but DEK trailer missing — corrupt snapshot")
+		} else {
+			transient, err := encrypt.NewTransientReadOnlyDEK(f.clusterID[:], newDEKVersions, newDEKActive, newActiveKEKVersion, f.KEKStore())
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: build transient read-only DEK: %w", err)
+			}
+			iamDecodeEnc := storage.NewTransientDataEncryptor(transient, f.clusterID[:])
+			tmp := iam.NewStore()
+			if err := iam.ReadSnapshot(bytes.NewReader(trailers.iamData), tmp, iamDecodeEnc); err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
+			}
+			iamTempStore = tmp
+		}
+	}
+
+	// GCFG: decode config values.
+	var newCfgValues map[string]string
+	if len(trailers.cfgData) > 0 {
+		if f.cfgStore == nil {
+			log.Warn().Int("cfg_len", len(trailers.cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
+		} else {
+			values, err := decodeMetaConfigSnapshot(trailers.cfgData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
+			}
+			newCfgValues = values
+		}
 	}
 
 	// IPST: decode IAM policy stores snapshot (§2 + §A stores).

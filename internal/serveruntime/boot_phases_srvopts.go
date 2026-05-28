@@ -175,6 +175,12 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithProxyTrust(state.proxyTrust))
 	}
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
+	if ensureProtocolCredentialStore(state) != nil {
+		srvOpts = append(srvOpts, server.WithProtocolCredentialAuth(
+			state.protocolCredentialStore,
+			protocolCredentialEnvelopeFromState(state),
+		))
+	}
 	// T33: wire the policy authorizer so Layer 1 (iamCheck) evaluates
 	// policy.Evaluate. Both iamPolicyStores and cfgStore are guaranteed non-nil
 	// by the fail-fast guards at the top of this function.

@@ -22,12 +22,16 @@ Work these in order. Do not run them in parallel.
      **SHIPPED v0.0.393.0 (PR #596)** — DEK-sealed logical-WAL/packblob/PUT-pipeline
      under the gen-aware DEK; `encryption.rotate-dek` gated; at-rest format 3→4.
      Data-WAL stayed on the static encryptor (deferred to R-FSM below).
-     **R2 — IAM credentials static→DEK.** Migrate `WrapSecret`/`UnwrapSecret`
-     (`iam/encrypt.go`) + `iam/fsm.go` Applier off `*encrypt.Encryptor` onto the
-     `DataEncryptor` seam, gen in raft payload + snapshot. Cipher is ALREADY XAES
-     (key-migration, not a cipher swap); fix stale `// AES-256-GCM` comments at
-     `iam/types.go:54/73/80`. Preserve in-memory plaintext cache. Cluster
-     cache-invalidation e2e. Depends on R1.
+     **R2 — IAM credentials static→DEK.** SHIPPED v0.0.401.0 (this PR). IAM
+     SA secret_key + BucketUpstream secret_key migrated onto the `DataEncryptor`
+     seam under a new `DomainIAMCredential` AAD that binds (sa_id, access_key).
+     Gen threaded through raft payload + snapshot. Two-pass decode in
+     `MetaFSM.Restore` (TransientReadOnlyDEK) so DEK-sealed credentials
+     decrypt before the live keeper is wired. Format version 4→5. Stale
+     `// AES-256-GCM` comments fixed. In-memory plaintext cache preserved
+     (sigv4 verify locked at ≤60 alloc/op). 3-node cluster cache-invalidation
+     e2e deferred (no 3-node IAM harness yet); single-node restart e2e
+     covers the snapshot/restore path end-to-end.
      **R3 — Retire static key.** After every `cfg.Encryptor` consumer
      (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
      replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,
@@ -356,18 +360,11 @@ Work these in order. Do not run them in parallel.
   reopen when their telemetry triggers fire.
 - [ ] **Incident store scope index / `ScanObjects(bucket, keyPrefix)`**: reopen
   when measured margins fail or a concrete caller needs prefix scope.
-- [ ] **Protocol credential data-plane enforcement**: the shared
-  `grainfs credential` admin API/CLI foundation exists for S3, Iceberg, NFS,
-  9P, and NBD, credential metadata is persisted through Meta Raft, and
-  create/rotate/revoke now check IAM permissions for the target service
-  account. NBD now enforces `volume@secret` attach when protocol credentials
-  are wired, and NFS/9P now accept protocol credential attach hints while
-  preserving the validator's strict stale/revoked/expired decisions and SAID
-  audit context. The attach validator foundation now centralizes strict/compat
-  stale decisions and bounded attach caching, and IAM policy detach/body
-  changes now mark dependent protocol credentials stale. Follow up by extending
-  protocol credential enforcement to S3/Iceberg auth paths and adding real
-  client smoke coverage for NFS/9P credential mounts.
+- [ ] **Protocol credential real-client smoke coverage**: protocol credential
+  data-plane enforcement is wired for S3, Iceberg, NBD, NFS, and 9P server
+  paths. Follow up by adding real client smoke coverage for S3/Iceberg
+  protocol credentials and NFS/9P credential mounts before promoting broader
+  compatibility claims.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

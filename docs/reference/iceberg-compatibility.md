@@ -23,6 +23,7 @@ coverage. Unit-test-only coverage is not enough.
 | Client                  | MinIO `warp iceberg`               | Supported  | Benchmark smoke coverage runs through `make bench-iceberg-table` and `make bench-iceberg-table-cluster`. |
 | Endpoint                | `/iceberg/v1/config`               | Supported  |                                                                                                     |
 | Endpoint                | `/_iceberg/v1/config`              | Supported  | AIStor-compatible alias used by `warp iceberg`.                                                     |
+| Auth                    | Protocol credential SigV4 access   | Partial    | Server tests cover catalog-scoped Iceberg protocol credentials, read-only request handling, omitted-warehouse requests using the credential catalog, and protocol mismatch rejection. Real client smoke coverage is still tracked separately. |
 | Namespace               | List/create/get/head namespace     | Supported  |                                                                                                     |
 | Namespace               | Warehouse create/delete endpoints  | Supported  | No-op compatibility endpoints for clients that provision warehouses before namespace/table work.     |
 | Table                   | List/create/get/head table         | Supported  |                                                                                                     |

@@ -211,8 +211,42 @@ func (rcv *MetaProtocolCredentialEntry) StaleReason() []byte {
 	return nil
 }
 
+func (rcv *MetaProtocolCredentialEntry) SecretEnc(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *MetaProtocolCredentialEntry) SecretEncLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MetaProtocolCredentialEntry) SecretEncBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *MetaProtocolCredentialEntry) MutateSecretEnc(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
 func MetaProtocolCredentialEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(15)
+	builder.StartObject(16)
 }
 func MetaProtocolCredentialEntryAddId(builder *flatbuffers.Builder, id flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(id), 0)
@@ -261,6 +295,12 @@ func MetaProtocolCredentialEntryAddStaleAtUnixNanos(builder *flatbuffers.Builder
 }
 func MetaProtocolCredentialEntryAddStaleReason(builder *flatbuffers.Builder, staleReason flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(staleReason), 0)
+}
+func MetaProtocolCredentialEntryAddSecretEnc(builder *flatbuffers.Builder, secretEnc flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(secretEnc), 0)
+}
+func MetaProtocolCredentialEntryStartSecretEncVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
 }
 func MetaProtocolCredentialEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

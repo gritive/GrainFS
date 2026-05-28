@@ -88,6 +88,12 @@ func (cv *CachingVerifier) Verify(r *http.Request) (string, error) {
 	return key, nil
 }
 
+// VerifyFresh bypasses the signing-key cache. It is used for credential sources
+// whose generation/revocation state must be checked on every request.
+func (cv *CachingVerifier) VerifyFresh(r *http.Request) (string, error) {
+	return cv.inner.Verify(r)
+}
+
 // Stats returns current cache hit/miss counts.
 func (cv *CachingVerifier) Stats() CacheStats {
 	return CacheStats{
@@ -99,6 +105,11 @@ func (cv *CachingVerifier) Stats() CacheStats {
 // LookupSecret delegates to the inner Verifier.
 func (cv *CachingVerifier) LookupSecret(accessKey string) string {
 	return cv.inner.LookupSecret(accessKey)
+}
+
+func AccessKeyFromRequest(r *http.Request) string {
+	accessKey, _, _, _, _ := parseCredentialFull(r)
+	return accessKey
 }
 
 // parseCredentialFull parses credential components from Authorization header or

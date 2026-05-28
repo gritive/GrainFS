@@ -1,63 +1,82 @@
 package iam
 
 import (
-	"bytes"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// newTestEncryptor builds a deterministic Encryptor for tests AND
-// benchmarks. testing.TB so bench_test.go can reuse it.
-func newTestEncryptor(t testing.TB) *encrypt.Encryptor {
+// staticTestEncryptor returns an EncryptorAdapter over a deterministic 32-byte
+// key — gen is always 0 (the EncryptorAdapter convention).
+func staticTestEncryptor(t testing.TB) storage.DataEncryptor {
 	t.Helper()
-	key := bytes.Repeat([]byte{0xab}, 32)
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
 	enc, err := encrypt.NewEncryptor(key)
-	if err != nil {
-		t.Fatalf("NewEncryptor: %v", err)
-	}
-	return enc
+	require.NoError(t, err)
+	clusterID := []byte("0123456789abcdef")
+	return storage.NewEncryptorAdapter(enc, clusterID)
 }
 
-func TestSecretWrap_Roundtrip(t *testing.T) {
-	enc := newTestEncryptor(t)
-	saID := "sa-test-1"
-	plain := "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-
-	ct, err := WrapSecret(enc, saID, plain)
-	if err != nil {
-		t.Fatalf("WrapSecret: %v", err)
-	}
-	if len(ct) == 0 || string(ct) == plain {
-		t.Fatal("ciphertext empty or unencrypted")
-	}
-
-	got, err := UnwrapSecret(enc, saID, ct)
-	if err != nil {
-		t.Fatalf("UnwrapSecret: %v", err)
-	}
-	if got != plain {
-		t.Fatalf("got %q want %q", got, plain)
-	}
+// newTestEncryptor is a back-compat alias for the many test sites that still
+// reference it. Kept until T5/T6 finish updating admin_api/snapshot tests.
+func newTestEncryptor(t testing.TB) storage.DataEncryptor {
+	return staticTestEncryptor(t)
 }
 
-func TestSecretWrap_AADBindsToSA(t *testing.T) {
-	enc := newTestEncryptor(t)
-	plain := "secret"
-	ct, err := WrapSecret(enc, "sa-A", plain)
-	if err != nil {
-		t.Fatalf("WrapSecret: %v", err)
-	}
-	if _, err := UnwrapSecret(enc, "sa-B", ct); err == nil {
-		t.Fatal("expected AAD mismatch error, got nil")
-	}
+func TestWrapUnwrapSecret_RoundTrip(t *testing.T) {
+	de := staticTestEncryptor(t)
+	ct, gen, err := WrapSecret(de, "sa-1", "AKIA-A", "secret123")
+	require.NoError(t, err)
+	require.NotEmpty(t, ct)
+	require.Equal(t, uint32(0), gen, "EncryptorAdapter returns gen 0")
+
+	pt, err := UnwrapSecret(de, "sa-1", "AKIA-A", gen, ct)
+	require.NoError(t, err)
+	require.Equal(t, "secret123", pt)
 }
 
-func TestSecretWrap_NilEncryptor(t *testing.T) {
-	if _, err := WrapSecret(nil, "sa", "secret"); err == nil {
-		t.Fatal("WrapSecret(nil) should error")
-	}
-	if _, err := UnwrapSecret(nil, "sa", []byte{1, 2, 3}); err == nil {
-		t.Fatal("UnwrapSecret(nil) should error")
-	}
+func TestWrapUnwrapSecret_WrongSAIDRejects(t *testing.T) {
+	de := staticTestEncryptor(t)
+	ct, gen, err := WrapSecret(de, "sa-1", "AKIA-A", "secret123")
+	require.NoError(t, err)
+	_, err = UnwrapSecret(de, "sa-OTHER", "AKIA-A", gen, ct)
+	require.Error(t, err, "AAD bind to sa_id must reject cross-SA replay")
+}
+
+// Codex P1 regression: two access keys under the SAME SA must not have
+// swappable ciphertexts.
+func TestWrapUnwrapSecret_CrossKeyReplayRejected(t *testing.T) {
+	de := staticTestEncryptor(t)
+	ctA, gen, err := WrapSecret(de, "sa-1", "AKIA-A", "secret-A")
+	require.NoError(t, err)
+	_, err = UnwrapSecret(de, "sa-1", "AKIA-B", gen, ctA)
+	require.Error(t, err, "AAD bind to access_key must reject cross-key replay within an SA")
+}
+
+// BucketUpstream uses saID="bucket-upstream:"+bucket, accessKey="" — the
+// bucket itself is the discriminator; access_key field is empty by convention.
+func TestWrapUnwrapSecret_BucketUpstreamRoundTrip(t *testing.T) {
+	de := staticTestEncryptor(t)
+	bucketSAID := "bucket-upstream:my-bucket"
+	ct, gen, err := WrapSecret(de, bucketSAID, "", "upstream-secret")
+	require.NoError(t, err)
+	pt, err := UnwrapSecret(de, bucketSAID, "", gen, ct)
+	require.NoError(t, err)
+	require.Equal(t, "upstream-secret", pt)
+}
+
+func TestWrapSecret_NilEncryptorErrors(t *testing.T) {
+	_, _, err := WrapSecret(nil, "sa-1", "AKIA-A", "x")
+	require.Error(t, err)
+}
+
+func TestUnwrapSecret_NilEncryptorErrors(t *testing.T) {
+	_, err := UnwrapSecret(nil, "sa-1", "AKIA-A", 0, []byte{0x01})
+	require.Error(t, err)
 }

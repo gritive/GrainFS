@@ -481,6 +481,12 @@ Auth uses two layers. SigV4 verification (`s3auth.Verifier` +
 matches, the auth middleware calls `iam.ResolveSA` to attach the
 principal sa_id to the request context. The authz middleware then
 serially evaluates IAM grants and bucket policies — both must allow.
+Protocol credentials are a second SigV4 source for S3 and Iceberg:
+`internal/server/protocol_credential_auth.go` opens the encrypted
+protocol-credential secret envelope, verifies the SigV4 request without the
+normal cache, then validates the credential strictly against the requested
+`bucket/<bucket>` or `catalog/<warehouse>` resource before attaching the
+credential's SAID to the request context.
 
 Bootstrap path: a fresh cluster starts with an empty IAM store and
 authzMiddleware always-on, so all S3 traffic returns 401 until an
@@ -558,6 +564,10 @@ SigV4 trust boundary. `internal/server/authMiddleware` routes Iceberg
 requests through `authenticateSignedRequest` and emits
 `401 NotAuthorizedException` JSON (Iceberg REST ErrorModel) on failure,
 while S3 requests continue to receive `403 + XML`.
+
+Iceberg protocol credentials reuse the SigV4 path but bind the request to a
+single `catalog/<warehouse>` resource. Requests that omit `warehouse` after
+the config call use the credential's catalog as the warehouse context.
 
 Per-action authorization (`iceberg:CreateTable`, etc.) is a separate
 follow-up. This layer establishes identity; authz is still bypassed via

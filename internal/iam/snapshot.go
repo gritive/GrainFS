@@ -8,8 +8,8 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // Snapshot binary format (current: v4):
@@ -83,7 +83,7 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 // ReadSnapshot deserializes the snapshot bytes into dst. The Encryptor is
 // required to decrypt SecretKeyEnc into in-memory plaintext SecretKey
 // (matches FSM Apply path semantics).
-func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
+func ReadSnapshot(r io.Reader, dst *Store, enc storage.DataEncryptor) error {
 	hdr := make([]byte, 1)
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return err
@@ -121,7 +121,8 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		encBytes := readEncBytes(p)
 		if err := ap.applyKeyCreateFromSnapshot(
 			string(p.SaId()), string(p.AccessKey()),
-			encBytes, time.Unix(0, p.CreatedAtUnixNs()),
+			encBytes, p.SecretKeyDekGen(),
+			time.Unix(0, p.CreatedAtUnixNs()),
 			readExpires(p), readScope(p),
 		); err != nil {
 			return err
@@ -212,6 +213,7 @@ func buildKeyCreatePayload(k AccessKey) []byte {
 	if len(k.BucketScope) > 0 {
 		iampb.KeyCreatePayloadAddBucketScope(b, scopeVec)
 	}
+	iampb.KeyCreatePayloadAddSecretKeyDekGen(b, k.SecretKeyDEKGen)
 	b.Finish(iampb.KeyCreatePayloadEnd(b))
 	return b.FinishedBytes()
 }
@@ -254,6 +256,7 @@ func buildBucketUpstreamPutPayload(u BucketUpstream) []byte {
 	iampb.BucketUpstreamPutPayloadAddCreatedAtUnixNs(b, u.CreatedAt.UnixNano())
 	iampb.BucketUpstreamPutPayloadAddCreatedBy(b, cbOff)
 	iampb.BucketUpstreamPutPayloadAddStatus(b, statusOff)
+	iampb.BucketUpstreamPutPayloadAddSecretKeyDekGen(b, u.SecretKeyDEKGen)
 	b.Finish(iampb.BucketUpstreamPutPayloadEnd(b))
 	return b.FinishedBytes()
 }

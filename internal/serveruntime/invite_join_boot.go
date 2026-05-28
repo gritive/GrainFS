@@ -24,7 +24,7 @@ package serveruntime
 //	    passes, and persist a .invite-join-pending sentinel so a crash before
 //	    Phase-2 resumes the ACK.
 //
-//	Phase-2 (post-boot, bootInviteJoinPhase2 from bootWALAndForwarders):
+//	Phase-2 (post-boot, bootInviteJoinPhase2 from bootWALAndForwardersPart1):
 //	  - LoadNodeKey (assert SPKI == pending), DialJoin again, send
 //	    JoinRequest{JoinPhase:2} to finalize raft membership, clear the sentinel.
 //
@@ -555,7 +555,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 }
 
 // bootInviteJoinPhase2 finalizes membership AFTER the meta-raft transport + raft
-// are up (called from bootWALAndForwarders, before WaitDEKReady). It reloads the
+// are up (called from bootWALAndForwardersPart1, before WaitDEKReady). It reloads the
 // node key (asserting the SPKI matches the Phase-1 identity), dials the seed join
 // listener with JoinPhase:2, and clears the resume sentinel on success.
 func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {

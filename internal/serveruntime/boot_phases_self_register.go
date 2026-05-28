@@ -46,9 +46,9 @@ func selfRegisterMember(ctx context.Context, mr memberSelfRegistrar, nodeID stri
 // bootSelfRegisterMember is the boot-phase wrapper: it pulls the node identity
 // fields from bootState and delegates to selfRegisterMember.
 //
-// Ordering: MUST run AFTER bootWALAndForwarders (which installs the meta-raft
+// Ordering: MUST run AFTER bootWALAndForwardersPart1 (which installs the meta-raft
 // forwarder so a follower's Propose reaches the leader) AND after invite-join
-// Phase-2 membership promotion (also inside bootWALAndForwarders). Wired last
+// Phase-2 membership promotion (also inside bootWALAndForwardersPart1). Wired last
 // in run.go's post-join sequence, after bootNodeServices.
 //
 // NON-FATAL: a propose failure (leader churn, transient forwarder failure, leader

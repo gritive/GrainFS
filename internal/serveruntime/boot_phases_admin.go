@@ -59,14 +59,18 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	}
 	if state.protocolCredentials == nil {
 		if state.metaRaft != nil {
-			if state.protocolCredentialStore == nil {
-				state.protocolCredentialStore = protocred.NewStore()
-				state.metaRaft.FSM().SetProtocolCredentialStore(state.protocolCredentialStore)
-			}
-			state.protocolCredentials = cluster.NewProtocolCredentialService(state.protocolCredentialStore, state.metaRaft.Propose)
+			ensureProtocolCredentialStore(state)
+			state.protocolCredentials = cluster.NewProtocolCredentialService(
+				state.protocolCredentialStore,
+				state.metaRaft.Propose,
+				cluster.WithProtocolCredentialSecretEnvelope(protocolCredentialEnvelopeFromState(state)),
+			)
 		} else {
-			state.protocolCredentialStore = protocred.NewStore()
-			state.protocolCredentials = protocred.NewService(state.protocolCredentialStore)
+			ensureProtocolCredentialStore(state)
+			state.protocolCredentials = protocred.NewService(
+				state.protocolCredentialStore,
+				protocred.WithSecretEnvelope(protocolCredentialEnvelopeFromState(state)),
+			)
 		}
 	}
 	state.adminDeps = &admin.Deps{
@@ -220,6 +224,19 @@ func iamMountSAAdminService(state *bootState) admin.IAMMountSAService {
 		store:   state.mountSAStore,
 		propose: state.metaRaft.Propose,
 	}
+}
+
+func ensureProtocolCredentialStore(state *bootState) *protocred.Store {
+	if state == nil {
+		return nil
+	}
+	if state.protocolCredentialStore == nil {
+		state.protocolCredentialStore = protocred.NewStore()
+	}
+	if state.metaRaft != nil {
+		state.metaRaft.FSM().SetProtocolCredentialStore(state.protocolCredentialStore)
+	}
+	return state.protocolCredentialStore
 }
 
 func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {

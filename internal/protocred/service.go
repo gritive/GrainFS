@@ -11,8 +11,9 @@ import (
 )
 
 type Service struct {
-	store *Store
-	now   func() time.Time
+	store    *Store
+	now      func() time.Time
+	envelope SecretEnvelope
 }
 
 type Option func(*Service)
@@ -22,6 +23,12 @@ func WithNow(now func() time.Time) Option {
 		if now != nil {
 			s.now = now
 		}
+	}
+}
+
+func WithSecretEnvelope(envelope SecretEnvelope) Option {
+	return func(s *Service) {
+		s.envelope = envelope
 	}
 }
 
@@ -37,7 +44,7 @@ func NewService(store *Store, opts ...Option) *Service {
 }
 
 func (s *Service) Create(req CreateRequest) (Secret, error) {
-	item, secret, err := MaterializeCreate(req, s.now())
+	item, secret, err := MaterializeCreateWithEnvelope(req, s.now(), s.envelope)
 	if err != nil {
 		return Secret{}, err
 	}
@@ -48,6 +55,10 @@ func (s *Service) Create(req CreateRequest) (Secret, error) {
 // MaterializeCreate builds the persisted row and one-time plaintext secret for
 // a credential create operation without mutating a store.
 func MaterializeCreate(req CreateRequest, now time.Time) (Credential, Secret, error) {
+	return MaterializeCreateWithEnvelope(req, now, nil)
+}
+
+func MaterializeCreateWithEnvelope(req CreateRequest, now time.Time, envelope SecretEnvelope) (Credential, Secret, error) {
 	if err := validateCreate(req); err != nil {
 		return Credential{}, Secret{}, err
 	}
@@ -74,6 +85,13 @@ func MaterializeCreate(req CreateRequest, now time.Time) (Credential, Secret, er
 		ExpiresAt:  cloneTime(req.ExpiresAt),
 		Generation: 1,
 	}
+	if envelope != nil {
+		enc, err := envelope.SealProtocolCredentialSecret(SecretAAD(item), secret)
+		if err != nil {
+			return Credential{}, Secret{}, err
+		}
+		item.SecretEnc = cloneBytes(enc)
+	}
 	return item, Secret{ID: id, Secret: secret, ConnectionHint: connectionHint(item, secret)}, nil
 }
 
@@ -94,6 +112,21 @@ func (s *Service) Get(id string) (Credential, error) {
 		return Credential{}, ErrNotFound
 	}
 	return cloneCredential(item), nil
+}
+
+func (s *Service) OpenSecret(id string) (string, Credential, error) {
+	item, ok := s.store.get(id)
+	if !ok {
+		return "", Credential{}, ErrNotFound
+	}
+	if len(item.SecretEnc) == 0 || s.envelope == nil {
+		return "", Credential{}, ErrInvalid
+	}
+	plain, err := s.envelope.OpenProtocolCredentialSecret(SecretAAD(item), item.SecretEnc)
+	if err != nil {
+		return "", Credential{}, err
+	}
+	return plain, cloneCredential(item), nil
 }
 
 func (s *Service) Authenticate(req AuthenticateRequest) (Credential, error) {
@@ -126,13 +159,14 @@ func (s *Service) Rotate(id string) (Secret, error) {
 	if !ok {
 		return Secret{}, ErrNotFound
 	}
-	hash, hint, secret, err := MaterializeRotate(item)
+	hash, hint, enc, secret, err := MaterializeRotateWithEnvelope(item, s.envelope)
 	if err != nil {
 		return Secret{}, err
 	}
 	_, _ = s.store.update(id, func(item Credential) Credential {
 		item.SecretHash = hash
 		item.SecretHint = hint
+		item.SecretEnc = cloneBytes(enc)
 		return item
 	})
 	return secret, nil
@@ -141,12 +175,17 @@ func (s *Service) Rotate(id string) (Secret, error) {
 // MaterializeRotate builds the next secret material for an existing credential
 // without mutating a store.
 func MaterializeRotate(item Credential) ([sha256.Size]byte, string, Secret, error) {
+	hash, hint, _, secret, err := MaterializeRotateWithEnvelope(item, nil)
+	return hash, hint, secret, err
+}
+
+func MaterializeRotateWithEnvelope(item Credential, envelope SecretEnvelope) ([sha256.Size]byte, string, []byte, Secret, error) {
 	if item.RevokedAt != nil {
-		return [sha256.Size]byte{}, "", Secret{}, ErrRevoked
+		return [sha256.Size]byte{}, "", nil, Secret{}, ErrRevoked
 	}
 	secretRand, err := randomString(32)
 	if err != nil {
-		return [sha256.Size]byte{}, "", Secret{}, err
+		return [sha256.Size]byte{}, "", nil, Secret{}, err
 	}
 	secret := "pcsec_" + secretRand
 	hash := sha256.Sum256([]byte(secret))
@@ -154,7 +193,14 @@ func MaterializeRotate(item Credential) ([sha256.Size]byte, string, Secret, erro
 	updated := item
 	updated.SecretHash = hash
 	updated.SecretHint = hint
-	return hash, hint, Secret{ID: item.ID, Secret: secret, ConnectionHint: connectionHint(updated, secret)}, nil
+	var enc []byte
+	if envelope != nil {
+		enc, err = envelope.SealProtocolCredentialSecret(SecretAAD(updated), secret)
+		if err != nil {
+			return [sha256.Size]byte{}, "", nil, Secret{}, err
+		}
+	}
+	return hash, hint, cloneBytes(enc), Secret{ID: item.ID, Secret: secret, ConnectionHint: connectionHint(updated, secret)}, nil
 }
 
 func (s *Service) Revoke(id string) error {
@@ -211,11 +257,21 @@ func cloneCredentials(items []Credential) []Credential {
 }
 
 func cloneCredential(item Credential) Credential {
+	item.SecretEnc = cloneBytes(item.SecretEnc)
 	item.ExpiresAt = cloneTime(item.ExpiresAt)
 	item.RevokedAt = cloneTime(item.RevokedAt)
 	item.LastUsedAt = cloneTime(item.LastUsedAt)
 	item.StaleAt = cloneTime(item.StaleAt)
 	return item
+}
+
+func cloneBytes(in []byte) []byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }
 
 func ParseProtocol(raw string) Protocol {

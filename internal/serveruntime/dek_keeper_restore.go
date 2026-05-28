@@ -90,6 +90,11 @@ func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 	fsm.SetDEKKeeper(keeper)
 	state.dekKeeper = keeper
 	state.clusterID = clusterID // keep the single-source clusterID in lockstep with the swapped keeper
+	// R2: re-wire the IAM applier + admin api to the freshly-restored keeper.
+	// The fresh-boot call in bootRotationAndAdminAPI fired with the pre-restore
+	// keeper; this call overrides it with the restored one so post-restore
+	// IAM apply paths Seal under the right gens.
+	wireIAMEncryptor(state)
 	return nil
 }
 

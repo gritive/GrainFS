@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.402.0] - 2026-05-28
+
+### Security
+
+- S3 and Iceberg can now authenticate protocol credentials through SigV4 while
+  keeping protocol credential secrets encrypted at rest.
+- S3 protocol credentials are enforced against their scoped bucket, including
+  stale/revoked/expired checks, read-only mode rejection, wrong-bucket
+  rejection, and fail-closed cross-bucket `CopyObject` source handling.
+- Iceberg protocol credentials are enforced against their scoped catalog and
+  carry the validated warehouse into catalog handlers, including requests that
+  omit `warehouse` after the initial config call.
+
+### Changed
+
+- Protocol credential create and rotate commands now persist encrypted secret
+  envelopes through Meta Raft snapshots and replay, so S3/Iceberg SigV4 can
+  derive signing keys without storing plaintext protocol secrets.
+- User and compatibility docs now describe S3/Iceberg protocol credential usage
+  and the remaining real-client smoke coverage follow-up.
+
+## [0.0.401.0] - 2026-05-28
+
+### Security
+
+- IAM service account credentials (secret keys) are now sealed with a per-cluster DEK instead of the static bulk-cipher key. Each secret key ciphertext is bound to both the service account ID and the access key via AAD, preventing cross-key replay attacks. The DEK generation is threaded through raft payloads and snapshots so credentials survive cluster restart, key rotation, and snapshot restore without re-encryption. Requires at-rest format version 5; nodes running an older binary will refuse to open the new format.
+
+## [0.0.400.0] - 2026-05-28
+
+### Changed
+
+- Internal: reordered boot phases so `bootShardService` and `bootBalancerAndGossip` run after `WaitDEKReady`; extracted `forwardReceiver.Register` into a new phase `bootRegisterForwardHandlers`. Boot log line order shifts accordingly. Foundation for R-FSM-β (`docs/superpowers/plans/2026-05-28-r-fsm-beta-fsm-value-dek-plan.md` — data-WAL DEK migration); no on-disk-format or wire-protocol change.
+
 ## [0.0.399.1] - 2026-05-28
 
 ### Security

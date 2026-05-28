@@ -80,6 +80,7 @@ type Server struct {
 	snapMgr           *snapshot.Manager
 	scrubber          *scrubber.BackgroundScrubber
 	verifier          *s3auth.CachingVerifier
+	protocolCredAuth  *protocolCredentialAuth
 	iamStore          *iam.Store
 	iamAudit          *iam.AuditLogger
 	authz             *s3auth.RequestAuthorizer

@@ -69,7 +69,7 @@ type bootState struct {
 	// inviteJoin carries the Phase-1 outcome (resolved bundle, leaderID, node
 	// SPKI) so the post-boot Phase-2 ACK can redrive DialJoin without re-reading
 	// the bundle env var. Set by maybeInviteJoin; consumed in
-	// bootWALAndForwarders.
+	// bootWALAndForwardersPart1.
 	inviteJoin *inviteJoinState
 	metaDir    string
 	raftDir    string
@@ -148,7 +148,7 @@ type bootState struct {
 	// handshakeVerifier gates cluster-join admission via HMAC-SHA256 challenge-
 	// response. The SAME instance must be wired into both MetaJoinReceiver and
 	// MetaChallengeReceiver so the issued-nonce map is shared. Set by
-	// wireDEKKeeper; consumed by bootWALAndForwarders. §7 T55 / B1.
+	// wireDEKKeeper; consumed by bootWALAndForwardersPart1. §7 T55 / B1.
 	handshakeVerifier *encrypt.HandshakeVerifier
 	// kekLeaseTracker counts in-flight KEK consumers per version. Phase B has no
 	// runtime acquire sites — Phase D wires them (raft snapshot reader holding
@@ -229,7 +229,7 @@ type bootState struct {
 	// groups, incident recording, and receipts are available.
 	dataWALRepairCollector *cluster.DataWALRepairCollector
 
-	// bootWALAndForwarders
+	// bootWALAndForwardersPart1
 	wal               *wal.WAL
 	walDir            string
 	forwardSender     *cluster.ForwardSender
@@ -246,7 +246,7 @@ type bootState struct {
 	joinListener *transport.JoinListener
 	// coalesceCfg is the cluster-wide coalesce/cap configuration derived from
 	// CLI flags. Stored here so that GroupBackends instantiated after
-	// bootWALAndForwarders (including dynamically created shard groups) can
+	// bootWALAndForwardersPart1 (including dynamically created shard groups) can
 	// inherit the same cap as state.distBackend (group-0).
 	coalesceCfg cluster.CoalesceConfig
 

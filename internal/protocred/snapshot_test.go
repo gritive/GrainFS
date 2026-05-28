@@ -20,6 +20,7 @@ func TestStoreSnapshotIsDeterministicAndDetached(t *testing.T) {
 		Mode:       ModeRW,
 		SecretHash: [32]byte{2},
 		SecretHint: "pcsec_b",
+		SecretEnc:  []byte("sealed-b"),
 		CreatedAt:  now,
 		CreatedBy:  "admin-b",
 		ExpiresAt:  &exp,
@@ -51,6 +52,7 @@ func TestStoreSnapshotIsDeterministicAndDetached(t *testing.T) {
 
 	*snap[1].ExpiresAt = now.Add(24 * time.Hour)
 	snap[1].SecretHash[0] = 99
+	snap[1].SecretEnc[0] = 'X'
 
 	again := store.Snapshot()
 	if !again[1].ExpiresAt.Equal(exp) {
@@ -58,6 +60,9 @@ func TestStoreSnapshotIsDeterministicAndDetached(t *testing.T) {
 	}
 	if again[1].SecretHash[0] != 2 {
 		t.Fatalf("Snapshot did not detach SecretHash: got %d want 2", again[1].SecretHash[0])
+	}
+	if string(again[1].SecretEnc) != "sealed-b" {
+		t.Fatalf("Snapshot did not detach SecretEnc: got %q want sealed-b", again[1].SecretEnc)
 	}
 }
 
@@ -89,6 +94,7 @@ func TestStoreRestoreIsDetachedAndPreservesNoPlaintextSecret(t *testing.T) {
 	dstStore := NewStore()
 	dstStore.Restore(rows)
 	rows[0].SecretHash[0] = 99
+	rows[0].SecretEnc = []byte("caller-owned")
 	*rows[0].ExpiresAt = now.Add(24 * time.Hour)
 
 	dst := NewService(dstStore)

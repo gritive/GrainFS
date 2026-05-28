@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/compat"
 )
 
@@ -408,8 +410,8 @@ func TestAdminAPI_BucketUpstream_PutHappyPath(t *testing.T) {
 	if len(got.SecretKeyEnc) == 0 {
 		t.Error("SecretKeyEnc empty — wrap not performed")
 	}
-	// A2: AAD = "bucket-upstream:"+bucket. Verify by unwrapping with the prefixed AAD.
-	unwrapped, err := UnwrapSecret(enc, "bucket-upstream:shared", got.SecretKeyEnc)
+	// A2: AAD = "bucket-upstream:"+bucket; codex P2: AAD also binds access_key.
+	unwrapped, err := UnwrapSecret(enc, "bucket-upstream:shared", "AKUP", got.SecretKeyDEKGen, got.SecretKeyEnc)
 	if err != nil {
 		t.Fatalf("unwrap with AAD=bucket-upstream:shared: %v", err)
 	}
@@ -457,10 +459,10 @@ func TestAdminAPI_BucketUpstream_GetMasksSecret(t *testing.T) {
 	store := NewStore()
 	enc := newTestEncryptor(t)
 	// A2: AAD prefix in test setup wrap.
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:shared", "sk-plain")
+	wrapped, gen, _ := WrapSecret(enc, "bucket-upstream:shared", "", "sk-plain")
 	store.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "shared", Endpoint: "http://up", AccessKey: "AKUP",
-		SecretKey: "sk-plain", SecretKeyEnc: wrapped,
+		SecretKey: "sk-plain", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen,
 		CreatedAt: time.Now().UTC(), CreatedBy: "sa-admin",
 	})
 	api := NewAdminAPI(store, newFakeProposer(), enc)
@@ -501,10 +503,10 @@ func TestAdminAPI_BucketUpstream_List(t *testing.T) {
 	enc := newTestEncryptor(t)
 	for _, b := range []string{"a", "b"} {
 		// A2 prefix
-		w, _ := WrapSecret(enc, "bucket-upstream:"+b, "sk-"+b)
+		w, gen, _ := WrapSecret(enc, "bucket-upstream:"+b, "", "sk-"+b)
 		store.applyBucketUpstreamPut(BucketUpstream{
 			Bucket: b, Endpoint: "http://up", AccessKey: "AK-" + b,
-			SecretKey: "sk-" + b, SecretKeyEnc: w, CreatedAt: time.Now().UTC(),
+			SecretKey: "sk-" + b, SecretKeyEnc: w, SecretKeyDEKGen: gen, CreatedAt: time.Now().UTC(),
 		})
 	}
 	api := NewAdminAPI(store, newFakeProposer(), enc)
@@ -544,10 +546,10 @@ func TestAdminAPI_BucketUpstream_ListEmptyReturnsEmptyArray(t *testing.T) {
 func TestAdminAPI_BucketUpstream_Delete(t *testing.T) {
 	store := NewStore()
 	enc := newTestEncryptor(t)
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:shared", "sk")
+	wrapped, gen, _ := WrapSecret(enc, "bucket-upstream:shared", "", "sk")
 	store.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "shared", Endpoint: "http://up", AccessKey: "AK",
-		SecretKey: "sk", SecretKeyEnc: wrapped, CreatedAt: time.Now().UTC(),
+		SecretKey: "sk", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen, CreatedAt: time.Now().UTC(),
 	})
 	fp := newFakeProposer()
 	api := NewAdminAPI(store, fp, enc)
@@ -593,10 +595,10 @@ func TestAdminAPI_BucketUpstream_ProposeFailureReturns500(t *testing.T) {
 func TestAdminAPI_BucketUpstream_DeleteProposeFailureReturns500(t *testing.T) {
 	store := NewStore()
 	enc := newTestEncryptor(t)
-	wrapped, _ := WrapSecret(enc, "bucket-upstream:shared", "sk")
+	wrapped, gen, _ := WrapSecret(enc, "bucket-upstream:shared", "", "sk")
 	store.applyBucketUpstreamPut(BucketUpstream{
 		Bucket: "shared", Endpoint: "http://up", AccessKey: "AK",
-		SecretKey: "sk", SecretKeyEnc: wrapped, CreatedAt: time.Now().UTC(),
+		SecretKey: "sk", SecretKeyEnc: wrapped, SecretKeyDEKGen: gen, CreatedAt: time.Now().UTC(),
 	})
 	fp := newFakeProposer()
 	fp.bucketUpstreamDeleteErr = errors.New("simulated propose failure")
@@ -638,4 +640,27 @@ func TestAdminAPI_BucketUpstream_CutoverGateRejectReturnsConflict(t *testing.T) 
 	if !strings.Contains(w.Body.String(), "migration_cutover_v1") {
 		t.Fatalf("public error missing capability: %s", w.Body.String())
 	}
+}
+
+func TestAdminAPI_NilEncryptorObservable(t *testing.T) {
+	a := NewAdminAPI(NewStore(), newFakeProposer(), nil)
+	require.Nil(t, a.Encryptor(), "encryptor nil until SetEncryptor")
+}
+
+func TestAdminAPI_SetEncryptorIsObservable(t *testing.T) {
+	a := NewAdminAPI(NewStore(), newFakeProposer(), nil)
+	de := staticTestEncryptor(t)
+	a.SetEncryptor(de)
+	got := a.Encryptor()
+	require.NotNil(t, got)
+	require.True(t, de == got, "Encryptor() returns the installed value")
+}
+
+func TestAdminAPI_SetEncryptorIdempotent(t *testing.T) {
+	a := NewAdminAPI(NewStore(), newFakeProposer(), nil)
+	de1 := staticTestEncryptor(t)
+	de2 := staticTestEncryptor(t)
+	a.SetEncryptor(de1)
+	a.SetEncryptor(de2)
+	require.True(t, de2 == a.Encryptor(), "last write wins")
 }
