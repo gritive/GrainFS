@@ -279,16 +279,6 @@ Work these in order. Do not run them in parallel.
   the background goroutine logs and DROPS on seal error. Apply the same
   probe-before-header rule plus a non-dropping rotation boundary there before
   moving legacy PITR WAL to a real gen>0 DEK sealer.
-- [ ] **KEK-envelope D-wal: per-WAL namespace distinction [P2]**. The legacy↔datawal half is
-  done: D-wal-legacy (storage/wal) uses namespace `"pitr-wal"` while D-wal-data (datawal) uses
-  `"datawal"`, so a frame from one WAL family will not AEAD-verify in the other. What remains is
-  the cluster-shard datawal vs node datawal split: both currently share the single `"datawal"`
-  constant, so a frame from one physical datawal dir could AEAD-verify in another with the same
-  namespace+seq. To close that cross-WAL frame-swap, give the cluster-shard WAL and the node WAL
-  distinct namespaces (e.g. `"datawal/shard"` vs `"datawal/node"`), which requires auditing
-  which call site (`boot_phases_storage_runtime`, `local.go`, `shard_service.go`) owns which
-  physical dir so the writer and reader of each dir agree. Within-WAL positional binding
-  (namespace+seq+monotonicity) already holds; this only hardens the cross-WAL case.
 - [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
   (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
   source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks

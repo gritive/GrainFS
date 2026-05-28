@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.436.0] - 2026-05-29
+
+### Security
+
+- Split encrypted data WAL AEAD namespaces so node-local WAL frames use
+  `datawal/node` while cluster-shard WAL frames use `datawal/shard`.
+- Bumped the at-rest format boundary to 9 for the greenfield encrypted data WAL
+  namespace break.
+
+### Changed
+
+- Removed the completed data WAL per-family namespace follow-up from `TODOS.md`
+  and documented the remaining DEK rotation boundary.
+
+### Tests
+
+- Updated node-local and cluster-shard data WAL recovery coverage to exercise
+  the distinct namespaces.
+
 ## [0.0.435.0] - 2026-05-29
 
 ### Added

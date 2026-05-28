@@ -82,7 +82,7 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 		t.Fatalf("test encryptor: %v", encErr)
 	}
 	var zero [16]byte
-	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewEncryptorAdapter(enc, zero[:]), "datawal")
+	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewEncryptorAdapter(enc, zero[:]), datawal.NamespaceShard)
 	if err != nil {
 		t.Fatalf("open data wal: %v", err)
 	}

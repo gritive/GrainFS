@@ -1261,7 +1261,7 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, "datawal", shardDataWALMaterializer{s: s}); err != nil {
+	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, datawal.NamespaceShard, shardDataWALMaterializer{s: s}); err != nil {
 		return err
 	}
 	// The materializer may have constructed a nil-WAL pack store while
