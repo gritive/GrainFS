@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.415.1] - 2026-05-28
+## [0.0.415.2] - 2026-05-28
 
 ### Added
 
@@ -14,6 +14,22 @@
 
 - Updated the operator runbook with a `data_groups` cluster-health check for
   diagnosing data-Raft group leadership and replication progress.
+
+## [0.0.415.1] - 2026-05-28
+
+### Changed
+
+- Zero-CA invite bootstrap payloads no longer carry the static at-rest
+  `encryption.key`; new payloads now carry KEK generations, transport bootstrap
+  data, peer SPKIs, and cutover state only.
+- The bootstrap secret provider now exposes only KEK generations and transport
+  PSK while legacy payload decode still accepts old `encryption_key` values
+  until the format-7 cut.
+- Post-drop invite joiners can load a KEK-sealed `node.key.enc` from staged disk
+  KEKs before QUIC Listen, so removing the static key from new bootstrap
+  payloads does not break the pre-Listen identity flip.
+- Updated D-cut tracking so Slice A is complete and the remaining Phase-2
+  migration and KEK-prune evidence follow-ups stay explicit.
 
 ## [0.0.415.0] - 2026-05-28
 

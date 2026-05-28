@@ -83,8 +83,8 @@ type JoinReply struct {
 	// promotion-time follow-up (Phase 3).
 	PeerSPKIs [][]byte `json:"peer_spkis,omitempty"`
 	// SealedBootstrap is the Phase-1 envelope (wire form of encrypt.SealedToPeer)
-	// the leader seals to the joiner's identity key: the bootstrap secrets
-	// (encryption.key, KEK generations, transport PSK). Empty outside Phase-1.
+	// the leader seals to the joiner's identity key: KEK generations and
+	// transport bootstrap data. Empty outside Phase-1.
 	SealedBootstrap []byte `json:"sealed_bootstrap,omitempty"`
 }
 
@@ -94,10 +94,11 @@ type JoinReply struct {
 // included here — it is public and carried in the InviteBundle. KEKGen is the
 // type already defined in bootstrap_codec.go (W2).
 type BootstrapSecretProvider interface {
-	// BootstrapSecrets returns the SECRET plaintext to seal: the static
-	// encryption.key bytes, EVERY KEK generation in the KEKStore, and the
-	// transport PSK. cluster.id is NOT included (public, in the InviteBundle).
-	BootstrapSecrets() (encryptionKey []byte, kekGens []KEKGen, transportPSK []byte, err error)
+	// BootstrapSecrets returns the SECRET plaintext to seal: EVERY KEK
+	// generation in the KEKStore and the transport PSK. cluster.id is NOT
+	// included (public, in the InviteBundle). The static encryption.key is not
+	// sent in new payloads; legacy decode compatibility stays in the codec.
+	BootstrapSecrets() (kekGens []KEKGen, transportPSK []byte, err error)
 }
 
 type metaJoinDialer func(peer string, payload []byte) ([]byte, error)
@@ -479,7 +480,7 @@ func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, s
 		return joinReplyFromError(err)
 	}
 	// Seal the bootstrap secrets to the joiner's identity key.
-	encKey, kekGens, psk, err := r.secretProvider.BootstrapSecrets()
+	kekGens, psk, err := r.secretProvider.BootstrapSecrets()
 	if err != nil {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "bootstrap secrets: " + err.Error()}
 	}
@@ -491,7 +492,7 @@ func (r *MetaJoinReceiver) handleJoinPhase1(ctx context.Context, capturedSPKI, s
 	// accept-set before Listen (PR-2a §8f M1). After PR-2b's drop, do not send
 	// the revoked cluster transport PSK to a new joiner; it must present its
 	// per-node cert from the first normal transport handshake.
-	payload := EncodeBootstrapSecretsPayloadWithCutover(encKey, kekGens, psk, r.meta.PeerSPKIs(), clusterKeyDropped)
+	payload := EncodeBootstrapSecretsPayloadWithCutover(kekGens, psk, r.meta.PeerSPKIs(), clusterKeyDropped)
 	bindCtx := r.sealBindContext(req)
 	blob, err := encrypt.SealToPeer(ecPub, payload, bindCtx, bindCtx)
 	if err != nil {

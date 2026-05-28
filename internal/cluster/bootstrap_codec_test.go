@@ -115,14 +115,13 @@ func TestSealedBootstrapRoundTrip_Empty(t *testing.T) {
 }
 
 func TestBootstrapSecretsPayload_CutoverFields_RoundTrip(t *testing.T) {
-	encKey := []byte("0123456789abcdef0123456789abcdef")
 	psk := []byte("transport-psk-bytes")
 	var a, b [32]byte
 	a[0], b[0] = 0x11, 0x22
-	blob := EncodeBootstrapSecretsPayloadWithCutover(encKey, nil, psk, [][32]byte{a, b}, true)
+	blob := EncodeBootstrapSecretsPayloadWithCutover(nil, psk, [][32]byte{a, b}, true)
 	gotKey, _, gotPSK, gotSPKIs, gotDropped, err := DecodeBootstrapSecretsPayloadWithCutover(blob)
 	require.NoError(t, err)
-	require.Equal(t, encKey, gotKey)
+	require.Empty(t, gotKey)
 	require.Equal(t, psk, gotPSK)
 	require.Len(t, gotSPKIs, 2)
 	require.Equal(t, a, gotSPKIs[0])
@@ -133,8 +132,9 @@ func TestBootstrapSecretsPayload_CutoverFields_RoundTrip(t *testing.T) {
 func TestBootstrapSecretsPayload_BackCompat_LegacyDecodesClean(t *testing.T) {
 	encKey := []byte("0123456789abcdef0123456789abcdef")
 	blob := encodeBootstrapSecretsPayload(encKey, nil, nil) // legacy encoder, no cutover fields
-	_, _, _, gotSPKIs, gotDropped, err := DecodeBootstrapSecretsPayloadWithCutover(blob)
+	gotKey, _, _, gotSPKIs, gotDropped, err := DecodeBootstrapSecretsPayloadWithCutover(blob)
 	require.NoError(t, err)
+	require.Equal(t, encKey, gotKey)
 	require.Empty(t, gotSPKIs)
 	require.False(t, gotDropped)
 }

@@ -24,18 +24,16 @@ var transcriptClusterID = []byte("cluster-x-16byt!")
 // fakeBootstrapProvider supplies deterministic bootstrap secrets so the Phase-1
 // seal has a known plaintext to round-trip-decrypt in tests.
 type fakeBootstrapProvider struct {
-	encKey  []byte
 	kekGens []KEKGen
 	psk     []byte
 }
 
-func (p *fakeBootstrapProvider) BootstrapSecrets() ([]byte, []KEKGen, []byte, error) {
-	return p.encKey, p.kekGens, p.psk, nil
+func (p *fakeBootstrapProvider) BootstrapSecrets() ([]KEKGen, []byte, error) {
+	return p.kekGens, p.psk, nil
 }
 
 func newFakeBootstrapProvider() *fakeBootstrapProvider {
 	return &fakeBootstrapProvider{
-		encKey:  []byte("enc-key-32-bytes-aaaaaaaaaaaaaaaa"),
 		kekGens: []KEKGen{{Gen: 1, Key: []byte("kek-gen-1-key-bytes-padding-aaaaa")}},
 		psk:     []byte("transport-psk-bytes"),
 	}
@@ -174,7 +172,7 @@ func TestHandleJoin_Phase1_Valid_SealsBootstrapNoMembership(t *testing.T) {
 	require.NoError(t, err)
 	encKey, gens, psk, err := decodeBootstrapSecretsPayload(plain)
 	require.NoError(t, err)
-	require.Equal(t, fx.provider.encKey, encKey)
+	require.Empty(t, encKey, "new Phase-1 bootstrap payloads must not carry static encryption.key")
 	require.Equal(t, fx.provider.psk, psk)
 	require.Len(t, gens, 1)
 	require.Equal(t, uint32(1), gens[0].Gen)

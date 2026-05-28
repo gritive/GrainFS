@@ -1,12 +1,15 @@
 package serveruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,6 +136,32 @@ func TestApplyPostDropInviteJoinIdentity_FlipsAndDrops(t *testing.T) {
 			RawEncryptionKey: encKey,
 		},
 		inviteJoin: &inviteJoinState{clusterKeyDropped: true},
+	}
+	tr := &fakeDropTransport{}
+
+	require.NoError(t, applyPostDropInviteJoinIdentity(state, tr))
+	require.True(t, tr.flipCalled.Load(), "FlipPresent must be called before Listen")
+	require.True(t, tr.droppedCalled.Load(), "SetDropped must be called before Listen")
+	require.NotNil(t, state.perNodeCert.Certificate)
+	require.NotEqual(t, [32]byte{}, state.perNodeSPKI)
+}
+
+func TestApplyPostDropInviteJoinIdentity_LoadsKEKSealedNodeKeyWithoutStaticKey(t *testing.T) {
+	dir := t.TempDir()
+	kek := bytes.Repeat([]byte{0x42}, 32)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	require.NoError(t, transport.SealNodeKey(dir, kek, tls.Certificate{PrivateKey: priv}))
+	keysDir := filepath.Join(dir, "keys")
+	require.NoError(t, os.MkdirAll(keysDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(keysDir, "7.key"), kek, 0o600))
+
+	state := &bootState{
+		cfg: Config{DataDir: dir},
+		inviteJoin: &inviteJoinState{
+			clusterKeyDropped: true,
+			nodeKeyKEKGen:     7,
+		},
 	}
 	tr := &fakeDropTransport{}
 
