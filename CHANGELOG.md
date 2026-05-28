@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.419.0] - 2026-05-29
+
+### Added
+
+- Protocol credential admin routes now accept route-scoped OIDC bearer actors
+  and evaluate create, list, read, rotate, and revoke decisions through typed
+  IAM principals.
+- Added HTTP coverage for valid federated actors, malformed and invalid bearer
+  rejection before mutation, no-bearer admin UDS fallback, and route scoping.
+
+### Changed
+
+- Wired runtime OIDC issuer configuration and JWKS-backed authentication into
+  admin protocol credential dependencies while keeping bearer authentication
+  disabled unless issuers are configured.
+- Updated the OIDC federated IAM operator guide and follow-up tracking for the
+  remaining broader admin route and external PDP architecture work.
+
 ## [0.0.418.0] - 2026-05-28
 
 ### Security

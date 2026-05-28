@@ -5,8 +5,11 @@
 package admin
 
 import (
+	"context"
+
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/dashboard"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/server/execution"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -35,6 +38,7 @@ type Deps struct {
 	NfsExports           NfsExportService          // optional; nil disables NFS export admin endpoints
 	ProtocolCredentials  ProtocolCredentialService // optional; nil disables protocol credential endpoints
 	ProtocolCredAuthz    CredentialAuthorizer      // required when ProtocolCredentials is configured; nil fails closed
+	ActorAuth            ActorAuthenticator        // optional; bearer actor auth for selected admin routes
 	IcebergConfig        IcebergConfigService      // optional; nil disables iceberg config endpoint
 	AuditQuery           AuditQueryService         // optional; nil disables audit admin endpoints
 	Status               StatusService             // optional; nil disables GET /v1/status
@@ -43,6 +47,10 @@ type Deps struct {
 	Token                *dashboard.TokenStore
 	PublicURL            string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID               string
+}
+
+type ActorAuthenticator interface {
+	AuthenticateActor(ctx context.Context, bearerToken string) (principal.Principal, error)
 }
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq

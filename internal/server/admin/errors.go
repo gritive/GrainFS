@@ -8,8 +8,11 @@ import (
 
 type Error = adminapi.Error
 
-func NewNotFound(msg string) *Error  { return &Error{Code: "not_found", Message: msg} }
-func NewInvalid(msg string) *Error   { return &Error{Code: "invalid", Message: msg} }
+func NewNotFound(msg string) *Error { return &Error{Code: "not_found", Message: msg} }
+func NewInvalid(msg string) *Error  { return &Error{Code: "invalid", Message: msg} }
+func NewUnauthorized(msg string) *Error {
+	return &Error{Code: "unauthorized", Message: msg}
+}
 func NewForbidden(msg string) *Error { return &Error{Code: "forbidden", Message: msg} }
 func NewInternal(msg string) *Error  { return &Error{Code: "internal", Message: msg} }
 func NewConflict(msg string, details map[string]any) *Error {

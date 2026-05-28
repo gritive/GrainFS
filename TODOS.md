@@ -135,9 +135,18 @@ Work these in order. Do not run them in parallel.
   principals from context and fall back to the target service account for
   existing UDS/CLI flows.
 
-- [ ] **OIDC federated IAM Slice 5**: add admin/protocol HTTP bearer-token
+- [x] **OIDC federated IAM Slice 5**: add admin/protocol HTTP bearer-token
   middleware for OIDC actors, expand `AuthorizePrincipal` adoption to additional
   admin/protocol routes, and add end-to-end denied/allowed audit examples.
+  SHIPPED in current branch: `/v1/credentials*` routes authenticate optional
+  bearer OIDC actors before protocol credential authorization; invalid bearer
+  tokens fail before mutation, while existing no-bearer admin UDS behavior is
+  preserved.
+
+- [ ] **OIDC federated IAM Slice 6**: expand typed actor adoption beyond
+  protocol credential routes, add first-class admin authz/audit rows for
+  federated allow/deny decisions, and decide whether the next architecture slice
+  is broader admin route policy or the external PDP adapter.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):

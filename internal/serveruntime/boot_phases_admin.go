@@ -136,6 +136,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		ProtocolCredentials:  state.protocolCredentials,
 		ProtocolCredAuthz:    protocolCredentialAuthorizer(state),
+		ActorAuth:            newOIDCActorAuthenticator(state.cfgStore),
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
 	if state.auditSearcher != nil {
