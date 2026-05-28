@@ -35,7 +35,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 		DataDirs:   []string{dataDir},
 		NodeID:     "n1",
 		ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		Encryptor:  newTestEncryptor(t),
 	})
 	require.NoError(t, bootValidateConfig(state))
 	require.NoError(t, bootAutoMigrate(state))
@@ -81,7 +80,6 @@ func TestBootShardServiceDataWALPrefersDEKKeeper(t *testing.T) {
 	require.NoError(t, err)
 	state.dekKeeper = keeper
 	state.clusterID = clusterID
-	state.cfg.Encryptor = newTestEncryptor(t)
 
 	sealer, err := dataWALSealerForState(state)
 	require.NoError(t, err)

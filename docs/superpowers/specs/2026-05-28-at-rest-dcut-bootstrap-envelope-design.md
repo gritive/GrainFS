@@ -173,6 +173,10 @@ transition, but production boot in format `7` must not require
   is gone.
 - Bump `encryption.format` to `7`.
 
+Implementation note: Slice D shipped the Zero-CA boot-glue cut. Static-key
+data-path consumers remain tracked under R3, but invite bootstrap and node
+identity no longer depend on raw static key material.
+
 ## Acceptance Criteria
 
 - A fresh invite joiner stages no `encryption.key`.

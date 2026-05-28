@@ -27,9 +27,8 @@ func runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t testing.TB) {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = removeE2EDir(dataDir) })
 	raftPort := freePort()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	server := startIcebergE2EServer(t, dataDir, raftPort, encKeyFile)
+	server := startIcebergE2EServer(t, dataDir, raftPort)
 	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dataDir}, 60*time.Second)
 	ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
 	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, bootstrap.SAID, "grainfs-tables", ecS3Client(server.endpoint, ak, sk))
@@ -43,7 +42,7 @@ SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_e2e.t;
 
 	server.stop()
 
-	server = startIcebergE2EServer(t, dataDir, raftPort, encKeyFile)
+	server = startIcebergE2EServer(t, dataDir, raftPort)
 	runDuckDBIcebergSQLWithCreds(t, server.endpoint, ak, sk, `
 SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_e2e.t;
 `, "49")
@@ -208,11 +207,11 @@ type icebergE2EServer struct {
 	stop     func()
 }
 
-func startIcebergE2EServer(t testing.TB, dataDir string, raftPort int, encKeyFile string) icebergE2EServer {
-	return startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort, encKeyFile)
+func startIcebergE2EServer(t testing.TB, dataDir string, raftPort int) icebergE2EServer {
+	return startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort)
 }
 
-func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort int, encKeyFile string, extraArgs ...string) icebergE2EServer {
+func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort int, extraArgs ...string) icebergE2EServer {
 	t.Helper()
 
 	port := freePort()
@@ -223,7 +222,6 @@ func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort i
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--encryption-key-file", encKeyFile,
 		"--lifecycle-interval", "0",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	}

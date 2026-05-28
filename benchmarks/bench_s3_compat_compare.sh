@@ -317,9 +317,6 @@ start_grainfs_single() {
     data_dir="${paths[0]}"
     data_arg="$(IFS=','; echo "${paths[*]}")"
   fi
-  BENCH_ENCRYPTION_KEY_FILE="$data_root/encryption.key"
-  export BENCH_ENCRYPTION_KEY_FILE
-  bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
   if [[ "$BENCH_PPROF" == "1" ]]; then
     GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
     extra+=(--pprof-port "$PPROF_BASE_PORT")
@@ -364,7 +361,6 @@ start_grainfs_cluster() {
   bench_require_binary "$BINARY"
 
   local cluster_dir="$BENCH_DIR/gfc"
-  local enc_key_file="$cluster_dir/encryption.key"
   local http_ports=()
   local raft_ports=()
   local pprof_ports=()
@@ -383,10 +379,6 @@ start_grainfs_cluster() {
   if [[ "$BENCH_PPROF" == "1" ]]; then
     GRAINFS_PPROF_PORTS=("${pprof_ports[@]}")
   fi
-  BENCH_ENCRYPTION_KEY_FILE="$enc_key_file"
-  export BENCH_ENCRYPTION_KEY_FILE
-  bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
-
   start_grainfs_cluster_node() {
     local node_idx="$1"
     local zero_idx=$((node_idx - 1))

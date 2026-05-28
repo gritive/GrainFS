@@ -34,18 +34,8 @@ Work these in order. Do not run them in parallel.
      covers the snapshot/restore path end-to-end.
      **R3 — Retire static key.** After every `cfg.Encryptor` consumer
      (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
-     replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,
+     replacement. Remove the remaining `encrypt.Encryptor` data path and
      `EncryptorAdapter`. ADR for cipher-unification + greenfield boundary.
-   - [ ] D-cut: remove static `encryption.key` from production protection paths
-     after redesigning invite/bootstrap secret transfer and node identity sealing.
-   - [ ] D-cut: replace `Config.RawEncryptionKey` bootstrap-secret payload with a
-     DEK/KEK-safe bootstrap envelope.
-   - [ ] D-cut: move `node.key.enc` away from static `encryption.key` without
-     making KEK prune able to brick restarted nodes.
-     Design path: `docs/superpowers/specs/2026-05-28-at-rest-dcut-bootstrap-envelope-design.md`
-     splits this into bootstrap-envelope, KEK-gen node identity seal,
-     prune-evidence gate, and final static-key removal slices.
-     Remaining D-cut work is final static-key removal.
    - [ ] Data-DEK rotation: persist non-zero `dek_gen` for every
      ciphertext-bearing format before enabling `encryption.rotate-dek`.
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec

@@ -20,7 +20,6 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			t := ginkgo.GinkgoTB()
 
 			dir := t.TempDir()
-			encKeyFile := makeSharedEncryptionKeyFile(t)
 			port := freePort()
 			raft := freePort()
 
@@ -36,7 +35,6 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 				"--node-id", "n-no-key",
 				"--nfs4-port", "0",
 				"--nbd-port", "0",
-				"--encryption-key-file", encKeyFile,
 			)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			out, err := cmd.CombinedOutput()
@@ -56,8 +54,6 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 
 			leaderDataDir := shortTempDir(t)
 			joinerDataDir := shortTempDir(t)
-			encKeyFile := makeSharedEncryptionKeyFile(t)
-
 			leaderHTTP := freePort()
 			leaderRaft := freePort()
 			joinerHTTP := freePort()
@@ -75,7 +71,6 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 				"--cluster-key", keyA,
 				"--nfs4-port", "0",
 				"--nbd-port", "0",
-				"--encryption-key-file", encKeyFile,
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			}
@@ -120,7 +115,6 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 				"--cluster-key", keyB, // MISMATCH
 				"--nfs4-port", "0",
 				"--nbd-port", "0",
-				"--encryption-key-file", encKeyFile,
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			}

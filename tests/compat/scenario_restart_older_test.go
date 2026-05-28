@@ -31,14 +31,13 @@ func TestRestartToOlderBinary(t *testing.T) {
 	cur := getBinary()
 
 	dataDir := t.TempDir()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	ports := uniqueFreePorts(4)
 	curHTTP, prevHTTP := ports[0], ports[1]
 	curRaft, prevRaft := ports[2], ports[3]
 
 	// Phase 1: start with current binary, write data.
-	cmd1 := startGrainfsNode(t, cur, dataDir, curHTTP, curRaft, encKeyFile)
+	cmd1 := startGrainfsNode(t, cur, dataDir, curHTTP, curRaft)
 	require.NoError(t, waitForPort(curHTTP, 60*time.Second), "wait for cur node HTTP port")
 	time.Sleep(2 * time.Second)
 
@@ -60,7 +59,7 @@ func TestRestartToOlderBinary(t *testing.T) {
 	terminateProcess(cmd1)
 
 	// Phase 2: attempt to restart the same data dir with the old binary.
-	oldCmd := startGrainfsNode(t, prev, dataDir, prevHTTP, prevRaft, encKeyFile)
+	oldCmd := startGrainfsNode(t, prev, dataDir, prevHTTP, prevRaft)
 	t.Cleanup(func() { terminateProcess(oldCmd) })
 
 	if err := waitForPort(prevHTTP, 10*time.Second); err != nil {

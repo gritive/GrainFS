@@ -66,9 +66,8 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 
 	// 3b. Zero-CA invite-join (W9b): when an invite bundle is present and the
 	// resume gate says FreshJoin/Resume, run Phase-1 over the dedicated QUIC join
-	// transport to pull + stage the cluster bootstrap secrets (encryption.key,
-	// KEK generations, cluster.id, transport PSK) BEFORE the earliest secret gate
-	// (LoadOrCreateEncryptionKeyWithRaw below). It writes back opts.NodeID and
+	// transport to pull + stage the cluster bootstrap secrets (KEK generations,
+	// cluster.id, transport PSK) BEFORE the earliest secret gate. It writes back opts.NodeID and
 	// opts.ClusterKey so the normal boot resolves the identical node id and the
 	// --cluster-key gate passes in-memory. The Phase-2 membership ACK runs
 	// post-boot in bootWALAndForwardersPart1. Staging targets primaryDataDir so the
@@ -78,14 +77,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 		return fmt.Errorf("zero-CA invite-join: %w", err)
 	}
 
-	// 4. Encryption key + IAMApplier.
-	// The legacy static encryption key is optional for Zero-CA invite joins once
-	// Phase-1 stages KEK/DEK-backed node identity material. Existing static-key
-	// clusters still load the file when present.
-	shardEncryptor, rawEncryptionKey, err := loadStaticEncryptionKeyForRun(opts, primaryDataDir, inviteJoin)
-	if err != nil {
-		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
-	}
+	// 4. At-rest format guard + IAMApplier.
 	metaDir := opts.MetaDir
 	if metaDir == "" {
 		metaDir = filepath.Join(primaryDataDir, "meta")
@@ -98,7 +90,6 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	// once the DEK keeper is at its final value (post-wireDEKKeeper, after any
 	// restore-time reassignment). The apply loop is gated by WaitDEKReady, so
 	// no apply runs before the encryptor is installed.
-	_ = shardEncryptor // shardEncryptor still feeds other paths via state.cfg.Encryptor
 	iamApplier := iam.NewApplier(iamStore, nil)
 
 	// 5. pprof.
@@ -136,8 +127,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	}
 
 	// 8. Build Config from options.
-	cfg := optionsToConfig(opts, addr, authOpts, shardEncryptor, iamStore, iamApplier)
-	cfg.RawEncryptionKey = rawEncryptionKey
+	cfg := optionsToConfig(opts, addr, authOpts, iamStore, iamApplier)
 	cfg.InviteJoin = inviteJoin
 
 	// 9. Delegate to existing Run.

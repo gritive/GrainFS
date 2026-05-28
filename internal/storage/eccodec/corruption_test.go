@@ -160,8 +160,8 @@ func TestIsCorruption(t *testing.T) {
 		},
 		{
 			// AEAD-failure classification follows audit #2: key selection on the
-			// shard read path is deterministic (single static --encryption-key-file,
-			// no versioned data-shard keystore / rotation), so a tag failure on an
+			// shard read path is deterministic (single DEK generation, no data-shard
+			// key rotation), so a tag failure on an
 			// owned shard is tampered/corrupt bytes, not a key-version race.
 			// Therefore: corruption.
 			name: "byte-tampered encrypted shard (AEAD tag fails)",

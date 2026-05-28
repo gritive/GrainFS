@@ -25,11 +25,10 @@ type ServeOptions struct {
 	PublicURL   string   // --public-url
 
 	// --- Cluster identity ---
-	NodeID            string // --node-id
-	RaftAddr          string // --raft-addr
-	JoinListenAddr    string // --join-listen-addr
-	ClusterKey        string // --cluster-key
-	EncryptionKeyFile string // --encryption-key-file
+	NodeID         string // --node-id
+	RaftAddr       string // --raft-addr
+	JoinListenAddr string // --join-listen-addr
+	ClusterKey     string // --cluster-key
 
 	// --- Cluster transport tuning ---
 	AppendForwardBufferTotalBytes    int64         // --cluster-append-forward-buffer-total-bytes

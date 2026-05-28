@@ -72,7 +72,7 @@ func TestInstallSnapshotPath(t *testing.T) {
 
 	// Start the replacement node with the current binary.
 	// It joins via .join-pending and receives InstallSnapshot from the leader.
-	newCmd := startGrainfsNode(t, cur, newDataDir, newHTTP, newRaft, c.encKeyFile)
+	newCmd := startGrainfsNode(t, cur, newDataDir, newHTTP, newRaft)
 	t.Cleanup(func() { terminateProcess(newCmd) })
 
 	// Wait for the new node's HTTP port — it must install the snapshot first.

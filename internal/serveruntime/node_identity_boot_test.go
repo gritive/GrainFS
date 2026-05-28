@@ -47,7 +47,7 @@ func TestEnsureNodeIdentity_GeneratesAndPersistsWhenAbsent(t *testing.T) {
 	encKey := testNIEncKey()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, spki, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, spki, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	require.Equal(t, store.ActiveVersion(), gotGen)
 	require.NotEqual(t, [32]byte{}, spki, "expected non-zero SPKI")
@@ -68,7 +68,7 @@ func TestEnsureNodeIdentity_GeneratesWithoutStaticEncryptionKey(t *testing.T) {
 	dir := t.TempDir()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, spki, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, nil, store)
+	_, spki, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	require.NotEqual(t, [32]byte{}, spki, "expected non-zero SPKI")
 	require.Equal(t, store.ActiveVersion(), gotGen)
@@ -86,12 +86,12 @@ func TestEnsureNodeIdentity_ReloadsKEKSealedKeyWithoutStaticEncryptionKey(t *tes
 	dir := t.TempDir()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, first, firstGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, nil, store)
+	_, first, firstGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	before, err := os.ReadFile(nodeKeyEncPath(dir))
 	require.NoError(t, err)
 
-	_, second, secondGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, nil, store)
+	_, second, secondGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
 	require.NoError(t, err)
@@ -104,14 +104,13 @@ func TestEnsureNodeIdentity_ReloadsKEKSealedKeyWithoutStaticEncryptionKey(t *tes
 
 func TestEnsureNodeIdentity_ReusesPersisted(t *testing.T) {
 	dir := t.TempDir()
-	encKey := testNIEncKey()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	_, first, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, first, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	before, err := os.ReadFile(nodeKeyEncPath(dir))
 	require.NoError(t, err)
-	_, second, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, second, _, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
@@ -121,7 +120,6 @@ func TestEnsureNodeIdentity_ReusesPersisted(t *testing.T) {
 
 func TestEnsureNodeIdentity_ReSealsOlderKEKGenToActive(t *testing.T) {
 	dir := t.TempDir()
-	encKey := testNIEncKey()
 	store := newNIKEKStore(t, 0, 1, 2, 3)
 	kek2, err := store.Get(2)
 	require.NoError(t, err)
@@ -130,7 +128,7 @@ func TestEnsureNodeIdentity_ReSealsOlderKEKGenToActive(t *testing.T) {
 	require.NoError(t, transport.SealNodeKey(dir, kek2, cert))
 	require.NoError(t, writeNodeKeyGen(dir, 2))
 
-	_, got, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, got, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.NoError(t, err)
 	require.Equal(t, store.ActiveVersion(), gotGen)
 	require.Equal(t, want, got)
@@ -144,32 +142,28 @@ func TestEnsureNodeIdentity_ReSealsOlderKEKGenToActive(t *testing.T) {
 	require.Equal(t, store.ActiveVersion(), gen)
 }
 
-func TestEnsureNodeIdentity_MigratesLegacyStaticSealedToActiveKEK(t *testing.T) {
+func TestEnsureNodeIdentity_RejectsLegacyStaticSealedNodeKey(t *testing.T) {
 	dir := t.TempDir()
 	encKey := testNIEncKey()
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	cert, want, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
+	cert, _, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
 	require.NoError(t, err)
 	require.NoError(t, transport.SealNodeKey(dir, encKey, cert))
+	before, err := os.ReadFile(nodeKeyEncPath(dir))
+	require.NoError(t, err)
 
-	_, got, gotGen, err := ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, _, _, err = ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no usable node.key.gen")
+	after, err := os.ReadFile(nodeKeyEncPath(dir))
 	require.NoError(t, err)
-	require.Equal(t, store.ActiveVersion(), gotGen)
-	require.Equal(t, want, got)
-	activeKEK, err := store.ActiveKEK()
-	require.NoError(t, err)
-	_, migrated, err := transport.LoadNodeKey(dir, activeKEK)
-	require.NoError(t, err)
-	require.Equal(t, want, migrated)
-	gen, ok := readNodeKeyGen(dir)
-	require.True(t, ok, "node.key.gen not written after static migration")
-	require.Equal(t, store.ActiveVersion(), gen)
+	require.Equal(t, before, after)
+	require.NoFileExists(t, nodeKeyGenPath(dir))
 }
 
 func TestEnsureNodeIdentity_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
 	dir := t.TempDir()
-	encKey := testNIEncKey()
 	sealStore := newNIKEKStore(t, 2)
 	kek2, err := sealStore.Get(2)
 	require.NoError(t, err)
@@ -180,7 +174,7 @@ func TestEnsureNodeIdentity_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
 	require.NoError(t, err)
 
 	store := newNIKEKStore(t, 0, 1, 2)
-	_, _, _, err = ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, _, _, err = ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.Error(t, err, "expected error when KEK-sealed key lacks sidecar")
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
 	require.NoError(t, err)
@@ -189,7 +183,6 @@ func TestEnsureNodeIdentity_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
 
 func TestEnsureNodeIdentity_NeverRegeneratesOnPrunedRecordedGen(t *testing.T) {
 	dir := t.TempDir()
-	encKey := testNIEncKey()
 	sealStore := newNIKEKStore(t, 2)
 	kek2, err := sealStore.Get(2)
 	require.NoError(t, err)
@@ -201,7 +194,7 @@ func TestEnsureNodeIdentity_NeverRegeneratesOnPrunedRecordedGen(t *testing.T) {
 	require.NoError(t, err)
 
 	store := newNIKEKStore(t, 0, 1)
-	_, _, _, err = ensureNodeIdentity(dir, testNIClusterID, testNINodeID, encKey, store)
+	_, _, _, err = ensureNodeIdentity(dir, testNIClusterID, testNINodeID, store)
 	require.Error(t, err, "expected error when recorded KEK gen is pruned")
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
 	require.NoError(t, err)

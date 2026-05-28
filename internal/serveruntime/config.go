@@ -10,7 +10,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/server"
@@ -39,13 +38,7 @@ type Config struct {
 	JoinListenAddr string
 
 	// Pre-built per Q9 of the cmd-thin grill
-	AuthOpts  []server.Option
-	Encryptor *encrypt.Encryptor
-	// RawEncryptionKey is the raw bytes of the static encryption.key, captured
-	// alongside Encryptor by LoadOrCreateEncryptionKeyWithRaw. Threaded onto
-	// bootState (via cfg) so the zero-CA bootstrap-secret provider can seal the
-	// encryption key to an invite-joining node. Nil when encryption is unwired.
-	RawEncryptionKey []byte
+	AuthOpts []server.Option
 
 	// InviteJoin carries the Zero-CA invite-join Phase-1 outcome (W9b) when this
 	// node booted from an invite bundle (FreshJoin/Resume). Nil on every other

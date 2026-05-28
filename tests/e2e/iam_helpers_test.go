@@ -3,7 +3,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,24 +24,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
-
-// makeSharedEncryptionKeyFile writes a 32-byte raw key to a temp file and
-// returns the path. All cluster nodes must pass --encryption-key-file=<path>
-// pointing at the same file so their shardEncryptors agree — IAM secret_key
-// wrap/unwrap must round-trip across the raft FSM on every node.
-func makeSharedEncryptionKeyFile(t testing.TB) string {
-	t.Helper()
-	f, err := os.CreateTemp("", "grainfs-e2e-enckey-*")
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	var key [32]byte
-	_, err = rand.Read(key[:])
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	_, err = f.Write(key[:])
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(f.Close()).To(gomega.Succeed())
-	t.Cleanup(func() { _ = os.Remove(f.Name()) })
-	return f.Name()
-}
 
 // bootstrapAdminViaUDS performs the post-serve admin SA bootstrap via the
 // admin UDS. Returns the access_key/secret_key pair for use in subsequent

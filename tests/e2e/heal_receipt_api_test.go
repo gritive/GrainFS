@@ -81,8 +81,6 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 			dataDirs[i] = d
 			ginkgo.DeferCleanup(removeE2EDir, d)
 		}
-		encKeyFile := makeSharedEncryptionKeyFile(t)
-
 		// ReceiptIDs used across the test — literal ids make log output readable.
 		const (
 			bucketName = "audit-test"
@@ -109,7 +107,6 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 				"--node-id", raftAddr(i),
 				"--raft-addr", raftAddr(i),
 				"--cluster-key", clusterKey,
-				"--encryption-key-file", encKeyFile,
 				"--heal-receipt-window=1",
 				"--heal-receipt-gossip-interval=1s",
 				"--nfs4-port", "0",

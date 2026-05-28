@@ -46,7 +46,6 @@ type mrCluster struct {
 	httpURLs      []string
 	stopped       bool
 	clusterKey    string
-	encKeyFile    string
 	accessKey     string
 	secretKey     string
 	saID          string
@@ -102,7 +101,6 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	c := &mrCluster{
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
-		encKeyFile: makeSharedEncryptionKeyFile(t),
 		extraArgs:  opts.ExtraArgs,
 	}
 	c.httpPorts = make([]int, maxNodes)
@@ -346,7 +344,6 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
 		"--cluster-key", c.clusterKey,
-		"--encryption-key-file", c.encKeyFile,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", "0",

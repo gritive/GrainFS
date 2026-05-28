@@ -101,7 +101,7 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	}
 
 	const addr = ":19000"
-	cfg := optionsToConfig(opts, addr, nil, nil, nil, nil)
+	cfg := optionsToConfig(opts, addr, nil, nil, nil)
 
 	// Pre-built / passthrough.
 	require.Equal(t, opts.Version, cfg.Version)
@@ -112,7 +112,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.True(t, cfg.RaftAddrExplicit, "RaftAddr non-empty implies explicit=true")
 	require.Equal(t, opts.ClusterKey, cfg.ClusterKey)
 	require.Nil(t, cfg.AuthOpts)
-	require.Nil(t, cfg.Encryptor)
 	require.Nil(t, cfg.IAMStore)
 	require.Nil(t, cfg.IAMApplier)
 
@@ -189,7 +188,7 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 // TestOptionsToConfigRaftAddrExplicitFalse covers the empty-RaftAddr branch.
 func TestOptionsToConfigRaftAddrExplicitFalse(t *testing.T) {
 	opts := ServeOptions{RaftAddr: ""}
-	cfg := optionsToConfig(opts, ":0", nil, nil, nil, nil)
+	cfg := optionsToConfig(opts, ":0", nil, nil, nil)
 	require.False(t, cfg.RaftAddrExplicit, "empty RaftAddr implies explicit=false")
 	require.Equal(t, "", cfg.RaftAddr)
 }

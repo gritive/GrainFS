@@ -108,7 +108,6 @@ func bootShardService(ctx context.Context, state *bootState) error {
 
 	state.dataWALRepairCollector = cluster.NewDataWALRepairCollector()
 	shardSvcOpts := []cluster.ShardServiceOption{
-		cluster.WithEncryptor(state.cfg.Encryptor),
 		cluster.WithDataWAL(state.dataWAL),
 		// Single-node (ParityShards==0) has no EC redundancy, so a large
 		// metadata-only shard write must fsync the shard file directly — read
@@ -158,9 +157,6 @@ func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
 			return nil, fmt.Errorf("data WAL DEK sealer requires 16-byte clusterID, got %d", len(state.clusterID))
 		}
 		return storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID), nil
-	case state.cfg.Encryptor != nil:
-		var zero [16]byte
-		return storage.NewEncryptorAdapter(state.cfg.Encryptor, zero[:]), nil
 	default:
 		return nil, nil
 	}
@@ -389,13 +385,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	// DistributedBackend (groups are created later for non-group-0
 	// placements). The pipeline owns long-lived actor goroutines shared
 	// across all groups.
-	// R1: wire the PUT pipeline whenever a data-at-rest seam exists — the
-	// gen-aware DEK keeper (preferred; putpipeline.New selects it over Encryptor)
-	// OR the static encryptor. Encryption-disabled keeps both nil.
-	if (state.dekKeeper != nil || state.cfg.Encryptor != nil) && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
+	// R1/R3: wire the PUT pipeline only when the gen-aware DEK keeper exists.
+	if state.dekKeeper != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
 		pipeline := putpipeline.New(putpipeline.Config{
 			DataDirs:  state.shardSvc.DataDirs(),
-			Encryptor: state.cfg.Encryptor,
 			DEKKeeper: state.dekKeeper,
 			ClusterID: state.clusterID,
 			ECConfig:  state.effectiveEC,

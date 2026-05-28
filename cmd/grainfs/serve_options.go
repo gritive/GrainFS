@@ -43,7 +43,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.RaftAddr, _ = cmd.Flags().GetString("raft-addr")
 	opts.JoinListenAddr, _ = cmd.Flags().GetString("join-listen-addr")
 	opts.ClusterKey, _ = cmd.Flags().GetString("cluster-key")
-	opts.EncryptionKeyFile, _ = cmd.Flags().GetString("encryption-key-file")
 
 	// Cluster transport tuning.
 	opts.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")

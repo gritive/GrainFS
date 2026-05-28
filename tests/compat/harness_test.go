@@ -26,17 +26,16 @@ import (
 // compatCluster is a multi-node grainfs cluster for compat testing.
 // Each node runs a potentially different binary version.
 type compatCluster struct {
-	t          *testing.T
-	binaries   []string
-	dataDirs   []string
-	httpPorts  []int
-	raftPorts  []int
-	httpURLs   []string
-	encKeyFile string
-	accessKey  string
-	secretKey  string
-	procs      []*exec.Cmd
-	stopped    bool
+	t         *testing.T
+	binaries  []string
+	dataDirs  []string
+	httpPorts []int
+	raftPorts []int
+	httpURLs  []string
+	accessKey string
+	secretKey string
+	procs     []*exec.Cmd
+	stopped   bool
 }
 
 // startCompatCluster starts an N-node cluster.
@@ -63,14 +62,13 @@ func startCompatCluster(t *testing.T, binaries []string) *compatCluster {
 	ports := uniqueFreePorts(2 * n)
 
 	c := &compatCluster{
-		t:          t,
-		binaries:   make([]string, n),
-		dataDirs:   make([]string, n),
-		httpPorts:  make([]int, n),
-		raftPorts:  make([]int, n),
-		httpURLs:   make([]string, n),
-		procs:      make([]*exec.Cmd, n),
-		encKeyFile: makeSharedEncryptionKeyFile(t),
+		t:         t,
+		binaries:  make([]string, n),
+		dataDirs:  make([]string, n),
+		httpPorts: make([]int, n),
+		raftPorts: make([]int, n),
+		httpURLs:  make([]string, n),
+		procs:     make([]*exec.Cmd, n),
 	}
 
 	for i := 0; i < n; i++ {
@@ -160,7 +158,6 @@ func (c *compatCluster) startNode(i int) *exec.Cmd {
 		"--node-id", nodeID,
 		"--raft-addr", raftAddr,
 		"--cluster-key", "COMPAT-KEY",
-		"--encryption-key-file", c.encKeyFile,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",

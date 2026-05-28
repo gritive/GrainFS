@@ -368,7 +368,8 @@ func TestMaybeInviteJoin_MultiDataDirUsesPrimary(t *testing.T) {
 	}
 }
 
-// TestStageInviteSecrets writes every secret where the normal boot reads them.
+// TestStageInviteSecrets writes every KEK secret where normal boot reads it,
+// and ignores legacy static encryption keys carried by pre-format-7 payloads.
 func TestStageInviteSecrets(t *testing.T) {
 	dir := t.TempDir()
 	encKey := []byte("encryption-key-bytes")
@@ -381,9 +382,7 @@ func TestStageInviteSecrets(t *testing.T) {
 		t.Fatalf("stageInviteSecrets: %v", err)
 	}
 
-	if got := mustRead(t, filepath.Join(dir, "encryption.key")); string(got) != string(encKey) {
-		t.Fatalf("encryption.key = %q", got)
-	}
+	require.NoFileExists(t, filepath.Join(dir, "encryption.key"))
 	if got := mustRead(t, filepath.Join(dir, nodeconfig.ClusterIDFile)); string(got) != string(clusterID) {
 		t.Fatalf("cluster.id = %q", got)
 	}
@@ -580,7 +579,7 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsOlderKEKGenToActive(t *testing.T) {
 		t.Fatal("node.key.enc unexpectedly decrypts under encKey before migration")
 	}
 
-	gotCert, gotSPKI, gotGen, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true)
+	gotCert, gotSPKI, gotGen, err := loadAndMigrateInviteNodeKey(dir, store, 3, true)
 	if err != nil {
 		t.Fatalf("loadAndMigrateInviteNodeKey: %v", err)
 	}
@@ -608,7 +607,7 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsOlderKEKGenToActive(t *testing.T) {
 
 	// Idempotent resume: a second call (e.g. after a crash before the sentinel
 	// clear) must succeed via node.key.gen even if fallback state is stale.
-	if _, spki, gotGen, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 3, true); err != nil {
+	if _, spki, gotGen, err := loadAndMigrateInviteNodeKey(dir, store, 3, true); err != nil {
 		t.Fatalf("idempotent resume failed: %v", err)
 	} else if spki != wantSPKI {
 		t.Fatalf("resume SPKI mismatch: got %x want %x", spki, wantSPKI)
@@ -617,52 +616,35 @@ func TestLoadAndMigrateInviteNodeKey_ReSealsOlderKEKGenToActive(t *testing.T) {
 	}
 }
 
-func TestLoadAndMigrateInviteNodeKey_MigratesLegacyStaticSealedToActiveKEK(t *testing.T) {
+func TestLoadAndMigrateInviteNodeKey_RejectsLegacyStaticSealedNodeKey(t *testing.T) {
 	dir := t.TempDir()
 	encKey := bytes.Repeat([]byte{0xCD}, 32)
 	store := newNIKEKStore(t, 0, 1, 2)
 
-	cert, wantSPKI, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
+	cert, _, err := transport.GenerateNodeIdentity(testNIClusterID, testNINodeID)
 	if err != nil {
 		t.Fatalf("GenerateNodeIdentity: %v", err)
 	}
 	if err := transport.SealNodeKey(dir, encKey, cert); err != nil {
 		t.Fatalf("SealNodeKey under encKey: %v", err)
 	}
+	before, err := os.ReadFile(nodeKeyEncPath(dir))
+	require.NoError(t, err)
 
 	if err := writeNodeKeyGen(dir, 3); err != nil {
 		t.Fatalf("writeNodeKeyGen stale sidecar: %v", err)
 	}
-	gotCert, gotSPKI, gotGen, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false)
-	if err != nil {
-		t.Fatalf("loadAndMigrateInviteNodeKey static migration: %v", err)
-	}
-	require.Equal(t, store.ActiveVersion(), gotGen)
-	if gotSPKI != wantSPKI {
-		t.Fatalf("SPKI mismatch: got %x want %x", gotSPKI, wantSPKI)
-	}
-	if gotCert.PrivateKey == nil {
-		t.Fatal("returned cert has nil private key")
-	}
-	activeKEK, err := store.ActiveKEK()
-	if err != nil {
-		t.Fatalf("ActiveKEK: %v", err)
-	}
-	if _, spki, err := transport.LoadNodeKey(dir, activeKEK); err != nil {
-		t.Fatalf("node.key.enc does not decrypt under active KEK after static migration: %v", err)
-	} else if spki != wantSPKI {
-		t.Fatalf("post-migration SPKI mismatch: got %x want %x", spki, wantSPKI)
-	}
-	if gen, ok := readNodeKeyGen(dir); !ok {
-		t.Fatal("node.key.gen must be written after static migration")
-	} else if gen != store.ActiveVersion() {
-		t.Fatalf("node.key.gen=%d want active %d", gen, store.ActiveVersion())
-	}
+
+	_, _, _, err = loadAndMigrateInviteNodeKey(dir, store, 0, false)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "get node key KEK gen 3")
+	after, err := os.ReadFile(nodeKeyEncPath(dir))
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 func TestLoadAndMigrateInviteNodeKey_RejectsMissingSidecarForKEKSealedKey(t *testing.T) {
 	dir := t.TempDir()
-	encKey := bytes.Repeat([]byte{0xCD}, 32)
 	store := newNIKEKStore(t, 0, 1, 2)
 	kek2, err := store.Get(2)
 	if err != nil {
@@ -681,7 +663,7 @@ func TestLoadAndMigrateInviteNodeKey_RejectsMissingSidecarForKEKSealedKey(t *tes
 		t.Fatalf("read node.key.enc: %v", err)
 	}
 
-	if _, _, _, err := loadAndMigrateInviteNodeKey(dir, encKey, store, 0, false); err == nil {
+	if _, _, _, err := loadAndMigrateInviteNodeKey(dir, store, 0, false); err == nil {
 		t.Fatal("expected missing node.key.gen to fail")
 	}
 	after, err := os.ReadFile(nodeKeyEncPath(dir))
@@ -760,35 +742,30 @@ func TestStageInviteJoinTransportKey_PostDropIgnoresDeliveredPSK(t *testing.T) {
 }
 
 func TestInviteNodeKeySealKey_PreDropUsesHighestKEK(t *testing.T) {
-	encKey := bytes.Repeat([]byte{0xCD}, 32)
 	gens := []cluster.KEKGen{
 		{Gen: 1, Key: bytes.Repeat([]byte{0x01}, 32)},
 		{Gen: 3, Key: bytes.Repeat([]byte{0x03}, 32)},
 	}
 
-	gen, key, err := inviteNodeKeySealKey(encKey, gens, false)
+	gen, key, err := inviteNodeKeySealKey(gens)
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), gen)
 	require.Equal(t, gens[1].Key, key, "pre-drop seal key did not use highest KEK generation")
 }
 
 func TestInviteNodeKeySealKey_PostDropUsesHighestKEK(t *testing.T) {
-	encKey := bytes.Repeat([]byte{0xCD}, 32)
 	gens := []cluster.KEKGen{
 		{Gen: 3, Key: bytes.Repeat([]byte{0x03}, 32)},
 	}
 
-	gen, key, err := inviteNodeKeySealKey(encKey, gens, true)
+	gen, key, err := inviteNodeKeySealKey(gens)
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), gen)
 	require.Equal(t, gens[0].Key, key, "post-drop seal key did not use highest KEK generation")
 }
 
-func TestInviteNodeKeySealKey_PostDropLegacyFallsBackToStaticEncryptionKey(t *testing.T) {
-	encKey := bytes.Repeat([]byte{0xCD}, 32)
-
-	gen, key, err := inviteNodeKeySealKey(encKey, nil, true)
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), gen, "legacy sentinel marker")
-	require.Equal(t, encKey, key, "post-drop legacy fallback must use static encryption key")
+func TestInviteNodeKeySealKey_RejectsMissingKEKGenerations(t *testing.T) {
+	_, _, err := inviteNodeKeySealKey(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "bootstrap secrets contain no KEK generations")
 }

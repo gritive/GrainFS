@@ -23,20 +23,12 @@ func startEncryptionServer(t testing.TB) (*s3.Client, string, string) {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(removeE2EDir, dir)
 
-	keyFile := filepath.Join(dir, "encryption.key")
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i)
-	}
-	gomega.Expect(os.WriteFile(keyFile, key, 0o600)).To(gomega.Succeed())
-
 	binary := getBinary()
 	port := freePort()
 
 	cmd := exec.Command(binary, "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--encryption-key-file", keyFile,
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",

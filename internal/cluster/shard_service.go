@@ -56,7 +56,7 @@ type shardFileWriter func(path string, payload []byte) error
 type ShardService struct {
 	dataDirs      []string
 	transport     *transport.QUICTransport
-	encryptor     *encrypt.Encryptor    // retained for the whole-buffer scrubber-repair + legacy single-blob fallback (D-seg-ec-scrub / D-cut)
+	encryptor     *encrypt.Encryptor    // legacy/test whole-buffer adapter; production uses dekKeeper + segEnc.
 	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
 	dekKeeper     *encrypt.DEKKeeper
 	clusterID     [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
@@ -91,8 +91,8 @@ type ShardService struct {
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
 
-// WithEncryptor wires an XAES-256-GCM encryptor into the shard service so that
-// all shards are encrypted at rest. Pass nil to disable encryption.
+// WithEncryptor wires the legacy static-key adapter used by older tests and
+// repair paths. Production runtime wires WithShardDEKKeeper instead.
 func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 	return func(s *ShardService) {
 		s.encryptor = enc
@@ -101,19 +101,18 @@ func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
 		// a prior option had set segEnc).
 		s.segEnc = nil
 		if enc != nil {
-			// D-seg-ec-struct: EncryptorAdapter over the static key, zero-sentinel
-			// clusterID. Slice C swaps this for a DEKKeeperAdapter + real clusterID.
+			// Legacy static-key adapter with a zero-sentinel clusterID.
+			// Production DEK wiring overrides this via WithShardDEKKeeper.
 			s.segEnc = storage.NewEncryptorAdapter(enc, s.clusterID[:])
 		}
 	}
 }
 
 // WithShardDEKKeeper wires the generation-aware DEK keeper as the chunked
-// EC-shard data-at-rest seam (slice C activation), overriding the static
-// EncryptorAdapter that WithEncryptor installs. clusterID MUST be 16 bytes and
-// MUST equal the value the put pipeline binds (divergence fails every GET).
-// nil keeper or non-16-byte clusterID → no-op (leaves the EncryptorAdapter;
-// also avoids the BuildAAD panic on a bad clusterID). Apply AFTER WithEncryptor.
+// EC-shard data-at-rest seam. clusterID MUST be 16 bytes and MUST equal the
+// value the put pipeline binds (divergence fails every GET). nil keeper or
+// non-16-byte clusterID is a no-op so callers can append the option before the
+// keeper is available in narrowly-scoped tests.
 func WithShardDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) ShardServiceOption {
 	return func(s *ShardService) {
 		if keeper == nil || len(clusterID) != 16 {
@@ -233,15 +232,10 @@ func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, op
 			log.Warn().Err(err).Msg("cluster shard pack disabled")
 		}
 	}
-	if s.encryptor == nil {
-		panic("cluster.NewShardService: encryptor is mandatory (at-rest encryption is always on); use WithEncryptor")
-	}
-	// segEnc is the chunked-EC seam derived from the encryptor by WithEncryptor;
-	// the write path uses it unconditionally, so a non-nil encryptor MUST imply a
-	// non-nil segEnc. Guard the coupling so a future encryptor-setter that forgets
-	// segEnc fails loudly here instead of NPEing inside EncodeEncryptedShard.
+	// segEnc is the chunked-EC data-at-rest seam. Production sets it from the
+	// generation-aware DEK keeper; legacy tests may still set it via WithEncryptor.
 	if s.segEnc == nil {
-		panic("cluster.NewShardService: segEnc not derived from encryptor; set both via WithEncryptor")
+		panic("cluster.NewShardService: data encryptor is mandatory (at-rest encryption is always on); use WithShardDEKKeeper")
 	}
 	return s
 }
@@ -840,7 +834,7 @@ func (s *ShardService) EncryptPayload(data, aad []byte) ([]byte, error) {
 func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 	if s.encryptor == nil {
 		if encrypt.IsEncryptedBlob(data) {
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		if encrypt.IsLegacyEncryptedBlob(data) {
 			return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
@@ -1628,7 +1622,7 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
 		if s.segEnc == nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		info, statErr := f.Stat()
 		if statErr != nil {
@@ -1692,7 +1686,7 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		return data, nil
 	}
 	if encrypt.IsEncryptedBlob(data) {
-		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 	}
 	if encrypt.IsLegacyEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
@@ -1708,7 +1702,7 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, sha
 	if eccodec.IsEncryptedShard(raw) {
 		// GFSENC3 chunked branch: use segEnc + ShardAADFields.
 		if s.segEnc == nil {
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		var decoded bytes.Buffer
 		if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.segEnc, ShardAADFields(bucket, key, shardIdx)); err != nil {
@@ -1745,7 +1739,7 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, sha
 		return data, nil
 	}
 	if encrypt.IsEncryptedBlob(data) {
-		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 	}
 	if encrypt.IsLegacyEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
@@ -1797,7 +1791,7 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
 		if s.segEnc == nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			_ = f.Close()
@@ -1887,7 +1881,7 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 	_, peekErr := io.ReadFull(f, prefix[:])
 	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
 		if s.segEnc == nil {
-			return 0, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+			return 0, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		n, err := eccodec.ReadEncryptedShardRangeAt(f, s.segEnc, ShardAADFields(bucket, key, shardIdx), offset, buf)
 		if err != nil {
@@ -1952,7 +1946,7 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
 		if s.segEnc == nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		r, err := eccodec.NewEncryptedShardRangeReader(f, s.segEnc, ShardAADFields(bucket, key, shardIdx), offset, length)
 		if err != nil {

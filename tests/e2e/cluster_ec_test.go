@@ -61,8 +61,6 @@ func runClusterECPutGet5Node(t testing.TB) {
 		dataDirs[i] = d
 		ginkgo.DeferCleanup(func() { _ = removeE2EDir(d) })
 	}
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/ec5-node-%d-stderr.log", i))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create stderr file for node %d", i)
@@ -72,7 +70,6 @@ func runClusterECPutGet5Node(t testing.TB) {
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--cluster-key", clusterKey,
-			"--encryption-key-file", encKeyFile,
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
@@ -412,8 +409,6 @@ func runClusterECTopologyChange(t testing.TB) {
 		dataDirs[i] = d
 		ginkgo.DeferCleanup(func() { _ = removeE2EDir(d) })
 	}
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
 	// All 6 nodes are configured with the full peer list from the start so the
 	// leader elected among the first 3 nodes already knows about nodes 3,4,5.
 	// Without this, stage-2 nodes timeout and send higher-term RequestVotes that
@@ -429,7 +424,6 @@ func runClusterECTopologyChange(t testing.TB) {
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--cluster-key", clusterKey,
-			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",

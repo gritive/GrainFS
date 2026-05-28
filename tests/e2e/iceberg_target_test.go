@@ -191,8 +191,7 @@ func newSingleNodeIcebergTarget(t testing.TB) *icebergTarget {
 	t.Helper()
 	dataDir := shortTempDir(t)
 	raftPort := freePort()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-	server := startIcebergE2EServer(t, dataDir, raftPort, encKeyFile)
+	server := startIcebergE2EServer(t, dataDir, raftPort)
 
 	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dataDir}, 60*time.Second)
 	ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
@@ -243,8 +242,7 @@ func newSingleNodeIcebergTargetWithAudit(t testing.TB, commitInterval time.Durat
 	t.Helper()
 	dataDir := shortTempDir(t)
 	raftPort := freePort()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-	server := startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort, encKeyFile,
+	server := startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort,
 		"--audit-iceberg=true",
 		"--audit-commit-interval", commitInterval.String(),
 	)

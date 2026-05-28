@@ -60,7 +60,6 @@ type e2eCluster struct {
 	pprofPorts    []int
 	httpURLs      []string
 	clusterKey    string
-	encKeyFile    string
 	accessKey     string
 	secretKey     string
 	saID          string
@@ -160,7 +159,6 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 		t:             t,
 		mode:          opts.Mode,
 		clusterKey:    opts.ClusterKey,
-		encKeyFile:    makeSharedEncryptionKeyFile(t),
 		accessKey:     opts.AccessKey,
 		secretKey:     opts.SecretKey,
 		noBootstrap:   opts.NoBootstrap,
@@ -409,7 +407,6 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 		"--node-id", c.nodeID(i),
 		"--raft-addr", c.raftAddr(i),
 		"--cluster-key", c.clusterKey,
-		"--encryption-key-file", c.encKeyFile,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", c.scrubIntervalArg(),

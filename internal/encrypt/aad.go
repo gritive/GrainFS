@@ -29,6 +29,7 @@ const (
 	DomainIAMCredential       AADDomain = 0x000D
 	DomainFSMValue            AADDomain = 0x000E
 	DomainClusterConfigSecret AADDomain = 0x000F
+	DomainProtocolCredential  AADDomain = 0x0010
 )
 
 const aadMagic = "AAD\x01"

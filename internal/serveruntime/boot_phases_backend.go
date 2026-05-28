@@ -52,7 +52,6 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 		// both nil → packblob falls through to a plaintext blob store.
 		pb, err := packblob.NewPackedBackendWithOptions(routed, blobDir, int64(cfg.PackThreshold), packblob.PackedBackendOptions{
 			Compress:  false,
-			Encryptor: cfg.Encryptor,
 			DEKKeeper: state.dekKeeper,
 			ClusterID: state.clusterID,
 		})
@@ -126,7 +125,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	if len(state.clusterID) != 16 {
 		return fmt.Errorf("boot: snapshot KEK wiring: cluster id len %d", len(state.clusterID))
 	}
-	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.cfg.Encryptor, state.kekStore, [16]byte(state.clusterID), 30*time.Second)
+	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), nil, state.kekStore, [16]byte(state.clusterID), 30*time.Second)
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}

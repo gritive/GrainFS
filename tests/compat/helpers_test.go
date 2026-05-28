@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"testing"
 	"time"
 )
 
@@ -69,23 +68,4 @@ func terminateProcess(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 		<-done
 	}
-}
-
-// makeSharedEncryptionKeyFile creates a temp file with a 32-byte AES key.
-func makeSharedEncryptionKeyFile(t *testing.T) string {
-	t.Helper()
-	f, err := os.CreateTemp("", "compat-enc-key-*.bin")
-	if err != nil {
-		t.Fatalf("makeSharedEncryptionKeyFile: %v", err)
-	}
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = 0xAB
-	}
-	if _, err := f.Write(key); err != nil {
-		t.Fatalf("write enc key: %v", err)
-	}
-	f.Close()
-	t.Cleanup(func() { os.Remove(f.Name()) })
-	return f.Name()
 }

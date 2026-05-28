@@ -19,7 +19,6 @@ package colimafixture
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,7 +52,6 @@ type Cluster struct {
 
 	procs   []*exec.Cmd
 	logs    []*os.File
-	tempEnc string // encryption key file (shared across nodes)
 	stopped bool
 }
 
@@ -108,7 +106,6 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		DataDirs:  make([]string, numNodes),
 		procs:     make([]*exec.Cmd, numNodes),
 		logs:      make([]*os.File, numNodes),
-		tempEnc:   makeEncryptionKeyFile(t),
 	}
 	if !opts.SkipCleanup {
 		t.Cleanup(c.Stop)
@@ -258,9 +255,6 @@ func (c *Cluster) Stop() {
 		}
 		_ = os.RemoveAll(d)
 	}
-	if c.tempEnc != "" {
-		_ = os.Remove(c.tempEnc)
-	}
 }
 
 // HTTPURL returns the host-local URL for node i. Colima VM tests should use
@@ -287,7 +281,6 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, clusterKey string) (
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
 		"--cluster-key", clusterKey,
-		"--encryption-key-file", c.tempEnc,
 		"--nfs4-port", fmt.Sprintf("%d", c.NFSPorts[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.NBDPorts[i]),
 		"--scrub-interval", "0",
@@ -346,30 +339,6 @@ func uniqueFreePorts(t testing.TB, n int) []int {
 		_ = pc.Close()
 	}
 	return ports
-}
-
-func makeEncryptionKeyFile(t testing.TB) string {
-	t.Helper()
-	f, err := os.CreateTemp("", "grainfs-colima-enckey-*")
-	if err != nil {
-		t.Fatalf("create enckey: %v", err)
-	}
-	var key [32]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		t.Fatalf("read rand: %v", err)
-	}
-	if _, err := f.Write(key[:]); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		t.Fatalf("write enckey: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		t.Fatalf("close enckey: %v", err)
-	}
-	return f.Name()
 }
 
 // writeJoinPending mirrors writeNodeJoinPending from
