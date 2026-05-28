@@ -62,6 +62,38 @@ func TestDecoratorDisabledIsPassThrough(t *testing.T) {
 	require.EqualValues(t, 1, inner.calls)
 }
 
+type missingCfg struct{}
+
+func (missingCfg) GetString(string) (string, bool) { return "", false }
+
+func TestDecoratorMalformedConfigIsPassThrough(t *testing.T) {
+	inner := &spyInner{decision: policy.DecisionAllow}
+	d := NewDecorator(inner, staticCfg("{"))
+	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Equal(t, policy.DecisionAllow, got.Decision)
+	require.EqualValues(t, 1, inner.calls)
+
+	inner2 := &spyInner{decision: policy.DecisionAllow}
+	d2 := NewDecorator(inner2, staticCfg("{"))
+	got2 := d2.Authorize(context.Background(), "sa", "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Equal(t, policy.DecisionAllow, got2.Decision)
+	require.EqualValues(t, 1, inner2.calls)
+}
+
+func TestDecoratorMissingConfigKeyIsPassThrough(t *testing.T) {
+	inner := &spyInner{decision: policy.DecisionAllow}
+	d := NewDecorator(inner, missingCfg{})
+	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Equal(t, policy.DecisionAllow, got.Decision)
+	require.EqualValues(t, 1, inner.calls)
+
+	inner2 := &spyInner{decision: policy.DecisionAllow}
+	d2 := NewDecorator(inner2, missingCfg{})
+	got2 := d2.Authorize(context.Background(), "sa", "", policy.RequestContext{Action: "a", Resource: "r"})
+	require.Equal(t, policy.DecisionAllow, got2.Decision)
+	require.EqualValues(t, 1, inner2.calls)
+}
+
 func TestDecoratorShortCircuitsInnerDeny(t *testing.T) {
 	var dialed int32
 	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&dialed, 1) })

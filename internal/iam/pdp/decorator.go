@@ -127,8 +127,12 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	// its own child timeout, so the inbound ctx is canceled only if the caller
 	// gave up.
 	if ctx.Err() != nil {
-		metrics.PDPRequestsTotal.WithLabelValues("error", ErrTypeTransport, fp).Inc()
-		d.audit(req, actor, ctxReq, "deny", ErrTypeTransport, "request canceled")
+		cancelErrType := ErrTypeTransport
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			cancelErrType = ErrTypeTimeout
+		}
+		metrics.PDPRequestsTotal.WithLabelValues("error", cancelErrType, fp).Inc()
+		d.audit(req, actor, ctxReq, "deny", cancelErrType, "request canceled")
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
 	}
 
