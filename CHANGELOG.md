@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.406.0] - 2026-05-28
+
+### Security
+
+- Added the Zero-CA complete-cutover flow that drops the shared cluster
+  transport key only after every voter presents a per-node identity.
+- Post-drop invite-join no longer sends the revoked shared transport PSK to new
+  nodes; joiners stage a local construction placeholder and switch to per-node
+  identity before listening.
+
+### Added
+
+- Added `grainfs cluster complete-cutover`, backed by the admin
+  `/v1/cluster/complete-cutover` endpoint and `DropClusterKeyAccept` meta-raft
+  command.
+- Added D-cut4 gating for complete-cutover: the leader refuses the drop unless
+  every current voter has a registered per-node SPKI and `presents_per_node`
+  marker, and single-voter configurations are rejected.
+
+### Changed
+
+- Restored cluster-key-dropped state now removes the legacy cluster-key accept
+  base from QUIC transport, and post-drop invite-join applies per-node identity
+  before transport listen.
+
 ## [0.0.404.0] - 2026-05-28
 
 ### Added
