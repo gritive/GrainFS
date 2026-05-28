@@ -15,6 +15,20 @@
 - Updated the operator runbook with a `data_groups` cluster-health check for
   diagnosing data-Raft group leadership and replication progress.
 
+## [0.0.413.2] - 2026-05-28
+
+### Added
+
+- Added the at-rest static-key D-cut bootstrap envelope design and
+  implementation plan. The plan separates bootstrap secret transfer, KEK-gen
+  node identity sealing, prune evidence, and final static-key removal into
+  reviewable follow-up slices.
+
+### Changed
+
+- Updated `TODOS.md` so the remaining DEK/KEK at-rest work points at the D-cut
+  design before implementation begins.
+
 ## [0.0.413.1] - 2026-05-28
 
 ### Added
