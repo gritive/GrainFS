@@ -70,7 +70,7 @@ func TestProductionPeerKEKProbe_LeaseSnapshotFanOut_LocalSelfShortcuts(t *testin
 	dialer := &fakeProbeDialer{
 		leaseFn: func(_ context.Context, peer string, _ []byte) ([]byte, error) {
 			resp := KEKLeaseSnapshotResp{NodeID: peer, LeaseCount: 0, ObservedAtRaftCommitIndex: 200}
-			return encodeKEKLeaseSnapshotResp(resp), nil
+			return encodeKEKLeaseSnapshotResp(resp)
 		},
 	}
 	localCalls := 0

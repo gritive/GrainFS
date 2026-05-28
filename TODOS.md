@@ -337,10 +337,6 @@ Work these in order. Do not run them in parallel.
   `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
   surface as `lease_count > 0`. Very low priority — the current window is practically
   unreachable.
-- [ ] **KEK lease-probe wire codec: bound node_id length [P3]**. `encodeKEKLeaseSnapshotResp`
-  casts `len(NodeID)` to `uint16` without a guard and the decoder accepts trailing bytes
-  (`internal/cluster/kek_lease_rpc.go`). Pre-existing; raft server IDs are short so it is
-  not currently reachable, but add a length check + exact-length decode.
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
