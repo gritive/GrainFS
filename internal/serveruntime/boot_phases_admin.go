@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // CompleteCutoverHandler handles POST /v1/cluster/complete-cutover.
@@ -36,7 +37,10 @@ func (h *CompleteCutoverHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if err := h.RunDrop(r.Context()); err != nil {
 		code := http.StatusInternalServerError
 		msg := err.Error()
-		if strings.Contains(msg, "D-cut4") || strings.Contains(msg, "single-node") || strings.Contains(msg, "empty voter") {
+		if strings.Contains(msg, "D-cut4") ||
+			strings.Contains(msg, "single-node") ||
+			strings.Contains(msg, "empty voter") ||
+			strings.Contains(msg, "not in peer registry") {
 			code = http.StatusBadRequest
 		}
 		writeCompleteCutoverJSON(w, code, map[string]string{"error": msg})
@@ -205,7 +209,23 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 
 				completeCutoverH := &CompleteCutoverHandler{
 					RunDrop: func(ctx context.Context) error {
-						return state.metaRaft.DropClusterKey(ctx, state.nodeID, 60*time.Second)
+						dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+							resp, err := state.quicTransport.Call(ctx, peer, &transport.Message{
+								Type:    transport.StreamAppliedIndexProbe,
+								Payload: payload,
+							})
+							if err != nil {
+								return nil, err
+							}
+							if resp == nil {
+								return nil, fmt.Errorf("applied-index probe: nil response from %s", peer)
+							}
+							if resp.Status != transport.StatusOK {
+								return nil, fmt.Errorf("applied-index probe from %s failed: %s", peer, string(resp.Payload))
+							}
+							return resp.Payload, nil
+						}
+						return state.metaRaft.CompleteCutover(ctx, dialer, 60*time.Second)
 					},
 				}
 				h.POST("/v1/cluster/complete-cutover", wrapStdlibNoParam(completeCutoverH.ServeHTTP))

@@ -239,20 +239,15 @@ Work these in order. Do not run them in parallel.
 
 ## Deferred Until Triggered
 
-- [ ] **Zero-CA cutover PR-2b (cluster-key drop + RecycleConns + CLI + e2e) + revocation slice**.
-  PR-2a (feat/zero-ca-cutover-live, pending merge) delivered the present-flip half: applied-index
-  barrier RPC (`StreamAppliedIndexProbe`), `PreparePresentFlip`(85)+`BeginPresentFlip`(86) raft
-  commands, `present_flip_begun` snapshot bit (slot 15), lazy `onPresentFlip` callback
-  (`FlipPresent` only — no `RecycleConns`, no drop), `RunPresentFlip` orchestration (single-node
-  refuse + Prepare→barrier→Begin), `bootState.perNodeCert` plumbing, §8f joiner accept-set seed
-  (`SeedInitialPeerSPKIs`). Safe-to-leave-merged: `cluster_key_dropped` stays false, cluster key
-  stays in every accept-set. PR-2b must add: `DropClusterKeyAccept`(87) config-stamped raft cmd +
-  `cluster_key_dropped=true` write path, `RecycleConns` trigger on `onClusterKeyDropped`,
-  `presents_per_node=true` write path, post-drop joiner construction (presents per-node-only +
-  no PSK seed when `cluster_key_dropped=true`), CLI `grainfs cluster complete-cutover`, and e2e.
-  THEN the revocation slice: `RevokeNode` (registry remove + denylist + `RemoveVoter` +
-  `ClosePeer` + invite-burn) + P1#1 stale-pending fix + deny-map snapshot + CLI
-  `cluster revoke-node` + e2e. Design: spec §6-§8 (gitignored design doc).
+- [ ] **Zero-CA revocation slice**.
+  PR-2a delivered live present-flip; PR-2b delivered complete-cutover
+  (`present-flip -> cluster-key drop`), connection recycle, post-drop
+  invite-join without the shared transport PSK, CLI/admin wiring, and focused
+  multi-node E2E coverage. Remaining revocation work: `RevokeNode` (registry
+  remove + denylist + `RemoveVoter` + `ClosePeer` + invite-burn), stale-pending
+  cleanup, deny-map snapshot, CLI `grainfs cluster revoke-node`, and E2E proving
+  a revoked node cannot rejoin or use stale invites. KEK/DEK rotation remains
+  gated on cluster-wide KEK distribution.
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source

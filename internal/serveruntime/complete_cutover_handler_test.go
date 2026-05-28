@@ -30,6 +30,28 @@ func TestCompleteCutoverHandler_DCut4NotMet_Returns400(t *testing.T) {
 	require.Contains(t, resp["error"], "D-cut4")
 }
 
+func TestCompleteCutoverHandler_PresentFlipPrecondition_Returns400(t *testing.T) {
+	h := &CompleteCutoverHandler{
+		RunDrop: func(context.Context) error {
+			return fmt.Errorf("RunPresentFlip: voter %q not in peer registry - operator must finish member registration before cutover", "node-b")
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "/v1/cluster/complete-cutover", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "not in peer registry") {
+		t.Fatalf("missing precondition error in body: %s", rr.Body.String())
+	}
+}
+
 func TestCompleteCutoverHandler_Success_Returns200(t *testing.T) {
 	h := &CompleteCutoverHandler{
 		RunDrop: func(context.Context) error { return nil },

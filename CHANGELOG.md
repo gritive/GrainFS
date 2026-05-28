@@ -27,6 +27,23 @@
 - Updated OIDC federated IAM follow-up tracking from Slice 2 to Slice 3 policy
   resolution work.
 
+## [0.0.412.0] - 2026-05-28
+
+### Fixed
+
+- `grainfs cluster complete-cutover` now runs the full Zero-CA cutover in
+  production: present-flip, D-cut4 readiness wait, and shared cluster-key drop
+  happen under one membership lock before the command reports success.
+- Post-drop invite-join nodes now seal their per-node transport identity under
+  the static at-rest encryption key, so they can start QUIC with a per-node
+  certificate after the shared transport key has been dropped.
+
+### Added
+
+- Added focused multi-node E2E coverage proving a cluster can complete cutover,
+  mint a new invite, accept a post-drop joiner without reviving the old shared
+  transport PSK, and serve S3 reads and writes through that joiner.
+
 ## [0.0.408.0] - 2026-05-28
 
 ### Security

@@ -602,3 +602,65 @@ func TestStageInviteJoinTransportKey_PostDropUsesLocalPlaceholder(t *testing.T) 
 		t.Fatalf("disk key = %q, want ClusterKey %q", disk, opts.ClusterKey)
 	}
 }
+
+func TestStageInviteJoinTransportKey_PostDropIgnoresDeliveredPSK(t *testing.T) {
+	dir := t.TempDir()
+	opts := &ServeOptions{}
+
+	if err := stageInviteJoinTransportKey(dir, opts, []byte("delivered-psk"), true); err != nil {
+		t.Fatalf("stageInviteJoinTransportKey: %v", err)
+	}
+	if opts.ClusterKey == "" {
+		t.Fatal("ClusterKey is empty, want local placeholder")
+	}
+	if opts.ClusterKey == "delivered-psk" {
+		t.Fatal("post-drop path persisted delivered PSK instead of local placeholder")
+	}
+	disk, err := transport.NewKeystore(dir).ReadCurrent()
+	if err != nil {
+		t.Fatalf("ReadCurrent: %v", err)
+	}
+	if disk != opts.ClusterKey {
+		t.Fatalf("disk key = %q, want ClusterKey %q", disk, opts.ClusterKey)
+	}
+	if disk == "delivered-psk" {
+		t.Fatal("disk key reused delivered PSK after cluster key drop")
+	}
+}
+
+func TestInviteNodeKeySealKey_PreDropUsesHighestKEK(t *testing.T) {
+	encKey := bytes.Repeat([]byte{0xCD}, 32)
+	gens := []cluster.KEKGen{
+		{Gen: 1, Key: bytes.Repeat([]byte{0x01}, 32)},
+		{Gen: 3, Key: bytes.Repeat([]byte{0x03}, 32)},
+	}
+
+	gen, key, err := inviteNodeKeySealKey(encKey, gens, false)
+	if err != nil {
+		t.Fatalf("inviteNodeKeySealKey: %v", err)
+	}
+	if gen != 3 {
+		t.Fatalf("gen=%d want 3", gen)
+	}
+	if !bytes.Equal(key, gens[1].Key) {
+		t.Fatal("pre-drop seal key did not use highest KEK generation")
+	}
+}
+
+func TestInviteNodeKeySealKey_PostDropUsesStaticEncryptionKey(t *testing.T) {
+	encKey := bytes.Repeat([]byte{0xCD}, 32)
+	gens := []cluster.KEKGen{
+		{Gen: 3, Key: bytes.Repeat([]byte{0x03}, 32)},
+	}
+
+	gen, key, err := inviteNodeKeySealKey(encKey, gens, true)
+	if err != nil {
+		t.Fatalf("inviteNodeKeySealKey: %v", err)
+	}
+	if gen != 0 {
+		t.Fatalf("gen=%d want 0 sentinel marker for encKey-first load", gen)
+	}
+	if !bytes.Equal(key, encKey) {
+		t.Fatal("post-drop seal key must use static encryption key before QUIC Listen")
+	}
+}
