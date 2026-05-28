@@ -167,10 +167,16 @@ func bootShardService(ctx context.Context, state *bootState) error {
 // node.Start fires the data-plane raft apply loop. After this returns,
 // distBackend.RunApplyLoop (started in bootOwnedGroupsAndEC) will see
 // applied entries flow.
+func bootStreamRouterShell(state *bootState) {
+	if state.streamRouter == nil {
+		state.streamRouter = transport.NewStreamRouter()
+		state.quicTransport.SetStreamHandler(state.streamRouter.Dispatch)
+	}
+}
+
 func bootStreamRouter(state *bootState) error {
-	state.streamRouter = transport.NewStreamRouter()
+	bootStreamRouterShell(state)
 	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
-	state.quicTransport.SetStreamHandler(state.streamRouter.Dispatch)
 	state.quicTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
 	state.quicTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
 	// Phase B1: node-level append-segment peer-fetch handler. Each node
