@@ -20,6 +20,7 @@ type iamPolicyAdminAdapter struct {
 }
 
 var _ admin.IAMPolicyService = (*iamPolicyAdminAdapter)(nil)
+var _ admin.AdminSelfEffectGuard = (*iamPolicyAdminAdapter)(nil)
 
 // NewIAMPolicyAdminAdapter constructs the adapter. propose is typically
 // state.metaRaft.Propose.
@@ -51,6 +52,77 @@ func (a *iamPolicyAdminAdapter) PolicyDoc(ctx context.Context, name string) ([]b
 
 func (a *iamPolicyAdminAdapter) PolicyList(_ context.Context) ([]string, error) {
 	return a.stores.Policies.List(), nil
+}
+
+func (a *iamPolicyAdminAdapter) PolicyAffectsPrincipal(ctx context.Context, actor principal.Principal, policyName string) (bool, error) {
+	names, err := a.effectivePolicyNames(ctx, actor)
+	if err != nil {
+		return false, err
+	}
+	return containsString(names, policyName), nil
+}
+
+func (a *iamPolicyAdminAdapter) GroupAffectsPrincipal(ctx context.Context, actor principal.Principal, group string) (bool, error) {
+	switch actor.Kind {
+	case principal.KindOIDC:
+		return containsString(actor.GroupNames(), group), nil
+	case principal.KindServiceAccount, principal.KindProtocolCredential:
+		groups, err := a.stores.Groups.MembershipOf(ctx, actor.ID)
+		if err != nil {
+			return false, err
+		}
+		return containsString(groups, group), nil
+	default:
+		return false, nil
+	}
+}
+
+func (a *iamPolicyAdminAdapter) effectivePolicyNames(ctx context.Context, actor principal.Principal) ([]string, error) {
+	switch actor.Kind {
+	case principal.KindMountSA:
+		return a.stores.Attach.MountSAPolicies(ctx, actor.ID)
+	case principal.KindOIDC:
+		names, err := a.stores.Attach.SAPolicies(ctx, actor.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, group := range actor.GroupNames() {
+			groupNames, err := a.stores.Adapter.GroupPolicies(ctx, group)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, groupNames...)
+		}
+		return names, nil
+	case principal.KindServiceAccount, principal.KindProtocolCredential:
+		names, err := a.stores.Attach.SAPolicies(ctx, actor.ID)
+		if err != nil {
+			return nil, err
+		}
+		groups, err := a.stores.Groups.MembershipOf(ctx, actor.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, group := range groups {
+			groupNames, err := a.stores.Adapter.GroupPolicies(ctx, group)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, groupNames...)
+		}
+		return names, nil
+	default:
+		return nil, nil
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // Simulate evaluates a hypothetical request against current IAM state using

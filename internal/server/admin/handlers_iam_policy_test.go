@@ -5,14 +5,19 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
 
 // fakePolicyService satisfies admin.IAMPolicyService without any real storage.
 type fakePolicyService struct {
-	proposed []clusterpb.MetaCmdType
-	simReqs  []admin.PolicySimulateRequest
+	proposed     []clusterpb.MetaCmdType
+	simReqs      []admin.PolicySimulateRequest
+	selfPolicies map[string]bool
+	selfGroups   map[string]bool
 }
 
 func (f *fakePolicyService) Propose(_ context.Context, cmdType clusterpb.MetaCmdType, _ []byte) error {
@@ -33,22 +38,24 @@ func (f *fakePolicyService) Simulate(_ context.Context, req admin.PolicySimulate
 	return admin.PolicySimulateResult{}, nil
 }
 
+func (f *fakePolicyService) PolicyAffectsPrincipal(_ context.Context, _ principal.Principal, policyName string) (bool, error) {
+	return f.selfPolicies[policyName], nil
+}
+
+func (f *fakePolicyService) GroupAffectsPrincipal(_ context.Context, _ principal.Principal, group string) (bool, error) {
+	return f.selfGroups[group], nil
+}
+
 func TestPutPolicy_BuiltinRefused(t *testing.T) {
 	d := &admin.Deps{IAMPolicy: &fakePolicyService{}}
 	doc := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`)
 
 	for _, name := range []string{"readonly", "readwrite", "writeonly", "bucket-admin"} {
 		err := admin.PutPolicy(context.Background(), d, name, doc)
-		if err == nil {
-			t.Fatalf("PutPolicy(%q): expected error, got nil", name)
-		}
+		require.Error(t, err, "PutPolicy(%q)", name)
 		var ae *admin.Error
-		if !errors.As(err, &ae) {
-			t.Fatalf("PutPolicy(%q): expected *admin.Error, got %T: %v", name, err, err)
-		}
-		if ae.Code != "forbidden" {
-			t.Fatalf("PutPolicy(%q): expected code=forbidden, got %q", name, ae.Code)
-		}
+		require.True(t, errors.As(err, &ae), "PutPolicy(%q): expected *admin.Error, got %T: %v", name, err, err)
+		require.Equal(t, "forbidden", ae.Code, "PutPolicy(%q)", name)
 	}
 }
 
@@ -57,12 +64,9 @@ func TestPutPolicy_CustomNameAllowed(t *testing.T) {
 	d := &admin.Deps{IAMPolicy: svc}
 	doc := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`)
 
-	if err := admin.PutPolicy(context.Background(), d, "my-custom-pol", doc); err != nil {
-		t.Fatalf("PutPolicy(custom): unexpected error: %v", err)
-	}
-	if len(svc.proposed) != 1 {
-		t.Fatalf("expected 1 Propose call, got %d", len(svc.proposed))
-	}
+	err := admin.PutPolicy(context.Background(), d, "my-custom-pol", doc)
+	require.NoError(t, err)
+	require.Len(t, svc.proposed, 1)
 }
 
 func TestSimulatePolicyRejectsMissingPrincipal(t *testing.T) {
@@ -115,24 +119,15 @@ func TestSimulatePolicyPassesLegacySARequest(t *testing.T) {
 		Action:   "s3:GetObject",
 		Resource: "arn:aws:s3:::bucket/key",
 	})
-	if err != nil {
-		t.Fatalf("SimulatePolicy: %v", err)
-	}
-	if len(svc.simReqs) != 1 || svc.simReqs[0].SAID != "sa-1" {
-		t.Fatalf("legacy request not delegated: %#v", svc.simReqs)
-	}
+	require.NoError(t, err)
+	require.Len(t, svc.simReqs, 1)
+	require.Equal(t, "sa-1", svc.simReqs[0].SAID)
 }
 
 func assertAdminCode(t *testing.T, err error, code string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("expected error")
-	}
+	require.Error(t, err)
 	var ae *admin.Error
-	if !errors.As(err, &ae) {
-		t.Fatalf("expected *admin.Error, got %T: %v", err, err)
-	}
-	if ae.Code != code {
-		t.Fatalf("code = %q, want %q", ae.Code, code)
-	}
+	require.True(t, errors.As(err, &ae), "expected *admin.Error, got %T: %v", err, err)
+	require.Equal(t, code, ae.Code)
 }

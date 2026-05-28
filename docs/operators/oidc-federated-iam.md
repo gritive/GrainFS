@@ -102,9 +102,9 @@ Bearer actor allow and deny decisions emit structured `admin_authz` log rows
 with normalized principal kind/id, action, resource, decision, policy match, and
 reason. Raw JWTs are never logged.
 
-## Read-only IAM Admin Flow
+## IAM Admin Flow
 
-Bearer-token actor adoption covers read-only IAM admin inspection routes:
+Bearer-token actor adoption covers IAM admin inspection routes:
 
 - `GET /v1/iam/sa` evaluates `grainfs:IAMServiceAccountList` on `iam/sa/*`.
 - `GET /v1/iam/sa/:id` evaluates `grainfs:IAMServiceAccountRead` on
@@ -115,15 +115,41 @@ Bearer-token actor adoption covers read-only IAM admin inspection routes:
 - `POST /v1/iam/policy/simulate` evaluates `grainfs:IAMPolicySimulate` on
   `iam/policy/*`.
 
+It also covers IAM policy and group mutation routes:
+
+- `PUT /v1/iam/policy/:name` evaluates `grainfs:IAMPolicyWrite` on
+  `iam/policy/:name`.
+- `DELETE /v1/iam/policy/:name` evaluates `grainfs:IAMPolicyDelete` on
+  `iam/policy/:name`.
+- `PUT /v1/iam/policy/:name/attach/sa/:said` evaluates
+  `grainfs:IAMPolicyAttach` on `iam/policy/:name/attach/sa/:said`.
+- `DELETE /v1/iam/policy/:name/attach/sa/:said` evaluates
+  `grainfs:IAMPolicyDetach` on `iam/policy/:name/attach/sa/:said`.
+- `PUT /v1/iam/group/:name` evaluates `grainfs:IAMGroupWrite` on
+  `iam/group/:name`.
+- `DELETE /v1/iam/group/:name` evaluates `grainfs:IAMGroupDelete` on
+  `iam/group/:name`.
+- `PUT /v1/iam/group/:name/member/:said` evaluates
+  `grainfs:IAMGroupMemberWrite` on `iam/group/:name`.
+- `DELETE /v1/iam/group/:name/member/:said` evaluates
+  `grainfs:IAMGroupMemberDelete` on `iam/group/:name`.
+- `PUT /v1/iam/group/:name/policy/:policy` evaluates
+  `grainfs:IAMGroupPolicyAttach` on `iam/group/:name/policy/:policy`.
+- `DELETE /v1/iam/group/:name/policy/:policy` evaluates
+  `grainfs:IAMGroupPolicyDetach` on `iam/group/:name/policy/:policy`.
+
 Requests without a bearer token keep the existing admin UDS behavior. Requests
 with a bearer token fail closed if the actor is unauthenticated, the admin
 authorizer is unavailable, or policy evaluation denies the route action.
 
-IAM mutation routes are intentionally not bearer-enabled in this slice. Policy
-write/attach and group membership changes can modify the caller's effective
-permissions, so those routes require a separate self-escalation guard design.
+For bearer actors, IAM policy and group mutation routes also run a
+self-effective-policy guard after route authorization and before the handler.
+The guard rejects direct policy attach/detach to the caller, mutations to a
+policy already in the caller's effective policy set, direct group membership
+changes for the caller, and policy attach/detach or delete operations for a
+group that is present in the caller's effective group set.
 
-Example read-only policy for a mapped OIDC group:
+Example policy for a mapped OIDC group:
 
 ```json
 {
@@ -136,11 +162,24 @@ Example read-only policy for a mapped OIDC group:
         "grainfs:IAMServiceAccountRead",
         "grainfs:IAMPolicyList",
         "grainfs:IAMPolicyRead",
-        "grainfs:IAMPolicySimulate"
+        "grainfs:IAMPolicySimulate",
+        "grainfs:IAMPolicyWrite",
+        "grainfs:IAMPolicyDelete",
+        "grainfs:IAMPolicyAttach",
+        "grainfs:IAMPolicyDetach",
+        "grainfs:IAMGroupWrite",
+        "grainfs:IAMGroupDelete",
+        "grainfs:IAMGroupMemberWrite",
+        "grainfs:IAMGroupMemberDelete",
+        "grainfs:IAMGroupPolicyAttach",
+        "grainfs:IAMGroupPolicyDetach"
       ],
       "Resource": [
         "iam/sa/*",
-        "iam/policy/*"
+        "iam/policy/*",
+        "iam/policy/*/attach/sa/*",
+        "iam/group/*",
+        "iam/group/*/policy/*"
       ]
     }
   ]
@@ -154,8 +193,10 @@ Example read-only policy for a mapped OIDC group:
 - Missing or malformed groups claim: the actor has no mapped group policies.
 - Policy attached to the target service account only: federated actors are
   denied unless their direct principal ID or mapped groups also carry policy.
-- Authorizer not configured: bearer actor credential, bucket policy, and
-  read-only IAM admin operations fail closed.
+- Authorizer not configured: bearer actor credential, bucket policy, and IAM
+  admin operations fail closed.
+- Self-effective-policy guard not configured: bearer actor IAM mutation routes
+  fail closed.
 - OIDC issuers not configured: bearer-token credential requests fail with `401`;
   requests without bearer tokens continue through the existing admin UDS path.
 - Unsupported actor principal kind: authorization denies with a resolver error.
@@ -163,6 +204,5 @@ Example read-only policy for a mapped OIDC group:
 ## Current Boundary
 
 HTTP bearer-token actors are wired for protocol credential, bucket policy, and
-read-only IAM admin routes. IAM mutation/group routes, mount-SA/upstream routes,
-config/dashboard route adoption, and an external PDP adapter remain separate
-follow-ups.
+IAM admin routes. Mount-SA/upstream routes, config/dashboard route adoption, and
+an external PDP adapter remain separate follow-ups.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
@@ -87,6 +88,15 @@ func (s *routeIAMService) GetSA(_ context.Context, saID string) (iam.SAGetRespon
 		Name:      "app",
 		CreatedAt: time.Unix(100, 0).UTC(),
 	}, nil
+}
+
+type routeIAMGroupService struct {
+	proposed []clusterpb.MetaCmdType
+}
+
+func (s *routeIAMGroupService) Propose(_ context.Context, cmdType clusterpb.MetaCmdType, _ []byte) error {
+	s.proposed = append(s.proposed, cmdType)
+	return nil
 }
 
 // TestRegisterIAMUI_NoPolicyRoutes asserts that the /ui/api surface does NOT
@@ -244,6 +254,99 @@ func TestIAMReadRoutesUseBearerActorAuthz(t *testing.T) {
 	require.Equal(t, wantResources, gotResources)
 }
 
+func TestIAMMutationAndGroupRoutesUseBearerActorAuthz(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	actor := principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", []string{"oidc:example:storage-admins"})
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        &routeIAMService{},
+		IAMPolicy:  &fakePolicyService{},
+		IAMGroup:   &routeIAMGroupService{},
+		ActorAuth:  &actorAuthStub{principal: actor},
+		AdminAuthz: authz,
+	})
+	start()
+
+	body := bytes.NewBufferString(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`)
+	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/policy/storage-admin", "Bearer route-token", body, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/policy/storage-admin", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/policy/storage-admin/attach/sa/sa-app", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/policy/storage-admin/attach/sa/sa-app", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/group/storage-admins", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/group/storage-admins", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/group/storage-admins/member/sa-app", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/group/storage-admins/member/sa-app", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/group/storage-admins/policy/storage-admin", "Bearer route-token", nil, http.StatusNoContent)
+	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/group/storage-admins/policy/storage-admin", "Bearer route-token", nil, http.StatusNoContent)
+
+	require.Len(t, authz.calls, 10)
+	gotActions := make([]string, 0, len(authz.calls))
+	gotResources := make([]string, 0, len(authz.calls))
+	for _, call := range authz.calls {
+		require.Equal(t, actor, call.principal)
+		gotActions = append(gotActions, call.action)
+		gotResources = append(gotResources, call.resource)
+	}
+	require.Equal(t, []string{
+		"grainfs:IAMPolicyWrite",
+		"grainfs:IAMPolicyDelete",
+		"grainfs:IAMPolicyAttach",
+		"grainfs:IAMPolicyDetach",
+		"grainfs:IAMGroupWrite",
+		"grainfs:IAMGroupDelete",
+		"grainfs:IAMGroupMemberWrite",
+		"grainfs:IAMGroupMemberDelete",
+		"grainfs:IAMGroupPolicyAttach",
+		"grainfs:IAMGroupPolicyDetach",
+	}, gotActions)
+	require.Equal(t, []string{
+		"iam/policy/storage-admin",
+		"iam/policy/storage-admin",
+		"iam/policy/storage-admin/attach/sa/sa-app",
+		"iam/policy/storage-admin/attach/sa/sa-app",
+		"iam/group/storage-admins",
+		"iam/group/storage-admins",
+		"iam/group/storage-admins",
+		"iam/group/storage-admins",
+		"iam/group/storage-admins/policy/storage-admin",
+		"iam/group/storage-admins/policy/storage-admin",
+	}, gotResources)
+}
+
+func TestIAMMutationRoutesDenyBearerSelfEffectBeforeHandler(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	policySvc := &fakePolicyService{
+		selfPolicies: map[string]bool{"self-admin": true},
+		selfGroups:   map[string]bool{"oidc:example:admins": true},
+	}
+	groupSvc := &routeIAMGroupService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	actor := principal.ServiceAccount("sa-self")
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        &routeIAMService{},
+		IAMPolicy:  policySvc,
+		IAMGroup:   groupSvc,
+		ActorAuth:  &actorAuthStub{principal: actor},
+		AdminAuthz: authz,
+	})
+	start()
+
+	body := bytes.NewBufferString(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`)
+	raw := doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/policy/self-admin", "Bearer route-token", body, http.StatusForbidden)
+	require.Contains(t, string(raw), "policy affects caller")
+	raw = doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/policy/self-admin/attach/sa/sa-self", "Bearer route-token", nil, http.StatusForbidden)
+	require.Contains(t, string(raw), "direct policy attachment")
+	raw = doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/group/oidc:example:admins", "Bearer route-token", nil, http.StatusForbidden)
+	require.Contains(t, string(raw), "group affects caller")
+	raw = doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/group/storage-admins/member/sa-self", "Bearer route-token", nil, http.StatusForbidden)
+	require.Contains(t, string(raw), "group membership")
+	raw = doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/group/oidc:example:admins/policy/self-admin", "Bearer route-token", nil, http.StatusForbidden)
+	require.Contains(t, string(raw), "group affects caller")
+
+	require.Empty(t, policySvc.proposed)
+	require.Empty(t, groupSvc.proposed)
+}
+
 func TestIAMReadRoutesDenyBearerBeforeHandler(t *testing.T) {
 	h, base, start := newUIRouteTestServer(t)
 	iamSvc := &routeIAMService{}
@@ -288,6 +391,24 @@ func TestIAMReadRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
 	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa", "", nil, http.StatusOK)
 
 	require.Equal(t, 1, iamSvc.listSACalls)
+	require.Empty(t, authz.calls)
+}
+
+func TestIAMMutationRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	policySvc := &fakePolicyService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny}
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        &routeIAMService{},
+		IAMPolicy:  policySvc,
+		AdminAuthz: authz,
+	})
+	start()
+
+	body := bytes.NewBufferString(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`)
+	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/policy/storage-admin", "", body, http.StatusNoContent)
+
+	require.Len(t, policySvc.proposed, 1)
 	require.Empty(t, authz.calls)
 }
 

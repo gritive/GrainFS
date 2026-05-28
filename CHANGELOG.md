@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.429.0] - 2026-05-29
+
+### Security
+
+- Allowed OIDC bearer actors to call IAM policy and group mutation routes only
+  when their policies explicitly grant the matching `grainfs:IAM*` admin
+  action.
+- Added a bearer-only self-effective-policy guard that rejects mutations to the
+  caller's own effective policy set, direct self policy attachments, direct
+  self group membership changes, and policy/group mutations against effective
+  groups.
+
+### Changed
+
+- Bound IAM policy attach/detach authorization resources to both the policy and
+  target service account with `iam/policy/<policy>/attach/sa/<sa>`.
+- Bound IAM group policy attach/detach authorization resources to both the
+  group and policy with `iam/group/<group>/policy/<policy>`.
+- Kept no-bearer admin UDS behavior for IAM mutation/group routes.
+
+### Tests
+
+- Added route coverage for bearer IAM mutation/group allow decisions,
+  self-effect denials before handlers, and no-bearer fallback.
+- Added runtime self-effect guard coverage for OIDC and service-account
+  principals.
+- Added parser coverage for the new IAM admin resource shapes.
+
 ## [0.0.428.0] - 2026-05-29
 
 ### Security

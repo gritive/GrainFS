@@ -108,6 +108,46 @@ func TestMatchResource_PrefixBoundary(t *testing.T) {
 	require.True(t, matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logs/2026-05.json"))
 }
 
+func TestMatchResource_IAMAdminWildcardIsSegmentScoped(t *testing.T) {
+	require.True(t, matchResource("iam/policy/*", "iam/policy/storage-admin"))
+	require.False(t, matchResource("iam/policy/*", "iam/policy/storage-admin/attach/sa/sa-app"))
+	require.True(t, matchResource("iam/policy/*/attach/sa/*", "iam/policy/storage-admin/attach/sa/sa-app"))
+	require.False(t, matchResource("iam/group/*", "iam/group/admins/policy/storage-admin"))
+	require.True(t, matchResource("iam/group/*/policy/*", "iam/group/admins/policy/storage-admin"))
+}
+
+func TestEvaluateIAMMutationRequiresNestedResourceGrant(t *testing.T) {
+	got := Evaluate(EvalInput{
+		PrincipalPolicies: []*Document{{
+			Statement: []Statement{{
+				Effect:   EffectAllow,
+				Action:   StringOrSlice{"grainfs:IAMPolicyAttach"},
+				Resource: StringOrSlice{"iam/policy/*"},
+			}},
+		}},
+		Ctx: RequestContext{
+			Action:   "grainfs:IAMPolicyAttach",
+			Resource: "iam/policy/storage-admin/attach/sa/sa-app",
+		},
+	})
+	require.Equal(t, DecisionDeny, got.Decision)
+
+	got = Evaluate(EvalInput{
+		PrincipalPolicies: []*Document{{
+			Statement: []Statement{{
+				Effect:   EffectAllow,
+				Action:   StringOrSlice{"grainfs:IAMPolicyAttach"},
+				Resource: StringOrSlice{"iam/policy/*/attach/sa/*"},
+			}},
+		}},
+		Ctx: RequestContext{
+			Action:   "grainfs:IAMPolicyAttach",
+			Resource: "iam/policy/storage-admin/attach/sa/sa-app",
+		},
+	})
+	require.Equal(t, DecisionAllow, got.Decision)
+}
+
 func TestMatchCondition_SourceIpAllow(t *testing.T) {
 	cond := map[string]map[string]StringOrSlice{
 		"IpAddress": {"aws:SourceIp": []string{"10.0.0.0/8"}},
