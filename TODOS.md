@@ -107,8 +107,9 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
-- [ ] **OIDC federated IAM Slice 2**: implement OIDC issuer config, JWKS
-  strict/grace validation, and normalized OIDC principal creation. Source spec:
+- [ ] **OIDC federated IAM Slice 3**: attach policies to external group names,
+  resolve OIDC groups into principal policy sets, and add policy simulation
+  support for federated principals. Source spec:
   `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever

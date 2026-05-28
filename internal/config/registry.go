@@ -51,12 +51,21 @@ func (s BoolSpec) Description() string { return s.Desc }
 type StringSpec struct {
 	Default  string
 	Desc     string
+	Validate func(string) error
 	OnReload func(context.Context, string) error
 }
 
 func (s StringSpec) defaultStr() string { return s.Default }
 
-func (s StringSpec) validate(_ string) error { return nil }
+func (s StringSpec) validate(v string) error {
+	if s.Validate == nil {
+		return nil
+	}
+	if err := s.Validate(v); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidValue, err)
+	}
+	return nil
+}
 
 func (s StringSpec) fireReload(ctx context.Context, v string) error {
 	if s.OnReload == nil {
