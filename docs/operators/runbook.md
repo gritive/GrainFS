@@ -564,6 +564,26 @@ around failure-domain boundaries) — restore from a backup or rebuild.
 steps down via commit-time wakeup. The remaining voters elect a new leader. The
 operator does not need a separate `transfer-leader` step.
 
+### Revoking a Zero-CA node identity
+
+Use `revoke-node` when the node identity itself should be blocked from future
+membership, not only removed from the current voter set. The command removes the
+peer from meta-Raft membership, burns pending invites for the same node ID, adds
+the node transport SPKI to the replicated denylist, and closes cached QUIC
+connections to that peer.
+
+Run the command on the leader through the admin socket:
+
+```bash
+grainfs cluster --endpoint $ENDPOINT revoke-node node-2
+```
+
+Verify that the node no longer appears in the voter set:
+
+```bash
+grainfs cluster --endpoint $ENDPOINT peers
+```
+
 ---
 
 ## NFSv4 Conformance Testing

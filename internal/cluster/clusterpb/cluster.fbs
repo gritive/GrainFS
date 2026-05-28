@@ -902,8 +902,9 @@ table MetaStateSnapshot {
   last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
   peers:[PeerEntry];                                        // zero-CA peer registry: slot 13 (Task 5, codex P1)
-  cluster_key_dropped:bool = false;                        // zero-CA cutover: slot 14 (H3); PR-2 sets it, PR-1 always false
-  present_flip_begun:bool = false;                         // zero-CA cutover: slot 15 (PR-2a §8c); set by BeginPresentFlip(86) Apply
+  revoked_peer_spkis:[SPKIBytes];                           // zero-CA revocation denylist: slot 14
+  cluster_key_dropped:bool = false;                        // zero-CA cutover: slot 15 (H3); PR-2 sets it, PR-1 always false
+  present_flip_begun:bool = false;                         // zero-CA cutover: slot 16 (PR-2a §8c); set by BeginPresentFlip(86) Apply
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

@@ -424,6 +424,24 @@ func (t *QUICTransport) RecycleConns() {
 	}
 }
 
+// ClosePeer evicts and closes cached outbound connections for one peer. Revoked
+// identities should not keep using a pre-revocation QUIC connection.
+func (t *QUICTransport) ClosePeer(addr string) {
+	t.mu.Lock()
+	legacy := t.conns[addr]
+	delete(t.conns, addr)
+	mux := t.muxConns[addr]
+	delete(t.muxConns, addr)
+	t.mu.Unlock()
+
+	if legacy != nil {
+		_ = legacy.CloseWithError(0, "peer revoked")
+	}
+	if mux != nil {
+		_ = mux.CloseWithError(0, "peer revoked")
+	}
+}
+
 // SetDropped removes the cluster-key base from the accept-set (spec §8 H3/H4').
 // DORMANT in PR-1 — boot consults a never-true snapshot bit; PR-2 calls it live.
 func (t *QUICTransport) SetDropped() {

@@ -87,6 +87,29 @@ func TestClient_RemovePeer_HappyPath_PostsExpectedBody(t *testing.T) {
 	assert.Equal(t, false, body["force"])
 }
 
+func TestClient_RevokeNode_HappyPath_PostsExpectedBody(t *testing.T) {
+	var calls atomic.Int32
+	var lastPath atomic.Value
+	var lastBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		lastPath.Store(r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		parsed := map[string]any{}
+		_ = json.Unmarshal(body, &parsed)
+		lastBody.Store(parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "message": "node revoked"})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	require.NoError(t, c.RevokeNode(context.Background(), "node-b"))
+	assert.Equal(t, int32(1), calls.Load())
+	assert.Equal(t, "/v1/cluster/revoke-node", lastPath.Load().(string))
+	body := lastBody.Load().(map[string]any)
+	assert.Equal(t, "node-b", body["node_id"])
+}
+
 func TestClient_RemovePeer_NotLeader_ReturnsStructuredError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)

@@ -320,19 +320,27 @@ func (rcv *MetaStateSnapshot) PeersLength() int {
 	return 0
 }
 
-func (rcv *MetaStateSnapshot) ClusterKeyDropped() bool {
+func (rcv *MetaStateSnapshot) RevokedPeerSpkis(obj *SPKIBytes, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
-		return rcv._tab.GetBool(o + rcv._tab.Pos)
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
 	}
 	return false
 }
 
-func (rcv *MetaStateSnapshot) MutateClusterKeyDropped(n bool) bool {
-	return rcv._tab.MutateBoolSlot(32, n)
+func (rcv *MetaStateSnapshot) RevokedPeerSpkisLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
 }
 
-func (rcv *MetaStateSnapshot) PresentFlipBegun() bool {
+func (rcv *MetaStateSnapshot) ClusterKeyDropped() bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
@@ -340,12 +348,24 @@ func (rcv *MetaStateSnapshot) PresentFlipBegun() bool {
 	return false
 }
 
-func (rcv *MetaStateSnapshot) MutatePresentFlipBegun(n bool) bool {
+func (rcv *MetaStateSnapshot) MutateClusterKeyDropped(n bool) bool {
 	return rcv._tab.MutateBoolSlot(34, n)
 }
 
+func (rcv *MetaStateSnapshot) PresentFlipBegun() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) MutatePresentFlipBegun(n bool) bool {
+	return rcv._tab.MutateBoolSlot(36, n)
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(16)
+	builder.StartObject(17)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -425,11 +445,17 @@ func MetaStateSnapshotAddPeers(builder *flatbuffers.Builder, peers flatbuffers.U
 func MetaStateSnapshotStartPeersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
+func MetaStateSnapshotAddRevokedPeerSpkis(builder *flatbuffers.Builder, revokedPeerSpkis flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(revokedPeerSpkis), 0)
+}
+func MetaStateSnapshotStartRevokedPeerSpkisVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
 func MetaStateSnapshotAddClusterKeyDropped(builder *flatbuffers.Builder, clusterKeyDropped bool) {
-	builder.PrependBoolSlot(14, clusterKeyDropped, false)
+	builder.PrependBoolSlot(15, clusterKeyDropped, false)
 }
 func MetaStateSnapshotAddPresentFlipBegun(builder *flatbuffers.Builder, presentFlipBegun bool) {
-	builder.PrependBoolSlot(15, presentFlipBegun, false)
+	builder.PrependBoolSlot(16, presentFlipBegun, false)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -169,6 +169,7 @@ firewall-restricted addresses.
 | Create/list service accounts, keys, and policies | `grainfs iam --endpoint <data>/admin.sock ...` |
 | Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
 | Mint a zero-CA join invite (leader) | `grainfs cluster invite create --endpoint <data>/admin.sock` |
+| Revoke a zero-CA node identity | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>` |
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
 | Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |

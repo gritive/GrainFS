@@ -253,15 +253,19 @@ Work these in order. Do not run them in parallel.
 
 ## Deferred Until Triggered
 
-- [ ] **Zero-CA revocation slice**.
+- [x] **Zero-CA revocation slice**.
   PR-2a delivered live present-flip; PR-2b delivered complete-cutover
   (`present-flip -> cluster-key drop`), connection recycle, post-drop
   invite-join without the shared transport PSK, CLI/admin wiring, and focused
-  multi-node E2E coverage. Remaining revocation work: `RevokeNode` (registry
-  remove + denylist + `RemoveVoter` + `ClosePeer` + invite-burn), stale-pending
-  cleanup, deny-map snapshot, CLI `grainfs cluster revoke-node`, and E2E proving
-  a revoked node cannot rejoin or use stale invites. KEK/DEK rotation remains
-  gated on cluster-wide KEK distribution.
+  multi-node E2E coverage. SHIPPED in current branch: `cluster revoke-node`
+  admin/CLI, `RevokeNode` orchestration, registry removal, durable SPKI
+  denylist snapshot, Phase-1-only pending invite burn/denylist, voter removal,
+  targeted QUIC `ClosePeer`, and focused E2E proving a post-drop revoked
+  node-id cannot rejoin. Phase-1-only stale pending and same persisted identity
+  reuse are covered at FSM/MetaRaft level because the e2e harness does not
+  expose a stable stop-after-Phase-1 hook and completed invite-join data dirs
+  intentionally classify as normal boot. KEK/DEK rotation remains gated on
+  cluster-wide KEK distribution.
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source
