@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.399.0] - 2026-05-28
+
+### Changed
+
+- build: `make lint` now also runs `lint-storage-fixture`, which fails the build if any non-`_test.go` file under `cmd/` or `internal/` (excluding `internal/storage/`) references the `LocalBackend` test fixture. Enforces ADR-0015.
+- docs: resolved duplicate ADR-0007 numbering — `topology-derived-durability` renumbered to ADR-0016. IAM Foundation retains ADR-0007 because it has 6 external references across 3 ADRs (`0008`, `0011`, `0014`).
+
 ## [0.0.398.0] - 2026-05-28
 
 ### Security

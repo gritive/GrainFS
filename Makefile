@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-9p-colima test-cluster-mount-colima
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-9p-colima test-cluster-mount-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
@@ -150,7 +150,22 @@ clean:
 lint-keyspace:
 	@bash scripts/lint-keyspace.sh
 
-lint: lint-keyspace
+# lint-storage-fixture asserts that no production code imports the LocalBackend
+# test fixture. See ADR-0015. This guards the marker comment's truthfulness —
+# if a future PR adds storage.NewLocalBackend (or any LocalBackend-named symbol)
+# under cmd/ or internal/ (excluding _test.go and internal/storage/ itself),
+# the build fails fast instead of silently lying.
+lint-storage-fixture:
+	@test -d cmd && test -d internal || { echo "FAIL: source layout changed — cmd/ or internal/ missing"; exit 2; }
+	@hits=$$(grep -rE 'storage\.[A-Za-z_]*LocalBackend' --include='*.go' cmd/ internal/ 2>/dev/null | { grep -v '_test.go' || true; } | { grep -v 'internal/storage/' || true; }); \
+	if [ -n "$$hits" ]; then \
+		echo "FAIL: production caller of LocalBackend found (see ADR-0015):"; \
+		echo "$$hits"; \
+		exit 1; \
+	fi; \
+	echo "lint-storage-fixture: OK (no production caller of LocalBackend)"
+
+lint: lint-keyspace lint-storage-fixture
 	go vet ./...
 	test -z "$$(gofmt -l .)"
 	golangci-lint run --timeout=5m ./...
