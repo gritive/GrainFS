@@ -12,12 +12,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 const (
 	fileMagic       = uint32(0x4457414c) // "DWAL"
 	fileVersion     = uint32(2)          // v2: adds dek_gen to the header (D-wal-data)
 	fileHeaderBytes = 16
+	probeHeaderSeq  = uint64(0)
 
 	fileModePlain     = byte(1)
 	fileModeEncrypted = byte(2)
@@ -288,6 +291,12 @@ func (w *WAL) openAppendFile(state walState) error {
 	}
 	repairedHeader := false
 	if info.Size() == 0 {
+		dekGen, err := w.newSegmentDEKGen()
+		if err != nil {
+			f.Close()
+			return err
+		}
+		w.dekGen = dekGen
 		if err := initSegment(f, w.dir, modeForSealer(w.sealer), w.dekGen); err != nil {
 			f.Close()
 			return err
@@ -302,6 +311,12 @@ func (w *WAL) openAppendFile(state walState) error {
 			f.Close()
 			return err
 		}
+		dekGen, err := w.newSegmentDEKGen()
+		if err != nil {
+			f.Close()
+			return err
+		}
+		w.dekGen = dekGen
 		if err := initSegment(f, w.dir, modeForSealer(w.sealer), w.dekGen); err != nil {
 			f.Close()
 			return err
@@ -332,6 +347,18 @@ func (w *WAL) openAppendFile(state walState) error {
 	}
 	w.file = f
 	return nil
+}
+
+func (w *WAL) newSegmentDEKGen() (uint32, error) {
+	if w.sealer == nil {
+		return 0, nil
+	}
+	sealed, gen, err := w.sealer.Seal(encrypt.DomainWAL, walRecordAADFields(w.namespace, probeHeaderSeq), nil)
+	clear(sealed)
+	if err != nil {
+		return 0, fmt.Errorf("datawal: probe encrypted segment DEK generation: %w", err)
+	}
+	return gen, nil
 }
 
 func initSegment(f walFile, dir string, mode byte, dekGen uint32) error {
