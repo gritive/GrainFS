@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,11 @@ type structuredChunk struct {
 
 func setupRawNBDConn(t *testing.T) (net.Conn, *Server) {
 	t.Helper()
+	return setupRawNBDConnWithAuth(t, nil)
+}
+
+func setupRawNBDConnWithAuth(t *testing.T, auth CredentialAuthenticator) (net.Conn, *Server) {
+	t.Helper()
 
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
@@ -43,6 +49,9 @@ func setupRawNBDConn(t *testing.T) (net.Conn, *Server) {
 	require.NoError(t, err)
 
 	srv := NewServer(mgr, "nbd-test")
+	if auth != nil {
+		srv.SetCredentialAuthenticator(auth)
+	}
 	client, server := net.Pipe()
 	go srv.handleConn(server)
 
@@ -246,6 +255,48 @@ func setupStructuredNBD(t *testing.T) (net.Conn, *Server) {
 	writeOptExportName(t, conn, "nbd-test")
 	readExact(t, conn, 134)
 	return conn, srv
+}
+
+func TestNBDProtocolCredentialAllowsVolumeSecretExport(t *testing.T) {
+	creds := protocred.NewService(protocred.NewStore())
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "node-a", Protocol: protocred.ProtocolNBD, Resource: "volume/nbd-test", Mode: protocred.ModeRW,
+	})
+	require.NoError(t, err)
+	conn, _ := setupRawNBDConnWithAuth(t, creds)
+
+	completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
+	writeOptExportName(t, conn, "nbd-test@"+secret.Secret)
+	export := readExact(t, conn, 134)
+	require.Equal(t, uint64(1024*1024), binary.BigEndian.Uint64(export[0:8]))
+}
+
+func TestNBDProtocolCredentialRejectsMissingOrInvalidSecret(t *testing.T) {
+	creds := protocred.NewService(protocred.NewStore())
+	secret, err := creds.Create(protocred.CreateRequest{
+		SAID: "node-a", Protocol: protocred.ProtocolNBD, Resource: "volume/nbd-test", Mode: protocred.ModeRW,
+	})
+	require.NoError(t, err)
+	require.NoError(t, creds.Revoke(secret.ID))
+
+	for _, name := range []string{"nbd-test", "nbd-test@wrong", "other@" + secret.Secret, "nbd-test@" + secret.Secret} {
+		conn, _ := setupRawNBDConnWithAuth(t, creds)
+		completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
+		writeOptExportName(t, conn, name)
+		_, err := readOptionReplyHeader(conn)
+		require.Error(t, err, "export %q should close the connection", name)
+		_ = conn.Close()
+	}
+}
+
+func TestNBDProtocolCredentialRejectsInfoBeforeAttach(t *testing.T) {
+	creds := protocred.NewService(protocred.NewStore())
+	conn, _ := setupRawNBDConnWithAuth(t, creds)
+
+	completeClientFlags(t, conn, nbdFlagClientFixedNewstyle)
+	writeOptInfo(t, conn, "nbd-test", []uint16{nbdInfoExport})
+	reply := readOptionReply(t, conn)
+	require.Equal(t, nbdRepErrUnknown, reply.typ)
 }
 
 func setupBlockStatusNBD(t *testing.T) (net.Conn, *Server) {

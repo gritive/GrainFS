@@ -102,6 +102,7 @@ type NodeServicesIAMConfig struct {
 	Authorizer   *s3auth.Authorizer
 	CfgStore     *config.Store
 	AuditHook    func(audit.S3Event)
+	NBDAuth      nbd.CredentialAuthenticator
 }
 
 // StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
@@ -172,7 +173,11 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 
 	if nbdPort > 0 {
 		const defaultVolName = "default"
-		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri)
+		var nbdAuth nbd.CredentialAuthenticator
+		if iamCfg != nil {
+			nbdAuth = iamCfg.NBDAuth
+		}
+		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri, nbdAuth)
 		if err != nil {
 			svc.nbdErr = err
 			log.Error().Err(err).Msg("nbd server start failed")
@@ -216,10 +221,13 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 	return svc
 }
 
-func startNBDServer(mgr *volume.Manager, volName string, port int, ri nbd.ReadIndexer) (*nbd.Server, error) {
+func startNBDServer(mgr *volume.Manager, volName string, port int, ri nbd.ReadIndexer, auth nbd.CredentialAuthenticator) (*nbd.Server, error) {
 	srv := nbd.NewServer(mgr, volName)
 	if ri != nil {
 		srv.SetReadIndexer(ri)
+	}
+	if auth != nil {
+		srv.SetCredentialAuthenticator(auth)
 	}
 	addr := fmt.Sprintf(":%d", port)
 	ln, err := net.Listen("tcp", addr)

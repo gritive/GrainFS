@@ -155,3 +155,17 @@ func TestRegisterClusterKeys_AllPresent(t *testing.T) {
 		assert.True(t, keys[k], "expected key %q to be registered", k)
 	}
 }
+
+// TestRegisterClusterKeys_RotateDEKDeferred: encryption.rotate-dek stays
+// REGISTERED (catalog presence above) but its use is GATED — Set with the
+// only valid trigger value "now" must be rejected with the deferral error so
+// the active DEK gen can never advance past 0 (R1: per-segment gen framing for
+// the logical-WAL/packblob lanes is a future slice; spec decision #5).
+func TestRegisterClusterKeys_RotateDEKDeferred(t *testing.T) {
+	s := config.NewStore()
+	config.RegisterClusterKeys(s, config.ReloadHooks{})
+
+	err := s.Set(context.Background(), "encryption.rotate-dek", "now")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deferred")
+}

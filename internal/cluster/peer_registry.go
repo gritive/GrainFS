@@ -73,8 +73,9 @@ func (r *peerRegistry) registerPendingLearner(nodeID string, s [32]byte, addr st
 // If the node is absent it is inserted directly as a member. If it is already
 // present with the SAME (nodeID, SPKI) it is kept/UPGRADED to member — an
 // existing member stays member, a pending-learner is promoted; it is NEVER
-// downgraded. Address and PresentsPerNode are refreshed last-write-wins on an
-// idempotent re-register. The same SPKI-uniqueness and node-id-rebind guards as
+// downgraded. Address is refreshed last-write-wins on an idempotent
+// re-register; PresentsPerNode is monotone (never true->false). The same
+// SPKI-uniqueness and node-id-rebind guards as
 // registerPendingLearner apply. presentsPerNode is recording-only (Task 7).
 func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, presentsPerNode bool) error {
 	r.mu.Lock()
@@ -87,6 +88,12 @@ func (r *peerRegistry) registerMember(nodeID string, s [32]byte, addr string, pr
 	}
 	if existing, ok := r.byNodeID[nodeID]; ok && existing.SPKI != s {
 		return fmt.Errorf("%w: node %s already bound to a different SPKI", errNodeIDRebind, nodeID)
+	}
+	// presents_per_node is MONOTONE (spec §8 H6): once true it never regresses
+	// via RegisterMember (a restart self-registers false and must not un-flip the
+	// gate bit). Resets only on explicit member removal (revoke slice).
+	if existing, ok := r.byNodeID[nodeID]; ok && existing.PresentsPerNode {
+		presentsPerNode = true
 	}
 	r.byNodeID[nodeID] = peerEntry{NodeID: nodeID, SPKI: s, Address: addr, State: peerStateMember, PresentsPerNode: presentsPerNode}
 	r.bySPKI[s] = nodeID

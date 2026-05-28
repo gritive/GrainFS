@@ -1114,19 +1114,29 @@ volume, so there is no nonce-exhaustion cliff forcing rotation. The per-generati
 seal count below is a cumulative-usage signal for rotation hygiene and
 compromise-recovery, not a hard limit.
 
+**Data-DEK rotation is deferred in this release.** The `encryption.rotate-dek`
+trigger is intentionally rejected (`grainfs config set encryption.rotate-dek now`
+returns a "deferred — not supported in this release" error) — the append-only
+at-rest writers pin the DEK generation at open, and per-segment generation framing
+for every lane lands in a later release before rotation is re-enabled. Because
+XAES removed the nonce-exhaustion cliff, the seal count below is **observability
+only** (cumulative-usage / compromise-recovery signal), not an action threshold.
+**KEK rotation** (`cluster rotate-key`, which re-wraps the existing DEKs without
+changing the DEK keys) remains fully available and is unaffected.
+
 GrainFS tracks seals per active DEK generation and surfaces a risk band in
 `grainfs encrypt kek status` (the `dek_generations` section, `nonce=` column)
 and in Prometheus (`grainfs_kek_seal_count{dek_generation="<active>"}`):
 
-| seal_count          | risk    | action                                      |
+| seal_count          | band    | meaning (observability only)                |
 | ------------------- | ------- | ------------------------------------------- |
-| `< 100,000,000`     | `ok`    | none                                        |
-| `100M – 1,000M`     | `warn`  | schedule a DEK rotation within 7 days       |
-| `>= 1,000,000,000`  | `alert` | rotate immediately: `grainfs dek rotate`    |
+| `< 100,000,000`     | `ok`    | normal cumulative usage                     |
+| `100M – 1,000M`     | `warn`  | high cumulative usage — note for capacity/compromise review |
+| `>= 1,000,000,000`  | `alert` | very high cumulative usage — track for the future rotation capability |
 
-Alert when ANY DEK generation's seal count crosses these thresholds (no need to
-template the active generation — a generation that exceeds the bound is the one
-to rotate):
+These bands are informational under XAES (no nonce cliff). Alert on them only for
+usage visibility; there is no operator rotation action in this release. Track when
+ANY DEK generation's seal count crosses a threshold:
 
 ```promql
 max(grainfs_kek_seal_count) >= 100000000   # warn
@@ -1139,13 +1149,14 @@ at scrape time, so these alerts fire autonomously without any polling of the
 
 The seal count is keyed by DEK generation because seal volume is per-DEK-key. A
 KEK rotation re-wraps the existing DEKs without changing the DEK keys, so the
-per-DEK seal count PERSISTS across a KEK rotation; it resets only
-when a new DEK generation is installed (`grainfs dek rotate`). The reported band
-therefore reflects true cumulative nonce usage for each DEK generation.
+per-DEK seal count PERSISTS across a KEK rotation. With data-DEK rotation deferred,
+the active generation stays fixed, so the band reflects true cumulative nonce usage
+for that generation (which, under XAES, carries no exhaustion risk).
 
-DEK rotation does not block client I/O: it adds a new DEK generation in parallel
-and new seals immediately use it, while existing objects remain readable under
-their original generation.
+When data-DEK rotation is re-enabled in a future release (with per-segment
+generation framing), it will add a new DEK generation in parallel — new seals use
+it immediately while existing objects stay readable under their original
+generation — without blocking client I/O.
 
 ---
 

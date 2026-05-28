@@ -36,6 +36,20 @@ func TestNBD_ClusterMountReplicatesAcrossNodes(t *testing.T) {
 	out, code := runClusterAdminCLI(t, leaderDir, "volume", "create", "default", "--size", clusterNBDVolSize)
 	require.Equalf(t, 0, code, "volume create on leader: %s", out)
 	grantClusterAdmin(t, c, leaderDir, "__grainfs_volumes")
+	binary := os.Getenv("GRAINFS_BINARY")
+	if binary == "" {
+		binary = "../../bin/grainfs"
+	}
+	require.NoError(t, grantNBDCredentialPolicy(binary, leaderDir+"/admin.sock", c.SAID))
+	out, code = runClusterAdminCLI(t, leaderDir, "credential", "create",
+		"--sa", c.SAID,
+		"--protocol", "nbd",
+		"--resource", "volume/default",
+		"--mode", "rw",
+	)
+	require.Equalf(t, 0, code, "credential create on leader: %s", out)
+	exportName := parseCredentialExportName(out)
+	require.NotEmpty(t, exportName, "credential create should return an NBD export_name: %s", out)
 
 	hostIP := envOrDefault("HOST_IP", "192.168.5.2")
 	colimaSSH("sudo", "modprobe", "nbd", "max_part=0").Run() //nolint:errcheck
@@ -44,7 +58,7 @@ func TestNBD_ClusterMountReplicatesAcrossNodes(t *testing.T) {
 
 	runColimaSSH(t, "sudo", "nbd-client",
 		hostIP, fmt.Sprintf("%d", c.NBDPorts[0]), nbdDev,
-		"-b", "4096", "-N", "default",
+		"-b", "4096", "-N", exportName,
 	)
 	t.Cleanup(func() {
 		colimaSSH("sudo", "nbd-client", "-d", nbdDev).Run() //nolint:errcheck

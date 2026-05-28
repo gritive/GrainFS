@@ -135,6 +135,44 @@ bench_require_binary() {
   fi
 }
 
+bench_create_nbd_export_name() {
+  local binary="$1"
+  local admin_sock="$2"
+  local volume_name="$3"
+  local sa_name="${4:-bench-nbd}"
+  local sa_out sa_id policy_name policy_file export_name
+
+  sa_out=$("$binary" iam sa create "$sa_name" --endpoint "$admin_sock")
+  sa_id=$(awk -F'sa_id:' '/sa_id:/{print $2}' <<<"$sa_out" | awk '{print $1; exit}')
+  if [[ -z "$sa_id" ]]; then
+    echo "failed to create NBD benchmark service account" >&2
+    echo "$sa_out" >&2
+    return 1
+  fi
+
+  policy_name="${sa_name}-credential-create"
+  policy_file=$(mktemp)
+  cat >"$policy_file" <<JSON
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["grainfs:CredentialCreate"],"Resource":["protocol-credential/nbd/volume/${volume_name}"]}]}
+JSON
+  "$binary" iam policy put "$policy_name" --file "$policy_file" --endpoint "$admin_sock" >/dev/null
+  rm -f "$policy_file"
+  "$binary" iam policy attach "$policy_name" --sa "$sa_id" --endpoint "$admin_sock" >/dev/null
+
+  export_name=$("$binary" credential create \
+    --sa "$sa_id" \
+    --protocol nbd \
+    --resource "volume/${volume_name}" \
+    --mode rw \
+    --endpoint "$admin_sock" \
+    | awk -F'export_name=' '/export_name=/{print $2}' | awk '{print $1}')
+  if [[ -z "$export_name" ]]; then
+    echo "failed to create NBD protocol credential" >&2
+    return 1
+  fi
+  printf '%s\n' "$export_name"
+}
+
 bench_require_colima() {
   if ! colima status >/dev/null 2>&1; then
     echo "colima not running - start with: colima start" >&2

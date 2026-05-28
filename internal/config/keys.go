@@ -1,6 +1,9 @@
 package config
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // ReloadHooks carries optional subsystem callbacks that fire when a cluster-wide
 // config key changes. Fields left nil are treated as no-ops.
@@ -61,11 +64,20 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 		},
 	})
 
-	// encryption.rotate-dek: Task 14 FSM post-commit hook acts on this key.
-	// The reload-hook closure is intentionally a no-op.
+	// encryption.rotate-dek: GATED in R1. The key stays registered (catalog +
+	// existing config tooling), but its trigger is rejected: connecting the
+	// logical-WAL/packblob/PUT-pipeline sealers to the gen-aware DEK (R1
+	// Commit 2) means a DEK rotation would advance the active gen, and those
+	// append-only writers pin the gen at open — so a rotation would break them.
+	// Proper data-DEK rotation with per-segment gen framing for every lane is a
+	// future slice (spec decision #5). Rejecting here in OnTrigger makes
+	// Store.Set roll back and surface the deferral error to the operator instead
+	// of silently no-op'ing or reaching ProposeDEKRotate.
 	s.Register("encryption.rotate-dek", TriggerSpec{
-		Desc:      "Rotate the data-encryption key (set to \"now\" to trigger)",
-		OnTrigger: func(_ context.Context) error { return nil },
+		Desc: "Rotate the data-encryption key (deferred — not supported in this release)",
+		OnTrigger: func(_ context.Context) error {
+			return fmt.Errorf("data-DEK rotation is deferred — not supported in this release; per-segment generation framing for all data lanes is a future slice")
+		},
 	})
 
 	// encryption.prune-dek-version: same — Task 14 handles the actual action.

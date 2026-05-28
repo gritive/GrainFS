@@ -32,21 +32,48 @@ Work these in order. Do not run them in parallel.
      KEK-rotation-across-XAES-DEK (open data sealed under old/new gen after rotate);
      dual single+cluster e2e. See [[project-grains-at-rest-two-key-systems]].
 
-- [ ] **At-rest unification remainder (deferred — Phase D track)**
-   - Phase D already migrated the data plane; these stay on the static
-     `encrypt.Encryptor` and complete the single KEK→DEK hierarchy:
-     (a) **BadgerDB metadata** — `encrypted_badger.go` still uses `*encrypt.Encryptor`
-     (bare ciphertext, no gen frame); needs a gen-carrying value frame.
-     (b) **IAM credential at-rest** — `SecretKeyEnc` in `AccessKey`/`BucketUpstream`
-     sealed via `*encrypt.Encryptor` (`iam/fsm.go`); needs gen in raft payload +
-     snapshot (orthogonal to #579 protocol-credential auth unification).
-     (c) **Retire static key** — `--encryption-key-file` flag + `EncryptorAdapter`
-     fallback still present; can only be removed after every `cfg.Encryptor`
-     consumer (cluster-config secrets, alerts, server/object snapshot, IAM admin)
-     has a DEK replacement. ADR for the cipher-unification + greenfield boundary.
-   - Boundary: fold into the existing Phase D roadmap rather than a parallel spec.
-     Full design + 4-pass codex review in the (gitignored) unified-at-rest-key
-     spec. See [[project-grains-at-rest-two-key-systems]].
+- [ ] **At-rest unification remainder — static→DEK (Phase D track, re-grounded 2026-05-28)**
+   - Phase D migrated the EC shard data plane onto the DEK; these remain on the
+     static `encrypt.Encryptor` and complete the single KEK→DEK hierarchy:
+     **R1 — Move DEK-ready gate + wire boot data-plane sealer to DEK.** Move
+     `WaitDEKReady` (`run.go:224`) before `bootShardService`/datawal open
+     (`run.go:156`, `datawal/wal.go:57`) + boot-ordering regression (cluster
+     join/restart); swap `boot_phases_storage_runtime.go:44` +
+     `boot_phases_forwarders.go:49` data-WAL sealer `NewEncryptorAdapter` →
+     `NewDEKKeeperAdapter`. Bench gate. (Original Slice 3 only partially landed.)
+     **R2 — IAM credentials static→DEK.** Migrate `WrapSecret`/`UnwrapSecret`
+     (`iam/encrypt.go`) + `iam/fsm.go` Applier off `*encrypt.Encryptor` onto the
+     `DataEncryptor` seam, gen in raft payload + snapshot. Cipher is ALREADY XAES
+     (key-migration, not a cipher swap); fix stale `// AES-256-GCM` comments at
+     `iam/types.go:54/73/80`. Preserve in-memory plaintext cache. Cluster
+     cache-invalidation e2e. Depends on R1.
+     **R3 — Retire static key.** After every `cfg.Encryptor` consumer
+     (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
+     replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,
+     `EncryptorAdapter`. ADR for cipher-unification + greenfield boundary.
+   - Full re-grounded design in the (gitignored) unified-at-rest-key spec
+     (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
+     See [[project-grains-at-rest-two-key-systems]].
+
+- [ ] **Remove dead `encrypted_badger.go` / `storage.LocalBackend`**
+   - `internal/storage/local.go` + `encrypted_badger.go` have **no production
+     caller** (constructors + tests only — the live serve path uses cluster
+     execution + raft meta-FSM; single = 1-node raft). NOT the live
+     metadata-at-rest path; the original at-rest "Slice 4" wrongly targeted it.
+   - Boundary: surgical dead-code removal once confirmed no embedding consumer
+     depends on it; not part of the static→DEK unification.
+
+- [ ] **Raft log store at-rest encryption (object-metadata plaintext gap) — design**
+   - Trust risk: live object metadata (bucket/key/size/etag/placement) persists as
+     raft log entries written **plaintext** to a Badger store opened with
+     `badgerutil.SmallOptions` (no `WithEncryptionKey`; `raftfactory.go:75`,
+     `logstore_badger.go:439` raw `txn.Set`). Snapshots ARE DEK+KEK-sealed (#580),
+     but log entries between snapshots are not. Never sealed by either key system.
+   - Boundary: **separate spec** (distinct from static→DEK unification).
+     Design-heavy — raft determinism (FSM apply must stay deterministic on
+     plaintext) favors Badger native encryption keyed by the DEK at the storage
+     layer (below replication), with key-registry/compaction interplay to resolve.
+     See [[project-grains-at-rest-two-key-systems]].
 
 - [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
@@ -213,6 +240,22 @@ Work these in order. Do not run them in parallel.
 
 ## Deferred Until Triggered
 
+- [ ] **Zero-CA cutover PR-2 (live per-node present-flip + cluster-key drop) + revocation slice**.
+  PR-1 (this slice) landed the inert plumbing: composer `pinPresent`/`dropped` modes,
+  `QUICTransport.FlipPresent`/`RecycleConns`/`SetDropped` (dormant), monotone
+  `presents_per_node`, the persisted `cluster_key_dropped` snapshot bit (slot 14) +
+  boot-consult, and `BootstrapSecretsPayload.peer_spkis`/`cluster_key_dropped` wire fields.
+  Nothing flips/drops live yet. PR-2 must add: a NEW follower-applied-index barrier RPC
+  (leader waits until every voter `lastApplied >= prepareIndex` — the config-stamp alone
+  does NOT prevent a lagging voter from rejecting a flipped peer; this is load-bearing),
+  `PreparePresentFlip`+`BeginPresentFlip` raft commands (config/voter-set stamped), flip
+  wiring (`SetOnPresentFlip` → `FlipPresent`+`RecycleConns`+record `presents_per_node=true`),
+  a config-stamped `DropClusterKeyAccept` that sets `dropped=true`, the post-drop join
+  SEMANTICS (joiner presents per-node-only + seeds accept from `peer_spkis`,
+  `invite_join_boot.go:613`), orchestration + CLI `cluster complete-cutover`, and e2e.
+  THEN the revocation slice: `RevokeNode` (registry remove + denylist + `RemoveVoter` +
+  `ClosePeer` + invite-burn) + P1#1 stale-pending fix + deny-map snapshot + CLI
+  `cluster revoke-node` + e2e. Design: spec §6-§8 (gitignored design doc).
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source
@@ -344,9 +387,11 @@ Work these in order. Do not run them in parallel.
   `grainfs credential` admin API/CLI foundation exists for S3, Iceberg, NFS,
   9P, and NBD, credential metadata is persisted through Meta Raft, and
   create/rotate/revoke now check IAM permissions for the target service
-  account. Follow up by enforcing NBD `volume@secret` attach and migrating
-  NFS/9P from MountSA-only auth onto protocol credentials without losing
-  uid/gid audit context.
+  account. NBD now enforces `volume@secret` attach when protocol credentials
+  are wired. The attach validator foundation now centralizes strict/compat
+  stale decisions and bounded attach caching. Follow up by wiring protocol
+  attach paths through that validator and migrating NFS/9P from MountSA-only
+  auth onto protocol credentials without losing uid/gid audit context.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

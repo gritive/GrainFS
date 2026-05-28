@@ -40,7 +40,12 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-func TestDispatcher_RotateConfigTriggersPropose(t *testing.T) {
+// TestDispatcher_RotateConfigIsDeferred: R1 gates data-DEK rotation. Even on
+// the leader, an encryption.rotate-dek=now ConfigPut must NOT propose a rotate
+// (the active DEK gen stays 0 for the gen-pinning logical-WAL/packblob/pipeline
+// sealers). The operator-facing rejection lives at the config-set boundary
+// (internal/config/keys.go); this is the defensive dispatcher-side skip.
+func TestDispatcher_RotateConfigIsDeferred(t *testing.T) {
 	p := &fakeDEKProposer{}
 	d := &DEKPostCommitDispatcher{
 		proposer: p,
@@ -53,7 +58,10 @@ func TestDispatcher_RotateConfigTriggersPropose(t *testing.T) {
 	}
 	d.Handle(clusterpb.MetaCmdTypeConfigPut, payload)
 
-	waitFor(t, 500*time.Millisecond, func() bool { return p.rotateCalls.Load() == 1 })
+	time.Sleep(100 * time.Millisecond)
+	if p.rotateCalls.Load() != 0 {
+		t.Fatal("rotate-dek is deferred in R1; dispatcher must not propose a rotation")
+	}
 }
 
 func TestDispatcher_PruneConfigTriggersPropose(t *testing.T) {
@@ -165,10 +173,12 @@ func TestDEKPostCommit_DEKReplicatedRotateGen0_NoKick(t *testing.T) {
 	}
 }
 
-// TestDEKPostCommit_ConfigRotateOnlyProposesOnLeader: leader dispatches rotate;
-// follower is silenced by the isLeader gate.
-func TestDEKPostCommit_ConfigRotateOnlyProposesOnLeader(t *testing.T) {
-	payload, err := cluster.EncodeConfigPutPayload("encryption.rotate-dek", "now")
+// TestDEKPostCommit_ConfigPruneOnlyProposesOnLeader: the leader-only gate still
+// applies to a non-deferred DEK config key. prune-dek-version proposes once on
+// the leader and is silenced on the follower. (rotate-dek is deferred in R1, so
+// the leader-only gate is now exercised via the still-live prune path.)
+func TestDEKPostCommit_ConfigPruneOnlyProposesOnLeader(t *testing.T) {
+	payload, err := cluster.EncodeConfigPutPayload("encryption.prune-dek-version", "3")
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -180,7 +190,7 @@ func TestDEKPostCommit_ConfigRotateOnlyProposesOnLeader(t *testing.T) {
 		isLeader: func() bool { return true },
 	}
 	leader.Handle(clusterpb.MetaCmdTypeConfigPut, payload)
-	waitFor(t, 500*time.Millisecond, func() bool { return leaderP.rotateCalls.Load() == 1 })
+	waitFor(t, 500*time.Millisecond, func() bool { return leaderP.pruneCalls.Load() == 1 })
 
 	// Follower dispatcher — must not propose.
 	followerP := &fakeDEKProposer{}
@@ -191,15 +201,16 @@ func TestDEKPostCommit_ConfigRotateOnlyProposesOnLeader(t *testing.T) {
 	follower.Handle(clusterpb.MetaCmdTypeConfigPut, payload)
 
 	time.Sleep(100 * time.Millisecond)
-	if followerP.rotateCalls.Load() != 0 {
-		t.Fatal("follower must not propose DEK rotate")
+	if followerP.pruneCalls.Load() != 0 {
+		t.Fatal("follower must not propose DEK prune")
 	}
 }
 
 // TestDEKPostCommit_NilIsLeaderDoesNotPropose: nil isLeader is treated as
-// not-leader (fail-safe) — no proposal must be made.
+// not-leader (fail-safe) — no proposal must be made. Exercised via the still-
+// live prune-dek-version path (rotate-dek is deferred in R1).
 func TestDEKPostCommit_NilIsLeaderDoesNotPropose(t *testing.T) {
-	payload, err := cluster.EncodeConfigPutPayload("encryption.rotate-dek", "now")
+	payload, err := cluster.EncodeConfigPutPayload("encryption.prune-dek-version", "3")
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -212,7 +223,7 @@ func TestDEKPostCommit_NilIsLeaderDoesNotPropose(t *testing.T) {
 	d.Handle(clusterpb.MetaCmdTypeConfigPut, payload)
 
 	time.Sleep(100 * time.Millisecond)
-	if p.rotateCalls.Load() != 0 {
+	if p.pruneCalls.Load() != 0 {
 		t.Fatal("nil isLeader must not propose")
 	}
 }

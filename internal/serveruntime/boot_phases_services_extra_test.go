@@ -72,10 +72,12 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	// WAL still not opened — proves WALAndForwarders has not yet run.
 	assert.Nil(t, state.wal, "WAL not opened before its phase")
 
-	// 2. WAL + forwarders — populates everything.
+	// 2. Forwarders + join — constructs forwarder/coordinator wiring + keeper
+	//    population; does NOT open the logical WAL (R1: moved to
+	//    bootLogicalWALOpen, which runs post-gate).
 	require.NoError(t, bootWALAndForwarders(ctx, state))
-	assert.NotNil(t, state.wal, "WAL after phase")
-	assert.NotEmpty(t, state.walDir, "walDir set")
+	assert.Nil(t, state.wal, "logical WAL NOT opened in forwarders phase (post-gate, R1)")
+	assert.Empty(t, state.walDir, "walDir not set until bootLogicalWALOpen")
 	assert.NotNil(t, state.forwardSender, "ForwardSender after phase")
 	assert.NotNil(t, state.forwardReceiver, "ForwardReceiver after phase")
 	assert.NotNil(t, state.metaForwardSender, "MetaForwardSender after phase")
@@ -83,4 +85,24 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	assert.NotNil(t, state.clusterCoord, "ClusterCoordinator after phase")
 	// seedGroups is max(clusterSize*4, 8); single-node cluster -> 8.
 	assert.GreaterOrEqual(t, state.seedGroups, 8, "seedGroups computed")
+
+	// 3. Logical WAL opens AFTER the (production) DEK gate — here we just prove
+	//    this phase is what populates state.wal now.
+	require.NoError(t, bootLogicalWALOpen(ctx, state))
+	assert.NotNil(t, state.wal, "logical WAL after bootLogicalWALOpen")
+	assert.NotEmpty(t, state.walDir, "walDir set by bootLogicalWALOpen")
+}
+
+// TestBootLogicalWALOpen_RequiresDataWAL — the data-WAL-before-logical-WAL
+// invariant (formerly enforced in bootWALAndForwarders) must stay executable
+// in bootLogicalWALOpen. With dataWAL nil the phase must fail fast and must NOT
+// open the logical WAL.
+func TestBootLogicalWALOpen_RequiresDataWAL(t *testing.T) {
+	state := newBootState(Config{})
+	require.Nil(t, state.dataWAL, "precondition: dataWAL nil")
+
+	err := bootLogicalWALOpen(context.Background(), state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "data WAL must be opened before logical WAL")
+	assert.Nil(t, state.wal, "logical WAL must NOT be opened when the guard fires")
 }

@@ -68,6 +68,51 @@ func TestServiceRotateAndRevoke(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestServiceAuthenticate(t *testing.T) {
+	now := time.Unix(180, 0).UTC()
+	svc := NewService(NewStore(), WithNow(func() time.Time { return now }))
+	secret, err := svc.Create(CreateRequest{
+		SAID: "node-a", Protocol: ProtocolNBD, Resource: "volume/devdisk", Mode: ModeRW,
+	})
+	require.NoError(t, err)
+
+	item, err := svc.Authenticate(AuthenticateRequest{
+		Protocol: ProtocolNBD,
+		Resource: "volume/devdisk",
+		Mode:     ModeRW,
+		Secret:   secret.Secret,
+	})
+	require.NoError(t, err)
+	require.Equal(t, secret.ID, item.ID)
+
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNBD, Resource: "volume/devdisk", Mode: ModeRW, Secret: "wrong"})
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNBD, Resource: "volume/other", Mode: ModeRW, Secret: secret.Secret})
+	require.ErrorIs(t, err, ErrInvalid)
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNBD, Resource: "volume/devdisk", Mode: ModeRO, Secret: secret.Secret})
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
+func TestServiceAuthenticateRejectsExpiredAndRevoked(t *testing.T) {
+	now := time.Unix(220, 0).UTC()
+	svc := NewService(NewStore(), WithNow(func() time.Time { return now }))
+	past := now.Add(-time.Second)
+	expired, err := svc.Create(CreateRequest{
+		SAID: "node-a", Protocol: ProtocolNBD, Resource: "volume/expired", Mode: ModeRW, ExpiresAt: &past,
+	})
+	require.NoError(t, err)
+	active, err := svc.Create(CreateRequest{
+		SAID: "node-a", Protocol: ProtocolNBD, Resource: "volume/revoked", Mode: ModeRW,
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.Revoke(active.ID))
+
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNBD, Resource: "volume/expired", Mode: ModeRW, Secret: expired.Secret})
+	require.ErrorIs(t, err, ErrExpired)
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNBD, Resource: "volume/revoked", Mode: ModeRW, Secret: active.Secret})
+	require.ErrorIs(t, err, ErrRevoked)
+}
+
 func TestMaterializeRotateDoesNotMutateInput(t *testing.T) {
 	now := time.Unix(124, 0).UTC()
 	item, _, err := MaterializeCreate(CreateRequest{
