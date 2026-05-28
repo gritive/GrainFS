@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.438.0] - 2026-05-29
+
+### Security
+
+- Encrypt scrubber-repaired EC shards at rest. Shards rewritten by the
+  scrub/repair path are now sealed through the DEK (GFSENC3), matching
+  normally-written shards. Previously, after the static at-rest key was retired,
+  repaired shards were written in plaintext on disk while their originals were
+  encrypted.
+
 ## [0.0.437.0] - 2026-05-29
 
 ### Security
