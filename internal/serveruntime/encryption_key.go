@@ -26,8 +26,9 @@ const bulkCipherFormatFile = "encryption.format"
 // records moved to the gen-aware DEK seam with persisted DEK generation frames.
 // "7" = Zero-CA bootstrap/node identity no longer uses the legacy static
 // encryption.key as boot glue; node.key.enc must be recoverable through KEK
-// generation evidence. Greenfield only.
-const bulkCipherFormatVersion = "7"
+// generation evidence. "8" = raft v2 Badger log stores are encrypted at rest
+// by a node-local raft-store key sealed under the cluster KEK. Greenfield only.
+const bulkCipherFormatVersion = "8"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
 // ONLY when at-rest encryption is enabled. bulkDataPresent reports whether the
@@ -39,7 +40,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); Zero-CA static-key boot glue was removed and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); raft log store encryption was enabled and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):
@@ -95,6 +96,8 @@ func dataDirHasEntries(path string) bool {
 //   - wal/            — logical WAL opened via wal.OpenEncrypted
 //     (boot_phases_logical_wal.go bootLogicalWALOpen; forwarder wiring lives
 //     in boot_phases_forwarders.go bootWALAndForwardersPart1)
+//   - raft/raft-v2/   — data-plane raft v2 Badger log/stable/snapshot store
+//   - meta_raft/raft-v2/ — meta-raft v2 Badger log/stable/snapshot store
 //   - metaDir (= --meta-dir or <dataDir>/meta):
 //   - BadgerDB with encrypted values — the earliest encrypted write on any
 //     deployment (encrypted_badger.go)
@@ -124,6 +127,12 @@ func BulkDataPresent(dataDir string, dataDirs []string, metaDir string) bool {
 		return true
 	}
 	if dataDirHasEntries(filepath.Join(dataDir, "wal")) {
+		return true
+	}
+	if dataDirHasEntries(filepath.Join(dataDir, "raft", "raft-v2")) {
+		return true
+	}
+	if dataDirHasEntries(filepath.Join(dataDir, "meta_raft", "raft-v2")) {
 		return true
 	}
 	return dataDirHasEntries(metaDir)

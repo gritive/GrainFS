@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -74,4 +75,28 @@ func TestRaftV2Smoke_BootstrapProposeRoundtrip(t *testing.T) {
 	idx, err := node.ProposeWait(proposeCtx, []byte("smoke"))
 	require.NoError(t, err)
 	assert.Greater(t, idx, uint64(0), "expected non-zero committed index from ProposeWait")
+}
+
+func TestRaftV2StoresEncryptedReopen(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{0x42}, 32)
+	db, logs, _, _, err := openRaftV2Stores(dir, RaftV2StoreOptions{EncryptionKey: key})
+	require.NoError(t, err)
+	require.NoError(t, logs.Append([]raft.LogEntry{{
+		Term:    1,
+		Index:   1,
+		Type:    raft.LogEntryCommand,
+		Command: []byte("encrypted-log-entry"),
+	}}))
+	require.NoError(t, db.Close())
+
+	db, logs, _, _, err = openRaftV2Stores(dir, RaftV2StoreOptions{EncryptionKey: key})
+	require.NoError(t, err)
+	got, err := logs.Entry(1)
+	require.NoError(t, err)
+	require.Equal(t, []byte("encrypted-log-entry"), got.Command)
+	require.NoError(t, db.Close())
+
+	_, _, _, _, err = openRaftV2Stores(dir, RaftV2StoreOptions{EncryptionKey: bytes.Repeat([]byte{0x24}, 32)})
+	require.Error(t, err)
 }

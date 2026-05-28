@@ -48,6 +48,7 @@ type MetaRaftConfig struct {
 	Transport        MetaTransport
 	ElectionTimeout  time.Duration // zero uses MetaRaftElectionTimeout
 	HeartbeatTimeout time.Duration // zero uses MetaRaftHeartbeatInterval
+	StoreOptions     RaftV2StoreOptions
 }
 
 // metaProposerNode abstracts the raft.Node methods used by proposeOrForward
@@ -140,7 +141,7 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	if cfg.HeartbeatTimeout > 0 {
 		nodeCfg.HeartbeatTimeout = cfg.HeartbeatTimeout
 	}
-	node, closeDB, err := newRaftNodeV2(nodeCfg, storePath)
+	node, closeDB, err := newRaftNodeV2WithStoreOptions(nodeCfg, storePath, cfg.StoreOptions)
 	if err != nil {
 		return nil, fmt.Errorf("meta_raft: new raft v2 node: %w", err)
 	}

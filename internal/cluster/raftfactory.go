@@ -19,11 +19,19 @@ var (
 
 const raftV2StoreSubdir = "raft-v2"
 
+type RaftV2StoreOptions struct {
+	EncryptionKey []byte
+}
+
 func newRaftNode(rcfg raft.Config, v2StoreDir string) (RaftNode, func() error, error) {
 	return newRaftNodeV2(rcfg, v2StoreDir)
 }
 
 func newRaftNodeV2(rcfg raft.Config, v2StoreDir string) (*raftNodeAdapter, func() error, error) {
+	return newRaftNodeV2WithStoreOptions(rcfg, v2StoreDir, RaftV2StoreOptions{})
+}
+
+func newRaftNodeV2WithStoreOptions(rcfg raft.Config, v2StoreDir string, opts RaftV2StoreOptions) (*raftNodeAdapter, func() error, error) {
 	v2cfg := raft.Config{
 		ID:                            rcfg.ID,
 		Peers:                         rcfg.Peers,
@@ -43,7 +51,7 @@ func newRaftNodeV2(rcfg raft.Config, v2StoreDir string) (*raftNodeAdapter, func(
 
 	var closeFn func() error
 	if v2StoreDir != "" {
-		db, ls, ss, sn, err := openRaftV2Stores(v2StoreDir)
+		db, ls, ss, sn, err := openRaftV2Stores(v2StoreDir, opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("raft open stores: %w", err)
 		}
@@ -67,12 +75,24 @@ func NewRaftV2NodeForServeruntime(rcfg raft.Config, raftDir string) (RaftNode, f
 	return newRaftNodeV2(rcfg, raftDir)
 }
 
-func openRaftV2Stores(dir string) (*badger.DB, raft.LogStore, raft.StableStore, raft.SnapshotStore, error) {
+func NewRaftV2NodeForServeruntimeWithStoreOptions(rcfg raft.Config, raftDir string, opts RaftV2StoreOptions) (RaftNode, func() error, error) {
+	return newRaftNodeV2WithStoreOptions(rcfg, raftDir, opts)
+}
+
+func openRaftV2Stores(dir string, opts RaftV2StoreOptions) (*badger.DB, raft.LogStore, raft.StableStore, raft.SnapshotStore, error) {
 	storeDir := filepath.Join(dir, raftV2StoreSubdir)
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("mkdir %s: %w", storeDir, err)
 	}
-	db, err := badger.Open(badgerutil.SmallOptions(storeDir))
+	bopts := badgerutil.RaftLogOptions(storeDir, true)
+	var err error
+	if len(opts.EncryptionKey) > 0 {
+		bopts, err = badgerutil.RaftLogEncryptedOptions(storeDir, true, opts.EncryptionKey)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+	}
+	db, err := badger.Open(bopts)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("open badger %s: %w", storeDir, err)
 	}

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.432.0] - 2026-05-29
+
+### Security
+
+- Encrypted raft v2 Badger log stores at rest with a node-local raft-store key
+  sealed under the cluster KEK.
+- Rewrapped the raft-store key sidecar after KEK rotation and refused KEK prune
+  while a node still references the target KEK version.
+
+### Changed
+
+- Bumped the at-rest format boundary to 8 for greenfield raft log encryption.
+- Documented backup and restore requirements for `keys.d/raft-store.key.enc`.
+
+### Tests
+
+- Added encrypted raft log reopen and wrong-key coverage.
+- Added raft-store sidecar round-trip, context binding, rewrap, and missing
+  sidecar refusal coverage.
+
 ## [0.0.431.0] - 2026-05-29
 
 ### Changed

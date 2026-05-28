@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
@@ -127,6 +128,11 @@ type bootState struct {
 	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ
 	// (ShardService) clusterID are identical. Empty until wireDEKKeeper runs.
 	clusterID []byte
+	// raftStoreKey is the node-local Badger encryption key for raft v2 log
+	// stores. It is sealed at rest in keys.d/raft-store.key.enc under kekStore
+	// and loaded before data/meta raft stores open.
+	raftStoreKey       []byte
+	raftStoreKeyKEKVer atomic.Uint32
 	// perNodeSPKI is the SPKI of this node's persisted per-node transport
 	// identity (keys.d/node.key.enc), populated by ensureNodeIdentity after the
 	// KEK store is wired (spec §6 D-rev3 step 1). It is the steady identity for
