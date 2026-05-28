@@ -217,6 +217,8 @@ func (f *fakeJoinCoordinator) LookupPending(string) (string, [32]byte, string, b
 }
 func (f *fakeJoinCoordinator) ProposeInviteConsume(context.Context, string) error { return nil }
 func (f *fakeJoinCoordinator) RemoveLearner(string, string) error                 { return nil }
+func (f *fakeJoinCoordinator) PeerSPKIs() [][32]byte                              { return nil }
+func (f *fakeJoinCoordinator) ClusterKeyDropped() bool                            { return false }
 
 func (f *fakeJoinCoordinator) JoinCalls() int {
 	f.mu.Lock()

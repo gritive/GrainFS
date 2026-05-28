@@ -95,6 +95,14 @@ type inviteJoinState struct {
 	// gen-0 — a cluster that rotated+pruned gen-0 won't ship it). Phase-2 must
 	// LoadNodeKey under this SAME gen.
 	nodeKeyKEKGen uint32
+	// peerSPKIs is the set of incumbent peer per-node SPKIs decoded from the
+	// Phase-1 sealed bootstrap (PR-2a §8f M2). Used to pre-seed the joiner's
+	// accept-set before Listen so the joiner can accept incumbents' per-node
+	// certs from the first inbound handshake (M3/M4).
+	peerSPKIs [][32]byte
+	// clusterKeyDropped mirrors the same field from the sealed bootstrap
+	// (PR-2a §8f M2). Always false in PR-2a (cluster key is not yet dropped).
+	clusterKeyDropped bool
 }
 
 // inviteJoinDecision is the resume gate's classification.
@@ -464,10 +472,27 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	if err != nil {
 		return fmt.Errorf("open sealed bootstrap: %w", err)
 	}
-	encKey, kekGens, psk, err := cluster.DecodeBootstrapSecretsPayload(plain)
+	// M2: switch decoder to DecodeBootstrapSecretsPayloadWithCutover so
+	// peer_spkis and clusterKeyDropped are extracted and staged (PR-2a §8f).
+	// Falls back gracefully when an old-encoder leader omits these fields (M5).
+	encKey, kekGens, psk, peerSPKIs, clusterKeyDropped, err := cluster.DecodeBootstrapSecretsPayloadWithCutover(plain)
 	if err != nil {
-		return fmt.Errorf("decode bootstrap secrets: %w", err)
+		// The old (pre-PR-2a) encoding lacks the cutover trailer; tolerate it.
+		var encKey2 []byte
+		var kekGens2 []cluster.KEKGen
+		var psk2 []byte
+		encKey2, kekGens2, psk2, err = cluster.DecodeBootstrapSecretsPayload(plain)
+		if err != nil {
+			return fmt.Errorf("decode bootstrap secrets: %w", err)
+		}
+		encKey, kekGens, psk = encKey2, kekGens2, psk2
+		log.Warn().Msg("invite-join: peer_spkis absent (old leader encoder); joiner accept-set will use PSK base only")
+	} else if len(peerSPKIs) == 0 {
+		// Leader sent the new format but with no peers (rolling upgrade, M5).
+		log.Warn().Msg("invite-join: peer_spkis empty in bootstrap; joiner accept-set will use PSK base only")
 	}
+	st.peerSPKIs = peerSPKIs
+	st.clusterKeyDropped = clusterKeyDropped
 
 	// 7. stage every secret on disk where the normal boot expects them.
 	if err := stageInviteSecrets(dataDir, encKey, kekGens, st.clusterID); err != nil {
@@ -845,29 +870,34 @@ func shredFile(path string) {
 // --- resume sentinel (length-prefixed binary, NO JSON) ---------------------
 
 type invitePendingRecord struct {
-	inviteID      string
-	leaderID      string
-	seedAddr      string
-	seedSPKI      [32]byte
-	nodeID        string
-	raftAddr      string
-	nodeSPKI      [32]byte
-	nodeKeyKEKGen uint32
+	inviteID          string
+	leaderID          string
+	seedAddr          string
+	seedSPKI          [32]byte
+	nodeID            string
+	raftAddr          string
+	nodeSPKI          [32]byte
+	nodeKeyKEKGen     uint32
+	peerSPKIs         [][32]byte
+	clusterKeyDropped bool
 }
 
 func writeInvitePendingSentinel(dataDir, path string, st *inviteJoinState) error {
 	rec := invitePendingRecord{
-		inviteID:      st.inviteID,
-		leaderID:      st.leaderID,
-		seedAddr:      st.seedAddr,
-		seedSPKI:      st.seedSPKI,
-		nodeID:        st.nodeID,
-		raftAddr:      st.raftAddr,
-		nodeSPKI:      st.nodeSPKI,
-		nodeKeyKEKGen: st.nodeKeyKEKGen,
+		inviteID:          st.inviteID,
+		leaderID:          st.leaderID,
+		seedAddr:          st.seedAddr,
+		seedSPKI:          st.seedSPKI,
+		nodeID:            st.nodeID,
+		raftAddr:          st.raftAddr,
+		nodeSPKI:          st.nodeSPKI,
+		nodeKeyKEKGen:     st.nodeKeyKEKGen,
+		peerSPKIs:         st.peerSPKIs,
+		clusterKeyDropped: st.clusterKeyDropped,
 	}
 	var genBuf [4]byte
 	binary.BigEndian.PutUint32(genBuf[:], rec.nodeKeyKEKGen)
+	// Fields 0–7 (original 8 fields).
 	var buf []byte
 	buf = transport.JoinPutField(buf, []byte(rec.inviteID))
 	buf = transport.JoinPutField(buf, []byte(rec.leaderID))
@@ -877,6 +907,15 @@ func writeInvitePendingSentinel(dataDir, path string, st *inviteJoinState) error
 	buf = transport.JoinPutField(buf, []byte(rec.raftAddr))
 	buf = transport.JoinPutField(buf, rec.nodeSPKI[:])
 	buf = transport.JoinPutField(buf, genBuf[:])
+	// Field 8: peerSPKIs as 2-byte count + N×32 bytes blob (PR-2a §8f M4).
+	spkiBlob := encodePeerSPKIsBlob(rec.peerSPKIs)
+	buf = transport.JoinPutField(buf, spkiBlob)
+	// Field 9: clusterKeyDropped as 1 byte.
+	dropped := byte(0)
+	if rec.clusterKeyDropped {
+		dropped = 1
+	}
+	buf = transport.JoinPutField(buf, []byte{dropped})
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("write invite sentinel: mkdir: %w", err)
 	}
@@ -886,15 +925,48 @@ func writeInvitePendingSentinel(dataDir, path string, st *inviteJoinState) error
 	return nil
 }
 
+// encodePeerSPKIsBlob packs a slice of SPKIs as: uint16 big-endian count,
+// followed by count×32 bytes. Empty slice encodes as a 2-byte zero count.
+func encodePeerSPKIsBlob(spkis [][32]byte) []byte {
+	blob := make([]byte, 2+len(spkis)*32)
+	binary.BigEndian.PutUint16(blob[:2], uint16(len(spkis)))
+	for i, s := range spkis {
+		copy(blob[2+i*32:], s[:])
+	}
+	return blob
+}
+
+// decodePeerSPKIsBlob is the inverse of encodePeerSPKIsBlob.
+func decodePeerSPKIsBlob(blob []byte) ([][32]byte, bool) {
+	if len(blob) < 2 {
+		return nil, false
+	}
+	n := int(binary.BigEndian.Uint16(blob[:2]))
+	if len(blob) < 2+n*32 {
+		return nil, false
+	}
+	out := make([][32]byte, n)
+	for i := range out {
+		copy(out[i][:], blob[2+i*32:])
+	}
+	return out, true
+}
+
 func readInvitePendingSentinel(dataDir string) (invitePendingRecord, bool) {
 	path := filepath.Join(dataDir, invitePendingFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return invitePendingRecord{}, false
 	}
-	fields, err := transport.JoinReadFields(bytes.NewReader(data), 8)
+	// Try the current 10-field format first; fall back to the legacy 8-field
+	// format for crash-resume of sentinels written before PR-2a §8f (M4).
+	fields, err := transport.JoinReadFields(bytes.NewReader(data), 10)
 	if err != nil {
-		return invitePendingRecord{}, false
+		// Legacy sentinel: re-try with 8 fields on a fresh reader.
+		fields, err = transport.JoinReadFields(bytes.NewReader(data), 8)
+		if err != nil {
+			return invitePendingRecord{}, false
+		}
 	}
 	var rec invitePendingRecord
 	rec.inviteID = string(fields[0])
@@ -906,6 +978,15 @@ func readInvitePendingSentinel(dataDir string) (invitePendingRecord, bool) {
 	copy(rec.nodeSPKI[:], fields[6])
 	if len(fields[7]) == 4 {
 		rec.nodeKeyKEKGen = binary.BigEndian.Uint32(fields[7])
+	}
+	// Fields 8 and 9 are present only in the PR-2a §8f format.
+	if len(fields) >= 9 {
+		if spkis, ok := decodePeerSPKIsBlob(fields[8]); ok {
+			rec.peerSPKIs = spkis
+		}
+	}
+	if len(fields) >= 10 && len(fields[9]) == 1 {
+		rec.clusterKeyDropped = fields[9][0] == 1
 	}
 	return rec, true
 }

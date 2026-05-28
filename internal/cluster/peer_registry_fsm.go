@@ -1,6 +1,10 @@
 package cluster
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+	"sort"
+)
 
 // Peers returns the peer registry sub-FSM.
 func (f *MetaFSM) Peers() *peerRegistry { return f.peers }
@@ -55,6 +59,31 @@ func (f *MetaFSM) SetPresentFlipBegunForTest(v bool) {
 	f.mu.Lock()
 	f.presentFlipBegun = v
 	f.mu.Unlock()
+}
+
+// PeerSPKIs returns a sorted snapshot of all registered peer SPKIs. Safe for
+// concurrent use. Used by the invite-join Phase-1 leader to populate
+// peer_spkis in the sealed bootstrap (PR-2a §8f M1).
+func (f *MetaFSM) PeerSPKIs() [][32]byte {
+	out := f.peers.acceptSPKIs()
+	sort.Slice(out, func(i, j int) bool {
+		return bytes.Compare(out[i][:], out[j][:]) < 0
+	})
+	return out
+}
+
+// PeerNodeIDToSPKI returns a snapshot of the nodeID→SPKI map for all
+// registered peers. Safe for concurrent use.
+func (f *MetaFSM) PeerNodeIDToSPKI() map[string][32]byte {
+	return f.peers.nodeIDToSPKI()
+}
+
+// ClusterKeyDropped reports whether the cluster-key-drop has been committed
+// in the raft log. Safe for concurrent use.
+func (f *MetaFSM) ClusterKeyDropped() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.clusterKeyDropped
 }
 
 // firePeersChanged snapshots the callback under lock then invokes it with the

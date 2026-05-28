@@ -347,6 +347,17 @@ func (t *QUICTransport) UpdateRegistryAccept(spkis [][32]byte) {
 	t.composer.setRegistry(spkis)
 }
 
+// SeedInitialPeerSPKIs populates the composer's registry-portion accept-set
+// before Listen, so the joiner accepts incumbents' per-node certs from the
+// first inbound handshake (PR-2a §8f mechanic 3). Empty input is a no-op
+// (rolling-upgrade compat — see invite_join_boot.go warning path).
+func (t *QUICTransport) SeedInitialPeerSPKIs(spkis [][32]byte) {
+	if len(spkis) == 0 {
+		return
+	}
+	t.UpdateRegistryAccept(spkis)
+}
+
 // ApplyRotation routes one rotation-phase change through the composer as a
 // single atomic op: it sets the rotation window + present cert/SPKI and, when
 // newBase is non-nil, advances the base — then recomputes once. Done under one

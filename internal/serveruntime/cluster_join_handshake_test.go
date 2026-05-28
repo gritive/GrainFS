@@ -336,3 +336,5 @@ func (f *fakeJoinCoord) ProposeInviteConsume(context.Context, string) error {
 func (f *fakeJoinCoord) RemoveLearner(string, string) error {
 	return errors.New("invite path not implemented in this fake")
 }
+func (f *fakeJoinCoord) PeerSPKIs() [][32]byte   { return nil }
+func (f *fakeJoinCoord) ClusterKeyDropped() bool { return false }
