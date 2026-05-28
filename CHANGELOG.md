@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.400.0] - 2026-05-28
+
+### Changed
+
+- Internal: reordered boot phases so `bootShardService` and `bootBalancerAndGossip` run after `WaitDEKReady`; extracted `forwardReceiver.Register` into a new phase `bootRegisterForwardHandlers`. Boot log line order shifts accordingly. Foundation for R-FSM-β (`docs/superpowers/plans/2026-05-28-r-fsm-beta-fsm-value-dek-plan.md` — data-WAL DEK migration); no on-disk-format or wire-protocol change.
+
 ## [0.0.399.1] - 2026-05-28
 
 ### Security
