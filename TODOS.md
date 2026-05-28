@@ -57,7 +57,7 @@ Work these in order. Do not run them in parallel.
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
      See [[project-grains-at-rest-two-key-systems]].
 
-- [ ] **Raft log store at-rest encryption (object-metadata plaintext gap) — design**
+- [x] **Raft log store at-rest encryption (object-metadata plaintext gap) — design**
    - Trust risk: live object metadata (bucket/key/size/etag/placement) persists as
      raft log entries written **plaintext** to a Badger store opened with
      `badgerutil.SmallOptions` (no `WithEncryptionKey`; `raftfactory.go:75`,
@@ -65,9 +65,20 @@ Work these in order. Do not run them in parallel.
      but log entries between snapshots are not. Never sealed by either key system.
    - Boundary: **separate spec** (distinct from static→DEK unification).
      Design-heavy — raft determinism (FSM apply must stay deterministic on
-     plaintext) favors Badger native encryption keyed by the DEK at the storage
-     layer (below replication), with key-registry/compaction interplay to resolve.
-     See [[project-grains-at-rest-two-key-systems]].
+     plaintext) favors Badger native encryption at the storage layer (below
+     replication). The design rejects active-DEK-as-store-key because meta/data
+     raft stores open before DEK restore, and instead uses a node-local
+     raft-store master key sealed under the KEK store. See
+     `docs/superpowers/specs/2026-05-28-raft-log-store-at-rest-encryption-design.md`
+     and
+     `docs/superpowers/plans/2026-05-28-raft-log-store-at-rest-encryption-plan.md`.
+
+- [ ] **Raft log store at-rest encryption — implementation**
+   - Implement the plan in
+     `docs/superpowers/plans/2026-05-28-raft-log-store-at-rest-encryption-plan.md`.
+   - Verification: encrypted raft log reopen test, wrong-key rejection, KEK
+     rewrap/prune safety, single-node restart, multi-node follower restart, and
+     raw-file plaintext object-key inspection.
 
 - [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
