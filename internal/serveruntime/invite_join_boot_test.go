@@ -95,6 +95,28 @@ func TestGateInviteJoin_DiskClassification(t *testing.T) {
 		}
 	})
 
+	t.Run("all zero-CA artifacts staged without encryption.key + sentinel present -> resume", func(t *testing.T) {
+		dir := t.TempDir()
+		p := inviteJoinPathsFor(dir)
+		mustWrite(t, p.clusterID, []byte("cid"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
+		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		require.Equal(t, inviteResume, gateInviteJoin(dir, true))
+	})
+
+	t.Run("all zero-CA artifacts staged without encryption.key + sentinel present + NO bundle -> resume", func(t *testing.T) {
+		dir := t.TempDir()
+		p := inviteJoinPathsFor(dir)
+		mustWrite(t, p.clusterID, []byte("cid"))
+		mustWrite(t, filepath.Join(p.keysDir, "0.key"), []byte("kek0"))
+		mustWrite(t, p.nodeKeyEnc, []byte("sealed"))
+		mustWrite(t, p.currentKey, []byte("psk"))
+		mustWrite(t, p.pendingSentinel, []byte("pending"))
+		require.Equal(t, inviteResume, gateInviteJoin(dir, false))
+	})
+
 	t.Run("all artifacts staged + sentinel present + NO bundle -> resume (P2)", func(t *testing.T) {
 		// The bundle env is one-shot: a restart that does not re-set it must still
 		// resume the Phase-2 ACK from the complete-but-unacked sentinel, NOT boot as
@@ -372,6 +394,23 @@ func TestStageInviteSecrets(t *testing.T) {
 	if got := mustRead(t, filepath.Join(keysDir, "1.key")); string(got) != "kek-gen-1" {
 		t.Fatalf("keys/1.key = %q", got)
 	}
+}
+
+func TestStageInviteSecretsSkipsEncryptionKeyWhenBootstrapOmitsIt(t *testing.T) {
+	dir := t.TempDir()
+	clusterID := []byte("0123456789abcdef") // 16 bytes
+	gens := []cluster.KEKGen{
+		{Gen: 0, Key: []byte("kek-gen-0")},
+		{Gen: 1, Key: []byte("kek-gen-1")},
+	}
+
+	require.NoError(t, stageInviteSecrets(dir, nil, gens, clusterID))
+	require.NoFileExists(t, filepath.Join(dir, "encryption.key"))
+	require.Equal(t, clusterID, mustRead(t, filepath.Join(dir, nodeconfig.ClusterIDFile)))
+
+	keysDir := nodeconfig.New(dir).KEKDir()
+	require.Equal(t, []byte("kek-gen-0"), mustRead(t, filepath.Join(keysDir, "0.key")))
+	require.Equal(t, []byte("kek-gen-1"), mustRead(t, filepath.Join(keysDir, "1.key")))
 }
 
 // TestInviteSealBindContext matches W7 MetaJoinReceiver.sealBindContext layout:

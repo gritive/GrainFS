@@ -115,11 +115,11 @@ func bootMetaRaftWiring(state *bootState) error {
 	// keys.d/node.key.enc once (genesis/normal boot included) and reloads it on
 	// later boots, recording the per-node SPKI. The node does NOT yet present
 	// this identity — accept-side foundation only. Task 6 consumes perNodeSPKI.
-	// Skipped when the static encryption key is not wired (test configs) or
-	// identity inputs are missing; production always has all three. node.key.enc
-	// is sealed under the active KEK generation and tracked by keys.d/node.key.gen
-	// so normal boot can re-seal during rotation and fail closed after prune.
-	if len(state.cfg.RawEncryptionKey) == 32 && len(state.clusterID) > 0 && state.nodeID != "" {
+	// Skipped when identity inputs are missing. node.key.enc is sealed under the
+	// active KEK generation and tracked by keys.d/node.key.gen so normal boot can
+	// re-seal during rotation and fail closed after prune. RawEncryptionKey is
+	// optional legacy migration material, not a steady-state boot prerequisite.
+	if len(state.clusterID) > 0 && state.nodeID != "" {
 		if state.inviteJoinMode {
 			// Invite-join OWNS node.key.enc this boot: Phase-1 sealed it under a KEK
 			// generation and Phase-2 (bootInviteJoinPhase2) LoadNodeKeys it under that

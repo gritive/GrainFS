@@ -130,12 +130,13 @@ const (
 //     exists (the joiner already generated + persisted its identity in Phase-1).
 //     PRESERVED for the table-test signature only — the decision is now driven
 //     by artifactsComplete, NOT mere key presence (see below).
-//   - artifactsComplete:     encryption.key + cluster.id + a staged KEK gen +
+//   - artifactsComplete:     cluster.id + a staged KEK gen +
 //     keys.d/node.key.enc + keys.d/current.key all present (the DURABLE Phase-1
-//     completion artifacts). Defined by their PRESENCE, NOT by the absence of
-//     node.key.unsealed: a crash after current.key but before the shred leaves a
-//     leftover unsealed key while all durable artifacts exist — that state is
-//     complete (resume), and the leftover is shredded idempotently on resume.
+//     completion artifacts). Defined by their PRESENCE, NOT by encryption.key nor
+//     by the absence of node.key.unsealed: a crash after current.key but before
+//     the shred leaves a leftover unsealed key while all durable artifacts exist
+//     — that state is complete (resume), and the leftover is shredded
+//     idempotently on resume.
 //   - acked:                 the .invite-join-pending sentinel is ABSENT (Phase-2
 //     membership ACK completed).
 //
@@ -231,8 +232,7 @@ func gateInviteJoin(dataDir string, bundlePresent bool) inviteJoinDecision {
 	//     (worse, without the one-shot bundle env) to a non-member boot that never
 	//     sends Phase-2 — splitting the node from the cluster. The leftover
 	//     unsealed key is shredded idempotently on the resume path instead.
-	artifactsComplete := fileExists(p.encryptionKey) &&
-		fileExists(p.clusterID) &&
+	artifactsComplete := fileExists(p.clusterID) &&
 		keysDirHasKEK(p.keysDir) &&
 		fileExists(p.nodeKeyEnc) &&
 		fileExists(p.currentKey) // PSK durable ⇒ seal durable; resume can't rerun Phase-1
@@ -510,9 +510,8 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	// Re-persist the sentinel with the chosen gen BEFORE sealing (the step-2 write
 	// predates staging and carries gen 0). For post-drop joins gen 0 is the
 	// encKey-first marker, not a KEK generation. Ordering matters for crash
-	// safety (durable artifacts are encryption.key, cluster.id, retained KEKs,
-	// node.key.enc, and keys.d/current.key; a leftover unsealed key is shredded on
-	// resume):
+	// safety (durable artifacts are cluster.id, retained KEKs, node.key.enc, and
+	// keys.d/current.key; a leftover unsealed key is shredded on resume):
 	//   - crash after this write, before SealNodeKey → no node.key.enc →
 	//     !artifactsComplete → FreshJoin re-runs Phase-1 (reusing the unsealed key);
 	//   - crash after SealNodeKey, before PSK write → unsealed still present →
@@ -844,9 +843,9 @@ func highestKEKGen(gens []cluster.KEKGen) (gen uint32, key []byte, ok bool) {
 	return gen, key, ok
 }
 
-// stageInviteSecrets writes encryption.key, every keys/<gen>.key, and cluster.id
-// (raw 16 bytes) where the normal boot (LoadOrCreateEncryptionKey, wireDEKKeeper)
-// expects them.
+// stageInviteSecrets writes every keys/<gen>.key and cluster.id (raw 16 bytes)
+// where normal boot expects them. encKey is a legacy bootstrap field; new
+// payloads omit it, and fresh invite joins must not create encryption.key.
 func stageInviteSecrets(dataDir string, encKey []byte, kekGens []cluster.KEKGen, clusterID []byte) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("stage secrets: mkdir data: %w", err)

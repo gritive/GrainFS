@@ -32,10 +32,6 @@ Work these in order. Do not run them in parallel.
      (sigv4 verify locked at ≤60 alloc/op). 3-node cluster cache-invalidation
      e2e deferred (no 3-node IAM harness yet); single-node restart e2e
      covers the snapshot/restore path end-to-end.
-     **R-FSM — data-group FSM + data WAL static→DEK.** SHIPPED in current branch.
-     Data-group FSM values now use a `GFMV` frame carrying `dek_gen`; boot and
-     recovery data WAL sealers prefer the live `DEKKeeperAdapter`. Format
-     version 5→6.
      **R3 — Retire static key.** After every `cfg.Encryptor` consumer
      (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
      replacement. Remove `--encryption-key-file`, `encrypt.Encryptor` data path,
@@ -49,46 +45,12 @@ Work these in order. Do not run them in parallel.
      Design path: `docs/superpowers/specs/2026-05-28-at-rest-dcut-bootstrap-envelope-design.md`
      splits this into bootstrap-envelope, KEK-gen node identity seal,
      prune-evidence gate, and final static-key removal slices.
-     **KEK-gen node identity seal shipped:** normal boot and invite Phase-2
-     now keep `node.key.enc` sealed under the active KEK generation and persist
-     `keys.d/node.key.gen`.
-     **Prune-evidence gate shipped in current branch:** self-register publishes
-     each voter's `node_key_kek_gen`, and KEK prune now refuses while any voter
-     lacks evidence or still reports a generation at/below the prune target.
      Remaining D-cut work is final static-key removal.
-     Slice A shipped in current branch: new invite bootstrap payloads no longer
-     encode `BootstrapSecretsPayload.encryption_key`; legacy decode remains for
-     pre-format-7 payloads; post-drop invite joiners now load the KEK-sealed
-     node key from staged disk KEKs before QUIC Listen.
-     Prep slice in progress: persist `keys.d/node.key.gen` for invite Phase-1
-     node-key seals so follow-up D-cut slices can identify the generation that
-     wrapped `node.key.enc`.
-   - [x] D-meta: migrate cluster-config alert webhook secret wrapping from static
-     `EncryptWithAAD` to a DEK seam with persisted `dek_gen`. SHIPPED in current
-     branch: new PATCH writes use `DomainClusterConfigSecret`; existing static
-     ciphertexts require PATCHing a fresh `alert-webhook-secret` before static
-     key removal.
    - [ ] Data-DEK rotation: persist non-zero `dek_gen` for every
      ciphertext-bearing format before enabling `encryption.rotate-dek`.
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
      See [[project-grains-at-rest-two-key-systems]].
-
-- [x] **Raft log store at-rest encryption (object-metadata plaintext gap) — design**
-   - Trust risk: live object metadata (bucket/key/size/etag/placement) persists as
-     raft log entries written **plaintext** to a Badger store opened with
-     `badgerutil.SmallOptions` (no `WithEncryptionKey`; `raftfactory.go:75`,
-     `logstore_badger.go:439` raw `txn.Set`). Snapshots ARE DEK+KEK-sealed (#580),
-     but log entries between snapshots are not. Never sealed by either key system.
-   - Boundary: **separate spec** (distinct from static→DEK unification).
-     Design-heavy — raft determinism (FSM apply must stay deterministic on
-     plaintext) favors Badger native encryption at the storage layer (below
-     replication). The design rejects active-DEK-as-store-key because meta/data
-     raft stores open before DEK restore, and instead uses a node-local
-     raft-store master key sealed under the KEK store. See
-     `docs/superpowers/specs/2026-05-28-raft-log-store-at-rest-encryption-design.md`
-     and
-     `docs/superpowers/plans/2026-05-28-raft-log-store-at-rest-encryption-plan.md`.
 
 - [ ] **Raft log store at-rest encryption — implementation**
    - Implement the plan in
