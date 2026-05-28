@@ -138,8 +138,9 @@ var iamPolicyValidateCmd = &cobra.Command{
 
 var iamPolicySimulateCmd = &cobra.Command{
 	Use:   "simulate",
-	Short: "Simulate a policy decision for a ServiceAccount",
+	Short: "Simulate a policy decision for a ServiceAccount or federated principal",
 	Example: `  grainfs iam policy simulate --sa sa-abc123 --action s3:GetObject --resource arn:aws:s3:::my-bucket/*
+  grainfs iam policy simulate --principal-kind oidc --principal-id oidc:... --issuer https://idp.example.com/ --subject user@example.com --group oidc:example:data-eng --action s3:GetObject --resource arn:aws:s3:::my-bucket/key
   grainfs iam --json policy simulate --sa sa-abc123 --action s3:PutObject --resource arn:aws:s3:::my-bucket/key`,
 	RunE: func(c *cobra.Command, args []string) error {
 		base, err := iamBaseOptionsFromCmd(c)
@@ -147,15 +148,37 @@ var iamPolicySimulateCmd = &cobra.Command{
 			return err
 		}
 		said, _ := c.Flags().GetString("sa")
+		principalKind, _ := c.Flags().GetString("principal-kind")
+		principalID, _ := c.Flags().GetString("principal-id")
+		issuer, _ := c.Flags().GetString("issuer")
+		subject, _ := c.Flags().GetString("subject")
+		groups, _ := c.Flags().GetStringArray("group")
+		groups = cleanSimulateGroups(groups)
 		action, _ := c.Flags().GetString("action")
 		resource, _ := c.Flags().GetString("resource")
 		return iamadmin.RunPolicySimulate(c.Context(), iamadmin.PolicySimulateOptions{
-			BaseOptions: base,
-			SAID:        said,
-			Action:      action,
-			Resource:    resource,
+			BaseOptions:   base,
+			SAID:          said,
+			PrincipalKind: principalKind,
+			PrincipalID:   principalID,
+			Issuer:        issuer,
+			Subject:       subject,
+			Groups:        groups,
+			Action:        action,
+			Resource:      resource,
 		})
 	},
+}
+
+func cleanSimulateGroups(groups []string) []string {
+	out := groups[:0]
+	for _, g := range groups {
+		if g == "" || g == "[]" {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
 }
 
 func init() {
@@ -171,6 +194,11 @@ func init() {
 	iamPolicyDetachCmd.Flags().String("sa", "", "ServiceAccount ID to detach from")
 
 	iamPolicySimulateCmd.Flags().String("sa", "", "ServiceAccount ID")
+	iamPolicySimulateCmd.Flags().String("principal-kind", "", "principal kind (sa, mount_sa, oidc, protocol_credential)")
+	iamPolicySimulateCmd.Flags().String("principal-id", "", "principal ID")
+	iamPolicySimulateCmd.Flags().String("issuer", "", "OIDC issuer URL")
+	iamPolicySimulateCmd.Flags().String("subject", "", "OIDC subject")
+	iamPolicySimulateCmd.Flags().StringArray("group", nil, "external group name (repeatable)")
 	iamPolicySimulateCmd.Flags().String("action", "", "IAM action (e.g. s3:GetObject)")
 	iamPolicySimulateCmd.Flags().String("resource", "*", "resource ARN or *")
 

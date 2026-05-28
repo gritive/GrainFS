@@ -126,24 +126,39 @@ type PolicyValidateOptions struct {
 
 type PolicySimulateOptions struct {
 	BaseOptions
-	SAID     string
-	Action   string
-	Resource string
+	SAID          string
+	PrincipalKind string
+	PrincipalID   string
+	Issuer        string
+	Subject       string
+	Groups        []string
+	Action        string
+	Resource      string
 }
 
 // PolicySimulateRequest is the wire type sent to POST /v1/iam/policy/simulate.
 type PolicySimulateRequest struct {
-	SAID     string `json:"sa_id"`
-	Action   string `json:"action"`
-	Resource string `json:"resource"`
+	SAID          string   `json:"sa_id"`
+	PrincipalKind string   `json:"principal_kind,omitempty"`
+	PrincipalID   string   `json:"principal_id,omitempty"`
+	Issuer        string   `json:"issuer,omitempty"`
+	Subject       string   `json:"subject,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+	Action        string   `json:"action"`
+	Resource      string   `json:"resource"`
 }
 
 // PolicySimulateResponse is the wire type received from POST /v1/iam/policy/simulate.
 type PolicySimulateResponse struct {
-	Effect        string `json:"effect"`
-	MatchedPolicy string `json:"matched_policy"`
-	MatchedSID    string `json:"matched_sid"`
-	Reason        string `json:"reason"`
+	Effect        string   `json:"effect"`
+	MatchedPolicy string   `json:"matched_policy"`
+	MatchedSID    string   `json:"matched_sid"`
+	Reason        string   `json:"reason"`
+	PrincipalKind string   `json:"principal_kind,omitempty"`
+	PrincipalID   string   `json:"principal_id,omitempty"`
+	Issuer        string   `json:"issuer,omitempty"`
+	Subject       string   `json:"subject,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
 }
 
 // --- Group ---

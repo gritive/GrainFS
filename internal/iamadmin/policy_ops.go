@@ -140,9 +140,14 @@ func RunPolicySimulate(ctx context.Context, opts PolicySimulateOptions) error {
 	ctx, cancel := withTimeout(ctx, opts.Timeout)
 	defer cancel()
 	resp, err := c.PolicySimulate(ctx, PolicySimulateRequest{
-		SAID:     opts.SAID,
-		Action:   opts.Action,
-		Resource: opts.Resource,
+		SAID:          opts.SAID,
+		PrincipalKind: opts.PrincipalKind,
+		PrincipalID:   opts.PrincipalID,
+		Issuer:        opts.Issuer,
+		Subject:       opts.Subject,
+		Groups:        opts.Groups,
+		Action:        opts.Action,
+		Resource:      opts.Resource,
 	})
 	if err != nil {
 		return err
