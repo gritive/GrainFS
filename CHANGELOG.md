@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.393.0] - 2026-05-28
+
+### Changed
+
+- At-rest encryption: the logical/PITR write-ahead log, the single-node packed
+  blob store, and the single-node PUT pipeline are now sealed under the
+  generation-aware DEK (KEK → DEK hierarchy) instead of the static encryption
+  key, bringing them onto the same key hierarchy already used for EC shard data.
+  Boot now waits for the DEK to be ready before opening these DEK-sealed stores.
+
+### Removed
+
+- Upgrade boundary: the on-disk at-rest format version is bumped to `4`. A data
+  directory created by an earlier release refuses to start on this version with a
+  clear error — there is no in-place upgrade. Back up and re-load into a freshly
+  created cluster. (Existing greenfield/test clusters only; consistent with the
+  prior XAES cutover.)
+
+- `grainfs config set encryption.rotate-dek now` is rejected — data-DEK rotation
+  is deferred in this release (it returns a "not supported in this release"
+  error). KEK rotation (`grainfs cluster rotate-key`) is unaffected and remains
+  available. Per-generation seal counts in `grainfs encrypt kek status` are now
+  observability only (no rotation action) because XAES removed the
+  nonce-exhaustion cliff.
+
 ## [0.0.392.0] - 2026-05-28
 
 ### Security

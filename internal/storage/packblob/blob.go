@@ -94,6 +94,31 @@ func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*
 	return bs, nil
 }
 
+// NewDEKBlobStore creates a blob store that seals entry payloads via the
+// gen-aware DEK seam (DEKKeeperAdapter). clusterID MUST be 16 bytes.
+//
+// GEN-FRAME INVARIANT: packblob entry frames carry no dek_gen — Append discards
+// the seal gen and Read/recovery always open at gen 0. This is correct ONLY
+// while the active DEK gen is 0. R1 defers data-DEK rotation (spec decision #5)
+// and gates encryption.rotate-dek to keep the active gen pinned at 0. A future
+// rotation slice MUST grow a per-entry gen field here before the active gen can
+// advance.
+func NewDEKBlobStore(dir string, maxSize int64, keeper *encrypt.DEKKeeper, clusterID []byte) (*BlobStore, error) {
+	if keeper == nil {
+		return nil, fmt.Errorf("DEK blob store requires keeper")
+	}
+	if len(clusterID) != 16 {
+		return nil, fmt.Errorf("DEK blob store requires 16-byte clusterID, got %d", len(clusterID))
+	}
+	bs, err := newBlobStore(dir, maxSize)
+	if err != nil {
+		return nil, err
+	}
+	copy(bs.clusterID[:], clusterID)
+	bs.segEnc = storage.NewDEKKeeperAdapter(keeper, bs.clusterID[:])
+	return bs, nil
+}
+
 func newBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create blob dir: %w", err)

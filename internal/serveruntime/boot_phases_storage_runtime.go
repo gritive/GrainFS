@@ -369,7 +369,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	// DistributedBackend (groups are created later for non-group-0
 	// placements). The pipeline owns long-lived actor goroutines shared
 	// across all groups.
-	if state.cfg.Encryptor != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
+	// R1: wire the PUT pipeline whenever a data-at-rest seam exists — the
+	// gen-aware DEK keeper (preferred; putpipeline.New selects it over Encryptor)
+	// OR the static encryptor. Encryption-disabled keeps both nil.
+	if (state.dekKeeper != nil || state.cfg.Encryptor != nil) && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
 		pipeline := putpipeline.New(putpipeline.Config{
 			DataDirs:  state.shardSvc.DataDirs(),
 			Encryptor: state.cfg.Encryptor,

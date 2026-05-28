@@ -54,13 +54,13 @@ func (d *DEKPostCommitDispatcher) handleConfigPut(payload []byte) {
 	}
 	switch key {
 	case "encryption.rotate-dek":
-		if value == "now" {
-			go func() {
-				if err := d.proposer.ProposeDEKRotate(context.Background()); err != nil {
-					log.Warn().Err(err).Msg("dek_post_commit: ProposeDEKRotate failed")
-				}
-			}()
-		}
+		// R1: data-DEK rotation is gated at the config-set boundary
+		// (config/keys.go rejects the trigger). This is a defensive skip in case a
+		// rotate-dek ConfigPut somehow lands here (e.g. replicated from an older
+		// binary): do NOT advance the active DEK gen via ProposeDEKRotate — the
+		// logical-WAL/packblob/PUT-pipeline DEK sealers pin gen 0. ProposeDEKRotate
+		// itself stays for the future rotation slice's mechanics.
+		log.Warn().Str("value", value).Msg("dek_post_commit: encryption.rotate-dek is deferred in this release; skipping ProposeDEKRotate")
 	case "encryption.prune-dek-version":
 		gen64, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
