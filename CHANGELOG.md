@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.426.0] - 2026-05-29
+
+### Fixed
+
+- Allowed static-keyless Zero-CA member restarts to recover when
+  `keys.d/current.key` is missing but the operator supplies `--cluster-key`;
+  the boot path now reaches transport key resolution instead of requiring the
+  removed legacy `encryption.key`.
+
+### Tests
+
+- Added regression coverage for flag-supplied cluster-key recovery on a
+  static-keyless member restart.
+
 ## [0.0.425.0] - 2026-05-29
 
 ### Security
