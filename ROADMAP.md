@@ -82,6 +82,8 @@ into the shared storage and cluster layers.
 - Mandatory local at-rest encryption.
 - Cluster-metadata and object-metadata snapshots sealed at rest via per-snapshot
   DEK + KEK envelope (Phase D-snap Slice 1 + Slice 2, v0.0.378.0+).
+- KEK prune refuses versions that any retained object snapshot depends on; the
+  error names the blocking voter and count (vNEXT+).
 - Rate limiting and no-plaintext-secret checks.
 
 ### Performance

@@ -138,9 +138,10 @@ func (p *peerKEKProbeImpl) ProbeKEKLeaseSnapshot(ctx context.Context, voters []s
 				resp.NodeID = p.selfID
 			}
 			out = append(out, LeaseAttestationSample{
-				NodeID:          resp.NodeID,
-				ObservedAtIndex: resp.ObservedAtRaftCommitIndex,
-				LeaseCount:      resp.LeaseCount,
+				NodeID:           resp.NodeID,
+				ObservedAtIndex:  resp.ObservedAtRaftCommitIndex,
+				LeaseCount:       resp.LeaseCount,
+				SnapshotRefCount: resp.SnapshotRefCount,
 			})
 			continue
 		}
@@ -149,9 +150,10 @@ func (p *peerKEKProbeImpl) ProbeKEKLeaseSnapshot(ctx context.Context, voters []s
 			return nil, fmt.Errorf("KEKLeaseSnapshot %s: %w", v, err)
 		}
 		out = append(out, LeaseAttestationSample{
-			NodeID:          resp.NodeID,
-			ObservedAtIndex: resp.ObservedAtRaftCommitIndex,
-			LeaseCount:      resp.LeaseCount,
+			NodeID:           resp.NodeID,
+			ObservedAtIndex:  resp.ObservedAtRaftCommitIndex,
+			LeaseCount:       resp.LeaseCount,
+			SnapshotRefCount: resp.SnapshotRefCount,
 		})
 	}
 	return out, nil

@@ -258,12 +258,6 @@ Work these in order. Do not run them in parallel.
   D-snap adds a new crypto failure mode to it. Surfaced by /review adversarial pass
   (2026-05-28). Fix: treat envelope-open / Restore failure on InstallSnapshot as a
   fatal halt (mirror the existing `ErrFSMKEKFatal` path) rather than log-and-advance.
-- [ ] **KEK-prune-refusal for object snapshots [P1]**. The cluster KEK retire
-  FSM (`internal/cluster/meta_fsm_kek_apply.go` `RemoveAndUnlink`) must refuse to
-  prune a KEK version still referenced by a retained object snapshot (Phase D-snap
-  Slice 2 D8). DEKs are rewrapped before retire; object snapshots are not, so
-  pruning silently destroys restore capability. Options: prune-refusal scan, or
-  rewrap-on-rotation.
 - [ ] **Pre-existing: two object-snapshot writers can collide on seq [P2]**. The
   serveruntime auto-snapshotter and the server HTTP create/restore/delete handler
   are independent `snapshot.Manager` instances over the same `<dataDir>/snapshots`
@@ -278,6 +272,19 @@ Work these in order. Do not run them in parallel.
   plaintext passthrough and add a boot-time scan that refuses startup if any
   plaintext snapshot file remains. The `grainfs_snapshot_legacy_plaintext_reads_total`
   counter is a runtime signal, not sufficient alone. Mirrors meta-FSM D-cut.
+- [ ] **KEK prune-refusal: absolute closure of the in-flight snapshot-write window [P3]**.
+  The prune guard scans retained `.json.zst` + in-flight `.json.zst.tmp` and uses the
+  APPLIED raft index for attestation freshness, which closes the race to a
+  sub-millisecond in-memory-seal window (a `Create()` that captured the retiring KEK
+  version but has not yet written its `.tmp` while the same node has already applied
+  retire). For absolute closure, `snapshot.Manager.Create` could acquire a short
+  `KEKLeaseTracker` lease on the sealed version across seal+rename, so in-flight writes
+  surface as `lease_count > 0`. Very low priority — the current window is practically
+  unreachable.
+- [ ] **KEK lease-probe wire codec: bound node_id length [P3]**. `encodeKEKLeaseSnapshotResp`
+  casts `len(NodeID)` to `uint16` without a guard and the decoder accepts trailing bytes
+  (`internal/cluster/kek_lease_rpc.go`). Pre-existing; raft server IDs are short so it is
+  not currently reachable, but add a length check + exact-length decode.
 - [ ] **KEK-envelope: cluster e2e join + snapshot-restore object reads**. The
   D-seg-ec-activate e2e added rotate-survives + follower-read-no-quarantine (both green
   on a live 3-node cluster). Join-after-bootstrap and snapshot-restore-boot object-read
@@ -576,6 +583,14 @@ Work these in order. Do not run them in parallel.
 - [ ] feat(scrubber): multi-node/multi-group segment GC fan-out. Orphan-segment GC currently (Plan 3.5) activates only on group-0's distBackend AND, in a cluster, runs only on the raft leader (CaughtUp uses node.ReadIndex → followers get ErrNotLeader → fail-closed skip). Result: single-node is complete; in a multi-node cluster, segments on non-leader nodes' local disks and in non-group-0 data-groups are never reclaimed → latent disk growth. Proper design needs leader-coordinated (or per-node-with-freshness-barrier) deletion across all groups — mirror the EC scrub ecResolver fan-out (boot_phases_scrubber.go) and decide who deletes follower-local raw segments. SegmentOrphanLog already namespaces by groupID. Blocked-by: Plan 3.5 (object-segment-gc-activation) land.
 
 ## Completed
+
+- [x] **KEK-prune-refusal for object snapshots [P1]**
+  - `grainfs encrypt kek prune` now refuses if any voter has a retained object
+    snapshot (`<data>/snapshots/snapshot-*.json.zst`) sealed under the target
+    version. The error names the node and count. Implemented via per-voter
+    `SnapshotRefCount` attestation (`snapshot.CountSnapshotsSealedUnderKEK`),
+    leader refusal in `ProposeKEKPrune`, and FSM apply re-check.
+  - **Completed:** vNEXT (2026-05-28)
 
 - [x] **§9 Follow-up: tighten L1 anonymous allow to default bucket scope**
   - Removed the global `iam.anon-enabled` anonymous bypass. Anonymous S3 access

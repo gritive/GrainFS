@@ -191,7 +191,7 @@ func writeDigestCredential(h interface{ Write([]byte) (int, error) }, row protoc
 	writeDigestString(h, string(row.Protocol))
 	writeDigestString(h, row.Resource)
 	writeDigestString(h, string(row.Mode))
-	h.Write(row.SecretHash[:])
+	_, _ = h.Write(row.SecretHash[:])
 	writeDigestString(h, row.SecretHint)
 	writeDigestInt64(h, unixNanos(row.CreatedAt))
 	writeDigestString(h, row.CreatedBy)
@@ -205,17 +205,17 @@ func writeDigestCredential(h interface{ Write([]byte) (int, error) }, row protoc
 
 func writeDigestString(h interface{ Write([]byte) (int, error) }, s string) {
 	writeDigestUint64(h, uint64(len(s)))
-	h.Write([]byte(s))
+	_, _ = h.Write([]byte(s))
 }
 
 func writeDigestInt64(h interface{ Write([]byte) (int, error) }, n int64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], uint64(n))
-	h.Write(buf[:])
+	_, _ = h.Write(buf[:])
 }
 
 func writeDigestUint64(h interface{ Write([]byte) (int, error) }, n uint64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], n)
-	h.Write(buf[:])
+	_, _ = h.Write(buf[:])
 }

@@ -156,7 +156,7 @@ var (
 	raftGroups           = map[string]struct{}{"meta": {}, "data": {}}
 	raftRoles            = []string{"leader", "follower", "candidate", "unknown"}
 	raftRolesSet         = map[string]struct{}{"leader": {}, "follower": {}, "candidate": {}, "unknown": {}}
-	bucketStates         = []string{"active", "list_error"}
+	bucketStates         = []string{"active", "list_error"} //nolint:unused // operator-state scaffolding (v0.0.388-389); kept until the feature wires it.
 	volumeHealthStates   = []string{"healthy", "degraded", "unknown", "missing_replica", "incident"}
 	operatorErrorSources = []string{"status", "buckets", "volumes", "raft"}
 )
