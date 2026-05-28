@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -647,6 +649,11 @@ func prepareLeaderForPrune(t *testing.T, voters []string) (*leaderTestFixture, u
 		voters:      append([]string(nil), voters...),
 		configIndex: 42,
 	}
+	for i, voter := range voters {
+		if err := fx.fsm.peers.registerMember(voter, spki(byte(0x40+i)), voter, true, 2); err != nil {
+			t.Fatalf("seed node-key evidence for %s: %v", voter, err)
+		}
+	}
 	return fx, 1
 }
 
@@ -679,6 +686,28 @@ func TestLeaderProposeKEKPrune_RejectsWhenNotRetiring(t *testing.T) {
 	if err := fx.leader.ProposeKEKPrune(2, "admin@uds"); err == nil || !strings.Contains(err.Error(), "retiring") {
 		t.Errorf("expected retiring-state reject, got: %v", err)
 	}
+}
+
+func TestLeaderProposeKEKPrune_RejectsMissingNodeKeyEvidence(t *testing.T) {
+	voters := []string{"node-0", "node-1"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	_, _ = fx.fsm.peers.remove("node-1")
+
+	err := fx.leader.ProposeKEKPrune(version, "admin@uds")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "node-key evidence")
+	require.Contains(t, err.Error(), "node-1")
+}
+
+func TestLeaderProposeKEKPrune_RejectsStaleNodeKeyEvidence(t *testing.T) {
+	voters := []string{"node-0", "node-1"}
+	fx, version := prepareLeaderForPrune(t, voters)
+	_, _ = fx.fsm.peers.remove("node-1")
+	require.NoError(t, fx.fsm.peers.registerMember("node-1", spki(0x42), "node-1", true, version))
+
+	err := fx.leader.ProposeKEKPrune(version, "admin@uds")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "node_key_kek_gen")
 }
 
 func TestLeaderProposeKEKPrune_DetectsMembershipChangeMidProbe(t *testing.T) {

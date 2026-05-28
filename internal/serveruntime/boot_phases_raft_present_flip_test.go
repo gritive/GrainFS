@@ -70,10 +70,11 @@ func TestBuildOnPresentFlipCallback_ProposesPresentsPerNode(t *testing.T) {
 	cert := tls.Certificate{Certificate: [][]byte{{0x01}}}
 	spki := [32]byte{0xAB}
 	st := &bootState{
-		nodeID:      "node-A",
-		raftAddr:    "127.0.0.1:4001",
-		perNodeCert: cert,
-		perNodeSPKI: spki,
+		nodeID:           "node-A",
+		raftAddr:         "127.0.0.1:4001",
+		perNodeCert:      cert,
+		perNodeSPKI:      spki,
+		perNodeKeyKEKGen: 7,
 	}
 
 	var flipCalled atomic.Bool
@@ -94,14 +95,16 @@ func TestBuildOnPresentFlipCallback_ProposesPresentsPerNode(t *testing.T) {
 	require.Equal(t, spki, reg.spki)
 	require.Equal(t, "127.0.0.1:4001", reg.addr)
 	require.True(t, reg.presentsPerNode, "presentsPerNode must be true")
+	require.Equal(t, uint32(7), reg.nodeKeyKEKGen)
 }
 
 func TestBuildOnPresentFlipCallback_RegistrarErrorNonFatal(t *testing.T) {
 	st := &bootState{
-		nodeID:      "node-A",
-		raftAddr:    "127.0.0.1:4001",
-		perNodeCert: tls.Certificate{Certificate: [][]byte{{0x01}}},
-		perNodeSPKI: [32]byte{0xAB},
+		nodeID:           "node-A",
+		raftAddr:         "127.0.0.1:4001",
+		perNodeCert:      tls.Certificate{Certificate: [][]byte{{0x01}}},
+		perNodeSPKI:      [32]byte{0xAB},
+		perNodeKeyKEKGen: 7,
 	}
 	tr := &fakeFlipTransport{}
 	reg := newRecordingPresentRegistrar(fmt.Errorf("leader unavailable"))
@@ -195,6 +198,7 @@ type recordingPresentRegistrar struct {
 	spki            [32]byte
 	addr            string
 	presentsPerNode bool
+	nodeKeyKEKGen   uint32
 	err             error
 }
 
@@ -211,12 +215,13 @@ func (r *recordingPresentRegistrar) wait(t *testing.T) {
 	}
 }
 
-func (r *recordingPresentRegistrar) ProposeRegisterMember(_ context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error {
+func (r *recordingPresentRegistrar) ProposeRegisterMember(_ context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32) error {
 	r.called.Store(true)
 	r.nodeID = nodeID
 	r.spki = spki
 	r.addr = addr
 	r.presentsPerNode = presentsPerNode
+	r.nodeKeyKEKGen = nodeKeyKEKGen
 	close(r.done)
 	return r.err
 }

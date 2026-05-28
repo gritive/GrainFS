@@ -12,7 +12,7 @@ import (
 // the repo's "interfaces at the consumer" rule so the boot step is testable
 // with a stub. *cluster.MetaRaft satisfies it.
 type memberSelfRegistrar interface {
-	ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error
+	ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool, nodeKeyKEKGen uint32) error
 }
 
 // selfRegisterMember proposes this node's OWN per-node SPKI into the peer
@@ -28,17 +28,18 @@ type memberSelfRegistrar interface {
 // Skips cleanly when the registrar is nil (single non-cluster configs that
 // never build a meta-raft) or the SPKI is zero (encryption-less test configs
 // that never persist a per-node transport identity).
-func selfRegisterMember(ctx context.Context, mr memberSelfRegistrar, nodeID string, spki [32]byte, addr string) error {
+func selfRegisterMember(ctx context.Context, mr memberSelfRegistrar, nodeID string, spki [32]byte, addr string, nodeKeyKEKGen uint32) error {
 	if mr == nil || spki == ([32]byte{}) {
 		return nil
 	}
-	if err := mr.ProposeRegisterMember(ctx, nodeID, spki, addr, false); err != nil {
+	if err := mr.ProposeRegisterMember(ctx, nodeID, spki, addr, false, nodeKeyKEKGen); err != nil {
 		return err
 	}
 	log.Info().
 		Str("node_id", nodeID).
 		Str("spki_prefix", hex.EncodeToString(spki[:8])).
 		Str("addr", addr).
+		Uint32("node_key_kek_gen", nodeKeyKEKGen).
 		Msg("zero-ca: self-registered per-node SPKI into peer registry (§6 D-rev3 step2)")
 	return nil
 }
@@ -59,9 +60,9 @@ func selfRegisterMember(ctx context.Context, mr memberSelfRegistrar, nodeID stri
 // TODO(phase3-revocation): bounded post-boot retry.
 func bootSelfRegisterMember(ctx context.Context, state *bootState) error {
 	if state.metaRaft == nil {
-		return selfRegisterMemberNonFatal(ctx, nil, state.nodeID, state.perNodeSPKI, state.raftAddr)
+		return selfRegisterMemberNonFatal(ctx, nil, state.nodeID, state.perNodeSPKI, state.raftAddr, state.perNodeKeyKEKGen)
 	}
-	return selfRegisterMemberNonFatal(ctx, state.metaRaft, state.nodeID, state.perNodeSPKI, state.raftAddr)
+	return selfRegisterMemberNonFatal(ctx, state.metaRaft, state.nodeID, state.perNodeSPKI, state.raftAddr, state.perNodeKeyKEKGen)
 }
 
 // selfRegisterMemberNonFatal wraps selfRegisterMember and swallows any propose
@@ -69,8 +70,8 @@ func bootSelfRegisterMember(ctx context.Context, state *bootState) error {
 // boundary, kept on the memberSelfRegistrar interface so it is unit-testable with
 // an erroring stub. It ALWAYS returns nil; the only error selfRegisterMember can
 // raise is a propose failure, which is best-effort/recoverable.
-func selfRegisterMemberNonFatal(ctx context.Context, mr memberSelfRegistrar, nodeID string, spki [32]byte, addr string) error {
-	if err := selfRegisterMember(ctx, mr, nodeID, spki, addr); err != nil {
+func selfRegisterMemberNonFatal(ctx context.Context, mr memberSelfRegistrar, nodeID string, spki [32]byte, addr string, nodeKeyKEKGen uint32) error {
+	if err := selfRegisterMember(ctx, mr, nodeID, spki, addr, nodeKeyKEKGen); err != nil {
 		log.Warn().
 			Err(err).
 			Str("node_id", nodeID).

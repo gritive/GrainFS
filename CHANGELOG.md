@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.421.0] - 2026-05-29
+## [0.0.422.0] - 2026-05-29
 
 ### Security
 
@@ -28,6 +28,28 @@
   behavior.
 - Added IAM namespace compatibility tests for bucket policy admin actions and
   regression coverage for denied empty protocol credential lists.
+
+## [0.0.421.0] - 2026-05-29
+
+### Security
+
+- Added Zero-CA node-key KEK generation evidence to member self-registration
+  and peer-registry snapshots so voters publish the generation sealing
+  `keys.d/node.key.enc`.
+- KEK prune now refuses when any current voter lacks node-key evidence or still
+  reports a node identity sealed at or below the prune target generation.
+
+### Changed
+
+- Threaded the node-key KEK generation from normal boot, invite Phase-2, and
+  post-drop invite present-flip loading into boot-time and present-flip
+  peer-registry registration.
+
+### Tests
+
+- Added leader and FSM prune refusal coverage for missing and stale node-key
+  evidence, plus registry monotonicity and register-member codec coverage for
+  `node_key_kek_gen`.
 
 ## [0.0.420.0] - 2026-05-29
 

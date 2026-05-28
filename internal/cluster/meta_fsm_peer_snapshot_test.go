@@ -32,9 +32,9 @@ func TestMetaFSM_SnapshotRestore_RoundTripsPeers(t *testing.T) {
 
 	f := NewMetaFSM()
 	wireSnapshotKEK(t, f)
-	// Register a member (with PresentsPerNode=true to verify it round-trips) and
-	// a pending-learner directly on the registry.
-	require.NoError(t, f.peers.registerMember("a", spki1, "addr-a", true))
+	// Register a member (with PresentsPerNode=true and NodeKeyKEKGen set to
+	// verify both round-trip) and a pending-learner directly on the registry.
+	require.NoError(t, f.peers.registerMember("a", spki1, "addr-a", true, 7))
 	require.NoError(t, f.peers.registerPendingLearner("b", spki2, "addr-b"))
 
 	snap, err := f.Snapshot()
@@ -58,6 +58,7 @@ func TestMetaFSM_SnapshotRestore_RoundTripsPeers(t *testing.T) {
 	require.Equal(t, spki1, ea.SPKI)
 	require.Equal(t, "addr-a", ea.Address)
 	require.True(t, ea.PresentsPerNode, "PresentsPerNode should round-trip")
+	require.Equal(t, uint32(7), ea.NodeKeyKEKGen, "NodeKeyKEKGen should round-trip")
 
 	// Pending-learner "b" restored as pendingLearner.
 	eb, ok := f2.peers.lookupByNodeID("b")
@@ -146,7 +147,7 @@ func TestMetaFSM_SnapshotRestore_PeersChangedFiresAfterMountSARestore(t *testing
 
 	src := NewMetaFSM()
 	wireSnapshotKEK(t, src)
-	require.NoError(t, src.peers.registerMember("a", spki, "addr-a", false))
+	require.NoError(t, src.peers.registerMember("a", spki, "addr-a", false, 0))
 	srcMountStore := newInMemMountSAStore(t)
 	src.SetMountSAStore(srcMountStore)
 	require.NoError(t, srcMountStore.ApplyCreate(mountsastore.MountSA{Name: "nfs-1", NumericUID: 400001, CreatedAt: 1700000123}))
