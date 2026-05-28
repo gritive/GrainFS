@@ -8,57 +8,88 @@ import (
 )
 
 func TestParseConfig(t *testing.T) {
-	t.Run("default empty is disabled", func(t *testing.T) {
-		c, err := ParseConfig([]byte(`{}`))
-		require.NoError(t, err)
-		require.False(t, c.Enabled)
-		require.Equal(t, 2*time.Second, c.Timeout)
-		require.Equal(t, FailureClosed, c.FailurePolicy)
-	})
-	t.Run("valid enabled unix endpoint", func(t *testing.T) {
-		c, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///run/grainfs/pdp.sock","timeout":"3s","failure_policy":"open"}`))
-		require.NoError(t, err)
-		require.True(t, c.Enabled)
-		require.Equal(t, "/run/grainfs/pdp.sock", c.SocketPath)
-		require.Equal(t, 3*time.Second, c.Timeout)
-		require.Equal(t, FailureOpen, c.FailurePolicy)
-	})
-	t.Run("enabled rejects missing endpoint", func(t *testing.T) {
-		_, err := ParseConfig([]byte(`{"enabled":true}`))
-		require.Error(t, err)
-	})
-	t.Run("enabled rejects non-unix scheme", func(t *testing.T) {
-		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"https://pdp.example.com/authorize"}`))
-		require.Error(t, err)
-	})
-	t.Run("rejects bad timeout and over-cap", func(t *testing.T) {
-		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","timeout":"nope"}`))
-		require.Error(t, err)
-		_, err = ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","timeout":"11s"}`))
-		require.Error(t, err)
-	})
-	t.Run("rejects bad failure_policy", func(t *testing.T) {
-		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","failure_policy":"maybe"}`))
-		require.Error(t, err)
-	})
-	t.Run("rejects relative unix socket path", func(t *testing.T) {
-		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix://relative.sock"}`))
-		require.Error(t, err)
-	})
-	t.Run("rejects non-positive timeout", func(t *testing.T) {
-		_, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","timeout":"0s"}`))
-		require.Error(t, err)
-		_, err = ParseConfig([]byte(`{"enabled":true,"endpoint":"unix:///s.sock","timeout":"-1s"}`))
-		require.Error(t, err)
-	})
-	t.Run("empty bytes parses as disabled", func(t *testing.T) {
-		c, err := ParseConfig([]byte(""))
-		require.NoError(t, err)
-		require.False(t, c.Enabled)
-	})
-	t.Run("disabled with empty endpoint still parses (disabled = inert)", func(t *testing.T) {
-		c, err := ParseConfig([]byte(`{"enabled":false,"endpoint":""}`))
-		require.NoError(t, err)
-		require.False(t, c.Enabled)
-	})
+	tests := []struct {
+		name            string
+		input           string
+		want            Config
+		wantErrContains string
+	}{
+		{
+			name:  "default empty is disabled",
+			input: `{}`,
+			want:  Config{Enabled: false, Timeout: 2 * time.Second, FailurePolicy: FailureClosed},
+		},
+		{
+			name:  "valid enabled unix endpoint",
+			input: `{"enabled":true,"endpoint":"unix:///run/grainfs/pdp.sock","timeout":"3s","failure_policy":"open"}`,
+			want:  Config{Enabled: true, SocketPath: "/run/grainfs/pdp.sock", Timeout: 3 * time.Second, FailurePolicy: FailureOpen},
+		},
+		{
+			name:  "empty bytes parses as disabled",
+			input: "",
+			want:  Config{Enabled: false, Timeout: 2 * time.Second, FailurePolicy: FailureClosed},
+		},
+		{
+			name:  "disabled with empty endpoint still parses (disabled = inert)",
+			input: `{"enabled":false,"endpoint":""}`,
+			want:  Config{Enabled: false, Timeout: 2 * time.Second, FailurePolicy: FailureClosed},
+		},
+		{
+			name:            "invalid JSON",
+			input:           `{`,
+			wantErrContains: "invalid JSON",
+		},
+		{
+			name:            "enabled rejects missing endpoint",
+			input:           `{"enabled":true}`,
+			wantErrContains: "endpoint must be a unix:// socket",
+		},
+		{
+			name:            "enabled rejects non-unix scheme",
+			input:           `{"enabled":true,"endpoint":"https://pdp.example.com/authorize"}`,
+			wantErrContains: "endpoint must be a unix:// socket",
+		},
+		{
+			name:            "rejects bad timeout",
+			input:           `{"enabled":true,"endpoint":"unix:///s.sock","timeout":"nope"}`,
+			wantErrContains: "invalid timeout",
+		},
+		{
+			name:            "rejects over-cap timeout",
+			input:           `{"enabled":true,"endpoint":"unix:///s.sock","timeout":"11s"}`,
+			wantErrContains: "timeout must be >0",
+		},
+		{
+			name:            "rejects bad failure_policy",
+			input:           `{"enabled":true,"endpoint":"unix:///s.sock","failure_policy":"maybe"}`,
+			wantErrContains: "failure_policy must be",
+		},
+		{
+			name:            "rejects relative unix socket path",
+			input:           `{"enabled":true,"endpoint":"unix://relative.sock"}`,
+			wantErrContains: "absolute socket path",
+		},
+		{
+			name:            "rejects non-positive timeout (zero)",
+			input:           `{"enabled":true,"endpoint":"unix:///s.sock","timeout":"0s"}`,
+			wantErrContains: "timeout must be >0",
+		},
+		{
+			name:            "rejects non-positive timeout (negative)",
+			input:           `{"enabled":true,"endpoint":"unix:///s.sock","timeout":"-1s"}`,
+			wantErrContains: "timeout must be >0",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := ParseConfig([]byte(tc.input))
+			if tc.wantErrContains != "" {
+				require.ErrorContains(t, err, tc.wantErrContains)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, c)
+		})
+	}
 }
