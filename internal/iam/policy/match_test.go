@@ -23,6 +23,65 @@ func TestMatchAction_ExactAndWildcard(t *testing.T) {
 	}
 }
 
+func TestEvaluateAdminAllowRequiresExplicitAction(t *testing.T) {
+	for _, action := range []string{
+		"grainfs:BucketPolicyWrite",
+		"grainfs:CredentialList",
+	} {
+		t.Run(action, func(t *testing.T) {
+			got := Evaluate(EvalInput{
+				PrincipalPolicies: []*Document{{
+					Statement: []Statement{{
+						Effect:   EffectAllow,
+						Action:   StringOrSlice{"*"},
+						Resource: StringOrSlice{"*"},
+					}},
+				}},
+				Ctx: RequestContext{Action: action, Resource: "*"},
+			})
+			if got.Decision != DecisionDeny {
+				t.Fatalf("global wildcard should not allow %s, got %s", action, got.Decision)
+			}
+		})
+	}
+}
+
+func TestEvaluateAdminAllowAcceptsExplicitAdminWildcard(t *testing.T) {
+	got := Evaluate(EvalInput{
+		PrincipalPolicies: []*Document{{
+			Statement: []Statement{{
+				Effect:   EffectAllow,
+				Action:   StringOrSlice{"grainfs:BucketPolicy*"},
+				Resource: StringOrSlice{"arn:aws:s3:::logs"},
+			}},
+		}},
+		Ctx: RequestContext{Action: "grainfs:BucketPolicyWrite", Resource: "arn:aws:s3:::logs"},
+	})
+	if got.Decision != DecisionAllow {
+		t.Fatalf("explicit bucket policy wildcard should allow, got %s", got.Decision)
+	}
+}
+
+func TestEvaluateAdminDenyStillAcceptsGlobalWildcard(t *testing.T) {
+	got := Evaluate(EvalInput{
+		PrincipalPolicies: []*Document{{
+			Statement: []Statement{{
+				Effect:   EffectDeny,
+				Action:   StringOrSlice{"*"},
+				Resource: StringOrSlice{"*"},
+			}, {
+				Effect:   EffectAllow,
+				Action:   StringOrSlice{"grainfs:BucketPolicyWrite"},
+				Resource: StringOrSlice{"arn:aws:s3:::logs"},
+			}},
+		}},
+		Ctx: RequestContext{Action: "grainfs:BucketPolicyWrite", Resource: "arn:aws:s3:::logs"},
+	})
+	if got.Decision != DecisionDeny {
+		t.Fatalf("global wildcard deny should still deny admin actions, got %s", got.Decision)
+	}
+}
+
 func TestMatchResource_PrefixBoundary(t *testing.T) {
 	// F#10: arn:aws:s3:::analytics/logs/* must NOT match analytics/logsx/secret
 	if matchResource("arn:aws:s3:::analytics/logs/*", "arn:aws:s3:::analytics/logsx/secret") {

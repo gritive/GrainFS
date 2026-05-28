@@ -48,6 +48,26 @@ func matchAction(pattern, req string) bool {
 	return wildcardMatch(pattern, req)
 }
 
+func explicitAdminAllowAction(pattern, req string) bool {
+	if pattern == req {
+		return true
+	}
+	if !strings.Contains(pattern, "*") {
+		return false
+	}
+	if strings.HasPrefix(req, "grainfs:BucketPolicy") {
+		return strings.HasPrefix(pattern, "grainfs:BucketPolicy") && wildcardMatch(pattern, req)
+	}
+	if strings.HasPrefix(req, "grainfs:Credential") {
+		return strings.HasPrefix(pattern, "grainfs:Credential") && wildcardMatch(pattern, req)
+	}
+	return wildcardMatch(pattern, req)
+}
+
+func requiresExplicitAdminAllowAction(action string) bool {
+	return strings.HasPrefix(action, "grainfs:BucketPolicy") || strings.HasPrefix(action, "grainfs:Credential")
+}
+
 // wildcardMatch implements the standard `*`-glob with iterative two-pointer backtrack.
 // `*` matches any sequence including empty. No `?` support.
 func wildcardMatch(pattern, s string) bool {
@@ -139,7 +159,11 @@ func evalCond(op, key string, values StringOrSlice, ctx RequestContext) bool {
 func (s *Statement) matches(ctx RequestContext) bool {
 	any := false
 	for _, a := range s.Action {
-		if matchAction(a, ctx.Action) {
+		matched := matchAction(a, ctx.Action)
+		if s.Effect == EffectAllow && requiresExplicitAdminAllowAction(ctx.Action) {
+			matched = explicitAdminAllowAction(a, ctx.Action)
+		}
+		if matched {
 			any = true
 			break
 		}

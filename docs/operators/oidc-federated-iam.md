@@ -73,6 +73,10 @@ bearer token fail closed if the actor is unauthenticated, the admin authorizer
 is unavailable, or the mapped OIDC principal and groups do not have an explicit
 allow.
 
+Admin action allows must name the credential or bucket-policy action family
+explicitly. Broad data-access policies that use `Action: "*"` do not grant
+`grainfs:Credential*` or `grainfs:BucketPolicy*` admin privileges.
+
 Example policy for a mapped OIDC group:
 
 ```json

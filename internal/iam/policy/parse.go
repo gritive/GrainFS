@@ -138,8 +138,24 @@ func validProtocolCredentialResource(r string) bool {
 		return false
 	}
 	parts := strings.Split(r, "/")
+	if len(parts) == 3 {
+		switch parts[1] {
+		case "s3", "iceberg", "nbd", "nfs", "9p", "*":
+		default:
+			return false
+		}
+		return parts[2] == "*"
+	}
 	if len(parts) != 4 {
 		return false
+	}
+	if parts[1] == "*" {
+		switch parts[2] {
+		case "bucket", "catalog", "volume", "*":
+		default:
+			return false
+		}
+		return parts[3] != ""
 	}
 	switch parts[1] + "/" + parts[2] {
 	case "s3/bucket", "iceberg/catalog", "nbd/volume", "nfs/bucket", "9p/bucket":

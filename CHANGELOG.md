@@ -9,6 +9,9 @@
   `grainfs:BucketPolicyDelete` decisions on bucket ARN resources.
 - Closed the protocol credential empty-list gap so federated actors still need
   `grainfs:CredentialList` permission when a scoped list returns no rows.
+- Kept broad `Action: "*"` data-access policies from granting credential or
+  bucket-policy admin actions; admin allows must name those `grainfs:` action
+  families explicitly.
 
 ### Changed
 

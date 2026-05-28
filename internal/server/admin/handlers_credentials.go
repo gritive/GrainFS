@@ -81,10 +81,7 @@ func authorizeEmptyProtocolCredentialList(ctx context.Context, d *Deps, protocol
 	if d.ProtocolCredAuthz == nil {
 		return NewForbidden("protocol credential permission denied: authorizer not configured")
 	}
-	reqResource := "*"
-	if protocol != "" && resource != "" {
-		reqResource = protocolCredentialPolicyResource(protocol, resource)
-	}
+	reqResource := protocolCredentialListPolicyResource(protocol, resource)
 	result := d.ProtocolCredAuthz.AuthorizePrincipal(ctx, actor, "", policy.RequestContext{
 		Action:   protocolCredentialActionList,
 		Resource: reqResource,
@@ -176,6 +173,19 @@ func authorizeProtocolCredential(ctx context.Context, d *Deps, saID string, prot
 
 func protocolCredentialPolicyResource(protocol protocred.Protocol, resource string) string {
 	return "protocol-credential/" + string(protocol) + "/" + resource
+}
+
+func protocolCredentialListPolicyResource(protocol protocred.Protocol, resource string) string {
+	if protocol == "" && resource == "" {
+		return "*"
+	}
+	if protocol == "" {
+		return "protocol-credential/*/" + resource
+	}
+	if resource == "" {
+		return "protocol-credential/" + string(protocol) + "/*"
+	}
+	return protocolCredentialPolicyResource(protocol, resource)
 }
 
 func credentialResp(item protocred.Credential, secret protocred.Secret) CredentialResp {

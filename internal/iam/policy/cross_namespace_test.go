@@ -119,6 +119,19 @@ func TestParse_AcceptsProtocolCredentialActions(t *testing.T) {
 	require.NoError(t, err, "Parse should accept protocol credential grainfs actions")
 }
 
+func TestParse_AcceptsProtocolCredentialPartialFilterResources(t *testing.T) {
+	for _, resource := range []string{
+		"protocol-credential/nbd/*",
+		"protocol-credential/*/volume/devdisk",
+	} {
+		t.Run(resource, func(t *testing.T) {
+			doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialList","Resource":"` + resource + `"}]}`)
+			_, err := Parse(doc)
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestParse_RejectsMalformedProtocolCredentialResource(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/s3"}]}`)
 	_, err := Parse(doc)

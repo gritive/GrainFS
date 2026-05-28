@@ -268,6 +268,27 @@ func TestCredentialHandlersDenyOIDCListEvenWhenEmpty(t *testing.T) {
 	}, authz.calls[0])
 }
 
+func TestCredentialHandlersAuthorizeOIDCEmptyListWithPartialFilterResource(t *testing.T) {
+	d := newDeps(t)
+	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
+	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
+	d.ProtocolCredAuthz = authz
+	ctx := admin.WithActorPrincipal(context.Background(), principal.OIDC(
+		"https://idp.example.com/",
+		"alice",
+		"oidc:example:alice",
+		[]string{"oidc:example:storage-admins"},
+	))
+
+	listed, err := admin.ListCredentials(ctx, d, admin.CredentialListReq{Protocol: "nbd"})
+
+	require.NoError(t, err)
+	require.Empty(t, listed.Credentials)
+	require.Len(t, authz.calls, 1)
+	require.Equal(t, "grainfs:CredentialList", authz.calls[0].action)
+	require.Equal(t, "protocol-credential/nbd/*", authz.calls[0].resource)
+}
+
 func TestCredentialHandlersFailClosedWhenAuthorizerMissing(t *testing.T) {
 	d := newDeps(t)
 	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
