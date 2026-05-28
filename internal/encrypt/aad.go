@@ -30,6 +30,7 @@ const (
 	DomainFSMValue            AADDomain = 0x000E
 	DomainClusterConfigSecret AADDomain = 0x000F
 	DomainProtocolCredential  AADDomain = 0x0010
+	DomainRaftStoreKey        AADDomain = 0x0011
 )
 
 const aadMagic = "AAD\x01"

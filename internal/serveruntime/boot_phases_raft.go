@@ -56,6 +56,9 @@ func bootMetaRaftWiring(state *bootState) error {
 		Peers:    metaPeers,
 		JoinMode: joinLike,
 		DataDir:  state.cfg.DataDir,
+		StoreOptions: cluster.RaftV2StoreOptions{
+			EncryptionKey: state.raftStoreKey,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("init meta-raft: %w", err)
@@ -102,6 +105,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	if err := wireDEKKeeper(state, metaRaft.FSM()); err != nil {
 		return err
 	}
+	wireRaftStoreKeyPostCommit(state, metaRaft.FSM())
 
 	// Zero-CA §6 D-rev3 step 1: persist a per-node transport identity for EVERY
 	// member now that the KEK store + clusterID are wired. This seals
