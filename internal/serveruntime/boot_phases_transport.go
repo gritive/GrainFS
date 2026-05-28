@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"github.com/rs/zerolog/log"
@@ -48,6 +49,9 @@ func bootQUICTransport(ctx context.Context, state *bootState) error {
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.
 	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 64})
+	if err := applyPostDropInviteJoinIdentity(state, quicTransport); err != nil {
+		return err
+	}
 	// M3: pre-seed peer SPKIs from the invite-join bootstrap so the joiner
 	// accepts incumbents' per-node certs from the first inbound handshake
 	// (PR-2a §8f). No-op on normal (non-invite) boot and when peer_spkis is
@@ -67,6 +71,27 @@ func bootQUICTransport(ctx context.Context, state *bootState) error {
 	if local := quicTransport.LocalAddr(); local != "" {
 		state.raftAddr = local
 	}
+	return nil
+}
+
+type postDropInviteJoinTransport interface {
+	FlipPresent(cert tls.Certificate, spki [32]byte)
+	SetDropped()
+}
+
+func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInviteJoinTransport) error {
+	if state == nil || quicTransport == nil || state.inviteJoin == nil || !state.inviteJoin.clusterKeyDropped {
+		return nil
+	}
+	cert, spki, err := transport.LoadNodeKey(state.cfg.DataDir, state.cfg.RawEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("post-drop invite-join: load per-node cert: %w", err)
+	}
+	quicTransport.FlipPresent(cert, spki)
+	quicTransport.SetDropped()
+	state.perNodeCert = cert
+	state.perNodeSPKI = spki
+	log.Info().Msg("post-drop invite-join: per-node cert pinned before Listen")
 	return nil
 }
 

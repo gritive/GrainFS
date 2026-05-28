@@ -284,6 +284,12 @@ type presentFlipTarget interface {
 	FlipPresent(cert tls.Certificate, spki [32]byte)
 }
 
+// presentsPerNodeWriter is the consumer-side slice of *cluster.MetaRaft used
+// by onPresentFlip to mark this node as presenting its per-node cert.
+type presentsPerNodeWriter interface {
+	ProposeRegisterMember(ctx context.Context, nodeID string, spki [32]byte, addr string, presentsPerNode bool) error
+}
+
 // buildOnPresentFlipCallback returns a callback that reads bootState fields
 // at INVOCATION time (pointer-capture) and flips the transport's presented cert.
 // Returns nil when tr is nil (single-node path has no transport).
@@ -291,6 +297,12 @@ type presentFlipTarget interface {
 // PR-2a §8c step 5 + F4 user decision: calls FlipPresent ONLY (no
 // RecycleConns — existing conns stay on cluster cert; recycle is PR-2b).
 func buildOnPresentFlipCallback(st *bootState, tr presentFlipTarget) func() {
+	return buildOnPresentFlipCallbackWithRegistrar(st, tr, nil)
+}
+
+// buildOnPresentFlipCallbackWithRegistrar returns a callback that flips the
+// transport's presented cert, then best-effort registers presentsPerNode=true.
+func buildOnPresentFlipCallbackWithRegistrar(st *bootState, tr presentFlipTarget, reg presentsPerNodeWriter) func() {
 	if tr == nil {
 		return nil
 	}
@@ -306,6 +318,34 @@ func buildOnPresentFlipCallback(st *bootState, tr presentFlipTarget) func() {
 			return
 		}
 		tr.FlipPresent(st.perNodeCert, st.perNodeSPKI)
+		if reg == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := reg.ProposeRegisterMember(ctx, st.nodeID, st.perNodeSPKI, st.raftAddr, true); err != nil {
+			log.Warn().Err(err).Msg("onPresentFlip: presentsPerNode registration failed (non-fatal); D-cut4 gate may be delayed")
+		}
+	}
+}
+
+// clusterKeyDropTarget narrows the QUICTransport surface for the
+// onClusterKeyDropped callback.
+type clusterKeyDropTarget interface {
+	SetDropped()
+	RecycleConns()
+}
+
+// buildOnClusterKeyDroppedCallback drops the cluster-key base and recycles
+// existing QUIC connections so peers re-handshake without the cluster key.
+func buildOnClusterKeyDroppedCallback(tr clusterKeyDropTarget) func() {
+	if tr == nil {
+		return nil
+	}
+	return func() {
+		tr.SetDropped()
+		tr.RecycleConns()
+		log.Info().Msg("zero-CA: cluster_key_dropped applied; transport base dropped, conns recycled")
 	}
 }
 
@@ -331,18 +371,16 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		// rotation window (spec §6 D-rev3 step 3).
 		state.quicTransport.UpdateRegistryAccept(accept)
 	})
+	state.metaRaft.FSM().SetRaftConfigReader(cluster.NewMetaRaftConfigReader(state.metaRaft))
 	// Persisted drop bit (spec §8 H3): if a restored snapshot says the cluster
 	// key was dropped (a PR-2 feature; ALWAYS false in PR-1), drop the
 	// cluster-key base on this node too. Dormant in PR-1 — no snapshot carries true.
-	state.metaRaft.FSM().SetOnClusterKeyDropped(func() {
-		state.quicTransport.SetDropped()
-		log.Info().Msg("zero-CA: cluster_key_dropped restored; transport base dropped")
-	})
+	state.metaRaft.FSM().SetOnClusterKeyDropped(buildOnClusterKeyDroppedCallback(state.quicTransport))
 	// PR-2a §8c step 5: lazy present-flip — FlipPresent only, no RecycleConns.
-	if cb := buildOnPresentFlipCallback(state, state.quicTransport); cb != nil {
+	if cb := buildOnPresentFlipCallbackWithRegistrar(state, state.quicTransport, state.metaRaft); cb != nil {
 		state.metaRaft.FSM().SetOnPresentFlip(func() {
 			cb()
-			log.Info().Msg("present-flip applied: transport now presents per-node cert")
+			log.Info().Msg("present-flip applied: transport now presents per-node cert; presentsPerNode registered")
 		})
 	}
 	// PR-2a §8b: applied-index probe handler for the leader's barrier fan-out.

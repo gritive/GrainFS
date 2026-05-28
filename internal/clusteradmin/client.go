@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"time"
@@ -119,6 +120,41 @@ func (c *Client) TransferLeader(ctx context.Context) (*TransferLeaderResult, err
 		return nil, err
 	}
 	return &out, nil
+}
+
+// CompleteCutoverResponse is returned by POST /v1/cluster/complete-cutover.
+type CompleteCutoverResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+	Error   string `json:"error"`
+}
+
+// CompleteCutover issues POST /v1/cluster/complete-cutover on the admin socket.
+func (c *Client) CompleteCutover(ctx context.Context) error {
+	var out CompleteCutoverResponse
+	if err := c.Post(ctx, "/v1/cluster/complete-cutover", struct{}{}, &out); err != nil {
+		return err
+	}
+	if out.Error != "" {
+		return fmt.Errorf("server: %s", out.Error)
+	}
+	return nil
+}
+
+// CompleteCutoverOptions configures RunCompleteCutover.
+type CompleteCutoverOptions struct {
+	Endpoint string
+	Out      io.Writer
+}
+
+// RunCompleteCutover is the thin-runner entry point for
+// `grainfs cluster complete-cutover`.
+func RunCompleteCutover(ctx context.Context, opts CompleteCutoverOptions) error {
+	if err := NewClient(opts.Endpoint).CompleteCutover(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(opts.Out, "Zero-CA cutover complete: cluster key dropped, connections recycled.")
+	return nil
 }
 
 // Health fetches GET /v1/cluster/health (typed parse).
