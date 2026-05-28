@@ -213,20 +213,19 @@ func (rcv *MetaClusterConfigPatchCmd) MutateAlertWebhookSecretWrapped(j int, n b
 	return false
 }
 
-func (rcv *MetaClusterConfigPatchCmd) DiskWarnFrac(obj *DoubleBox) *DoubleBox {
+func (rcv *MetaClusterConfigPatchCmd) AlertWebhookSecretDekGen() uint32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(DoubleBox)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
 	}
-	return nil
+	return 0
 }
 
-func (rcv *MetaClusterConfigPatchCmd) DiskCriticalFrac(obj *DoubleBox) *DoubleBox {
+func (rcv *MetaClusterConfigPatchCmd) MutateAlertWebhookSecretDekGen(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(28, n)
+}
+
+func (rcv *MetaClusterConfigPatchCmd) DiskWarnFrac(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -239,8 +238,21 @@ func (rcv *MetaClusterConfigPatchCmd) DiskCriticalFrac(obj *DoubleBox) *DoubleBo
 	return nil
 }
 
-func (rcv *MetaClusterConfigPatchCmd) SnapshotIntervalNs(obj *Int64Box) *Int64Box {
+func (rcv *MetaClusterConfigPatchCmd) DiskCriticalFrac(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(DoubleBox)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *MetaClusterConfigPatchCmd) SnapshotIntervalNs(obj *Int64Box) *Int64Box {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
@@ -253,7 +265,7 @@ func (rcv *MetaClusterConfigPatchCmd) SnapshotIntervalNs(obj *Int64Box) *Int64Bo
 }
 
 func (rcv *MetaClusterConfigPatchCmd) SnapshotRetain(obj *Int32Box) *Int32Box {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
@@ -266,7 +278,7 @@ func (rcv *MetaClusterConfigPatchCmd) SnapshotRetain(obj *Int32Box) *Int32Box {
 }
 
 func (rcv *MetaClusterConfigPatchCmd) ResetKeys(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
@@ -275,7 +287,7 @@ func (rcv *MetaClusterConfigPatchCmd) ResetKeys(j int) []byte {
 }
 
 func (rcv *MetaClusterConfigPatchCmd) ResetKeysLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -283,7 +295,7 @@ func (rcv *MetaClusterConfigPatchCmd) ResetKeysLength() int {
 }
 
 func (rcv *MetaClusterConfigPatchCmd) ExpectedRev() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
 	if o != 0 {
 		return rcv._tab.GetUint64(o + rcv._tab.Pos)
 	}
@@ -291,11 +303,11 @@ func (rcv *MetaClusterConfigPatchCmd) ExpectedRev() uint64 {
 }
 
 func (rcv *MetaClusterConfigPatchCmd) MutateExpectedRev(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(38, n)
+	return rcv._tab.MutateUint64Slot(40, n)
 }
 
 func (rcv *MetaClusterConfigPatchCmd) UpdatedAtUnixMs() int64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
 	}
@@ -303,23 +315,10 @@ func (rcv *MetaClusterConfigPatchCmd) UpdatedAtUnixMs() int64 {
 }
 
 func (rcv *MetaClusterConfigPatchCmd) MutateUpdatedAtUnixMs(n int64) bool {
-	return rcv._tab.MutateInt64Slot(40, n)
+	return rcv._tab.MutateInt64Slot(42, n)
 }
 
 func (rcv *MetaClusterConfigPatchCmd) WeightedHrwEnabled(obj *BoolBox) *BoolBox {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
-	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(BoolBox)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
-	}
-	return nil
-}
-
-func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsEnabled(obj *BoolBox) *BoolBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(44))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -332,12 +331,12 @@ func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsEnabled(obj *BoolBox) *BoolBox
 	return nil
 }
 
-func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsC(obj *DoubleBox) *DoubleBox {
+func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsEnabled(obj *BoolBox) *BoolBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(46))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
-			obj = new(DoubleBox)
+			obj = new(BoolBox)
 		}
 		obj.Init(rcv._tab.Bytes, x)
 		return obj
@@ -345,7 +344,7 @@ func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsC(obj *DoubleBox) *DoubleBox {
 	return nil
 }
 
-func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsCLow(obj *DoubleBox) *DoubleBox {
+func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsC(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(48))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
@@ -358,8 +357,21 @@ func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsCLow(obj *DoubleBox) *DoubleBo
 	return nil
 }
 
-func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsMaxStaleTtlNs(obj *Int64Box) *Int64Box {
+func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsCLow(obj *DoubleBox) *DoubleBox {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(DoubleBox)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsMaxStaleTtlNs(obj *Int64Box) *Int64Box {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(52))
 	if o != 0 {
 		x := rcv._tab.Indirect(o + rcv._tab.Pos)
 		if obj == nil {
@@ -372,7 +384,7 @@ func (rcv *MetaClusterConfigPatchCmd) BoundedLoadsMaxStaleTtlNs(obj *Int64Box) *
 }
 
 func MetaClusterConfigPatchCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(24)
+	builder.StartObject(25)
 }
 func MetaClusterConfigPatchCmdAddBalancerEnabled(builder *flatbuffers.Builder, balancerEnabled flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(balancerEnabled), 0)
@@ -413,44 +425,47 @@ func MetaClusterConfigPatchCmdAddAlertWebhookSecretWrapped(builder *flatbuffers.
 func MetaClusterConfigPatchCmdStartAlertWebhookSecretWrappedVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
+func MetaClusterConfigPatchCmdAddAlertWebhookSecretDekGen(builder *flatbuffers.Builder, alertWebhookSecretDekGen uint32) {
+	builder.PrependUint32Slot(12, alertWebhookSecretDekGen, 0)
+}
 func MetaClusterConfigPatchCmdAddDiskWarnFrac(builder *flatbuffers.Builder, diskWarnFrac flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(diskWarnFrac), 0)
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(diskWarnFrac), 0)
 }
 func MetaClusterConfigPatchCmdAddDiskCriticalFrac(builder *flatbuffers.Builder, diskCriticalFrac flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(diskCriticalFrac), 0)
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(diskCriticalFrac), 0)
 }
 func MetaClusterConfigPatchCmdAddSnapshotIntervalNs(builder *flatbuffers.Builder, snapshotIntervalNs flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(snapshotIntervalNs), 0)
+	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(snapshotIntervalNs), 0)
 }
 func MetaClusterConfigPatchCmdAddSnapshotRetain(builder *flatbuffers.Builder, snapshotRetain flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(snapshotRetain), 0)
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(snapshotRetain), 0)
 }
 func MetaClusterConfigPatchCmdAddResetKeys(builder *flatbuffers.Builder, resetKeys flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(resetKeys), 0)
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(resetKeys), 0)
 }
 func MetaClusterConfigPatchCmdStartResetKeysVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaClusterConfigPatchCmdAddExpectedRev(builder *flatbuffers.Builder, expectedRev uint64) {
-	builder.PrependUint64Slot(17, expectedRev, 0)
+	builder.PrependUint64Slot(18, expectedRev, 0)
 }
 func MetaClusterConfigPatchCmdAddUpdatedAtUnixMs(builder *flatbuffers.Builder, updatedAtUnixMs int64) {
-	builder.PrependInt64Slot(18, updatedAtUnixMs, 0)
+	builder.PrependInt64Slot(19, updatedAtUnixMs, 0)
 }
 func MetaClusterConfigPatchCmdAddWeightedHrwEnabled(builder *flatbuffers.Builder, weightedHrwEnabled flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(19, flatbuffers.UOffsetT(weightedHrwEnabled), 0)
+	builder.PrependUOffsetTSlot(20, flatbuffers.UOffsetT(weightedHrwEnabled), 0)
 }
 func MetaClusterConfigPatchCmdAddBoundedLoadsEnabled(builder *flatbuffers.Builder, boundedLoadsEnabled flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(20, flatbuffers.UOffsetT(boundedLoadsEnabled), 0)
+	builder.PrependUOffsetTSlot(21, flatbuffers.UOffsetT(boundedLoadsEnabled), 0)
 }
 func MetaClusterConfigPatchCmdAddBoundedLoadsC(builder *flatbuffers.Builder, boundedLoadsC flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(21, flatbuffers.UOffsetT(boundedLoadsC), 0)
+	builder.PrependUOffsetTSlot(22, flatbuffers.UOffsetT(boundedLoadsC), 0)
 }
 func MetaClusterConfigPatchCmdAddBoundedLoadsCLow(builder *flatbuffers.Builder, boundedLoadsCLow flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(22, flatbuffers.UOffsetT(boundedLoadsCLow), 0)
+	builder.PrependUOffsetTSlot(23, flatbuffers.UOffsetT(boundedLoadsCLow), 0)
 }
 func MetaClusterConfigPatchCmdAddBoundedLoadsMaxStaleTtlNs(builder *flatbuffers.Builder, boundedLoadsMaxStaleTtlNs flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(23, flatbuffers.UOffsetT(boundedLoadsMaxStaleTtlNs), 0)
+	builder.PrependUOffsetTSlot(24, flatbuffers.UOffsetT(boundedLoadsMaxStaleTtlNs), 0)
 }
 func MetaClusterConfigPatchCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -58,6 +58,7 @@ func TestDecodeClusterConfigPatchCmd_SecretBytesIndependent(t *testing.T) {
 	secret := []byte("wrapped-ciphertext-bytes")
 	p := ClusterConfigPatch{
 		AlertWebhookSecretWrapped: secret,
+		AlertWebhookSecretDEKGen:  9,
 	}
 	data, err := EncodeClusterConfigPatchInner(p)
 	require.NoError(t, err)
@@ -65,6 +66,7 @@ func TestDecodeClusterConfigPatchCmd_SecretBytesIndependent(t *testing.T) {
 	got, err := DecodeClusterConfigPatchCmd(data)
 	require.NoError(t, err)
 	require.Equal(t, secret, got.AlertWebhookSecretWrapped)
+	require.Equal(t, uint32(9), got.AlertWebhookSecretDEKGen)
 
 	// Mutate every byte of the source buffer to simulate a pooled/reused
 	// Raft log entry. If Decode aliased the FB bytes, got's slice would
