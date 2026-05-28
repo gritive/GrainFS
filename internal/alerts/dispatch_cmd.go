@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -85,13 +86,13 @@ type dispatchEnv struct {
 	inFlight          map[string]struct{}
 	lastDecryptWarnAt time.Time
 
-	opts      Options
-	cfg       AlertCfgReader
-	enc       SecretDecrypter
-	secretAAD []byte
-	alertKind string
-	onResult  func(Alert, error)
-	url       string
+	opts         Options
+	cfg          AlertCfgReader
+	enc          SecretOpener
+	secretFields []encrypt.AADField
+	alertKind    string
+	onResult     func(Alert, error)
+	url          string
 
 	// spawn invokes retryAndDeliver in a new goroutine in production. Tests
 	// may set spawnTestHook to capture spawn invocations without running HTTP retry.
@@ -108,7 +109,7 @@ func (env *dispatchEnv) resolveLive() (string, string) {
 	if len(wrapped) == 0 || env.enc == nil {
 		return url, ""
 	}
-	secret, err := env.enc.DecryptWithAAD(wrapped, env.secretAAD)
+	secret, err := env.enc.Open(encrypt.DomainClusterConfigSecret, env.secretFields, env.cfg.AlertWebhookSecretDEKGen(), wrapped)
 	if err != nil {
 		env.observeSecretDecryptFailure(err)
 		return url, ""
@@ -127,7 +128,7 @@ func (env *dispatchEnv) observeSecretDecryptFailure(err error) {
 			Str("alert_kind", env.alertKind).
 			Str("err_class", cls).
 			Err(err).
-			Msg("webhook signing secret decrypt failed; delivering unsigned. Likely stale wrapped-secret after cluster rotate-key — PATCH cluster_config with a fresh alert-webhook-secret-plaintext to re-wrap.")
+			Msg("webhook signing secret decrypt failed; delivering unsigned. Likely stale wrapped-secret after DEK rotation — PATCH cluster_config with a fresh alert-webhook-secret to re-seal.")
 	}
 }
 

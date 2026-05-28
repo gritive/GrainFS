@@ -5,12 +5,10 @@ import (
 	"time"
 )
 
-// ClusterConfigAlertSecretAAD is the additional-authenticated-data binding the
-// wrapped alert-webhook-secret ciphertext to this specific cluster-config
-// field. Mirrors IAM's per-SA AAD pattern: prevents cross-ciphertext
-// substitution by the storage layer. Constant — never rotated.
-// Referenced by adminapi (PATCH wrap) and alerts consumer (unwrap).
-var ClusterConfigAlertSecretAAD = []byte("cluster_config.alert_webhook_secret")
+// ClusterConfigAlertSecretField is the AAD field binding the wrapped
+// alert-webhook-secret ciphertext to this specific cluster-config field.
+// Referenced by adminapi (PATCH seal) and alerts consumer (open).
+const ClusterConfigAlertSecretField = "cluster_config.alert_webhook_secret"
 
 // ClusterConfigPatch is the in-memory equivalent of MetaClusterConfigPatchCmd.
 // Each pointer field: nil = leave alone, non-nil = set explicit value.
@@ -37,6 +35,7 @@ type ClusterConfigPatch struct {
 
 	AlertWebhook              *string
 	AlertWebhookSecretWrapped []byte // nil = leave alone; len()==0 with explicit nil semantics handled via ResetKeys
+	AlertWebhookSecretDEKGen  uint32
 
 	DiskWarnFrac     *float64
 	DiskCriticalFrac *float64
@@ -90,6 +89,7 @@ type clusterConfigSnap struct {
 	alertWebhook              string // "" if not explicitly set
 	alertWebhookHasExplicit   bool   // distinguishes default "" from explicit ""
 	alertWebhookSecretWrapped []byte // nil if not set
+	alertWebhookSecretDEKGen  uint32
 
 	diskWarnFrac     *float64
 	diskCriticalFrac *float64
@@ -154,6 +154,7 @@ func (c *ClusterConfig) applyPatch(p ClusterConfigPatch, ts time.Time) {
 	}
 	if p.AlertWebhookSecretWrapped != nil {
 		next.alertWebhookSecretWrapped = p.AlertWebhookSecretWrapped
+		next.alertWebhookSecretDEKGen = p.AlertWebhookSecretDEKGen
 	}
 	if p.DiskWarnFrac != nil {
 		next.diskWarnFrac = p.DiskWarnFrac
@@ -217,6 +218,7 @@ func (s *clusterConfigSnap) clearKey(k string) {
 		s.alertWebhookHasExplicit = false
 	case "alert-webhook-secret":
 		s.alertWebhookSecretWrapped = nil
+		s.alertWebhookSecretDEKGen = 0
 	case "disk-warn-threshold":
 		s.diskWarnFrac = nil
 	case "disk-critical-threshold":
@@ -352,6 +354,10 @@ func (c *ClusterConfig) AlertWebhook() string {
 
 func (c *ClusterConfig) AlertWebhookSecretWrapped() []byte {
 	return c.snap.Load().alertWebhookSecretWrapped
+}
+
+func (c *ClusterConfig) AlertWebhookSecretDEKGen() uint32 {
+	return c.snap.Load().alertWebhookSecretDEKGen
 }
 
 func (c *ClusterConfig) DiskWarnFrac() float64 {

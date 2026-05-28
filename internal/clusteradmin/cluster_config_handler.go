@@ -13,6 +13,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // ClusterConfigResponse is the JSON shape for GET /v1/cluster/config.
@@ -39,13 +40,13 @@ type ClusterConfigProposer interface {
 type ClusterConfigHandler struct {
 	fsm       ClusterConfigReader
 	proposer  ClusterConfigProposer // raft propose; nil for read-only paths
-	encryptor *encrypt.Encryptor    // nil in --no-encryption mode; PATCH with secret then early-rejects 403
+	encryptor storage.DataEncryptor // nil in --no-encryption mode; PATCH with secret then early-rejects 403
 }
 
 // NewClusterConfigHandler constructs the handler. proposer may be nil when
 // only GET is wired; encryptor may be nil in --no-encryption mode (PATCH with
 // alert-webhook-secret is then rejected with 403 before raft propose).
-func NewClusterConfigHandler(fsm ClusterConfigReader, proposer ClusterConfigProposer, enc *encrypt.Encryptor) *ClusterConfigHandler {
+func NewClusterConfigHandler(fsm ClusterConfigReader, proposer ClusterConfigProposer, enc storage.DataEncryptor) *ClusterConfigHandler {
 	return &ClusterConfigHandler{fsm: fsm, proposer: proposer, encryptor: enc}
 }
 
@@ -110,7 +111,7 @@ func redactedSecret(b []byte) string {
 // ClusterConfigPatchRequest is the JSON body for PATCH /v1/cluster/config.
 // Field names mirror the kebab-case config keys. Pointers distinguish absent
 // from zero. `reset_keys` removes explicit overrides. `alert-webhook-secret`
-// is the plaintext; the handler wraps it via EncryptWithAAD before propose.
+// is the plaintext; the handler seals it via the DEK data-at-rest seam before propose.
 type ClusterConfigPatchRequest struct {
 	BalancerEnabled             *bool    `json:"balancer-enabled,omitempty"`
 	BalancerImbalanceTriggerPct *float64 `json:"balancer-imbalance-trigger-pct,omitempty"`
@@ -194,10 +195,10 @@ func (h *ClusterConfigHandler) servePatch(w http.ResponseWriter, r *http.Request
 }
 
 // toPatch maps the JSON request into a cluster.ClusterConfigPatch, parsing
-// Duration strings and wrapping alert-webhook-secret via EncryptWithAAD with
-// cluster.ClusterConfigAlertSecretAAD (A2 plan-eng-review: per-field AAD binds
-// the ciphertext to this config field and prevents cross-substitution).
-func (req ClusterConfigPatchRequest) toPatch(enc *encrypt.Encryptor) (cluster.ClusterConfigPatch, error) {
+// Duration strings and sealing alert-webhook-secret through the generation-aware
+// data-at-rest seam. The AAD binds the ciphertext to this config field and
+// prevents cross-substitution.
+func (req ClusterConfigPatchRequest) toPatch(enc storage.DataEncryptor) (cluster.ClusterConfigPatch, error) {
 	var p cluster.ClusterConfigPatch
 
 	p.BalancerEnabled = req.BalancerEnabled
@@ -243,11 +244,16 @@ func (req ClusterConfigPatchRequest) toPatch(enc *encrypt.Encryptor) (cluster.Cl
 		if enc == nil {
 			return p, errSecretRequiresEncryption
 		}
-		wrapped, werr := enc.EncryptWithAAD([]byte(*req.AlertWebhookSecretPlaintext), cluster.ClusterConfigAlertSecretAAD)
+		wrapped, gen, werr := enc.Seal(
+			encrypt.DomainClusterConfigSecret,
+			[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
+			[]byte(*req.AlertWebhookSecretPlaintext),
+		)
 		if werr != nil {
-			return p, fmt.Errorf("wrap alert-webhook-secret: %w", werr)
+			return p, fmt.Errorf("seal alert-webhook-secret: %w", werr)
 		}
 		p.AlertWebhookSecretWrapped = wrapped
+		p.AlertWebhookSecretDEKGen = gen
 	}
 	return p, nil
 }

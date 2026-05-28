@@ -23,11 +23,12 @@ func (f *MetaFSM) applyClusterConfigPatch(data []byte) error {
 		return fmt.Errorf("meta_fsm: ClusterConfigPatch: %w", err)
 	}
 
-	// Reject wrapped-secret patches when no encryptor is registered.
-	// The handler (Task 10) maps this error to HTTP
-	// 403 by matching the literal "encryption disabled" substring.
-	if len(p.AlertWebhookSecretWrapped) > 0 && f.encryptor == nil {
-		return fmt.Errorf("cluster-config alert-webhook-secret rejected: encryption disabled on this node (encryptor not wired)")
+	// Reject wrapped-secret patches when neither the DEK keeper nor the legacy
+	// static encryptor is registered. New admin writes use the DEK keeper; the
+	// legacy encryptor remains accepted only so older raft log entries can
+	// replay during mixed-version upgrade.
+	if len(p.AlertWebhookSecretWrapped) > 0 && f.DEKKeeper() == nil && f.encryptor == nil {
+		return fmt.Errorf("cluster-config alert-webhook-secret rejected: encryption disabled on this node (DEK keeper not wired)")
 	}
 
 	current := f.clusterCfg

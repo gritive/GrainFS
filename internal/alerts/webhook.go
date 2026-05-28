@@ -35,6 +35,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -104,12 +105,13 @@ type Options struct {
 type AlertCfgReader interface {
 	AlertWebhook() string
 	AlertWebhookSecretWrapped() []byte
+	AlertWebhookSecretDEKGen() uint32
 }
 
-// SecretDecrypter unwraps the cluster-config secret blob produced by
-// EncryptWithAAD. *encrypt.Encryptor satisfies this.
-type SecretDecrypter interface {
-	DecryptWithAAD(ciphertext, aad []byte) ([]byte, error)
+// SecretOpener unwraps the cluster-config secret blob produced by the
+// generation-aware data-at-rest seam.
+type SecretOpener interface {
+	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error)
 }
 
 // Dispatcher delivers Alerts to a single webhook URL.
@@ -119,11 +121,11 @@ type SecretDecrypter interface {
 //     Used by tests and any caller that does not run under cluster-config.
 //   - Live (NewDispatcherWithConfig): URL + wrapped secret are read from an
 //     AlertCfgReader on every Send so rotations via cluster-config PATCH take
-//     effect without restart. secretAAD must be supplied for unwrap.
+//     effect without restart. secretFields must be supplied for unwrap.
 type Dispatcher struct {
 	opts Options
 
-	// Actor fields. State (url, cfg, enc, secretAAD, alertKind, lastSent,
+	// Actor fields. State (url, cfg, enc, secretFields, alertKind, lastSent,
 	// inFlight, lastDecryptWarnAt) lives in envPtr and is mutated only inside
 	// the controller goroutine.
 	inbox        chan dispatchCmd
@@ -152,7 +154,7 @@ func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatc
 }
 
 // NewDispatcherWithConfig constructs a Dispatcher that reads URL + wrapped
-// secret from cfg on every Send. enc unwraps the secret using secretAAD; if
+// secret from cfg on every Send. enc unwraps the secret using secretFields; if
 // enc is nil or the wrapped secret is empty, no signature header is written
 // (matches the empty-secret behaviour of the static constructor). cfg.AlertWebhook()
 // returning "" makes Send a no-op so cluster-config can disable alerts live.
@@ -162,13 +164,13 @@ func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatc
 //
 // alertKind is recorded as the alert_kind label on
 // WebhookSignatureDecryptFailureTotal so multi-dispatcher deployments can
-// distinguish which dispatcher saw stale wrapped secrets after rotate-key.
+// distinguish which dispatcher saw stale wrapped secrets after DEK rotation.
 // Use a small bounded enum (e.g., "cluster", "degraded", "incident").
-func NewDispatcherWithConfig(cfg AlertCfgReader, enc SecretDecrypter, secretAAD []byte, opts Options, onFailure FailureCallback, alertKind string) *Dispatcher {
+func NewDispatcherWithConfig(cfg AlertCfgReader, enc SecretOpener, secretFields []encrypt.AADField, opts Options, onFailure FailureCallback, alertKind string) *Dispatcher {
 	d := newDispatcher(opts, onFailure)
 	d.envPtr.cfg = cfg
 	d.envPtr.enc = enc
-	d.envPtr.secretAAD = secretAAD
+	d.envPtr.secretFields = append([]encrypt.AADField(nil), secretFields...)
 	d.envPtr.alertKind = alertKind
 	return d
 }
@@ -525,7 +527,7 @@ func (d *Dispatcher) observeDrop(reason dropReason) {
 // for callers building higher-level abstractions.
 var ErrEmptyURL = errors.New("webhook URL is empty")
 
-// classifyDecryptErr maps a DecryptWithAAD error to a small bounded enum.
+// classifyDecryptErr maps a secret-open error to a small bounded enum.
 // Metric labels MUST go through this function — never label with raw
 // err.Error() (unbounded cardinality, leaks key material into series names).
 func classifyDecryptErr(err error) string {
