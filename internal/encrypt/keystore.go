@@ -211,22 +211,28 @@ func parseKeyFilename(name string) (uint32, bool) {
 // auto-generate gating, because LoadOrInitKEKStoreDir would skip them
 // the same way.
 func KeysDirIsEmpty(keysDir string) (bool, error) {
-	entries, err := os.ReadDir(keysDir)
+	d, err := os.Open(keysDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return true, nil
 		}
 		return false, fmt.Errorf("KeysDirIsEmpty: %w", err)
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	defer d.Close()
+	for {
+		names, err := d.Readdirnames(64)
+		for _, name := range names {
+			if _, ok := parseKeyFilename(name); ok {
+				return false, nil
+			}
 		}
-		if _, ok := parseKeyFilename(e.Name()); ok {
-			return false, nil
+		if errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("KeysDirIsEmpty: %w", err)
 		}
 	}
-	return true, nil
 }
 
 // LoadOrInitKEKStoreDir loads all `<V>.key` files from keysDir into a fresh

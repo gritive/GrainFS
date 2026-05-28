@@ -80,6 +80,14 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
+- [ ] **Zero-CA invite join protocol binding hardening**
+    - Bind the signed invite transcript to the concrete TLS session with a TLS
+      exporter value instead of leaving `InviteTranscript.Bind` empty.
+    - Replace the client-only join nonce with a leader-issued freshness challenge
+      or add a leader-side replay cache/window. Keep the current SPKI pinning and
+      pending redemption binding as the baseline; this item is the next protocol
+      hardening slice, not a regression in the present key ownership checks.
+
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
     - Maintainability M#2: extract `peelTrailer(data, magic, trailerLen)` helper in

@@ -47,9 +47,58 @@ anonymous access works.
 
 ## Add cluster peers
 
-There are two join paths. Use `grainfs cluster join` for a not-yet-running
-node during first bootstrap. Use `grainfs join` only when a node is already
-running and you want it to restart into the cluster through its admin socket.
+There are three join paths:
+
+- Use Zero-CA invite join for a brand-new node when you do not want to pre-copy
+  cluster secrets. This is the preferred path for new production peers.
+- Use `grainfs cluster join` for a not-yet-running node when you intentionally
+  want offline bootstrap with pre-staged `keys/0.key`, `cluster.id`, and
+  `--cluster-key`.
+- Use `grainfs join` only when a node is already running and you want it to
+  restart into the cluster through its admin socket.
+
+### Zero-CA invite join for a new node
+
+Pin a stable join listener on the leader:
+
+```bash
+grainfs serve \
+  --data /var/lib/grainfs-a \
+  --node-id node-a \
+  --raft-addr node-a:7001 \
+  --join-listen-addr node-a:7443 \
+  --cluster-key "$CLUSTER_KEY"
+```
+
+Mint a one-time invite:
+
+```bash
+grainfs cluster invite create \
+  --endpoint /var/lib/grainfs-a/admin.sock \
+  --ttl 1h
+```
+
+Start the joining node with the printed bundle and no pre-staged cluster
+secrets:
+
+```bash
+GRAINFS_INVITE_BUNDLE='<bundle-token>' grainfs serve \
+  --data /var/lib/grainfs-b \
+  --node-id node-b \
+  --raft-addr node-b:7001 \
+  --port 9001
+```
+
+Verify membership from the leader:
+
+```bash
+grainfs cluster --endpoint /var/lib/grainfs-a/admin.sock peers
+```
+
+The joiner should have `keys.d/node.key.enc` and should not have
+`encryption.key`. The full operator procedure, including cutover, post-cutover
+join behavior, and revocation, is in
+[`zero-ca-cluster-join.md`](zero-ca-cluster-join.md).
 
 ### Offline bootstrap for a new node
 

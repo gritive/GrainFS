@@ -163,9 +163,8 @@ type metaJoinCoordinator interface {
 	// (nodeID, spki) redeemer; Phase-2 validates the ACK against that binding,
 	// stages membership, and consumes the invite.
 	ProposeInvitePending(ctx context.Context, inviteID, nodeID string, spki [32]byte, addr string) error
-	LookupPending(inviteID string) (nodeID string, spki [32]byte, addr string, ok bool)
-	ProposeInviteConsume(ctx context.Context, inviteID string) error
-	RemoveLearner(nodeID, addr string) error
+	LookupPending(inviteID string, now time.Time) (nodeID string, spki [32]byte, addr string, ok bool)
+	ProposeInviteConsumeAt(ctx context.Context, inviteID string, consumedAt time.Time) error
 	// PeerSPKIs and ClusterKeyDropped supply the FSM state needed to populate
 	// peer_spkis in the sealed bootstrap for invite-join joiners (PR-2a §8f M1).
 	PeerSPKIs() [][32]byte
@@ -315,7 +314,7 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 //     change.
 //   - Phase-2 (req.JoinPhase==2): match the ACK against the pending binding AND
 //     capturedSPKI, stage membership (idempotently), run the post-join hook, and
-//     consume the invite. On membership failure: RemoveLearner rollback.
+//     consume the invite. On membership failure, leave pending state retryable.
 func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte, req JoinRequest) JoinReply {
 	if len(r.clusterID) == 0 {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"}
@@ -324,8 +323,7 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 	// QUIC join listener dispatches decoded requests straight here, so without
 	// this a malformed client could sign Phase-1 with an empty node_id/address;
 	// Phase-2 would then register/promote a learner keyed by the address and only
-	// ProposeAddNode rejects the empty id AFTER promotion, leaving an orphan voter
-	// the learner rollback cannot remove.
+	// ProposeAddNode rejects the empty id AFTER promotion.
 	if req.NodeID == "" || req.Address == "" {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "node_id and address are required"}
 	}
@@ -514,9 +512,10 @@ func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, s
 	// pending record proves the invite was gate-verified at Phase-1; capturedSPKI
 	// proves this ACK comes from the holder of that Phase-1 key (payload fields
 	// alone are forgeable).
-	pendNode, pendSPKI, pendAddr, ok := r.meta.LookupPending(req.InviteID)
+	phaseNow := time.Now()
+	pendNode, pendSPKI, pendAddr, ok := r.meta.LookupPending(req.InviteID, phaseNow)
 	if !ok {
-		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "no pending invite redemption"}
+		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite invalid/used/expired"}
 	}
 	if pendNode != req.NodeID || pendSPKI != spki {
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "ACK does not match pending redemption"}
@@ -528,13 +527,12 @@ func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, s
 	// transcript), NOT req.Address — a replayed/altered ACK must not be able to
 	// finalize membership for a different (unreachable or attacker-chosen) endpoint
 	// than the one the invite actually authorized.
-	// Stage membership idempotently (JoinViaInvite resumes from the first missing
-	// step). On failure roll back the un-promoted learner.
+	// Stage membership idempotently. On failure, leave the pending redemption and
+	// any learner state retryable instead of attempting best-effort rollback that
+	// can itself fail and obscure the original membership error.
 	if err := r.meta.JoinViaInvite(ctx, req.NodeID, pendAddr, spki, req.InviteID); err != nil {
-		if rbErr := r.meta.RemoveLearner(req.NodeID, pendAddr); rbErr != nil {
-			log.Warn().Err(rbErr).Str("node_id", req.NodeID).
-				Msg("meta_join: JoinViaInvite rollback RemoveLearner failed")
-		}
+		log.Warn().Err(err).Str("node_id", req.NodeID).
+			Msg("meta_join: invite Phase-2 membership staging failed; leaving pending state for retry")
 		return joinReplyFromError(err)
 	}
 	if r.postJoinHook != nil {
@@ -545,7 +543,7 @@ func (r *MetaJoinReceiver) handleJoinPhase2(ctx context.Context, capturedSPKI, s
 	// Consume the invite (pending → used). Single consume owned by Phase-2. On a
 	// retry the invite is already used — tolerate that so the ACK still succeeds
 	// idempotently (the pending+captured checks above already authorized it).
-	if err := r.meta.ProposeInviteConsume(ctx, req.InviteID); err != nil && !errors.Is(err, errInviteInvalid) {
+	if err := r.meta.ProposeInviteConsumeAt(ctx, req.InviteID, phaseNow); err != nil && !errors.Is(err, errInviteInvalid) {
 		return joinReplyFromError(err)
 	}
 	return JoinReply{Accepted: true, Status: JoinStatusOK, PeerSPKIs: r.meta.AcceptSPKIBytes()}

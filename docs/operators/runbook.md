@@ -575,6 +575,45 @@ around failure-domain boundaries) — restore from a backup or rebuild.
 steps down via commit-time wakeup. The remaining voters elect a new leader. The
 operator does not need a separate `transfer-leader` step.
 
+### Adding a node with Zero-CA invite join
+
+Use Zero-CA invite join when adding a brand-new node without copying
+`keys/0.key`, `cluster.id`, or `--cluster-key` to the node first. The detailed
+procedure is in [`zero-ca-cluster-join.md`](zero-ca-cluster-join.md).
+
+Mint an invite on the leader:
+
+```bash
+grainfs cluster invite create --endpoint $ENDPOINT --ttl 1h
+```
+
+Start the joining node with the printed bundle:
+
+```bash
+GRAINFS_INVITE_BUNDLE='<bundle-token>' grainfs serve \
+  --data /var/lib/grainfs-b \
+  --node-id node-b \
+  --raft-addr node-b:7001
+```
+
+Verify membership:
+
+```bash
+grainfs cluster --endpoint $ENDPOINT peers
+```
+
+If the cluster is ready to remove the shared cluster-key accept path, run:
+
+```bash
+grainfs cluster --endpoint $ENDPOINT complete-cutover
+```
+
+Successful output:
+
+```text
+Zero-CA cutover complete: cluster key dropped, connections recycled.
+```
+
 ### Revoking a Zero-CA node identity
 
 Use `revoke-node` when the node identity itself should be blocked from future

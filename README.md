@@ -84,6 +84,9 @@ GRAINFS_INVITE_BUNDLE='<bundle-token>' ./bin/grainfs serve \
   --node-id node-b \
   --raft-addr <nodeB>:7001
 ```
+
+For production steps, verification, cutover, and revocation, see
+[`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md).
 </details>
 
 <details>
@@ -168,7 +171,9 @@ firewall-restricted addresses.
 | --- | --- |
 | Create/list service accounts, keys, and policies | `grainfs iam --endpoint <data>/admin.sock ...` |
 | Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
-| Mint a zero-CA join invite (leader) | `grainfs cluster invite create --endpoint <data>/admin.sock` |
+| Add a peer with zero-CA invite join | [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md) |
+| Mint a zero-CA join invite (leader) | `grainfs cluster invite create --endpoint <data>/admin.sock --ttl 1h` |
+| Drop the shared cluster-key accept path | `grainfs cluster --endpoint <data>/admin.sock complete-cutover` |
 | Revoke a zero-CA node identity | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>` |
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
