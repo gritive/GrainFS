@@ -93,9 +93,10 @@ func registerDashboard(g router, d *Deps) {
 }
 
 func registerCredentials(g router, d *Deps) {
-	g.POST(routePathCredentials, wrapBody[CredentialCreateReq, CredentialResp](d, CreateCredential))
-	g.GET(routePathCredentials, listCredentialsHandler(d))
-	g.GET(routePathCredential, credentialGetHandler(d))
-	g.POST(routePathCredentialRotate, credentialRotateHandler(d))
-	g.DELETE(routePathCredential, credentialRevokeHandler(d))
+	actor := credentialActorMiddleware(d)
+	g.POST(routePathCredentials, actor, wrapBody[CredentialCreateReq, CredentialResp](d, CreateCredential))
+	g.GET(routePathCredentials, actor, listCredentialsHandler(d))
+	g.GET(routePathCredential, actor, credentialGetHandler(d))
+	g.POST(routePathCredentialRotate, actor, credentialRotateHandler(d))
+	g.DELETE(routePathCredential, actor, credentialRevokeHandler(d))
 }
