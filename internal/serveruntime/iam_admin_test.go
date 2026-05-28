@@ -20,6 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/server/admin"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // inProcessPropose dispatches IAM cmd payloads directly to the FSM Applier,
@@ -51,6 +52,15 @@ func newTestEncryptor(t *testing.T) *encrypt.Encryptor {
 		t.Fatalf("NewEncryptor: %v", err)
 	}
 	return enc
+}
+
+// newTestDataEncryptor returns a storage.DataEncryptor wrapping a
+// deterministic *encrypt.Encryptor — for IAM applier/admin api fixtures
+// after R2.
+func newTestDataEncryptor(t *testing.T) storage.DataEncryptor {
+	t.Helper()
+	clusterID := bytes.Repeat([]byte{0xcd}, 16)
+	return storage.NewEncryptorAdapter(newTestEncryptor(t), clusterID)
 }
 
 func startIAMAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {
@@ -105,11 +115,11 @@ func startIAMAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {
 
 func newAdminAPIWithStore(t *testing.T) (*iam.AdminAPI, *iam.Store) {
 	t.Helper()
-	enc := newTestEncryptor(t)
+	de := newTestDataEncryptor(t)
 	store := iam.NewStore()
-	applier := iam.NewApplier(store, enc)
+	applier := iam.NewApplier(store, de)
 	proposer := &iam.MetaProposer{Propose: inProcessPropose(applier)}
-	api := iam.NewAdminAPI(store, proposer, enc)
+	api := iam.NewAdminAPI(store, proposer, de)
 	return api, store
 }
 

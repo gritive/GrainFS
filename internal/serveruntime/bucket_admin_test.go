@@ -39,11 +39,11 @@ func inProcessProposeFull(applier *iam.Applier) iam.ProposeFunc {
 // proposals, suitable for TestBucketAdminRoutes_* tests.
 func newAdminAPIWithBucketUpstream(t *testing.T) *iam.AdminAPI {
 	t.Helper()
-	enc := newTestEncryptor(t)
+	de := newTestDataEncryptor(t)
 	store := iam.NewStore()
-	applier := iam.NewApplier(store, enc)
+	applier := iam.NewApplier(store, de)
 	proposer := &iam.MetaProposer{Propose: inProcessProposeFull(applier)}
-	return iam.NewAdminAPI(store, proposer, enc)
+	return iam.NewAdminAPI(store, proposer, de)
 }
 
 // startBucketAdminTestServer spins up a Hertz UDS server with BOTH
