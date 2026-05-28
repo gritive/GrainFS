@@ -49,15 +49,16 @@ type ServiceAccount struct {
 // AccessKey is one credential pair belonging to a ServiceAccount.
 // SecretKey holds the plaintext only in-memory after Decrypt; persisted form is SecretKeyEnc.
 type AccessKey struct {
-	AccessKey    string // public component, used as SigV4 access key id
-	SecretKey    string // plaintext, in-memory only (zero if not decrypted)
-	SecretKeyEnc []byte // AES-256-GCM ciphertext, persisted form
-	SAID         string // owning ServiceAccount ID
-	Status       KeyStatus
-	CreatedAt    time.Time
-	LastUsedAt   time.Time  // best-effort, updated on Verify hit
-	ExpiresAt    *time.Time // nil = never expires
-	BucketScope  []string   // nil/empty = unrestricted (backward compat); non-empty = subset filter on Layer 0 authz
+	AccessKey       string // public component, used as SigV4 access key id
+	SecretKey       string // plaintext, in-memory only (zero if not decrypted)
+	SecretKeyEnc    []byte // XAES-256-GCM ciphertext under DEK gen SecretKeyDEKGen, AAD = BuildAAD(DomainIAMCredential, clusterID, FieldString(SAID), FieldString(AccessKey))
+	SecretKeyDEKGen uint32 // DEK generation that produced SecretKeyEnc; 0 = unset (matches FB default)
+	SAID            string // owning ServiceAccount ID
+	Status          KeyStatus
+	CreatedAt       time.Time
+	LastUsedAt      time.Time  // best-effort, updated on Verify hit
+	ExpiresAt       *time.Time // nil = never expires
+	BucketScope     []string   // nil/empty = unrestricted (backward compat); non-empty = subset filter on Layer 0 authz
 }
 
 type BucketUpstreamStatus string
@@ -70,15 +71,17 @@ const (
 // BucketUpstream stores per-bucket pull-through upstream credentials. Created
 // and rotated through the admin UDS API; persisted via meta-FSM so all nodes
 // see the same record. SecretKey holds plaintext only in-memory after Apply;
-// SecretKeyEnc is the AES-256-GCM ciphertext (AAD = "bucket-upstream:"+bucket)
+// SecretKeyEnc is the XAES-256-GCM ciphertext under DEK gen SecretKeyDEKGen
+// (AAD = BuildAAD(DomainIAMCredential, clusterID, FieldString("bucket-upstream:"+Bucket)))
 // used for snapshot + raft log persistence.
 type BucketUpstream struct {
-	Bucket       string
-	Endpoint     string // e.g., http://minio:9000
-	AccessKey    string
-	SecretKey    string // in-memory plaintext; zero before Apply or after snapshot read with no encryptor
-	SecretKeyEnc []byte // AES-256-GCM ciphertext, AAD = "bucket-upstream:"+bucket
-	CreatedAt    time.Time
-	CreatedBy    string // sa_id of admin that issued the put
-	Status       BucketUpstreamStatus
+	Bucket          string
+	Endpoint        string // e.g., http://minio:9000
+	AccessKey       string
+	SecretKey       string // in-memory plaintext; zero before Apply or after snapshot read with no encryptor
+	SecretKeyEnc    []byte // XAES-256-GCM ciphertext under DEK gen SecretKeyDEKGen, AAD = BuildAAD(DomainIAMCredential, clusterID, FieldString("bucket-upstream:"+Bucket))
+	SecretKeyDEKGen uint32 // DEK generation that produced SecretKeyEnc; 0 = unset (matches FB default)
+	CreatedAt       time.Time
+	CreatedBy       string // sa_id of admin that issued the put
+	Status          BucketUpstreamStatus
 }
