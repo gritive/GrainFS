@@ -399,9 +399,11 @@ Work these in order. Do not run them in parallel.
   create/rotate/revoke now check IAM permissions for the target service
   account. NBD now enforces `volume@secret` attach when protocol credentials
   are wired. The attach validator foundation now centralizes strict/compat
-  stale decisions and bounded attach caching. Follow up by wiring protocol
-  attach paths through that validator and migrating NFS/9P from MountSA-only
-  auth onto protocol credentials without losing uid/gid audit context.
+  stale decisions and bounded attach caching, and IAM policy detach/body
+  changes now mark dependent protocol credentials stale. Follow up by wiring
+  protocol attach paths through that validator and migrating NFS/9P from
+  MountSA-only auth onto protocol credentials without losing uid/gid audit
+  context.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

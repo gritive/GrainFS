@@ -1,12 +1,15 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/iam"
 	iambuiltin "github.com/gritive/GrainFS/internal/iam/builtin"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
+	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/reservedname"
 )
 
@@ -32,8 +35,12 @@ func (f *MetaFSM) applyPolicyPut(payload []byte) error {
 	if !isBuiltin && iambuiltin.IsBuiltinName(name) {
 		return fmt.Errorf("meta_fsm: PolicyPut: refusing to overwrite built-in policy %q", name)
 	}
+	previous, previousErr := f.policyStore.GetRaw(context.Background(), name)
 	if err := f.policyStore.Put(context.Background(), name, docJSON, isBuiltin); err != nil {
 		return fmt.Errorf("meta_fsm: PolicyPut store: %w", err)
+	}
+	if previousErr == nil && !bytes.Equal(previous, docJSON) {
+		f.markProtocolCredentialsStaleForPolicy(name, "policy_changed")
 	}
 	if f.policyResolver != nil {
 		// A policy doc body change can affect any cached entry that references it;
@@ -156,14 +163,121 @@ func (f *MetaFSM) applyPolicyAttachToSADelete(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: PolicyAttachToSADelete: %w", err)
 	}
+	wasAttached := f.saHasPolicyAttached(saID, pol)
 	if err := f.policyAttachStore.DetachFromSA(context.Background(), saID, pol); err != nil {
 		return fmt.Errorf("meta_fsm: PolicyAttachToSADelete store: %w", err)
+	}
+	if wasAttached {
+		f.markProtocolCredentialsStaleForSAs([]string{saID}, "policy_detached")
 	}
 	if f.policyResolver != nil {
 		// Only the affected SA's cached entries need to be dropped.
 		f.policyResolver.Invalidate([]string{saID}, nil)
 	}
 	return nil
+}
+
+func (f *MetaFSM) markProtocolCredentialsStaleForPolicy(policyName, reason string) {
+	sas := f.serviceAccountsDependingOnPolicy(policyName)
+	f.markProtocolCredentialsStaleForSAs(sas, reason)
+}
+
+func (f *MetaFSM) serviceAccountsDependingOnPolicy(policyName string) []string {
+	if f.policyAttachStore == nil {
+		return nil
+	}
+	out := make(map[string]struct{})
+	snap := f.policyAttachStore.Snapshot()
+	for _, entry := range snap.SAAttachments {
+		if stringSliceContains(entry.Policies, policyName) {
+			out[entry.SAID] = struct{}{}
+		}
+	}
+	if f.groupStore != nil {
+		for _, entry := range snap.GroupAttachments {
+			if !stringSliceContains(entry.Policies, policyName) {
+				continue
+			}
+			members, err := f.groupStore.MembersOf(context.Background(), entry.Group)
+			if err == nil {
+				for _, saID := range members {
+					out[saID] = struct{}{}
+				}
+			}
+		}
+		for _, groupEntry := range f.groupStore.Snapshot() {
+			if !stringSliceContains(groupEntry.AttachedPolicies, policyName) {
+				continue
+			}
+			for _, saID := range groupEntry.Members {
+				out[saID] = struct{}{}
+			}
+		}
+	}
+	sas := make([]string, 0, len(out))
+	for saID := range out {
+		sas = append(sas, saID)
+	}
+	return sas
+}
+
+func (f *MetaFSM) markProtocolCredentialsStaleForSAs(saIDs []string, reason string) {
+	if f.protocolCredentialStore == nil || len(saIDs) == 0 {
+		return
+	}
+	saSet := make(map[string]struct{}, len(saIDs))
+	for _, saID := range saIDs {
+		saSet[saID] = struct{}{}
+	}
+	for _, row := range f.protocolCredentialStore.Snapshot() {
+		if _, ok := saSet[row.SAID]; !ok {
+			continue
+		}
+		_, _ = f.protocolCredentialStore.ApplyMarkStale(row.ID, f.protocolCredentialStaleAt(row), reason)
+	}
+}
+
+func (f *MetaFSM) protocolCredentialStaleAt(row protocred.Credential) time.Time {
+	if f.lastApplyIndex > 0 {
+		return time.Unix(0, int64(f.lastApplyIndex)).UTC()
+	}
+	return row.CreatedAt
+}
+
+func (f *MetaFSM) saHasPolicyAttached(saID, policyName string) bool {
+	if f.policyAttachStore == nil {
+		return false
+	}
+	policies, err := f.policyAttachStore.SAPolicies(context.Background(), saID)
+	return err == nil && stringSliceContains(policies, policyName)
+}
+
+func (f *MetaFSM) groupHasPolicyAttached(groupName, policyName string) bool {
+	if f.policyAttachStore == nil {
+		return false
+	}
+	policies, err := f.policyAttachStore.GroupPolicies(context.Background(), groupName)
+	return err == nil && stringSliceContains(policies, policyName)
+}
+
+func (f *MetaFSM) groupMembers(groupName string) []string {
+	if f.groupStore == nil {
+		return nil
+	}
+	members, err := f.groupStore.MembersOf(context.Background(), groupName)
+	if err != nil {
+		return nil
+	}
+	return members
+}
+
+func stringSliceContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *MetaFSM) applyPolicyAttachToGroupPut(payload []byte) error {
@@ -194,8 +308,13 @@ func (f *MetaFSM) applyPolicyAttachToGroupDelete(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: PolicyAttachToGroupDelete: %w", err)
 	}
+	wasAttached := f.groupHasPolicyAttached(grp, pol)
+	members := f.groupMembers(grp)
 	if err := f.policyAttachStore.DetachFromGroup(context.Background(), grp, pol); err != nil {
 		return fmt.Errorf("meta_fsm: PolicyAttachToGroupDelete store: %w", err)
+	}
+	if wasAttached {
+		f.markProtocolCredentialsStaleForSAs(members, "policy_detached")
 	}
 	if f.policyResolver != nil {
 		// TODO(opt): nuke only SAs that are members of grp once we can enumerate
