@@ -47,6 +47,7 @@ func TestBuildAAD_AllDomainsUnique(t *testing.T) {
 		{DomainKEKRotate, "kek_rotate"},
 		{DomainKEKCatchup, "kek_catchup"},
 		{DomainNBD, "nbd"},
+		{DomainFSMValue, "fsm_value"},
 	} {
 		if prev, ok := seen[uint16(dom.tag)]; ok {
 			t.Errorf("duplicate domain_tag %#x for %s and %s", uint16(dom.tag), prev, dom.name)
@@ -95,7 +96,7 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		DomainShard, DomainWAL, DomainSnapshotBody, DomainSnapshotDEK,
 		DomainJWTKey, DomainDEKFSMWrap, DomainKEKRotate, DomainKEKCatchup,
 		DomainNBD, DomainIAMAdmin, DomainCapabilityAssertV1, DomainCASChunk,
-		DomainIAMCredential,
+		DomainIAMCredential, DomainFSMValue,
 	}
 	seen := make(map[uint16]struct{}, len(domains))
 	for _, d := range domains {
@@ -105,8 +106,8 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		seen[uint16(d)] = struct{}{}
 		_ = BuildAAD(d, clusterID) // exercise BuildAAD with every domain
 	}
-	if len(seen) != 13 {
-		t.Errorf("expected 13 unique domains, got %d", len(seen))
+	if len(seen) != 14 {
+		t.Errorf("expected 14 unique domains, got %d", len(seen))
 	}
 }
 

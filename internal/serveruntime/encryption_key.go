@@ -87,8 +87,10 @@ const bulkCipherFormatFile = "encryption.format"
 // under DomainIAMCredential AAD (R2). Pre-"5" IAM ciphertext used the static
 // *encrypt.Encryptor with raw saID AAD; "5" binary uses the DataEncryptor seam
 // with BuildAAD(DomainIAMCredential, clusterID, FieldString(saID), FieldString(accessKey))
-// and cannot read pre-"5" IAM bytes. Greenfield only.
-const bulkCipherFormatVersion = "5"
+// and cannot read pre-"5" IAM bytes. "6" = data-group FSM values and data WAL
+// records moved to the gen-aware DEK seam with persisted DEK generation frames.
+// Greenfield only.
+const bulkCipherFormatVersion = "6"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
 // ONLY when at-rest encryption is enabled. bulkDataPresent reports whether the
@@ -100,7 +102,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); IAM credentials migrated to the gen-aware DEK seam (R2) and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); data-group FSM values and data WAL records migrated to the gen-aware DEK seam and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):

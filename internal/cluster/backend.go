@@ -384,6 +384,7 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	b.shardSvc = svc
 	if b.fsm != nil && svc != nil {
 		b.fsm.SetEncryptor(svc.encryptor)
+		b.fsm.SetDEKKeeper(svc.DEKKeeper(), svc.ClusterID())
 	}
 	topology := newBackendTopology(allNodes)
 	b.selfAddr = topology.selfAddr

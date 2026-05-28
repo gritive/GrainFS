@@ -33,7 +33,7 @@ func runRestartRecoveryOrphanSweepCases(t testing.TB) {
 	// The test pre-populates the data dir before boot. Stamp the current
 	// encryption format marker so the XAES boot guard treats these artifacts as
 	// current-format orphan candidates rather than a pre-XAES data dir.
-	gomega.Expect(os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("5"), 0o600)).To(gomega.Succeed())
+	gomega.Expect(os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("6"), 0o600)).To(gomega.Succeed())
 
 	// Plant a stale .tmp file (backdated past the 5-min in-flight guard).
 	staleTmp := filepath.Join(dir, "shards", "b", "k", "0.tmp")

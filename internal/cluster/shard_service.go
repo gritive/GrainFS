@@ -58,7 +58,8 @@ type ShardService struct {
 	transport     *transport.QUICTransport
 	encryptor     *encrypt.Encryptor    // retained for the whole-buffer scrubber-repair + legacy single-blob fallback (D-seg-ec-scrub / D-cut)
 	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
-	clusterID     [16]byte              // zero sentinel in D-seg-ec-struct; real ID in slice C
+	dekKeeper     *encrypt.DEKKeeper
+	clusterID     [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
 	addrBook      NodeAddressBook
 	directWriter  shardFileWriter
 	shardPack     *shardPackStore
@@ -119,6 +120,7 @@ func WithShardDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) ShardServic
 			return
 		}
 		copy(s.clusterID[:], clusterID)
+		s.dekKeeper = keeper
 		s.segEnc = storage.NewDEKKeeperAdapter(keeper, s.clusterID[:])
 	}
 }
@@ -173,6 +175,14 @@ func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
 
 // HasDataWALRepairSink reports whether a data WAL repair candidate sink is wired.
 func (s *ShardService) HasDataWALRepairSink() bool { return s.dataWALRepairSink != nil }
+
+func (s *ShardService) DEKKeeper() *encrypt.DEKKeeper { return s.dekKeeper }
+
+func (s *ShardService) ClusterID() []byte {
+	out := make([]byte, len(s.clusterID))
+	copy(out, s.clusterID[:])
+	return out
+}
 
 // Close releases resources owned by the ShardService — currently the shard-pack
 // actor goroutine, which is spawned only when a data WAL is wired. The data WAL
@@ -1253,10 +1263,9 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	}
 	s.replayingDataWAL.Store(true)
 	defer s.replayingDataWAL.Store(false)
-	var sealer datawal.RecordSealer
-	if s.encryptor != nil {
-		var zero [16]byte
-		sealer = storage.NewEncryptorAdapter(s.encryptor, zero[:])
+	sealer, err := s.dataWALRecoverySealer()
+	if err != nil {
+		return err
 	}
 	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, "datawal", shardDataWALMaterializer{s: s}); err != nil {
 		return err
@@ -1276,6 +1285,18 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 		s.shardPack = pack
 	}
 	return nil
+}
+
+func (s *ShardService) dataWALRecoverySealer() (datawal.RecordSealer, error) {
+	switch {
+	case s.dekKeeper != nil:
+		return storage.NewDEKKeeperAdapter(s.dekKeeper, s.clusterID[:]), nil
+	case s.encryptor != nil:
+		var zero [16]byte
+		return storage.NewEncryptorAdapter(s.encryptor, zero[:]), nil
+	default:
+		return nil, nil
+	}
 }
 
 type shardDataWALMaterializer struct {
