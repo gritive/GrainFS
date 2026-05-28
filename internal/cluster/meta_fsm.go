@@ -122,8 +122,9 @@ const (
 	MetaCmdTypeProtocolCredentialRevoke    = clusterpb.MetaCmdTypeProtocolCredentialRevoke
 	MetaCmdTypeProtocolCredentialMarkStale = clusterpb.MetaCmdTypeProtocolCredentialMarkStale
 	MetaCmdTypeProtocolCredentialLastUsed  = clusterpb.MetaCmdTypeProtocolCredentialLastUsed
-	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip // zero-CA cutover: PR-2a §8c
-	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip   // zero-CA cutover: PR-2a §8c
+	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip   // zero-CA cutover: PR-2a §8c
+	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip     // zero-CA cutover: PR-2a §8c
+	MetaCmdTypeDropClusterKeyAccept        = clusterpb.MetaCmdTypeDropClusterKeyAccept // zero-CA cutover: PR-2b §8 H2
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -303,6 +304,11 @@ type MetaFSM struct {
 	// onPresentFlip fires on the first false→true Apply transition and on
 	// Restore when the snapshot has the bit set. nil = no-op.
 	onPresentFlip func()
+
+	// raftConfigReader is injected at boot to perform the strict Apply-side
+	// config-stamp check for DropClusterKeyAccept (spec §8 H2, PR-2b). nil
+	// disables the check for tests.
+	raftConfigReader RaftConfigReader
 
 	// IAM sub-FSM — wired after construction via SetIAM (Phase 1). iamStore is
 	// always non-nil (default empty); iamApplier is nil until SetIAM is called.
@@ -906,11 +912,50 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 			cb() // OUTSIDE f.mu
 		}
 		return nil
+	case clusterpb.MetaCmdTypeDropClusterKeyAccept:
+		return f.applyDropClusterKeyAccept(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
 	}
+}
+
+// applyDropClusterKeyAccept applies cmd 87. If a RaftConfigReader is wired, the
+// current voter set must match the leader-stamped voter set; otherwise this node
+// rejects the drop as a deterministic no-op and the operator can re-run after
+// the new voter is ready. On acceptance, it sets clusterKeyDropped=true and
+// fires onClusterKeyDropped outside f.mu once.
+func (f *MetaFSM) applyDropClusterKeyAccept(data []byte) error {
+	stamp, err := decodeDropClusterKeyAcceptCmd(data)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: DropClusterKeyAccept: decode: %w", err)
+	}
+
+	f.mu.RLock()
+	rdr := f.raftConfigReader
+	f.mu.RUnlock()
+	if rdr != nil {
+		currentVoters, _ := rdr.EffectiveConfiguration()
+		if !voterSetsEqual(stamp.Voters, currentVoters) {
+			log.Warn().
+				Strs("stamped", stamp.Voters).
+				Strs("current", currentVoters).
+				Msg("DropClusterKeyAccept: config-stamp mismatch; drop rejected")
+			return nil
+		}
+	}
+
+	f.mu.Lock()
+	wasDropped := f.clusterKeyDropped
+	f.clusterKeyDropped = true
+	cb := f.onClusterKeyDropped
+	f.mu.Unlock()
+
+	if !wasDropped && cb != nil {
+		cb()
+	}
+	return nil
 }
 
 // --- encoding helpers ---

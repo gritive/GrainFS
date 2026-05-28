@@ -45,6 +45,14 @@ func (f *MetaFSM) SetOnPresentFlip(fn func()) {
 	f.mu.Unlock()
 }
 
+// SetRaftConfigReader wires the voter-reader used by DropClusterKeyAccept
+// Apply for the H2 strict config-stamp check (PR-2b). nil disables the check.
+func (f *MetaFSM) SetRaftConfigReader(rdr RaftConfigReader) {
+	f.mu.Lock()
+	f.raftConfigReader = rdr
+	f.mu.Unlock()
+}
+
 // PresentFlipBegun reports whether the present-flip has been committed in the
 // raft log (i.e., BeginPresentFlip has been applied). Safe for concurrent use.
 func (f *MetaFSM) PresentFlipBegun() bool {
@@ -92,6 +100,13 @@ func (f *MetaFSM) ClusterKeyDropped() bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.clusterKeyDropped
+}
+
+// AllVotersPresentsPerNode reports whether every voter in the given list has a
+// registered registry entry with PresentsPerNode=true. Voters are raft server
+// IDs, which are QUIC addresses in production.
+func (f *MetaFSM) AllVotersPresentsPerNode(voters []string) bool {
+	return f.peers.allVotersPresentsPerNode(voters)
 }
 
 // firePeersChanged snapshots the callback under lock then invokes it with the

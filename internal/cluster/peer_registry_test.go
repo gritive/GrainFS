@@ -355,3 +355,23 @@ func TestRegisterMember_PresentsPerNode_FalseToTrue(t *testing.T) {
 	require.NoError(t, r.registerMember("n2", spki, "addr2", true)) // false->true applies
 	require.True(t, r.byNodeID["n2"].PresentsPerNode)
 }
+
+func TestAllVotersPresentsPerNode_TrueWhenAll(t *testing.T) {
+	r := newPeerRegistry()
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true))
+	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", true))
+	require.True(t, r.allVotersPresentsPerNode([]string{"127.0.0.1:1001", "127.0.0.1:1002"}))
+}
+
+func TestAllVotersPresentsPerNode_FalseWhenOneMissing(t *testing.T) {
+	r := newPeerRegistry()
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true))
+	require.NoError(t, r.registerMember("node-B", [32]byte{0xBB}, "127.0.0.1:1002", false))
+	require.False(t, r.allVotersPresentsPerNode([]string{"127.0.0.1:1001", "127.0.0.1:1002"}))
+}
+
+func TestAllVotersPresentsPerNode_FalseWhenVoterUnregistered(t *testing.T) {
+	r := newPeerRegistry()
+	require.NoError(t, r.registerMember("node-A", [32]byte{0xAA}, "127.0.0.1:1001", true))
+	require.False(t, r.allVotersPresentsPerNode([]string{"127.0.0.1:1001", "127.0.0.1:1002"}))
+}

@@ -94,6 +94,7 @@ const (
 	MetaCmdTypeProtocolCredentialLastUsed   MetaCmdType = 84
 	MetaCmdTypePreparePresentFlip           MetaCmdType = 85
 	MetaCmdTypeBeginPresentFlip             MetaCmdType = 86
+	MetaCmdTypeDropClusterKeyAccept         MetaCmdType = 87
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -184,6 +185,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeProtocolCredentialLastUsed:   "ProtocolCredentialLastUsed",
 	MetaCmdTypePreparePresentFlip:           "PreparePresentFlip",
 	MetaCmdTypeBeginPresentFlip:             "BeginPresentFlip",
+	MetaCmdTypeDropClusterKeyAccept:         "DropClusterKeyAccept",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -274,6 +276,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"ProtocolCredentialLastUsed":   MetaCmdTypeProtocolCredentialLastUsed,
 	"PreparePresentFlip":           MetaCmdTypePreparePresentFlip,
 	"BeginPresentFlip":             MetaCmdTypeBeginPresentFlip,
+	"DropClusterKeyAccept":         MetaCmdTypeDropClusterKeyAccept,
 }
 
 func (v MetaCmdType) String() string {
