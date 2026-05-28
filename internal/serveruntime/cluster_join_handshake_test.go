@@ -161,7 +161,7 @@ func TestB3_WireDEKKeeper_StandaloneModeAutoGenerates(t *testing.T) {
 // shared with the MetaJoinReceiver.
 
 // TestB1_VerifierWiredIntoStreamRouter exercises the production wiring shape
-// without spinning up QUIC: it drives the same code path bootWALAndForwarders
+// without spinning up QUIC: it drives the same code path bootWALAndForwardersPart1
 // builds (MetaJoinReceiver.WithHandshakeVerifier + MetaChallengeReceiver
 // registered on StreamRouter for StreamMetaJoinChallenge), then asserts that
 //
@@ -182,7 +182,7 @@ func TestB1_VerifierWiredIntoStreamRouter(t *testing.T) {
 	require.NoError(t, wireDEKKeeper(state, fsm))
 	require.NotNil(t, state.handshakeVerifier, "B1: wireDEKKeeper must construct the shared HandshakeVerifier")
 
-	// (2) Build the receivers exactly as bootWALAndForwarders does and
+	// (2) Build the receivers exactly as bootWALAndForwardersPart1 does and
 	// register them on a fresh StreamRouter. This mirrors the production
 	// path (boot_phases_forwarders.go:136-145).
 	router := transport.NewStreamRouter()

@@ -152,7 +152,37 @@ func Run(ctx context.Context, cfg Config) error {
 		recordBadgerStartupDecision(state, decision)
 	}
 
-	// PR 5: storage runtime.
+	// R-FSM-α: forwarder/coordinator CONSTRUCTION + keeper-population catch-up
+	// must run BEFORE WaitDEKReady so the meta-raft apply loop can install gen-0
+	// into the keeper. Handler registration is deferred to
+	// bootRegisterForwardHandlers (below, after bootShardService).
+	if err := bootWALAndForwardersPart1(ctx, state); err != nil {
+		return err
+	}
+	// R1 (narrow): gate here — the keeper is now guaranteed populated by the
+	// join / invite catch-up at the end of bootWALAndForwardersPart1 (the
+	// meta-raft apply loop, started in bootMetaRaftStart, installs gen-0).
+	// Bounded so a joiner that cannot install fails fast instead of deadlocking.
+	if state.dekKeeper != nil {
+		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
+		err := WaitDEKReady(readyCtx, state.dekKeeper)
+		readyCancel()
+		if err != nil {
+			return fmt.Errorf("DEK readiness: %w", err)
+		}
+	}
+	// Open the DEK-sealed logical/PITR WAL (decrypts existing records on open)
+	// AFTER the gate. Its sole consumer (wal.NewBackend) is in bootBackendWrap,
+	// which follows immediately.
+	if err := bootLogicalWALOpen(ctx, state); err != nil {
+		return err
+	}
+	if err := bootBackendWrap(ctx, state); err != nil {
+		return err
+	}
+
+	// R-FSM-α: PR 5 storage runtime now runs AFTER WaitDEKReady so the data
+	// encryptor it constructs sees a populated DEK keeper.
 	if err := bootShardService(ctx, state); err != nil {
 		return err
 	}
@@ -181,32 +211,16 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	// R-FSM-α: register data-shard RPC handlers now that shardSvc exists. Until
+	// this point, StreamRouter.Dispatch returns nil for the forwarder RPC types
+	// (graceful no-handler path), so any racing forwarded RPC sees a clean
+	// no-handler reply rather than a panic.
+	if err := bootRegisterForwardHandlers(state); err != nil {
+		return err
+	}
+
 	// PR-final: services + shutdown.
 	if err := bootBalancerAndGossip(ctx, state); err != nil {
-		return err
-	}
-	if err := bootWALAndForwarders(ctx, state); err != nil {
-		return err
-	}
-	// R1 (narrow): gate here — the keeper is now guaranteed populated by the
-	// join / invite catch-up at the end of bootWALAndForwarders (the meta-raft
-	// apply loop, started in bootMetaRaftStart, installs gen-0). Bounded so a
-	// joiner that cannot install fails fast instead of deadlocking.
-	if state.dekKeeper != nil {
-		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
-		err := WaitDEKReady(readyCtx, state.dekKeeper)
-		readyCancel()
-		if err != nil {
-			return fmt.Errorf("DEK readiness: %w", err)
-		}
-	}
-	// Open the DEK-sealed logical/PITR WAL (decrypts existing records on open)
-	// AFTER the gate. Its sole consumer (wal.NewBackend) is in bootBackendWrap,
-	// which follows immediately.
-	if err := bootLogicalWALOpen(ctx, state); err != nil {
-		return err
-	}
-	if err := bootBackendWrap(ctx, state); err != nil {
 		return err
 	}
 	if err := bootSrvOptsAndReceipt(ctx, state); err != nil {
@@ -275,8 +289,8 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Zero-CA §6 D-rev3 step 2: announce this node's own per-node SPKI into the
 	// peer registry. Placed LAST in the post-join sequence — after
-	// bootWALAndForwarders (forwarder installed) and after invite-join Phase-2
-	// membership promotion (also inside bootWALAndForwarders) — so this node is a
+	// bootWALAndForwardersPart1 (forwarder installed) and after invite-join Phase-2
+	// membership promotion (also inside bootWALAndForwardersPart1) — so this node is a
 	// functioning meta-raft member whose Propose reaches the leader. PSK-bridged:
 	// the booting node is still accepted via the PSK SPKI.
 	if err := bootSelfRegisterMember(ctx, state); err != nil {
@@ -295,7 +309,7 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Info().Str("peer", state.joinAddr).Msg("join complete — pending file removed")
 	}
 
-	// Zero-CA invite-join (W9b): the Phase-2 ACK in bootWALAndForwarders already
+	// Zero-CA invite-join (W9b): the Phase-2 ACK in bootWALAndForwardersPart1 already
 	// cleared the .invite-join-pending sentinel + shredded node.key.unsealed on
 	// success. Nothing left to clean here — the sentinel removal is the resume
 	// barrier, owned by the Phase-2 path.

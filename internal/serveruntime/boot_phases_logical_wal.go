@@ -13,18 +13,15 @@ import (
 // because the WAL is DEK-sealed and wal.OpenEncrypted decrypts existing records
 // during its open scan (wal.go scanMaxSeq). Its sole consumer is the PITR
 // backend wrap (wal.NewBackend) in bootBackendWrap, which runs immediately
-// after this phase. The data WAL is opened separately and earlier in
-// bootShardService and is NOT migrated in R1 (R-FSM owns it).
+// after this phase. The data WAL is opened separately and LATER in
+// bootShardService (R-FSM-α reorder); bootLogicalWALOpen does not consume
+// state.dataWAL, so the previous "data WAL must precede logical WAL" guard
+// (formerly in bootWALAndForwardersPart1) was removed — the ordering it
+// asserted was inverted by the reorder.
 //
 // Outputs: state.wal, state.walDir.
 // Cleanup: state.AddCleanup closes the WAL.
 func bootLogicalWALOpen(ctx context.Context, state *bootState) error {
-	// Invariant (preserved from the former bootWALAndForwarders): the data WAL
-	// must already be open+recovered (bootShardService) before the logical WAL
-	// opens. Self-enforced here so the ordering stays executable.
-	if state.dataWAL == nil {
-		return fmt.Errorf("data WAL must be opened before logical WAL")
-	}
 	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
 	// R1: prefer the gen-aware DEK seam. This phase runs after WaitDEKReady, so
 	// when the keeper is present it has an active generation and the 16-byte

@@ -13,7 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// bootWALAndForwarders builds the v0.0.7.1 PR-D ForwardSender +
+// bootWALAndForwardersPart1 builds the v0.0.7.1 PR-D ForwardSender +
 // ForwardReceiver, the meta-propose forward sender/receiver pair, the
 // meta-catalog read sender, the meta-join receiver, and the
 // ClusterCoordinator. Also performs the join-mode meta-join + initial Router
@@ -25,12 +25,12 @@ import (
 // CONSTRUCTION and the keeper-population catch-up (legacy PerformMetaJoin /
 // invite-Phase-2 bootInviteJoinPhase2 below), which MUST run BEFORE
 // WaitDEKReady so a joiner's empty keeper fills via the meta-raft apply loop
-// before the gate. forwardReceiver.Register STAYS here (the data WAL is
-// already open+recovered in bootShardService and is NOT migrated in R1).
+// before the gate. forwardReceiver.Register is now in bootRegisterForwardHandlers
+// (R-FSM-α) so bootShardService can run past WaitDEKReady.
 //
 // Inputs:  state.cfg.DataDir, state.quicTransport, state.metaRaft,
 //
-//	state.streamRouter, state.dgMgr, state.clusterRouter, state.shardSvc,
+//	state.streamRouter, state.dgMgr, state.clusterRouter,
 //	state.distBackend, state.nodeID, state.raftAddr, state.peers,
 //	state.effectiveEC, state.joinMode.
 //
@@ -39,9 +39,11 @@ import (
 //	state.metaForwardSender, state.metaReadSender, state.clusterCoord,
 //	state.seedGroups.
 //
-// Ordering: must run AFTER bootBalancerAndGossip (no direct dep, but matches
-// run.go); MUST run BEFORE bootLogicalWALOpen + bootBackendWrap.
-func bootWALAndForwarders(ctx context.Context, state *bootState) error {
+// Ordering: R-FSM-α moves this BEFORE WaitDEKReady (so the keeper-population
+// catch-up runs pre-gate) and BEFORE bootShardService (handler registration
+// happens later in bootRegisterForwardHandlers). MUST run BEFORE
+// bootLogicalWALOpen + bootBackendWrap.
+func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// Seed data groups from cluster size only. Operators no longer choose this:
 	// group count is placement headroom, not a durability policy.
 	clusterSize := 1 + len(state.peers)
@@ -98,7 +100,6 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	})
 	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr).
 		WithObjectIndexProposer(indexProposer)
-	state.forwardReceiver.Register(state.shardSvc)
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
@@ -300,5 +301,25 @@ func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeI
 		log.Info().Str("node_id", nodeID).Int("groups", len(missingGroups)).Int("seed_groups", state.seedGroups).Msg("seeded shard groups for joined node count")
 	}
 
+	return nil
+}
+
+// bootRegisterForwardHandlers registers the data-shard RPC handlers into the
+// previously-constructed forwardReceiver. Extracted from
+// bootWALAndForwardersPart1 in R-FSM-α so that handler registration can happen
+// AFTER bootShardService (which constructs state.shardSvc), allowing
+// bootShardService to run past WaitDEKReady.
+//
+// Prerequisites:
+//   - state.forwardReceiver must be set by bootWALAndForwardersPart1.
+//   - state.shardSvc must be set by bootShardService.
+func bootRegisterForwardHandlers(state *bootState) error {
+	if state.forwardReceiver == nil {
+		return fmt.Errorf("bootRegisterForwardHandlers: forwardReceiver is nil — bootWALAndForwardersPart1 must run first")
+	}
+	if state.shardSvc == nil {
+		return fmt.Errorf("bootRegisterForwardHandlers: shardSvc is nil — bootShardService must run first")
+	}
+	state.forwardReceiver.Register(state.shardSvc)
 	return nil
 }
