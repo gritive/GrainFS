@@ -246,6 +246,64 @@ func TestDEKKeeper_SealOpenWithAAD_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSealWithAADToMatchesSealWithAAD(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, KEKSize)
+	k, err := NewDEKKeeper(kek, testClusterID())
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	plain := []byte("secret payload")
+	aad := []byte("ctx|123")
+
+	ctTo, genTo, err := k.SealWithAADTo(make([]byte, 0, 256), plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithAADTo: %v", err)
+	}
+	gotTo, err := k.OpenWithAAD(ctTo, genTo, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD(To): %v", err)
+	}
+	if !bytes.Equal(gotTo, plain) {
+		t.Errorf("SealWithAADTo round-trip mismatch: %q vs %q", gotTo, plain)
+	}
+
+	ctAlloc, genAlloc, err := k.SealWithAAD(plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithAAD: %v", err)
+	}
+	if genAlloc != genTo {
+		t.Errorf("gen mismatch: alloc=%d to=%d", genAlloc, genTo)
+	}
+	if len(ctAlloc) != len(ctTo) {
+		t.Errorf("ciphertext len mismatch: alloc=%d to=%d", len(ctAlloc), len(ctTo))
+	}
+	gotAlloc, err := k.OpenWithAAD(ctAlloc, genAlloc, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD(alloc): %v", err)
+	}
+	if !bytes.Equal(gotAlloc, plain) {
+		t.Errorf("SealWithAAD round-trip mismatch: %q vs %q", gotAlloc, plain)
+	}
+}
+
+func TestSealWithAADToReusesCapacity(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, KEKSize)
+	k, err := NewDEKKeeper(kek, testClusterID())
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	buf := make([]byte, 0, 4096)
+	small := []byte("x")
+	aad := []byte("a")
+	ct, _, err := k.SealWithAADTo(buf, small, aad)
+	if err != nil {
+		t.Fatalf("SealWithAADTo: %v", err)
+	}
+	if &buf[:1][0] != &ct[:1][0] {
+		t.Errorf("SealWithAADTo reallocated despite sufficient capacity")
+	}
+}
+
 func TestDEKKeeper_OpenWithAAD_MismatchedAAD(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x22}, KEKSize)
 	k, _ := NewDEKKeeper(kek, testClusterID())
