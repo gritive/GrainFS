@@ -22,8 +22,8 @@ import (
 // JoinPendingFile is the sentinel written by an operator (or a test harness)
 // before boot and read at startup to perform a pending cluster join. Its
 // presence means the solo Raft state must be wiped so the node can bootstrap
-// cleanly in join mode. Exported so the cluster test harnesses can write it
-// without duplicating the path.
+// cleanly in join mode. (The e2e/colima harnesses mirror this path locally to
+// avoid an import cycle rather than importing the symbol.)
 const JoinPendingFile = ".join-pending"
 
 // wipeSoloRaftState renames meta_raft/, raft/, and shared-raft-log/ to
