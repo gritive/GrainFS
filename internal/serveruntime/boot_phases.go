@@ -84,7 +84,31 @@ func bootValidateConfig(state *bootState) error {
 		}
 	}
 
-	// clusterMode is always true: --cluster-key is required in all modes.
+	// metaDir/raftDir/priorState are computed BEFORE the --cluster-key gate so the
+	// genesis self-seed path (resolveOrSeedClusterKey, wired in below the gate
+	// block) can consult !priorState and the dir paths. priorState is captured
+	// before any DB phase (bootOpenMetaDB) populates <dataDir>/meta: true if meta
+	// or raft is non-empty on entry → restart. Consumed by wireDEKKeeper to refuse
+	// silent auto-regeneration.
+	state.metaDir = cfg.MetaDir
+	if state.metaDir == "" {
+		state.metaDir = filepath.Join(cfg.DataDir, "meta")
+	}
+	state.raftDir = filepath.Join(cfg.DataDir, "raft")
+	state.priorState = dirHasContent(state.metaDir) || dirHasContent(state.raftDir)
+
+	// Genesis self-seed: a fresh node with no --cluster-key / invite bundle /
+	// peers and an empty data dir generates and persists its own transport key,
+	// so operators never hand-carry one. Runs BEFORE the gate so the generated
+	// key satisfies ValidateClusterKey. Fail-closed on probe errors. See
+	// docs/superpowers/specs/2026-05-29-genesis-cluster-key-self-seed.md.
+	if err := resolveOrSeedClusterKey(state); err != nil {
+		return err
+	}
+	cfg = state.cfg // refresh: resolveOrSeedClusterKey may have set ClusterKey
+
+	// clusterMode is always true: --cluster-key is required in all modes
+	// (unless self-seeded or loaded from disk above).
 	state.clusterMode = true
 	if err := transport.ValidateClusterKey(cfg.ClusterKey); err != nil {
 		if errors.Is(err, transport.ErrEmptyClusterKey) {
@@ -102,16 +126,6 @@ func bootValidateConfig(state *bootState) error {
 		state.raftAddr = "127.0.0.1:0"
 	}
 
-	state.metaDir = cfg.MetaDir
-	if state.metaDir == "" {
-		state.metaDir = filepath.Join(cfg.DataDir, "meta")
-	}
-	state.raftDir = filepath.Join(cfg.DataDir, "raft")
-	// Capture prior-state signal BEFORE any DB phase (bootOpenMetaDB)
-	// has a chance to populate <dataDir>/meta. True if either meta or
-	// raft dir is non-empty on entry → restart of an existing node.
-	// Consumed by wireDEKKeeper to refuse silent auto-regeneration.
-	state.priorState = dirHasContent(state.metaDir) || dirHasContent(state.raftDir)
 	state.bootID = uuid.NewString()
 	state.roleRegistry = badgerrole.DefaultRegistry()
 	state.startupDecisions = make([]badgerrole.Decision, 0, 8)

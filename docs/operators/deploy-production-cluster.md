@@ -66,9 +66,12 @@ grainfs serve \
   --data /var/lib/grainfs-a \
   --node-id node-a \
   --raft-addr node-a:7001 \
-  --join-listen-addr node-a:7443 \
-  --cluster-key "$CLUSTER_KEY"
+  --join-listen-addr node-a:7443
 ```
+
+The genesis leader self-seeds its cluster key (no `--cluster-key`); see
+[`zero-ca-cluster-join.md`](zero-ca-cluster-join.md) for the self-seed semantics
+and the `grainfs_cluster_self_seeded` alerting caution.
 
 Mint a one-time invite:
 
