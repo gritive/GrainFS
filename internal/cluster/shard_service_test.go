@@ -463,11 +463,12 @@ func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) 
 	})
 }
 
-// TestShardService_ReadLocalShard_SingleBlobRoundTrip proves the scrubber
-// repair on-disk format — eccodec.EncodeShard over an EncryptPayload (single-
-// blob XAES) blob — is readable through both ReadLocalShard and the
-// ReadLocalShardAt range path. This is the regression the plain-GFSCRC1 read
-// removal could silently introduce (single-blob is NOT GFSENC2 but MUST decode).
+// TestShardService_ReadLocalShard_SingleBlobRoundTrip proves the legacy
+// single-blob XAES on-disk shape (eccodec.EncodeShard over an EncryptWithAAD
+// blob) is still readable on an encryptor!=nil service through both
+// ReadLocalShard and the ReadLocalShardAt range path. This is the regression the
+// plain-GFSCRC1 read removal could silently introduce (single-blob is NOT
+// GFSENC2 but MUST decode).
 func TestShardService_ReadLocalShard_SingleBlobRoundTrip(t *testing.T) {
 	enc := testEncryptor(t)
 	dir := t.TempDir()
@@ -478,9 +479,9 @@ func TestShardService_ReadLocalShard_SingleBlobRoundTrip(t *testing.T) {
 	aad := []byte(bucket + "/" + objKey + "/0")
 	plaintext := bytes.Repeat([]byte("single-blob xaes round trip payload "), 16)
 
-	// Build exactly what DistributedBackend.WriteShard (scrubber repair) writes:
-	// EncodeShard(EncryptPayload(data, aad)).
-	blob, err := svc.EncryptPayload(plaintext, aad)
+	// Build the legacy single-blob XAES on-disk shape (EncodeShard over an
+	// EncryptWithAAD blob) the encryptor!=nil read path still decodes for compat.
+	blob, err := enc.EncryptWithAAD(plaintext, aad)
 	require.NoError(t, err)
 	raw := eccodec.EncodeShard(blob)
 

@@ -33,7 +33,7 @@ func withTestWALDEK(tb clusterTestTB, keeper *encrypt.DEKKeeper, clusterID []byt
 // newTestDistributedBackendDEK mirrors newTestDistributedBackend but wires the
 // ShardService with WithShardDEKKeeper (and no static encryptor), so
 // svc.encryptor is nil — the production shape after PR #631. This reproduces
-// the at-rest hole the scrubber-repair fix closes: EncryptPayload would have
+// the at-rest hole the scrubber-repair fix closes: the pre-fix path would have
 // returned plaintext under this shape.
 func newTestDistributedBackendDEK(t *testing.T) *DistributedBackend {
 	t.Helper()
@@ -104,7 +104,7 @@ func newTestDistributedBackendDEK(t *testing.T) *DistributedBackend {
 
 // TestWriteShardSealsRepairedShardWithDEK asserts the scrubber-repair write path
 // seals shards as GFSENC3 ciphertext via the DEK seam, not plaintext — closing
-// the P1 at-rest hole where EncryptPayload returned plaintext (encryptor nil).
+// the P1 at-rest hole where the pre-fix path returned plaintext (encryptor nil).
 func TestWriteShardSealsRepairedShardWithDEK(t *testing.T) {
 	b := newTestDistributedBackendDEK(t) // production-shaped: WithShardDEKKeeper, encryptor nil
 	bucket, key, versionID := "bkt", "obj", "v0000000000000001"
