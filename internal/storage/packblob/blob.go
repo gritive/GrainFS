@@ -31,9 +31,29 @@ const (
 )
 
 var (
-	blobReadKeyPool     = make(chan []byte, 256)
-	blobReadPayloadPool = make(chan []byte, 256)
+	blobReadKeyPool      = make(chan []byte, 256)
+	blobReadPayloadPool  = make(chan []byte, 256)
+	blobAppendSealedPool = make(chan []byte, 256)
 )
+
+func getBlobAppendSealedBuf() []byte {
+	select {
+	case b := <-blobAppendSealedPool:
+		return b[:0]
+	default:
+		return nil
+	}
+}
+
+func putBlobAppendSealedBuf(b []byte) {
+	if cap(b) == 0 {
+		return
+	}
+	select {
+	case blobAppendSealedPool <- b[:0]:
+	default:
+	}
+}
 
 // BlobStore manages append-only blob files for packing small objects.
 type BlobStore struct {
@@ -186,12 +206,18 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	offset := bs.activeOff
 	if bs.segEnc != nil {
 		flags |= flagEncrypted
-		sealed, _, err := bs.segEnc.Seal(encrypt.DomainShard,
+		sealedBuf := getBlobAppendSealedBuf()
+		// Closure (not value-capture): the rotate branch below reassigns
+		// payload to a re-sealed buffer, so we must return whatever payload
+		// is at function exit. payload is fully written to bs.active before
+		// we return, so recycling it after is safe.
+		defer func() { putBlobAppendSealedBuf(payload) }()
+		sealed, _, err := bs.segEnc.SealTo(sealedBuf[:0], encrypt.DomainShard,
 			blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
+		payload = sealed
 		if err != nil {
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 		}
-		payload = sealed
 	}
 
 	entrySize := int64(entryOverhead + len(key) + len(payload))
@@ -203,12 +229,12 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 		}
 		offset = bs.activeOff
 		if bs.segEnc != nil {
-			sealed, _, err := bs.segEnc.Seal(encrypt.DomainShard,
+			sealed, _, err := bs.segEnc.SealTo(payload[:0], encrypt.DomainShard,
 				blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
+			payload = sealed
 			if err != nil {
 				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 			}
-			payload = sealed
 			entrySize = int64(entryOverhead + len(key) + len(payload))
 		}
 	}
