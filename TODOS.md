@@ -19,30 +19,6 @@ Work these in order. Do not run them in parallel.
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
      no legacy ciphertext to support). Current format = **8**.
-   - LANDED (reconciled 2026-05-29 against origin/master): the functional KEK→DEK
-     migration is **complete** — every production at-rest consumer now seals through
-     the `DataEncryptor`/DEK seam:
-       - R1 (boot gate + logical-WAL/packblob/PUT-pipeline→DEK; `encryption.rotate-dek`
-         gated) — PR #596 v0.0.393.0
-       - R2 (IAM SA + BucketUpstream secrets→DEK, `DomainIAMCredential`, two-pass
-         restore) — PR #605 v0.0.401.0
-       - R-FSM (data-group FSM value sealing + data WAL→DEK) — PR #608
-       - cluster-config secrets→DEK — PR #611 v0.0.408.0
-       - static at-rest **boot-glue** D-cut (RawEncryptionKey / `--encryption-key-file` /
-         LoadOrCreateEncryptionKeyWithRaw removed; node identity sealed under KEK) —
-         PR #631 v0.0.428.0 + #619/#623/#627/#629
-       - raft log store at-rest encryption (the separate-spec metadata copy; KEK-derived
-         `raft-store.key.enc`, not the DEK) — PR #635 v0.0.432.0
-       - datawal dek-generation persisted + namespace split — PR #637/#640 v0.0.434.0/.436.0
-   - [P1 SECURITY] scrubber-repair plaintext hole — **FIXED 2026-05-29 (this worktree).**
-     `DistributedBackend.WriteShard` now seals via `ShardService.EncodeEncryptedShardBuffer`
-     (GFSENC3/DEK seam), so scrubber-repaired shards are DEK-encrypted at rest like normally-written
-     shards. WriteShard errors when `shardSvc==nil` or path is not under a shard data dir (no
-     plaintext fallback). Covered by `TestWriteShardSealsRepairedShardWithDEK` (production-shaped
-     DEK backend) + the cluster e2e (`cluster_scrubber_test.go` asserts the repaired shard is
-     ciphertext on disk). Follow-up: e2e covers cluster auto-repair only; no single-node scrub
-     auto-repair e2e harness exists, so single-node repair-to-ciphertext relies on the unit test —
-     add a single-node scrub-repair e2e when a trigger/shard-path helper lands.
    - [ ] **[P2] shard-pack repair shadowing (PRE-EXISTING, orthogonal to AAD-coherence).**
      `readShardIntegrity` prefers `ReadLocalShardFromPack`, but `WriteShard` writes a standalone
      `shard_N` FILE. When a *packed* shard entry is corrupt/stale, repair writes a file that the
@@ -58,20 +34,14 @@ Work these in order. Do not run them in parallel.
      `putObjectEC`/`writeLocalShard` write still maps the raw key into the path without a containment
      check. Fix at the S3 key boundary (reject/normalize `..` segments) or add containment to
      `writeLocalShard`. Its own slice — touches the PUT path, not just the scrubber.
-   - **Gate-fix slice — DONE 2026-05-29 (ShardService.encryptor retirement, this worktree).**
-     The vestigial `ShardService.encryptor != nil` runtime gates are gone: the putPipeline
-     dispatch gate (`backend.go`) now keys off an explicit `putPipelineEnabled` bool (boot wires
-     it `false` = dormant pending F1; only the integration test enables it), and the WAL
-     raw-payload sizing now passes a constant `false`. The static `encryptor` field + `WithEncryptor`
-     option were deleted and all ~97 test fixtures migrated to the DEK keeper (full WithEncryptor→DEK
-     migration). Behavior-preserving in prod (prod always had `encryptor==nil`).
-     - **Still DEFERRED: putPipeline prod REACTIVATION (F1 durability).** putPipeline acks on early
-       K-shard quorum (`putpipeline/pipeline.go:240`) + defers fsync to a batched WAL commit
-       (`drive.go` `skipFsync`, `commit.go:120`), whereas the spooled path flushes the data WAL
-       synchronously before the raft metadata propose. Verify PutShard does not let metadata commit
-       before shard durability before enabling in prod. Its own slice.
-   - [ ] **R3 static-residue deletion (remaining residue; AFTER any F1 reactivation).** The
-     ShardService static `encryptor` + `WithEncryptor` are DONE (above). Remaining dead/legacy
+   - [ ] **putPipeline prod reactivation (F1 durability).** putPipeline dispatch is wired but
+     dormant in prod (gate `putPipelineEnabled` defaults false; only the integration test enables
+     it). Before enabling in prod: putPipeline acks on early K-shard quorum
+     (`putpipeline/pipeline.go:240`) + defers fsync to a batched WAL commit (`drive.go` `skipFsync`,
+     `commit.go:120`), whereas the spooled path flushes the data WAL synchronously before the raft
+     metadata propose. Verify PutShard does not let metadata commit before shard durability before
+     enabling. Its own slice.
+   - [ ] **R3 static-residue deletion (remaining residue).** Remaining dead/legacy
      static residue still to remove in its own slice(s): `storage.EncryptorAdapter`/
      `NewEncryptorAdapter` (still used by `fsm_values.go`, `pitr.go`, `packblob/blob.go`,
      `storage/local.go` — migrate those first), `putpipeline/pipeline.go` `cfg.Encryptor` fallback,
