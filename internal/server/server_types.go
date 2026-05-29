@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -66,6 +67,15 @@ type RaftSnapshotter interface {
 	RaftSnapshotStatus() (raft.SnapshotStatus, error)
 }
 
+// PolicyAuthorizer is the policy seam that Layer 1 (S3 iamCheck) + all Iceberg
+// authz paths funnel through. *s3auth.Authorizer satisfies it; in production it is
+// wrapped by *pdp.Decorator so the external PDP is chained with deny-override on the
+// S3/Iceberg data plane. Only Authorize is needed here (AuthorizePrincipal is a
+// control-plane-only entry, not called on this field).
+type PolicyAuthorizer interface {
+	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
+}
+
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
 	backend           storage.Backend
@@ -82,7 +92,7 @@ type Server struct {
 	iamStore          *iam.Store
 	iamAudit          *iam.AuditLogger
 	authz             *s3auth.RequestAuthorizer
-	policyAuthorizer  *s3auth.Authorizer
+	policyAuthorizer  PolicyAuthorizer
 	mutations         *MutationBroker
 
 	hertz       *server.Hertz

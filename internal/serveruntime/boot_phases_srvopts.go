@@ -19,6 +19,7 @@ import (
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/iam/pdp"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
@@ -185,7 +186,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// policy.Evaluate. Both iamPolicyStores and cfgStore are guaranteed non-nil
 	// by the fail-fast guards at the top of this function.
 	policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
-	srvOpts = append(srvOpts, server.WithPolicyAuthorizer(policyAuthz))
+	// Always install the PDP decorator on the S3/Iceberg data plane; it is a pure
+	// pass-through unless iam.pdp + data_plane.enabled are set (read per request
+	// from the cfg store), so hot-enable works with no dependency rebuild.
+	dataPlanePDP := pdp.NewDecorator(policyAuthz, state.cfgStore, ensurePDPTokenSource(state), "data_plane")
+	srvOpts = append(srvOpts, server.WithPolicyAuthorizer(dataPlanePDP))
 	if state.balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(NewBalancerInfoAdapter(state.balancerProposer)))
 	}

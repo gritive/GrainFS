@@ -216,3 +216,22 @@ func TestParseConfig_RemoteTransport(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfigDataPlaneEnabled(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"https://pdp.example:8443","data_plane":{"enabled":true}}`))
+	require.NoError(t, err)
+	require.True(t, c.DataPlane.Enabled)
+}
+
+func TestParseConfigDataPlaneDefaultsFalse(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"enabled":true,"endpoint":"https://pdp.example:8443"}`))
+	require.NoError(t, err)
+	require.False(t, c.DataPlane.Enabled)
+}
+
+func TestParseConfigDataPlaneParsedWhenDisabled(t *testing.T) {
+	// staged-config: data_plane parsed even when top-level disabled
+	c, err := ParseConfig([]byte(`{"enabled":false,"data_plane":{"enabled":true}}`))
+	require.NoError(t, err)
+	require.True(t, c.DataPlane.Enabled)
+}

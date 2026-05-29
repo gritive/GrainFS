@@ -58,6 +58,7 @@ type Config struct {
 	TLS           TLSConfig
 	SSRF          SSRFConfig
 	Cache         CacheConfig
+	DataPlane     DataPlaneConfig
 }
 
 // TLSConfig is the parsed, validated iam.pdp.tls configuration.
@@ -71,14 +72,22 @@ type SSRFConfig struct {
 	AllowPrivate bool
 }
 
+// DataPlaneConfig is the parsed iam.pdp.data_plane configuration. When Enabled,
+// the data_plane-scope decorator enforces PDP on S3/Iceberg object operations
+// (in addition to the top-level Enabled gate). Default false (secure-by-default).
+type DataPlaneConfig struct {
+	Enabled bool
+}
+
 type rawConfig struct {
-	Enabled       bool      `json:"enabled"`
-	Endpoint      string    `json:"endpoint"`
-	Timeout       string    `json:"timeout"`
-	FailurePolicy string    `json:"failure_policy"`
-	TLS           *rawTLS   `json:"tls"`
-	SSRF          *rawSSRF  `json:"ssrf"`
-	Cache         *rawCache `json:"cache"`
+	Enabled       bool          `json:"enabled"`
+	Endpoint      string        `json:"endpoint"`
+	Timeout       string        `json:"timeout"`
+	FailurePolicy string        `json:"failure_policy"`
+	TLS           *rawTLS       `json:"tls"`
+	SSRF          *rawSSRF      `json:"ssrf"`
+	Cache         *rawCache     `json:"cache"`
+	DataPlane     *rawDataPlane `json:"data_plane"`
 }
 
 type rawTLS struct {
@@ -88,6 +97,10 @@ type rawTLS struct {
 
 type rawSSRF struct {
 	AllowPrivate bool `json:"allow_private"`
+}
+
+type rawDataPlane struct {
+	Enabled bool `json:"enabled"`
 }
 
 type rawCache struct {
@@ -159,6 +172,10 @@ func ParseConfig(raw []byte) (Config, error) {
 			}
 			c.TLS.CAPEM = rc.TLS.CAPEM
 		}
+	}
+
+	if rc.DataPlane != nil {
+		c.DataPlane.Enabled = rc.DataPlane.Enabled
 	}
 
 	if !c.Enabled {

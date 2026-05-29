@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
@@ -36,6 +38,11 @@ const (
 const genericDenyMsg = "pdp_deny: denied by external policy"
 
 const schemaVersion = 1
+
+// scopeDataPlane is the scope label for the S3/Iceberg object data-plane
+// decorator. Only this scope infers Request.Protocol from the action prefix;
+// control-plane scopes (admin | protocol_credential) keep the literal "admin".
+const scopeDataPlane = "data_plane"
 
 // ConfigReader is the minimal view of the config store the decorator needs.
 type ConfigReader interface {
@@ -86,6 +93,18 @@ type Decorator struct {
 	// and updates this field to avoid JSON unmarshal on every request.
 	parsed atomic.Pointer[parsedConfig]
 
+	// released: lock-free fast path for the disabled hot path — once dropped,
+	// disabled requests Load()==true and skip the exclusive d.mu lock. refresh()
+	// clears it on (re)build. Disabled path still takes the config RLock via GetString
+	// (Restore-coherence; not eliminable — this is NOT a bare "lock-free" path).
+	released atomic.Bool
+
+	// sf collapses concurrent identical cache misses into one PDP round trip (D2).
+	// Keyed on cacheKey + configGen so a config flip cannot collapse across
+	// generations. The detached flight in consult() decouples the shared round
+	// trip from any single waiter's ctx; per-waiter cancel is the DoChan select.
+	sf singleflight.Group
+
 	mu       sync.Mutex
 	client   *Client
 	clientID string
@@ -115,7 +134,22 @@ func NewDecorator(inner innerAuthorizer, cfg ConfigReader, tokens TokenSource, s
 // actor presented to the PDP is the named service account.
 func (d *Decorator) Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult {
 	inner := d.inner.Authorize(ctx, saID, bucket, ctxReq)
+	// Disabled-path short-circuit BEFORE principal.ServiceAccount(saID): the actor
+	// escapes to the heap inside chain (toWire→req→client.Authorize), so passing it
+	// here would heap-allocate on every call, including the 0-alloc disabled hot path.
+	// chain keeps its own gate for the AuthorizePrincipal entry.
+	if cfg, ok, err := d.loadConfig(); !ok || err != nil || d.disabledForScope(cfg) {
+		d.release()
+		return inner
+	}
 	return d.chain(ctx, principal.ServiceAccount(saID), saID, inner, ctxReq)
+}
+
+// disabledForScope reports whether the PDP must be skipped for this decorator's
+// scope: control-plane scopes gate on cfg.Enabled alone; the data_plane scope
+// additionally requires cfg.DataPlane.Enabled.
+func (d *Decorator) disabledForScope(cfg Config) bool {
+	return !cfg.Enabled || (d.scope == scopeDataPlane && !cfg.DataPlane.Enabled)
 }
 
 // AuthorizePrincipal chains the PDP after the GrainFS principal authorizer. The
@@ -161,7 +195,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		d.release()
 		return inner
 	}
-	if !cfg.Enabled {
+	if d.disabledForScope(cfg) {
 		d.release()
 		return inner
 	}
@@ -171,16 +205,24 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		return inner
 	}
 
+	protocol := "admin"
+	am := string(actor.Kind)
+	ts := targetSA
+	if d.scope == scopeDataPlane {
+		protocol = protocolFromAction(ctxReq.Action)
+		am = authMethod(actor)
+		ts = "" // data-plane op acts on an object, not an SA (spec D5)
+	}
 	req := Request{
 		SchemaVersion: schemaVersion,
 		RequestID:     newRequestID(),
 		Principal:     toWire(actor),
 		Action:        ctxReq.Action,
 		Resource:      ctxReq.Resource,
-		Protocol:      "admin",
+		Protocol:      protocol,
 		Context: map[string]string{
-			"auth_method": string(actor.Kind),
-			"target_sa":   targetSA,
+			"auth_method": am,
+			"target_sa":   ts,
 			"route":       ctxReq.Action,
 		},
 	}
@@ -231,15 +273,17 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	// without consulting the PDP and without an audit line; a stale entry is held
 	// for a possible grace-serve in the failure branch below.
 	var (
-		key   string
 		entry cacheEntry
 		state cacheState
 	)
+	// cacheKey is computed unconditionally (deterministic in req) so the
+	// singleflight collapse key exists even when the cache is disabled; the
+	// cache-nil branch just skips Lookup/Put.
+	key := cacheKey(req)
 	if cache != nil {
 		// PDPCacheEntries is best-effort/approximate: it is updated on put, release,
 		// and refresh, NOT on the lazy eviction that Lookup may perform here (Len()
 		// locks every shard, so we do not call it per lookup).
-		key = cacheKey(req)
 		entry, state = cache.Lookup(key, cfg.Cache.GraceTTL, d.now())
 		if state == cacheFresh {
 			d.mCache.WithLabelValues("hit", entry.decision).Inc()
@@ -250,31 +294,88 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 	}
 
-	// The decorator owns the per-request deadline so a runtime iam.pdp.timeout
-	// change takes effect without rebuilding the cached client. Deriving callCtx
-	// from the FRESH cfg here (not in the client) is what makes the timeout
-	// track hot-reload.
-	callCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	// sfKey includes configGen so a config flip cannot collapse across generations
+	// (cacheKey omits failure_policy/endpoint/token-gen/timeout). The cache itself
+	// still keys on plain cacheKey; only the collapse key is generation-scoped.
+	// Grace coherence: leader computes grace from its entry/state; collapsed waiters
+	// share this sfKey so they looked up the same key — at the grace boundary their
+	// captured state may differ slightly, but the divergence is sub-ms and always
+	// security-equivalent-or-more-restrictive. Cancel/audit delta: the detached flight
+	// completes even if the sole waiter cancels, so a canceled request adds one extra
+	// completion audit/mRequests row on top of its cancel row (observability-only).
+	sfKey := key + "\x00" + configGen(cfg, tokenGen)
+	ch := d.sf.DoChan(sfKey, func() (any, error) {
+		return d.consult(req, cfg, fp, key, cache, entry, state, actor, ctxReq, client), nil
+	})
+	// canceledDeny restores master's invariant that a canceled request never adopts
+	// an allow (incl. fail-open). The ctx.Done() arm catches a cancel that wins the
+	// select race; the post-<-ch check is defense-in-depth for the case where the
+	// flight result won the select but the inbound ctx is ALREADY canceled (a select
+	// between two ready channels picks randomly). The invariant is tested at its two
+	// black-box-reachable points — TestDecoratorCanceledCtxDeniesEvenFailOpen
+	// (pre-call arm) and TestDecoratorSingleflightPerWaiterCancel (ctx.Done arm); the
+	// post-<-ch arm is not black-box reachable today (the pre-call check absorbs early
+	// cancels and a blocked flight lands on ctx.Done), so it is correct-by-inspection
+	// defense-in-depth, NOT test-covered. S3 passes context.Background() (never
+	// cancels), but the deferred "thread ctx through IAMChecker" follow-up would make
+	// this arm reachable on S3 — close it now rather than ship a latent fail-open.
+	canceledDeny := func() policy.EvalResult {
+		errType := ErrTypeTransport
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			errType = ErrTypeTimeout
+		}
+		d.mRequests.WithLabelValues("error", errType, fp).Inc()
+		d.audit(req, actor, ctxReq, "deny", errType, "request canceled")
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
+	}
+	var r consultResult
+	select {
+	case <-ctx.Done():
+		return canceledDeny()
+	case res := <-ch:
+		if ctx.Err() != nil {
+			return canceledDeny()
+		}
+		r = res.Val.(consultResult)
+	}
+	if r.useInner {
+		out := inner
+		if r.reason == layerFailOpen {
+			out.Reason = annotate(out.Reason, layerFailOpen)
+		}
+		return out
+	}
+	return policy.EvalResult{Decision: r.decision, Reason: r.reason}
+}
+
+// consultResult is the outcome of one PDP consult (miss path). useInner=true means
+// "return the GrainFS inner result" (allow / fail-open / grace-allow); otherwise
+// Decision/Reason carry the PDP/grace/failure/cancel outcome.
+type consultResult struct {
+	useInner bool
+	decision policy.Decision
+	reason   string
+}
+
+// consult performs the PDP round trip + grace + failure policy + caching. It runs
+// inside the singleflight flight, shared by collapsed waiters; callCtx is DETACHED
+// from any single waiter's inbound ctx so one waiter's cancel cannot poison the
+// shared round trip (per-waiter cancel is the DoChan select in chain). The decorator
+// still owns the per-request deadline (cfg.Timeout) so a runtime iam.pdp.timeout
+// change takes effect without rebuilding the cached client.
+func (d *Decorator) consult(req Request, cfg Config, fp, key string,
+	cache *decisionCache, entry cacheEntry, state cacheState,
+	actor principal.Principal, ctxReq policy.RequestContext, client *Client) consultResult {
+
+	// DETACHED: a single waiter's cancel must not poison the shared flight; per-waiter
+	// cancel is the DoChan select in chain(). S3 passes context.Background() anyway.
+	callCtx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
 	start := time.Now()
 	_, errType, err := client.Authorize(callCtx, req)
 	d.mDuration.Observe(time.Since(start).Seconds())
-
-	// Caller-canceled takes precedence over the failure policy: a fail-open
-	// config must not turn an abandoned request into an allow. We check the
-	// ORIGINAL inbound ctx (not callCtx): a client-timeout fires callCtx while
-	// the inbound ctx stays live, so it falls through to the failure policy
-	// below; only a genuine inbound cancel/deadline lands here.
-	if ctx.Err() != nil {
-		cancelErrType := ErrTypeTransport
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			cancelErrType = ErrTypeTimeout
-		}
-		d.mRequests.WithLabelValues("error", cancelErrType, fp).Inc()
-		d.audit(req, actor, ctxReq, "deny", cancelErrType, "request canceled")
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
-	}
+	// (4a post-call inbound ctx.Err() block REMOVED — the select owns per-waiter cancel.)
 
 	var de *DenyError
 	if errors.As(err, &de) {
@@ -287,7 +388,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			}
 		}
 		d.audit(req, actor, ctxReq, "deny", "", layerDeny+": "+de.Reason)
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
+		return consultResult{decision: policy.DecisionDeny, reason: genericDenyMsg}
 	}
 
 	if errType != "" {
@@ -300,7 +401,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			log.Warn().Str("event", "iam.pdp").Str("error_type", errType).
 				Msg("iam.pdp: dial blocked by SSRF egress filter — hard deny")
 			d.audit(req, actor, ctxReq, "deny", errType, "ssrf_blocked: egress filter")
-			return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
+			return consultResult{decision: policy.DecisionDeny, reason: layerFailClosed}
 		}
 		// Grace first: a PDP failure with a stale-but-within-grace cached decision
 		// serves that decision rather than applying the failure policy.
@@ -308,9 +409,9 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			d.mCache.WithLabelValues("grace", entry.decision).Inc()
 			d.audit(req, actor, ctxReq, entry.decision, errType, layerGraceServed)
 			if entry.decision == DecisionDeny {
-				return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
+				return consultResult{decision: policy.DecisionDeny, reason: genericDenyMsg}
 			}
-			return inner
+			return consultResult{useInner: true}
 		}
 		// No grace served: this consult falls through to the failure policy, so
 		// count exactly one miss (covers both fail-open and fail-closed).
@@ -319,12 +420,10 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 		if cfg.FailurePolicy == FailureOpen {
 			d.audit(req, actor, ctxReq, "allow", errType, layerFailOpen)
-			out := inner
-			out.Reason = annotate(out.Reason, layerFailOpen)
-			return out
+			return consultResult{useInner: true, reason: layerFailOpen}
 		}
 		d.audit(req, actor, ctxReq, "deny", errType, layerFailClosed)
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
+		return consultResult{decision: policy.DecisionDeny, reason: layerFailClosed}
 	}
 
 	d.mRequests.WithLabelValues("allow", "", fp).Inc()
@@ -336,7 +435,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 	}
 	d.audit(req, actor, ctxReq, "allow", "", layerAllow)
-	return inner
+	return consultResult{useInner: true}
 }
 
 // refresh reconciles the cached client and decision cache against cfg under a
@@ -376,6 +475,10 @@ func (d *Decorator) refresh(cfg Config, token, tokenGen string) (*Client, *decis
 		d.mGauge.Set(0)
 	}
 
+	// (Re)build complete with a non-nil client: re-arm release()'s fast path so a
+	// subsequent disable performs the cleanup once more instead of short-circuiting.
+	d.released.Store(false)
+
 	return d.client, d.cache
 }
 
@@ -391,12 +494,18 @@ func clientIdentity(cfg Config, tokenGen string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// release closes and drops the cached client AND the decision cache (used when
-// PDP is unconfigured/invalid/disabled so a hot enable->disable frees the idle
-// unix-socket connection and cannot reuse stale decisions on re-enable).
+// release closes the cached client + drops the decision cache. The released atomic
+// is a LOCK-FREE FAST PATH for the steady-state disabled hot path (Load()==true ->
+// return, no d.mu). The cleanup body stays under d.mu and is idempotent. BENIGN
+// WINDOW: a concurrent re-enable (refresh: Store(false)) can interleave so a disable
+// request that saw the OLD released==true skips the lock, leaving an idle client live
+// under a disabled config for one request cycle — healed by the next disabled request.
+// This changes NO decision: the disabled gate returns inner and never reads d.client.
 // cacheGen is reset so a re-enable with identical config rebuilds the cache.
-// Idempotent.
 func (d *Decorator) release() {
+	if d.released.Load() {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.client != nil {
@@ -407,6 +516,7 @@ func (d *Decorator) release() {
 	d.cache = nil
 	d.cacheGen = ""
 	d.mGauge.Set(0)
+	d.released.Store(true)
 }
 
 // configGen returns a stable hash of the config inputs that, when changed, must
@@ -461,6 +571,25 @@ func annotate(reason, marker string) string {
 		return marker
 	}
 	return reason + "; " + marker
+}
+
+// protocolFromAction returns the namespace prefix of a policy action ("s3" for
+// "s3:GetObject"). Data_plane scope only — control plane keeps literal "admin"
+// (its actions are grainfs:*, whose prefix is the IAM action namespace, not a protocol).
+func protocolFromAction(action string) string {
+	if i := strings.IndexByte(action, ':'); i > 0 {
+		return action[:i]
+	}
+	return "admin"
+}
+
+// authMethod maps the actor to the PDP auth_method; an empty-ID service account
+// is the anonymous S3 actor (saID==""), which presents "anonymous".
+func authMethod(actor principal.Principal) string {
+	if actor.Kind == principal.KindServiceAccount && actor.ID == "" {
+		return "anonymous"
+	}
+	return string(actor.Kind)
 }
 
 // newRequestID returns a time-ordered request id, falling back to an empty

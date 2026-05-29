@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.465.0] - 2026-05-29
+
+### Added
+
+- External PDP data-plane enforcement for S3 and Iceberg: when `iam.pdp.enabled`
+  and `iam.pdp.data_plane.enabled` are both set, GrainFS consults the external PDP
+  with deny-override after IAM allows an object/bucket operation, so an external
+  authority can veto object/bucket access. Disabled by default. Concurrent
+  duplicate authorization misses for the same key collapse to a single PDP call
+  (singleflight). S3 and Iceberg only; NFS/9P/NBD are not covered.
+
+### Changed
+
+- `iam.pdp` `failure_policy` is shared across the control and data planes: setting
+  `failure_policy: open` fail-opens both. A per-scope failure policy is a follow-up.
+
 ## [0.0.461.0] - 2026-05-29
 
 ### Fixed
