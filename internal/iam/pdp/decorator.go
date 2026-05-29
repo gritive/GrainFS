@@ -2,7 +2,10 @@ package pdp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -19,10 +22,11 @@ const ConfigKey = "iam.pdp"
 
 // Layer markers recorded in the audit log and surfaced in EvalResult.Reason.
 const (
-	layerDeny       = "pdp_deny"
-	layerAllow      = "pdp_allow"
-	layerFailOpen   = "pdp_skipped_fail_open"
-	layerFailClosed = "pdp_unavailable"
+	layerDeny        = "pdp_deny"
+	layerAllow       = "pdp_allow"
+	layerFailOpen    = "pdp_skipped_fail_open"
+	layerFailClosed  = "pdp_unavailable"
+	layerGraceServed = "pdp_grace_served"
 )
 
 // genericDenyMsg is the user-facing reason for a PDP deny. The PDP-supplied raw
@@ -53,14 +57,20 @@ type Decorator struct {
 	inner innerAuthorizer
 	cfg   ConfigReader
 
+	// now is the clock used for cache TTL/grace decisions. Defaults to time.Now;
+	// tests override it for deterministic expiry.
+	now func() time.Time
+
 	mu         sync.Mutex
 	client     *Client
 	clientSock string
+	cache      *decisionCache
+	cacheGen   string
 }
 
 // NewDecorator wraps inner with a per-request PDP chain driven by cfg.
 func NewDecorator(inner innerAuthorizer, cfg ConfigReader) *Decorator {
-	return &Decorator{inner: inner, cfg: cfg}
+	return &Decorator{inner: inner, cfg: cfg, now: time.Now}
 }
 
 // Authorize chains the PDP after the GrainFS service-account authorizer. The
@@ -85,17 +95,17 @@ func (d *Decorator) AuthorizePrincipal(ctx context.Context, p principal.Principa
 func (d *Decorator) chain(ctx context.Context, actor principal.Principal, targetSA string, inner policy.EvalResult, ctxReq policy.RequestContext) policy.EvalResult {
 	raw, ok := d.cfg.GetString(ConfigKey)
 	if !ok {
-		d.releaseClient() // unconfigured: free any client left over from when it was enabled
-		return inner      // unconfigured: pure pass-through
+		d.release()  // unconfigured: free any client/cache left over from when it was enabled
+		return inner // unconfigured: pure pass-through
 	}
 	cfg, err := ParseConfig([]byte(raw))
 	if err != nil {
 		log.Warn().Err(err).Str("event", "iam.pdp").Msg("iam.pdp: invalid config, treating as disabled")
-		d.releaseClient()
+		d.release()
 		return inner
 	}
 	if !cfg.Enabled {
-		d.releaseClient()
+		d.release()
 		return inner
 	}
 
@@ -119,7 +129,30 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	}
 
 	fp := string(cfg.FailurePolicy)
-	client := d.clientFor(cfg)
+	client, cache := d.refresh(cfg)
+
+	// Cache lookup slots between req-build and the PDP call. A fresh hit returns
+	// without consulting the PDP and without an audit line; a stale entry is held
+	// for a possible grace-serve in the failure branch below.
+	var (
+		key   string
+		entry cacheEntry
+		state cacheState
+	)
+	if cache != nil {
+		key = cacheKey(req)
+		entry, state = cache.Lookup(key, cfg.Cache.GraceTTL, d.now())
+		if state == cacheFresh {
+			metrics.PDPCacheTotal.WithLabelValues("hit", entry.decision).Inc()
+			if entry.decision == DecisionDeny {
+				return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
+			}
+			return inner
+		}
+		// PR-8: count the miss exactly once here (miss or stale), regardless of
+		// the PDP outcome below.
+		metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+	}
 
 	// The decorator owns the per-request deadline so a runtime iam.pdp.timeout
 	// change takes effect without rebuilding the cached client. Deriving callCtx
@@ -150,12 +183,26 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	var de *DenyError
 	if errors.As(err, &de) {
 		metrics.PDPRequestsTotal.WithLabelValues("deny", "", fp).Inc()
+		if cache != nil && cfg.Cache.TTLDeny > 0 {
+			cache.Put(key, DecisionDeny, de.Reason, cfg.Cache.TTLDeny, d.now())
+			metrics.PDPCacheEntries.Set(float64(cache.Len()))
+		}
 		d.audit(req, actor, ctxReq, "deny", "", layerDeny+": "+de.Reason)
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
 	}
 
 	if errType != "" {
 		metrics.PDPRequestsTotal.WithLabelValues("error", errType, fp).Inc()
+		// Grace first: a PDP failure with a stale-but-within-grace cached decision
+		// serves that decision rather than applying the failure policy.
+		if cache != nil && cfg.Cache.GraceTTL > 0 && state == cacheStale {
+			metrics.PDPCacheTotal.WithLabelValues("grace", entry.decision).Inc()
+			d.audit(req, actor, ctxReq, entry.decision, errType, layerGraceServed)
+			if entry.decision == DecisionDeny {
+				return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
+			}
+			return inner
+		}
 		if cfg.FailurePolicy == FailureOpen {
 			d.audit(req, actor, ctxReq, "allow", errType, layerFailOpen)
 			out := inner
@@ -167,16 +214,25 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	}
 
 	metrics.PDPRequestsTotal.WithLabelValues("allow", "", fp).Inc()
+	if cache != nil && cfg.Cache.TTLAllow > 0 {
+		cache.Put(key, DecisionAllow, "", cfg.Cache.TTLAllow, d.now())
+		metrics.PDPCacheEntries.Set(float64(cache.Len()))
+	}
 	d.audit(req, actor, ctxReq, "allow", "", layerAllow)
 	return inner
 }
 
-// clientFor returns a cached *Client, rebuilding it only when the socket path
-// changes. The FailurePolicy is read per request from cfg, not the cached
-// client, so a runtime policy flip takes effect without a client rebuild.
-func (d *Decorator) clientFor(cfg Config) *Client {
+// refresh reconciles the cached client and decision cache against cfg under a
+// single lock and returns a snapshot of both. The client is rebuilt ONLY when
+// the socket path changes (FailurePolicy/timeout are read per request from cfg,
+// not the cached client, so those flips take effect without a rebuild). The
+// cache is rebuilt/dropped only when configGen changes — so an endpoint,
+// failure_policy, or cache-parameter change clears prior cached decisions (R-A).
+// The returned *decisionCache is internally locked, safe to use after unlock.
+func (d *Decorator) refresh(cfg Config) (*Client, *decisionCache) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	if d.client == nil || d.clientSock != cfg.SocketPath {
 		if d.client != nil {
 			// Endpoint changed: release the old client's idle keep-alive
@@ -186,12 +242,25 @@ func (d *Decorator) clientFor(cfg Config) *Client {
 		d.client = NewClient(cfg)
 		d.clientSock = cfg.SocketPath
 	}
-	return d.client
+
+	if gen := configGen(cfg); gen != d.cacheGen {
+		if cfg.Cache.Active {
+			d.cache = newDecisionCache(cfg.Cache.MaxEntries)
+		} else {
+			d.cache = nil
+		}
+		d.cacheGen = gen
+	}
+
+	return d.client, d.cache
 }
 
-// releaseClient closes and drops the cached client (used when PDP is disabled so
-// a hot enable->disable frees the idle unix-socket connection). Idempotent.
-func (d *Decorator) releaseClient() {
+// release closes and drops the cached client AND the decision cache (used when
+// PDP is unconfigured/invalid/disabled so a hot enable->disable frees the idle
+// unix-socket connection and cannot reuse stale decisions on re-enable).
+// cacheGen is reset so a re-enable with identical config rebuilds the cache.
+// Idempotent.
+func (d *Decorator) release() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.client != nil {
@@ -199,6 +268,24 @@ func (d *Decorator) releaseClient() {
 		d.client = nil
 		d.clientSock = ""
 	}
+	d.cache = nil
+	d.cacheGen = ""
+}
+
+// configGen returns a stable hash of the config inputs that, when changed, must
+// invalidate the decision cache: socket, failure policy, and every cache knob.
+func configGen(cfg Config) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%d\x00%d\x00%d\x00%d",
+		cfg.SocketPath,
+		cfg.FailurePolicy,
+		cfg.Cache.Active,
+		int64(cfg.Cache.TTLAllow),
+		int64(cfg.Cache.TTLDeny),
+		cfg.Cache.MaxEntries,
+		int64(cfg.Cache.GraceTTL),
+	)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // audit emits the path-agnostic PDP decision audit line. Request fields are
