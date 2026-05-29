@@ -347,6 +347,46 @@ func TestEncryptedSpoolReader_ZeroizesPlaintextOnClose(t *testing.T) {
 	}
 }
 
+// residueOpenSeam simulates an AEAD that overwrites dst up to capacity before
+// returning an auth error — behavior the cipher.AEAD.Open contract explicitly
+// permits ("the contents of dst, up to its capacity, may be overwritten" even
+// on failure). Go's GCM happens to zero on failure, so this fake is how we
+// prove the spool reader's defensive wipe independent of the live cipher.
+type residueOpenSeam struct {
+	storage.DataEncryptor
+}
+
+func (residueOpenSeam) OpenTo(dst []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
+	d := dst[:cap(dst)]
+	for i := range d {
+		d[i] = 0xAA
+	}
+	return nil, errors.New("simulated auth failure")
+}
+
+// TestReadSpoolEncryptedRecord_WipesPlaintextOnOpenError is the regression
+// guard for the code-gate finding: on an Open error the reader-owned plaintext
+// buffer must be wiped to its full capacity, leaving no unauthenticated
+// residue. Cipher-independent (uses residueOpenSeam): fails without the
+// full-capacity clear on the error path.
+func TestReadSpoolEncryptedRecord_WipesPlaintextOnOpenError(t *testing.T) {
+	blob := bytes.Repeat([]byte{0x01}, 64)
+	var hdr [12]byte
+	binary.BigEndian.PutUint32(hdr[:4], 64) // plainLen (unused on error)
+	binary.BigEndian.PutUint32(hdr[4:8], uint32(len(blob)))
+	binary.BigEndian.PutUint32(hdr[8:], 0) // gen
+	frame := append(append([]byte{}, hdr[:]...), blob...)
+
+	plainDst := make([]byte, 0, 256) // reusable buffer the fake will dirty
+	_, _, _, err := readSpoolEncryptedRecord(bytes.NewReader(frame), residueOpenSeam{}, "d", 0, plainDst, nil)
+	require.Error(t, err)
+
+	full := plainDst[:cap(plainDst)]
+	for i, b := range full {
+		require.Zerof(t, b, "plainDst[%d]=%#x not wiped on Open error", i, b)
+	}
+}
+
 // spool unit tests exercise the real seam-backed write/read path. clusterID is
 // fixed (16 bytes); the same seam instance seals and opens within a test.
 func newClusterTestSeam(t *testing.T) storage.DataEncryptor {

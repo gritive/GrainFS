@@ -376,10 +376,16 @@ func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain st
 	out, err := seam.OpenTo(plainDst[:0], encrypt.DomainSpool, spoolRecordAADFields(domain, record), gen, blob)
 	clear(blob) // zeroize ciphertext after decrypt; buffer is reused next record
 	if err != nil {
+		// cipher.AEAD.Open may overwrite dst up to capacity even on failure.
+		// plainDst is the reader-owned reusable buffer, so wipe its full
+		// capacity to leave no unauthenticated plaintext residue (defense in
+		// depth: Go's GCM already zeroes on auth failure, but the AEAD
+		// contract does not guarantee it).
+		clear(plainDst[:cap(plainDst)])
 		return nil, blob, false, fmt.Errorf("open encrypted spool record: %w", err)
 	}
 	if len(out) != int(plainLen) {
-		clear(out)
+		clear(out[:cap(out)])
 		return nil, blob, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
 	}
 	return out, blob, false, nil
