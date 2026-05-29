@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.456.0] - 2026-05-29
+
+### Changed
+
+- Lowered per-operation allocations in at-rest encryption AAD construction.
+  Encryption-context field values (`FieldString`, `FieldUint16/32/64`) are now
+  stored inline instead of each allocating a small byte slice, completing the
+  at-rest seam's allocation cleanup. On a representative encrypted write
+  (`BenchmarkAppendEncrypted`, 64 KiB) allocations drop from 9 to 5 per op with
+  a small reduction in bytes allocated. The on-disk AAD byte format and all
+  call sites are unchanged.
+
 ## [0.0.455.0] - 2026-05-29
 
 ### Changed
