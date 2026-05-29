@@ -31,10 +31,9 @@ func withTestWALDEK(tb clusterTestTB, keeper *encrypt.DEKKeeper, clusterID []byt
 }
 
 // newTestDistributedBackendDEK mirrors newTestDistributedBackend but wires the
-// ShardService with WithShardDEKKeeper (and no static encryptor), so
-// svc.encryptor is nil — the production shape after PR #631. This reproduces
-// the at-rest hole the scrubber-repair fix closes: the pre-fix path would have
-// returned plaintext under this shape.
+// ShardService with WithShardDEKKeeper — the production shape after PR #631.
+// This reproduces the at-rest hole the scrubber-repair fix closes: the pre-fix
+// path would have returned plaintext under this shape.
 func newTestDistributedBackendDEK(t *testing.T) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()

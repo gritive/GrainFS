@@ -77,17 +77,17 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	}
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	enc, encErr := encrypt.NewEncryptor(bytes.Repeat([]byte("k"), 32))
-	if encErr != nil {
-		t.Fatalf("test encryptor: %v", encErr)
+	clusterID := bytes.Repeat([]byte{0x42}, 16)
+	keeper, kErr := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x91}, encrypt.KEKSize), clusterID)
+	if kErr != nil {
+		t.Fatalf("test DEK keeper: %v", kErr)
 	}
-	var zero [16]byte
-	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewEncryptorAdapter(enc, zero[:]), datawal.NamespaceShard)
+	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 	if err != nil {
 		t.Fatalf("open data wal: %v", err)
 	}
 	t.Cleanup(func() { _ = dwal.Close() })
-	svc := NewShardService(backend.root, nil, WithEncryptor(enc), WithDataWAL(dwal))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})

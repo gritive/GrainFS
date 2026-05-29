@@ -198,9 +198,12 @@ type DistributedBackend struct {
 	scrubOrphanAge time.Duration
 
 	// putPipeline is the optional single-node EC PUT actor pipeline.
-	// When non-nil, PutObjectWithRequest dispatches eligible PUTs to it;
-	// other PUTs fall through to the legacy spool/EC writer path.
+	// When dispatch is enabled, PutObjectWithRequest dispatches eligible PUTs to
+	// it; other PUTs fall through to the legacy spool/EC writer path.
 	putPipeline PutPipelineRunner
+	// putPipelineEnabled gates dispatch to putPipeline. Disabled in prod pending
+	// the F1 durability review even though the pipeline is constructed at boot.
+	putPipelineEnabled bool
 }
 
 type backendTopology struct {
@@ -383,7 +386,6 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
 	if b.fsm != nil && svc != nil {
-		b.fsm.SetEncryptor(svc.encryptor)
 		b.fsm.SetDEKKeeper(svc.DEKKeeper(), svc.ClusterID())
 	}
 	topology := newBackendTopology(allNodes)
@@ -394,11 +396,14 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
 }
 
-// SetPutPipeline injects the single-node EC PUT actor pipeline.
-// When non-nil, PutObjectWithRequest dispatches to it for eligible
-// PUTs; other PUTs fall through to the legacy spool/EC writer path.
-func (b *DistributedBackend) SetPutPipeline(p PutPipelineRunner) {
+// SetPutPipeline injects the single-node EC PUT actor pipeline. When enabled is
+// true, PutObjectWithRequest dispatches to it for eligible PUTs; otherwise the
+// pipeline is wired but dormant and all PUTs fall through to the legacy
+// spool/EC writer path. Prod passes enabled=false pending the F1 durability
+// review.
+func (b *DistributedBackend) SetPutPipeline(p PutPipelineRunner, enabled bool) {
 	b.putPipeline = p
+	b.putPipelineEnabled = enabled
 }
 
 // SetClusterNodes refreshes the configured placement node set without
@@ -1608,7 +1613,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	}
 	observePutStage("distributed", "quarantine_check", stageStart)
 
-	if b.putPipeline != nil && b.shardSvc != nil && b.shardSvc.encryptor != nil && !storage.IsInternalBucket(bucket) && req.SizeHint != nil {
+	if b.putPipeline != nil && b.putPipelineEnabled && b.shardSvc != nil && !storage.IsInternalBucket(bucket) && req.SizeHint != nil {
 		selfID := b.currentSelfAddr()
 		placementPlan, planErr := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
 			Operation: "put_object",

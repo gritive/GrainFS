@@ -1083,9 +1083,9 @@ func TestWithShardDEKKeeper_SetsSegEncAndClusterID(t *testing.T) {
 }
 
 func TestWithShardDEKKeeper_NilOrBadClusterIDIsNoOp(t *testing.T) {
-	enc, _ := encrypt.NewEncryptor(bytes.Repeat([]byte{0x11}, 32))
-	s := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(nil, nil))
+	keeper, clusterID := testDEKKeeper(t)
+	s := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), WithShardDEKKeeper(nil, nil))
 	if s.segEnc == nil {
-		t.Fatal("nil keeper must leave the EncryptorAdapter segEnc intact")
+		t.Fatal("nil keeper must leave the valid DEK-keeper segEnc intact")
 	}
 }
