@@ -182,7 +182,8 @@ func TestMoveReplica_HappyPath(t *testing.T) {
 	require.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
 	require.Equal(t, "10.0.0.3:9003", fakeNode.lastAdds[0].Address)
 	require.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
-	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+	// data-group raft keys voters by node id, so the remove is the node id.
+	require.Equal(t, []string{"node-0"}, fakeNode.lastRemoves)
 
 	require.Len(t, sgUpdater.proposed, 1)
 	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
@@ -614,7 +615,8 @@ func TestEvacuateVoter_FreshMove_DelegatesToMoveReplica(t *testing.T) {
 	require.Equal(t, 1, fakeNode.changeMembershipCalls)
 	require.Len(t, fakeNode.lastAdds, 1)
 	require.Equal(t, "newnode", fakeNode.lastAdds[0].ID)
-	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+	// Move delegates to MoveReplica, which removes by node id (fromNode).
+	require.Equal(t, []string{"revoked"}, fakeNode.lastRemoves)
 	require.NotEmpty(t, sgUpdater.proposed)
 }
 

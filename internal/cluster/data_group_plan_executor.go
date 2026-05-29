@@ -7,8 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -55,9 +53,9 @@ type dataRaftNode interface {
 
 // DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
 //
-// MoveReplica algorithm (PR-K2 — single §4.3 atomic call):
+// MoveReplica algorithm (PR-K2):
 //
-//	ChangeMembership(adds=[toNode], removes=[fromAddr]) → ProposeShardGroup (MetaFSM) →
+//	ChangeMembership(adds=[toNode], removes=[fromNode]) → ProposeShardGroup (MetaFSM) →
 //	DataGroupManager.Add
 //
 // Self-removal is handled by the joint commit-time step-down hook in
@@ -214,19 +212,16 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	if err != nil {
 		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
 	}
-	fromAddr, err := e.resolveAddr(fromNode)
-	if err != nil {
-		return fmt.Errorf("data_group_executor: resolve fromNode: %w", err)
-	}
 
-	// Single atomic §4.3 call: learner-first add + joint propose + commit + leave.
-	// Self-removal: joint commit-time hook closes jointPromoteCh BEFORE state=Follower
-	// (verified ordering invariant in internal/raft/raft.go), so caller wakes up nil.
+	// ChangeMembership is sequenced add-then-remove by the adapter (not atomic).
+	// The data-group raft config keys voters by NODE ID (GroupLifecycleConfig.NodeID
+	// = the node id from the seeded peer set), so the add carries the resolved
+	// address but the remove MUST be the node id (fromNode), symmetric with the add.
 	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
 	defer cancel()
 	if err := node.ChangeMembership(addCtx,
 		[]raft.ServerEntry{{ID: toNode, Address: toAddr, Suffrage: raft.Voter}},
-		[]string{fromAddr}, // data-Raft uses address as peerKey
+		[]string{fromNode}, // data-group raft keys voters by node id
 	); err != nil {
 		return fmt.Errorf("data_group_executor: ChangeMembership: %w", err)
 	}
@@ -267,9 +262,8 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 // would over-replicate.) replacementID == "" always requests a shrink.
 //
 // Must run on the data-group raft leader. Refuses to drop the last voter.
-// resolveAddr not-found is log-and-skip (graceful degrade for a future
-// revoke+RemoveNode flow), never a crash. revoked == local leader -> transfer
-// leadership and let the new leader retry.
+// A revoked node id that is not among the current voters is an idempotent no-op.
+// revoked == local leader -> transfer leadership and let the new leader retry.
 func (e *DataGroupPlanExecutor) EvacuateVoter(ctx context.Context, groupID, revokedID, replacementID string) error {
 	dg := e.dgMgr.Get(groupID)
 	if dg == nil {
@@ -280,23 +274,27 @@ func (e *DataGroupPlanExecutor) EvacuateVoter(ctx context.Context, groupID, revo
 		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
 	}
 
-	voterAddrs := make(map[string]struct{})
+	// REAL voter set, normalized to NODE IDs. data-group raft Server.ID IS the
+	// node ID (seed/MatchLocal/GroupLifecycleConfig.NodeID); normalize anyway so
+	// any address-form id also resolves. Keep the raw Server.ID as the removal key
+	// (ChangeMembership/RemoveVoter operate in the config's own id space).
+	voterByNodeID := make(map[string]string) // nodeID -> raw Server.ID (removal key)
 	for _, s := range node.Configuration().Servers {
-		if s.Suffrage == raft.Voter {
-			voterAddrs[s.ID] = struct{}{} // data-raft Server.ID is the address
+		if s.Suffrage != raft.Voter {
+			continue
 		}
+		nid := ResolveShardGroupPeer(e.addrBook, s.ID).NodeID
+		if nid == "" {
+			nid = s.ID
+		}
+		voterByNodeID[nid] = s.ID
 	}
 
-	revokedAddr, err := e.resolveAddr(revokedID)
-	if err != nil {
-		log.Warn().Str("group", groupID).Str("revoked", revokedID).
-			Msg("EvacuateVoter: cannot resolve revoked voter address; skipping (graceful degrade)")
-		return nil
-	}
-	if _, present := voterAddrs[revokedAddr]; !present {
+	rawRevoked, present := voterByNodeID[revokedID]
+	if !present {
 		return nil // idempotent no-op: already absent
 	}
-	if len(voterAddrs)-1 == 0 {
+	if len(voterByNodeID)-1 == 0 {
 		return fmt.Errorf("data_group_executor: refusing to evict last voter of group %q: %w", groupID, ErrRefuseLastVoter)
 	}
 
@@ -311,20 +309,18 @@ func (e *DataGroupPlanExecutor) EvacuateVoter(ctx context.Context, groupID, revo
 		return ErrLeadershipTransferred
 	}
 
+	// COUNT-BASED, PICK-STABLE (P1-2): target = intended RF = mirror size (stable
+	// across a crashed move, which updates the mirror only after success).
+	// survivors = real voters minus the revoked one. survivors >= target (or no
+	// replacement) => remove-only; never adds a 2nd replacement on a crashed-move
+	// retry regardless of which node a prior attempt picked.
 	target := len(dg.PeerIDs())
-	survivors := 0
-	for addr := range voterAddrs {
-		if addr == revokedAddr {
-			continue
-		}
-		survivors++
-	}
+	survivors := len(voterByNodeID) - 1
 
 	if replacementID == "" || survivors >= target {
-		// Clean shrink OR crashed-move recovery: remove-only (the P1-2 fix).
 		rmCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
 		defer cancel()
-		if err := node.ChangeMembership(rmCtx, nil, []string{revokedAddr}); err != nil {
+		if err := node.ChangeMembership(rmCtx, nil, []string{rawRevoked}); err != nil {
 			return fmt.Errorf("data_group_executor: ChangeMembership remove: %w", err)
 		}
 		return e.convergePeerIDsFromRealConfig(ctx, groupID, dg, node, revokedID)
