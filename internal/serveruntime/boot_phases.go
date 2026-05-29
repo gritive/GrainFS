@@ -69,8 +69,9 @@ func bootValidateConfig(state *bootState) error {
 		log.Info().Str("component", "server").Str("node_id", state.nodeID).Msg("auto-generated node ID")
 	}
 
-	// File-based join detection: written by `grainfs join` UDS handler.
-	// Takes precedence over any other bootstrap logic.
+	// File-based join detection: the .join-pending sentinel is written before
+	// boot by an operator or a test harness. Takes precedence over any other
+	// bootstrap logic.
 	pendingFile := filepath.Join(cfg.DataDir, JoinPendingFile)
 	if rawPeer, err := os.ReadFile(pendingFile); err == nil {
 		peerAddr := strings.TrimSpace(string(rawPeer))
