@@ -34,7 +34,7 @@ func withTestWALDEK(tb clusterTestTB, keeper *encrypt.DEKKeeper, clusterID []byt
 // ShardService with WithShardDEKKeeper — the production shape after PR #631.
 // This reproduces the at-rest hole the scrubber-repair fix closes: the pre-fix
 // path would have returned plaintext under this shape.
-func newTestDistributedBackendDEK(t *testing.T) *DistributedBackend {
+func newTestDistributedBackendDEK(t *testing.T, extraSvcOpts ...ShardServiceOption) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -73,7 +73,7 @@ func newTestDistributedBackendDEK(t *testing.T) *DistributedBackend {
 	clusterID := bytes.Repeat([]byte{0x78}, 16)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(backend.root, nil, append([]ShardServiceOption{WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID)}, extraSvcOpts...)...)
 	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
