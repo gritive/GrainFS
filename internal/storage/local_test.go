@@ -26,9 +26,27 @@ func setupTestBackend(t *testing.T) *LocalBackend {
 	return b
 }
 
-func TestNewEncryptedLocalBackendRejectsNilEncryptor(t *testing.T) {
-	_, err := NewEncryptedLocalBackend(t.TempDir(), nil)
-	require.Error(t, err)
+// dekTestClusterID is the fixed 16-byte clusterID shared by the storage DEK
+// test fixtures.
+func dekTestClusterID() []byte { return bytes.Repeat([]byte{0x99}, 16) }
+
+// newDEKKeeper builds a deterministic-KEK DEKKeeper for tests. The DEK itself is
+// randomized by NewDEKKeeper, so callers that need a sealer and a backend to
+// agree MUST share the SAME returned keeper instance.
+func newDEKKeeper(t *testing.T) *encrypt.DEKKeeper {
+	t.Helper()
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x88}, encrypt.KEKSize), dekTestClusterID())
+	require.NoError(t, err, "NewDEKKeeper")
+	return keeper
+}
+
+// newDEKLocalBackend builds a DEKKeeper-backed LocalBackend rooted at a temp dir.
+func newDEKLocalBackend(t *testing.T) *LocalBackend {
+	t.Helper()
+	b, err := NewLocalBackendWithDEKKeeper(t.TempDir(), newDEKKeeper(t), dekTestClusterID())
+	require.NoError(t, err, "NewLocalBackendWithDEKKeeper")
+	t.Cleanup(func() { b.Close() })
+	return b
 }
 
 func TestCreateBucket(t *testing.T) {
@@ -193,11 +211,15 @@ func TestLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
 func TestEncryptedLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(root, "datawal"), NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceNode)
+	// The DataWAL sealer and the backend segEnc MUST wrap the same keeper
+	// instance — NewDEKKeeper randomizes the DEK, so two keepers would not
+	// decrypt each other's records during RecoverDataWAL.
+	keeper := newDEKKeeper(t)
+	cid := dekTestClusterID()
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), NewDEKKeeperAdapter(keeper, cid), datawal.NamespaceNode)
 	require.NoError(t, err)
 
-	b, err := NewEncryptedLocalBackendWithDataWAL(root, enc, dwal)
+	b, err := NewLocalBackendWithDEKKeeperAndDataWAL(root, keeper, cid, dwal)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, b.Close()) })
 

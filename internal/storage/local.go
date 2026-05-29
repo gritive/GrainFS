@@ -151,6 +151,24 @@ func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, cluste
 	return b, nil
 }
 
+// NewLocalBackendWithDEKKeeperAndDataWAL builds a DEKKeeper-backed LocalBackend
+// (see NewLocalBackendWithDEKKeeper) wired to a DataWAL. The DataWAL's record
+// sealer MUST wrap the SAME keeper instance (NewDEKKeeper randomizes the DEK),
+// so RecoverDataWAL — which seals/opens WAL records via b.segEnc — can decrypt
+// what the WAL wrote. clusterID MUST be 16 bytes.
+func NewLocalBackendWithDEKKeeperAndDataWAL(root string, keeper *encrypt.DEKKeeper, clusterID []byte, dwal DataWAL) (*LocalBackend, error) {
+	if dwal == nil {
+		return nil, fmt.Errorf("local backend data wal requires wal")
+	}
+	b, err := NewLocalBackendWithDEKKeeper(root, keeper, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	b.dataWAL = dwal
+	b.dataWALDir = dwal.Dir()
+	return b, nil
+}
+
 func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
 	for _, root := range dataRoots {
 		dataDir := filepath.Join(root, "data")
@@ -1069,9 +1087,11 @@ func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
 	b.replayingDataWAL = true
 	defer func() { b.replayingDataWAL = false }()
 	var sealer datawal.RecordSealer
-	if b.encryptor != nil {
-		var zero [16]byte
-		sealer = NewEncryptorAdapter(b.encryptor, zero[:])
+	if b.segEnc != nil {
+		// b.segEnc is the data-at-rest seam (a *DEKKeeperAdapter on the DEK
+		// path); it satisfies datawal.RecordSealer and opens DEK-sealed WAL
+		// records written under the same keeper.
+		sealer = b.segEnc
 	}
 	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, datawal.NamespaceNode, localDataWALMaterializer{b: b})
 }
