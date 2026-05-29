@@ -1726,6 +1726,10 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, sha
 			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
 		}
 		var decoded bytes.Buffer
+		// Pre-size to the encrypted length (≥ decoded plaintext) so DecodeEncryptedShard's
+		// streamed writes never trigger the bytes.Buffer doubling chain. Mirrors the
+		// file-read branch in ReadLocalShard, which already pre-grows from the stat size.
+		decoded.Grow(len(raw))
 		if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.segEnc, ShardAADFields(bucket, key, shardIdx)); err != nil {
 			return nil, fmt.Errorf("decrypt shard: %w", err)
 		}
