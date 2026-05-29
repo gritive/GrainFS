@@ -74,6 +74,15 @@ var encryptedPlainChunkPool = sync.Pool{New: func() any {
 	return &b
 }}
 
+// encryptedCipherChunkPool recycles the reader-side ciphertext read buffer.
+// A chunk's ciphertext is plaintext(≤DefaultEncryptedChunkSize) + AEAD overhead,
+// so buffers are pre-sized to the max so a pooled buffer never needs to grow
+// mid-stream (which would defeat the pool and break the full-cap residue wipe).
+var encryptedCipherChunkPool = sync.Pool{New: func() any {
+	b := make([]byte, DefaultEncryptedChunkSize+maxChunkOverhead)
+	return &b
+}}
+
 const (
 	DefaultEncryptedChunkSize = 1 << 20
 	maxEncryptedChunkSize     = DefaultEncryptedChunkSize
@@ -81,6 +90,9 @@ const (
 	encryptedShardFormatVersion = uint16(1)
 	encryptedHeaderLen          = 8 + 2 + 4 + 4 + 2
 	encryptedChunkHeaderLen     = 8
+	// maxChunkOverhead bounds the AEAD expansion (XAES-256-GCM tag is 16 B);
+	// 64 B leaves headroom so the pooled ciphertext buffer always fits cipherLen.
+	maxChunkOverhead = 64
 )
 
 // IsEncodedShard reports whether raw bytes carry the current eccodec magic.
@@ -403,6 +415,12 @@ func NewEncryptedShardReader(r io.Reader, enc ShardEncryptor, baseFields []encry
 	if err != nil {
 		return nil, err
 	}
+	// Acquire the per-chunk plaintext/ciphertext buffers from pools so a GET
+	// that spins up one reader per shard does not allocate ~2×chunkSize each.
+	// chunkSize ≤ DefaultEncryptedChunkSize and cipherLen ≤ chunkSize+overhead,
+	// so the pooled buffers never need to grow (loadChunk's cap guards stay no-ops).
+	plainPtr := encryptedPlainChunkPool.Get().(*[]byte)
+	cipherPtr := encryptedCipherChunkPool.Get().(*[]byte)
 	return &encryptedShardReader{
 		r:          r,
 		enc:        enc,
@@ -410,6 +428,10 @@ func NewEncryptedShardReader(r io.Reader, enc ShardEncryptor, baseFields []encry
 		gen:        gen,
 		chunkSize:  chunkSize,
 		overhead:   overhead,
+		plainPtr:   plainPtr,
+		cipherPtr:  cipherPtr,
+		plainFull:  (*plainPtr)[:0],
+		cipherBuf:  (*cipherPtr)[:0],
 	}, nil
 }
 
@@ -610,9 +632,11 @@ type encryptedShardReader struct {
 	gen        uint32
 	overhead   uint16
 	chunkIdx   uint32
-	plain      []byte // current read window into plainFull
-	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
-	cipherBuf  []byte // reader-owned ciphertext read buffer, reused across chunks
+	plain      []byte  // current read window into plainFull
+	plainFull  []byte  // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
+	cipherBuf  []byte  // reader-owned ciphertext read buffer, reused across chunks
+	plainPtr   *[]byte // pooled backing for plainFull; returned to encryptedPlainChunkPool on Close
+	cipherPtr  *[]byte // pooled backing for cipherBuf; returned to encryptedCipherChunkPool on Close
 	done       bool
 	closed     bool
 }
@@ -641,9 +665,20 @@ func (r *encryptedShardReader) Close() error {
 	r.closed = true
 	// plainFull is the reused decryption buffer; zero its FULL capacity (not
 	// just len) so a partial last chunk's untouched tail — which still holds the
-	// prior full chunk's plaintext — does not linger.
+	// prior full chunk's plaintext — does not linger. Zero BEFORE returning the
+	// backing to the pool so no decrypted residue survives in a recycled buffer.
 	clear(r.plainFull[:cap(r.plainFull)])
 	clear(r.cipherBuf[:cap(r.cipherBuf)])
+	if r.plainPtr != nil {
+		*r.plainPtr = r.plainFull[:cap(r.plainFull)]
+		encryptedPlainChunkPool.Put(r.plainPtr)
+		r.plainPtr = nil
+	}
+	if r.cipherPtr != nil {
+		*r.cipherPtr = r.cipherBuf[:cap(r.cipherBuf)]
+		encryptedCipherChunkPool.Put(r.cipherPtr)
+		r.cipherPtr = nil
+	}
 	r.plain = nil
 	r.plainFull = nil
 	r.cipherBuf = nil
