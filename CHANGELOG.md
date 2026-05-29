@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.445.0] - 2026-05-29
+
+### Changed
+
+- Reduced memory churn on the at-rest-encrypted small-object write path. Packed
+  blob entries are now sealed through a buffer-reusing seam (`SealTo`), cutting
+  per-write allocation on encrypted `Append` from ~75 KB to ~1.5 KB (about 50x
+  less garbage), with no change to on-disk format or behavior. This lowers GC
+  pressure on PUT-heavy workloads with encryption enabled.
+
 ## [0.0.444.0] - 2026-05-29
 
 ### Fixed
