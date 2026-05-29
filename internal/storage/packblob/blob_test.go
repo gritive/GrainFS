@@ -161,7 +161,7 @@ func TestBlobEntryCRCMatchesStandardIEEEStream(t *testing.T) {
 	_, _ = h.Write([]byte{flags})
 	_, _ = h.Write(payload)
 
-	require.Equal(t, h.Sum32(), blobEntryCRC(key, flags, payload))
+	require.Equal(t, h.Sum32(), blobEntryCRC(key, flags, 0, payload))
 }
 
 func TestEncryptedBlobStoreHidesPayload(t *testing.T) {
@@ -259,6 +259,9 @@ func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
 
 	flagsOff := keyEnd
 	dataLenOff := flagsOff + 1
+	if raw[flagsOff]&flagGenFramed != 0 { // encrypted store: [flags][dek_gen:4][data_len]
+		dataLenOff += genFieldSize
+	}
 	dataLen := binary.BigEndian.Uint32(raw[dataLenOff:])
 	payloadStart := dataLenOff + 4
 	payloadEnd := payloadStart + int(dataLen)
@@ -286,14 +289,27 @@ func tamperStripEncryptedFlag(t *testing.T, dir, key string, loc BlobLocation) {
 	require.NoError(t, err)
 	defer f.Close()
 
-	// entry layout: [key_len:4][key][flags:1][data_len:4][data][crc:4]
+	// entry layout: [key_len:4][key][flags:1]([dek_gen:4] iff gen-framed)[data_len:4][data][crc:4]
 	flagsPos := int64(loc.Offset) + 4 + int64(len(key))
 	var flagBuf [1]byte
 	_, err = f.ReadAt(flagBuf[:], flagsPos)
 	require.NoError(t, err)
 	require.NotZero(t, flagBuf[0]&flagEncrypted, "precondition: entry must be encrypted-flagged")
 
-	dataPos := flagsPos + 1 + 4
+	// Read the gen field (present on an encrypted store) so the recomputed CRC
+	// matches; newFlags keeps flagGenFramed (only flagEncrypted is stripped), so
+	// Read still parses the gen and the downgrade Open-attempt fires (M3).
+	var dekGen uint32
+	genBytes := int64(0)
+	if flagBuf[0]&flagGenFramed != 0 {
+		var gb [genFieldSize]byte
+		_, err = f.ReadAt(gb[:], flagsPos+1)
+		require.NoError(t, err)
+		dekGen = binary.BigEndian.Uint32(gb[:])
+		genBytes = genFieldSize
+	}
+
+	dataPos := flagsPos + 1 + genBytes + 4
 	payload := make([]byte, loc.Length)
 	_, err = f.ReadAt(payload, dataPos)
 	require.NoError(t, err)
@@ -303,7 +319,7 @@ func tamperStripEncryptedFlag(t *testing.T, dir, key string, loc BlobLocation) {
 	require.NoError(t, err)
 
 	var crcBuf [4]byte
-	binary.BigEndian.PutUint32(crcBuf[:], blobEntryCRC([]byte(key), newFlags, payload))
+	binary.BigEndian.PutUint32(crcBuf[:], blobEntryCRC([]byte(key), newFlags, dekGen, payload))
 	_, err = f.WriteAt(crcBuf[:], dataPos+int64(loc.Length))
 	require.NoError(t, err)
 }
