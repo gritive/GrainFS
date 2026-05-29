@@ -265,8 +265,8 @@ func (d *Decorator) refresh(cfg Config) (*Client, *decisionCache) {
 			// connections so hot-reloading the socket doesn't leak FDs.
 			d.client.Close()
 		}
-		d.client = NewClient(cfg)
-		d.clientSock = cfg.RemoteURL // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
+		d.client = NewClient(cfg, "") // TASK3-STUB: empty token; Task 6 wires the real bearer token
+		d.clientSock = cfg.RemoteURL  // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
 	}
 
 	if gen := configGen(cfg); gen != d.cacheGen {

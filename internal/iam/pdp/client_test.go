@@ -2,11 +2,13 @@ package pdp
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
-	"net"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -14,28 +16,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newUnixPDP starts an httptest server on a unix socket; returns the socket path.
-func newUnixPDP(t *testing.T, handler http.HandlerFunc) string {
+func pemEncodeCert(t *testing.T, c *x509.Certificate) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "pdp.sock")
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: handler}}
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return sock
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw}))
 }
+
+func hostOf(rawURL string) string { u, _ := url.Parse(rawURL); return u.Host }
 
 func TestClientAuthorize(t *testing.T) {
 	var gotBody Request
-	sock := newUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/authorize", r.URL.Path)
 		require.Equal(t, "application/json", r.Header.Get("Content-Type"))
-		require.Empty(t, r.Header.Get("Authorization")) // no token in slice 1
+		require.Empty(t, r.Header.Get("Authorization")) // no token on http
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_, _ = w.Write([]byte(`{"decision":"Allow ","reason":"ok"}`))
-	})
-	c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: 2 * time.Second, FailurePolicy: FailureClosed})
+	}))
+	defer srv.Close()
+	c := NewClient(Config{Enabled: true, Scheme: "http", RemoteURL: srv.URL, Host: hostOf(srv.URL), Timeout: 2 * time.Second, FailurePolicy: FailureClosed}, "")
 	dec, etype, err := c.Authorize(context.Background(), Request{
 		SchemaVersion: 1, RequestID: "req-1",
 		Principal: WirePrincipal{Kind: "oidc", ID: "oidc:abc:u1", Groups: []string{"g"}},
@@ -48,10 +46,11 @@ func TestClientAuthorize(t *testing.T) {
 }
 
 func TestClientAuthorizeDeny(t *testing.T) {
-	sock := newUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
-	})
-	c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: time.Second, FailurePolicy: FailureClosed})
+	}))
+	defer srv.Close()
+	c := NewClient(Config{Enabled: true, Scheme: "http", RemoteURL: srv.URL, Host: hostOf(srv.URL), Timeout: time.Second, FailurePolicy: FailureClosed}, "")
 	dec, etype, err := c.Authorize(context.Background(), Request{SchemaVersion: 1})
 	// Deny must be distinguishable from failure. Assert via whatever shape you chose:
 	require.Equal(t, "", etype) // a deny is NOT a failure (no errType)
@@ -73,8 +72,9 @@ func TestClientAuthorizeFailures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sock := newUnixPDP(t, tc.handler)
-			c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: time.Second, FailurePolicy: FailureClosed})
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			c := NewClient(Config{Enabled: true, Scheme: "http", RemoteURL: srv.URL, Host: hostOf(srv.URL), Timeout: time.Second, FailurePolicy: FailureClosed}, "")
 			_, etype, err := c.Authorize(context.Background(), Request{SchemaVersion: 1})
 			require.Error(t, err)
 			require.Equal(t, tc.etype, etype)
@@ -83,11 +83,12 @@ func TestClientAuthorizeFailures(t *testing.T) {
 }
 
 func TestClientTimeout(t *testing.T) {
-	sock := newUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
-	})
-	c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: 50 * time.Millisecond, FailurePolicy: FailureClosed})
+	}))
+	defer srv.Close()
+	c := NewClient(Config{Enabled: true, Scheme: "http", RemoteURL: srv.URL, Host: hostOf(srv.URL), Timeout: 50 * time.Millisecond, FailurePolicy: FailureClosed}, "")
 	// The caller owns the deadline now: the client no longer applies cfg.Timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -100,4 +101,60 @@ func TestSanitizeReason(t *testing.T) {
 	require.Equal(t, "ok", sanitizeReason("ok\x00\x07"))
 	long := strings.Repeat("a", 500)
 	require.LessOrEqual(t, len(sanitizeReason(long)), maxReasonLen)
+}
+
+func TestClient_HTTPS_BearerAndTLS(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "allow"})
+	}))
+	defer srv.Close()
+	caPEM := pemEncodeCert(t, srv.Certificate())
+	cfg := Config{
+		Enabled: true, Scheme: "https", RemoteURL: srv.URL, Host: hostOf(srv.URL),
+		Timeout: 2 * time.Second, TLS: TLSConfig{CAPEM: caPEM, MinVersion: tls.VersionTLS12},
+		SSRF: SSRFConfig{AllowPrivate: true}, // httptest binds 127.0.0.1
+	}
+	c := NewClient(cfg, "tok-123")
+	dec, errType, err := c.Authorize(context.Background(), Request{SchemaVersion: 1, Action: "x", Resource: "y"})
+	if err != nil || errType != "" || dec != DecisionAllow {
+		t.Fatalf("dec=%q errType=%q err=%v", dec, errType, err)
+	}
+	if gotAuth != "Bearer tok-123" {
+		t.Fatalf("Authorization = %q, want Bearer tok-123", gotAuth)
+	}
+	tr, ok := c.hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", c.hc.Transport)
+	}
+	if tr.Proxy != nil {
+		t.Fatal("Transport.Proxy must be nil (SSRF: no proxy bypass)")
+	}
+}
+
+func TestClient_HTTP_NoBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "allow"})
+	}))
+	defer srv.Close()
+	cfg := Config{Enabled: true, Scheme: "http", RemoteURL: srv.URL, Host: hostOf(srv.URL), Timeout: 2 * time.Second}
+	c := NewClient(cfg, "tok-should-not-send")
+	if _, _, err := c.Authorize(context.Background(), Request{SchemaVersion: 1}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization must be empty on http, got %q", gotAuth)
+	}
+}
+
+func TestClient_SSRF_BlocksPrivateHTTPS(t *testing.T) {
+	cfg := Config{Enabled: true, Scheme: "https", RemoteURL: "https://10.0.0.5:8443", Host: "10.0.0.5:8443", Timeout: time.Second}
+	c := NewClient(cfg, "")
+	_, errType, err := c.Authorize(context.Background(), Request{SchemaVersion: 1})
+	if err == nil || errType != ErrTypeSSRF {
+		t.Fatalf("want ErrTypeSSRF, got errType=%q err=%v", errType, err)
+	}
 }
