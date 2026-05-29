@@ -149,9 +149,16 @@ Work these in order. Do not run them in parallel.
     - Remote `https://` transport + bearer token (delivered via admin UDS + a
       `grainfs iam pdp` CLI, DEK-sealed like other IAM secrets) + mTLS + active SSRF
       egress filtering.
-    - Decision cache (positive/negative TTL) + grace mode.
+    - Decision cache (positive/negative TTL) + grace mode — **SHIPPED Slice 2**
+      (`iam.pdp.cache`: ttl_allow/ttl_deny + LRU max_entries + grace_ttl;
+      sharded TTL+LRU, stale-preserving lookup, cache cleared on any iam.pdp
+      config change, failures never cached, cache-hit audit suppressed).
     - S3/Iceberg data-plane PDP enforcement (needs a `WithPolicyAuthorizer` interface
-      seam + latency/cache design).
+      seam + latency/cache design — **now builds on the Slice-2 cache/grace**).
+    - **Singleflight** for concurrent duplicate cache misses (deferred from Slice 2;
+      control-plane tolerates the stampede, the data-plane slice needs it).
+    - **Event-driven cache invalidation** (on `iam.pdp` config / policy change) —
+      Slice 2 is TTL-only.
     - Full GrainFS-only audit on the protocol-credential control plane (pre-existing
       gap; Slice 1 added only the PDP-outcome `iam.pdp` audit).
     - Admin peercred/UDS path is intentionally NOT PDP-gated (local socket trust).
