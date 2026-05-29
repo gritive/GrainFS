@@ -114,6 +114,74 @@ func TestDecisionCache_PutReplaceResetsDecidedAt(t *testing.T) {
 	require.Equal(t, "new", ent.reason)
 }
 
+func TestDecisionCache_StaleReadDoesNotPromote(t *testing.T) {
+	// Single-shard targeting: A,B,C,D all hash to FNV-1a shard 13. maxEntries=33
+	// => perShard = ceil(33/16) = 3, so that shard holds at most 3 entries and a
+	// 4th Put evicts the LRU-back. A stale read of A must NOT move A to the front;
+	// if it did, the overflow would evict B instead of A.
+	const (
+		keyA = "key-19"
+		keyB = "key-60"
+		keyC = "key-73"
+		keyD = "key-91"
+	)
+	c := newDecisionCache(33)
+	require.Equal(t, 3, c.perShard)
+	sh := c.shardFor(keyA)
+	require.Same(t, sh, c.shardFor(keyB))
+	require.Same(t, sh, c.shardFor(keyC))
+	require.Same(t, sh, c.shardFor(keyD))
+
+	base := time.Unix(1000, 0)
+	// Insert A (oldest/back), then fresher B, C. Order back->front = A,B,C.
+	c.Put(keyA, "allow", "a", 10*time.Second, base)
+	c.Put(keyB, "allow", "b", time.Hour, base)
+	c.Put(keyC, "allow", "c", time.Hour, base)
+
+	// Stale-read A: age past A's 10s ttl, within a large graceTTL.
+	_, st := c.Lookup(keyA, time.Hour, base.Add(11*time.Second))
+	require.Equal(t, cacheStale, st)
+
+	// Overflow the shard: D forces eviction of the LRU-back.
+	c.Put(keyD, "allow", "d", time.Hour, base.Add(11*time.Second))
+
+	// A must be the evicted one. Use a LARGE graceTTL on this final lookup: if the
+	// stale read had wrongly promoted A, A would still be present (age>ttl) and read
+	// as cacheStale; a small graceTTL would mask that by returning cacheMiss for
+	// BOTH the promoted-and-present and the correctly-evicted cases. With a large
+	// graceTTL, cacheMiss unambiguously means A was LRU-evicted (not promoted).
+	_, stA := c.Lookup(keyA, time.Hour, base.Add(11*time.Second))
+	require.Equal(t, cacheMiss, stA, "stale read must not promote A; A is the LRU-back and must be evicted")
+
+	// B, C, D survive (ttl=hour => fresh), proving A specifically was dropped.
+	_, stB := c.Lookup(keyB, time.Hour, base.Add(11*time.Second))
+	require.Equal(t, cacheFresh, stB)
+	_, stC := c.Lookup(keyC, time.Hour, base.Add(11*time.Second))
+	require.Equal(t, cacheFresh, stC)
+	_, stD := c.Lookup(keyD, time.Hour, base.Add(11*time.Second))
+	require.Equal(t, cacheFresh, stD)
+}
+
+func TestDecisionCache_BoundaryEquality(t *testing.T) {
+	c := newDecisionCache(64)
+	base := time.Unix(1000, 0)
+	c.Put("k", "allow", "ok", 10*time.Second, base)
+
+	// age == ttl exactly => fresh (pins age <= ttl, not <).
+	_, st := c.Lookup("k", 20*time.Second, base.Add(10*time.Second))
+	require.Equal(t, cacheFresh, st, "age==ttl must be fresh (<=, not <)")
+
+	// age == graceTTL exactly => stale (pins age <= graceTTL, not <).
+	_, st = c.Lookup("k", 20*time.Second, base.Add(20*time.Second))
+	require.Equal(t, cacheStale, st, "age==graceTTL must be stale (<=, not <)")
+
+	// 1ns past graceTTL => miss (and evicts). Asserted LAST because the miss path
+	// removes the entry.
+	_, st = c.Lookup("k", 20*time.Second, base.Add(20*time.Second+time.Nanosecond))
+	require.Equal(t, cacheMiss, st, "age>graceTTL must miss")
+	require.Equal(t, 0, c.Len())
+}
+
 func TestDecisionCache_Clear(t *testing.T) {
 	c := newDecisionCache(64)
 	base := time.Unix(1000, 0)
