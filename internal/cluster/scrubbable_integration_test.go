@@ -210,19 +210,19 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(string(got.Payload)).To(Equal("packed-payload"))
 		})
 
-		It("keeps legacy raw shards readable but unverified", func() {
+		It("rejects shards outside a data dir (non-data-dir read fail-closed)", func() {
+			// A shard reaching the non-data-dir fallback can carry no canonical key
+			// binding, so it must be rejected fail-closed rather than handed back
+			// as plaintext/unverified-legacy. Repaired shards now always live under
+			// a shard data dir and are GFSENC3.
 			path := filepath.Join(GinkgoT().TempDir(), "shard_0")
-			payload := []byte("legacy-raw-payload")
-			Expect(os.WriteFile(path, payload, 0o600)).To(Succeed())
+			Expect(os.WriteFile(path, []byte("legacy-raw-payload"), 0o600)).To(Succeed())
 
-			got, err := b.ReadShardIntegrity("bkt", "k", "01VID", 0, path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Status).To(Equal(scrubber.ShardIntegrityUnverifiedLegacy))
-			Expect(got.Payload).To(Equal(payload))
+			_, err := b.ReadShardIntegrity("bkt", "k", "01VID", 0, path)
+			Expect(err).To(HaveOccurred())
 
-			compat, err := b.ReadShard("bkt", "k", "01VID", 0, path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(compat).To(Equal(payload))
+			_, err = b.ReadShard("bkt", "k", "01VID", 0, path)
+			Expect(err).To(HaveOccurred())
 		})
 
 		It("overwrites shards atomically without leftover temp files", func() {

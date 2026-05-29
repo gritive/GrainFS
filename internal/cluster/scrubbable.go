@@ -163,9 +163,13 @@ func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShar
 func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, shardIdx int, path string) (scrubber.ShardIntegrityResult, error) {
 	unlock := b.acquireShardReadLock(bucket, key)
 	defer unlock()
+	// Canonical identity: the AAD must bind to the UNCLEANED ecObjectShardKey the
+	// original EC write sealed under — never the cleaned filesystem path. The file
+	// location stays correct because ReadLocalShard*/getShardPath clean the key.
+	canonicalKey := ecObjectShardKey(key, versionID)
 	if b.shardSvc != nil {
-		if shardKey, shardIdx, ok := b.shardServiceKeyFromPath(bucket, path); ok {
-			if data, found, err := b.shardSvc.ReadLocalShardFromPack(bucket, shardKey, shardIdx); found || err != nil {
+		if _, _, ok := b.shardServiceKeyFromPath(bucket, path); ok {
+			if data, found, err := b.shardSvc.ReadLocalShardFromPack(bucket, canonicalKey, shardIdx); found || err != nil {
 				if err != nil {
 					return scrubber.ShardIntegrityResult{}, err
 				}
@@ -178,8 +182,8 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: %w", err)
 	}
 	if b.shardSvc != nil {
-		if shardKey, shardIdx, ok := b.shardServiceKeyFromPath(bucket, path); ok {
-			data, err := b.shardSvc.ReadLocalShard(bucket, shardKey, shardIdx)
+		if _, _, ok := b.shardServiceKeyFromPath(bucket, path); ok {
+			data, err := b.shardSvc.ReadLocalShard(bucket, canonicalKey, shardIdx)
 			if err != nil {
 				return scrubber.ShardIntegrityResult{}, err
 			}
@@ -191,28 +195,14 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		}
 	}
 	// path is not under any shardSvc data-dir (checked by shardServiceKeyFromPath
-	// above): fall back to the CRC-framed / legacy-raw path.
-	// CRC-framed shards written by WriteShard may carry an encrypted inner
-	// payload (when shardSvc is set); legacy raw shards have no magic header and
-	// must NOT be passed through DecryptPayload.
-	status := scrubber.ShardIntegrityUnverifiedLegacy
-	data := raw
-	if eccodec.IsEncodedShard(raw) {
-		data, err = eccodec.DecodeShard(raw)
-		if err != nil {
-			return scrubber.ShardIntegrityResult{}, err
-		}
-		status = scrubber.ShardIntegrityVerified
-		// The inner payload is encrypted iff WriteShard encrypted it.
-		if b.shardSvc != nil {
-			aad := shardAAD(bucket, key, path)
-			data, err = b.shardSvc.DecryptPayload(data, aad)
-			if err != nil {
-				return scrubber.ShardIntegrityResult{}, err
-			}
-		}
+	// above). Repaired shards now always live under a shard data dir and are
+	// GFSENC3, so anything reaching this fallback as a recognizable plaintext/
+	// legacy shard is rejected fail-closed rather than handed back undecrypted.
+	// A genuinely-raw file (no magic, foreign) keeps the read-error path.
+	if eccodec.IsEncodedShard(raw) || eccodec.IsEncryptedShard(raw) {
+		return scrubber.ShardIntegrityResult{}, fmt.Errorf("%w: shard outside a data dir carries an encrypted/legacy envelope but no canonical key binding (plaintext/legacy rejected)", eccodec.ErrShardCorrupt)
 	}
-	return scrubber.ShardIntegrityResult{Payload: data, Status: status}, nil
+	return scrubber.ShardIntegrityResult{}, fmt.Errorf("%w: shard at %q is not a recognized GFSENC3 envelope", eccodec.ErrShardCorrupt, path)
 }
 
 func (b *DistributedBackend) shardServiceKeyFromPath(bucket, path string) (string, int, bool) {
@@ -272,11 +262,16 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 	if b.shardSvc == nil {
 		return fmt.Errorf("write shard: shard service required")
 	}
-	shardKey, shardIdx, ok := b.shardServiceKeyFromPath(bucket, path)
-	if !ok {
-		return fmt.Errorf("write shard: path %q is not under a shard data dir", path)
+	// Canonical identity: seal AAD under the UNCLEANED ecObjectShardKey (matching
+	// the original EC write), and require the supplied path to BE the canonical
+	// on-disk location for that identity. This prevents sealing object A's AAD at
+	// object B's path (a path-derived key could let them diverge).
+	canonicalKey := ecObjectShardKey(key, versionID)
+	canonicalPath := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
+	if filepath.Clean(path) != filepath.Clean(canonicalPath) {
+		return fmt.Errorf("write shard: path %q is not the canonical location %q for %s/%s/%d", path, canonicalPath, bucket, canonicalKey, shardIdx)
 	}
-	encoded, err := b.shardSvc.EncodeEncryptedShardBuffer(bucket, shardKey, shardIdx, data)
+	encoded, err := b.shardSvc.EncodeEncryptedShardBuffer(bucket, canonicalKey, shardIdx, data)
 	if err != nil {
 		return fmt.Errorf("encrypt shard: %w", err)
 	}
@@ -302,16 +297,6 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 		return fmt.Errorf("rename shard: %w", err)
 	}
 	return nil
-}
-
-// shardAAD builds the AAD string for the given shard path.
-// path must end with /shard_N; if parsing fails an empty slice is returned.
-// Must match the AAD used by WriteLocalShard/ReadLocalShard.
-func shardAAD(bucket, key, path string) []byte {
-	// filepath.Base(path) = "shard_N"
-	base := filepath.Base(path)
-	idxStr := strings.TrimPrefix(base, "shard_")
-	return []byte(bucket + "/" + key + "/" + idxStr)
 }
 
 // NodeID implements scrubber.ShardOwner. Returns the raft address (selfAddr)
