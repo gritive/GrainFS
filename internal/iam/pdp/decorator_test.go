@@ -1028,3 +1028,75 @@ func BenchmarkDecorator_DisabledDataPlanePath(b *testing.B) {
 		_ = d.Authorize(ctx, "sa-1", "b", ctxReq)
 	}
 }
+
+func pdpConfigJSONWithCacheDP(url, policy, ttlAllow, ttlDeny, graceTTL string) string {
+	return `{"enabled":true,"endpoint":"` + url + `","failure_policy":"` + policy +
+		`","data_plane":{"enabled":true},"cache":{"ttl_allow":"` + ttlAllow +
+		`","ttl_deny":"` + ttlDeny + `","grace_ttl":"` + graceTTL + `","max_entries":1024}}`
+}
+
+func TestDecoratorSingleflightCollapsesConcurrentMisses(t *testing.T) {
+	var calls int32
+	release := make(chan struct{})
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		<-release
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(pdpConfigJSONWithCacheDP(url, "closed", "1m", "1m", "0")), nil, "data_plane")
+	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"}
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = d.Authorize(context.Background(), "sa", "b", ctxReq) }()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "20 identical misses must collapse to 1 PDP call")
+}
+
+func TestDecoratorSingleflightDoesNotCacheError(t *testing.T) {
+	var calls int32
+	fail := int32(1)
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if atomic.LoadInt32(&fail) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(pdpConfigJSONWithCacheDP(url, "open", "1m", "1m", "0")), nil, "data_plane")
+	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"}
+	_ = d.Authorize(context.Background(), "sa", "b", ctxReq) // error (fail-open allow), not cached
+	atomic.StoreInt32(&fail, 0)
+	_ = d.Authorize(context.Background(), "sa", "b", ctxReq) // must call PDP again
+	require.Equal(t, int32(2), atomic.LoadInt32(&calls), "error result must not be cached")
+}
+
+// Per-waiter cancel (Iceberg passes a real ctx). A waiter whose ctx cancels DURING
+// the flight must DENY "request canceled" via the select, not adopt the shared result.
+func TestDecoratorSingleflightPerWaiterCancel(t *testing.T) {
+	block := make(chan struct{})
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) { <-block; _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
+	defer close(block)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(pdpConfigJSONWithCacheDP(url, "open", "1m", "1m", "0")), nil, "data_plane")
+	ctx, cancel := context.WithCancel(context.Background())
+	ctxReq := policy.RequestContext{Action: "iceberg:GetTable", Resource: "arn:aws:s3:::wh/t"}
+	done := make(chan policy.EvalResult, 1)
+	go func() { done <- d.AuthorizePrincipal(ctx, principal.ServiceAccount("sa"), "wh", ctxReq) }()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case res := <-done:
+		require.Equal(t, policy.DecisionDeny, res.Decision)
+		require.Equal(t, "request canceled", res.Reason)
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled waiter did not return promptly — select on ctx.Done() not wired")
+	}
+}

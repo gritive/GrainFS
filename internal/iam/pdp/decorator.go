@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
@@ -97,6 +98,12 @@ type Decorator struct {
 	// clears it on (re)build. Disabled path still takes the config RLock via GetString
 	// (Restore-coherence; not eliminable — this is NOT a bare "lock-free" path).
 	released atomic.Bool
+
+	// sf collapses concurrent identical cache misses into one PDP round trip (D2).
+	// Keyed on cacheKey + configGen so a config flip cannot collapse across
+	// generations. The detached flight in consult() decouples the shared round
+	// trip from any single waiter's ctx; per-waiter cancel is the DoChan select.
+	sf singleflight.Group
 
 	mu       sync.Mutex
 	client   *Client
@@ -266,15 +273,17 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	// without consulting the PDP and without an audit line; a stale entry is held
 	// for a possible grace-serve in the failure branch below.
 	var (
-		key   string
 		entry cacheEntry
 		state cacheState
 	)
+	// cacheKey is computed unconditionally (deterministic in req) so the
+	// singleflight collapse key exists even when the cache is disabled; the
+	// cache-nil branch just skips Lookup/Put.
+	key := cacheKey(req)
 	if cache != nil {
 		// PDPCacheEntries is best-effort/approximate: it is updated on put, release,
 		// and refresh, NOT on the lazy eviction that Lookup may perform here (Len()
 		// locks every shard, so we do not call it per lookup).
-		key = cacheKey(req)
 		entry, state = cache.Lookup(key, cfg.Cache.GraceTTL, d.now())
 		if state == cacheFresh {
 			d.mCache.WithLabelValues("hit", entry.decision).Inc()
@@ -285,7 +294,32 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 	}
 
-	r := d.consult(ctx, req, cfg, fp, key, cache, entry, state, actor, ctxReq, client)
+	// sfKey includes configGen so a config flip cannot collapse across generations
+	// (cacheKey omits failure_policy/endpoint/token-gen/timeout). The cache itself
+	// still keys on plain cacheKey; only the collapse key is generation-scoped.
+	// Grace coherence: leader computes grace from its entry/state; collapsed waiters
+	// share this sfKey so they looked up the same key — at the grace boundary their
+	// captured state may differ slightly, but the divergence is sub-ms and always
+	// security-equivalent-or-more-restrictive. Cancel/audit delta: the detached flight
+	// completes even if the sole waiter cancels, so a canceled request adds one extra
+	// completion audit/mRequests row on top of its cancel row (observability-only).
+	sfKey := key + "\x00" + configGen(cfg, tokenGen)
+	ch := d.sf.DoChan(sfKey, func() (any, error) {
+		return d.consult(req, cfg, fp, key, cache, entry, state, actor, ctxReq, client), nil
+	})
+	var r consultResult
+	select {
+	case <-ctx.Done():
+		errType := ErrTypeTransport
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			errType = ErrTypeTimeout
+		}
+		d.mRequests.WithLabelValues("error", errType, fp).Inc()
+		d.audit(req, actor, ctxReq, "deny", errType, "request canceled")
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
+	case res := <-ch:
+		r = res.Val.(consultResult)
+	}
 	if r.useInner {
 		out := inner
 		if r.reason == layerFailOpen {
@@ -305,39 +339,25 @@ type consultResult struct {
 	reason   string
 }
 
-// consult performs the PDP round trip + grace + failure policy + caching. 4a: PURE
-// extraction — callCtx is inbound-derived and the post-call inbound-cancel check is
-// preserved, so behavior == the inlined original. (4b detaches callCtx + removes the
-// post-call check, compensated by the DoChan select.)
-func (d *Decorator) consult(ctx context.Context, req Request, cfg Config, fp, key string,
+// consult performs the PDP round trip + grace + failure policy + caching. It runs
+// inside the singleflight flight, shared by collapsed waiters; callCtx is DETACHED
+// from any single waiter's inbound ctx so one waiter's cancel cannot poison the
+// shared round trip (per-waiter cancel is the DoChan select in chain). The decorator
+// still owns the per-request deadline (cfg.Timeout) so a runtime iam.pdp.timeout
+// change takes effect without rebuilding the cached client.
+func (d *Decorator) consult(req Request, cfg Config, fp, key string,
 	cache *decisionCache, entry cacheEntry, state cacheState,
 	actor principal.Principal, ctxReq policy.RequestContext, client *Client) consultResult {
 
-	// The decorator owns the per-request deadline so a runtime iam.pdp.timeout
-	// change takes effect without rebuilding the cached client. Deriving callCtx
-	// from the FRESH cfg here (not in the client) is what makes the timeout
-	// track hot-reload.
-	callCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	// DETACHED: a single waiter's cancel must not poison the shared flight; per-waiter
+	// cancel is the DoChan select in chain(). S3 passes context.Background() anyway.
+	callCtx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
 	start := time.Now()
 	_, errType, err := client.Authorize(callCtx, req)
 	d.mDuration.Observe(time.Since(start).Seconds())
-
-	// Caller-canceled takes precedence over the failure policy: a fail-open
-	// config must not turn an abandoned request into an allow. We check the
-	// ORIGINAL inbound ctx (not callCtx): a client-timeout fires callCtx while
-	// the inbound ctx stays live, so it falls through to the failure policy
-	// below; only a genuine inbound cancel/deadline lands here.
-	if ctx.Err() != nil {
-		cancelErrType := ErrTypeTransport
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			cancelErrType = ErrTypeTimeout
-		}
-		d.mRequests.WithLabelValues("error", cancelErrType, fp).Inc()
-		d.audit(req, actor, ctxReq, "deny", cancelErrType, "request canceled")
-		return consultResult{decision: policy.DecisionDeny, reason: "request canceled"}
-	}
+	// (4a post-call inbound ctx.Err() block REMOVED — the select owns per-waiter cancel.)
 
 	var de *DenyError
 	if errors.As(err, &de) {
