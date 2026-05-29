@@ -376,6 +376,15 @@ Work these in order. Do not run them in parallel.
   / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
   + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec/datawal call sites.
   Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
+  **Upload-spool addendum (2026-05-29, spool-dek-encryption slice):** migrating the
+  shared `encryptedSpoolRecordWriter`/`Reader` off the static `*encrypt.Encryptor`
+  (which reused `w.blob`) onto the seam's allocating `Seal`/`Open` raised the spool
+  micro-bench allocs (`BenchmarkEncryptedSpoolWrite` 72→97 allocs/op, 1.04→8.1 MiB
+  B/op; `BenchmarkEncryptedSpoolOpen` 64→87 allocs/op, 2.0→16.1 MiB B/op; 15s×3).
+  Write throughput is flat (~14.95→14.99 ms/op, AEAD+IO-bound), but Open sec/op
+  regressed ~35% (1.72–1.88 → 2.37–2.43 ms/op, non-overlapping ranges; still
+  3.26 GiB/s). Accept-alloc shipped per the slice's bench gate; reintroduce the
+  per-record buffer reuse in `spool.go` once `SealTo`/`OpenTo` land.
 - [ ] **KEK-envelope D-wal: live DEK rotation segment rollover [P1]**.
   D-wal-data now opens production writer/recovery paths with `DEKKeeperAdapter`
   and new encrypted `internal/storage/datawal` segments probe-seal before header

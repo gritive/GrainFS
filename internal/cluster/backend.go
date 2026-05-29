@@ -2037,7 +2037,7 @@ func (b *DistributedBackend) PreferReadAt(bucket string) bool {
 }
 
 func (b *DistributedBackend) encryptedShardStorage() bool {
-	return b.shardSvc != nil && b.shardSvc.encryptor != nil
+	return b.shardSvc != nil && b.shardSvc.segEnc != nil
 }
 
 func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore, bl *BoundedLoads) []ObjectWritePlacementNodeState {
@@ -3860,7 +3860,7 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	if b.encryptedShardStorage() {
 		partWriter = &encryptedSpoolRecordWriter{
 			w:      f,
-			enc:    b.shardSvc.encryptor,
+			seam:   b.shardSvc.segEnc,
 			domain: clusterMultipartPartDomain(uploadID, partNumber),
 		}
 	}
@@ -3974,7 +3974,7 @@ func (b *DistributedBackend) multipartPartSpooledObject(uploadID string, part st
 	}
 	if b.encryptedShardStorage() {
 		sp.encrypted = true
-		sp.encryptor = b.shardSvc.encryptor
+		sp.seam = b.shardSvc.segEnc
 		sp.domain = clusterMultipartPartDomain(uploadID, part.PartNumber)
 	}
 	return sp
@@ -3987,7 +3987,7 @@ func (b *DistributedBackend) spoolMultipartCompleteManifest(ctx context.Context,
 	}
 	defer body.Close()
 	if b.encryptedShardStorage() {
-		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.encryptor, clusterMultipartSpoolDomain(uploadID, versionID))
+		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.segEnc, clusterMultipartSpoolDomain(uploadID, versionID))
 	}
 	return spoolObject(ctx, b.spoolDir(), body, bucket)
 }
@@ -4138,7 +4138,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 func (b *DistributedBackend) openMultipartPart(uploadID string, partNumber int) (io.ReadCloser, error) {
 	full := b.partPath(uploadID, partNumber)
 	if b.encryptedShardStorage() {
-		return openSpoolEncryptedRecordFile(full, b.shardSvc.encryptor, clusterMultipartPartDomain(uploadID, partNumber))
+		return openSpoolEncryptedRecordFile(full, b.shardSvc.segEnc, clusterMultipartPartDomain(uploadID, partNumber))
 	}
 	return os.Open(full)
 }

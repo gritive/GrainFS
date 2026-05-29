@@ -31,6 +31,7 @@ const (
 	DomainClusterConfigSecret AADDomain = 0x000F
 	DomainProtocolCredential  AADDomain = 0x0010
 	DomainRaftStoreKey        AADDomain = 0x0011
+	DomainSpool               AADDomain = 0x0012
 )
 
 const aadMagic = "AAD\x01"
