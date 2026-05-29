@@ -255,6 +255,24 @@ func (s *ShardService) getShardDir(bucket, key string, shardIdx int) string {
 	return filepath.Join(targetDir, bucket, key)
 }
 
+// ShardPathUnderDataDir reports whether p resolves inside the {dataDir}/{bucket}
+// subtree for the given shard index — i.e. no "../" traversal escapes the shard
+// root. The scrubber repair read/write paths derive the on-disk location from an
+// object key via getShardPath; a key containing enough ".." would otherwise let
+// that path resolve outside the shard root. Callers MUST reject when this returns
+// false (containment guard previously provided by shardServiceKeyFromPath).
+func (s *ShardService) ShardPathUnderDataDir(bucket string, shardIdx int, p string) bool {
+	if len(s.dataDirs) == 0 {
+		return false
+	}
+	root := filepath.Join(s.dataDirs[shardIdx%len(s.dataDirs)], bucket)
+	rel, err := filepath.Rel(root, filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // HandleRPC returns the stream handler function for use with a StreamRouter.
 func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Message {
 	return s.handleRPC
@@ -818,34 +836,6 @@ func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Mes
 		}
 		return s.okResponse(nil), r
 	}
-}
-
-// EncryptPayload encrypts data with AAD if an encryptor is configured.
-// Used by DistributedBackend.WriteShard (scrubber path).
-func (s *ShardService) EncryptPayload(data, aad []byte) ([]byte, error) {
-	if s.encryptor == nil {
-		return data, nil
-	}
-	return s.encryptor.EncryptWithAAD(data, aad)
-}
-
-// DecryptPayload decrypts data with AAD if an encryptor is configured.
-// Used by DistributedBackend.ReadShard (scrubber path).
-func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
-	if s.encryptor == nil {
-		if encrypt.IsEncryptedBlob(data) {
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		if encrypt.IsLegacyEncryptedBlob(data) {
-			return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
-		}
-		return data, nil
-	}
-	decrypted, err := s.encryptor.DecryptWithAAD(data, aad)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt shard: %w", err)
-	}
-	return decrypted, nil
 }
 
 // WriteLocalShard stores a shard on the local node's disk without involving
@@ -1705,7 +1695,9 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 	if encrypt.IsLegacyEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
 	}
-	return data, nil
+	// DEK-only service: every shard is GFSENC3-sealed (handled above). A payload
+	// that reaches here carries no envelope — reject plaintext fail-closed.
+	return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
 }
 
 func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, shardIdx int) ([]byte, error) {
@@ -1758,7 +1750,9 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, sha
 	if encrypt.IsLegacyEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
 	}
-	return data, nil
+	// DEK-only service: every shard is GFSENC3-sealed (handled above). A payload
+	// that reaches here carries no envelope — reject plaintext fail-closed.
+	return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
 }
 
 // crcShardMagicLen is the length of the eccodec CRC envelope magic
@@ -1980,30 +1974,16 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 		}
 		return &multiReadCloser{Reader: r, close: closeFn}, nil
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
-		if err := rejectLegacyEncodedShardBlob(f); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		info, err := f.Stat()
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		payloadLen := info.Size() - 8 - 4
-		if payloadLen < 0 {
-			_ = f.Close()
-			return nil, eccodec.ErrCRCMismatch
-		}
-		if offset >= payloadLen {
-			_ = f.Close()
-			return nil, io.EOF
-		}
-		if max := payloadLen - offset; length > max {
-			length = max
-		}
-		return &multiReadCloser{Reader: io.NewSectionReader(f, 8+offset, length), close: f.Close}, nil
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+		// DEK-only service: every shard is GFSENC3-sealed, so a GFSCRC1 shard here
+		// is plaintext (or legacy). Reject fail-closed rather than leak it.
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
 	}
+	// GFSCRC1 with encryptor != nil (single-blob compat), or a plain/short shard:
+	// route through OpenLocalShard for proper decode (rejects plaintext, decrypts
+	// single-blob) rather than streaming the raw payload — keeps OpenLocalShardRange
+	// consistent with ReadLocalShard/ReadLocalShardAt.
 	_ = f.Close()
 
 	r, err := s.OpenLocalShard(bucket, key, shardIdx)

@@ -92,7 +92,7 @@ func (m *mockBackend) ShardPaths(bucket, key, versionID string, total int) []str
 	return paths
 }
 
-func (m *mockBackend) ReadShard(bucket, key, path string) ([]byte, error) {
+func (m *mockBackend) ReadShard(bucket, key, versionID string, shardIdx int, path string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err, ok := m.shardErr[path]; ok {
@@ -105,7 +105,7 @@ func (m *mockBackend) ReadShard(bucket, key, path string) ([]byte, error) {
 	return data, nil
 }
 
-func (m *mockBackend) WriteShard(bucket, key, path string, data []byte) error {
+func (m *mockBackend) WriteShard(bucket, key, versionID string, shardIdx int, path string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.writes++
@@ -202,11 +202,11 @@ func newIntegrityMockBackend() *integrityMockBackend {
 	}
 }
 
-func (m *integrityMockBackend) ReadShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
+func (m *integrityMockBackend) ReadShardIntegrity(bucket, key, versionID string, shardIdx int, path string) (scrubber.ShardIntegrityResult, error) {
 	m.mu.Lock()
 	m.reads[path]++
 	m.mu.Unlock()
-	data, err := m.ReadShard(bucket, key, path)
+	data, err := m.ReadShard(bucket, key, versionID, shardIdx, path)
 	if err != nil {
 		return scrubber.ShardIntegrityResult{}, err
 	}

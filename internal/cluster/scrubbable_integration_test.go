@@ -162,8 +162,8 @@ var _ = Describe("Scrubbable integration", func() {
 			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			payload := []byte("ec-shard-payload-0x42")
 
-			Expect(b.WriteShard("bkt", "k", path, payload)).To(Succeed())
-			got, err := b.ReadShard("bkt", "k", path)
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, payload)).To(Succeed())
+			got, err := b.ReadShard("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(payload))
 		})
@@ -171,9 +171,9 @@ var _ = Describe("Scrubbable integration", func() {
 		It("verifies encoded shard integrity", func() {
 			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			payload := []byte("encoded-payload")
-			Expect(b.WriteShard("bkt", "k", path, payload)).To(Succeed())
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, payload)).To(Succeed())
 
-			got, err := b.ReadShardIntegrity("bkt", "k", path)
+			got, err := b.ReadShardIntegrity("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(got.Payload).To(Equal(payload))
@@ -187,7 +187,7 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
 			path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
-			got, err := b.ReadShardIntegrity("bkt", "key", path)
+			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(string(got.Payload)).To(Equal("payload"))
@@ -204,35 +204,35 @@ var _ = Describe("Scrubbable integration", func() {
 			_, err = os.Stat(path)
 			Expect(os.IsNotExist(err)).To(BeTrue())
 
-			got, err := b.ReadShardIntegrity("bkt", "key", path)
+			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(string(got.Payload)).To(Equal("packed-payload"))
 		})
 
-		It("keeps legacy raw shards readable but unverified", func() {
+		It("rejects shards outside a data dir (non-data-dir read fail-closed)", func() {
+			// A shard reaching the non-data-dir fallback can carry no canonical key
+			// binding, so it must be rejected fail-closed rather than handed back
+			// as plaintext/unverified-legacy. Repaired shards now always live under
+			// a shard data dir and are GFSENC3.
 			path := filepath.Join(GinkgoT().TempDir(), "shard_0")
-			payload := []byte("legacy-raw-payload")
-			Expect(os.WriteFile(path, payload, 0o600)).To(Succeed())
+			Expect(os.WriteFile(path, []byte("legacy-raw-payload"), 0o600)).To(Succeed())
 
-			got, err := b.ReadShardIntegrity("bkt", "k", path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Status).To(Equal(scrubber.ShardIntegrityUnverifiedLegacy))
-			Expect(got.Payload).To(Equal(payload))
+			_, err := b.ReadShardIntegrity("bkt", "k", "01VID", 0, path)
+			Expect(err).To(HaveOccurred())
 
-			compat, err := b.ReadShard("bkt", "k", path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(compat).To(Equal(payload))
+			_, err = b.ReadShard("bkt", "k", "01VID", 0, path)
+			Expect(err).To(HaveOccurred())
 		})
 
 		It("overwrites shards atomically without leftover temp files", func() {
 			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			dir := filepath.Dir(path)
 
-			Expect(b.WriteShard("bkt", "k", path, []byte("v1"))).To(Succeed())
-			Expect(b.WriteShard("bkt", "k", path, []byte("v2"))).To(Succeed())
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, []byte("v1"))).To(Succeed())
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, []byte("v2"))).To(Succeed())
 
-			got, err := b.ReadShard("bkt", "k", path)
+			got, err := b.ReadShard("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(got)).To(Equal("v2"))
 
@@ -244,7 +244,7 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("errors for missing shard files", func() {
-			_, err := b.ReadShard("bkt", "k", filepath.Join(GinkgoT().TempDir(), "nope"))
+			_, err := b.ReadShard("bkt", "k", "01VID", 0, filepath.Join(GinkgoT().TempDir(), "nope"))
 			Expect(err).To(HaveOccurred())
 		})
 	})

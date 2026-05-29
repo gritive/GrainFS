@@ -64,7 +64,7 @@ func (r *RepairEngine) RepairWithCorrelation(rec ObjectRecord, status ShardStatu
 
 	shards := make([][]byte, total)
 	for i, path := range paths {
-		data, err := r.backend.ReadShard(rec.Bucket, rec.Key, path)
+		data, err := r.backend.ReadShard(rec.Bucket, rec.Key, rec.VersionID, i, path)
 		if err != nil {
 			shards[i] = nil // nil → reedsolomon treats as missing
 			continue
@@ -93,7 +93,7 @@ func (r *RepairEngine) RepairWithCorrelation(rec ObjectRecord, status ShardStatu
 	toRepair := append(append([]int{}, status.Missing...), status.Corrupt...)
 	for _, idx := range toRepair {
 		writeStart := time.Now()
-		if err := r.backend.WriteShard(rec.Bucket, rec.Key, paths[idx], shards[idx]); err != nil {
+		if err := r.backend.WriteShard(rec.Bucket, rec.Key, rec.VersionID, idx, paths[idx], shards[idx]); err != nil {
 			ev := newRepairEvent(PhaseWrite, OutcomeFailed, rec, correlationID)
 			ev.ShardID = int32(idx)
 			ev.DurationMs = uint32(time.Since(writeStart).Milliseconds())

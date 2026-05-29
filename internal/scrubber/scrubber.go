@@ -33,11 +33,15 @@ type Scrubbable interface {
 	// ShardPaths returns all expected shard file paths for an object.
 	ShardPaths(bucket, key, versionID string, totalShards int) []string
 	// ReadShard reads and decrypts a shard, verifying its CRC32 footer.
-	// bucket+key are used for locking (RLock).
-	ReadShard(bucket, key, path string) ([]byte, error)
+	// bucket+key are used for locking (RLock); versionID+shardIdx identify the
+	// canonical shard so the backend binds AAD to the same key the original EC
+	// write sealed under (never the cleaned filesystem path).
+	ReadShard(bucket, key, versionID string, shardIdx int, path string) ([]byte, error)
 	// WriteShard encrypts and atomically writes a shard with a CRC32 footer.
-	// bucket+key are used for locking (Lock).
-	WriteShard(bucket, key, path string, data []byte) error
+	// bucket+key are used for locking (Lock); versionID+shardIdx identify the
+	// canonical shard so the repaired bytes are sealed under the same AAD key as
+	// the original EC write.
+	WriteShard(bucket, key, versionID string, shardIdx int, path string, data []byte) error
 }
 
 // ShardIntegrityStatus describes whether a shard read had an integrity oracle.
@@ -60,7 +64,7 @@ type ShardIntegrityResult struct {
 // ShardIntegrityReader is an optional Scrubbable extension for backends that
 // can distinguish CRC-verified shards from readable legacy raw shards.
 type ShardIntegrityReader interface {
-	ReadShardIntegrity(bucket, key, path string) (ShardIntegrityResult, error)
+	ReadShardIntegrity(bucket, key, versionID string, shardIdx int, path string) (ShardIntegrityResult, error)
 }
 
 // ObjectRecord carries metadata needed for scrubbing.

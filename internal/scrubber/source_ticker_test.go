@@ -37,10 +37,14 @@ func (noopScrubbable) ScanObjects(bucket string) (<-chan ObjectRecord, error) {
 	close(ch)
 	return ch, nil
 }
-func (noopScrubbable) ObjectExists(bucket, key string) (bool, error)          { return false, nil }
-func (noopScrubbable) ShardPaths(bucket, key, vid string, n int) []string     { return nil }
-func (noopScrubbable) ReadShard(bucket, key, path string) ([]byte, error)     { return nil, nil }
-func (noopScrubbable) WriteShard(bucket, key, path string, data []byte) error { return nil }
+func (noopScrubbable) ObjectExists(bucket, key string) (bool, error)      { return false, nil }
+func (noopScrubbable) ShardPaths(bucket, key, vid string, n int) []string { return nil }
+func (noopScrubbable) ReadShard(bucket, key, vid string, idx int, path string) ([]byte, error) {
+	return nil, nil
+}
+func (noopScrubbable) WriteShard(bucket, key, vid string, idx int, path string, data []byte) error {
+	return nil
+}
 
 func TestBackgroundScrubber_SourceTickerFires(t *testing.T) {
 	bg := New(noopScrubbable{}, 50*time.Millisecond)
