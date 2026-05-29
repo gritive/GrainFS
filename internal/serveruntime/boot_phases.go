@@ -19,10 +19,11 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// JoinPendingFile is the sentinel written by the UDS join handler and read at
-// startup to perform a pending cluster join. Its presence means the solo Raft
-// state must be wiped so the node can bootstrap cleanly in join mode.
-// Exported so tests in cmd/grainfs can write it without duplicating the path.
+// JoinPendingFile is the sentinel written by an operator (or a test harness)
+// before boot and read at startup to perform a pending cluster join. Its
+// presence means the solo Raft state must be wiped so the node can bootstrap
+// cleanly in join mode. Exported so the cluster test harnesses can write it
+// without duplicating the path.
 const JoinPendingFile = ".join-pending"
 
 // wipeSoloRaftState renames meta_raft/, raft/, and shared-raft-log/ to
