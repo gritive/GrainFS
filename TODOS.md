@@ -431,18 +431,20 @@ Work these in order. Do not run them in parallel.
   seam methods (+ `encrypt.AppendAAD`, `DEKKeeper.SealWithAADTo`/`OpenWithAADTo`,
   `TransientReadOnlyDEK.OpenWithAADTo`, pooled `withSeamAAD`/`withSeamAADErr2`) exist and are wired
   through all 3 adapters; packblob `Append` (Seal), spool `Read` (Open), spool write (Seal), the
-  EC-shard readers (`eccodec/shardio.go` Open), and the single-node object readers
-  (`encrypted_object_file.go` Open) consumers are migrated.
+  EC-shard readers (`eccodec/shardio.go` Open), the single-node object readers
+  (`encrypted_object_file.go` Open), and the `AADField` per-field construction (inline values, no
+  per-field `make`) consumers are migrated.
   Open side needs **per-consumer lifetime analysis** — Open plaintext escapes to callers, so pooling the
   `OpenTo` dst is a use-after-free hazard, NOT a mechanical pool reintroduction. Each remaining consumer
   is its own slice; bench ≥15s×3 (allocs/op AND B/op).
   - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis. Plaintext **escapes** to the S3
     read path / Compact `entries` (UNSAFE for naive pooling) — needs ownership rework, not a mechanical
-    OpenTo swap.
-  - datawal (`scanRecords`) Open — cold path (WAL recovery/startup only), lowest payoff.
-  - **[P3] `AADField` append/pool** — the residual per-op allocs are `AADField` construction
-    (`FieldUint64`/`FieldString`/`FieldUint16` each `make` a per-field slice + the `[]AADField` slice).
-    Eliminating them needs an `encrypt.AADField` append/pool variant touching every AAD builder.
+    OpenTo swap. **The last remaining hot-path Open consumer.**
+  - datawal (`scanRecords`) Open — **dropped**: cold path (WAL recovery/startup only), and the plaintext
+    is copied (`copyBytes=true`) + cleared per record, so `OpenTo` buffer reuse yields no real benefit.
+  - The `[]AADField` slice itself (one per builder call, e.g. `ShardAADFields`/`chunkFields`) still
+    allocates — pooling it is non-trivial (concurrency requires a fresh slice) and is a separate larger
+    refactor, not pursued. The per-field `make` floor it sat on is now gone.
 - [ ] **KEK-envelope D-wal: live DEK rotation segment rollover [P1]**.
   D-wal-data now opens production writer/recovery paths with `DEKKeeperAdapter`
   and new encrypted `internal/storage/datawal` segments probe-seal before header

@@ -46,36 +46,37 @@ const (
 	fieldKindU64    aadFieldKind = 0x05
 )
 
-// AADField is one length-prefixed field in an AAD blob.
+// AADField is one length-prefixed field in an AAD blob. Values are stored
+// inline (string for String/Bytes payloads, uint64 for the integer kinds);
+// the wire encoding in AppendAAD is unchanged. FieldString and the FieldUint*
+// constructors allocate nothing. FieldBytes is the deliberate exception: it
+// takes an immutable defensive copy of its input via string(b) (one alloc),
+// which is consensus-critical — callers may mutate their input slice after
+// construction, so this copy must not be removed to chase zero-alloc.
 type AADField struct {
 	kind aadFieldKind
-	data []byte
+	num  uint64
+	str  string
 }
 
 func FieldString(s string) AADField {
-	return AADField{kind: fieldKindString, data: []byte(s)}
+	return AADField{kind: fieldKindString, str: s}
 }
 
 func FieldBytes(b []byte) AADField {
-	return AADField{kind: fieldKindBytes, data: append([]byte(nil), b...)}
+	return AADField{kind: fieldKindBytes, str: string(b)}
 }
 
 func FieldUint16(v uint16) AADField {
-	b := make([]byte, 2)
-	binary.BigEndian.PutUint16(b, v)
-	return AADField{kind: fieldKindU16, data: b}
+	return AADField{kind: fieldKindU16, num: uint64(v)}
 }
 
 func FieldUint32(v uint32) AADField {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, v)
-	return AADField{kind: fieldKindU32, data: b}
+	return AADField{kind: fieldKindU32, num: uint64(v)}
 }
 
 func FieldUint64(v uint64) AADField {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return AADField{kind: fieldKindU64, data: b}
+	return AADField{kind: fieldKindU64, num: v}
 }
 
 // BuildAAD assembles a binary AAD blob. cluster_id MUST be exactly 16
@@ -113,11 +114,25 @@ func AppendAAD(dst []byte, domain AADDomain, clusterID []byte, fields ...AADFiel
 	out = append(out, uint8(len(fields)))
 	for _, f := range fields {
 		out = append(out, byte(f.kind))
-		if len(f.data) > 65535 {
-			panic("BuildAAD: field exceeds 64KB")
+		switch f.kind {
+		case fieldKindString, fieldKindBytes:
+			if len(f.str) > 65535 {
+				panic("BuildAAD: field exceeds 64KB")
+			}
+			out = binary.BigEndian.AppendUint16(out, uint16(len(f.str)))
+			out = append(out, f.str...)
+		case fieldKindU16:
+			out = binary.BigEndian.AppendUint16(out, 2)
+			out = binary.BigEndian.AppendUint16(out, uint16(f.num))
+		case fieldKindU32:
+			out = binary.BigEndian.AppendUint16(out, 4)
+			out = binary.BigEndian.AppendUint32(out, uint32(f.num))
+		case fieldKindU64:
+			out = binary.BigEndian.AppendUint16(out, 8)
+			out = binary.BigEndian.AppendUint64(out, f.num)
+		default:
+			panic("BuildAAD: unknown field kind")
 		}
-		out = binary.BigEndian.AppendUint16(out, uint16(len(f.data)))
-		out = append(out, f.data...)
 	}
 	return out
 }
