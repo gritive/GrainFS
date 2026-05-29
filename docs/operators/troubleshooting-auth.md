@@ -120,8 +120,8 @@ WARN: KEK handshake HMAC mismatch from <addr>
 The joiner has the wrong KEK. Verify `<data>/keys/0.key` matches a healthy
 node's active KEK byte-for-byte (`sha256sum <data>/keys/0.key`), and that
 `<data>/cluster.id` matches the destination cluster's identity. On match,
-retry `cluster join`. Nonces are single-use and 60s-TTL — a retry forces a
-fresh challenge automatically.
+retry the runtime `grainfs join` (or use invite-join). Nonces are single-use
+and 60s-TTL — a retry forces a fresh challenge automatically.
 
 ## Audit table queries return zero rows
 

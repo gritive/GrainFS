@@ -101,14 +101,16 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 
 			waitForPort(t, leaderHTTP, 15*time.Second)
 
-			// Joiner with keyB: write .join-pending pointing to leader, then boot.
-			// Must fail (SPKI mismatch on QUIC handshake; cluster join cannot complete).
-			gomega.Expect(os.WriteFile(
-				fmt.Sprintf("%s/%s", joinerDataDir, joinPendingFile),
-				[]byte(fmt.Sprintf("127.0.0.1:%d", leaderRaft)), 0o600)).To(gomega.Succeed())
-			// Pre-stage the MISMATCHED keyB on disk (replaces the removed
-			// cluster-key flag). PSK->SPKI is deterministic, so the joiner's SPKI
-			// differs from the leader's and the QUIC handshake is rejected.
+			// Joiner with keyB: stage the leader's KEK (keys/0.key) + cluster.id so
+			// the joiner passes the KEK boot gate and actually reaches the QUIC
+			// handshake (without the staged KEK it dies at "KEK not found" BEFORE
+			// the SPKI check this test asserts), and write .join-pending pointing at
+			// the leader.
+			gomega.Expect(writeNodeJoinPending(joinerDataDir, leaderDataDir,
+				fmt.Sprintf("127.0.0.1:%d", leaderRaft))).To(gomega.Succeed())
+			// Pre-stage the MISMATCHED keyB as the transport PSK (replaces the
+			// removed cluster-key flag). PSK->SPKI is deterministic, so the joiner's
+			// SPKI differs from the leader's and the QUIC handshake is rejected.
 			gomega.Expect(transport.NewKeystore(joinerDataDir).WriteCurrent(keyB)).To(gomega.Succeed())
 
 			joinerCtx, joinerCancel := context.WithTimeout(context.Background(), 3*time.Second)
