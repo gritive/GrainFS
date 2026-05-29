@@ -68,12 +68,17 @@ func (p *EnvProtector) Name() string { return "env" }
 
 // slotAAD binds a slot's ciphertext to the caller aad (carries the KEK version),
 // the format version, the salt, and the slot identity — preventing slot-confusion
-// and cross-version replay.
+// and cross-version replay. Every variable-length field is length-prefixed
+// (uint32 big-endian) so distinct (aad, salt, slotTag) tuples can never collide
+// into the same AAD bytes regardless of what a future caller passes as aad.
 func slotAAD(callerAAD, salt []byte, slotTag string) []byte {
-	out := make([]byte, 0, len(callerAAD)+1+len(salt)+len(slotTag))
+	out := make([]byte, 0, 4+len(callerAAD)+1+4+len(salt)+4+len(slotTag))
+	out = appendU32(out, uint32(len(callerAAD)))
 	out = append(out, callerAAD...)
 	out = append(out, envKEKFmtVer)
+	out = appendU32(out, uint32(len(salt)))
 	out = append(out, salt...)
+	out = appendU32(out, uint32(len(slotTag)))
 	out = append(out, slotTag...)
 	return out
 }
@@ -102,6 +107,7 @@ func (p *EnvProtector) Protect(plaintext, aad []byte) ([]byte, error) {
 		return nil, err
 	}
 	recKey := deriveRecoveryKey(secret, salt, argonTimeDefault, argonMemDefault, argonThreadsDefault)
+	zeroize(secret)
 	defer zeroize(eek)
 	defer zeroize(recKey)
 
@@ -156,6 +162,7 @@ func (p *EnvProtector) Unprotect(blob, aad []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("env protector: env binding unusable and no recovery secret: %w", rerr)
 	}
 	recKey := deriveRecoveryKey(secret, c.salt, c.argonT, c.argonM, c.argonP)
+	zeroize(secret)
 	pt, oerr := AESGCMOpenWithAAD(recKey, c.recSlot, slotAAD(aad, c.salt, "rec"))
 	zeroize(recKey)
 	if oerr != nil {

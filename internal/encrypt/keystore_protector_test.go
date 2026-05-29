@@ -185,6 +185,20 @@ func TestKEKStore_EnvProtector_MixedStoreLoads(t *testing.T) {
 	_ = s // silence
 }
 
+func TestWriteKEKFileAtomic_StaleTmpDoesNotWedge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "0.key")
+	// Simulate a crashed prior write leaving an orphaned tmp.
+	require.NoError(t, os.WriteFile(path+".tmp", []byte("stale"), 0o600))
+
+	blob := make([]byte, KEKSize)
+	blob[0] = 0x77
+	require.NoError(t, writeKEKFileAtomic(path, blob), "stale .tmp must not wedge the O_EXCL write")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, blob, got)
+}
+
 func TestKEKStore_TruncatedPlaintextFileRejected(t *testing.T) {
 	dir := t.TempDir()
 	keysDir := filepath.Join(dir, "keys")

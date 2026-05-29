@@ -20,9 +20,16 @@ func TestBuildKEKProtector_DefaultIsPlaintext(t *testing.T) {
 }
 
 func TestBuildKEKProtector_EnvSelectsEnv(t *testing.T) {
+	t.Setenv(kekRecoverySecretEnv, "boot-pass")
 	p, err := buildKEKProtector(Config{KEKProtector: "env"})
 	require.NoError(t, err)
 	require.Equal(t, "env", p.Name())
+}
+
+func TestBuildKEKProtector_EnvWithoutSecretFailsClosed(t *testing.T) {
+	t.Setenv(kekRecoverySecretEnv, "") // absent
+	_, err := buildKEKProtector(Config{KEKProtector: "env"})
+	require.Error(t, err, "env mode requires the recovery secret at boot (fail-closed)")
 }
 
 func TestBuildKEKProtector_UnknownErrors(t *testing.T) {

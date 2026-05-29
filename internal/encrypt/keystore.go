@@ -483,6 +483,14 @@ func writeKEKFileAtomic(path string, kek []byte) error {
 		return fmt.Errorf("writeKEKFileAtomic: empty blob")
 	}
 	tmp := path + ".tmp"
+	// Remove any stale tmp left by a crashed prior write. Without this the
+	// rebind rewrite-in-place path (env protector rebinding <V>.key to new
+	// machine factors) would wedge forever on the O_EXCL collision below after a
+	// power loss between create and rename. O_EXCL|O_NOFOLLOW on the immediately
+	// following create still guards against a symlink/race substitution.
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale tmp %q: %w", tmp, err)
+	}
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("open tmp %q: %w", tmp, err)
