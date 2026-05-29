@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.448.0] - 2026-05-29
+
+### Changed
+
+- Reduced memory churn on the at-rest-encrypted upload-spool **write** path. The
+  spool encrypt path now reuses a per-writer ciphertext buffer (via the
+  buffer-reusing `SealTo` seam) instead of allocating per record, recovering the
+  allocation regression introduced when upload spools were encrypted at rest
+  (`BenchmarkEncryptedSpoolWrite`: ~8.5 MiB → ~1.1 MiB per op). This completes the
+  spool buffer-reuse work begun on the read path in 0.0.447.0 and applies to
+  whole-object spools, multipart parts, and EC shard spools. No change to on-disk
+  format or behavior.
+
 ## [0.0.447.0] - 2026-05-29
 
 ### Changed
