@@ -405,8 +405,69 @@ it alongside `grainfs_iam_pdp_requests_total{decision="error"}` to spot PDP
 unavailability. Cache **hits are not re-audited** in the `iam.pdp` log (the
 decision was audited when first computed); misses and grace-serves are.
 
-Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist, and
-S3/Iceberg data-plane enforcement.
+### Data-plane enforcement
+
+The slices above gate **control-plane** operations (admin routes, protocol
+credentials). `iam.pdp.data_plane.enabled` extends the same external PDP, with
+the same deny-override semantics, to **S3 and Iceberg object/bucket
+authorization** — after GrainFS IAM allows an object/bucket operation, the PDP
+can still veto it.
+
+It is **disabled by default** and is an **AND-gate**: data-plane enforcement
+runs only when **both** `iam.pdp.enabled` and `iam.pdp.data_plane.enabled` are
+`true`. "Data-plane on while control-plane off" is inexpressible by design —
+turning off the top-level `iam.pdp.enabled` disables every PDP plane at once
+(secure-by-default).
+
+```json
+{
+  "enabled": true,
+  "endpoint": "https://pdp.internal.example:8443",
+  "timeout": "2s",
+  "failure_policy": "closed",
+  "tls": { "ca_pem": "-----BEGIN CERTIFICATE-----\n...", "min_version": "1.2" },
+  "data_plane": { "enabled": true }
+}
+```
+
+- **Scope: S3 + Iceberg only.** NFS, 9P, and NBD are served by separate
+  authorizer instances and are **not** covered by data-plane PDP enforcement
+  yet — that is a documented follow-up.
+- **Protocol/context on the wire.** A data-plane PDP request carries
+  `protocol` = the action namespace (`s3` or `iceberg`), `auth_method` =
+  `sa` or `anonymous`, and an **empty** `target_sa` (the operation acts on an
+  object, not a service account). Control-plane PDP requests are unchanged and
+  still carry `protocol="admin"`.
+- **Singleflight.** Concurrent duplicate authorization misses for the same cache
+  key collapse to a **single** PDP call; the rest wait for and share that one
+  result, so a burst of identical object requests does not fan out into a burst
+  of PDP calls.
+- **Availability (`failure_policy=closed`).** With the secure default, a PDP
+  outage **denies** cache-cold data-plane traffic (object/bucket requests with
+  no in-window cached decision). Set `cache.grace_ttl` (see above) to keep
+  serving last-good allows through a brief outage. SSRF-blocked dials and
+  broken-token failures are **HARD-DENY** and are exempt from grace and from
+  `failure_policy` — they are fail-fast security gates, not ordinary outages.
+
+> **Cross-plane fail-open warning.** `failure_policy` is **shared** across the
+> control and data planes. Setting `failure_policy: open` to relieve a
+> data-plane availability problem **also fail-opens the control-plane PDP gates**
+> (the shipped admin and protocol-credential enforcement) — a PDP outage would
+> then allow control-plane operations that GrainFS IAM permits. A per-scope
+> failure policy (so data-plane and control-plane can differ) is a documented
+> follow-up. Until then, prefer `failure_policy: closed` + `cache.grace_ttl` for
+> data-plane availability rather than `open`.
+
+Observe per plane with the `scope` label on the `grainfs_iam_pdp_*` metric
+families (`scope` = `admin` | `protocol_credential` | `data_plane`). To read
+just the data-plane series, filter on `scope="data_plane"`, e.g.
+`grainfs_iam_pdp_requests_total{scope="data_plane"}` and
+`grainfs_iam_pdp_cache_total{scope="data_plane"}`. This lets you split
+data-plane request volume, cache hit/miss/grace, and latency from the
+control-plane series.
+
+Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist,
+data-plane enforcement for NFS / 9P / NBD, and a per-scope `failure_policy`.
 
 ## Current Boundary
 
@@ -414,5 +475,7 @@ HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
 mount-SA, bucket-upstream, config, and dashboard-token admin routes. An optional
 External PDP adapter (remote `https` with a DEK-sealed bearer token + dial-time SSRF
 egress filtering, or a local `http` loopback sidecar; disabled by default) chains
-after GrainFS IAM for admin and protocol-credential operations; mTLS and S3/Iceberg
-data-plane enforcement remain future slices.
+after GrainFS IAM for admin and protocol-credential operations, and — when
+`iam.pdp.data_plane.enabled` is also set — for S3/Iceberg object/bucket
+operations. mTLS, a per-CIDR SSRF allowlist, NFS/9P/NBD data-plane enforcement,
+and a per-scope `failure_policy` remain future slices.
