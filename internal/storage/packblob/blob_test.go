@@ -183,13 +183,15 @@ func TestEncryptedBlobStoreAppendKeepsAllocationBound(t *testing.T) {
 		_, err := bs.Append(key, payload)
 		require.NoError(t, err)
 	})
-	// D-seg-pack: the DataEncryptor seam returns a freshly-allocated ciphertext
-	// per Seal (the cipher owns its buffer) and BuildAAD allocates the AAD blob
-	// plus the four positional AADField slices, replacing the pooled
-	// sealedBuf/aadBuf. Bound raised from 5 → 15 (measured 11 without -race, 14
-	// under -race instrumentation, + margin); SealTo/OpenTo buffer reuse is a
-	// future optimization (TODOS.md).
-	require.LessOrEqual(t, allocs, 15.0)
+	// SealTo seam-pooling (BenchmarkAppendEncrypted, 15s-class): the Append now
+	// seals via DataEncryptor.SealTo into a pooled buffer (blobAppendSealedPool)
+	// with the AAD built into a pooled scratch (withSeamAAD/AppendAAD), so the
+	// per-Append ciphertext+AAD churn is gone — B/op dropped 75,400 → ~1,500 (≈50×).
+	// allocs/op fell 14 → 9 (non-race; 12 under -race instrumentation). The residual
+	// is the AADField construction in blobEntryAADFields (FieldUint64/String allocate
+	// per field); eliminating it needs an AADField-API append/pool variant — a
+	// separate slice (TODOS.md). Bound 15 → 13 (race ceiling 12 + margin).
+	require.LessOrEqual(t, allocs, 13.0)
 }
 
 func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
