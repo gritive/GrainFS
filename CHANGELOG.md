@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **At-rest KEK protection (`--kek-protector`).** The cluster KEK store
+  (`<dataDir>/keys/<V>.key`) can now be stored wrapped instead of as plaintext.
+  `--kek-protector=plaintext` (default) keeps the current raw 32-byte format with
+  no change. `--kek-protector=env` wraps every KEK version under a key derived
+  from machine-binding factors (machine-id, NIC MAC addresses, CPU brand), so a
+  stolen disk or detached volume snapshot cannot unwrap the KEK on a different
+  machine. A mandatory recovery passphrase slot (`GRAINFS_KEK_RECOVERY_SECRET`
+  env var, or `--kek-recovery-secret-file`) provides a second unwrap path: if the
+  machine binding changes (hardware replacement, NIC change, migration), the KEK
+  is recovered via the passphrase and transparently re-bound to the new machine.
+  Boot fails closed if the KEK can be unwrapped by neither path — it never
+  regenerates. `env` mode requires the recovery secret to remain resident for the
+  lifetime of the service (enforced at boot) so online KEK rotation cannot
+  fatal-halt a node. Enabling `env` is a one-way migration of the key files (the
+  plaintext reader cannot parse the wrapped container). Single-node and cluster
+  behave identically; only the KEK store is affected (cluster-key PSK protection
+  is a planned follow-up).
+
 ## [0.0.474.0] - 2026-05-30
 
 ### Removed

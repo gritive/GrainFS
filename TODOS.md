@@ -356,6 +356,33 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 ## Deferred Until Triggered
 
+- [ ] **At-rest KEK protection Slice 2 — cluster-key PSK** [P3]. The transport
+  cluster-key PSK (`internal/transport/keystore.go`, `keys.d`) is still written
+  plaintext. Apply the `encrypt.KeyProtector` seam (added in Slice 1, the
+  `--kek-protector` feature) to it so `env` mode also wraps the PSK. Mirror the
+  keystore integration: protector as a field, Protect on write, Unprotect+rewrap
+  on load, fail-closed.
+- [ ] **At-rest KEK protection Slice 3 — KMS/HSM/TPM providers** [P3]. Implement
+  concrete `KeyProtector` backends behind the existing seam (envelope: external
+  service wraps our KEK). No interface change; adds external SDK deps.
+- [ ] **env KEK protector: secret-resident residual** [P3]. `--kek-protector=env`
+  enforces the recovery secret at boot (`buildKEKProtector`), but
+  `EnvProtector.Protect` re-resolves it at KEK-rotation time. If an operator
+  unsets `GRAINFS_KEK_RECOVERY_SECRET` after boot, a later rotation's
+  `AddAndPersist`→`Protect` could fail and fatal-halt the node. The boot gate
+  narrows but does not fully close this; documented as "secret must stay resident
+  for the service lifetime". Consider caching the boot-resolved secret in the
+  protector so rotation never depends on live process env.
+- [ ] **Flaky `TestEncryptedObjectFileReadAtRejectsCorruptRequestedChunk`** [P3]
+  (`internal/storage/encrypted_object_file_test.go`). ~3/10 FAIL on master base
+  (devel d217cdc8), unrelated to KEK-protector work — the corrupted-chunk
+  full-read fallback intermittently returns nil error with 1024 bytes.
+- [ ] **Optional `grainfs encrypt kek unprotect` admin tool** [P3]. Enabling
+  `--kek-protector=env` is a one-way migration (plaintext reader can't parse the
+  container). Add a tool to convert env→plaintext if reversibility is needed.
+- [ ] **Retire dead `internal/encrypt/filekek.go`** [P3] (`FileKEK`) — no
+  production callers; superseded by KEKStore + KeyProtector.
+
 - [ ] **Solo-leader full-process restart fails `WaitDEKReady` (pre-existing, found 2026-05-29)**.
   A single-node genesis leader (whether started with `--cluster-key` OR self-seeded)
   does not come back up after a terminate+restart on the same data dir: boot aborts with
