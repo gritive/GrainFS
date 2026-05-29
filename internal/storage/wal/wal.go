@@ -150,6 +150,9 @@ func open(dir string, sealer RecordSealer, namespace string, version uint32) (*W
 		return nil, err
 	}
 	w.lastSeq.Store(maxSeq)
+	// Seeds the pinned gen for replay correctness. Under seal-first the first
+	// post-open write always rotates (w.file == nil) and re-pins w.dekGen to the
+	// freshly-sealed gen, so this seed is not consulted by the write path.
 	w.dekGen = dekGen
 
 	w.wg.Add(1)
@@ -235,12 +238,37 @@ func (w *WAL) writer() {
 // writeEntry writes e to the current segment file, rotating if necessary.
 // Must be called with w.mu held.
 func (w *WAL) writeEntry(e Entry) error {
-	if w.file == nil || w.fileBytes >= maxSegmentBytes || w.fileCount >= maxSegmentEntries {
-		if err := w.rotate(e.Seq); err != nil {
+	if w.sealer == nil {
+		// Plaintext WAL: gen-0, no DEK rotation possible — size/count rotate only.
+		if w.file == nil || w.fileBytes >= maxSegmentBytes || w.fileCount >= maxSegmentEntries {
+			if err := w.rotate(e.Seq, 0); err != nil {
+				return err
+			}
+		}
+		n, err := marshalPlainEntry(w.file, e)
+		if err != nil {
+			return err
+		}
+		w.fileBytes += n
+		w.fileCount++
+		return nil
+	}
+	// Encrypted: SEAL FIRST so the gen this entry was sealed under is known before
+	// choosing the segment. Roll when the open segment's pinned gen differs (a DEK
+	// rotation since it was opened) so the entry always lands in a segment whose
+	// header gen == the gen it was sealed under. No probe, no mismatch state, no
+	// retry: if the keeper's gen advances again after this seal, THIS entry is
+	// already sealed+headed at its gen and the NEXT entry rolls.
+	sealed, gen, err := sealEntry(e, w.sealer, w.namespace)
+	if err != nil {
+		return err
+	}
+	if w.file == nil || w.fileBytes >= maxSegmentBytes || w.fileCount >= maxSegmentEntries || gen != w.dekGen {
+		if err := w.rotate(e.Seq, gen); err != nil {
 			return err
 		}
 	}
-	n, err := marshalEntry(w.file, e, w.sealer, w.namespace, w.dekGen)
+	n, err := writeFrame(w.file, e, sealed)
 	if err != nil {
 		return err
 	}
@@ -249,9 +277,11 @@ func (w *WAL) writeEntry(e Entry) error {
 	return nil
 }
 
-// rotate closes the current segment and opens a new one named after firstSeq.
-// Must be called with w.mu held.
-func (w *WAL) rotate(firstSeq uint64) error {
+// rotate closes the current segment and opens a new one named after firstSeq,
+// pinning gen in its header and adopting it as the active pinned gen. Must be
+// called with w.mu held. The caller passes the gen the entry was sealed under
+// (seal-first), so header gen == sealed gen by construction.
+func (w *WAL) rotate(firstSeq uint64, gen uint32) error {
 	if w.file != nil {
 		if err := w.file.Sync(); err != nil {
 			log.Warn().Err(err).Msg("wal: sync on rotate failed")
@@ -264,18 +294,58 @@ func (w *WAL) rotate(firstSeq uint64) error {
 	if err != nil {
 		return fmt.Errorf("wal: open segment %s: %w", name, err)
 	}
-	// Write header only if new file
-	fi, _ := f.Stat()
-	if fi.Size() == 0 {
-		if err := writeHeader(f, w.version, w.dekGen); err != nil {
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	hb := int64(headerBytesFor(w.version))
+	switch {
+	case fi.Size() == 0:
+		// Fresh segment (the normal path: firstSeq is always a new name).
+		if err := writeHeader(f, w.version, gen); err != nil {
 			f.Close()
 			return err
 		}
+	case fi.Size() <= hb:
+		// Header-only crash leftover under this name: re-pin it at the live gen in
+		// place. By seq-monotonicity no committed entry can live here (the active
+		// populated segment has a lower firstSeq), so truncating is safe. This also
+		// fixes a latent bug where the old "header only if size==0" path appended
+		// onto a stale-gen header after a restart that reused the name.
+		if err := f.Truncate(0); err != nil {
+			f.Close()
+			return err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			f.Close()
+			return err
+		}
+		if err := writeHeader(f, w.version, gen); err != nil {
+			f.Close()
+			return err
+		}
+	default:
+		// Bytes past the header under a fresh rotate target: unreachable after a
+		// successful boot (a torn leftover fails scanMaxSeq first — see the crash-
+		// window follow-up). Fail closed rather than corrupt by appending.
+		f.Close()
+		return fmt.Errorf("wal: refuse to rotate onto non-empty segment %s (%d bytes)", name, fi.Size())
 	}
 	w.file = f
-	w.fileBytes = int(fi.Size())
+	w.dekGen = gen
+	w.fileBytes = 0 // counts entry bytes past the header; header is not counted
 	w.fileCount = 0
 	return nil
+}
+
+// headerBytesFor returns the on-disk header size for a wire version: v4 carries
+// dek_gen (magic+version+gen = 12 bytes), older plaintext layouts are 8 bytes.
+func headerBytesFor(version uint32) int {
+	if version == fileVersionV4 {
+		return 12
+	}
+	return 8
 }
 
 // scanMaxSeq reads all existing WAL segments and returns the highest seq seen
@@ -558,11 +628,12 @@ func putString16(dst []byte, off int, s string) int {
 	return off + len(s)
 }
 
-// marshalEntry writes an entry in binary format and returns bytes written.
-func marshalEntry(w io.Writer, e Entry, sealer RecordSealer, namespace string, wantGen uint32) (int, error) {
-	if sealer == nil {
-		return marshalPlainEntry(w, e)
-	}
+// sealEntry seals e's body once and returns the ciphertext plus the DEK
+// generation it was sealed under. The returned slice is freshly allocated by
+// Seal (dst==nil → make), so it is safe to hold across the pooled body buffer's
+// release; callers MUST NOT copy it into a pooled buffer that is released before
+// the frame is written (use-after-free / cross-entry corruption).
+func sealEntry(e Entry, sealer RecordSealer, namespace string) ([]byte, uint32, error) {
 	bodySize := 1 + 2 + len(e.Bucket) + 2 + len(e.Key) + 2 + len(e.ETag) + 2 + len(e.ContentType) + 8 + 2 + len(e.VersionID)
 	bodyBuf := getBuffer(bodySize)
 	defer putBuffer(bodyBuf)
@@ -571,12 +642,14 @@ func marshalEntry(w io.Writer, e Entry, sealer RecordSealer, namespace string, w
 
 	sealed, gen, err := sealer.Seal(encrypt.DomainWAL, walEntryAADFields(namespace, e.Seq), body)
 	if err != nil {
-		return 0, fmt.Errorf("wal: encrypt entry body: %w", err)
+		return nil, 0, fmt.Errorf("wal: encrypt entry body: %w", err)
 	}
-	if gen != wantGen {
-		return 0, fmt.Errorf("wal: entry gen %d != pinned header gen %d", gen, wantGen)
-	}
+	return sealed, gen, nil
+}
 
+// writeFrame writes the v4 framed record [8:seq][8:ts][4:len][sealed] for an
+// already-sealed entry body.
+func writeFrame(w io.Writer, e Entry, sealed []byte) (int, error) {
 	frameSize := 8 + 8 + 4 + len(sealed)
 	frameBuf := getBuffer(frameSize)
 	defer putBuffer(frameBuf)
@@ -590,8 +663,7 @@ func marshalEntry(w io.Writer, e Entry, sealer RecordSealer, namespace string, w
 	off += 4
 	copy(frameBuf[off:], sealed)
 
-	n, err := w.Write(frameBuf[:frameSize])
-	return n, err
+	return w.Write(frameBuf[:frameSize])
 }
 
 // marshalPlainEntry writes the legacy plaintext v2 record format.

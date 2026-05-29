@@ -10,7 +10,7 @@ import (
 )
 
 // TestClusterHelpGolden is the C1 contract guard for the `grainfs cluster`
-// command tree and the top-level `grainfs join` shortcut. Any change to a
+// command tree. Any change to a
 // subcommand name, flag name, default, hidden status, deprecation, or help
 // text fails this test. Treat failures as a CLI contract change — most
 // updates here need a CHANGELOG entry. Regenerate via the capture block
@@ -27,7 +27,6 @@ import (
 //	./bin/grainfs cluster balancer --help              > cmd/grainfs/testdata/cluster_balancer_help.golden 2>&1
 //	./bin/grainfs cluster remove-peer --help           > cmd/grainfs/testdata/cluster_remove_peer_help.golden 2>&1
 //	./bin/grainfs cluster drain --help                 > cmd/grainfs/testdata/cluster_drain_help.golden 2>&1
-//	./bin/grainfs join --help                          > cmd/grainfs/testdata/join_help.golden 2>&1
 func TestClusterHelpGolden(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -43,13 +42,11 @@ func TestClusterHelpGolden(t *testing.T) {
 		{"cluster_balancer", []string{"cluster", "balancer", "--help"}, "testdata/cluster_balancer_help.golden"},
 		{"cluster_remove_peer", []string{"cluster", "remove-peer", "--help"}, "testdata/cluster_remove_peer_help.golden"},
 		{"cluster_drain", []string{"cluster", "drain", "--help"}, "testdata/cluster_drain_help.golden"},
-		{"join", []string{"join", "--help"}, "testdata/join_help.golden"},
 	}
 
-	// Walk the cluster + join command trees so cleanup hits every singleton
-	// cobra may have parsed --help on, including subcommands built by
-	// factory functions (clusterJoinCmd(), clusterRotateKeyCmd(), etc.)
-	// that we cannot name directly.
+	// Walk the whole command tree so cleanup hits every singleton cobra may
+	// have parsed --help on, including subcommands built by factory functions
+	// (clusterRotateKeyCmd(), etc.) that we cannot name directly.
 	var allCmds []*cobra.Command
 	collect := func(root *cobra.Command) {
 		var walk func(*cobra.Command)

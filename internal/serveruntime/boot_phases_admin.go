@@ -192,15 +192,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				// at which point the handler proxies through to the leader.
 				RegisterEncryptionKEKRoutes(h, state.kekRotationLeader, state.capabilityGate, state.metaRaft.FSM(), state.dekKeeper, state.kekLeaseTracker)
 
-				joinH := &JoinHandler{
-					dataDir:     cfg.DataDir,
-					raftAddr:    state.raftAddr,
-					cancel:      state.cancel,
-					nodes:       state.metaRaft,
-					dataChecker: state.metaRaft.FSM(),
-				}
-				h.POST("/v1/cluster/join", joinH.Handle)
-
 				// Zero-CA W10: invite mint + operator bundle. SeedAddr/SeedSPKI
 				// come from the running join listener (W9a accessors on
 				// bootState); cluster.id from the post-apply FSM.

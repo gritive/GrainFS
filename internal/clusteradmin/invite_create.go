@@ -24,7 +24,6 @@ type InviteCreateResult struct {
 // /v1/cluster/invite/create. The handler returns a plain {error,leader_id}
 // JSON body, so adminapi.Transport lands the raw body in Error.Message; we
 // re-parse it here so cmd never has to know about the JSON-in-JSON shape.
-// Mirrors JoinConflictError in this package.
 type InviteNotLeaderError struct {
 	Message  string
 	LeaderID string

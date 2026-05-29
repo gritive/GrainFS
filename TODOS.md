@@ -44,11 +44,15 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        decrypts survivors then re-`Append`s them → re-seals under the **active** gen (no
        seal-under-specific-gen API). So Compact migrates entries off their pinned gen. **S7 prune
        MUST NOT assume Compact preserves an entry's gen** when deciding a gen is unreferenced.
-     - S2 datawal `RollSegmentOnRotation` boundary method — SHIPPED (this PR; method + unit
+     - S2 datawal `RollSegmentOnRotation` boundary method — SHIPPED (#676; method + unit
        tests, no production caller yet). Synchronous wiring (the gen-advance→roll window) is
        deferred to S5, where it is reachable end-to-end after `state.dataWAL` exists.
-     - S3 legacy/logical WAL (`internal/storage/wal`) per-record gen framing + rotation boundary +
-       non-dropping seal-error on the async `AppendAsync` path.
+     - S3 legacy/logical WAL (`internal/storage/wal`) rotation boundary — SHIPPED (#678).
+       Seal-first write path: seal once → roll when the sealed gen differs from the open
+       segment's pinned gen, so the entry always lands in a header matching its gen. Removes
+       the prior silent-drop (the deleted gen-mismatch assertion fed `writer()`'s log+continue
+       after `lastSeq` advanced). Per-segment header gen (not per-record framing) — consistent
+       with datawal. Behavior-neutral today (trigger gated); auto-activates at S5.
      - S4 close the EC mid-shard race (`eccodec/shardio.go:168`).
      - S5 enable `encryption.rotate-dek` (remove gate `config/keys.go:109`, wire `OnDEKRotate`) — needs S1–S4.
      - S6 rewrap scrubber: old-gen→new-gen re-encryption across ALL lanes (EC/packblob/datawal/
@@ -369,26 +373,23 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   peer's `keys/0.key`), the orphaned `keys.d/raft-store.key.enc` can no longer be
   AEAD-opened (`cipher: message authentication failed`) and the rejoin boot fails.
   `wipeSoloRaftState` (`internal/serveruntime/boot_phases.go`) backs up `meta_raft`/`raft`/
-  `shared-raft-log` but not the raft-store key. Landed with #635 (raft-store sealing);
-  uncaught because no e2e drove the real `grainfs join` CLI. Confirmed orthogonal to the
-  cluster-key-input removal via the invite-join (stages KEK pre-boot → green) vs grainfs
-  join (stages KEK post-solo-boot → fails) asymmetry. Fix: have `wipeSoloRaftState` also
-  clear/re-derive the raft-store key (mind the `.pre-join-backup` stores sealed under the
-  old key). A Pending e2e `Cluster runtime join staged PSK` (tests/e2e/
-  cluster_runtime_join_staged_psk_test.go) is ready to un-Pend once fixed. [P3]
+  `shared-raft-log` but not the raft-store key. Landed with #635 (raft-store sealing).
+  The runtime `grainfs join` CLI — the only trigger that staged a peer KEK *after* solo
+  boot, and the only thing that exercised this path — has since been retired (v0.0.473.0),
+  taking its parked e2e with it. The bug now stays LATENT in the `.join-pending` solo->join
+  boot path: reachable only by manually writing `.join-pending` on an already-bootstrapped
+  solo node. Invite-join is immune (it stages the KEK pre-boot, before any self-seal). Fix
+  if/when the manual `.join-pending` solo->join path is exercised again: have
+  `wipeSoloRaftState` also clear/re-derive the raft-store key (mind the `.pre-join-backup`
+  stores sealed under the old key). [P3]
 
 - [ ] **Retire the clientless KEK-challenge server admission gate**. Offline `grainfs
   cluster join` was removed (v0.0.460.0); its KEK-challenge client is gone, but the
   server-side `MetaChallengeReceiver` + the HMAC challenge path in
-  `MetaJoinReceiver.HandleJoin` (`internal/cluster/`) remain, now reachable only by the
-  retired client. They are entangled with the live invite-join receiver, so disentangle
-  and remove the clientless-dead admission path. [P3]
-
-- [ ] **Optionally retire runtime `grainfs join` in favor of invite-join**. Invite-join is
-  strictly more capable for secret provisioning and works (13 e2e specs green), whereas
-  `grainfs join` solo->join is currently broken by the raft-store.key.enc bug above. If
-  invite-join covers all production join workflows, retire `cmd/grainfs/join.go` and its
-  `.join-pending`/`/v1/cluster/join` server path. [P3]
+  `MetaJoinReceiver.HandleJoin` (`internal/cluster/`) remain. With the runtime `grainfs
+  join` CLI also retired (v0.0.473.0), no shipping client drives the HMAC challenge path
+  at all — only invite-join uses the receiver now. They are entangled with the live
+  invite-join receiver, so disentangle and remove the clientless-dead admission path. [P3]
 
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
@@ -467,12 +468,12 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   SYNCHRONOUSLY on DEK rotation (a currently-open segment pins one generation while
   `DEKKeeperAdapter.Seal` uses the live active gen, so appends fail-closed until the
   segment rolls). Remaining before enabling `encryption.rotate-dek`: synchronous
-  wiring (S5) + the legacy-WAL boundary below.
-  **Legacy-WAL caveat (codex, D-wal-legacy code gate):** `internal/storage/wal`
-  writes via the async `AppendAsync` path — `lastSeq` advances at submit time and
-  the background goroutine logs and DROPS on seal error. Apply the same
-  probe-before-header rule plus a non-dropping rotation boundary there before
-  moving legacy PITR WAL to a real gen>0 DEK sealer.
+  wiring (S5) + the legacy-WAL boundary (RESOLVED below).
+  **Legacy-WAL caveat — RESOLVED (S3, #678).** `internal/storage/wal` now uses a
+  seal-first write path: the rotation cause of the async-drop is closed (a DEK rotation
+  rolls the segment instead of erroring into `writer()`'s log+continue). Two residuals are
+  split out as their own follow-ups below: the crash-window boot/PITR brick and the
+  hard-IO-error silent drop.
   **Plan-gate findings (2026-05-29, a `RollSegmentOnRotation` slice was scoped then
   deferred — fold these into the implementation here so they are not re-discovered):**
   - **`RollSegmentOnRotation` method — SHIPPED (this PR).** Empty current segment →
@@ -492,9 +493,27 @@ Planning reference: operator trust roadmap note from 2026-05-15.
     synchronous roll (or roll-and-retry inside `Append` on gen mismatch) reachable
     after `state.dataWAL` exists.
   - **Un-gate gate:** enabling `encryption.rotate-dek` is blocked until BOTH (a) the
-    datawal rollover boundary AND (b) the legacy-WAL non-dropping boundary land.
-    Legacy WAL shares the same gen-aware seam; enabling rotation without (b) is a
-    [P1] silent-data-loss hole (mutations dropped under gen mismatch).
+    datawal rollover boundary is wired (S2 method shipped #676; synchronous wiring at S5)
+    AND (b) the legacy-WAL non-dropping boundary — **(b) DONE (S3, #678).** Legacy WAL
+    shares the same gen-aware seam; (a) still pending.
+- [ ] **WAL (legacy + datawal) rotation crash-window durability [P1]** (surfaced by the S3
+  plan-gate; pre-existing, affects the plaintext WAL too). `rotate` creates `wal-<seq>.bin`
+  then `writeHeader` with **no fsync** — a crash in between leaves a zero-length / torn-header
+  segment **visible under a scanned name**. On restart `scanMaxSeq` (`internal/storage/wal/wal.go`
+  encrypted branch returns the read error) turns that into a **boot failure**, and strict
+  `replay`/`ReplayEncrypted` into a **PITR-restore failure** (the #672 torn-tail tolerance covers
+  v4 *body* short-reads, NOT the header window). S3 does not make this worse (it dropped the
+  proposed `O_EXCL`, preserving the `size==0`/header-only self-heal) but does not close it. Fix:
+  write the new segment to a tmp name → fsync → atomic rename (a partial segment is never visible
+  under a scanned name); a half-measure fsync-after-header does NOT close the window (the file is
+  visible zero-length from `O_CREATE`). Pair with fsync-on-rotation-boundary + a gap-detection
+  signal (`seqMonotonic` only rejects `seq <= prev`, so an ascending gap is invisible today).
+- [ ] **WAL hard write-error non-dropping policy [P2]** (surfaced by the S3 plan-gate). After S3,
+  a `writeEntry` failure from a hard I/O error (disk full, EIO) — not a DEK rotation — still
+  log+continues in `writer()` / the channel-full sync fallback (`internal/storage/wal/wal.go`)
+  while `lastSeq` already advanced → a silent seq gap. S3 closed the **rotation** cause of this
+  drop; the I/O cause remains. Fix: halt / fail-close the WAL on an unrecoverable write error
+  instead of advancing past a lost entry. Applies to both legacy `wal` and `datawal`.
 - [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
   (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
   source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks
