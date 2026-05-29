@@ -242,17 +242,18 @@ func spoolHashForBucket(bucket string) (io.Writer, func() string, func()) {
 }
 
 type encryptedSpoolRecordWriter struct {
-	w      io.Writer
-	seam   storage.DataEncryptor
-	domain string
-	record uint64
+	w         io.Writer
+	seam      storage.DataEncryptor
+	domain    string
+	record    uint64
+	cipherBuf []byte // writer-owned ciphertext buffer, reused across records
 }
 
 func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 	if uint64(len(p)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("encrypted spool record too large: %d", len(p))
 	}
-	blob, gen, err := w.seam.Seal(encrypt.DomainSpool, spoolRecordAADFields(w.domain, w.record), p)
+	blob, gen, err := w.seam.SealTo(w.cipherBuf[:0], encrypt.DomainSpool, spoolRecordAADFields(w.domain, w.record), p)
 	if err != nil {
 		return 0, err
 	}
@@ -272,6 +273,7 @@ func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	clear(blob)
+	w.cipherBuf = blob
 	w.record++
 	return len(p), nil
 }
