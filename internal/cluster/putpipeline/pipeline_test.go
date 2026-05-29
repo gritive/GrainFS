@@ -56,7 +56,8 @@ func TestPipeline_Put_5MiB_RoundTrip(t *testing.T) {
 	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()}
 	p := New(Config{
 		DataDirs:    dirs,
-		Encryptor:   testEncryptorRaw(t),
+		DEKKeeper:   testDEKKeeper(t),
+		ClusterID:   testClusterID(),
 		ECConfig:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		StripeBytes: 1 << 20,
 	})

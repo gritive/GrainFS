@@ -18,9 +18,9 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-// fakeSealer is a real-crypto RecordSealer for datawal tests. It mirrors
-// storage.EncryptorAdapter (gen 0) without importing storage (which would form
-// a cycle: storage imports datawal).
+// fakeSealer is a real-crypto, gen-0 RecordSealer for datawal-internal tests.
+// It seals at the sentinel generation 0 without importing storage (which would
+// form a cycle: storage imports datawal).
 type fakeSealer struct {
 	enc       *encrypt.Encryptor
 	clusterID []byte

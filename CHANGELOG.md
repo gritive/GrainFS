@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.455.0] - 2026-05-29
+
+### Changed
+
+- External PDP metrics (`grainfs_iam_pdp_*`) now carry a `scope` label
+  (`admin` | `protocol_credential`) identifying the authorizer instance that
+  emitted them. `grainfs_iam_pdp_request_duration_seconds` and
+  `grainfs_iam_pdp_cache_entries` changed from unlabeled to per-`scope` series, so
+  dashboards or alerts bound to the old unlabeled series must add the `scope` label
+  (aggregate with `sum without(scope) (...)`). This also fixes
+  `grainfs_iam_pdp_cache_entries`, which previously clobbered across authorizer
+  instances and is now accurate per scope. The decorator additionally memoizes its
+  parsed `iam.pdp` config so a disabled PDP adds no per-request JSON parse. No
+  config or API change.
+
+## [0.0.454.0] - 2026-05-29
+
+### Changed
+
+- Reduced memory churn when reading at-rest-encrypted single-node objects. The
+  encrypted object read paths (streaming GET, ranged ReadAt, full-object read,
+  and multipart-completion ETag hashing) now decrypt each 128 KiB chunk into a
+  reused buffer instead of allocating a fresh plaintext per chunk. For a large
+  multi-chunk object the streaming reader's allocation volume drops from
+  ~8.6 MiB to ~0.37 MiB per read (~23×) with higher throughput, and the
+  decrypted buffer is fully zeroed on every error and on close. No on-disk
+  format or API change.
+
+## [0.0.453.0] - 2026-05-29
+
+### Changed
+
+- Internal at-rest encryption cleanup: retired the legacy static `EncryptorAdapter`
+  data-at-rest type and `NewEncryptorAdapter`, plus the dead static encryptor
+  setters (`FSM`/`MetaFSM` `SetEncryptor`, `putpipeline` `cfg.Encryptor`, and the
+  `NewManagerWithEncryptor` static parameter). All data sealing already flowed
+  through the generation-aware DEK keeper; the remaining test fixtures were
+  migrated to it. No change to on-disk format or runtime behavior.
+
 ## [0.0.452.0] - 2026-05-29
 
 ### Changed

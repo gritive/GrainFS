@@ -35,7 +35,7 @@ func NewTestKEK(t *testing.T) (*encrypt.KEKStore, [16]byte) {
 func NewTestManager(t *testing.T, dir string, backend storage.Snapshotable, walDir string) *Manager {
 	t.Helper()
 	store, cid := NewTestKEK(t)
-	m, err := NewManagerWithEncryptor(dir, backend, walDir, nil, store, cid)
+	m, err := NewManager(dir, backend, walDir, store, cid)
 	require.NoError(t, err)
 	return m
 }
@@ -44,7 +44,7 @@ func NewTestManager(t *testing.T, dir string, backend storage.Snapshotable, walD
 func NewTestManagerRefSink(t *testing.T, dir string, backend storage.Snapshotable, walDir string, refs RefSink) *Manager {
 	t.Helper()
 	store, cid := NewTestKEK(t)
-	m, err := NewManagerWithRefSink(dir, backend, walDir, nil, store, cid, refs)
+	m, err := NewManagerWithRefSink(dir, backend, walDir, store, cid, refs)
 	require.NoError(t, err)
 	return m
 }

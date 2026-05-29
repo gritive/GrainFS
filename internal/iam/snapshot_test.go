@@ -242,7 +242,7 @@ func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 
 // fakeDEKEncryptor wraps a real DataEncryptor and returns a CALLER-FIXED gen
 // on Seal, so this round-trip test proves the gen really survives via the
-// payload bytes (not by accident through EncryptorAdapter's gen=0).
+// payload bytes (not by accident through the inner adapter's active gen 0).
 type fakeDEKEncryptor struct {
 	inner storage.DataEncryptor
 	gen   uint32

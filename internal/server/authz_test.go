@@ -110,11 +110,10 @@ type iamTestHelper struct {
 
 func newIAMTestHelper(t *testing.T) *iamTestHelper {
 	t.Helper()
-	key := bytes.Repeat([]byte{0xab}, 32)
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(t, err)
 	clusterID := bytes.Repeat([]byte{0xcd}, 16)
-	de := storage.NewEncryptorAdapter(enc, clusterID)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xab}, encrypt.KEKSize), clusterID)
+	require.NoError(t, err)
+	de := storage.NewDEKKeeperAdapter(keeper, clusterID)
 	store := iam.NewStore()
 	ap := iam.NewApplier(store, de)
 	return &iamTestHelper{store: store, applier: ap, enc: de}
@@ -142,7 +141,7 @@ func (h *iamTestHelper) applyKeyCreateScoped(t *testing.T, ak, saID, secret stri
 	t.Helper()
 	wrapped, gen, err := iam.WrapSecret(h.enc, saID, ak, secret)
 	require.NoError(t, err)
-	_ = gen // EncryptorAdapter always returns 0; KeyCreatePayload defaults to 0
+	_ = gen // DEK adapter seals at active gen 0; KeyCreatePayload defaults to 0
 
 	b := flatbuffers.NewBuilder(256)
 	akOff := b.CreateString(ak)

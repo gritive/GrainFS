@@ -36,14 +36,14 @@ func TestSnapshotEnvelope_RoundTrip(t *testing.T) {
 }
 
 func TestSnapshotEnvelope_NilKEKConstructorFails(t *testing.T) {
-	_, err := NewManagerWithEncryptor(t.TempDir(), &testBackend{}, "", nil, nil, [16]byte{0x5A})
+	_, err := NewManager(t.TempDir(), &testBackend{}, "", nil, [16]byte{0x5A})
 	require.Error(t, err, "constructor must reject a nil KEK source")
 }
 
 func TestSnapshotEnvelope_ZeroClusterIDFails(t *testing.T) {
 	store := encrypt.NewKEKStore()
 	require.NoError(t, store.Add(1, make([]byte, encrypt.KEKSize)))
-	_, err := NewManagerWithEncryptor(t.TempDir(), &testBackend{}, "", nil, store, [16]byte{})
+	_, err := NewManager(t.TempDir(), &testBackend{}, "", store, [16]byte{})
 	require.Error(t, err, "constructor must reject an all-zero cluster id")
 }
 
@@ -65,7 +65,7 @@ func TestSnapshotEnvelope_RestoreAcrossKEKRotation(t *testing.T) {
 	require.NoError(t, store.Add(1, k1))
 	var cid [16]byte
 	cid[0] = 0xAB
-	m, err := NewManagerWithEncryptor(dir, &testBackend{}, "", nil, store, cid)
+	m, err := NewManager(dir, &testBackend{}, "", store, cid)
 	require.NoError(t, err)
 	require.NoError(t, m.writeSnapshot(m.path(3), &Snapshot{Seq: 3, Buckets: []string{"b"}}))
 
@@ -91,7 +91,7 @@ func TestPITRRestore_FailsClosedOnUnreadableNewerSnapshot(t *testing.T) {
 	require.NoError(t, store.Add(1, k1))
 	var cid [16]byte
 	cid[0] = 0xAB
-	m, err := NewManagerWithEncryptor(dir, &testBackend{}, "", nil, store, cid)
+	m, err := NewManager(dir, &testBackend{}, "", store, cid)
 	require.NoError(t, err)
 
 	// seq 1: a normal sealed snapshot this manager can read.

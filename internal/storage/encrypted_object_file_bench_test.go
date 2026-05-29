@@ -11,11 +11,12 @@ import (
 
 func benchmarkStorageEncryptor(b *testing.B) DataEncryptor {
 	b.Helper()
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	cid := bytes.Repeat([]byte{0x42}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x42}, encrypt.KEKSize), cid)
 	if err != nil {
 		b.Fatal(err)
 	}
-	return NewEncryptorAdapter(enc, make([]byte, 16))
+	return NewDEKKeeperAdapter(keeper, cid)
 }
 
 func BenchmarkEncryptedObjectFileWrite(b *testing.B) {

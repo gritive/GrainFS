@@ -41,15 +41,35 @@ Work these in order. Do not run them in parallel.
      `commit.go:120`), whereas the spooled path flushes the data WAL synchronously before the raft
      metadata propose. Verify PutShard does not let metadata commit before shard durability before
      enabling. Its own slice.
-   - [ ] **R3 static-residue deletion (remaining residue).** Remaining dead/legacy
-     static residue still to remove in its own slice(s): `storage.EncryptorAdapter`/
-     `NewEncryptorAdapter` (still used by `fsm_values.go`, `pitr.go`, `packblob/blob.go`,
-     `storage/local.go` — migrate those first), `putpipeline/pipeline.go` `cfg.Encryptor` fallback,
-     `NewManagerWithEncryptor` static `enc` param, `MetaFSM.encryptor`/`SetEncryptor`/`Encryptor`
-     + `FSM.enc` (still read by `fsm_values.go` `dataEncryptor`/`openValue` fallback — retire after
-     those callers move to DEK). NOTE: `storage/encrypted_badger.go` + `storage.LocalBackend` are
-     NOT dead (many prod callers — earlier "no production caller" note was wrong; verify before any
-     removal). ADR for cipher-unification + greenfield boundary; bumps format 8→9.
+   - [ ] **R3 residual: `LocalBackend.encryptor` field + `encrypted_badger.go`.** The static
+     `EncryptorAdapter` type + `NewEncryptorAdapter` + dead static setters (FSM/MetaFSM
+     `SetEncryptor`, `putpipeline` `cfg.Encryptor`, `NewManagerWithEncryptor` static `enc`) are
+     retired. What remains is the always-nil `LocalBackend.encryptor` field, kept solely as the
+     badger-meta sealer arg for `encrypted_badger.go` (now plaintext on every surviving path).
+     Removing it means inlining `encrypted_badger.go` AND re-pointing the encryption-gating
+     predicates `PreferWriteAt`/`local.go:620`/`local.go:1457` from `b.encryptor` to `b.segEnc`
+     (a behavior change — a DEK `LocalBackend` currently advertises WriteAt for encrypted internal
+     buckets; test-fixture-only, LocalBackend has no prod caller per ADR-0015). Its own slice.
+   - [ ] **[P1] packblob DEK encrypted-flag-downgrade detection (pre-existing prod gap).**
+     `rejectEncryptedFlagDowngrade` (`packblob/blob.go:646`) only runs on the legacy-CRC branch, so a
+     downgrade attacker who recomputes the CRC with the *current* (`blobEntryCRC`, flags-included)
+     formula bypasses it: DEK ciphertext carries no value-magic, so `decodePayload` passes it through
+     as plaintext. The static path was defended by `decodePayload`'s value-magic check, which has no
+     DEK equivalent. Complete fix: attempt `segEnc.Open` on EVERY plaintext-flagged read on an
+     encrypted store (`segEnc != nil`) and reject on success — greenfield means no legit plaintext
+     entries exist there, so no false positives, but it is a read-path change with a per-read Open
+     cost + its own threat model. `packblob.NewDEKBlobStore` is the prod single-node packed path.
+     **NOTE:** the static-path tests `TestEncryptedBlobStoreRejects{,Compressed}EncryptedFlagDowngrade`
+     were removed with the static seam (they tested deleted code); the DEK gap is what this slice fixes.
+   - [ ] **[P1] DEK-encrypted PITR WAL replay unwired (pre-existing prod gap).** Prod opens the
+     logical/PITR WAL with a DEK sealer (`boot_phases_logical_wal.go:39`), but `PITRRestore`
+     (`snapshot/pitr.go`) falls through to plaintext `wal.Replay` (the static `walEnc` scaffold was
+     removed as dead code) — `wal.Replay` on DEK WAL is non-strict and logs/skips, so restore can
+     **silently omit post-snapshot mutations**. Fix: thread `storage.NewDEKKeeperAdapter(dekKeeper,
+     clusterID)` (a `wal.RecordSealer`, namespace `"pitr-wal"`) into the snapshot `Manager` and use
+     `wal.ReplayEncrypted`. Wiring spans 3 packages: prod restore `Manager` = `objSnapMgr` (built in
+     `StartAutoSnapshotterWhenReady`, injected via `WithSnapshotManager`) + the `server_bootstrap.go`
+     fallback. The keeper is restore-stable (`dek_keeper_restore.go` `LoadFromFSM`, gen-0-pinned).
    - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
      the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
      a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND
@@ -408,16 +428,16 @@ Work these in order. Do not run them in parallel.
 - **KEK-envelope: DataEncryptor buffer-reusing seam — remaining consumers.** The `SealTo`/`OpenTo`
   seam methods (+ `encrypt.AppendAAD`, `DEKKeeper.SealWithAADTo`/`OpenWithAADTo`,
   `TransientReadOnlyDEK.OpenWithAADTo`, pooled `withSeamAAD`/`withSeamAADErr2`) exist and are wired
-  through all 3 adapters; packblob `Append` (Seal), spool `Read` (Open), spool write (Seal), and the
-  EC-shard readers (`eccodec/shardio.go` Open) consumers are migrated.
+  through all 3 adapters; packblob `Append` (Seal), spool `Read` (Open), spool write (Seal), the
+  EC-shard readers (`eccodec/shardio.go` Open), and the single-node object readers
+  (`encrypted_object_file.go` Open) consumers are migrated.
   Open side needs **per-consumer lifetime analysis** — Open plaintext escapes to callers, so pooling the
   `OpenTo` dst is a use-after-free hazard, NOT a mechanical pool reintroduction. Each remaining consumer
   is its own slice; bench ≥15s×3 (allocs/op AND B/op).
-  - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis.
+  - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis. Plaintext **escapes** to the S3
+    read path / Compact `entries` (UNSAFE for naive pooling) — needs ownership rework, not a mechanical
+    OpenTo swap.
   - datawal (`scanRecords`) Open — cold path (WAL recovery/startup only), lowest payoff.
-  - `internal/storage/encrypted_object_file.go` `encryptedObjectReader` — a separate object-file read
-    consumer (not EC shard) that still allocs a fresh plaintext per `Read` (its own deferred zero-alloc
-    note); Open side, needs lifetime analysis.
   - **[P3] `AADField` append/pool** — the residual per-op allocs are `AADField` construction
     (`FieldUint64`/`FieldString`/`FieldUint16` each `make` a per-field slice + the `[]AADField` slice).
     Eliminating them needs an `encrypt.AADField` append/pool variant touching every AAD builder.

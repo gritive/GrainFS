@@ -139,7 +139,7 @@ func (s *Server) initSnapshotManager(ss ServerStorage) {
 	if snap := ss.Snapshotable; snap != nil {
 		dir := filepath.Join(s.dataDir, "snapshots")
 		walDir := filepath.Join(s.dataDir, "wal")
-		if mgr, err := snapshot.NewManagerWithEncryptor(dir, snap, walDir, s.snapshotEnc, s.snapshotKEK, s.snapshotClusterID); err == nil {
+		if mgr, err := snapshot.NewManager(dir, snap, walDir, s.snapshotKEK, s.snapshotClusterID); err == nil {
 			s.snapMgr = mgr
 		} else {
 			log.Warn().Err(err).Msg("snapshot manager init failed, snapshot/PITR endpoints will be unavailable")

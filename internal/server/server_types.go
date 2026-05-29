@@ -12,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
@@ -74,7 +73,6 @@ type Server struct {
 	readIndexer       ReadIndexer
 	raftSnapshots     RaftSnapshotter
 	dataDir           string
-	snapshotEnc       *encrypt.Encryptor
 	snapshotKEK       snapshot.KEKSource
 	snapshotClusterID [16]byte
 	snapMgr           *snapshot.Manager

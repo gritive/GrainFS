@@ -63,49 +63,6 @@ func buildSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.A
 	return encrypt.BuildAAD(domain, clusterID, fields...)
 }
 
-// EncryptorAdapter implements DataEncryptor over the static encrypt.Encryptor.
-// It always seals at the sentinel generation 0 and ignores the gen argument on
-// Open. clusterID MUST be 16 bytes (BuildAAD panics otherwise).
-type EncryptorAdapter struct {
-	enc       *encrypt.Encryptor
-	clusterID []byte
-}
-
-// NewEncryptorAdapter wraps enc so it satisfies DataEncryptor. clusterID is
-// bound into every AAD via encrypt.BuildAAD.
-func NewEncryptorAdapter(enc *encrypt.Encryptor, clusterID []byte) *EncryptorAdapter {
-	return &EncryptorAdapter{enc: enc, clusterID: append([]byte(nil), clusterID...)}
-}
-
-func (a *EncryptorAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
-	aad := buildSeamAAD(a.clusterID, domain, fields)
-	ct, err := a.enc.SealValueAADTo(nil, aad, plain)
-	if err != nil {
-		return nil, 0, err
-	}
-	return ct, 0, nil
-}
-
-func (a *EncryptorAdapter) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
-	return withSeamAAD(a.clusterID, domain, fields, func(aad []byte) ([]byte, uint32, error) {
-		ct, err := a.enc.SealValueAADTo(dst, aad, plain)
-		return ct, 0, err
-	})
-}
-
-func (a *EncryptorAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
-	aad := buildSeamAAD(a.clusterID, domain, fields)
-	return a.enc.OpenValueAADTo(nil, aad, ct)
-}
-
-func (a *EncryptorAdapter) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
-	return withSeamAADErr2(a.clusterID, domain, fields, func(aad []byte) ([]byte, error) {
-		return a.enc.OpenValueAADTo(dst, aad, ct)
-	})
-}
-
-var _ DataEncryptor = (*EncryptorAdapter)(nil)
-
 // DEKKeeperAdapter implements DataEncryptor over the generation-aware
 // encrypt.DEKKeeper. Seal uses the active generation; Open uses the supplied
 // generation. clusterID MUST be 16 bytes.
