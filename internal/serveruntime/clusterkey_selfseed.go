@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/rs/zerolog/log"
 )
@@ -101,11 +99,15 @@ func selfSeedDecision(state *bootState) (bool, error) {
 	if state.joinMode || state.inviteJoinMode || len(state.peers) > 0 { // cond 6 (genesis)
 		return false, nil
 	}
-	dataDir := state.cfg.DataDir
+	// Use inviteJoinPathsFor so the probes consult the SAME authoritative paths the
+	// invite-join writer uses (keys.d/node.key.{unsealed,enc}, root .invite-join-
+	// pending, cluster.id, KEK keysDir) — joining names against dataDir directly
+	// would miss the keys.d/-rooted artifacts and let a crashed invite-join self-seed.
+	p := inviteJoinPathsFor(state.cfg.DataDir)
 
 	// cond 3: invite-join artifacts (covers both Phase-1 crash windows).
-	for _, name := range []string{"node.key.unsealed", "node.key.enc", ".invite-join-pending"} {
-		absent, err := fileAbsentStrict(filepath.Join(dataDir, name))
+	for _, path := range []string{p.nodeKeyUnsealed, p.nodeKeyEnc, p.pendingSentinel} {
+		absent, err := fileAbsentStrict(path)
 		if err != nil {
 			return false, err
 		}
@@ -115,14 +117,14 @@ func selfSeedDecision(state *bootState) (bool, error) {
 	}
 
 	// cond 7: no cluster.id — never adopt a foreign/staged cluster identity.
-	if absent, err := fileAbsentStrict(filepath.Join(dataDir, nodeconfig.ClusterIDFile)); err != nil {
+	if absent, err := fileAbsentStrict(p.clusterID); err != nil {
 		return false, err
 	} else if !absent {
 		return false, nil
 	}
 
-	// cond 4: empty effective KEK dir (honors GRAINFS_KEK_DIR).
-	if empty, err := kekDirEmptyStrict(nodeconfig.New(dataDir).KEKDir()); err != nil {
+	// cond 4: empty effective KEK dir (honors GRAINFS_KEK_DIR via inviteJoinPathsFor).
+	if empty, err := kekDirEmptyStrict(p.keysDir); err != nil {
 		return false, err
 	} else if !empty {
 		return false, nil

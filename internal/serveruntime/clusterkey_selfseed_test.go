@@ -144,9 +144,16 @@ func TestSelfSeedDecision(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, seed)
 	})
-	t.Run("invite node.key.unsealed blocks", func(t *testing.T) {
+	t.Run("invite node.key.unsealed (keys.d) blocks", func(t *testing.T) {
 		st := freshGenesisState(t)
-		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "node.key.unsealed"))
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "keys.d", "node.key.unsealed"))
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("invite node.key.enc (keys.d) blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "keys.d", "node.key.enc"))
 		seed, err := selfSeedDecision(st)
 		require.NoError(t, err)
 		require.False(t, seed)
