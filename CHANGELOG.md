@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.442.0] - 2026-05-29
+
+### Security
+
+- Encrypt upload spool, EC-spool shard temp files, and multipart part files at
+  rest. These staging files are now sealed through the DEK (the same
+  generation-aware key as object shards) instead of being written in plaintext.
+  Previously, after the static at-rest key was retired, the spool and multipart
+  parts were written unencrypted on disk while the final objects were encrypted.
+
 ## [0.0.441.0] - 2026-05-29
 
 ### Security
