@@ -359,11 +359,14 @@ func TestEncryptedSegment_PerSegmentAADIsolation(t *testing.T) {
 }
 
 // fakeDataEncryptor records the gen it seals at and can be told to advance the
-// gen mid-stream to exercise the writer's generation-pinning guard.
+// gen mid-stream to simulate a DEK rotation racing an in-flight write.
+// sealAtGenGens records the gen argument of every SealAtGen call so tests can
+// assert chunks 1+ pinned chunk 0's gen.
 type fakeDataEncryptor struct {
-	gen     uint32
-	advance bool // when true, gen++ after each Seal
-	enc     *encrypt.Encryptor
+	gen           uint32
+	advance       bool // when true, gen++ after each Seal
+	enc           *encrypt.Encryptor
+	sealAtGenGens []uint32
 }
 
 func newFakeDataEncryptor(t *testing.T) *fakeDataEncryptor {
@@ -395,6 +398,11 @@ func (f *fakeDataEncryptor) SealTo(_ []byte, domain encrypt.AADDomain, fields []
 	return f.Seal(domain, fields, plain)
 }
 
+func (f *fakeDataEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	f.sealAtGenGens = append(f.sealAtGenGens, gen)
+	return f.enc.SealValueAADTo(nil, f.aad(domain, fields), plain)
+}
+
 func (f *fakeDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
 	return f.enc.OpenValueAADTo(nil, f.aad(domain, fields), ct)
 }
@@ -403,17 +411,27 @@ func (f *fakeDataEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fields 
 	return f.enc.OpenValueAADTo(dst, f.aad(domain, fields), ct)
 }
 
-func TestWriteEncryptedObjectFile_GenPinning_FailsOnMidStreamChange(t *testing.T) {
+// A DEK rotation racing the (possibly non-seekable) object write must NOT fail
+// it (S4): chunks 1+ seal AT chunk 0's pinned gen so the object stays single-gen
+// and round-trips.
+func TestWriteEncryptedObjectFile_PinsGenAcrossMidStreamDrift(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/obj"
 	f := newFakeDataEncryptor(t)
-	f.advance = true // gen changes after the first chunk
-	// Two chunks worth of plaintext forces a second Seal at a different gen.
+	f.advance = true // gen drifts after the first chunk
+	// Two chunks worth of plaintext forces a second seal under the pinned gen.
 	plain := bytes.Repeat([]byte("x"), encryptedChunkSize+1)
-	_, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(plain), io.Discard)
-	if err == nil {
-		t.Fatal("expected gen-pinning to fail the write on mid-stream gen change")
+	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(plain), io.Discard)
+	require.NoError(t, err, "mid-stream gen drift must not fail the object write")
+	require.Equal(t, int64(len(plain)), n)
+	require.NotEmpty(t, f.sealAtGenGens, "chunk 1+ must go through SealAtGen")
+	for i, g := range f.sealAtGenGens {
+		require.Equalf(t, uint32(0), g, "object chunk %d sealed at gen %d, want pinned 0", i+1, g)
 	}
+
+	got, err := readEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), n)
+	require.NoError(t, err)
+	require.Equal(t, plain, got, "round-trip mismatch")
 }
 
 func TestWriteEncryptedObjectFile_RoundTrip(t *testing.T) {
@@ -542,6 +560,10 @@ func (r *recordingObjEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.
 
 func (r *recordingObjEncryptor) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
 	return r.inner.SealTo(dst, domain, fields, plain)
+}
+
+func (r *recordingObjEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	return r.inner.SealAtGen(domain, fields, plain, gen)
 }
 
 func (r *recordingObjEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {

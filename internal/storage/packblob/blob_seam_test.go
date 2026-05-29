@@ -37,6 +37,11 @@ func (f *fakeSeam) SealTo(_ []byte, domain encrypt.AADDomain, fields []encrypt.A
 	return f.Seal(domain, fields, plain)
 }
 
+func (f *fakeSeam) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, _ uint32) ([]byte, error) {
+	ct, _, err := f.Seal(domain, fields, plain)
+	return ct, err
+}
+
 func (f *fakeSeam) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
 	return f.enc.OpenValueAADTo(nil, f.aad(domain, fields), ct)
 }

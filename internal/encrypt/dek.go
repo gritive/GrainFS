@@ -317,6 +317,53 @@ func (k *DEKKeeper) SealWithAADTo(dst, plain, aad []byte) ([]byte, uint32, error
 	return aead.Seal(out, out, plain, aad), k.active, nil
 }
 
+// addSealAtGen records one seal under gen for nonce-exhaustion diagnostics
+// (Task 13). When gen is the active generation it bumps the lock-free live
+// counter (identical to the hot path); for a retired generation — the EC
+// mid-shard rotation-race window, where one shard's remaining chunks pin a
+// just-retired gen — it adds to that gen's frozen count under retiredSealsMu.
+// The retired branch is bounded by chunks-per-shard and rare, so the brief lock
+// is acceptable. The caller holds k.mu (RLock), so k.active is stable for the
+// active-vs-retired decision (a concurrent Rotate needs k.mu.Lock).
+func (k *DEKKeeper) addSealAtGen(gen uint32) {
+	if gen == k.active {
+		k.activeSeals.Add(1)
+		return
+	}
+	k.retiredSealsMu.Lock()
+	k.retiredSeals[gen]++
+	k.retiredSealsMu.Unlock()
+}
+
+// SealWithAADToAtGen is SealWithAADTo that seals under a CALLER-SPECIFIED gen
+// instead of the active gen. It exists to pin every chunk of one EC shard /
+// object to a single generation when a DEK rotation races an in-flight encode
+// (eccodec, encrypted_object_file): chunk 0 records the active gen, later chunks
+// seal at that pinned gen so the header's dek_gen describes every chunk. gen
+// must be resident (old gens stay installed until a reference-safe Prune); an
+// unknown gen fails closed with ErrDEKGenUnknown. The output framing (nonce||ct)
+// is byte-identical to SealWithAADTo, and when gen == k.active this is exactly
+// SealWithAADTo — so the common (no-rotation) path is unchanged.
+func (k *DEKKeeper) SealWithAADToAtGen(dst, plain, aad []byte, gen uint32) ([]byte, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	aead, ok := k.aead[gen]
+	if !ok {
+		return nil, ErrDEKGenUnknown
+	}
+	nonceSize := aead.NonceSize()
+	outLen := nonceSize + len(plain) + aead.Overhead()
+	if cap(dst) < outLen {
+		dst = make([]byte, 0, outLen)
+	}
+	out := dst[:nonceSize]
+	if _, err := io.ReadFull(rand.Reader, out); err != nil {
+		return nil, err
+	}
+	k.addSealAtGen(gen)
+	return aead.Seal(out, out, plain, aad), nil
+}
+
 // Open decrypts ct using the cached AEAD for the specified gen.
 func (k *DEKKeeper) Open(ct []byte, gen uint32) ([]byte, error) {
 	k.mu.RLock()

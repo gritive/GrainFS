@@ -457,11 +457,14 @@ func TestEncryptedShardStream_RejectsOversizedChunkHeader(t *testing.T) {
 }
 
 // fakeShardEncryptor seals via a real Encryptor under BuildAAD(DomainShard,…)
-// and reports a gen it can advance mid-stream to exercise gen-pinning.
+// and reports a gen it can advance mid-stream to simulate a DEK rotation racing
+// an in-flight encode. sealAtGenGens records the gen argument of every SealAtGen
+// call so tests can assert chunks 1+ pinned chunk 0's gen.
 type fakeShardEncryptor struct {
-	enc     *encrypt.Encryptor
-	gen     uint32
-	advance bool
+	enc           *encrypt.Encryptor
+	gen           uint32
+	advance       bool
+	sealAtGenGens []uint32
 }
 
 func newFakeShardEncryptor(t *testing.T) *fakeShardEncryptor {
@@ -487,6 +490,11 @@ func (f *fakeShardEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AAD
 		f.gen++
 	}
 	return ct, g, nil
+}
+
+func (f *fakeShardEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	f.sealAtGenGens = append(f.sealAtGenGens, gen)
+	return f.enc.SealValueAADTo(nil, f.aad(domain, fields), plain)
 }
 
 func (f *fakeShardEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
@@ -520,15 +528,54 @@ func TestEncodeEncryptedShard_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestEncodeEncryptedShard_GenPinning_FailsOnMidStreamChange(t *testing.T) {
+// A DEK rotation racing the encode (gen drifts after chunk 0) must NOT fail the
+// write (S4): chunks 1+ are sealed AT chunk 0's pinned gen, so the header's
+// dek_gen describes every chunk and the shard round-trips.
+func TestEncodeEncryptedShard_PinsGenAcrossMidStreamDrift(t *testing.T) {
 	f := newFakeShardEncryptor(t)
-	f.advance = true
+	f.advance = true                                                // active gen drifts after chunk 0
 	plain := bytes.Repeat([]byte("x"), DefaultEncryptedChunkSize+1) // forces a 2nd chunk
 	var buf bytes.Buffer
-	err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize)
-	if err == nil {
-		t.Fatal("expected gen-pinning to fail on mid-stream gen change")
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize),
+		"mid-stream gen drift must not fail the encode")
+
+	gen, _, _, err := readEncryptedShardHeader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), gen, "header pins chunk 0's gen")
+	require.NotEmpty(t, f.sealAtGenGens, "chunk 1+ must go through SealAtGen")
+	for i, g := range f.sealAtGenGens {
+		require.Equalf(t, uint32(0), g, "chunk %d sealed at gen %d, want pinned 0", i+1, g)
 	}
+
+	var out bytes.Buffer
+	require.NoError(t, DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), f, shardBaseFields()))
+	require.Equal(t, plain, out.Bytes(), "round-trip mismatch")
+}
+
+// Same race, streaming writer (cpupool's encoder): it has already flushed the
+// header + earlier chunks, so it must pin in a single pass.
+func TestEncryptedShardChunkedWriter_PinsGenAcrossMidStreamDrift(t *testing.T) {
+	f := newFakeShardEncryptor(t)
+	f.advance = true
+	var buf bytes.Buffer
+	w, err := NewEncryptedShardChunkedWriter(&buf, f, shardBaseFields(), DefaultEncryptedChunkSize)
+	require.NoError(t, err)
+	plain := bytes.Repeat([]byte("s"), DefaultEncryptedChunkSize*2+5) // ≥3 chunks
+	_, err = w.Write(plain)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	gen, _, _, err := readEncryptedShardHeader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), gen, "header pins chunk 0's gen")
+	require.NotEmpty(t, f.sealAtGenGens, "chunks 1+ must go through SealAtGen")
+	for i, g := range f.sealAtGenGens {
+		require.Equalf(t, uint32(0), g, "streamed chunk %d sealed at gen %d, want pinned 0", i+1, g)
+	}
+
+	var out bytes.Buffer
+	require.NoError(t, DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), f, shardBaseFields()))
+	require.Equal(t, plain, out.Bytes(), "round-trip mismatch")
 }
 
 func TestEncryptedShardHeader_RoundTrip(t *testing.T) {
@@ -672,6 +719,9 @@ type errInjectShardEncryptor struct {
 
 func (e *errInjectShardEncryptor) Seal(d encrypt.AADDomain, f []encrypt.AADField, p []byte) ([]byte, uint32, error) {
 	return e.inner.Seal(d, f, p)
+}
+func (e *errInjectShardEncryptor) SealAtGen(d encrypt.AADDomain, f []encrypt.AADField, p []byte, gen uint32) ([]byte, error) {
+	return e.inner.SealAtGen(d, f, p, gen)
 }
 func (e *errInjectShardEncryptor) Open(_ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
 	return nil, e.openErr

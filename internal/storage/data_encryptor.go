@@ -20,6 +20,14 @@ type DataEncryptor interface {
 	// SealTo is Seal that appends the ciphertext into dst, reusing dst's
 	// capacity when it suffices. The output is byte-equivalent to Seal.
 	SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
+	// SealAtGen is Seal that seals under a CALLER-SPECIFIED gen instead of the
+	// active gen. It pins every chunk of one shard/object to a single generation
+	// when a DEK rotation races an in-flight chunked encode (eccodec,
+	// encrypted_object_file): chunk 0 records the active gen, later chunks seal
+	// at that pinned gen. gen must be a resident generation; an unknown gen fails
+	// closed (ErrDEKGenUnknown for the gen-aware adapter). When gen is the active
+	// gen the output is byte-identical to Seal.
+	SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) (ct []byte, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 	// OpenTo is Open that appends the plaintext into dst, reusing dst's
 	// capacity when it suffices. The output is byte-equivalent to Open.
@@ -87,6 +95,11 @@ func (a *DEKKeeperAdapter) SealTo(dst []byte, domain encrypt.AADDomain, fields [
 	})
 }
 
+func (a *DEKKeeperAdapter) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	aad := buildSeamAAD(a.clusterID, domain, fields)
+	return a.keeper.SealWithAADToAtGen(nil, plain, aad, gen)
+}
+
 func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
 	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.keeper.OpenWithAAD(ct, gen, aad)
@@ -127,6 +140,10 @@ func (a *TransientDataEncryptor) Seal(_ encrypt.AADDomain, _ []encrypt.AADField,
 
 func (a *TransientDataEncryptor) SealTo(_ []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ []byte) ([]byte, uint32, error) {
 	return nil, 0, encrypt.ErrTransientReadOnly
+}
+
+func (a *TransientDataEncryptor) SealAtGen(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte, _ uint32) ([]byte, error) {
+	return nil, encrypt.ErrTransientReadOnly
 }
 
 func (a *TransientDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {

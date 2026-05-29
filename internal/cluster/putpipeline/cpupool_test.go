@@ -157,11 +157,12 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC3(t *testing.T) {
 	}
 }
 
-// fakeGenDriftEncryptor simulates a ShardEncryptor that increments gen each
-// call, triggering the gen-pinning check in EncryptedShardChunkedWriter.
+// fakeGenDriftEncryptor seals chunk 0 (active gen) successfully but fails the
+// at-gen seal used for chunks 1+, injecting a seal error on the second chunk.
+// (After S4 a mid-shard gen drift no longer fails the encode — it pins instead —
+// so this fake injects an explicit error to drive the seal-error→commitCh path.)
 type fakeGenDriftEncryptor struct {
 	enc *encrypt.Encryptor
-	gen uint32
 }
 
 func (f *fakeGenDriftEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
@@ -170,9 +171,11 @@ func (f *fakeGenDriftEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.
 	if err != nil {
 		return nil, 0, err
 	}
-	g := f.gen
-	f.gen++
-	return ct, g, nil
+	return ct, 0, nil
+}
+
+func (f *fakeGenDriftEncryptor) SealAtGen(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte, gen uint32) ([]byte, error) {
+	return nil, fmt.Errorf("fakeGenDriftEncryptor: injected seal error at gen %d (chunk 1+)", gen)
 }
 
 func (f *fakeGenDriftEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
@@ -197,8 +200,8 @@ func (f *fakeGenDriftEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fie
 func TestCPUPool_SealError_PropagatesToCommitCh(t *testing.T) {
 	// 2 MiB stripes ⟹ each data shard gets 1 MiB/stripe; with a 1 MiB chunk
 	// size, the first stripe seals chunk 0 (gen 0, opens the drive tmp) and the
-	// second stripe trips the gen-pin on chunk 1 — exercising the failChunk
-	// (pending-state) branch of the drive short-circuit.
+	// second stripe trips the injected at-gen seal error on chunk 1 — exercising
+	// the failChunk (pending-state) branch of the drive short-circuit.
 	const stripe = 2 << 20
 	enc, err := encrypt.NewEncryptor(make([]byte, 32))
 	require.NoError(t, err)

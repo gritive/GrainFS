@@ -110,8 +110,10 @@ func IsEncryptedShard(raw []byte) bool {
 
 // EncodeEncryptedShard streams r into the GFSENC3 format, sealing each chunk
 // via enc under DomainShard with baseFields plus the per-chunk ordinal. All
-// chunks are sealed under one pinned generation (chunk 0's); a later chunk at a
-// different gen fails the write so the header's dek_gen describes every chunk.
+// chunks are sealed under one pinned generation (chunk 0's): chunk 0 seals at
+// the active gen and records it in the header, and chunks 1+ seal AT that
+// pinned gen, so a DEK rotation racing the encode cannot split the shard across
+// generations (the header's dek_gen describes every chunk).
 func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) error {
 	if enc == nil {
 		return fmt.Errorf("encrypted shard encode requires encryptor")
@@ -149,28 +151,36 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFiel
 		if n == 0 && errors.Is(readErr, io.EOF) {
 			break
 		}
-		sealed, gen, err := enc.Seal(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n])
-		if err != nil {
-			return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
+		// chunk 0 seals at the active gen and pins it; chunks 1+ seal AT the
+		// pinned gen so a DEK rotation racing this encode can't split the shard
+		// across generations (the header's dek_gen describes every chunk).
+		var sealed []byte
+		var err error
+		if chunkIdx == 0 {
+			var gen uint32
+			sealed, gen, err = enc.Seal(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n])
+			if err != nil {
+				return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
+			}
+			pinnedGen = gen
+		} else {
+			sealed, err = enc.SealAtGen(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n], pinnedGen)
+			if err != nil {
+				return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
+			}
 		}
 		over := len(sealed) - n
 		if over < 0 || over > int(^uint16(0)) {
 			return fmt.Errorf("encrypt shard chunk %d: implausible overhead %d", chunkIdx, over)
 		}
 		if chunkIdx == 0 {
-			pinnedGen = gen
 			chunkOverhead = uint16(over)
 			if err := writeEncryptedShardHeader(w, pinnedGen, uint32(chunkSize), chunkOverhead); err != nil {
 				return err
 			}
 			headerWritten = true
-		} else {
-			if gen != pinnedGen {
-				return fmt.Errorf("encrypt shard chunk %d sealed at gen %d, pinned %d", chunkIdx, gen, pinnedGen)
-			}
-			if uint16(over) != chunkOverhead {
-				return fmt.Errorf("encrypt shard chunk %d overhead %d != pinned %d", chunkIdx, over, chunkOverhead)
-			}
+		} else if uint16(over) != chunkOverhead {
+			return fmt.Errorf("encrypt shard chunk %d overhead %d != pinned %d", chunkIdx, over, chunkOverhead)
 		}
 		var chunkHeader [encryptedChunkHeaderLen]byte
 		binary.LittleEndian.PutUint32(chunkHeader[0:4], uint32(n))
@@ -297,28 +307,37 @@ func (w *EncryptedShardChunkedWriter) Close() error {
 }
 
 func (w *EncryptedShardChunkedWriter) emitChunk() error {
-	sealed, gen, err := w.enc.Seal(encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf)
-	if err != nil {
-		return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
+	// First chunk seals at the active gen and pins it; later chunks seal AT the
+	// pinned gen so a DEK rotation racing this stream can't split the shard
+	// across generations. The streaming writer has already flushed the header +
+	// earlier chunks, so a single-pass pin (not retry) is the only option.
+	var sealed []byte
+	var err error
+	if !w.headerWritten {
+		var gen uint32
+		sealed, gen, err = w.enc.Seal(encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf)
+		if err != nil {
+			return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
+		}
+		w.pinnedGen = gen
+	} else {
+		sealed, err = w.enc.SealAtGen(encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf, w.pinnedGen)
+		if err != nil {
+			return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
+		}
 	}
 	over := len(sealed) - len(w.plainBuf)
 	if over < 0 || over > int(^uint16(0)) {
 		return fmt.Errorf("encrypt shard chunk %d: implausible overhead %d", w.chunkIdx, over)
 	}
 	if !w.headerWritten {
-		w.pinnedGen = gen
 		w.chunkOverhead = uint16(over)
 		if err := writeEncryptedShardHeader(w.w, w.pinnedGen, uint32(w.chunkSize), w.chunkOverhead); err != nil {
 			return err
 		}
 		w.headerWritten = true
-	} else {
-		if gen != w.pinnedGen {
-			return fmt.Errorf("encrypt shard chunk %d sealed at gen %d, pinned %d", w.chunkIdx, gen, w.pinnedGen)
-		}
-		if uint16(over) != w.chunkOverhead {
-			return fmt.Errorf("encrypt shard chunk %d overhead %d != pinned %d", w.chunkIdx, over, w.chunkOverhead)
-		}
+	} else if uint16(over) != w.chunkOverhead {
+		return fmt.Errorf("encrypt shard chunk %d overhead %d != pinned %d", w.chunkIdx, over, w.chunkOverhead)
 	}
 	var chunkHeader [encryptedChunkHeaderLen]byte
 	binary.LittleEndian.PutUint32(chunkHeader[:4], uint32(len(w.plainBuf)))

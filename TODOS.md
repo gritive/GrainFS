@@ -53,8 +53,18 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        the prior silent-drop (the deleted gen-mismatch assertion fed `writer()`'s log+continue
        after `lastSeq` advanced). Per-segment header gen (not per-record framing) — consistent
        with datawal. Behavior-neutral today (trigger gated); auto-activates at S5.
-     - S4 close the EC mid-shard race (`eccodec/shardio.go:168`).
-     - S5 enable `encryption.rotate-dek` (remove gate `config/keys.go:109`, wire `OnDEKRotate`) — needs S1–S4.
+     - S4 close the EC mid-shard race — SHIPPED. seal-at-pinned-gen: chunk 0 seals at
+       the active gen + records it in the header; chunks 1+ seal AT that pinned gen via a
+       new gen-selecting seal (`encrypt.DEKKeeper.SealWithAADToAtGen` → `storage.DataEncryptor.SealAtGen`
+       → `eccodec.ShardEncryptor.SealAtGen`). Closes the race in all THREE chunked encoders —
+       `eccodec.EncodeEncryptedShard`, `EncryptedShardChunkedWriter` (cluster), and
+       `storage.writeEncryptedObjectFile` (single-node GFOBJENC2; parity). A rotation racing an
+       in-flight encode no longer fails the write; the removed `gen != pinnedGen` branch is
+       unreachable by construction. Behavior-neutral when no rotation (gen == active → byte-identical
+       to `Seal`); auto-activates at S5. **S7 dependency:** the pinned (possibly just-retired) gen must
+       stay resident until a reference-safe Prune — S7 must treat an in-flight/Compact-held gen as
+       referenced. Fail-closed if a gen is missing (`ErrDEKGenUnknown` → write error, no leak).
+     - S5 enable `encryption.rotate-dek` (remove gate `config/keys.go:109`, wire `OnDEKRotate`) — needs S1–S4 (S1–S4 DONE).
      - S6 rewrap scrubber: old-gen→new-gen re-encryption across ALL lanes (EC/packblob/datawal/
        logical-WAL/FSM-value/IAM/snapshot) — large, may sub-slice; `scrubberKick` is `nil` today
        (`dek_keeper_wiring.go:200`).
