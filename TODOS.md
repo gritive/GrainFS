@@ -43,13 +43,6 @@ Work these in order. Do not run them in parallel.
      ciphertext on disk). Follow-up: e2e covers cluster auto-repair only; no single-node scrub
      auto-repair e2e harness exists, so single-node repair-to-ciphertext relies on the unit test —
      add a single-node scrub-repair e2e when a trigger/shard-path helper lands.
-   - [P2] scrubber shard-AAD key incoherence for cleanable object keys — **FIXED 2026-05-29
-     (this worktree).** Canonical identity (`versionID`, `shardIdx`) is now threaded through the
-     `scrubber.Scrubbable`/`ShardIntegrityReader` interfaces so both the read and write scrubber
-     paths bind AAD to the UNCLEANED `ecObjectShardKey(key,versionID)` (the file location stays
-     correct via `getShardPath`). `WriteShard` additionally rejects a `path` that is not the
-     canonical on-disk location for the identity. Covered by
-     `TestScrubberRepairCleanableKeyRoundTrips` + `TestWriteShardRejectsNonCanonicalPath`.
    - [ ] **[P2] shard-pack repair shadowing (PRE-EXISTING, orthogonal to AAD-coherence).**
      `readShardIntegrity` prefers `ReadLocalShardFromPack`, but `WriteShard` writes a standalone
      `shard_N` FILE. When a *packed* shard entry is corrupt/stale, repair writes a file that the
