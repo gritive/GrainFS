@@ -156,12 +156,16 @@ type encryptedObjectReader struct {
 	gen        uint32
 	chunk      uint64
 	remaining  int64
-	// buf holds the current chunk's plaintext, drained by Read(). loadNext
-	// assigns it the fresh plaintext slice returned by the DataEncryptor seam's
-	// Open (the seam owns the decrypt buffer, so there is no reuse here).
-	// Read() clears bytes as they leave the buffer (security), and the chunk
-	// boundary truncation clears the discarded tail.
+	// buf is the current drain window into plainBuf, advanced by Read() as it
+	// copies bytes out. Read() clears bytes as they leave the buffer (security),
+	// and the chunk boundary truncation clears the discarded tail.
 	buf []byte
+	// plainBuf is the reusable plaintext backing for the current chunk. loadNext
+	// pre-sizes it to encryptedChunkSize once and passes it to OpenTo so the
+	// per-chunk plaintext allocation disappears after the first chunk. Its full
+	// capacity is zeroed before each OpenTo (and on Close) so no prior chunk's
+	// plaintext lingers in the [len:cap] tail. Mirrors eccodec's plainFull.
+	plainBuf []byte
 	// sealedBuf is reusable scratch for the on-disk sealed record body. It
 	// grows to chunk-class size on the first chunk and stays there for the
 	// lifetime of the reader.
@@ -191,6 +195,9 @@ func (r *encryptedObjectReader) Close() error {
 	if len(r.buf) > 0 {
 		clear(r.buf)
 	}
+	if cap(r.plainBuf) > 0 {
+		clear(r.plainBuf[:cap(r.plainBuf)])
+	}
 	if cap(r.sealedBuf) > 0 {
 		clear(r.sealedBuf[:cap(r.sealedBuf)])
 	}
@@ -212,18 +219,40 @@ func (r *encryptedObjectReader) loadNext() error {
 		return err
 	}
 	r.sealedBuf = sealed
+	// Pre-size the reusable plaintext buffer to encryptedChunkSize once. The
+	// guard below rejects plainLen > encryptedChunkSize, so OpenTo(plainBuf[:0],
+	// …) never reallocates mid-stream — making the full-cap error-path wipe
+	// provably complete.
+	if cap(r.plainBuf) < encryptedChunkSize {
+		r.plainBuf = make([]byte, 0, encryptedChunkSize)
+	}
+	// Upper-bound guard: no legit record declares plainLen > encryptedChunkSize
+	// (the writer chunks at encryptedChunkSize), so this only rejects corruption
+	// and keeps the pre-sized buffer from reallocating. Upper bound only — a
+	// 0-plainLen record is a finite EOF walk, not a loop, so no ==0 check here.
+	if plainLen > encryptedChunkSize {
+		clear(r.plainBuf[:cap(r.plainBuf)])
+		return fmt.Errorf("encrypted object chunk %d plaintext length exceeds chunk size", r.chunk)
+	}
 	// Readers append the per-chunk ordinal to a fresh slice each chunk
 	// (the writer reuses a preallocated slice via ordinalIdx). The alloc
 	// is acceptable for this groundwork lane; a zero-alloc reader pass is
 	// deferred to a later optimization.
 	fields := append(append([]encrypt.AADField(nil), r.baseFields...), encrypt.FieldUint32(uint32(r.chunk)))
-	plain, err := r.enc.Open(encrypt.DomainShard, fields, r.gen, sealed)
+	// Zero the prior chunk's plaintext (full cap, incl. any partial tail) before
+	// OpenTo reuses the backing for this chunk.
+	clear(r.plainBuf[:cap(r.plainBuf)])
+	plain, err := r.enc.OpenTo(r.plainBuf[:0], encrypt.DomainShard, fields, r.gen, sealed)
 	clear(sealed)
 	if err != nil {
+		// cipher.AEAD.Open may overwrite dst up to capacity even on auth
+		// failure, and OpenTo returns nil on error — wipe the full cap of the
+		// buffer we passed (defense in depth: no unauthenticated residue).
+		clear(r.plainBuf[:cap(r.plainBuf)])
 		return fmt.Errorf("decrypt object chunk %d: %w", r.chunk, err)
 	}
 	if len(plain) != int(plainLen) {
-		clear(plain)
+		clear(plain[:cap(plain)])
 		return fmt.Errorf("encrypted object chunk %d length mismatch", r.chunk)
 	}
 	if int64(len(plain)) > r.remaining {
@@ -233,6 +262,9 @@ func (r *encryptedObjectReader) loadNext() error {
 	}
 	r.remaining -= int64(len(plain))
 	r.chunk++
+	// Retain the active/grown slice so its full cap is wiped next time; with
+	// pre-size + bound, plain aliases plainBuf's backing (no realloc).
+	r.plainBuf = plain
 	r.buf = plain
 	return nil
 }
@@ -273,6 +305,11 @@ func readAtEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encr
 			clear(plainBuf[:cap(plainBuf)])
 		}
 	}()
+	// Pre-size the reusable plaintext buffer once. plainLen is validated ≤
+	// encryptedChunkSize at :289 below (validateEncryptedObjectRecordPlainLen),
+	// so OpenTo(plainBuf[:0], …) never reallocates — the full-cap error wipes
+	// stay complete.
+	plainBuf = make([]byte, 0, encryptedChunkSize)
 	for copied < len(buf) && plainPos < size {
 		var hdr [8]byte
 		if _, err := io.ReadFull(f, hdr[:]); err != nil {
@@ -316,14 +353,16 @@ func readAtEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encr
 			return copied, fmt.Errorf("read encrypted object record body: %w", err)
 		}
 		fields := append(append([]encrypt.AADField(nil), baseFields...), encrypt.FieldUint32(uint32(chunk)))
-		plain, err := enc.Open(encrypt.DomainShard, fields, gen, sealedBuf)
+		clear(plainBuf[:cap(plainBuf)])
+		plain, err := enc.OpenTo(plainBuf[:0], encrypt.DomainShard, fields, gen, sealedBuf)
 		clear(sealedBuf)
 		if err != nil {
+			clear(plainBuf[:cap(plainBuf)])
 			return copied, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
 		plainBuf = plain
 		if len(plain) != int(plainLen) {
-			clear(plain)
+			clear(plain[:cap(plain)])
 			return copied, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
 		}
 		readStart := offset
@@ -337,7 +376,7 @@ func readAtEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encr
 		srcStart := int(readStart - chunkStart)
 		srcEnd := int(readEnd - chunkStart)
 		copied += copy(buf[copied:], plain[srcStart:srcEnd])
-		clear(plain)
+		clear(plain[:cap(plain)])
 		plainPos += int64(plainLen)
 		chunk++
 	}
@@ -461,6 +500,7 @@ func readEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encryp
 			clear(plainBuf[:cap(plainBuf)])
 		}
 	}()
+	plainBuf = make([]byte, 0, encryptedChunkSize)
 	for {
 		plainLen, sealed, err := readEncryptedObjectRecordInto(f, sealedBuf[:0])
 		if err == io.EOF {
@@ -470,13 +510,21 @@ func readEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encryp
 			return nil, err
 		}
 		sealedBuf = sealed
+		// Upper-bound guard: reject plainLen > encryptedChunkSize (corruption)
+		// so the pre-sized plainBuf never reallocates. Upper bound only.
+		if plainLen > encryptedChunkSize {
+			return nil, fmt.Errorf("encrypted object chunk %d plaintext length exceeds chunk size", chunk)
+		}
 		fields := append(append([]encrypt.AADField(nil), baseFields...), encrypt.FieldUint32(uint32(chunk)))
-		plain, err := enc.Open(encrypt.DomainShard, fields, gen, sealed)
+		clear(plainBuf[:cap(plainBuf)])
+		plain, err := enc.OpenTo(plainBuf[:0], encrypt.DomainShard, fields, gen, sealed)
 		if err != nil {
+			clear(plainBuf[:cap(plainBuf)])
 			return nil, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
 		plainBuf = plain
 		if len(plain) != int(plainLen) {
+			clear(plain[:cap(plain)])
 			return nil, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
 		}
 		_, _ = out.Write(plain)
@@ -514,6 +562,7 @@ func hashEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encryp
 			clear(plainBuf[:cap(plainBuf)])
 		}
 	}()
+	plainBuf = make([]byte, 0, encryptedChunkSize)
 	for {
 		plainLen, sealed, err := readEncryptedObjectRecordInto(f, sealedBuf[:0])
 		if err == io.EOF {
@@ -523,20 +572,27 @@ func hashEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encryp
 			return 0, err
 		}
 		sealedBuf = sealed
+		// Upper-bound guard: reject plainLen > encryptedChunkSize (corruption)
+		// so the pre-sized plainBuf never reallocates. Upper bound only.
+		if plainLen > encryptedChunkSize {
+			return 0, fmt.Errorf("encrypted object chunk %d plaintext length exceeds chunk size", chunk)
+		}
 		fields := append(append([]encrypt.AADField(nil), baseFields...), encrypt.FieldUint32(uint32(chunk)))
-		plain, err := enc.Open(encrypt.DomainShard, fields, gen, sealed)
+		clear(plainBuf[:cap(plainBuf)])
+		plain, err := enc.OpenTo(plainBuf[:0], encrypt.DomainShard, fields, gen, sealed)
 		clear(sealed)
 		if err != nil {
+			clear(plainBuf[:cap(plainBuf)])
 			return 0, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
 		plainBuf = plain
 		if len(plain) != int(plainLen) {
-			clear(plain)
+			clear(plain[:cap(plain)])
 			return 0, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
 		}
 		_, _ = h.Write(plain)
 		size += int64(len(plain))
-		clear(plain)
+		clear(plain[:cap(plain)])
 		chunk++
 	}
 	return size, nil

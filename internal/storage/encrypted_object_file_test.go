@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -521,4 +523,190 @@ func swapFirstTwoEncryptedRecords(path string) error {
 	copy(raw[b0s:b0e], body1)
 	copy(raw[b1s:b1e], body0)
 	return os.WriteFile(path, raw, 0o644)
+}
+
+// recordingObjEncryptor wraps a real DataEncryptor and records, per OpenTo
+// call, the backing-array pointer of the dst it received and of the slice it
+// returned. It flags whether the plain Open path was ever taken. Used to prove
+// the streaming reader (a) never calls Open and (b) reuses the same plaintext
+// backing across chunks. No t.Fatal inside — record, assert after.
+type recordingObjEncryptor struct {
+	inner      DataEncryptor
+	openCalled bool
+	dstPtrs    []uintptr // backing of dst passed to each OpenTo (0 for nil/empty)
+	retPtrs    []uintptr // backing of slice returned by each OpenTo
+}
+
+func objBackingPtr(b []byte) uintptr {
+	if cap(b) == 0 {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(unsafe.SliceData(b[:cap(b)])))
+}
+
+func (r *recordingObjEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	return r.inner.Seal(domain, fields, plain)
+}
+
+func (r *recordingObjEncryptor) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	return r.inner.SealTo(dst, domain, fields, plain)
+}
+
+func (r *recordingObjEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	r.openCalled = true
+	return r.inner.Open(domain, fields, gen, ct)
+}
+
+func (r *recordingObjEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	r.dstPtrs = append(r.dstPtrs, objBackingPtr(dst))
+	out, err := r.inner.OpenTo(dst, domain, fields, gen, ct)
+	r.retPtrs = append(r.retPtrs, objBackingPtr(out))
+	return out, err
+}
+
+var _ DataEncryptor = (*recordingObjEncryptor)(nil)
+
+// TestEncryptedObjectReader_ReusesPlaintextBufferAcrossChunks proves the
+// streaming reader uses OpenTo (never Open) and reuses ONE plaintext backing
+// across all chunks. The discriminator is that every OpenTo returns the SAME
+// backing it was handed (dst == ret → no realloc) and that backing is stable
+// across chunks. (Asserting ret[i-1] == dst[i] would be tautological: the
+// reader threads each call's return into the next call's dst regardless of
+// whether OpenTo reallocated, so that holds even with per-chunk allocation.)
+// Backing-array identity, not AllocsPerRun.
+func TestEncryptedObjectReader_ReusesPlaintextBufferAcrossChunks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	fields := objectFileAADFields("b", "k")
+	// ≥3 full chunks so the reuse pattern is exercised multiple times.
+	plaintext := bytes.Repeat([]byte("z"), 3*encryptedChunkSize)
+
+	// One seam for BOTH write and open: testSegEnc builds a DEK keeper with a
+	// randomized DEK, so two separate instances would not decrypt each other.
+	base := testSegEnc(t)
+	size, err := writeEncryptedObjectFile(path, base, fields, bytes.NewReader(plaintext), io.Discard)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(plaintext)), size)
+
+	rec := &recordingObjEncryptor{inner: base}
+	rc, err := openEncryptedObjectFile(path, rec, fields, size)
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+
+	assert.False(t, rec.openCalled, "reader must use OpenTo, never Open")
+	require.GreaterOrEqual(t, len(rec.dstPtrs), 3, "expected at least 3 OpenTo calls")
+	for i := range rec.dstPtrs {
+		assert.NotZerof(t, rec.dstPtrs[i], "chunk %d: dst must be a real pre-sized buffer, not nil/fresh", i)
+		assert.Equalf(t, rec.dstPtrs[i], rec.retPtrs[i],
+			"chunk %d: OpenTo returned a different backing (%#x) than the dst it was handed (%#x) — it reallocated instead of reusing",
+			i, rec.retPtrs[i], rec.dstPtrs[i])
+		assert.Equalf(t, rec.retPtrs[0], rec.retPtrs[i],
+			"chunk %d: plaintext backing %#x differs from chunk 0's %#x — buffer not reused across chunks",
+			i, rec.retPtrs[i], rec.retPtrs[0])
+	}
+}
+
+// TestEncryptedObjectReader_PartialFinalChunkZeroesTail is the regression guard
+// for the clear-before-OpenTo full-cap wipe. With a reused plaintext buffer a
+// FULL chunk fills the backing [0:chunkSize], then a PARTIAL final chunk
+// decrypts only [0:plainLen] — the [plainLen:cap] tail must be zeroed, NOT left
+// holding the prior full chunk's plaintext.
+//
+// To ISOLATE clear-before-OpenTo, this drives loadNext() directly across the
+// chunk boundary with NO Read() in between. The reader also drain-clears r.buf
+// as Read() copies out, which would otherwise zero the prior full chunk and
+// mask a clear-before-OpenTo regression; skipping Read() removes that masking,
+// so the tail is zeroed ONLY by clear-before-OpenTo. Verified RED: removing the
+// loadNext clear-before-OpenTo leaves the prior chunk's bytes in the tail.
+func TestEncryptedObjectReader_PartialFinalChunkZeroesTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k")
+	// 2 full chunks + a 4096-byte partial final chunk, with distinctive per-byte
+	// content so a residue from a prior full chunk would be a non-zero tail.
+	data := make([]byte, 2*encryptedChunkSize+4096)
+	for i := range data {
+		data[i] = byte('A' + i%26)
+	}
+
+	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(data), io.Discard)
+	require.NoError(t, err)
+
+	rc, err := openEncryptedObjectFile(path, enc, fields, size)
+	require.NoError(t, err)
+	defer rc.Close()
+	r := rc.(*encryptedObjectReader)
+
+	// Load all three chunks via loadNext directly, WITHOUT Read() between them,
+	// so Read()'s drain-clear never runs and the tail is governed solely by
+	// loadNext's clear-before-OpenTo. 2 full + 1 partial → exactly 3 loads.
+	require.NoError(t, r.loadNext()) // chunk 0 (full)
+	require.NoError(t, r.loadNext()) // chunk 1 (full)
+	require.NoError(t, r.loadNext()) // chunk 2 (partial, 4096 bytes)
+	require.Equal(t, 4096, len(r.plainBuf), "final chunk is the 4096-byte partial")
+	require.GreaterOrEqual(t, cap(r.plainBuf), encryptedChunkSize, "buffer pre-sized to chunkSize")
+
+	tail := r.plainBuf[len(r.plainBuf):cap(r.plainBuf)]
+	for i, b := range tail {
+		require.Zerof(t, b, "tail[%d] (backing index %d) not zeroed — prior chunk plaintext leaked", i, len(r.plainBuf)+i)
+	}
+}
+
+// TestEncryptedObjectFile_RejectsOversizedPlainLen tampers a record's plainLen
+// header to exceed encryptedChunkSize and asserts every chunk-loop reader
+// rejects it via the PRE-Open upper-bound guard specifically. We assert the
+// guard's error text ("exceeds chunk size") rather than just any error: with
+// the record body left intact, decrypt still yields encryptedChunkSize bytes,
+// so the pre-existing post-Open `len(plain) != plainLen` backstop would also
+// reject it ("length mismatch"). Matching the guard's message isolates the new
+// guard from that backstop — verified RED: removing the guard flips the error
+// to the mismatch message and the assertion fails.
+func TestEncryptedObjectFile_RejectsOversizedPlainLen(t *testing.T) {
+	enc := testSegEnc(t)
+	fields := objectFileAADFields("b", "k")
+
+	build := func(t *testing.T) (string, int64) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "object")
+		plaintext := bytes.Repeat([]byte("p"), encryptedChunkSize)
+		size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
+		require.NoError(t, err)
+		// Overwrite the first record's plainLen header (4 bytes at the start of
+		// the first record) with a value > encryptedChunkSize.
+		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		require.NoError(t, err)
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], encryptedChunkSize+1)
+		_, err = f.WriteAt(hdr[:], int64(encryptedObjectHeaderLen))
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		return path, size
+	}
+
+	const guardMsg = "exceeds chunk size" // the pre-Open guard's message
+
+	t.Run("streaming_reader", func(t *testing.T) {
+		path, size := build(t)
+		rc, err := openEncryptedObjectFile(path, enc, fields, size)
+		require.NoError(t, err)
+		defer rc.Close()
+		_, err = io.ReadAll(rc)
+		require.ErrorContains(t, err, guardMsg)
+	})
+
+	t.Run("full_read", func(t *testing.T) {
+		path, size := build(t)
+		_, err := readEncryptedObjectFile(path, enc, fields, size)
+		require.ErrorContains(t, err, guardMsg)
+	})
+
+	t.Run("hash", func(t *testing.T) {
+		path, _ := build(t)
+		h, release := hashForBucket("")
+		defer release()
+		_, err := hashEncryptedObjectFile(path, enc, fields, h)
+		require.ErrorContains(t, err, guardMsg)
+	})
 }
