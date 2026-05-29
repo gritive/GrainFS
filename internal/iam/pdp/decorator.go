@@ -51,9 +51,9 @@ type innerAuthorizer interface {
 }
 
 // parsedConfig holds the last successfully parsed iam.pdp config together with
-// its raw source string. A later task adds logic that uses this field; it is
-// declared here so the struct compiles in a single coupled commit.
-type parsedConfig struct { //nolint:unused
+// its raw source string. loadConfig stores and reads this to skip JSON unmarshal
+// when the raw config string has not changed between requests.
+type parsedConfig struct {
 	raw string
 	cfg Config
 }
@@ -82,9 +82,9 @@ type Decorator struct {
 	mRequests *prometheus.CounterVec
 	mCache    *prometheus.CounterVec
 
-	// parsed caches the last successfully parsed iam.pdp config. Declared here
-	// for struct completeness; logic is added in a later task.
-	parsed atomic.Pointer[parsedConfig] //nolint:unused
+	// parsed caches the last successfully parsed iam.pdp config. loadConfig reads
+	// and updates this field to avoid JSON unmarshal on every request.
+	parsed atomic.Pointer[parsedConfig]
 
 	mu       sync.Mutex
 	client   *Client
@@ -129,14 +129,33 @@ func (d *Decorator) AuthorizePrincipal(ctx context.Context, p principal.Principa
 	return d.chain(ctx, p, targetSA, inner, ctxReq)
 }
 
+// loadConfig returns the parsed iam.pdp config for the current raw value,
+// re-parsing only when the raw string changed. Restore-coherent: raw comes from
+// GetString (the live config store), so a snapshot install that swaps the stored
+// value is picked up next request. ok=false ⇒ key unset (unconfigured pass-through).
+func (d *Decorator) loadConfig() (Config, bool, error) {
+	raw, ok := d.cfg.GetString(ConfigKey)
+	if !ok {
+		return Config{}, false, nil
+	}
+	if snap := d.parsed.Load(); snap != nil && snap.raw == raw {
+		return snap.cfg, true, nil
+	}
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		return Config{}, true, err
+	}
+	d.parsed.Store(&parsedConfig{raw: raw, cfg: cfg})
+	return cfg, true, nil
+}
+
 // chain applies the PDP consultation given the GrainFS (inner) result.
 func (d *Decorator) chain(ctx context.Context, actor principal.Principal, targetSA string, inner policy.EvalResult, ctxReq policy.RequestContext) policy.EvalResult {
-	raw, ok := d.cfg.GetString(ConfigKey)
+	cfg, ok, err := d.loadConfig()
 	if !ok {
 		d.release()  // unconfigured: free any client/cache left over from when it was enabled
 		return inner // unconfigured: pure pass-through
 	}
-	cfg, err := ParseConfig([]byte(raw))
 	if err != nil {
 		log.Warn().Err(err).Str("event", "iam.pdp").Msg("iam.pdp: invalid config, treating as disabled")
 		d.release()

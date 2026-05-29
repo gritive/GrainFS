@@ -759,6 +759,71 @@ func TestDecoratorTokenErrorHardDeniesUnderFailOpen(t *testing.T) {
 	}
 }
 
+// TestDecorator_ParseCache_ParseOncePerRawChange proves the memoized snapshot is
+// reused across many requests when the raw config string stays stable.
+func TestDecorator_ParseCache_ParseOncePerRawChange(t *testing.T) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	cr := &mutableCfg{}
+	raw := decoCfg(endpoint, "closed")
+	cr.set(raw)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cr, nil, "admin")
+	for i := 0; i < 5; i++ {
+		d.Authorize(context.Background(), "sa-1", "bkt", policy.RequestContext{Action: "s3:GetObject"})
+	}
+	snap := d.parsed.Load()
+	require.NotNil(t, snap)
+	require.Equal(t, raw, snap.raw)
+}
+
+// TestDecorator_ParseCache_RestoreCoherent proves that changing the raw config
+// out-of-band (mimicking Store.Restore) causes a re-parse on the next request,
+// because GetString is the source of truth.
+func TestDecorator_ParseCache_RestoreCoherent(t *testing.T) {
+	endpointEnabled := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	// Start with a disabled config (enabled:false parses fine, no endpoint needed).
+	disabledRaw := `{"enabled":false}`
+	enabledRaw := decoCfg(endpointEnabled, "closed")
+
+	cr := &mutableCfg{}
+	cr.set(disabledRaw)
+	d := NewDecorator(&spyInner{decision: policy.DecisionDeny}, cr, nil, "admin")
+	d.Authorize(context.Background(), "sa-1", "bkt", policy.RequestContext{Action: "s3:GetObject"})
+	// We memoize ALL valid parses including enabled:false, so snapshot is present.
+	snap0 := d.parsed.Load()
+	require.NotNil(t, snap0)
+	require.False(t, snap0.cfg.Enabled)
+
+	// Flip to an ENABLED config out-of-band.
+	cr.set(enabledRaw)
+	d.Authorize(context.Background(), "sa-1", "bkt", policy.RequestContext{Action: "s3:GetObject"})
+	snap1 := d.parsed.Load()
+	require.NotNil(t, snap1)
+	require.True(t, snap1.cfg.Enabled)
+	require.Equal(t, enabledRaw, snap1.raw)
+}
+
+// BenchmarkDecorator_DisabledPath proves the disabled path (enabled:false) is
+// alloc-free: the parse-cache short-circuits before any request/cacheKey
+// construction, and release() uses the pre-bound d.mGauge.
+func BenchmarkDecorator_DisabledPath(b *testing.B) {
+	cr := &mutableCfg{}
+	cr.set(`{"enabled":false}`)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cr, nil, "admin")
+	ctx := context.Background()
+	rc := policy.RequestContext{Action: "s3:GetObject"}
+	// Warmup: parse once so the first b.N iteration is not amortized.
+	d.Authorize(ctx, "sa-1", "bkt", rc)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.Authorize(ctx, "sa-1", "bkt", rc)
+	}
+}
+
 // TestDecoratorTokenRotationRebuildsClientAndCache proves a bearer-token rotation
 // (a new generation from the TokenSource) feeds both clientIdentity and configGen,
 // so the cached client is rebuilt AND the decision cache is dropped — a prior
