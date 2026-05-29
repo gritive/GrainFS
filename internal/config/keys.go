@@ -54,6 +54,18 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 		},
 	})
 
+	s.Register("iam.pdp.token", StringSpec{
+		Default: "",
+		Desc:    "Sealed External PDP bearer-token envelope (managed by `grainfs iam pdp set-token`; do not edit directly)",
+		Validate: func(raw string) error {
+			if raw == "" {
+				return nil
+			}
+			_, err := iampdp.ParseTokenEnvelope([]byte(raw))
+			return err
+		},
+	})
+
 	s.Register("trusted-proxy.cidr", StringSpec{
 		Default: "",
 		Desc:    "CIDR range of trusted reverse proxies (e.g. 10.0.0.0/8)",

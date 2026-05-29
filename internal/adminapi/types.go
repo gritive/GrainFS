@@ -567,6 +567,18 @@ type ConfigSetReq struct {
 	Value string `json:"value"`
 }
 
+// PDPSetTokenReq is the body for POST /v1/iam/pdp/token. The token travels in
+// the request body, never the URL.
+type PDPSetTokenReq struct {
+	Token string `json:"token"`
+}
+
+// PDPStatusResp is the body for GET /v1/iam/pdp/status. Status is the
+// server-rendered human-readable status text; it NEVER contains the token.
+type PDPStatusResp struct {
+	Status string `json:"status"`
+}
+
 // --- Bucket admin wire types ---
 
 // BucketInfo is the JSON representation of a bucket in admin responses.

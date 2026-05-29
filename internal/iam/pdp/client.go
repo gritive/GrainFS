@@ -3,6 +3,8 @@ package pdp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
+	"time"
 	"unicode/utf8"
 )
 
@@ -27,6 +31,11 @@ const (
 	ErrTypeStatus          = "status"
 	ErrTypeDecode          = "decode"
 	ErrTypeInvalidDecision = "invalid_decision"
+	ErrTypeSSRF            = "ssrf_blocked"
+	ErrTypeTLS             = "tls"
+	// ErrTypeTokenUnavailable: a bearer token is configured but unusable
+	// (parse/unseal failure or encryptor not ready). The decorator hard-denies.
+	ErrTypeTokenUnavailable = "token_unavailable"
 )
 
 const (
@@ -76,27 +85,53 @@ func (e *DenyError) Error() string {
 	return "pdp: denied: " + e.Reason
 }
 
-// Client talks HTTP/JSON to the external PDP over a Unix socket.
+// Client talks HTTP/JSON to a remote http:// or https:// external PDP. Its
+// transport carries an SSRF egress filter (net.Dialer.Control) and never uses a
+// proxy or follows redirects.
 type Client struct {
-	hc *http.Client
+	hc      *http.Client
+	baseURL string
+	scheme  string
+	token   string
 }
 
-// NewClient builds a Client whose HTTP transport dials the configured Unix
-// socket and never follows redirects.
-func NewClient(cfg Config) *Client {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", cfg.SocketPath)
+// NewClient builds a Client whose HTTP transport dials the configured remote
+// endpoint, rejecting blocked addresses via the SSRF Control hook. The bearer
+// token (if any) is attached only on https. Proxy is nil so no proxy can bypass
+// the egress filter.
+func NewClient(cfg Config, token string) *Client {
+	scheme, allowPrivate := cfg.Scheme, cfg.SSRF.AllowPrivate
+	dialer := &net.Dialer{
+		Control: func(_, address string, _ syscall.RawConn) error {
+			return checkDialAddr(scheme, address, allowPrivate)
 		},
+	}
+	tr := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	if scheme == "https" {
+		tlsCfg := &tls.Config{MinVersion: cfg.TLS.MinVersion}
+		if cfg.TLS.CAPEM != "" {
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM([]byte(cfg.TLS.CAPEM))
+			tlsCfg.RootCAs = pool
+		}
+		tr.TLSClientConfig = tlsCfg
 	}
 	return &Client{
 		hc: &http.Client{
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+			Transport:     tr,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
+		baseURL: cfg.RemoteURL,
+		scheme:  scheme,
+		token:   token,
 	}
 }
 
@@ -120,17 +155,30 @@ func (c *Client) Authorize(ctx context.Context, req Request) (string, string, er
 		return "", ErrTypeTransport, fmt.Errorf("pdp: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://pdp"+authorizePath, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+authorizePath, bytes.NewReader(body))
 	if err != nil {
 		return "", ErrTypeTransport, fmt.Errorf("pdp: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
+	if c.scheme == "https" && c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.hc.Do(httpReq)
 	if err != nil {
+		if errors.Is(err, errSSRFBlocked) {
+			return "", ErrTypeSSRF, fmt.Errorf("pdp: ssrf blocked: %w", err)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "", ErrTypeTimeout, fmt.Errorf("pdp: request timed out: %w", err)
+		}
+		var rhe tls.RecordHeaderError
+		var ca x509.UnknownAuthorityError
+		var ce x509.CertificateInvalidError
+		var he x509.HostnameError
+		if errors.As(err, &rhe) || errors.As(err, &ca) || errors.As(err, &ce) || errors.As(err, &he) {
+			return "", ErrTypeTLS, fmt.Errorf("pdp: tls error: %w", err)
 		}
 		return "", ErrTypeTransport, fmt.Errorf("pdp: transport error: %w", err)
 	}

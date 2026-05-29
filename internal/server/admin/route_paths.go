@@ -67,6 +67,10 @@ const (
 	routePathIAMMountSAByName       = "/iam/mount-sa/:name"
 	routePathIAMMountSAPolicyAttach = "/iam/mount-sa/:name/policy/:policy"
 
+	// PDP bearer-token: set (POST, token in body) / clear (DELETE) / show (GET).
+	routePathIAMPDPToken  = "/iam/pdp/token"
+	routePathIAMPDPStatus = "/iam/pdp/status"
+
 	routePathAuditQuery        = "/audit/query"
 	routePathAuditRecentDenies = "/audit/recent-denies"
 	routePathAuditBySA         = "/audit/by-sa/:said"

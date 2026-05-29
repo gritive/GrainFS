@@ -102,9 +102,37 @@ Work these in order. Do not run them in parallel.
   disabled-by-default, chain/deny-override, fail-closed default + opt-in fail-open,
   admin + protocol-credential paths, Prometheus `grainfs_iam_pdp_*` + `iam.pdp` audit).
   Remaining:
-    - Remote `https://` transport + bearer token (delivered via admin UDS + a
-      `grainfs iam pdp` CLI, DEK-sealed like other IAM secrets) + mTLS + active SSRF
-      egress filtering.
+    - Remote `https://` transport + bearer token + SSRF egress filtering — **SHIPPED
+      Slice 6** (`http`/`https`-only endpoint, `unix://` removed; DEK-sealed bearer
+      token in reserved `iam.pdp.token` via `grainfs iam pdp set-token/clear-token/show`;
+      inline `tls.ca_pem` (parity-safe) + TLS 1.2 floor, no InsecureSkipVerify;
+      dial-time `net.Dialer.Control` SSRF filter + `Proxy:nil` + `ssrf.allow_private`;
+      SSRF-blocked hard-denies regardless of failure_policy). Remaining sub-items:
+        - **mTLS client cert** to the PDP — deferred; **necessity to be re-evaluated**
+          (likely overkill for an external PDP behind a bearer token; low priority).
+        - **per-CIDR SSRF allowlist** — Slice 6 ships only the `allow_private` boolean.
+        - **NAT64/DNS64 residual risk** — dial-time IP classification can't detect a
+          public-looking IPv6 that synthesizes a route to private IPv4; document +
+          rely on operator egress controls (a per-CIDR allowlist would help).
+        - **Cross-node DEK-parity e2e** — DEK cross-node replication is verified in
+          code + unit-tested (`pdp_token_source_test`), but a tests/e2e cluster spec
+          (set-token on node A → PDP consult unseals on node B) was deferred: no ready
+          multi-node IAM harness in tests/e2e. Add when one exists.
+
+- [ ] **[P2] IAM-credential encryptor not refreshed on a LIVE snapshot install
+  (PRE-EXISTING, broader than PDP)** — the apply-loop snapshot branch
+  (`meta_raft.go:961`) calls `fsm.Restore` but does NOT run
+  `rebuildDEKKeeperFromRestore`/`wireIAMEncryptor`; that rebuild hook fires only at
+  STARTUP (`boot_phases_raft.go`). A running follower that catches up via a LIVE
+  `InstallSnapshot` carrying newer DEK/config state can be left with a stale
+  DEKKeeper → **any** IAM-credential unseal (AccessKey, BucketUpstream, and the new
+  `iam.pdp.token`) can fail until restart. This is the shared `wireIAMEncryptor`
+  lifecycle, NOT specific to the PDP slice (the PDP token inherits it; with the
+  Slice-6 fix a stale-encryptor unseal now hard-denies instead of silently
+  proceeding, which is safe but still an availability hit). Fix: invoke the
+  post-restore DEK rebuild on the live snapshot path before marking the snapshot
+  applied (or prove live meta snapshots never carry DKVS/credential state). Found
+  by the Slice-6 code gate (codex). Its own slice — touches core raft/DEK lifecycle.
     - Decision cache (positive/negative TTL) + grace mode — **SHIPPED Slice 2**
       (`iam.pdp.cache`: ttl_allow/ttl_deny + LRU max_entries + grace_ttl;
       sharded TTL+LRU, stale-preserving lookup, cache cleared on any iam.pdp
@@ -127,7 +155,7 @@ Work these in order. Do not run them in parallel.
       `WithActorTarget` ctx value) — expands beyond the decorator-only boundary into
       `handlers_credentials.go`. Documented as a Slice-1 limitation (spec P2a).
   Spec: `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`
-  "External PDP Adapter — Slice 5 Detailed Design".
+  "External PDP Adapter — Slice 5/6 Detailed Design".
 
 - [ ] **Zero-CA cutover/revocation follow-ups** (2026-05-29 re-review of the merged
   revocation + complete-cutover slices; zero-CA is greenfield so none of these are

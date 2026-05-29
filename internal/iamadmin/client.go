@@ -169,6 +169,27 @@ func (c *Client) GroupPolicyDetach(ctx context.Context, group, policy string) er
 		nil)
 }
 
+// --- PDP bearer token ---
+
+// PDPSetToken seals + stores the External PDP bearer token. The token travels
+// in the request body (never the URL).
+func (c *Client) PDPSetToken(ctx context.Context, token string) error {
+	body := map[string]string{"token": token}
+	return c.Post(ctx, "/v1/iam/pdp/token", body, nil)
+}
+
+// PDPClearToken removes the configured External PDP bearer token.
+func (c *Client) PDPClearToken(ctx context.Context) error {
+	return c.Delete(ctx, "/v1/iam/pdp/token", nil)
+}
+
+// PDPShow returns the server-rendered PDP status (never the token).
+func (c *Client) PDPShow(ctx context.Context) (PDPStatusResponse, error) {
+	var resp PDPStatusResponse
+	err := c.Get(ctx, "/v1/iam/pdp/status", &resp)
+	return resp, err
+}
+
 // --- MountSA ---
 
 // MountSACreate creates a NFS/9P mount service account.

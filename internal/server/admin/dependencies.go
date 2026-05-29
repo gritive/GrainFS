@@ -8,11 +8,13 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
+	iampdp "github.com/gritive/GrainFS/internal/iam/pdp"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // DirectorAPI is the slim interface admin handlers need from the scrub
@@ -164,6 +166,15 @@ type IAMMountSAService interface {
 type ConfigProposer interface {
 	ProposeConfigPut(ctx context.Context, key, value string) error
 	ProposeConfigDelete(ctx context.Context, key string) error
+}
+
+// PDPTokenManager is the slim accessor the PDP token admin handlers need: the
+// current sealed bearer token (tri-stated: absent / ready / configured-but-error)
+// and the live cluster-consistent DataEncryptor used to seal a new one. Satisfied
+// by an adapter in serveruntime. nil disables the pdp token endpoints.
+type PDPTokenManager interface {
+	CurrentToken() (token, gen string, status iampdp.TokenStatus)
+	CurrentEncryptor() storage.DataEncryptor
 }
 
 // ConfigStoreReader is the slim interface config admin handlers need to read

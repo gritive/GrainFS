@@ -121,8 +121,13 @@ type bootState struct {
 	iamPolicyStores  *IAMStores
 	mountSAStore     *mountsastore.Store
 	cfgStore         *config.Store
-	nfsExportSvc     *nfsexport.ExportService
-	dekKeeper        *encrypt.DEKKeeper
+	// pdpTokenSource is the single PDP TokenSource / admin.PDPTokenManager
+	// instance, created once via ensurePDPTokenSource (adminAuthorizer is
+	// called twice + the Deps literal references it). Its live encryptor is
+	// refreshed by wireIAMEncryptor on fresh boot and snapshot-restore swaps.
+	pdpTokenSource *pdpTokenSource
+	nfsExportSvc   *nfsexport.ExportService
+	dekKeeper      *encrypt.DEKKeeper
 	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
 	// restore) rebuildDEKKeeperFromRestore, threaded as the single source into
 	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ

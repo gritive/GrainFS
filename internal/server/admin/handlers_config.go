@@ -2,18 +2,33 @@ package admin
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/config"
 )
 
+// reservedConfigKeys are managed ONLY through their dedicated sealing handlers,
+// never the generic config set/unset route. This is a UX-level guard; the
+// load-bearing protection is the Store-layer envelope validator, which runs on
+// both Set and Restore.
+var reservedConfigKeys = map[string]string{
+	"iam.pdp.token": "grainfs iam pdp set-token / clear-token",
+}
+
 // ConfigSetEntry sets a cluster-wide config key via the proposer.
 func ConfigSetEntry(ctx context.Context, d *Deps, key, value string) error {
+	if owner, ok := reservedConfigKeys[key]; ok {
+		return fmt.Errorf("config key %q is reserved; manage it via `%s`", key, owner)
+	}
 	return d.ConfigProposer.ProposeConfigPut(ctx, key, value)
 }
 
 // ConfigUnsetEntry removes a cluster-wide config key override via the proposer.
 func ConfigUnsetEntry(ctx context.Context, d *Deps, key string) error {
+	if owner, ok := reservedConfigKeys[key]; ok {
+		return fmt.Errorf("config key %q is reserved; manage it via `%s`", key, owner)
+	}
 	return d.ConfigProposer.ProposeConfigDelete(ctx, key)
 }
 

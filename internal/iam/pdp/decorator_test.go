@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -46,25 +45,24 @@ func (s staticCfg) GetString(key string) (string, bool) {
 	return "", false
 }
 
-func decoUnixPDP(t *testing.T, h http.HandlerFunc) string {
+// decoHTTPPDP starts a loopback http httptest mock PDP and returns its URL
+// (http://127.0.0.1:PORT). Loopback http is the one address an http remote PDP is
+// allowed to target, so it passes both ParseConfig and the SSRF dial filter.
+func decoHTTPPDP(t *testing.T, h http.HandlerFunc) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "pdp.sock")
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: h}}
-	srv.Start()
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return sock
+	return srv.URL
 }
 
-func decoCfg(sock, policyMode string) string {
-	b, _ := json.Marshal(map[string]any{"enabled": true, "endpoint": "unix://" + sock, "failure_policy": policyMode})
+func decoCfg(endpoint, policyMode string) string {
+	b, _ := json.Marshal(map[string]any{"enabled": true, "endpoint": endpoint, "failure_policy": policyMode})
 	return string(b)
 }
 
 func TestDecoratorDisabledIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg(`{"enabled":false}`))
+	d := NewDecorator(inner, staticCfg(`{"enabled":false}`), nil)
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.EqualValues(t, 1, inner.calls)
@@ -76,13 +74,13 @@ func (missingCfg) GetString(string) (string, bool) { return "", false }
 
 func TestDecoratorMalformedConfigIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg("{"))
+	d := NewDecorator(inner, staticCfg("{"), nil)
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.EqualValues(t, 1, inner.calls)
 
 	inner2 := &spyInner{decision: policy.DecisionAllow}
-	d2 := NewDecorator(inner2, staticCfg("{"))
+	d2 := NewDecorator(inner2, staticCfg("{"), nil)
 	got2 := d2.Authorize(context.Background(), "sa", "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got2.Decision)
 	require.EqualValues(t, 1, inner2.calls)
@@ -90,13 +88,13 @@ func TestDecoratorMalformedConfigIsPassThrough(t *testing.T) {
 
 func TestDecoratorMissingConfigKeyIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, missingCfg{})
+	d := NewDecorator(inner, missingCfg{}, nil)
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.EqualValues(t, 1, inner.calls)
 
 	inner2 := &spyInner{decision: policy.DecisionAllow}
-	d2 := NewDecorator(inner2, missingCfg{})
+	d2 := NewDecorator(inner2, missingCfg{}, nil)
 	got2 := d2.Authorize(context.Background(), "sa", "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got2.Decision)
 	require.EqualValues(t, 1, inner2.calls)
@@ -104,46 +102,46 @@ func TestDecoratorMissingConfigKeyIsPassThrough(t *testing.T) {
 
 func TestDecoratorShortCircuitsInnerDeny(t *testing.T) {
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&dialed, 1) })
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&dialed, 1) })
 	inner := &spyInner{decision: policy.DecisionDeny}
-	d := NewDecorator(inner, staticCfg(decoCfg(sock, "closed")))
+	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil)
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionDeny, got.Decision)
 	require.EqualValues(t, 0, dialed)
 }
 
 func TestDecoratorAllowAndAllow(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg(decoCfg(sock, "closed")))
+	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil)
 	got := d.AuthorizePrincipal(context.Background(), principal.OIDC("iss", "sub", "oidc:x:u", []string{"g"}), "", policy.RequestContext{Action: "grainfs:CredentialCreate", Resource: "protocol-credential/nbd/v/d"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 }
 
 func TestDecoratorAllowThenPDPDeny(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg(decoCfg(sock, "closed")))
+	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil)
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionDeny, got.Decision)
 	require.Contains(t, got.Reason, "pdp_deny")
 }
 
 func TestDecoratorFailClosedVsOpen(t *testing.T) {
-	down := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
-	closed := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "closed")))
+	down := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
+	closed := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "closed")), nil)
 	require.Equal(t, policy.DecisionDeny, closed.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"}).Decision)
-	open := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "open")))
+	open := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "open")), nil)
 	got := open.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.Contains(t, got.Reason, "pdp_skipped_fail_open")
 }
 
 func TestDecoratorCanceledCtxDeniesEvenFailOpen(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(sock, "open")))
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	got := d.AuthorizePrincipal(ctx, principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
@@ -159,13 +157,13 @@ func TestDecoratorCanceledCtxDeniesEvenFailOpen(t *testing.T) {
 func TestDecoratorCanceledCtxIgnoresFreshCache(t *testing.T) {
 	metrics.PDPCacheTotal.Reset()
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	// Long ttl_allow keeps the primed entry fresh at the canceled-call time
 	// (no d.now advancement, so the entry is still fresh on the 2nd call).
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "10m", "", "")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "10m", "", "")), nil)
 
 	// Prime a FRESH allow (live ctx). Same actor/bucket/ctxReq as the canceled
 	// call below so both produce the SAME cache key (a genuine fresh hit).
@@ -213,22 +211,22 @@ func (m *mutableCfg) GetString(key string) (string, bool) {
 }
 
 // TestDecoratorTimeoutHotReload proves the per-request timeout tracks a config
-// change against the SAME socket (same cached client). The PDP sleeps ~150ms.
+// change against the SAME endpoint (same cached client). The PDP sleeps ~150ms.
 // First request: 1s timeout (fail-open) -> allow. Second request: 20ms timeout
-// against the same socket -> the client deadline fires -> fail-open allow but
+// against the same endpoint -> the client deadline fires -> fail-open allow but
 // with the timeout error_type path, demonstrating the new deadline took effect
 // without a client rebuild.
 func TestDecoratorTimeoutHotReload(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(150 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
 
 	timeoutCfg := func(d string) string {
 		b, _ := json.Marshal(map[string]any{
-			"enabled": true, "endpoint": "unix://" + sock,
+			"enabled": true, "endpoint": endpoint,
 			"failure_policy": "open", "timeout": d,
 		})
 		return string(b)
@@ -250,18 +248,18 @@ func TestDecoratorTimeoutHotReload(t *testing.T) {
 }
 
 // TestDecoratorReleasesClientWhenDisabled proves a hot enable->disable frees the
-// cached unix-socket client. The first (enabled) request builds and caches the
-// client; the second request, with {"enabled":false}, must release it so the
-// idle keep-alive connection does not linger until process exit.
+// cached HTTP client. The first (enabled) request builds and caches the client;
+// the second request, with {"enabled":false}, must release it so the idle
+// keep-alive connection does not linger until process exit.
 func TestDecoratorReleasesClientWhenDisabled(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
 
 	// Enabled request builds and caches the client.
-	cfg.set(decoCfg(sock, "closed"))
+	cfg.set(decoCfg(endpoint, "closed"))
 	d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.NotNil(t, d.client)
 
@@ -269,18 +267,18 @@ func TestDecoratorReleasesClientWhenDisabled(t *testing.T) {
 	cfg.set(`{"enabled":false}`)
 	d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Nil(t, d.client)
-	require.Empty(t, d.clientSock)
+	require.Empty(t, d.clientID)
 	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PDPCacheEntries), 0.0001,
 		"release() resets the entries gauge to 0 on disable")
 }
 
 func TestDecoratorAuthorizeMapsServiceAccount(t *testing.T) {
 	var got Request
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(sock, "closed")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "closed")), nil)
 	d.Authorize(context.Background(), "sa-app", "", policy.RequestContext{Action: "grainfs:CredentialGet", Resource: "protocol-credential/nbd/v/d"})
 	require.Equal(t, string(principal.KindServiceAccount), got.Principal.Kind)
 	require.Equal(t, "sa-app", got.Principal.ID)
@@ -288,7 +286,7 @@ func TestDecoratorAuthorizeMapsServiceAccount(t *testing.T) {
 }
 
 // cacheCfg builds an iam.pdp config with caching/grace knobs.
-func cacheCfg(sock, policyMode, ttlAllow, ttlDeny, grace string) string {
+func cacheCfg(endpoint, policyMode, ttlAllow, ttlDeny, grace string) string {
 	cache := map[string]any{}
 	if ttlAllow != "" {
 		cache["ttl_allow"] = ttlAllow
@@ -300,7 +298,7 @@ func cacheCfg(sock, policyMode, ttlAllow, ttlDeny, grace string) string {
 		cache["grace_ttl"] = grace
 	}
 	b, _ := json.Marshal(map[string]any{
-		"enabled": true, "endpoint": "unix://" + sock,
+		"enabled": true, "endpoint": endpoint,
 		"failure_policy": policyMode, "cache": cache,
 	})
 	return string(b)
@@ -317,11 +315,11 @@ func cacheTotal(result, decision string) float64 {
 func TestDecoratorCacheMissThenHit(t *testing.T) {
 	metrics.PDPCacheTotal.Reset()
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil)
 
 	// First request: cache MISS (PDP consulted, returns allow).
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -343,11 +341,11 @@ func TestDecoratorCacheMissThenHit(t *testing.T) {
 func TestDecoratorCacheDeny(t *testing.T) {
 	metrics.PDPCacheTotal.Reset()
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "", "1m", "")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "", "1m", "")), nil)
 
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionDeny, got1.Decision)
@@ -362,14 +360,14 @@ func TestDecoratorCacheDeny(t *testing.T) {
 
 func TestDecoratorCacheFailureNotCached(t *testing.T) {
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&dialed, 1) == 1 {
 			w.WriteHeader(500)
 			return
 		}
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "open", "1m", "", "")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "open", "1m", "", "")), nil)
 
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionAllow, got1.Decision) // fail-open allow, NOT cached
@@ -381,11 +379,11 @@ func TestDecoratorCacheFailureNotCached(t *testing.T) {
 
 func TestDecoratorCacheExpiry(t *testing.T) {
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil)
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -402,7 +400,7 @@ func TestDecoratorGraceServesAllow(t *testing.T) {
 	metrics.PDPCacheTotal.Reset()
 	var up atomic.Bool
 	up.Store(true)
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		if !up.Load() {
 			w.WriteHeader(500)
 			return
@@ -410,7 +408,7 @@ func TestDecoratorGraceServesAllow(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	logBuf := captureLog(t)
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "1h")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "1h")), nil)
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -435,14 +433,14 @@ func TestDecoratorGraceServesAllow(t *testing.T) {
 func TestDecoratorGraceExpiredFallsToFailureClosed(t *testing.T) {
 	var up atomic.Bool
 	up.Store(true)
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		if !up.Load() {
 			w.WriteHeader(500)
 			return
 		}
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "5m")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "5m")), nil)
 	base := time.Now()
 	d.now = func() time.Time { return base }
 	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
@@ -459,14 +457,14 @@ func TestDecoratorGraceServesDeny(t *testing.T) {
 	metrics.PDPCacheTotal.Reset()
 	var up atomic.Bool
 	up.Store(true)
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		if !up.Load() {
 			w.WriteHeader(500)
 			return
 		}
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "open", "", "1m", "1h")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "open", "", "1m", "1h")), nil)
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -481,10 +479,10 @@ func TestDecoratorGraceServesDeny(t *testing.T) {
 }
 
 func TestDecoratorCacheHitSuppressesAudit(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil)
 
 	// Prime (this emits an audit line).
 	d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -497,16 +495,16 @@ func TestDecoratorCacheHitSuppressesAudit(t *testing.T) {
 
 func TestDecoratorConfigChangeClearsCache(t *testing.T) {
 	var dialedA, dialedB int32
-	sockA := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	sockA := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialedA, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	sockB := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	sockB := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialedB, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
 
 	cfg.set(cacheCfg(sockA, "closed", "1m", "", ""))
 	d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -520,13 +518,13 @@ func TestDecoratorConfigChangeClearsCache(t *testing.T) {
 
 func TestDecoratorReEnableSameConfigRebuildsCache(t *testing.T) {
 	var dialed int32
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
-	enabled := cacheCfg(sock, "closed", "1m", "", "")
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
+	enabled := cacheCfg(endpoint, "closed", "1m", "", "")
 
 	cfg.set(enabled)
 	d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -552,7 +550,7 @@ func TestDecoratorReEnableSameConfigRebuildsCache(t *testing.T) {
 func TestDecoratorReachableDenyOverridesStaleAllow(t *testing.T) {
 	var dialed int32
 	var denyMode atomic.Bool
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&dialed, 1)
 		if denyMode.Load() {
 			_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
@@ -562,7 +560,7 @@ func TestDecoratorReachableDenyOverridesStaleAllow(t *testing.T) {
 	})
 	// ttl_allow short (1m), grace large (1h, the max) -> the entry goes stale but
 	// stays within grace. failure_policy irrelevant here (no failure occurs).
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "1h")))
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "1h")), nil)
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -589,21 +587,21 @@ func TestDecoratorReachableDenyOverridesStaleAllow(t *testing.T) {
 // TestDecoratorConcurrentAuthorizeRace drives many concurrent Authorize calls on
 // a SHARED Decorator with caching enabled (a mix of shared and distinct
 // resources so some hit and some miss), while another goroutine flips the config
-// between two valid cache settings on the SAME socket to exercise the
+// between two valid cache settings on the SAME endpoint to exercise the
 // cache-rebuild path under contention. It exists to run under `-race`: it asserts
 // no panic and that every result is a valid decision. The clock is fixed and
 // never mutated concurrently (d.now is not lock-guarded).
 func TestDecoratorConcurrentAuthorizeRace(t *testing.T) {
-	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	// Same socket, vary only a cache knob (ttl_allow) so cacheGen changes and the
+	// Same endpoint, vary only a cache knob (ttl_allow) so cacheGen changes and the
 	// cache is rebuilt under contention WITHOUT closing the client mid-flight.
-	cfgA := cacheCfg(sock, "closed", "1m", "", "1h")
-	cfgB := cacheCfg(sock, "closed", "2m", "", "1h")
+	cfgA := cacheCfg(endpoint, "closed", "1m", "", "1h")
+	cfgB := cacheCfg(endpoint, "closed", "2m", "", "1h")
 	cfg.set(cfgA)
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
 	base := time.Now()
 	d.now = func() time.Time { return base } // fixed clock, never mutated below
 
@@ -677,4 +675,115 @@ func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// TestDecorator_SSRFBlocked_HardDeniesUnderFailOpen proves that a dial rejected by
+// the SSRF egress filter HARD-DENIES even with failure_policy=open. The endpoint
+// is "https://localhost:PORT": it parses OK (localhost is a plausible DNS name),
+// but at dial it resolves to 127.0.0.1, which the SSRF filter forbids for https.
+// That block must NOT be treated as a routine PDP failure (which fail-open would
+// turn into an allow); it must deny.
+func TestDecorator_SSRFBlocked_HardDeniesUnderFailOpen(t *testing.T) {
+	// A real TLS listener gives us a live loopback port to aim at; the SSRF filter
+	// rejects the dial before the TLS handshake, so the cert is never exercised.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	}))
+	defer srv.Close()
+	// srv.URL is https://127.0.0.1:PORT (or https://[::1]:PORT on a v4-less host);
+	// swap the literal loopback IP for the "localhost" DNS name so ParseConfig
+	// accepts it (literal loopback IPs are rejected at parse time) while the dial
+	// still resolves to loopback (blocked for https by the egress filter).
+	endpoint := strings.NewReplacer("127.0.0.1", "localhost", "[::1]", "localhost").Replace(srv.URL)
+	// Guard: if the substitution silently no-op'd (server bound an unexpected
+	// address) the test would exercise the pass-through path, not the SSRF branch.
+	require.Contains(t, endpoint, "localhost", "endpoint must use the localhost DNS name to reach the SSRF dial filter")
+	cfgRaw, _ := json.Marshal(map[string]any{
+		"enabled": true, "endpoint": endpoint, "failure_policy": "open",
+	})
+
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(string(cfgRaw)), nil)
+	res := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "b",
+		policy.RequestContext{Action: "s3:GetObject", Resource: "b/o"})
+	if res.Decision != policy.DecisionDeny {
+		t.Fatalf("SSRF-blocked must HARD-DENY even with failure_policy=open, got %v", res.Decision)
+	}
+}
+
+// rotatingTokens is a fake TokenSource whose generation can be flipped between
+// calls to simulate a bearer-token rotation.
+type rotatingTokens struct {
+	mu  sync.Mutex
+	tok string
+	gen string
+}
+
+func (r *rotatingTokens) set(tok, gen string) {
+	r.mu.Lock()
+	r.tok, r.gen = tok, gen
+	r.mu.Unlock()
+}
+
+func (r *rotatingTokens) CurrentToken() (string, string, TokenStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gen == "" {
+		return "", "", TokenAbsent
+	}
+	return r.tok, r.gen, TokenReady
+}
+
+// brokenTokens is a TokenSource that reports a token IS configured but unusable.
+type brokenTokens struct{}
+
+func (brokenTokens) CurrentToken() (string, string, TokenStatus) { return "", "", TokenError }
+
+// TestDecoratorTokenErrorHardDeniesUnderFailOpen proves a configured-but-unusable
+// bearer token hard-denies even with failure_policy=open — a corrupt/misconfigured
+// token must never silently degrade to a token-less PDP call that fail-open could
+// turn into an allow. The PDP server here would ALLOW if reached; it must not be.
+func TestDecoratorTokenErrorHardDeniesUnderFailOpen(t *testing.T) {
+	var reached int32
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reached, 1)
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), brokenTokens{})
+	res := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("u1"), "",
+		policy.RequestContext{Action: "a", Resource: "r"})
+	if res.Decision != policy.DecisionDeny {
+		t.Fatalf("configured-but-unusable token must HARD-DENY even with failure_policy=open, got %v", res.Decision)
+	}
+	if atomic.LoadInt32(&reached) != 0 {
+		t.Fatalf("PDP must NOT be called when the token is unusable (called %d times)", reached)
+	}
+}
+
+// TestDecoratorTokenRotationRebuildsClientAndCache proves a bearer-token rotation
+// (a new generation from the TokenSource) feeds both clientIdentity and configGen,
+// so the cached client is rebuilt AND the decision cache is dropped — a prior
+// cached allow under the old token must not be served after rotation.
+func TestDecoratorTokenRotationRebuildsClientAndCache(t *testing.T) {
+	var dialed int32
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&dialed, 1)
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	tokens := &rotatingTokens{}
+	tokens.set("tok-1", "gen-1")
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), tokens)
+
+	// First request: cache miss -> dial #1, cached under gen-1.
+	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
+	require.EqualValues(t, 1, atomic.LoadInt32(&dialed))
+
+	// Same gen: served from cache, no new dial.
+	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
+	require.EqualValues(t, 1, atomic.LoadInt32(&dialed), "same token gen serves the cached allow")
+
+	// Rotate the token: configGen changes -> cache dropped, client rebuilt ->
+	// the next request must re-consult the PDP (cannot serve the stale entry).
+	tokens.set("tok-2", "gen-2")
+	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
+	require.EqualValues(t, 2, atomic.LoadInt32(&dialed), "token rotation cleared the cache; PDP re-consulted")
 }

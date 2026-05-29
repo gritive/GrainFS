@@ -270,16 +270,49 @@ Enable it with the `iam.pdp` config key (single JSON document):
 ```json
 {
   "enabled": true,
-  "endpoint": "unix:///run/grainfs/pdp.sock",
+  "endpoint": "https://pdp.internal.example:8443",
   "timeout": "2s",
-  "failure_policy": "closed"
+  "failure_policy": "closed",
+  "tls": { "ca_pem": "-----BEGIN CERTIFICATE-----\n...", "min_version": "1.2" },
+  "ssrf": { "allow_private": false }
 }
 ```
 
-- `endpoint`: a **local Unix socket only** (`unix:///path`). GrainFS POSTs
-  `/authorize` over the socket with a JSON `{principal, action, resource, protocol,
-  context}` body and expects `{"decision":"allow|deny","reason":"..."}`. Trust is
-  local (same model as the admin UDS) — there is no bearer token in this release.
+- `endpoint`: **`https://` (remote) or `http://` (local sidecar only)**. GrainFS
+  POSTs `/authorize` with a JSON `{principal, action, resource, protocol, context}`
+  body and expects `{"decision":"allow|deny","reason":"..."}`. The endpoint must be
+  `scheme://host[:port]` with no path/query/fragment/userinfo.
+  - **`https://`**: the remote/production form. Requires TLS server verification
+    (below) and is the only scheme that may carry a bearer token.
+  - **`http://`**: allowed **only to a loopback host** (a co-located sidecar, e.g.
+    `http://127.0.0.1:8181`). A bearer token or `tls` block on an `http://`
+    endpoint is rejected at config time (no plaintext secret on the wire).
+  - The legacy `unix://` transport has been removed; use `http://127.0.0.1:…` for a
+    local sidecar.
+- **Bearer token** (https only): set it out-of-band, never in this JSON. It is
+  sealed at rest under the cluster DEK (same path as IAM credentials, replicated to
+  every node) and delivered via the admin socket:
+  ```
+  grainfs iam pdp set-token --token-file /run/secrets/pdp-token   # seals + stores
+  grainfs iam pdp show                                            # status only; prints a fingerprint, never the token
+  grainfs iam pdp clear-token                                     # removes it
+  ```
+  The token is attached as `Authorization: Bearer <token>` on every PDP call and is
+  never logged, audited, or shown. Rotating it (`set-token` again) transparently
+  rebuilds the PDP client and clears the decision cache.
+- **`tls`** (https only): `ca_pem` pins a CA by **inlining the PEM content** (not a
+  file path) so every cluster node verifies identically — a per-node file path would
+  diverge. Omit `ca_pem` to use the host's system roots (see the parity caveat
+  below). `min_version` floors the TLS version (`1.2` default, `1.3` allowed; lower
+  is rejected). `InsecureSkipVerify` is never available — there is no TLS-downgrade knob.
+- **`ssrf`**: GrainFS applies an **egress filter at dial time** on the resolved IP
+  (rebinding-proof): an `https` endpoint that resolves to loopback, link-local
+  (incl. the cloud metadata IP `169.254.169.254`), private (RFC1918 / IPv6 ULA),
+  CGNAT, or other special-use ranges is **blocked**. `allow_private: true` (default
+  `false`) relaxes the loopback/private/CGNAT classes for an internal-network PDP —
+  **note that this disables SSRF protection for those ranges**; link-local,
+  metadata, and multicast stay blocked regardless. HTTP proxies (`HTTP(S)_PROXY`)
+  are ignored for PDP calls so they cannot bypass the filter.
 - `timeout`: per-request deadline (`>0`, `≤10s`). Read fresh each request, so a
   config change takes effect without restart.
 - `failure_policy`:
@@ -289,14 +322,30 @@ Enable it with the `iam.pdp` config key (single JSON document):
   - `open`: on PDP failure, fall back to the GrainFS-only decision and **allow**
     (audited as `pdp_skipped_fail_open`). Availability over enforcement — a
     conscious operator choice.
+  - **SSRF-blocked is exempt from `failure_policy`:** if a PDP dial is rejected by
+    the egress filter (`error_type=ssrf_blocked`), the request is **always denied**,
+    even under `failure_policy: open`. An egress block is a security event, not an
+    ordinary outage — `open` must not turn a poisoned-DNS/misconfigured endpoint into
+    a silent total PDP bypass. Such events are logged at WARN and counted.
+
+> **Cluster parity caveats.** TLS verification with `ca_pem` is identical on every
+> node (the PEM replicates via Raft). With `ca_pem` omitted, "system roots" are
+> **node-local** — nodes with different OS trust stores could disagree on the same
+> PDP cert; pin `ca_pem` for strict cluster parity. TLS validity also depends on
+> each node's clock (assume NTP). **NAT64/DNS64 residual:** in such environments a
+> public-looking IPv6 can synthesize a route to private IPv4 that dial-time IP
+> classification cannot detect; rely on operator egress controls there.
 
 Coverage: protocol-credential operations are PDP-gated on every request; admin
 routes are PDP-gated only for bearer/OIDC actor requests (a local peercred CLI
 call over the admin UDS is governed by socket trust, not the PDP).
 
 Observe: `grainfs_iam_pdp_requests_total{decision,error_type,failure_policy}` and
-`grainfs_iam_pdp_request_duration_seconds`. Every PDP outcome (including a
-fail-open skip) is recorded in the `iam.pdp` audit log line.
+`grainfs_iam_pdp_request_duration_seconds`. `error_type` now includes
+`ssrf_blocked` (dial rejected by the egress filter) and `tls` (handshake failure)
+alongside `timeout`/`transport`/`status`/`decode`/`invalid_decision`. Every PDP
+outcome (including a fail-open skip and a hard SSRF deny) is recorded in the
+`iam.pdp` audit log line.
 
 ### Decision cache + grace
 
@@ -347,13 +396,14 @@ it alongside `grainfs_iam_pdp_requests_total{decision="error"}` to spot PDP
 unavailability. Cache **hits are not re-audited** in the `iam.pdp` log (the
 decision was audited when first computed); misses and grace-serves are.
 
-Not yet supported: remote (`https`) PDP endpoints, bearer tokens to the PDP, mTLS,
-and S3/Iceberg data-plane enforcement.
+Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist, and
+S3/Iceberg data-plane enforcement.
 
 ## Current Boundary
 
 HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
 mount-SA, bucket-upstream, config, and dashboard-token admin routes. An optional
-External PDP adapter (local Unix socket, disabled by default) chains after GrainFS
-IAM for admin and protocol-credential operations; remote transport and broader
-coverage remain future slices.
+External PDP adapter (remote `https` with a DEK-sealed bearer token + dial-time SSRF
+egress filtering, or a local `http` loopback sidecar; disabled by default) chains
+after GrainFS IAM for admin and protocol-credential operations; mTLS and S3/Iceberg
+data-plane enforcement remain future slices.

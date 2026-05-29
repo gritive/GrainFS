@@ -34,6 +34,7 @@ type Deps struct {
 	BucketWithPolicyProp BucketWithPolicyProposer  // optional; nil → create-only path (no attach)
 	ConfigProposer       ConfigProposer            // optional; nil disables config write endpoints
 	ConfigStore          ConfigStoreReader         // optional; nil disables config read endpoints
+	PDPTokens            PDPTokenManager           // optional; nil disables IAM PDP token endpoints
 	Buckets              BucketOps                 // optional; nil disables bucket CRUD admin endpoints
 	NfsExports           NfsExportService          // optional; nil disables NFS export admin endpoints
 	ProtocolCredentials  ProtocolCredentialService // optional; nil disables protocol credential endpoints

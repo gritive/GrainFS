@@ -144,6 +144,7 @@ func TestRegisterClusterKeys_AllPresent(t *testing.T) {
 		"iam.allow-anonymous-bucket-policy",
 		"iam.oidc.issuers",
 		"iam.pdp",
+		"iam.pdp.token",
 		"trusted-proxy.cidr",
 		"jwt.signing-key-rotate",
 		"jwt.signing-key-prune",

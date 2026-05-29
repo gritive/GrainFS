@@ -1,15 +1,18 @@
 // Package pdp implements an optional External Policy Decision Point adapter.
 // It chains an external authorizer AFTER GrainFS IAM (deny-override): a request
 // is allowed only if BOTH GrainFS and the PDP allow. Disabled by default; when
-// enabled it talks HTTP/JSON over a local Unix socket. See
+// enabled it talks HTTP/JSON to a remote http:// or https:// endpoint. See
 // docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md
 // "External PDP Adapter — Slice 5 Detailed Design".
 package pdp
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"net/netip"
+	"net/url"
 	"time"
 )
 
@@ -47,10 +50,25 @@ type CacheConfig struct {
 // Config is the parsed, validated iam.pdp configuration.
 type Config struct {
 	Enabled       bool
-	SocketPath    string // absolute path from a unix:// endpoint; "" when disabled
+	Scheme        string // "http" or "https"; "" when disabled
+	RemoteURL     string // scheme://host[:port], no path/query/userinfo; "" when disabled
+	Host          string // host[:port] from the endpoint
 	Timeout       time.Duration
 	FailurePolicy FailurePolicy
+	TLS           TLSConfig
+	SSRF          SSRFConfig
 	Cache         CacheConfig
+}
+
+// TLSConfig is the parsed, validated iam.pdp.tls configuration.
+type TLSConfig struct {
+	CAPEM      string
+	MinVersion uint16
+}
+
+// SSRFConfig is the parsed iam.pdp.ssrf configuration.
+type SSRFConfig struct {
+	AllowPrivate bool
 }
 
 type rawConfig struct {
@@ -58,7 +76,18 @@ type rawConfig struct {
 	Endpoint      string    `json:"endpoint"`
 	Timeout       string    `json:"timeout"`
 	FailurePolicy string    `json:"failure_policy"`
+	TLS           *rawTLS   `json:"tls"`
+	SSRF          *rawSSRF  `json:"ssrf"`
 	Cache         *rawCache `json:"cache"`
+}
+
+type rawTLS struct {
+	CAPEM      string `json:"ca_pem"`
+	MinVersion string `json:"min_version"`
+}
+
+type rawSSRF struct {
+	AllowPrivate bool `json:"allow_private"`
 }
 
 type rawCache struct {
@@ -105,18 +134,60 @@ func ParseConfig(raw []byte) (Config, error) {
 		}
 		c.Cache = cache
 	}
+
+	// TLS+SSRF are parsed even when disabled so a staged config is validated
+	// before an operator flips enabled.
+	if rc.SSRF != nil {
+		c.SSRF.AllowPrivate = rc.SSRF.AllowPrivate
+	}
+	c.TLS.MinVersion = tls.VersionTLS12
+	if rc.TLS != nil {
+		if rc.TLS.MinVersion != "" {
+			switch rc.TLS.MinVersion {
+			case "1.2":
+				c.TLS.MinVersion = tls.VersionTLS12
+			case "1.3":
+				c.TLS.MinVersion = tls.VersionTLS13
+			default:
+				return Config{}, fmt.Errorf("iam.pdp: tls.min_version must be \"1.2\" or \"1.3\", got %q", rc.TLS.MinVersion)
+			}
+		}
+		if rc.TLS.CAPEM != "" {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM([]byte(rc.TLS.CAPEM)) {
+				return Config{}, fmt.Errorf("iam.pdp: tls.ca_pem did not parse to any certificate")
+			}
+			c.TLS.CAPEM = rc.TLS.CAPEM
+		}
+	}
+
 	if !c.Enabled {
-		// Disabled: timeout/failure_policy format validated above (cheap); endpoint
-		// is NOT validated so a config can be staged and enabled later.
+		// Disabled: timeout/failure_policy/tls format validated above (cheap);
+		// endpoint is NOT validated so a config can be staged and enabled later.
 		return c, nil
 	}
-	const unixPrefix = "unix://"
-	if !strings.HasPrefix(rc.Endpoint, unixPrefix) {
-		return Config{}, fmt.Errorf("iam.pdp: endpoint must be a unix:// socket in this release, got %q", rc.Endpoint)
+
+	u, err := url.Parse(rc.Endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return Config{}, fmt.Errorf("iam.pdp: endpoint must be http:// or https://, got %q", rc.Endpoint)
 	}
-	c.SocketPath = strings.TrimPrefix(rc.Endpoint, unixPrefix)
-	if !strings.HasPrefix(c.SocketPath, "/") {
-		return Config{}, fmt.Errorf("iam.pdp: unix:// endpoint needs an absolute socket path, got %q", rc.Endpoint)
+	if u.Host == "" || u.Hostname() == "" {
+		return Config{}, fmt.Errorf("iam.pdp: endpoint missing host: %q", rc.Endpoint)
+	}
+	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return Config{}, fmt.Errorf("iam.pdp: endpoint must be scheme://host[:port] with no path/query/fragment/userinfo, got %q", rc.Endpoint)
+	}
+	c.Scheme = u.Scheme
+	c.RemoteURL = rc.Endpoint
+	c.Host = u.Host
+
+	host := u.Hostname()
+	if addr, perr := netip.ParseAddr(host); perr == nil {
+		if verr := validateLiteralAddr(c.Scheme, addr, c.SSRF.AllowPrivate); verr != nil {
+			return Config{}, verr
+		}
+	} else if !isPlausibleDNSName(host) {
+		return Config{}, fmt.Errorf("iam.pdp: endpoint host %q is not a valid host (canonical IP or DNS name)", host)
 	}
 	return c, nil
 }
