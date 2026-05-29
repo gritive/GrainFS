@@ -9,6 +9,11 @@ import "github.com/gritive/GrainFS/internal/encrypt"
 type ShardEncryptor interface {
 	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
+	// OpenTo is Open that appends the plaintext into dst, reusing dst's
+	// capacity when it suffices. The output is byte-equivalent to Open.
+	// dst and ct MUST NOT overlap. Signature matches storage.DataEncryptor.OpenTo
+	// so the production adapters satisfy this view structurally.
+	OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 }
 
 // chunkFields returns baseFields with the per-chunk ordinal appended. The

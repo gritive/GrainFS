@@ -451,8 +451,12 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc ShardEncryptor, baseFields []e
 
 	done := 0
 	pos := offset
+	// plainScratch/cipherScratch are reused across the per-chunk loop so only a
+	// single plaintext + ciphertext buffer is allocated per call (not per chunk).
+	var plainScratch, cipherScratch []byte
 	for done < len(dst) {
-		n, err := readEncryptedShardChunkAt(r, enc, baseFields, gen, overhead, chunkSize, pos, dst[done:])
+		var n int
+		n, plainScratch, cipherScratch, err = readEncryptedShardChunkAt(r, enc, baseFields, gen, overhead, chunkSize, pos, dst[done:], plainScratch, cipherScratch)
 		done += n
 		pos += int64(n)
 		if err != nil {
@@ -470,11 +474,17 @@ func ReadEncryptedShardRangeAt(r io.ReaderAt, enc ShardEncryptor, baseFields []e
 	return done, nil
 }
 
-func readEncryptedShardChunkAt(r io.ReaderAt, enc ShardEncryptor, baseFields []encrypt.AADField, gen uint32, overhead uint16, chunkSize uint32, pos int64, dst []byte) (int, error) {
+// readEncryptedShardChunkAt decrypts the chunk covering pos and copies the
+// requested bytes into dst. plainScratch and cipherScratch are caller-owned
+// reusable buffers threaded through the per-chunk loop in
+// ReadEncryptedShardRangeAt; they are returned (possibly grown) so the next
+// iteration reuses them. Errors return the (possibly grown) scratches too so
+// the loop never drops a freshly-allocated backing.
+func readEncryptedShardChunkAt(r io.ReaderAt, enc ShardEncryptor, baseFields []encrypt.AADField, gen uint32, overhead uint16, chunkSize uint32, pos int64, dst, plainScratch, cipherScratch []byte) (n int, plainOut, cipherOut []byte, err error) {
 	chunkSize64 := int64(chunkSize)
 	chunkIdx64 := pos / chunkSize64
 	if chunkIdx64 > int64(^uint32(0)) {
-		return 0, fmt.Errorf("encrypted shard chunk index too large: %d", chunkIdx64)
+		return 0, plainScratch, cipherScratch, fmt.Errorf("encrypted shard chunk index too large: %d", chunkIdx64)
 	}
 	chunkIdx := uint32(chunkIdx64)
 	inChunk := int(pos % chunkSize64)
@@ -482,66 +492,83 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc ShardEncryptor, baseFields []e
 	chunkFileOffset := int64(encryptedHeaderLen) + chunkIdx64*(int64(encryptedChunkHeaderLen)+fullCipherLen)
 
 	var chunkHeader [encryptedChunkHeaderLen]byte
-	if n, err := r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
+	if hn, err := r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
 		// ReadAt returns io.EOF for both "offset fully past EOF, 0 bytes read"
 		// (clean end-of-stream: no chunk here, normal for a healthy shard read
 		// past its last chunk) and "partial header at EOF" (truncation). Unlike
 		// io.ReadFull, ReadAt does not split these into EOF vs ErrUnexpectedEOF,
-		// so we disambiguate by bytes read (n).
-		if n == 0 && errors.Is(err, io.EOF) {
+		// so we disambiguate by bytes read (hn).
+		if hn == 0 && errors.Is(err, io.EOF) {
 			// Clean end-of-stream: NOT corruption. The caller
 			// (ReadEncryptedShardRangeAt) remaps a partial (done>0) read to
 			// io.ErrUnexpectedEOF; an exact-boundary full read sees no error.
-			return 0, io.EOF
+			return 0, plainScratch, cipherScratch, io.EOF
 		}
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			// n>0: a partial chunk header at EOF means the file is truncated
+			// hn>0: a partial chunk header at EOF means the file is truncated
 			// mid-structure → corruption.
-			return 0, fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
+			return 0, plainScratch, cipherScratch, fmt.Errorf("read encrypted shard chunk header: %w: %w", ErrShardCorrupt, err)
 		}
-		return 0, fmt.Errorf("read encrypted shard chunk header: %w", err)
+		return 0, plainScratch, cipherScratch, fmt.Errorf("read encrypted shard chunk header: %w", err)
 	}
 	plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
 	cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
 	if plainLen > chunkSize {
-		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, chunkIdx, plainLen, chunkSize)
+		return 0, plainScratch, cipherScratch, fmt.Errorf("%w: encrypted shard chunk %d plaintext length %d exceeds chunk size %d", ErrShardCorrupt, chunkIdx, plainLen, chunkSize)
 	}
 	if cipherLen != plainLen+uint32(overhead) {
-		return 0, fmt.Errorf("%w: encrypted shard chunk %d ciphertext length %d != %d+%d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen, overhead)
+		return 0, plainScratch, cipherScratch, fmt.Errorf("%w: encrypted shard chunk %d ciphertext length %d != %d+%d", ErrShardCorrupt, chunkIdx, cipherLen, plainLen, overhead)
 	}
 	if inChunk >= int(plainLen) {
 		// Clean end-of-stream at a chunk boundary: NOT corruption. The caller
 		// (ReadEncryptedShardRangeAt) maps a partial read to io.ErrUnexpectedEOF.
-		return 0, io.EOF
+		return 0, plainScratch, cipherScratch, io.EOF
 	}
 
-	ciphertext := make([]byte, cipherLen)
+	// Pre-size the reusable plaintext scratch to chunkSize once. plainLen is
+	// validated ≤ chunkSize above, so OpenTo(plainScratch[:0], …) never
+	// reallocates — making the full-cap error-path wipe below provably complete.
+	if cap(plainScratch) < int(chunkSize) {
+		plainScratch = make([]byte, 0, chunkSize)
+	}
+	if cap(cipherScratch) < int(cipherLen) {
+		cipherScratch = make([]byte, cipherLen)
+	}
+	// Slice to exactly cipherLen so ReadAt fills the whole slice and Open never
+	// sees stale tail bytes from a larger reused buffer.
+	ciphertext := cipherScratch[:cipherLen]
 	if _, err := r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
 		// The header declared cipherLen bytes; a short ReadAt (io.EOF) means the
 		// payload is truncated → corruption. Other errors are transient.
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return 0, fmt.Errorf("read encrypted shard chunk: %w: %w", ErrShardCorrupt, err)
+			return 0, plainScratch, cipherScratch, fmt.Errorf("read encrypted shard chunk: %w: %w", ErrShardCorrupt, err)
 		}
-		return 0, fmt.Errorf("read encrypted shard chunk: %w", err)
+		return 0, plainScratch, cipherScratch, fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
 	// AEAD auth failure = corruption; ErrDEKGenUnknown = transient — classifyOpenErr.
-	plaintext, err := enc.Open(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), gen, ciphertext)
+	plaintext, err := enc.OpenTo(plainScratch[:0], encrypt.DomainShard, chunkFields(baseFields, chunkIdx), gen, ciphertext)
 	if err != nil {
-		return 0, classifyOpenErr(chunkIdx, err)
+		// cipher.AEAD.Open may overwrite dst up to capacity even on auth
+		// failure, and OpenTo returns nil on error — wipe the full cap of the
+		// scratch we passed (defense in depth: no unauthenticated residue).
+		clear(plainScratch[:cap(plainScratch)])
+		return 0, plainScratch, cipherScratch, classifyOpenErr(chunkIdx, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
-		return 0, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
+		clear(plaintext[:cap(plaintext)])
+		return 0, plaintext, cipherScratch, fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
 	}
 
 	end := len(plaintext)
 	if max := inChunk + len(dst); max < end {
 		end = max
 	}
-	n := copy(dst, plaintext[inChunk:end])
-	// Zero the decrypted plaintext (incl. the skipped prefix/suffix) now that the
-	// requested bytes are in dst, so it does not linger in the fresh Open slice.
-	clear(plaintext)
-	return n, nil
+	n = copy(dst, plaintext[inChunk:end])
+	// Zero the decrypted plaintext (full cap, incl. the skipped prefix/suffix)
+	// now that the requested bytes are in dst, so it does not linger in the
+	// reused scratch before the next iteration overwrites it.
+	clear(plaintext[:cap(plaintext)])
+	return n, plaintext, cipherScratch, nil
 }
 
 type encryptedShardReader struct {
@@ -554,6 +581,7 @@ type encryptedShardReader struct {
 	chunkIdx   uint32
 	plain      []byte // current read window into plainFull
 	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
+	cipherBuf  []byte // reader-owned ciphertext read buffer, reused across chunks
 	done       bool
 	closed     bool
 }
@@ -580,13 +608,14 @@ func (r *encryptedShardReader) Close() error {
 		return nil
 	}
 	r.closed = true
-	// The seam's Open returns a fresh plaintext slice; zero the full backing
-	// slice (not just the unread window) so decrypted bytes do not linger.
-	if len(r.plainFull) > 0 {
-		clear(r.plainFull)
-	}
+	// plainFull is the reused decryption buffer; zero its FULL capacity (not
+	// just len) so a partial last chunk's untouched tail — which still holds the
+	// prior full chunk's plaintext — does not linger.
+	clear(r.plainFull[:cap(r.plainFull)])
+	clear(r.cipherBuf[:cap(r.cipherBuf)])
 	r.plain = nil
 	r.plainFull = nil
+	r.cipherBuf = nil
 	return nil
 }
 
@@ -613,7 +642,18 @@ func (r *encryptedShardReader) loadChunk() error {
 	if cipherLen != plainLen+uint32(r.overhead) {
 		return fmt.Errorf("%w: encrypted shard chunk %d ciphertext length %d != %d+%d", ErrShardCorrupt, r.chunkIdx, cipherLen, plainLen, r.overhead)
 	}
-	ciphertext := make([]byte, cipherLen)
+	// Pre-size the reusable plaintext buffer to chunkSize once. plainLen is
+	// validated ≤ chunkSize above, so OpenTo(plainFull[:0], …) never reallocates
+	// mid-stream — making the full-cap error-path wipe below provably complete.
+	if cap(r.plainFull) < int(r.chunkSize) {
+		r.plainFull = make([]byte, 0, r.chunkSize)
+	}
+	if cap(r.cipherBuf) < int(cipherLen) {
+		r.cipherBuf = make([]byte, cipherLen)
+	}
+	// Slice to exactly cipherLen so io.ReadFull fills the whole slice and Open
+	// never sees stale tail bytes from a larger reused buffer.
+	ciphertext := r.cipherBuf[:cipherLen]
 	if _, err := io.ReadFull(r.r, ciphertext); err != nil {
 		// The header declared cipherLen bytes; a short read means the payload
 		// is truncated → corruption. Other errors are transient I/O faults.
@@ -622,17 +662,21 @@ func (r *encryptedShardReader) loadChunk() error {
 		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
+	// Zero the previous chunk's decrypted plaintext (full cap, incl. any partial
+	// tail) before OpenTo reuses the backing for this chunk.
+	clear(r.plainFull[:cap(r.plainFull)])
 	// AEAD auth failure = corruption; ErrDEKGenUnknown = transient — classifyOpenErr.
-	plaintext, err := r.enc.Open(encrypt.DomainShard, chunkFields(r.baseFields, r.chunkIdx), r.gen, ciphertext)
+	plaintext, err := r.enc.OpenTo(r.plainFull[:0], encrypt.DomainShard, chunkFields(r.baseFields, r.chunkIdx), r.gen, ciphertext)
 	if err != nil {
+		// cipher.AEAD.Open may overwrite dst up to capacity even on auth
+		// failure, and OpenTo returns nil on error — so wipe the full cap of
+		// the buffer we passed (defense in depth: no unauthenticated residue).
+		clear(r.plainFull[:cap(r.plainFull)])
 		return classifyOpenErr(r.chunkIdx, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
+		clear(plaintext[:cap(plaintext)])
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, r.chunkIdx, len(plaintext), plainLen)
-	}
-	// Zero the previous chunk's decrypted plaintext before dropping it.
-	if len(r.plainFull) > 0 {
-		clear(r.plainFull)
 	}
 	r.plainFull = plaintext
 	r.plain = plaintext
@@ -654,6 +698,7 @@ type encryptedShardRangeReader struct {
 	remaining  int64
 	plain      []byte // [inChunk:end] read window into plainFull
 	plainFull  []byte // full decrypted plaintext of the current chunk (zeroed on overwrite/Close)
+	cipherBuf  []byte // reader-owned ciphertext read buffer, reused across chunks
 	closed     bool
 }
 
@@ -684,13 +729,14 @@ func (r *encryptedShardRangeReader) Close() error {
 		return nil
 	}
 	r.closed = true
-	// r.plain is only the [inChunk:end] view; zero the full backing slice so the
-	// skipped prefix and trailing suffix of the decrypted chunk are cleared too.
-	if len(r.plainFull) > 0 {
-		clear(r.plainFull)
-	}
+	// r.plain is only the [inChunk:end] view; zero the FULL capacity of the
+	// reused backing so the skipped prefix, trailing suffix, and any partial-
+	// chunk tail of decrypted plaintext are cleared too.
+	clear(r.plainFull[:cap(r.plainFull)])
+	clear(r.cipherBuf[:cap(r.cipherBuf)])
 	r.plain = nil
 	r.plainFull = nil
+	r.cipherBuf = nil
 	return nil
 }
 
@@ -733,7 +779,18 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 		return io.EOF
 	}
 
-	ciphertext := make([]byte, cipherLen)
+	// Pre-size the reusable plaintext buffer to chunkSize once. plainLen is
+	// validated ≤ chunkSize above, so OpenTo(plainFull[:0], …) never reallocates
+	// mid-stream — making the full-cap error-path wipe below provably complete.
+	if cap(r.plainFull) < int(r.chunkSize) {
+		r.plainFull = make([]byte, 0, r.chunkSize)
+	}
+	if cap(r.cipherBuf) < int(cipherLen) {
+		r.cipherBuf = make([]byte, cipherLen)
+	}
+	// Slice to exactly cipherLen so ReadAt fills the whole slice and Open never
+	// sees stale tail bytes from a larger reused buffer.
+	ciphertext := r.cipherBuf[:cipherLen]
 	if _, err := r.r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
 		// The header declared cipherLen bytes; a short ReadAt (io.EOF) means the
 		// payload is truncated → corruption. Other errors are transient.
@@ -742,22 +799,26 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 		}
 		return fmt.Errorf("read encrypted shard chunk: %w", err)
 	}
+	// Zero the previous chunk's decrypted plaintext (full cap, incl. the skipped
+	// prefix/suffix) before OpenTo reuses the backing for this chunk.
+	clear(r.plainFull[:cap(r.plainFull)])
 	// AEAD auth failure = corruption; ErrDEKGenUnknown = transient — classifyOpenErr.
-	plaintext, err := r.enc.Open(encrypt.DomainShard, chunkFields(r.baseFields, chunkIdx), r.gen, ciphertext)
+	plaintext, err := r.enc.OpenTo(r.plainFull[:0], encrypt.DomainShard, chunkFields(r.baseFields, chunkIdx), r.gen, ciphertext)
 	if err != nil {
+		// cipher.AEAD.Open may overwrite dst up to capacity even on auth
+		// failure, and OpenTo returns nil on error — wipe the full cap of the
+		// buffer we passed (defense in depth: no unauthenticated residue).
+		clear(r.plainFull[:cap(r.plainFull)])
 		return classifyOpenErr(chunkIdx, err)
 	}
 	if uint32(len(plaintext)) != plainLen {
+		clear(plaintext[:cap(plaintext)])
 		return fmt.Errorf("%w: encrypted shard chunk %d plaintext length mismatch: got %d, want %d", ErrShardCorrupt, chunkIdx, len(plaintext), plainLen)
 	}
 
 	end := len(plaintext)
 	if max := inChunk + int(r.remaining); max < end {
 		end = max
-	}
-	// Zero the previous chunk's decrypted plaintext before dropping it.
-	if len(r.plainFull) > 0 {
-		clear(r.plainFull)
 	}
 	r.plainFull = plaintext
 	r.plain = plaintext[inChunk:end]

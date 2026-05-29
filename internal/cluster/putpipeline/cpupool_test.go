@@ -180,6 +180,11 @@ func (f *fakeGenDriftEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.
 	return f.enc.OpenValueAADTo(nil, aad, ct)
 }
 
+func (f *fakeGenDriftEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	aad := encrypt.BuildAAD(domain, make([]byte, 16), fields...)
+	return f.enc.OpenValueAADTo(dst, aad, ct)
+}
+
 // TestCPUPool_SealError_PropagatesToCommitCh drives a PUT through the pool with
 // a gen-drifting encryptor (fails on the 2nd chunk via gen-pinning) and wires
 // the per-shard channels into real DriveActors so the error-chunk flows through
