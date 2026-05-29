@@ -174,7 +174,20 @@ func (f *fakeGenDriftEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.
 	return ct, 0, nil
 }
 
+func (f *fakeGenDriftEncryptor) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	aad := encrypt.BuildAAD(domain, make([]byte, 16), fields...)
+	ct, err := f.enc.SealValueAADTo(dst, aad, plain)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ct, 0, nil
+}
+
 func (f *fakeGenDriftEncryptor) SealAtGen(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte, gen uint32) ([]byte, error) {
+	return nil, fmt.Errorf("fakeGenDriftEncryptor: injected seal error at gen %d (chunk 1+)", gen)
+}
+
+func (f *fakeGenDriftEncryptor) SealAtGenTo(_ []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ []byte, gen uint32) ([]byte, error) {
 	return nil, fmt.Errorf("fakeGenDriftEncryptor: injected seal error at gen %d (chunk 1+)", gen)
 }
 

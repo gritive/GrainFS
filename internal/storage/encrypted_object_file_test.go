@@ -403,6 +403,11 @@ func (f *fakeDataEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt
 	return f.enc.SealValueAADTo(nil, f.aad(domain, fields), plain)
 }
 
+func (f *fakeDataEncryptor) SealAtGenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	f.sealAtGenGens = append(f.sealAtGenGens, gen)
+	return f.enc.SealValueAADTo(dst, f.aad(domain, fields), plain)
+}
+
 func (f *fakeDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
 	return f.enc.OpenValueAADTo(nil, f.aad(domain, fields), ct)
 }
@@ -564,6 +569,10 @@ func (r *recordingObjEncryptor) SealTo(dst []byte, domain encrypt.AADDomain, fie
 
 func (r *recordingObjEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
 	return r.inner.SealAtGen(domain, fields, plain, gen)
+}
+
+func (r *recordingObjEncryptor) SealAtGenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	return r.inner.SealAtGenTo(dst, domain, fields, plain, gen)
 }
 
 func (r *recordingObjEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {

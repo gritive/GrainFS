@@ -252,6 +252,8 @@ type EncryptedShardChunkedWriter struct {
 	chunkIdx      uint32
 	plainBuf      []byte // pending plaintext, len ≤ chunkSize
 	plainPtr      *[]byte
+	sealBuf       []byte  // reusable ciphertext output for SealTo, recycled across chunks
+	sealPtr       *[]byte // pooled backing for sealBuf (encryptedCipherChunkPool)
 	closed        bool
 }
 
@@ -279,6 +281,11 @@ func NewEncryptedShardChunkedWriter(w io.Writer, enc ShardEncryptor, baseFields 
 		plain = make([]byte, 0, chunkSize)
 	}
 	out.plainBuf = plain[:0]
+	// Reusable ciphertext buffer for SealTo, recycled across chunks so each
+	// emitChunk no longer allocates the sealed output. Sized chunkSize+overhead
+	// by the pool, so SealTo never grows it.
+	out.sealPtr = encryptedCipherChunkPool.Get().(*[]byte)
+	out.sealBuf = (*out.sealPtr)[:0]
 	return out, nil
 }
 
@@ -339,17 +346,21 @@ func (w *EncryptedShardChunkedWriter) emitChunk() error {
 	var err error
 	if !w.headerWritten {
 		var gen uint32
-		sealed, gen, err = w.enc.Seal(encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf)
+		sealed, gen, err = w.enc.SealTo(w.sealBuf[:0], encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf)
 		if err != nil {
 			return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
 		}
 		w.pinnedGen = gen
 	} else {
-		sealed, err = w.enc.SealAtGen(encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf, w.pinnedGen)
+		sealed, err = w.enc.SealAtGenTo(w.sealBuf[:0], encrypt.DomainShard, chunkFields(w.baseFields, w.chunkIdx), w.plainBuf, w.pinnedGen)
 		if err != nil {
 			return fmt.Errorf("encrypt shard chunk %d: %w", w.chunkIdx, err)
 		}
 	}
+	// Retain the (possibly grown) backing so the next chunk reuses it. The
+	// bytes are consumed synchronously by the w.w.Write below (a bytes.Buffer
+	// copies), so overwriting on the next emitChunk is safe.
+	w.sealBuf = sealed
 	over := len(sealed) - len(w.plainBuf)
 	if over < 0 || over > int(^uint16(0)) {
 		return fmt.Errorf("encrypt shard chunk %d: implausible overhead %d", w.chunkIdx, over)
@@ -387,6 +398,13 @@ func (w *EncryptedShardChunkedWriter) releasePools() {
 		encryptedPlainChunkPool.Put(w.plainPtr)
 		w.plainPtr = nil
 		w.plainBuf = nil
+	}
+	if w.sealPtr != nil {
+		// Ciphertext, not plaintext — no zeroing needed for confidentiality.
+		*w.sealPtr = w.sealBuf[:cap(w.sealBuf)]
+		encryptedCipherChunkPool.Put(w.sealPtr)
+		w.sealPtr = nil
+		w.sealBuf = nil
 	}
 }
 
