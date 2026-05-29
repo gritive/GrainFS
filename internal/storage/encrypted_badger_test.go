@@ -9,196 +9,87 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
-func TestEncryptedBadgerValueRoundTripAndNoPlaintext(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
+// LocalBackend badger meta is plaintext after the R3 static meta-encryptor
+// retirement (the data-at-rest seam is b.segEnc, protecting object/segment files,
+// not badger meta). The badger-value helpers now only pass meta through and keep
+// the pre-XAES loud-fail boundary. The previous round-trip/wrong-domain/wrong-key
+// encryption tests were removed with the encryptor seam (they tested deleted code).
 
-	enc := testEncryptor(t)
+func openBadgerDB(t *testing.T) *badger.DB {
+	t.Helper()
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func TestBadgerValueRoundTripPlaintext(t *testing.T) {
+	db := openBadgerDB(t)
 	key := []byte("obj:bkt/key")
-	plain := []byte(`{"key":"secret-object"}`)
+	plain := []byte(`{"key":"object"}`)
 
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, enc, "badger:meta:object", key, plain)
+		return setBadgerValue(txn, key, plain)
 	}))
 
 	var raw []byte
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(key)
-		if err != nil {
-			return err
-		}
+		require.NoError(t, err)
 		return item.Value(func(val []byte) error {
 			raw = append([]byte(nil), val...)
 			return nil
 		})
 	}))
-	require.NotContains(t, string(raw), "secret-object")
+	require.Equal(t, plain, raw, "badger meta is stored as plaintext")
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		got, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		got, err := getBadgerValue(txn, key)
 		require.NoError(t, err)
 		require.Equal(t, plain, got)
 		return nil
 	}))
 }
 
-func TestEncryptedBadgerValueRejectsWrongDomain(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	enc := testEncryptor(t)
-	key := []byte("mpu:id")
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, enc, "badger:multipart", key, []byte("secret"))
-	}))
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		_, err := getBadgerValue(txn, enc, "badger:object", key)
-		require.Error(t, err)
-		return nil
-	}))
-}
-
-func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	enc := testEncryptor(t)
-	keyA := []byte("obj:bkt/a")
-	keyB := []byte("obj:bkt/b")
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		if err := setBadgerValue(txn, enc, "badger:meta:object", keyA, []byte("secret-a")); err != nil {
-			return err
-		}
-		return setBadgerValue(txn, enc, "badger:meta:object", keyB, []byte("secret-b"))
-	}))
-
-	var rawA []byte
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyA)
-		require.NoError(t, err)
-		return item.Value(func(val []byte) error {
-			rawA = append([]byte(nil), val...)
-			return nil
-		})
-	}))
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(keyB, rawA)
-	}))
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		_, err := getBadgerValue(txn, enc, "badger:meta:object", keyB)
-		require.Error(t, err)
-		return nil
-	}))
-}
-
-func TestEncryptedBadgerValueRejectsOldFormatEncrypted(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	enc := testEncryptor(t)
+// TestBadgerValueRejectsPreXAESEncryptedFormat: a value carrying the exact
+// pre-XAES envelope (magic 0xAE 0xE2 + version 0x01) must loud-fail rather than
+// be served as plaintext.
+func TestBadgerValueRejectsPreXAESEncryptedFormat(t *testing.T) {
+	db := openBadgerDB(t)
 	key := []byte("obj:bkt/old-format")
-	// Simulate an old-format encrypted value: 0xAE 0xE2 (value magic) + version 0x01 (pre-XAES)
 	oldFormatVal := []byte{0xAE, 0xE2, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
 		return txn.Set(key, oldFormatVal)
 	}))
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		_, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		_, err := getBadgerValue(txn, key)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
 		return nil
 	}))
 }
 
-// TestEncryptedBadgerValueReadsPlaintextWithValueMagicButNonLegacyVersion
-// verifies the precise-match decision: a value starting with the value magic
-// (0xAE 0xE2) but NOT the exact legacy version byte 0x01 must pass through as
-// plaintext rather than loud-failing.
-func TestEncryptedBadgerValueReadsPlaintextWithValueMagicButNonLegacyVersion(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	enc := testEncryptor(t)
+// TestBadgerValueReadsPlaintextWithValueMagicNonLegacyVersion: a value with the
+// value magic but a non-legacy version byte (not 0x01) passes through unchanged.
+func TestBadgerValueReadsPlaintextWithValueMagicNonLegacyVersion(t *testing.T) {
+	db := openBadgerDB(t)
 	key := []byte("obj:bkt/non-legacy-magic")
-	// Value magic prefix but version 0x05 (neither legacy 0x01 nor current 0x02).
 	val := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
 		return txn.Set(key, val)
 	}))
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		got, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		got, err := getBadgerValue(txn, key)
 		require.NoError(t, err)
 		require.Equal(t, val, got)
 		return nil
 	}))
 }
 
-// TestEncryptedBadgerValueRejectsOldFormatEncryptedWithoutEncryptor verifies the
-// enc == nil branch loud-fails on an exact legacy value rather than returning it
-// as raw plaintext.
-func TestEncryptedBadgerValueRejectsOldFormatEncryptedWithoutEncryptor(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	key := []byte("obj:bkt/old-format-noenc")
-	oldFormatVal := []byte{0xAE, 0xE2, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, oldFormatVal)
-	}))
-
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		_, err := getBadgerValue(txn, nil, "badger:meta:object", key)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
-		return nil
-	}))
-}
-
-// TestEncryptedBadgerValueReadsPlaintextWithoutEncryptor verifies the enc == nil
-// branch still passes genuine plaintext (incl. value-magic with a non-legacy
-// version) through unchanged.
-func TestEncryptedBadgerValueReadsPlaintextWithoutEncryptor(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	key := []byte("obj:bkt/plain-noenc")
-	// Value magic prefix but version 0x05 (neither legacy 0x01 nor current 0x02).
-	val := []byte{0xAE, 0xE2, 0x05, 'd', 'a', 't', 'a'}
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, val)
-	}))
-
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		got, err := getBadgerValue(txn, nil, "badger:meta:object", key)
-		require.NoError(t, err)
-		require.Equal(t, val, got)
-		return nil
-	}))
-}
-
-func TestEncryptedBadgerValueReadsLegacyPlaintext(t *testing.T) {
-	dir := t.TempDir()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	defer db.Close()
-
-	enc := testEncryptor(t)
+func TestBadgerValueReadsGenuinePlaintext(t *testing.T) {
+	db := openBadgerDB(t)
 	key := []byte("obj:bkt/legacy")
 	plain := []byte(`{"key":"legacy"}`)
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
@@ -206,7 +97,7 @@ func TestEncryptedBadgerValueReadsLegacyPlaintext(t *testing.T) {
 	}))
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		got, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		got, err := getBadgerValue(txn, key)
 		require.NoError(t, err)
 		require.Equal(t, plain, got)
 		return nil

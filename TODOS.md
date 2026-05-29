@@ -31,15 +31,13 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      `commit.go:120`), whereas the spooled path flushes the data WAL synchronously before the raft
      metadata propose. Verify PutShard does not let metadata commit before shard durability before
      enabling. Its own slice.
-   - [ ] **R3 residual: `LocalBackend.encryptor` field + `encrypted_badger.go`.** The static
-     `EncryptorAdapter` type + `NewEncryptorAdapter` + dead static setters (FSM/MetaFSM
-     `SetEncryptor`, `putpipeline` `cfg.Encryptor`, `NewManagerWithEncryptor` static `enc`) are
-     retired. What remains is the always-nil `LocalBackend.encryptor` field, kept solely as the
-     badger-meta sealer arg for `encrypted_badger.go` (now plaintext on every surviving path).
-     Removing it means inlining `encrypted_badger.go` AND re-pointing the encryption-gating
-     predicates `PreferWriteAt`/`local.go:620`/`local.go:1457` from `b.encryptor` to `b.segEnc`
-     (a behavior change — a DEK `LocalBackend` currently advertises WriteAt for encrypted internal
-     buckets; test-fixture-only, LocalBackend has no prod caller per ADR-0015). Its own slice.
+   - [ ] **[P3] verify the prod copy path does not share the raw-segment-copy AAD bug class.**
+     The R3-residual slice fixed a latent bug in the test-fixture `LocalBackend.CopyObject`: it
+     byte-copied encrypted segment files to the dst path, but segment AAD binds `(bucket,key,blobID)`,
+     so the dst was un-decryptable (now re-pointed to `b.segEnc` → re-encode path). Prod copy routes
+     `s.ops.CopyObject` and `DistributedBackend` has NO `CopyObject`/`copyFile` (grep clean), so prod
+     appears to re-encode and is unaffected — confirm the ops-layer copy for an EC/segmented object on
+     an encrypted backend reads-then-writes (re-encodes) rather than raw-copying segment files.
    - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
      DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
      (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path

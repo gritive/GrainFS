@@ -19,41 +19,24 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-const (
-	badgerDomainBucket    = "badger:local:bucket"
-	badgerDomainObject    = "badger:local:object"
-	badgerDomainMultipart = "badger:local:multipart"
-	badgerDomainPolicy    = "badger:local:policy"
-)
+// LocalBackend badger meta is plaintext: the static value-sealing meta encryptor
+// was retired in R3 (the data-at-rest seam is b.segEnc, which protects object and
+// segment files, not badger meta). These helpers keep the pre-XAES loud-fail
+// boundary — a value carrying the old encrypted-value envelope must error rather
+// than be served as plaintext — and otherwise pass meta through verbatim.
 
-func setBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key, plain []byte) error {
-	if enc == nil {
-		return txn.Set(key, plain)
-	}
-	sealed, err := enc.SealValueAADTo(nil, badgerValueAAD(domain, key), plain)
-	if err != nil {
-		return fmt.Errorf("encrypt badger value %s: %w", domain, err)
-	}
-	return txn.Set(key, sealed)
+func setBadgerValue(txn *badger.Txn, key, plain []byte) error {
+	return txn.Set(key, plain)
 }
 
-func openBadgerValue(enc *encrypt.Encryptor, domain string, key, val []byte) ([]byte, error) {
-	if enc == nil {
-		if encrypt.IsLegacyEncryptedValue(val) {
-			return nil, fmt.Errorf("value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
-		}
-		return append([]byte(nil), val...), nil
+func openBadgerValue(val []byte) ([]byte, error) {
+	if encrypt.IsLegacyEncryptedValue(val) {
+		return nil, fmt.Errorf("value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 	}
-	if !encrypt.IsEncryptedValue(val) {
-		if encrypt.IsLegacyEncryptedValue(val) {
-			return nil, fmt.Errorf("value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
-		}
-		return append([]byte(nil), val...), nil
-	}
-	return enc.OpenValueAAD(badgerValueAAD(domain, key), val)
+	return append([]byte(nil), val...), nil
 }
 
-func getBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key []byte) ([]byte, error) {
+func getBadgerValue(txn *badger.Txn, key []byte) ([]byte, error) {
 	item, err := txn.Get(key)
 	if err != nil {
 		return nil, err
@@ -61,16 +44,8 @@ func getBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key 
 	var out []byte
 	err = item.Value(func(val []byte) error {
 		var openErr error
-		out, openErr = openBadgerValue(enc, domain, key, val)
+		out, openErr = openBadgerValue(val)
 		return openErr
 	})
 	return out, err
-}
-
-func badgerValueAAD(domain string, key []byte) []byte {
-	aad := make([]byte, 0, len(domain)+1+len(key))
-	aad = append(aad, domain...)
-	aad = append(aad, 0)
-	aad = append(aad, key...)
-	return aad
 }
