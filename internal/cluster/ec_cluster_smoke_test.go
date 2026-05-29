@@ -56,8 +56,8 @@ func TestECCluster_Smoke_3Node(t *testing.T) {
 	require.NoError(t, backend.CreateBucket(context.Background(), "ec-smoke"))
 	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 
-	enc := testEncryptor(t)
-	svc := NewShardService(backend.root, nil, WithEncryptor(enc), withTestWALEnc(t, enc))
+	keeper, clusterID := testDEKKeeper(t)
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	backend.SetShardService(svc, []string{"self", "self", "self"})
 
 	content := bytes.Repeat([]byte("ec-smoke-3node-"), 4096)

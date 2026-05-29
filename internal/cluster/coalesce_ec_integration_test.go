@@ -10,7 +10,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,8 +33,8 @@ var _ = Describe("Coalesce EC integration", func() {
 	configureEC := func(opts ...ShardServiceOption) {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
-		enc := testEncryptor(GinkgoT())
-		opts = append(opts, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		opts = append(opts, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 		svc := NewShardService(b.root, nil, opts...)
 		b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr})
 	}
@@ -105,9 +104,7 @@ var _ = Describe("Coalesce EC integration", func() {
 	})
 
 	It("round-trips B3 coalesced EC data through encrypted shard storage", func() {
-		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x55}, 32))
-		Expect(err).NotTo(HaveOccurred())
-		configureEC(WithEncryptor(enc))
+		configureEC()
 
 		expected, _ := appendTriggerChunks()
 		expectCoalesceComplete()

@@ -10,7 +10,6 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -165,8 +164,8 @@ var _ = Describe("Multipart complete manifest integration", func() {
 	})
 
 	It("returns plaintext from encrypted part storage", func() {
-		enc := testMultipartEncryptor()
-		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), []string{b.selfAddr})
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr})
 		up := createUpload()
 		p1Body := testMultipartMinPartBody
 		p2Body := []byte("tail")
@@ -360,12 +359,6 @@ var _ = Describe("Multipart complete manifest reader", func() {
 		Expect(errors.Is(fmtInvalidPart("x"), storage.ErrInvalidPart)).To(BeTrue())
 	})
 })
-
-func testMultipartEncryptor() *encrypt.Encryptor {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x45}, 32))
-	Expect(err).NotTo(HaveOccurred())
-	return enc
-}
 
 type bytesEOFReadCloser struct {
 	body     []byte

@@ -14,7 +14,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -469,12 +468,10 @@ func TestEcObjectSegmentShardKey_DifferentBlobIDsDifferentKeys(t *testing.T) {
 // existing inline AAD (bucket+"/"+key+"/"+shardIdx) automatically becomes
 // segment-scoped — no ShardService changes needed.
 func TestEcObjectSegmentShardKey_AADPropagation(t *testing.T) {
-	rawKey := make([]byte, 32)
-	enc, err := encrypt.NewEncryptor(rawKey)
-	require.NoError(t, err)
+	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc), withTestWALEnc(t, enc))
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	bucket := "bucket"
 	plan := ecObjectWritePlan{Key: "obj", VersionID: "v1", SegmentBlobID: "blob1", SegmentIdx: 0}

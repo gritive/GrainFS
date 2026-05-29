@@ -83,8 +83,8 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	require.NoError(t, err)
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	enc := testEncryptor(t)
-	svc := NewShardService(backend.root, nil, WithEncryptor(enc), withTestWALEnc(t, enc))
+	keeper, clusterID := testDEKKeeper(t)
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})

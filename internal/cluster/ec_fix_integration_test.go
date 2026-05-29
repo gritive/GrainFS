@@ -86,8 +86,8 @@ var _ = Describe("EC compatibility integration", func() {
 	configureEC := func(dataShards, parityShards int) {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: dataShards, ParityShards: parityShards})
-		enc := testEncryptor(GinkgoT())
-		svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 		nodes := make([]string, dataShards+parityShards)
 		for i := range nodes {
 			nodes[i] = b.selfAddr
@@ -96,8 +96,8 @@ var _ = Describe("EC compatibility integration", func() {
 	}
 
 	It("stores the first shard service node as selfAddr", func() {
-		enc := testEncryptor(GinkgoT())
-		svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 		allNodes := []string{"addr-self:9001", "addr-peer1:9001", "addr-peer2:9001"}
 
 		b.SetShardService(svc, allNodes)
@@ -110,8 +110,8 @@ var _ = Describe("EC compatibility integration", func() {
 		// DistributedBackend.PreferWriteAt was removed along with WriteAt/Truncate.
 		// The ClusterCoordinator now always returns false from PreferWriteAt;
 		// all writes use the encrypted RMW (PutObject) path.
-		enc := testEncryptor(GinkgoT())
-		svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 		b.SetShardService(svc, []string{b.selfAddr, "peer-1", "peer-2"})
 
 		// DistributedBackend no longer exposes PreferWriteAt (removed); verify via
@@ -120,8 +120,8 @@ var _ = Describe("EC compatibility integration", func() {
 	})
 
 	It("keeps selfAddr different from the Raft node ID", func() {
-		enc := testEncryptor(GinkgoT())
-		svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 		b.SetShardService(svc, []string{"addr-self:9001", "addr-peer1:9001"})
 
 		Expect(b.RaftNodeID()).To(Equal("test-node"))

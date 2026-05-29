@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 
@@ -131,8 +129,8 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("matches the shard service layout", func() {
-			enc := testEncryptor(GinkgoT())
-			svc := NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+			keeper, clusterID := testDEKKeeper(GinkgoT())
+			svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 3, []byte("payload"))).To(Succeed())
 
 			paths := b.ShardPaths("bkt", "key", "01VID", 4)
@@ -145,8 +143,8 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("uses the shared shard service root", func() {
 			shardRoot := GinkgoT().TempDir()
-			enc := testEncryptor(GinkgoT())
-			svc := NewShardService(shardRoot, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+			keeper, clusterID := testDEKKeeper(GinkgoT())
+			svc := NewShardService(shardRoot, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
@@ -180,9 +178,8 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("verifies encrypted shard-service shards", func() {
-			enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{7}, 32))
-			Expect(err).NotTo(HaveOccurred())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc))
+			keeper, clusterID := testDEKKeeper(GinkgoT())
+			svc := NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
@@ -194,14 +191,13 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("verifies packed shards through shared shard service", func() {
-			enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{8}, 32))
-			Expect(err).NotTo(HaveOccurred())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithEncryptor(enc), WithShardPackThreshold(1024), withTestWALEnc(GinkgoT(), enc))
+			keeper, clusterID := testDEKKeeper(GinkgoT())
+			svc := NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), WithShardPackThreshold(1024), withTestWALDEK(GinkgoT(), keeper, clusterID))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("packed-payload"))).To(Succeed())
 
 			path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
-			_, err = os.Stat(path)
+			_, err := os.Stat(path)
 			Expect(os.IsNotExist(err)).To(BeTrue())
 
 			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)

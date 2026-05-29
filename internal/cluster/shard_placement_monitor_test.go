@@ -22,8 +22,8 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 	dir, err := os.MkdirTemp("", "shard-svc-test-*")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	enc := testEncryptor(t)
-	svc := NewShardService(dir, nil, WithEncryptor(enc), withTestWALEnc(t, enc))
+	keeper, clusterID := testDEKKeeper(t)
+	svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	return svc, dir
 }
 

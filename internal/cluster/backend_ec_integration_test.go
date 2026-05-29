@@ -31,8 +31,10 @@ var _ = Describe("Backend EC object integration", func() {
 			nodes[i] = b.selfAddr
 		}
 		b.SetECConfig(cfg)
-		enc := testEncryptor(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), nodes)
+		// Reuse the backend's existing keeper so FSM-sealed meta written before
+		// this reconfigure (e.g. legacy-convert tests) stays decryptable.
+		keeper, clusterID := b.shardSvc.DEKKeeper(), b.shardSvc.ClusterID()
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
 	}
 
 	It("spools large parity EC shard encoding to disk", func() {

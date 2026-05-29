@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
@@ -20,9 +19,7 @@ import (
 // of whether the caller knows the size; the sized variant should let us
 // pre-allocate and skip Buffer doubling.
 func BenchmarkShardServiceWriteLocalShardStream_DataWAL_5MiB(b *testing.B) {
-	key := bytes.Repeat([]byte("k"), 32)
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(b, err)
+	keeper, clusterID := testDEKKeeper(b)
 	payload := bytes.Repeat([]byte("x"), 5<<20)
 
 	for _, tc := range []struct {
@@ -44,14 +41,14 @@ func BenchmarkShardServiceWriteLocalShardStream_DataWAL_5MiB(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			dir := b.TempDir()
-			dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
+			dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 			require.NoError(b, err)
 			b.Cleanup(func() { _ = dwal.Close() })
 
 			svc := NewShardService(
 				dir,
 				nil,
-				WithEncryptor(enc),
+				WithShardDEKKeeper(keeper, clusterID),
 				WithDataWAL(dwal),
 				WithShardPackThreshold(65545),
 			)

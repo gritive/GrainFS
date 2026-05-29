@@ -21,11 +21,11 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 	shardDir := t.TempDir()
 	// WAL must live where RecoverDataWAL replays from: filepath.Dir(dataDirs[0])
 	// == shardDir (dataDirs[0] is shardDir/shards). withTestWAL would NOT work.
-	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
+	keeper, clusterID := testDEKKeeper(t)
+	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
-	svc := NewShardService(shardDir, nil, WithEncryptor(enc), WithDataWAL(dwal), WithDataWALRepairSink(collector))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal), WithDataWALRepairSink(collector))
 
 	backend := NewSingletonBackendForTest(t)
 	const selfAddr = "self"
@@ -94,11 +94,11 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.
 	shardDir := t.TempDir()
 	// WAL must live where RecoverDataWAL replays from: filepath.Dir(dataDirs[0])
 	// == shardDir (dataDirs[0] is shardDir/shards).
-	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
+	keeper, clusterID := testDEKKeeper(t)
+	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
-	svc := NewShardService(shardDir, nil, WithEncryptor(enc), WithDataWAL(dwal), WithDataWALRepairSink(collector))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal), WithDataWALRepairSink(collector))
 
 	backend := NewSingletonBackendForTest(t)
 	const selfAddr = "self"
@@ -182,8 +182,8 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.
 // heals a lost segment shard with no startup-WAL involvement.
 func TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd(t *testing.T) {
 	shardDir := t.TempDir()
-	enc := testEncryptor(t)
-	svc := NewShardService(shardDir, nil, WithEncryptor(enc), withTestWALEnc(t, enc))
+	keeper, clusterID := testDEKKeeper(t)
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	backend := NewSingletonBackendForTest(t)
 	const selfAddr = "self"
@@ -300,11 +300,11 @@ func firstSegmentShardKeyOnDisk(t *testing.T, svc *ShardService) string {
 // TestRepairShardAtShardKey_SegmentKey does.
 func TestDataWALStartupRepair_DiscoversAndRepairsMissingCoalescedShard(t *testing.T) {
 	shardDir := t.TempDir()
-	enc := testEncryptor(t)
-	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
+	keeper, clusterID := testDEKKeeper(t)
+	dwal, err := datawal.Open(filepath.Join(shardDir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 	require.NoError(t, err)
 	collector := NewDataWALRepairCollector()
-	svc := NewShardService(shardDir, nil, WithEncryptor(enc), WithDataWAL(dwal), WithDataWALRepairSink(collector))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal), WithDataWALRepairSink(collector))
 
 	backend := NewSingletonBackendForTest(t)
 	const selfAddr = "self"
