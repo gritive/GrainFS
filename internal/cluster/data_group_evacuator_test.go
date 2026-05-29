@@ -97,6 +97,17 @@ func TestPickHealthyExcluding_SkipsExcludedAndPicksLightest(t *testing.T) {
 	// All excluded → ("", false) to signal a shrink.
 	_, ok = PickHealthyExcluding(candidates, loadFn, revokedSet("a", "b", "c", "d"))
 	require.False(t, ok)
+
+	// "e" has NO load signal (down/non-reporting). It must be skipped, not treated
+	// as load 0 and picked over the live "b" — otherwise the evacuator loops adding
+	// a dead replacement.
+	got, ok = PickHealthyExcluding(append(candidates, "e"), loadFn, revokedSet("d"))
+	require.True(t, ok)
+	require.Equal(t, "b", got)
+
+	// Only an unknown-load candidate remains → shrink, never place on it.
+	_, ok = PickHealthyExcluding([]string{"e"}, loadFn, map[string]struct{}{})
+	require.False(t, ok)
 }
 
 func TestEvacuator_DoesNotMoveToAnotherRevokedNode(t *testing.T) {

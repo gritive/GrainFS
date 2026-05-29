@@ -172,7 +172,11 @@ func NewDataGroupEvacuator(
 }
 
 // PickHealthyExcluding returns the lightest (lowest load) candidate not in exclude,
-// or ("", false) to signal a shrink. loadFn returns (load, known).
+// or ("", false) to signal a shrink. loadFn returns (load, known). Candidates with
+// no load signal (known==false) are SKIPPED, not treated as load 0 — a
+// down/non-reporting node must never out-rank a live loaded one, which would make
+// the evacuator loop forever trying to add an unavailable replacement. With no
+// known-load candidate we return ("", false) so the caller shrinks instead.
 func PickHealthyExcluding(candidates []string, loadFn func(id string) (float64, bool), exclude map[string]struct{}) (string, bool) {
 	best := ""
 	var bestLoad float64
@@ -180,7 +184,10 @@ func PickHealthyExcluding(candidates []string, loadFn func(id string) (float64, 
 		if _, ex := exclude[id]; ex {
 			continue
 		}
-		l, _ := loadFn(id)
+		l, known := loadFn(id)
+		if !known {
+			continue // no health/load signal: prefer shrink over placing on a possibly-dead node
+		}
 		if best == "" || l < bestLoad {
 			best = id
 			bestLoad = l

@@ -164,6 +164,26 @@ Work these in order. Do not run them in parallel.
       data-group leader cannot converge the PeerIDs mirror. The evacuation path uses
       the new `ProposeShardGroupForwarding` instead; option A was verified
       apply-wait-equivalent but deferred on surgical grounds.
+    - **[P3] Revoke eviction is best-effort; a 2-voter group whose other voter is
+      revoked cannot self-heal**. After revoke `ClosePeer`s the revoked node, a data
+      group with exactly `[revoked, survivor]` cannot commit either AddVoter or
+      RemoveVoter (the old 2-voter config needs a quorum that includes the now-
+      unreachable revoked node — raft joint-consensus limitation). The evacuator
+      logs `eviction failed; retry next tick` and the revoked node stays in
+      `raft_voters` until an operator intervenes or the cluster key is dropped
+      (hard-security path). Groups with RF≥3 evict cleanly. The guarantee here is
+      AVAILABILITY (eventually-consistent), not hard security. Consider a
+      force-shrink / operator command for the stranded 2-voter case. (Surfaced by
+      the revoke data-group-evacuation code gate — 2026-05-29.)
+    - **[P3] Evacuation discovery + MoveReplica remove assume node-id PeerIDs**.
+      `DataGroupEvacuator.ledTargets` compares raw `dg.PeerIDs()` against the node-id
+      revoked set, and `MoveReplica` removes by `fromNode` (node id). True for Zero-CA
+      greenfield (`seedShardGroupPeerIDs` emits node ids), but if legacy address-form
+      shard peers are ever introduced, ledTargets would miss them and MoveReplica's
+      remove would not match the config. `EvacuateVoter` itself already normalizes via
+      `ResolveShardGroupPeer` and removes by the raw Server.ID, so the remove-only path
+      is robust; add the same normalization to ledTargets discovery + MoveReplica if
+      address-form peers become possible. (Surfaced by the code gate — 2026-05-29.)
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
