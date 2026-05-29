@@ -43,22 +43,20 @@ Work these in order. Do not run them in parallel.
      ciphertext on disk). Follow-up: e2e covers cluster auto-repair only; no single-node scrub
      auto-repair e2e harness exists, so single-node repair-to-ciphertext relies on the unit test —
      add a single-node scrub-repair e2e when a trigger/shard-path helper lands.
-   - [ ] **[P2] scrubber shard-AAD key incoherence for cleanable object keys (PRE-EXISTING, not
-     the plaintext fix).** The original EC write (`putObjectEC` → `ecObjectShardKey` = uncleaned
-     `key+"/"+versionID`) and a normal S3 GET (`ResolvePlacement`, same uncleaned key) seal/open
-     shard AAD under the UNCLEANED metadata key. But the scrubber's survivor/verify-read
-     (`readShardIntegrity` → `shardServiceKeyFromPath`, `scrubbable.go:167/182`) derives the AAD
-     key from the CLEANED filesystem path (`filepath.Join` collapses `..`/`.`/`//`). For an object
-     key with cleanable segments (e.g. `a/../b`) these diverge: file lands at `.../b/<ver>/shard_0`,
-     scrubber reads AAD under `b/<ver>`, but the shard was sealed under `a/../b/<ver>` → AEAD
-     `message authentication failed`. Empirically reproduced 2026-05-29: PUT/GET of `a/../b`
-     round-trips (both use the uncleaned key), but the scrubber `ReadShard` of the survivor fails
-     AEAD — so EC repair for such keys bails at the survivor-read step BEFORE `WriteShard` runs,
-     identically before and after the plaintext fix (the plaintext fix never reaches that path).
-     Fix scope = thread the uncleaned metadata key (`key+"/"+versionID`, empty-versionID safe)
-     coherently through BOTH read and write scrubber paths (single + cluster repair-read), not a
-     write-only change. Its own slice — touches `readShardIntegrity`/`ReadShard`/`ReadShardIntegrity`
-     + the `scrubber.Scrubbable` interface.
+   - [P2] scrubber shard-AAD key incoherence for cleanable object keys — **FIXED 2026-05-29
+     (this worktree).** Canonical identity (`versionID`, `shardIdx`) is now threaded through the
+     `scrubber.Scrubbable`/`ShardIntegrityReader` interfaces so both the read and write scrubber
+     paths bind AAD to the UNCLEANED `ecObjectShardKey(key,versionID)` (the file location stays
+     correct via `getShardPath`). `WriteShard` additionally rejects a `path` that is not the
+     canonical on-disk location for the identity. Covered by
+     `TestScrubberRepairCleanableKeyRoundTrips` + `TestWriteShardRejectsNonCanonicalPath`.
+   - [ ] **[P2] shard-pack repair shadowing (PRE-EXISTING, orthogonal to AAD-coherence).**
+     `readShardIntegrity` prefers `ReadLocalShardFromPack`, but `WriteShard` writes a standalone
+     `shard_N` FILE. When a *packed* shard entry is corrupt/stale, repair writes a file that the
+     pack entry still shadows on the next read, so the repair does not take effect for pack-resident
+     shards. The AAD-coherence slice changed only WHICH key binds the AAD, never the pack-vs-file
+     read preference, so it neither introduces nor worsens the shadowing. Fix (its own slice): have
+     repair rewrite the pack entry, or invalidate the pack slot before the file write.
    - [ ] **Gate-fix slice — RE-SCOPED after codex plan-gate (2026-05-29); putPipeline/WAL under
      investigation.** #631 broke runtime gates that key off `ShardService.encryptor != nil` as an
      "encryption enabled" flag (nil in prod). Three candidate gates, but codex review changed the

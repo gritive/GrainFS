@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.444.0] - 2026-05-29
+
+### Fixed
+
+- The background scrubber can now repair erasure-coded objects whose keys
+  contain `.`, `..`, or `//` path segments. Previously the scrubber derived the
+  shard encryption key from the cleaned filesystem path while the original write
+  sealed it under the uncleaned object key, so authentication failed and repair
+  bailed for such keys. Shard reads now also reject plaintext shards instead of
+  returning them when at-rest encryption is enabled.
+
 ## [0.0.443.0] - 2026-05-29
 
 ### Added
