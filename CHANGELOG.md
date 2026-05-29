@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.443.0] - 2026-05-29
+
+### Added
+
+- The External PDP adapter now caches decisions and can ride out brief PDP
+  outages. Configure `iam.pdp.cache` with per-allow/deny TTLs (`ttl_allow`,
+  `ttl_deny`), a bounded LRU (`max_entries`), and an optional `grace_ttl` that
+  serves the last-good cached decision when the PDP is briefly unreachable
+  (instead of immediately failing closed). Disabled by default. New metrics
+  `grainfs_iam_pdp_cache_total` and `grainfs_iam_pdp_cache_entries`.
+
 ## [0.0.442.0] - 2026-05-29
 
 ### Security

@@ -298,8 +298,57 @@ Observe: `grainfs_iam_pdp_requests_total{decision,error_type,failure_policy}` an
 `grainfs_iam_pdp_request_duration_seconds`. Every PDP outcome (including a
 fail-open skip) is recorded in the `iam.pdp` audit log line.
 
+### Decision cache + grace
+
+To avoid a PDP round-trip on every request and to ride out brief PDP outages, add
+an optional `cache` block to `iam.pdp`:
+
+```json
+{
+  "enabled": true,
+  "endpoint": "unix:///run/grainfs/pdp.sock",
+  "timeout": "2s",
+  "failure_policy": "closed",
+  "cache": {
+    "ttl_allow": "60s",
+    "ttl_deny": "30s",
+    "max_entries": 4096,
+    "grace_ttl": "5m"
+  }
+}
+```
+
+- Caching is active when `ttl_allow` or `ttl_deny` is `> 0` (absent `cache` block ⇒
+  no caching). A cached decision is reused (no PDP call) until its TTL expires;
+  allow and deny have separate TTLs. The cache is a bounded LRU (`max_entries`).
+- A definitive PDP allow/deny is cached; a PDP **failure** is never cached.
+- The cache is keyed on the full request (principal + action + resource), so two
+  requests share a cached decision only if every input the PDP sees is identical.
+- The cache is cleared automatically whenever `iam.pdp` changes (endpoint,
+  failure_policy, or cache params), so a config change never serves a stale
+  decision from the previous PDP.
+- **`grace_ttl` (optional, `0` = disabled):** when the PDP call fails (timeout /
+  unreachable / error) and a cached decision exists whose age is within
+  `grace_ttl`, GrainFS serves that **last-good** decision instead of applying the
+  failure policy. This is what lets `failure_policy: closed` survive a brief PDP
+  blip — cached allows keep working, cached denies stay denied. If no cached entry
+  is within `grace_ttl`, the failure policy applies as usual.
+- **Revocation-lag tradeoff (read before enabling grace):** during a PDP outage, a
+  cached **allow** can keep granting access for up to `grace_ttl` after the
+  external PDP would have revoked it. Normally (PDP reachable) revocations
+  propagate within `ttl_allow`. `grace_ttl: 0` (the default) eliminates this — a
+  PDP outage then fails closed immediately. Set `grace_ttl` to the availability
+  window you are willing to trade for that lag.
+
+Cache observability: `grainfs_iam_pdp_cache_total{result,decision}`
+(`result` = `hit` | `miss` | `grace`) and `grainfs_iam_pdp_cache_entries` (gauge).
+A `grace` outcome means a cached decision was served during a PDP outage — watch
+it alongside `grainfs_iam_pdp_requests_total{decision="error"}` to spot PDP
+unavailability. Cache **hits are not re-audited** in the `iam.pdp` log (the
+decision was audited when first computed); misses and grace-serves are.
+
 Not yet supported: remote (`https`) PDP endpoints, bearer tokens to the PDP, mTLS,
-decision caching/grace, and S3/Iceberg data-plane enforcement.
+and S3/Iceberg data-plane enforcement.
 
 ## Current Boundary
 
