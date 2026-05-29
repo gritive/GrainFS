@@ -74,31 +74,24 @@ func (b *LocalBackend) DB() *badger.DB { return b.db }
 
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
-	return newLocalBackend(root, []string{root}, nil)
+	return newLocalBackend(root, []string{root})
 }
 
-func NewEncryptedLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
-	if enc == nil {
-		return nil, fmt.Errorf("encrypted local backend requires encryptor")
-	}
-	return newLocalBackend(root, []string{root}, enc)
-}
-
-func NewMultiRootLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+func NewMultiRootLocalBackend(metaDir string, dataRoots []string) (*LocalBackend, error) {
 	if len(dataRoots) == 0 {
 		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
 	}
-	return newLocalBackend(metaDir, dataRoots, enc)
+	return newLocalBackend(metaDir, dataRoots)
 }
 
-func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, enc *encrypt.Encryptor, dwal DataWAL) (*LocalBackend, error) {
+func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, dwal DataWAL) (*LocalBackend, error) {
 	if len(dataRoots) == 0 {
 		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
 	}
 	if dwal == nil {
 		return nil, fmt.Errorf("multi-root local backend data wal requires wal")
 	}
-	b, err := newLocalBackend(metaDir, dataRoots, enc)
+	b, err := newLocalBackend(metaDir, dataRoots)
 	if err != nil {
 		return nil, err
 	}
@@ -111,23 +104,7 @@ func NewLocalBackendWithDataWAL(root string, dwal DataWAL) (*LocalBackend, error
 	if dwal == nil {
 		return nil, fmt.Errorf("local backend data wal requires wal")
 	}
-	b, err := newLocalBackend(root, []string{root}, nil)
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
-	return b, nil
-}
-
-func NewEncryptedLocalBackendWithDataWAL(root string, enc *encrypt.Encryptor, dwal DataWAL) (*LocalBackend, error) {
-	if enc == nil {
-		return nil, fmt.Errorf("encrypted local backend requires encryptor")
-	}
-	if dwal == nil {
-		return nil, fmt.Errorf("encrypted local backend data wal requires wal")
-	}
-	b, err := newLocalBackend(root, []string{root}, enc)
+	b, err := newLocalBackend(root, []string{root})
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +117,7 @@ func NewEncryptedLocalBackendWithDataWAL(root string, enc *encrypt.Encryptor, dw
 // data-at-rest seam is the generation-aware DEKKeeper (slice C). clusterID MUST
 // be 16 bytes. The static encryptor is left nil (DEKKeeper-only path).
 func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, clusterID []byte) (*LocalBackend, error) {
-	b, err := newLocalBackend(root, []string{root}, nil)
+	b, err := newLocalBackend(root, []string{root})
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +128,25 @@ func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, cluste
 	return b, nil
 }
 
-func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+// NewLocalBackendWithDEKKeeperAndDataWAL builds a DEKKeeper-backed LocalBackend
+// (see NewLocalBackendWithDEKKeeper) wired to a DataWAL. The DataWAL's record
+// sealer MUST wrap the SAME keeper instance (NewDEKKeeper randomizes the DEK),
+// so RecoverDataWAL — which seals/opens WAL records via b.segEnc — can decrypt
+// what the WAL wrote. clusterID MUST be 16 bytes.
+func NewLocalBackendWithDEKKeeperAndDataWAL(root string, keeper *encrypt.DEKKeeper, clusterID []byte, dwal DataWAL) (*LocalBackend, error) {
+	if dwal == nil {
+		return nil, fmt.Errorf("local backend data wal requires wal")
+	}
+	b, err := NewLocalBackendWithDEKKeeper(root, keeper, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	b.dataWAL = dwal
+	b.dataWALDir = dwal.Dir()
+	return b, nil
+}
+
+func newLocalBackend(metaDir string, dataRoots []string) (*LocalBackend, error) {
 	for _, root := range dataRoots {
 		dataDir := filepath.Join(root, "data")
 		if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -166,21 +161,14 @@ func newLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor)
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
+	// b.encryptor (the badger-meta sealer arg) is left nil: the data-at-rest
+	// seam is b.segEnc (a DEKKeeperAdapter on the DEK path), wired by the
+	// DEKKeeper constructors. badger meta is stored as plaintext.
 	b := &LocalBackend{
 		metaDir:    metaDir,
 		dataRoots:  dataRoots,
 		db:         db,
-		encryptor:  enc,
 		dataWALDir: filepath.Join(metaDir, "datawal"),
-	}
-	if enc != nil {
-		// D-seg-local: EncryptorAdapter over the static key, zero-sentinel
-		// clusterID. D-seg-ec swaps this for a DEKKeeperAdapter + real clusterID.
-		// NOTE: clusterID is bound into every file's AAD, so swapping the
-		// sentinel for a real ID changes the AAD and makes pre-swap files
-		// undecryptable. Safe now (green-field, no production data); D-seg-ec
-		// must wipe/re-encrypt rather than swap in place.
-		b.segEnc = NewEncryptorAdapter(enc, b.clusterID[:])
 	}
 	return b, nil
 }
@@ -1069,9 +1057,11 @@ func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
 	b.replayingDataWAL = true
 	defer func() { b.replayingDataWAL = false }()
 	var sealer datawal.RecordSealer
-	if b.encryptor != nil {
-		var zero [16]byte
-		sealer = NewEncryptorAdapter(b.encryptor, zero[:])
+	if b.segEnc != nil {
+		// b.segEnc is the data-at-rest seam (a *DEKKeeperAdapter on the DEK
+		// path); it satisfies datawal.RecordSealer and opens DEK-sealed WAL
+		// records written under the same keeper.
+		sealer = b.segEnc
 	}
 	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, datawal.NamespaceNode, localDataWALMaterializer{b: b})
 }

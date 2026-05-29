@@ -105,10 +105,9 @@ var packedCandidatePool = make(chan []byte, 256)
 
 // PackedBackendOptions configures optional behavior for PackedBackend.
 type PackedBackendOptions struct {
-	Compress  bool // enable zstd compression for packed (small) objects
-	Encryptor *encrypt.Encryptor
-	// DEKKeeper, when non-nil, seals blob entries via the gen-aware DEK seam
-	// (preferred over Encryptor). ClusterID MUST be 16 bytes when set.
+	Compress bool // enable zstd compression for packed (small) objects
+	// DEKKeeper, when non-nil, seals blob entries via the gen-aware DEK seam.
+	// ClusterID MUST be 16 bytes when set.
 	DEKKeeper *encrypt.DEKKeeper
 	ClusterID []byte
 }
@@ -129,8 +128,6 @@ func NewPackedBackendWithOptions(inner storage.Backend, blobDir string, threshol
 	switch {
 	case opts.DEKKeeper != nil:
 		bs, err = NewDEKBlobStore(blobDir, 256*1024*1024, opts.DEKKeeper, opts.ClusterID)
-	case opts.Encryptor != nil:
-		bs, err = NewEncryptedBlobStore(blobDir, 256*1024*1024, opts.Encryptor)
 	default:
 		bs, err = NewBlobStore(blobDir, 256*1024*1024)
 	}

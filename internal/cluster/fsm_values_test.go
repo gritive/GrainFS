@@ -12,24 +12,8 @@ import (
 )
 
 func TestFSMOpenValueRejectsOldFormatEncrypted(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(make([]byte, 32))
-	require.NoError(t, err)
-
-	f := &FSM{}
-	f.enc = enc
-
-	key := []byte("cluster-fsm:test-key")
-	// Old-format encrypted value: 0xAE 0xE2 (value magic) + version 0x01 (pre-XAES)
-	oldFormatVal := []byte{0xAE, 0xE2, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}
-
-	_, err = f.openValue(key, oldFormatVal)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "unsupported/old encrypted-value format")
-}
-
-func TestFSMOpenValueRejectsOldFormatEncryptedWithoutEncryptor(t *testing.T) {
-	// enc == nil branch: a legacy v1 value must loud-fail, not pass through as
-	// raw plaintext.
+	// A legacy v1 (pre-XAES) value must loud-fail rather than pass through as
+	// raw plaintext, regardless of which seam (if any) is wired.
 	f := &FSM{}
 
 	key := []byte("cluster-fsm:test-key")
@@ -54,11 +38,8 @@ func TestFSMOpenValuePassesGenuinePlaintextWithoutEncryptor(t *testing.T) {
 }
 
 func TestFSMOpenValuePassesGenuinePlaintext(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(make([]byte, 32))
-	require.NoError(t, err)
-
+	// No seam wired: genuine plaintext (no magic bytes) passes through.
 	f := &FSM{}
-	f.enc = enc
 
 	key := []byte("cluster-fsm:test-key")
 	// Genuine plaintext: no magic bytes at all
@@ -70,11 +51,11 @@ func TestFSMOpenValuePassesGenuinePlaintext(t *testing.T) {
 }
 
 func TestFSMOpenValueRoundTrip(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(make([]byte, 32))
+	f := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	clusterID := bytes.Repeat([]byte{0x71}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x71}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
-
-	f := &FSM{}
-	f.enc = enc
+	f.SetDEKKeeper(keeper, clusterID)
 
 	key := []byte("cluster-fsm:test-key")
 	plain := []byte("mutation body")

@@ -45,7 +45,7 @@ const (
 )
 
 // RecordSealer is the wal package's view of the storage.DataEncryptor seam.
-// Declared locally so package wal never imports storage; *storage.EncryptorAdapter
+// Declared locally so package wal never imports storage; *storage.DEKKeeperAdapter
 // satisfies it structurally.
 type RecordSealer interface {
 	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)

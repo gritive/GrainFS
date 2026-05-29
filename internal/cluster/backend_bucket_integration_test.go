@@ -52,9 +52,10 @@ var _ = Describe("Backend bucket integration", func() {
 
 	It("decrypts encrypted bucket policy FSM values", func() {
 		policy := []byte(`{"Version":"2012-10-17","Statement":[{"Resource":"secret-policy-resource"}]}`)
-		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x48}, 32))
+		clusterID := bytes.Repeat([]byte{0x48}, 16)
+		keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x48}, encrypt.KEKSize), clusterID)
 		Expect(err).NotTo(HaveOccurred())
-		b.fsm.SetEncryptor(enc)
+		b.fsm.SetDEKKeeper(keeper, clusterID)
 
 		Expect(b.CreateBucket(ctx, "policy-bucket")).To(Succeed())
 		Expect(b.SetBucketPolicy("policy-bucket", policy)).To(Succeed())

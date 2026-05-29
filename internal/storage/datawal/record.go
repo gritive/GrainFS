@@ -41,7 +41,7 @@ var ErrChecksumMismatch = errors.New("datawal: checksum mismatch")
 
 // RecordSealer is datawal's view of the storage.DataEncryptor seam. datawal
 // cannot import storage (storage imports datawal), so it declares the method
-// set locally; *storage.EncryptorAdapter satisfies it structurally.
+// set locally; *storage.DEKKeeperAdapter satisfies it structurally.
 type RecordSealer interface {
 	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)

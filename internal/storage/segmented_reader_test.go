@@ -106,12 +106,7 @@ func TestSegmentedReaderRangeAtBoundary(t *testing.T) {
 }
 
 func TestSegmentedReaderEncryptedTamperRejected(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	if err != nil {
-		t.Fatalf("NewEncryptedLocalBackend: %v", err)
-	}
-	t.Cleanup(func() { _ = b.Close() })
+	b := newDEKLocalBackend(t)
 	ctx := context.Background()
 	if err := b.CreateBucket(ctx, "test"); err != nil {
 		t.Fatalf("CreateBucket: %v", err)

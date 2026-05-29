@@ -4,8 +4,8 @@ import "github.com/gritive/GrainFS/internal/encrypt"
 
 // ShardEncryptor is eccodec's use-site view of the data-at-rest seam
 // (storage.DataEncryptor). Defined here so eccodec need not import
-// internal/storage (which would create an import cycle); *storage.EncryptorAdapter
-// and *storage.DEKKeeperAdapter satisfy it structurally.
+// internal/storage (which would create an import cycle); *storage.DEKKeeperAdapter
+// satisfies it structurally.
 type ShardEncryptor interface {
 	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)

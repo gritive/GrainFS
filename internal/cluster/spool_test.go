@@ -286,17 +286,6 @@ func TestECStreamBlockSizeScalesWithObjectSize(t *testing.T) {
 	require.Equal(t, 1<<20, ecStreamBlockSize(cfg, 64<<20))
 }
 
-func newClusterTestEncryptor(t *testing.T) *encrypt.Encryptor {
-	t.Helper()
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i)
-	}
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(t, err)
-	return enc
-}
-
 // newClusterTestSeam returns a DataEncryptor over the static test encryptor so
 // TestEncryptedSpoolReader_MultiRecordByteExact reconstructs a payload spanning
 // several 1 MiB spool records (last one smaller) byte-for-byte. This is the
@@ -447,5 +436,7 @@ func newClusterTestSeam(t *testing.T) storage.DataEncryptor {
 	t.Helper()
 	var clusterID [16]byte
 	copy(clusterID[:], bytes.Repeat([]byte("c"), 16))
-	return storage.NewEncryptorAdapter(newClusterTestEncryptor(t), clusterID[:])
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x33}, encrypt.KEKSize), clusterID[:])
+	require.NoError(t, err)
+	return storage.NewDEKKeeperAdapter(keeper, clusterID[:])
 }
