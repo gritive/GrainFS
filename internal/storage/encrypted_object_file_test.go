@@ -21,14 +21,6 @@ import (
 // because production code addresses records via sequential reads, not offsets.
 const encryptedObjectHeaderLen = len(encryptedObjectMagic) + 6
 
-func testEncryptor(t *testing.T) *encrypt.Encryptor {
-	t.Helper()
-	key := bytes.Repeat([]byte{0x44}, 32)
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(t, err)
-	return enc
-}
-
 // testSegEnc returns a DEK-backed DataEncryptor seam, matching how a DEK
 // LocalBackend builds segEnc. NewDEKKeeper randomizes the DEK, so the returned
 // seam must be used for both writeEncryptedObjectFile and openEncryptedObjectFile

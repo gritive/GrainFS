@@ -46,9 +46,8 @@ type LocalBackend struct {
 	metaDir          string
 	dataRoots        []string
 	db               *badger.DB
-	encryptor        *encrypt.Encryptor // retained for Badger meta (D-meta)
-	segEnc           DataEncryptor      // object/segment file data-at-rest seam
-	clusterID        [16]byte           // zero sentinel in D-seg-local; real ID in D-seg-ec
+	segEnc           DataEncryptor // object/segment file data-at-rest seam
+	clusterID        [16]byte      // zero sentinel in D-seg-local; real ID in D-seg-ec
 	dataWAL          DataWAL
 	dataWALDir       string
 	replayingDataWAL bool
@@ -115,7 +114,7 @@ func NewLocalBackendWithDataWAL(root string, dwal DataWAL) (*LocalBackend, error
 
 // NewLocalBackendWithDEKKeeper builds a LocalBackend whose object/segment
 // data-at-rest seam is the generation-aware DEKKeeper (slice C). clusterID MUST
-// be 16 bytes. The static encryptor is left nil (DEKKeeper-only path).
+// be 16 bytes. Badger meta is plaintext (the static meta encryptor was retired).
 func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, clusterID []byte) (*LocalBackend, error) {
 	b, err := newLocalBackend(root, []string{root})
 	if err != nil {
@@ -161,9 +160,8 @@ func newLocalBackend(metaDir string, dataRoots []string) (*LocalBackend, error) 
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	// b.encryptor (the badger-meta sealer arg) is left nil: the data-at-rest
-	// seam is b.segEnc (a DEKKeeperAdapter on the DEK path), wired by the
-	// DEKKeeper constructors. badger meta is stored as plaintext.
+	// Badger meta is stored as plaintext; the data-at-rest seam is b.segEnc
+	// (a DEKKeeperAdapter on the DEK path), wired by the DEKKeeper constructors.
 	b := &LocalBackend{
 		metaDir:    metaDir,
 		dataRoots:  dataRoots,
@@ -238,7 +236,7 @@ func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 				return fmt.Errorf("create bucket dir %s: %w", bDir, err)
 			}
 		}
-		return setBadgerValue(txn, b.encryptor, badgerDomainBucket, bk, []byte(`{}`))
+		return setBadgerValue(txn, bk, []byte(`{}`))
 	})
 }
 
@@ -456,7 +454,7 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 	// per-View overhead (getMemTables alloc cluster) twice on every call.
 	var obj Object
 	err := b.db.View(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key))
+		val, err := getBadgerValue(txn, b.objectMetaKey(bucket, key))
 		if err == nil {
 			return unmarshalObjectInto(val, &obj)
 		}
@@ -486,7 +484,7 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+		val, err := getBadgerValue(txn, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
@@ -502,7 +500,7 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 		if err != nil {
 			return err
 		}
-		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
+		return setBadgerValue(txn, mk, newVal)
 	})
 }
 
@@ -516,7 +514,7 @@ func (b *LocalBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) 
 	}
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+		val, err := getBadgerValue(txn, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
@@ -544,7 +542,7 @@ func (b *LocalBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) 
 		if err != nil {
 			return err
 		}
-		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
+		return setBadgerValue(txn, mk, newVal)
 	})
 }
 
@@ -557,7 +555,7 @@ func (b *LocalBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, erro
 	mk := b.objectMetaKey(bucket, key)
 	var result []Tag
 	err := b.db.View(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+		val, err := getBadgerValue(txn, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
@@ -605,9 +603,6 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 		if !errors.Is(err, ErrObjectNotFound) {
 			return err
 		}
-		if b.encryptor != nil {
-			return err
-		}
 	}
 	if b.dataWAL != nil && !b.replayingDataWAL {
 		if _, err := b.dataWAL.Append(ctx, datawal.Record{
@@ -636,7 +631,7 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 	}
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+		val, err := getBadgerValue(txn, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
@@ -652,7 +647,7 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 		if err != nil {
 			return err
 		}
-		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
+		return setBadgerValue(txn, mk, newVal)
 	})
 }
 
@@ -728,7 +723,7 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 			return nil, fmt.Errorf("marshal metadata: %w", err)
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
-			return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
+			return setBadgerValue(txn, b.objectMetaKey(bucket, key), meta)
 		}); err != nil {
 			return nil, err
 		}
@@ -813,7 +808,7 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
+		return setBadgerValue(txn, b.objectMetaKey(bucket, key), meta)
 	}); err != nil {
 		return nil, err
 	}
@@ -1050,7 +1045,10 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 }
 
 func (b *LocalBackend) PreferWriteAt(bucket string) bool {
-	return b.encryptor == nil && IsInternalBucket(bucket)
+	// Gate on the data-at-rest seam: chunked-AEAD object data (b.segEnc != nil)
+	// cannot be written in place, so only advertise WriteAt for internal buckets
+	// when data is stored as plaintext.
+	return b.segEnc == nil && IsInternalBucket(bucket)
 }
 
 func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
@@ -1213,10 +1211,9 @@ func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, m
 				break
 			}
 			item := it.Item()
-			itemKey := item.KeyCopy(nil)
 			var obj Object
 			err := item.Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				plain, err := openBadgerValue(val)
 				if err != nil {
 					return err
 				}
@@ -1264,10 +1261,9 @@ func (b *LocalBackend) ListObjectsPage(ctx context.Context, bucket, prefix, mark
 				break
 			}
 			item := it.Item()
-			itemKey := item.KeyCopy(nil)
 			var obj Object
 			if err := item.Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				plain, err := openBadgerValue(val)
 				if err != nil {
 					return err
 				}
@@ -1292,10 +1288,9 @@ func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, f
 		defer it.Close()
 		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
 			item := it.Item()
-			itemKey := item.KeyCopy(nil)
 			var obj Object
 			if err := item.Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				plain, err := openBadgerValue(val)
 				if err != nil {
 					return err
 				}
@@ -1353,10 +1348,9 @@ func (b *LocalBackend) ScanObjectsGrouped(bucket string) (<-chan ObjectKeyGroup,
 			defer it.Close()
 			for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
 				item := it.Item()
-				itemKey := item.KeyCopy(nil)
 				var obj Object
 				if err := item.Value(func(val []byte) error {
-					plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+					plain, err := openBadgerValue(val)
 					if err != nil {
 						return err
 					}
@@ -1405,9 +1399,8 @@ func (b *LocalBackend) ScanLocalMultipartUploads(bucket string) (<-chan Multipar
 			mpuPrefix := []byte("mpu:")
 			for it.Seek(mpuPrefix); it.ValidForPrefix(mpuPrefix); it.Next() {
 				item := it.Item()
-				itemKey := item.KeyCopy(nil)
 				if err := item.Value(func(val []byte) error {
-					plain, err := openBadgerValue(b.encryptor, badgerDomainMultipart, itemKey, val)
+					plain, err := openBadgerValue(val)
 					if err != nil {
 						return err
 					}
@@ -1444,7 +1437,11 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 	}
 	defer rc.Close()
 
-	if b.encryptor == nil && obj.Segments != nil {
+	// Raw per-segment file copy only when data is plaintext: encrypted segment
+	// files seal their AAD to (bucket, key, blobID), so a byte copy to the dst
+	// path would be un-decryptable. On an encrypted backend fall through to the
+	// re-encode path below (PutObjectWithRequest reads the decrypted source).
+	if b.segEnc == nil && obj.Segments != nil {
 		if err := b.HeadBucket(ctx, dstBucket); err != nil {
 			return nil, err
 		}
@@ -1531,7 +1528,7 @@ func (b *LocalBackend) policyKey(bucket string) []byte {
 func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 	var data []byte
 	err := b.db.View(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainPolicy, b.policyKey(bucket))
+		val, err := getBadgerValue(txn, b.policyKey(bucket))
 		if err == badger.ErrKeyNotFound {
 			return ErrBucketNotFound
 		}
@@ -1547,7 +1544,7 @@ func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 // SetBucketPolicy stores the raw policy JSON for a bucket.
 func (b *LocalBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
 	return b.db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, b.encryptor, badgerDomainPolicy, b.policyKey(bucket), policyJSON)
+		return setBadgerValue(txn, b.policyKey(bucket), policyJSON)
 	})
 }
 
@@ -1583,10 +1580,9 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 			key := rest[slashIdx+1:]
 
 			item := it.Item()
-			itemKey := item.KeyCopy(nil)
 			var obj Object
 			if err := item.Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				plain, err := openBadgerValue(val)
 				if err != nil {
 					return err
 				}
@@ -1693,7 +1689,7 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
-			return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(snap.Bucket, snap.Key), meta)
+			return setBadgerValue(txn, b.objectMetaKey(snap.Bucket, snap.Key), meta)
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
