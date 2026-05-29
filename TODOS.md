@@ -15,31 +15,93 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 Work these in order. Do not run them in parallel.
 
-- [ ] **At-rest unification remainder — static→DEK (Phase D track, re-grounded 2026-05-28)**
-   - Phase D migrated the EC shard data plane onto the DEK; these remain on the
-     static `encrypt.Encryptor` and complete the single KEK→DEK hierarchy:
-     **R1 — Move DEK-ready gate + wire boot data-plane sealer to DEK.**
-     **SHIPPED v0.0.393.0 (PR #596)** — DEK-sealed logical-WAL/packblob/PUT-pipeline
-     under the gen-aware DEK; `encryption.rotate-dek` gated; at-rest format 3→4.
-     Data-WAL stayed on the static encryptor (deferred to R-FSM below).
-     **R2 — IAM credentials static→DEK.** SHIPPED v0.0.401.0 (this PR). IAM
-     SA secret_key + BucketUpstream secret_key migrated onto the `DataEncryptor`
-     seam under a new `DomainIAMCredential` AAD that binds (sa_id, access_key).
-     Gen threaded through raft payload + snapshot. Two-pass decode in
-     `MetaFSM.Restore` (TransientReadOnlyDEK) so DEK-sealed credentials
-     decrypt before the live keeper is wired. Format version 4→5. Stale
-     `// AES-256-GCM` comments fixed. In-memory plaintext cache preserved
-     (sigv4 verify locked at ≤60 alloc/op). 3-node cluster cache-invalidation
-     e2e deferred (no 3-node IAM harness yet); single-node restart e2e
-     covers the snapshot/restore path end-to-end.
-     **R3 — Retire static key.** After every `cfg.Encryptor` consumer
-     (cluster-config secrets, alerts, server/object snapshot, IAM admin) has a DEK
-     replacement. Remove the remaining `encrypt.Encryptor` data path and
-     `EncryptorAdapter`. ADR for cipher-unification + greenfield boundary.
-   - [ ] Data-DEK rotation: persist non-zero `dek_gen` for every
-     ciphertext-bearing format before enabling `encryption.rotate-dek`.
+- [ ] **At-rest unification — R3 static-key retirement (last slice; cleanup, not migration)**
+   - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
+     version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
+     no legacy ciphertext to support). Current format = **8**.
+   - LANDED (reconciled 2026-05-29 against origin/master): the functional KEK→DEK
+     migration is **complete** — every production at-rest consumer now seals through
+     the `DataEncryptor`/DEK seam:
+       - R1 (boot gate + logical-WAL/packblob/PUT-pipeline→DEK; `encryption.rotate-dek`
+         gated) — PR #596 v0.0.393.0
+       - R2 (IAM SA + BucketUpstream secrets→DEK, `DomainIAMCredential`, two-pass
+         restore) — PR #605 v0.0.401.0
+       - R-FSM (data-group FSM value sealing + data WAL→DEK) — PR #608
+       - cluster-config secrets→DEK — PR #611 v0.0.408.0
+       - static at-rest **boot-glue** D-cut (RawEncryptionKey / `--encryption-key-file` /
+         LoadOrCreateEncryptionKeyWithRaw removed; node identity sealed under KEK) —
+         PR #631 v0.0.428.0 + #619/#623/#627/#629
+       - raft log store at-rest encryption (the separate-spec metadata copy; KEK-derived
+         `raft-store.key.enc`, not the DEK) — PR #635 v0.0.432.0
+       - datawal dek-generation persisted + namespace split — PR #637/#640 v0.0.434.0/.436.0
+   - [P1 SECURITY] scrubber-repair plaintext hole — **FIXED 2026-05-29 (this worktree).**
+     `DistributedBackend.WriteShard` now seals via `ShardService.EncodeEncryptedShardBuffer`
+     (GFSENC3/DEK seam), so scrubber-repaired shards are DEK-encrypted at rest like normally-written
+     shards. WriteShard errors when `shardSvc==nil` or path is not under a shard data dir (no
+     plaintext fallback). Covered by `TestWriteShardSealsRepairedShardWithDEK` (production-shaped
+     DEK backend) + the cluster e2e (`cluster_scrubber_test.go` asserts the repaired shard is
+     ciphertext on disk). Follow-up: e2e covers cluster auto-repair only; no single-node scrub
+     auto-repair e2e harness exists, so single-node repair-to-ciphertext relies on the unit test —
+     add a single-node scrub-repair e2e when a trigger/shard-path helper lands.
+   - [ ] **[P2] scrubber shard-AAD key incoherence for cleanable object keys (PRE-EXISTING, not
+     the plaintext fix).** The original EC write (`putObjectEC` → `ecObjectShardKey` = uncleaned
+     `key+"/"+versionID`) and a normal S3 GET (`ResolvePlacement`, same uncleaned key) seal/open
+     shard AAD under the UNCLEANED metadata key. But the scrubber's survivor/verify-read
+     (`readShardIntegrity` → `shardServiceKeyFromPath`, `scrubbable.go:167/182`) derives the AAD
+     key from the CLEANED filesystem path (`filepath.Join` collapses `..`/`.`/`//`). For an object
+     key with cleanable segments (e.g. `a/../b`) these diverge: file lands at `.../b/<ver>/shard_0`,
+     scrubber reads AAD under `b/<ver>`, but the shard was sealed under `a/../b/<ver>` → AEAD
+     `message authentication failed`. Empirically reproduced 2026-05-29: PUT/GET of `a/../b`
+     round-trips (both use the uncleaned key), but the scrubber `ReadShard` of the survivor fails
+     AEAD — so EC repair for such keys bails at the survivor-read step BEFORE `WriteShard` runs,
+     identically before and after the plaintext fix (the plaintext fix never reaches that path).
+     Fix scope = thread the uncleaned metadata key (`key+"/"+versionID`, empty-versionID safe)
+     coherently through BOTH read and write scrubber paths (single + cluster repair-read), not a
+     write-only change. Its own slice — touches `readShardIntegrity`/`ReadShard`/`ReadShardIntegrity`
+     + the `scrubber.Scrubbable` interface.
+   - [ ] **Gate-fix slice — RE-SCOPED after codex plan-gate (2026-05-29); putPipeline/WAL under
+     investigation.** #631 broke runtime gates that key off `ShardService.encryptor != nil` as an
+     "encryption enabled" flag (nil in prod). Three candidate gates, but codex review changed the
+     risk picture:
+     - (A) `backend.go:1611` putPipeline eligibility → **DEAD in prod**. Reactivating is the
+       original intent BUT codex (F1) flagged a **durability question**: putPipeline acks on early
+       K-shard quorum (`putpipeline/pipeline.go:240`) + defers fsync to a batched WAL commit
+       (`drive.go` `skipFsync`, `commit.go:120`), whereas the current spooled path flushes the data
+       WAL synchronously before the raft metadata propose. Must verify PutShard does not return
+       (and let metadata commit) before shard durability before flipping. INVESTIGATE.
+     - (B) `shard_service.go:1446-1447` WAL raw-payload sizing → keyed off `encryptor != nil`.
+       codex (F3): ≥1 MiB shards are metadata-only in the WAL (`walPayloadInlineThreshold`,
+       `shard_service.go:1171`), so the flip mostly affects the ~64 MiB boundary; likely a marginal
+       clean-rejection improvement, not a regression, but LOW value. INVESTIGATE whether it's a
+       real fix or a no-op.
+     - Note (codex F5): `segEnc` is **mandatory** (`NewShardService` panics if nil,
+       `shard_service.go:238`), so `segEnc != nil` is always true — a `EncryptionEnabled()` predicate
+       would be unconditionally true; the "encryption disabled" branch is unconstructable. The
+       gate-rekey is really "remove the vestigial `encryptor`-presence condition," and the predicate
+       can't be unit-tested in a false state.
+     - Spool/multipart-spool plaintext (`spool.go:211`, `encryptedShardStorage()` `backend.go:2040`
+       + callers `3860/3975/3989/4140`) → encrypt via the DataEncryptor seam (needs buffer-reusing
+       `SealTo`/`OpenTo`); its own slice.
+     **Decision owed:** after F1/F3 investigation, decide which of A/B ship and whether spool +
+     scrubber fold together (all are #631-regression at-rest gates).
+   - [ ] **R3 static-residue deletion (AFTER the gate-fix slice).** Once no runtime gate keys off
+     the static `encryptor`, delete the dead static residue: `storage.EncryptorAdapter`/
+     `NewEncryptorAdapter`, static fallbacks (`fsm_values.go:51`, `shard_service.go:106/1288-1290`,
+     `packblob/blob.go:93`, `pitr.go:85`, read-side `shard_service.go:826/835/1668/1720`,
+     `putpipeline/pipeline.go:124` `cfg.Encryptor` fallback), `WithEncryptor` option (migrate
+     testbackend to a DEK keeper), `NewManagerWithEncryptor` static `enc` param, MetaFSM
+     `SetEncryptor`/`Encryptor` (dead). Plus dead-code removal: `storage/encrypted_badger.go` +
+     `storage.LocalBackend` (no production caller, ADR-0015). ADR for cipher-unification +
+     greenfield boundary. Bumps format 8→9. Greenfield (format loud-fail) → no legacy ciphertext
+     to support.
+   - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
+     the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
+     a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND
+     all data lanes carry EC-style per-segment gen framing + roll-on-gen-change (today only EC
+     has it); also close the EC mid-shard race (`eccodec/shardio.go:168`).
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
-     (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`).
+     (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`) +
+     D-cut bootstrap-envelope design (`...at-rest-dcut-bootstrap-envelope-design.md`).
      See [[project-grains-at-rest-two-key-systems]].
 
 - [ ] **BadgerDB atomic auto-recovery design**
@@ -111,6 +173,41 @@ Work these in order. Do not run them in parallel.
       or add a leader-side replay cache/window. Keep the current SPKI pinning and
       pending redemption binding as the baseline; this item is the next protocol
       hardening slice, not a regression in the present key ownership checks.
+
+- [ ] **Zero-CA cutover/revocation follow-ups** (2026-05-29 re-review of the merged
+  revocation + complete-cutover slices; zero-CA is greenfield so none of these are
+  migration concerns):
+    - **[P3] H4' — incomplete drop under an in-flight transport rotation**.
+      `internal/transport/identity_composer.go:88` still carries `TODO(PR-2)`: when
+      `dropped=true`, `recompute()` excludes the base PSK but still appends
+      `c.rotation`. If `DropClusterKeyAccept` applies while a transport KEK-rotation
+      window is open, the cluster-key-derived `{OldSPKI, NewSPKI}`
+      (`internal/cluster/rotation_worker.go:88,104`) remain in the accept-set until
+      the next steady recompute clears the window (`rotation_worker.go:143` sets
+      window=nil), transiently defeating the drop's purpose. Latent today because
+      transport KEK rotation is gated on cluster-wide KEK distribution (Phase B);
+      it becomes a live hole the moment rotation is enabled. Fix one of: filter
+      cluster-key-derived SPKIs out of the rotation set when `dropped`, refuse
+      `DropClusterKeyAccept` while a rotation window is open, or force a steady
+      recompute on drop. Add a unit test that drops mid-window and asserts the
+      old/new cluster SPKIs are not accepted.
+    - **[P3] Stale "DORMANT/SUPPORT-ONLY in PR-1" comments on now-live code**.
+      Cluster-key drop, present-flip, and conn-recycle are wired live
+      (`internal/serveruntime/boot_phases_raft.go:302,330`,
+      `boot_phases_transport.go:95`), but the transport surface still annotates
+      itself as PR-1 dormant / no-live-caller:
+      `internal/transport/identity_composer.go:46-48,57-59`,
+      `internal/transport/quic.go:386` (FlipPresent), `:394` (RecycleConns),
+      `:446` (SetDropped). Misleading on security-critical accept-set code — a
+      future reader could remove "dead" wiring. Refresh comments to name the live
+      callers.
+    - **[P3] Orphaned join-redirect TODOs (operability)**. A joiner that contacts a
+      follower gets `JoinStatusNotLeader` but no leader address to retry against:
+      `internal/cluster/meta_join.go:234` `TODO(W7b/W9)` (return
+      leader_join_addr/leader_join_spki from member state) and
+      `internal/serveruntime/invite_admin.go:96` `TODO(W7b)` (FSM-resolve redirect to
+      auto-forward the invite-admin call to the leader). Not a security gap; a
+      usability rough edge for multi-node join.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):

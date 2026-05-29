@@ -865,6 +865,20 @@ func (s *ShardService) WriteLocalShardContext(ctx context.Context, bucket, key s
 	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
 }
 
+// EncodeEncryptedShardBuffer seals data as a GFSENC3 chunked shard using the
+// DEK seam, identical to the normal writeLocalShard format. Used by the
+// scrubber/EC-repair path (DistributedBackend.WriteShard) so repaired shards
+// are DEK-encrypted at rest like normally-written shards. The at-rest sealer
+// (segEnc) is mandatory (NewShardService panics if absent), so there is no
+// plaintext branch.
+func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx int, data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := eccodec.EncodeEncryptedShard(&buf, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+		return nil, fmt.Errorf("encode encrypted shard: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
 	if s.shardPack != nil && len(data) < s.packThreshold {
 		var buf bytes.Buffer
