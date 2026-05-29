@@ -580,11 +580,14 @@ func TestEncryptedObjectReader_ReusesPlaintextBufferAcrossChunks(t *testing.T) {
 	// ≥3 full chunks so the reuse pattern is exercised multiple times.
 	plaintext := bytes.Repeat([]byte("z"), 3*encryptedChunkSize)
 
-	size, err := writeEncryptedObjectFile(path, testSegEnc(t), fields, bytes.NewReader(plaintext), io.Discard)
+	// One seam for BOTH write and open: testSegEnc builds a DEK keeper with a
+	// randomized DEK, so two separate instances would not decrypt each other.
+	base := testSegEnc(t)
+	size, err := writeEncryptedObjectFile(path, base, fields, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
 
-	rec := &recordingObjEncryptor{inner: testSegEnc(t)}
+	rec := &recordingObjEncryptor{inner: base}
 	rc, err := openEncryptedObjectFile(path, rec, fields, size)
 	require.NoError(t, err)
 	defer rc.Close()
