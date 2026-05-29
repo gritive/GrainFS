@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.451.0] - 2026-05-29
+
+### Changed
+
+- Reduced memory churn when reading at-rest-encrypted erasure-coded shards. The
+  three EC-shard read paths now decrypt each chunk into a reused buffer instead
+  of allocating a fresh plaintext and ciphertext buffer per chunk. For a 5 MiB
+  shard read the streaming reader's allocation volume drops from ~10.5 MiB to
+  ~2.1 MiB per read (~5×) with a matching throughput gain, and the decrypted
+  buffer is fully zeroed on every error and on close. No on-disk format or API
+  change.
+
 ## [0.0.450.0] - 2026-05-29
 
 ### Added
