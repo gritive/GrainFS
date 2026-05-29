@@ -545,11 +545,17 @@ func voterConfig(addrs ...string) raft.Configuration {
 	return cfg
 }
 
-func TestEvacuateVoter_AlreadyAbsent_NoOp(t *testing.T) {
+func TestEvacuateVoter_AbsentFromRealConfig_ConvergesMirror(t *testing.T) {
+	// Divergent state (review finding A): a prior remove committed to raft (revoked
+	// already gone from the REAL config) but the follow-up PeerIDs forward failed,
+	// so the mirror still lists it. The evacuator only reaches EvacuateVoter with
+	// revoked still in the mirror, so this branch IS that divergence — it must
+	// converge the mirror (a forward, no raft change), never a bare no-op that loops
+	// forever.
 	fakeNode := &fakeRaftNode{
 		isLeader:  true,
 		committed: 10,
-		config:    voterConfig("10.0.0.1:9001", "10.0.0.2:9002"),
+		config:    voterConfig("10.0.0.1:9001", "10.0.0.2:9002"), // revoked already gone from raft
 	}
 	nodes := []cluster.MetaNodeEntry{
 		{ID: "revoked", Address: "10.0.0.0:9000"},
@@ -558,12 +564,14 @@ func TestEvacuateVoter_AlreadyAbsent_NoOp(t *testing.T) {
 	}
 	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
 	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
-		[]string{"r1", "r2"}, nil))
+		[]string{"revoked", "r1", "r2"}, nil)) // mirror still lists revoked
 
 	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "")
 	require.NoError(t, err)
-	require.Equal(t, 0, fakeNode.changeMembershipCalls)
-	require.Empty(t, sgUpdater.proposed)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls) // already absent from raft: no membership change
+	require.Len(t, sgUpdater.proposed, 1)               // but the mirror converges from the real config
+	require.ElementsMatch(t, []string{"r1", "r2"}, sgUpdater.proposed[0].PeerIDs)
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "revoked")
 }
 
 func TestEvacuateVoter_ShrinkWhenNoReplacement(t *testing.T) {
@@ -639,13 +647,16 @@ func TestEvacuateVoter_RefusesLastVoter(t *testing.T) {
 	require.Empty(t, sgUpdater.proposed)
 }
 
-func TestEvacuateVoter_ResolveNotFound_LogAndSkip(t *testing.T) {
+func TestEvacuateVoter_FullyAbsent_NoOp(t *testing.T) {
+	// Revoked node is absent from BOTH the real config AND the mirror (e.g. a
+	// double-fire after a complete eviction). No raft change, and the convergence
+	// pass is a true no-op because the mirror already matches the real config
+	// (samePeerSet skips the redundant proposal).
 	fakeNode := &fakeRaftNode{
 		isLeader:  true,
 		committed: 10,
 		config:    voterConfig("10.0.0.1:9001", "10.0.0.2:9002"),
 	}
-	// addrBook does NOT contain "revoked" -> resolveAddr fails.
 	nodes := []cluster.MetaNodeEntry{
 		{ID: "r1", Address: "10.0.0.1:9001"},
 		{ID: "r2", Address: "10.0.0.2:9002"},

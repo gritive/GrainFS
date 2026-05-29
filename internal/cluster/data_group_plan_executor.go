@@ -292,7 +292,13 @@ func (e *DataGroupPlanExecutor) EvacuateVoter(ctx context.Context, groupID, revo
 
 	rawRevoked, present := voterByNodeID[revokedID]
 	if !present {
-		return nil // idempotent no-op: already absent
+		// Already absent from the REAL voter config. But the evacuator only reaches
+		// EvacuateVoter with revokedID still in the PeerIDs mirror (ledTargets reads
+		// dg.PeerIDs()), so this branch IS the divergent state left when a prior
+		// remove committed to raft but the follow-up PeerIDs forward failed (meta
+		// leader election / transient). Converge the mirror from the real config so
+		// the next tick self-heals instead of looping on a bare no-op forever.
+		return e.convergePeerIDsFromRealConfig(ctx, groupID, dg, node, revokedID)
 	}
 	if len(voterByNodeID)-1 == 0 {
 		return fmt.Errorf("data_group_executor: refusing to evict last voter of group %q: %w", groupID, ErrRefuseLastVoter)
@@ -356,11 +362,41 @@ func (e *DataGroupPlanExecutor) convergePeerIDsFromRealConfig(ctx context.Contex
 		}
 		newPeers = append(newPeers, id)
 	}
+	// Skip the meta proposal when the live mirror already matches the real config
+	// (set-equal). Two effects: a divergence-heal where nothing changed is a true
+	// no-op (no redundant meta traffic), and the fresh-move path does not re-propose
+	// what MoveReplica already persisted. Compare against the CURRENT mirror
+	// (dgMgr.Get), not the dg captured before MoveReplica ran.
+	if cur := e.dgMgr.Get(groupID); cur != nil && samePeerSet(newPeers, cur.PeerIDs()) {
+		return nil
+	}
 	if err := e.sgUpdater.ProposeShardGroupForwarding(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
 		return fmt.Errorf("data_group_executor: ProposeShardGroupForwarding: %w", err)
 	}
 	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
 	return nil
+}
+
+// samePeerSet reports whether a and b contain the same node IDs, ignoring order
+// and duplicates.
+func samePeerSet(a, b []string) bool {
+	sa := make(map[string]struct{}, len(a))
+	for _, id := range a {
+		sa[id] = struct{}{}
+	}
+	sb := make(map[string]struct{}, len(b))
+	for _, id := range b {
+		sb[id] = struct{}{}
+	}
+	if len(sa) != len(sb) {
+		return false
+	}
+	for id := range sa {
+		if _, ok := sb[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *DataGroupPlanExecutor) waitForLeadershipTransferTarget(
