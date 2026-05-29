@@ -48,9 +48,10 @@ func TestFSM_CreateBucket(t *testing.T) {
 func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x46}, 32))
+	clusterID := bytes.Repeat([]byte{0x46}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x46}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
-	fsm.SetEncryptor(enc)
+	fsm.SetDEKKeeper(keeper, clusterID)
 
 	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "b",
@@ -108,9 +109,10 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x47}, 32))
+	clusterID := bytes.Repeat([]byte{0x47}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x47}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
-	fsm.SetEncryptor(enc)
+	fsm.SetDEKKeeper(keeper, clusterID)
 
 	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket: "b",

@@ -25,7 +25,6 @@ var restoreCrashAfterDrop func()
 type FSM struct {
 	db        *badger.DB
 	keys      *stateKeyspace
-	enc       *encrypt.Encryptor
 	clusterID [16]byte
 	dekKeeper *encrypt.DEKKeeper
 

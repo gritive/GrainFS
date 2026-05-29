@@ -16,12 +16,6 @@ const (
 	fsmValueFrameHeader  = 4 + 1 + 4
 )
 
-func (f *FSM) SetEncryptor(enc *encrypt.Encryptor) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.enc = enc
-}
-
 func (f *FSM) SetDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -34,30 +28,13 @@ func (f *FSM) SetDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) {
 	copy(f.clusterID[:], clusterID)
 }
 
-func (f *FSM) encryptor() *encrypt.Encryptor {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return f.enc
-}
-
 func (f *FSM) dataEncryptor() storage.DataEncryptor {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if f.dekKeeper != nil {
 		return storage.NewDEKKeeperAdapter(f.dekKeeper, f.clusterID[:])
 	}
-	if f.enc != nil {
-		var zero [16]byte
-		return storage.NewEncryptorAdapter(f.enc, zero[:])
-	}
 	return nil
-}
-
-func fsmValueAAD(key []byte) []byte {
-	aad := make([]byte, len("cluster-fsm-value:")+len(key))
-	copy(aad, "cluster-fsm-value:")
-	copy(aad[len("cluster-fsm-value:"):], key)
-	return aad
 }
 
 func (f *FSM) sealValue(key []byte, plain []byte) ([]byte, error) {
@@ -83,23 +60,17 @@ func (f *FSM) openValue(key []byte, raw []byte) ([]byte, error) {
 		}
 		return de.Open(encrypt.DomainFSMValue, []encrypt.AADField{encrypt.FieldBytes(key)}, gen, ct)
 	}
-	enc := f.encryptor()
-	if enc == nil {
-		if encrypt.IsEncryptedValue(raw) {
-			return nil, fmt.Errorf("cluster fsm value is encrypted but encryptor is not wired")
-		}
-		if encrypt.IsLegacyEncryptedValue(raw) {
-			return nil, fmt.Errorf("cluster fsm value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
-		}
-		return raw, nil
+	// Non-V2-frame values are plaintext. The legacy static EncryptorAdapter
+	// whole-buffer encrypted frame was never written by any prod path
+	// (greenfield at-rest; prod always seals via the DEK V2 frame above), so a
+	// static-encrypted value here is unsupported.
+	if encrypt.IsEncryptedValue(raw) {
+		return nil, fmt.Errorf("cluster fsm value carries an unsupported static-encrypted format; in-place upgrade unsupported")
 	}
-	if !encrypt.IsEncryptedValue(raw) {
-		if encrypt.IsLegacyEncryptedValue(raw) {
-			return nil, fmt.Errorf("cluster fsm value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
-		}
-		return raw, nil
+	if encrypt.IsLegacyEncryptedValue(raw) {
+		return nil, fmt.Errorf("cluster fsm value carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 	}
-	return enc.OpenValueAAD(fsmValueAAD(key), raw)
+	return raw, nil
 }
 
 func encodeFSMValueFrameV2(gen uint32, ct []byte) []byte {
