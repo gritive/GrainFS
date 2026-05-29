@@ -189,3 +189,22 @@ func TestOpenLocalShardRangeRejectsPlaintextWithEncryptor(t *testing.T) {
 		t.Fatal("OpenLocalShardRange streamed plaintext GFSCRC1 raw in encryptor mode")
 	}
 }
+
+// A key with enough ".." would make getShardPath resolve outside the shard data
+// root. WriteShard/ReadShardIntegrity must refuse it (containment guard restored
+// after the shardServiceKeyFromPath removal), not write/read outside the root.
+func TestScrubberRejectsTraversalKey(t *testing.T) {
+	root := t.TempDir()
+	svc, _ := dekShardSvc(t, root)
+	b := &DistributedBackend{}
+	b.SetShardService(svc, []string{"self"})
+
+	bucket, evilKey, versionID, shardIdx := "bkt", "../../../../etc/escape", "v1", 0
+	canonical := svc.getShardPath(bucket, ecObjectShardKey(evilKey, versionID), shardIdx)
+	if err := b.WriteShard(bucket, evilKey, versionID, shardIdx, canonical, []byte("x")); err == nil {
+		t.Fatal("WriteShard accepted a traversal key that escapes the shard data root")
+	}
+	if _, err := b.ReadShardIntegrity(bucket, evilKey, versionID, shardIdx, canonical); err == nil {
+		t.Fatal("ReadShardIntegrity accepted a traversal key that escapes the shard data root")
+	}
+}

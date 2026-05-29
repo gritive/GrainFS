@@ -50,6 +50,14 @@ Work these in order. Do not run them in parallel.
      shards. The AAD-coherence slice changed only WHICH key binds the AAD, never the pack-vs-file
      read preference, so it neither introduces nor worsens the shadowing. Fix (its own slice): have
      repair rewrite the pack entry, or invalidate the pack slot before the file write.
+   - [ ] **[P2] object-key path traversal in the EC shard write path (PRE-EXISTING).** `getShardPath`
+     is `filepath.Join(dataDir, bucket, key, shard_N)`; an object key with enough `..` can resolve a
+     shard file outside the shard data root. `getKey` (`server/object_api.go`) does not normalize
+     URL-encoded keys, so such a key is reachable as metadata. The scrubber read/write path now has a
+     `ShardPathUnderDataDir` containment guard (added with the AAD-coherence fix), but the NORMAL
+     `putObjectEC`/`writeLocalShard` write still maps the raw key into the path without a containment
+     check. Fix at the S3 key boundary (reject/normalize `..` segments) or add containment to
+     `writeLocalShard`. Its own slice — touches the PUT path, not just the scrubber.
    - [ ] **Gate-fix slice — RE-SCOPED after codex plan-gate (2026-05-29); putPipeline/WAL under
      investigation.** #631 broke runtime gates that key off `ShardService.encryptor != nil` as an
      "encryption enabled" flag (nil in prod). Three candidate gates, but codex review changed the

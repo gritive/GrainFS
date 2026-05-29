@@ -255,6 +255,24 @@ func (s *ShardService) getShardDir(bucket, key string, shardIdx int) string {
 	return filepath.Join(targetDir, bucket, key)
 }
 
+// ShardPathUnderDataDir reports whether p resolves inside the {dataDir}/{bucket}
+// subtree for the given shard index — i.e. no "../" traversal escapes the shard
+// root. The scrubber repair read/write paths derive the on-disk location from an
+// object key via getShardPath; a key containing enough ".." would otherwise let
+// that path resolve outside the shard root. Callers MUST reject when this returns
+// false (containment guard previously provided by shardServiceKeyFromPath).
+func (s *ShardService) ShardPathUnderDataDir(bucket string, shardIdx int, p string) bool {
+	if len(s.dataDirs) == 0 {
+		return false
+	}
+	root := filepath.Join(s.dataDirs[shardIdx%len(s.dataDirs)], bucket)
+	rel, err := filepath.Rel(root, filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // HandleRPC returns the stream handler function for use with a StreamRouter.
 func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Message {
 	return s.handleRPC

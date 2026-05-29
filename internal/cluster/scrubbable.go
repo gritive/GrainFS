@@ -172,6 +172,11 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		// path/shardIdx would report data/status for a different canonical shard than
 		// the path being checked.
 		canonicalPath := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
+		// Containment guard: refuse to read outside {dataDir}/{bucket} when a key
+		// containing ".." makes getShardPath resolve outside the shard root.
+		if !b.shardSvc.ShardPathUnderDataDir(bucket, shardIdx, canonicalPath) {
+			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: canonical path %q for %s/%s/%d escapes the shard data root", canonicalPath, bucket, canonicalKey, shardIdx)
+		}
 		if filepath.Clean(path) != filepath.Clean(canonicalPath) {
 			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: path %q is not the canonical location %q for %s/%s/%d", path, canonicalPath, bucket, canonicalKey, shardIdx)
 		}
@@ -242,6 +247,11 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 	// object B's path (a path-derived key could let them diverge).
 	canonicalKey := ecObjectShardKey(key, versionID)
 	canonicalPath := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
+	// Containment guard: a key containing ".." can make getShardPath resolve
+	// outside the shard root. Refuse to write outside {dataDir}/{bucket}.
+	if !b.shardSvc.ShardPathUnderDataDir(bucket, shardIdx, canonicalPath) {
+		return fmt.Errorf("write shard: canonical path %q for %s/%s/%d escapes the shard data root", canonicalPath, bucket, canonicalKey, shardIdx)
+	}
 	if filepath.Clean(path) != filepath.Clean(canonicalPath) {
 		return fmt.Errorf("write shard: path %q is not the canonical location %q for %s/%s/%d", path, canonicalPath, bucket, canonicalKey, shardIdx)
 	}
