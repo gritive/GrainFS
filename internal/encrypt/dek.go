@@ -334,6 +334,13 @@ func (k *DEKKeeper) Open(ct []byte, gen uint32) ([]byte, error) {
 
 // OpenWithAAD decrypts ct produced by SealWithAAD under the supplied aad.
 func (k *DEKKeeper) OpenWithAAD(ct []byte, gen uint32, aad []byte) ([]byte, error) {
+	return k.OpenWithAADTo(nil, ct, gen, aad)
+}
+
+// OpenWithAADTo decrypts ct (produced by SealWithAAD) under aad, appending the
+// plaintext into dst and reusing dst's capacity when it suffices. dst and ct
+// MUST NOT overlap (cipher.AEAD.Open contract). Byte-equivalent to OpenWithAAD.
+func (k *DEKKeeper) OpenWithAADTo(dst, ct []byte, gen uint32, aad []byte) ([]byte, error) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	aead, ok := k.aead[gen]
@@ -344,7 +351,7 @@ func (k *DEKKeeper) OpenWithAAD(ct []byte, gen uint32, aad []byte) ([]byte, erro
 	if len(ct) < ns {
 		return nil, ErrCiphertextTooShort
 	}
-	return aead.Open(nil, ct[:ns], ct[ns:], aad)
+	return aead.Open(dst, ct[:ns], ct[ns:], aad)
 }
 
 // Rotate generates a new DEK at active+1 and makes it the active generation.

@@ -47,6 +47,34 @@ func TestTransientReadOnlyDEK_OpenMatchesLiveKeeper(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
+func TestTransientReadOnlyDEK_OpenWithAADToMatchesLive(t *testing.T) {
+	store := newTestKEKStoreWithVersion(t, 0)
+	kek, err := store.ActiveKEK()
+	require.NoError(t, err)
+
+	k, err := NewDEKKeeper(kek, testClusterID())
+	require.NoError(t, err)
+	require.NoError(t, k.Rotate())
+
+	plaintext := bytes.Repeat([]byte("z"), 5000)
+	aad := BuildAAD(DomainIAMCredential, testClusterID(), FieldString("sa-x"), FieldString("AK1"))
+	ct, gen, err := k.SealWithAAD(plaintext, aad)
+	require.NoError(t, err)
+
+	versions, active := k.VersionsAndActive()
+	transient, err := NewTransientReadOnlyDEK(testClusterID(), versions, active, 0, store)
+	require.NoError(t, err)
+
+	got, err := transient.OpenWithAADTo(make([]byte, 0, 16), ct, gen, aad)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+
+	// Byte-equivalent to the allocating OpenWithAAD.
+	gotAlloc, err := transient.OpenWithAAD(ct, gen, aad)
+	require.NoError(t, err)
+	require.Equal(t, gotAlloc, got)
+}
+
 // TestTransientReadOnlyDEK_GenZeroOpens — codex P0 regression: gen 0 is a
 // legitimate active gen on a fresh genesis-bootstrap cluster. The
 // transient view must Open ciphertext sealed at gen 0.

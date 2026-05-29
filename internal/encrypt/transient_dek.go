@@ -124,6 +124,13 @@ func (t *TransientReadOnlyDEK) aeadFor(gen uint32) (cipher.AEAD, error) {
 // Read-only: no seal counter, no active-gen advancement, no global state
 // mutation.
 func (t *TransientReadOnlyDEK) OpenWithAAD(ct []byte, gen uint32, aad []byte) ([]byte, error) {
+	return t.OpenWithAADTo(nil, ct, gen, aad)
+}
+
+// OpenWithAADTo is OpenWithAAD that appends the plaintext into dst, reusing
+// dst's capacity when it suffices. dst and ct MUST NOT overlap
+// (cipher.AEAD.Open contract). Byte-equivalent to OpenWithAAD.
+func (t *TransientReadOnlyDEK) OpenWithAADTo(dst, ct []byte, gen uint32, aad []byte) ([]byte, error) {
 	aead, err := t.aeadFor(gen)
 	if err != nil {
 		return nil, err
@@ -132,5 +139,5 @@ func (t *TransientReadOnlyDEK) OpenWithAAD(ct []byte, gen uint32, aad []byte) ([
 	if len(ct) < ns {
 		return nil, ErrCiphertextTooShort
 	}
-	return aead.Open(nil, ct[:ns], ct[ns:], aad)
+	return aead.Open(dst, ct[:ns], ct[ns:], aad)
 }
