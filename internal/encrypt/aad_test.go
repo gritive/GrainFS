@@ -115,6 +115,39 @@ func TestAppendAADByteIdenticalToBuildAAD(t *testing.T) {
 	require.Equal(t, want, gotNil, "AppendAAD(nil, ...) must equal BuildAAD exactly")
 }
 
+var sinkAADField AADField
+
+func TestAADField_ConstructorsZeroAlloc(t *testing.T) {
+	require.Zero(t, testing.AllocsPerRun(1000, func() { sinkAADField = FieldString("bucket/object") }), "FieldString")
+	require.Zero(t, testing.AllocsPerRun(1000, func() { sinkAADField = FieldUint16(0x1234) }), "FieldUint16")
+	require.Zero(t, testing.AllocsPerRun(1000, func() { sinkAADField = FieldUint32(0xDEADBEEF) }), "FieldUint32")
+	require.Zero(t, testing.AllocsPerRun(1000, func() { sinkAADField = FieldUint64(0x0102030405060708) }), "FieldUint64")
+}
+
+func TestBuildAAD_ByteIdenticalAcrossKinds(t *testing.T) {
+	clusterID := bytes.Repeat([]byte{0xAB}, 16)
+	got := BuildAAD(DomainShard, clusterID,
+		FieldString(""),                      // kind 0x01, len 0x0000, no payload
+		FieldString("bk"),                    // kind 0x01, len 0x0002, "bk"
+		FieldBytes([]byte{0xCA, 0xFE, 0xBA}), // kind 0x02, len 0x0003, CA FE BA
+		FieldUint16(0),                       // kind 0x03, len 0x0002, 00 00
+		FieldUint32(0x01020304),              // kind 0x04, len 0x0004, 01 02 03 04
+		FieldUint64(0xA1A2A3A4A5A6A7A8),      // kind 0x05, len 0x0008, A1..A8
+	)
+	want := []byte{ /* "AAD\x01" */ 0x41, 0x41, 0x44, 0x01,
+		/* domain DomainShard=0x0001 */ 0x00, 0x01,
+		/* clusterID 16x 0xAB */ 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB,
+		/* fieldCount */ 0x06,
+		/* FieldString "" */ 0x01, 0x00, 0x00,
+		/* FieldString "bk" */ 0x01, 0x00, 0x02, 0x62, 0x6B,
+		/* FieldBytes CAFEBA */ 0x02, 0x00, 0x03, 0xCA, 0xFE, 0xBA,
+		/* FieldUint16 0 */ 0x03, 0x00, 0x02, 0x00, 0x00,
+		/* FieldUint32 */ 0x04, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04,
+		/* FieldUint64 */ 0x05, 0x00, 0x08, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8,
+	}
+	require.Equal(t, want, got)
+}
+
 func TestBuildAAD_FieldBytesDefensiveCopy(t *testing.T) {
 	// The AAD format is consensus-critical: if FieldBytes ever loses its
 	// defensive copy, callers can silently produce divergent AADs by
