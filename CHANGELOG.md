@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.453.0] - 2026-05-29
+
+### Changed
+
+- Internal at-rest encryption cleanup: retired the legacy static `EncryptorAdapter`
+  data-at-rest type and `NewEncryptorAdapter`, plus the dead static encryptor
+  setters (`FSM`/`MetaFSM` `SetEncryptor`, `putpipeline` `cfg.Encryptor`, and the
+  `NewManagerWithEncryptor` static parameter). All data sealing already flowed
+  through the generation-aware DEK keeper; the remaining test fixtures were
+  migrated to it. No change to on-disk format or runtime behavior.
+
 ## [0.0.452.0] - 2026-05-29
 
 ### Changed
