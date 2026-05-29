@@ -25,7 +25,6 @@ import (
 //	./bin/grainfs cluster rotate-key --help            > cmd/grainfs/testdata/cluster_rotate_key_help.golden 2>&1
 //	./bin/grainfs cluster rotate-key begin --help      > cmd/grainfs/testdata/cluster_rotate_key_begin_help.golden 2>&1
 //	./bin/grainfs cluster balancer --help              > cmd/grainfs/testdata/cluster_balancer_help.golden 2>&1
-//	./bin/grainfs cluster join --help                  > cmd/grainfs/testdata/cluster_join_help.golden 2>&1
 //	./bin/grainfs cluster remove-peer --help           > cmd/grainfs/testdata/cluster_remove_peer_help.golden 2>&1
 //	./bin/grainfs cluster drain --help                 > cmd/grainfs/testdata/cluster_drain_help.golden 2>&1
 //	./bin/grainfs join --help                          > cmd/grainfs/testdata/join_help.golden 2>&1
@@ -42,7 +41,6 @@ func TestClusterHelpGolden(t *testing.T) {
 		{"cluster_rotate_key", []string{"cluster", "rotate-key", "--help"}, "testdata/cluster_rotate_key_help.golden"},
 		{"cluster_rotate_key_begin", []string{"cluster", "rotate-key", "begin", "--help"}, "testdata/cluster_rotate_key_begin_help.golden"},
 		{"cluster_balancer", []string{"cluster", "balancer", "--help"}, "testdata/cluster_balancer_help.golden"},
-		{"cluster_join", []string{"cluster", "join", "--help"}, "testdata/cluster_join_help.golden"},
 		{"cluster_remove_peer", []string{"cluster", "remove-peer", "--help"}, "testdata/cluster_remove_peer_help.golden"},
 		{"cluster_drain", []string{"cluster", "drain", "--help"}, "testdata/cluster_drain_help.golden"},
 		{"join", []string{"join", "--help"}, "testdata/join_help.golden"},
