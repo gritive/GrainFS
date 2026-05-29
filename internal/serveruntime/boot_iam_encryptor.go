@@ -32,4 +32,7 @@ func wireIAMEncryptor(state *bootState) {
 	if state.iamAdminAPI != nil {
 		state.iamAdminAPI.SetEncryptor(adapter)
 	}
+	if state.pdpTokenSource != nil {
+		state.pdpTokenSource.setEncryptor(adapter)
+	}
 }

@@ -140,6 +140,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		AdminAuthz:           adminAuthorizer(state),
 		ActorAuth:            newOIDCActorAuthenticator(state.cfgStore),
 		Protocols:            storageProtocolStatusFromConfig(cfg),
+		PDPTokens:            ensurePDPTokenSource(state),
 	}
 	if state.auditSearcher != nil {
 		state.adminDeps.AuditQuery = state.auditSearcher
@@ -274,7 +275,27 @@ func adminAuthorizer(state *bootState) admin.CredentialAuthorizer {
 	// Always install the PDP decorator; it is a pure pass-through unless iam.pdp
 	// is enabled (read per request from the cfg store), so hot-enable works with
 	// no dependency rebuild.
-	return pdp.NewDecorator(base, state.cfgStore, nil) // TASK6-STUB: nil TokenSource; Task 9 wires the real one
+	return pdp.NewDecorator(base, state.cfgStore, ensurePDPTokenSource(state))
+}
+
+// ensurePDPTokenSource lazily constructs the single PDP TokenSource /
+// admin.PDPTokenManager instance and caches it on state. It is called from the
+// two adminAuthorizer sites (protocolCredentialAuthorizer + AdminAuthz) and the
+// admin.Deps literal, so the nil-check collapses all three to one instance.
+// Boot is single-threaded here, so the guard needs no locking; the source's
+// atomic.Pointer only guards request-path reads vs. restore-swap writes.
+//
+// The encryptor is seeded immediately when the DEK keeper is already wired
+// (normal boot: admin phase runs after the raft phase). wireIAMEncryptor
+// re-pushes the live adapter on fresh boot and after snapshot-restore swaps.
+func ensurePDPTokenSource(state *bootState) *pdpTokenSource {
+	if state.pdpTokenSource == nil {
+		state.pdpTokenSource = newPDPTokenSource(state.cfgStore)
+		if state.dekKeeper != nil {
+			state.pdpTokenSource.setEncryptor(storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID))
+		}
+	}
+	return state.pdpTokenSource
 }
 
 // iamPolicyAdminService returns a wired admin.IAMPolicyService if MetaRaft and
