@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -206,34 +205,6 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		return scrubber.ShardIntegrityResult{}, fmt.Errorf("%w: shard carries an encrypted/legacy envelope but no shard service is wired to verify it", eccodec.ErrShardCorrupt)
 	}
 	return scrubber.ShardIntegrityResult{}, fmt.Errorf("%w: shard at %q is not a recognized GFSENC3 envelope", eccodec.ErrShardCorrupt, path)
-}
-
-func (b *DistributedBackend) shardServiceKeyFromPath(bucket, path string) (string, int, bool) {
-	if b.shardSvc == nil {
-		return "", 0, false
-	}
-	var rel string
-	var err error
-	found := false
-	for _, dir := range b.shardSvc.dataDirs {
-		rel, err = filepath.Rel(filepath.Join(dir, bucket), path)
-		if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return "", 0, false
-	}
-	base := filepath.Base(rel)
-	if !strings.HasPrefix(base, "shard_") {
-		return "", 0, false
-	}
-	idx, err := strconv.Atoi(strings.TrimPrefix(base, "shard_"))
-	if err != nil {
-		return "", 0, false
-	}
-	return filepath.ToSlash(filepath.Dir(rel)), idx, true
 }
 
 func (b *DistributedBackend) ReadShard(bucket, key, versionID string, shardIdx int, path string) ([]byte, error) {
