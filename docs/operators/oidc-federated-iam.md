@@ -340,12 +340,21 @@ Coverage: protocol-credential operations are PDP-gated on every request; admin
 routes are PDP-gated only for bearer/OIDC actor requests (a local peercred CLI
 call over the admin UDS is governed by socket trust, not the PDP).
 
-Observe: `grainfs_iam_pdp_requests_total{decision,error_type,failure_policy}` and
-`grainfs_iam_pdp_request_duration_seconds`. `error_type` now includes
+Observe: `grainfs_iam_pdp_requests_total{scope,decision,error_type,failure_policy}` and
+`grainfs_iam_pdp_request_duration_seconds{scope}`. `error_type` now includes
 `ssrf_blocked` (dial rejected by the egress filter) and `tls` (handshake failure)
 alongside `timeout`/`transport`/`status`/`decode`/`invalid_decision`. Every PDP
 outcome (including a fail-open skip and a hard SSRF deny) is recorded in the
 `iam.pdp` audit log line.
+
+All four `grainfs_iam_pdp_*` metrics now carry a **`scope`** label identifying the
+authorizer instance that emitted them (`admin` and `protocol_credential` today).
+`grainfs_iam_pdp_request_duration_seconds` and `grainfs_iam_pdp_cache_entries`
+changed from unlabeled to per-`scope` series — **any dashboard or alert bound to
+the old unlabeled series must add the `scope` label** (e.g. `sum without(scope)
+(...)` to aggregate back). The `scope` label also fixed a gauge that previously
+clobbered across authorizer instances, so `grainfs_iam_pdp_cache_entries` is now
+accurate per scope.
 
 ### Decision cache + grace
 
@@ -389,8 +398,8 @@ an optional `cache` block to `iam.pdp`:
   PDP outage then fails closed immediately. Set `grace_ttl` to the availability
   window you are willing to trade for that lag.
 
-Cache observability: `grainfs_iam_pdp_cache_total{result,decision}`
-(`result` = `hit` | `miss` | `grace`) and `grainfs_iam_pdp_cache_entries` (gauge).
+Cache observability: `grainfs_iam_pdp_cache_total{scope,result,decision}`
+(`result` = `hit` | `miss` | `grace`) and `grainfs_iam_pdp_cache_entries{scope}` (gauge).
 A `grace` outcome means a cached decision was served during a PDP outage — watch
 it alongside `grainfs_iam_pdp_requests_total{decision="error"}` to spot PDP
 unavailability. Cache **hits are not re-audited** in the `iam.pdp` log (the

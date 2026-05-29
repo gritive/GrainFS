@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/iam/policy"
@@ -48,6 +50,14 @@ type innerAuthorizer interface {
 	AuthorizePrincipal(ctx context.Context, p principal.Principal, bucket string, ctxReq policy.RequestContext) policy.EvalResult
 }
 
+// parsedConfig holds the last successfully parsed iam.pdp config together with
+// its raw source string. loadConfig stores and reads this to skip JSON unmarshal
+// when the raw config string has not changed between requests.
+type parsedConfig struct {
+	raw string
+	cfg Config
+}
+
 // Decorator chains an external PDP AFTER the GrainFS IAM authorizer using a
 // deny-override rule: a request is allowed only if BOTH GrainFS and the PDP
 // allow. It reads the iam.pdp config per request, so an operator can flip
@@ -62,6 +72,20 @@ type Decorator struct {
 	// tests override it for deterministic expiry.
 	now func() time.Time
 
+	// scope is the control-plane scope label (admin | protocol_credential).
+	scope string
+
+	// Pre-bound metric handles: scope is curried once in NewDecorator so emit
+	// sites never call metrics.X.WithLabelValues(d.scope, ...) per request.
+	mGauge    prometheus.Gauge
+	mDuration prometheus.Observer
+	mRequests *prometheus.CounterVec
+	mCache    *prometheus.CounterVec
+
+	// parsed caches the last successfully parsed iam.pdp config. loadConfig reads
+	// and updates this field to avoid JSON unmarshal on every request.
+	parsed atomic.Pointer[parsedConfig]
+
 	mu       sync.Mutex
 	client   *Client
 	clientID string
@@ -71,9 +95,20 @@ type Decorator struct {
 
 // NewDecorator wraps inner with a per-request PDP chain driven by cfg. tokens
 // supplies the bearer token (and its rotation generation) for an https remote
-// PDP; it may be nil when no token is configured.
-func NewDecorator(inner innerAuthorizer, cfg ConfigReader, tokens TokenSource) *Decorator {
-	return &Decorator{inner: inner, cfg: cfg, tokens: tokens, now: time.Now}
+// PDP; it may be nil when no token is configured. scope is the control-plane
+// scope label (admin | protocol_credential) used for all metric emissions.
+func NewDecorator(inner innerAuthorizer, cfg ConfigReader, tokens TokenSource, scope string) *Decorator {
+	return &Decorator{
+		inner:     inner,
+		cfg:       cfg,
+		tokens:    tokens,
+		now:       time.Now,
+		scope:     scope,
+		mGauge:    metrics.PDPCacheEntries.WithLabelValues(scope),
+		mDuration: metrics.PDPRequestDuration.WithLabelValues(scope),
+		mRequests: metrics.PDPRequestsTotal.MustCurryWith(prometheus.Labels{"scope": scope}),
+		mCache:    metrics.PDPCacheTotal.MustCurryWith(prometheus.Labels{"scope": scope}),
+	}
 }
 
 // Authorize chains the PDP after the GrainFS service-account authorizer. The
@@ -94,14 +129,33 @@ func (d *Decorator) AuthorizePrincipal(ctx context.Context, p principal.Principa
 	return d.chain(ctx, p, targetSA, inner, ctxReq)
 }
 
+// loadConfig returns the parsed iam.pdp config for the current raw value,
+// re-parsing only when the raw string changed. Restore-coherent: raw comes from
+// GetString (the live config store), so a snapshot install that swaps the stored
+// value is picked up next request. ok=false ⇒ key unset (unconfigured pass-through).
+func (d *Decorator) loadConfig() (Config, bool, error) {
+	raw, ok := d.cfg.GetString(ConfigKey)
+	if !ok {
+		return Config{}, false, nil
+	}
+	if snap := d.parsed.Load(); snap != nil && snap.raw == raw {
+		return snap.cfg, true, nil
+	}
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		return Config{}, true, err
+	}
+	d.parsed.Store(&parsedConfig{raw: raw, cfg: cfg})
+	return cfg, true, nil
+}
+
 // chain applies the PDP consultation given the GrainFS (inner) result.
 func (d *Decorator) chain(ctx context.Context, actor principal.Principal, targetSA string, inner policy.EvalResult, ctxReq policy.RequestContext) policy.EvalResult {
-	raw, ok := d.cfg.GetString(ConfigKey)
+	cfg, ok, err := d.loadConfig()
 	if !ok {
 		d.release()  // unconfigured: free any client/cache left over from when it was enabled
 		return inner // unconfigured: pure pass-through
 	}
-	cfg, err := ParseConfig([]byte(raw))
 	if err != nil {
 		log.Warn().Err(err).Str("event", "iam.pdp").Msg("iam.pdp: invalid config, treating as disabled")
 		d.release()
@@ -154,7 +208,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			errType = ErrTypeTimeout
 		}
-		metrics.PDPRequestsTotal.WithLabelValues("error", errType, fp).Inc()
+		d.mRequests.WithLabelValues("error", errType, fp).Inc()
 		d.audit(req, actor, ctxReq, "deny", errType, "request canceled")
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
 	}
@@ -166,7 +220,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	// checked before the cache so a stale allow cached under a once-good token is
 	// not served while the token is broken.
 	if tokenBroken {
-		metrics.PDPRequestsTotal.WithLabelValues("error", ErrTypeTokenUnavailable, fp).Inc()
+		d.mRequests.WithLabelValues("error", ErrTypeTokenUnavailable, fp).Inc()
 		log.Warn().Str("event", "iam.pdp").Str("error_type", ErrTypeTokenUnavailable).
 			Msg("iam.pdp: configured bearer token is unusable (parse/unseal/encryptor) — hard deny")
 		d.audit(req, actor, ctxReq, "deny", ErrTypeTokenUnavailable, "token_unavailable: configured token unusable")
@@ -188,7 +242,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		key = cacheKey(req)
 		entry, state = cache.Lookup(key, cfg.Cache.GraceTTL, d.now())
 		if state == cacheFresh {
-			metrics.PDPCacheTotal.WithLabelValues("hit", entry.decision).Inc()
+			d.mCache.WithLabelValues("hit", entry.decision).Inc()
 			if entry.decision == DecisionDeny {
 				return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
 			}
@@ -205,7 +259,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 
 	start := time.Now()
 	_, errType, err := client.Authorize(callCtx, req)
-	metrics.PDPRequestDuration.Observe(time.Since(start).Seconds())
+	d.mDuration.Observe(time.Since(start).Seconds())
 
 	// Caller-canceled takes precedence over the failure policy: a fail-open
 	// config must not turn an abandoned request into an allow. We check the
@@ -217,19 +271,19 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			cancelErrType = ErrTypeTimeout
 		}
-		metrics.PDPRequestsTotal.WithLabelValues("error", cancelErrType, fp).Inc()
+		d.mRequests.WithLabelValues("error", cancelErrType, fp).Inc()
 		d.audit(req, actor, ctxReq, "deny", cancelErrType, "request canceled")
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
 	}
 
 	var de *DenyError
 	if errors.As(err, &de) {
-		metrics.PDPRequestsTotal.WithLabelValues("deny", "", fp).Inc()
+		d.mRequests.WithLabelValues("deny", "", fp).Inc()
 		if cache != nil {
-			metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+			d.mCache.WithLabelValues("miss", "").Inc()
 			if cfg.Cache.TTLDeny > 0 {
 				cache.Put(key, DecisionDeny, de.Reason, cfg.Cache.TTLDeny, d.now())
-				metrics.PDPCacheEntries.Set(float64(cache.Len()))
+				d.mGauge.Set(float64(cache.Len()))
 			}
 		}
 		d.audit(req, actor, ctxReq, "deny", "", layerDeny+": "+de.Reason)
@@ -237,7 +291,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	}
 
 	if errType != "" {
-		metrics.PDPRequestsTotal.WithLabelValues("error", errType, fp).Inc()
+		d.mRequests.WithLabelValues("error", errType, fp).Inc()
 		// SSRF-blocked is a HARD DENY independent of failure_policy: a dial rejected
 		// by the egress filter must never fall through to fail-open (it would let an
 		// attacker reach a forbidden target by tripping the filter). It also bypasses
@@ -251,7 +305,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		// Grace first: a PDP failure with a stale-but-within-grace cached decision
 		// serves that decision rather than applying the failure policy.
 		if cache != nil && cfg.Cache.GraceTTL > 0 && state == cacheStale {
-			metrics.PDPCacheTotal.WithLabelValues("grace", entry.decision).Inc()
+			d.mCache.WithLabelValues("grace", entry.decision).Inc()
 			d.audit(req, actor, ctxReq, entry.decision, errType, layerGraceServed)
 			if entry.decision == DecisionDeny {
 				return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
@@ -261,7 +315,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		// No grace served: this consult falls through to the failure policy, so
 		// count exactly one miss (covers both fail-open and fail-closed).
 		if cache != nil {
-			metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+			d.mCache.WithLabelValues("miss", "").Inc()
 		}
 		if cfg.FailurePolicy == FailureOpen {
 			d.audit(req, actor, ctxReq, "allow", errType, layerFailOpen)
@@ -273,12 +327,12 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
 	}
 
-	metrics.PDPRequestsTotal.WithLabelValues("allow", "", fp).Inc()
+	d.mRequests.WithLabelValues("allow", "", fp).Inc()
 	if cache != nil {
-		metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+		d.mCache.WithLabelValues("miss", "").Inc()
 		if cfg.Cache.TTLAllow > 0 {
 			cache.Put(key, DecisionAllow, "", cfg.Cache.TTLAllow, d.now())
-			metrics.PDPCacheEntries.Set(float64(cache.Len()))
+			d.mGauge.Set(float64(cache.Len()))
 		}
 	}
 	d.audit(req, actor, ctxReq, "allow", "", layerAllow)
@@ -319,7 +373,7 @@ func (d *Decorator) refresh(cfg Config, token, tokenGen string) (*Client, *decis
 		d.cacheGen = gen
 		// A rebuilt cache is empty and a dropped cache holds nothing, so the live
 		// entry count is 0 either way.
-		metrics.PDPCacheEntries.Set(0)
+		d.mGauge.Set(0)
 	}
 
 	return d.client, d.cache
@@ -352,7 +406,7 @@ func (d *Decorator) release() {
 	}
 	d.cache = nil
 	d.cacheGen = ""
-	metrics.PDPCacheEntries.Set(0)
+	d.mGauge.Set(0)
 }
 
 // configGen returns a stable hash of the config inputs that, when changed, must

@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.456.0] - 2026-05-29
+
+### Changed
+
+- The genesis cluster leader no longer needs `--cluster-key`. On a fresh data
+  directory with no invite bundle and no peers it self-generates and seals its own
+  cluster transport key, so operators never generate or hand-carry raw key
+  material for the Zero-CA invite-join lifecycle. `--cluster-key` is now only
+  needed for the legacy offline-join (`grainfs cluster join`) path; on a restart
+  the on-disk key always wins.
+
+### Added
+
+- New `grainfs_cluster_self_seeded` gauge (=1 on `/metrics`) marks a node that
+  self-generated its cluster key at genesis bootstrap. Alert on it for unattended
+  fleets: a keyless start on an *empty* data dir bootstraps a NEW single-node
+  cluster (distinct `cluster.id`, cannot merge into an existing one), so if a node
+  meant to JOIN is started without `GRAINFS_INVITE_BUNDLE` it forks its own
+  cluster — the gauge (and a `self_seeded=true` startup log) make that visible.
+
+## [0.0.455.0] - 2026-05-29
+
+### Changed
+
+- External PDP metrics (`grainfs_iam_pdp_*`) now carry a `scope` label
+  (`admin` | `protocol_credential`) identifying the authorizer instance that
+  emitted them. `grainfs_iam_pdp_request_duration_seconds` and
+  `grainfs_iam_pdp_cache_entries` changed from unlabeled to per-`scope` series, so
+  dashboards or alerts bound to the old unlabeled series must add the `scope` label
+  (aggregate with `sum without(scope) (...)`). This also fixes
+  `grainfs_iam_pdp_cache_entries`, which previously clobbered across authorizer
+  instances and is now accurate per scope. The decorator additionally memoizes its
+  parsed `iam.pdp` config so a disabled PDP adds no per-request JSON parse. No
+  config or API change.
+
 ## [0.0.454.0] - 2026-05-29
 
 ### Changed

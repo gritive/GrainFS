@@ -24,15 +24,28 @@ you intentionally want offline bootstrap with pre-staged `keys/0.key`,
 
 ```bash
 LEADER_DATA=/var/lib/grainfs-a
-CLUSTER_KEY=$(openssl rand -hex 32)
 
 grainfs serve \
   --data "$LEADER_DATA" \
   --node-id node-a \
   --raft-addr node-a:7001 \
-  --join-listen-addr node-a:7443 \
-  --cluster-key "$CLUSTER_KEY"
+  --join-listen-addr node-a:7443
 ```
+
+The genesis leader needs **no `--cluster-key`**. On a fresh data dir with no
+invite bundle and no peers it self-generates and seals its own cluster transport
+key, so you never generate or hand-carry raw key material. Pass `--cluster-key`
+only for the legacy offline-join (`grainfs cluster join`) world, where peers must
+share a pre-known secret; supplying it on a fresh genesis is a deterministic seed
+input (on a restart, the on-disk key wins and a differing flag is ignored).
+
+> **Caution — a keyless boot on an EMPTY data dir bootstraps a NEW single-node
+> cluster.** If you intended to JOIN an existing cluster, set
+> `GRAINFS_INVITE_BUNDLE`. A keyless, bundle-less, empty-dir start forks its own
+> cluster with a distinct `cluster.id` (it cannot silently merge into the intended
+> one). The node logs `self_seeded=true` at startup AND exports the
+> `grainfs_cluster_self_seeded` gauge (=1) on `/metrics` — **alert on the gauge**
+> for unattended fleets, since the startup log is invisible to automation.
 
 `--join-listen-addr` is the address embedded in newly minted invite bundles. If
 it is omitted, GrainFS derives a listener address from `--raft-addr`. That is

@@ -62,7 +62,7 @@ func decoCfg(endpoint, policyMode string) string {
 
 func TestDecoratorDisabledIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg(`{"enabled":false}`), nil)
+	d := NewDecorator(inner, staticCfg(`{"enabled":false}`), nil, "admin")
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.EqualValues(t, 1, inner.calls)
@@ -74,13 +74,13 @@ func (missingCfg) GetString(string) (string, bool) { return "", false }
 
 func TestDecoratorMalformedConfigIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg("{"), nil)
+	d := NewDecorator(inner, staticCfg("{"), nil, "admin")
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.EqualValues(t, 1, inner.calls)
 
 	inner2 := &spyInner{decision: policy.DecisionAllow}
-	d2 := NewDecorator(inner2, staticCfg("{"), nil)
+	d2 := NewDecorator(inner2, staticCfg("{"), nil, "admin")
 	got2 := d2.Authorize(context.Background(), "sa", "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got2.Decision)
 	require.EqualValues(t, 1, inner2.calls)
@@ -88,13 +88,13 @@ func TestDecoratorMalformedConfigIsPassThrough(t *testing.T) {
 
 func TestDecoratorMissingConfigKeyIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, missingCfg{}, nil)
+	d := NewDecorator(inner, missingCfg{}, nil, "admin")
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.EqualValues(t, 1, inner.calls)
 
 	inner2 := &spyInner{decision: policy.DecisionAllow}
-	d2 := NewDecorator(inner2, missingCfg{}, nil)
+	d2 := NewDecorator(inner2, missingCfg{}, nil, "admin")
 	got2 := d2.Authorize(context.Background(), "sa", "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got2.Decision)
 	require.EqualValues(t, 1, inner2.calls)
@@ -104,7 +104,7 @@ func TestDecoratorShortCircuitsInnerDeny(t *testing.T) {
 	var dialed int32
 	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&dialed, 1) })
 	inner := &spyInner{decision: policy.DecisionDeny}
-	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil)
+	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil, "admin")
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionDeny, got.Decision)
 	require.EqualValues(t, 0, dialed)
@@ -113,7 +113,7 @@ func TestDecoratorShortCircuitsInnerDeny(t *testing.T) {
 func TestDecoratorAllowAndAllow(t *testing.T) {
 	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil)
+	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil, "admin")
 	got := d.AuthorizePrincipal(context.Background(), principal.OIDC("iss", "sub", "oidc:x:u", []string{"g"}), "", policy.RequestContext{Action: "grainfs:CredentialCreate", Resource: "protocol-credential/nbd/v/d"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 }
@@ -123,7 +123,7 @@ func TestDecoratorAllowThenPDPDeny(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
 	inner := &spyInner{decision: policy.DecisionAllow}
-	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil)
+	d := NewDecorator(inner, staticCfg(decoCfg(endpoint, "closed")), nil, "admin")
 	got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionDeny, got.Decision)
 	require.Contains(t, got.Reason, "pdp_deny")
@@ -131,9 +131,9 @@ func TestDecoratorAllowThenPDPDeny(t *testing.T) {
 
 func TestDecoratorFailClosedVsOpen(t *testing.T) {
 	down := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
-	closed := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "closed")), nil)
+	closed := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "closed")), nil, "admin")
 	require.Equal(t, policy.DecisionDeny, closed.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"}).Decision)
-	open := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "open")), nil)
+	open := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(down, "open")), nil, "admin")
 	got := open.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 	require.Contains(t, got.Reason, "pdp_skipped_fail_open")
@@ -141,7 +141,7 @@ func TestDecoratorFailClosedVsOpen(t *testing.T) {
 
 func TestDecoratorCanceledCtxDeniesEvenFailOpen(t *testing.T) {
 	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), nil, "admin")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	got := d.AuthorizePrincipal(ctx, principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
@@ -163,7 +163,7 @@ func TestDecoratorCanceledCtxIgnoresFreshCache(t *testing.T) {
 	})
 	// Long ttl_allow keeps the primed entry fresh at the canceled-call time
 	// (no d.now advancement, so the entry is still fresh on the 2nd call).
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "10m", "", "")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "10m", "", "")), nil, "admin")
 
 	// Prime a FRESH allow (live ctx). Same actor/bucket/ctxReq as the canceled
 	// call below so both produce the SAME cache key (a genuine fresh hit).
@@ -222,7 +222,7 @@ func TestDecoratorTimeoutHotReload(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "admin")
 
 	timeoutCfg := func(d string) string {
 		b, _ := json.Marshal(map[string]any{
@@ -256,7 +256,7 @@ func TestDecoratorReleasesClientWhenDisabled(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "admin")
 
 	// Enabled request builds and caches the client.
 	cfg.set(decoCfg(endpoint, "closed"))
@@ -268,7 +268,7 @@ func TestDecoratorReleasesClientWhenDisabled(t *testing.T) {
 	d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Nil(t, d.client)
 	require.Empty(t, d.clientID)
-	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PDPCacheEntries), 0.0001,
+	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PDPCacheEntries.WithLabelValues("admin")), 0.0001,
 		"release() resets the entries gauge to 0 on disable")
 }
 
@@ -278,7 +278,7 @@ func TestDecoratorAuthorizeMapsServiceAccount(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "closed")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "closed")), nil, "admin")
 	d.Authorize(context.Background(), "sa-app", "", policy.RequestContext{Action: "grainfs:CredentialGet", Resource: "protocol-credential/nbd/v/d"})
 	require.Equal(t, string(principal.KindServiceAccount), got.Principal.Kind)
 	require.Equal(t, "sa-app", got.Principal.ID)
@@ -309,7 +309,7 @@ func reqCtx() policy.RequestContext {
 }
 
 func cacheTotal(result, decision string) float64 {
-	return testutil.ToFloat64(metrics.PDPCacheTotal.WithLabelValues(result, decision))
+	return testutil.ToFloat64(metrics.PDPCacheTotal.WithLabelValues("admin", result, decision))
 }
 
 func TestDecoratorCacheMissThenHit(t *testing.T) {
@@ -319,7 +319,7 @@ func TestDecoratorCacheMissThenHit(t *testing.T) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil, "admin")
 
 	// First request: cache MISS (PDP consulted, returns allow).
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -345,7 +345,7 @@ func TestDecoratorCacheDeny(t *testing.T) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "", "1m", "")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "", "1m", "")), nil, "admin")
 
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionDeny, got1.Decision)
@@ -367,7 +367,7 @@ func TestDecoratorCacheFailureNotCached(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "open", "1m", "", "")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "open", "1m", "", "")), nil, "admin")
 
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionAllow, got1.Decision) // fail-open allow, NOT cached
@@ -383,7 +383,7 @@ func TestDecoratorCacheExpiry(t *testing.T) {
 		atomic.AddInt32(&dialed, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil, "admin")
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -408,7 +408,7 @@ func TestDecoratorGraceServesAllow(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	logBuf := captureLog(t)
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "1h")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "1h")), nil, "admin")
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -440,7 +440,7 @@ func TestDecoratorGraceExpiredFallsToFailureClosed(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "5m")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "5m")), nil, "admin")
 	base := time.Now()
 	d.now = func() time.Time { return base }
 	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
@@ -464,7 +464,7 @@ func TestDecoratorGraceServesDeny(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "open", "", "1m", "1h")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "open", "", "1m", "1h")), nil, "admin")
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -482,7 +482,7 @@ func TestDecoratorCacheHitSuppressesAudit(t *testing.T) {
 	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), nil, "admin")
 
 	// Prime (this emits an audit line).
 	d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -504,7 +504,7 @@ func TestDecoratorConfigChangeClearsCache(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "admin")
 
 	cfg.set(cacheCfg(sockA, "closed", "1m", "", ""))
 	d.Authorize(context.Background(), "sa", "", reqCtx())
@@ -523,7 +523,7 @@ func TestDecoratorReEnableSameConfigRebuildsCache(t *testing.T) {
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
 	cfg := &mutableCfg{}
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "admin")
 	enabled := cacheCfg(endpoint, "closed", "1m", "", "")
 
 	cfg.set(enabled)
@@ -560,7 +560,7 @@ func TestDecoratorReachableDenyOverridesStaleAllow(t *testing.T) {
 	})
 	// ttl_allow short (1m), grace large (1h, the max) -> the entry goes stale but
 	// stays within grace. failure_policy irrelevant here (no failure occurs).
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "1h")), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "1h")), nil, "admin")
 	base := time.Now()
 	d.now = func() time.Time { return base }
 
@@ -601,7 +601,7 @@ func TestDecoratorConcurrentAuthorizeRace(t *testing.T) {
 	cfgA := cacheCfg(endpoint, "closed", "1m", "", "1h")
 	cfgB := cacheCfg(endpoint, "closed", "2m", "", "1h")
 	cfg.set(cfgA)
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "admin")
 	base := time.Now()
 	d.now = func() time.Time { return base } // fixed clock, never mutated below
 
@@ -702,7 +702,7 @@ func TestDecorator_SSRFBlocked_HardDeniesUnderFailOpen(t *testing.T) {
 		"enabled": true, "endpoint": endpoint, "failure_policy": "open",
 	})
 
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(string(cfgRaw)), nil)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(string(cfgRaw)), nil, "admin")
 	res := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "b",
 		policy.RequestContext{Action: "s3:GetObject", Resource: "b/o"})
 	if res.Decision != policy.DecisionDeny {
@@ -748,7 +748,7 @@ func TestDecoratorTokenErrorHardDeniesUnderFailOpen(t *testing.T) {
 		atomic.AddInt32(&reached, 1)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), brokenTokens{})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), brokenTokens{}, "admin")
 	res := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("u1"), "",
 		policy.RequestContext{Action: "a", Resource: "r"})
 	if res.Decision != policy.DecisionDeny {
@@ -756,6 +756,87 @@ func TestDecoratorTokenErrorHardDeniesUnderFailOpen(t *testing.T) {
 	}
 	if atomic.LoadInt32(&reached) != 0 {
 		t.Fatalf("PDP must NOT be called when the token is unusable (called %d times)", reached)
+	}
+}
+
+// TestDecorator_ParseCache_ParseOncePerRawChange proves the memoized snapshot is
+// reused across many requests when the raw config string stays stable.
+func TestDecorator_ParseCache_ParseOncePerRawChange(t *testing.T) {
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	cr := &mutableCfg{}
+	raw := decoCfg(endpoint, "closed")
+	cr.set(raw)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cr, nil, "admin")
+	for i := 0; i < 5; i++ {
+		d.Authorize(context.Background(), "sa-1", "bkt", policy.RequestContext{Action: "s3:GetObject"})
+	}
+	snap := d.parsed.Load()
+	require.NotNil(t, snap)
+	require.Equal(t, raw, snap.raw)
+}
+
+// TestDecorator_ParseCache_RestoreCoherent proves that changing the raw config
+// out-of-band (mimicking Store.Restore) causes a re-parse on the next request,
+// because GetString is the source of truth.
+func TestDecorator_ParseCache_RestoreCoherent(t *testing.T) {
+	endpointEnabled := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	// Start with a disabled config (enabled:false parses fine, no endpoint needed).
+	disabledRaw := `{"enabled":false}`
+	enabledRaw := decoCfg(endpointEnabled, "closed")
+
+	cr := &mutableCfg{}
+	cr.set(disabledRaw)
+	d := NewDecorator(&spyInner{decision: policy.DecisionDeny}, cr, nil, "admin")
+	d.Authorize(context.Background(), "sa-1", "bkt", policy.RequestContext{Action: "s3:GetObject"})
+	// We memoize ALL valid parses including enabled:false, so snapshot is present.
+	snap0 := d.parsed.Load()
+	require.NotNil(t, snap0)
+	require.False(t, snap0.cfg.Enabled)
+
+	// Flip to an ENABLED config out-of-band.
+	cr.set(enabledRaw)
+	d.Authorize(context.Background(), "sa-1", "bkt", policy.RequestContext{Action: "s3:GetObject"})
+	snap1 := d.parsed.Load()
+	require.NotNil(t, snap1)
+	require.True(t, snap1.cfg.Enabled)
+	require.Equal(t, enabledRaw, snap1.raw)
+}
+
+// BenchmarkDecorator_DisabledPath proves the disabled path (enabled:false) is
+// alloc-free: the parse-cache short-circuits before any request/cacheKey
+// construction, and release() uses the pre-bound d.mGauge.
+func BenchmarkDecorator_DisabledPath(b *testing.B) {
+	cr := &mutableCfg{}
+	cr.set(`{"enabled":false}`)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cr, nil, "admin")
+	ctx := context.Background()
+	rc := policy.RequestContext{Action: "s3:GetObject"}
+	// Warmup: parse once so the first b.N iteration is not amortized.
+	d.Authorize(ctx, "sa-1", "bkt", rc)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.Authorize(ctx, "sa-1", "bkt", rc)
+	}
+}
+
+// BenchmarkDecorator_UnconfiguredPath covers the OTHER disabled branch and the
+// most common production state: iam.pdp is unset, so loadConfig returns ok=false
+// and chain() short-circuits via release() (pre-bound d.mGauge) before any
+// parse/request build. Like the disabled-path bench, this must be 0 allocs/op.
+func BenchmarkDecorator_UnconfiguredPath(b *testing.B) {
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, missingCfg{}, nil, "admin")
+	ctx := context.Background()
+	rc := policy.RequestContext{Action: "s3:GetObject"}
+	d.Authorize(ctx, "sa-1", "bkt", rc) // warmup
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.Authorize(ctx, "sa-1", "bkt", rc)
 	}
 }
 
@@ -771,7 +852,7 @@ func TestDecoratorTokenRotationRebuildsClientAndCache(t *testing.T) {
 	})
 	tokens := &rotatingTokens{}
 	tokens.set("tok-1", "gen-1")
-	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), tokens)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(endpoint, "closed", "1m", "", "")), tokens, "admin")
 
 	// First request: cache miss -> dial #1, cached under gen-1.
 	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
