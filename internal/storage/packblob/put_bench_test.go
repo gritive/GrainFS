@@ -104,7 +104,7 @@ func BenchmarkBlobStoreAppend64KBNoCompress(b *testing.B) {
 }
 
 func BenchmarkEncryptedBlobStoreAppend64KBNoCompress(b *testing.B) {
-	bs, err := NewEncryptedBlobStore(b.TempDir(), math.MaxInt64, newPackblobBenchmarkEncryptor(b))
+	bs, err := NewDEKBlobStore(b.TempDir(), math.MaxInt64, newPackblobBenchmarkKeeper(b), benchClusterID())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func BenchmarkEncryptedBlobStoreAppend64KBNoCompress(b *testing.B) {
 }
 
 func BenchmarkEncryptedBlobStoreRead64KBNoCompress(b *testing.B) {
-	bs, err := NewEncryptedBlobStore(b.TempDir(), math.MaxInt64, newPackblobBenchmarkEncryptor(b))
+	bs, err := NewDEKBlobStore(b.TempDir(), math.MaxInt64, newPackblobBenchmarkKeeper(b), benchClusterID())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -150,14 +150,16 @@ func BenchmarkEncryptedBlobStoreRead64KBNoCompress(b *testing.B) {
 	}
 }
 
-func newPackblobBenchmarkEncryptor(b *testing.B) *encrypt.Encryptor {
+func newPackblobBenchmarkKeeper(b *testing.B) *encrypt.DEKKeeper {
 	b.Helper()
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x42}, encrypt.KEKSize), benchClusterID())
 	if err != nil {
 		b.Fatal(err)
 	}
-	return enc
+	return keeper
 }
+
+func benchClusterID() []byte { return bytes.Repeat([]byte{0x42}, 16) }
 
 func BenchmarkGetObject64KB(b *testing.B) {
 	ctx := context.Background()
@@ -234,7 +236,8 @@ func BenchmarkGetObject64KB(b *testing.B) {
 		}
 		packed, err := NewPackedBackendWithOptions(inner, b.TempDir(), int64(len(payload)+1), PackedBackendOptions{
 			Compress:  false,
-			Encryptor: newPackblobBenchmarkEncryptor(b),
+			DEKKeeper: newPackblobBenchmarkKeeper(b),
+			ClusterID: benchClusterID(),
 		})
 		if err != nil {
 			b.Fatal(err)

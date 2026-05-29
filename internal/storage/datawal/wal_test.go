@@ -19,13 +19,17 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
+// testAdapter returns a fresh DEK record sealer (active gen 0). NewDEKKeeper
+// randomizes the DEK, so a single returned sealer must be used for BOTH seal
+// and replay within a test; two separate testAdapter calls will not decrypt
+// each other's records (exercised deliberately by the wrong-key tests).
 func testAdapter(t *testing.T) datawal.RecordSealer {
 	t.Helper()
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte("k"), 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	kek := bytes.Repeat([]byte{0x51}, encrypt.KEKSize)
+	clusterID := bytes.Repeat([]byte{0xC1}, 16)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 func testDEKKeeperAdapterAtGen(t *testing.T, gen uint32) datawal.RecordSealer {
@@ -90,9 +94,7 @@ func TestWALAppendFlushReplay(t *testing.T) {
 }
 
 func TestWALEncryptedRoundTrip(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
-	require.NoError(t, err)
-	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	s := testAdapter(t)
 	w, err := datawal.Open(t.TempDir(), s, "datawal")
 	require.NoError(t, err)
 	defer w.Close()
@@ -113,9 +115,9 @@ func TestWALEncryptedRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "plaintext")
 
-	wrong, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x78}, 32))
-	require.NoError(t, err)
-	wrongAdapter := storage.NewEncryptorAdapter(wrong, make([]byte, 16))
+	// A different keeper (independent random DEK) must fail to open the
+	// records sealed by s.
+	wrongAdapter := testAdapter(t)
 	err = datawal.Replay(context.Background(), w.Dir(), 0, wrongAdapter, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 }
@@ -408,10 +410,8 @@ func TestOpenTruncatesTornTailBeforeAppending(t *testing.T) {
 }
 
 func TestEncryptedWALRejectsNilEncryptor(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
-	require.NoError(t, err)
 	dir := t.TempDir()
-	w, err := datawal.Open(dir, storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
+	w, err := datawal.Open(dir, testAdapter(t), "datawal")
 	require.NoError(t, err)
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("secret")})
 	require.NoError(t, err)
@@ -431,9 +431,7 @@ func TestPlainWALRejectsEncryptorMismatch(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
-	require.NoError(t, err)
-	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	s := testAdapter(t)
 	err = datawal.Replay(context.Background(), dir, 0, s, "datawal", func(datawal.Record) error { return nil })
 	require.Error(t, err)
 	_, err = datawal.Open(dir, s, "datawal")
@@ -513,9 +511,7 @@ func TestSegmentDiscoveryRequiresExactName(t *testing.T) {
 }
 
 func TestReplayRejectsReorderedFrames(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
-	require.NoError(t, err)
-	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	s := testAdapter(t)
 	dir := t.TempDir()
 	w, err := datawal.Open(dir, s, "datawal")
 	require.NoError(t, err)
@@ -561,9 +557,7 @@ func splitEncryptedFrame(t *testing.T, b []byte) (frame, rest []byte) {
 }
 
 func TestReplayWrongNamespaceFails(t *testing.T) {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
-	require.NoError(t, err)
-	s := storage.NewEncryptorAdapter(enc, make([]byte, 16))
+	s := testAdapter(t)
 	dir := t.TempDir()
 	w, err := datawal.Open(dir, s, datawal.NamespaceShard)
 	require.NoError(t, err)

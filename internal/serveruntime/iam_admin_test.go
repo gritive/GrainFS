@@ -44,23 +44,17 @@ func inProcessPropose(applier *iam.Applier) iam.ProposeFunc {
 	}
 }
 
-func newTestEncryptor(t *testing.T) *encrypt.Encryptor {
-	t.Helper()
-	key := bytes.Repeat([]byte{0x42}, 32)
-	enc, err := encrypt.NewEncryptor(key)
-	if err != nil {
-		t.Fatalf("NewEncryptor: %v", err)
-	}
-	return enc
-}
-
-// newTestDataEncryptor returns a storage.DataEncryptor wrapping a
-// deterministic *encrypt.Encryptor — for IAM applier/admin api fixtures
-// after R2.
+// newTestDataEncryptor returns a DEK-backed storage.DataEncryptor seam for IAM
+// applier/admin api fixtures. NewDEKKeeper randomizes the DEK, so the returned
+// seam must be used for both seal and open within one test (callers do so).
 func newTestDataEncryptor(t *testing.T) storage.DataEncryptor {
 	t.Helper()
 	clusterID := bytes.Repeat([]byte{0xcd}, 16)
-	return storage.NewEncryptorAdapter(newTestEncryptor(t), clusterID)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x42}, encrypt.KEKSize), clusterID)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 func startIAMAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {

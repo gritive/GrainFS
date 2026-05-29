@@ -27,11 +27,16 @@ func testEncryptor(t *testing.T) *encrypt.Encryptor {
 	return enc
 }
 
-// testSegEnc wraps the static test Encryptor in the DataEncryptor seam (the
-// EncryptorAdapter seals at gen 0), matching how LocalBackend builds segEnc.
+// testSegEnc returns a DEK-backed DataEncryptor seam, matching how a DEK
+// LocalBackend builds segEnc. NewDEKKeeper randomizes the DEK, so the returned
+// seam must be used for both writeEncryptedObjectFile and openEncryptedObjectFile
+// within one test (callers do exactly that).
 func testSegEnc(t *testing.T) DataEncryptor {
 	t.Helper()
-	return NewEncryptorAdapter(testEncryptor(t), make([]byte, 16))
+	cid := bytes.Repeat([]byte{0x44}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x44}, encrypt.KEKSize), cid)
+	require.NoError(t, err)
+	return NewDEKKeeperAdapter(keeper, cid)
 }
 
 func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
@@ -322,11 +327,7 @@ func corruptByteAt(t *testing.T, path string, off int64) {
 // accidentally collapses the per-segment domain (e.g. drops blob_id and
 // reuses object-level AAD), this test fails immediately.
 func TestEncryptedSegment_PerSegmentAADIsolation(t *testing.T) {
-	enc := testEncryptor(t)
-	dir := t.TempDir()
-	b, err := NewEncryptedLocalBackend(dir, enc)
-	require.NoError(t, err, "NewEncryptedLocalBackend")
-	t.Cleanup(func() { _ = b.Close() })
+	b := newDEKLocalBackend(t)
 
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "test"), "CreateBucket")

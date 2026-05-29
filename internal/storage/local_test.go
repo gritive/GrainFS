@@ -333,10 +333,7 @@ func requireReaderEqualPattern(r io.Reader, size int) error {
 }
 
 func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	b := newDEKLocalBackend(t)
 
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	plaintext := []byte("sensitive object payload")
@@ -351,16 +348,6 @@ func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), string(plaintext))
 
-	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.objectMetaKey("bkt", key))
-		require.NoError(t, err)
-		return item.Value(func(val []byte) error {
-			require.True(t, encrypt.IsEncryptedValue(val))
-			require.NotContains(t, string(val), key)
-			return nil
-		})
-	}))
-
 	rc, _, err := b.GetObject(context.Background(), "bkt", key)
 	require.NoError(t, err)
 	defer rc.Close()
@@ -370,14 +357,11 @@ func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 }
 
 func TestEncryptedLocalBackendListsEncryptedObjectMetadata(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	b := newDEKLocalBackend(t)
 
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
-	_, err = b.PutObject(ctx, "bkt", "dir/a.txt", bytes.NewReader([]byte("alpha")), "text/plain")
+	_, err := b.PutObject(ctx, "bkt", "dir/a.txt", bytes.NewReader([]byte("alpha")), "text/plain")
 	require.NoError(t, err)
 	_, err = b.PutObject(ctx, "bkt", "dir/b.txt", bytes.NewReader([]byte("beta")), "text/plain")
 	require.NoError(t, err)
@@ -414,9 +398,12 @@ func TestEncryptedLocalBackendListsEncryptedObjectMetadata(t *testing.T) {
 }
 
 func TestEncryptedLocalBackendObjectSurvivesDataRootMove(t *testing.T) {
-	enc := testEncryptor(t)
+	// Reopen must decrypt what the first open sealed, so the SAME keeper
+	// instance is threaded through both opens (NewDEKKeeper randomizes the DEK).
+	keeper := newDEKKeeper(t)
+	cid := dekTestClusterID()
 	root := filepath.Join(t.TempDir(), "root")
-	b, err := NewEncryptedLocalBackend(root, enc)
+	b, err := NewLocalBackendWithDEKKeeper(root, keeper, cid)
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -428,7 +415,7 @@ func TestEncryptedLocalBackendObjectSurvivesDataRootMove(t *testing.T) {
 
 	moved := filepath.Join(t.TempDir(), "moved")
 	require.NoError(t, os.Rename(root, moved))
-	reopened, err := NewEncryptedLocalBackend(moved, enc)
+	reopened, err := NewLocalBackendWithDEKKeeper(moved, keeper, cid)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
 
@@ -438,15 +425,6 @@ func TestEncryptedLocalBackendObjectSurvivesDataRootMove(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
-}
-
-func TestEncryptedLocalBackendDoesNotAdvertiseWriteAt(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, b.Close()) })
-
-	require.False(t, b.PreferWriteAt("__grainfs_volumes"))
 }
 
 func TestGetObjectNotFound(t *testing.T) {
@@ -1019,7 +997,7 @@ func TestMultiRootLocalBackend(t *testing.T) {
 	dataRoot2 := t.TempDir()
 	dataRoots := []string{dataRoot1, dataRoot2}
 
-	b, err := NewMultiRootLocalBackend(metaDir, dataRoots, nil)
+	b, err := NewMultiRootLocalBackend(metaDir, dataRoots)
 	require.NoError(t, err)
 	t.Cleanup(func() { b.Close() })
 

@@ -14,26 +14,19 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// newIAMRawEncryptor returns a *encrypt.Encryptor (legacy raw form) for FSM
-// state that still consumes one (alert webhook etc.). IAM-specific paths use
-// newIAMTestEncryptor (returns storage.DataEncryptor) after R2.
-func newIAMRawEncryptor(t *testing.T) *encrypt.Encryptor {
-	t.Helper()
-	key := bytes.Repeat([]byte{0xab}, 32)
-	enc, err := encrypt.NewEncryptor(key)
-	if err != nil {
-		t.Fatalf("NewEncryptor: %v", err)
-	}
-	return enc
-}
-
-// newIAMTestEncryptor returns a storage.DataEncryptor suitable for IAM
-// snapshot round-trip tests. Wraps a deterministic *encrypt.Encryptor in the
-// static EncryptorAdapter (gen always 0).
+// newIAMTestEncryptor returns a DEK-backed storage.DataEncryptor seam (active
+// gen 0) for IAM snapshot round-trip tests. NewDEKKeeper randomizes the DEK, so
+// the returned seam must be used for both seal and open within one test;
+// callers thread one instance through both the seal-side and restore-side
+// appliers, which is sufficient.
 func newIAMTestEncryptor(t *testing.T) storage.DataEncryptor {
 	t.Helper()
 	clusterID := bytes.Repeat([]byte{0xcd}, 16)
-	return storage.NewEncryptorAdapter(newIAMRawEncryptor(t), clusterID)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0xab}, encrypt.KEKSize), clusterID)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 // wireTestKEKAndDEK wires both a KEKStore (K0 active) and a DEKKeeper (gen 0

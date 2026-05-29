@@ -84,21 +84,21 @@ func NewEncryptedLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBacken
 	return newLocalBackend(root, []string{root}, enc)
 }
 
-func NewMultiRootLocalBackend(metaDir string, dataRoots []string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+func NewMultiRootLocalBackend(metaDir string, dataRoots []string) (*LocalBackend, error) {
 	if len(dataRoots) == 0 {
 		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
 	}
-	return newLocalBackend(metaDir, dataRoots, enc)
+	return newLocalBackend(metaDir, dataRoots, nil)
 }
 
-func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, enc *encrypt.Encryptor, dwal DataWAL) (*LocalBackend, error) {
+func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, dwal DataWAL) (*LocalBackend, error) {
 	if len(dataRoots) == 0 {
 		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
 	}
 	if dwal == nil {
 		return nil, fmt.Errorf("multi-root local backend data wal requires wal")
 	}
-	b, err := newLocalBackend(metaDir, dataRoots, enc)
+	b, err := newLocalBackend(metaDir, dataRoots, nil)
 	if err != nil {
 		return nil, err
 	}
