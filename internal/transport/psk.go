@@ -5,11 +5,11 @@ import (
 	"fmt"
 )
 
-// ErrEmptyClusterKey is returned when --cluster-key is empty in cluster mode.
+// ErrEmptyClusterKey is returned when cluster-key is empty in cluster mode.
 // Treat as fatal — refuse to start.
 var ErrEmptyClusterKey = errors.New("cluster key is empty")
 
-// ErrShortClusterKey wraps an error when --cluster-key is shorter than the
+// ErrShortClusterKey wraps an error when cluster-key is shorter than the
 // recommended length. Treat as warning — startup proceeds but the operator
 // chose a weak key. Emit log.Warn at the call site.
 var ErrShortClusterKey = errors.New("cluster key is shorter than recommended")

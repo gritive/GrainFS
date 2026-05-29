@@ -344,12 +344,32 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   the self-seed e2e. Investigate whether solo (RF=1) nodes can restart at all in the
   current KEK/DEK readiness path; add a restart e2e once fixed. [P2]
 
-- [ ] **env/file reader for the `--cluster-key` override path (companion to genesis self-seed)**.
-  Genesis self-seed (shipped) removes key handling for the common path, but the
-  legacy/deterministic `--cluster-key` override is still a CLI literal (visible in
-  `ps`/`/proc/<pid>/cmdline`/shell history), which violates the project rule "secrets via
-  env or file path only". Add `--cluster-key-file <path>` and/or `GRAINFS_CLUSTER_KEY`
-  env (mirror `iam pdp set-token --token-file` / `GRAINFS_INVITE_BUNDLE`). [P3]
+- [ ] **`wipeSoloRaftState` does not clear `keys.d/raft-store.key.enc` on solo->join (found 2026-05-29)**.
+  A solo node that has booted self-seals its node-local raft-store key under its OWN
+  KEK. When converting to a cluster member via runtime `grainfs join` (after staging the
+  peer's `keys/0.key`), the orphaned `keys.d/raft-store.key.enc` can no longer be
+  AEAD-opened (`cipher: message authentication failed`) and the rejoin boot fails.
+  `wipeSoloRaftState` (`internal/serveruntime/boot_phases.go`) backs up `meta_raft`/`raft`/
+  `shared-raft-log` but not the raft-store key. Landed with #635 (raft-store sealing);
+  uncaught because no e2e drove the real `grainfs join` CLI. Confirmed orthogonal to the
+  cluster-key-input removal via the invite-join (stages KEK pre-boot → green) vs grainfs
+  join (stages KEK post-solo-boot → fails) asymmetry. Fix: have `wipeSoloRaftState` also
+  clear/re-derive the raft-store key (mind the `.pre-join-backup` stores sealed under the
+  old key). A Pending e2e `Cluster runtime join staged PSK` (tests/e2e/
+  cluster_runtime_join_staged_psk_test.go) is ready to un-Pend once fixed. [P3]
+
+- [ ] **Retire the clientless KEK-challenge server admission gate**. Offline `grainfs
+  cluster join` was removed (v0.0.460.0); its KEK-challenge client is gone, but the
+  server-side `MetaChallengeReceiver` + the HMAC challenge path in
+  `MetaJoinReceiver.HandleJoin` (`internal/cluster/`) remain, now reachable only by the
+  retired client. They are entangled with the live invite-join receiver, so disentangle
+  and remove the clientless-dead admission path. [P3]
+
+- [ ] **Optionally retire runtime `grainfs join` in favor of invite-join**. Invite-join is
+  strictly more capable for secret provisioning and works (13 e2e specs green), whereas
+  `grainfs join` solo->join is currently broken by the raft-store.key.enc bug above. If
+  invite-join covers all production join workflows, retire `cmd/grainfs/join.go` and its
+  `.join-pending`/`/v1/cluster/join` server path. [P3]
 
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK

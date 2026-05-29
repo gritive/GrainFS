@@ -105,12 +105,15 @@ start_node() {
     extra+=(--pprof-port "$(pprof_port "$i")")
   fi
 
+  # Pre-stage the cluster transport PSK on disk (replaces the removed
+  # cluster-key flag). Idempotent; must precede serve.
+  mkdir -p "$BENCH_DIR/n$i/keys.d"
+  printf '%s\n' "bench-iceberg-cluster-key" >"$BENCH_DIR/n$i/keys.d/current.key"
   "$BINARY" serve \
     --data "$BENCH_DIR/n$i" \
     --port "$(http_port "$i")" \
     --node-id "bench-iceberg-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
-    --cluster-key "bench-iceberg-cluster-key" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \

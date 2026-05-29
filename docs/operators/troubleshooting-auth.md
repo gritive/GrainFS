@@ -84,28 +84,28 @@ scp nodeA:<data>/keys/0.key  <data>/keys/0.key
 scp nodeA:<data>/cluster.id  <data>/cluster.id
 chmod 0600 <data>/keys/0.key <data>/cluster.id
 
-# Option B: decommission and rejoin before starting the replacement node
+# Option B: stage the cluster transport key + identity, then runtime-join
 rm -rf <data>
-mkdir -p <data>/keys
-scp nodeA:<data>/keys/0.key  <data>/keys/0.key
-scp nodeA:<data>/cluster.id  <data>/cluster.id
-chmod 0600 <data>/keys/0.key <data>/cluster.id
-grainfs cluster join <healthy-peer>:7001 \
-  --data <data> \
-  --node-id <replacement-node-id> \
-  --bind-addr <replacement-node>:7001 \
-  --cluster-key "$CLUSTER_KEY"
+mkdir -p <data>/keys <data>/keys.d
+scp nodeA:<data>/keys/0.key          <data>/keys/0.key
+scp nodeA:<data>/cluster.id          <data>/cluster.id
+scp nodeA:<data>/keys.d/current.key  <data>/keys.d/current.key
+chmod 0600 <data>/keys/0.key <data>/cluster.id <data>/keys.d/current.key
 grainfs serve \
   --data <data> \
   --node-id <replacement-node-id> \
-  --raft-addr <replacement-node>:7001 \
-  --cluster-key "$CLUSTER_KEY"
+  --raft-addr <replacement-node>:7001 &
+grainfs join <healthy-peer>:7001 \
+  --endpoint <data>/admin.sock \
+  --confirm-staged-keys
 ```
 
-`grainfs cluster join` is the offline bootstrap path for a not-yet-running
-node. If the node is already running and has an admin socket, use
-`grainfs join <healthy-peer>:7001 --endpoint <data>/admin.sock --confirm-staged-keys`
-instead — Phase A requires the operator acknowledge the staged keystore.
+The runtime `grainfs join` path requires the node to be running (admin socket
+present) and the operator to have staged the keystore (`keys/0.key`), cluster
+identity (`cluster.id`), and cluster transport key (`keys.d/current.key`) from a
+healthy peer; `--confirm-staged-keys` acknowledges they are in place. The
+offline `cluster join` command has been retired in favor of invite-join and the
+staged-key runtime join above.
 
 ## "KEK does not decrypt FSM DEK"
 

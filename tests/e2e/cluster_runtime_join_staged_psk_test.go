@@ -19,7 +19,7 @@ import (
 
 // Runtime `grainfs join` with a staged keys.d/current.key (real CLI).
 //
-// Covers the staged-PSK runtime-join path now that --cluster-key is gone: a
+// Covers the staged-PSK runtime-join path now that cluster-key is gone: a
 // solo self-seeded node converts into a cluster member by staging the seed's
 // keystore (keys/0.key), cluster identity (cluster.id), AND transport PSK
 // (keys.d/current.key) from a healthy peer, then invoking the REAL `grainfs
@@ -83,7 +83,7 @@ var _ = ginkgo.Describe("Cluster runtime join staged PSK", func() {
 	// raft-store.key.enc can no longer be AEAD-opened ("cipher: message
 	// authentication failed") and the rejoin boot fails. This landed with #635
 	// (raft-store sealing) and was uncaught because no e2e drove the real
-	// `grainfs join` CLI. The asymmetry confirms it is orthogonal to --cluster-key
+	// `grainfs join` CLI. The asymmetry confirms it is orthogonal to cluster-key
 	// removal: invite-join stages the KEK BEFORE first boot (raft-store.key.enc
 	// derives under the right KEK → 13 specs pass), while `grainfs join` stages it
 	// AFTER a solo boot. The staged-PSK path itself works; the gap is KEK staging
@@ -94,7 +94,7 @@ var _ = ginkgo.Describe("Cluster runtime join staged PSK", func() {
 	ginkgo.PIt("a solo node joins via real grainfs join after staging keys.d/current.key", func() {
 		t := ginkgo.GinkgoTB()
 
-		// 1. Seed: solo self-seed (no --cluster-key). It becomes the leader and
+		// 1. Seed: solo self-seed (no cluster-key). It becomes the leader and
 		//    accepts a .join-pending joiner.
 		seed := &rjNode{nodeID: "rj-seed", dataDir: shortTempDir(t), httpPort: freePort(), raftPort: freePort()}
 		seed.httpURL = fmt.Sprintf("http://127.0.0.1:%d", seed.httpPort)
@@ -103,7 +103,7 @@ var _ = ginkgo.Describe("Cluster runtime join staged PSK", func() {
 		waitSocketReady(t, filepath.Join(seed.dataDir, "admin.sock"), 30*time.Second)
 		bootstrapAdminViaUDSAnyResult(t, []string{seed.dataDir}, 30*time.Second)
 
-		// 2. Joiner: solo self-seed (no --cluster-key). It generates its OWN
+		// 2. Joiner: solo self-seed (no cluster-key). It generates its OWN
 		//    keys/0.key, cluster.id, and keys.d/current.key.
 		joiner := &rjNode{nodeID: "rj-joiner", dataDir: shortTempDir(t), httpPort: freePort(), raftPort: freePort()}
 		joiner.httpURL = fmt.Sprintf("http://127.0.0.1:%d", joiner.httpPort)

@@ -69,7 +69,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	// transport to pull + stage the cluster bootstrap secrets (KEK generations,
 	// cluster.id, transport PSK) BEFORE the earliest secret gate. It writes back opts.NodeID and
 	// opts.ClusterKey so the normal boot resolves the identical node id and the
-	// --cluster-key gate passes in-memory. The Phase-2 membership ACK runs
+	// cluster-key gate passes in-memory. The Phase-2 membership ACK runs
 	// post-boot in bootWALAndForwardersPart1. Staging targets primaryDataDir so the
 	// Phase-1 staging dir == Phase-2 read dir == cfg.DataDir on multi-disk.
 	inviteJoin, err := maybeInviteJoin(ctx, &opts, primaryDataDir)

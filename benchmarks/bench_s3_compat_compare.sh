@@ -324,7 +324,6 @@ start_grainfs_single() {
   "$BINARY" serve \
     --data "$data_arg" \
     --port "$port" \
-    --cluster-key "bench-s3-compat-key" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \
@@ -386,12 +385,15 @@ start_grainfs_cluster() {
     if [[ "$BENCH_PPROF" == "1" ]]; then
       extra+=(--pprof-port "${pprof_ports[$zero_idx]}")
     fi
+    # Pre-stage the cluster transport PSK on disk (replaces the removed
+    # cluster-key flag). Idempotent; must precede serve.
+    mkdir -p "$cluster_dir/n${node_idx}/keys.d"
+    printf '%s\n' "bench-s3-compat-cluster-key" >"$cluster_dir/n${node_idx}/keys.d/current.key"
     "$BINARY" serve \
       --data "$cluster_dir/n${node_idx}" \
       --port "${http_ports[$zero_idx]}" \
       --node-id "bench-node-${node_idx}" \
       --raft-addr "127.0.0.1:${raft_ports[$zero_idx]}" \
-      --cluster-key "bench-s3-compat-cluster-key" \
       $(bench_encryption_args) \
       --nfs4-port 0 \
       --nbd-port 0 \

@@ -139,7 +139,7 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	clusterKey := "COLIMA-FIXTURE-CLUSTER-KEY"
 
 	// Pre-seed the cluster transport PSK on every node's disk (replaces the
-	// removed --cluster-key flag). Must run BEFORE any node boots, else a node
+	// removed cluster-key flag). Must run BEFORE any node boots, else a node
 	// self-seeds a different key and the cluster cannot form.
 	for i := 0; i < numNodes; i++ {
 		if err := transport.NewKeystore(c.DataDirs[i]).WriteCurrent(clusterKey); err != nil {

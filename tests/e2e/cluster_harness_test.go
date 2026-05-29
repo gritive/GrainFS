@@ -214,7 +214,7 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 	}
 
 	// Pre-seed the cluster transport PSK on every node's disk (replaces the
-	// removed --cluster-key flag). WriteCurrent creates keys.d/. Must run BEFORE
+	// removed cluster-key flag). WriteCurrent creates keys.d/. Must run BEFORE
 	// any node boots, else a node self-seeds a different key and the cluster
 	// cannot form. wipeSoloRaftState (join mode) does not touch keys.d/.
 	for i := range c.dataDirs {

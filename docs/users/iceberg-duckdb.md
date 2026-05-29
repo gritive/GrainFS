@@ -54,8 +54,7 @@ and local `s3.endpoint`, but omit reusable S3 secrets.
 ## Start `GrainFS`
 
 ```sh
-CLUSTER_KEY=$(openssl rand -hex 32)
-grainfs serve --data ./data --port 9000 --cluster-key "$CLUSTER_KEY" &
+grainfs serve --data ./data --port 9000 &
 
 # Bootstrap: create the first service account and note the access_key / secret_key
 grainfs iam sa create admin --endpoint ./data/admin.sock

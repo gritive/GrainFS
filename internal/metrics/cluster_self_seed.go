@@ -6,7 +6,7 @@ import (
 )
 
 // ClusterSelfSeeded is set to 1 when a genesis node self-generated its cluster
-// transport key at boot (no --cluster-key / invite-bundle / peers, empty data
+// transport key at boot (no cluster-key / invite-bundle / peers, empty data
 // dir). Operators running unattended automation alert on this to catch an
 // accidental fork (e.g. a node meant to invite-join but missing its bundle): the
 // startup WARN log is invisible to automation, this gauge is not.

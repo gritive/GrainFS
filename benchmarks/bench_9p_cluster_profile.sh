@@ -70,12 +70,15 @@ raft_addr() {
 
 start_node() {
   local i="$1"
+  # Pre-stage the cluster transport PSK on disk (replaces the removed
+  # cluster-key flag). Idempotent; must precede serve.
+  mkdir -p "$BENCH_DIR/n$i/keys.d"
+  printf '%s\n' "bench-9p-cluster-key" >"$BENCH_DIR/n$i/keys.d/current.key"
   "$BINARY" serve \
     --data "$BENCH_DIR/n$i" \
     --port "${HTTP_PORTS[$i]}" \
     --node-id "bench-9p-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
-    --cluster-key "bench-9p-cluster-key" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \

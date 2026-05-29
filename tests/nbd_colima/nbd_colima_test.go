@@ -23,7 +23,6 @@ var (
 	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
 	nbdVolSize     = envOrDefault("NBD_VOL_SIZE", "64MiB")
 	nbdDev         = envOrDefault("NBD_DEV", "/dev/nbd0")
-	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	nbdExportName  string
 )
 
@@ -110,7 +109,6 @@ func TestMain(m *testing.M) {
 		"--port", colimaHTTPPort,
 		"--nbd-port", colimaNBDPort,
 		"--nfs4-port", "0",
-		"--cluster-key", clusterKey,
 	}
 
 	cmd := exec.Command(binary, args...)

@@ -50,7 +50,7 @@ func wipeSoloRaftState(dataDir string) error {
 }
 
 // bootValidateConfig validates flag combinations, resolves nodeID, computes
-// clusterMode (always true — --cluster-key required in all modes), defaults
+// clusterMode (always true — cluster-key required in all modes), defaults
 // raftAddr for solo mode, and stages metaDir/raftDir paths. No I/O on DB or
 // network; the only side effect is GenerateNodeID writing the node-id file
 // when nodeID is empty.
@@ -84,7 +84,7 @@ func bootValidateConfig(state *bootState) error {
 		}
 	}
 
-	// metaDir/raftDir/priorState are computed BEFORE the --cluster-key gate so the
+	// metaDir/raftDir/priorState are computed BEFORE the cluster-key gate so the
 	// genesis self-seed path (resolveOrSeedClusterKey, wired in below the gate
 	// block) can consult !priorState and the dir paths. priorState is captured
 	// before any DB phase (bootOpenMetaDB) populates <dataDir>/meta: true if meta
@@ -97,7 +97,7 @@ func bootValidateConfig(state *bootState) error {
 	state.raftDir = filepath.Join(cfg.DataDir, "raft")
 	state.priorState = dirHasContent(state.metaDir) || dirHasContent(state.raftDir)
 
-	// Genesis self-seed: a fresh node with no --cluster-key / invite bundle /
+	// Genesis self-seed: a fresh node with no cluster-key / invite bundle /
 	// peers and an empty data dir generates and persists its own transport key,
 	// so operators never hand-carry one. Runs BEFORE the gate so the generated
 	// key satisfies ValidateClusterKey. Fail-closed on probe errors. See

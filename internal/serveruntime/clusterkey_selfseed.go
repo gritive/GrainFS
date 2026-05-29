@@ -19,7 +19,7 @@ import (
 // (return false/absent on any error) because their other consumers
 // (wireDEKKeeper, isGenesisBoot, gateInviteJoin) want that. Self-seed must NOT
 // reuse them: a populated data dir on a transiently failing or mis-permissioned
-// mount, restarted with no --cluster-key, would be misread as "fresh" and
+// mount, restarted with no cluster-key, would be misread as "fresh" and
 // self-seed a new identity OVER the existing one. These local probes distinguish
 // os.ErrNotExist (truly absent) from any other error (surfaced → caller blocks).
 
@@ -141,7 +141,7 @@ func selfSeedDecision(state *bootState) (bool, error) {
 	return true, nil
 }
 
-// resolveOrSeedClusterKey runs just before the --cluster-key gate in
+// resolveOrSeedClusterKey runs just before the cluster-key gate in
 // bootValidateConfig. It loads an existing disk key (restart), self-seeds a fresh
 // genesis, or leaves the key empty so the existing ErrEmptyClusterKey gate fires.
 //
@@ -159,7 +159,7 @@ func resolveOrSeedClusterKey(state *bootState) error {
 		return err
 	}
 	if have {
-		// Restart: load the disk key so the --cluster-key gate (which runs before
+		// Restart: load the disk key so the cluster-key gate (which runs before
 		// bootQUICTransport's ResolveClusterKey) passes; ResolveClusterKey then
 		// sees flag == disk and returns disk with no conflict.
 		state.cfg.ClusterKey = diskKey
@@ -185,7 +185,7 @@ func resolveOrSeedClusterKey(state *bootState) error {
 		Str("node_id", state.nodeID).
 		Str("data_dir", state.cfg.DataDir).
 		Bool("self_seeded", true).
-		Msg("genesis self-seed: no --cluster-key/invite-bundle/peers and data dir empty — " +
+		Msg("genesis self-seed: no cluster-key/invite-bundle/peers and data dir empty — " +
 			"bootstrapping a NEW single-node cluster with a self-generated key. " +
 			"If you meant to JOIN an existing cluster, stop and set GRAINFS_INVITE_BUNDLE.")
 	return nil

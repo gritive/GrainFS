@@ -88,7 +88,7 @@ func startCompatCluster(t *testing.T, binaries []string) *compatCluster {
 	}
 
 	// Pre-seed the cluster transport PSK on every node's disk (replaces the
-	// removed --cluster-key flag). Must run BEFORE any node boots.
+	// removed cluster-key flag). Must run BEFORE any node boots.
 	for i := 0; i < n; i++ {
 		require.NoError(t, transport.NewKeystore(c.dataDirs[i]).WriteCurrent("COMPAT-KEY"),
 			"pre-seed keys.d/current.key for node %d", i)

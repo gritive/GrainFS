@@ -255,7 +255,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions, dataDir string) (*
 	decision := gateInviteJoin(dataDir, token != "")
 	if decision == inviteNormalBoot {
 		// Stale-bundle no-op resume: a fully-joined node restarted with the
-		// (now-consumed) bundle env still set hits the same --cluster-key gate as
+		// (now-consumed) bundle env still set hits the same cluster-key gate as
 		// inviteResume — bootValidateConfig runs BEFORE ResolveClusterKey reads
 		// disk, so an empty flag PSK trips ErrEmptyClusterKey. Load the PSK that
 		// Phase-1 mirrored to keys.d/current.key. ReadCurrent on a truly fresh
@@ -327,7 +327,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions, dataDir string) (*
 // the gate classifies inviteResume (artifacts complete but the ACK never
 // landed), regardless of whether the bundle env is set on this restart. It also
 // populates opts.ClusterKey from the transport PSK Phase-1 mirrored to
-// keys.d/current.key, because bootValidateConfig's --cluster-key gate runs
+// keys.d/current.key, because bootValidateConfig's cluster-key gate runs
 // BEFORE bootQUICTransport's ResolveClusterKey reads disk.
 func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJoinState, error) {
 	rec, ok := readInvitePendingSentinel(dataDir)
@@ -541,7 +541,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	}
 
 	// 9. set a transport construction key in memory so bootValidateConfig's
-	// --cluster-key gate passes, and mirror it to keys.d/current.key for crash
+	// cluster-key gate passes, and mirror it to keys.d/current.key for crash
 	// resume. In a post-drop cluster the leader intentionally omits the revoked
 	// cluster PSK; use a local random placeholder instead. bootQUICTransport
 	// immediately calls FlipPresent+SetDropped for post-drop joiners, so this

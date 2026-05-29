@@ -24,7 +24,7 @@ func ResolveClusterKey(dataDir, flagKey string) (string, string, error) {
 
 	switch {
 	case hasDisk && flagKey != "" && diskKey != flagKey:
-		warn := fmt.Sprintf("--cluster-key flag (%d chars) does not match keys.d/current.key (%d chars); disk wins. Reconcile via `cluster rotate-key` or update flag to match disk.", len(flagKey), len(diskKey))
+		warn := fmt.Sprintf("supplied cluster key (%d chars) does not match keys.d/current.key (%d chars); disk wins. Reconcile via `cluster rotate-key` or update the supplied key to match disk.", len(flagKey), len(diskKey))
 		return diskKey, warn, nil
 	case hasDisk:
 		return diskKey, "", nil
