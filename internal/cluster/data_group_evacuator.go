@@ -85,7 +85,7 @@ func (e *DataGroupEvacuator) reconcileOnce(ctx context.Context) {
 		}
 		if err := e.mover.EvacuateVoter(ctx, tgt.groupID, tgt.revokedNode, replacement); err != nil {
 			if errors.Is(err, ErrLeadershipTransferred) {
-				e.logger.Info().Str("group", tgt.groupID).
+				e.logger.Info().Str("group", tgt.groupID).Str("revoked", tgt.revokedNode).
 					Msg("evacuator: leadership transferred; new leader will retry")
 				continue
 			}
