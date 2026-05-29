@@ -10,10 +10,10 @@ import (
 )
 
 func BenchmarkLocalBackendPutObject5MiBEncrypted(b *testing.B) {
-	key := bytes.Repeat([]byte("k"), 32)
-	enc, err := encrypt.NewEncryptor(key)
+	cid := bytes.Repeat([]byte{0x88}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x88}, encrypt.KEKSize), cid)
 	require.NoError(b, err)
-	backend, err := NewEncryptedLocalBackend(b.TempDir(), enc)
+	backend, err := NewLocalBackendWithDEKKeeper(b.TempDir(), keeper, cid)
 	require.NoError(b, err)
 	b.Cleanup(func() {
 		require.NoError(b, backend.Close())

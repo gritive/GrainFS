@@ -44,12 +44,7 @@ func TestRangeGet_ChunkBoundaries(t *testing.T) {
 		{
 			name: "encrypted",
 			make: func(t *testing.T) *LocalBackend {
-				enc := testEncryptor(t)
-				b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-				if err != nil {
-					t.Fatalf("NewEncryptedLocalBackend: %v", err)
-				}
-				t.Cleanup(func() { _ = b.Close() })
+				b := newDEKLocalBackend(t)
 				if err := b.CreateBucket(context.Background(), "test"); err != nil {
 					t.Fatalf("CreateBucket: %v", err)
 				}

@@ -30,7 +30,7 @@ type WAL struct {
 	dir       string
 	sealer    RecordSealer
 	namespace string
-	dekGen    uint32 // generation pinned for this WAL's active files (0 under EncryptorAdapter)
+	dekGen    uint32 // generation pinned for this WAL's active files (active DEKKeeper gen)
 
 	mu            sync.Mutex
 	file          walFile

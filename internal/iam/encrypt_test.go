@@ -9,22 +9,23 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// staticTestEncryptor returns an EncryptorAdapter over a deterministic 32-byte
-// key — gen is always 0 (the EncryptorAdapter convention).
+// staticTestEncryptor returns a DEK-backed DataEncryptor seam at active gen 0.
+// NewDEKKeeper randomizes the DEK, so the returned seam must be used for both
+// wrap and unwrap within one test (every caller here does so).
 func staticTestEncryptor(t testing.TB) storage.DataEncryptor {
 	t.Helper()
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(t, err)
 	clusterID := []byte("0123456789abcdef")
-	return storage.NewEncryptorAdapter(enc, clusterID)
+	kek := make([]byte, encrypt.KEKSize)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 // newTestEncryptor is a back-compat alias for the many test sites that still
-// reference it. Kept until T5/T6 finish updating admin_api/snapshot tests.
+// reference it.
 func newTestEncryptor(t testing.TB) storage.DataEncryptor {
 	return staticTestEncryptor(t)
 }
@@ -34,7 +35,7 @@ func TestWrapUnwrapSecret_RoundTrip(t *testing.T) {
 	ct, gen, err := WrapSecret(de, "sa-1", "AKIA-A", "secret123")
 	require.NoError(t, err)
 	require.NotEmpty(t, ct)
-	require.Equal(t, uint32(0), gen, "EncryptorAdapter returns gen 0")
+	require.Equal(t, uint32(0), gen, "DEK adapter seals at active gen 0")
 
 	pt, err := UnwrapSecret(de, "sa-1", "AKIA-A", gen, ct)
 	require.NoError(t, err)

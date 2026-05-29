@@ -14,7 +14,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -39,7 +38,6 @@ type Manager struct {
 	backend   storage.Snapshotable
 	nextSeq   atomic.Uint64
 	walDir    string // optional: path to WAL directory for PITR
-	walEnc    *encrypt.Encryptor
 	refs      RefSink
 	kek       KEKSource
 	clusterID [16]byte
@@ -49,23 +47,6 @@ type Manager struct {
 // snapshotDir is the directory where snapshot files are stored.
 // walDir is optional: if non-empty, enables PITR via WAL replay.
 func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string, kek KEKSource, clusterID [16]byte) (*Manager, error) {
-	return NewManagerWithEncryptor(snapshotDir, backend, walDir, nil, kek, clusterID)
-}
-
-// NewManagerWithRefSink is NewManagerWithEncryptor plus a chunk-ref sink so
-// snapshot freeze pins (AddRef) and delete unpins (RemoveRef) the frozen chunks.
-func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor, kek KEKSource, clusterID [16]byte, refs RefSink) (*Manager, error) {
-	m, err := NewManagerWithEncryptor(snapshotDir, backend, walDir, enc, kek, clusterID)
-	if err != nil {
-		return nil, err
-	}
-	m.refs = refs
-	return m, nil
-}
-
-// NewManagerWithEncryptor creates a Manager that can replay encrypted WAL
-// entries during PITR when walDir is configured.
-func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor, kek KEKSource, clusterID [16]byte) (*Manager, error) {
 	if kek == nil {
 		return nil, fmt.Errorf("snapshot: NewManager: KEK source required")
 	}
@@ -75,12 +56,23 @@ func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, w
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
-	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir, walEnc: enc, kek: kek, clusterID: clusterID}
+	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir, kek: kek, clusterID: clusterID}
 	maxSeq, err := maxSnapshotSeqFromFilenames(snapshotDir)
 	if err != nil {
 		return nil, err
 	}
 	m.nextSeq.Store(maxSeq)
+	return m, nil
+}
+
+// NewManagerWithRefSink is NewManager plus a chunk-ref sink so snapshot freeze
+// pins (AddRef) and delete unpins (RemoveRef) the frozen chunks.
+func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, walDir string, kek KEKSource, clusterID [16]byte, refs RefSink) (*Manager, error) {
+	m, err := NewManager(snapshotDir, backend, walDir, kek, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	m.refs = refs
 	return m, nil
 }
 

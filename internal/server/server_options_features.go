@@ -1,7 +1,6 @@
 package server
 
 import (
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
@@ -15,12 +14,6 @@ import (
 func WithDataDir(dir string) Option {
 	return func(s *Server) {
 		s.dataDir = dir
-	}
-}
-
-func WithSnapshotEncryptor(enc *encrypt.Encryptor) Option {
-	return func(s *Server) {
-		s.snapshotEnc = enc
 	}
 }
 

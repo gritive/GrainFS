@@ -341,12 +341,6 @@ type MetaFSM struct {
 	// lock-free via atomic.Pointer.
 	clusterCfg *ClusterConfig
 
-	// encryptor is used to gate cluster-config patches that carry a wrapped
-	// alert-webhook secret. nil means the encryptor has not been wired; such
-	// patches are rejected at apply time (see applyClusterConfigPatch). Wired
-	// via SetEncryptor before the raft log starts replaying.
-	encryptor *encrypt.Encryptor
-
 	// policyStore is the IAM policy document store. nil until SetPolicyStore is
 	// called; PolicyPut/PolicyDelete commands are safe no-ops when nil.
 	policyStore *policystore.InMemoryStore

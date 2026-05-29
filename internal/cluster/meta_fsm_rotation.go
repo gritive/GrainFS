@@ -18,19 +18,6 @@ import (
 // so it is an unambiguous sentinel.
 const dekBootstrapSentinel = math.MaxUint32
 
-// SetEncryptor wires the cluster-wide encryptor used to gate cluster-config
-// patches carrying wrapped secrets. Must be called before the raft log starts
-// replaying. nil means cluster-config patches with a wrapped secret will be
-// rejected at apply.
-func (f *MetaFSM) SetEncryptor(e *encrypt.Encryptor) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.encryptor = e
-}
-
-// Encryptor returns the registered encryptor, or nil if it has not been wired.
-func (f *MetaFSM) Encryptor() *encrypt.Encryptor { return f.encryptor }
-
 // SetDEKKeeper wires the DEK keeper into the MetaFSM. Must be called before
 // the apply loop starts — either pre-Start during bootMetaRaftWiring, or via
 // MetaRaft.Start's preApplyLoop callback (which runs AFTER Restore but BEFORE

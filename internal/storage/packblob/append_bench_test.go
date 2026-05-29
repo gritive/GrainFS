@@ -12,12 +12,12 @@ import (
 // change: the seam's allocating Seal churned a fresh ciphertext + AAD per call;
 // SealTo + the reintroduced sealed/AAD pools should recover that.
 func BenchmarkAppendEncrypted(b *testing.B) {
-	key32 := bytes.Repeat([]byte{0x66}, 32)
-	enc, err := encrypt.NewEncryptor(key32)
+	cid := bytes.Repeat([]byte{0x66}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x66}, encrypt.KEKSize), cid)
 	if err != nil {
 		b.Fatal(err)
 	}
-	bs, err := NewEncryptedBlobStore(b.TempDir(), 256*1024*1024, enc)
+	bs, err := NewDEKBlobStore(b.TempDir(), 256*1024*1024, keeper, cid)
 	if err != nil {
 		b.Fatal(err)
 	}

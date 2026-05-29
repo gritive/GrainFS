@@ -97,10 +97,7 @@ func TestAbortMultipartUpload(t *testing.T) {
 }
 
 func TestEncryptedMultipartPartFilesHidePlaintext(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	b := newDEKLocalBackend(t)
 
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bkt", "obj", "text/plain")
@@ -133,10 +130,7 @@ func TestEncryptedMultipartPartFilesHidePlaintext(t *testing.T) {
 }
 
 func TestEncryptedMultipartCompleteStreamsMultiplePartsOutOfOrder(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	b := newDEKLocalBackend(t)
 
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
@@ -171,10 +165,7 @@ func TestEncryptedMultipartCompleteStreamsMultiplePartsOutOfOrder(t *testing.T) 
 }
 
 func TestEncryptedMultipartUploadsListDecryptsMetadata(t *testing.T) {
-	enc := testEncryptor(t)
-	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, b.Close()) })
+	b := newDEKLocalBackend(t)
 
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))

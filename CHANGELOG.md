@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.452.0] - 2026-05-29
+## [0.0.454.0] - 2026-05-29
 
 ### Changed
 
@@ -14,6 +14,25 @@
   instances and is now accurate per scope. The decorator additionally memoizes its
   parsed `iam.pdp` config so a disabled PDP adds no per-request JSON parse. No
   config or API change.
+
+## [0.0.453.0] - 2026-05-29
+
+### Changed
+
+- Internal at-rest encryption cleanup: retired the legacy static `EncryptorAdapter`
+  data-at-rest type and `NewEncryptorAdapter`, plus the dead static encryptor
+  setters (`FSM`/`MetaFSM` `SetEncryptor`, `putpipeline` `cfg.Encryptor`, and the
+  `NewManagerWithEncryptor` static parameter). All data sealing already flowed
+  through the generation-aware DEK keeper; the remaining test fixtures were
+  migrated to it. No change to on-disk format or runtime behavior.
+
+## [0.0.452.0] - 2026-05-29
+
+### Changed
+
+- The cluster evacuator's `leadership transferred` log line now records the
+  revoked node id, matching its sibling eviction log lines so operators can
+  correlate a leadership self-transfer with the node being revoked.
 
 ## [0.0.451.0] - 2026-05-29
 

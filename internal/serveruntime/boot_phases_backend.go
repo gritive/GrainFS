@@ -125,7 +125,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	if len(state.clusterID) != 16 {
 		return fmt.Errorf("boot: snapshot KEK wiring: cluster id len %d", len(state.clusterID))
 	}
-	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), nil, state.kekStore, [16]byte(state.clusterID), 30*time.Second)
+	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.kekStore, [16]byte(state.clusterID), 30*time.Second)
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}

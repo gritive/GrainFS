@@ -102,16 +102,18 @@ func BenchmarkWALAppend(b *testing.B) {
 
 func BenchmarkWALAppendEncrypted(b *testing.B) {
 	sizes := []int{1024, 64 * 1024}
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	clusterID := bytes.Repeat([]byte{0xC1}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x51}, encrypt.KEKSize), clusterID)
 	if err != nil {
 		b.Fatal(err)
 	}
+	sealer := storage.NewDEKKeeperAdapter(keeper, clusterID)
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
 			payload := make([]byte, size)
 			_, _ = io.ReadFull(rand.Reader, payload)
 			dir := filepath.Join(b.TempDir(), "datawal")
-			w, err := datawal.Open(dir, storage.NewEncryptorAdapter(enc, make([]byte, 16)), "datawal")
+			w, err := datawal.Open(dir, sealer, "datawal")
 			if err != nil {
 				b.Fatal(err)
 			}
