@@ -17,21 +17,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
      no legacy ciphertext to support). Current format = **8**.
-   - [ ] **putPipeline prod reactivation (F1 durability).** putPipeline dispatch is wired but
-     dormant in prod (gate `putPipelineEnabled` defaults false; only the integration test enables
-     it). Before enabling in prod: putPipeline acks on early K-shard quorum
-     (`putpipeline/pipeline.go:240`) + defers fsync to a batched WAL commit (`drive.go` `skipFsync`,
-     `commit.go:120`), whereas the spooled path flushes the data WAL synchronously before the raft
-     metadata propose. Verify PutShard does not let metadata commit before shard durability before
-     enabling. Its own slice.
-     - **Path containment must be added before enable.** The `DriveActor` builds the shard dir
-       directly as `filepath.Join(d.dataDir, entry.bucket, entry.shardKey)` then `MkdirAll`+writes
-       (`putpipeline/drive.go:149`), bypassing the `ShardService` containment chokepoint
-       (`getShardDir`/`ShardPathUnderDataDir`). A traversal bucket/key would escape `d.dataDir`. S3
-       ingress (`ValidBucketName`) blocks the public vector and the path is gate-off today, but the
-       reactivation slice MUST route this write through (or replicate) the chokepoint validation
-       before flipping the gate. Same gap class as the shard-path containment fixes (#663 + bucket
-       segment guard).
    - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
      DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
      (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path

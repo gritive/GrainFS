@@ -165,9 +165,13 @@ func New(cfg Config) *Pipeline {
 	return p
 }
 
-// Put dispatches one PUT through the pipeline. Blocks until K data-shard
-// quorum is satisfied (early-ack). Parity shards and metadata commit
-// complete in the background.
+// Put dispatches one PUT through the pipeline and blocks until the object
+// is durable: every shard has been written and fsynced (or, with a WAL, the
+// group-commit fsync has completed). The K-shard early-ack is used only as
+// an internal fast-fail signal (K data shards unreachable); a successful
+// return means the caller may safely commit object metadata. Metadata
+// commit itself is the caller's responsibility (Raft propose in the cluster
+// backend).
 //
 // req.SizeHint MUST be non-nil — the per-PUT shard header is written
 // once at registerPut using this size so the EC reader knows where to
@@ -261,14 +265,21 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		LastModified: time.Now().Unix(),
 	}
 
-	// Wait for parity finalization in the background. Errors are noted
-	// for future metrics wiring (Phase 5.5+).
-	go func() {
-		select {
-		case <-finalDone:
-		case <-time.After(30 * time.Second):
+	// Block until the PUT is durable: every shard has hit disk and, when a
+	// WAL is wired, the group-commit fsync has completed. Returning on the
+	// K-shard early-ack alone would let the caller propose object metadata
+	// to raft before the shards are durable (a crash in that window leaves
+	// durable metadata pointing at non-durable shards) and would report a
+	// WAL fsync failure as success. This mirrors the spooled path, which
+	// flushes the data WAL synchronously before the metadata propose.
+	select {
+	case err := <-finalDone:
+		if err != nil {
+			return nil, err
 		}
-	}()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	return obj, nil
 }
 

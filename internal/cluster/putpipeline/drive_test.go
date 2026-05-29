@@ -155,3 +155,69 @@ func TestDriveActor_RecoversFromPanic(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "ok", string(got))
 }
+
+// TestDriveActor_RejectsPathTraversalShardKey ensures a shard key carrying
+// ".." segments cannot escape the {dataDir}/{bucket} subtree. The shard key
+// is ecObjectShardKey(objectKey, versionID); getKey does not normalize
+// URL-encoded ".." in the S3 object key, so a crafted key could otherwise
+// resolve a shard file outside the shard root once the pipeline is enabled.
+func TestDriveActor_RejectsPathTraversalShardKey(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+
+	in := make(chan EncryptedShardChunk, 1)
+	commit := make(chan ShardWriteResult, 1)
+	d := &DriveActor{in: in, dataDir: dataDir, commitCh: commit, pending: make(map[uint64]*shardWriteState)}
+	// shardDir resolves to {dataDir}/bucket/../../escape == {root}/escape,
+	// which is outside the {dataDir}/bucket containment root.
+	d.registerPut(1, "bucket", "../../escape", 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: []byte("pwned"), LastInPut: true}
+	select {
+	case res := <-commit:
+		require.Error(t, res.Err, "shard key with .. traversal must be rejected")
+	case <-time.After(2 * time.Second):
+		t.Fatal("no commit result")
+	}
+
+	// Nothing may have been written outside the data dir.
+	_, statErr := os.Stat(filepath.Join(root, "escape", "shard_0"))
+	require.True(t, os.IsNotExist(statErr), "traversal shard must not have escaped the data dir")
+}
+
+// TestDriveActor_RejectsPathTraversalBucket covers the second escape vector:
+// a bucket of ".." (or one carrying a separator) re-roots the containment
+// check so the per-bucket Rel test alone would pass while the path physically
+// escapes the data dir. The guard must reject the bucket as an unsafe segment.
+func TestDriveActor_RejectsPathTraversalBucket(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+
+	in := make(chan EncryptedShardChunk, 1)
+	commit := make(chan ShardWriteResult, 1)
+	d := &DriveActor{in: in, dataDir: dataDir, commitCh: commit, pending: make(map[uint64]*shardWriteState)}
+	// bucket ".." moves the containment root up to {root}; shardDir resolves
+	// to {root}/loot, escaping the {dataDir} the drive owns.
+	d.registerPut(1, "..", "loot", 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: []byte("pwned"), LastInPut: true}
+	select {
+	case res := <-commit:
+		require.Error(t, res.Err, "bucket with .. traversal must be rejected")
+	case <-time.After(2 * time.Second):
+		t.Fatal("no commit result")
+	}
+
+	_, statErr := os.Stat(filepath.Join(root, "loot", "shard_0"))
+	require.True(t, os.IsNotExist(statErr), "traversal bucket must not have escaped the data dir")
+}

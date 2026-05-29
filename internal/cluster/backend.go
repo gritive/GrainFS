@@ -201,8 +201,9 @@ type DistributedBackend struct {
 	// When dispatch is enabled, PutObjectWithRequest dispatches eligible PUTs to
 	// it; other PUTs fall through to the legacy spool/EC writer path.
 	putPipeline PutPipelineRunner
-	// putPipelineEnabled gates dispatch to putPipeline. Disabled in prod pending
-	// the F1 durability review even though the pipeline is constructed at boot.
+	// putPipelineEnabled gates dispatch to putPipeline. Enabled in prod (the
+	// F1 durability review is closed: Put() blocks on shard durability before
+	// returning). Tests may still construct a backend with it off.
 	putPipelineEnabled bool
 }
 
