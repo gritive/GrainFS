@@ -274,6 +274,16 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 	if err != nil {
 		return fmt.Errorf("encrypt shard: %w", err)
 	}
+	// If the shard currently lives in the pack, repair INTO the pack: the
+	// pack-first read preference (readShardIntegrity) would otherwise shadow a
+	// standalone shard_N file with the stale/corrupt pack entry, so the repair
+	// would have no effect. The pack index is last-wins, so this supersedes the
+	// stale entry. A non-pack-resident shard falls through to the file write.
+	if repaired, err := b.shardSvc.RepairShardInPackIfResident(bucket, canonicalKey, shardIdx, encoded); err != nil {
+		return fmt.Errorf("repair shard in pack: %w", err)
+	} else if repaired {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}

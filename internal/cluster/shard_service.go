@@ -862,6 +862,23 @@ func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx i
 	return buf.Bytes(), nil
 }
 
+// RepairShardInPackIfResident rewrites the shard's pack entry with the supplied
+// already-encoded bytes when the shard currently lives in the pack, so the
+// pack-first read preference (readShardIntegrity) observes the repair. The pack
+// index is last-wins, so the put supersedes the stale/corrupt entry. Returns
+// false when the shard is not pack-resident — the caller writes the standalone
+// shard_N file instead. `encoded` must be the EncodeEncryptedShardBuffer output
+// (identical format to the pack write path).
+func (s *ShardService) RepairShardInPackIfResident(bucket, key string, shardIdx int, encoded []byte) (bool, error) {
+	if s.shardPack == nil || !s.shardPack.has(bucket, key, shardIdx) {
+		return false, nil
+	}
+	if err := s.shardPack.put(bucket, key, shardIdx, encoded); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
 	if s.shardPack != nil && len(data) < s.packThreshold {
 		var buf bytes.Buffer

@@ -17,13 +17,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
      no legacy ciphertext to support). Current format = **8**.
-   - [ ] **[P2] shard-pack repair shadowing (PRE-EXISTING, orthogonal to AAD-coherence).**
-     `readShardIntegrity` prefers `ReadLocalShardFromPack`, but `WriteShard` writes a standalone
-     `shard_N` FILE. When a *packed* shard entry is corrupt/stale, repair writes a file that the
-     pack entry still shadows on the next read, so the repair does not take effect for pack-resident
-     shards. The AAD-coherence slice changed only WHICH key binds the AAD, never the pack-vs-file
-     read preference, so it neither introduces nor worsens the shadowing. Fix (its own slice): have
-     repair rewrite the pack entry, or invalidate the pack slot before the file write.
    - [ ] **[P3] bucket-relative shard-path containment gap (defense-in-depth, follow-up to the
      object-key path-traversal fix).** `getShardDir`/`ShardPathUnderDataDir` compute both the candidate
      dir and the containment root from the SAME `bucket`, so a `bucket` of `..` would move root+dir

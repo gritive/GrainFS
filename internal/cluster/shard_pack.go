@@ -102,6 +102,17 @@ func (s *shardPackStore) deleteKey(bucket, key string) error {
 	return s.enqueue(shardPackFlagDel, shardPackPrefix(bucket, key), nil)
 }
 
+// has reports whether the shard currently lives in the pack (index hit only, no
+// byte read). A corrupt pack entry still has an index entry, so this answers
+// "pack-resident?" independent of content integrity.
+func (s *shardPackStore) has(bucket, key string, shardIdx int) bool {
+	pkey := shardPackKey(bucket, key, shardIdx)
+	s.indexMu.RLock()
+	_, ok := s.index[pkey]
+	s.indexMu.RUnlock()
+	return ok
+}
+
 // enqueue routes a write through the actor mailbox (post-recovery, dataWAL != nil)
 // or falls back to the in-line append path (recovery stores with nil dataWAL).
 func (s *shardPackStore) enqueue(flag byte, key string, data []byte) error {
