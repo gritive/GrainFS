@@ -6,11 +6,12 @@ single-use invite bundle. The joining node presents a fresh per-node identity,
 pulls the sealed bootstrap secrets over the dedicated join listener, and then
 finishes membership through meta-Raft.
 
-Use this path for new nodes. When you cannot use invite join, the alternative is
-the runtime `grainfs join` with pre-staged `keys/0.key`, `cluster.id`, and
-`keys.d/current.key` — see
-[`deploy-production-cluster.md`](deploy-production-cluster.md). The offline
-`grainfs cluster join` command has been retired.
+Use this path for new nodes — it is the only join path. Both the offline
+`grainfs cluster join` and the runtime `grainfs join` commands have been
+retired: a node joins by booting `grainfs serve` with an invite bundle, never
+through a separate join verb (the bundle is a secret and must not appear in
+argv). For a deterministic / externally-managed cluster transport key, write
+`keys.d/current.key` before boot (see below) — a file path, not an invite.
 
 ## Prerequisites
 
