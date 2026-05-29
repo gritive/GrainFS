@@ -107,7 +107,8 @@ func (p *EnvProtector) Protect(plaintext, aad []byte) ([]byte, error) {
 		return nil, err
 	}
 	recKey := deriveRecoveryKey(secret, salt, argonTimeDefault, argonMemDefault, argonThreadsDefault)
-	zeroize(secret)
+	// NOTE: secret is owned by the caller's resolver (it may return a shared or
+	// reused backing array, e.g. a cached config value); do not zeroize it here.
 	defer zeroize(eek)
 	defer zeroize(recKey)
 
@@ -162,7 +163,7 @@ func (p *EnvProtector) Unprotect(blob, aad []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("env protector: env binding unusable and no recovery secret: %w", rerr)
 	}
 	recKey := deriveRecoveryKey(secret, c.salt, c.argonT, c.argonM, c.argonP)
-	zeroize(secret)
+	// secret is caller-owned (see Protect) — do not zeroize.
 	pt, oerr := AESGCMOpenWithAAD(recKey, c.recSlot, slotAAD(aad, c.salt, "rec"))
 	zeroize(recKey)
 	if oerr != nil {
