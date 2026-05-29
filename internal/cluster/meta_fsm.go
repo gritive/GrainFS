@@ -287,6 +287,17 @@ type MetaFSM struct {
 	peers          *peerRegistry
 	onPeersChanged func([][32]byte) // fired after each peer-registry apply; nil = no-op
 
+	// revokedNodeIDs is the durable Zero-CA revoked-node set (node IDs only).
+	// Captured in applyRevokePeer. Survives snapshots so the DataGroupEvacuator
+	// can re-derive eviction targets after restart/replay (req #4) and so
+	// candidate-selection can exclude revoked nodes. Address is NOT stored: the
+	// revoked node remains in f.nodes (revoke never removes meta membership), so
+	// EvacuateVoter resolves its removal address live via resolveAddr. Mirrors
+	// the revoked_peer_spkis denylist vector.
+	revokedNodeIDs map[string]struct{}
+
+	onNodeRevoked func(string) // fired after a node is recorded revoked; must not block; set before Start()
+
 	// zero-CA cutover drop bit (spec §8 H3): persisted in the snapshot so a node
 	// restarting from a post-drop snapshot drops its cluster-key base too. PR-1
 	// has no command that sets this true; PR-2 (DropClusterKeyAccept) does. The
@@ -668,6 +679,7 @@ func NewMetaFSM() *MetaFSM {
 		rotation:                   NewRotationFSM(),
 		invites:                    newInviteFSM(),
 		peers:                      newPeerRegistry(),
+		revokedNodeIDs:             make(map[string]struct{}),
 		iamStore:                   iam.NewStore(),
 		activeFeatures:             compat.NewActiveFeatures(),
 		clusterCfg:                 NewClusterConfig(),
@@ -676,6 +688,51 @@ func NewMetaFSM() *MetaFSM {
 		jwtKeys:                    iamjwt.NewKeySet(),
 		protocolCredentialRequests: make(map[string]ProtocolCredentialRequestRecord),
 	}
+}
+
+// IsRevoked reports whether nodeID is in the durable revoked-node set.
+// Safe for concurrent use.
+func (f *MetaFSM) IsRevoked(nodeID string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	_, ok := f.revokedNodeIDs[nodeID]
+	return ok
+}
+
+// RevokedNodeIDs returns a defensive copy of the durable revoked-node set.
+// Safe for concurrent use.
+func (f *MetaFSM) RevokedNodeIDs() map[string]struct{} {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[string]struct{}, len(f.revokedNodeIDs))
+	for k := range f.revokedNodeIDs {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+// recordRevokedNodeLocked inserts the revoked node-ID. Idempotent. Caller must
+// hold f.mu.
+func (f *MetaFSM) recordRevokedNodeLocked(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	f.revokedNodeIDs[nodeID] = struct{}{}
+}
+
+// recordRevokedNodeForTest is a test-only helper that records under the lock.
+func (f *MetaFSM) recordRevokedNodeForTest(nodeID string) {
+	f.mu.Lock()
+	f.recordRevokedNodeLocked(nodeID)
+	f.mu.Unlock()
+}
+
+// SetOnNodeRevoked wires the side-effect callback fired (with f.mu released)
+// after a node is recorded revoked. Must not block; set before MetaRaft.Start().
+func (f *MetaFSM) SetOnNodeRevoked(fn func(string)) {
+	f.mu.Lock()
+	f.onNodeRevoked = fn
+	f.mu.Unlock()
 }
 
 // applyCmdAtIndex is the production entry point — wraps applyCmd with the
