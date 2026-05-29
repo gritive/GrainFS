@@ -81,6 +81,9 @@ func optionsToConfig(
 	cfg.AuditIceberg = opts.AuditIceberg
 	cfg.AuditCommitInterval = opts.AuditCommitInterval
 
+	cfg.KEKProtector = opts.KEKProtector
+	cfg.KEKRecoverySecretFile = opts.KEKRecoverySecretFile
+
 	cfg.NFS4Port = opts.NFS4Port
 	cfg.NFSWriteBufferDir = opts.NFSWriteBufferDir
 	cfg.NFSWriteBufferIdle = opts.NFSWriteBufferIdle

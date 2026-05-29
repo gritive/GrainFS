@@ -113,7 +113,14 @@ func loadKEKForRestore(state *bootState, keysDir string, version uint32) ([]byte
 	if _, err := os.Stat(keysDir); err != nil {
 		return nil, err
 	}
-	store, err := encrypt.LoadOrInitKEKStoreDir(keysDir)
+	// Fallback path (tests / direct callers): production boot pre-populates
+	// state.kekStore via wireDEKKeeper, so this rarely runs. Use the SAME
+	// config-selected protector so a wrapped keystore is read consistently.
+	protector, err := buildKEKProtector(state.cfg)
+	if err != nil {
+		return nil, err
+	}
+	store, err := encrypt.LoadOrInitKEKStoreDirWithProtector(keysDir, protector)
 	if err != nil {
 		return nil, err
 	}

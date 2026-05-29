@@ -108,6 +108,8 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration("heal-receipt-retention", 30*24*time.Hour, "HealReceipt retention window (older entries are GC'd)")
 	cmd.Flags().Duration("heal-receipt-gossip-interval", 5*time.Second, "how often this node gossips its recent receipt IDs to peers")
 	cmd.Flags().Int("heal-receipt-window", 50, "rolling window size — how many recent receipt IDs to gossip per tick")
+	cmd.Flags().String("kek-protector", "plaintext", "at-rest KEK protection: \"plaintext\" (raw 32-byte key files) or \"env\" (machine-bound wrap + recovery passphrase slot)")
+	cmd.Flags().String("kek-recovery-secret-file", "", "file path holding the recovery passphrase for --kek-protector=env (GRAINFS_KEK_RECOVERY_SECRET env var takes precedence)")
 	cmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	cmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	cmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
