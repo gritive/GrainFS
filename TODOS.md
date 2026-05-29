@@ -331,13 +331,11 @@ Work these in order. Do not run them in parallel.
 - **KEK-envelope: DataEncryptor buffer-reusing seam — remaining consumers.** The `SealTo`/`OpenTo`
   seam methods (+ `encrypt.AppendAAD`, `DEKKeeper.SealWithAADTo`/`OpenWithAADTo`,
   `TransientReadOnlyDEK.OpenWithAADTo`, pooled `withSeamAAD`/`withSeamAADErr2`) exist and are wired
-  through all 3 adapters; packblob `Append` (Seal) and spool `Read` (Open) consumers are migrated.
+  through all 3 adapters; packblob `Append` (Seal), spool `Read` (Open), and spool write (Seal)
+  consumers are migrated.
   Open side needs **per-consumer lifetime analysis** — Open plaintext escapes to callers, so pooling the
   `OpenTo` dst is a use-after-free hazard, NOT a mechanical pool reintroduction. Each remaining consumer
   is its own slice; bench ≥15s×3 (allocs/op AND B/op).
-  - **spool *write* side** — `encryptedSpoolRecordWriter.Write` still uses `Seal` (not `SealTo`); the
-    #645 write-side regression (`BenchmarkEncryptedSpoolWrite` 72→97 allocs, 1.04→8.1 MiB B/op) is a
-    separate Seal-side slice.
   - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis.
   - ec / local (`eccodec/shardio.go`) Open — hot read path.
   - datawal (`scanRecords`) Open.
