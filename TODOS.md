@@ -13,8 +13,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 ## Now
 
-Work these in order. Do not run them in parallel.
-
 - [ ] **At-rest unification — R3 static-key retirement (last slice; cleanup, not migration)**
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
@@ -50,17 +48,6 @@ Work these in order. Do not run them in parallel.
      predicates `PreferWriteAt`/`local.go:620`/`local.go:1457` from `b.encryptor` to `b.segEnc`
      (a behavior change — a DEK `LocalBackend` currently advertises WriteAt for encrypted internal
      buckets; test-fixture-only, LocalBackend has no prod caller per ADR-0015). Its own slice.
-   - [ ] **[P1] packblob DEK encrypted-flag-downgrade detection (pre-existing prod gap).**
-     `rejectEncryptedFlagDowngrade` (`packblob/blob.go:646`) only runs on the legacy-CRC branch, so a
-     downgrade attacker who recomputes the CRC with the *current* (`blobEntryCRC`, flags-included)
-     formula bypasses it: DEK ciphertext carries no value-magic, so `decodePayload` passes it through
-     as plaintext. The static path was defended by `decodePayload`'s value-magic check, which has no
-     DEK equivalent. Complete fix: attempt `segEnc.Open` on EVERY plaintext-flagged read on an
-     encrypted store (`segEnc != nil`) and reject on success — greenfield means no legit plaintext
-     entries exist there, so no false positives, but it is a read-path change with a per-read Open
-     cost + its own threat model. `packblob.NewDEKBlobStore` is the prod single-node packed path.
-     **NOTE:** the static-path tests `TestEncryptedBlobStoreRejects{,Compressed}EncryptedFlagDowngrade`
-     were removed with the static seam (they tested deleted code); the DEK gap is what this slice fixes.
    - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
      DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
      (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path

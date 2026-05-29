@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.459.0] - 2026-05-29
+
+### Security
+
+- Packed object storage now rejects an encrypted entry whose "encrypted" marker
+  was stripped on disk. On encryption-enabled deployments every packed entry is
+  written encrypted, so a plaintext-marked entry that still decrypts under the
+  data key can only be tampering; the reader now detects this and fails the read
+  loudly instead of returning the raw ciphertext as if it were plaintext. Genuine
+  plaintext entries are unaffected (they do not decrypt, so they pass through),
+  and the check adds no cost to normal encrypted reads.
+
 ## [0.0.458.0] - 2026-05-29
 
 ### Fixed

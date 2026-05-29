@@ -642,8 +642,15 @@ func crc32UpdateIEEEByte(crc uint32, b byte) uint32 {
 	return ^crc
 }
 
+// rejectEncryptedFlagDowngrade detects a stripped flagEncrypted bit on an
+// encrypted (segEnc != nil) store. Greenfield invariant: Append always sets
+// flagEncrypted on an encrypted store, so a plaintext-flagged read whose payload
+// decrypts cleanly under an encrypted-flag AAD candidate is proof of downgrade.
+// The check does NOT gate on encrypt.IsEncryptedValue: DEK-sealed payloads are
+// nonce||ciphertext and carry no value-magic, so the Open-attempt is the only
+// reliable signal. Genuine plaintext fails every Open and passes through.
 func (bs *BlobStore) rejectEncryptedFlagDowngrade(blobID uint64, offset uint64, key string, flags byte, payload []byte) error {
-	if bs.segEnc == nil || flags&flagEncrypted != 0 || !encrypt.IsEncryptedValue(payload) {
+	if bs.segEnc == nil || flags&flagEncrypted != 0 {
 		return nil
 	}
 	for _, candidate := range encryptedFlagCandidates(flags) {
@@ -677,11 +684,13 @@ func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, fla
 		}
 		return plain, nil
 	}
-	if !encrypt.IsEncryptedValue(payload) {
-		if encrypt.IsLegacyEncryptedValue(payload) {
-			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
-		}
-		return payload, nil
+	// Plaintext-flagged read on an encrypted store. Loud-fail pre-XAES envelopes
+	// first, then run the downgrade Open-attempt for every remaining payload
+	// (DEK ciphertext has no value-magic, so it must not be gated on
+	// IsEncryptedValue). Genuine plaintext fails the Open-attempt and passes
+	// through.
+	if encrypt.IsLegacyEncryptedValue(payload) {
+		return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 	}
 	if err := bs.rejectEncryptedFlagDowngrade(blobID, offset, key, flags, payload); err != nil {
 		return nil, err

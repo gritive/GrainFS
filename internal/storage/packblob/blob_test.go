@@ -3,8 +3,10 @@ package packblob
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -272,17 +274,108 @@ func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
 	require.Error(t, err)
 }
 
-// NOTE: TestEncryptedBlobStoreRejects{,Compressed}EncryptedFlagDowngrade were
-// removed in the R3 static-seam retirement. They stripped flagEncrypted on disk
-// and relied on decodePayload's encrypt.IsEncryptedValue(payload) guard
-// (blob.go) catching the downgraded entry. That guard matches only the legacy
-// static value-magic frame (0xAE 0xE2 0x02); DEK-sealed entries are
-// nonce||ciphertext and never carry it, so the guard short-circuits before the
-// segEnc Open-attempt in rejectEncryptedFlagDowngrade that WOULD catch a DEK
-// downgrade. Re-instating downgrade detection on the DEK path is a prod
-// decode-path behavior change (gate on the Open-attempt, not the magic) —
-// deferred to its own slice (see final report). Asserting the current
-// short-circuit is asserting a hole, so the tests are removed, not migrated.
+// tamperStripEncryptedFlag rewrites the on-disk entry at loc to clear
+// flagEncrypted and recompute the trailing CRC with the CURRENT (flags-included)
+// blobEntryCRC formula. This simulates a sophisticated flag-downgrade attacker
+// who bypasses the legacy-CRC detection branch (blob.go:325) by recomputing the
+// modern CRC, so detection must come from the segEnc Open-attempt, not the CRC.
+func tamperStripEncryptedFlag(t *testing.T, dir, key string, loc BlobLocation) {
+	t.Helper()
+	path := filepath.Join(dir, fmt.Sprintf("blob_%016x.blob", loc.BlobID))
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// entry layout: [key_len:4][key][flags:1][data_len:4][data][crc:4]
+	flagsPos := int64(loc.Offset) + 4 + int64(len(key))
+	var flagBuf [1]byte
+	_, err = f.ReadAt(flagBuf[:], flagsPos)
+	require.NoError(t, err)
+	require.NotZero(t, flagBuf[0]&flagEncrypted, "precondition: entry must be encrypted-flagged")
+
+	dataPos := flagsPos + 1 + 4
+	payload := make([]byte, loc.Length)
+	_, err = f.ReadAt(payload, dataPos)
+	require.NoError(t, err)
+
+	newFlags := flagBuf[0] &^ flagEncrypted
+	_, err = f.WriteAt([]byte{newFlags}, flagsPos)
+	require.NoError(t, err)
+
+	var crcBuf [4]byte
+	binary.BigEndian.PutUint32(crcBuf[:], blobEntryCRC([]byte(key), newFlags, payload))
+	_, err = f.WriteAt(crcBuf[:], dataPos+int64(loc.Length))
+	require.NoError(t, err)
+}
+
+// newPackblobDEKStoreSharedKeeper builds a DEK BlobStore over an EXISTING keeper
+// so seal (store1) and open (store2) agree — NewDEKKeeper randomizes per keeper,
+// so a tamper-then-reopen test cannot use newPackblobDEKStore (fresh keeper each
+// call).
+func newPackblobDEKStoreSharedKeeper(t testing.TB, dir string, maxSize int64, keeper *encrypt.DEKKeeper) *BlobStore {
+	t.Helper()
+	bs, err := NewDEKBlobStore(dir, maxSize, keeper, packblobTestClusterID())
+	require.NoError(t, err)
+	return bs
+}
+
+// TestEncryptedBlobStoreRejectsDEKEncryptedFlagDowngrade verifies that a DEK
+// store rejects an entry whose flagEncrypted bit was stripped on disk while the
+// payload remains valid ciphertext. Greenfield: an encrypted store never writes
+// a plaintext-flagged entry, so a payload that decrypts cleanly under the
+// encrypted-flag AAD is proof of downgrade. DEK ciphertext carries no
+// value-magic, so detection cannot rely on encrypt.IsEncryptedValue.
+// (Re-instates the static tests removed in the R3 static-seam retirement, now on
+// the DEK path.)
+func TestEncryptedBlobStoreRejectsDEKEncryptedFlagDowngrade(t *testing.T) {
+	dir := t.TempDir()
+	cid := packblobTestClusterID()
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x66}, encrypt.KEKSize), cid)
+	require.NoError(t, err)
+
+	store1 := newPackblobDEKStoreSharedKeeper(t, dir, 256*1024*1024, keeper)
+	key := "bucket/secret-object"
+	loc, err := store1.Append(key, []byte("top secret plaintext"))
+	require.NoError(t, err)
+	require.NoError(t, store1.Close())
+
+	tamperStripEncryptedFlag(t, dir, key, loc)
+
+	store2 := newPackblobDEKStoreSharedKeeper(t, dir, 256*1024*1024, keeper)
+	defer store2.Close()
+	_, err = store2.Read(loc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "flags mismatch")
+}
+
+// TestEncryptedBlobStoreRejectsCompressedDEKEncryptedFlagDowngrade is the
+// compressed variant: the original flags are flagCompressed|flagEncrypted and
+// only flagEncrypted is stripped, so encryptedFlagCandidates(flagCompressed)
+// must still reconstruct the sealed AAD and reject. On master this surfaces a
+// decompress error (raw ciphertext fed to decompress), NOT the downgrade error —
+// hence the specific "flags mismatch" assertion.
+func TestEncryptedBlobStoreRejectsCompressedDEKEncryptedFlagDowngrade(t *testing.T) {
+	dir := t.TempDir()
+	cid := packblobTestClusterID()
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x66}, encrypt.KEKSize), cid)
+	require.NoError(t, err)
+
+	store1 := newPackblobDEKStoreSharedKeeper(t, dir, 256*1024*1024, keeper)
+	store1.EnableCompression()
+	key := "bucket/compressible-object"
+	loc, err := store1.Append(key, bytes.Repeat([]byte("A"), 4096)) // highly compressible
+	require.NoError(t, err)
+	require.NoError(t, store1.Close())
+
+	tamperStripEncryptedFlag(t, dir, key, loc)
+
+	store2 := newPackblobDEKStoreSharedKeeper(t, dir, 256*1024*1024, keeper)
+	store2.EnableCompression()
+	defer store2.Close()
+	_, err = store2.Read(loc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "flags mismatch")
+}
 
 func TestEncryptedBlobStoreReadsLegacyPlaintextEntry(t *testing.T) {
 	dir := t.TempDir()
