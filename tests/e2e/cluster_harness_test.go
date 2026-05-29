@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -212,6 +213,17 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 		c.dataDirs[i] = dir
 	}
 
+	// Pre-seed the cluster transport PSK on every node's disk (replaces the
+	// removed --cluster-key flag). WriteCurrent creates keys.d/. Must run BEFORE
+	// any node boots, else a node self-seeds a different key and the cluster
+	// cannot form. wipeSoloRaftState (join mode) does not touch keys.d/.
+	for i := range c.dataDirs {
+		if err := transport.NewKeystore(c.dataDirs[i]).WriteCurrent(c.clusterKey); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("pre-seed keys.d/current.key for node %d: %w", i, err)
+		}
+	}
+
 	switch opts.Mode {
 	case ClusterModeDynamicJoin:
 		return c.startDynamicJoin()
@@ -406,7 +418,6 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", c.nodeID(i),
 		"--raft-addr", c.raftAddr(i),
-		"--cluster-key", c.clusterKey,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", c.scrubIntervalArg(),
