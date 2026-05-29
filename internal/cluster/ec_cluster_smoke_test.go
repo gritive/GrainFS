@@ -66,7 +66,7 @@ func TestECCluster_Smoke_3Node(t *testing.T) {
 	require.NotEmpty(t, obj.VersionID)
 
 	shardKey := "obj/" + obj.VersionID
-	require.NoError(t, os.Remove(backend.shardSvc.getShardPath("ec-smoke", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(backend.shardSvc, "ec-smoke", shardKey, 0)))
 
 	rc, _, err := backend.GetObject(context.Background(), "ec-smoke", "obj")
 	require.NoError(t, err)

@@ -32,7 +32,7 @@ func TestRepairShardLocalWithIncident_ShardKeyPath(t *testing.T) {
 	}
 
 	// Drop shard 0 so it must be reconstructed from surviving shard 1.
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
 
 	rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
 	recorder := &recordingIncidentRecorder{}
@@ -85,7 +85,7 @@ func TestRepairShardLocalWithIncident_ShardKeyPath_FailsButReadable(t *testing.T
 	// finds 0 survivors < DataShards=1, so RepairShardAtShardKey fails. But shard
 	// 0 is still present on disk, so localRepairTargetReadableAtShardKey returns
 	// true → the incident terminates in FactVerified, not FactActionFailed.
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 1)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 1)))
 
 	rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
 	recorder := &recordingIncidentRecorder{}

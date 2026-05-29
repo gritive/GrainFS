@@ -503,7 +503,7 @@ func readLocalECDataShardsParallelRawNoCRC(bk *DistributedBackend, bucket, shard
 	for i := 0; i < cfg.DataShards; i++ {
 		shardIdx := i
 		g.Go(func() error {
-			path := bk.shardSvc.getShardPath(bucket, shardKey, shardIdx)
+			path := mustShardPath(bk.shardSvc, bucket, shardKey, shardIdx)
 			f, err := os.Open(path)
 			if err != nil {
 				return err
@@ -537,7 +537,7 @@ func openLocalECDataShardFiles(bk *DistributedBackend, bucket, shardKey string, 
 	files := make([]*os.File, 0, cfg.DataShards)
 	var payloadLen int64 = -1
 	for i := 0; i < cfg.DataShards; i++ {
-		path := bk.shardSvc.getShardPath(bucket, shardKey, i)
+		path := mustShardPath(bk.shardSvc, bucket, shardKey, i)
 		f, err := os.Open(path)
 		if err != nil {
 			for _, f := range files {

@@ -41,7 +41,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 	require.NotEmpty(t, obj.VersionID)
 
 	shardKey := "obj/" + obj.VersionID
-	info, err := os.Stat(svc.getShardPath("b", shardKey, 0))
+	info, err := os.Stat(mustShardPath(svc, "b", shardKey, 0))
 	require.NoError(t, err)
 	// PutObject already wrote one metadata-only OpShardPut record for shard 0
 	// (>1MiB shard => not inlined). Append a second record for the same shard to
@@ -52,7 +52,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, dwal.Flush())
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
 
 	// Replay the WAL: metadata-only record for the now-missing shard must enqueue
 	// exactly one repair candidate carrying the physical shard identity.
@@ -136,7 +136,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.
 	// MISSING.
 	segShardKey := firstSegmentShardKeyOnDisk(t, svc)
 	require.Contains(t, segShardKey, "/segments/", "must target the segment path, not object-version")
-	require.NoError(t, os.Remove(svc.getShardPath("b", segShardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", segShardKey, 0)))
 
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 
@@ -213,9 +213,9 @@ func TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd(t *testing.T)
 	// remove its shard 0 so the monitor must classify it as locally missing.
 	segShardKey := firstSegmentShardKeyOnDisk(t, svc)
 	require.Contains(t, segShardKey, "/segments/", "must target the segment path, not object-version")
-	_, err = os.Stat(svc.getShardPath("b", segShardKey, 0))
+	_, err = os.Stat(mustShardPath(svc, "b", segShardKey, 0))
 	require.NoError(t, err, "segment shard 0 must exist before removal")
-	require.NoError(t, os.Remove(svc.getShardPath("b", segShardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", segShardKey, 0)))
 
 	// Construct the monitor over the SAME FSM the chunked PutObject wrote object
 	// meta into (backend.fsm), with the backend as resolver and shardSvc.
@@ -259,7 +259,7 @@ func TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd(t *testing.T)
 	require.NotEmpty(t, reported[0].Placement.Nodes)
 
 	// The repair callback reconstructed shard 0; it must be back on disk.
-	_, err = os.Stat(svc.getShardPath("b", segShardKey, 0))
+	_, err = os.Stat(mustShardPath(svc, "b", segShardKey, 0))
 	require.NoError(t, err, "segment shard 0 must exist again after repair")
 
 	// End-to-end proof: the object reads back byte-for-byte after the scrub repair.
@@ -275,7 +275,7 @@ func TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd(t *testing.T)
 // the first segment blob the chunked PUT wrote under bucket "b", object "obj".
 func firstSegmentShardKeyOnDisk(t *testing.T, svc *ShardService) string {
 	t.Helper()
-	dir := svc.getShardDir("b", "obj/segments", 0) // .../shards/b/obj/segments
+	dir := mustShardDir(svc, "b", "obj/segments", 0) // .../shards/b/obj/segments
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.NotEmpty(t, entries, "chunked PUT must have written segment shards")
@@ -331,7 +331,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingCoalescedShard(t *testin
 		require.NoError(t, svc.WriteLocalShard("b", shardKey, i, s))
 		// WAL Size must match the on-disk shard size (which includes encryption
 		// framing), else replay flags a false size_mismatch on the surviving shard.
-		info, statErr := os.Stat(svc.getShardPath("b", shardKey, i))
+		info, statErr := os.Stat(mustShardPath(svc, "b", shardKey, i))
 		require.NoError(t, statErr)
 		_, err = dwal.Append(context.Background(), datawal.Record{
 			Op: datawal.OpShardPut, Bucket: "b", Key: shardKey, Target: strconv.Itoa(i), Size: info.Size(),
@@ -353,7 +353,7 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingCoalescedShard(t *testin
 	})
 
 	// Remove shard 0 so replay classifies it as a repair candidate.
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
 
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	// Only shard 0 was removed; shard 1 is present, so replay must enqueue
