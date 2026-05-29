@@ -566,9 +566,13 @@ func (r *recordingObjEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fie
 var _ DataEncryptor = (*recordingObjEncryptor)(nil)
 
 // TestEncryptedObjectReader_ReusesPlaintextBufferAcrossChunks proves the
-// streaming reader uses OpenTo (never Open) and, from chunk 2 on, hands OpenTo
-// the prior call's RETURNED backing — i.e. the per-instance plaintext buffer is
-// reused, not freshly allocated per chunk. Backing-array identity, not AllocsPerRun.
+// streaming reader uses OpenTo (never Open) and reuses ONE plaintext backing
+// across all chunks. The discriminator is that every OpenTo returns the SAME
+// backing it was handed (dst == ret → no realloc) and that backing is stable
+// across chunks. (Asserting ret[i-1] == dst[i] would be tautological: the
+// reader threads each call's return into the next call's dst regardless of
+// whether OpenTo reallocated, so that holds even with per-chunk allocation.)
+// Backing-array identity, not AllocsPerRun.
 func TestEncryptedObjectReader_ReusesPlaintextBufferAcrossChunks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
 	fields := objectFileAADFields("b", "k")
@@ -589,24 +593,29 @@ func TestEncryptedObjectReader_ReusesPlaintextBufferAcrossChunks(t *testing.T) {
 
 	assert.False(t, rec.openCalled, "reader must use OpenTo, never Open")
 	require.GreaterOrEqual(t, len(rec.dstPtrs), 3, "expected at least 3 OpenTo calls")
-	for i := 1; i < len(rec.dstPtrs); i++ {
-		assert.Equalf(t, rec.retPtrs[i-1], rec.dstPtrs[i],
-			"chunk %d: dst backing %#x != prior returned backing %#x (buffer not reused)",
-			i, rec.dstPtrs[i], rec.retPtrs[i-1])
-		assert.NotZerof(t, rec.dstPtrs[i], "chunk %d: dst backing must be a real (pre-sized) buffer", i)
+	for i := range rec.dstPtrs {
+		assert.NotZerof(t, rec.dstPtrs[i], "chunk %d: dst must be a real pre-sized buffer, not nil/fresh", i)
+		assert.Equalf(t, rec.dstPtrs[i], rec.retPtrs[i],
+			"chunk %d: OpenTo returned a different backing (%#x) than the dst it was handed (%#x) — it reallocated instead of reusing",
+			i, rec.retPtrs[i], rec.dstPtrs[i])
+		assert.Equalf(t, rec.retPtrs[0], rec.retPtrs[i],
+			"chunk %d: plaintext backing %#x differs from chunk 0's %#x — buffer not reused across chunks",
+			i, rec.retPtrs[i], rec.retPtrs[0])
 	}
 }
 
 // TestEncryptedObjectReader_PartialFinalChunkZeroesTail is the regression guard
-// for the len→cap buffer-hygiene change. With a reused plaintext buffer, the
-// FULL chunks fill the backing [0:chunkSize], then a PARTIAL final chunk
+// for the clear-before-OpenTo full-cap wipe. With a reused plaintext buffer a
+// FULL chunk fills the backing [0:chunkSize], then a PARTIAL final chunk
 // decrypts only [0:plainLen] — the [plainLen:cap] tail must be zeroed, NOT left
 // holding the prior full chunk's plaintext.
 //
-// Unlike eccodec (where only clear-before-OpenTo guards the tail), the streaming
-// object reader double-protects it: Read() drain-clears r.buf[:n] as it copies
-// out, AND loadNext clear-before-OpenTo zeroes the full cap. So this guard goes
-// red only when BOTH mechanisms are removed — a single neuter leaves the other.
+// To ISOLATE clear-before-OpenTo, this drives loadNext() directly across the
+// chunk boundary with NO Read() in between. The reader also drain-clears r.buf
+// as Read() copies out, which would otherwise zero the prior full chunk and
+// mask a clear-before-OpenTo regression; skipping Read() removes that masking,
+// so the tail is zeroed ONLY by clear-before-OpenTo. Verified RED: removing the
+// loadNext clear-before-OpenTo leaves the prior chunk's bytes in the tail.
 func TestEncryptedObjectReader_PartialFinalChunkZeroesTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
 	enc := testSegEnc(t)
@@ -624,13 +633,17 @@ func TestEncryptedObjectReader_PartialFinalChunkZeroesTail(t *testing.T) {
 	rc, err := openEncryptedObjectFile(path, enc, fields, size)
 	require.NoError(t, err)
 	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, data, got)
-
-	// Inspect the reader's plainBuf BEFORE Close (Close full-cap wipes it).
 	r := rc.(*encryptedObjectReader)
+
+	// Load all three chunks via loadNext directly, WITHOUT Read() between them,
+	// so Read()'s drain-clear never runs and the tail is governed solely by
+	// loadNext's clear-before-OpenTo. 2 full + 1 partial → exactly 3 loads.
+	require.NoError(t, r.loadNext()) // chunk 0 (full)
+	require.NoError(t, r.loadNext()) // chunk 1 (full)
+	require.NoError(t, r.loadNext()) // chunk 2 (partial, 4096 bytes)
+	require.Equal(t, 4096, len(r.plainBuf), "final chunk is the 4096-byte partial")
 	require.GreaterOrEqual(t, cap(r.plainBuf), encryptedChunkSize, "buffer pre-sized to chunkSize")
+
 	tail := r.plainBuf[len(r.plainBuf):cap(r.plainBuf)]
 	for i, b := range tail {
 		require.Zerof(t, b, "tail[%d] (backing index %d) not zeroed — prior chunk plaintext leaked", i, len(r.plainBuf)+i)
@@ -639,8 +652,13 @@ func TestEncryptedObjectReader_PartialFinalChunkZeroesTail(t *testing.T) {
 
 // TestEncryptedObjectFile_RejectsOversizedPlainLen tampers a record's plainLen
 // header to exceed encryptedChunkSize and asserts every chunk-loop reader
-// surfaces it as a corruption error via the pre-Open upper-bound guard, before
-// OpenTo runs.
+// rejects it via the PRE-Open upper-bound guard specifically. We assert the
+// guard's error text ("exceeds chunk size") rather than just any error: with
+// the record body left intact, decrypt still yields encryptedChunkSize bytes,
+// so the pre-existing post-Open `len(plain) != plainLen` backstop would also
+// reject it ("length mismatch"). Matching the guard's message isolates the new
+// guard from that backstop — verified RED: removing the guard flips the error
+// to the mismatch message and the assertion fails.
 func TestEncryptedObjectFile_RejectsOversizedPlainLen(t *testing.T) {
 	enc := testSegEnc(t)
 	fields := objectFileAADFields("b", "k")
@@ -663,19 +681,21 @@ func TestEncryptedObjectFile_RejectsOversizedPlainLen(t *testing.T) {
 		return path, size
 	}
 
+	const guardMsg = "exceeds chunk size" // the pre-Open guard's message
+
 	t.Run("streaming_reader", func(t *testing.T) {
 		path, size := build(t)
 		rc, err := openEncryptedObjectFile(path, enc, fields, size)
 		require.NoError(t, err)
 		defer rc.Close()
 		_, err = io.ReadAll(rc)
-		require.Error(t, err)
+		require.ErrorContains(t, err, guardMsg)
 	})
 
 	t.Run("full_read", func(t *testing.T) {
 		path, size := build(t)
 		_, err := readEncryptedObjectFile(path, enc, fields, size)
-		require.Error(t, err)
+		require.ErrorContains(t, err, guardMsg)
 	})
 
 	t.Run("hash", func(t *testing.T) {
@@ -683,6 +703,6 @@ func TestEncryptedObjectFile_RejectsOversizedPlainLen(t *testing.T) {
 		h, release := hashForBucket("")
 		defer release()
 		_, err := hashEncryptedObjectFile(path, enc, fields, h)
-		require.Error(t, err)
+		require.ErrorContains(t, err, guardMsg)
 	})
 }
