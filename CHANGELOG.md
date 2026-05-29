@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.452.0] - 2026-05-29
+
+### Changed
+
+- The cluster evacuator's `leadership transferred` log line now records the
+  revoked node id, matching its sibling eviction log lines so operators can
+  correlate a leadership self-transfer with the node being revoked.
+
 ## [0.0.451.0] - 2026-05-29
 
 ### Changed

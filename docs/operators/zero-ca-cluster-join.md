@@ -181,8 +181,7 @@ stays in `raft_voters`. Detection: the revoked node persists in `raft_voters` fo
 a group plus that repeating log line. Remedy: an operator must intervene, or run
 `complete-cutover` to drop the cluster key (the hard-security path that excludes
 the revoked SPKI from the accept-set regardless of voter membership). Groups with
-replication factor 3 or higher evict automatically; the controller's guarantee is
-availability (eventual consistency), and hard security is the cluster-key drop.
+replication factor 3 or higher evict automatically.
 
 ## Troubleshooting
 
