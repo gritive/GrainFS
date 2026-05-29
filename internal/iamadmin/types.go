@@ -253,6 +253,27 @@ type MountSAItem struct {
 	CreatedBy string `json:"created_by,omitempty"`
 }
 
+// --- PDP bearer token ---
+
+type PDPSetTokenOptions struct {
+	BaseOptions
+	TokenFile string
+}
+
+type PDPClearTokenOptions struct {
+	BaseOptions
+}
+
+type PDPShowOptions struct {
+	BaseOptions
+}
+
+// PDPStatusResponse is the wire shape returned by GET /v1/iam/pdp/status.
+// Status is server-rendered text; it never contains the token.
+type PDPStatusResponse struct {
+	Status string `json:"status"`
+}
+
 // --- Bucket (iam bucket subtree) ---
 
 type BucketCreateOptions struct {
