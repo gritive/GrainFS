@@ -907,6 +907,7 @@ table MetaStateSnapshot {
   revoked_peer_spkis:[SPKIBytes];                           // zero-CA revocation denylist: slot 14
   cluster_key_dropped:bool = false;                        // zero-CA cutover: slot 15 (H3); PR-2 sets it, PR-1 always false
   present_flip_begun:bool = false;                         // zero-CA cutover: slot 16 (PR-2a §8c); set by BeginPresentFlip(86) Apply
+  revoked_node_ids:[string];                               // zero-CA revoked-node set: slot 17 (data-group evacuation)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

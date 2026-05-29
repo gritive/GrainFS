@@ -303,13 +303,16 @@ func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembe
 
 func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeID string) error {
 	nodes := state.metaRaft.FSM().Nodes()
-	refreshRuntimeTopologyFromMetaNodes(state, nodes)
+	refreshRuntimeTopologyFromMetaNodes(state, nodes) // topology/address-book: all members, incl. revoked
+	// Voter-candidate pool and cluster-size count must exclude revoked nodes so a
+	// revoked node is never (re-)seeded as a data-group voter (pairs with the evacuator).
+	liveNodes := liveNonRevokedNodes(state.metaRaft.FSM())
 	missingGroups := MissingSeedShardGroups(
 		state.nodeID,
 		state.raftAddr,
-		nodes,
+		liveNodes,
 		state.metaRaft.FSM().ShardGroups(),
-		cluster.AutoECConfigForClusterSize(len(nodes)).NumShards(),
+		cluster.AutoECConfigForClusterSize(len(liveNodes)).NumShards(),
 	)
 	for _, group := range missingGroups {
 		if err := state.metaRaft.ProposeShardGroup(ctx, group); err != nil {
@@ -317,7 +320,7 @@ func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeI
 		}
 	}
 	if len(missingGroups) > 0 {
-		state.seedGroups = seedGroupCountForClusterSize(len(nodes))
+		state.seedGroups = seedGroupCountForClusterSize(len(liveNodes))
 		log.Info().Str("node_id", nodeID).Int("groups", len(missingGroups)).Int("seed_groups", state.seedGroups).Msg("seeded shard groups for joined node count")
 	}
 

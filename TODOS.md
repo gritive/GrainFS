@@ -171,16 +171,47 @@ Work these in order. Do not run them in parallel.
       "follower byte-proxies the join stream" — channel binding (RFC 5705
       exporter) is session-local, so a proxy gives joiner and leader different
       exporters and every bound join fails verification.
-    - **[P3] Revoke cleans meta-raft voters only, not data-group voters**.
-      `MetaRaft.RevokeNode` (`internal/cluster/revoke_node.go:44`) calls
-      `m.node.RemoveVoter` on the meta-raft alone; per-data-group raft membership is
-      untouched. Full eviction therefore relies on the transport backstop
-      (`ClosePeer` drops the live mux + SPKI denylist + cluster-key drop excludes the
-      revoked SPKI from the accept-set). Precondition: before the cluster key is
-      dropped the base PSK is still accepted, so a revoked node could in principle
-      re-dial and resume as a lingering data-group voter. Verify whether revoke
-      should also remove the node from data-group voter sets, or document that full
-      eviction is only guaranteed post-drop.
+    - **[P3] GC the durable revoked-node-ID set**. The Zero-CA revoked set (meta FSM
+      `revokedNodeIDs`, snapshot `revoked_node_ids` slot 17) grows unbounded, mirroring
+      the existing unbounded `revoked_peer_spkis` denylist. Bound or GC once a node-id
+      can be provably never-reused. (Deferred from the revoke data-group-evacuation
+      work — 2026-05-29.)
+    - **[P3] `MoveReplica` self-removal pre-wait is a no-op under v2 raft**. The
+      rebalancer self-move path (`DataGroupPlanExecutor.MoveReplica` →
+      `waitForLeadershipTransferTarget` → `peerCaughtUp` → `PeerMatchIndex`) reads the
+      v2 adapter's `PeerMatchIndex`, which always returns `(0,false)`
+      (`raftnode_adapter.go`), so the pre-wait can never observe catch-up and times
+      out — the same latent bug the evacuation slice fixed in `EvacuateVoter` by
+      calling `TransferLeadership()` directly (v2 §3.10 picks the most-caught-up peer
+      from the leader's real matchIndex and steps down regardless). Apply the same
+      direct-call fix to `MoveReplica` self-removal and retire
+      `waitForLeadershipTransferTarget`/`peerCaughtUp` if no caller remains. (Surfaced
+      by the revoke data-group-evacuation e2e — 2026-05-29.)
+    - **[P3] Optionally make `ProposeShardGroup` itself forward to the meta-leader**
+      (option A), repairing the pre-existing latent gap where a non-meta-leader
+      data-group leader cannot converge the PeerIDs mirror. The evacuation path uses
+      the new `ProposeShardGroupForwarding` instead; option A was verified
+      apply-wait-equivalent but deferred on surgical grounds.
+    - **[P3] Revoke eviction is best-effort; a 2-voter group whose other voter is
+      revoked cannot self-heal**. After revoke `ClosePeer`s the revoked node, a data
+      group with exactly `[revoked, survivor]` cannot commit either AddVoter or
+      RemoveVoter (the old 2-voter config needs a quorum that includes the now-
+      unreachable revoked node — raft joint-consensus limitation). The evacuator
+      logs `eviction failed; retry next tick` and the revoked node stays in
+      `raft_voters` until an operator intervenes or the cluster key is dropped
+      (hard-security path). Groups with RF≥3 evict cleanly. The guarantee here is
+      AVAILABILITY (eventually-consistent), not hard security. Consider a
+      force-shrink / operator command for the stranded 2-voter case. (Surfaced by
+      the revoke data-group-evacuation code gate — 2026-05-29.)
+    - **[P3] Evacuation discovery + MoveReplica remove assume node-id PeerIDs**.
+      `DataGroupEvacuator.ledTargets` compares raw `dg.PeerIDs()` against the node-id
+      revoked set, and `MoveReplica` removes by `fromNode` (node id). True for Zero-CA
+      greenfield (`seedShardGroupPeerIDs` emits node ids), but if legacy address-form
+      shard peers are ever introduced, ledTargets would miss them and MoveReplica's
+      remove would not match the config. `EvacuateVoter` itself already normalizes via
+      `ResolveShardGroupPeer` and removes by the raw Server.ID, so the remove-only path
+      is robust; add the same normalization to ledTargets discovery + MoveReplica if
+      address-form peers become possible. (Surfaced by the code gate — 2026-05-29.)
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
@@ -405,11 +436,6 @@ Work these in order. Do not run them in parallel.
 - [ ] **Iceberg REST high-concurrency Raft ceiling**: reopen when production
   catalog workloads miss SLOs or the consistency spec for reducing proposals is
   clear.
-- [x] **Iceberg `/v1/config` secret over plaintext HTTP**: fixed by making
-  the HTTP handler publish caller S3 credential overrides only for HTTPS
-  requests. Plain HTTP still returns catalog defaults and `s3.endpoint`, but
-  omits `s3.access-key-id`, `s3.secret-access-key`, and
-  `s3.path-style-access`.
 - [ ] **Iceberg Spark/Trino/PyIceberg client coverage**: promote only after
   real-client REST Catalog smoke tests define which client behaviors are
   supported versus DuckDB-only compatibility.
@@ -637,15 +663,3 @@ Work these in order. Do not run them in parallel.
 
 ## Completed
 
-- [x] **KEK-prune-refusal for object snapshots [P1]**
-  - `grainfs encrypt kek prune` now refuses if any voter has a retained object
-    snapshot (`<data>/snapshots/snapshot-*.json.zst`) sealed under the target
-    version. The error names the node and count. Implemented via per-voter
-    `SnapshotRefCount` attestation (`snapshot.CountSnapshotsSealedUnderKEK`),
-    leader refusal in `ProposeKEKPrune`, and FSM apply re-check.
-  - **Completed:** vNEXT (2026-05-28)
-
-- [x] **§9 Follow-up: tighten L1 anonymous allow to default bucket scope**
-  - Removed the global `iam.anon-enabled` anonymous bypass. Anonymous S3 access
-    now flows through default-bucket implicit policy or explicit bucket policy.
-  - **Completed:** v0.0.375.0 (2026-05-28)

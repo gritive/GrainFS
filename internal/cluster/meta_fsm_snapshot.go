@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -115,6 +116,12 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// zero-CA present-flip bit (slot 16, PR-2a §8c): capture alongside drop bit
 	// for consistency.
 	presentFlipBegunCopy := f.presentFlipBegun
+	// zero-CA revoked-node set (slot 17): capture under the same RLock so the
+	// serialized set is consistent with the rest of the snapshot.
+	revokedIDs := make([]string, 0, len(f.revokedNodeIDs))
+	for id := range f.revokedNodeIDs {
+		revokedIDs = append(revokedIDs, id)
+	}
 	// Task 4b: capture DEKKeeper wraps inside the same lock window as
 	// activeKEKVersion. LOCK ORDER: f.mu → keeper.mu (VersionsAndActive
 	// acquires keeper.mu). Releasing f.mu first and then calling
@@ -314,6 +321,19 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	denyVec := b.EndVector(len(denyOffs))
 
+	// zero-CA revoked-node set (slot 17): sorted for determinism (mirrors
+	// revoked_peer_spkis). Nested strings must be created before the vector start.
+	sort.Strings(revokedIDs)
+	revokedOffs := make([]flatbuffers.UOffsetT, len(revokedIDs))
+	for i, id := range revokedIDs {
+		revokedOffs[i] = b.CreateString(id)
+	}
+	clusterpb.MetaStateSnapshotStartRevokedNodeIdsVector(b, len(revokedOffs))
+	for i := len(revokedOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(revokedOffs[i])
+	}
+	revokedNodeIDsVec := b.EndVector(len(revokedOffs))
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -334,6 +354,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddRevokedPeerSpkis(b, denyVec)
 	clusterpb.MetaStateSnapshotAddClusterKeyDropped(b, droppedCopy)
 	clusterpb.MetaStateSnapshotAddPresentFlipBegun(b, presentFlipBegunCopy)
+	clusterpb.MetaStateSnapshotAddRevokedNodeIds(b, revokedNodeIDsVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -667,6 +688,19 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// outside the lock. Legacy snapshots default false (FlatBuffer default).
 	droppedDecoded := snap.ClusterKeyDropped()
 
+	// zero-CA revoked-node set (slot 17): decode into a local map. A missing
+	// vector (legacy snapshot) yields an empty set, matching a fresh FSM. The
+	// evacuator re-derives from the restored set on its next tick, so no
+	// onNodeRevoked callback is fired from Restore (mirrors onRebalancePlan).
+	newRevokedNodeIDs := make(map[string]struct{}, snap.RevokedNodeIdsLength())
+	for i := 0; i < snap.RevokedNodeIdsLength(); i++ {
+		id := string(snap.RevokedNodeIds(i))
+		if id == "" {
+			continue
+		}
+		newRevokedNodeIDs[id] = struct{}{}
+	}
+
 	// --- DECODE PHASE ---
 	// Decode all trailers into local variables BEFORE touching any f.* field.
 	// If any decode fails, Restore returns an error with f.* completely untouched.
@@ -835,6 +869,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.kekStatuses = newKEKStatuses
 	f.clusterKeyDropped = droppedDecoded
 	f.presentFlipBegun = snap.PresentFlipBegun()
+	f.revokedNodeIDs = newRevokedNodeIDs
 	if hasDEKData {
 		f.pendingDEKVersions = newDEKVersions
 		f.pendingDEKActive = newDEKActive

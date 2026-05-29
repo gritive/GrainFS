@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -193,6 +194,71 @@ func runRevokeNode(t testing.TB, leaderDataDir, nodeID string) {
 	if !strings.Contains(string(out), "Zero-CA node revoked: "+nodeID) {
 		t.Fatalf("revoke-node output missing success line:\n%s", string(out))
 	}
+}
+
+// dataGroupHasVoter reports whether nodeID appears in ANY data-group's REAL raft
+// voter set (raft_voters), aggregated across every supplied admin socket.
+// raft_voters is admin-UDS-only (the `cluster health` route), so we shell out to
+// the CLI per node (mirrors runRevokeNode). Aggregation is required because a
+// node's health only carries REAL config for groups where it has an instantiated
+// raft member; a group led purely by joiners reads empty on the leader.
+//
+// We use .Output() (stdout only): the daemon logs to stderr, and merging it would
+// corrupt the JSON and silently turn this into a constant false.
+func dataGroupHasVoter(t testing.TB, adminSocks []string, nodeID string) bool {
+	t.Helper()
+	type dgHealth struct {
+		DataGroups *struct {
+			Groups []struct {
+				RaftVoters []string `json:"raft_voters"`
+			} `json:"groups"`
+		} `json:"data_groups"`
+	}
+	for _, sock := range adminSocks {
+		out, err := exec.Command(getBinary(), "cluster", "--endpoint", sock, "--format", "json", "health").Output()
+		if err != nil {
+			continue // a node may be momentarily unreachable; another may report
+		}
+		var h dgHealth
+		if json.Unmarshal(out, &h) != nil || h.DataGroups == nil {
+			continue
+		}
+		for _, g := range h.DataGroups.Groups {
+			if containsString(g.RaftVoters, nodeID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dumpDataGroupHealth returns each socket's `cluster --format json health` output,
+// labelled, so a placement-driven precondition miss is diagnosable in one run.
+func dumpDataGroupHealth(adminSocks []string) string {
+	var b strings.Builder
+	for _, sock := range adminSocks {
+		out, err := exec.Command(getBinary(), "cluster", "--endpoint", sock, "--format", "json", "health").Output()
+		fmt.Fprintf(&b, "=== %s (err=%v) ===\n%s\n", sock, err, string(out))
+	}
+	return b.String()
+}
+
+// shardGroupPeersContain reports whether nodeID appears in any shard-group's
+// peer_ids mirror, read from the public /api/cluster/status of the given node.
+func shardGroupPeersContain(t testing.TB, base, nodeID string) bool {
+	t.Helper()
+	s := getStatusJSON(t, base)
+	groups, _ := s["shard_groups"].([]any)
+	for _, g := range groups {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		if containsString(stringList(gm["peer_ids"]), nodeID) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseBundleToken extracts the bundle token printed by RunInviteCreate: the
@@ -536,6 +602,79 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return containsString(stringList(s["peers"]), "revoked-joiner")
 			}, 2*time.Second, 500*time.Millisecond).Should(gomega.BeFalse(),
 				"revoked node must not rejoin")
+		})
+
+		// Proves the data-group evacuation feature (Tasks 1-7): revoking a node
+		// EVICTS it from the REAL data-group raft voter sets (raft_voters), not just
+		// the peer_ids mirror. raft_voters is admin-UDS-only, so dataGroupHasVoter
+		// shells out to `cluster --format json health` on each node's admin socket.
+		ginkgo.It("evicts a revoked node from data-group voter sets", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeader(t, inviteJoinClusterKey)
+			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
+			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
+
+			// Full socket set (incl. the revoke target) for the precondition; the
+			// survivor set excludes the revoked node, whose own local view of its
+			// former group stays stale/unauthoritative after removal and would keep
+			// reporting itself a voter forever (permanent false-positive flake).
+			leaderSock := filepath.Join(leader.dataDir, "admin.sock")
+			adminSocks := []string{leaderSock}
+			var revokedSock string
+			for _, id := range []string{"evac-joiner-1", "evac-joiner-2", "evac-spare"} {
+				b := mintInvite(t, leader.dataDir)
+				jd := shortTempDir(t)
+				j := startInviteJoiner(t, id, jd, b)
+				waitForVoter(t, leader.httpURL, id, 90*time.Second)
+				waitForPort(t, j.httpPort, 60*time.Second)
+				sock := filepath.Join(jd, "admin.sock")
+				adminSocks = append(adminSocks, sock)
+				if id == "evac-joiner-1" {
+					revokedSock = sock
+				}
+			}
+			survivorSocks := make([]string, 0, len(adminSocks))
+			for _, s := range adminSocks {
+				if s != revokedSock {
+					survivorSocks = append(survivorSocks, s)
+				}
+			}
+
+			// PUT an object so the bucket's data group gains real raft membership.
+			bucket := "evac-bucket"
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
+			cli := s3ClientFor(leader.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(cli, 60*time.Second)).To(gomega.Succeed())
+			gomega.Eventually(func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				return tryPutObject(ctx, cli, bucket, "evac.txt", []byte("evac payload"))
+			}, 60*time.Second, time.Second).Should(gomega.Succeed())
+
+			// LOAD-BEARING PRECONDITION: evac-joiner-1 IS a REAL data-group voter
+			// before revoke (else the post-revoke BeFalse is vacuous). On a miss,
+			// dump every socket's health so a placement skew is diagnosable in one run.
+			gomega.Eventually(func() bool {
+				return dataGroupHasVoter(t, adminSocks, "evac-joiner-1")
+			}, 90*time.Second, time.Second).Should(gomega.BeTrue(),
+				"PRECONDITION: evac-joiner-1 must be a REAL data-group voter before revoke; health dump:\n"+dumpDataGroupHealth(adminSocks))
+
+			runRevokeNode(t, leader.dataDir, "evac-joiner-1")
+
+			// THE FIX: evac-joiner-1 disappears from every REAL data-group voter set
+			// across the survivors (its own stale local view is excluded).
+			gomega.Eventually(func() bool {
+				return dataGroupHasVoter(t, survivorSocks, "evac-joiner-1")
+			}, 120*time.Second, time.Second).Should(gomega.BeFalse(),
+				"revoked node must be evicted from all data-group REAL voter sets; survivor health dump:\n"+dumpDataGroupHealth(survivorSocks))
+
+			// And the persisted peer_ids mirror converges (consequence of the real
+			// ChangeMembership the evacuation controller drives).
+			gomega.Eventually(func() bool {
+				return shardGroupPeersContain(t, leader.httpURL, "evac-joiner-1")
+			}, 120*time.Second, time.Second).Should(gomega.BeFalse())
 		})
 	})
 

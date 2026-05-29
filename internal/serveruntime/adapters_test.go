@@ -135,6 +135,23 @@ func TestRaftMembershipRemoveVoterKeepsSelfNodeID(t *testing.T) {
 	require.Equal(t, [][]string{{"n1"}}, node.removes)
 }
 
+// TestRaftClusterInfoNormalizesRaftVotersAddressToNodeID proves the data-group
+// health surface resolves raft-config ADDRESSES in RaftVoters to node IDs
+// (symmetric with PeerIDs), so a Task-8 e2e reading raft_voters can match a
+// node ID like "joiner-1" instead of an unmatchable address. normalizePeerIDs
+// is idempotent on already-node-ID input, so mixed input is safe.
+func TestRaftClusterInfoNormalizesRaftVotersAddressToNodeID(t *testing.T) {
+	info := NewRaftClusterInfo(&fakeRaftNode{id: "n1"}, nil, nil,
+		fakeAddressBook{nodes: []cluster.MetaNodeEntry{
+			{ID: "joiner-1", Address: "10.0.0.2:7001"},
+			{ID: "n1", Address: "10.0.0.1:7001"},
+		}})
+
+	// Address resolves to node ID; an already-node-ID input passes through.
+	got := info.normalizePeerIDs([]string{"10.0.0.2:7001", "n1"})
+	require.Equal(t, []string{"joiner-1", "n1"}, got)
+}
+
 func TestRaftClusterInfoLeaderIDNormalizesRaftAddress(t *testing.T) {
 	info := NewRaftClusterInfo(&fakeRaftNode{
 		id:       "n1",

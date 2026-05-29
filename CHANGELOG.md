@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.449.0] - 2026-05-29
+## [0.0.450.0] - 2026-05-29
 
 ### Added
 
@@ -27,6 +27,27 @@
   local sidecar). `http://` is permitted only to a loopback host and may not carry
   a token. A bearer token configured with an unusable seal now hard-denies rather
   than silently calling the PDP without authentication.
+
+## [0.0.449.0] - 2026-05-29
+
+### Changed
+
+- Revoking a node (`grainfs cluster --endpoint <admin.sock> revoke-node <id>`) now
+  evicts it from per-data-group Raft voter sets, not just meta-Raft membership.
+  A surviving leader in each affected data group removes the revoked node —
+  replacing it with a healthy node when one is available, or shrinking the group —
+  so a revoked node stops being a data-group voter on its own. Eviction is
+  eventually-consistent; a 2-voter group whose only other voter is the revoked
+  node cannot self-heal and needs operator action or a cluster-key drop (the
+  Zero-CA operator guide documents how to detect and resolve this).
+
+### Added
+
+- Cluster health now reports the real committed Raft voter set per data group as
+  `raft_voters`, alongside the existing `peer_ids` placement view
+  (`grainfs cluster --endpoint <admin.sock> --format json health`). Operators can
+  confirm a revoked or migrated node has actually left a group's voter set, not
+  just the placement mirror.
 
 ## [0.0.448.0] - 2026-05-29
 
