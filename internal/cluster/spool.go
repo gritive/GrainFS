@@ -264,11 +264,14 @@ func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 	binary.BigEndian.PutUint32(header[4:8], uint32(len(blob)))
 	binary.BigEndian.PutUint32(header[8:], gen)
 	if _, err := w.w.Write(header[:]); err != nil {
+		clear(blob)
 		return 0, err
 	}
 	if _, err := w.w.Write(blob); err != nil {
+		clear(blob)
 		return 0, err
 	}
+	clear(blob)
 	w.record++
 	return len(p), nil
 }
