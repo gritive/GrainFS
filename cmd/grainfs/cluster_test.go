@@ -55,15 +55,17 @@ func TestClusterCmd_Day2OpsRegistered(t *testing.T) {
 	}
 }
 
-// TestRuntimeJoinRemainsClusterJoinRetired verifies the cluster-key-input
-// retirement: the offline `grainfs cluster join` command (which required the
-// removed --cluster-key flag) is gone, while runtime `grainfs join`
-// (admin-UDS restart-into-join, now staging keys.d/current.key) remains.
-func TestRuntimeJoinRemainsClusterJoinRetired(t *testing.T) {
-	assert.Contains(t, rootSubcommandNames(), "join",
-		"root `join` (admin-UDS restart-into-join) must remain registered")
+// TestRuntimeJoinRetired verifies the join-surface retirement: BOTH the offline
+// `grainfs cluster join` (retired in #673) and the runtime `grainfs join`
+// (admin-UDS restart-into-join) commands are gone. Joining a cluster is now
+// invite-join only: `grainfs serve` with GRAINFS_INVITE_BUNDLE set, minted via
+// `grainfs cluster invite create`. The invite bundle is a secret, so there is
+// deliberately no `join <token>` verb that would leak it into argv.
+func TestRuntimeJoinRetired(t *testing.T) {
+	assert.NotContains(t, rootSubcommandNames(), "join",
+		"runtime `grainfs join` retired (superseded by invite-join); no join verb (bundle is a secret)")
 	assert.NotContains(t, clusterSubcommandNames(), "join",
-		"offline `cluster join` retired (superseded by invite-join); --cluster-key input removed")
+		"offline `cluster join` retired in #673 (superseded by invite-join)")
 }
 
 // clusterClientFromCmd helper tests.
