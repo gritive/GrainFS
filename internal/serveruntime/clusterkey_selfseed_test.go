@@ -76,3 +76,91 @@ func TestKekDirEmptyStrict(t *testing.T) {
 	_, err = kekDirEmptyStrict(fileAsDir)
 	require.Error(t, err)
 }
+
+func writeProbeFile(t *testing.T, path string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+}
+
+func freshGenesisState(t *testing.T) *bootState {
+	t.Helper()
+	d := t.TempDir()
+	return &bootState{
+		cfg:     Config{DataDir: d, ClusterKey: ""},
+		metaDir: filepath.Join(d, "meta"),
+		raftDir: filepath.Join(d, "raft"),
+	}
+}
+
+func TestSelfSeedDecision(t *testing.T) {
+	t.Run("fresh genesis seeds", func(t *testing.T) {
+		seed, err := selfSeedDecision(freshGenesisState(t))
+		require.NoError(t, err)
+		require.True(t, seed)
+	})
+	t.Run("flag present blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		st.cfg.ClusterKey = "deadbeef"
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("joinMode blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		st.joinMode = true
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("inviteJoinMode blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		st.inviteJoinMode = true
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("priorState (raft non-empty) blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		writeProbeFile(t, filepath.Join(st.raftDir, "0001.log"))
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("staged cluster.id blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "cluster.id"))
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("staged KEK <N>.key blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "keys", "3.key"))
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("invite node.key.unsealed blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "node.key.unsealed"))
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("invite-join-pending sentinel blocks", func(t *testing.T) {
+		st := freshGenesisState(t)
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, ".invite-join-pending"))
+		seed, err := selfSeedDecision(st)
+		require.NoError(t, err)
+		require.False(t, seed)
+	})
+	t.Run("fail-closed: KEK dir unreadable errors, no seed", func(t *testing.T) {
+		st := freshGenesisState(t)
+		// make the keys path a regular file → KeysDirIsEmpty errors (ENOTDIR).
+		writeProbeFile(t, filepath.Join(st.cfg.DataDir, "keys"))
+		seed, err := selfSeedDecision(st)
+		require.Error(t, err)
+		require.False(t, seed)
+	})
+}
