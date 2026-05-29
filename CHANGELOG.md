@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.452.0] - 2026-05-29
+
+### Changed
+
+- External PDP metrics (`grainfs_iam_pdp_*`) now carry a `scope` label
+  (`admin` | `protocol_credential`) identifying the authorizer instance that
+  emitted them. `grainfs_iam_pdp_request_duration_seconds` and
+  `grainfs_iam_pdp_cache_entries` changed from unlabeled to per-`scope` series, so
+  dashboards or alerts bound to the old unlabeled series must add the `scope` label
+  (aggregate with `sum without(scope) (...)`). This also fixes
+  `grainfs_iam_pdp_cache_entries`, which previously clobbered across authorizer
+  instances and is now accurate per scope. The decorator additionally memoizes its
+  parsed `iam.pdp` config so a disabled PDP adds no per-request JSON parse. No
+  config or API change.
+
 ## [0.0.451.0] - 2026-05-29
 
 ### Changed
