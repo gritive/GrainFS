@@ -14,6 +14,10 @@ import (
 // itself: it transfers leadership first, then the caller retries on the new leader.
 var ErrLeadershipTransferred = errors.New("leadership transferred to another voter")
 
+// ErrRefuseLastVoter is returned by EvacuateVoter when removing the revoked node
+// would empty the voter set; the group would lose quorum permanently.
+var ErrRefuseLastVoter = errors.New("refusing to evict last voter")
+
 // ErrDataGroupNotLocalLeader is returned when an operation requires the local
 // process to lead a data group but leadership is elsewhere or not established.
 var ErrDataGroupNotLocalLeader = errors.New("data group not led locally")
@@ -28,6 +32,7 @@ type NodeAddressBook interface {
 // *MetaRaft implements this interface.
 type ShardGroupUpdater interface {
 	ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error
+	ProposeShardGroupForwarding(ctx context.Context, sg ShardGroupEntry) error
 }
 
 // dataRaftNode is the subset of RaftNode used by DataGroupPlanExecutor.
@@ -43,13 +48,14 @@ type dataRaftNode interface {
 	TransferLeadership() error
 	AddVoterCtx(ctx context.Context, id, addr string) error
 	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
+	Configuration() raft.Configuration
 }
 
 // DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
 //
-// MoveReplica algorithm (PR-K2 — single §4.3 atomic call):
+// MoveReplica algorithm (PR-K2):
 //
-//	ChangeMembership(adds=[toNode], removes=[fromAddr]) → ProposeShardGroup (MetaFSM) →
+//	ChangeMembership(adds=[toNode], removes=[fromNode]) → ProposeShardGroup (MetaFSM) →
 //	DataGroupManager.Add
 //
 // Self-removal is handled by the joint commit-time step-down hook in
@@ -159,8 +165,11 @@ func (e *DataGroupPlanExecutor) AddReplica(ctx context.Context, groupID, toNode 
 	return nil
 }
 
-// MoveReplica migrates a Raft voter in groupID from fromNode to toNode using a
-// single §4.3 atomic ChangeMembership call.
+// MoveReplica migrates a Raft voter in groupID from fromNode to toNode. It issues
+// one ChangeMembership(adds, removes) which the adapter SEQUENCES as add-then-remove
+// (not atomic; see internal/cluster/raftnode_adapter.go). A partial failure can
+// leave an added-but-not-removed voter, which EvacuateVoter recovers from
+// idempotently.
 //
 // Self-removal (fromNode == localNodeID): transfers leadership to another voter
 // and returns ErrLeadershipTransferred so the caller retries on the new leader.
@@ -203,19 +212,16 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	if err != nil {
 		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
 	}
-	fromAddr, err := e.resolveAddr(fromNode)
-	if err != nil {
-		return fmt.Errorf("data_group_executor: resolve fromNode: %w", err)
-	}
 
-	// Single atomic §4.3 call: learner-first add + joint propose + commit + leave.
-	// Self-removal: joint commit-time hook closes jointPromoteCh BEFORE state=Follower
-	// (verified ordering invariant in internal/raft/raft.go), so caller wakes up nil.
+	// ChangeMembership is sequenced add-then-remove by the adapter (not atomic).
+	// The data-group raft config keys voters by NODE ID (GroupLifecycleConfig.NodeID
+	// = the node id from the seeded peer set), so the add carries the resolved
+	// address but the remove MUST be the node id (fromNode), symmetric with the add.
 	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
 	defer cancel()
 	if err := node.ChangeMembership(addCtx,
 		[]raft.ServerEntry{{ID: toNode, Address: toAddr, Suffrage: raft.Voter}},
-		[]string{fromAddr}, // data-Raft uses address as peerKey
+		[]string{fromNode}, // data-group raft keys voters by node id
 	); err != nil {
 		return fmt.Errorf("data_group_executor: ChangeMembership: %w", err)
 	}
@@ -230,15 +236,167 @@ func (e *DataGroupPlanExecutor) MoveReplica(ctx context.Context, groupID, fromNo
 	}
 	newPeers = append(newPeers, toNode)
 
-	// Persist new membership to MetaFSM. Even after self-removal of the data-Raft
-	// leader, this node may still be meta-Raft leader; if not, ProposeShardGroup
-	// forwards or fails — caller can reconcile later.
-	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
-		return fmt.Errorf("data_group_executor: ProposeShardGroup: %w", err)
+	// Persist new membership to MetaFSM. A non-meta-leader group leader still
+	// converges by forwarding to the meta leader (P1-1).
+	if err := e.sgUpdater.ProposeShardGroupForwarding(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
+		return fmt.Errorf("data_group_executor: ProposeShardGroupForwarding: %w", err)
 	}
 
 	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
 	return nil
+}
+
+// EvacuateVoter idempotently removes revokedID from groupID's voter set, reading
+// the group's REAL raft config (node.Configuration()) to decide the minimal
+// membership change. Safe to re-run after a partial/crashed prior attempt (P1-2).
+//
+// COUNT-BASED, PICK-STABLE decision: target = the group's intended replication
+// factor = len(dg.PeerIDs()) (the mirror, which MoveReplica updates ONLY after a
+// ChangeMembership fully succeeds, so it is stable across a crashed move).
+// survivors = REAL voters minus the revoked node being evicted. If removing the
+// revoked voter still leaves >= target voters (survivors >= target), a prior
+// (possibly crashed) move already supplied a replacement -> issue REMOVE-ONLY and
+// never add a second replacement, regardless of which node a prior attempt picked.
+// (Keying the decision on whether the SPECIFIC replacementID is already a voter —
+// "pick-based" — is the bug this replaces: a retry that picks a different node
+// would over-replicate.) replacementID == "" always requests a shrink.
+//
+// Must run on the data-group raft leader. Refuses to drop the last voter.
+// A revoked node id that is not among the current voters is an idempotent no-op.
+// revoked == local leader -> transfer leadership and let the new leader retry.
+func (e *DataGroupPlanExecutor) EvacuateVoter(ctx context.Context, groupID, revokedID, replacementID string) error {
+	dg := e.dgMgr.Get(groupID)
+	if dg == nil {
+		return fmt.Errorf("data_group_executor: group %q not found", groupID)
+	}
+	node := e.nodeFor(dg)
+	if !node.IsLeader() {
+		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
+	}
+
+	// REAL voter set, normalized to NODE IDs. data-group raft Server.ID IS the
+	// node ID (seed/MatchLocal/GroupLifecycleConfig.NodeID); normalize anyway so
+	// any address-form id also resolves. Keep the raw Server.ID as the removal key
+	// (ChangeMembership/RemoveVoter operate in the config's own id space).
+	voterByNodeID := make(map[string]string) // nodeID -> raw Server.ID (removal key)
+	for _, s := range node.Configuration().Servers {
+		if s.Suffrage != raft.Voter {
+			continue
+		}
+		nid := ResolveShardGroupPeer(e.addrBook, s.ID).NodeID
+		if nid == "" {
+			nid = s.ID
+		}
+		voterByNodeID[nid] = s.ID
+	}
+
+	rawRevoked, present := voterByNodeID[revokedID]
+	if !present {
+		// Already absent from the REAL voter config. But the evacuator only reaches
+		// EvacuateVoter with revokedID still in the PeerIDs mirror (ledTargets reads
+		// dg.PeerIDs()), so this branch IS the divergent state left when a prior
+		// remove committed to raft but the follow-up PeerIDs forward failed (meta
+		// leader election / transient). Converge the mirror from the real config so
+		// the next tick self-heals instead of looping on a bare no-op forever.
+		return e.convergePeerIDsFromRealConfig(ctx, groupID, dg, node, revokedID)
+	}
+	if len(voterByNodeID)-1 == 0 {
+		return fmt.Errorf("data_group_executor: refusing to evict last voter of group %q: %w", groupID, ErrRefuseLastVoter)
+	}
+
+	// Self-removal: the revoked node leads this group. Step down so a surviving
+	// voter takes over and evicts us on its next tick. v2 TransferLeadership picks
+	// the most-caught-up peer from the leader's REAL matchIndex and steps down
+	// regardless (raft §3.10). We must NOT pre-wait via waitForLeadershipTransferTarget
+	// here: it reads the adapter's PeerMatchIndex, which is always (0,false) under
+	// v2 (raftnode_adapter.go), so the pre-wait can never observe catch-up and would
+	// time out — leaving a revoked leader permanently un-evictable.
+	if revokedID == e.localNodeID {
+		if err := node.TransferLeadership(); err != nil {
+			return fmt.Errorf("data_group_executor: TransferLeadership: %w", err)
+		}
+		return ErrLeadershipTransferred
+	}
+
+	// COUNT-BASED, PICK-STABLE (P1-2): target = intended RF = mirror size (stable
+	// across a crashed move, which updates the mirror only after success).
+	// survivors = real voters minus the revoked one. survivors >= target (or no
+	// replacement) => remove-only; never adds a 2nd replacement on a crashed-move
+	// retry regardless of which node a prior attempt picked.
+	target := len(dg.PeerIDs())
+	survivors := len(voterByNodeID) - 1
+
+	if replacementID == "" || survivors >= target {
+		rmCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+		defer cancel()
+		if err := node.ChangeMembership(rmCtx, nil, []string{rawRevoked}); err != nil {
+			return fmt.Errorf("data_group_executor: ChangeMembership remove: %w", err)
+		}
+		return e.convergePeerIDsFromRealConfig(ctx, groupID, dg, node, revokedID)
+	}
+
+	// Fresh move: survivors < target and a replacement was provided. Reuse
+	// MoveReplica (v2 catch-up is unobservable — reuse, do not reimplement).
+	if err := e.MoveReplica(ctx, groupID, revokedID, replacementID); err != nil {
+		return err
+	}
+	return e.convergePeerIDsFromRealConfig(ctx, groupID, dg, node, revokedID)
+}
+
+// convergePeerIDsFromRealConfig builds PeerIDs from the REAL voter set (not the
+// stale mirror), minus removeID, then forwards to the meta-leader so a non-meta-
+// leader group leader still converges (P1-1). Server.ID is an address; resolve
+// each to a node ID.
+func (e *DataGroupPlanExecutor) convergePeerIDsFromRealConfig(ctx context.Context, groupID string, dg *DataGroup, node dataRaftNode, removeID string) error {
+	var newPeers []string
+	for _, s := range node.Configuration().Servers {
+		if s.Suffrage != raft.Voter {
+			continue
+		}
+		id := ResolveShardGroupPeer(e.addrBook, s.ID).NodeID
+		if id == "" {
+			id = s.ID
+		}
+		if id == removeID {
+			continue // immune to RemoveVoter commit-timing on the immediate re-read
+		}
+		newPeers = append(newPeers, id)
+	}
+	// Skip the meta proposal when the live mirror already matches the real config
+	// (set-equal). Two effects: a divergence-heal where nothing changed is a true
+	// no-op (no redundant meta traffic), and the fresh-move path does not re-propose
+	// what MoveReplica already persisted. Compare against the CURRENT mirror
+	// (dgMgr.Get), not the dg captured before MoveReplica ran.
+	if cur := e.dgMgr.Get(groupID); cur != nil && samePeerSet(newPeers, cur.PeerIDs()) {
+		return nil
+	}
+	if err := e.sgUpdater.ProposeShardGroupForwarding(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
+		return fmt.Errorf("data_group_executor: ProposeShardGroupForwarding: %w", err)
+	}
+	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
+	return nil
+}
+
+// samePeerSet reports whether a and b contain the same node IDs, ignoring order
+// and duplicates.
+func samePeerSet(a, b []string) bool {
+	sa := make(map[string]struct{}, len(a))
+	for _, id := range a {
+		sa[id] = struct{}{}
+	}
+	sb := make(map[string]struct{}, len(b))
+	for _, id := range b {
+		sb[id] = struct{}{}
+	}
+	if len(sa) != len(sb) {
+		return false
+	}
+	for id := range sa {
+		if _, ok := sb[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *DataGroupPlanExecutor) waitForLeadershipTransferTarget(

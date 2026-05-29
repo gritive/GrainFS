@@ -10,6 +10,25 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
+// liveNonRevokedNodes returns meta members excluding Zero-CA-revoked nodes, so
+// placement never (re-)seeds a revoked node as a data-group voter. Pairs with the
+// DataGroupEvacuator: placement excludes, the evacuator evicts. Also corrects the
+// cluster-size/replication count, which must not count a revoked node.
+func liveNonRevokedNodes(fsm interface {
+	Nodes() []cluster.MetaNodeEntry
+	IsRevoked(string) bool
+}) []cluster.MetaNodeEntry {
+	all := fsm.Nodes()
+	out := make([]cluster.MetaNodeEntry, 0, len(all))
+	for _, n := range all {
+		if fsm.IsRevoked(n.ID) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 func seedGroupCountForClusterSize(clusterSize int) int {
 	if clusterSize < 1 {
 		clusterSize = 1
@@ -49,7 +68,7 @@ func SeedInitialShardGroups(
 		if voterCount < 1 {
 			voterCount = 1
 		}
-		voters := SeedShardGroupVoters(selfNodeID, selfAddr, peers, metaRaft.FSM().Nodes(), groupID, voterCount)
+		voters := SeedShardGroupVoters(selfNodeID, selfAddr, peers, liveNonRevokedNodes(metaRaft.FSM()), groupID, voterCount)
 
 		sgCtx, sgCancel := context.WithTimeout(bootstrapCtx, 5*time.Second)
 		err := metaRaft.ProposeShardGroup(sgCtx, cluster.ShardGroupEntry{

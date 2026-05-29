@@ -364,8 +364,25 @@ func (rcv *MetaStateSnapshot) MutatePresentFlipBegun(n bool) bool {
 	return rcv._tab.MutateBoolSlot(36, n)
 }
 
+func (rcv *MetaStateSnapshot) RevokedNodeIds(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *MetaStateSnapshot) RevokedNodeIdsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(17)
+	builder.StartObject(18)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -456,6 +473,12 @@ func MetaStateSnapshotAddClusterKeyDropped(builder *flatbuffers.Builder, cluster
 }
 func MetaStateSnapshotAddPresentFlipBegun(builder *flatbuffers.Builder, presentFlipBegun bool) {
 	builder.PrependBoolSlot(16, presentFlipBegun, false)
+}
+func MetaStateSnapshotAddRevokedNodeIds(builder *flatbuffers.Builder, revokedNodeIds flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(revokedNodeIds), 0)
+}
+func MetaStateSnapshotStartRevokedNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

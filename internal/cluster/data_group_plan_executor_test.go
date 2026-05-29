@@ -32,7 +32,12 @@ type fakeRaftNode struct {
 	lastAdds              []raft.ServerEntry
 	lastRemoves           []string
 	isLeaderFn            func() bool
+
+	// config is the real raft Configuration returned by Configuration() (EvacuateVoter).
+	config raft.Configuration
 }
+
+func (f *fakeRaftNode) Configuration() raft.Configuration { return f.config }
 
 func (f *fakeRaftNode) IsLeader() bool {
 	if f.isLeaderFn != nil {
@@ -136,6 +141,12 @@ func (f *fakeSGUpdater) ProposeShardGroup(_ context.Context, sg cluster.ShardGro
 	return f.err
 }
 
+// ProposeShardGroupForwarding delegates to ProposeShardGroup so existing
+// recording assertions (proposed/err/errForCall) keep working unchanged.
+func (f *fakeSGUpdater) ProposeShardGroupForwarding(ctx context.Context, sg cluster.ShardGroupEntry) error {
+	return f.ProposeShardGroup(ctx, sg)
+}
+
 // newTestExecutor wires a DataGroupPlanExecutor with a fake raft node.
 func newTestExecutor(t *testing.T, fakeNode *fakeRaftNode, nodes []cluster.MetaNodeEntry) (
 	*cluster.DataGroupPlanExecutor, *fakeSGUpdater,
@@ -171,7 +182,8 @@ func TestMoveReplica_HappyPath(t *testing.T) {
 	require.Equal(t, "node-3", fakeNode.lastAdds[0].ID)
 	require.Equal(t, "10.0.0.3:9003", fakeNode.lastAdds[0].Address)
 	require.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
-	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+	// data-group raft keys voters by node id, so the remove is the node id.
+	require.Equal(t, []string{"node-0"}, fakeNode.lastRemoves)
 
 	require.Len(t, sgUpdater.proposed, 1)
 	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
@@ -521,4 +533,185 @@ func TestMoveReplica_ContextCancelDuringCatchup(t *testing.T) {
 	err := exec.MoveReplica(ctx, "group-0", "node-0", "node-3")
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// --- EvacuateVoter (P1-2) -------------------------------------------------
+
+func voterConfig(addrs ...string) raft.Configuration {
+	cfg := raft.Configuration{}
+	for _, a := range addrs {
+		cfg.Servers = append(cfg.Servers, raft.Server{ID: a, Suffrage: raft.Voter})
+	}
+	return cfg
+}
+
+func TestEvacuateVoter_AbsentFromRealConfig_ConvergesMirror(t *testing.T) {
+	// Divergent state (review finding A): a prior remove committed to raft (revoked
+	// already gone from the REAL config) but the follow-up PeerIDs forward failed,
+	// so the mirror still lists it. The evacuator only reaches EvacuateVoter with
+	// revoked still in the mirror, so this branch IS that divergence — it must
+	// converge the mirror (a forward, no raft change), never a bare no-op that loops
+	// forever.
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 10,
+		config:    voterConfig("10.0.0.1:9001", "10.0.0.2:9002"), // revoked already gone from raft
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "revoked", Address: "10.0.0.0:9000"},
+		{ID: "r1", Address: "10.0.0.1:9001"},
+		{ID: "r2", Address: "10.0.0.2:9002"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"revoked", "r1", "r2"}, nil)) // mirror still lists revoked
+
+	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "")
+	require.NoError(t, err)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls) // already absent from raft: no membership change
+	require.Len(t, sgUpdater.proposed, 1)               // but the mirror converges from the real config
+	require.ElementsMatch(t, []string{"r1", "r2"}, sgUpdater.proposed[0].PeerIDs)
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "revoked")
+}
+
+func TestEvacuateVoter_ShrinkWhenNoReplacement(t *testing.T) {
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 10,
+		config:    voterConfig("10.0.0.0:9000", "10.0.0.1:9001", "10.0.0.2:9002"),
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "revoked", Address: "10.0.0.0:9000"},
+		{ID: "r1", Address: "10.0.0.1:9001"},
+		{ID: "r2", Address: "10.0.0.2:9002"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"revoked", "r1", "r2"}, nil))
+
+	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "")
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Empty(t, fakeNode.lastAdds)
+	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+
+	// PeerIDs mirror converges from the real config minus the revoked node.
+	require.Len(t, sgUpdater.proposed, 1)
+	require.ElementsMatch(t, []string{"r1", "r2"}, sgUpdater.proposed[0].PeerIDs)
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "revoked")
+}
+
+func TestEvacuateVoter_FreshMove_DelegatesToMoveReplica(t *testing.T) {
+	// survivors (real voters minus revoked) = {r1} = 1 < target 2 -> fresh move.
+	fakeNode := &fakeRaftNode{
+		isLeader:    true,
+		committed:   10,
+		autoCatchup: true,
+		config:      voterConfig("10.0.0.0:9000", "10.0.0.1:9001"),
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "revoked", Address: "10.0.0.0:9000"},
+		{ID: "r1", Address: "10.0.0.1:9001"},
+		{ID: "newnode", Address: "10.0.0.3:9003"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"revoked", "r1"}, nil))
+
+	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "newnode")
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, fakeNode.lastAdds, 1)
+	require.Equal(t, "newnode", fakeNode.lastAdds[0].ID)
+	// Move delegates to MoveReplica, which removes by node id (fromNode).
+	require.Equal(t, []string{"revoked"}, fakeNode.lastRemoves)
+	require.NotEmpty(t, sgUpdater.proposed)
+}
+
+func TestEvacuateVoter_RefusesLastVoter(t *testing.T) {
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 10,
+		config:    voterConfig("10.0.0.0:9000"),
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "revoked", Address: "10.0.0.0:9000"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"revoked"}, nil))
+
+	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "")
+	require.ErrorIs(t, err, cluster.ErrRefuseLastVoter)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Empty(t, sgUpdater.proposed)
+}
+
+func TestEvacuateVoter_FullyAbsent_NoOp(t *testing.T) {
+	// Revoked node is absent from BOTH the real config AND the mirror (e.g. a
+	// double-fire after a complete eviction). No raft change, and the convergence
+	// pass is a true no-op because the mirror already matches the real config
+	// (samePeerSet skips the redundant proposal).
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 10,
+		config:    voterConfig("10.0.0.1:9001", "10.0.0.2:9002"),
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "r1", Address: "10.0.0.1:9001"},
+		{ID: "r2", Address: "10.0.0.2:9002"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"r1", "r2"}, nil))
+
+	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "")
+	require.NoError(t, err)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Empty(t, sgUpdater.proposed)
+}
+
+// TestEvacuateVoter_CrashedMove_DifferentReplacementPicked_RemoveOnly is the
+// discriminating test: a prior move added node-X then crashed before removing
+// revoked. The retry picks a DIFFERENT replacement (node-Y). A count-based impl
+// must issue REMOVE-ONLY (adds empty) because survivors already >= target; a
+// pick-based impl would add node-Y -> over-replication.
+func TestEvacuateVoter_CrashedMove_DifferentReplacementPicked_RemoveOnly(t *testing.T) {
+	// REAL config voters = {revoked, r1, r2, node-X} (4 voters, prior crashed move added node-X).
+	fakeNode := &fakeRaftNode{
+		isLeader:  true,
+		committed: 10,
+		config: voterConfig(
+			"10.0.0.0:9000", // revoked
+			"10.0.0.1:9001", // r1
+			"10.0.0.2:9002", // r2
+			"10.0.0.4:9004", // node-X (added by crashed move)
+		),
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "revoked", Address: "10.0.0.0:9000"},
+		{ID: "r1", Address: "10.0.0.1:9001"},
+		{ID: "r2", Address: "10.0.0.2:9002"},
+		{ID: "node-X", Address: "10.0.0.4:9004"},
+		{ID: "node-Y", Address: "10.0.0.5:9005"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	// mirror dg.PeerIDs() = {revoked, r1, r2} => target = 3.
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"revoked", "r1", "r2"}, nil))
+
+	// Retry picks a DIFFERENT replacement (node-Y, NOT a current voter).
+	err := exec.EvacuateVoter(context.Background(), "group-0", "revoked", "node-Y")
+	require.NoError(t, err)
+
+	// survivors {r1,r2,X} = 3 >= target 3 -> remove-only. Must NOT add node-Y.
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Empty(t, fakeNode.lastAdds, "must NOT add node-Y (pick-based would over-replicate)")
+	require.Equal(t, []string{"10.0.0.0:9000"}, fakeNode.lastRemoves)
+
+	// Mirror converges from real config minus revoked = {r1, r2, node-X}.
+	require.Len(t, sgUpdater.proposed, 1)
+	require.ElementsMatch(t, []string{"r1", "r2", "node-X"}, sgUpdater.proposed[0].PeerIDs)
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "revoked")
+	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "node-Y")
 }

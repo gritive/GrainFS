@@ -72,6 +72,67 @@ func TestSeedShardGroupVoters_NonZeroGroupUsesEffectiveECWidth(t *testing.T) {
 	}
 }
 
+// fakeFSMNodes is a minimal stand-in for *cluster.MetaFSM satisfying the
+// liveNonRevokedNodes interface (Nodes + IsRevoked).
+type fakeFSMNodes struct {
+	nodes   []cluster.MetaNodeEntry
+	revoked map[string]struct{}
+}
+
+func (f fakeFSMNodes) Nodes() []cluster.MetaNodeEntry { return f.nodes }
+func (f fakeFSMNodes) IsRevoked(id string) bool {
+	_, ok := f.revoked[id]
+	return ok
+}
+
+func TestLiveNonRevokedNodes_FiltersRevoked(t *testing.T) {
+	fsm := fakeFSMNodes{
+		nodes: []cluster.MetaNodeEntry{
+			{ID: "node-a", Address: "10.0.0.1:7000"},
+			{ID: "node-b", Address: "10.0.0.2:7000"},
+			{ID: "node-c", Address: "10.0.0.3:7000"},
+		},
+		revoked: map[string]struct{}{"node-b": {}},
+	}
+	got := liveNonRevokedNodes(fsm)
+	if len(got) != 2 {
+		t.Fatalf("got %d live nodes (%v), want 2", len(got), got)
+	}
+	for _, n := range got {
+		if n.ID == "node-b" {
+			t.Fatalf("revoked node-b must be filtered out, got %v", got)
+		}
+	}
+}
+
+// TestMissingSeedShardGroups_ExcludesRevokedNode verifies that seeding driven by
+// liveNonRevokedNodes never yields a PeerIDs set containing a revoked node.
+func TestMissingSeedShardGroups_ExcludesRevokedNode(t *testing.T) {
+	fsm := fakeFSMNodes{
+		nodes: []cluster.MetaNodeEntry{
+			{ID: "node-a", Address: "10.0.0.1:7000"},
+			{ID: "revoked", Address: "10.0.0.2:7000"},
+			{ID: "node-c", Address: "10.0.0.3:7000"},
+		},
+		revoked: map[string]struct{}{"revoked": {}},
+	}
+	live := liveNonRevokedNodes(fsm)
+
+	existing := make([]cluster.ShardGroupEntry, 0, 8)
+	for i := 0; i < 8; i++ {
+		existing = append(existing, cluster.ShardGroupEntry{ID: fmt.Sprintf("group-%d", i), PeerIDs: []string{"node-a"}})
+	}
+
+	got := MissingSeedShardGroups("node-a", "10.0.0.1:7000", live, existing, 2)
+	for _, group := range got {
+		for _, voter := range group.PeerIDs {
+			if voter == "revoked" {
+				t.Fatalf("group %s seeded the revoked node as a voter: %v", group.ID, group.PeerIDs)
+			}
+		}
+	}
+}
+
 func TestMissingSeedShardGroups_GrowsToJoinedNodeCount(t *testing.T) {
 	nodes := []cluster.MetaNodeEntry{
 		{ID: "node-a", Address: "10.0.0.1:7000"},
