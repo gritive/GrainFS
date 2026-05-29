@@ -145,12 +145,39 @@ Planning reference: operator trust roadmap note from 2026-05-15.
       (`iam.pdp.cache`: ttl_allow/ttl_deny + LRU max_entries + grace_ttl;
       sharded TTL+LRU, stale-preserving lookup, cache cleared on any iam.pdp
       config change, failures never cached, cache-hit audit suppressed).
-    - S3/Iceberg data-plane PDP enforcement (needs a `WithPolicyAuthorizer` interface
-      seam + latency/cache design — **now builds on the Slice-2 cache/grace**).
-    - **Singleflight** for concurrent duplicate cache misses (deferred from Slice 2;
-      control-plane tolerates the stampede, the data-plane slice needs it).
+    - S3/Iceberg data-plane PDP enforcement — **SHIPPED Slice 7 (PR-A #658 metrics
+      scope-label + lazy parse-cache; PR-B data-plane wrap)**: `server.policyAuthorizer`
+      is now an interface wrapped by a `data_plane`-scope `pdp.Decorator` at the boot
+      seam; `iam.pdp.data_plane.enabled` (default false, AND-gated with top-level
+      enabled) gates S3 + Iceberg object/bucket authz with deny-override; scope-aware
+      req-build (protocol from action prefix, `target_sa=""`, anon auth_method) leaves
+      the control-plane wire byte-identical; lock-free `release()` keeps the disabled
+      hot path 0-alloc + no exclusive lock. Remaining data-plane sub-items:
+        - **NFS / 9P / NBD data-plane PDP** — they use a SEPARATE `s3auth.Authorizer`
+          instance (boot_phases_node_services.go); each needs its own wrap + protocol
+          RequestContext + e2e.
+        - **`SourceIP` into the data-plane RequestContext** — not threaded through the
+          S3 `IAMChecker` (server.go:113); pre-existing gap.
+        - **Thread request `ctx` through the S3 `IAMChecker`** so the S3 PDP consult
+          honors request cancellation (currently `context.Background()`, bounded by PDP
+          Timeout). The singleflight result-arm cancel guard already anticipates this.
+        - **Per-scope `failure_policy`** — currently one shared knob; `fail_open` opens
+          BOTH planes. Needed only if an operator wants data-plane-fail-open without
+          control-plane-fail-open.
+        - **Per-request deny audit on cache hits** — currently one row per `ttl_deny`
+          window (cache-hit suppression); opt-in for high-sensitivity retry monitoring.
+        - **Pooled / fixed-`[32]byte` cachekey** to restore zero-alloc on the
+          enabled-hit path (touches the shipped Slice-2 cachekey).
+        - **Cluster data-plane e2e** — parity is by-construction (common boot seam);
+          a multi-node IAM harness for an explicit cluster spec is still absent.
+    - **Singleflight** for concurrent duplicate cache misses — **SHIPPED Slice 7 PR-B**
+      (`DoChan`, detached callCtx, `sfKey = cacheKey + configGen`, per-waiter cancel via
+      select; failures never cached).
     - **Event-driven cache invalidation** (on `iam.pdp` config / policy change) —
-      Slice 2 is TTL-only.
+      Slice 2 is TTL-only; data-plane analysis (Slice 7 D6) concluded TTL is the only
+      correct tool for the external PDP's own drift (GrainFS re-evaluates `inner` every
+      request and only caches the PDP consult), so event-driven invalidation is not
+      meaningful for the external decision and is dropped, not deferred.
     - Full GrainFS-only audit on the protocol-credential control plane (pre-existing
       gap; Slice 1 added only the PDP-outcome `iam.pdp` audit).
     - Admin peercred/UDS path is intentionally NOT PDP-gated (local socket trust).
