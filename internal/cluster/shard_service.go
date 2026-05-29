@@ -1956,38 +1956,16 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 		}
 		return &multiReadCloser{Reader: r, close: closeFn}, nil
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
 		// DEK-only service: every shard is GFSENC3-sealed, so a GFSCRC1 shard here
-		// is plaintext (or legacy) — the section reader below would stream it
-		// undecrypted. Reject fail-closed rather than leak it. (The encryptor!=nil
-		// single-blob compat path keeps the section-reader behavior unchanged.)
-		if s.encryptor == nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
-		}
-		if err := rejectLegacyEncodedShardBlob(f); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		info, err := f.Stat()
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		payloadLen := info.Size() - 8 - 4
-		if payloadLen < 0 {
-			_ = f.Close()
-			return nil, eccodec.ErrCRCMismatch
-		}
-		if offset >= payloadLen {
-			_ = f.Close()
-			return nil, io.EOF
-		}
-		if max := payloadLen - offset; length > max {
-			length = max
-		}
-		return &multiReadCloser{Reader: io.NewSectionReader(f, 8+offset, length), close: f.Close}, nil
+		// is plaintext (or legacy). Reject fail-closed rather than leak it.
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
 	}
+	// GFSCRC1 with encryptor != nil (single-blob compat), or a plain/short shard:
+	// route through OpenLocalShard for proper decode (rejects plaintext, decrypts
+	// single-blob) rather than streaming the raw payload — keeps OpenLocalShardRange
+	// consistent with ReadLocalShard/ReadLocalShardAt.
 	_ = f.Close()
 
 	r, err := s.OpenLocalShard(bucket, key, shardIdx)

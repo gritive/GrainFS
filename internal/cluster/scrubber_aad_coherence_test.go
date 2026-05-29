@@ -162,3 +162,30 @@ func TestScrubberNonDataDirReadRejectsPlaintext(t *testing.T) {
 		t.Fatal("ReadShardIntegrity returned planted plaintext from non-data-dir fallback")
 	}
 }
+
+// In static-encryptor (WithEncryptor) mode a GFSCRC1 shard is no longer streamed
+// raw by OpenLocalShardRange; it routes through OpenLocalShard for proper decode,
+// so a planted plaintext GFSCRC1 is rejected just like ReadLocalShard rejects it
+// (keeps the range API consistent with the full-read API).
+func TestOpenLocalShardRangeRejectsPlaintextWithEncryptor(t *testing.T) {
+	enc := testEncryptor(t)
+	dir := t.TempDir()
+	svc := NewShardService(dir, nil, WithEncryptor(enc), withTestWALEnc(t, enc))
+
+	bucket, key, shardIdx := "bkt", "obj", 0
+	sdir := svc.getShardDir(bucket, key, shardIdx)
+	if err := svc.ensureShardDir(sdir); err != nil {
+		t.Fatalf("ensureShardDir: %v", err)
+	}
+	path := filepath.Join(sdir, "shard_0")
+	if err := os.WriteFile(path, eccodec.EncodeShard([]byte("plaintext-body")), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// ReadLocalShard rejects it; OpenLocalShardRange must do the same (was: raw stream).
+	if _, err := svc.ReadLocalShard(bucket, key, shardIdx); err == nil {
+		t.Fatal("ReadLocalShard accepted plaintext GFSCRC1 in encryptor mode")
+	}
+	if _, err := svc.OpenLocalShardRange(bucket, key, shardIdx, 0, 4); err == nil {
+		t.Fatal("OpenLocalShardRange streamed plaintext GFSCRC1 raw in encryptor mode")
+	}
+}
