@@ -97,7 +97,18 @@ func bootValidateConfig(state *bootState) error {
 	state.raftDir = filepath.Join(cfg.DataDir, "raft")
 	state.priorState = dirHasContent(state.metaDir) || dirHasContent(state.raftDir)
 
-	// clusterMode is always true: --cluster-key is required in all modes.
+	// Genesis self-seed: a fresh node with no --cluster-key / invite bundle /
+	// peers and an empty data dir generates and persists its own transport key,
+	// so operators never hand-carry one. Runs BEFORE the gate so the generated
+	// key satisfies ValidateClusterKey. Fail-closed on probe errors. See
+	// docs/superpowers/specs/2026-05-29-genesis-cluster-key-self-seed.md.
+	if err := resolveOrSeedClusterKey(state); err != nil {
+		return err
+	}
+	cfg = state.cfg // refresh: resolveOrSeedClusterKey may have set ClusterKey
+
+	// clusterMode is always true: --cluster-key is required in all modes
+	// (unless self-seeded or loaded from disk above).
 	state.clusterMode = true
 	if err := transport.ValidateClusterKey(cfg.ClusterKey); err != nil {
 		if errors.Is(err, transport.ErrEmptyClusterKey) {

@@ -62,17 +62,18 @@ func kekDirEmptyStrict(kekDir string) (bool, error) {
 	return empty, nil
 }
 
-// currentKeyState reports whether keys.d/current.key holds a usable PSK.
-// have=true → present (restart). have=false,nil → truly absent (os.ErrNotExist).
-// err!=nil → unreadable; the caller MUST block and never WriteCurrent over it.
-func currentKeyState(ks *transport.Keystore) (have bool, err error) {
-	if _, rerr := ks.ReadCurrent(); rerr == nil {
-		return true, nil
-	} else if errors.Is(rerr, os.ErrNotExist) {
-		return false, nil
-	} else {
-		return false, fmt.Errorf("self-seed probe: read current.key: %w", rerr)
+// readCurrentKey reads keys.d/current.key. have=true → present (restart), key set.
+// have=false,nil → truly absent (os.ErrNotExist). err!=nil → unreadable; the caller
+// MUST block and never WriteCurrent over it (fail closed).
+func readCurrentKey(ks *transport.Keystore) (key string, have bool, err error) {
+	k, rerr := ks.ReadCurrent()
+	if rerr == nil {
+		return k, true, nil
 	}
+	if errors.Is(rerr, os.ErrNotExist) {
+		return "", false, nil
+	}
+	return "", false, fmt.Errorf("self-seed probe: read current.key: %w", rerr)
 }
 
 // generateRandomClusterKey returns 32 random bytes hex-encoded (64 chars).
@@ -150,12 +151,16 @@ func resolveOrSeedClusterKey(state *bootState) error {
 		return nil // flag path; ResolveClusterKey mirrors it to disk later
 	}
 	ks := transport.NewKeystore(state.cfg.DataDir)
-	have, err := currentKeyState(ks) // cond 2, fail-closed
+	diskKey, have, err := readCurrentKey(ks) // cond 2, fail-closed
 	if err != nil {
 		return err
 	}
 	if have {
-		return nil // restart: disk key wins; bootQUICTransport's ResolveClusterKey loads it
+		// Restart: load the disk key so the --cluster-key gate (which runs before
+		// bootQUICTransport's ResolveClusterKey) passes; ResolveClusterKey then
+		// sees flag == disk and returns disk with no conflict.
+		state.cfg.ClusterKey = diskKey
+		return nil
 	}
 	seed, err := selfSeedDecision(state)
 	if err != nil {

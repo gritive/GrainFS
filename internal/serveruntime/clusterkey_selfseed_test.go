@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -163,4 +164,33 @@ func TestSelfSeedDecision(t *testing.T) {
 		require.Error(t, err)
 		require.False(t, seed)
 	})
+}
+
+// bootValidateConfig on a fresh dir with an empty flag must self-seed: no error,
+// ClusterKey populated, current.key persisted, and a restart loads it (no reseed).
+func TestBootValidateConfigSelfSeeds(t *testing.T) {
+	d := t.TempDir()
+	st := &bootState{cfg: Config{DataDir: d, NodeID: "n1"}}
+	require.NoError(t, bootValidateConfig(st))
+	require.NotEmpty(t, st.cfg.ClusterKey, "fresh genesis should self-seed")
+
+	got, err := transport.NewKeystore(d).ReadCurrent()
+	require.NoError(t, err)
+	require.Equal(t, st.cfg.ClusterKey, got)
+
+	// restart: same dir, fresh state, empty flag → loads disk, no error, no reseed.
+	st2 := &bootState{cfg: Config{DataDir: d, NodeID: "n1"}}
+	require.NoError(t, bootValidateConfig(st2))
+}
+
+// bootValidateConfig with priorState (raft state present) and no key must NOT
+// seed — the existing --cluster-key error fires.
+func TestBootValidateConfigNoSeedOnPriorState(t *testing.T) {
+	d := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(d, "raft"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(d, "raft", "x"), []byte("y"), 0o600))
+	st := &bootState{cfg: Config{DataDir: d, NodeID: "n1"}}
+	err := bootValidateConfig(st)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cluster-key")
 }
