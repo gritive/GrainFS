@@ -65,9 +65,8 @@ type BlobStore struct {
 	activeOff int64
 	nextID    atomic.Uint64
 	compress  bool
-	encryptor *encrypt.Encryptor    // legacy; replaced by segEnc on the data path (Tasks 3-4)
-	segEnc    storage.DataEncryptor // data-at-rest seam (EncryptorAdapter in this lane)
-	clusterID [16]byte              // zero sentinel (single-node, no cluster ID)
+	segEnc    storage.DataEncryptor // data-at-rest seam (DEKKeeperAdapter on the DEK path)
+	clusterID [16]byte              // 16-byte data-plane AAD id (zero until DEK-wired)
 	lockFile  *os.File              // held for the lifetime of this BlobStore (flock on unix)
 
 	// readFiles caches open *os.File handles for completed (read-only) blobs.
@@ -96,22 +95,6 @@ func (bs *BlobStore) EnableCompression() {
 // NewBlobStore creates a blob store rooted at dir.
 func NewBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	return newBlobStore(dir, maxSize)
-}
-
-// NewEncryptedBlobStore creates a blob store that encrypts entry payloads via
-// the DataEncryptor seam (EncryptorAdapter over the static key in this lane).
-func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*BlobStore, error) {
-	if enc == nil {
-		return nil, fmt.Errorf("encrypted blob store requires encryptor")
-	}
-	bs, err := newBlobStore(dir, maxSize)
-	if err != nil {
-		return nil, err
-	}
-	bs.encryptor = enc
-	// D-seg-pack: EncryptorAdapter over the static key, zero-sentinel clusterID.
-	bs.segEnc = storage.NewEncryptorAdapter(enc, bs.clusterID[:])
-	return bs, nil
 }
 
 // NewDEKBlobStore creates a blob store that seals entry payloads via the
@@ -443,7 +426,7 @@ func (bs *BlobStore) skipReadCRC(flags byte) bool {
 	// XAES-256-GCM authenticates encrypted blob entries, including key, blob id,
 	// offset, and flags via AAD. Recomputing CRC32 over the ciphertext on every
 	// GET duplicates that integrity check on the hot path.
-	return bs.encryptor != nil && flags&flagEncrypted != 0
+	return bs.segEnc != nil && flags&flagEncrypted != 0
 }
 
 func (bs *BlobStore) rotate() error {

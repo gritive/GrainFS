@@ -124,7 +124,7 @@ func setupPackedBackend(b *testing.B, n int) (*PackedBackend, []string) {
 	return setupPackedBackendWithEnc(b, n, nil)
 }
 
-func setupPackedBackendWithEnc(b *testing.B, n int, enc *encrypt.Encryptor) (*PackedBackend, []string) {
+func setupPackedBackendWithEnc(b *testing.B, n int, keeper *encrypt.DEKKeeper) (*PackedBackend, []string) {
 	b.Helper()
 	inner, err := storage.NewLocalBackend(b.TempDir())
 	if err != nil {
@@ -132,10 +132,12 @@ func setupPackedBackendWithEnc(b *testing.B, n int, enc *encrypt.Encryptor) (*Pa
 	}
 	b.Cleanup(func() { _ = inner.Close() })
 
-	pb, err := NewPackedBackendWithOptions(inner, b.TempDir(), 4*1024, PackedBackendOptions{
-		Compress:  true,
-		Encryptor: enc,
-	})
+	opts := PackedBackendOptions{Compress: true}
+	if keeper != nil {
+		opts.DEKKeeper = keeper
+		opts.ClusterID = benchClusterID()
+	}
+	pb, err := NewPackedBackendWithOptions(inner, b.TempDir(), 4*1024, opts)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -164,13 +166,13 @@ func setupPackedBackendWithEnc(b *testing.B, n int, enc *encrypt.Encryptor) (*Pa
 // targets the encrypted GetObject path (the OpenValueAAD plaintext-buffer
 // allocation in BlobStore.decodePayload is the primary residual alloc).
 func BenchmarkParallelGetSmallObjects_Encrypted(b *testing.B) {
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x42}, encrypt.KEKSize), benchClusterID())
 	if err != nil {
 		b.Fatal(err)
 	}
 	for _, n := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprintf("entries=%d", n), func(b *testing.B) {
-			pb, keys := setupPackedBackendWithEnc(b, n, enc)
+			pb, keys := setupPackedBackendWithEnc(b, n, keeper)
 			b.Cleanup(func() { _ = pb.Close() })
 
 			b.ReportAllocs()

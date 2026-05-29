@@ -430,7 +430,7 @@ func TestWAL_EncryptedHeaderGenPinnedOnReopen(t *testing.T) {
 	firstSeq := w.CurrentSeq()
 	require.NoError(t, w.Close())
 
-	// Reopen scans the active segment's header gen (0 for the EncryptorAdapter)
+	// Reopen scans the active segment's header gen (0 at the active DEK gen)
 	// and keeps appending into the same gen-pinned file without a gen-mismatch error.
 	w2, err := wal.OpenEncrypted(dir, newSealer(keeper), "pitr-wal")
 	require.NoError(t, err)

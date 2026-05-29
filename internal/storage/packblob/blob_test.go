@@ -273,15 +273,15 @@ func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
 }
 
 // NOTE: TestEncryptedBlobStoreRejects{,Compressed}EncryptedFlagDowngrade were
-// removed in the R3 EncryptorAdapter retirement. They stripped flagEncrypted on
-// disk and relied on decodePayload's encrypt.IsEncryptedValue(payload) guard
-// (blob.go:692/658) catching the downgraded entry. That guard matches only the
-// static EncryptorAdapter value-magic frame (0xAE 0xE2 0x02); DEK-sealed
-// entries are nonce||ciphertext and never carry it, so the guard short-circuits
-// before the segEnc Open-attempt in rejectEncryptedFlagDowngrade that WOULD
-// catch a DEK downgrade. Re-instating downgrade detection on the DEK path is a
-// prod decode-path behavior change (gate on the Open-attempt, not the magic) —
-// deferred to its own slice (see TODOS / final report). Asserting the current
+// removed in the R3 static-seam retirement. They stripped flagEncrypted on disk
+// and relied on decodePayload's encrypt.IsEncryptedValue(payload) guard
+// (blob.go) catching the downgraded entry. That guard matches only the legacy
+// static value-magic frame (0xAE 0xE2 0x02); DEK-sealed entries are
+// nonce||ciphertext and never carry it, so the guard short-circuits before the
+// segEnc Open-attempt in rejectEncryptedFlagDowngrade that WOULD catch a DEK
+// downgrade. Re-instating downgrade detection on the DEK path is a prod
+// decode-path behavior change (gate on the Open-attempt, not the magic) —
+// deferred to its own slice (see final report). Asserting the current
 // short-circuit is asserting a hole, so the tests are removed, not migrated.
 
 func TestEncryptedBlobStoreReadsLegacyPlaintextEntry(t *testing.T) {

@@ -60,9 +60,9 @@ func (f *FSM) openValue(key []byte, raw []byte) ([]byte, error) {
 		}
 		return de.Open(encrypt.DomainFSMValue, []encrypt.AADField{encrypt.FieldBytes(key)}, gen, ct)
 	}
-	// Non-V2-frame values are plaintext. The legacy static EncryptorAdapter
-	// whole-buffer encrypted frame was never written by any prod path
-	// (greenfield at-rest; prod always seals via the DEK V2 frame above), so a
+	// Non-V2-frame values are plaintext. The legacy static whole-buffer
+	// encrypted-value frame was never written by any prod path (greenfield
+	// at-rest; prod always seals via the DEK V2 frame above), so a
 	// static-encrypted value here is unsupported.
 	if encrypt.IsEncryptedValue(raw) {
 		return nil, fmt.Errorf("cluster fsm value carries an unsupported static-encrypted format; in-place upgrade unsupported")
