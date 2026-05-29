@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,11 @@ const (
 const genericDenyMsg = "pdp_deny: denied by external policy"
 
 const schemaVersion = 1
+
+// scopeDataPlane is the scope label for the S3/Iceberg object data-plane
+// decorator. Only this scope infers Request.Protocol from the action prefix;
+// control-plane scopes (admin | protocol_credential) keep the literal "admin".
+const scopeDataPlane = "data_plane"
 
 // ConfigReader is the minimal view of the config store the decorator needs.
 type ConfigReader interface {
@@ -171,16 +177,24 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		return inner
 	}
 
+	protocol := "admin"
+	am := string(actor.Kind)
+	ts := targetSA
+	if d.scope == scopeDataPlane {
+		protocol = protocolFromAction(ctxReq.Action)
+		am = authMethod(actor)
+		ts = "" // data-plane op acts on an object, not an SA (spec D5)
+	}
 	req := Request{
 		SchemaVersion: schemaVersion,
 		RequestID:     newRequestID(),
 		Principal:     toWire(actor),
 		Action:        ctxReq.Action,
 		Resource:      ctxReq.Resource,
-		Protocol:      "admin",
+		Protocol:      protocol,
 		Context: map[string]string{
-			"auth_method": string(actor.Kind),
-			"target_sa":   targetSA,
+			"auth_method": am,
+			"target_sa":   ts,
 			"route":       ctxReq.Action,
 		},
 	}
@@ -461,6 +475,25 @@ func annotate(reason, marker string) string {
 		return marker
 	}
 	return reason + "; " + marker
+}
+
+// protocolFromAction returns the namespace prefix of a policy action ("s3" for
+// "s3:GetObject"). Data_plane scope only — control plane keeps literal "admin"
+// (its actions are grainfs:*, whose prefix is the IAM action namespace, not a protocol).
+func protocolFromAction(action string) string {
+	if i := strings.IndexByte(action, ':'); i > 0 {
+		return action[:i]
+	}
+	return "admin"
+}
+
+// authMethod maps the actor to the PDP auth_method; an empty-ID service account
+// is the anonymous S3 actor (saID==""), which presents "anonymous".
+func authMethod(actor principal.Principal) string {
+	if actor.Kind == principal.KindServiceAccount && actor.ID == "" {
+		return "anonymous"
+	}
+	return string(actor.Kind)
 }
 
 // newRequestID returns a time-ordered request id, falling back to an empty

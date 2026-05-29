@@ -60,6 +60,61 @@ func decoCfg(endpoint, policyMode string) string {
 	return string(b)
 }
 
+// decoCfgDataPlane is decoCfg plus data_plane.enabled=true.
+func decoCfgDataPlane(endpoint, policyMode string) string {
+	return `{"enabled":true,"endpoint":"` + endpoint + `","failure_policy":"` + policyMode +
+		`","data_plane":{"enabled":true}}`
+}
+
+type pdpRequestProbe struct {
+	Protocol string            `json:"protocol"`
+	Action   string            `json:"action"`
+	Context  map[string]string `json:"context"`
+}
+
+// newProbePDP records the last request body and returns the given decision.
+func newProbePDP(t *testing.T, got *pdpRequestProbe, decision string) string {
+	t.Helper()
+	return decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(got)
+		if decision == "deny" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"decision":"deny","reason":"probe"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+}
+
+func TestDecoratorDataPlaneProtocolAndContext(t *testing.T) {
+	var got pdpRequestProbe
+	url := newProbePDP(t, &got, "allow")
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(decoCfgDataPlane(url, "closed")), nil, "data_plane")
+	_ = d.Authorize(context.Background(), "sa-1", "bucket",
+		policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::bucket/key"})
+	require.Equal(t, "s3", got.Protocol)
+	require.Equal(t, "sa", got.Context["auth_method"])
+	require.Equal(t, "", got.Context["target_sa"])
+	_ = d.Authorize(context.Background(), "", "bucket",
+		policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::bucket/key"})
+	require.Equal(t, "anonymous", got.Context["auth_method"])
+}
+
+// REGRESSION-GUARD: control-plane wire stays Protocol="admin" with grainfs:* action + populated target_sa.
+func TestDecoratorControlPlaneProtocolStaysAdmin(t *testing.T) {
+	var got pdpRequestProbe
+	url := newProbePDP(t, &got, "allow")
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(decoCfg(url, "closed")), nil, "admin")
+	_ = d.AuthorizePrincipal(context.Background(),
+		principal.ServiceAccount("owner-sa"), "",
+		policy.RequestContext{Action: "grainfs:CredentialCreate", Resource: "protocol-credential/nbd/v/d"})
+	require.Equal(t, "admin", got.Protocol)
+	require.Equal(t, "sa", got.Context["auth_method"])
+	require.Equal(t, "owner-sa", got.Context["target_sa"])
+}
+
 func TestDecoratorDisabledIsPassThrough(t *testing.T) {
 	inner := &spyInner{decision: policy.DecisionAllow}
 	d := NewDecorator(inner, staticCfg(`{"enabled":false}`), nil, "admin")
