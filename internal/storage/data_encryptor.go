@@ -21,6 +21,10 @@ type DataEncryptor interface {
 	// capacity when it suffices. The output is byte-equivalent to Seal.
 	SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
+	// OpenTo is Open that appends the plaintext into dst, reusing dst's
+	// capacity when it suffices. The output is byte-equivalent to Open.
+	// dst and ct MUST NOT overlap (cipher.AEAD.Open contract).
+	OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 }
 
 // seamAADPool recycles the scratch buffer used to build the canonical AAD for
@@ -37,6 +41,18 @@ func withSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AA
 	*p = aad[:0]
 	seamAADPool.Put(p)
 	return ct, gen, err
+}
+
+// withSeamAADErr2 is withSeamAAD for the Open path: same pooled AAD scratch,
+// but fn returns ([]byte, error) (Open has no generation to report). The AAD is
+// only consumed as GCM associated data (never retained), so reuse is safe.
+func withSeamAADErr2(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AADField, fn func(aad []byte) ([]byte, error)) ([]byte, error) {
+	p := seamAADPool.Get().(*[]byte)
+	aad := encrypt.AppendAAD((*p)[:0], domain, clusterID, fields...)
+	plain, err := fn(aad)
+	*p = aad[:0]
+	seamAADPool.Put(p)
+	return plain, err
 }
 
 // buildSeamAAD is the AAD-construction point shared by every adapter's Seal.
@@ -82,6 +98,12 @@ func (a *EncryptorAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADFi
 	return a.enc.OpenValueAADTo(nil, aad, ct)
 }
 
+func (a *EncryptorAdapter) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return withSeamAADErr2(a.clusterID, domain, fields, func(aad []byte) ([]byte, error) {
+		return a.enc.OpenValueAADTo(dst, aad, ct)
+	})
+}
+
 var _ DataEncryptor = (*EncryptorAdapter)(nil)
 
 // DEKKeeperAdapter implements DataEncryptor over the generation-aware
@@ -111,6 +133,12 @@ func (a *DEKKeeperAdapter) SealTo(dst []byte, domain encrypt.AADDomain, fields [
 func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
 	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.keeper.OpenWithAAD(ct, gen, aad)
+}
+
+func (a *DEKKeeperAdapter) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	return withSeamAADErr2(a.clusterID, domain, fields, func(aad []byte) ([]byte, error) {
+		return a.keeper.OpenWithAADTo(dst, ct, gen, aad)
+	})
 }
 
 var _ DataEncryptor = (*DEKKeeperAdapter)(nil)
@@ -147,6 +175,12 @@ func (a *TransientDataEncryptor) SealTo(_ []byte, _ encrypt.AADDomain, _ []encry
 func (a *TransientDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
 	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.inner.OpenWithAAD(ct, gen, aad)
+}
+
+func (a *TransientDataEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	return withSeamAADErr2(a.clusterID, domain, fields, func(aad []byte) ([]byte, error) {
+		return a.inner.OpenWithAADTo(dst, ct, gen, aad)
+	})
 }
 
 var _ DataEncryptor = (*TransientDataEncryptor)(nil)

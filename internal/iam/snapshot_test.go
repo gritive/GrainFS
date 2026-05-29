@@ -264,6 +264,13 @@ func (f *fakeDEKEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADFi
 	return f.inner.Open(domain, fields, 0, ct)
 }
 
+func (f *fakeDEKEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	if gen != f.gen {
+		return nil, fmt.Errorf("fakeDEKEncryptor: expected gen %d, got %d", f.gen, gen)
+	}
+	return f.inner.OpenTo(dst, domain, fields, 0, ct)
+}
+
 func TestSnapshot_DEKGenSurvivesAccessKeyRoundTrip(t *testing.T) {
 	de := &fakeDEKEncryptor{inner: staticTestEncryptor(t), gen: 7}
 

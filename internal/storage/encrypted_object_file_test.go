@@ -404,6 +404,10 @@ func (f *fakeDataEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADF
 	return f.enc.OpenValueAADTo(nil, f.aad(domain, fields), ct)
 }
 
+func (f *fakeDataEncryptor) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return f.enc.OpenValueAADTo(dst, f.aad(domain, fields), ct)
+}
+
 func TestWriteEncryptedObjectFile_GenPinning_FailsOnMidStreamChange(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/obj"

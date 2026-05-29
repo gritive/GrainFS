@@ -289,6 +289,60 @@ func TestSealToRoundTripsAndMatchesSeal(t *testing.T) {
 	}
 }
 
+func TestOpenToRoundTripsAndMatchesOpen(t *testing.T) {
+	cases := []struct {
+		name string
+		de   DataEncryptor
+	}{
+		{"encryptor", newEncryptorAdapterForTest(t)},
+		{"dekkeeper", newDEKKeeperAdapterForTest(t)},
+	}
+	plain := []byte("segment chunk plaintext")
+	fields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldString("key"), encrypt.FieldUint32(3)}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, gen, err := tc.de.Seal(encrypt.DomainShard, fields, plain)
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			gotTo, err := tc.de.OpenTo(make([]byte, 0, 512), encrypt.DomainShard, fields, gen, ct)
+			if err != nil {
+				t.Fatalf("OpenTo: %v", err)
+			}
+			if !bytes.Equal(gotTo, plain) {
+				t.Fatalf("OpenTo plaintext mismatch: got %q want %q", gotTo, plain)
+			}
+			gotOpen, err := tc.de.Open(encrypt.DomainShard, fields, gen, ct)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if !bytes.Equal(gotOpen, gotTo) {
+				t.Fatalf("OpenTo != Open: %q vs %q", gotTo, gotOpen)
+			}
+		})
+	}
+}
+
+// TestOpenToReusesCapacity proves OpenTo writes into the caller's buffer when
+// capacity suffices (the spool reader relies on this to avoid per-record allocs).
+func TestOpenToReusesCapacity(t *testing.T) {
+	de := newDEKKeeperAdapterForTest(t)
+	fields := []encrypt.AADField{encrypt.FieldString("k")}
+	plain := bytes.Repeat([]byte("p"), 64)
+	ct, gen, err := de.Seal(encrypt.DomainShard, fields, plain)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	buf := make([]byte, 0, 4096)
+	got, err := de.OpenTo(buf, encrypt.DomainShard, fields, gen, ct)
+	if err != nil {
+		t.Fatalf("OpenTo: %v", err)
+	}
+	if &buf[:1][0] != &got[:1][0] {
+		t.Fatalf("OpenTo reallocated despite sufficient capacity")
+	}
+}
+
 func TestTransientSealToUnsupported(t *testing.T) {
 	de := &TransientDataEncryptor{}
 	_, _, err := de.SealTo(nil, encrypt.DomainShard, nil, []byte("x"))
