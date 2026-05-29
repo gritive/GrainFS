@@ -113,7 +113,7 @@ type DataGroupRaftHealth struct {
 	LeaderID       string
 	Term           uint64
 	CommitIndex    uint64
-	LastLogIndex    uint64
+	LastLogIndex   uint64
 	PeerMatchIndex map[string]uint64
 	MaxPeerLag     uint64
 	Issues         []string
