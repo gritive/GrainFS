@@ -91,6 +91,36 @@ func TestBlobStore_RotatesOnMaxSize(t *testing.T) {
 	assert.Equal(t, data, got2)
 }
 
+// TestEncryptedBlobStore_RotatesOnMaxSize exercises the encrypted re-seal-on-rotate
+// branch in Append: a second encrypted Append that would exceed maxSize at the
+// current offset triggers a rotate, then re-seals the entry at the new offset —
+// reusing the pooled sealed buffer for a SECOND SealTo within the same call and
+// rebinding the AAD to the new activeID/offset. The closure defer (not value-capture)
+// must return the final re-sealed buffer; a stale/aliased buffer would corrupt the
+// AEAD and fail the round-trip below.
+func TestEncryptedBlobStore_RotatesOnMaxSize(t *testing.T) {
+	dir := t.TempDir()
+	bs, err := NewEncryptedBlobStore(dir, 100, newPackblobTestEncryptor(t)) // tiny max forces rotation
+	require.NoError(t, err)
+	defer bs.Close()
+
+	data1 := bytes.Repeat([]byte("A"), 40)
+	data2 := bytes.Repeat([]byte("B"), 40)
+
+	loc1, err := bs.Append("bucket/key1", data1)
+	require.NoError(t, err)
+	loc2, err := bs.Append("bucket/key2", data2)
+	require.NoError(t, err)
+	require.NotEqual(t, loc1.BlobID, loc2.BlobID, "second encrypted entry must land in a rotated blob")
+
+	got1, err := bs.Read(loc1)
+	require.NoError(t, err)
+	require.Equal(t, data1, got1)
+	got2, err := bs.Read(loc2)
+	require.NoError(t, err)
+	require.Equal(t, data2, got2, "re-sealed entry must round-trip (AAD rebound to new offset; pooled buffer not corrupted)")
+}
+
 func TestBlobStore_EmptyData(t *testing.T) {
 	dir := t.TempDir()
 	bs, err := NewBlobStore(dir, 256*1024*1024)
