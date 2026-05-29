@@ -259,14 +259,14 @@ func (d *Decorator) refresh(cfg Config) (*Client, *decisionCache) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.client == nil || d.clientSock != cfg.SocketPath {
+	if d.client == nil || d.clientSock != cfg.RemoteURL { // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
 		if d.client != nil {
 			// Endpoint changed: release the old client's idle keep-alive
 			// connections so hot-reloading the socket doesn't leak FDs.
 			d.client.Close()
 		}
 		d.client = NewClient(cfg)
-		d.clientSock = cfg.SocketPath
+		d.clientSock = cfg.RemoteURL // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
 	}
 
 	if gen := configGen(cfg); gen != d.cacheGen {
@@ -307,7 +307,7 @@ func (d *Decorator) release() {
 func configGen(cfg Config) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%d\x00%d\x00%d\x00%d",
-		cfg.SocketPath,
+		cfg.RemoteURL, // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
 		cfg.FailurePolicy,
 		cfg.Cache.Active,
 		int64(cfg.Cache.TTLAllow),

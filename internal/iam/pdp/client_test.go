@@ -35,7 +35,7 @@ func TestClientAuthorize(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_, _ = w.Write([]byte(`{"decision":"Allow ","reason":"ok"}`))
 	})
-	c := NewClient(Config{Enabled: true, SocketPath: sock, Timeout: 2 * time.Second, FailurePolicy: FailureClosed})
+	c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: 2 * time.Second, FailurePolicy: FailureClosed})
 	dec, etype, err := c.Authorize(context.Background(), Request{
 		SchemaVersion: 1, RequestID: "req-1",
 		Principal: WirePrincipal{Kind: "oidc", ID: "oidc:abc:u1", Groups: []string{"g"}},
@@ -51,7 +51,7 @@ func TestClientAuthorizeDeny(t *testing.T) {
 	sock := newUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
 	})
-	c := NewClient(Config{Enabled: true, SocketPath: sock, Timeout: time.Second, FailurePolicy: FailureClosed})
+	c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: time.Second, FailurePolicy: FailureClosed})
 	dec, etype, err := c.Authorize(context.Background(), Request{SchemaVersion: 1})
 	// Deny must be distinguishable from failure. Assert via whatever shape you chose:
 	require.Equal(t, "", etype) // a deny is NOT a failure (no errType)
@@ -74,7 +74,7 @@ func TestClientAuthorizeFailures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sock := newUnixPDP(t, tc.handler)
-			c := NewClient(Config{Enabled: true, SocketPath: sock, Timeout: time.Second, FailurePolicy: FailureClosed})
+			c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: time.Second, FailurePolicy: FailureClosed})
 			_, etype, err := c.Authorize(context.Background(), Request{SchemaVersion: 1})
 			require.Error(t, err)
 			require.Equal(t, tc.etype, etype)
@@ -87,7 +87,7 @@ func TestClientTimeout(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"decision":"allow"}`))
 	})
-	c := NewClient(Config{Enabled: true, SocketPath: sock, Timeout: 50 * time.Millisecond, FailurePolicy: FailureClosed})
+	c := NewClient(Config{Enabled: true, RemoteURL: sock, Timeout: 50 * time.Millisecond, FailurePolicy: FailureClosed})
 	// The caller owns the deadline now: the client no longer applies cfg.Timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

@@ -87,7 +87,7 @@ func NewClient(cfg Config) *Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, "unix", cfg.SocketPath)
+			return d.DialContext(ctx, "unix", cfg.RemoteURL) // TASK1-STUB: replaced by Task 3 (remote http/https transport)
 		},
 	}
 	return &Client{
