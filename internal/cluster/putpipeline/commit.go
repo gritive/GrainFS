@@ -2,11 +2,14 @@ package putpipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 // CommitCoord aggregates ShardWriteResults from all DriveActors and
@@ -92,6 +95,9 @@ func (c *CommitCoord) handle(res ShardWriteResult) {
 
 	if res.Err != nil {
 		w.shardsFailed++
+		if errors.Is(res.Err, encrypt.ErrDEKGenUnknown) {
+			w.dekGenUnknown = true
+		}
 	} else {
 		w.shardsOK++
 		if res.ShardIdx < w.cfg.DataShards {
@@ -110,9 +116,15 @@ func (c *CommitCoord) handle(res ShardWriteResult) {
 			w.earlyAck <- nil
 			w.earlyAckSent = true
 		} else if !canStillReachK(w) {
-			w.earlyAck <- fmt.Errorf(
-				"put %d: K data shards unreachable (ok=%d failed=%d need=%d)",
-				res.PutID, w.dataShardsOK, w.shardsFailed, w.cfg.DataShards)
+			if w.dekGenUnknown {
+				w.earlyAck <- fmt.Errorf(
+					"put %d: data shards unavailable (DEK generation not yet local): %w",
+					res.PutID, encrypt.ErrDEKGenUnknown)
+			} else {
+				w.earlyAck <- fmt.Errorf(
+					"put %d: K data shards unreachable (ok=%d failed=%d need=%d)",
+					res.PutID, w.dataShardsOK, w.shardsFailed, w.cfg.DataShards)
+			}
 			w.earlyAckSent = true
 		}
 	}
@@ -149,6 +161,11 @@ func (c *CommitCoord) handle(res ShardWriteResult) {
 				w.finalDone <- nil
 			}
 		} else {
+			// The final-ack error is consumed by a fire-and-forget goroutine
+			// (pipeline.go) and never reaches the client, and this branch is
+			// only reached after the early-ack above already errored. The
+			// retriable-503 signal is carried solely by the early-ack path, so
+			// the ErrDEKGenUnknown sentinel is intentionally not wrapped here.
 			w.finalDone <- fmt.Errorf(
 				"put %d: insufficient shards (ok=%d failed=%d)",
 				res.PutID, w.shardsOK, w.shardsFailed)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -54,6 +55,9 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "too many forwarded upload streams in flight")
 	case errors.Is(err, cluster.ErrPlacementTargetsUnavailable):
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+	case errors.Is(err, encrypt.ErrDEKGenUnknown):
+		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable",
+			"data encryption key generation not yet available; retry")
 	case errors.Is(err, compat.ErrCapabilityRejected):
 		msg := "finish the cluster rolling upgrade before retrying this S3 operation"
 		var gateErr *compat.GateRejectError
