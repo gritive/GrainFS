@@ -151,6 +151,45 @@ func TestDecoratorCanceledCtxDeniesEvenFailOpen(t *testing.T) {
 	require.Contains(t, got.Reason, "request canceled")
 }
 
+// TestDecoratorCanceledCtxIgnoresFreshCache proves an already-canceled inbound
+// ctx denies "request canceled" even when the cache holds a fresh allow: the
+// pre-cache cancel check must short-circuit BEFORE the fresh-hit path so the
+// abandoned request cannot be resurrected by a cached allow, and emits no
+// cache_total.
+func TestDecoratorCanceledCtxIgnoresFreshCache(t *testing.T) {
+	metrics.PDPCacheTotal.Reset()
+	var dialed int32
+	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&dialed, 1)
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	// Long ttl_allow keeps the primed entry fresh at the canceled-call time
+	// (no d.now advancement, so the entry is still fresh on the 2nd call).
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "10m", "", "")))
+
+	// Prime a FRESH allow (live ctx). Same actor/bucket/ctxReq as the canceled
+	// call below so both produce the SAME cache key (a genuine fresh hit).
+	got := d.Authorize(context.Background(), "sa", "", reqCtx())
+	require.Equal(t, policy.DecisionAllow, got.Decision)
+	require.EqualValues(t, 1, atomic.LoadInt32(&dialed), "prime dialed the PDP once")
+
+	// Reset AFTER priming so the prime's miss does not pollute the assertion.
+	metrics.PDPCacheTotal.Reset()
+
+	// Already-canceled inbound ctx: must DENY before the fresh-hit serves the
+	// cached allow.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got = d.AuthorizePrincipal(ctx, principal.ServiceAccount("sa"), "", reqCtx())
+	require.Equal(t, policy.DecisionDeny, got.Decision)
+	require.Contains(t, got.Reason, "request canceled")
+
+	require.InDelta(t, 0.0, cacheTotal("hit", "allow"), 0.0001,
+		"canceled request must not emit a cache hit (fresh-hit path bypassed)")
+	require.EqualValues(t, 1, atomic.LoadInt32(&dialed),
+		"canceled request must not dial the PDP")
+}
+
 // mutableCfg is a ConfigReader whose value can be swapped between requests to
 // simulate an iam.pdp hot-reload.
 type mutableCfg struct {

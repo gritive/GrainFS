@@ -131,6 +131,21 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	fp := string(cfg.FailurePolicy)
 	client, cache := d.refresh(cfg)
 
+	// Inbound-cancel takes precedence over ANY cached decision: an already-canceled
+	// request must DENY "request canceled" before the cache lookup, so a fresh cached
+	// allow can never resurrect an abandoned request (and emits no cache_total). This
+	// covers the fresh-hit, grace, and miss paths uniformly since it runs before the
+	// lookup. The post-PDP ctx.Err() check below catches cancellation DURING the call.
+	if ctx.Err() != nil {
+		errType := ErrTypeTransport
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			errType = ErrTypeTimeout
+		}
+		metrics.PDPRequestsTotal.WithLabelValues("error", errType, fp).Inc()
+		d.audit(req, actor, ctxReq, "deny", errType, "request canceled")
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
+	}
+
 	// Cache lookup slots between req-build and the PDP call. A fresh hit returns
 	// without consulting the PDP and without an audit line; a stale entry is held
 	// for a possible grace-serve in the failure branch below.
