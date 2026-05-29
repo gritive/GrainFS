@@ -4,6 +4,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,18 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
+
+// PITRWALNamespace is the AAD namespace for the logical/PITR WAL. It is part of
+// every record's seal AAD (walEntryAADFields), so the seal side (OpenEncrypted in
+// serveruntime boot) and the replay side (ReplayEncrypted in snapshot PITRRestore)
+// MUST use this exact value — a change would make existing on-disk WALs unreadable.
+const PITRWALNamespace = "pitr-wal"
+
+// ErrEncryptedWALNeedsSealer is returned when an encrypted (v4) segment is
+// replayed without a sealer. It is a configuration mismatch that guarantees data
+// loss (every record is undecryptable), so replay() returns it even in
+// non-strict mode rather than logging-and-skipping the segment.
+var ErrEncryptedWALNeedsSealer = errors.New("wal: encrypted segment requires sealer")
 
 const (
 	fileMagic = uint32(0x57414C31) // "WAL1"
@@ -338,7 +351,10 @@ func replay(dir string, fromSeq uint64, targetTime time.Time, sealer RecordSeale
 		n, err := replayFile(path, fromSeq, target, sealer, namespace, mono, fn)
 		count += n
 		if err != nil {
-			if strict {
+			// ErrEncryptedWALNeedsSealer is a config mismatch that guarantees
+			// data loss (the whole segment is undecryptable) — never swallow it,
+			// even in non-strict mode.
+			if strict || errors.Is(err, ErrEncryptedWALNeedsSealer) {
 				return count, err
 			}
 			log.Warn().Str("file", path).Err(err).Msg("wal: replay file error")
@@ -377,7 +393,7 @@ func replayFile(path string, fromSeq uint64, targetNs int64, sealer RecordSealer
 		}
 		if ver == fileVersionV4 {
 			if sealer == nil {
-				return count, fmt.Errorf("wal: encrypted entry requires sealer")
+				return count, ErrEncryptedWALNeedsSealer
 			}
 			e, err = decryptEntryBody(e, body, sealer, namespace, headerGen)
 			if err != nil {

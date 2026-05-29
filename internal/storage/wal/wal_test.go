@@ -247,6 +247,33 @@ func TestWAL_EncryptedReplayRejectsWrongKey(t *testing.T) {
 	require.Error(t, err)
 }
 
+// Plaintext Replay over an encrypted (v4) WAL must fail closed, not silently
+// return 0. Pre-fix, replayFile errored ("encrypted entry requires sealer") but
+// replay()'s non-strict branch swallowed it — the silent-loss mechanism behind
+// the PITR fallback bug. The sentinel is now non-swallowable.
+func TestWAL_PlaintextReplayOnEncryptedFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	keeper := newKeeper(t, 0x77)
+
+	w, err := wal.OpenEncrypted(dir, newSealer(keeper), wal.PITRWALNamespace)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k1"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	n, err := wal.Replay(dir, 0, time.Now().Add(time.Second), func(e wal.Entry) {})
+	require.ErrorIs(t, err, wal.ErrEncryptedWALNeedsSealer)
+	require.Zero(t, n)
+}
+
+// The PITR WAL namespace is part of every record's seal AAD. Changing it would
+// make every existing on-disk PITR WAL undecryptable. Lock the value so a rename
+// is a conscious, test-breaking act — the seal side (boot) and replay side
+// (snapshot PITRRestore) both reference this const.
+func TestPITRWALNamespace_ValueLocked(t *testing.T) {
+	require.Equal(t, "pitr-wal", wal.PITRWALNamespace)
+}
+
 func TestWAL_EncryptedReplayRejectsFrameMetadataTamper(t *testing.T) {
 	dir := t.TempDir()
 	keeper := newKeeper(t, 0x77)
