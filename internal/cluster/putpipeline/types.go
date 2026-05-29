@@ -85,6 +85,12 @@ type putWaiter struct {
 	finalDone    chan<- error
 	metadata     MetadataRecord
 	earlyAckSent bool
+	// dekGenUnknown is set when any shard failed with an error wrapping
+	// encrypt.ErrDEKGenUnknown (sealing DEK gen not yet local). When set,
+	// the early-ack fail error (the client-observable path) wraps the
+	// sentinel so the HTTP layer maps the PUT to a retriable 503 instead
+	// of a hard 500.
+	dekGenUnknown bool
 }
 
 // PutRequest is what Pipeline.Put consumes (matches storage.PutObjectRequest
