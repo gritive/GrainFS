@@ -820,27 +820,6 @@ func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Mes
 	}
 }
 
-// DecryptPayload decrypts data with AAD if an encryptor is configured. On a
-// DEK-only service (encryptor nil) every shard is GFSENC3-sealed, so a payload
-// reaching this path carries no GFSENC3 envelope and plaintext is rejected
-// fail-closed rather than passed through.
-func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
-	if s.encryptor == nil {
-		if encrypt.IsEncryptedBlob(data) {
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		if encrypt.IsLegacyEncryptedBlob(data) {
-			return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
-		}
-		return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
-	}
-	decrypted, err := s.encryptor.DecryptWithAAD(data, aad)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt shard: %w", err)
-	}
-	return decrypted, nil
-}
-
 // WriteLocalShard stores a shard on the local node's disk without involving
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
