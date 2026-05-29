@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.478.0] - 2026-05-30
+
+### Added
+
+- Data-encryption-key (DEK) rotation is now supported. Trigger it with
+  `grainfs config set encryption.rotate-dek now`: the active DEK generation
+  advances across the cluster and subsequent writes are sealed under it. Objects
+  written before the rotation stay readable — older generations are retained
+  (re-encrypting data onto the new generation and pruning old generations are
+  planned for a later release). Confirm the new generation via the encryption
+  status (`active_dek_generation`); the `config set` call returns once the request
+  is accepted, while the rotation itself completes asynchronously.
+
 ## [0.0.474.0] - 2026-05-30
 
 ### Removed
