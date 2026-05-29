@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.449.0] - 2026-05-29
+
+### Added
+
+- The External PDP adapter can now reach a **remote** Policy Decision Point over
+  `https://` (in addition to a local `http://` loopback sidecar). Configure the
+  endpoint in the `iam.pdp` config key; TLS server verification is always on
+  (pin a CA with inline `tls.ca_pem`, floor the version with `tls.min_version`,
+  minimum 1.2 — there is no insecure-skip-verify option).
+- New `grainfs iam pdp set-token --token-file <path>`, `grainfs iam pdp clear-token`,
+  and `grainfs iam pdp show` commands manage a bearer token sent to the PDP. The
+  token is sealed at rest under the cluster key (like other IAM secrets, replicated
+  to every node), sent only over `https` as `Authorization: Bearer`, and never
+  logged or printed (`show` reports only a fingerprint).
+- Active SSRF egress filtering on PDP calls: the resolved endpoint IP is checked at
+  dial time (rebinding-proof) and a request to loopback, link-local, the cloud
+  metadata address, private, CGNAT, or other special-use ranges is blocked. Set
+  `ssrf.allow_private: true` to allow an internal-network PDP. A blocked dial is a
+  hard deny regardless of `failure_policy`.
+
+### Changed
+
+- The External PDP `endpoint` is now `http://`/`https://` only; the previous
+  `unix://` socket transport has been removed (use `http://127.0.0.1:<port>` for a
+  local sidecar). `http://` is permitted only to a loopback host and may not carry
+  a token. A bearer token configured with an unusable seal now hard-denies rather
+  than silently calling the PDP without authentication.
+
 ## [0.0.448.0] - 2026-05-29
 
 ### Changed
