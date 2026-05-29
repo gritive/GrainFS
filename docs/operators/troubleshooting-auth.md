@@ -84,28 +84,23 @@ scp nodeA:<data>/keys/0.key  <data>/keys/0.key
 scp nodeA:<data>/cluster.id  <data>/cluster.id
 chmod 0600 <data>/keys/0.key <data>/cluster.id
 
-# Option B: stage the cluster transport key + identity, then runtime-join
+# Option B: replace the node entirely via invite-join (no hand-copied secrets)
 rm -rf <data>
-mkdir -p <data>/keys <data>/keys.d
-scp nodeA:<data>/keys/0.key          <data>/keys/0.key
-scp nodeA:<data>/cluster.id          <data>/cluster.id
-scp nodeA:<data>/keys.d/current.key  <data>/keys.d/current.key
-chmod 0600 <data>/keys/0.key <data>/cluster.id <data>/keys.d/current.key
-grainfs serve \
+#   On the leader, mint a fresh single-use invite:
+grainfs cluster invite create --endpoint <leader-data>/admin.sock --ttl 1h
+#   Boot the replacement with the printed bundle; it pulls the KEK,
+#   cluster.id, and transport key over the join listener:
+GRAINFS_INVITE_BUNDLE='<bundle-token>' grainfs serve \
   --data <data> \
   --node-id <replacement-node-id> \
-  --raft-addr <replacement-node>:7001 &
-grainfs join <healthy-peer>:7001 \
-  --endpoint <data>/admin.sock \
-  --confirm-staged-keys
+  --raft-addr <replacement-node>:7001
 ```
 
-The runtime `grainfs join` path requires the node to be running (admin socket
-present) and the operator to have staged the keystore (`keys/0.key`), cluster
-identity (`cluster.id`), and cluster transport key (`keys.d/current.key`) from a
-healthy peer; `--confirm-staged-keys` acknowledges they are in place. The
-offline `cluster join` command has been retired in favor of invite-join and the
-staged-key runtime join above.
+Option A restores an existing node's own keystore in place. Option B provisions
+a fresh replacement via invite-join, which carries the KEK, `cluster.id`, and
+transport key in the sealed bundle — nothing is hand-copied. Both the offline
+`grainfs cluster join` and the runtime `grainfs join` commands have been
+retired; joining is always `grainfs serve` with an invite bundle.
 
 ## "KEK does not decrypt FSM DEK"
 
@@ -119,9 +114,10 @@ WARN: KEK handshake HMAC mismatch from <addr>
 
 The joiner has the wrong KEK. Verify `<data>/keys/0.key` matches a healthy
 node's active KEK byte-for-byte (`sha256sum <data>/keys/0.key`), and that
-`<data>/cluster.id` matches the destination cluster's identity. On match,
-retry the runtime `grainfs join` (or use invite-join). Nonces are single-use
-and 60s-TTL — a retry forces a fresh challenge automatically.
+`<data>/cluster.id` matches the destination cluster's identity. The robust fix
+is to re-provision the node via invite-join (mint a fresh bundle on the leader),
+which carries the correct KEK and identity. Invite nonces are single-use and
+short-TTL — a fresh invite forces a fresh challenge automatically.
 
 ## Audit table queries return zero rows
 

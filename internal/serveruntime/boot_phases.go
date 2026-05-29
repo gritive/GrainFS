@@ -19,10 +19,11 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// JoinPendingFile is the sentinel written by the UDS join handler and read at
-// startup to perform a pending cluster join. Its presence means the solo Raft
-// state must be wiped so the node can bootstrap cleanly in join mode.
-// Exported so tests in cmd/grainfs can write it without duplicating the path.
+// JoinPendingFile is the sentinel written by an operator (or a test harness)
+// before boot and read at startup to perform a pending cluster join. Its
+// presence means the solo Raft state must be wiped so the node can bootstrap
+// cleanly in join mode. (The e2e/colima harnesses mirror this path locally to
+// avoid an import cycle rather than importing the symbol.)
 const JoinPendingFile = ".join-pending"
 
 // wipeSoloRaftState renames meta_raft/, raft/, and shared-raft-log/ to
@@ -68,8 +69,9 @@ func bootValidateConfig(state *bootState) error {
 		log.Info().Str("component", "server").Str("node_id", state.nodeID).Msg("auto-generated node ID")
 	}
 
-	// File-based join detection: written by `grainfs join` UDS handler.
-	// Takes precedence over any other bootstrap logic.
+	// File-based join detection: the .join-pending sentinel is written before
+	// boot by an operator or a test harness. Takes precedence over any other
+	// bootstrap logic.
 	pendingFile := filepath.Join(cfg.DataDir, JoinPendingFile)
 	if rawPeer, err := os.ReadFile(pendingFile); err == nil {
 		peerAddr := strings.TrimSpace(string(rawPeer))

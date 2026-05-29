@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.474.0] - 2026-05-30
+
+### Removed
+
+- The runtime `grainfs join` command and the `POST /v1/cluster/join` admin
+  endpoint it drove. Joining a cluster is now Zero-CA invite-join only: start
+  `grainfs serve` with `GRAINFS_INVITE_BUNDLE` set to a bundle minted via
+  `grainfs cluster invite create`. There is deliberately no `join` verb — the
+  invite bundle is a secret (sealed KEK + transport key + cluster identity) and
+  must never be passed on the command line. Replacing a failed node is done by
+  booting the replacement with a fresh invite; restoring an existing node uses
+  that node's own keystore (`keys/`, `cluster.id`, `keys.d/`, `raft/`,
+  `meta_raft/`).
+
 ## [0.0.473.0] - 2026-05-30
 
 ### Changed
