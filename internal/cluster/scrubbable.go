@@ -160,7 +160,7 @@ func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShar
 // ReadShard reads a shard at path under a per-object read lock. New shards use
 // eccodec's CRC envelope. Legacy raw shards from pre-CRC cluster deployments are
 // still readable; they simply cannot provide bit-rot detection until rewritten.
-func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
+func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, shardIdx int, path string) (scrubber.ShardIntegrityResult, error) {
 	unlock := b.acquireShardReadLock(bucket, key)
 	defer unlock()
 	if b.shardSvc != nil {
@@ -243,8 +243,8 @@ func (b *DistributedBackend) shardServiceKeyFromPath(bucket, path string) (strin
 	return filepath.ToSlash(filepath.Dir(rel)), idx, true
 }
 
-func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error) {
-	res, err := b.readShardIntegrity(bucket, key, path)
+func (b *DistributedBackend) ReadShard(bucket, key, versionID string, shardIdx int, path string) ([]byte, error) {
+	res, err := b.readShardIntegrity(bucket, key, versionID, shardIdx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -254,8 +254,8 @@ func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error)
 // ReadShardIntegrity reads a shard and reports whether the bytes had a CRC
 // integrity oracle. It is used by EC scrub so legacy raw shards are reported as
 // unverified instead of healthy.
-func (b *DistributedBackend) ReadShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
-	return b.readShardIntegrity(bucket, key, path)
+func (b *DistributedBackend) ReadShardIntegrity(bucket, key, versionID string, shardIdx int, path string) (scrubber.ShardIntegrityResult, error) {
+	return b.readShardIntegrity(bucket, key, versionID, shardIdx, path)
 }
 
 // WriteShard writes data atomically at path under a per-object write lock.
@@ -266,7 +266,7 @@ func (b *DistributedBackend) ReadShardIntegrity(bucket, key, path string) (scrub
 // the next scrub pass detecting the still-corrupt shard. New writes are
 // wrapped in eccodec's CRC envelope so scrubber verification can
 // distinguish corrupt shards from missing shards.
-func (b *DistributedBackend) WriteShard(bucket, key, path string, data []byte) error {
+func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx int, path string, data []byte) error {
 	unlock := b.acquireShardWriteLock(bucket, key)
 	defer unlock()
 	if b.shardSvc == nil {

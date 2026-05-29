@@ -13,12 +13,14 @@ import (
 // external scrubber_test package and is unreachable here).
 type stubScrubbable struct{}
 
-func (stubScrubbable) ListBuckets(context.Context) ([]string, error)    { return nil, nil }
-func (stubScrubbable) ScanObjects(string) (<-chan ObjectRecord, error)  { return nil, nil }
-func (stubScrubbable) ObjectExists(string, string) (bool, error)        { return true, nil }
-func (stubScrubbable) ShardPaths(string, string, string, int) []string  { return nil }
-func (stubScrubbable) ReadShard(string, string, string) ([]byte, error) { return nil, nil }
-func (stubScrubbable) WriteShard(string, string, string, []byte) error  { return nil }
+func (stubScrubbable) ListBuckets(context.Context) ([]string, error)   { return nil, nil }
+func (stubScrubbable) ScanObjects(string) (<-chan ObjectRecord, error) { return nil, nil }
+func (stubScrubbable) ObjectExists(string, string) (bool, error)       { return true, nil }
+func (stubScrubbable) ShardPaths(string, string, string, int) []string { return nil }
+func (stubScrubbable) ReadShard(string, string, string, int, string) ([]byte, error) {
+	return nil, nil
+}
+func (stubScrubbable) WriteShard(string, string, string, int, string, []byte) error { return nil }
 
 // fakeManifestSource implements Scrubbable (via stubScrubbable) plus
 // segmentManifestSource so it can be passed to New() for hoist tests.

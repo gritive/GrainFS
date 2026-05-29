@@ -114,7 +114,7 @@ func TestWriteShardSealsRepairedShardWithDEK(t *testing.T) {
 	path := b.ShardPaths(bucket, key, versionID, total)[0]
 
 	plain := bytes.Repeat([]byte("repaired-shard-data"), 500)
-	require.NoError(t, b.WriteShard(bucket, key, path, plain))
+	require.NoError(t, b.WriteShard(bucket, key, versionID, 0, path, plain))
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -122,7 +122,7 @@ func TestWriteShardSealsRepairedShardWithDEK(t *testing.T) {
 	require.False(t, bytes.Contains(raw, plain[:64]), "plaintext run must not be on disk")
 
 	// Reads back through the integrity path (ReadLocalShard, GFSENC3-aware).
-	got, err := b.ReadShard(bucket, key, path)
+	got, err := b.ReadShard(bucket, key, versionID, 0, path)
 	require.NoError(t, err)
 	require.Equal(t, plain, got)
 }

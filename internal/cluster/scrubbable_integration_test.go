@@ -162,8 +162,8 @@ var _ = Describe("Scrubbable integration", func() {
 			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			payload := []byte("ec-shard-payload-0x42")
 
-			Expect(b.WriteShard("bkt", "k", path, payload)).To(Succeed())
-			got, err := b.ReadShard("bkt", "k", path)
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, payload)).To(Succeed())
+			got, err := b.ReadShard("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(payload))
 		})
@@ -171,9 +171,9 @@ var _ = Describe("Scrubbable integration", func() {
 		It("verifies encoded shard integrity", func() {
 			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			payload := []byte("encoded-payload")
-			Expect(b.WriteShard("bkt", "k", path, payload)).To(Succeed())
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, payload)).To(Succeed())
 
-			got, err := b.ReadShardIntegrity("bkt", "k", path)
+			got, err := b.ReadShardIntegrity("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(got.Payload).To(Equal(payload))
@@ -187,7 +187,7 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
 			path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
-			got, err := b.ReadShardIntegrity("bkt", "key", path)
+			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(string(got.Payload)).To(Equal("payload"))
@@ -204,7 +204,7 @@ var _ = Describe("Scrubbable integration", func() {
 			_, err = os.Stat(path)
 			Expect(os.IsNotExist(err)).To(BeTrue())
 
-			got, err := b.ReadShardIntegrity("bkt", "key", path)
+			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(string(got.Payload)).To(Equal("packed-payload"))
@@ -215,12 +215,12 @@ var _ = Describe("Scrubbable integration", func() {
 			payload := []byte("legacy-raw-payload")
 			Expect(os.WriteFile(path, payload, 0o600)).To(Succeed())
 
-			got, err := b.ReadShardIntegrity("bkt", "k", path)
+			got, err := b.ReadShardIntegrity("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityUnverifiedLegacy))
 			Expect(got.Payload).To(Equal(payload))
 
-			compat, err := b.ReadShard("bkt", "k", path)
+			compat, err := b.ReadShard("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(compat).To(Equal(payload))
 		})
@@ -229,10 +229,10 @@ var _ = Describe("Scrubbable integration", func() {
 			path := b.ShardPaths("bkt", "k", "01VID", 1)[0]
 			dir := filepath.Dir(path)
 
-			Expect(b.WriteShard("bkt", "k", path, []byte("v1"))).To(Succeed())
-			Expect(b.WriteShard("bkt", "k", path, []byte("v2"))).To(Succeed())
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, []byte("v1"))).To(Succeed())
+			Expect(b.WriteShard("bkt", "k", "01VID", 0, path, []byte("v2"))).To(Succeed())
 
-			got, err := b.ReadShard("bkt", "k", path)
+			got, err := b.ReadShard("bkt", "k", "01VID", 0, path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(got)).To(Equal("v2"))
 
@@ -244,7 +244,7 @@ var _ = Describe("Scrubbable integration", func() {
 		})
 
 		It("errors for missing shard files", func() {
-			_, err := b.ReadShard("bkt", "k", filepath.Join(GinkgoT().TempDir(), "nope"))
+			_, err := b.ReadShard("bkt", "k", "01VID", 0, filepath.Join(GinkgoT().TempDir(), "nope"))
 			Expect(err).To(HaveOccurred())
 		})
 	})

@@ -73,7 +73,7 @@ func (v *ShardVerifier) check(rec ObjectRecord, indices []int) ShardStatus {
 			return
 		}
 		if reader, ok := v.backend.(ShardIntegrityReader); ok {
-			res, err := reader.ReadShardIntegrity(rec.Bucket, rec.Key, paths[i])
+			res, err := reader.ReadShardIntegrity(rec.Bucket, rec.Key, rec.VersionID, i, paths[i])
 			if err == nil {
 				if res.Status == ShardIntegrityUnverifiedLegacy {
 					status.Unverified = append(status.Unverified, i)
@@ -88,7 +88,7 @@ func (v *ShardVerifier) check(rec ObjectRecord, indices []int) ShardStatus {
 			}
 			return
 		}
-		_, err := v.backend.ReadShard(rec.Bucket, rec.Key, paths[i])
+		_, err := v.backend.ReadShard(rec.Bucket, rec.Key, rec.VersionID, i, paths[i])
 		if err == nil {
 			return
 		}
