@@ -39,8 +39,10 @@ func withSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AA
 	return ct, gen, err
 }
 
-// buildSeamAAD is the single AAD-construction point shared by every adapter, so
-// the seam's AAD shape can never drift between implementations.
+// buildSeamAAD is the AAD-construction point shared by every adapter's Seal.
+// Both it and withSeamAAD (the pooled SealTo path) funnel through
+// encrypt.AppendAAD, so the seam's AAD shape can never drift between
+// implementations or between Seal and SealTo.
 func buildSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AADField) []byte {
 	return encrypt.BuildAAD(domain, clusterID, fields...)
 }
