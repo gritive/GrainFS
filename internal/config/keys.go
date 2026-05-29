@@ -2,7 +2,6 @@ package config
 
 import (
 	"context"
-	"fmt"
 
 	iamoidc "github.com/gritive/GrainFS/internal/iam/oidc"
 	iampdp "github.com/gritive/GrainFS/internal/iam/pdp"
@@ -97,23 +96,23 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 		},
 	})
 
-	// encryption.rotate-dek: GATED in R1. The key stays registered (catalog +
-	// existing config tooling), but its trigger is rejected: connecting the
-	// logical-WAL/packblob/PUT-pipeline sealers to the gen-aware DEK (R1
-	// Commit 2) means a DEK rotation would advance the active gen, and those
-	// append-only writers pin the gen at open — so a rotation would break them.
-	// Proper data-DEK rotation with per-segment gen framing for every lane is a
-	// future slice (spec decision #5). Rejecting here in OnTrigger makes
-	// Store.Set roll back and surface the deferral error to the operator instead
-	// of silently no-op'ing or reaching ProposeDEKRotate.
+	// encryption.rotate-dek: ENABLED (S5). All data lanes now carry gen framing
+	// or self-roll on a gen advance (packblob per-entry gen S1; datawal/logical-WAL
+	// rotation boundaries S2/S3; EC/object seal-at-pinned-gen S4; datawal Append
+	// roll-then-retry S5), so advancing the active gen is safe. OnTrigger is a
+	// no-op accept: it runs SYNCHRONOUSLY inside the raft apply loop
+	// (applyConfigPut → cfgStore.Set → fireReload), where calling the blocking
+	// ProposeDEKRotate would deadlock the apply loop. The actual rotation is
+	// proposed by the post-commit dispatcher (serveruntime/dek_post_commit.go),
+	// which runs after apply and escapes the apply goroutine — mirroring the
+	// encryption.prune-dek-version path below. Leader-gating lives there.
 	s.Register("encryption.rotate-dek", TriggerSpec{
-		Desc: "Rotate the data-encryption key (deferred — not supported in this release)",
-		OnTrigger: func(_ context.Context) error {
-			return fmt.Errorf("data-DEK rotation is deferred — not supported in this release; per-segment generation framing for all data lanes is a future slice")
-		},
+		Desc:      "Rotate the data-encryption key (set to \"now\" to trigger)",
+		OnTrigger: func(_ context.Context) error { return nil },
 	})
 
-	// encryption.prune-dek-version: same — Task 14 handles the actual action.
+	// encryption.prune-dek-version: same shape — the post-commit dispatcher
+	// handles the actual action; this accept is a no-op at apply time.
 	s.Register("encryption.prune-dek-version", Uint32Spec{
 		Desc:     "Prune DEK versions older than this version number",
 		OnReload: func(_ context.Context, _ uint32) error { return nil },

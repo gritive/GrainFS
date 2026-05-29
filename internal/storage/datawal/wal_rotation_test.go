@@ -188,10 +188,12 @@ func TestRollSegmentReplayAcrossBoundary(t *testing.T) {
 	}
 }
 
-// Without RollSegmentOnRotation, appending under a rotated keeper fails closed
-// (the gen-match assertion at wal.go ~150). This documents why the boundary is
-// required and guards against a regression that silently drops the assertion.
-func TestAppendAfterRotationWithoutRollFails(t *testing.T) {
+// S5: appending under a rotated keeper WITHOUT a manual RollSegmentOnRotation
+// now succeeds — Append self-rolls (the gen-match assertion turned into a
+// roll-then-retry). After the self-roll the segment is pinned at the new gen, so
+// a subsequent manual RollSegmentOnRotation is a redundant no-op. (Pre-S5 this
+// append failed closed; the assertion is now self-healing.)
+func TestAppendAfterRotationSelfRolls(t *testing.T) {
 	keeper, sealer := testKeeperAndSealer(t)
 	dir := t.TempDir()
 	w, err := datawal.Open(dir, sealer, "datawal")
@@ -199,13 +201,17 @@ func TestAppendAfterRotationWithoutRollFails(t *testing.T) {
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k1", Payload: []byte("gen0")})
 	require.NoError(t, err)
 
-	require.NoError(t, keeper.Rotate()) // advance active gen WITHOUT rolling
+	require.NoError(t, keeper.Rotate()) // advance active gen WITHOUT a manual roll
 
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k2", Payload: []byte("gen1")})
-	require.Error(t, err, "append under a rotated keeper without RollSegmentOnRotation must fail closed")
+	require.NoError(t, err, "append under a rotated keeper must self-roll and succeed")
 
-	require.NoError(t, w.RollSegmentOnRotation())
+	filesAfterSelfRoll := segmentPaths(t, dir)
+	require.NoError(t, w.RollSegmentOnRotation()) // redundant now: gen already matches
 	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k3", Payload: []byte("gen1")})
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
+
+	require.Equal(t, filesAfterSelfRoll, segmentPaths(t, dir),
+		"the redundant manual roll after a self-roll must be a no-op (no new segment)")
 }

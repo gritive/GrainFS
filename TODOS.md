@@ -64,7 +64,17 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        to `Seal`); auto-activates at S5. **S7 dependency:** the pinned (possibly just-retired) gen must
        stay resident until a reference-safe Prune — S7 must treat an in-flight/Compact-held gen as
        referenced. Fail-closed if a gen is missing (`ErrDEKGenUnknown` → write error, no leak).
-     - S5 enable `encryption.rotate-dek` (remove gate `config/keys.go:109`, wire `OnDEKRotate`) — needs S1–S4 (S1–S4 DONE).
+     - S5 enable `encryption.rotate-dek` — SHIPPED. The trigger now ACCEPTS "now" as a no-op at
+       apply time (it runs inside the raft apply loop, where a blocking propose would deadlock); the
+       post-commit dispatcher (`serveruntime/dek_post_commit.go`) does the actual leader-gated
+       `ProposeDEKRotate` off the apply goroutine — mirroring the prune path (NOT a reload-hook, which
+       would deadlock + double-propose). datawal `Append` now self-rolls across a gen advance via
+       roll-then-retry BETWEEN locked attempts (`appendRecordOnce` + bounded retry calling the existing
+       `RollSegmentOnRotation`), so concurrent appenders never duplicate a seq (the inline-park design
+       the plan gate rejected). Legacy/logical WAL already self-heals (S3 seal-first); EC/object pin via
+       S4. Old gens stay resident ⇒ pre-rotation data still decrypts; new writes use the new gen
+       (mixed-gen is expected until S6 rewrap / S7 prune). Operator surface: `grainfs config set
+       encryption.rotate-dek now`; confirm via `active_dek_generation` in the encryption status.
      - S6 rewrap scrubber: old-gen→new-gen re-encryption across ALL lanes (EC/packblob/datawal/
        logical-WAL/FSM-value/IAM/snapshot) — large, may sub-slice; `scrubberKick` is `nil` today
        (`dek_keeper_wiring.go:200`).
