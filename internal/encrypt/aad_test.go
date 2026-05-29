@@ -95,6 +95,26 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 	require.Len(t, seen, 16)
 }
 
+func TestAppendAADByteIdenticalToBuildAAD(t *testing.T) {
+	clusterID := bytes.Repeat([]byte{0x42}, 16)
+	fields := []AADField{
+		FieldString("bucket"),
+		FieldUint64(42),
+		FieldUint32(3),
+	}
+	want := BuildAAD(DomainShard, clusterID, fields...)
+
+	prefix := []byte("PREFIX")
+	dst := make([]byte, len(prefix), len(prefix)+len(want)+64)
+	copy(dst, prefix)
+	got := AppendAAD(dst, DomainShard, clusterID, fields...)
+	require.Equal(t, prefix, got[:len(prefix)], "AppendAAD must preserve existing prefix")
+	require.Equal(t, want, got[len(prefix):], "AppendAAD must append byte-identical BuildAAD output")
+
+	gotNil := AppendAAD(nil, DomainShard, clusterID, fields...)
+	require.Equal(t, want, gotNil, "AppendAAD(nil, ...) must equal BuildAAD exactly")
+}
+
 func TestBuildAAD_FieldBytesDefensiveCopy(t *testing.T) {
 	// The AAD format is consensus-critical: if FieldBytes ever loses its
 	// defensive copy, callers can silently produce divergent AADs by

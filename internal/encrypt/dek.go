@@ -291,18 +291,30 @@ func (k *DEKKeeper) Seal(plain []byte) ([]byte, uint32, error) {
 // binding the ciphertext to aad. The same aad bytes must be supplied to
 // OpenWithAAD to decrypt — different aad fails authentication.
 func (k *DEKKeeper) SealWithAAD(plain, aad []byte) ([]byte, uint32, error) {
+	return k.SealWithAADTo(nil, plain, aad)
+}
+
+// SealWithAADTo is SealWithAAD that appends the nonce-prefixed ciphertext into
+// dst, reusing dst's capacity when it suffices. The output framing (nonce||ct)
+// is byte-identical to SealWithAAD; pass the same aad to OpenWithAAD.
+func (k *DEKKeeper) SealWithAADTo(dst, plain, aad []byte) ([]byte, uint32, error) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	aead, ok := k.aead[k.active]
 	if !ok {
 		return nil, 0, ErrDEKGenUnknown
 	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	nonceSize := aead.NonceSize()
+	outLen := nonceSize + len(plain) + aead.Overhead()
+	if cap(dst) < outLen {
+		dst = make([]byte, 0, outLen)
+	}
+	out := dst[:nonceSize]
+	if _, err := io.ReadFull(rand.Reader, out); err != nil {
 		return nil, 0, err
 	}
 	k.activeSeals.Add(1)
-	return aead.Seal(nonce, nonce, plain, aad), k.active, nil
+	return aead.Seal(out, out, plain, aad), k.active, nil
 }
 
 // Open decrypts ct using the cached AEAD for the specified gen.

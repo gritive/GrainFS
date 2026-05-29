@@ -92,6 +92,13 @@ func FieldUint64(v uint64) AADField {
 //	  [field_len     uint16]
 //	  [field_bytes   ...   ]
 func BuildAAD(domain AADDomain, clusterID []byte, fields ...AADField) []byte {
+	return AppendAAD(nil, domain, clusterID, fields...)
+}
+
+// AppendAAD appends the canonical AAD blob (see BuildAAD) to dst and returns
+// the extended slice, reusing dst's capacity when it suffices. AppendAAD(nil,
+// ...) is byte-identical to BuildAAD.
+func AppendAAD(dst []byte, domain AADDomain, clusterID []byte, fields ...AADField) []byte {
 	if len(clusterID) != 16 {
 		panic(fmt.Sprintf("BuildAAD: cluster_id must be 16 bytes, got %d", len(clusterID)))
 	}
@@ -99,11 +106,7 @@ func BuildAAD(domain AADDomain, clusterID []byte, fields ...AADField) []byte {
 		panic(fmt.Sprintf("BuildAAD: too many fields (%d > 255)", len(fields)))
 	}
 
-	size := 4 + 2 + 16 + 1
-	for _, f := range fields {
-		size += 1 + 2 + len(f.data)
-	}
-	out := make([]byte, 0, size)
+	out := dst
 	out = append(out, []byte(aadMagic)...)
 	out = binary.BigEndian.AppendUint16(out, uint16(domain))
 	out = append(out, clusterID...)

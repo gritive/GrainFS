@@ -254,3 +254,45 @@ func TestTransientDataEncryptor_SealIsRefused(t *testing.T) {
 func TestTransientDataEncryptor_ImplementsDataEncryptor(t *testing.T) {
 	var _ DataEncryptor = (*TransientDataEncryptor)(nil)
 }
+
+func TestSealToRoundTripsAndMatchesSeal(t *testing.T) {
+	cases := []struct {
+		name string
+		de   DataEncryptor
+	}{
+		{"encryptor", newEncryptorAdapterForTest(t)},
+		{"dekkeeper", newDEKKeeperAdapterForTest(t)},
+	}
+	plain := []byte("segment chunk plaintext")
+	fields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldString("key"), encrypt.FieldUint32(3)}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, gen, err := tc.de.SealTo(make([]byte, 0, 512), encrypt.DomainShard, fields, plain)
+			if err != nil {
+				t.Fatalf("SealTo: %v", err)
+			}
+			got, err := tc.de.Open(encrypt.DomainShard, fields, gen, ct)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if !bytes.Equal(got, plain) {
+				t.Fatalf("plaintext mismatch: got %q want %q", got, plain)
+			}
+			ctSeal, _, err := tc.de.Seal(encrypt.DomainShard, fields, plain)
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			if len(ctSeal) != len(ct) {
+				t.Fatalf("ciphertext len mismatch: Seal=%d SealTo=%d", len(ctSeal), len(ct))
+			}
+		})
+	}
+}
+
+func TestTransientSealToUnsupported(t *testing.T) {
+	de := &TransientDataEncryptor{}
+	_, _, err := de.SealTo(nil, encrypt.DomainShard, nil, []byte("x"))
+	if !errors.Is(err, encrypt.ErrTransientReadOnly) {
+		t.Fatalf("SealTo must return ErrTransientReadOnly, got %v", err)
+	}
+}

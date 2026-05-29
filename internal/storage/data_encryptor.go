@@ -1,6 +1,10 @@
 package storage
 
-import "github.com/gritive/GrainFS/internal/encrypt"
+import (
+	"sync"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
+)
 
 // DataEncryptor is the data-at-rest encryption seam. It hides whether the
 // underlying key material is the static Encryptor (legacy) or the
@@ -13,11 +17,32 @@ import "github.com/gritive/GrainFS/internal/encrypt"
 // implementation ignores it.
 type DataEncryptor interface {
 	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
+	// SealTo is Seal that appends the ciphertext into dst, reusing dst's
+	// capacity when it suffices. The output is byte-equivalent to Seal.
+	SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 }
 
-// buildSeamAAD is the single AAD-construction point shared by every adapter, so
-// the seam's AAD shape can never drift between implementations.
+// seamAADPool recycles the scratch buffer used to build the canonical AAD for
+// SealTo. The AAD is only consumed as GCM associated data (never retained), so
+// reusing the backing array across calls is safe.
+var seamAADPool = sync.Pool{New: func() any { b := make([]byte, 0, 128); return &b }}
+
+// withSeamAAD builds the canonical AAD into a pooled scratch buffer, invokes fn
+// with it, then returns the buffer to the pool.
+func withSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AADField, fn func(aad []byte) ([]byte, uint32, error)) ([]byte, uint32, error) {
+	p := seamAADPool.Get().(*[]byte)
+	aad := encrypt.AppendAAD((*p)[:0], domain, clusterID, fields...)
+	ct, gen, err := fn(aad)
+	*p = aad[:0]
+	seamAADPool.Put(p)
+	return ct, gen, err
+}
+
+// buildSeamAAD is the AAD-construction point shared by every adapter's Seal.
+// Both it and withSeamAAD (the pooled SealTo path) funnel through
+// encrypt.AppendAAD, so the seam's AAD shape can never drift between
+// implementations or between Seal and SealTo.
 func buildSeamAAD(clusterID []byte, domain encrypt.AADDomain, fields []encrypt.AADField) []byte {
 	return encrypt.BuildAAD(domain, clusterID, fields...)
 }
@@ -45,6 +70,13 @@ func (a *EncryptorAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADFi
 	return ct, 0, nil
 }
 
+func (a *EncryptorAdapter) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	return withSeamAAD(a.clusterID, domain, fields, func(aad []byte) ([]byte, uint32, error) {
+		ct, err := a.enc.SealValueAADTo(dst, aad, plain)
+		return ct, 0, err
+	})
+}
+
 func (a *EncryptorAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
 	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.enc.OpenValueAADTo(nil, aad, ct)
@@ -68,6 +100,12 @@ func NewDEKKeeperAdapter(keeper *encrypt.DEKKeeper, clusterID []byte) *DEKKeeper
 func (a *DEKKeeperAdapter) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
 	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.keeper.SealWithAAD(plain, aad)
+}
+
+func (a *DEKKeeperAdapter) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	return withSeamAAD(a.clusterID, domain, fields, func(aad []byte) ([]byte, uint32, error) {
+		return a.keeper.SealWithAADTo(dst, plain, aad)
+	})
 }
 
 func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
@@ -99,6 +137,10 @@ func NewTransientDataEncryptor(t *encrypt.TransientReadOnlyDEK, clusterID []byte
 }
 
 func (a *TransientDataEncryptor) Seal(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte) ([]byte, uint32, error) {
+	return nil, 0, encrypt.ErrTransientReadOnly
+}
+
+func (a *TransientDataEncryptor) SealTo(_ []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ []byte) ([]byte, uint32, error) {
 	return nil, 0, encrypt.ErrTransientReadOnly
 }
 
