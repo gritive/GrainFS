@@ -137,7 +137,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		ProtocolCredentials:  state.protocolCredentials,
 		ProtocolCredAuthz:    protocolCredentialAuthorizer(state),
-		AdminAuthz:           adminAuthorizer(state),
+		AdminAuthz:           adminAuthorizer(state, "admin"),
 		ActorAuth:            newOIDCActorAuthenticator(state.cfgStore),
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 		PDPTokens:            ensurePDPTokenSource(state),
@@ -264,10 +264,10 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 }
 
 func protocolCredentialAuthorizer(state *bootState) admin.CredentialAuthorizer {
-	return adminAuthorizer(state)
+	return adminAuthorizer(state, "protocol_credential")
 }
 
-func adminAuthorizer(state *bootState) admin.CredentialAuthorizer {
+func adminAuthorizer(state *bootState, scope string) admin.CredentialAuthorizer {
 	if state.iamPolicyStores == nil || state.iamPolicyStores.Resolver == nil || state.cfgStore == nil {
 		return nil
 	}
@@ -275,7 +275,7 @@ func adminAuthorizer(state *bootState) admin.CredentialAuthorizer {
 	// Always install the PDP decorator; it is a pure pass-through unless iam.pdp
 	// is enabled (read per request from the cfg store), so hot-enable works with
 	// no dependency rebuild.
-	return pdp.NewDecorator(base, state.cfgStore, ensurePDPTokenSource(state))
+	return pdp.NewDecorator(base, state.cfgStore, ensurePDPTokenSource(state), scope)
 }
 
 // ensurePDPTokenSource lazily constructs the single PDP TokenSource /
