@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 func TestMetaFSM_RevokedNodes_RecordAndQuery(t *testing.T) {
@@ -44,4 +46,21 @@ func TestMetaFSM_ApplyRevokePeer_RecordsRevokedNodeAndFiresCallback(t *testing.T
 	// and does not panic when the registry entry is already gone.
 	require.NoError(t, f.applyRevokePeer(data))
 	require.True(t, f.IsRevoked("node-b"))
+}
+
+func TestMetaFSM_Snapshot_RoundTrips_RevokedNodeIDs(t *testing.T) {
+	f := NewMetaFSM()
+	wireSnapshotKEK(t, f)
+	f.recordRevokedNodeForTest("node-b")
+	f.recordRevokedNodeForTest("node-c")
+
+	blob, err := f.Snapshot()
+	require.NoError(t, err)
+
+	g := NewMetaFSM()
+	wireSnapshotKEK(t, g)
+	require.NoError(t, g.Restore(raft.SnapshotMeta{}, blob))
+
+	require.True(t, g.IsRevoked("node-b"))
+	require.True(t, g.IsRevoked("node-c"))
 }
