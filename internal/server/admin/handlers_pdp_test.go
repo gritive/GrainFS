@@ -12,18 +12,20 @@ import (
 )
 
 // staticTestEncryptor mirrors internal/iam/encrypt_test.go: a deterministic
-// EncryptorAdapter over a fixed 32-byte key (gen always 0).
+// DataEncryptor over a fixed KEK + clusterID (DEK keeper, active gen 0).
+// Replaces the retired static encryptor seam; both seal at gen 0.
 func staticTestEncryptor(t testing.TB) storage.DataEncryptor {
 	t.Helper()
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
+	clusterID := []byte("0123456789abcdef")
+	kek := make([]byte, encrypt.KEKSize)
+	for i := range kek {
+		kek[i] = byte(i + 1)
 	}
-	enc, err := encrypt.NewEncryptor(key)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	if err != nil {
-		t.Fatalf("new encryptor: %v", err)
+		t.Fatalf("new dek keeper: %v", err)
 	}
-	return storage.NewEncryptorAdapter(enc, []byte("0123456789abcdef"))
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 // fakePDPTokens implements admin.PDPTokenManager.
