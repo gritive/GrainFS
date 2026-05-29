@@ -756,7 +756,7 @@ func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
 	require.NoError(t, dwal.Flush())
-	shardPath := svc.getShardPath("b", "k", 0)
+	shardPath := mustShardPath(svc, "b", "k", 0)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, err := svc.ReadLocalShard("b", "k", 0)
@@ -772,7 +772,7 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
 	require.NoError(t, dwal.Flush())
-	shardPath := svc.getShardPath("b", "streamed", 1)
+	shardPath := mustShardPath(svc, "b", "streamed", 1)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, err := svc.ReadLocalShard("b", "streamed", 1)
@@ -801,7 +801,7 @@ func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, found, "pack entry must remain absent after delete replay")
 	// And there must be no resurrected per-shard file either.
-	_, statErr := os.Stat(svc.getShardPath("b", "packed", 0))
+	_, statErr := os.Stat(mustShardPath(svc, "b", "packed", 0))
 	require.True(t, os.IsNotExist(statErr), "pack-routed write must not resurrect shard file on replay")
 }
 
@@ -861,7 +861,7 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	)
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("encrypted-payload")))
 	require.NoError(t, dwal.Flush())
-	shardPath := svc.getShardPath("b", "k", 0)
+	shardPath := mustShardPath(svc, "b", "k", 0)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 	got, err := svc.ReadLocalShard("b", "k", 0)
@@ -987,7 +987,7 @@ func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *test
 		WithDataWALRepairSink(collector),
 	)
 
-	path := svc.getShardPath("b", "obj/v1", 1)
+	path := mustShardPath(svc, "b", "obj/v1", 1)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte("short"), 0o600))
 	_, err = dwal.Append(context.Background(), datawal.Record{
@@ -1052,7 +1052,7 @@ func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T)
 	)
 	require.NoError(t, svc.WriteLocalShard("b", "small", 0, []byte("payload")))
 	require.NoError(t, dwal.Flush())
-	require.NoError(t, os.Remove(svc.getShardPath("b", "small", 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", "small", 0)))
 
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 

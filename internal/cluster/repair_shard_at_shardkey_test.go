@@ -33,7 +33,7 @@ func TestRepairShardAtShardKey_SegmentKey(t *testing.T) {
 	}
 
 	// Drop shard 0 so it must be reconstructed from the surviving shard 1.
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
 
 	rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
 	require.NoError(t, backend.RepairShardAtShardKey(t.Context(), "b", shardKey, rec, 0))
@@ -63,8 +63,8 @@ func TestRepairShardAtShardKey_InsufficientSurvivors(t *testing.T) {
 	// Delete BOTH shards: repairing shard 0 skips shard 0 and finds shard 1 also
 	// gone, leaving 0 survivors < DataShards. The error must carry the substring
 	// classifyDataWALStartupRepairFailure matches on.
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 0)))
-	require.NoError(t, os.Remove(svc.getShardPath("b", shardKey, 1)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 1)))
 
 	rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
 	err = backend.RepairShardAtShardKey(t.Context(), "b", shardKey, rec, 0)

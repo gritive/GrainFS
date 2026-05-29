@@ -53,7 +53,7 @@ func TestScrubberRepairCleanableKeyRoundTrips(t *testing.T) {
 		if err := svc.WriteLocalShard(bucket, canonicalKey, shardIdx, orig); err != nil {
 			t.Fatalf("WriteLocalShard: %v", err)
 		}
-		path := filepath.Join(svc.getShardDir(bucket, canonicalKey, shardIdx), "shard_1")
+		path := filepath.Join(mustShardDir(svc, bucket, canonicalKey, shardIdx), "shard_1")
 
 		res, err := b.ReadShardIntegrity(bucket, objKey, versionID, shardIdx, path)
 		if err != nil {
@@ -73,7 +73,7 @@ func TestScrubberRepairCleanableKeyRoundTrips(t *testing.T) {
 		b := &DistributedBackend{}
 		b.SetShardService(svc, []string{"self", "peer-1", "peer-2"})
 
-		path := filepath.Join(svc.getShardDir(bucket, canonicalKey, shardIdx), "shard_1")
+		path := filepath.Join(mustShardDir(svc, bucket, canonicalKey, shardIdx), "shard_1")
 		repaired := bytes.Repeat([]byte("repaired"), 64)
 		if err := b.WriteShard(bucket, objKey, versionID, shardIdx, path, repaired); err != nil {
 			t.Fatalf("WriteShard: %v", err)
@@ -106,7 +106,7 @@ func TestWriteShardRejectsNonCanonicalPath(t *testing.T) {
 
 	bucket, objKey, versionID, shardIdx := "bkt", "objA", "v1", 0
 	// Canonical path for a DIFFERENT object/identity.
-	wrongPath := filepath.Join(svc.getShardDir(bucket, ecObjectShardKey("objB", versionID), shardIdx), "shard_0")
+	wrongPath := filepath.Join(mustShardDir(svc, bucket, ecObjectShardKey("objB", versionID), shardIdx), "shard_0")
 	if err := b.WriteShard(bucket, objKey, versionID, shardIdx, wrongPath, []byte("x")); err == nil {
 		t.Fatal("WriteShard accepted a path that is not the canonical location for the identity")
 	}
@@ -121,7 +121,7 @@ func TestDEKReadAPIsRejectPlaintext(t *testing.T) {
 	root := t.TempDir()
 	svc, _ := dekShardSvc(t, root)
 	bucket, key, shardIdx := "bkt", "obj", 0
-	dir := svc.getShardDir(bucket, key, shardIdx)
+	dir := mustShardDir(svc, bucket, key, shardIdx)
 	if err := svc.ensureShardDir(dir); err != nil {
 		t.Fatalf("ensureShardDir: %v", err)
 	}
@@ -173,11 +173,16 @@ func TestScrubberRejectsTraversalKey(t *testing.T) {
 	b.SetShardService(svc, []string{"self"})
 
 	bucket, evilKey, versionID, shardIdx := "bkt", "../../../../etc/escape", "v1", 0
-	canonical := svc.getShardPath(bucket, ecObjectShardKey(evilKey, versionID), shardIdx)
-	if err := b.WriteShard(bucket, evilKey, versionID, shardIdx, canonical, []byte("x")); err == nil {
+	// The chokepoint itself now rejects the escaping key; WriteShard/
+	// ReadShardIntegrity surface that error rather than touching disk, so the
+	// supplied path argument is irrelevant.
+	if _, err := svc.getShardPath(bucket, ecObjectShardKey(evilKey, versionID), shardIdx); err == nil {
+		t.Fatal("getShardPath accepted a traversal key that escapes the shard data root")
+	}
+	if err := b.WriteShard(bucket, evilKey, versionID, shardIdx, "ignored-path", []byte("x")); err == nil {
 		t.Fatal("WriteShard accepted a traversal key that escapes the shard data root")
 	}
-	if _, err := b.ReadShardIntegrity(bucket, evilKey, versionID, shardIdx, canonical); err == nil {
+	if _, err := b.ReadShardIntegrity(bucket, evilKey, versionID, shardIdx, "ignored-path"); err == nil {
 		t.Fatal("ReadShardIntegrity accepted a traversal key that escapes the shard data root")
 	}
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.460.0] - 2026-05-29
+
+### Security
+
+- Erasure-coded shard storage now rejects an object key whose `..` path segments
+  would resolve a shard file outside its bucket's data directory. The containment
+  check is applied at the single point that maps a key to its on-disk shard path,
+  so it covers every code path — object writes and reads, inter-node shard RPC,
+  and recovery/repair — regardless of how the key arrived. A crafted key now fails
+  the operation loudly instead of escaping the data root.
+
 ## [0.0.459.0] - 2026-05-29
 
 ### Security

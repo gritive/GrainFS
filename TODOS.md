@@ -24,14 +24,13 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      shards. The AAD-coherence slice changed only WHICH key binds the AAD, never the pack-vs-file
      read preference, so it neither introduces nor worsens the shadowing. Fix (its own slice): have
      repair rewrite the pack entry, or invalidate the pack slot before the file write.
-   - [ ] **[P2] object-key path traversal in the EC shard write path (PRE-EXISTING).** `getShardPath`
-     is `filepath.Join(dataDir, bucket, key, shard_N)`; an object key with enough `..` can resolve a
-     shard file outside the shard data root. `getKey` (`server/object_api.go`) does not normalize
-     URL-encoded keys, so such a key is reachable as metadata. The scrubber read/write path now has a
-     `ShardPathUnderDataDir` containment guard (added with the AAD-coherence fix), but the NORMAL
-     `putObjectEC`/`writeLocalShard` write still maps the raw key into the path without a containment
-     check. Fix at the S3 key boundary (reject/normalize `..` segments) or add containment to
-     `writeLocalShard`. Its own slice — touches the PUT path, not just the scrubber.
+   - [ ] **[P3] bucket-relative shard-path containment gap (defense-in-depth, follow-up to the
+     object-key path-traversal fix).** `getShardDir`/`ShardPathUnderDataDir` compute both the candidate
+     dir and the containment root from the SAME `bucket`, so a `bucket` of `..` would move root+dir
+     together and pass the check while physically escaping `{dataDir}/shards`. Closed at the S3 ingress
+     today by `ValidBucketName` (rejects `/`, `..` is <3 chars, leading/trailing dot rejected); the
+     residual exposure is a trusted peer shard-RPC sending a crafted bucket. Fix: validate bucket at the
+     ShardService boundary or root the containment check at `{dataDir}/shards` rather than per-bucket.
    - [ ] **putPipeline prod reactivation (F1 durability).** putPipeline dispatch is wired but
      dormant in prod (gate `putPipelineEnabled` defaults false; only the integration test enables
      it). Before enabling in prod: putPipeline acks on early K-shard quorum

@@ -95,7 +95,7 @@ func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 	require.NotEmpty(t, obj.VersionID)
 
 	shardKey := "obj/" + obj.VersionID
-	require.NoError(t, os.Remove(backend.shardSvc.getShardPath("b", shardKey, 0)))
+	require.NoError(t, os.Remove(mustShardPath(backend.shardSvc, "b", shardKey, 0)))
 
 	require.NoError(t, backend.RepairShard(t.Context(), "b", "obj", obj.VersionID, 0))
 

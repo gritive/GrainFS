@@ -37,6 +37,22 @@ var _ = Describe("Backend EC object integration", func() {
 		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
 	}
 
+	It("rejects an object key that escapes the shard data root", func() {
+		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
+
+		// The shared EC write path (single + cluster) maps key→shard path via
+		// getShardDir, which now rejects a key whose ".." segments escape
+		// {dataDir}/{bucket}. The physical no-escape guarantee is asserted
+		// deterministically in TestWriteLocalShard_RejectsKeyEscapingShardRoot;
+		// here we assert the user-facing PutObject surfaces the rejection.
+		_, err := b.PutObject(ctx, "bucket", "../../../escape", bytes.NewReader([]byte("malicious")), "application/octet-stream")
+		Expect(err).To(HaveOccurred())
+
+		escaped := filepath.Join(filepath.Dir(b.root), "escape")
+		_, statErr := os.Stat(escaped)
+		Expect(os.IsNotExist(statErr)).To(BeTrue(), "no shard dir may escape the data dir: %s", escaped)
+	})
+
 	It("spools large parity EC shard encoding to disk", func() {
 		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
 

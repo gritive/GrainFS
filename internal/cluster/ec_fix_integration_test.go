@@ -210,7 +210,7 @@ var _ = Describe("EC compatibility integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		shardKey := "obj/" + obj.VersionID
-		Expect(os.Remove(b.shardSvc.getShardPath("bkt", shardKey, 0))).To(Succeed())
+		Expect(os.Remove(mustShardPath(b.shardSvc, "bkt", shardKey, 0))).To(Succeed())
 
 		rc, _, err := b.GetObject(ctx, "bkt", "obj")
 		Expect(err).NotTo(HaveOccurred())

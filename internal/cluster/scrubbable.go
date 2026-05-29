@@ -144,7 +144,16 @@ func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShar
 	paths := make([]string, totalShards)
 	if b.shardSvc != nil {
 		for i := 0; i < totalShards; i++ {
-			paths[i] = b.shardSvc.getShardPath(bucket, key+"/"+versionID, i)
+			p, err := b.shardSvc.getShardPath(bucket, key+"/"+versionID, i)
+			if err != nil {
+				// An escaping key cannot reach a stored record post-fix (writes
+				// are rejected at getShardDir), so this is defensive: keep the
+				// list populated with the best-effort raw mapping; the disk-touch
+				// boundary (readShardIntegrity / WriteShard) enforces containment.
+				dirs := b.shardSvc.DataDirs()
+				p = filepath.Join(dirs[i%len(dirs)], bucket, key+"/"+versionID, fmt.Sprintf("shard_%d", i))
+			}
+			paths[i] = p
 		}
 		return paths
 	}
@@ -171,9 +180,12 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		// canonical on-disk location for this identity. Otherwise a mismatched
 		// path/shardIdx would report data/status for a different canonical shard than
 		// the path being checked.
-		canonicalPath := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
-		// Containment guard: refuse to read outside {dataDir}/{bucket} when a key
-		// containing ".." makes getShardPath resolve outside the shard root.
+		canonicalPath, err := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
+		if err != nil {
+			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: %w", err)
+		}
+		// Containment guard (belt-and-suspenders; getShardPath already rejects an
+		// escaping key): refuse to read outside {dataDir}/{bucket}.
 		if !b.shardSvc.ShardPathUnderDataDir(bucket, shardIdx, canonicalPath) {
 			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: canonical path %q for %s/%s/%d escapes the shard data root", canonicalPath, bucket, canonicalKey, shardIdx)
 		}
@@ -246,9 +258,12 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 	// on-disk location for that identity. This prevents sealing object A's AAD at
 	// object B's path (a path-derived key could let them diverge).
 	canonicalKey := ecObjectShardKey(key, versionID)
-	canonicalPath := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
-	// Containment guard: a key containing ".." can make getShardPath resolve
-	// outside the shard root. Refuse to write outside {dataDir}/{bucket}.
+	canonicalPath, err := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
+	if err != nil {
+		return fmt.Errorf("write shard: %w", err)
+	}
+	// Containment guard (belt-and-suspenders; getShardPath already rejects an
+	// escaping key): refuse to write outside {dataDir}/{bucket}.
 	if !b.shardSvc.ShardPathUnderDataDir(bucket, shardIdx, canonicalPath) {
 		return fmt.Errorf("write shard: canonical path %q for %s/%s/%d escapes the shard data root", canonicalPath, bucket, canonicalKey, shardIdx)
 	}

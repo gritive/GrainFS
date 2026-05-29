@@ -227,14 +227,25 @@ func (s *ShardService) DataDirs() []string {
 	return s.dataDirs
 }
 
-func (s *ShardService) getShardPath(bucket, key string, shardIdx int) string {
+// getShardDir resolves the on-disk directory for an object's shard and rejects
+// any key whose ".." segments would escape the {dataDir}/{bucket} root. This is
+// the single containment chokepoint for every shard path consumer (S3 writes,
+// peer shard RPC, record-driven mover/repair, reads) — see ShardPathUnderDataDir.
+func (s *ShardService) getShardDir(bucket, key string, shardIdx int) (string, error) {
 	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
-	return filepath.Join(targetDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	dir := filepath.Join(targetDir, bucket, key)
+	if !s.ShardPathUnderDataDir(bucket, shardIdx, dir) {
+		return "", fmt.Errorf("shard path for object key %q escapes the shard root", key)
+	}
+	return dir, nil
 }
 
-func (s *ShardService) getShardDir(bucket, key string, shardIdx int) string {
-	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
-	return filepath.Join(targetDir, bucket, key)
+func (s *ShardService) getShardPath(bucket, key string, shardIdx int) (string, error) {
+	dir, err := s.getShardDir(bucket, key, shardIdx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx)), nil
 }
 
 // ShardPathUnderDataDir reports whether p resolves inside the {dataDir}/{bucket}
@@ -879,7 +890,10 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		})
 		return nil
 	}
-	dir := s.getShardDir(bucket, key, shardIdx)
+	dir, err := s.getShardDir(bucket, key, shardIdx)
+	if err != nil {
+		return err
+	}
 	mkdirStart := time.Now()
 	if err := s.ensureShardDir(dir); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
@@ -1319,7 +1333,10 @@ func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawa
 	if err != nil {
 		return false, err
 	}
-	path := m.s.getShardPath(rec.Bucket, rec.Key, idx)
+	path, err := m.s.getShardPath(rec.Bucket, rec.Key, idx)
+	if err != nil {
+		return false, err
+	}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -1347,11 +1364,17 @@ func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 		if err != nil {
 			return err
 		}
-		dir := m.s.getShardDir(rec.Bucket, rec.Key, idx)
+		dir, err := m.s.getShardDir(rec.Bucket, rec.Key, idx)
+		if err != nil {
+			return err
+		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		path := m.s.getShardPath(rec.Bucket, rec.Key, idx)
+		path, err := m.s.getShardPath(rec.Bucket, rec.Key, idx)
+		if err != nil {
+			return err
+		}
 		if len(rec.Payload) == 0 {
 			// Metadata-only record (large shard path). The on-disk file
 			// either survived the crash (rename hit fs metadata journal) or
@@ -1584,7 +1607,10 @@ func isUnsupportedDirectIO(err error) bool {
 // the DEK keeper. Returns an error if the shard appears encrypted but at-rest
 // encryption is disabled (downgrade guard).
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
-	path := s.getShardPath(bucket, key, shardIdx)
+	path, err := s.getShardPath(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
+	}
 
 	if s.shardPack != nil {
 		if raw, ok, err := s.shardPack.get(bucket, key, shardIdx); ok || err != nil {
@@ -1720,7 +1746,10 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 			return io.NopCloser(bytes.NewReader(data)), nil
 		}
 	}
-	path := s.getShardPath(bucket, key, shardIdx)
+	path, err := s.getShardPath(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1809,7 +1838,10 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 			return n, nil
 		}
 	}
-	path := s.getShardPath(bucket, key, shardIdx)
+	path, err := s.getShardPath(bucket, key, shardIdx)
+	if err != nil {
+		return 0, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -1874,7 +1906,10 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 			return io.NopCloser(bytes.NewReader(data[offset:end])), nil
 		}
 	}
-	path := s.getShardPath(bucket, key, shardIdx)
+	path, err := s.getShardPath(bucket, key, shardIdx)
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
