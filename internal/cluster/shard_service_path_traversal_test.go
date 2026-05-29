@@ -81,3 +81,49 @@ func TestWriteLocalShard_RejectsKeyEscapingShardRoot(t *testing.T) {
 	_, statErr := os.Stat(escaped)
 	require.Truef(t, os.IsNotExist(statErr), "no shard dir may escape the data dir; found %s", escaped)
 }
+
+// TestShardPathUnderDataDir_RejectsEscapingBucket pins the bucket-relative
+// containment gap (follow-up to the object-key fix): getShardDir derives the
+// candidate dir AND the containment root from the same bucket, so a bucket of
+// ".." moves both up together and the per-bucket filepath.Rel check passes while
+// the path physically escapes the shard data dir. S3 ingress blocks this
+// (ValidBucketName), but a trusted peer shard-RPC reaches the chokepoint directly.
+func TestShardPathUnderDataDir_RejectsEscapingBucket(t *testing.T) {
+	svc, root := newTraversalTestShardService(t)
+
+	// The path builders must reject a traversal bucket outright.
+	_, err := svc.getShardDir("..", "obj", 0)
+	require.Error(t, err, "a traversal bucket must be rejected by getShardDir")
+	_, err = svc.getShardPath("..", "obj", 0)
+	require.Error(t, err, "a traversal bucket must be rejected by getShardPath")
+
+	// The containment primitive itself must report false for a traversal bucket,
+	// even when the (escaping) candidate path looks clean relative to the moved
+	// per-bucket root.
+	escapingDir := filepath.Join(root, "..", "obj")
+	require.False(t, svc.ShardPathUnderDataDir("..", 0, escapingDir),
+		"a traversal bucket must not be reported as contained")
+
+	// A write with a traversal bucket must not materialize a shard outside root.
+	werr := svc.writeLocalShard(context.Background(), "..", "obj", 0, []byte("malicious"))
+	require.Error(t, werr, "writeLocalShard must reject a traversal bucket")
+	escaped := filepath.Join(filepath.Dir(root), "obj")
+	_, statErr := os.Stat(escaped)
+	require.Truef(t, os.IsNotExist(statErr), "no shard dir may escape the data dir via bucket; found %s", escaped)
+}
+
+// TestShardPathUnderDataDir_RejectsSeparatorBucket guards the other shape of a
+// non-segment bucket: one carrying a path separator (e.g. "a/b") would let the
+// per-bucket root span multiple levels. A flat S3 bucket is always a single
+// segment, so rejecting separators costs no legitimate caller.
+func TestShardPathUnderDataDir_RejectsSeparatorBucket(t *testing.T) {
+	svc, _ := newTraversalTestShardService(t)
+
+	_, err := svc.getShardDir("a/b", "obj", 0)
+	require.Error(t, err, "a bucket containing a path separator must be rejected")
+
+	// Regression: a normal flat bucket with a nested key still resolves cleanly.
+	p, err := svc.getShardPath("bucket", "a/b/c", 0)
+	require.NoError(t, err, "a flat bucket with a nested key must be accepted")
+	require.True(t, svc.ShardPathUnderDataDir("bucket", 0, p))
+}

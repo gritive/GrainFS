@@ -258,12 +258,31 @@ func (s *ShardService) ShardPathUnderDataDir(bucket string, shardIdx int, p stri
 	if len(s.dataDirs) == 0 {
 		return false
 	}
+	// The candidate path AND the containment root are both derived from bucket,
+	// so a bucket of ".." (or one carrying a separator) would move both up
+	// together and slip past the per-bucket Rel check while physically escaping
+	// the shard data dir. Require bucket to be a single clean path segment. S3
+	// ingress already rejects these (ValidBucketName); this guards the trusted
+	// peer shard-RPC / mover paths that reach the chokepoint directly.
+	if !isSafePathSegment(bucket) {
+		return false
+	}
 	root := filepath.Join(s.dataDirs[shardIdx%len(s.dataDirs)], bucket)
 	rel, err := filepath.Rel(root, filepath.Clean(p))
 	if err != nil {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// isSafePathSegment reports whether name is a single, non-traversal path
+// component — non-empty, not "." or "..", and free of any path separator. Used
+// to keep a bucket from re-rooting the shard containment check.
+func isSafePathSegment(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !strings.ContainsRune(name, '/') && !strings.ContainsRune(name, filepath.Separator)
 }
 
 // HandleRPC returns the stream handler function for use with a StreamRouter.
