@@ -4,11 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,19 +17,19 @@ import (
 	"github.com/gritive/GrainFS/internal/credentialadmin"
 )
 
-// pdpConfigJSON builds the iam.pdp config document pointing at a unix-socket
-// PDP with the given failure policy ("closed"|"open").
-func pdpConfigJSON(sock, policy string) string {
-	return fmt.Sprintf(`{"enabled":true,"endpoint":"unix://%s","failure_policy":"%s"}`, sock, policy)
+// pdpConfigJSON builds the iam.pdp config document pointing at the given http(s)
+// PDP URL with the given failure policy ("closed"|"open").
+func pdpConfigJSON(url, policy string) string {
+	return fmt.Sprintf(`{"enabled":true,"endpoint":"%s","failure_policy":"%s"}`, url, policy)
 }
 
 // pdpConfigJSONWithCache builds the iam.pdp config document with a nested cache
 // block (ttl_allow/ttl_deny/grace_ttl). Empty duration strings are omitted so a
 // caller can populate only the knobs a spec needs.
-func pdpConfigJSONWithCache(sock, policy, ttlAllow, ttlDeny, graceTTL string) string {
+func pdpConfigJSONWithCache(url, policy, ttlAllow, ttlDeny, graceTTL string) string {
 	return fmt.Sprintf(
-		`{"enabled":true,"endpoint":"unix://%s","failure_policy":"%s","cache":{"ttl_allow":"%s","ttl_deny":"%s","grace_ttl":"%s"}}`,
-		sock, policy, ttlAllow, ttlDeny, graceTTL,
+		`{"enabled":true,"endpoint":"%s","failure_policy":"%s","cache":{"ttl_allow":"%s","ttl_deny":"%s","grace_ttl":"%s"}}`,
+		url, policy, ttlAllow, ttlDeny, graceTTL,
 	)
 }
 
@@ -101,26 +98,18 @@ func createProtocolCredentialOnly(t testing.TB, adminSock, saID, protocol, resou
 	return nil
 }
 
-var _ = ginkgo.Describe("External PDP adapter (Slice 1)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("External PDP adapter", ginkgo.Ordered, func() {
 	var (
 		srv      iamTestServer
-		pdpSock  string
+		pdpURL   string
 		pdpAllow atomic.Bool
 		pdpDown  atomic.Bool
 		pdpReqs  atomic.Int64
 	)
 
 	ginkgo.BeforeAll(func() {
-		// Mock PDP on a unix socket. ParseConfig requires an absolute path, so
-		// keep the socket under a short temp dir to stay within sun_path.
-		dir, err := os.MkdirTemp("", "grainfs-pdp-*")
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp for pdp socket")
-		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
-		pdpSock = filepath.Join(dir, "pdp.sock")
-
-		ln, err := net.Listen("unix", pdpSock)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "listen on pdp socket")
-
+		// Mock PDP over plain http (httptest binds 127.0.0.1 — loopback http is
+		// the only scheme the SSRF egress filter allows for an http endpoint).
 		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Count every inbound request BEFORE the down-check so the grace spec can
 			// prove the PDP was re-consulted during the simulated outage.
@@ -135,20 +124,20 @@ var _ = ginkgo.Describe("External PDP adapter (Slice 1)", ginkgo.Ordered, func()
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"decision": dec, "reason": "e2e"})
 		})
-		mock := &httptest.Server{Listener: ln, Config: &http.Server{Handler: h}}
-		mock.Start()
+		mock := httptest.NewServer(h)
 		ginkgo.DeferCleanup(mock.Close)
+		pdpURL = mock.URL
 
 		srv = startIAMTestServer(ginkgo.GinkgoTB())
 		ginkgo.DeferCleanup(srv.Stop)
 
-		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpSock, "closed"))
+		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpURL, "closed"))
 	})
 
 	ginkgo.It("denies the credential mint when the PDP denies", func() {
 		pdpAllow.Store(false)
 		pdpDown.Store(false)
-		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpSock, "closed"))
+		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpURL, "closed"))
 
 		err := tryCreateProtocolCredential(ginkgo.GinkgoTB(), srv.AdminSock, srv.BootstrapSAID, "s3", "bucket/pdp-deny", "rw")
 		gomega.Expect(err).To(gomega.HaveOccurred(), "PDP deny should block the mint")
@@ -166,7 +155,7 @@ var _ = ginkgo.Describe("External PDP adapter (Slice 1)", ginkgo.Ordered, func()
 	ginkgo.It("denies when the PDP is down and failure_policy is closed", func() {
 		pdpAllow.Store(false)
 		pdpDown.Store(true)
-		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpSock, "closed"))
+		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpURL, "closed"))
 
 		err := tryCreateProtocolCredential(ginkgo.GinkgoTB(), srv.AdminSock, srv.BootstrapSAID, "s3", "bucket/pdp-closed", "rw")
 		gomega.Expect(err).To(gomega.HaveOccurred(), "fail-closed should block the mint when PDP is down")
@@ -176,7 +165,7 @@ var _ = ginkgo.Describe("External PDP adapter (Slice 1)", ginkgo.Ordered, func()
 	ginkgo.It("allows when the PDP is down and failure_policy is open", func() {
 		pdpAllow.Store(false)
 		pdpDown.Store(true)
-		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpSock, "open"))
+		setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock, pdpConfigJSON(pdpURL, "open"))
 
 		err := tryCreateProtocolCredential(ginkgo.GinkgoTB(), srv.AdminSock, srv.BootstrapSAID, "s3", "bucket/pdp-open", "rw")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "fail-open should permit the mint when PDP is down")
@@ -188,7 +177,7 @@ var _ = ginkgo.Describe("External PDP adapter (Slice 1)", ginkgo.Ordered, func()
 			pdpDown.Store(false)
 			// Long allow-TTL, no grace: a fresh hit on the 2nd identical request.
 			setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock,
-				pdpConfigJSONWithCache(pdpSock, "closed", "60s", "", "0s"))
+				pdpConfigJSONWithCache(pdpURL, "closed", "60s", "", "0s"))
 
 			// Attach the GrainFS grant ONCE while the PDP is up. The credential-create
 			// authorization is what the PDP gates (admin policy ops carry no actor on
@@ -216,7 +205,7 @@ var _ = ginkgo.Describe("External PDP adapter (Slice 1)", ginkgo.Ordered, func()
 			// entry can be grace-served once the PDP starts erroring. Fail-closed: only
 			// grace (not the failure policy) can save the request during the outage.
 			setPDPConfig(ginkgo.GinkgoTB(), srv.AdminSock,
-				pdpConfigJSONWithCache(pdpSock, "closed", "1s", "", "60s"))
+				pdpConfigJSONWithCache(pdpURL, "closed", "1s", "", "60s"))
 
 			attachProtocolCredentialPolicy(ginkgo.GinkgoTB(), srv.AdminSock, srv.BootstrapSAID, "s3", "bucket/pdp-grace")
 
