@@ -8,6 +8,11 @@ import "github.com/gritive/GrainFS/internal/encrypt"
 // satisfies it structurally.
 type ShardEncryptor interface {
 	Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) (ct []byte, gen uint32, err error)
+	// SealAtGen seals under a CALLER-SPECIFIED gen instead of the active gen, so
+	// every chunk of one shard pins chunk 0's generation even if a DEK rotation
+	// races the encode. Signature matches storage.DataEncryptor.SealAtGen so the
+	// production adapters satisfy this view structurally.
+	SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) (ct []byte, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 	// OpenTo is Open that appends the plaintext into dst, reusing dst's
 	// capacity when it suffices. The output is byte-equivalent to Open.
