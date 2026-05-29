@@ -275,7 +275,7 @@ func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string,
 	if err != nil {
 		return err
 	}
-	if err := setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, data); err != nil {
+	if err := setBadgerValue(txn, mk, data); err != nil {
 		return err
 	}
 	for _, c := range obj.ChunkLocators() {
@@ -289,7 +289,7 @@ func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string,
 // readObjectInTxn reads and decodes the Object stored at mk within txn.
 // Returns (nil, badger.ErrKeyNotFound) when no record exists.
 func (b *LocalBackend) readObjectInTxn(txn *badger.Txn, mk []byte) (*Object, error) {
-	plain, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+	plain, err := getBadgerValue(txn, mk)
 	if err != nil {
 		return nil, err
 	}

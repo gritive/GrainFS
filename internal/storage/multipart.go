@@ -72,7 +72,7 @@ func (b *LocalBackend) CreateMultipartUpload(ctx context.Context, bucket, key, c
 	}
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, b.encryptor, badgerDomainMultipart, b.multipartKey(uploadID), data)
+		return setBadgerValue(txn, b.multipartKey(uploadID), data)
 	})
 	if err != nil {
 		return nil, err
@@ -121,7 +121,7 @@ func (b *LocalBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket
 	}
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, b.encryptor, badgerDomainMultipart, b.multipartKey(uploadID), data)
+		return setBadgerValue(txn, b.multipartKey(uploadID), data)
 	})
 	if err != nil {
 		return "", err
@@ -189,7 +189,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	_ = ctx
 	var meta multipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
-		val, err := getBadgerValue(txn, b.encryptor, badgerDomainMultipart, b.multipartKey(uploadID))
+		val, err := getBadgerValue(txn, b.multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return ErrUploadNotFound
 		}
@@ -286,7 +286,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	objMeta, _ := marshalObject(obj)
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		if err := setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), objMeta); err != nil {
+		if err := setBadgerValue(txn, b.objectMetaKey(bucket, key), objMeta); err != nil {
 			return err
 		}
 		return txn.Delete(b.multipartKey(uploadID))
@@ -382,9 +382,8 @@ func (b *LocalBackend) ListMultipartUploads(ctx context.Context, bucket, prefix 
 		mpuPrefix := []byte("mpu:")
 		for it.Seek(mpuPrefix); it.ValidForPrefix(mpuPrefix); it.Next() {
 			item := it.Item()
-			itemKey := item.KeyCopy(nil)
 			err := item.Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainMultipart, itemKey, val)
+				plain, err := openBadgerValue(val)
 				if err != nil {
 					return err
 				}
