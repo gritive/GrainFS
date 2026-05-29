@@ -371,26 +371,34 @@ Work these in order. Do not run them in parallel.
   Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
   `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK
   rotation lifecycle" Describe.
-- [ ] **KEK-envelope: DataEncryptor `SealTo`/`OpenTo` buffer-reusing seam methods**.
-  Deferred from D-seg-pack (v0.0.369.0). The seam's `Seal`/`Open` return a freshly
-  allocated buffer per call (the cipher owns its buffer), so migrating packblob's
-  encrypted hot path off its pooled `blobAppendAADPool`/`blobAppendSealedPool` raised the
-  per-small-object-PUT allocation count (Append encrypted bound 5→15, Read 8→16 in
-  `internal/storage/packblob/blob_test.go`). Same nil-dst allocation exists in D-seg-local,
-  D-seg-ec, and now datawal (D-wal-data v0.0.370.0 dropped the per-open pooled buffer in
-  `scanRecords`). Reopen as a seam-wide optimization: add `SealTo(dst, domain, fields, plain)`
-  / `OpenTo(dst, domain, fields, gen, ct)` to `storage.DataEncryptor` (+ EncryptorAdapter
-  + DEKKeeperAdapter), then reintroduce buffer pools at the packblob/local/ec/datawal call sites.
-  Bench ≥15s×3 before/after to confirm the alloc win is real on the small-object path.
-  **Upload-spool addendum (2026-05-29, spool-dek-encryption slice):** migrating the
-  shared `encryptedSpoolRecordWriter`/`Reader` off the static `*encrypt.Encryptor`
-  (which reused `w.blob`) onto the seam's allocating `Seal`/`Open` raised the spool
-  micro-bench allocs (`BenchmarkEncryptedSpoolWrite` 72→97 allocs/op, 1.04→8.1 MiB
-  B/op; `BenchmarkEncryptedSpoolOpen` 64→87 allocs/op, 2.0→16.1 MiB B/op; 15s×3).
-  Write throughput is flat (~14.95→14.99 ms/op, AEAD+IO-bound), but Open sec/op
-  regressed ~35% (1.72–1.88 → 2.37–2.43 ms/op, non-overlapping ranges; still
-  3.26 GiB/s). Accept-alloc shipped per the slice's bench gate; reintroduce the
-  per-record buffer reuse in `spool.go` once `SealTo`/`OpenTo` land.
+- **KEK-envelope: DataEncryptor `SealTo`/`OpenTo` buffer-reusing seam methods** — Seal half landed.
+  - **Slice 1 (Seal side) — DONE 2026-05-29 (ship-pending PR).** Added `encrypt.AppendAAD`,
+    `encrypt.DEKKeeper.SealWithAADTo` (both byte-identical wrappers; `BuildAAD`/`SealWithAAD`
+    re-expressed as `...To(nil,...)`), `storage.DataEncryptor.SealTo` (+ EncryptorAdapter via the
+    existing `SealValueAADTo`, DEKKeeperAdapter, TransientDataEncryptor→ErrTransientReadOnly) with a
+    pooled AAD scratch (`seamAADPool`/`withSeamAAD`, closures verified non-escaping via `-gcflags=-m`).
+    Migrated the **packblob `Append`** consumer (reintroduced `blobAppendSealedPool`, seals via
+    `SealTo`). Bench-gated `BenchmarkAppendEncrypted` (64KiB): **B/op 75,400→1,497 (~50×)**, allocs/op
+    14→9 (12 under -race), ~42→35µs/op. Alloc bound 15→13.
+  - **Residual / follow-up [P3]:** the remaining 9 allocs/op are the **`AADField` construction** in
+    `blobEntryAADFields` (`FieldUint64`/`FieldString`/`FieldUint16` each `make` a per-field data slice +
+    the `[]AADField` slice). Eliminating them needs an `encrypt.AADField` append/pool variant
+    (`AppendField...`-style) — touches every AAD builder, its own slice. Only then does Append drop
+    below ~5 allocs/op. (Pre-#572's "5-alloc" baseline used a different positional-AAD scheme.)
+  - **Remaining Seal/Open consumers (each its own slice; Open side needs lifetime analysis — Open
+    plaintext escapes to callers, so pooling the `OpenTo` dst is a use-after-free hazard, NOT a
+    mechanical pool reintroduction):**
+    - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis.
+    - **spool Open (the #645 regression below)** — Open side; the #645 micro-bench regression is
+      Open-side, so Slice 1 did NOT fix it. Add `OpenTo` + reintroduce per-record buffer reuse in
+      `spool.go`'s `encryptedSpoolRecordWriter`/`Reader`.
+    - ec / local (`eccodec/shardio.go`) Seal then Open — hot read path.
+    - datawal (`scanRecords`) Seal then Open.
+  - **#645 spool regression data (Open-side, still open):** `BenchmarkEncryptedSpoolWrite` 72→97
+    allocs/op (1.04→8.1 MiB B/op); `BenchmarkEncryptedSpoolOpen` 64→87 allocs/op (2.0→16.1 MiB B/op);
+    Open sec/op +~35% (1.72–1.88→2.37–2.43 ms/op). Write throughput flat (AEAD+IO-bound). Fix in the
+    spool Open slice above. Each Open-side slice introduces `OpenTo` only with its first
+    hazard-analyzed consumer (do not freeze `OpenTo` early). Bench ≥15s×3 (allocs/op AND B/op) per slice.
 - [ ] **KEK-envelope D-wal: live DEK rotation segment rollover [P1]**.
   D-wal-data now opens production writer/recovery paths with `DEKKeeperAdapter`
   and new encrypted `internal/storage/datawal` segments probe-seal before header
