@@ -17,13 +17,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
      no legacy ciphertext to support). Current format = **8**.
-   - [ ] **[P3] bucket-relative shard-path containment gap (defense-in-depth, follow-up to the
-     object-key path-traversal fix).** `getShardDir`/`ShardPathUnderDataDir` compute both the candidate
-     dir and the containment root from the SAME `bucket`, so a `bucket` of `..` would move root+dir
-     together and pass the check while physically escaping `{dataDir}/shards`. Closed at the S3 ingress
-     today by `ValidBucketName` (rejects `/`, `..` is <3 chars, leading/trailing dot rejected); the
-     residual exposure is a trusted peer shard-RPC sending a crafted bucket. Fix: validate bucket at the
-     ShardService boundary or root the containment check at `{dataDir}/shards` rather than per-bucket.
    - [ ] **putPipeline prod reactivation (F1 durability).** putPipeline dispatch is wired but
      dormant in prod (gate `putPipelineEnabled` defaults false; only the integration test enables
      it). Before enabling in prod: putPipeline acks on early K-shard quorum
@@ -31,6 +24,14 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      `commit.go:120`), whereas the spooled path flushes the data WAL synchronously before the raft
      metadata propose. Verify PutShard does not let metadata commit before shard durability before
      enabling. Its own slice.
+     - **Path containment must be added before enable.** The `DriveActor` builds the shard dir
+       directly as `filepath.Join(d.dataDir, entry.bucket, entry.shardKey)` then `MkdirAll`+writes
+       (`putpipeline/drive.go:149`), bypassing the `ShardService` containment chokepoint
+       (`getShardDir`/`ShardPathUnderDataDir`). A traversal bucket/key would escape `d.dataDir`. S3
+       ingress (`ValidBucketName`) blocks the public vector and the path is gate-off today, but the
+       reactivation slice MUST route this write through (or replicate) the chokepoint validation
+       before flipping the gate. Same gap class as the shard-path containment fixes (#663 + bucket
+       segment guard).
    - [ ] **[P3] verify the prod copy path does not share the raw-segment-copy AAD bug class.**
      The R3-residual slice fixed a latent bug in the test-fixture `LocalBackend.CopyObject`: it
      byte-copied encrypted segment files to the dst path, but segment AAD binds `(bucket,key,blobID)`,
