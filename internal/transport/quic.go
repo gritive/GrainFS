@@ -383,16 +383,17 @@ func (t *QUICTransport) ApplyRotation(window [][32]byte, present tls.Certificate
 }
 
 // FlipPresent pins this transport's PRESENTED identity to its per-node cert
-// (spec §8 H4'-PR1). DORMANT in PR-1 — no production caller; PR-2's flip wiring
-// calls it then RecycleConns.
+// (spec §8 H4'). Live: fired by the meta-FSM onPresentFlip callback (present-flip
+// apply + Restore of a flipped snapshot) and by post-drop invite-join boot
+// before Listen.
 func (t *QUICTransport) FlipPresent(cert tls.Certificate, spki [32]byte) {
 	t.composer.setPinPresent(cert, spki)
 }
 
 // RecycleConns closes every live legacy + mux QUIC connection so peers
 // re-handshake under the current presented identity (spec §8 H7). Bounded
-// jitter avoids a synchronized cluster-wide re-handshake storm. DORMANT in
-// PR-1 — PR-2 triggers it.
+// jitter avoids a synchronized cluster-wide re-handshake storm. Live: fired by
+// the onClusterKeyDropped callback right after a cluster-key drop applies.
 func (t *QUICTransport) RecycleConns() {
 	t.mu.Lock()
 	legacy := make([]*quic.Conn, 0, len(t.conns))
@@ -442,8 +443,10 @@ func (t *QUICTransport) ClosePeer(addr string) {
 	}
 }
 
-// SetDropped removes the cluster-key base from the accept-set (spec §8 H3/H4').
-// DORMANT in PR-1 — boot consults a never-true snapshot bit; PR-2 calls it live.
+// SetDropped removes ALL cluster-key-derived SPKIs (base + rotation window)
+// from the accept-set (spec §8 H3/H4'). Live: fired by the onClusterKeyDropped
+// callback on apply and on Restore of a dropped snapshot; post-drop invite-join
+// boot also calls it before Listen.
 func (t *QUICTransport) SetDropped() {
 	t.composer.setDropped()
 }

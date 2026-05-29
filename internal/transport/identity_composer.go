@@ -43,9 +43,9 @@ func (c *identityComposer) setPresent(cert tls.Certificate, spki [32]byte) {
 
 // setPinPresent pins the presented cert/SPKI so that subsequent applyRotation
 // and setPresent calls no longer change presentCert/presentSPKI (applyRotation
-// still advances the rotation window + base). SUPPORT-ONLY in PR-1: no live
-// caller sets this yet; a later PR flips it on for per-node identity
-// (spec §8 H4'-PR1).
+// still advances the rotation window + base). Live caller: the present-flip to
+// per-node identity, via QUICTransport.FlipPresent — fired by the meta-FSM
+// onPresentFlip callback and by post-drop invite-join boot (spec §8 H4').
 func (c *identityComposer) setPinPresent(cert tls.Certificate, spki [32]byte) {
 	c.mu.Lock()
 	c.presentCert, c.presentSPKI = cert, spki
@@ -54,9 +54,11 @@ func (c *identityComposer) setPinPresent(cert tls.Certificate, spki [32]byte) {
 	c.mu.Unlock()
 }
 
-// setDropped marks the cluster key as dropped so recompute excludes the base
-// PSK from the accept-set (accept = rotation ∪ registry). SUPPORT-ONLY in PR-1:
-// PR-2's live drop sets it (spec §8 H3/H4').
+// setDropped marks the cluster key as dropped so recompute excludes ALL
+// cluster-key-derived SPKIs (base PSK + rotation window) from the accept-set
+// (accept = registry only). Live caller: QUICTransport.SetDropped — fired by
+// the meta-FSM onClusterKeyDropped callback (apply + Restore of a dropped
+// snapshot) and by post-drop invite-join boot (spec §8 H3/H4').
 func (c *identityComposer) setDropped() {
 	c.mu.Lock()
 	c.dropped = true
