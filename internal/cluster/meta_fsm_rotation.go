@@ -286,6 +286,86 @@ func (f *MetaFSM) applyDEKReplicatedRotate(applyIndex uint64, data []byte) error
 	return nil
 }
 
+// installSnapshotDEKs installs the DEK generations decoded by the most recent
+// Restore (f.pendingDEKVersions / f.pendingDEKActive, sealed under
+// f.pendingActiveKEKVersion) IN-PLACE into the existing f.dekKeeper. It is
+// invoked on the LIVE snapshot-apply path (follower InstallSnapshot) by
+// applySnapshotEntry.
+//
+// Unlike the boot path (rebuildDEKKeeperFromRestore, which legitimately builds a
+// fresh keeper because none exists yet), this preserves f.dekKeeper's object
+// identity: the data-plane adapter (ShardService.segEnc) and the IAM adapter all
+// wrap that same keeper, so an in-place install is visible to BOTH with zero
+// re-wiring — and future applyDEKReplicatedRotate mutations keep reaching the
+// data plane because the shared object is never swapped.
+//
+// KEK resolution mirrors applyDEKReplicatedRotate: when the snapshot's wraps were
+// sealed under a KEK version other than the keeper's active one, the historical
+// KEK is fetched from the keystore to authenticate the unwrap. A genuine unwrap
+// failure or a same-gen-different-bytes install is fatal (divergence) and halts
+// the apply loop.
+func (f *MetaFSM) installSnapshotDEKs() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.dekKeeper == nil {
+		return nil // encryption disabled -> no-op
+	}
+	if len(f.pendingDEKVersions) == 0 {
+		return nil // no-trailer snapshot (reset by Restore) -> no-op
+	}
+
+	snapKEKVer := f.pendingActiveKEKVersion
+
+	// Resolve the KEK that authenticates the snapshot wraps. If it differs from
+	// the keeper's active KEK, fetch the historical key from the keystore (same
+	// as applyDEKReplicatedRotate's older-KEK replay path). nil unwrapKEK falls
+	// back to the keeper's active KEK.
+	var unwrapKEK []byte
+	if snapKEKVer != f.dekKeeper.ActiveKEKVersion() && f.keystore != nil {
+		k, err := f.keystore.Get(snapKEKVer)
+		if err != nil {
+			return fatalKEKApply(fmt.Errorf("snapshot DEK install: resolve KEK v%d: %w", snapKEKVer, err))
+		}
+		unwrapKEK = k
+		defer func() {
+			for i := range unwrapKEK {
+				unwrapKEK[i] = 0
+			}
+		}()
+	}
+
+	// Install every snapshot gen. InstallReplicatedDEKWithKEK is idempotent on
+	// same-bytes (no-op success) and sets the keeper's active gen to each gen it
+	// installs; map iteration order is random, so we pin the active gen after the
+	// loop below.
+	for gen, wrapped := range f.pendingDEKVersions {
+		if err := f.dekKeeper.InstallReplicatedDEKWithKEK(gen, wrapped, snapKEKVer, unwrapKEK); err != nil {
+			return fatalKEKApply(fmt.Errorf("snapshot DEK install gen %d: %w", gen, err))
+		}
+	}
+
+	// Pin the active gen to the snapshot's active generation. Each install above
+	// set active to its own gen; re-installing the active gen LAST (idempotent on
+	// same bytes) leaves k.active == pendingDEKActive.
+	if w, ok := f.pendingDEKVersions[f.pendingDEKActive]; ok {
+		if err := f.dekKeeper.InstallReplicatedDEKWithKEK(f.pendingDEKActive, w, snapKEKVer, unwrapKEK); err != nil {
+			return fatalKEKApply(fmt.Errorf("snapshot DEK install active gen %d: %w", f.pendingDEKActive, err))
+		}
+	}
+
+	// NOTE: the keeper's active KEK version is intentionally NOT advanced here.
+	// applyDEKReplicatedRotate's rotation precondition reads f.activeKEKVersion
+	// (the FSM field, which Restore already set to snapKEKVer), NOT the keeper's
+	// ActiveKEKVersion(). And the keeper's ActiveKEKVersion() is the seam by which
+	// installReplicatedDEK decides whether to fetch a historical KEK to unwrap
+	// cross-KEK bytes — flipping it without re-keying k.kek (we have no snapshot
+	// material to re-key with) would break the NEXT cross-KEK install's
+	// historical-fetch path. Mirrors applyDEKReplicatedRotate, which likewise
+	// never touches the keeper's KEK version and leans on per-call historical fetch.
+	return nil
+}
+
 func (f *MetaFSM) applyDEKVersionPrune(data []byte) error {
 	if f.dekKeeper == nil {
 		return nil

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.467.0] - 2026-05-30
+
+### Fixed
+
+- Cluster: a follower that caught up via a live raft `InstallSnapshot` carrying
+  newer data-encryption-key generations was left with a stale key keeper, so IAM
+  credential operations (access keys, bucket upstreams, the external-PDP token) and
+  reads of object data sealed under those generations could fail on that node until
+  it was restarted. The follower now installs the snapshot's DEK generations into
+  its live keeper as part of applying the snapshot, so both the control plane and
+  the data plane recover without a restart. Cluster-mode only.
+
 ## [0.0.465.0] - 2026-05-29
 
 ### Added

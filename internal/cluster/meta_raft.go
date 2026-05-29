@@ -283,6 +283,12 @@ func (m *MetaRaft) Bootstrap() error {
 //
 // If preApplyLoop returns an error, the apply loop is NOT started and the
 // error propagates — startup is refused.
+//
+// The LIVE snapshot-apply path (follower InstallSnapshot) does NOT use this
+// closure: it installs the snapshot's DEK generations IN-PLACE into the existing
+// f.dekKeeper (applySnapshotEntry → MetaFSM.installSnapshotDEKs), so the
+// data-plane and IAM adapters already wrapping that keeper see the new gens with
+// zero re-wiring. Only the boot path needs to build a fresh keeper.
 func (m *MetaRaft) Start(ctx context.Context, preApplyLoop func() error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
@@ -979,18 +985,9 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 					Term:    entry.Term,
 					Servers: m.node.Configuration().Servers,
 				}
-				if err := m.fsm.Restore(meta, entry.Command); err != nil {
-					// A failed snapshot Restore must NOT advance lastApplied: the FSM
-					// is left un-restored while Raft would otherwise believe the
-					// snapshot applied, silently diverging state. Halt the apply loop
-					// like the ErrFSMKEKFatal command path above. D-snap's envelope
-					// adds new restore failure modes (unknown KEK version, cluster-id
-					// mismatch, corrupt/legacy envelope) that make this reachable.
-					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FATAL FSM snapshot restore error — halting apply loop to prevent silent FSM divergence")
-					m.fsm.MarkFatalHalted(err)
+				if m.applySnapshotEntry(meta, entry.Command, entry.Index) {
 					return
 				}
-				m.lastSnapshotIndex = entry.Index
 			}
 			m.lastApplied.Store(entry.Index)
 			m.applyNotifyMu.Lock()
@@ -1002,6 +999,53 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// applySnapshotEntry runs Restore + the in-place DEK install + the
+// lastSnapshotIndex bookkeeping for one live LogEntrySnapshot. It returns true
+// if the apply loop must halt (a fatal Restore or DEK install error); the caller
+// then returns without advancing lastApplied. On success it returns false and
+// the caller falls through to lastApplied.Store.
+//
+// The in-place install fires AFTER Restore succeeds and BEFORE
+// lastSnapshotIndex/lastApplied advance — the same ordering and fatal-halt
+// posture as the existing Restore-error path. This is the fix for the
+// live-InstallSnapshot DEK staleness bug: a follower applying a snapshot that
+// carries a newer DEK set installs those generations into its EXISTING keeper
+// (preserving object identity), so the data-plane adapter (ShardService.segEnc)
+// AND the IAM adapter — all wrapping that same keeper — immediately see the new
+// gens with zero re-wiring, instead of being left stale until process restart.
+//
+// Idempotency: InstallSnapshot only fires when the follower is behind the
+// snapshot index, so the snapshot's DEK set ≥ the follower's current set —
+// installing never regresses the keeper. Re-installing an already-present gen
+// with the same bytes is a no-op success (InstallReplicatedDEKWithKEK).
+//
+// The apply loop is single-threaded and holds no FSM lock between entries, so
+// the install (takes f.mu, uncontended here) does not race a concurrent apply —
+// the same lock posture as applyDEKReplicatedRotate.
+func (m *MetaRaft) applySnapshotEntry(meta raft.SnapshotMeta, data []byte, index uint64) (halt bool) {
+	if err := m.fsm.Restore(meta, data); err != nil {
+		// A failed snapshot Restore must NOT advance lastApplied: the FSM is
+		// left un-restored while Raft would otherwise believe the snapshot
+		// applied, silently diverging state. Halt the apply loop like the
+		// ErrFSMKEKFatal command path. D-snap's envelope adds new restore
+		// failure modes (unknown KEK version, cluster-id mismatch,
+		// corrupt/legacy envelope) that make this reachable.
+		log.Error().Err(err).Uint64("index", index).Msg("meta_raft: FATAL FSM snapshot restore error — halting apply loop to prevent silent FSM divergence")
+		m.fsm.MarkFatalHalted(err)
+		return true
+	}
+	if err := m.fsm.installSnapshotDEKs(); err != nil {
+		// A genuine unwrap failure / divergence (wrong KEK, non-deterministic
+		// wrapped bytes) must be fatal for the same reason as a Restore failure:
+		// the snapshot must never be marked applied with a stale/unusable keeper.
+		log.Error().Err(err).Uint64("index", index).Msg("meta_raft: DEK install after live snapshot apply failed — halting apply loop")
+		m.fsm.MarkFatalHalted(err)
+		return true
+	}
+	m.lastSnapshotIndex = index
+	return false
 }
 
 // runKEKLeadershipWatcher tracks raft leadership transitions and calls

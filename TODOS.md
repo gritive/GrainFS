@@ -119,20 +119,7 @@ Planning reference: operator trust roadmap note from 2026-05-15.
           (set-token on node A → PDP consult unseals on node B) was deferred: no ready
           multi-node IAM harness in tests/e2e. Add when one exists.
 
-- [ ] **[P2] IAM-credential encryptor not refreshed on a LIVE snapshot install
-  (PRE-EXISTING, broader than PDP)** — the apply-loop snapshot branch
-  (`meta_raft.go:961`) calls `fsm.Restore` but does NOT run
-  `rebuildDEKKeeperFromRestore`/`wireIAMEncryptor`; that rebuild hook fires only at
-  STARTUP (`boot_phases_raft.go`). A running follower that catches up via a LIVE
-  `InstallSnapshot` carrying newer DEK/config state can be left with a stale
-  DEKKeeper → **any** IAM-credential unseal (AccessKey, BucketUpstream, and the new
-  `iam.pdp.token`) can fail until restart. This is the shared `wireIAMEncryptor`
-  lifecycle, NOT specific to the PDP slice (the PDP token inherits it; with the
-  Slice-6 fix a stale-encryptor unseal now hard-denies instead of silently
-  proceeding, which is safe but still an availability hit). Fix: invoke the
-  post-restore DEK rebuild on the live snapshot path before marking the snapshot
-  applied (or prove live meta snapshots never carry DKVS/credential state). Found
-  by the Slice-6 code gate (codex). Its own slice — touches core raft/DEK lifecycle.
+- [ ] **External PDP Adapter — remaining slices / follow-ups**
     - Decision cache (positive/negative TTL) + grace mode — **SHIPPED Slice 2**
       (`iam.pdp.cache`: ttl_allow/ttl_deny + LRU max_entries + grace_ttl;
       sharded TTL+LRU, stale-preserving lookup, cache cleared on any iam.pdp
@@ -464,6 +451,32 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   the background goroutine logs and DROPS on seal error. Apply the same
   probe-before-header rule plus a non-dropping rotation boundary there before
   moving legacy PITR WAL to a real gen>0 DEK sealer.
+  **Plan-gate findings (2026-05-29, a `RollSegmentOnRotation` slice was scoped then
+  deferred — fold these into the implementation here so they are not re-discovered):**
+  - **`RollSegmentOnRotation` design (do NOT reuse `openAppendFile`).** A naive
+    close+reopen collides on the empty genesis segment: `segmentName(lastSeq+1)`
+    can resolve to the same file, and a second `initSegment` under `O_APPEND`
+    writes a SECOND header → corrupt segment. Branch on records-written: empty
+    current segment → `Truncate(0)` + re-`initSegment` in place (mirror the repair
+    precedent `datawal/wal.go:305-324`); non-empty → `Sync`+`Close` then `O_CREATE`
+    a NEW file named for the next firstSeq (zero-padded, sorts after the prior
+    segment — preserve `seqMonotonic`/sort invariants `wal.go:419-463`). Refresh
+    `w.dekGen` to the new gen; no-op when the freshly probed gen equals `w.dekGen`.
+    Needs a test helper returning BOTH the sealer AND the `*encrypt.DEKKeeper` (the
+    existing `testDEKKeeperAdapterAtGen` hides the keeper).
+  - **Wiring must be SYNCHRONOUS, not async post-commit.** The keeper's active gen
+    advances synchronously in the FSM apply, but `handleDEKReplicatedRotate`
+    dispatches via `go` (must-not-block) — between gen-advance and an async roll,
+    every `Append` seals under the new gen into an old-gen-pinned header → the
+    `wal.go:148-153` assertion fails (transient write errors). Also `state.dataWAL`
+    is nil at `WireDEKPostCommit` time (opened later in the storage phase), and the
+    hook early-returns when `scrubberKick == nil` (today's prod state). Use a
+    synchronous roll (or roll-and-retry inside `Append` on gen mismatch) reachable
+    after `state.dataWAL` exists.
+  - **Un-gate gate:** enabling `encryption.rotate-dek` is blocked until BOTH (a) the
+    datawal rollover boundary AND (b) the legacy-WAL non-dropping boundary land.
+    Legacy WAL shares the same gen-aware seam; enabling rotation without (b) is a
+    [P1] silent-data-loss hole (mutations dropped under gen mismatch).
 - [ ] **packblob `Compact` active-blob concurrency hardening [P2]**. Pre-existing race
   (surfaced by codex during D-seg-pack review, not introduced by it): `Compact` reads the
   source blob without `bs.mu` (`internal/storage/packblob/blob.go` ~440), only later locks
