@@ -84,6 +84,38 @@ func TestComposer_Dropped_ExcludesBase(t *testing.T) {
 	require.True(t, acceptsContains(snap, spkiN(7)), "registry still accepted after drop")
 }
 
+func TestComposer_Dropped_ExcludesRotationWindow(t *testing.T) {
+	base := spkiN(1)
+	var snap *IdentitySnapshot
+	c := newIdentityComposer(base, captureSwap(&snap))
+	c.setRegistry([][32]byte{spkiN(7)})
+	// Open a cluster-key rotation window: Old=base, New=spkiN(2). Both are
+	// cluster-key-derived (rotation_worker installs the cluster rotation FSM's
+	// {OldSPKI,NewSPKI} here).
+	c.applyRotation([][32]byte{base, spkiN(2)}, tls.Certificate{}, base, nil)
+	require.True(t, acceptsContains(snap, spkiN(2)), "rotation window accepted before drop")
+	// Drop the cluster key MID-window.
+	c.setDropped()
+	require.False(t, acceptsContains(snap, base), "dropped excludes base PSK")
+	require.False(t, acceptsContains(snap, spkiN(2)), "dropped excludes cluster-key-derived rotation SPKI (H4')")
+	require.True(t, acceptsContains(snap, spkiN(7)), "registry per-node SPKI still accepted after drop")
+}
+
+func TestComposer_Dropped_ThenRotation_NeverAccepts(t *testing.T) {
+	// Reverse order: drop FIRST, then a rotation arrives. Proves the dropped
+	// guard lives in recompute() (every mutator path), not only in setDropped() —
+	// so post-drop rotation activity can never re-introduce a cluster-key SPKI.
+	base := spkiN(1)
+	var snap *IdentitySnapshot
+	c := newIdentityComposer(base, captureSwap(&snap))
+	c.setRegistry([][32]byte{spkiN(7)})
+	c.setDropped()
+	c.applyRotation([][32]byte{base, spkiN(2)}, tls.Certificate{}, base, nil)
+	require.False(t, acceptsContains(snap, base), "post-drop: base never accepted")
+	require.False(t, acceptsContains(snap, spkiN(2)), "post-drop rotation SPKI never accepted")
+	require.True(t, acceptsContains(snap, spkiN(7)), "registry per-node SPKI still accepted")
+}
+
 func TestComposer_NotPinned_RotationStillOverridesPresent(t *testing.T) {
 	base := spkiN(1)
 	var snap *IdentitySnapshot

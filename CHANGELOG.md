@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.441.0] - 2026-05-29
+
+### Security
+
+- Hardened the Zero-CA complete-cutover so that dropping the shared cluster key
+  also stops accepting cluster-key-derived rotation-window certificates, not just
+  the base key, closing a transient gap if a drop coincided with a transport key
+  rotation.
+
 ## [0.0.440.0] - 2026-05-29
 
 ### Security
