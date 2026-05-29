@@ -143,6 +143,7 @@ func TestRegisterClusterKeys_AllPresent(t *testing.T) {
 	expected := []string{
 		"iam.allow-anonymous-bucket-policy",
 		"iam.oidc.issuers",
+		"iam.pdp",
 		"trusted-proxy.cidr",
 		"jwt.signing-key-rotate",
 		"jwt.signing-key-prune",

@@ -258,8 +258,53 @@ Example policy for a mapped OIDC group:
   requests without bearer tokens continue through the existing admin UDS path.
 - Unsupported actor principal kind: authorization denies with a resolver error.
 
+## External PDP Adapter
+
+GrainFS can chain an external Policy Decision Point (PDP) after its own IAM
+evaluation for IAM admin and protocol-credential operations. It is **disabled by
+default**; when enabled, a request is allowed only if **both** GrainFS IAM and the
+PDP allow it (deny-override) — the PDP can further restrict, never grant.
+
+Enable it with the `iam.pdp` config key (single JSON document):
+
+```json
+{
+  "enabled": true,
+  "endpoint": "unix:///run/grainfs/pdp.sock",
+  "timeout": "2s",
+  "failure_policy": "closed"
+}
+```
+
+- `endpoint`: a **local Unix socket only** (`unix:///path`). GrainFS POSTs
+  `/authorize` over the socket with a JSON `{principal, action, resource, protocol,
+  context}` body and expects `{"decision":"allow|deny","reason":"..."}`. Trust is
+  local (same model as the admin UDS) — there is no bearer token in this release.
+- `timeout`: per-request deadline (`>0`, `≤10s`). Read fresh each request, so a
+  config change takes effect without restart.
+- `failure_policy`:
+  - `closed` (default): if the PDP is unreachable/erroring, the request is
+    **denied** (`pdp_unavailable`). A PDP outage therefore blocks every
+    GrainFS-allowed admin/credential operation — the secure default.
+  - `open`: on PDP failure, fall back to the GrainFS-only decision and **allow**
+    (audited as `pdp_skipped_fail_open`). Availability over enforcement — a
+    conscious operator choice.
+
+Coverage: protocol-credential operations are PDP-gated on every request; admin
+routes are PDP-gated only for bearer/OIDC actor requests (a local peercred CLI
+call over the admin UDS is governed by socket trust, not the PDP).
+
+Observe: `grainfs_iam_pdp_requests_total{decision,error_type,failure_policy}` and
+`grainfs_iam_pdp_request_duration_seconds`. Every PDP outcome (including a
+fail-open skip) is recorded in the `iam.pdp` audit log line.
+
+Not yet supported: remote (`https`) PDP endpoints, bearer tokens to the PDP, mTLS,
+decision caching/grace, and S3/Iceberg data-plane enforcement.
+
 ## Current Boundary
 
 HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
-mount-SA, bucket-upstream, config, and dashboard-token admin routes. An external
-PDP adapter remains a separate future option.
+mount-SA, bucket-upstream, config, and dashboard-token admin routes. An optional
+External PDP adapter (local Unix socket, disabled by default) chains after GrainFS
+IAM for admin and protocol-credential operations; remote transport and broader
+coverage remain future slices.
