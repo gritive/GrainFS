@@ -54,7 +54,6 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 		"--9p-port", fmt.Sprintf("%d", p9Port),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout

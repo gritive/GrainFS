@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/clusteradmin"
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -133,6 +134,15 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 			return nil, fmt.Errorf("mkdir tmp node %d: %w", i, err)
 		}
 		c.dataDirs[i] = d
+	}
+
+	// Pre-seed the cluster transport PSK on every node's disk (replaces the
+	// removed cluster-key flag). Must run BEFORE any node boots.
+	for i := range c.dataDirs {
+		if err := transport.NewKeystore(c.dataDirs[i]).WriteCurrent(c.clusterKey); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("pre-seed keys.d/current.key for node %d: %w", i, err)
+		}
 	}
 
 	ginkgo.DeferCleanup(c.Stop)
@@ -343,7 +353,6 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
-		"--cluster-key", c.clusterKey,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", "0",

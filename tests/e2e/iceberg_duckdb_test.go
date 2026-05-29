@@ -223,7 +223,6 @@ func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort i
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	}
 	args = append(args, extraArgs...)
 	cmd := exec.Command(getBinary(), args...)

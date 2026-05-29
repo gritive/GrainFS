@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/transport"
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -53,13 +54,17 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 				dataDirs[i] = d
 				ginkgo.DeferCleanup(removeE2EDir, d)
 			}
+			// Pre-seed the cluster transport PSK on every node's disk (replaces
+			// the removed cluster-key flag). Must run BEFORE any node boots.
+			for i := range dataDirs {
+				gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
+			}
 			startNode := func(i int) *exec.Cmd {
 				cmd := exec.Command(binary, "serve",
 					"--data", dataDirs[i],
 					"--port", fmt.Sprintf("%d", httpPorts[i]),
 					"--node-id", raftAddr(i),
 					"--raft-addr", raftAddr(i),
-					"--cluster-key", clusterKey,
 					"--nfs4-port", "0",
 					"--nbd-port", "0",
 					"--scrub-interval", "0",

@@ -73,7 +73,6 @@ func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
-			"--cluster-key", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		}
 		cmd := exec.Command(binary, args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

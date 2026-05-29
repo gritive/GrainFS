@@ -51,10 +51,11 @@ type inviteJoinNode struct {
 
 const inviteJoinClusterKey = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 
-// startInviteLeader boots a genesis leader: --cluster-key +
+// startInviteLeader boots a genesis leader: a pre-staged keys.d/current.key +
 // stable --raft-addr + explicit --join-listen-addr. clusterMode is always true,
 // so the Zero-CA join listener starts even on a single node, letting it mint
-// invites.
+// invites. The transport PSK is staged to disk (deterministic-key path) rather
+// than passed via the removed cluster-key flag.
 func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 	n := &inviteJoinNode{
 		nodeID:   "leader",
@@ -64,6 +65,9 @@ func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 		joinPort: freePort(),
 	}
 	n.httpURL = fmt.Sprintf("http://127.0.0.1:%d", n.httpPort)
+	// Stage the cluster transport PSK on disk before boot (replaces the removed
+	// cluster-key flag); resolveOrSeedClusterKey reads keys.d/current.key.
+	gomega.Expect(transport.NewKeystore(n.dataDir).WriteCurrent(clusterKey)).To(gomega.Succeed())
 	args := []string{
 		"serve",
 		"--data", n.dataDir,
@@ -71,7 +75,6 @@ func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
 		"--node-id", n.nodeID,
-		"--cluster-key", clusterKey,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",
@@ -83,7 +86,7 @@ func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 }
 
 // startInviteJoiner boots a secret-less node with GRAINFS_INVITE_BUNDLE set and
-// NO --cluster-key. extraEnv lets the resume test reuse
+// no staged cluster key. extraEnv lets the resume test reuse
 // a populated data dir.
 func startInviteJoiner(t testing.TB, nodeID, dataDir, bundle string) *inviteJoinNode {
 	n := &inviteJoinNode{

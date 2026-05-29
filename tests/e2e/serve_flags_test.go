@@ -30,7 +30,7 @@ func runServeFlagsRejectionCases() {
 	for _, c := range cases {
 		c := c
 		ginkgo.It("rejects "+c.flag, func() {
-			cmd := exec.Command(binary, "serve", c.flag, "value", "--data", "/tmp/_unused_serve_flags_test", "--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+			cmd := exec.Command(binary, "serve", c.flag, "value", "--data", "/tmp/_unused_serve_flags_test")
 			out, err := cmd.CombinedOutput()
 			gomega.Expect(err).To(gomega.HaveOccurred(), "binary must exit non-zero when %s is present", c.flag)
 			gomega.Expect(string(out)).To(gomega.ContainSubstring("unknown flag"), "stderr must mention 'unknown flag' for %s; got: %s", c.flag, string(out))

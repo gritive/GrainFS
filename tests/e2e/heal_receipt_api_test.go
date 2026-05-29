@@ -21,6 +21,7 @@ import (
 	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/receipt"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // Heal receipt API verifies the Phase 16 Slice 2 resolution
@@ -81,6 +82,12 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 			dataDirs[i] = d
 			ginkgo.DeferCleanup(removeE2EDir, d)
 		}
+		// Pre-seed the cluster transport PSK on every node's disk (replaces the
+		// removed cluster-key flag). Must run BEFORE any node boots. heal-receipt
+		// reads the resolved cfg.ClusterKey, so this also covers the no-flag path.
+		for i := range dataDirs {
+			gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
+		}
 		// ReceiptIDs used across the test — literal ids make log output readable.
 		const (
 			bucketName = "audit-test"
@@ -106,7 +113,6 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 				"--port", fmt.Sprintf("%d", httpPorts[i]),
 				"--node-id", raftAddr(i),
 				"--raft-addr", raftAddr(i),
-				"--cluster-key", clusterKey,
 				"--heal-receipt-window=1",
 				"--heal-receipt-gossip-interval=1s",
 				"--nfs4-port", "0",

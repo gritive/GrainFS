@@ -245,7 +245,6 @@ func startSingleKEKNode(t testing.TB) (string, string) {
 		"--port", fmt.Sprintf("%d", httpPort),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--node-id", "kek-single",
-		"--cluster-key", strings.Repeat("a", 64),
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",
