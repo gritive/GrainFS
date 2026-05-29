@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/transport"
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -29,6 +30,11 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 			raftPort := freePort()
 			oldKey := strings.Repeat("a", 64)
 
+			// Pre-stage the OLD PSK on disk (replaces the removed cluster-key flag).
+			// The rotation worker promotes current->previous, so the previous.key ==
+			// oldKey assertion below holds without the flag.
+			gomega.Expect(transport.NewKeystore(dir).WriteCurrent(oldKey)).To(gomega.Succeed())
+
 			ctx, cancel := context.WithCancel(context.Background())
 			ginkgo.DeferCleanup(cancel)
 
@@ -38,7 +44,6 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 				"--port", fmt.Sprintf("%d", httpPort),
 				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 				"--node-id", "rotate-test",
-				"--cluster-key", oldKey,
 				"--nfs4-port", "0",
 				"--nbd-port", "0",
 				"--scrub-interval", "0",
@@ -118,7 +123,6 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 				"--port", fmt.Sprintf("%d", httpPort),
 				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 				"--node-id", "rotate-status-test",
-				"--cluster-key", strings.Repeat("c", 64),
 				"--nfs4-port", "0",
 				"--nbd-port", "0",
 				"--scrub-interval", "0",
