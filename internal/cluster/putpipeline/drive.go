@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/gritive/GrainFS/internal/storage/directio"
@@ -138,6 +139,24 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 		return nil
 	}
 	shardDir := filepath.Join(d.dataDir, entry.bucket, entry.shardKey)
+	// Containment guard (mirrors ShardService.ShardPathUnderDataDir): the
+	// candidate path and its containment root both derive from bucket, so a
+	// bucket of ".." (or one carrying a separator) would move both up
+	// together and slip past the Rel check while physically escaping
+	// d.dataDir — reject such buckets outright. shardKey is
+	// ecObjectShardKey(objectKey, versionID) and getKey does not normalize
+	// URL-encoded ".." in the S3 key, so the Rel check keeps the key from
+	// escaping {dataDir}/{bucket}. S3 ingress (ValidBucketName) blocks the
+	// public vector; this also guards the trusted peer shard-RPC / mover
+	// paths that reach the chokepoint directly.
+	if !isSafePathSegment(entry.bucket) || !pathUnderRoot(filepath.Join(d.dataDir, entry.bucket), shardDir) {
+		d.commitCh <- ShardWriteResult{
+			PutID:    chunk.PutID,
+			ShardIdx: chunk.ShardIdx,
+			Err:      fmt.Errorf("drive actor: shard location escapes data dir (bucket=%q key=%q)", entry.bucket, entry.shardKey),
+		}
+		return nil
+	}
 	if err := os.MkdirAll(shardDir, 0o755); err != nil {
 		d.commitCh <- ShardWriteResult{
 			PutID:    chunk.PutID,
@@ -239,4 +258,27 @@ func (d *DriveActor) dropPending(putID uint64) {
 	delete(d.pending, putID)
 	delete(d.registry, putID)
 	d.mu.Unlock()
+}
+
+// pathUnderRoot reports whether p resolves inside root after cleaning,
+// i.e. no "../" traversal escapes root. Mirrors the containment logic of
+// ShardService.ShardPathUnderDataDir for the pipeline's drive-local path.
+func pathUnderRoot(root, p string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// isSafePathSegment reports whether name is a single, non-traversal path
+// component — non-empty, not "." or "..", and free of any path separator.
+// Keeps a bucket from re-rooting the containment check (it derives both the
+// candidate path and its root). Mirrors cluster.isSafePathSegment, which is
+// unexported in that package.
+func isSafePathSegment(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !strings.ContainsRune(name, '/') && !strings.ContainsRune(name, filepath.Separator)
 }

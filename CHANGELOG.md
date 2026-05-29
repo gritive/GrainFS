@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.472.0] - 2026-05-30
+
+### Changed
+
+- Single-node EC object PUTs whose shards all land on the local node now run
+  through the actor write pipeline by default (previously the spool/EC writer).
+  The pipeline still waits for shard durability before the object becomes
+  readable: a PUT is acknowledged only after every shard has been fsynced (or,
+  with the data WAL, after the group-commit fsync), so a crash can never leave
+  committed object metadata pointing at non-durable shards. Multi-node
+  placements continue to use the spooled writer.
+
 ## [0.0.471.0] - 2026-05-30
 
 ### Removed

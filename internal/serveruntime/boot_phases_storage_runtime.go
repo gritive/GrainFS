@@ -356,8 +356,11 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	// pipeline. The pipeline owns long-lived actor goroutines shared
 	// across groups.
 	if state.putPipeline != nil {
-		// Wired but disabled: dispatch is gated off in prod pending F1 review.
-		gb.SetPutPipeline(state.putPipeline, false)
+		// Enabled in prod (F1 durability review closed): Put() now blocks on
+		// shard durability before returning, so the metadata propose cannot
+		// precede shard fsync, and the drive-write path rejects ".." key
+		// traversal. Dispatch is still bounded to all-local EC placements.
+		gb.SetPutPipeline(state.putPipeline, true)
 	}
 	return gb, nil
 }
@@ -396,8 +399,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			WAL:       shardServiceWALAdapter{s: state.shardSvc},
 		})
 		state.putPipeline = pipeline
-		// Constructed but dispatch-disabled pending the F1 durability review.
-		distBackend.SetPutPipeline(pipeline, false)
+		// Enabled in prod (F1 durability review closed): Put() blocks on shard
+		// durability before returning and the drive-write path rejects ".."
+		// key traversal. Dispatch stays bounded to all-local EC placements.
+		distBackend.SetPutPipeline(pipeline, true)
 		log.Info().
 			Int("drives", len(state.shardSvc.DataDirs())).
 			Int("k", state.effectiveEC.DataShards).

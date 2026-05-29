@@ -17,21 +17,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
      no legacy ciphertext to support). Current format = **8**.
-   - [ ] **putPipeline prod reactivation (F1 durability).** putPipeline dispatch is wired but
-     dormant in prod (gate `putPipelineEnabled` defaults false; only the integration test enables
-     it). Before enabling in prod: putPipeline acks on early K-shard quorum
-     (`putpipeline/pipeline.go:240`) + defers fsync to a batched WAL commit (`drive.go` `skipFsync`,
-     `commit.go:120`), whereas the spooled path flushes the data WAL synchronously before the raft
-     metadata propose. Verify PutShard does not let metadata commit before shard durability before
-     enabling. Its own slice.
-     - **Path containment must be added before enable.** The `DriveActor` builds the shard dir
-       directly as `filepath.Join(d.dataDir, entry.bucket, entry.shardKey)` then `MkdirAll`+writes
-       (`putpipeline/drive.go:149`), bypassing the `ShardService` containment chokepoint
-       (`getShardDir`/`ShardPathUnderDataDir`). A traversal bucket/key would escape `d.dataDir`. S3
-       ingress (`ValidBucketName`) blocks the public vector and the path is gate-off today, but the
-       reactivation slice MUST route this write through (or replicate) the chokepoint validation
-       before flipping the gate. Same gap class as the shard-path containment fixes (#663 + bucket
-       segment guard).
    - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
      the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
      a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND
