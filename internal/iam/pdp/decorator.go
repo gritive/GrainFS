@@ -285,6 +285,34 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 	}
 
+	r := d.consult(ctx, req, cfg, fp, key, cache, entry, state, actor, ctxReq, client)
+	if r.useInner {
+		out := inner
+		if r.reason == layerFailOpen {
+			out.Reason = annotate(out.Reason, layerFailOpen)
+		}
+		return out
+	}
+	return policy.EvalResult{Decision: r.decision, Reason: r.reason}
+}
+
+// consultResult is the outcome of one PDP consult (miss path). useInner=true means
+// "return the GrainFS inner result" (allow / fail-open / grace-allow); otherwise
+// Decision/Reason carry the PDP/grace/failure/cancel outcome.
+type consultResult struct {
+	useInner bool
+	decision policy.Decision
+	reason   string
+}
+
+// consult performs the PDP round trip + grace + failure policy + caching. 4a: PURE
+// extraction — callCtx is inbound-derived and the post-call inbound-cancel check is
+// preserved, so behavior == the inlined original. (4b detaches callCtx + removes the
+// post-call check, compensated by the DoChan select.)
+func (d *Decorator) consult(ctx context.Context, req Request, cfg Config, fp, key string,
+	cache *decisionCache, entry cacheEntry, state cacheState,
+	actor principal.Principal, ctxReq policy.RequestContext, client *Client) consultResult {
+
 	// The decorator owns the per-request deadline so a runtime iam.pdp.timeout
 	// change takes effect without rebuilding the cached client. Deriving callCtx
 	// from the FRESH cfg here (not in the client) is what makes the timeout
@@ -308,7 +336,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 		d.mRequests.WithLabelValues("error", cancelErrType, fp).Inc()
 		d.audit(req, actor, ctxReq, "deny", cancelErrType, "request canceled")
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
+		return consultResult{decision: policy.DecisionDeny, reason: "request canceled"}
 	}
 
 	var de *DenyError
@@ -322,7 +350,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			}
 		}
 		d.audit(req, actor, ctxReq, "deny", "", layerDeny+": "+de.Reason)
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
+		return consultResult{decision: policy.DecisionDeny, reason: genericDenyMsg}
 	}
 
 	if errType != "" {
@@ -335,7 +363,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			log.Warn().Str("event", "iam.pdp").Str("error_type", errType).
 				Msg("iam.pdp: dial blocked by SSRF egress filter — hard deny")
 			d.audit(req, actor, ctxReq, "deny", errType, "ssrf_blocked: egress filter")
-			return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
+			return consultResult{decision: policy.DecisionDeny, reason: layerFailClosed}
 		}
 		// Grace first: a PDP failure with a stale-but-within-grace cached decision
 		// serves that decision rather than applying the failure policy.
@@ -343,9 +371,9 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			d.mCache.WithLabelValues("grace", entry.decision).Inc()
 			d.audit(req, actor, ctxReq, entry.decision, errType, layerGraceServed)
 			if entry.decision == DecisionDeny {
-				return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
+				return consultResult{decision: policy.DecisionDeny, reason: genericDenyMsg}
 			}
-			return inner
+			return consultResult{useInner: true}
 		}
 		// No grace served: this consult falls through to the failure policy, so
 		// count exactly one miss (covers both fail-open and fail-closed).
@@ -354,12 +382,10 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 		if cfg.FailurePolicy == FailureOpen {
 			d.audit(req, actor, ctxReq, "allow", errType, layerFailOpen)
-			out := inner
-			out.Reason = annotate(out.Reason, layerFailOpen)
-			return out
+			return consultResult{useInner: true, reason: layerFailOpen}
 		}
 		d.audit(req, actor, ctxReq, "deny", errType, layerFailClosed)
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
+		return consultResult{decision: policy.DecisionDeny, reason: layerFailClosed}
 	}
 
 	d.mRequests.WithLabelValues("allow", "", fp).Inc()
@@ -371,7 +397,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		}
 	}
 	d.audit(req, actor, ctxReq, "allow", "", layerAllow)
-	return inner
+	return consultResult{useInner: true}
 }
 
 // refresh reconciles the cached client and decision cache against cfg under a
