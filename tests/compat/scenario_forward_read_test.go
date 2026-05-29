@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,6 +88,11 @@ func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort i
 	if _, err := os.Stat(binary); err != nil {
 	}
 
+	// Pre-stage the cluster transport PSK on disk (replaces the removed
+	// cluster-key flag). Idempotent across the prev->cur restart on the same dir.
+	require.NoError(t, transport.NewKeystore(dataDir).WriteCurrent("COMPAT-KEY"),
+		"pre-seed keys.d/current.key")
+
 	logFile, err := os.CreateTemp("", "grainfs-compat-node-*.log")
 	require.NoError(t, err, "create node log file")
 	t.Cleanup(func() {
@@ -104,7 +110,6 @@ func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort i
 		"--port", fmt.Sprintf("%d", httpPort),
 		"--node-id", "n1",
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--cluster-key", "COMPAT-KEY",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",

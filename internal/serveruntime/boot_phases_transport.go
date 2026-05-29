@@ -23,7 +23,7 @@ import (
 // on the cleanup stack.
 //
 // Cluster key resolution order (rotation-spec D10):
-//  1. keys.d/current.key wins over --cluster-key flag if both differ (warn).
+//  1. keys.d/current.key wins over cluster-key flag if both differ (warn).
 //  2. Disk only: use disk silently.
 //  3. Flag only: use flag, mirror to keys.d/current.key on first boot.
 //  4. Both empty + cluster mode: rejected upstream by ValidateClusterKey.

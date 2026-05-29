@@ -19,8 +19,7 @@ grainfs volume --help
 Minimal single-node startup:
 
 ```bash
-CLUSTER_KEY=$(openssl rand -hex 32)
-grainfs serve --data ./data --port 9000 --cluster-key "$CLUSTER_KEY"
+grainfs serve --data ./data --port 9000
 ```
 
 Common serve options:
@@ -29,7 +28,7 @@ Common serve options:
 | --- | --- |
 | `--data` | Data directory. |
 | `--port` | HTTP/S3 port. |
-| `--cluster-key` | Pre-shared key for peer authentication. Required, including single-node mode. |
+| (cluster transport key) | Generated at genesis, pulled by invite-join, or read from `keys.d/current.key`; no flag. |
 | `--admin-socket` | Local Unix socket for admin commands. Defaults under the data directory. |
 | `--admin-group` | Group owner for the admin socket. |
 | `--public-url` | Dashboard base URL shown by `grainfs dashboard`. |
@@ -261,7 +260,6 @@ storage is wired. Keep the default loopback bind unless the network is trusted.
 grainfs serve \
   --data ./data \
   --port 9000 \
-  --cluster-key "$CLUSTER_KEY" \
   --9p-bind 127.0.0.1 \
   --9p-port 5640
 ```

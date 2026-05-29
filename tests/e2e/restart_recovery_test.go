@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/transport"
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -33,7 +34,13 @@ func runRestartRecoveryOrphanSweepCases(t testing.TB) {
 	// The test pre-populates the data dir before boot. Stamp the current
 	// encryption format marker so the XAES boot guard treats these artifacts as
 	// current-format orphan candidates rather than a pre-XAES data dir.
-	gomega.Expect(os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("8"), 0o600)).To(gomega.Succeed())
+	// (Pre-existing stale stamp: #640 bumped the format to "9" but left this at
+	// "8"; e2e is not in the default gate, so it rotted undetected.)
+	gomega.Expect(os.WriteFile(filepath.Join(dir, "encryption.format"), []byte("9"), 0o600)).To(gomega.Succeed())
+	// Pre-populated (non-empty) dir blocks self-seed, so stage a deterministic
+	// cluster transport PSK on disk (replaces the removed cluster-key flag).
+	gomega.Expect(transport.NewKeystore(dir).WriteCurrent(
+		"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")).To(gomega.Succeed())
 
 	// Plant a stale .tmp file (backdated past the 5-min in-flight guard).
 	staleTmp := filepath.Join(dir, "shards", "b", "k", "0.tmp")
@@ -55,7 +62,6 @@ func runRestartRecoveryOrphanSweepCases(t testing.TB) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

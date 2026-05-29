@@ -53,11 +53,9 @@ If the migration channel is full, `GrainFS` persists the task under the BadgerDB
 Conservative production example:
 
 ```bash
-CLUSTER_KEY=$(openssl rand -hex 32)
 grainfs serve \
   --data ./data \
   --port 9000 \
-  --cluster-key "$CLUSTER_KEY" \
   --balancer-gossip-interval=60s \
   --balancer-imbalance-trigger-pct=30.0 \
   --balancer-imbalance-stop-pct=10.0 \
@@ -204,11 +202,13 @@ Use `GRAINFS_TEST_DISK_PCT` to exercise balancer behavior without filling a real
 disk.
 
 ```bash
-CLUSTER_KEY=$(openssl rand -hex 32)
+# Multi-node: stage the shared cluster transport key on disk before boot
+# (every peer must hold the same keys.d/current.key).
+mkdir -p ./data/keys.d
+openssl rand -hex 32 > ./data/keys.d/current.key
 GRAINFS_TEST_DISK_PCT=80 grainfs serve \
   --data ./data \
   --port 9000 \
-  --cluster-key "$CLUSTER_KEY" \
   --peers peer-a:9001
 ```
 

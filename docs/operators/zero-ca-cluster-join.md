@@ -6,9 +6,11 @@ single-use invite bundle. The joining node presents a fresh per-node identity,
 pulls the sealed bootstrap secrets over the dedicated join listener, and then
 finishes membership through meta-Raft.
 
-Use this path for new nodes. Use the older `grainfs cluster join` path only when
-you intentionally want offline bootstrap with pre-staged `keys/0.key`,
-`cluster.id`, and `--cluster-key`.
+Use this path for new nodes. When you cannot use invite join, the alternative is
+the runtime `grainfs join` with pre-staged `keys/0.key`, `cluster.id`, and
+`keys.d/current.key` — see
+[`deploy-production-cluster.md`](deploy-production-cluster.md). The offline
+`grainfs cluster join` command has been retired.
 
 ## Prerequisites
 
@@ -32,12 +34,12 @@ grainfs serve \
   --join-listen-addr node-a:7443
 ```
 
-The genesis leader needs **no `--cluster-key`**. On a fresh data dir with no
-invite bundle and no peers it self-generates and seals its own cluster transport
-key, so you never generate or hand-carry raw key material. Pass `--cluster-key`
-only for the legacy offline-join (`grainfs cluster join`) world, where peers must
-share a pre-known secret; supplying it on a fresh genesis is a deterministic seed
-input (on a restart, the on-disk key wins and a differing flag is ignored).
+The genesis leader needs **no operator-supplied key**. On a fresh data dir with
+no invite bundle and no peers it self-generates and seals its own cluster
+transport key into `keys.d/current.key`, so you never generate or hand-carry raw
+key material. For a deterministic / externally-managed key, write
+`<data>/keys.d/current.key` before first boot — a file, never an argv literal;
+on a restart the on-disk key always wins.
 
 > **Caution — a keyless boot on an EMPTY data dir bootstraps a NEW single-node
 > cluster.** If you intended to JOIN an existing cluster, set

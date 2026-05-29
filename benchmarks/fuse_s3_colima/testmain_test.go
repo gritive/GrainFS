@@ -18,7 +18,6 @@ var (
 	accessKey      = envOrDefault("S3_ACCESS_KEY", "")
 	secretKey      = envOrDefault("S3_SECRET_KEY", "")
 	bucket         = envOrDefault("S3_BUCKET", "fuse-colima-test")
-	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 )
 
 func envOrDefault(key, def string) string {
@@ -68,7 +67,6 @@ func TestMain(m *testing.M) {
 		"--port", colimaHTTPPort,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--cluster-key", clusterKey,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

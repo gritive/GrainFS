@@ -18,15 +18,15 @@ The usual path is:
 
 ```bash
 DATA_DIR=/var/lib/grainfs
-CLUSTER_KEY=$(openssl rand -hex 32)
 install -d -m 0700 "$DATA_DIR"
-./grainfs serve --data "$DATA_DIR" --port 9000 --cluster-key "$CLUSTER_KEY"
+./grainfs serve --data "$DATA_DIR" --port 9000
 ```
 
 - `<data>/keys/0.key` (mode 0600) is auto-generated on first start — this is the active KEK file in the versioned keystore
 - `<data>/cluster.id` (16-byte UUID v7) is generated at first-cluster boot and binds the cluster identity into the join handshake
+- `<data>/keys.d/current.key` (the cluster transport PSK) is self-generated and persisted at genesis — no flag, no operator-supplied key
 - `<data>/keys.d/raft-store.key.enc` is generated on each node and seals that node's local raft v2 Badger encryption key under the cluster KEK
-- `--cluster-key` is required even for the first single-node bootstrap
+- A fixed/externally-managed transport key is supplied by writing `<data>/keys.d/current.key` before first boot (a file, never an argv literal)
 - `default` bucket is auto-created with anonymous read/write access
 - `_grainfs` reserved bucket + `_grainfs/audit/evaluations` Iceberg table seeded
 
@@ -47,15 +47,13 @@ anonymous access works.
 
 ## Add cluster peers
 
-There are three join paths:
+There are two join paths:
 
 - Use Zero-CA invite join for a brand-new node when you do not want to pre-copy
   cluster secrets. This is the preferred path for new production peers.
-- Use `grainfs cluster join` for a not-yet-running node when you intentionally
-  want offline bootstrap with pre-staged `keys/0.key`, `cluster.id`, and
-  `--cluster-key`.
-- Use `grainfs join` only when a node is already running and you want it to
-  restart into the cluster through its admin socket.
+- Use `grainfs join` when a node is already running and you want it to restart
+  into the cluster through its admin socket, having pre-staged `keys/0.key`,
+  `cluster.id`, and `keys.d/current.key` from a healthy peer.
 
 ### Zero-CA invite join for a new node
 
@@ -69,7 +67,7 @@ grainfs serve \
   --join-listen-addr node-a:7443
 ```
 
-The genesis leader self-seeds its cluster key (no `--cluster-key`); see
+The genesis leader self-seeds its cluster key (no operator-supplied key); see
 [`zero-ca-cluster-join.md`](zero-ca-cluster-join.md) for the self-seed semantics
 and the `grainfs_cluster_self_seeded` alerting caution.
 
@@ -103,70 +101,56 @@ The joiner should have `keys.d/node.key.enc` and should not have
 join behavior, and revocation, is in
 [`zero-ca-cluster-join.md`](zero-ca-cluster-join.md).
 
-### Offline bootstrap for a new node
+### Runtime join with staged cluster secrets
 
-## Phase A: Keystore + Cluster Identity Staging
-
-Each node has TWO files that must be staged before joining an existing cluster:
+When you do not use invite join, a node joins by pre-staging the cluster
+secrets and then sending a runtime join request through its admin socket. Three
+files must be staged before joining an existing cluster:
 
 1. `<dataDir>/keys/0.key` — the cluster's active Key Encryption Key (KEK). 32 bytes, 0o600.
 2. `<dataDir>/cluster.id` — the 16-byte cluster identity (UUID v7) bound into the join handshake.
+3. `<dataDir>/keys.d/current.key` — the cluster transport PSK (QUIC peer auth).
 
-Both files are generated at first-cluster boot. To add a node to an existing cluster, copy both from a healthy peer:
+All three are generated at first-cluster boot. Copy them from a healthy peer,
+overwriting any self-seeded `current.key` the solo node generated:
 
 ```bash
 DATA_DIR=/var/lib/grainfs
-install -d -m 0700 "$DATA_DIR"
-install -d -m 0700 "$DATA_DIR/keys"
-scp node-a:/var/lib/grainfs/keys/0.key  "$DATA_DIR/keys/0.key"
-scp node-a:/var/lib/grainfs/cluster.id  "$DATA_DIR/cluster.id"
-chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
-./grainfs cluster join node-a:7001 \
-  --data "$DATA_DIR" \
-  --node-id node-b \
-  --bind-addr node-b:7001 \
-  --cluster-key "$CLUSTER_KEY"
+install -d -m 0700 "$DATA_DIR" "$DATA_DIR/keys" "$DATA_DIR/keys.d"
+scp node-a:/var/lib/grainfs/keys/0.key          "$DATA_DIR/keys/0.key"
+scp node-a:/var/lib/grainfs/cluster.id          "$DATA_DIR/cluster.id"
+scp node-a:/var/lib/grainfs/keys.d/current.key  "$DATA_DIR/keys.d/current.key"
+chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id" "$DATA_DIR/keys.d/current.key"
 ```
 
 Do not copy `<dataDir>/keys.d/raft-store.key.enc` from another node during a
 fresh join. It is node-local and is generated when the joining node first opens
 its raft v2 stores. For backup/restore of an existing node, restore that
 node's own `keys.d/raft-store.key.enc` together with `keys/`, `cluster.id`,
-`raft/`, and `meta_raft/`.
+`keys.d/current.key`, `raft/`, and `meta_raft/`.
 
-After the join succeeds, start the new node with the same data directory,
-node ID, Raft address, and cluster key:
+Start the node (it self-seeds nothing because `keys.d/current.key` is staged),
+then send the join through its admin socket. `--confirm-staged-keys`
+acknowledges that the staged secrets belong to the destination cluster:
 
 ```bash
 ./grainfs serve \
   --data "$DATA_DIR" \
   --node-id node-b \
   --raft-addr node-b:7001 \
-  --port 9000 \
-  --cluster-key "$CLUSTER_KEY"
-```
-
-The join handshake (HMAC-SHA256 challenge-response on a 32B nonce) verifies
-KEK possession. Nodes with a different KEK are refused with 403 and would not
-be able to decrypt the cluster's wrapped DEKs anyway.
-
-### Runtime join for an already-running node
-
-If the node is already running as a solo node, send the join request through
-that node's admin socket instead. Phase A requires that both
-`<dataDir>/keys/0.key` and `<dataDir>/cluster.id` be pre-staged before the
-runtime join, and the operator must explicitly acknowledge that the staged
-keys belong to the destination cluster via `--confirm-staged-keys`:
-
-```bash
+  --port 9000 &
 grainfs join node-a:7001 \
-  --endpoint /var/lib/grainfs/admin.sock \
+  --endpoint "$DATA_DIR/admin.sock" \
   --confirm-staged-keys
 ```
 
 If the node has local user data, the admin API refuses the join unless you
 repeat the command with `--force`, which discards the solo data before the
 node restarts into the cluster.
+
+The join handshake (HMAC-SHA256 challenge-response on a 32B nonce) verifies
+KEK possession. Nodes with a different KEK are refused with 403 and would not
+be able to decrypt the cluster's wrapped DEKs anyway.
 
 ## Require identity and S3 auth
 

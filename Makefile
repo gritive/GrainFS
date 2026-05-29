@@ -140,8 +140,7 @@ test-compat: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -tags compat -v -count=1 -timeout 10m ./tests/compat/
 
 run: bin/$(BINARY)
-	CLUSTER_KEY=$${CLUSTER_KEY:-$$(openssl rand -hex 32)}; \
-	./bin/$(BINARY) serve --data ./tmp --port 9000 --cluster-key "$$CLUSTER_KEY"
+	./bin/$(BINARY) serve --data ./tmp --port 9000
 
 clean:
 	rm -rf bin/ tmp/

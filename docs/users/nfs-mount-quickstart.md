@@ -7,8 +7,7 @@ GrainFS exposes the same data via S3, NFSv4, and 9P. Mount once, read/write eith
 Start GrainFS and register the default bucket as an NFS export:
 
 ```bash
-CLUSTER_KEY=$(openssl rand -hex 32)
-./grainfs serve --data ./tmp --port 9000 --cluster-key "$CLUSTER_KEY" &
+./grainfs serve --data ./tmp --port 9000 &
 
 # Register the export (bucket creation is automatic on first S3 write,
 # but NFS requires an explicit export registration).

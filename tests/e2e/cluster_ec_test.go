@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -61,6 +62,11 @@ func runClusterECPutGet5Node(t testing.TB) {
 		dataDirs[i] = d
 		ginkgo.DeferCleanup(func() { _ = removeE2EDir(d) })
 	}
+	// Pre-seed the cluster transport PSK on every node's disk (replaces the
+	// removed cluster-key flag). Must run BEFORE any node boots.
+	for i := range dataDirs {
+		gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
+	}
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/ec5-node-%d-stderr.log", i))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create stderr file for node %d", i)
@@ -69,7 +75,6 @@ func runClusterECPutGet5Node(t testing.TB) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--cluster-key", clusterKey,
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
@@ -409,6 +414,11 @@ func runClusterECTopologyChange(t testing.TB) {
 		dataDirs[i] = d
 		ginkgo.DeferCleanup(func() { _ = removeE2EDir(d) })
 	}
+	// Pre-seed the cluster transport PSK on every node's disk (replaces the
+	// removed cluster-key flag). Must run BEFORE any node boots.
+	for i := range dataDirs {
+		gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
+	}
 	// All 6 nodes are configured with the full peer list from the start so the
 	// leader elected among the first 3 nodes already knows about nodes 3,4,5.
 	// Without this, stage-2 nodes timeout and send higher-term RequestVotes that
@@ -423,7 +433,6 @@ func runClusterECTopologyChange(t testing.TB) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--cluster-key", clusterKey,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",

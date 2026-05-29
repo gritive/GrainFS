@@ -61,7 +61,6 @@ echo "profile: $PROFILE_DIR"
   --nbd-port 0 \
   --9p-bind 0.0.0.0 \
   --9p-port "$P9_PORT" \
-  --cluster-key "bench-9p-single-key" \
   $(bench_encryption_args) \
   --pprof-port "$PPROF_PORT" \
   --scrub-interval 0 \

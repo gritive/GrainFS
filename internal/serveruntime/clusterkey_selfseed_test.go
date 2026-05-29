@@ -193,7 +193,7 @@ func TestBootValidateConfigSelfSeeds(t *testing.T) {
 }
 
 // bootValidateConfig with priorState (raft state present) and no key must NOT
-// seed — the existing --cluster-key error fires.
+// seed — the cluster-transport-key-missing gate error fires.
 func TestBootValidateConfigNoSeedOnPriorState(t *testing.T) {
 	d := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(d, "raft"), 0o700))
@@ -201,7 +201,7 @@ func TestBootValidateConfigNoSeedOnPriorState(t *testing.T) {
 	st := &bootState{cfg: Config{DataDir: d, NodeID: "n1"}}
 	err := bootValidateConfig(st)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cluster-key")
+	require.Contains(t, err.Error(), "cluster transport key missing: stage keys.d/current.key, set GRAINFS_INVITE_BUNDLE, or start a fresh genesis node")
 }
 
 // A self-seed boot sets the detectability gauge to 1 (the only signal that

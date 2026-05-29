@@ -18,8 +18,9 @@ import (
 // cluster-key-self-seed.md): a keyless genesis on a fresh data dir generates and
 // persists its own cluster transport key instead of erroring.
 
-// selfSeedLeaderArgs is startInviteLeader's arg set MINUS --cluster-key. It keeps
-// --join-listen-addr so the self-seeded leader can still mint invites.
+// selfSeedLeaderArgs is startInviteLeader's arg set without a pre-staged
+// keys.d/current.key, so the leader self-seeds. It keeps --join-listen-addr so
+// the self-seeded leader can still mint invites.
 func selfSeedLeaderArgs(n *inviteJoinNode) []string {
 	return []string{
 		"serve",
@@ -86,7 +87,7 @@ var _ = ginkgo.Describe("Genesis cluster-key self-seed", func() {
 	// NOTE: self-seed RESTART semantics (restart loads keys.d/current.key, does NOT
 	// re-seed) are covered by the unit test TestBootValidateConfigSelfSeeds. A
 	// full-process e2e restart of a SOLO leader is intentionally omitted: it fails
-	// `WaitDEKReady: context deadline exceeded` for BOTH a --cluster-key leader and a
+	// `WaitDEKReady: context deadline exceeded` for BOTH a staged-key leader and a
 	// self-seeded one (verified with a control), i.e. a PRE-EXISTING solo-leader-
 	// restart limitation in the KEK/DEK path, unrelated to this cluster-key change.
 	// Captured in TODOS for separate investigation.

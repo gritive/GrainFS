@@ -27,9 +27,8 @@ admin group can connect; others cannot.
 ### Bootstrap a new cluster
 
 ```bash
-# 1) Start grainfs.
-CLUSTER_KEY=$(openssl rand -hex 32)
-grainfs serve --data ./data --port 9000 --cluster-key "$CLUSTER_KEY" &
+# 1) Start grainfs (genesis self-seeds the cluster transport key).
+grainfs serve --data ./data --port 9000 &
 
 # 2) Create the first admin SA (returns one-time secret_key).
 grainfs iam sa create admin --endpoint ./data/admin.sock
@@ -70,9 +69,14 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
   ```bash
   export GRAINFS_DATA_DIR=/path/to/production/data
   export GRAINFS_PORT=9000
-  export GRAINFS_CLUSTER_KEY="$(secret-manager read grainfs/cluster-key)"
   export GRAINFS_ACCESS_KEY="$(secret-manager read grainfs/access-key)"
   export GRAINFS_SECRET_KEY="$(secret-manager read grainfs/secret-key)"
+  # For a multi-node cluster with an externally-managed transport key, stage it
+  # on disk before boot (a file, never an argv/env literal). A single genesis
+  # node self-seeds and needs no staging.
+  install -d -m 0700 "$GRAINFS_DATA_DIR/keys.d"
+  secret-manager read grainfs/cluster-key > "$GRAINFS_DATA_DIR/keys.d/current.key"
+  chmod 0600 "$GRAINFS_DATA_DIR/keys.d/current.key"
   ```
 - [ ] **Cluster membership** (if applicable):
   ```bash
@@ -360,22 +364,20 @@ above) immediately after the first node starts. S3 clients, such as
 `$GRAINFS_ACCESS_KEY` and `$GRAINFS_SECRET_KEY` for the rest of this runbook's
 `aws` examples.
 
-**Local mode:**
+**Local mode:** (genesis self-seeds the transport key)
 ```bash
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
-**Cluster mode:**
+**Cluster mode:** (each node reads the staged `keys.d/current.key` from above)
 ```bash
 # First node
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   --node-id node-1 \
   --raft-addr node-1.example.com:9001 \
   > /var/log/grainfs/production.log 2>&1 &
@@ -384,7 +386,6 @@ grainfs serve \
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   --node-id node-2 \
   --raft-addr node-2.example.com:9001 \
   --join node-1.example.com:9001 \
@@ -504,11 +505,10 @@ pgrep -f "grainfs serve" | xargs kill
 LATEST_BACKUP=$(ls -t /usr/local/bin/grainfs.backup.* | head -1)
 cp $LATEST_BACKUP /usr/local/bin/grainfs
 
-# Restart with old binary
+# Restart with old binary (reads the on-disk keys.d/current.key)
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
-  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -578,8 +578,8 @@ operator does not need a separate `transfer-leader` step.
 ### Adding a node with Zero-CA invite join
 
 Use Zero-CA invite join when adding a brand-new node without copying
-`keys/0.key`, `cluster.id`, or `--cluster-key` to the node first. The detailed
-procedure is in [`zero-ca-cluster-join.md`](zero-ca-cluster-join.md).
+`keys/0.key`, `cluster.id`, or `keys.d/current.key` to the node first. The
+detailed procedure is in [`zero-ca-cluster-join.md`](zero-ca-cluster-join.md).
 
 Mint an invite on the leader:
 
@@ -805,9 +805,8 @@ make build
 # Create host data directory
 mkdir -p /var/lib/grainfs
 
-# Start GrainFS directly
-CLUSTER_KEY=$(openssl rand -hex 32)
-./bin/grainfs serve --data /var/lib/grainfs --port 9000 --cluster-key "$CLUSTER_KEY"
+# Start GrainFS directly (genesis self-seeds the transport key)
+./bin/grainfs serve --data /var/lib/grainfs --port 9000
 ```
 
 After the server starts, bootstrap the admin SA once via the host-side admin socket:
@@ -828,8 +827,9 @@ AWS_DEFAULT_REGION=us-east-1 \
 
 **Rollback:**
 ```bash
-# Replace ./bin/grainfs with the previous binary, then restart the service:
-./bin/grainfs serve --data /var/lib/grainfs --port 9000 --cluster-key "$CLUSTER_KEY"
+# Replace ./bin/grainfs with the previous binary, then restart the service
+# (reads the on-disk keys.d/current.key):
+./bin/grainfs serve --data /var/lib/grainfs --port 9000
 ```
 
 ### Kubernetes Deployment
@@ -891,22 +891,21 @@ spec:
         - /grainfs/data
         - --port
         - "9000"
-        - --cluster-key
-        - $(GRAINFS_CLUSTER_KEY)
         ports:
         - containerPort: 9000
           name: s3
         - containerPort: 2049
           name: nfsv4
-        env:
-        - name: GRAINFS_CLUSTER_KEY
-          valueFrom:
-            secretKeyRef:
-              name: grainfs-secrets
-              key: cluster-key
         volumeMounts:
         - name: data
           mountPath: /grainfs/data
+        # Project the cluster transport key into keys.d/current.key before boot
+        # (a file, never an argv/env literal). Omit this mount for a single
+        # genesis node, which self-seeds its own key.
+        - name: cluster-key
+          mountPath: /grainfs/data/keys.d/current.key
+          subPath: cluster-key
+          readOnly: true
         resources:
           requests:
             memory: "2Gi"
@@ -930,6 +929,13 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: grainfs-data
+      - name: cluster-key
+        secret:
+          secretName: grainfs-secrets
+          items:
+          - key: cluster-key
+            path: cluster-key
+            mode: 0600
 ```
 
 **Rollback:**
@@ -965,10 +971,10 @@ v0.0.320.0.
 
 ## Cluster Key Rotation
 
-`--cluster-key` is the PSK used to derive the cluster TLS
-identity (certificate and SPKI). A different key creates a different cluster
-identity; nodes that keep the old key fail authentication against nodes that use
-the new key.
+The cluster transport key (`keys.d/current.key`) is the PSK used to derive the
+cluster TLS identity (certificate and SPKI). A different key creates a different
+cluster identity; nodes that keep the old key fail authentication against nodes
+that use the new key.
 
 **v0.0.39 and newer support online rolling rotation.** The PSK can be replaced
 without S3, NFS, or NBD downtime. The CLI sends rotation commands through the
@@ -1031,11 +1037,10 @@ leader with:
    complete disk I/O and swap transport identity. A healthy rotation usually
    finishes in about 10 to 15 seconds.
 
-5. **Update persistent configuration on every node** so the new key survives the
-   next restart. Update environment variables, systemd units, or the
-   `--cluster-key` flag as applicable. `GrainFS` updates `keys.d/current.key` to
-   NEW after rotation, so a restart without a flag uses the rotated NEW key
-   (D10: disk wins).
+5. **No per-node config update is needed.** `GrainFS` writes the rotated NEW key
+   to each node's `keys.d/current.key` during rotation, so a restart picks it up
+   from disk automatically. If you stage the key from an external secret store,
+   update that store to the NEW value for future fresh provisioning.
 
 6. **Verify**: use `grainfs cluster --endpoint <data-dir>/admin.sock status` to
    confirm all peers are healthy, then use
@@ -1062,7 +1067,7 @@ leader with:
 ### Offline fallback (all nodes older than v0.0.39)
 
 1. Stop every node. This causes S3, NFS, and NBD downtime.
-2. Restart every node with the new `--cluster-key`.
+2. Write the new key to every node's `keys.d/current.key`, then restart each node.
 3. Confirm peer reconnection with `grainfs cluster --endpoint <data-dir>/admin.sock status`.
 
 ---

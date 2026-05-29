@@ -42,7 +42,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.NodeID, _ = cmd.Flags().GetString("node-id")
 	opts.RaftAddr, _ = cmd.Flags().GetString("raft-addr")
 	opts.JoinListenAddr, _ = cmd.Flags().GetString("join-listen-addr")
-	opts.ClusterKey, _ = cmd.Flags().GetString("cluster-key")
 
 	// Cluster transport tuning.
 	opts.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")
@@ -116,16 +115,16 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 
 // collectFlagsSnapshot walks every cobra flag once and produces the
 // map[string]string consumed by serveruntime.LogStartupConfigSnapshot.
-// Secret-bearing flags (cluster-key, alert-webhook-secret, heal-receipt-psk)
-// are redacted at the source so neither the structured log nor the on-disk
-// snapshot ever sees the raw value.
+// Secret-bearing flags (alert-webhook-secret, heal-receipt-psk) are redacted
+// at the source so neither the structured log nor the on-disk snapshot ever
+// sees the raw value.
 //
 // Lives in cmd because it walks *pflag.Flag — cobra-bound.
 func collectFlagsSnapshot(cmd *cobra.Command) map[string]string {
 	snap := make(map[string]string, 64)
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		switch f.Name {
-		case "cluster-key", "alert-webhook-secret", "heal-receipt-psk":
+		case "alert-webhook-secret", "heal-receipt-psk":
 			if f.Value.String() != "" {
 				snap[f.Name] = "<redacted>"
 			}

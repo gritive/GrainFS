@@ -272,7 +272,6 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 		"--nbd-port", fmt.Sprintf("%d", nbdPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	}
 	args = append(args, extraArgs...)
 

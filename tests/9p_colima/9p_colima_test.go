@@ -24,7 +24,6 @@ var (
 	colimaHostIP    = envOrDefault("HOST_IP", "192.168.5.2")
 	colima9PPort    = envOrDefault("P9_PORT", "19259")
 	colimaHTTPPort  = envOrDefault("HTTP_PORT", "19200")
-	clusterKey      = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	colimaAdminSock string
 	colima9PBucket  = "colima-9p-test"
 	colimaAccessKey string
@@ -166,7 +165,6 @@ func TestMain(m *testing.M) {
 		"--nbd-port", "0",
 		"--9p-bind", "0.0.0.0",
 		"--9p-port", colima9PPort,
-		"--cluster-key", clusterKey,
 	}
 
 	cmd := exec.Command(binary, args...)

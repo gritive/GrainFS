@@ -274,3 +274,14 @@ func TestProposeDEKBootstrap_RejectsNonZeroGen(t *testing.T) {
 		t.Fatal("ProposeDEKBootstrap must reject gen != 0")
 	}
 }
+
+// newTestKEKStore seeds a single-gen KEKStore for cluster tests. (Preserved
+// from the deleted offline_join_test.go, which owned this shared helper.)
+func newTestKEKStore(t *testing.T, kek []byte) *encrypt.KEKStore {
+	t.Helper()
+	store := encrypt.NewKEKStore()
+	if err := store.Add(0, kek); err != nil {
+		t.Fatalf("seed KEKStore: %v", err)
+	}
+	return store
+}

@@ -268,7 +268,7 @@ func stageResumeArtifacts(t *testing.T, dir string) string {
 
 // TestMaybeInviteJoin_ResumePopulatesClusterKey: on Resume, opts.ClusterKey is
 // read from keys.d/current.key (the gate runs BEFORE bootQUICTransport, so an
-// empty key would trip the --cluster-key gate).
+// empty key would trip the cluster-transport-key-missing gate).
 func TestMaybeInviteJoin_ResumePopulatesClusterKey(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(inviteBundleEnv, mintTestBundleToken(t))

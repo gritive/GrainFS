@@ -21,7 +21,6 @@ var (
 	colimaHostIP          = envOrDefault("HOST_IP", "192.168.5.2")
 	colimaNFS4Port        = envOrDefault("NFS4_PORT", "19249")
 	colimaHTTPPort        = envOrDefault("HTTP_PORT", "19200")
-	clusterKey            = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	colimaAdminSock       string
 	colimaNFSExportBucket = "colima-nfs-export"
 )
@@ -105,7 +104,6 @@ func TestMain(m *testing.M) {
 		"--port", colimaHTTPPort,
 		"--nfs4-port", colimaNFS4Port,
 		"--nbd-port", "0",
-		"--cluster-key", clusterKey,
 	}
 
 	cmd := exec.Command(binary, args...)

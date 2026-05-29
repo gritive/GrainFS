@@ -70,7 +70,6 @@ SERVE_ARGS=(
   --port "$BASE_PORT"
   --nfs4-port 0
   --nbd-port 0
-  --cluster-key "bench-iceberg-table-key"
   $(bench_encryption_args)
   --lifecycle-interval 0
   --log-level warn

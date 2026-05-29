@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/clusteradmin"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // Cluster is the handle returned by StartCluster. All ports bind 0.0.0.0 on
@@ -137,8 +138,18 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 
 	clusterKey := "COLIMA-FIXTURE-CLUSTER-KEY"
 
+	// Pre-seed the cluster transport PSK on every node's disk (replaces the
+	// removed cluster-key flag). Must run BEFORE any node boots, else a node
+	// self-seeds a different key and the cluster cannot form.
+	for i := 0; i < numNodes; i++ {
+		if err := transport.NewKeystore(c.DataDirs[i]).WriteCurrent(clusterKey); err != nil {
+			c.Stop()
+			t.Fatalf("pre-seed keys.d/current.key for node %d: %v", i, err)
+		}
+	}
+
 	// Seed (node 0) starts first.
-	c.procs[0], c.logs[0] = c.spawn(t, binary, 0, clusterKey)
+	c.procs[0], c.logs[0] = c.spawn(t, binary, 0)
 	if err := waitHTTPReady(c.HTTPPorts[0], 60*time.Second); err != nil {
 		c.Stop()
 		t.Fatalf("seed node http not ready: %v", err)
@@ -193,7 +204,7 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 			c.Stop()
 			t.Fatalf("write .join-pending node %d: %v", i, err)
 		}
-		c.procs[i], c.logs[i] = c.spawn(t, binary, i, clusterKey)
+		c.procs[i], c.logs[i] = c.spawn(t, binary, i)
 	}
 	for i := 1; i < numNodes; i++ {
 		if err := waitHTTPReady(c.HTTPPorts[i], 90*time.Second); err != nil {
@@ -267,7 +278,7 @@ func (c *Cluster) HTTPURL(i int) string {
 // presence of a `.join-pending` file in the data dir (written by the caller
 // before calling spawn); the seed has no such file and bootstraps a new
 // cluster.
-func (c *Cluster) spawn(t testing.TB, binary string, i int, clusterKey string) (*exec.Cmd, *os.File) {
+func (c *Cluster) spawn(t testing.TB, binary string, i int) (*exec.Cmd, *os.File) {
 	t.Helper()
 	raftAddr := fmt.Sprintf("127.0.0.1:%d", c.RaftPorts[i])
 	logFile, err := os.CreateTemp("", fmt.Sprintf("grainfs-colima-cluster-%d-*.log", i))
@@ -280,7 +291,6 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, clusterKey string) (
 		"--port", fmt.Sprintf("%d", c.HTTPPorts[i]),
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
-		"--cluster-key", clusterKey,
 		"--nfs4-port", fmt.Sprintf("%d", c.NFSPorts[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.NBDPorts[i]),
 		"--scrub-interval", "0",

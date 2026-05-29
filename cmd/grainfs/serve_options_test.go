@@ -27,7 +27,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--public-url", "https://sentinel.example.com",
 		"--node-id", "sentinel-node",
 		"--raft-addr", "sentinel-raft:7000",
-		"--cluster-key", "sentinel-cluster-key",
 		"--cluster-append-forward-buffer-total-bytes", "16777216",
 		"--cluster-append-forward-buffer-max-per-request", "1048576",
 		"--append-size-cap-bytes", "67108864",
@@ -105,7 +104,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	// Cluster identity.
 	require.Equal(t, "sentinel-node", opts.NodeID)
 	require.Equal(t, "sentinel-raft:7000", opts.RaftAddr)
-	require.Equal(t, "sentinel-cluster-key", opts.ClusterKey)
 
 	// Cluster transport tuning.
 	require.Equal(t, int64(16777216), opts.AppendForwardBufferTotalBytes)
@@ -181,6 +179,5 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.NotEmpty(t, opts.FlagsSnapshot)
 	require.Equal(t, "9001", opts.FlagsSnapshot["port"])
 	require.Equal(t, "/tmp/sentinel-data", opts.FlagsSnapshot["data"])
-	require.Equal(t, "<redacted>", opts.FlagsSnapshot["cluster-key"], "secret redaction")
 	require.Equal(t, "<redacted>", opts.FlagsSnapshot["heal-receipt-psk"], "secret redaction")
 }

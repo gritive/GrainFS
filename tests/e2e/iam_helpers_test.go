@@ -551,7 +551,6 @@ func startIAMTestServer(t testing.TB) iamTestServer {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
@@ -643,7 +642,6 @@ func (h *iamTestServerHandle) Start(t testing.TB) {
 		"--nbd-port", fmt.Sprintf("%d", h.nbdPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	}
 
 	cmd := exec.Command(getBinary(), args...)

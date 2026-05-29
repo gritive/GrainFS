@@ -19,16 +19,18 @@ If the node is already a cluster member the call is a no-op.
 If the node is a solo bootstrap and the peer is reachable, the server will
 restart and join the cluster on next boot.
 
-Phase A REQUIREMENT — pre-stage the cluster keystore + identity:
+Phase A REQUIREMENT — pre-stage the cluster keystore, identity, and transport key:
   The restarted node would otherwise boot with its own auto-generated
-  keys/0.key and cluster.id, which will NOT match the target cluster and
-  produce confusing handshake errors. Before running this command, copy
-  the active keystore + cluster identity from a healthy peer:
+  keys/0.key, cluster.id, and keys.d/current.key, which will NOT match the
+  target cluster and produce confusing handshake errors. Before running this
+  command, copy the active keystore + cluster identity + transport PSK from a
+  healthy peer, overwriting any pre-existing self-seeded current.key:
 
-      scp <peer>:<dataDir>/keys/0.key   <local-dataDir>/keys/0.key
-      scp <peer>:<dataDir>/cluster.id   <local-dataDir>/cluster.id
+      scp <peer>:<dataDir>/keys/0.key            <local-dataDir>/keys/0.key
+      scp <peer>:<dataDir>/cluster.id            <local-dataDir>/cluster.id
+      scp <peer>:<dataDir>/keys.d/current.key    <local-dataDir>/keys.d/current.key
 
-  Both files must have mode 0o600. Then re-run with --confirm-staged-keys.
+  All three files must have mode 0o600. Then re-run with --confirm-staged-keys.
 
 Example:
   grainfs join 192.168.1.10:8301 --endpoint /data/admin.sock --confirm-staged-keys`,
@@ -41,14 +43,16 @@ func runJoin(cmd *cobra.Command, args []string) error {
 	if !confirmStaged {
 		return fmt.Errorf(`runtime join requires pre-staged keys.
 
-Phase A bound the join handshake to per-cluster KEK + cluster_id. Before
-running "grainfs join", copy the active keystore + cluster identity from
-a healthy peer:
+Phase A bound the join handshake to per-cluster KEK + cluster_id, and the QUIC
+transport to the cluster PSK. Before running "grainfs join", copy the active
+keystore + cluster identity + transport PSK from a healthy peer, overwriting
+any pre-existing self-seeded current.key:
 
-    scp <peer>:<dataDir>/keys/0.key   <local-dataDir>/keys/0.key
-    scp <peer>:<dataDir>/cluster.id   <local-dataDir>/cluster.id
+    scp <peer>:<dataDir>/keys/0.key            <local-dataDir>/keys/0.key
+    scp <peer>:<dataDir>/cluster.id            <local-dataDir>/cluster.id
+    scp <peer>:<dataDir>/keys.d/current.key    <local-dataDir>/keys.d/current.key
 
-Both files must have mode 0o600. Re-run with --confirm-staged-keys.`)
+All three files must have mode 0o600. Re-run with --confirm-staged-keys.`)
 	}
 	force, _ := cmd.Flags().GetBool("force")
 	ep, err := adminEndpointFromCmd(cmd)
@@ -83,6 +87,6 @@ func init() {
 	registerAdminTimeoutFlag(joinCmd)
 	joinCmd.Flags().Bool("force", false, "force join even if solo node has user data (data will be discarded)")
 	joinCmd.Flags().Bool("confirm-staged-keys", false,
-		"Confirm that <dataDir>/keys/0.key and <dataDir>/cluster.id have been staged from the target cluster (REQUIRED in Phase A — runtime join cannot auto-stage these files)")
+		"Confirm that <dataDir>/keys/0.key, <dataDir>/cluster.id, and <dataDir>/keys.d/current.key have been staged from the target cluster (REQUIRED in Phase A — runtime join cannot auto-stage these files)")
 	rootCmd.AddCommand(joinCmd)
 }

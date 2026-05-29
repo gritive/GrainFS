@@ -22,7 +22,7 @@ import (
 // transport, raft) and seeds state.node + state.rpcTransport, leaving the
 // state ready for the three storage runtime phases under test.
 //
-// --cluster-key is required in all modes; a fixed test key is supplied.
+// cluster-key is required in all modes; a fixed test key is supplied.
 // In solo mode bootShardService still runs the !JoinMode branch — meta-raft
 // has a single voter so the leader wait completes near-instantly.
 // The data-plane raft node is constructed but not Bootstrap'd — bootStreamRouter

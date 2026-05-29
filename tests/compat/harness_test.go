@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,6 +85,13 @@ func startCompatCluster(t *testing.T, binaries []string) *compatCluster {
 		dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("gc-%d-*", i))
 		require.NoError(t, err, "mkdtemp for node %d", i)
 		c.dataDirs[i] = dir
+	}
+
+	// Pre-seed the cluster transport PSK on every node's disk (replaces the
+	// removed cluster-key flag). Must run BEFORE any node boots.
+	for i := 0; i < n; i++ {
+		require.NoError(t, transport.NewKeystore(c.dataDirs[i]).WriteCurrent("COMPAT-KEY"),
+			"pre-seed keys.d/current.key for node %d", i)
 	}
 
 	// Start seed node (node 0).
@@ -157,7 +165,6 @@ func (c *compatCluster) startNode(i int) *exec.Cmd {
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", nodeID,
 		"--raft-addr", raftAddr,
-		"--cluster-key", "COMPAT-KEY",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--scrub-interval", "0",
