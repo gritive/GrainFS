@@ -132,9 +132,13 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	}
 
 	token, tokenGen := "", ""
+	tokenBroken := false
 	if d.tokens != nil {
-		if tk, g, ok := d.tokens.CurrentToken(); ok {
+		switch tk, g, st := d.tokens.CurrentToken(); st {
+		case TokenReady:
 			token, tokenGen = tk, g
+		case TokenError:
+			tokenBroken = true
 		}
 	}
 	fp := string(cfg.FailurePolicy)
@@ -153,6 +157,20 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		metrics.PDPRequestsTotal.WithLabelValues("error", errType, fp).Inc()
 		d.audit(req, actor, ctxReq, "deny", errType, "request canceled")
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
+	}
+
+	// A configured-but-unusable bearer token (bad envelope / unseal failure /
+	// encryptor not ready) HARD-DENIES — never silently call the PDP without
+	// Authorization, or a fail-open policy could turn a corrupt/misconfigured token
+	// into an allow. Exempt from failure_policy AND grace, like an SSRF block, and
+	// checked before the cache so a stale allow cached under a once-good token is
+	// not served while the token is broken.
+	if tokenBroken {
+		metrics.PDPRequestsTotal.WithLabelValues("error", ErrTypeTokenUnavailable, fp).Inc()
+		log.Warn().Str("event", "iam.pdp").Str("error_type", ErrTypeTokenUnavailable).
+			Msg("iam.pdp: configured bearer token is unusable (parse/unseal/encryptor) — hard deny")
+		d.audit(req, actor, ctxReq, "deny", ErrTypeTokenUnavailable, "token_unavailable: configured token unusable")
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
 	}
 
 	// Cache lookup slots between req-build and the PDP call. A fresh hit returns

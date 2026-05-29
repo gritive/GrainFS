@@ -33,6 +33,9 @@ const (
 	ErrTypeInvalidDecision = "invalid_decision"
 	ErrTypeSSRF            = "ssrf_blocked"
 	ErrTypeTLS             = "tls"
+	// ErrTypeTokenUnavailable: a bearer token is configured but unusable
+	// (parse/unseal failure or encryptor not ready). The decorator hard-denies.
+	ErrTypeTokenUnavailable = "token_unavailable"
 )
 
 const (

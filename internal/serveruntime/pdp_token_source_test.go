@@ -34,8 +34,8 @@ func TestPDPTokenSource_GenChangesOnReseal(t *testing.T) {
 	ts := newPDPTokenSource(cfg)
 	ts.setEncryptor(enc)
 
-	if _, _, ok := ts.CurrentToken(); ok {
-		t.Fatal("expected no token")
+	if _, _, st := ts.CurrentToken(); st != iampdp.TokenAbsent {
+		t.Fatalf("expected TokenAbsent, got %v", st)
 	}
 
 	envJSON, err := iampdp.SealToken(func(s, k, p string) ([]byte, uint32, error) {
@@ -48,9 +48,9 @@ func TestPDPTokenSource_GenChangesOnReseal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tok, gen1, ok := ts.CurrentToken()
-	if !ok || tok != "tok-1" {
-		t.Fatalf("tok=%q ok=%v", tok, ok)
+	tok, gen1, st := ts.CurrentToken()
+	if st != iampdp.TokenReady || tok != "tok-1" {
+		t.Fatalf("tok=%q status=%v", tok, st)
 	}
 	_, gen1b, _ := ts.CurrentToken()
 	if gen1 != gen1b {
@@ -69,5 +69,27 @@ func TestPDPTokenSource_GenChangesOnReseal(t *testing.T) {
 	tok2, gen2, _ := ts.CurrentToken()
 	if tok2 != "tok-2" || gen2 == gen1 {
 		t.Fatalf("rotation must change token+gen: tok=%q gen=%q (was %q)", tok2, gen2, gen1)
+	}
+}
+
+// TestPDPTokenSource_ConfiguredButNoEncryptorIsError proves that a configured
+// token with the encryptor NOT yet wired reports TokenError (not TokenAbsent) —
+// the decorator hard-denies rather than silently calling the PDP token-less.
+func TestPDPTokenSource_ConfiguredButNoEncryptorIsError(t *testing.T) {
+	cfg := config.NewStore()
+	config.RegisterClusterKeys(cfg, config.ReloadHooks{})
+	enc := staticTestEncryptor(t)
+	envJSON, err := iampdp.SealToken(func(s, k, p string) ([]byte, uint32, error) {
+		return iam.WrapSecret(enc, s, k, p)
+	}, "tok-x")
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	if err := cfg.Set(context.Background(), "iam.pdp.token", string(envJSON)); err != nil {
+		t.Fatal(err)
+	}
+	ts := newPDPTokenSource(cfg) // NOTE: setEncryptor intentionally NOT called
+	if _, _, st := ts.CurrentToken(); st != iampdp.TokenError {
+		t.Fatalf("configured token with no encryptor must be TokenError, got %v", st)
 	}
 }

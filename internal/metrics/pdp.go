@@ -7,7 +7,7 @@ import (
 
 // PDPRequestsTotal counts External PDP consultations.
 //   - decision: "allow" | "deny" | "error"
-//   - error_type: "" for non-errors, else timeout|transport|status|decode|invalid_decision|ssrf_blocked|tls
+//   - error_type: "" for non-errors, else timeout|transport|status|decode|invalid_decision|ssrf_blocked|tls|token_unavailable
 //   - failure_policy: "closed" | "open" (policy in effect for the request)
 var PDPRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "grainfs_iam_pdp_requests_total",

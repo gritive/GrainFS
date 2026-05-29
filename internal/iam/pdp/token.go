@@ -71,10 +71,28 @@ func Fingerprint(token string) string {
 	return hex.EncodeToString(sum[:])[:8]
 }
 
+// TokenStatus tri-states the configured bearer token so the decorator can tell
+// "no token configured" (proceed without Authorization — valid for an http
+// loopback sidecar or an unauthenticated PDP) apart from "a token IS configured
+// but cannot be made usable" (parse/unseal failure, or the encryptor is not
+// ready). The latter must NOT silently degrade to a token-less call — a
+// configured-but-broken secret hard-denies (see Decorator.chain), so a
+// fail-open policy can never turn a corrupt/misconfigured token into an allow.
+type TokenStatus int
+
+const (
+	// TokenAbsent: no iam.pdp.token configured. Proceed without a bearer.
+	TokenAbsent TokenStatus = iota
+	// TokenReady: a usable token (token+gen populated).
+	TokenReady
+	// TokenError: a token is configured but unusable (bad envelope, unseal
+	// failure, or encryptor not ready). The decorator hard-denies.
+	TokenError
+)
+
 // TokenSource gives the decorator the current bearer token + an opaque generation
 // that changes on rotation (feeds clientID + configGen). Implemented in
 // serveruntime (reads the live encryptor + the iam.pdp.token config value).
-// ok=false ⇒ no token configured.
 type TokenSource interface {
-	CurrentToken() (token string, gen string, ok bool)
+	CurrentToken() (token string, gen string, status TokenStatus)
 }

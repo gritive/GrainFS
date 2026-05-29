@@ -28,13 +28,15 @@ func staticTestEncryptor(t testing.TB) storage.DataEncryptor {
 
 // fakePDPTokens implements admin.PDPTokenManager.
 type fakePDPTokens struct {
-	enc   storage.DataEncryptor
-	token string
-	gen   string
-	ok    bool
+	enc    storage.DataEncryptor
+	token  string
+	gen    string
+	status iampdp.TokenStatus
 }
 
-func (f *fakePDPTokens) CurrentToken() (string, string, bool)    { return f.token, f.gen, f.ok }
+func (f *fakePDPTokens) CurrentToken() (string, string, iampdp.TokenStatus) {
+	return f.token, f.gen, f.status
+}
 func (f *fakePDPTokens) CurrentEncryptor() storage.DataEncryptor { return f.enc }
 
 func TestPDPSetToken_SealsBeforePropose(t *testing.T) {
@@ -42,7 +44,7 @@ func TestPDPSetToken_SealsBeforePropose(t *testing.T) {
 	cfg := &routeConfigService{}
 	d := &admin.Deps{
 		ConfigProposer: cfg,
-		PDPTokens:      &fakePDPTokens{enc: staticTestEncryptor(t), ok: false},
+		PDPTokens:      &fakePDPTokens{enc: staticTestEncryptor(t), status: iampdp.TokenAbsent},
 	}
 
 	const plaintext = "super-secret-bearer-token"
@@ -68,7 +70,7 @@ func TestPDPSetToken_NoOpWhenUnchanged(t *testing.T) {
 	const plaintext = "unchanged-token"
 	d := &admin.Deps{
 		ConfigProposer: cfg,
-		PDPTokens:      &fakePDPTokens{enc: staticTestEncryptor(t), token: plaintext, gen: "1", ok: true},
+		PDPTokens:      &fakePDPTokens{enc: staticTestEncryptor(t), token: plaintext, gen: "1", status: iampdp.TokenReady},
 	}
 
 	if err := admin.PDPSetToken(ctx, d, plaintext); err != nil {
@@ -83,7 +85,7 @@ func TestBuildPDPStatus_NeverPrintsToken(t *testing.T) {
 	const token = "a-very-secret-token"
 	pdpRaw := `{"enabled":true,"endpoint":"https://pdp.example.com:8443","tls":{"min_version":"1.3","ca_pem":"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"}}`
 
-	out := admin.BuildPDPStatus(pdpRaw, token)
+	out := admin.BuildPDPStatus(pdpRaw, token, iampdp.TokenReady)
 
 	if strings.Contains(out, token) {
 		t.Fatalf("status output must NEVER contain the token, got:\n%s", out)

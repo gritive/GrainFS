@@ -118,6 +118,21 @@ Work these in order. Do not run them in parallel.
           code + unit-tested (`pdp_token_source_test`), but a tests/e2e cluster spec
           (set-token on node A → PDP consult unseals on node B) was deferred: no ready
           multi-node IAM harness in tests/e2e. Add when one exists.
+
+- [ ] **[P2] IAM-credential encryptor not refreshed on a LIVE snapshot install
+  (PRE-EXISTING, broader than PDP)** — the apply-loop snapshot branch
+  (`meta_raft.go:961`) calls `fsm.Restore` but does NOT run
+  `rebuildDEKKeeperFromRestore`/`wireIAMEncryptor`; that rebuild hook fires only at
+  STARTUP (`boot_phases_raft.go`). A running follower that catches up via a LIVE
+  `InstallSnapshot` carrying newer DEK/config state can be left with a stale
+  DEKKeeper → **any** IAM-credential unseal (AccessKey, BucketUpstream, and the new
+  `iam.pdp.token`) can fail until restart. This is the shared `wireIAMEncryptor`
+  lifecycle, NOT specific to the PDP slice (the PDP token inherits it; with the
+  Slice-6 fix a stale-encryptor unseal now hard-denies instead of silently
+  proceeding, which is safe but still an availability hit). Fix: invoke the
+  post-restore DEK rebuild on the live snapshot path before marking the snapshot
+  applied (or prove live meta snapshots never carry DKVS/credential state). Found
+  by the Slice-6 code gate (codex). Its own slice — touches core raft/DEK lifecycle.
     - Decision cache (positive/negative TTL) + grace mode — **SHIPPED Slice 2**
       (`iam.pdp.cache`: ttl_allow/ttl_deny + LRU max_entries + grace_ttl;
       sharded TTL+LRU, stale-preserving lookup, cache cleared on any iam.pdp

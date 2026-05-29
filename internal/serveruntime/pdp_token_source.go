@@ -17,7 +17,9 @@ type configGetter interface {
 
 // pdpTokenSource implements iampdp.TokenSource AND admin.PDPTokenManager. It reads
 // the sealed envelope from the config store per call and unseals it with the LIVE
-// encryptor (atomic.Pointer, updated by wireIAMEncryptor on snapshot-restore swaps).
+// encryptor (atomic.Pointer, updated by wireIAMEncryptor on fresh boot and the
+// startup snapshot-restore swap; see the known live-snapshot caveat in TODOS —
+// it is the SAME refresh lifecycle the IAM-credential encryptor uses).
 // gen = hash of the sealed envelope string, so any reseal/rotation/clear changes gen.
 type pdpTokenSource struct {
 	cfg configGetter
@@ -36,26 +38,31 @@ func (s *pdpTokenSource) CurrentEncryptor() storage.DataEncryptor {
 	return nil
 }
 
-// CurrentToken reads + unseals the configured bearer token. ok=false ⇒ none configured / not ready.
-func (s *pdpTokenSource) CurrentToken() (string, string, bool) {
+// CurrentToken reads + unseals the configured bearer token, tri-stating the result:
+//   - TokenAbsent: no iam.pdp.token configured.
+//   - TokenReady:  usable token (+ opaque gen = hash of the sealed envelope).
+//   - TokenError:  a token IS configured but unusable (bad envelope, unseal
+//     failure, or encryptor not ready) — the decorator hard-denies rather than
+//     calling the PDP without Authorization.
+func (s *pdpTokenSource) CurrentToken() (string, string, iampdp.TokenStatus) {
 	raw, ok := s.cfg.GetString(iampdp.TokenConfigKey)
 	if !ok || raw == "" {
-		return "", "", false
+		return "", "", iampdp.TokenAbsent
 	}
 	env, err := iampdp.ParseTokenEnvelope([]byte(raw))
 	if err != nil {
-		return "", "", false
+		return "", "", iampdp.TokenError // configured but malformed envelope
 	}
 	encp := s.enc.Load()
 	if encp == nil {
-		return "", "", false
+		return "", "", iampdp.TokenError // configured but encryptor not ready
 	}
 	tok, err := iampdp.OpenToken(func(sa, ak string, gen uint32, ct []byte) (string, error) {
 		return iam.UnwrapSecret(*encp, sa, ak, gen, ct)
 	}, env)
 	if err != nil {
-		return "", "", false
+		return "", "", iampdp.TokenError // configured but unseal failed
 	}
 	sum := sha256.Sum256([]byte(raw))
-	return tok, hex.EncodeToString(sum[:])[:16], true
+	return tok, hex.EncodeToString(sum[:])[:16], iampdp.TokenReady
 }

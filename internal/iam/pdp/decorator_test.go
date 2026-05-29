@@ -724,13 +724,39 @@ func (r *rotatingTokens) set(tok, gen string) {
 	r.mu.Unlock()
 }
 
-func (r *rotatingTokens) CurrentToken() (string, string, bool) {
+func (r *rotatingTokens) CurrentToken() (string, string, TokenStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.gen == "" {
-		return "", "", false
+		return "", "", TokenAbsent
 	}
-	return r.tok, r.gen, true
+	return r.tok, r.gen, TokenReady
+}
+
+// brokenTokens is a TokenSource that reports a token IS configured but unusable.
+type brokenTokens struct{}
+
+func (brokenTokens) CurrentToken() (string, string, TokenStatus) { return "", "", TokenError }
+
+// TestDecoratorTokenErrorHardDeniesUnderFailOpen proves a configured-but-unusable
+// bearer token hard-denies even with failure_policy=open — a corrupt/misconfigured
+// token must never silently degrade to a token-less PDP call that fail-open could
+// turn into an allow. The PDP server here would ALLOW if reached; it must not be.
+func TestDecoratorTokenErrorHardDeniesUnderFailOpen(t *testing.T) {
+	var reached int32
+	endpoint := decoHTTPPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reached, 1)
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(decoCfg(endpoint, "open")), brokenTokens{})
+	res := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("u1"), "",
+		policy.RequestContext{Action: "a", Resource: "r"})
+	if res.Decision != policy.DecisionDeny {
+		t.Fatalf("configured-but-unusable token must HARD-DENY even with failure_policy=open, got %v", res.Decision)
+	}
+	if atomic.LoadInt32(&reached) != 0 {
+		t.Fatalf("PDP must NOT be called when the token is unusable (called %d times)", reached)
+	}
 }
 
 // TestDecoratorTokenRotationRebuildsClientAndCache proves a bearer-token rotation

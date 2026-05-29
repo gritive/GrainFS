@@ -19,7 +19,7 @@ func PDPSetToken(ctx context.Context, d *Deps, plaintext string) error {
 	if d.PDPTokens == nil || d.PDPTokens.CurrentEncryptor() == nil {
 		return fmt.Errorf("pdp set-token: encryptor not ready")
 	}
-	if cur, _, ok := d.PDPTokens.CurrentToken(); ok && cur == plaintext {
+	if cur, _, st := d.PDPTokens.CurrentToken(); st == iampdp.TokenReady && cur == plaintext {
 		return nil // no-op on idempotent re-set (avoid cache/client churn)
 	}
 	enc := d.PDPTokens.CurrentEncryptor()
@@ -45,29 +45,30 @@ func PDPClearToken(ctx context.Context, d *Deps) error {
 	return d.ConfigProposer.ProposeConfigDelete(ctx, iampdp.TokenConfigKey)
 }
 
-// PDPStatus reads the current iam.pdp config + unseals the current token via
+// PDPStatus reads the current iam.pdp config + the current token status via
 // d.PDPTokens, then renders the human-readable status. It NEVER returns the
-// token — only token_configured + the SHA-256 fingerprint.
+// token — only token_configured / token_error + the SHA-256 fingerprint.
 func PDPStatus(_ context.Context, d *Deps) (string, error) {
 	if d.ConfigStore == nil {
 		return "", fmt.Errorf("pdp show: config store not ready")
 	}
 	pdpRaw, _ := d.ConfigStore.GetString("iam.pdp")
-	var token string
+	token := ""
+	status := iampdp.TokenAbsent
 	if d.PDPTokens != nil {
-		if tok, _, ok := d.PDPTokens.CurrentToken(); ok {
-			token = tok
-		}
+		tok, _, st := d.PDPTokens.CurrentToken()
+		token, status = tok, st
 	}
-	return BuildPDPStatus(pdpRaw, token), nil
+	return BuildPDPStatus(pdpRaw, token, status), nil
 }
 
 // BuildPDPStatus renders the PDP status text: endpoint, scheme, TLS
-// (min_version + ca_pinned), token_configured, and the token fingerprint when a
-// token is configured. It NEVER prints the token itself. A malformed iam.pdp
-// document degrades gracefully (the parse error is surfaced) rather than
-// hiding the token state.
-func BuildPDPStatus(pdpRaw, token string) string {
+// (min_version + ca_pinned), token_configured/token_error, and the token
+// fingerprint when a usable token is configured. It NEVER prints the token
+// itself. A configured-but-unusable token reports token_error:true (never
+// silently shown as "not configured"). A malformed iam.pdp document degrades
+// gracefully (the parse error is surfaced) rather than hiding the token state.
+func BuildPDPStatus(pdpRaw, token string, status iampdp.TokenStatus) string {
 	var b strings.Builder
 	cfg, err := iampdp.ParseConfig([]byte(pdpRaw))
 	if err != nil {
@@ -79,8 +80,11 @@ func BuildPDPStatus(pdpRaw, token string) string {
 		fmt.Fprintf(&b, "tls.min_version: %s\n", tlsVersionString(cfg.TLS.MinVersion))
 		fmt.Fprintf(&b, "tls.ca_pinned:   %t\n", cfg.TLS.CAPEM != "")
 	}
-	fmt.Fprintf(&b, "token_configured: %t\n", token != "")
-	if token != "" {
+	fmt.Fprintf(&b, "token_configured: %t\n", status != iampdp.TokenAbsent)
+	if status == iampdp.TokenError {
+		fmt.Fprintf(&b, "token_error:      true (configured but unusable: bad envelope / unseal / encryptor not ready)\n")
+	}
+	if status == iampdp.TokenReady && token != "" {
 		fmt.Fprintf(&b, "token_fingerprint: %s\n", iampdp.Fingerprint(token))
 	}
 	return b.String()

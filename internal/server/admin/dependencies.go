@@ -8,6 +8,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
+	iampdp "github.com/gritive/GrainFS/internal/iam/pdp"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/nfs4server"
@@ -168,11 +169,11 @@ type ConfigProposer interface {
 }
 
 // PDPTokenManager is the slim accessor the PDP token admin handlers need: the
-// current sealed bearer token (plaintext + opaque generation) and the live
-// cluster-consistent DataEncryptor used to seal a new one. Satisfied by an
-// adapter in serveruntime (Task 9). nil disables the pdp token endpoints.
+// current sealed bearer token (tri-stated: absent / ready / configured-but-error)
+// and the live cluster-consistent DataEncryptor used to seal a new one. Satisfied
+// by an adapter in serveruntime. nil disables the pdp token endpoints.
 type PDPTokenManager interface {
-	CurrentToken() (token, gen string, ok bool)
+	CurrentToken() (token, gen string, status iampdp.TokenStatus)
 	CurrentEncryptor() storage.DataEncryptor
 }
 
