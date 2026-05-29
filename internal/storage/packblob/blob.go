@@ -422,11 +422,16 @@ func readFullAt(f *os.File, buf []byte, off *int64) error {
 	return nil
 }
 
-func (bs *BlobStore) skipReadCRC(flags byte) bool {
-	// XAES-256-GCM authenticates encrypted blob entries, including key, blob id,
-	// offset, and flags via AAD. Recomputing CRC32 over the ciphertext on every
-	// GET duplicates that integrity check on the hot path.
-	return bs.segEnc != nil && flags&flagEncrypted != 0
+func (bs *BlobStore) skipReadCRC(_ byte) bool {
+	// Behavior-preservation (R3): the CRC-skip optimization was previously gated
+	// on the now-removed static bs.encryptor, which was nil on the live DEK path,
+	// so encrypted DEK reads have ALWAYS recomputed the CRC. Keep that — do NOT
+	// re-point the gate at bs.segEnc, which would flip the DEK read path to
+	// CRC-skip (a prod behavior change outside this dead-code-removal slice).
+	// AEAD already authenticates encrypted entries (key/blob id/offset/flags via
+	// AAD), so extending the skip to the DEK path is a safe future optimization —
+	// see TODOS / PR follow-ups.
+	return false
 }
 
 func (bs *BlobStore) rotate() error {
