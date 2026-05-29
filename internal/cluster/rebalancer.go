@@ -125,6 +125,15 @@ func (r *Rebalancer) tickOnce(ctx context.Context) {
 		return
 	}
 
+	if r.meta.FSM().IsRevoked(lightest) {
+		lightest = lightestExcludingRevoked(snap, r.meta.FSM())
+		if lightest == "" || lightest == heaviest {
+			// No healthy destination distinct from the source: a from==to move
+			// would have MoveReplica remove the only healthy voter it re-adds.
+			return
+		}
+	}
+
 	groupID := r.selectGroupToMigrate(heaviest)
 	if groupID == "" {
 		return
@@ -181,6 +190,24 @@ func (r *Rebalancer) selectGroupToMigrate(heaviestNode string) string {
 		}
 	}
 	return ""
+}
+
+// lightestExcludingRevoked returns the lowest-DiskUsedPct node that is not
+// Zero-CA-revoked, or "" if every node in the snapshot is revoked. Mirrors
+// findImbalance's iteration so a revoked node is never chosen as a destination.
+func lightestExcludingRevoked(snap map[string]LoadStatEntry, fsm *MetaFSM) string {
+	best := ""
+	var minPct float64 = 101
+	for _, e := range snap {
+		if fsm.IsRevoked(e.NodeID) {
+			continue
+		}
+		if e.DiskUsedPct < minPct {
+			minPct = e.DiskUsedPct
+			best = e.NodeID
+		}
+	}
+	return best
 }
 
 // findImbalance returns (heaviest, lightest, diff) from the load snapshot.

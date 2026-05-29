@@ -206,6 +206,7 @@ type bootState struct {
 	effectiveEC      cluster.ECConfig
 	stopApply        chan struct{}
 	rebalancer       *cluster.Rebalancer
+	evacuator        *cluster.DataGroupEvacuator
 	loadReporter     *cluster.LoadReporter
 	loadReporterStor *cluster.NodeStatsStore
 

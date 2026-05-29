@@ -125,6 +125,74 @@ func (e *DataGroupEvacuator) Run(ctx context.Context) {
 // Stop signals Run to exit. Idempotent.
 func (e *DataGroupEvacuator) Stop() { e.stopOnce.Do(func() { close(e.stopCh) }) }
 
+// NewDataGroupEvacuator builds the production evacuator. ledTargets derives groups
+// this node LEADS that still contain a revoked voter. loadPick picks a non-revoked,
+// non-member replacement. It drives the idempotent EvacuateVoter; PeerIDs
+// convergence is a CONSEQUENCE of that real ChangeMembership (P1-1) — the evacuator
+// NEVER prunes a mirror directly.
+func NewDataGroupEvacuator(
+	localNodeID string,
+	fsm *MetaFSM,
+	dgMgr *DataGroupManager,
+	exec *DataGroupPlanExecutor,
+	loadPick func(groupID string, exclude map[string]struct{}) (string, bool),
+	tick time.Duration,
+) *DataGroupEvacuator {
+	e := &DataGroupEvacuator{
+		localNodeID: localNodeID,
+		src:         fsm,
+		mover:       exec,
+		logger:      log.With().Str("component", "evacuator").Logger(),
+		pickHealthy: loadPick,
+		tick:        tick,
+		wakeCh:      make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
+	}
+	e.ledTargets = func() []evacTarget {
+		revoked := fsm.RevokedNodeIDs()
+		if len(revoked) == 0 {
+			return nil
+		}
+		var out []evacTarget
+		for _, dg := range dgMgr.All() {
+			if dg == nil || dg.Backend() == nil || dg.Backend().Node() == nil {
+				continue
+			}
+			if !dg.Backend().Node().IsLeader() {
+				continue
+			}
+			for _, p := range dg.PeerIDs() {
+				if _, isRevoked := revoked[p]; isRevoked {
+					out = append(out, evacTarget{groupID: dg.ID(), revokedNode: p, peerIDs: dg.PeerIDs()})
+				}
+			}
+		}
+		return out
+	}
+	return e
+}
+
+// PickHealthyExcluding returns the lightest (lowest load) candidate not in exclude,
+// or ("", false) to signal a shrink. loadFn returns (load, known).
+func PickHealthyExcluding(candidates []string, loadFn func(id string) (float64, bool), exclude map[string]struct{}) (string, bool) {
+	best := ""
+	var bestLoad float64
+	for _, id := range candidates {
+		if _, ex := exclude[id]; ex {
+			continue
+		}
+		l, _ := loadFn(id)
+		if best == "" || l < bestLoad {
+			best = id
+			bestLoad = l
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
 // newDataGroupEvacuatorForTest builds an evacuator with injected derivation
 // functions and a tiny tick. Test-only.
 func newDataGroupEvacuatorForTest(

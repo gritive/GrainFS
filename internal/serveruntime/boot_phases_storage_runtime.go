@@ -408,7 +408,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
 		"group-0",
-		SeedShardGroupVoters(state.nodeID, state.raftAddr, state.peers, state.metaRaft.FSM().Nodes(), "group-0", 3),
+		SeedShardGroupVoters(state.nodeID, state.raftAddr, state.peers, liveNonRevokedNodes(state.metaRaft.FSM()), "group-0", 3),
 		group0Backend,
 	)
 	state.dgMgr.Add(group0)
@@ -434,6 +434,38 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	})
 	go rebalancer.Run(ctx)
 	state.rebalancer = rebalancer
+
+	evacExec := cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft)
+	loadPick := func(groupID string, exclude map[string]struct{}) (string, bool) {
+		members := map[string]struct{}{}
+		if dg := state.dgMgr.Get(groupID); dg != nil {
+			for _, p := range dg.PeerIDs() {
+				members[p] = struct{}{}
+			}
+		}
+		var candidates []string
+		for _, n := range state.metaRaft.FSM().Nodes() {
+			if _, isMember := members[n.ID]; isMember {
+				continue
+			}
+			candidates = append(candidates, n.ID)
+		}
+		return cluster.PickHealthyExcluding(candidates, func(id string) (float64, bool) {
+			if ls, ok := state.metaRaft.FSM().LoadSnapshot()[id]; ok {
+				return ls.DiskUsedPct, true
+			}
+			return 0, false
+		}, exclude)
+	}
+	evacuator := cluster.NewDataGroupEvacuator(state.nodeID, state.metaRaft.FSM(), state.dgMgr, evacExec, loadPick, 30*time.Second)
+	state.metaRaft.FSM().SetOnNodeRevoked(func(string) { evacuator.Wake() })
+	// Run UNCONDITIONALLY on every node (mirror the ungated `go rebalancer.Run(ctx)`).
+	// LOAD-BEARING: data groups are led by invite-JOINED nodes, and only that group's
+	// leader can issue the data-raft ChangeMembership that evicts a revoked voter.
+	// Gating on joinMode would make joiner-led groups never evict. The single-node /
+	// leads-no-foreign-group case is a true no-op via empty led-targets, not a boot gate.
+	go evacuator.Run(ctx)
+	state.evacuator = evacuator
 
 	owned := &ownedGroupsState{
 		m:        make(map[string]*cluster.GroupBackend),

@@ -111,6 +111,53 @@ func TestRebalancer_NewNodeUnderUtilization_TriggersMigration(t *testing.T) {
 	assert.Equal(t, "fresh", mc.proposedPlans[0].ToNode, "lightest (fresh) must be ToNode")
 }
 
+// TestRebalancer_DoesNotTargetRevokedNodeAsDestination verifies that when the
+// lightest (lowest-load) node is Zero-CA-revoked, the rebalancer never proposes
+// it as a migration destination — it falls back to the lightest non-revoked node.
+func TestRebalancer_DoesNotTargetRevokedNodeAsDestination(t *testing.T) {
+	mc := newMockMetaClient()
+	entries := []LoadStatEntry{
+		{NodeID: "heavy", DiskUsedPct: 90.0},
+		{NodeID: "revoked-light", DiskUsedPct: 5.0}, // lightest, but revoked
+		{NodeID: "healthy-light", DiskUsedPct: 20.0},
+	}
+	require.NoError(t, mc.fsm.applyCmd(makeSetLoadSnapshotCmdDirect(entries)))
+	mc.fsm.recordRevokedNodeForTest("revoked-light")
+
+	gm := NewDataGroupManager()
+	gm.Add(NewDataGroup("group-0", []string{"heavy", "other"}))
+
+	r := NewRebalancer("leader", mc, gm, DefaultRebalancerConfig())
+	r.tickOnce(context.Background())
+
+	require.Len(t, mc.proposedPlans, 1)
+	assert.Equal(t, "heavy", mc.proposedPlans[0].FromNode)
+	assert.Equal(t, "healthy-light", mc.proposedPlans[0].ToNode, "must not target the revoked lightest node")
+	assert.NotEqual(t, "revoked-light", mc.proposedPlans[0].ToNode)
+}
+
+// TestRebalancer_NoPlanWhenOnlyHealthyNodeIsHeaviest verifies the 2-node edge:
+// when the lightest node is revoked, the only non-revoked candidate is the
+// heaviest (source) itself — a from==to move would be destructive, so no plan
+// is proposed.
+func TestRebalancer_NoPlanWhenOnlyHealthyNodeIsHeaviest(t *testing.T) {
+	mc := newMockMetaClient()
+	entries := []LoadStatEntry{
+		{NodeID: "heavy", DiskUsedPct: 90.0},
+		{NodeID: "revoked-light", DiskUsedPct: 5.0}, // lightest, but revoked
+	}
+	require.NoError(t, mc.fsm.applyCmd(makeSetLoadSnapshotCmdDirect(entries)))
+	mc.fsm.recordRevokedNodeForTest("revoked-light")
+
+	gm := NewDataGroupManager()
+	gm.Add(NewDataGroup("group-0", []string{"heavy", "revoked-light"}))
+
+	r := NewRebalancer("leader", mc, gm, DefaultRebalancerConfig())
+	r.tickOnce(context.Background())
+
+	assert.Empty(t, mc.proposedPlans, "must not propose a from==to move when the only healthy node is the source")
+}
+
 func TestRebalancer_SkipsIfNotLeader(t *testing.T) {
 	mc := newMockMetaClient()
 	mc.leader = false

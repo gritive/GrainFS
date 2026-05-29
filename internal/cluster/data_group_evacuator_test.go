@@ -79,6 +79,24 @@ func TestEvacuator_LeadershipTransferred_IsNotFatal(t *testing.T) {
 	require.Len(t, ev.mover.(*fakeEvacuator).calls, 1)
 }
 
+func TestPickHealthyExcluding_SkipsExcludedAndPicksLightest(t *testing.T) {
+	loads := map[string]float64{"a": 70, "b": 10, "c": 30, "d": 5}
+	loadFn := func(id string) (float64, bool) {
+		l, ok := loads[id]
+		return l, ok
+	}
+	candidates := []string{"a", "b", "c", "d"}
+
+	// "d" is the lightest (5) but excluded; "b" (10) is the lightest non-excluded.
+	got, ok := PickHealthyExcluding(candidates, loadFn, revokedSet("d"))
+	require.True(t, ok)
+	require.Equal(t, "b", got)
+
+	// All excluded → ("", false) to signal a shrink.
+	_, ok = PickHealthyExcluding(candidates, loadFn, revokedSet("a", "b", "c", "d"))
+	require.False(t, ok)
+}
+
 func TestEvacuator_DoesNotMoveToAnotherRevokedNode(t *testing.T) {
 	var capturedExclude map[string]struct{}
 	ev := newDataGroupEvacuatorForTest("node-a", revokedSet("node-b", "node-d"), &fakeEvacuator{},
