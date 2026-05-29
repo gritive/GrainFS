@@ -23,11 +23,17 @@ type BlobLocation struct {
 }
 
 // Entry format: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
-// flags bit 0: compressed (zstd)
+// Gen-framed (flagGenFramed) entry format inserts dek_gen after flags:
+//
+//	[key_len:4][key][flags:1][dek_gen:4][data_len:4][data][crc32:4]
+//
+// flags bit 0: compressed (zstd); bit 1: encrypted (DEK); bit 2: gen-framed.
 const (
-	entryOverhead  = 4 + 1 + 4 + 4 // key_len + flags + data_len + crc32
+	entryOverhead  = 4 + 1 + 4 + 4 // key_len + flags + data_len + crc32 (gen-framed adds genFieldSize)
+	genFieldSize   = 4             // dek_gen, present only when flagGenFramed is set
 	flagCompressed = byte(0x01)
 	flagEncrypted  = byte(0x02)
+	flagGenFramed  = byte(0x04) // entry frame carries a 4-byte dek_gen after flags
 )
 
 var (
@@ -100,12 +106,11 @@ func NewBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 // NewDEKBlobStore creates a blob store that seals entry payloads via the
 // gen-aware DEK seam (DEKKeeperAdapter). clusterID MUST be 16 bytes.
 //
-// GEN-FRAME INVARIANT: packblob entry frames carry no dek_gen — Append discards
-// the seal gen and Read/recovery always open at gen 0. This is correct ONLY
-// while the active DEK gen is 0. R1 defers data-DEK rotation (spec decision #5)
-// and gates encryption.rotate-dek to keep the active gen pinned at 0. A future
-// rotation slice MUST grow a per-entry gen field here before the active gen can
-// advance.
+// Entries written by an encrypted store are gen-framed (flagGenFramed): each
+// frame records the DEK generation it was sealed under, so Read/recovery open
+// under the correct per-entry gen and entries of mixed gens may coexist in one
+// blob file (the prerequisite for incremental rewrap). The active gen stays 0
+// until encryption.rotate-dek is enabled; gen-0 frames are the steady state.
 func NewDEKBlobStore(dir string, maxSize int64, keeper *encrypt.DEKKeeper, clusterID []byte) (*BlobStore, error) {
 	if keeper == nil {
 		return nil, fmt.Errorf("DEK blob store requires keeper")
@@ -187,23 +192,31 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	defer bs.mu.Unlock()
 
 	offset := bs.activeOff
+	// dekGen is the generation SealTo actually sealed under. It is recorded in
+	// the frame (M2: never re-read from the keeper — Append holds bs.mu across
+	// seal+frame-write, so the returned value is the authoritative, race-free
+	// gen). gen is NOT bound in the AAD: it is only knowable after SealTo, and a
+	// flipped frame gen already fails closed because Open(gen') selects key[gen']
+	// and the AEAD tag mismatches (the AAD binds flags, incl. flagGenFramed).
+	var dekGen uint32
 	if bs.segEnc != nil {
-		flags |= flagEncrypted
+		flags |= flagEncrypted | flagGenFramed
 		sealedBuf := getBlobAppendSealedBuf()
 		// Closure (not value-capture): the rotate branch below reassigns
 		// payload to a re-sealed buffer, so we must return whatever payload
 		// is at function exit. payload is fully written to bs.active before
 		// we return, so recycling it after is safe.
 		defer func() { putBlobAppendSealedBuf(payload) }()
-		sealed, _, err := bs.segEnc.SealTo(sealedBuf[:0], encrypt.DomainShard,
+		sealed, gen, err := bs.segEnc.SealTo(sealedBuf[:0], encrypt.DomainShard,
 			blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
 		payload = sealed
 		if err != nil {
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 		}
+		dekGen = gen
 	}
 
-	entrySize := int64(entryOverhead + len(key) + len(payload))
+	entrySize := int64(framedEntrySize(len(key), len(payload), flags))
 
 	// Rotate if this entry would exceed max blob size
 	if bs.activeOff+entrySize > bs.maxSize && bs.activeOff > 0 {
@@ -212,17 +225,18 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 		}
 		offset = bs.activeOff
 		if bs.segEnc != nil {
-			sealed, _, err := bs.segEnc.SealTo(payload[:0], encrypt.DomainShard,
+			sealed, gen, err := bs.segEnc.SealTo(payload[:0], encrypt.DomainShard,
 				blobEntryAADFields(bs.activeID, uint64(offset), key, flags), storedPayload)
 			payload = sealed
 			if err != nil {
 				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 			}
-			entrySize = int64(entryOverhead + len(key) + len(payload))
+			dekGen = gen
+			entrySize = int64(framedEntrySize(len(key), len(payload), flags))
 		}
 	}
 
-	// Write: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
+	// Write: [key_len:4][key][flags:1]([dek_gen:4] iff gen-framed)[data_len:4][data][crc32:4]
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(key)))
 	if _, err := bs.active.Write(header[:]); err != nil {
@@ -231,10 +245,16 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	if _, err := bs.active.WriteString(key); err != nil {
 		return BlobLocation{}, err
 	}
-	var entryHeader [5]byte
+	var entryHeader [9]byte // flags(1) + optional dek_gen(4) + data_len(4)
 	entryHeader[0] = flags
-	binary.BigEndian.PutUint32(entryHeader[1:], uint32(len(payload)))
-	if _, err := bs.active.Write(entryHeader[:]); err != nil {
+	n := 1
+	if flags&flagGenFramed != 0 {
+		binary.BigEndian.PutUint32(entryHeader[n:], dekGen)
+		n += genFieldSize
+	}
+	binary.BigEndian.PutUint32(entryHeader[n:], uint32(len(payload)))
+	n += 4
+	if _, err := bs.active.Write(entryHeader[:n]); err != nil {
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.Write(payload); err != nil {
@@ -242,7 +262,7 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	}
 
 	var crc [4]byte
-	binary.BigEndian.PutUint32(crc[:], blobEntryCRC([]byte(key), flags, payload))
+	binary.BigEndian.PutUint32(crc[:], blobEntryCRC([]byte(key), flags, dekGen, payload))
 	if _, err := bs.active.Write(crc[:]); err != nil {
 		return BlobLocation{}, err
 	}
@@ -289,6 +309,15 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	}
 	flags := flagBuf[0]
 
+	var dekGen uint32
+	if flags&flagGenFramed != 0 {
+		if err := readFullAt(f, header[:], &off); err != nil {
+			releaseBlobReadBuffers(key, nil, false)
+			return nil, err
+		}
+		dekGen = binary.BigEndian.Uint32(header[:])
+	}
+
 	if err := readFullAt(f, header[:], &off); err != nil {
 		releaseBlobReadBuffers(key, nil, false)
 		return nil, err
@@ -322,12 +351,12 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	expectedCRC := binary.BigEndian.Uint32(header[:])
 
 	if !bs.skipReadCRC(flags) {
-		if blobEntryCRC(key, flags, payload) != expectedCRC {
+		if blobEntryCRC(key, flags, dekGen, payload) != expectedCRC {
 			if legacyBlobEntryCRC(key, payload) != expectedCRC {
 				releaseBlobReadBuffers(key, payload, pooledPayload)
 				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
 			}
-			if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, payload); err != nil {
+			if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, dekGen, payload); err != nil {
 				releaseBlobReadBuffers(key, payload, pooledPayload)
 				return nil, err
 			}
@@ -337,11 +366,11 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	if bs.segEnc != nil && flags&flagEncrypted != 0 {
 		encryptedPayload := payload
 		payload, err = bs.segEnc.Open(encrypt.DomainShard,
-			blobEntryAADFields(loc.BlobID, loc.Offset, string(key), flags), 0, encryptedPayload)
+			blobEntryAADFields(loc.BlobID, loc.Offset, string(key), flags), dekGen, encryptedPayload)
 		releaseBlobReadBuffers(key, encryptedPayload, pooledPayload)
 	} else {
 		keyString := string(key)
-		payload, err = bs.decodePayload(loc.BlobID, loc.Offset, keyString, flags, payload)
+		payload, err = bs.decodePayload(loc.BlobID, loc.Offset, keyString, flags, dekGen, payload)
 		releaseBlobReadBuffers(key, nil, false)
 	}
 	if err != nil {
@@ -494,6 +523,14 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 		}
 		flags := flagBuf[0]
 
+		var dekGen uint32
+		if flags&flagGenFramed != 0 {
+			if _, err := io.ReadFull(f, header[:]); err != nil {
+				break
+			}
+			dekGen = binary.BigEndian.Uint32(header[:])
+		}
+
 		if _, err := io.ReadFull(f, header[:]); err != nil {
 			break
 		}
@@ -512,18 +549,18 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 			break
 		}
 		expectedCRC := binary.BigEndian.Uint32(header[:])
-		offset += int64(entryOverhead + int(keyLen) + int(dataLen))
+		offset += int64(framedEntrySize(int(keyLen), int(dataLen), flags))
 
 		if !tombstones[string(key)] {
-			if blobEntryCRC(key, flags, payload) != expectedCRC {
+			if blobEntryCRC(key, flags, dekGen, payload) != expectedCRC {
 				if legacyBlobEntryCRC(key, payload) != expectedCRC {
 					return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", blobID, entryOffset)
 				}
-				if err := bs.rejectEncryptedFlagDowngrade(blobID, uint64(entryOffset), string(key), flags, payload); err != nil {
+				if err := bs.rejectEncryptedFlagDowngrade(blobID, uint64(entryOffset), string(key), flags, dekGen, payload); err != nil {
 					return nil, err
 				}
 			}
-			data, err := bs.decodePayload(blobID, uint64(entryOffset), string(key), flags, payload)
+			data, err := bs.decodePayload(blobID, uint64(entryOffset), string(key), flags, dekGen, payload)
 			if err != nil {
 				return nil, err
 			}
@@ -625,9 +662,27 @@ func releaseBlobReadPayloadBuffer(buf []byte) {
 	}
 }
 
-func blobEntryCRC(key []byte, flags byte, payload []byte) uint32 {
+// framedEntrySize is the on-disk byte size of an entry, including the optional
+// dek_gen field when flagGenFramed is set.
+func framedEntrySize(keyLen, payloadLen int, flags byte) int {
+	size := entryOverhead + keyLen + payloadLen
+	if flags&flagGenFramed != 0 {
+		size += genFieldSize
+	}
+	return size
+}
+
+// blobEntryCRC covers key + flags + (dek_gen, iff gen-framed) + payload. The gen
+// is folded in only for gen-framed entries so legacy/plaintext frames keep their
+// existing CRC formula (and the legacyBlobEntryCRC downgrade fallback).
+func blobEntryCRC(key []byte, flags byte, gen uint32, payload []byte) uint32 {
 	crc := crc32.Update(0, crc32.IEEETable, key)
 	crc = crc32UpdateIEEEByte(crc, flags)
+	if flags&flagGenFramed != 0 {
+		var g [genFieldSize]byte
+		binary.BigEndian.PutUint32(g[:], gen)
+		crc = crc32.Update(crc, crc32.IEEETable, g[:])
+	}
 	return crc32.Update(crc, crc32.IEEETable, payload)
 }
 
@@ -649,12 +704,16 @@ func crc32UpdateIEEEByte(crc uint32, b byte) uint32 {
 // The check does NOT gate on encrypt.IsEncryptedValue: DEK-sealed payloads are
 // nonce||ciphertext and carry no value-magic, so the Open-attempt is the only
 // reliable signal. Genuine plaintext fails every Open and passes through.
-func (bs *BlobStore) rejectEncryptedFlagDowngrade(blobID uint64, offset uint64, key string, flags byte, payload []byte) error {
+func (bs *BlobStore) rejectEncryptedFlagDowngrade(blobID uint64, offset uint64, key string, flags byte, gen uint32, payload []byte) error {
 	if bs.segEnc == nil || flags&flagEncrypted != 0 {
 		return nil
 	}
+	// Candidates re-add flagEncrypted (and flagCompressed) while preserving the
+	// rest of flags — including flagGenFramed, which is bound in the AAD; gen is
+	// passed as the Open selector (M3). For a downgraded gen-framed entry the
+	// parsed gen is real, so the candidate Open reproduces the sealing context.
 	for _, candidate := range encryptedFlagCandidates(flags) {
-		if _, err := bs.segEnc.Open(encrypt.DomainShard, blobEntryAADFields(blobID, offset, key, candidate), 0, payload); err == nil {
+		if _, err := bs.segEnc.Open(encrypt.DomainShard, blobEntryAADFields(blobID, offset, key, candidate), gen, payload); err == nil {
 			return fmt.Errorf("encrypted blob entry flags mismatch")
 		}
 	}
@@ -670,7 +729,7 @@ func encryptedFlagCandidates(flags byte) []byte {
 	return []byte{withEncrypted, withCompressedEncrypted}
 }
 
-func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, payload []byte) ([]byte, error) {
+func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, gen uint32, payload []byte) ([]byte, error) {
 	if bs.segEnc == nil {
 		if encrypt.IsLegacyEncryptedValue(payload) {
 			return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
@@ -678,7 +737,7 @@ func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, fla
 		return payload, nil
 	}
 	if flags&flagEncrypted != 0 {
-		plain, err := bs.segEnc.Open(encrypt.DomainShard, blobEntryAADFields(blobID, offset, key, flags), 0, payload)
+		plain, err := bs.segEnc.Open(encrypt.DomainShard, blobEntryAADFields(blobID, offset, key, flags), gen, payload)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt blob entry: %w", err)
 		}
@@ -692,7 +751,7 @@ func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, fla
 	if encrypt.IsLegacyEncryptedValue(payload) {
 		return nil, fmt.Errorf("blob entry carries an unsupported/old encrypted-value format (pre-XAES); in-place upgrade unsupported")
 	}
-	if err := bs.rejectEncryptedFlagDowngrade(blobID, offset, key, flags, payload); err != nil {
+	if err := bs.rejectEncryptedFlagDowngrade(blobID, offset, key, flags, gen, payload); err != nil {
 		return nil, err
 	}
 	return payload, nil
@@ -737,6 +796,15 @@ func (bs *BlobStore) ScanAll() (map[string]BlobLocation, error) {
 			if _, err := io.ReadFull(f, flagBuf[:]); err != nil {
 				break
 			}
+			flags := flagBuf[0]
+
+			var dekGen uint32
+			if flags&flagGenFramed != 0 {
+				if _, err := io.ReadFull(f, header[:]); err != nil {
+					break
+				}
+				dekGen = binary.BigEndian.Uint32(header[:])
+			}
 
 			if _, err := io.ReadFull(f, header[:]); err != nil {
 				break
@@ -755,12 +823,15 @@ func (bs *BlobStore) ScanAll() (map[string]BlobLocation, error) {
 				break
 			}
 			expectedCRC := binary.BigEndian.Uint32(header[:])
-			if crc := blobEntryCRC(key, flagBuf[0], data); crc != expectedCRC && legacyBlobEntryCRC(key, data) != expectedCRC {
-				offset += int64(entryOverhead + int(keyLen) + int(dataLen))
+			if crc := blobEntryCRC(key, flags, dekGen, data); crc != expectedCRC && legacyBlobEntryCRC(key, data) != expectedCRC {
+				offset += int64(framedEntrySize(int(keyLen), int(dataLen), flags))
 				continue
 			}
 
-			entrySize := int64(entryOverhead + int(keyLen) + int(dataLen))
+			// BlobLocation.Length is the ciphertext length (excludes the gen
+			// field); Read re-parses the gen from the frame, so gen is not
+			// propagated into the locator/index (scope guard).
+			entrySize := int64(framedEntrySize(int(keyLen), int(dataLen), flags))
 			locs[string(key)] = BlobLocation{
 				BlobID: blobID,
 				Offset: uint64(offset),

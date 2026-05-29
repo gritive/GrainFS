@@ -17,11 +17,43 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,
      no legacy ciphertext to support). Current format = **8**.
-   - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
-     the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
-     a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND
-     all data lanes carry EC-style per-segment gen framing + roll-on-gen-change (today only EC
-     has it); also close the EC mid-shard race (`eccodec/shardio.go:168`).
+   - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
+     DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
+     (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path
+     `break`s gracefully). The WAL does NOT self-heal the torn tail — `scanMaxSeq` only reads (no
+     truncate) and the writer reopens `O_APPEND` (`wal.go:250`), so after a crash a torn frame
+     persists and PITR restore **errors until that segment ages out of WAL retention**. Strictly
+     better than before the DEK-PITR fix (encrypted PITR was 100% broken), but a real post-crash gap.
+     Fix would tolerate a trailing `io.ErrUnexpectedEOF` on the FINAL segment in `wal.replay()` (index
+     `i == len(files)-1`; `segmentFiles` sorts ascending) while keeping decrypt/auth + non-final torn
+     fatal — this REVERSES the deliberate replay-strict contract, so update the existing test
+     consciously. Keep parity with the plaintext path.
+   - [ ] **Data-DEK rotation re-enable → full rekey lifecycle (epic; keep gated until prerequisites land).**
+     User decision 2026-05-30: target the **full rekey lifecycle** (rotate → rewrap → prune,
+     compromise recovery), executed slice-by-slice. Re-enable the `encryption.rotate-dek` trigger
+     only after **all** ciphertext-bearing formats persist a non-zero `dek_gen` AND all data lanes
+     carry per-entry/per-segment gen framing + roll-on-gen-change. Slice status:
+     - **S1 packblob per-entry `dek_gen` framing — DONE** (this PR). Done via a self-describing
+       per-entry flag bit (`flagGenFramed` + 4-byte gen between flags and data_len), **deliberately
+       NOT the "format v8+" bump the spec anticipated** — packblob has no file/dir header to version,
+       and rewrap needs mixed-gen entries in one append-only file, so per-entry self-describing
+       framing is the permanent design. Read/Compact/ScanAll all gen-aware; gen is a key selector
+       (not AAD-bound: only known post-`SealTo`; flipped gen fails closed via AEAD key-miss) +
+       CRC-covered. Behavior-neutral at gen 0.
+       **Compact = implicit partial rewrap (S7 prune-safety input):** post-rotation, `Compact`
+       decrypts survivors then re-`Append`s them → re-seals under the **active** gen (no
+       seal-under-specific-gen API). So Compact migrates entries off their pinned gen. **S7 prune
+       MUST NOT assume Compact preserves an entry's gen** when deciding a gen is unreferenced.
+     - S2 datawal `RollSegmentOnRotation` boundary + synchronous wiring (plan exists, deferred).
+     - S3 legacy/logical WAL (`internal/storage/wal`) per-record gen framing + rotation boundary +
+       non-dropping seal-error on the async `AppendAsync` path.
+     - S4 close the EC mid-shard race (`eccodec/shardio.go:168`).
+     - S5 enable `encryption.rotate-dek` (remove gate `config/keys.go:109`, wire `OnDEKRotate`) — needs S1–S4.
+     - S6 rewrap scrubber: old-gen→new-gen re-encryption across ALL lanes (EC/packblob/datawal/
+       logical-WAL/FSM-value/IAM/snapshot) — large, may sub-slice; `scrubberKick` is `nil` today
+       (`dek_keeper_wiring.go:200`).
+     - S7 reference-safe `Prune` (DEKKeeper.Prune `safe` arg) + wire `scrubberKick` + rewrap-completion tracking.
+     - (out of epic) raft-log-command plaintext at rest — **separate spec** (DEK is boot-circular).
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`) +
      D-cut bootstrap-envelope design (`...at-rest-dcut-bootstrap-envelope-design.md`).
