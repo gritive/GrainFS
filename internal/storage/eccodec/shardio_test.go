@@ -829,6 +829,63 @@ func TestEncryptedShardReaders_ReusePlaintextBufferAcrossChunks(t *testing.T) {
 	})
 }
 
+// TestEncryptedShardReaders_PartialFinalChunkZeroesTail is the regression guard
+// for the len→cap buffer-hygiene change. With a reused plaintext buffer, a FULL
+// chunk fills the backing [0:chunkSize], then a PARTIAL final chunk decrypts only
+// [0:plainLen] — the [plainLen:cap] tail must be zeroed (by the clear-before-OpenTo
+// of the full capacity), NOT left holding the previous full chunk's plaintext. The
+// uniform-full-chunk reuse test cannot catch a regression here (len==cap always),
+// so this drives a non-chunk-aligned total and asserts the tail of the final
+// (partial) chunk's backing is all-zero.
+func TestEncryptedShardReaders_PartialFinalChunkZeroesTail(t *testing.T) {
+	const chunkSize = 1024
+	// 3 full chunks + a 200-byte partial final chunk, with distinctive per-byte
+	// content so a residue from a prior full chunk would be a non-zero tail.
+	data := make([]byte, 3*chunkSize+200)
+	for i := range data {
+		data[i] = byte('A' + i%26)
+	}
+	fields := shardBaseFields()
+
+	encode := func(t *testing.T) []byte {
+		f := newFakeShardEncryptor(t)
+		var buf bytes.Buffer
+		require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(data), f, fields, chunkSize))
+		return buf.Bytes()
+	}
+	// assertTail checks the final chunk's plaintext window is exactly 200 bytes and
+	// the backing's [200:cap] tail is fully zeroed (no prior full-chunk residue).
+	assertTail := func(t *testing.T, plainFull []byte) {
+		t.Helper()
+		require.Equal(t, 200, len(plainFull), "final partial chunk plaintext len")
+		require.GreaterOrEqual(t, cap(plainFull), chunkSize, "buffer pre-sized to chunkSize")
+		tail := plainFull[len(plainFull):cap(plainFull)]
+		for i, b := range tail {
+			require.Zerof(t, b, "tail[%d] (backing index %d) not zeroed — prior chunk plaintext leaked", i, len(plainFull)+i)
+		}
+	}
+
+	t.Run("streaming_reader", func(t *testing.T) {
+		f := newFakeShardEncryptor(t)
+		r, err := NewEncryptedShardReader(bytes.NewReader(encode(t)), f, fields)
+		require.NoError(t, err)
+		got, err := io.ReadAll(r)
+		require.NoError(t, err)
+		require.Equal(t, data, got)
+		assertTail(t, r.(*encryptedShardReader).plainFull)
+	})
+
+	t.Run("range_reader", func(t *testing.T) {
+		f := newFakeShardEncryptor(t)
+		r, err := NewEncryptedShardRangeReader(bytes.NewReader(encode(t)), f, fields, 0, int64(len(data)))
+		require.NoError(t, err)
+		got, err := io.ReadAll(r)
+		require.NoError(t, err)
+		require.Equal(t, data, got)
+		assertTail(t, r.(*encryptedShardRangeReader).plainFull)
+	})
+}
+
 func BenchmarkEncryptedShardRangeReaderRead5MiB(b *testing.B) {
 	rawEnc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
 	require.NoError(b, err)
