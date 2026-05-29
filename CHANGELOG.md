@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.471.0] - 2026-05-30
+
+### Removed
+
+- The offline `grainfs cluster join` command. Joining a cluster now uses Zero-CA
+  invite-join (preferred) or the runtime `grainfs join` command with pre-staged
+  key files.
+- The `serve --cluster-key` flag. The cluster transport key is no longer supplied
+  on the command line (where it leaked into `ps` / `/proc/<pid>/cmdline` / shell
+  history).
+
+### Changed
+
+- The cluster transport key is now generated at genesis (self-seed), pulled by
+  invite-join, or read from `<data>/keys.d/current.key`. A deterministic or
+  externally-managed key is supplied by writing that file before first boot — a
+  file path, never an argv/env literal.
+- `grainfs join` now requires staging the cluster transport key
+  (`keys.d/current.key`) alongside `keys/0.key` and `cluster.id` from a healthy
+  peer before joining.
+- The boot error for a missing cluster transport key now reads
+  `cluster transport key missing: stage keys.d/current.key, set
+  GRAINFS_INVITE_BUNDLE, or start a fresh genesis node`.
+
 ## [0.0.470.0] - 2026-05-30
 
 ### Fixed
