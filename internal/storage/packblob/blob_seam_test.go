@@ -41,6 +41,10 @@ func (f *fakeSeam) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ u
 	return f.enc.OpenValueAADTo(nil, f.aad(domain, fields), ct)
 }
 
+func (f *fakeSeam) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return f.enc.OpenValueAADTo(dst, f.aad(domain, fields), ct)
+}
+
 var _ storage.DataEncryptor = (*fakeSeam)(nil)
 
 func TestBlobStore_SeamRoundTrip(t *testing.T) {

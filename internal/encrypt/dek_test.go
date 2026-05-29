@@ -304,6 +304,61 @@ func TestSealWithAADToReusesCapacity(t *testing.T) {
 	}
 }
 
+func TestOpenWithAADToMatchesOpenWithAAD(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, KEKSize)
+	k, err := NewDEKKeeper(kek, testClusterID())
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	plain := []byte("secret payload")
+	aad := []byte("ctx|123")
+	ct, gen, err := k.SealWithAAD(plain, aad)
+	if err != nil {
+		t.Fatalf("SealWithAAD: %v", err)
+	}
+	gotTo, err := k.OpenWithAADTo(make([]byte, 0, 256), ct, gen, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAADTo: %v", err)
+	}
+	if !bytes.Equal(gotTo, plain) {
+		t.Errorf("OpenWithAADTo round-trip mismatch: %q vs %q", gotTo, plain)
+	}
+	gotAlloc, err := k.OpenWithAAD(ct, gen, aad)
+	if err != nil {
+		t.Fatalf("OpenWithAAD: %v", err)
+	}
+	if !bytes.Equal(gotAlloc, gotTo) {
+		t.Errorf("OpenWithAADTo != OpenWithAAD: %q vs %q", gotTo, gotAlloc)
+	}
+}
+
+func TestOpenWithAADToReusesDstAcrossDecreasingSizes(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x11}, KEKSize)
+	k, err := NewDEKKeeper(kek, testClusterID())
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+	aad := []byte("aad-x")
+	// Decreasing then growing exercises capacity reuse without clobber.
+	sizes := []int{4096, 4096, 1000, 16, 4096}
+	dst := make([]byte, 0, 32)
+	for _, n := range sizes {
+		plain := bytes.Repeat([]byte{byte(n)}, n)
+		ct, gen, err := k.SealWithAAD(plain, aad)
+		if err != nil {
+			t.Fatalf("SealWithAAD(%d): %v", n, err)
+		}
+		got, err := k.OpenWithAADTo(dst[:0], ct, gen, aad)
+		if err != nil {
+			t.Fatalf("OpenWithAADTo(%d): %v", n, err)
+		}
+		if !bytes.Equal(got, plain) {
+			t.Errorf("OpenWithAADTo(%d) mismatch", n)
+		}
+		dst = got // carry capacity forward
+	}
+}
+
 func TestDEKKeeper_OpenWithAAD_MismatchedAAD(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x22}, KEKSize)
 	k, _ := NewDEKKeeper(kek, testClusterID())

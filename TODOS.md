@@ -328,34 +328,22 @@ Work these in order. Do not run them in parallel.
   Reopen: add an `AddNode`/post-bootstrap join helper + a snapshot-restore-boot helper to
   `tests/e2e/cluster_harness_test.go`, then add the two additive specs under the "KEK
   rotation lifecycle" Describe.
-- **KEK-envelope: DataEncryptor `SealTo`/`OpenTo` buffer-reusing seam methods** — Seal half landed.
-  - **Slice 1 (Seal side) — DONE 2026-05-29 (ship-pending PR).** Added `encrypt.AppendAAD`,
-    `encrypt.DEKKeeper.SealWithAADTo` (both byte-identical wrappers; `BuildAAD`/`SealWithAAD`
-    re-expressed as `...To(nil,...)`), `storage.DataEncryptor.SealTo` (+ EncryptorAdapter via the
-    existing `SealValueAADTo`, DEKKeeperAdapter, TransientDataEncryptor→ErrTransientReadOnly) with a
-    pooled AAD scratch (`seamAADPool`/`withSeamAAD`, closures verified non-escaping via `-gcflags=-m`).
-    Migrated the **packblob `Append`** consumer (reintroduced `blobAppendSealedPool`, seals via
-    `SealTo`). Bench-gated `BenchmarkAppendEncrypted` (64KiB): **B/op 75,400→1,497 (~50×)**, allocs/op
-    14→9 (12 under -race), ~42→35µs/op. Alloc bound 15→13.
-  - **Residual / follow-up [P3]:** the remaining 9 allocs/op are the **`AADField` construction** in
-    `blobEntryAADFields` (`FieldUint64`/`FieldString`/`FieldUint16` each `make` a per-field data slice +
-    the `[]AADField` slice). Eliminating them needs an `encrypt.AADField` append/pool variant
-    (`AppendField...`-style) — touches every AAD builder, its own slice. Only then does Append drop
-    below ~5 allocs/op. (Pre-#572's "5-alloc" baseline used a different positional-AAD scheme.)
-  - **Remaining Seal/Open consumers (each its own slice; Open side needs lifetime analysis — Open
-    plaintext escapes to callers, so pooling the `OpenTo` dst is a use-after-free hazard, NOT a
-    mechanical pool reintroduction):**
-    - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis.
-    - **spool Open (the #645 regression below)** — Open side; the #645 micro-bench regression is
-      Open-side, so Slice 1 did NOT fix it. Add `OpenTo` + reintroduce per-record buffer reuse in
-      `spool.go`'s `encryptedSpoolRecordWriter`/`Reader`.
-    - ec / local (`eccodec/shardio.go`) Seal then Open — hot read path.
-    - datawal (`scanRecords`) Seal then Open.
-  - **#645 spool regression data (Open-side, still open):** `BenchmarkEncryptedSpoolWrite` 72→97
-    allocs/op (1.04→8.1 MiB B/op); `BenchmarkEncryptedSpoolOpen` 64→87 allocs/op (2.0→16.1 MiB B/op);
-    Open sec/op +~35% (1.72–1.88→2.37–2.43 ms/op). Write throughput flat (AEAD+IO-bound). Fix in the
-    spool Open slice above. Each Open-side slice introduces `OpenTo` only with its first
-    hazard-analyzed consumer (do not freeze `OpenTo` early). Bench ≥15s×3 (allocs/op AND B/op) per slice.
+- **KEK-envelope: DataEncryptor buffer-reusing seam — remaining consumers.** The `SealTo`/`OpenTo`
+  seam methods (+ `encrypt.AppendAAD`, `DEKKeeper.SealWithAADTo`/`OpenWithAADTo`,
+  `TransientReadOnlyDEK.OpenWithAADTo`, pooled `withSeamAAD`/`withSeamAADErr2`) exist and are wired
+  through all 3 adapters; packblob `Append` (Seal) and spool `Read` (Open) consumers are migrated.
+  Open side needs **per-consumer lifetime analysis** — Open plaintext escapes to callers, so pooling the
+  `OpenTo` dst is a use-after-free hazard, NOT a mechanical pool reintroduction. Each remaining consumer
+  is its own slice; bench ≥15s×3 (allocs/op AND B/op).
+  - **spool *write* side** — `encryptedSpoolRecordWriter.Write` still uses `Seal` (not `SealTo`); the
+    #645 write-side regression (`BenchmarkEncryptedSpoolWrite` 72→97 allocs, 1.04→8.1 MiB B/op) is a
+    separate Seal-side slice.
+  - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis.
+  - ec / local (`eccodec/shardio.go`) Open — hot read path.
+  - datawal (`scanRecords`) Open.
+  - **[P3] `AADField` append/pool** — the residual per-op allocs are `AADField` construction
+    (`FieldUint64`/`FieldString`/`FieldUint16` each `make` a per-field slice + the `[]AADField` slice).
+    Eliminating them needs an `encrypt.AADField` append/pool variant touching every AAD builder.
 - [ ] **KEK-envelope D-wal: live DEK rotation segment rollover [P1]**.
   D-wal-data now opens production writer/recovery paths with `DEKKeeperAdapter`
   and new encrypted `internal/storage/datawal` segments probe-seal before header

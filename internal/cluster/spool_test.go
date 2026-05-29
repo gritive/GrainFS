@@ -297,6 +297,96 @@ func newClusterTestEncryptor(t *testing.T) *encrypt.Encryptor {
 }
 
 // newClusterTestSeam returns a DataEncryptor over the static test encryptor so
+// TestEncryptedSpoolReader_MultiRecordByteExact reconstructs a payload spanning
+// several 1 MiB spool records (last one smaller) byte-for-byte. This is the
+// regression guard for the reader-owned plaintext/ciphertext buffer reuse
+// (OpenTo + r.cipherBuf): a slice/cap bug shows up here and nowhere else.
+func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
+	seam := newClusterTestSeam(t)
+	// 2.5 MiB → records of 1 MiB, 1 MiB, 0.5 MiB; the shrinking tail exercises
+	// dst[:0] capacity reuse on a smaller record.
+	payload := make([]byte, spoolCopyBufferSize*2+spoolCopyBufferSize/2)
+	for i := range payload {
+		payload[i] = byte(i*31 + 7)
+	}
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reuse")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, payload, got)
+}
+
+// TestEncryptedSpoolReader_ZeroizesPlaintextOnClose asserts the reader-owned
+// plaintext buffer is wiped on Close (no plaintext residue), preserving the
+// zeroization guarantee across the buffer-reuse refactor.
+func TestEncryptedSpoolReader_ZeroizesPlaintextOnClose(t *testing.T) {
+	seam := newClusterTestSeam(t)
+	payload := bytes.Repeat([]byte("S"), 4096)
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:zeroize")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	r, ok := rc.(*encryptedSpoolRecordReader)
+	require.True(t, ok, "expected *encryptedSpoolRecordReader")
+
+	// Load the first record by reading a few bytes (leaves undrained plaintext).
+	tmp := make([]byte, 10)
+	_, err = io.ReadFull(r, tmp)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	for i, b := range r.plain {
+		require.Zerof(t, b, "r.plain[%d] not zeroized after Close", i)
+	}
+}
+
+// residueOpenSeam simulates an AEAD that overwrites dst up to capacity before
+// returning an auth error — behavior the cipher.AEAD.Open contract explicitly
+// permits ("the contents of dst, up to its capacity, may be overwritten" even
+// on failure). Go's GCM happens to zero on failure, so this fake is how we
+// prove the spool reader's defensive wipe independent of the live cipher.
+type residueOpenSeam struct {
+	storage.DataEncryptor
+}
+
+func (residueOpenSeam) OpenTo(dst []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
+	d := dst[:cap(dst)]
+	for i := range d {
+		d[i] = 0xAA
+	}
+	return nil, errors.New("simulated auth failure")
+}
+
+// TestReadSpoolEncryptedRecord_WipesPlaintextOnOpenError is the regression
+// guard for the code-gate finding: on an Open error the reader-owned plaintext
+// buffer must be wiped to its full capacity, leaving no unauthenticated
+// residue. Cipher-independent (uses residueOpenSeam): fails without the
+// full-capacity clear on the error path.
+func TestReadSpoolEncryptedRecord_WipesPlaintextOnOpenError(t *testing.T) {
+	blob := bytes.Repeat([]byte{0x01}, 64)
+	var hdr [12]byte
+	binary.BigEndian.PutUint32(hdr[:4], 64) // plainLen (unused on error)
+	binary.BigEndian.PutUint32(hdr[4:8], uint32(len(blob)))
+	binary.BigEndian.PutUint32(hdr[8:], 0) // gen
+	frame := append(append([]byte{}, hdr[:]...), blob...)
+
+	plainDst := make([]byte, 0, 256) // reusable buffer the fake will dirty
+	_, _, _, err := readSpoolEncryptedRecord(bytes.NewReader(frame), residueOpenSeam{}, "d", 0, plainDst, nil)
+	require.Error(t, err)
+
+	full := plainDst[:cap(plainDst)]
+	for i, b := range full {
+		require.Zerof(t, b, "plainDst[%d]=%#x not wiped on Open error", i, b)
+	}
+}
+
 // spool unit tests exercise the real seam-backed write/read path. clusterID is
 // fixed (16 bytes); the same seam instance seals and opens within a test.
 func newClusterTestSeam(t *testing.T) storage.DataEncryptor {

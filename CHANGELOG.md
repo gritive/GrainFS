@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.447.0] - 2026-05-29
+
+### Changed
+
+- Reduced memory churn on the at-rest-encrypted upload-spool read path. The spool
+  decrypt path now reuses per-reader plaintext and ciphertext buffers (via a
+  buffer-reusing `OpenTo` seam) instead of allocating per record, recovering the
+  allocation regression introduced when upload spools were encrypted at rest
+  (`BenchmarkEncryptedSpoolOpen`: ~16.9 MiB → ~2.1 MiB per op, ~36% faster). No
+  change to on-disk format or behavior.
+
 ## [0.0.446.0] - 2026-05-29
 
 ### Changed

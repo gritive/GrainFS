@@ -292,13 +292,14 @@ func openSpoolEncryptedRecordFile(path string, seam storage.DataEncryptor, domai
 }
 
 type encryptedSpoolRecordReader struct {
-	f      *os.File
-	seam   storage.DataEncryptor
-	domain string
-	record uint64
-	buf    []byte
-	plain  []byte
-	err    error
+	f         *os.File
+	seam      storage.DataEncryptor
+	domain    string
+	record    uint64
+	buf       []byte
+	plain     []byte // reader-owned plaintext buffer, reused across records
+	cipherBuf []byte // reader-owned ciphertext read buffer, reused across records
+	err       error
 }
 
 func (r *encryptedSpoolRecordReader) Read(p []byte) (int, error) {
@@ -324,11 +325,17 @@ func (r *encryptedSpoolRecordReader) Close() error {
 	if len(r.plain) > 0 {
 		clear(r.plain)
 	}
+	if len(r.cipherBuf) > 0 {
+		clear(r.cipherBuf)
+	}
 	return r.f.Close()
 }
 
 func (r *encryptedSpoolRecordReader) loadNext() error {
-	plain, done, err := readSpoolEncryptedRecord(r.f, r.seam, r.domain, r.record)
+	// Reuse the reader-owned plaintext/ciphertext buffers. Safe because the
+	// previous record is fully drained before loadNext is called (Read loops
+	// while len(r.buf)==0) and the plaintext only ever exits via Read's copy.
+	plain, cipher, done, err := readSpoolEncryptedRecord(r.f, r.seam, r.domain, r.record, r.plain[:0], r.cipherBuf[:0])
 	if err != nil {
 		return err
 	}
@@ -337,41 +344,51 @@ func (r *encryptedSpoolRecordReader) loadNext() error {
 	}
 	r.record++
 	r.plain = plain
+	r.cipherBuf = cipher
 	r.buf = plain
 	return nil
 }
 
-func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain string, record uint64) (plain []byte, done bool, err error) {
+func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain string, record uint64, plainDst, cipherDst []byte) (plain, cipher []byte, done bool, err error) {
 	var header [12]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		if err == io.EOF {
-			return nil, true, nil
+			return nil, cipherDst, true, nil
 		}
-		return nil, false, fmt.Errorf("read encrypted spool header: %w", err)
+		return nil, cipherDst, false, fmt.Errorf("read encrypted spool header: %w", err)
 	}
 	plainLen := binary.BigEndian.Uint32(header[:4])
 	blobLen := binary.BigEndian.Uint32(header[4:8])
 	gen := binary.BigEndian.Uint32(header[8:])
 	if blobLen == 0 {
-		return nil, false, fmt.Errorf("read encrypted spool record: empty blob")
+		return nil, cipherDst, false, fmt.Errorf("read encrypted spool record: empty blob")
 	}
 	if blobLen > maxEncryptedSpoolBlobBytes {
-		return nil, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
+		return nil, cipherDst, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
 	}
-	blob := make([]byte, blobLen)
+	if cap(cipherDst) < int(blobLen) {
+		cipherDst = make([]byte, blobLen)
+	}
+	blob := cipherDst[:blobLen]
 	if _, err := io.ReadFull(r, blob); err != nil {
-		return nil, false, fmt.Errorf("read encrypted spool blob: %w", err)
+		return nil, blob, false, fmt.Errorf("read encrypted spool blob: %w", err)
 	}
-	out, err := seam.Open(encrypt.DomainSpool, spoolRecordAADFields(domain, record), gen, blob)
-	clear(blob)
+	out, err := seam.OpenTo(plainDst[:0], encrypt.DomainSpool, spoolRecordAADFields(domain, record), gen, blob)
+	clear(blob) // zeroize ciphertext after decrypt; buffer is reused next record
 	if err != nil {
-		return nil, false, fmt.Errorf("open encrypted spool record: %w", err)
+		// cipher.AEAD.Open may overwrite dst up to capacity even on failure.
+		// plainDst is the reader-owned reusable buffer, so wipe its full
+		// capacity to leave no unauthenticated plaintext residue (defense in
+		// depth: Go's GCM already zeroes on auth failure, but the AEAD
+		// contract does not guarantee it).
+		clear(plainDst[:cap(plainDst)])
+		return nil, blob, false, fmt.Errorf("open encrypted spool record: %w", err)
 	}
 	if len(out) != int(plainLen) {
-		clear(out)
-		return nil, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
+		clear(out[:cap(out)])
+		return nil, blob, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
 	}
-	return out, false, nil
+	return out, blob, false, nil
 }
 
 // writeFileAtomicFromReader materializes bytes from r at path via
