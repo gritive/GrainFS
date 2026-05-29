@@ -361,6 +361,97 @@ func (w *WAL) newSegmentDEKGen() (uint32, error) {
 	return gen, nil
 }
 
+// RollSegmentOnRotation re-pins the active WAL segment to the DEKKeeper's
+// current active generation after a DEK rotation. A segment header pins one
+// dek_gen at open time, but every Append seals under the keeper's live active
+// gen; after a rotation those disagree and Append fails the gen-match assertion
+// (appendRecord, ~line 151). Calling this on rotation rolls the active segment
+// to a new file (non-empty) or re-initializes it in place (header-only) under
+// the new gen so subsequent appends pass. Old segments stay pinned at their
+// header gen and remain readable (the read path is gen-aware).
+//
+// No-op when the freshly probed active gen equals the pinned gen. w.lastSeq /
+// w.lastTimestamp are preserved so seqs stay contiguous and monotonic across the
+// boundary (replay relies on seqMonotonic). Plaintext WALs (sealer == nil) never
+// rotate, so this is a no-op there.
+//
+// This method has NO production caller yet: it is the rotation-boundary primitive
+// the encryption.rotate-dek re-enable slice (S5) will wire synchronously (the
+// gate proved an async post-commit roll cannot close the gen-advance window). If
+// S5 instead adopts roll-and-retry inside Append, this standalone method may be
+// reworked — keep its surface minimal.
+func (w *WAL) RollSegmentOnRotation() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Wait out any in-flight group-commit Sync before swapping w.file — Flush
+	// releases w.mu mid-sync (isSyncing), and Close() guards the same way. Without
+	// this, a concurrent Flush could Sync a descriptor we just closed and surface
+	// a spurious error on already-durable records.
+	for w.isSyncing {
+		w.syncCond.Wait()
+	}
+	if w.sealer == nil {
+		return nil
+	}
+	gen, err := w.newSegmentDEKGen()
+	if err != nil {
+		return err
+	}
+	if gen == w.dekGen {
+		return nil // no rotation since this segment was pinned
+	}
+	if w.file == nil {
+		w.dekGen = gen // no open segment; adopt the new gen for the next open
+		return nil
+	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() <= fileHeaderBytes {
+		// Header-only segment: re-init in place under the new gen. Mirrors the
+		// repair precedent in openAppendFile (Truncate(0)+Seek(0)+initSegment).
+		if err := w.file.Truncate(0); err != nil {
+			return err
+		}
+		if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := initSegment(w.file, w.dir, modeForSealer(w.sealer), gen); err != nil {
+			return err
+		}
+		w.dekGen = gen
+		return nil
+	}
+	// Non-empty: sync+close the current file, then create a NEW segment named for
+	// the next firstSeq (zero-padded so it sorts after the prior segment) and init
+	// it under the new gen. Use w.file.Sync/Close (walFile), never w.Close()
+	// (public) — we already hold w.mu, and Close re-locks and nils w.file.
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+	if err := w.file.Close(); err != nil {
+		return err
+	}
+	w.file = nil
+	path := filepath.Join(w.dir, segmentName(w.lastSeq+1))
+	// O_EXCL: fail closed if the name somehow collides — never append a second
+	// header onto an existing file (the BLOCKER-1 corruption class). Roll only
+	// happens at runtime rotation, disjoint from the recovery path, so O_EXCL
+	// cannot break the normal open flow.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("datawal: roll segment on rotation: %w", err)
+	}
+	if err := initSegment(f, w.dir, modeForSealer(w.sealer), gen); err != nil {
+		_ = f.Close()
+		return err
+	}
+	w.file = f
+	w.dekGen = gen
+	return nil
+}
+
 func initSegment(f walFile, dir string, mode byte, dekGen uint32) error {
 	if err := writeHeader(f, mode, dekGen); err != nil {
 		return err
