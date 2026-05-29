@@ -8,11 +8,12 @@ import (
 	"testing"
 )
 
-// TestClusterKey_Empty_ReturnsError verifies the cluster-key guard still fires
-// when genesis self-seed does NOT apply. On a FRESH data dir an empty key now
-// self-seeds (see genesis-cluster-key-self-seed); the guard is reserved for the
-// non-genesis cases — here a node with existing raft state (priorState) and no
-// key, which must still demand --cluster-key rather than self-seed over identity.
+// TestClusterKey_Empty_ReturnsError verifies the cluster transport key guard
+// still fires when genesis self-seed does NOT apply. On a FRESH data dir an
+// empty key now self-seeds (see genesis-cluster-key-self-seed); the guard is
+// reserved for the non-genesis cases — here a node with existing raft state
+// (priorState) and no key, which must still demand a staged key rather than
+// self-seed over identity.
 func TestClusterKey_Empty_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -29,7 +30,7 @@ func TestClusterKey_Empty_ReturnsError(t *testing.T) {
 		NodeID:     "node1",
 		RaftAddr:   "127.0.0.1:0",
 		DataDir:    dataDir,
-		ClusterKey: "", // empty cluster-key + priorState → guard fires (no self-seed)
+		ClusterKey: "", // empty key + priorState → guard fires (no self-seed)
 	}
 	cfg := optionsToConfig(opts, ":9000", nil, nil, nil)
 	err := Run(ctx, cfg)
@@ -37,7 +38,7 @@ func TestClusterKey_Empty_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty clusterKey on a priorState dir")
 	}
-	if !strings.Contains(err.Error(), "--cluster-key is required") {
+	if !strings.Contains(err.Error(), "cluster transport key missing: stage keys.d/current.key, set GRAINFS_INVITE_BUNDLE, or start a fresh genesis node") {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }

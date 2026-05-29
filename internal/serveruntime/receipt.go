@@ -122,7 +122,7 @@ func receiptDBOptions(dir string) badger.Options {
 
 // SetupClusterReceipt wires the full Slice 2 stack in cluster mode.
 // PSK comes from opts.PSK if set; callers usually pass --heal-receipt-psk
-// when set, otherwise --cluster-key. Registers the StreamReceiptQuery
+// when set, otherwise the resolved cluster transport key. Registers the StreamReceiptQuery
 // handler on the router and wires the routing cache into the gossip
 // receiver. Starts the gossip broadcast goroutine bound to ctx.
 func SetupClusterReceipt(
@@ -172,7 +172,7 @@ func setupClusterReceipt(
 	// operator adds peers they must supply a PSK upstream.
 	if psk == "" {
 		if len(peers) > 0 || (peerProvider != nil && len(peerProvider()) > 0) {
-			return srvOpts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk or --cluster-key")
+			return srvOpts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk")
 		}
 		psk = "local-no-peers"
 	}

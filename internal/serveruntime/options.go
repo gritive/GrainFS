@@ -28,7 +28,7 @@ type ServeOptions struct {
 	NodeID         string // --node-id
 	RaftAddr       string // --raft-addr
 	JoinListenAddr string // --join-listen-addr
-	ClusterKey     string // --cluster-key
+	ClusterKey     string // resolved cluster transport key (disk / self-seed / invite-join)
 
 	// --- Cluster transport tuning ---
 	AppendForwardBufferTotalBytes    int64         // --cluster-append-forward-buffer-total-bytes

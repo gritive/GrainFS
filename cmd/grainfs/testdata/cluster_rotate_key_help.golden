@@ -17,9 +17,9 @@ Workflow (online rolling, zero-downtime):
        begun:    accept set = [OLD, NEW], present OLD
        switched: accept = [OLD, NEW], present NEW (after grace)
        steady:   accept = [NEW], OLD demoted to previous.key
-  4. Operator must distribute the same new PSK to all peers' --cluster-key
-     environment / config so future restarts pick it up. Workers consume
-     keys.d/next.key from disk during rotation.
+  4. The rotation worker propagates the new PSK to every peer's
+     keys.d/current.key (peers read it from disk), so future restarts pick it
+     up. Workers consume keys.d/next.key from disk during rotation.
 
 Failures roll back automatically:
   - abort while begun: revert to OLD

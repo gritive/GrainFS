@@ -24,7 +24,9 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			port := freePort()
 			raft := freePort()
 
-			// Write .join-pending to trigger join mode (which requires --cluster-key).
+			// Write .join-pending to trigger join mode (which requires a staged
+			// cluster transport key). A join-mode boot with no staged key and no
+			// invite bundle must trip the gate.
 			gomega.Expect(os.WriteFile(
 				fmt.Sprintf("%s/%s", dir, joinPendingFile),
 				[]byte(fmt.Sprintf("127.0.0.1:%d", freePort())), 0o600)).To(gomega.Succeed())
@@ -39,9 +41,9 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			out, err := cmd.CombinedOutput()
-			gomega.Expect(err).To(gomega.HaveOccurred(), "process must exit non-zero without --cluster-key")
-			if !strings.Contains(string(out), "--cluster-key is required") {
-				t.Fatalf("expected '--cluster-key is required' in output, got:\n%s", string(out))
+			gomega.Expect(err).To(gomega.HaveOccurred(), "process must exit non-zero without a staged cluster transport key")
+			if !strings.Contains(string(out), "cluster transport key missing: stage keys.d/current.key, set GRAINFS_INVITE_BUNDLE, or start a fresh genesis node") {
+				t.Fatalf("expected the cluster-transport-key-missing gate message in output, got:\n%s", string(out))
 			}
 		})
 	})

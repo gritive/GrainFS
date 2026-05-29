@@ -26,7 +26,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	cmd.Flags().String("raft-addr", "", "Raft listen address for cluster communication (required in cluster mode)")
 	cmd.Flags().String("join-listen-addr", "", "Zero-CA QUIC join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host")
-	cmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
 	cmd.Flags().Int64("cluster-append-forward-buffer-total-bytes", 512*1024*1024,
 		"Total byte budget for AppendObject forward-body reservation pool (default 512 MiB).")
 	cmd.Flags().Int64("cluster-append-forward-buffer-max-per-request", 64*1024*1024,
@@ -105,7 +104,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int64("shard-cache-size", 1024*1024*1024, "EC shard cache capacity in bytes (0 disables)")
 	// HealReceipt API + gossip.
 	cmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API")
-	cmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
+	cmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to the resolved cluster transport key in cluster mode)")
 	cmd.Flags().Duration("heal-receipt-retention", 30*24*time.Hour, "HealReceipt retention window (older entries are GC'd)")
 	cmd.Flags().Duration("heal-receipt-gossip-interval", 5*time.Second, "how often this node gossips its recent receipt IDs to peers")
 	cmd.Flags().Int("heal-receipt-window", 50, "rolling window size — how many recent receipt IDs to gossip per tick")
