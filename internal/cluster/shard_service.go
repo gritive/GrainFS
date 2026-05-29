@@ -56,7 +56,6 @@ type shardFileWriter func(path string, payload []byte) error
 type ShardService struct {
 	dataDirs      []string
 	transport     *transport.QUICTransport
-	encryptor     *encrypt.Encryptor    // legacy/test whole-buffer adapter; production uses dekKeeper + segEnc.
 	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
 	dekKeeper     *encrypt.DEKKeeper
 	clusterID     [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
@@ -90,23 +89,6 @@ type ShardService struct {
 
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
-
-// WithEncryptor wires the legacy static-key adapter used by older tests and
-// repair paths. Production runtime wires WithShardDEKKeeper instead.
-func WithEncryptor(enc *encrypt.Encryptor) ShardServiceOption {
-	return func(s *ShardService) {
-		s.encryptor = enc
-		// Clear segEnc first so WithEncryptor(nil) fully disables the chunked
-		// GFSENC3 path too (honors the "pass nil to disable" contract even when
-		// a prior option had set segEnc).
-		s.segEnc = nil
-		if enc != nil {
-			// Legacy static-key adapter with a zero-sentinel clusterID.
-			// Production DEK wiring overrides this via WithShardDEKKeeper.
-			s.segEnc = storage.NewEncryptorAdapter(enc, s.clusterID[:])
-		}
-	}
-}
 
 // WithShardDEKKeeper wires the generation-aware DEK keeper as the chunked
 // EC-shard data-at-rest seam. clusterID MUST be 16 bytes and MUST equal the
@@ -233,9 +215,9 @@ func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, op
 		}
 	}
 	// segEnc is the chunked-EC data-at-rest seam. Production sets it from the
-	// generation-aware DEK keeper; legacy tests may still set it via WithEncryptor.
+	// generation-aware DEK keeper.
 	if s.segEnc == nil {
-		panic("cluster.NewShardService: at-rest sealer is mandatory; use WithEncryptor or WithShardDEKKeeper")
+		panic("cluster.NewShardService: at-rest sealer is mandatory; use WithShardDEKKeeper")
 	}
 	return s
 }
@@ -841,7 +823,7 @@ func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Mes
 // WriteLocalShard stores a shard on the local node's disk without involving
 // the QUIC transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
-// When an encryptor is configured, the shard is AES-256-GCM encrypted before writing.
+// The shard is sealed via the DEK keeper (GFSENC3) before writing.
 // Writes are crash-safe: the encoded payload is appended to the data WAL
 // before any shard file mutation, and the on-disk write uses tmp + rename
 // for atomic visibility. Durability is owned by internal/storage/datawal.
@@ -1289,9 +1271,6 @@ func (s *ShardService) dataWALRecoverySealer() (datawal.RecordSealer, error) {
 	switch {
 	case s.dekKeeper != nil:
 		return storage.NewDEKKeeperAdapter(s.dekKeeper, s.clusterID[:]), nil
-	case s.encryptor != nil:
-		var zero [16]byte
-		return storage.NewEncryptorAdapter(s.encryptor, zero[:]), nil
 	default:
 		return nil, nil
 	}
@@ -1447,8 +1426,8 @@ func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket,
 	if s.dataWAL == nil {
 		return fmt.Errorf("writeLocalShardStreamContext: stream shard write requires a data WAL (WAL is mandatory)")
 	}
-	rawCap := maxRawShardPayloadForWAL(s.encryptor != nil)
-	data, err := readShardPayload(body, rawCap, streamSize, s.encryptor != nil)
+	rawCap := maxRawShardPayloadForWAL(false)
+	data, err := readShardPayload(body, rawCap, streamSize, false)
 	if err != nil {
 		return err
 	}
@@ -1601,10 +1580,9 @@ func isUnsupportedDirectIO(err error) bool {
 		strings.Contains(es, "not implemented")
 }
 
-// ReadLocalShard fetches a shard from the local node's disk.
-// Decrypts the data if an encryptor is configured.
-// Returns an error if the shard appears encrypted but no encryptor is set
-// (downgrade guard).
+// ReadLocalShard fetches a shard from the local node's disk and decrypts it via
+// the DEK keeper. Returns an error if the shard appears encrypted but at-rest
+// encryption is disabled (downgrade guard).
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
 	path := s.getShardPath(bucket, key, shardIdx)
 
@@ -1659,35 +1637,12 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	data := raw
-	decodedEncoded := false
 	if eccodec.IsEncodedShard(raw) {
 		data, err = eccodec.DecodeShard(raw)
 		if err != nil {
 			return nil, err
 		}
-		decodedEncoded = true
-	}
-	if s.encryptor != nil {
-		if !encrypt.IsEncryptedBlob(data) {
-			if encrypt.IsLegacyEncryptedBlob(data) {
-				return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
-			}
-			if decodedEncoded {
-				return nil, fmt.Errorf("decrypt shard: %w: shard is not an encrypted blob (plain GFSCRC1 / unrecognized format not supported)", eccodec.ErrShardCorrupt)
-			}
-			// Encryption is enabled and the outer CRC validated, but the inner
-			// magic header is missing: structural format corruption.
-			return nil, fmt.Errorf("decrypt shard: %w: not an encrypted blob (missing magic header)", eccodec.ErrShardCorrupt)
-		}
-		data, err = s.encryptor.DecryptWithAAD(data, aad)
-		if err != nil {
-			// AEAD auth failure on an owned legacy single-blob shard ⟹ tampered
-			// bytes or AAD mismatch: corruption, not a transient fault.
-			return nil, fmt.Errorf("decrypt shard: %w: %w", eccodec.ErrShardCorrupt, err)
-		}
-		return data, nil
 	}
 	if encrypt.IsEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
@@ -1701,10 +1656,8 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 }
 
 func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, shardIdx int) ([]byte, error) {
-	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx)) // legacy fallback only
 	data := raw
 	var err error
-	decodedEncoded := false
 	if eccodec.IsEncryptedShard(raw) {
 		// GFSENC3 chunked branch: use segEnc + ShardAADFields.
 		if s.segEnc == nil {
@@ -1721,28 +1674,6 @@ func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, sha
 		if err != nil {
 			return nil, err
 		}
-		decodedEncoded = true
-	}
-	if s.encryptor != nil {
-		// Whole-buffer legacy single-blob fallback: stays on s.encryptor + aad (D-seg-ec-scrub / D-cut scope).
-		if !encrypt.IsEncryptedBlob(data) {
-			if encrypt.IsLegacyEncryptedBlob(data) {
-				return nil, fmt.Errorf("decrypt shard: %w: shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported", eccodec.ErrShardCorrupt)
-			}
-			if decodedEncoded {
-				return nil, fmt.Errorf("decrypt shard: %w: shard is not an encrypted blob (plain GFSCRC1 / unrecognized format not supported)", eccodec.ErrShardCorrupt)
-			}
-			// Encryption is enabled and the outer CRC validated, but the inner
-			// magic header is missing: structural format corruption.
-			return nil, fmt.Errorf("decrypt shard: %w: not an encrypted blob (missing magic header)", eccodec.ErrShardCorrupt)
-		}
-		data, err = s.encryptor.DecryptWithAAD(data, aad)
-		if err != nil {
-			// AEAD auth failure on an owned legacy single-blob shard ⟹ tampered
-			// bytes or AAD mismatch: corruption, not a transient fault.
-			return nil, fmt.Errorf("decrypt shard: %w: %w", eccodec.ErrShardCorrupt, err)
-		}
-		return data, nil
 	}
 	if encrypt.IsEncryptedBlob(data) {
 		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
@@ -1974,15 +1905,14 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 		}
 		return &multiReadCloser{Reader: r, close: closeFn}, nil
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		// DEK-only service: every shard is GFSENC3-sealed, so a GFSCRC1 shard here
 		// is plaintext (or legacy). Reject fail-closed rather than leak it.
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
 	}
-	// GFSCRC1 with encryptor != nil (single-blob compat), or a plain/short shard:
-	// route through OpenLocalShard for proper decode (rejects plaintext, decrypts
-	// single-blob) rather than streaming the raw payload — keeps OpenLocalShardRange
+	// A plain/short shard: route through OpenLocalShard for proper decode (rejects
+	// plaintext) rather than streaming the raw payload — keeps OpenLocalShardRange
 	// consistent with ReadLocalShard/ReadLocalShardAt.
 	_ = f.Close()
 

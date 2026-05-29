@@ -97,9 +97,7 @@ func TestDistributedBackendSetShardServicePropagatesDEKKeeperToFSM(t *testing.T)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
 
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x43}, 32))
-	require.NoError(t, err)
-	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(keeper, clusterID))
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 
 	backend.SetShardService(svc, []string{"self"})
 
@@ -143,12 +141,9 @@ func TestDistributedBackendDEKFramedFSMValueSurvivesDBReopen(t *testing.T) {
 	clusterID := bytes.Repeat([]byte{0x62}, 16)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x63}, 32))
-	require.NoError(t, err)
-
 	fsm := NewFSM(db, keys)
 	backend := &DistributedBackend{db: db, fsm: fsm, keys: keys}
-	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardDEKKeeper(keeper, clusterID))
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 	t.Cleanup(func() { _ = svc.Close() })
 	backend.SetShardService(svc, []string{"self"})
 

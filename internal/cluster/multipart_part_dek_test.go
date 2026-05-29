@@ -56,7 +56,7 @@ func newDEKBackendAt(t *testing.T, dataDir string, keeper *encrypt.DEKKeeper, cl
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	require.Nil(t, svc.encryptor, "production shape: static encryptor must be nil")
+	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})

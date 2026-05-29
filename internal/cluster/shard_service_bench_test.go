@@ -8,14 +8,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
-	key := bytes.Repeat([]byte("k"), 32)
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(b, err)
+	keeper, clusterID := testDEKKeeper(b)
 	payload := bytes.Repeat([]byte("x"), 5<<20)
 
 	for _, tc := range []struct {
@@ -39,7 +35,7 @@ func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
 			svc := NewShardService(
 				b.TempDir(),
 				nil,
-				WithEncryptor(enc),
+				WithShardDEKKeeper(keeper, clusterID),
 				WithShardPackThreshold(65545),
 			)
 
@@ -59,15 +55,13 @@ func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
 // object (10 MiB / 4 data shards = 2.5 MiB per shard). This is the GET hot
 // path exercised by `warp get` at large object sizes.
 func BenchmarkShardServiceOpenLocalShardStream2_5MiB(b *testing.B) {
-	key := bytes.Repeat([]byte("k"), 32)
-	enc, err := encrypt.NewEncryptor(key)
-	require.NoError(b, err)
+	keeper, clusterID := testDEKKeeper(b)
 	payload := bytes.Repeat([]byte("x"), (10<<20)/4)
 
 	svc := NewShardService(
 		b.TempDir(),
 		nil,
-		WithEncryptor(enc),
+		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(65545),
 	)
 	require.NoError(b, svc.WriteLocalShardStreamSizedContext(context.Background(), "bench", "obj", 0, bytes.NewReader(payload), int64(len(payload))))

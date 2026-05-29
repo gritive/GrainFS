@@ -12,7 +12,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -186,9 +185,8 @@ var _ = Describe("Backend multipart integration", func() {
 	})
 
 	It("encrypts multipart part storage", func() {
-		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x45}, 32))
-		Expect(err).NotTo(HaveOccurred())
-		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), []string{b.selfAddr})
+		keeper, clusterID := testDEKKeeper(GinkgoT())
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr})
 
 		partBytes := []byte("cluster multipart sensitive payload")
 		upload, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
@@ -299,8 +297,8 @@ var _ = Describe("Backend multipart integration", func() {
 func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 	GinkgoHelper()
 	nodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
-	enc := testEncryptor(GinkgoT())
-	b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), nodes)
+	keeper, clusterID := testDEKKeeper(GinkgoT())
+	b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
 	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{

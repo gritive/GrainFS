@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.446.0] - 2026-05-29
+
+### Changed
+
+- Internal at-rest encryption cleanup: retired the legacy static shard-encryption
+  code path (`ShardService` static encryptor) now that all shard sealing flows
+  through the generation-aware DEK keeper. The single-node EC PUT pipeline gate is
+  now an explicit toggle (dormant in production) instead of keying off the legacy
+  encryptor. No change to on-disk format or runtime behavior.
+
 ## [0.0.445.0] - 2026-05-29
 
 ### Changed

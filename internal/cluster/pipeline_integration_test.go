@@ -31,17 +31,22 @@ var _ = Describe("Backend put pipeline integration", func() {
 	})
 
 	It("round-trips objects through the actor pipeline", func() {
-		enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0xAB}, 32))
+		// The same keeper instance + clusterID must thread through the data WAL
+		// adapter, the ShardService sealer, and the put pipeline so that
+		// PUT-via-pipeline seals and GET-via-ShardService opens under one DEK.
+		clusterID := bytes.Repeat([]byte{0x42}, 16)
+		keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x91}, encrypt.KEKSize), clusterID)
 		Expect(err).NotTo(HaveOccurred())
-		dwal, err := datawal.Open(filepath.Join(b.Root(), "datawal"), storage.NewEncryptorAdapter(enc, make([]byte, 16)), datawal.NamespaceShard)
+		dwal, err := datawal.Open(filepath.Join(b.Root(), "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { _ = dwal.Close() })
-		b.SetShardService(cluster.NewShardService(b.Root(), nil, cluster.WithEncryptor(enc), cluster.WithDataWAL(dwal)), []string{b.SelfAddr()})
+		b.SetShardService(cluster.NewShardService(b.Root(), nil, cluster.WithShardDEKKeeper(keeper, clusterID), cluster.WithDataWAL(dwal)), []string{b.SelfAddr()})
 
 		shardsDir := filepath.Join(b.Root(), "shards")
 		pipeline := putpipeline.New(putpipeline.Config{
 			DataDirs:  []string{shardsDir},
-			Encryptor: enc,
+			DEKKeeper: keeper,
+			ClusterID: clusterID,
 			ECConfig:  cluster.ECConfig{DataShards: 1, ParityShards: 0},
 		})
 		DeferCleanup(func() {
@@ -49,7 +54,7 @@ var _ = Describe("Backend put pipeline integration", func() {
 			defer cancel()
 			_ = pipeline.Shutdown(shutdownCtx)
 		})
-		b.SetPutPipeline(pipeline)
+		b.SetPutPipeline(pipeline, true)
 
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 

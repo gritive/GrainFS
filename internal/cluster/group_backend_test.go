@@ -49,8 +49,8 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	enc := testEncryptor(t)
-	svc := NewShardService(dir+"/shards", nil, WithEncryptor(enc), withTestWALEnc(t, enc))
+	keeper, clusterID := testDEKKeeper(t)
+	svc := NewShardService(dir+"/shards", nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,

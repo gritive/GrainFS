@@ -56,8 +56,10 @@ var _ = Describe("Reshard manager integration", func() {
 		Expect(preTags).To(HaveLen(2))
 
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
-		enc := testEncryptor(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc), withTestWALEnc(GinkgoT(), enc)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		// Reuse the backend's existing keeper so FSM-sealed meta written above
+		// (b.fsm.Apply legacy meta) stays decryptable after the reconfigure.
+		keeper, clusterID := b.shardSvc.DEKKeeper(), b.shardSvc.ClusterID()
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
 
 		Expect(b.ConvertObjectToEC(ctx, "bucket", key)).To(Succeed())
 

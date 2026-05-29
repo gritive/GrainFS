@@ -356,7 +356,8 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	// pipeline. The pipeline owns long-lived actor goroutines shared
 	// across groups.
 	if state.putPipeline != nil {
-		gb.SetPutPipeline(state.putPipeline)
+		// Wired but disabled: dispatch is gated off in prod pending F1 review.
+		gb.SetPutPipeline(state.putPipeline, false)
 	}
 	return gb, nil
 }
@@ -395,7 +396,8 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			WAL:       shardServiceWALAdapter{s: state.shardSvc},
 		})
 		state.putPipeline = pipeline
-		distBackend.SetPutPipeline(pipeline)
+		// Constructed but dispatch-disabled pending the F1 durability review.
+		distBackend.SetPutPipeline(pipeline, false)
 		log.Info().
 			Int("drives", len(state.shardSvc.DataDirs())).
 			Int("k", state.effectiveEC.DataShards).
