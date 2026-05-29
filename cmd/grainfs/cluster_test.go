@@ -55,19 +55,15 @@ func TestClusterCmd_Day2OpsRegistered(t *testing.T) {
 	}
 }
 
-// TestJoinAndClusterJoinCoexist verifies the §7 T56 split:
-//
-//   - `grainfs join`           — runtime restart-into-join via admin UDS
-//     (root-level, established convention).
-//   - `grainfs cluster join`   — offline-bootstrap KEK challenge-response
-//     handshake directly over QUIC against a not-yet-running node.
-//
-// Both must exist; they target different operational scenarios.
-func TestJoinAndClusterJoinCoexist(t *testing.T) {
+// TestRuntimeJoinRemainsClusterJoinRetired verifies the cluster-key-input
+// retirement: the offline `grainfs cluster join` command (which required the
+// removed --cluster-key flag) is gone, while runtime `grainfs join`
+// (admin-UDS restart-into-join, now staging keys.d/current.key) remains.
+func TestRuntimeJoinRemainsClusterJoinRetired(t *testing.T) {
 	assert.Contains(t, rootSubcommandNames(), "join",
 		"root `join` (admin-UDS restart-into-join) must remain registered")
-	assert.Contains(t, clusterSubcommandNames(), "join",
-		"`cluster join` (§7 T56 offline-bootstrap KEK handshake) must be registered")
+	assert.NotContains(t, clusterSubcommandNames(), "join",
+		"offline `cluster join` retired (superseded by invite-join); --cluster-key input removed")
 }
 
 // clusterClientFromCmd helper tests.
