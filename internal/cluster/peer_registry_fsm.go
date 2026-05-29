@@ -177,8 +177,21 @@ func (f *MetaFSM) applyRevokePeer(data []byte) error {
 		f.invites.burnPendingForNode(nodeID, spki)
 		changed = true
 	}
+
+	// Record the durable revoked node-ID so the DataGroupEvacuator can evict it
+	// from data-group voter sets, including after a restart/snapshot-restore, and
+	// so candidate-selection excludes it. ID only — the address is resolved live
+	// from f.nodes (revoke does not remove meta membership).
+	f.mu.Lock()
+	f.recordRevokedNodeLocked(nodeID)
+	cb := f.onNodeRevoked
+	f.mu.Unlock()
+
 	if changed {
 		f.firePeersChanged()
+	}
+	if cb != nil {
+		cb(nodeID)
 	}
 	return nil
 }
