@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.461.0] - 2026-05-29
+
+### Fixed
+
+- Scrubber auto-repair of a corrupt or stale erasure-coded shard now takes effect
+  for shards stored in the packed-shard store. Previously the repair wrote a
+  standalone shard file while reads preferred the packed entry, so the stale
+  packed shard kept shadowing the repair and the object stayed unhealthy. The
+  repair is now written back into the packed store, so the next read returns the
+  repaired data.
+
 ## [0.0.460.0] - 2026-05-29
 
 ### Security
