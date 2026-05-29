@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"unsafe"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/require"
@@ -385,6 +386,59 @@ func TestReadSpoolEncryptedRecord_WipesPlaintextOnOpenError(t *testing.T) {
 	for i, b := range full {
 		require.Zerof(t, b, "plainDst[%d]=%#x not wiped on Open error", i, b)
 	}
+}
+
+// recordingSealSeam wraps a real seam, recording whether Seal (the
+// fresh-allocation path) was ever used and, for each SealTo call, the backing
+// array of the dst it received vs. the slice it returned. This lets the writer
+// test prove the API switch (SealTo, never Seal) and the cipherBuf reuse
+// (second SealTo is handed the first call's returned backing array) without a
+// flaky AllocsPerRun assertion. No t.Fatal inside the fake — flags are recorded
+// and asserted in the test goroutine after the Writes.
+type recordingSealSeam struct {
+	storage.DataEncryptor
+	sealCalled bool
+	dstBacking []*byte
+	retBacking []*byte
+}
+
+func (f *recordingSealSeam) Seal(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	f.sealCalled = true
+	return f.DataEncryptor.Seal(domain, fields, plain)
+}
+
+func (f *recordingSealSeam) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	f.dstBacking = append(f.dstBacking, unsafe.SliceData(dst[:cap(dst)]))
+	blob, gen, err := f.DataEncryptor.SealTo(dst, domain, fields, plain)
+	f.retBacking = append(f.retBacking, unsafe.SliceData(blob))
+	return blob, gen, err
+}
+
+// TestEncryptedSpoolWriter_ReusesCipherBufViaSealTo is the regression guard for
+// the writer-owned ciphertext buffer reuse (SealTo + w.cipherBuf): it proves the
+// writer (a) uses SealTo and never the fresh-allocating Seal, and (b) feeds the
+// first record's returned buffer back as the second record's dst (backing-array
+// identity), i.e. the per-record ciphertext allocation is eliminated. Pointer
+// identity — not cap>0 — is required: a buggy impl that re-allocates a same-sized
+// buffer each call would pass a cap>0 check but is not reuse.
+func TestEncryptedSpoolWriter_ReusesCipherBufViaSealTo(t *testing.T) {
+	fake := &recordingSealSeam{DataEncryptor: newClusterTestSeam(t)}
+	w := &encryptedSpoolRecordWriter{w: io.Discard, seam: fake, domain: "spool:reuse-test"}
+
+	// Larger record first, then a smaller one that fits in the retained capacity.
+	big := bytes.Repeat([]byte("A"), 4096)
+	small := bytes.Repeat([]byte("b"), 512)
+	_, err := w.Write(big)
+	require.NoError(t, err)
+	_, err = w.Write(small)
+	require.NoError(t, err)
+
+	require.False(t, fake.sealCalled, "writer must use SealTo, never the fresh-allocating Seal")
+	require.Len(t, fake.dstBacking, 2, "expected exactly two SealTo calls")
+	require.Len(t, fake.retBacking, 2)
+	require.NotNil(t, fake.dstBacking[1], "second SealTo got a nil dst — cipherBuf was not retained")
+	require.Equal(t, fake.retBacking[0], fake.dstBacking[1],
+		"second SealTo dst must reuse the first call's returned backing array (cipherBuf reuse)")
 }
 
 // spool unit tests exercise the real seam-backed write/read path. clusterID is
