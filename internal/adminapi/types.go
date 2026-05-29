@@ -455,6 +455,7 @@ type DataGroupHealthSummary struct {
 type DataGroupHealthRow struct {
 	GroupID        string            `json:"group_id"`
 	PeerIDs        []string          `json:"peer_ids,omitempty"`
+	RaftVoters     []string          `json:"raft_voters,omitempty"`
 	LocalState     string            `json:"local_state,omitempty"`
 	LeaderID       string            `json:"leader_id,omitempty"`
 	Term           uint64            `json:"term,omitempty"`

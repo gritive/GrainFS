@@ -95,6 +95,7 @@ func mapDataGroupHealthRows(rows []cluster.DataGroupRaftHealth) *adminapi.DataGr
 		row := adminapi.DataGroupHealthRow{
 			GroupID:        r.GroupID,
 			PeerIDs:        append([]string(nil), r.PeerIDs...),
+			RaftVoters:     append([]string(nil), r.RaftVoters...),
 			LocalState:     r.LocalState,
 			LeaderID:       r.LeaderID,
 			Term:           r.Term,

@@ -477,6 +477,27 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeShardGroupForwarding is ProposeShardGroup that forwards to the meta
+// leader when this node is a follower (P1-1 convergence). proposeOrForward waits
+// for apply equivalently (leader applies locally; follower forwards), so a
+// non-meta-leader group leader can converge ITS group's PeerIDs mirror after a
+// real data-raft ChangeMembership. The shared ProposeShardGroup hot path is left
+// unchanged (minimal blast radius).
+func (m *MetaRaft) ProposeShardGroupForwarding(ctx context.Context, sg ShardGroupEntry) error {
+	if err := raft.ValidateGroupID(sg.ID); err != nil {
+		return fmt.Errorf("meta_raft: ProposeShardGroupForwarding: %w", err)
+	}
+	payload, err := encodeMetaPutShardGroupCmd(sg)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode PutShardGroup: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypePutShardGroup, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	return m.proposeOrForward(ctx, m.node, data)
+}
+
 // ProposeLoadSnapshot encodes a SetLoadSnapshot command and proposes it to the
 // cluster, blocking until the entry is applied to the local FSM.
 func (m *MetaRaft) ProposeLoadSnapshot(ctx context.Context, entries []LoadStatEntry) error {

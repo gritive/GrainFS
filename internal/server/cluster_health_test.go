@@ -74,6 +74,24 @@ func TestBuildClusterHealth_IncludesDataGroupRaftHealth(t *testing.T) {
 	require.Equal(t, uint64(4), h.DataGroups.Groups[0].MaxPeerLag)
 }
 
+// TestMapDataGroupHealthRows_PassesThroughRaftVoters verifies the RaftVoters
+// field (raft-config addresses; resolution deferred) is surfaced on the wire row.
+func TestMapDataGroupHealthRows_PassesThroughRaftVoters(t *testing.T) {
+	rows := []cluster.DataGroupRaftHealth{
+		{
+			GroupID:    "group-1",
+			PeerIDs:    []string{"n1", "n2", "n3"},
+			RaftVoters: []string{"10.0.0.1:9000", "10.0.0.2:9000", "10.0.0.3:9000", "10.0.0.9:9000"},
+		},
+	}
+	out := mapDataGroupHealthRows(rows)
+	require.NotNil(t, out)
+	require.Len(t, out.Groups, 1)
+	require.Equal(t, []string{"10.0.0.1:9000", "10.0.0.2:9000", "10.0.0.3:9000", "10.0.0.9:9000"},
+		out.Groups[0].RaftVoters)
+	require.Equal(t, []string{"n1", "n2", "n3"}, out.Groups[0].PeerIDs)
+}
+
 func TestDeriveIssues_LocalMode_WithConfiguredPeers(t *testing.T) {
 	h := Health{Mode: "local"}
 	issues := deriveIssues(h, true)

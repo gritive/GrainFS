@@ -146,6 +146,37 @@ func TestDataGroupManager_RaftHealthSnapshot_LeaderlessAndPeerLag(t *testing.T) 
 	require.Equal(t, map[string]uint64{"node-0": 50, "node-1": 44}, got[0].PeerMatchIndex)
 }
 
+// TestRaftHealthSnapshot_RaftVoters_ReadsRealConfigNotMirror verifies that
+// RaftHealthSnapshot populates RaftVoters from the node's REAL raft
+// Configuration (Suffrage==Voter), not from the constructed peerIDs mirror.
+func TestRaftHealthSnapshot_RaftVoters_ReadsRealConfigNotMirror(t *testing.T) {
+	mgr := NewDataGroupManager()
+	node := &dataGroupHealthNode{
+		id:          "node-0",
+		state:       raft.Leader,
+		term:        3,
+		leaderID:    "node-0",
+		commitIndex: 100,
+		config: raft.Configuration{
+			Servers: []raft.Server{
+				{ID: "10.0.0.0:9000", Suffrage: raft.Voter},
+				{ID: "10.0.0.1:9001", Suffrage: raft.Voter},
+				{ID: "10.0.0.9:9009", Suffrage: raft.Voter}, // extra voter NOT in the mirror
+			},
+		},
+	}
+	// Mirror peerIDs intentionally differs from the real config voter set.
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-0", "node-1"}, &GroupBackend{
+		DistributedBackend: &DistributedBackend{node: node},
+	}))
+
+	got := mgr.RaftHealthSnapshot()
+	require.Len(t, got, 1)
+	require.Equal(t, []string{"node-0", "node-1"}, got[0].PeerIDs, "PeerIDs mirror untouched")
+	require.Equal(t, []string{"10.0.0.0:9000", "10.0.0.1:9001", "10.0.0.9:9009"}, got[0].RaftVoters,
+		"RaftVoters must reflect the real raft config voter set, not the peerIDs mirror")
+}
+
 type dataGroupLeaderNode struct {
 	RaftNode
 	leaderID string
@@ -162,14 +193,16 @@ type dataGroupHealthNode struct {
 	commitIndex  uint64
 	lastLogIndex uint64
 	match        map[string]uint64
+	config       raft.Configuration
 }
 
-func (n *dataGroupHealthNode) ID() string             { return n.id }
-func (n *dataGroupHealthNode) State() raft.NodeState  { return n.state }
-func (n *dataGroupHealthNode) Term() uint64           { return n.term }
-func (n *dataGroupHealthNode) LeaderID() string       { return n.leaderID }
-func (n *dataGroupHealthNode) CommittedIndex() uint64 { return n.commitIndex }
-func (n *dataGroupHealthNode) LastLogIndex() uint64   { return n.lastLogIndex }
+func (n *dataGroupHealthNode) ID() string                        { return n.id }
+func (n *dataGroupHealthNode) Configuration() raft.Configuration { return n.config }
+func (n *dataGroupHealthNode) State() raft.NodeState             { return n.state }
+func (n *dataGroupHealthNode) Term() uint64                      { return n.term }
+func (n *dataGroupHealthNode) LeaderID() string                  { return n.leaderID }
+func (n *dataGroupHealthNode) CommittedIndex() uint64            { return n.commitIndex }
+func (n *dataGroupHealthNode) LastLogIndex() uint64              { return n.lastLogIndex }
 func (n *dataGroupHealthNode) PeerMatchIndex(peer string) (uint64, bool) {
 	v, ok := n.match[peer]
 	return v, ok

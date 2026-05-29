@@ -507,6 +507,32 @@ func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {
 	assert.InDelta(t, 20.0, snap["n2"].DiskUsedPct, 0.01)
 }
 
+// TestMetaRaft_ProposeShardGroupForwarding_LeaderAppliesLocally verifies that
+// the forwarding variant applies locally on the leader path exactly like
+// ProposeShardGroup (proposeOrForward leader branch == ProposeWait + apply).
+func TestMetaRaft_ProposeShardGroupForwarding_LeaderAppliesLocally(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background(), nil))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeShardGroupForwarding(ctx, ShardGroupEntry{
+		ID:      "group-0",
+		PeerIDs: []string{"node-0"},
+	}))
+
+	sg, ok := m.FSM().ShardGroup("group-0")
+	require.True(t, ok)
+	assert.Equal(t, "group-0", sg.ID)
+	assert.Equal(t, []string{"node-0"}, sg.PeerIDs)
+}
+
 func TestMetaRaft_ProposeRebalancePlan_CommitToFSM(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })

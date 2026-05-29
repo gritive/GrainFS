@@ -3,6 +3,8 @@ package cluster
 import (
 	"sort"
 	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // DataGroup is the data Raft group scaffold. PR-D adds raft.Node + FSM.
@@ -109,6 +111,7 @@ func (m *DataGroupManager) LeaderIDs() map[string]string {
 type DataGroupRaftHealth struct {
 	GroupID        string
 	PeerIDs        []string
+	RaftVoters     []string
 	LocalState     string
 	LeaderID       string
 	Term           uint64
@@ -139,6 +142,11 @@ func (m *DataGroupManager) RaftHealthSnapshot() []DataGroupRaftHealth {
 			continue
 		}
 		node := dg.backend.Node()
+		for _, s := range node.Configuration().Servers {
+			if s.Suffrage == raft.Voter {
+				row.RaftVoters = append(row.RaftVoters, s.ID) // addresses; resolution to node IDs deferred
+			}
+		}
 		row.LocalState = node.State().String()
 		row.LeaderID = node.LeaderID()
 		row.Term = node.Term()
