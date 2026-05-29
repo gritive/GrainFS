@@ -274,7 +274,7 @@ func adminAuthorizer(state *bootState) admin.CredentialAuthorizer {
 	// Always install the PDP decorator; it is a pure pass-through unless iam.pdp
 	// is enabled (read per request from the cfg store), so hot-enable works with
 	// no dependency rebuild.
-	return pdp.NewDecorator(base, state.cfgStore)
+	return pdp.NewDecorator(base, state.cfgStore, nil) // TASK6-STUB: nil TokenSource; Task 9 wires the real one
 }
 
 // iamPolicyAdminService returns a wired admin.IAMPolicyService if MetaRaft and

@@ -54,23 +54,26 @@ type innerAuthorizer interface {
 // enabled/failure_policy/endpoint at runtime without a restart. When disabled
 // (or the config is missing/invalid) it is a pure pass-through.
 type Decorator struct {
-	inner innerAuthorizer
-	cfg   ConfigReader
+	inner  innerAuthorizer
+	cfg    ConfigReader
+	tokens TokenSource // may be nil
 
 	// now is the clock used for cache TTL/grace decisions. Defaults to time.Now;
 	// tests override it for deterministic expiry.
 	now func() time.Time
 
-	mu         sync.Mutex
-	client     *Client
-	clientSock string
-	cache      *decisionCache
-	cacheGen   string
+	mu       sync.Mutex
+	client   *Client
+	clientID string
+	cache    *decisionCache
+	cacheGen string
 }
 
-// NewDecorator wraps inner with a per-request PDP chain driven by cfg.
-func NewDecorator(inner innerAuthorizer, cfg ConfigReader) *Decorator {
-	return &Decorator{inner: inner, cfg: cfg, now: time.Now}
+// NewDecorator wraps inner with a per-request PDP chain driven by cfg. tokens
+// supplies the bearer token (and its rotation generation) for an https remote
+// PDP; it may be nil when no token is configured.
+func NewDecorator(inner innerAuthorizer, cfg ConfigReader, tokens TokenSource) *Decorator {
+	return &Decorator{inner: inner, cfg: cfg, tokens: tokens, now: time.Now}
 }
 
 // Authorize chains the PDP after the GrainFS service-account authorizer. The
@@ -128,8 +131,14 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		},
 	}
 
+	token, tokenGen := "", ""
+	if d.tokens != nil {
+		if tk, g, ok := d.tokens.CurrentToken(); ok {
+			token, tokenGen = tk, g
+		}
+	}
 	fp := string(cfg.FailurePolicy)
-	client, cache := d.refresh(cfg)
+	client, cache := d.refresh(cfg, token, tokenGen)
 
 	// Inbound-cancel takes precedence over ANY cached decision: an already-canceled
 	// request must DENY "request canceled" before the cache lookup, so a fresh cached
@@ -211,6 +220,16 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 
 	if errType != "" {
 		metrics.PDPRequestsTotal.WithLabelValues("error", errType, fp).Inc()
+		// SSRF-blocked is a HARD DENY independent of failure_policy: a dial rejected
+		// by the egress filter must never fall through to fail-open (it would let an
+		// attacker reach a forbidden target by tripping the filter). It also bypasses
+		// grace — a blocked dial is not "PDP unavailable", it is a refused egress.
+		if errType == ErrTypeSSRF {
+			log.Warn().Str("event", "iam.pdp").Str("error_type", errType).
+				Msg("iam.pdp: dial blocked by SSRF egress filter — hard deny")
+			d.audit(req, actor, ctxReq, "deny", errType, "ssrf_blocked: egress filter")
+			return policy.EvalResult{Decision: policy.DecisionDeny, Reason: layerFailClosed}
+		}
 		// Grace first: a PDP failure with a stale-but-within-grace cached decision
 		// serves that decision rather than applying the failure policy.
 		if cache != nil && cfg.Cache.GraceTTL > 0 && state == cacheStale {
@@ -250,26 +269,30 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 
 // refresh reconciles the cached client and decision cache against cfg under a
 // single lock and returns a snapshot of both. The client is rebuilt ONLY when
-// the socket path changes (FailurePolicy/timeout are read per request from cfg,
-// not the cached client, so those flips take effect without a rebuild). The
-// cache is rebuilt/dropped only when configGen changes — so an endpoint,
-// failure_policy, or cache-parameter change clears prior cached decisions (R-A).
-// The returned *decisionCache is internally locked, safe to use after unlock.
-func (d *Decorator) refresh(cfg Config) (*Client, *decisionCache) {
+// its identity changes (endpoint/scheme/TLS/SSRF or the bearer-token generation —
+// FailurePolicy/timeout are read per request from cfg, not the cached client, so
+// those flips take effect without a rebuild). The cache is rebuilt/dropped only
+// when configGen changes — so an endpoint, failure_policy, cache-parameter, or
+// token-generation change clears prior cached decisions (R-A). The returned
+// *decisionCache is internally locked, safe to use after unlock. token is the
+// snapshot taken once by the caller so client+cache reconcile against the same
+// value; tokenGen feeds both client identity and configGen.
+func (d *Decorator) refresh(cfg Config, token, tokenGen string) (*Client, *decisionCache) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.client == nil || d.clientSock != cfg.RemoteURL { // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
+	id := clientIdentity(cfg, tokenGen)
+	if d.client == nil || d.clientID != id {
 		if d.client != nil {
-			// Endpoint changed: release the old client's idle keep-alive
-			// connections so hot-reloading the socket doesn't leak FDs.
+			// Identity changed: release the old client's idle keep-alive
+			// connections so hot-reloading the endpoint/token doesn't leak FDs.
 			d.client.Close()
 		}
-		d.client = NewClient(cfg, "") // TASK3-STUB: empty token; Task 6 wires the real bearer token
-		d.clientSock = cfg.RemoteURL  // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
+		d.client = NewClient(cfg, token)
+		d.clientID = id
 	}
 
-	if gen := configGen(cfg); gen != d.cacheGen {
+	if gen := configGen(cfg, tokenGen); gen != d.cacheGen {
 		if cfg.Cache.Active {
 			d.cache = newDecisionCache(cfg.Cache.MaxEntries)
 		} else {
@@ -284,6 +307,18 @@ func (d *Decorator) refresh(cfg Config) (*Client, *decisionCache) {
 	return d.client, d.cache
 }
 
+// clientIdentity hashes the inputs that determine the HTTP client's wiring:
+// scheme, endpoint, bearer-token generation, CA bundle, TLS floor, and SSRF
+// relaxation. A change in any of these forces a client rebuild (close + new),
+// so a hot-reloaded endpoint or rotated token never reuses a stale transport.
+func clientIdentity(cfg Config, tokenGen string) string {
+	h := sha256.New()
+	caHash := sha256.Sum256([]byte(cfg.TLS.CAPEM))
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%x\x00%d\x00%t",
+		cfg.Scheme, cfg.RemoteURL, tokenGen, caHash, cfg.TLS.MinVersion, cfg.SSRF.AllowPrivate)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // release closes and drops the cached client AND the decision cache (used when
 // PDP is unconfigured/invalid/disabled so a hot enable->disable frees the idle
 // unix-socket connection and cannot reuse stale decisions on re-enable).
@@ -295,7 +330,7 @@ func (d *Decorator) release() {
 	if d.client != nil {
 		d.client.Close()
 		d.client = nil
-		d.clientSock = ""
+		d.clientID = ""
 	}
 	d.cache = nil
 	d.cacheGen = ""
@@ -303,17 +338,18 @@ func (d *Decorator) release() {
 }
 
 // configGen returns a stable hash of the config inputs that, when changed, must
-// invalidate the decision cache: socket, failure policy, and every cache knob.
-func configGen(cfg Config) string {
+// invalidate the decision cache: scheme, endpoint, failure policy, token
+// generation, TLS/SSRF wiring, and every cache knob. A change in any of these
+// could alter a decision (or which PDP produced it), so prior cached decisions
+// must not survive the change.
+func configGen(cfg Config, tokenGen string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%d\x00%d\x00%d\x00%d",
-		cfg.RemoteURL, // TASK1-STUB: SocketPath→RemoteURL (Task 3/6 finalize)
-		cfg.FailurePolicy,
-		cfg.Cache.Active,
-		int64(cfg.Cache.TTLAllow),
-		int64(cfg.Cache.TTLDeny),
-		cfg.Cache.MaxEntries,
-		int64(cfg.Cache.GraceTTL),
+	caHash := sha256.Sum256([]byte(cfg.TLS.CAPEM))
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%x\x00%d\x00%t\x00%t\x00%d\x00%d\x00%d\x00%d",
+		cfg.Scheme, cfg.RemoteURL, cfg.FailurePolicy, tokenGen,
+		caHash, cfg.TLS.MinVersion, cfg.SSRF.AllowPrivate,
+		cfg.Cache.Active, int64(cfg.Cache.TTLAllow), int64(cfg.Cache.TTLDeny),
+		cfg.Cache.MaxEntries, int64(cfg.Cache.GraceTTL),
 	)
 	return hex.EncodeToString(h.Sum(nil))
 }
