@@ -58,41 +58,28 @@ Work these in order. Do not run them in parallel.
      `putObjectEC`/`writeLocalShard` write still maps the raw key into the path without a containment
      check. Fix at the S3 key boundary (reject/normalize `..` segments) or add containment to
      `writeLocalShard`. Its own slice — touches the PUT path, not just the scrubber.
-   - [ ] **Gate-fix slice — RE-SCOPED after codex plan-gate (2026-05-29); putPipeline/WAL under
-     investigation.** #631 broke runtime gates that key off `ShardService.encryptor != nil` as an
-     "encryption enabled" flag (nil in prod). Three candidate gates, but codex review changed the
-     risk picture:
-     - (A) `backend.go:1611` putPipeline eligibility → **DEAD in prod**. Reactivating is the
-       original intent BUT codex (F1) flagged a **durability question**: putPipeline acks on early
+   - **Gate-fix slice — DONE 2026-05-29 (ShardService.encryptor retirement, this worktree).**
+     The vestigial `ShardService.encryptor != nil` runtime gates are gone: the putPipeline
+     dispatch gate (`backend.go`) now keys off an explicit `putPipelineEnabled` bool (boot wires
+     it `false` = dormant pending F1; only the integration test enables it), and the WAL
+     raw-payload sizing now passes a constant `false`. The static `encryptor` field + `WithEncryptor`
+     option were deleted and all ~97 test fixtures migrated to the DEK keeper (full WithEncryptor→DEK
+     migration). Behavior-preserving in prod (prod always had `encryptor==nil`).
+     - **Still DEFERRED: putPipeline prod REACTIVATION (F1 durability).** putPipeline acks on early
        K-shard quorum (`putpipeline/pipeline.go:240`) + defers fsync to a batched WAL commit
-       (`drive.go` `skipFsync`, `commit.go:120`), whereas the current spooled path flushes the data
-       WAL synchronously before the raft metadata propose. Must verify PutShard does not return
-       (and let metadata commit) before shard durability before flipping. INVESTIGATE.
-     - (B) `shard_service.go:1446-1447` WAL raw-payload sizing → keyed off `encryptor != nil`.
-       codex (F3): ≥1 MiB shards are metadata-only in the WAL (`walPayloadInlineThreshold`,
-       `shard_service.go:1171`), so the flip mostly affects the ~64 MiB boundary; likely a marginal
-       clean-rejection improvement, not a regression, but LOW value. INVESTIGATE whether it's a
-       real fix or a no-op.
-     - Note (codex F5): `segEnc` is **mandatory** (`NewShardService` panics if nil,
-       `shard_service.go:238`), so `segEnc != nil` is always true — a `EncryptionEnabled()` predicate
-       would be unconditionally true; the "encryption disabled" branch is unconstructable. The
-       gate-rekey is really "remove the vestigial `encryptor`-presence condition," and the predicate
-       can't be unit-tested in a false state.
-     - Spool/multipart-spool plaintext (`spool.go:211`, `encryptedShardStorage()` `backend.go:2040`
-       + callers `3860/3975/3989/4140`) → encrypt via the DataEncryptor seam (needs buffer-reusing
-       `SealTo`/`OpenTo`); its own slice.
-     **Decision owed:** after F1/F3 investigation, decide which of A/B ship and whether spool +
-     scrubber fold together (all are #631-regression at-rest gates).
-   - [ ] **R3 static-residue deletion (AFTER the gate-fix slice).** Once no runtime gate keys off
-     the static `encryptor`, delete the dead static residue: `storage.EncryptorAdapter`/
-     `NewEncryptorAdapter`, static fallbacks (`fsm_values.go:51`, `shard_service.go:106/1288-1290`,
-     `packblob/blob.go:93`, `pitr.go:85`, read-side `shard_service.go:826/835/1668/1720`,
-     `putpipeline/pipeline.go:124` `cfg.Encryptor` fallback), `WithEncryptor` option (migrate
-     testbackend to a DEK keeper), `NewManagerWithEncryptor` static `enc` param, MetaFSM
-     `SetEncryptor`/`Encryptor` (dead). Plus dead-code removal: `storage/encrypted_badger.go` +
-     `storage.LocalBackend` (no production caller, ADR-0015). ADR for cipher-unification +
-     greenfield boundary. Bumps format 8→9. Greenfield (format loud-fail) → no legacy ciphertext
-     to support.
+       (`drive.go` `skipFsync`, `commit.go:120`), whereas the spooled path flushes the data WAL
+       synchronously before the raft metadata propose. Verify PutShard does not let metadata commit
+       before shard durability before enabling in prod. Its own slice.
+   - [ ] **R3 static-residue deletion (remaining residue; AFTER any F1 reactivation).** The
+     ShardService static `encryptor` + `WithEncryptor` are DONE (above). Remaining dead/legacy
+     static residue still to remove in its own slice(s): `storage.EncryptorAdapter`/
+     `NewEncryptorAdapter` (still used by `fsm_values.go`, `pitr.go`, `packblob/blob.go`,
+     `storage/local.go` — migrate those first), `putpipeline/pipeline.go` `cfg.Encryptor` fallback,
+     `NewManagerWithEncryptor` static `enc` param, `MetaFSM.encryptor`/`SetEncryptor`/`Encryptor`
+     + `FSM.enc` (still read by `fsm_values.go` `dataEncryptor`/`openValue` fallback — retire after
+     those callers move to DEK). NOTE: `storage/encrypted_badger.go` + `storage.LocalBackend` are
+     NOT dead (many prod callers — earlier "no production caller" note was wrong; verify before any
+     removal). ADR for cipher-unification + greenfield boundary; bumps format 8→9.
    - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
      the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
      a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND
