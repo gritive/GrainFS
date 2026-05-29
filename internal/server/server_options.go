@@ -52,6 +52,10 @@ func WithIAMAudit(audit *iam.AuditLogger) Option {
 
 // WithPolicyAuthorizer wires the IAM policy authorizer so Layer 1 (iamCheck)
 // evaluates policy.Evaluate for authenticated requests instead of deny-by-default.
+// Pass a concrete non-nil implementation, or leave the option unset to disable the
+// gate (the s.policyAuthorizer != nil checks rely on an untyped-nil field). Do NOT
+// pass a typed-nil concrete (e.g. (*s3auth.Authorizer)(nil)): it wraps to a non-nil
+// interface and the nil-checks would let Authorize panic.
 func WithPolicyAuthorizer(a PolicyAuthorizer) Option {
 	return func(s *Server) {
 		s.policyAuthorizer = a

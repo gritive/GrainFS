@@ -307,9 +307,19 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	ch := d.sf.DoChan(sfKey, func() (any, error) {
 		return d.consult(req, cfg, fp, key, cache, entry, state, actor, ctxReq, client), nil
 	})
-	var r consultResult
-	select {
-	case <-ctx.Done():
+	// canceledDeny restores master's invariant that a canceled request never adopts
+	// an allow (incl. fail-open). The ctx.Done() arm catches a cancel that wins the
+	// select race; the post-<-ch check is defense-in-depth for the case where the
+	// flight result won the select but the inbound ctx is ALREADY canceled (a select
+	// between two ready channels picks randomly). The invariant is tested at its two
+	// black-box-reachable points — TestDecoratorCanceledCtxDeniesEvenFailOpen
+	// (pre-call arm) and TestDecoratorSingleflightPerWaiterCancel (ctx.Done arm); the
+	// post-<-ch arm is not black-box reachable today (the pre-call check absorbs early
+	// cancels and a blocked flight lands on ctx.Done), so it is correct-by-inspection
+	// defense-in-depth, NOT test-covered. S3 passes context.Background() (never
+	// cancels), but the deferred "thread ctx through IAMChecker" follow-up would make
+	// this arm reachable on S3 — close it now rather than ship a latent fail-open.
+	canceledDeny := func() policy.EvalResult {
 		errType := ErrTypeTransport
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			errType = ErrTypeTimeout
@@ -317,7 +327,15 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		d.mRequests.WithLabelValues("error", errType, fp).Inc()
 		d.audit(req, actor, ctxReq, "deny", errType, "request canceled")
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "request canceled"}
+	}
+	var r consultResult
+	select {
+	case <-ctx.Done():
+		return canceledDeny()
 	case res := <-ch:
+		if ctx.Err() != nil {
+			return canceledDeny()
+		}
 		r = res.Val.(consultResult)
 	}
 	if r.useInner {
