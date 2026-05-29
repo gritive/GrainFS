@@ -197,6 +197,34 @@ func TestPackblobGenFramed_FrameShiftDowngradeFailsClosed(t *testing.T) {
 	require.Error(t, err, "frame-shift downgrade must fail closed, not return ciphertext")
 }
 
+// TestPackblobGenFramed_FrameShiftDowngradeFailsClosedGen0 locks the SHIPPING
+// steady state (active gen 0): clearing flagGenFramed makes the reader parse the
+// gen-0 bytes (0x00000000) as data_len → dataLen=0 != loc.Length → fail closed.
+func TestPackblobGenFramed_FrameShiftDowngradeFailsClosedGen0(t *testing.T) {
+	dir := t.TempDir()
+	bs := newPackblobDEKStore(t, dir, 256*1024*1024) // active gen 0
+	defer bs.Close()
+
+	loc, err := bs.Append("bucket/g0", []byte("gen-0 confidential data"))
+	require.NoError(t, err)
+
+	path := bs.blobPath(loc.BlobID)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	flagsPos := int64(loc.Offset) + 4 + int64(len("bucket/g0"))
+	var fb [1]byte
+	_, err = f.ReadAt(fb[:], flagsPos)
+	require.NoError(t, err)
+	require.NotZero(t, fb[0]&flagGenFramed)
+	fb[0] &^= flagGenFramed
+	_, err = f.WriteAt(fb[:], flagsPos)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, err = bs.Read(loc)
+	require.Error(t, err, "gen-0 frame-shift must fail closed")
+}
+
 // TestPackblobGenFramed_TamperedGenSelectorFails (task 4): flipping the frame
 // gen to an unknown gen (CRC recomputed so the gen byte-rot guard is bypassed)
 // makes Open select a missing key → hard error, never silent wrong-plaintext.
