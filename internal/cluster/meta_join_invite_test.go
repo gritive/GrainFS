@@ -43,14 +43,16 @@ func newFakeBootstrapProvider() *fakeBootstrapProvider {
 // inviteJoinFixture wires a real single-node (or, for membership tests, a paired
 // second node) MetaRaft leader plus a valid invite-path JoinRequest for node-b.
 type inviteJoinFixture struct {
-	leader     *MetaRaft
-	receiver   *MetaJoinReceiver
-	provider   *fakeBootstrapProvider
-	req        JoinRequest
-	inviteID   string
-	spki       [32]byte
-	joinerKey  *ecdsa.PrivateKey
-	invitePriv ed25519.PrivateKey
+	leader       *MetaRaft
+	receiver     *MetaJoinReceiver
+	provider     *fakeBootstrapProvider
+	req          JoinRequest
+	inviteID     string
+	spki         [32]byte
+	capturedSPKI [32]byte
+	bind         []byte
+	joinerKey    *ecdsa.PrivateKey
+	invitePriv   ed25519.PrivateKey
 }
 
 // buildInviteJoinFixture starts a real single-node MetaRaft leader, mints an
@@ -82,13 +84,20 @@ func buildInviteJoinFixture(t *testing.T, joinerRaftAddr string) inviteJoinFixtu
 	require.NoError(t, err)
 	joinerKey := cert.PrivateKey.(*ecdsa.PrivateKey)
 
+	// Fixed 32-byte test channel-binding value. The leader rebuilds the
+	// transcript with the bind passed to HandleJoin; the joiner signs over the
+	// SAME value here so both signatures verify on the happy path.
+	bind := make([]byte, transport.JoinBindingLen)
+	for i := range bind {
+		bind[i] = 0x42
+	}
 	tr := encrypt.InviteTranscript{
 		ClusterID: transcriptClusterID,
 		Nonce:     []byte("joiner-nonce"),
 		NodeID:    "node-b",
 		Address:   joinerRaftAddr,
 		SPKI:      spki[:],
-		Bind:      nil,
+		Bind:      bind,
 	}
 	inviteSig := encrypt.SignInviteTranscript(invitePriv, tr)
 	nodeSig, err := encrypt.SignNodeTranscript(joinerKey, tr)
@@ -110,15 +119,41 @@ func buildInviteJoinFixture(t *testing.T, joinerRaftAddr string) inviteJoinFixtu
 		InviteID:       inviteID,
 	}
 	return inviteJoinFixture{
-		leader:     m,
-		receiver:   receiver,
-		provider:   provider,
-		req:        req,
-		inviteID:   inviteID,
-		spki:       spki,
-		joinerKey:  joinerKey,
-		invitePriv: invitePriv,
+		leader:       m,
+		receiver:     receiver,
+		provider:     provider,
+		req:          req,
+		inviteID:     inviteID,
+		spki:         spki,
+		capturedSPKI: spki,
+		bind:         bind,
+		joinerKey:    joinerKey,
+		invitePriv:   invitePriv,
 	}
+}
+
+// signReqOverBind rebuilds fx.req with BOTH signatures (Ed25519 invite + ECDSA
+// node) recomputed over a transcript carrying the given Bind. Used by the
+// wrong-length-bind test to produce a request whose signatures match a
+// non-standard bind value.
+func (fx *inviteJoinFixture) signReqOverBind(bind []byte) JoinRequest {
+	tr := encrypt.InviteTranscript{
+		ClusterID: transcriptClusterID,
+		Nonce:     fx.req.HandshakeNonce,
+		NodeID:    fx.req.NodeID,
+		Address:   fx.req.Address,
+		SPKI:      fx.req.SPKI,
+		Bind:      bind,
+	}
+	nodeSig, err := encrypt.SignNodeTranscript(fx.joinerKey, tr)
+	if err != nil {
+		panic(err)
+	}
+	req := fx.req
+	req.JoinPhase = 1
+	req.InviteSig = encrypt.SignInviteTranscript(fx.invitePriv, tr)
+	req.NodeSig = nodeSig
+	return req
 }
 
 func newSingleNodeInviteFixture(t *testing.T) inviteJoinFixture {
@@ -151,6 +186,53 @@ func buildTwoNodeInviteFixture(t *testing.T) (inviteJoinFixture, *MetaRaft) {
 	return fx, joiner
 }
 
+// --- Phase-1 channel binding (Task 3) ----------------------------------------
+
+func TestHandleJoinPhase1_EmptyBindRejected(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	req := fx.req
+	req.JoinPhase = 1
+	reply := fx.receiver.HandleJoin(context.Background(), fx.capturedSPKI, nil, req)
+	if reply.Accepted {
+		t.Fatal("Phase-1 accepted with empty channel binding")
+	}
+}
+
+func TestHandleJoinPhase1_WrongLengthBindRejected(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	short := []byte{0x01}
+	req := fx.signReqOverBind(short)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.capturedSPKI, short, req)
+	if reply.Accepted {
+		t.Fatal("Phase-1 accepted with wrong-length channel binding")
+	}
+}
+
+func TestHandleJoinPhase1_BindMismatchRejected(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	// fx.req signed over fx.bind; verifying against a different 32-byte bind fails sigs.
+	other := make([]byte, transport.JoinBindingLen)
+	for i := range other {
+		other[i] = 0xAB
+	}
+	req := fx.req
+	req.JoinPhase = 1
+	reply := fx.receiver.HandleJoin(context.Background(), fx.capturedSPKI, other, req)
+	if reply.Accepted {
+		t.Fatal("Phase-1 accepted with mismatched channel binding")
+	}
+}
+
+func TestHandleJoinPhase1_MatchingBindAccepted(t *testing.T) {
+	fx := newSingleNodeInviteFixture(t)
+	req := fx.req
+	req.JoinPhase = 1
+	reply := fx.receiver.HandleJoin(context.Background(), fx.capturedSPKI, fx.bind, req)
+	if !reply.Accepted {
+		t.Fatalf("Phase-1 rejected with matching bind: status=%s msg=%s", reply.Status, reply.Message)
+	}
+}
+
 // --- Phase-1 -----------------------------------------------------------------
 
 func TestHandleJoin_Phase1_Valid_SealsBootstrapNoMembership(t *testing.T) {
@@ -159,7 +241,7 @@ func TestHandleJoin_Phase1_Valid_SealsBootstrapNoMembership(t *testing.T) {
 
 	req := fx.req
 	req.JoinPhase = 1
-	reply := fx.receiver.HandleJoin(ctx, fx.spki, req)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, req)
 
 	require.True(t, reply.Accepted)
 	require.Equal(t, JoinStatusOK, reply.Status)
@@ -198,7 +280,7 @@ func TestHandleJoin_Phase1_PostDropOmitsTransportPSK(t *testing.T) {
 
 	req := fx.req
 	req.JoinPhase = 1
-	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, fx.bind, req)
 
 	require.True(t, reply.Accepted)
 	eph, ct, err := decodeSealedBootstrap(reply.SealedBootstrap)
@@ -219,7 +301,7 @@ func TestHandleJoin_Phase1_CapturedSPKIMismatch_Rejected(t *testing.T) {
 
 	var wrong [32]byte
 	wrong[0] = 0xFF
-	reply := fx.receiver.HandleJoin(context.Background(), wrong, req)
+	reply := fx.receiver.HandleJoin(context.Background(), wrong, fx.bind, req)
 
 	require.False(t, reply.Accepted)
 	require.Equal(t, JoinStatusError, reply.Status)
@@ -233,7 +315,7 @@ func TestHandleJoin_Phase1_ReplayByDifferentIdentity_Rejected(t *testing.T) {
 	// First redeemer binds the invite.
 	first := fx.req
 	first.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, first).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, first).Accepted)
 
 	// A DIFFERENT identity node-c re-redeems the SAME invite, signing its own
 	// transcript with the SAME (leaked) invite key the FSM holds. The gate
@@ -248,7 +330,7 @@ func TestHandleJoin_Phase1_ReplayByDifferentIdentity_Rejected(t *testing.T) {
 		NodeID:    "node-c",
 		Address:   "10.0.0.3:7001",
 		SPKI:      spkiC[:],
-		Bind:      nil,
+		Bind:      fx.bind,
 	}
 	reqC := JoinRequest{
 		NodeID:         "node-c",
@@ -261,7 +343,7 @@ func TestHandleJoin_Phase1_ReplayByDifferentIdentity_Rejected(t *testing.T) {
 		InviteID:       fx.inviteID,
 		JoinPhase:      1,
 	}
-	reply := fx.receiver.HandleJoin(ctx, spkiC, reqC)
+	reply := fx.receiver.HandleJoin(ctx, spkiC, fx.bind, reqC)
 	require.False(t, reply.Accepted)
 	require.Equal(t, JoinStatusError, reply.Status)
 }
@@ -283,7 +365,7 @@ func TestHandleJoin_Phase1_RejectsForgedNodeSig(t *testing.T) {
 	req.JoinPhase = 1
 	req.NodeSig = mustSignNode(t, otherKey, tr)
 
-	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, fx.bind, req)
 	require.False(t, reply.Accepted)
 	require.Equal(t, "node signature invalid", reply.Message)
 }
@@ -296,7 +378,7 @@ func TestHandleJoin_Phase1_RejectsSPKICertMismatch(t *testing.T) {
 	req.JoinPhase = 1
 	req.CertDER = otherCert.Leaf.Raw
 
-	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, fx.bind, req)
 	require.False(t, reply.Accepted)
 	require.Equal(t, "SPKI does not match presented cert", reply.Message)
 }
@@ -307,7 +389,7 @@ func TestHandleJoin_Phase1_RejectsDenylistedSPKI(t *testing.T) {
 	req := fx.req
 	req.JoinPhase = 1
 
-	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, fx.bind, req)
 	require.False(t, reply.Accepted)
 	require.Contains(t, reply.Message, "SPKI denylisted")
 }
@@ -322,7 +404,7 @@ func TestHandleJoin_Phase1_RejectsExpiredInvite(t *testing.T) {
 	req := fx.req
 	req.JoinPhase = 1
 
-	reply := fx.receiver.HandleJoin(ctx, fx.spki, req)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, req)
 	require.False(t, reply.Accepted)
 	require.Equal(t, "invite invalid/used/expired", reply.Message)
 }
@@ -342,7 +424,7 @@ func TestHandleJoin_Phase1_RejectsForgedInviteSig(t *testing.T) {
 	req.JoinPhase = 1
 	req.InviteSig = encrypt.SignInviteTranscript(otherPriv, tr)
 
-	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, req)
+	reply := fx.receiver.HandleJoin(context.Background(), fx.spki, fx.bind, req)
 	require.False(t, reply.Accepted)
 	require.Equal(t, "invite signature invalid", reply.Message)
 }
@@ -362,12 +444,12 @@ func TestHandleJoin_Phase2_ACK_StagesMembershipConsumesInvite(t *testing.T) {
 	// Phase-1 binds the invite.
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 
 	// Phase-2 ACK from the pending redeemer.
 	p2 := fx.req
 	p2.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2)
 	require.True(t, reply.Accepted, "phase-2 reply: %+v", reply)
 	require.Equal(t, JoinStatusOK, reply.Status)
 	require.True(t, hookRan, "postJoinHook must run on Phase-2")
@@ -389,13 +471,13 @@ func TestHandleJoin_Phase2_CapturedSPKIMismatch_Rejected(t *testing.T) {
 
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 
 	p2 := fx.req
 	p2.JoinPhase = 2
 	var wrong [32]byte
 	wrong[0] = 0xAB
-	reply := fx.receiver.HandleJoin(ctx, wrong, p2)
+	reply := fx.receiver.HandleJoin(ctx, wrong, fx.bind, p2)
 	require.False(t, reply.Accepted)
 	require.Equal(t, JoinStatusError, reply.Status)
 	require.Contains(t, reply.Message, "captured SPKI does not match pending")
@@ -410,7 +492,7 @@ func TestHandleJoin_Phase2_RejectsExpiredPendingInvite(t *testing.T) {
 
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 
 	fx.leader.fsm.invites.mu.Lock()
 	rec := fx.leader.fsm.invites.records[fx.inviteID]
@@ -420,7 +502,7 @@ func TestHandleJoin_Phase2_RejectsExpiredPendingInvite(t *testing.T) {
 
 	p2 := fx.req
 	p2.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2)
 	require.False(t, reply.Accepted, "expired pending invite must not complete membership")
 	require.Equal(t, JoinStatusError, reply.Status)
 	require.Contains(t, reply.Message, "invite invalid/used/expired")
@@ -433,7 +515,7 @@ func TestHandleJoin_Phase2_JoinFailureDoesNotRollbackLearner(t *testing.T) {
 
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 
 	originalMeta := fx.receiver.meta
 	fake := &phase2FailCoordinator{
@@ -444,7 +526,7 @@ func TestHandleJoin_Phase2_JoinFailureDoesNotRollbackLearner(t *testing.T) {
 
 	p2 := fx.req
 	p2.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2)
 	require.False(t, reply.Accepted)
 	require.Contains(t, reply.Message, "promote failed")
 	require.False(t, fake.removeLearnerCalled, "Phase-2 failure must stay retryable instead of best-effort rollback")
@@ -456,17 +538,17 @@ func TestHandleJoin_Phase2_Idempotent_ResumesToConsume(t *testing.T) {
 
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 
 	p2 := fx.req
 	p2.JoinPhase = 2
-	first := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	first := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2)
 	require.True(t, first.Accepted)
 
 	// Second Phase-2 invocation simulates a crash-after-membership retry: every
 	// membership step is already applied and the invite is already consumed.
 	// Idempotent JoinViaInvite + consume must still report success.
-	second := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	second := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2)
 	require.True(t, second.Accepted, "phase-2 retry must resume idempotently: %+v", second)
 
 	// Still exactly one voter member + consumed invite.
@@ -487,7 +569,7 @@ func TestHandleJoin_Phase2_ResumesFromMembershipAppliedNotConsumed(t *testing.T)
 	// Phase-1 binds the invite.
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 
 	// Simulate the crash middle state: membership fully staged, invite NOT
 	// consumed. (JoinViaInvite is the membership-only half; it does not consume.)
@@ -499,7 +581,7 @@ func TestHandleJoin_Phase2_ResumesFromMembershipAppliedNotConsumed(t *testing.T)
 	// Phase-2 ACK resumes: membership idempotently re-applied, invite consumed.
 	p2 := fx.req
 	p2.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, fx.spki, p2)
+	reply := fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2)
 	require.True(t, reply.Accepted, "phase-2 must resume from middle state: %+v", reply)
 	require.Equal(t, peerStateMember, fx.leader.fsm.peers.byNodeID["node-b"].State)
 	_, ok := fx.leader.LookupInvite(fx.inviteID, time.Now())
@@ -521,10 +603,10 @@ func TestHandleJoin_Phase2_RejectsAddressOwnedByAnotherNode(t *testing.T) {
 	// node-b joins for real: Phase-1 + Phase-2 → voting member at ownedAddr.
 	p1 := fx.req
 	p1.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p1).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p1).Accepted)
 	p2 := fx.req
 	p2.JoinPhase = 2
-	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, p2).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, fx.spki, fx.bind, p2).Accepted)
 	require.True(t, fsmHasNode(fx.leader, "node-b"))
 	require.Equal(t, peerStateMember, fx.leader.fsm.peers.byNodeID["node-b"].State)
 
@@ -543,7 +625,7 @@ func TestHandleJoin_Phase2_RejectsAddressOwnedByAnotherNode(t *testing.T) {
 		NodeID:    "node-c",
 		Address:   ownedAddr,
 		SPKI:      spkiC[:],
-		Bind:      nil,
+		Bind:      fx.bind,
 	}
 	reqC := JoinRequest{
 		NodeID:         "node-c",
@@ -559,11 +641,11 @@ func TestHandleJoin_Phase2_RejectsAddressOwnedByAnotherNode(t *testing.T) {
 	// Phase-1 succeeds (fresh invite, own SPKI; the address is not validated at
 	// Phase-1 — it is bound into the pending redemption).
 	reqC.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, spkiC, reqC).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, spkiC, fx.bind, reqC).Accepted)
 
 	// Phase-2 ACK must be REJECTED: ownedAddr belongs to node-b, not node-c.
 	reqC.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, spkiC, reqC)
+	reply := fx.receiver.HandleJoin(ctx, spkiC, fx.bind, reqC)
 	require.False(t, reply.Accepted, "phase-2 must reject an address owned by another node")
 	require.Equal(t, JoinStatusError, reply.Status)
 
@@ -613,7 +695,7 @@ func TestHandleJoin_Phase2_RejectsNodeIDOwnedByAnotherNode(t *testing.T) {
 		NodeID:    "node-b", // reuse the existing member's node id
 		Address:   freshAddr,
 		SPKI:      spkiX[:],
-		Bind:      nil,
+		Bind:      fx.bind,
 	}
 	reqX := JoinRequest{
 		NodeID:         "node-b",
@@ -629,12 +711,12 @@ func TestHandleJoin_Phase2_RejectsNodeIDOwnedByAnotherNode(t *testing.T) {
 	// Phase-1 succeeds (fresh invite, own SPKI; address bound into the pending
 	// redemption, not validated at Phase-1).
 	reqX.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, spkiX, reqX).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, spkiX, fx.bind, reqX).Accepted)
 
 	// Phase-2 ACK must be REJECTED: node-b's node id is already a member at a
 	// different address.
 	reqX.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, spkiX, reqX)
+	reply := fx.receiver.HandleJoin(ctx, spkiX, fx.bind, reqX)
 	require.False(t, reply.Accepted, "phase-2 must reject reusing an existing node id")
 	require.Equal(t, JoinStatusError, reply.Status)
 
@@ -684,7 +766,7 @@ func TestHandleJoin_Phase2_RejectsNodeIDReuseAtSameAddress(t *testing.T) {
 		NodeID:    "node-b",  // reuse the existing member's node id
 		Address:   ownedAddr, // at the SAME address
 		SPKI:      spkiX[:],
-		Bind:      nil,
+		Bind:      fx.bind,
 	}
 	reqX := JoinRequest{
 		NodeID:         "node-b",
@@ -699,12 +781,12 @@ func TestHandleJoin_Phase2_RejectsNodeIDReuseAtSameAddress(t *testing.T) {
 
 	// Phase-1 succeeds (fresh invite, own SPKI; address bound, not validated).
 	reqX.JoinPhase = 1
-	require.True(t, fx.receiver.HandleJoin(ctx, spkiX, reqX).Accepted)
+	require.True(t, fx.receiver.HandleJoin(ctx, spkiX, fx.bind, reqX).Accepted)
 
 	// Phase-2 ACK must be REJECTED: node-b's node id is already a member and the
 	// peer registry has no prior (node-b, spkiX) binding for this join.
 	reqX.JoinPhase = 2
-	reply := fx.receiver.HandleJoin(ctx, spkiX, reqX)
+	reply := fx.receiver.HandleJoin(ctx, spkiX, fx.bind, reqX)
 	require.False(t, reply.Accepted, "phase-2 must reject node-id reuse even at the same address")
 	require.Equal(t, JoinStatusError, reply.Status)
 

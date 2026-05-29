@@ -12,9 +12,9 @@ package serveruntime
 //	  - require a stable advertised raft addr,
 //	  - generate the node ECDSA identity + self-signed leaf, persist UNWRAPPED at
 //	    keys.d/node.key.unsealed (0600) BEFORE redeeming,
-//	  - sign the canonical InviteTranscript (InviteSig=ed25519 invite key,
-//	    NodeSig=ecdsa node key),
-//	  - DialJoin(SeedAddr, SeedSPKI, nodeCert) and send JoinRequest{JoinPhase:1},
+//	  - DialJoin(SeedAddr, SeedSPKI, nodeCert), then sign the canonical
+//	    InviteTranscript over the LIVE session channel binding (InviteSig=ed25519
+//	    invite key, NodeSig=ecdsa node key) and send JoinRequest{JoinPhase:1},
 //	  - OpenFromPeer the SealedBootstrap with the bindCtx W7 used
 //	    (clusterID‖inviteID‖nodeID‖leaderID), stage every secret on disk
 //	    (keys/<gen>.key and cluster.id),
@@ -410,50 +410,59 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 		return err
 	}
 
-	// 3. build + sign the canonical transcript. ClusterID is the raw 16-byte
-	// cluster.id (matches W7 gateInvite). Nonce is joiner-generated.
+	// 3. generate the joiner nonce + advertise this node's OWN join listener
+	// (W9a) so a non-leader seed can later redirect us to the leader (redirect
+	// itself is a follow-up task). The nonce is joiner-generated and fixed across
+	// the dial; the transcript itself is built + signed INSIDE buildPhase1 below,
+	// AFTER the dial yields the live session's channel binding (Bind).
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("invite nonce: %w", err)
 	}
-	tr := encrypt.InviteTranscript{
-		ClusterID: st.clusterID,
-		Nonce:     nonce,
-		NodeID:    st.nodeID,
-		Address:   st.raftAddr,
-		SPKI:      spki[:],
-		Bind:      nil,
-	}
-	inviteSig := encrypt.SignInviteTranscript(bundle.InvitePriv, tr)
-	nodeSig, err := encrypt.SignNodeTranscript(priv, tr)
-	if err != nil {
-		return fmt.Errorf("sign node transcript: %w", err)
-	}
-
-	// 4. advertise this node's OWN join listener (W9a) so a non-leader seed can
-	// later redirect us to the leader (redirect itself is a follow-up task).
 	_, joinListenerSPKI, err := LoadOrCreateJoinListenerCert(dataDir)
 	if err != nil {
 		return fmt.Errorf("load join listener cert: %w", err)
 	}
 	joinListenAddr := resolveJoinListenAddr(opts.JoinListenAddr, st.raftAddr)
 
-	req := cluster.JoinRequest{
-		JoinPhase:              1,
-		NodeID:                 st.nodeID,
-		Address:                st.raftAddr,
-		SPKI:                   spki[:],
-		CertDER:                certDER,
-		NodeSig:                nodeSig,
-		InviteSig:              inviteSig,
-		InviteID:               bundle.InviteID,
-		HandshakeNonce:         nonce,
-		JoinerJoinListenerAddr: joinListenAddr,
-		JoinerJoinListenerSPKI: joinListenerSPKI[:],
+	// buildPhase1 builds + signs the canonical transcript over the LIVE join TLS
+	// channel binding (bind), then returns the full Phase-1 JoinRequest. Channel
+	// binding requires signing over the live session's exporter, so this runs
+	// AFTER the dial. ClusterID is the raw 16-byte cluster.id (matches W7
+	// gateInvite). The signed request is NEVER persisted: a resumed Phase-1
+	// re-dials and re-signs over the new session's bind (see resume gate).
+	buildPhase1 := func(bind []byte) (cluster.JoinRequest, error) {
+		tr := encrypt.InviteTranscript{
+			ClusterID: st.clusterID,
+			Nonce:     nonce,
+			NodeID:    st.nodeID,
+			Address:   st.raftAddr,
+			SPKI:      spki[:],
+			Bind:      bind,
+		}
+		inviteSig := encrypt.SignInviteTranscript(bundle.InvitePriv, tr)
+		nodeSig, err := encrypt.SignNodeTranscript(priv, tr)
+		if err != nil {
+			return cluster.JoinRequest{}, fmt.Errorf("sign node transcript: %w", err)
+		}
+		return cluster.JoinRequest{
+			JoinPhase:              1,
+			NodeID:                 st.nodeID,
+			Address:                st.raftAddr,
+			SPKI:                   spki[:],
+			CertDER:                certDER,
+			NodeSig:                nodeSig,
+			InviteSig:              inviteSig,
+			InviteID:               bundle.InviteID,
+			HandshakeNonce:         nonce,
+			JoinerJoinListenerAddr: joinListenAddr,
+			JoinerJoinListenerSPKI: joinListenerSPKI[:],
+		}, nil
 	}
 
-	// 5. dial the seed join listener (Phase-1), pinning its SPKI.
-	reply, err := inviteJoinDial(ctx, bundle.SeedAddr, bundle.SeedSPKI, cert, req)
+	// 5. dial the seed join listener (Phase-1), pinning its SPKI. The transcript
+	// is signed inside buildPhase1 over the resulting channel binding.
+	reply, err := inviteJoinDial(ctx, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
 	if err != nil {
 		return fmt.Errorf("phase-1 dial: %w", err)
 	}
@@ -628,7 +637,8 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		SPKI:      spki[:],
 		InviteID:  st.inviteID,
 	}
-	reply, err := inviteJoinDial(ctx, st.seedAddr, st.seedSPKI, cert, req)
+	reply, err := inviteJoinDial(ctx, st.seedAddr, st.seedSPKI, cert,
+		func([]byte) (cluster.JoinRequest, error) { return req, nil })
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2 dial: %w", err)
 	}
@@ -655,18 +665,26 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	return nil
 }
 
-// inviteJoinDial dials a JoinListener at addr (pinning serverSPKI), sends the
-// framed JoinRequest, and reads the framed JoinReply. One field in each
-// direction, length-prefixed binary (NO JSON) — mirrors W7 HandleJoinStream.
-func inviteJoinDial(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate, req cluster.JoinRequest) (cluster.JoinReply, error) {
+// inviteJoinDial dials a JoinListener at addr (pinning serverSPKI), then invokes
+// buildReq with the live session's channel binding to obtain the JoinRequest,
+// sends it framed, and reads the framed JoinReply. One field in each direction,
+// length-prefixed binary (NO JSON) — mirrors W7 HandleJoinStream. buildReq runs
+// AFTER the dial so the joiner can sign over the channel binding (Bind); on a
+// resumed Phase-1 each dial yields a fresh bind, so the request is re-signed and
+// never persisted.
+func inviteJoinDial(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, inviteJoinDialTimeout)
 	defer cancel()
-	stream, closeConn, err := transport.DialJoin(dialCtx, addr, serverSPKI, clientCert)
+	stream, bind, closeConn, err := transport.DialJoin(dialCtx, addr, serverSPKI, clientCert)
 	if err != nil {
 		return cluster.JoinReply{}, err
 	}
 	defer func() { _ = closeConn() }()
 
+	req, err := buildReq(bind)
+	if err != nil {
+		return cluster.JoinReply{}, err
+	}
 	reqBlob, err := cluster.EncodeJoinRequest(req)
 	if err != nil {
 		return cluster.JoinReply{}, fmt.Errorf("encode join request: %w", err)

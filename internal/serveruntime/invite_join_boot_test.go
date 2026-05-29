@@ -2,11 +2,13 @@ package serveruntime
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -760,4 +762,39 @@ func TestInviteNodeKeySealKey_RejectsMissingKEKGenerations(t *testing.T) {
 	_, _, err := inviteNodeKeySealKey(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "bootstrap secrets contain no KEK generations")
+}
+
+func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
+	srvCert, srvSPKI, err := transport.GenerateNodeIdentity("cid", "seed")
+	if err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	ln, err := transport.NewJoinListener("127.0.0.1:0", srvCert,
+		func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+			defer stream.Close()
+			_, _ = transport.JoinReadFields(stream, 1)
+			blob, _ := cluster.EncodeJoinReplyForTest(cluster.JoinReply{Accepted: true, Status: cluster.JoinStatusOK})
+			_, _ = stream.Write(transport.JoinPutField(nil, blob))
+		})
+	if err != nil {
+		t.Fatalf("listener: %v", err)
+	}
+	defer ln.Close()
+
+	cliCert, _, err := transport.GenerateNodeIdentity("cid", "joiner")
+	if err != nil {
+		t.Fatalf("joiner identity: %v", err)
+	}
+	var gotBind []byte
+	_, err = inviteJoinDial(context.Background(), ln.Addr(), srvSPKI, cliCert,
+		func(bind []byte) (cluster.JoinRequest, error) {
+			gotBind = append([]byte(nil), bind...)
+			return cluster.JoinRequest{JoinPhase: 1, NodeID: "joiner", Address: "127.0.0.1:1"}, nil
+		})
+	if err != nil {
+		t.Fatalf("inviteJoinDial: %v", err)
+	}
+	if len(gotBind) != 32 {
+		t.Fatalf("builder bind len=%d want 32", len(gotBind))
+	}
 }

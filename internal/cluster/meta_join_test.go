@@ -326,7 +326,7 @@ func TestHandleJoinStream_NotLeaderReturnsRedirect(t *testing.T) {
 	require.NoError(t, err)
 	pipe := &rwcPipe{in: bytes.NewReader(transport.JoinPutField(nil, reqBytes))}
 
-	r.HandleJoinStream(context.Background(), [32]byte{1}, pipe)
+	r.HandleJoinStream(context.Background(), [32]byte{1}, make([]byte, transport.JoinBindingLen), pipe)
 	require.True(t, pipe.closed, "stream must be closed by the handler")
 
 	fields, err := transport.JoinReadFields(bytes.NewReader(pipe.out.Bytes()), 1)

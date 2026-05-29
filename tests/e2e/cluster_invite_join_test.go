@@ -4,8 +4,13 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/tls"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +23,8 @@ import (
 	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // Zero-CA over-the-wire invite-join e2e (WIRE slice, W11).
@@ -214,6 +221,161 @@ func waitForVoter(t testing.TB, leaderURL, nodeID string, timeout time.Duration)
 		return containsString(stringList(s["peers"]), nodeID)
 	}, timeout, 500*time.Millisecond).Should(gomega.BeTrue(),
 		"node %s must become a meta-raft voter", nodeID)
+}
+
+// --- channel-binding negative-test helpers --------------------------------
+//
+// These drive the seed join listener DIRECTLY in-process (the e2e suite already
+// imports internal/cluster/transport/encrypt), mirroring the joiner boot path in
+// internal/serveruntime/invite_join_boot.go: GenerateNodeIdentity → DialJoin
+// (capturing the live RFC 5705 exporter), sign the InviteTranscript over a chosen
+// bind, frame the Phase-1 JoinRequest, send it, and read the framed JoinReply.
+// They let us forge the bind a Phase-1 transcript is signed over without going
+// through the subprocess joiner, which always signs over its own live exporter.
+
+// phase1Material is a freshly minted invite + a fresh joiner identity, ready to
+// build a Phase-1 JoinRequest against the leader.
+type phase1Material struct {
+	bundle  cluster.InviteBundle
+	tlsCert tls.Certificate
+	priv    *ecdsa.PrivateKey
+	spki    [32]byte
+	nodeID  string
+}
+
+// buildSignedPhase1 builds + signs a Phase-1 JoinRequest over the supplied bind,
+// mirroring inviteJoinPhase1.buildPhase1. The signatures verify ONLY if bind
+// equals the live join-listener session exporter the leader reconstructs over.
+func buildSignedPhase1(m phase1Material, clusterID []byte, bind []byte) cluster.JoinRequest {
+	nonce := bytes.Repeat([]byte{0x5a}, 16)
+	tr := encrypt.InviteTranscript{
+		ClusterID: clusterID,
+		Nonce:     nonce,
+		NodeID:    m.nodeID,
+		Address:   "127.0.0.1:1",
+		SPKI:      m.spki[:],
+		Bind:      bind,
+	}
+	inviteSig := encrypt.SignInviteTranscript(m.bundle.InvitePriv, tr)
+	nodeSig, err := encrypt.SignNodeTranscript(m.priv, tr)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	return cluster.JoinRequest{
+		JoinPhase:      1,
+		NodeID:         m.nodeID,
+		Address:        "127.0.0.1:1",
+		SPKI:           m.spki[:],
+		CertDER:        m.tlsCert.Certificate[0],
+		NodeSig:        nodeSig,
+		InviteSig:      inviteSig,
+		InviteID:       m.bundle.InviteID,
+		HandshakeNonce: nonce,
+	}
+}
+
+// newPhase1Material mints a fresh single-use invite on the leader and a fresh
+// joiner ECDSA identity, decodes the bundle, and returns both. Each negative
+// test mints its OWN invite so it never consumes the positive test's invite.
+func newPhase1Material(t testing.TB, leader *inviteJoinNode, nodeID string) (phase1Material, []byte) {
+	token := mintInvite(t, leader.dataDir)
+	bundle, err := cluster.DecodeInviteBundle(token)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	clusterID, err := hex.DecodeString(bundle.ClusterIDHex)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	cert, spki, err := transport.GenerateNodeIdentity(bundle.ClusterIDHex, nodeID)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	priv, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+	gomega.Expect(ok).To(gomega.BeTrue(), "node identity key must be ECDSA")
+	return phase1Material{
+		bundle:  bundle,
+		tlsCert: cert,
+		priv:    priv,
+		spki:    spki,
+		nodeID:  nodeID,
+	}, clusterID
+}
+
+// sendPhase1 frames + writes req onto stream and reads/decodes the framed reply.
+// A rejected Phase-1 is written as a framed JoinReply{Accepted:false} by the
+// leader's HandleJoinStream, so the reply is always decodable. A torn-down stream
+// surfaces as a non-nil error, which callers also treat as a reject.
+func sendPhase1(stream interface {
+	io.Reader
+	Write([]byte) (int, error)
+	Close() error
+}, req cluster.JoinRequest) (cluster.JoinReply, error) {
+	blob, err := cluster.EncodeJoinRequest(req)
+	if err != nil {
+		return cluster.JoinReply{}, err
+	}
+	if _, err := stream.Write(transport.JoinPutField(nil, blob)); err != nil {
+		return cluster.JoinReply{}, err
+	}
+	_ = stream.Close()
+	fields, err := transport.JoinReadFields(stream, 1)
+	if err != nil {
+		return cluster.JoinReply{}, err
+	}
+	reply, err := cluster.DecodeJoinReply(fields[0])
+	if err != nil {
+		return cluster.JoinReply{}, err
+	}
+	return *reply, nil
+}
+
+// relayPhase1AcrossSessions opens session A (capturing bindA), signs a Phase-1
+// transcript over bindA, then sends the session-A-signed request onto a SECOND
+// session B. The leader reconstructs the transcript with B's server-side exporter
+// (≠ bindA), so BOTH signatures fail → reject. This is the test that actually
+// proves channel binding rather than mere signature verification.
+func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *inviteJoinNode) (cluster.JoinReply, []byte, []byte, error) {
+	m, clusterID := newPhase1Material(t, leader, "relay-joiner")
+
+	streamA, bindA, closeA, err := transport.DialJoin(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session A dial")
+	defer func() { _ = closeA() }()
+	_ = streamA // session A is opened only to capture its live exporter (bindA).
+
+	reqA := buildSignedPhase1(m, clusterID, bindA)
+
+	streamB, bindB, closeB, err := transport.DialJoin(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session B dial")
+	defer func() { _ = closeB() }()
+
+	reply, sendErr := sendPhase1(streamB, reqA)
+	return reply, bindA, bindB, sendErr
+}
+
+// dialPhase1WithForgedBind signs a Phase-1 transcript over a forged bind that is
+// NOT any live session exporter, dials once, and sends it on the SAME session.
+// The leader reconstructs over the real session exporter → signatures fail.
+func dialPhase1WithForgedBind(ctx context.Context, t testing.TB, leader *inviteJoinNode, forged []byte) (cluster.JoinReply, error) {
+	m, clusterID := newPhase1Material(t, leader, "forged-bind-joiner")
+
+	stream, _, closeConn, err := transport.DialJoin(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "forged-bind dial")
+	defer func() { _ = closeConn() }()
+
+	req := buildSignedPhase1(m, clusterID, forged)
+	return sendPhase1(stream, req)
+}
+
+// isBindingReject asserts the Phase-1 request was DELIVERED and a framed reply
+// DECODED, and that the reply is a channel-binding/signature rejection — NOT a
+// transport teardown and NOT an unrelated reject (already_member/addr_mismatch/
+// cluster_full/not_leader). The leader's HandleJoinStream always writes a framed
+// JoinReply{Accepted:false} on reject (no teardown), so a delivered relay/forged
+// request MUST return a decodable "signature invalid" reply; treating a transport
+// error as a pass would be vacuous (it could mask an early conn close, a failed
+// exporter derivation, or broken handler wiring rather than the bind being what
+// rejected the request).
+func isBindingReject(reply cluster.JoinReply, sendErr error) {
+	gomega.Expect(sendErr).NotTo(gomega.HaveOccurred(),
+		"the relayed/forged Phase-1 request must reach the leader and a framed reply must come back, not a transport teardown")
+	gomega.Expect(reply.Accepted).To(gomega.BeFalse())
+	gomega.Expect(reply.Status).To(gomega.Equal(cluster.JoinStatusError),
+		"reject must be a generic invite-gate error (got %q), not an unrelated status", reply.Status)
+	gomega.Expect(reply.Message).To(gomega.ContainSubstring("signature invalid"),
+		"reject must be due to signature/binding mismatch, not an unrelated cause (got %q)", reply.Message)
 }
 
 var _ = ginkgo.Describe("Zero-CA invite-join", func() {
@@ -452,6 +614,48 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return containsString(stringList(s["peers"]), "x-joiner")
 			}, 2*time.Second, 500*time.Millisecond).Should(gomega.BeFalse(),
 				"cross-cluster joiner must not join cluster B")
+		})
+	})
+
+	ginkgo.Context("ChannelBinding", func() {
+		// POSITIVE regression: the existing HappyPath "a secret-less node joins via
+		// invite and becomes a voter" already drives a matching channel binding end
+		// to end (both ends derive the same RFC 5705 exporter). It is the key
+		// regression check for mandatory binding — kept there, not duplicated here.
+
+		// NEGATIVE primary: a TRUE cross-session relay. Session A's signed Phase-1
+		// is replayed onto session B; the leader reconstructs the transcript with
+		// B's exporter, so both signatures fail. This proves channel binding rather
+		// than mere signature verification.
+		ginkgo.It("rejects a Phase-1 request relayed onto a different TLS session", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeader(t, inviteJoinClusterKey)
+			_, _ = bootstrapAdminViaUDS(t, leader.dataDir)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			reply, bindA, bindB, sendErr := relayPhase1AcrossSessions(ctx, t, leader)
+			// The two sessions must produce different exporters, else the relay
+			// would be a no-op and the test would prove nothing.
+			gomega.Expect(bytes.Equal(bindA, bindB)).To(gomega.BeFalse(),
+				"session A and B must derive different channel bindings")
+			isBindingReject(reply, sendErr)
+		})
+
+		// NEGATIVE secondary (cheap): a Phase-1 transcript signed over a 32-byte
+		// constant that is not any live session exporter.
+		ginkgo.It("rejects an invite transcript signed for a non-session bind", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeader(t, inviteJoinClusterKey)
+			_, _ = bootstrapAdminViaUDS(t, leader.dataDir)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			forged := bytes.Repeat([]byte{0}, transport.JoinBindingLen)
+			reply, sendErr := dialPhase1WithForgedBind(ctx, t, leader, forged)
+			isBindingReject(reply, sendErr)
 		})
 	})
 

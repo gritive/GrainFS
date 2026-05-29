@@ -164,10 +164,20 @@ The joiner cannot dial the seed:
 Confirm that the leader's `--join-listen-addr` host and port are reachable from
 the joining node. Mint a new invite after correcting the address.
 
+Phase 1 is rejected with `signature invalid`:
+The invite handshake is bound to the joiner's TLS session (RFC 5705 channel
+binding), so the signed request is only valid on the exact connection it was
+created on. This rejection is expected if the join stream is relayed or proxied
+through a third party — the joiner must dial the leader's join listener
+directly. If you front the leader behind an L7 proxy that terminates TLS, point
+`--join-listen-addr`/the seed address at the leader itself instead.
+
 The joiner resumes after a crash:
 Restart it with the same data directory before the invite TTL expires. If
 Phase-1 artifacts are complete but Phase-2 did not ACK, GrainFS resumes from
 `.invite-join-pending` and completes membership without re-running Phase 1.
+An incomplete Phase 1 is re-run from scratch (it re-dials and re-signs over the
+new session's channel binding); the signed request is never persisted.
 
 `revoke-node` succeeds but the old process is still running:
 Stop or isolate the old process. The identity is denied for future membership
