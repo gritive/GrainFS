@@ -32,13 +32,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        reactivation slice MUST route this write through (or replicate) the chokepoint validation
        before flipping the gate. Same gap class as the shard-path containment fixes (#663 + bucket
        segment guard).
-   - [ ] **[P3] verify the prod copy path does not share the raw-segment-copy AAD bug class.**
-     The R3-residual slice fixed a latent bug in the test-fixture `LocalBackend.CopyObject`: it
-     byte-copied encrypted segment files to the dst path, but segment AAD binds `(bucket,key,blobID)`,
-     so the dst was un-decryptable (now re-pointed to `b.segEnc` → re-encode path). Prod copy routes
-     `s.ops.CopyObject` and `DistributedBackend` has NO `CopyObject`/`copyFile` (grep clean), so prod
-     appears to re-encode and is unaffected — confirm the ops-layer copy for an EC/segmented object on
-     an encrypted backend reads-then-writes (re-encodes) rather than raw-copying segment files.
    - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
      DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
      (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path
