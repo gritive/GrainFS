@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.458.0] - 2026-05-29
+
+### Fixed
+
+- Point-in-time restore (`POST /admin/pitr`) no longer silently drops object
+  changes made after the base snapshot on encryption-enabled deployments.
+  The point-in-time write-ahead log is sealed with the data key, but restore was
+  replaying it as plaintext and discarding every record, so a restore returned the
+  snapshot state with none of the later puts or deletes. Restore now decrypts the
+  log with the live key. A restore that cannot decrypt the log (no key available)
+  now fails loudly instead of returning a silently truncated result.
+
 ## [0.0.456.0] - 2026-05-29
 
 ### Changed
