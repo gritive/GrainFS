@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.470.0] - 2026-05-30
+
+### Fixed
+
+- PITR: an encrypted point-in-time restore could fail to replay the data
+  write-ahead log after an unclean shutdown. A crash can leave a partially written
+  (torn) final WAL record, and the encrypted replay path treated that torn tail as
+  fatal — so restore errored until the affected segment aged out of WAL retention.
+  Replay now tolerates a torn frame on the final segment (an incomplete crash-time
+  append), matching the writer's own recovery and the plaintext replay path, while
+  still rejecting a torn frame in any earlier segment and any tampered or
+  authentication-failing record. The intact records before the torn tail are
+  replayed as expected.
+
 ## [0.0.467.0] - 2026-05-30
 
 ### Fixed
