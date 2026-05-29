@@ -92,6 +92,12 @@ type Decorator struct {
 	// and updates this field to avoid JSON unmarshal on every request.
 	parsed atomic.Pointer[parsedConfig]
 
+	// released: lock-free fast path for the disabled hot path — once dropped,
+	// disabled requests Load()==true and skip the exclusive d.mu lock. refresh()
+	// clears it on (re)build. Disabled path still takes the config RLock via GetString
+	// (Restore-coherence; not eliminable — this is NOT a bare "lock-free" path).
+	released atomic.Bool
+
 	mu       sync.Mutex
 	client   *Client
 	clientID string
@@ -121,7 +127,22 @@ func NewDecorator(inner innerAuthorizer, cfg ConfigReader, tokens TokenSource, s
 // actor presented to the PDP is the named service account.
 func (d *Decorator) Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult {
 	inner := d.inner.Authorize(ctx, saID, bucket, ctxReq)
+	// Disabled-path short-circuit BEFORE principal.ServiceAccount(saID): the actor
+	// escapes to the heap inside chain (toWire→req→client.Authorize), so passing it
+	// here would heap-allocate on every call, including the 0-alloc disabled hot path.
+	// chain keeps its own gate for the AuthorizePrincipal entry.
+	if cfg, ok, err := d.loadConfig(); !ok || err != nil || d.disabledForScope(cfg) {
+		d.release()
+		return inner
+	}
 	return d.chain(ctx, principal.ServiceAccount(saID), saID, inner, ctxReq)
+}
+
+// disabledForScope reports whether the PDP must be skipped for this decorator's
+// scope: control-plane scopes gate on cfg.Enabled alone; the data_plane scope
+// additionally requires cfg.DataPlane.Enabled.
+func (d *Decorator) disabledForScope(cfg Config) bool {
+	return !cfg.Enabled || (d.scope == scopeDataPlane && !cfg.DataPlane.Enabled)
 }
 
 // AuthorizePrincipal chains the PDP after the GrainFS principal authorizer. The
@@ -167,7 +188,7 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		d.release()
 		return inner
 	}
-	if !cfg.Enabled {
+	if d.disabledForScope(cfg) {
 		d.release()
 		return inner
 	}
@@ -390,6 +411,10 @@ func (d *Decorator) refresh(cfg Config, token, tokenGen string) (*Client, *decis
 		d.mGauge.Set(0)
 	}
 
+	// (Re)build complete with a non-nil client: re-arm release()'s fast path so a
+	// subsequent disable performs the cleanup once more instead of short-circuiting.
+	d.released.Store(false)
+
 	return d.client, d.cache
 }
 
@@ -405,12 +430,18 @@ func clientIdentity(cfg Config, tokenGen string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// release closes and drops the cached client AND the decision cache (used when
-// PDP is unconfigured/invalid/disabled so a hot enable->disable frees the idle
-// unix-socket connection and cannot reuse stale decisions on re-enable).
+// release closes the cached client + drops the decision cache. The released atomic
+// is a LOCK-FREE FAST PATH for the steady-state disabled hot path (Load()==true ->
+// return, no d.mu). The cleanup body stays under d.mu and is idempotent. BENIGN
+// WINDOW: a concurrent re-enable (refresh: Store(false)) can interleave so a disable
+// request that saw the OLD released==true skips the lock, leaving an idle client live
+// under a disabled config for one request cycle — healed by the next disabled request.
+// This changes NO decision: the disabled gate returns inner and never reads d.client.
 // cacheGen is reset so a re-enable with identical config rebuilds the cache.
-// Idempotent.
 func (d *Decorator) release() {
+	if d.released.Load() {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.client != nil {
@@ -421,6 +452,7 @@ func (d *Decorator) release() {
 	d.cache = nil
 	d.cacheGen = ""
 	d.mGauge.Set(0)
+	d.released.Store(true)
 }
 
 // configGen returns a stable hash of the config inputs that, when changed, must

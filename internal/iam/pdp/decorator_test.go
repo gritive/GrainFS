@@ -923,3 +923,108 @@ func TestDecoratorTokenRotationRebuildsClientAndCache(t *testing.T) {
 	require.Equal(t, policy.DecisionAllow, d.Authorize(context.Background(), "sa", "", reqCtx()).Decision)
 	require.EqualValues(t, 2, atomic.LoadInt32(&dialed), "token rotation cleared the cache; PDP re-consulted")
 }
+
+// --- T3: D9 scope-gated enforcement + lock-free release() fast path ---
+
+func TestDecoratorDataPlaneScopeGatedByDataPlaneEnabled(t *testing.T) {
+	// data_plane scope + enabled but data_plane.enabled=false => pass-through, no PDP.
+	called := false
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusForbidden)
+	})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(decoCfg(url, "closed")), nil, "data_plane") // decoCfg has NO data_plane block => data_plane.enabled=false
+	res := d.Authorize(context.Background(), "sa", "b",
+		policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"})
+	require.Equal(t, policy.DecisionAllow, res.Decision)
+	require.False(t, called, "PDP must NOT be consulted when data_plane.enabled is false")
+}
+
+func TestDecoratorAdminScopeNotGatedByDataPlane(t *testing.T) {
+	// admin scope ignores data_plane.enabled: enabled alone consults the PDP (deny).
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"decision":"deny","reason":"x"}`))
+	})
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(decoCfg(url, "closed")), nil, "admin")
+	res := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "b",
+		policy.RequestContext{Action: "grainfs:CredentialCreate"})
+	require.Equal(t, policy.DecisionDeny, res.Decision)
+}
+
+func TestDecoratorReleaseLockFreeAfterFirstRelease(t *testing.T) {
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
+	cfg := &mutableCfg{val: decoCfgDataPlane(url, "closed")}
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "data_plane")
+	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"}
+	_ = d.Authorize(context.Background(), "sa", "b", ctxReq) // enabled: builds client
+	cfg.set(`{"enabled":false}`)                             // disable
+	_ = d.Authorize(context.Background(), "sa", "b", ctxReq)
+	cfg.set(decoCfgDataPlane(url, "closed")) // re-enable
+	res := d.Authorize(context.Background(), "sa", "b", ctxReq)
+	require.Equal(t, policy.DecisionAllow, res.Decision) // re-enabled consults+allows
+}
+
+func TestDecoratorReleaseConcurrentFlipDecisionInvariant(t *testing.T) {
+	var consulted int32
+	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&consulted, 1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"decision":"deny","reason":"x"}`))
+	})
+	cfg := &mutableCfg{val: `{"enabled":false}`}
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "data_plane")
+	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		on := false
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			on = !on
+			if on {
+				cfg.set(decoCfgDataPlane(url, "closed"))
+			} else {
+				cfg.set(`{"enabled":false}`)
+			}
+		}
+	}()
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				res := d.Authorize(context.Background(), "sa", "b", ctxReq)
+				if res.Decision != policy.DecisionAllow && res.Decision != policy.DecisionDeny {
+					t.Errorf("torn decision under concurrent flip: %v", res.Decision)
+				}
+			}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	require.Greater(t, atomic.LoadInt32(&consulted), int32(0))
+}
+
+func BenchmarkDecorator_DisabledDataPlanePath(b *testing.B) {
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
+		staticCfg(`{"enabled":true,"endpoint":"https://pdp.invalid:9","data_plane":{"enabled":false}}`),
+		nil, "data_plane")
+	ctx := context.Background()
+	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"}
+	_ = d.Authorize(ctx, "sa-1", "b", ctxReq) // PREWARM: parse-cache + released flag
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = d.Authorize(ctx, "sa-1", "b", ctxReq)
+	}
+}
