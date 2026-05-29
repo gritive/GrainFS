@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,14 +42,33 @@ type KEKStore struct {
 	keys             map[uint32][]byte
 	active           uint32
 	retiringVersions map[uint32]struct{}
+	// protector wraps/unwraps the on-disk <V>.key bytes. It is reused by every
+	// at-rest write path (v0 generate, AddAndPersist rotation, rebind/migrate)
+	// so the on-disk format stays uniform. Defaults to PlaintextProtector
+	// (identity) so files remain byte-identical when the feature is off.
+	protector KeyProtector
 }
 
-// NewKEKStore creates an empty KEKStore.
+// NewKEKStore creates an empty KEKStore with the identity (plaintext) protector.
 func NewKEKStore() *KEKStore {
 	return &KEKStore{
 		keys:             make(map[uint32][]byte),
 		retiringVersions: make(map[uint32]struct{}),
+		protector:        PlaintextProtector{},
 	}
+}
+
+// fileNameFor returns the canonical on-disk filename for a KEK version.
+func fileNameFor(version uint32) string {
+	return strconv.FormatUint(uint64(version), 10) + ".key"
+}
+
+// aadForVersion binds a wrapped <V>.key to its version so a protected slot
+// cannot be replayed across versions (e.g. renaming 1.key -> 2.key fails to
+// open under EnvProtector). PlaintextProtector ignores aad.
+func aadForVersion(version uint32) []byte {
+	b := []byte("grainfs-kek\x00v")
+	return appendU32(b, version)
 }
 
 // Retire marks the given version as retiring in memory. The key bytes are
@@ -246,6 +266,17 @@ func KeysDirIsEmpty(keysDir string) (bool, error) {
 //   - Mode must be 0o600 (operator's responsibility to maintain).
 //   - No symlinks (O_NOFOLLOW).
 func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
+	return LoadOrInitKEKStoreDirWithProtector(keysDir, PlaintextProtector{})
+}
+
+// LoadOrInitKEKStoreDirWithProtector is LoadOrInitKEKStoreDir with an explicit
+// at-rest KeyProtector. The protector wraps the v0-generate write and unwraps
+// every loaded <V>.key; when Unprotect signals rewrap (env binding changed, or a
+// legacy raw file was migrated) the file is re-Protected and atomically
+// rewritten. Unwrap failure is FATAL (fail-closed) — never regenerate, which
+// would orphan all DEKs. A rewrap-PERSIST failure is non-fatal (logged) so a
+// read-only data dir can still boot once the KEK is recovered.
+func LoadOrInitKEKStoreDirWithProtector(keysDir string, protector KeyProtector) (*KEKStore, error) {
 	parent := filepath.Dir(keysDir)
 	legacy := filepath.Join(parent, "kek.key")
 	if _, err := os.Lstat(legacy); err == nil {
@@ -277,6 +308,7 @@ func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 	}
 
 	s := NewKEKStore()
+	s.protector = protector
 	loaded := 0
 	for _, e := range entries {
 		if e.IsDir() {
@@ -287,28 +319,55 @@ func LoadOrInitKEKStoreDir(keysDir string) (*KEKStore, error) {
 			continue // ignore other files (operator notes, etc.)
 		}
 		path := filepath.Join(keysDir, e.Name())
-		kek, err := readKEKFile(path)
+		blob, err := readKEKFile(path)
 		if err != nil {
 			return nil, err
 		}
+		// Unwrap through the protector. FAIL-CLOSED: an unopenable file is a
+		// hard error and we MUST return (never `continue`) — a continue would
+		// leave loaded==0 and trigger v0 regeneration, orphaning all DEKs.
+		kek, rewrap, err := protector.Unprotect(blob, aadForVersion(v))
+		if err != nil {
+			return nil, fmt.Errorf("KEKStore: unprotect v=%d from %s: %w", v, path, err)
+		}
 		if err := s.Add(v, kek); err != nil {
+			zeroize(kek)
 			return nil, fmt.Errorf("KEKStore: add v=%d from %s: %w", v, path, err)
 		}
+		// Rewrap (env rebound to new factors, or legacy raw migrated). Persist
+		// failure is NON-fatal: the KEK is already recovered in memory; a
+		// read-only data dir must still boot. Never discard the error silently.
+		if rewrap {
+			if blob2, perr := protector.Protect(kek, aadForVersion(v)); perr != nil {
+				log.Printf("KEKStore: re-protect v=%d failed (continuing with in-memory key): %v", v, perr)
+			} else if werr := writeKEKFileAtomic(path, blob2); werr != nil {
+				log.Printf("KEKStore: persist rebind for v=%d failed (continuing; will retry next boot): %v", v, werr)
+			}
+		}
+		zeroize(kek)
 		loaded++
 	}
 
 	if loaded == 0 {
-		// Fresh: generate v0
+		// Fresh: generate v0 and protect it for at-rest storage.
 		kek := make([]byte, KEKSize)
 		if _, err := io.ReadFull(rand.Reader, kek); err != nil {
 			return nil, fmt.Errorf("KEKStore: generate v0: %w", err)
 		}
-		if err := writeKEKFileAtomic(filepath.Join(keysDir, "0.key"), kek); err != nil {
+		blob, err := protector.Protect(kek, aadForVersion(0))
+		if err != nil {
+			zeroize(kek)
+			return nil, fmt.Errorf("KEKStore: protect v0: %w", err)
+		}
+		if err := writeKEKFileAtomic(filepath.Join(keysDir, "0.key"), blob); err != nil {
+			zeroize(kek)
 			return nil, fmt.Errorf("KEKStore: write v0: %w", err)
 		}
 		if err := s.Add(0, kek); err != nil {
+			zeroize(kek)
 			return nil, err
 		}
+		zeroize(kek)
 	}
 	return s, nil
 }
@@ -363,13 +422,19 @@ func (s *KEKStore) RemoveAndUnlink(keysDir string, version uint32) error {
 // On Add failure (e.g. duplicate in-memory but absent on disk), best-effort
 // remove the file we just wrote.
 func (s *KEKStore) AddAndPersist(keysDir string, version uint32, kek []byte) error {
-	path := filepath.Join(keysDir, strconv.FormatUint(uint64(version), 10)+".key")
+	path := filepath.Join(keysDir, fileNameFor(version))
 	if _, err := os.Lstat(path); err == nil {
 		return fmt.Errorf("%w: %d (file %s already exists)", ErrKEKVersionDuplicate, version, path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("KEKStore.AddAndPersist: stat %q: %w", path, err)
 	}
-	if err := writeKEKFileAtomic(path, kek); err != nil {
+	// Protect the at-rest bytes through the same protector used at load, so the
+	// rotation write produces the same on-disk format as v0-generate.
+	blob, err := s.protector.Protect(kek, aadForVersion(version))
+	if err != nil {
+		return fmt.Errorf("KEKStore.AddAndPersist: protect v%d: %w", version, err)
+	}
+	if err := writeKEKFileAtomic(path, blob); err != nil {
 		return err
 	}
 	if err := s.Add(version, kek); err != nil {
@@ -394,24 +459,28 @@ func readKEKFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("KEK file %q has mode %#o, want 0o600", path, perm)
 	}
 
-	buf := make([]byte, KEKSize+1)
-	n, err := io.ReadFull(f, buf[:KEKSize])
-	if err != nil {
+	// Read the whole file up to a sane bound. The exact-32 check is gone because
+	// a wrapped key (EnvProtector container) is larger than KEKSize; the
+	// protector's Unprotect validates structure, and PlaintextProtector hands
+	// the blob to Add which still rejects len != KEKSize (truncation guard).
+	const maxKEKFileBytes = 4096
+	buf := make([]byte, maxKEKFileBytes+1)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("read %q: %w", path, err)
 	}
-	if n != KEKSize {
-		return nil, fmt.Errorf("KEK file %q has %d bytes, want %d", path, n, KEKSize)
+	if n > maxKEKFileBytes {
+		return nil, fmt.Errorf("KEK file %q exceeds %d bytes", path, maxKEKFileBytes)
 	}
-	extra, _ := f.Read(buf[KEKSize:])
-	if extra > 0 {
-		return nil, fmt.Errorf("KEK file %q exceeds %d bytes", path, KEKSize)
+	if n == 0 {
+		return nil, fmt.Errorf("KEK file %q is empty", path)
 	}
-	return buf[:KEKSize], nil
+	return buf[:n], nil
 }
 
 func writeKEKFileAtomic(path string, kek []byte) error {
-	if len(kek) != KEKSize {
-		return fmt.Errorf("writeKEKFileAtomic: kek len = %d, want %d", len(kek), KEKSize)
+	if len(kek) == 0 {
+		return fmt.Errorf("writeKEKFileAtomic: empty blob")
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
