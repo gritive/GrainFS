@@ -306,13 +306,23 @@ func TestWAL_EncryptedReplayRejectsFrameMetadataTamper(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestWAL_EncryptedReplayRejectsTruncatedFrame(t *testing.T) {
+// TestWAL_EncryptedReplayToleratesTruncatedFinalFrame is the conscious reversal of
+// the former strict-replay contract (was TestWAL_EncryptedReplayRejectsTruncatedFrame).
+// A torn frame on the FINAL segment is an incomplete crash-time append, not
+// corruption, so ReplayEncrypted must tolerate it — matching the writer's
+// OpenEncrypted/scanMaxSeq (TestWAL_EncryptedOpenIgnoresTrailingPartialFrame) and the
+// plaintext path. The intact PREFIX before the torn tail must still be replayed
+// (tolerance discards only the torn record, never preceding ones). Tamper on a
+// complete frame stays fatal — see TestWAL_EncryptedReplayRejectsFrameMetadataTamper,
+// which (single-segment = final) proves tamper-on-the-final-segment is NOT tolerated.
+func TestWAL_EncryptedReplayToleratesTruncatedFinalFrame(t *testing.T) {
 	dir := t.TempDir()
 	keeper := newKeeper(t, 0x77)
 
 	w, err := wal.OpenEncrypted(dir, newSealer(keeper), "pitr-wal")
 	require.NoError(t, err)
-	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "intact"})
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "torn-tail"})
 	require.NoError(t, w.Flush())
 	require.NoError(t, w.Close())
 
@@ -329,12 +339,63 @@ func TestWAL_EncryptedReplayRejectsTruncatedFrame(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, walPath)
 
+	// Tear the trailing byte → the final (2nd) frame is incomplete.
+	info, err := os.Stat(walPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(walPath, info.Size()-1))
+
+	var got []wal.Entry
+	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(keeper), "pitr-wal", func(e wal.Entry) {
+		got = append(got, e)
+	})
+	require.NoError(t, err, "a torn final frame must be tolerated (crash recovery)")
+	require.Equal(t, 1, n)
+	require.Len(t, got, 1)
+	require.Equal(t, "intact", got[0].Key, "the intact prefix before the torn tail must still be replayed")
+}
+
+// TestWAL_EncryptedReplayRejectsTornNonFinalSegment proves the tolerance is scoped to
+// the LAST segment only: a torn frame in a non-final segment is corruption (a
+// rotated/sealed segment is fully written), not a crash tail, and stays fatal. We
+// make the real segment non-final by adding a higher-named sibling so it is no
+// longer last; replay hits the torn frame in the first (non-final) segment and must
+// error before ever reaching the sibling.
+func TestWAL_EncryptedReplayRejectsTornNonFinalSegment(t *testing.T) {
+	dir := t.TempDir()
+	keeper := newKeeper(t, 0x77)
+
+	w, err := wal.OpenEncrypted(dir, newSealer(keeper), "pitr-wal")
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "k"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	var walPath string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasPrefix(filepath.Base(path), "wal-") && strings.HasSuffix(filepath.Base(path), ".bin") {
+			walPath = path
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, walPath)
+
+	// Add a higher-named segment so walPath is no longer the final segment.
+	// (segmentFiles sorts ascending; its content is irrelevant — replay errors on
+	// the torn first segment before reaching it.)
+	data, err := os.ReadFile(walPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "wal-0000099999.bin"), data, 0o644))
+
 	info, err := os.Stat(walPath)
 	require.NoError(t, err)
 	require.NoError(t, os.Truncate(walPath, info.Size()-1))
 
 	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), newSealer(keeper), "pitr-wal", func(e wal.Entry) {})
-	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF, "a torn non-final segment must stay fatal")
 }
 
 func TestWAL_EncryptedOpenIgnoresTrailingPartialFrame(t *testing.T) {

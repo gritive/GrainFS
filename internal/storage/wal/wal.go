@@ -32,6 +32,19 @@ const PITRWALNamespace = "pitr-wal"
 // non-strict mode rather than logging-and-skipping the segment.
 var ErrEncryptedWALNeedsSealer = errors.New("wal: encrypted segment requires sealer")
 
+// errTornFrame marks a final-segment frame that could not be read in full
+// (an incomplete crash-time append): readEntryFrame ran out of bytes reading the
+// fixed header or ciphertext body, BEFORE any decrypt. replay() tolerates this
+// only on the last segment (crash recovery), matching the writer's
+// OpenEncrypted/scanMaxSeq and the plaintext path. It wraps io.ErrUnexpectedEOF so
+// the non-final (fatal) case still satisfies errors.Is(err, io.ErrUnexpectedEOF)
+// for existing callers. A torn frame is structurally distinct from a complete
+// frame whose AEAD-authenticated body unmarshals short (decryptEntryBody →
+// unmarshalEntryBody returns a bare io.ErrUnexpectedEOF AFTER a successful Open):
+// that stays fatal, so tolerance never swallows an authentic-but-malformed record
+// and never weakens AEAD on complete frames.
+var errTornFrame = fmt.Errorf("wal: torn final-segment frame (incomplete append): %w", io.ErrUnexpectedEOF)
+
 const (
 	fileMagic = uint32(0x57414C31) // "WAL1"
 
@@ -347,14 +360,29 @@ func replay(dir string, fromSeq uint64, targetTime time.Time, sealer RecordSeale
 	}
 	mono := &seqMonotonic{}
 	var count int
-	for _, path := range files {
+	for i, path := range files {
 		n, err := replayFile(path, fromSeq, target, sealer, namespace, mono, fn)
 		count += n
 		if err != nil {
 			// ErrEncryptedWALNeedsSealer is a config mismatch that guarantees
 			// data loss (the whole segment is undecryptable) — never swallow it,
 			// even in non-strict mode.
-			if strict || errors.Is(err, ErrEncryptedWALNeedsSealer) {
+			if errors.Is(err, ErrEncryptedWALNeedsSealer) {
+				return count, err
+			}
+			// Crash recovery: a torn frame on the LAST segment is an incomplete
+			// append, not corruption. Tolerate it (the writer's OpenEncrypted /
+			// scanMaxSeq already repositions past it, and the plaintext path
+			// break-tolerates its tail). A torn frame fails in readEntryFrame
+			// before decrypt, so AEAD auth on complete frames is unaffected; a
+			// torn NON-final segment is corruption and stays fatal below; a
+			// tamper is a decrypt error (not errTornFrame) and stays fatal.
+			// segmentFiles sorts ascending, so the appended segment is last.
+			if errors.Is(err, errTornFrame) && i == len(files)-1 {
+				log.Warn().Str("file", path).Msg("wal: tolerating torn frame on final segment (crash recovery)")
+				return count, nil
+			}
+			if strict {
 				return count, err
 			}
 			log.Warn().Str("file", path).Err(err).Msg("wal: replay file error")
@@ -384,7 +412,11 @@ func replayFile(path string, fromSeq uint64, targetNs int64, sealer RecordSealer
 		}
 		if err == io.ErrUnexpectedEOF {
 			if ver == fileVersionV4 {
-				return count, err
+				// Torn frame (header/body short read) before decrypt. Surface a
+				// sentinel so replay() can tolerate it on the final segment only;
+				// a post-decrypt unmarshal-short stays a bare io.ErrUnexpectedEOF
+				// and remains fatal.
+				return count, errTornFrame
 			}
 			break
 		}

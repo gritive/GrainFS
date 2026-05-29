@@ -32,17 +32,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        reactivation slice MUST route this write through (or replicate) the chokepoint validation
        before flipping the gate. Same gap class as the shard-path containment fixes (#663 + bucket
        segment guard).
-   - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
-     DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
-     (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path
-     `break`s gracefully). The WAL does NOT self-heal the torn tail — `scanMaxSeq` only reads (no
-     truncate) and the writer reopens `O_APPEND` (`wal.go:250`), so after a crash a torn frame
-     persists and PITR restore **errors until that segment ages out of WAL retention**. Strictly
-     better than before the DEK-PITR fix (encrypted PITR was 100% broken), but a real post-crash gap.
-     Fix would tolerate a trailing `io.ErrUnexpectedEOF` on the FINAL segment in `wal.replay()` (index
-     `i == len(files)-1`; `segmentFiles` sorts ascending) while keeping decrypt/auth + non-final torn
-     fatal — this REVERSES the deliberate replay-strict contract, so update the existing test
-     consciously. Keep parity with the plaintext path.
    - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
      the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
      a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND
