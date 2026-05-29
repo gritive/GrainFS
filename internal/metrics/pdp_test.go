@@ -24,6 +24,7 @@ func TestPDPCacheMetrics(t *testing.T) {
 }
 
 func TestPDPMetrics_HaveScopeLabel(t *testing.T) {
+	PDPCacheEntries.Reset() // isolate this test's gauge values from other tests
 	PDPRequestsTotal.WithLabelValues("admin", "allow", "", "closed").Inc()
 	PDPCacheTotal.WithLabelValues("admin", "hit", "allow").Inc()
 	PDPRequestDuration.WithLabelValues("admin").Observe(0.01)

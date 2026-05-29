@@ -824,6 +824,22 @@ func BenchmarkDecorator_DisabledPath(b *testing.B) {
 	}
 }
 
+// BenchmarkDecorator_UnconfiguredPath covers the OTHER disabled branch and the
+// most common production state: iam.pdp is unset, so loadConfig returns ok=false
+// and chain() short-circuits via release() (pre-bound d.mGauge) before any
+// parse/request build. Like the disabled-path bench, this must be 0 allocs/op.
+func BenchmarkDecorator_UnconfiguredPath(b *testing.B) {
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, missingCfg{}, nil, "admin")
+	ctx := context.Background()
+	rc := policy.RequestContext{Action: "s3:GetObject"}
+	d.Authorize(ctx, "sa-1", "bkt", rc) // warmup
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.Authorize(ctx, "sa-1", "bkt", rc)
+	}
+}
+
 // TestDecoratorTokenRotationRebuildsClientAndCache proves a bearer-token rotation
 // (a new generation from the TokenSource) feeds both clientIdentity and configGen,
 // so the cached client is rebuilt AND the decision cache is dropped — a prior
