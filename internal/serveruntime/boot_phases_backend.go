@@ -125,7 +125,14 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	if len(state.clusterID) != 16 {
 		return fmt.Errorf("boot: snapshot KEK wiring: cluster id len %d", len(state.clusterID))
 	}
-	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.kekStore, [16]byte(state.clusterID), 30*time.Second)
+	// PITR WAL sealer: mirror bootLogicalWALOpen's exact condition so the
+	// snapshot Manager decrypts the WAL with the SAME keeper it was sealed with.
+	// nil on the encryption-disabled path (plaintext WAL).
+	var pitrWALSealer wal.RecordSealer
+	if state.dekKeeper != nil && len(state.clusterID) == 16 {
+		pitrWALSealer = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
+	}
+	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.kekStore, [16]byte(state.clusterID), pitrWALSealer, 30*time.Second)
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}

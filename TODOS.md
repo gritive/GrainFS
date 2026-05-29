@@ -61,15 +61,17 @@ Work these in order. Do not run them in parallel.
      cost + its own threat model. `packblob.NewDEKBlobStore` is the prod single-node packed path.
      **NOTE:** the static-path tests `TestEncryptedBlobStoreRejects{,Compressed}EncryptedFlagDowngrade`
      were removed with the static seam (they tested deleted code); the DEK gap is what this slice fixes.
-   - [ ] **[P1] DEK-encrypted PITR WAL replay unwired (pre-existing prod gap).** Prod opens the
-     logical/PITR WAL with a DEK sealer (`boot_phases_logical_wal.go:39`), but `PITRRestore`
-     (`snapshot/pitr.go`) falls through to plaintext `wal.Replay` (the static `walEnc` scaffold was
-     removed as dead code) — `wal.Replay` on DEK WAL is non-strict and logs/skips, so restore can
-     **silently omit post-snapshot mutations**. Fix: thread `storage.NewDEKKeeperAdapter(dekKeeper,
-     clusterID)` (a `wal.RecordSealer`, namespace `"pitr-wal"`) into the snapshot `Manager` and use
-     `wal.ReplayEncrypted`. Wiring spans 3 packages: prod restore `Manager` = `objSnapMgr` (built in
-     `StartAutoSnapshotterWhenReady`, injected via `WithSnapshotManager`) + the `server_bootstrap.go`
-     fallback. The keeper is restore-stable (`dek_keeper_restore.go` `LoadFromFSM`, gen-0-pinned).
+   - [ ] **[P2] PITR WAL torn-tail tolerance on encrypted replay (D5 follow-up, descoped from the
+     DEK-PITR replay slice).** `ReplayEncrypted` is strict and errors on a final-segment torn frame
+     (`TestWAL_EncryptedReplayRejectsTruncatedFrame` deliberately locks this; the plaintext path
+     `break`s gracefully). The WAL does NOT self-heal the torn tail — `scanMaxSeq` only reads (no
+     truncate) and the writer reopens `O_APPEND` (`wal.go:250`), so after a crash a torn frame
+     persists and PITR restore **errors until that segment ages out of WAL retention**. Strictly
+     better than before the DEK-PITR fix (encrypted PITR was 100% broken), but a real post-crash gap.
+     Fix would tolerate a trailing `io.ErrUnexpectedEOF` on the FINAL segment in `wal.replay()` (index
+     `i == len(files)-1`; `segmentFiles` sorts ascending) while keeping decrypt/auth + non-final torn
+     fatal — this REVERSES the deliberate replay-strict contract, so update the existing test
+     consciously. Keep parity with the plaintext path.
    - [ ] **Data-DEK rotation re-enable (separate, larger — keep gated for now).** Re-enable
      the `encryption.rotate-dek` trigger only after **all** ciphertext-bearing formats persist
      a non-zero `dek_gen` (datawal done #637; packblob gen still deferred to format v8+) AND

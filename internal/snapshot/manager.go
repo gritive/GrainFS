@@ -16,6 +16,7 @@ import (
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/wal"
 )
 
 // WALProvider is an optional interface for backends that expose a WAL offset.
@@ -41,6 +42,20 @@ type Manager struct {
 	refs      RefSink
 	kek       KEKSource
 	clusterID [16]byte
+	// walSealer, when non-nil, decrypts the DEK-sealed PITR WAL during
+	// PITRRestore (mirrors how serveruntime boot opens the WAL with
+	// wal.OpenEncrypted). nil = plaintext WAL (encryption-disabled deployment).
+	walSealer wal.RecordSealer
+}
+
+// SetPITRWALSealer installs the sealer used to decrypt the PITR WAL during
+// PITRRestore. Production passes storage.NewDEKKeeperAdapter(dekKeeper, clusterID)
+// — the same keeper the logical WAL was sealed with at boot. Set post-construction
+// (like refs) so the NewManager* signatures stay stable. nil keeps plaintext replay.
+func (m *Manager) SetPITRWALSealer(s wal.RecordSealer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.walSealer = s
 }
 
 // NewManager creates a Manager backed by the given snapshotable backend.

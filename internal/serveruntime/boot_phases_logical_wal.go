@@ -44,7 +44,7 @@ func bootLogicalWALOpen(ctx context.Context, state *bootState) error {
 	var w *wal.WAL
 	var err error
 	if sealer != nil {
-		w, err = wal.OpenEncrypted(state.walDir, sealer, "pitr-wal")
+		w, err = wal.OpenEncrypted(state.walDir, sealer, wal.PITRWALNamespace)
 	} else {
 		w, err = wal.Open(state.walDir)
 	}

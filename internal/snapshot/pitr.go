@@ -75,48 +75,57 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 		objects[snapshotObjectKey(o.Bucket, o.Key, o.VersionID)] = o
 	}
 
-	// Replay WAL entries if WAL directory is configured.
-	// NOTE: prod writes the PITR WAL with a DEK sealer, but DEK-encrypted
-	// replay is not yet wired here — replay is plaintext-only. See TODOS
-	// ("DEK-encrypted PITR WAL replay is unwired").
+	// Replay WAL entries if WAL directory is configured. When a sealer is set,
+	// the PITR WAL is DEK-encrypted (serveruntime boot opens it with
+	// wal.OpenEncrypted) — replay it with ReplayEncrypted under the same
+	// namespace. Without a sealer (encryption-disabled deployment), plaintext
+	// Replay is used; it fails closed via ErrEncryptedWALNeedsSealer if it ever
+	// meets an encrypted segment, so a missing sealer can never silently drop
+	// post-snapshot mutations.
 	walReplayed := 0
-	if m.walDir != "" {
-		walReplayed, err = wal.Replay(m.walDir, base.WALOffset, targetTime, func(e wal.Entry) {
-			switch e.Op {
-			case wal.OpPut:
-				objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{
-					Bucket:      e.Bucket,
-					Key:         e.Key,
-					ETag:        e.ETag,
-					ContentType: e.ContentType,
-					Size:        e.Size,
-					Modified:    e.Timestamp / 1e9, // ns → s
-					VersionID:   e.VersionID,
-					IsLatest:    true,
-				}
-				clearLatest(objects, e.Bucket, e.Key, e.VersionID)
-			case wal.OpDelete:
-				if e.VersionID == "" {
-					deleteAllVersions(objects, e.Bucket, e.Key)
-					return
-				}
-				objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{
-					Bucket:         e.Bucket,
-					Key:            e.Key,
-					ETag:           "DEL",
-					VersionID:      e.VersionID,
-					IsDeleteMarker: true,
-					IsLatest:       true,
-				}
-				clearLatest(objects, e.Bucket, e.Key, e.VersionID)
-			case wal.OpDeleteVersion:
-				if e.VersionID != "" {
-					delete(objects, snapshotObjectKey(e.Bucket, e.Key, e.VersionID))
-				} else {
-					deleteAllVersions(objects, e.Bucket, e.Key)
-				}
+	applyEntry := func(e wal.Entry) {
+		switch e.Op {
+		case wal.OpPut:
+			objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{
+				Bucket:      e.Bucket,
+				Key:         e.Key,
+				ETag:        e.ETag,
+				ContentType: e.ContentType,
+				Size:        e.Size,
+				Modified:    e.Timestamp / 1e9, // ns → s
+				VersionID:   e.VersionID,
+				IsLatest:    true,
 			}
-		})
+			clearLatest(objects, e.Bucket, e.Key, e.VersionID)
+		case wal.OpDelete:
+			if e.VersionID == "" {
+				deleteAllVersions(objects, e.Bucket, e.Key)
+				return
+			}
+			objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{
+				Bucket:         e.Bucket,
+				Key:            e.Key,
+				ETag:           "DEL",
+				VersionID:      e.VersionID,
+				IsDeleteMarker: true,
+				IsLatest:       true,
+			}
+			clearLatest(objects, e.Bucket, e.Key, e.VersionID)
+		case wal.OpDeleteVersion:
+			if e.VersionID != "" {
+				delete(objects, snapshotObjectKey(e.Bucket, e.Key, e.VersionID))
+			} else {
+				deleteAllVersions(objects, e.Bucket, e.Key)
+			}
+		}
+	}
+
+	if m.walDir != "" {
+		if m.walSealer != nil {
+			walReplayed, err = wal.ReplayEncrypted(m.walDir, base.WALOffset, targetTime, m.walSealer, wal.PITRWALNamespace, applyEntry)
+		} else {
+			walReplayed, err = wal.Replay(m.walDir, base.WALOffset, targetTime, applyEntry)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("wal replay: %w", err)
 		}
