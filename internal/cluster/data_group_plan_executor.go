@@ -298,11 +298,14 @@ func (e *DataGroupPlanExecutor) EvacuateVoter(ctx context.Context, groupID, revo
 		return fmt.Errorf("data_group_executor: refusing to evict last voter of group %q: %w", groupID, ErrRefuseLastVoter)
 	}
 
-	// Self-removal: transfer leadership; the new leader retries.
+	// Self-removal: the revoked node leads this group. Step down so a surviving
+	// voter takes over and evicts us on its next tick. v2 TransferLeadership picks
+	// the most-caught-up peer from the leader's REAL matchIndex and steps down
+	// regardless (raft §3.10). We must NOT pre-wait via waitForLeadershipTransferTarget
+	// here: it reads the adapter's PeerMatchIndex, which is always (0,false) under
+	// v2 (raftnode_adapter.go), so the pre-wait can never observe catch-up and would
+	// time out — leaving a revoked leader permanently un-evictable.
 	if revokedID == e.localNodeID {
-		if err := e.waitForLeadershipTransferTarget(ctx, dg, node, revokedID); err != nil {
-			return err
-		}
 		if err := node.TransferLeadership(); err != nil {
 			return fmt.Errorf("data_group_executor: TransferLeadership: %w", err)
 		}
