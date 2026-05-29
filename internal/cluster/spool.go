@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -25,6 +26,12 @@ var md5Pool = sync.Pool{
 
 const spoolCopyBufferSize = 1 << 20
 const maxEncryptedSpoolBlobBytes = 2 * spoolCopyBufferSize
+
+// spoolDomainSeq yields a process-unique per-spool domain counter so each PUT
+// spool gets a distinct AAD domain (the per-record counter prevents intra-spool
+// splice; a unique per-spool domain prevents cross-spool splice). Reset on
+// restart is harmless — PUT spool files are transient and deleted.
+var spoolDomainSeq atomic.Uint64
 
 var spoolCopyBufferPool = sync.Pool{
 	New: func() any {
@@ -51,7 +58,7 @@ type spooledObject struct {
 	Size      int64
 	ETag      string
 	encrypted bool
-	encryptor *encrypt.Encryptor
+	seam      storage.DataEncryptor
 	domain    string
 }
 
@@ -118,9 +125,9 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*
 	return &spooledObject{Path: path, Size: size, ETag: etag}, nil
 }
 
-func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket string, enc *encrypt.Encryptor, domain string) (*spooledObject, error) {
-	if enc == nil {
-		return nil, fmt.Errorf("encrypt spool object: nil encryptor")
+func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket string, seam storage.DataEncryptor, domain string) (*spooledObject, error) {
+	if seam == nil {
+		return nil, fmt.Errorf("encrypt spool object: nil seam")
 	}
 	if domain == "" {
 		return nil, fmt.Errorf("encrypt spool object: empty domain")
@@ -150,7 +157,7 @@ func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket s
 		clear(*bufp)
 		spoolCopyBufferPool.Put(bufp)
 	}()
-	writer := &encryptedSpoolRecordWriter{w: tmp, enc: enc, domain: domain}
+	writer := &encryptedSpoolRecordWriter{w: tmp, seam: seam, domain: domain}
 	hashWriter, etagFunc, releaseHash := spoolHashForBucket(bucket)
 	defer releaseHash()
 	stageStart = time.Now()
@@ -191,14 +198,14 @@ func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket s
 		Size:      size,
 		ETag:      etag,
 		encrypted: true,
-		encryptor: enc,
+		seam:      seam,
 		domain:    domain,
 	}, nil
 }
 
 func (s *spooledObject) Open() (io.ReadCloser, error) {
 	if s.encrypted {
-		return openSpoolEncryptedRecordFile(s.Path, s.encryptor, s.domain)
+		return openSpoolEncryptedRecordFile(s.Path, s.seam, s.domain)
 	}
 	return os.Open(s.Path)
 }
@@ -208,9 +215,9 @@ func (s *spooledObject) Cleanup() {
 }
 
 func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, r io.Reader) (*spooledObject, error) {
-	if b.shardSvc != nil && b.shardSvc.encryptor != nil {
-		domain := fmt.Sprintf("cluster-spool:%d", time.Now().UnixNano())
-		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.encryptor, domain)
+	if b.shardSvc != nil && b.shardSvc.segEnc != nil {
+		domain := fmt.Sprintf("cluster-spool:%d", spoolDomainSeq.Add(1))
+		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.segEnc, domain)
 	}
 	return spoolObject(ctx, b.spoolDir(), r, bucket)
 }
@@ -236,44 +243,39 @@ func spoolHashForBucket(bucket string) (io.Writer, func() string, func()) {
 
 type encryptedSpoolRecordWriter struct {
 	w      io.Writer
-	enc    *encrypt.Encryptor
+	seam   storage.DataEncryptor
 	domain string
 	record uint64
-	blob   []byte
 }
 
 func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 	if uint64(len(p)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("encrypted spool record too large: %d", len(p))
 	}
-	blob, err := w.enc.SealValueAADTo(w.blob[:0], []byte(spoolEncryptedRecordAAD(w.domain, w.record)), p)
+	blob, gen, err := w.seam.Seal(encrypt.DomainSpool, spoolRecordAADFields(w.domain, w.record), p)
 	if err != nil {
 		return 0, err
 	}
-	w.blob = blob
 	if uint64(len(blob)) > uint64(^uint32(0)) {
-		clear(blob)
 		return 0, fmt.Errorf("encrypted spool blob too large: %d", len(blob))
 	}
-	var header [8]byte
+	var header [12]byte
 	binary.BigEndian.PutUint32(header[:4], uint32(len(p)))
-	binary.BigEndian.PutUint32(header[4:], uint32(len(blob)))
+	binary.BigEndian.PutUint32(header[4:8], uint32(len(blob)))
+	binary.BigEndian.PutUint32(header[8:], gen)
 	if _, err := w.w.Write(header[:]); err != nil {
-		clear(blob)
 		return 0, err
 	}
 	if _, err := w.w.Write(blob); err != nil {
-		clear(blob)
 		return 0, err
 	}
-	clear(blob)
 	w.record++
 	return len(p), nil
 }
 
-func openSpoolEncryptedRecordFile(path string, enc *encrypt.Encryptor, domain string) (io.ReadCloser, error) {
-	if enc == nil {
-		return nil, fmt.Errorf("open encrypted spool: nil encryptor")
+func openSpoolEncryptedRecordFile(path string, seam storage.DataEncryptor, domain string) (io.ReadCloser, error) {
+	if seam == nil {
+		return nil, fmt.Errorf("open encrypted spool: nil seam")
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -281,19 +283,18 @@ func openSpoolEncryptedRecordFile(path string, enc *encrypt.Encryptor, domain st
 	}
 	return &encryptedSpoolRecordReader{
 		f:      f,
-		enc:    enc,
+		seam:   seam,
 		domain: domain,
 	}, nil
 }
 
 type encryptedSpoolRecordReader struct {
 	f      *os.File
-	enc    *encrypt.Encryptor
+	seam   storage.DataEncryptor
 	domain string
 	record uint64
 	buf    []byte
 	plain  []byte
-	blob   []byte
 	err    error
 }
 
@@ -320,14 +321,11 @@ func (r *encryptedSpoolRecordReader) Close() error {
 	if len(r.plain) > 0 {
 		clear(r.plain)
 	}
-	if len(r.blob) > 0 {
-		clear(r.blob)
-	}
 	return r.f.Close()
 }
 
 func (r *encryptedSpoolRecordReader) loadNext() error {
-	plain, blob, done, err := readSpoolEncryptedRecordTo(r.f, r.enc, r.domain, r.record, r.plain[:0], r.blob[:0])
+	plain, done, err := readSpoolEncryptedRecord(r.f, r.seam, r.domain, r.record)
 	if err != nil {
 		return err
 	}
@@ -336,48 +334,41 @@ func (r *encryptedSpoolRecordReader) loadNext() error {
 	}
 	r.record++
 	r.plain = plain
-	r.blob = blob
 	r.buf = plain
 	return nil
 }
 
-func readSpoolEncryptedRecordTo(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64, plainBuf, blobBuf []byte) ([]byte, []byte, bool, error) {
-	var header [8]byte
+func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain string, record uint64) (plain []byte, done bool, err error) {
+	var header [12]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		if err == io.EOF {
-			return nil, blobBuf, true, nil
+			return nil, true, nil
 		}
-		return nil, blobBuf, false, fmt.Errorf("read encrypted spool header: %w", err)
+		return nil, false, fmt.Errorf("read encrypted spool header: %w", err)
 	}
 	plainLen := binary.BigEndian.Uint32(header[:4])
-	blobLen := binary.BigEndian.Uint32(header[4:])
+	blobLen := binary.BigEndian.Uint32(header[4:8])
+	gen := binary.BigEndian.Uint32(header[8:])
 	if blobLen == 0 {
-		return nil, blobBuf, false, fmt.Errorf("read encrypted spool record: empty blob")
+		return nil, false, fmt.Errorf("read encrypted spool record: empty blob")
 	}
 	if blobLen > maxEncryptedSpoolBlobBytes {
-		return nil, blobBuf, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
+		return nil, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
 	}
-	if cap(blobBuf) < int(blobLen) {
-		blobBuf = make([]byte, blobLen)
-	}
-	blob := blobBuf[:blobLen]
+	blob := make([]byte, blobLen)
 	if _, err := io.ReadFull(r, blob); err != nil {
-		return nil, blobBuf, false, fmt.Errorf("read encrypted spool blob: %w", err)
+		return nil, false, fmt.Errorf("read encrypted spool blob: %w", err)
 	}
-	plain, err := enc.OpenValueAADTo(plainBuf, []byte(spoolEncryptedRecordAAD(domain, record)), blob)
+	out, err := seam.Open(encrypt.DomainSpool, spoolRecordAADFields(domain, record), gen, blob)
 	clear(blob)
 	if err != nil {
-		return nil, blobBuf, false, fmt.Errorf("open encrypted spool record: %w", err)
+		return nil, false, fmt.Errorf("open encrypted spool record: %w", err)
 	}
-	if len(plain) != int(plainLen) {
-		clear(plain)
-		return nil, blobBuf, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
+	if len(out) != int(plainLen) {
+		clear(out)
+		return nil, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
 	}
-	return plain, blobBuf, false, nil
-}
-
-func spoolEncryptedRecordAAD(domain string, record uint64) string {
-	return fmt.Sprintf("%s:%d", domain, record)
+	return out, false, nil
 }
 
 // writeFileAtomicFromReader materializes bytes from r at path via

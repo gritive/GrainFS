@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/klauspost/reedsolomon"
 )
 
@@ -23,7 +23,7 @@ type spooledECShards struct {
 	sizes     []int64
 	origSize  int64
 	encrypted bool
-	encryptor *encrypt.Encryptor
+	seam      storage.DataEncryptor
 	domains   []string
 }
 
@@ -45,7 +45,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		sizes:     make([]int64, cfg.NumShards()),
 		origSize:  sp.Size,
 		encrypted: sp.encrypted,
-		encryptor: sp.encryptor,
+		seam:      sp.seam,
 		domains:   make([]string, cfg.NumShards()),
 	}
 	cleanup := func() {
@@ -81,7 +81,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		dataFiles[i] = f
 		var writer io.Writer = f
 		if out.encrypted {
-			writer = &encryptedSpoolRecordWriter{w: f, enc: out.encryptor, domain: out.domains[i]}
+			writer = &encryptedSpoolRecordWriter{w: f, seam: out.seam, domain: out.domains[i]}
 		}
 		dataWriters[i] = &countingWriter{w: writer, n: &out.sizes[i]}
 	}
@@ -144,7 +144,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		parityFiles[i] = f
 		var writer io.Writer = f
 		if out.encrypted {
-			writer = &encryptedSpoolRecordWriter{w: f, enc: out.encryptor, domain: out.domains[idx]}
+			writer = &encryptedSpoolRecordWriter{w: f, seam: out.seam, domain: out.domains[idx]}
 		}
 		parityWriters[i] = &countingWriter{w: writer, n: &out.sizes[idx]}
 	}
@@ -213,7 +213,7 @@ func (s *spooledECShards) Cleanup() {
 
 func (s *spooledECShards) openPayload(idx int) (io.ReadCloser, error) {
 	if s.encrypted {
-		return openSpoolEncryptedRecordFile(s.paths[idx], s.encryptor, s.domains[idx])
+		return openSpoolEncryptedRecordFile(s.paths[idx], s.seam, s.domains[idx])
 	}
 	return os.Open(s.paths[idx])
 }

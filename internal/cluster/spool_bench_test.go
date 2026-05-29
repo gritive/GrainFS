@@ -7,19 +7,21 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func benchmarkClusterEncryptor(b *testing.B) *encrypt.Encryptor {
+func benchmarkClusterSeam(b *testing.B) storage.DataEncryptor {
 	b.Helper()
-	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	clusterID := bytes.Repeat([]byte{0x42}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x42}, encrypt.KEKSize), clusterID)
 	if err != nil {
 		b.Fatal(err)
 	}
-	return enc
+	return storage.NewDEKKeeperAdapter(keeper, clusterID)
 }
 
 func BenchmarkEncryptedSpoolWrite(b *testing.B) {
-	enc := benchmarkClusterEncryptor(b)
+	seam := benchmarkClusterSeam(b)
 	payload := bytes.Repeat([]byte("s"), 8<<20)
 	dir := b.TempDir()
 
@@ -27,7 +29,7 @@ func BenchmarkEncryptedSpoolWrite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(payload), "bench-bucket", enc, "bench:spool")
+		sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(payload), "bench-bucket", seam, "bench:spool")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -39,9 +41,9 @@ func BenchmarkEncryptedSpoolWrite(b *testing.B) {
 }
 
 func BenchmarkEncryptedSpoolOpen(b *testing.B) {
-	enc := benchmarkClusterEncryptor(b)
+	seam := benchmarkClusterSeam(b)
 	payload := bytes.Repeat([]byte("o"), 8<<20)
-	sp, err := spoolObjectEncrypted(context.Background(), b.TempDir(), bytes.NewReader(payload), "bench-bucket", enc, "bench:spool")
+	sp, err := spoolObjectEncrypted(context.Background(), b.TempDir(), bytes.NewReader(payload), "bench-bucket", seam, "bench:spool")
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -70,9 +70,9 @@ func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 }
 
 func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
-	enc := newClusterTestEncryptor(t)
+	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", enc, "cluster-spool:test")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(len(payload)), sp.Size)
@@ -90,20 +90,47 @@ func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
 	require.Equal(t, payload, got)
 }
 
+func TestSpoolObjectEncryptedRoundTripsViaDEKSeam(t *testing.T) {
+	clusterID := bytes.Repeat([]byte("c"), 16)
+	kek := bytes.Repeat([]byte{0x77}, encrypt.KEKSize)
+	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
+	require.NoError(t, err)
+	seam := storage.NewDEKKeeperAdapter(keeper, clusterID)
+
+	dir := t.TempDir()
+	plain := bytes.Repeat([]byte("spool-bytes-"), 200_000) // > 1 MiB, multiple records
+	sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(plain), "bkt", seam, "cluster-spool:test")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	// On-disk spool file must be ciphertext, not the plaintext run.
+	raw, err := os.ReadFile(sp.Path)
+	require.NoError(t, err)
+	require.False(t, bytes.Contains(raw, plain[:4096]), "spool file must not contain plaintext")
+
+	// Reads back to the exact plaintext via the seam.
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plain, got)
+}
+
 func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testing.T) {
-	enc := newClusterTestEncryptor(t)
+	seam := newClusterTestSeam(t)
 	payload := append(bytes.Repeat([]byte("a"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), spoolCopyBufferSize)...)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", enc, "cluster-spool:stream")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:stream")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
 	f, err := os.OpenFile(sp.Path, os.O_RDWR, 0)
 	require.NoError(t, err)
-	var hdr [8]byte
+	var hdr [12]byte
 	_, err = f.ReadAt(hdr[:], 0)
 	require.NoError(t, err)
-	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
-	secondBodyOffset := int64(8 + int(firstBlobLen) + 8)
+	firstBlobLen := binary.BigEndian.Uint32(hdr[4:8])
+	secondBodyOffset := int64(12 + int(firstBlobLen) + 12)
 	_, err = f.Seek(secondBodyOffset, io.SeekStart)
 	require.NoError(t, err)
 	_, err = f.Write([]byte{0x00})
@@ -126,13 +153,13 @@ func TestCopyToSpoolChunkedHandlesLargeReaders(t *testing.T) {
 	// reader rejects as "blob too large". multipart UploadPart hit this
 	// when warp pushed 5 MiB parts through the encrypted spool path.
 	// copyToSpoolChunked must keep every record within the invariant.
-	enc := newClusterTestEncryptor(t)
+	seam := newClusterTestSeam(t)
 	dir := t.TempDir()
 	path := dir + "/part"
 	f, err := os.Create(path)
 	require.NoError(t, err)
 	domain := "spool:test-large"
-	w := &encryptedSpoolRecordWriter{w: f, enc: enc, domain: domain}
+	w := &encryptedSpoolRecordWriter{w: f, seam: seam, domain: domain}
 
 	// Use a bytes.Reader so WriteTo is implemented; the helper must still
 	// chunk the copy through a spoolCopyBufferSize-sized buffer.
@@ -142,7 +169,7 @@ func TestCopyToSpoolChunkedHandlesLargeReaders(t *testing.T) {
 	require.Equal(t, int64(len(payload)), n)
 	require.NoError(t, f.Close())
 
-	rc, err := openSpoolEncryptedRecordFile(path, enc, domain)
+	rc, err := openSpoolEncryptedRecordFile(path, seam, domain)
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -151,18 +178,18 @@ func TestCopyToSpoolChunkedHandlesLargeReaders(t *testing.T) {
 }
 
 func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
-	enc := newClusterTestEncryptor(t)
+	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", enc, "cluster-spool:oversized")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:oversized")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
 	f, err := os.OpenFile(sp.Path, os.O_RDWR, 0)
 	require.NoError(t, err)
-	var hdr [8]byte
+	var hdr [12]byte
 	_, err = f.ReadAt(hdr[:], 0)
 	require.NoError(t, err)
-	binary.BigEndian.PutUint32(hdr[4:], uint32(maxEncryptedSpoolBlobBytes+1))
+	binary.BigEndian.PutUint32(hdr[4:8], uint32(maxEncryptedSpoolBlobBytes+1))
 	_, err = f.WriteAt(hdr[:], 0)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
@@ -221,10 +248,10 @@ func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
 }
 
 func TestEncryptedSpoolECShardsHidePlaintextAndReconstruct(t *testing.T) {
-	enc := newClusterTestEncryptor(t)
+	seam := newClusterTestSeam(t)
 	marker := []byte("sensitive-erasure-coding-block-")
 	payload := bytes.Repeat(marker, 4096)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", enc, "cluster-spool:test-ec")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test-ec")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -267,4 +294,14 @@ func newClusterTestEncryptor(t *testing.T) *encrypt.Encryptor {
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
 	return enc
+}
+
+// newClusterTestSeam returns a DataEncryptor over the static test encryptor so
+// spool unit tests exercise the real seam-backed write/read path. clusterID is
+// fixed (16 bytes); the same seam instance seals and opens within a test.
+func newClusterTestSeam(t *testing.T) storage.DataEncryptor {
+	t.Helper()
+	var clusterID [16]byte
+	copy(clusterID[:], bytes.Repeat([]byte("c"), 16))
+	return storage.NewEncryptorAdapter(newClusterTestEncryptor(t), clusterID[:])
 }
