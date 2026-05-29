@@ -492,6 +492,109 @@ func TestDecoratorReEnableSameConfigRebuildsCache(t *testing.T) {
 	require.EqualValues(t, 2, atomic.LoadInt32(&dialed), "re-enabled cache serves the hit")
 }
 
+// TestDecoratorReachableDenyOverridesStaleAllow pins the deny-precedence
+// security semantic: a reachable PDP returning an AUTHORITATIVE deny must
+// override a STALE-but-within-grace cached allow. Grace exists only to ride out
+// PDP *unavailability* (errType != ""); it must NOT resurrect a stale allow when
+// the PDP is actually reachable and says deny.
+func TestDecoratorReachableDenyOverridesStaleAllow(t *testing.T) {
+	var dialed int32
+	var denyMode atomic.Bool
+	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&dialed, 1)
+		if denyMode.Load() {
+			_, _ = w.Write([]byte(`{"decision":"deny","reason":"blocked"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	// ttl_allow short (1m), grace large (1h, the max) -> the entry goes stale but
+	// stays within grace. failure_policy irrelevant here (no failure occurs).
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "1h")))
+	base := time.Now()
+	d.now = func() time.Time { return base }
+
+	// Prime: PDP allow -> cached allow.
+	got := d.Authorize(context.Background(), "sa", "", reqCtx())
+	require.Equal(t, policy.DecisionAllow, got.Decision)
+	require.EqualValues(t, 1, atomic.LoadInt32(&dialed))
+
+	// Advance past ttl_allow but within grace_ttl: the cached entry is now STALE.
+	// Flip the PDP to a reachable authoritative deny (NOT a 500/failure).
+	denyMode.Store(true)
+	d.now = func() time.Time { return base.Add(2 * time.Minute) }
+
+	got = d.Authorize(context.Background(), "sa", "", reqCtx())
+	require.Equal(t, policy.DecisionDeny, got.Decision,
+		"reachable PDP deny must override the stale cached allow; grace must not resurrect it")
+	require.Equal(t, genericDenyMsg, got.Reason)
+	// A reachable deny means the PDP was actually dialed on the stale request
+	// (it was not served from cache as a fresh hit).
+	require.EqualValues(t, 2, atomic.LoadInt32(&dialed),
+		"stale entry re-consulted the PDP; the deny came from the live call, not the cache")
+}
+
+// TestDecoratorConcurrentAuthorizeRace drives many concurrent Authorize calls on
+// a SHARED Decorator with caching enabled (a mix of shared and distinct
+// resources so some hit and some miss), while another goroutine flips the config
+// between two valid cache settings on the SAME socket to exercise the
+// cache-rebuild path under contention. It exists to run under `-race`: it asserts
+// no panic and that every result is a valid decision. The clock is fixed and
+// never mutated concurrently (d.now is not lock-guarded).
+func TestDecoratorConcurrentAuthorizeRace(t *testing.T) {
+	sock := decoUnixPDP(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow"}`))
+	})
+	cfg := &mutableCfg{}
+	// Same socket, vary only a cache knob (ttl_allow) so cacheGen changes and the
+	// cache is rebuilt under contention WITHOUT closing the client mid-flight.
+	cfgA := cacheCfg(sock, "closed", "1m", "", "1h")
+	cfgB := cacheCfg(sock, "closed", "2m", "", "1h")
+	cfg.set(cfgA)
+	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg)
+	base := time.Now()
+	d.now = func() time.Time { return base } // fixed clock, never mutated below
+
+	const n = 50
+
+	// Config flipper: toggles between two valid configs to contend with refresh.
+	// Tracked separately from the Authorize goroutines so it can be stopped only
+	// after they finish.
+	stop := make(chan struct{})
+	flipDone := make(chan struct{})
+	go func() {
+		defer close(flipDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				cfg.set(cfgB)
+				cfg.set(cfgA)
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			rc := reqCtx()
+			if i%2 == 0 {
+				// Distinct resource -> cache miss for half the callers.
+				rc.Resource = "r-" + string(rune('a'+i%26))
+			}
+			got := d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", rc)
+			require.Contains(t, []policy.Decision{policy.DecisionAllow, policy.DecisionDeny}, got.Decision)
+		}(i)
+	}
+
+	wg.Wait()   // all Authorize callers done
+	close(stop) // stop the flipper
+	<-flipDone  // and wait for it to exit before the test returns
+}
+
 // captureLog redirects the zerolog global logger to a mutex-guarded buffer for
 // the duration of the test and restores it afterward. The decorator audits on
 // its own goroutine path while the test reads concurrently, so the buffer must
