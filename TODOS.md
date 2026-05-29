@@ -390,14 +390,16 @@ Work these in order. Do not run them in parallel.
 - **KEK-envelope: DataEncryptor buffer-reusing seam — remaining consumers.** The `SealTo`/`OpenTo`
   seam methods (+ `encrypt.AppendAAD`, `DEKKeeper.SealWithAADTo`/`OpenWithAADTo`,
   `TransientReadOnlyDEK.OpenWithAADTo`, pooled `withSeamAAD`/`withSeamAADErr2`) exist and are wired
-  through all 3 adapters; packblob `Append` (Seal), spool `Read` (Open), and spool write (Seal)
-  consumers are migrated.
+  through all 3 adapters; packblob `Append` (Seal), spool `Read` (Open), spool write (Seal), and the
+  EC-shard readers (`eccodec/shardio.go` Open) consumers are migrated.
   Open side needs **per-consumer lifetime analysis** — Open plaintext escapes to callers, so pooling the
   `OpenTo` dst is a use-after-free hazard, NOT a mechanical pool reintroduction. Each remaining consumer
   is its own slice; bench ≥15s×3 (allocs/op AND B/op).
   - packblob `Read` — Open side; needs `OpenTo` + lifetime analysis.
-  - ec / local (`eccodec/shardio.go`) Open — hot read path.
-  - datawal (`scanRecords`) Open.
+  - datawal (`scanRecords`) Open — cold path (WAL recovery/startup only), lowest payoff.
+  - `internal/storage/encrypted_object_file.go` `encryptedObjectReader` — a separate object-file read
+    consumer (not EC shard) that still allocs a fresh plaintext per `Read` (its own deferred zero-alloc
+    note); Open side, needs lifetime analysis.
   - **[P3] `AADField` append/pool** — the residual per-op allocs are `AADField` construction
     (`FieldUint64`/`FieldString`/`FieldUint16` each `make` a per-field slice + the `[]AADField` slice).
     Eliminating them needs an `encrypt.AADField` append/pool variant touching every AAD builder.
