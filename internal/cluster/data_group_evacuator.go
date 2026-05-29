@@ -14,7 +14,6 @@ import (
 // revocationSource is the evacuator's read view of the meta FSM.
 type revocationSource interface {
 	RevokedNodeIDs() map[string]struct{}
-	Nodes() []MetaNodeEntry
 }
 
 // voterMover removes a revoked voter from a data group. Production impl is
@@ -192,30 +191,3 @@ func PickHealthyExcluding(candidates []string, loadFn func(id string) (float64, 
 	}
 	return best, true
 }
-
-// newDataGroupEvacuatorForTest builds an evacuator with injected derivation
-// functions and a tiny tick. Test-only.
-func newDataGroupEvacuatorForTest(
-	localNodeID string,
-	revoked map[string]struct{},
-	mover voterMover,
-	ledTargets func() []evacTarget,
-	pickHealthy func(string, map[string]struct{}) (string, bool),
-) *DataGroupEvacuator {
-	return &DataGroupEvacuator{
-		localNodeID: localNodeID,
-		src:         staticRevocationSource{revoked: revoked},
-		mover:       mover,
-		logger:      log.With().Str("component", "evacuator-test").Logger(),
-		ledTargets:  ledTargets,
-		pickHealthy: pickHealthy,
-		tick:        time.Millisecond,
-		wakeCh:      make(chan struct{}, 1),
-		stopCh:      make(chan struct{}),
-	}
-}
-
-type staticRevocationSource struct{ revoked map[string]struct{} }
-
-func (s staticRevocationSource) RevokedNodeIDs() map[string]struct{} { return s.revoked }
-func (s staticRevocationSource) Nodes() []MetaNodeEntry              { return nil }

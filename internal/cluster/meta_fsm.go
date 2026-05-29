@@ -720,13 +720,6 @@ func (f *MetaFSM) recordRevokedNodeLocked(nodeID string) {
 	f.revokedNodeIDs[nodeID] = struct{}{}
 }
 
-// recordRevokedNodeForTest is a test-only helper that records under the lock.
-func (f *MetaFSM) recordRevokedNodeForTest(nodeID string) {
-	f.mu.Lock()
-	f.recordRevokedNodeLocked(nodeID)
-	f.mu.Unlock()
-}
-
 // SetOnNodeRevoked wires the side-effect callback fired (with f.mu released)
 // after a node is recorded revoked. Must not block; set before MetaRaft.Start().
 func (f *MetaFSM) SetOnNodeRevoked(fn func(string)) {

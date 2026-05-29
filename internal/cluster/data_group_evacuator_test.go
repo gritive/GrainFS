@@ -4,7 +4,9 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,3 +116,29 @@ func TestEvacuator_DoesNotMoveToAnotherRevokedNode(t *testing.T) {
 	require.True(t, hasB, "revoked target must be excluded")
 	require.True(t, hasD, "other revoked nodes must be excluded as candidates")
 }
+
+// newDataGroupEvacuatorForTest builds an evacuator with injected derivation
+// functions and a tiny tick. Test-only.
+func newDataGroupEvacuatorForTest(
+	localNodeID string,
+	revoked map[string]struct{},
+	mover voterMover,
+	ledTargets func() []evacTarget,
+	pickHealthy func(string, map[string]struct{}) (string, bool),
+) *DataGroupEvacuator {
+	return &DataGroupEvacuator{
+		localNodeID: localNodeID,
+		src:         staticRevocationSource{revoked: revoked},
+		mover:       mover,
+		logger:      log.With().Str("component", "evacuator-test").Logger(),
+		ledTargets:  ledTargets,
+		pickHealthy: pickHealthy,
+		tick:        time.Millisecond,
+		wakeCh:      make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
+	}
+}
+
+type staticRevocationSource struct{ revoked map[string]struct{} }
+
+func (s staticRevocationSource) RevokedNodeIDs() map[string]struct{} { return s.revoked }

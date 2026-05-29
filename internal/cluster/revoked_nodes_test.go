@@ -64,3 +64,11 @@ func TestMetaFSM_Snapshot_RoundTrips_RevokedNodeIDs(t *testing.T) {
 	require.True(t, g.IsRevoked("node-b"))
 	require.True(t, g.IsRevoked("node-c"))
 }
+
+// recordRevokedNodeForTest is a test-only helper that records a revoked node
+// under the lock (mirrors applyRevokePeer's capture without the codec/callback).
+func (f *MetaFSM) recordRevokedNodeForTest(nodeID string) {
+	f.mu.Lock()
+	f.recordRevokedNodeLocked(nodeID)
+	f.mu.Unlock()
+}
