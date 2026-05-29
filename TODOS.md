@@ -44,7 +44,9 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        decrypts survivors then re-`Append`s them → re-seals under the **active** gen (no
        seal-under-specific-gen API). So Compact migrates entries off their pinned gen. **S7 prune
        MUST NOT assume Compact preserves an entry's gen** when deciding a gen is unreferenced.
-     - S2 datawal `RollSegmentOnRotation` boundary + synchronous wiring (plan exists, deferred).
+     - S2 datawal `RollSegmentOnRotation` boundary method — SHIPPED (this PR; method + unit
+       tests, no production caller yet). Synchronous wiring (the gen-advance→roll window) is
+       deferred to S5, where it is reachable end-to-end after `state.dataWAL` exists.
      - S3 legacy/logical WAL (`internal/storage/wal`) per-record gen framing + rotation boundary +
        non-dropping seal-error on the async `AppendAsync` path.
      - S4 close the EC mid-shard race (`eccodec/shardio.go:168`).
@@ -459,12 +461,13 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 - [ ] **KEK-envelope D-wal: live DEK rotation segment rollover [P1]**.
   D-wal-data now opens production writer/recovery paths with `DEKKeeperAdapter`
   and new encrypted `internal/storage/datawal` segments probe-seal before header
-  write so `dek_gen` records the actual active generation. Rotation is still
-  deferred because a currently-open segment pins one generation in its header
-  while `DEKKeeperAdapter.Seal` always uses the live active generation. Before
-  enabling `encryption.rotate-dek`, add a rotation boundary: either roll/close
-  active data WAL segments on DEK rotation or add a seal-under-specific-generation
-  API so appends keep using the header-pinned generation until rollover.
+  write so `dek_gen` records the actual active generation. The rotation-boundary
+  method `WAL.RollSegmentOnRotation` is now SHIPPED (see below). Rotation is still
+  deferred because the method has no production caller: it must be wired
+  SYNCHRONOUSLY on DEK rotation (a currently-open segment pins one generation while
+  `DEKKeeperAdapter.Seal` uses the live active gen, so appends fail-closed until the
+  segment rolls). Remaining before enabling `encryption.rotate-dek`: synchronous
+  wiring (S5) + the legacy-WAL boundary below.
   **Legacy-WAL caveat (codex, D-wal-legacy code gate):** `internal/storage/wal`
   writes via the async `AppendAsync` path — `lastSeq` advances at submit time and
   the background goroutine logs and DROPS on seal error. Apply the same
@@ -472,17 +475,13 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   moving legacy PITR WAL to a real gen>0 DEK sealer.
   **Plan-gate findings (2026-05-29, a `RollSegmentOnRotation` slice was scoped then
   deferred — fold these into the implementation here so they are not re-discovered):**
-  - **`RollSegmentOnRotation` design (do NOT reuse `openAppendFile`).** A naive
-    close+reopen collides on the empty genesis segment: `segmentName(lastSeq+1)`
-    can resolve to the same file, and a second `initSegment` under `O_APPEND`
-    writes a SECOND header → corrupt segment. Branch on records-written: empty
-    current segment → `Truncate(0)` + re-`initSegment` in place (mirror the repair
-    precedent `datawal/wal.go:305-324`); non-empty → `Sync`+`Close` then `O_CREATE`
-    a NEW file named for the next firstSeq (zero-padded, sorts after the prior
-    segment — preserve `seqMonotonic`/sort invariants `wal.go:419-463`). Refresh
-    `w.dekGen` to the new gen; no-op when the freshly probed gen equals `w.dekGen`.
-    Needs a test helper returning BOTH the sealer AND the `*encrypt.DEKKeeper` (the
-    existing `testDEKKeeperAdapterAtGen` hides the keeper).
+  - **`RollSegmentOnRotation` method — SHIPPED (this PR).** Empty current segment →
+    `Truncate(0)` + re-`initSegment` in place; non-empty → `Sync`+`Close` then
+    `O_CREATE|O_EXCL` a NEW file named for the next firstSeq (zero-padded, sorts after
+    the prior segment; `O_EXCL` fails closed against the double-header collision class).
+    No-op when the freshly probed gen equals `w.dekGen`; `w.lastSeq`/`w.lastTimestamp`
+    preserved (seqMonotonic). Mirrors `Close()`'s `isSyncing` wait-guard so a concurrent
+    group-commit `Flush` cannot Sync a closed fd. No production caller yet.
   - **Wiring must be SYNCHRONOUS, not async post-commit.** The keeper's active gen
     advances synchronously in the FSM apply, but `handleDEKReplicatedRotate`
     dispatches via `go` (must-not-block) — between gen-advance and an async roll,

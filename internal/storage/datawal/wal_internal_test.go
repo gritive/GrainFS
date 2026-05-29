@@ -360,3 +360,42 @@ func writePlainSegmentForTest(t *testing.T, dir string, seq uint64, records []Re
 	_, err = f.Write(tail)
 	require.NoError(t, err)
 }
+
+// RollSegmentOnRotation must honor the same isSyncing wait-guard as Close: while
+// a group-commit Sync is in flight (Flush sets isSyncing and releases w.mu),
+// Roll must block before touching w.file and proceed only once the sync clears.
+// The guard runs before the sealer==nil short-circuit, so a plaintext WAL
+// exercises it deterministically. Removing the guard makes the negative window
+// fire immediately (Roll returns nil at once), failing this test.
+func TestRollSegmentOnRotationWaitsForInFlightSync(t *testing.T) {
+	w, err := Open(t.TempDir(), nil, "datawal")
+	require.NoError(t, err)
+	defer w.Close()
+
+	w.mu.Lock()
+	w.isSyncing = true // simulate an in-flight group-commit sync
+	w.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		_ = w.RollSegmentOnRotation()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("RollSegmentOnRotation returned while a sync was in flight (missing isSyncing wait-guard)")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	w.mu.Lock()
+	w.isSyncing = false
+	w.syncCond.Broadcast()
+	w.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RollSegmentOnRotation did not proceed after the sync cleared")
+	}
+}
