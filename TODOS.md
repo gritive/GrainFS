@@ -142,6 +142,30 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
+- [ ] **External PDP adapter — deferred slices** (Slice 1 SHIPPED: local-unix-socket-only,
+  disabled-by-default, chain/deny-override, fail-closed default + opt-in fail-open,
+  admin + protocol-credential paths, Prometheus `grainfs_iam_pdp_*` + `iam.pdp` audit).
+  Remaining:
+    - Remote `https://` transport + bearer token (delivered via admin UDS + a
+      `grainfs iam pdp` CLI, DEK-sealed like other IAM secrets) + mTLS + active SSRF
+      egress filtering.
+    - Decision cache (positive/negative TTL) + grace mode.
+    - S3/Iceberg data-plane PDP enforcement (needs a `WithPolicyAuthorizer` interface
+      seam + latency/cache design).
+    - Full GrainFS-only audit on the protocol-credential control plane (pre-existing
+      gap; Slice 1 added only the PDP-outcome `iam.pdp` audit).
+    - Admin peercred/UDS path is intentionally NOT PDP-gated (local socket trust).
+    - **`target_sa` is empty for bearer/OIDC credential ops.** The decorator only
+      sets `context.target_sa` when the actor principal is a service account; a
+      bearer actor minting/rotating/revoking a credential for some SA does not
+      expose the target SA to the PDP (the handler has `saID` but
+      `AuthorizePrincipal` does not receive it). To close: thread the target SA from
+      `authorizeProtocolCredential` into the decorator via request context (e.g. a
+      `WithActorTarget` ctx value) — expands beyond the decorator-only boundary into
+      `handlers_credentials.go`. Documented as a Slice-1 limitation (spec P2a).
+  Spec: `docs/superpowers/specs/2026-05-28-oidc-federated-iam-boundary-design.md`
+  "External PDP Adapter — Slice 5 Detailed Design".
+
 - [ ] **Zero-CA cutover/revocation follow-ups** (2026-05-29 re-review of the merged
   revocation + complete-cutover slices; zero-CA is greenfield so none of these are
   migration concerns):
@@ -190,41 +214,6 @@ Work these in order. Do not run them in parallel.
       re-dial and resume as a lingering data-group voter. Verify whether revoke
       should also remove the node from data-group voter sets, or document that full
       eviction is only guaranteed post-drop.
-
-- [ ] **Zero-CA cutover/revocation follow-ups** (2026-05-29 re-review of the merged
-  revocation + complete-cutover slices; zero-CA is greenfield so none of these are
-  migration concerns):
-    - **[P3] H4' — incomplete drop under an in-flight transport rotation**.
-      `internal/transport/identity_composer.go:88` still carries `TODO(PR-2)`: when
-      `dropped=true`, `recompute()` excludes the base PSK but still appends
-      `c.rotation`. If `DropClusterKeyAccept` applies while a transport KEK-rotation
-      window is open, the cluster-key-derived `{OldSPKI, NewSPKI}`
-      (`internal/cluster/rotation_worker.go:88,104`) remain in the accept-set until
-      the next steady recompute clears the window (`rotation_worker.go:143` sets
-      window=nil), transiently defeating the drop's purpose. Latent today because
-      transport KEK rotation is gated on cluster-wide KEK distribution (Phase B);
-      it becomes a live hole the moment rotation is enabled. Fix one of: filter
-      cluster-key-derived SPKIs out of the rotation set when `dropped`, refuse
-      `DropClusterKeyAccept` while a rotation window is open, or force a steady
-      recompute on drop. Add a unit test that drops mid-window and asserts the
-      old/new cluster SPKIs are not accepted.
-    - **[P3] Stale "DORMANT/SUPPORT-ONLY in PR-1" comments on now-live code**.
-      Cluster-key drop, present-flip, and conn-recycle are wired live
-      (`internal/serveruntime/boot_phases_raft.go:302,330`,
-      `boot_phases_transport.go:95`), but the transport surface still annotates
-      itself as PR-1 dormant / no-live-caller:
-      `internal/transport/identity_composer.go:46-48,57-59`,
-      `internal/transport/quic.go:386` (FlipPresent), `:394` (RecycleConns),
-      `:446` (SetDropped). Misleading on security-critical accept-set code — a
-      future reader could remove "dead" wiring. Refresh comments to name the live
-      callers.
-    - **[P3] Orphaned join-redirect TODOs (operability)**. A joiner that contacts a
-      follower gets `JoinStatusNotLeader` but no leader address to retry against:
-      `internal/cluster/meta_join.go:234` `TODO(W7b/W9)` (return
-      leader_join_addr/leader_join_spki from member state) and
-      `internal/serveruntime/invite_admin.go:96` `TODO(W7b)` (FSM-resolve redirect to
-      auto-forward the invite-admin call to the leader). Not a security gap; a
-      usability rough edge for multi-node join.
 
 - [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
   Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):

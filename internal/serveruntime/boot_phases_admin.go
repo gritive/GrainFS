@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
+	"github.com/gritive/GrainFS/internal/iam/pdp"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -269,7 +270,11 @@ func adminAuthorizer(state *bootState) admin.CredentialAuthorizer {
 	if state.iamPolicyStores == nil || state.iamPolicyStores.Resolver == nil || state.cfgStore == nil {
 		return nil
 	}
-	return s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
+	base := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
+	// Always install the PDP decorator; it is a pure pass-through unless iam.pdp
+	// is enabled (read per request from the cfg store), so hot-enable works with
+	// no dependency rebuild.
+	return pdp.NewDecorator(base, state.cfgStore)
 }
 
 // iamPolicyAdminService returns a wired admin.IAMPolicyService if MetaRaft and
