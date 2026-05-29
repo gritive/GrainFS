@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.454.0] - 2026-05-29
+
+### Changed
+
+- Reduced memory churn when reading at-rest-encrypted single-node objects. The
+  encrypted object read paths (streaming GET, ranged ReadAt, full-object read,
+  and multipart-completion ETag hashing) now decrypt each 128 KiB chunk into a
+  reused buffer instead of allocating a fresh plaintext per chunk. For a large
+  multi-chunk object the streaming reader's allocation volume drops from
+  ~8.6 MiB to ~0.37 MiB per read (~23×) with higher throughput, and the
+  decrypted buffer is fully zeroed on every error and on close. No on-disk
+  format or API change.
+
 ## [0.0.453.0] - 2026-05-29
 
 ### Changed
