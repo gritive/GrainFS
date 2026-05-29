@@ -547,7 +547,13 @@ func (r *RaftClusterInfo) DataGroupRaftHealth() []cluster.DataGroupRaftHealth {
 	if r.dgMgr == nil {
 		return nil
 	}
-	return r.dgMgr.RaftHealthSnapshot()
+	rows := r.dgMgr.RaftHealthSnapshot()
+	for i := range rows {
+		// RaftVoters carries raft-config addresses; resolve to node IDs so the
+		// health surface is symmetric with PeerIDs (P1-1 e2e read).
+		rows[i].RaftVoters = r.normalizePeerIDs(rows[i].RaftVoters)
+	}
+	return rows
 }
 
 func (r *RaftClusterInfo) ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary {

@@ -144,7 +144,9 @@ func (m *DataGroupManager) RaftHealthSnapshot() []DataGroupRaftHealth {
 		node := dg.backend.Node()
 		for _, s := range node.Configuration().Servers {
 			if s.Suffrage == raft.Voter {
-				row.RaftVoters = append(row.RaftVoters, s.ID) // addresses; resolution to node IDs deferred
+				// raft-config addresses; RaftClusterInfo.DataGroupRaftHealth resolves
+				// them to node IDs via RaftClusterInfo.normalizePeerIDs at the surface.
+				row.RaftVoters = append(row.RaftVoters, s.ID)
 			}
 		}
 		row.LocalState = node.State().String()
