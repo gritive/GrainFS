@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/rs/zerolog/log"
@@ -177,6 +178,7 @@ func resolveOrSeedClusterKey(state *bootState) error {
 		return fmt.Errorf("self-seed: persist current.key: %w", err)
 	}
 	state.cfg.ClusterKey = key
+	metrics.ClusterSelfSeeded.Set(1)
 	log.Warn().
 		Str("node_id", state.nodeID).
 		Str("data_dir", state.cfg.DataDir).

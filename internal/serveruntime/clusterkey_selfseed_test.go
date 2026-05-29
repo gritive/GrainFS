@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -193,4 +195,15 @@ func TestBootValidateConfigNoSeedOnPriorState(t *testing.T) {
 	err := bootValidateConfig(st)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cluster-key")
+}
+
+// A self-seed boot sets the detectability gauge to 1 (the only signal that
+// reaches an operator's monitoring; the WARN log does not).
+func TestSelfSeedSetsMetric(t *testing.T) {
+	metrics.ClusterSelfSeeded.Set(0)
+	d := t.TempDir()
+	st := &bootState{cfg: Config{DataDir: d, NodeID: "n1"}}
+	require.NoError(t, bootValidateConfig(st))
+	require.NotEmpty(t, st.cfg.ClusterKey)
+	require.Equal(t, 1.0, testutil.ToFloat64(metrics.ClusterSelfSeeded))
 }
