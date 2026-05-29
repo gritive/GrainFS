@@ -231,6 +231,8 @@ func TestDecoratorReleasesClientWhenDisabled(t *testing.T) {
 	d.AuthorizePrincipal(context.Background(), principal.ServiceAccount("sa"), "", policy.RequestContext{Action: "a", Resource: "r"})
 	require.Nil(t, d.client)
 	require.Empty(t, d.clientSock)
+	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PDPCacheEntries), 0.0001,
+		"release() resets the entries gauge to 0 on disable")
 }
 
 func TestDecoratorAuthorizeMapsServiceAccount(t *testing.T) {
@@ -282,14 +284,21 @@ func TestDecoratorCacheMissThenHit(t *testing.T) {
 	})
 	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, staticCfg(cacheCfg(sock, "closed", "1m", "", "")))
 
+	// First request: cache MISS (PDP consulted, returns allow).
 	got1 := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionAllow, got1.Decision)
+	require.InDelta(t, 1.0, cacheTotal("miss", ""), 0.0001, "miss +1 on the consulted request")
+	require.InDelta(t, 0.0, cacheTotal("hit", "allow"), 0.0001, "no hit yet")
+	require.InDelta(t, 0.0, cacheTotal("grace", "allow"), 0.0001, "no grace on a normal miss")
+
+	// Second request: fresh cache HIT (miss must NOT advance).
 	got2 := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionAllow, got2.Decision)
 
 	require.EqualValues(t, 1, atomic.LoadInt32(&dialed), "PDP dialed exactly once; 2nd served from cache")
-	require.InDelta(t, 1.0, cacheTotal("hit", "allow"), 0.0001)
-	require.InDelta(t, 1.0, cacheTotal("miss", ""), 0.0001)
+	require.InDelta(t, 1.0, cacheTotal("hit", "allow"), 0.0001, "hit +1 on the cached request")
+	require.InDelta(t, 1.0, cacheTotal("miss", ""), 0.0001, "miss unchanged by the hit (one consult)")
+	require.InDelta(t, 0.0, cacheTotal("grace", "allow"), 0.0001)
 }
 
 func TestDecoratorCacheDeny(t *testing.T) {
@@ -370,13 +379,17 @@ func TestDecoratorGraceServesAllow(t *testing.T) {
 	got := d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionAllow, got.Decision)
 
-	// Advance past ttl_allow but within grace; PDP now down.
+	// Advance past ttl_allow but within grace; PDP now down. Snapshot the miss
+	// counter so we can prove the grace serve emits ONLY "grace", never "miss".
+	missBefore := cacheTotal("miss", "")
 	up.Store(false)
 	d.now = func() time.Time { return base.Add(2 * time.Minute) }
 	got = d.Authorize(context.Background(), "sa", "", reqCtx())
 	require.Equal(t, policy.DecisionAllow, got.Decision, "grace-served stale allow despite PDP down + fail-closed")
 
 	require.InDelta(t, 1.0, cacheTotal("grace", "allow"), 0.0001)
+	require.InDelta(t, missBefore, cacheTotal("miss", ""), 0.0001,
+		"a grace serve must not increment miss (no double-count with grace)")
 	require.Contains(t, logBuf.String(), layerGraceServed)
 }
 

@@ -140,6 +140,9 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 		state cacheState
 	)
 	if cache != nil {
+		// PDPCacheEntries is best-effort/approximate: it is updated on put, release,
+		// and refresh, NOT on the lazy eviction that Lookup may perform here (Len()
+		// locks every shard, so we do not call it per lookup).
 		key = cacheKey(req)
 		entry, state = cache.Lookup(key, cfg.Cache.GraceTTL, d.now())
 		if state == cacheFresh {
@@ -149,9 +152,6 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			}
 			return inner
 		}
-		// PR-8: count the miss exactly once here (miss or stale), regardless of
-		// the PDP outcome below.
-		metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
 	}
 
 	// The decorator owns the per-request deadline so a runtime iam.pdp.timeout
@@ -183,9 +183,12 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	var de *DenyError
 	if errors.As(err, &de) {
 		metrics.PDPRequestsTotal.WithLabelValues("deny", "", fp).Inc()
-		if cache != nil && cfg.Cache.TTLDeny > 0 {
-			cache.Put(key, DecisionDeny, de.Reason, cfg.Cache.TTLDeny, d.now())
-			metrics.PDPCacheEntries.Set(float64(cache.Len()))
+		if cache != nil {
+			metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+			if cfg.Cache.TTLDeny > 0 {
+				cache.Put(key, DecisionDeny, de.Reason, cfg.Cache.TTLDeny, d.now())
+				metrics.PDPCacheEntries.Set(float64(cache.Len()))
+			}
 		}
 		d.audit(req, actor, ctxReq, "deny", "", layerDeny+": "+de.Reason)
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: genericDenyMsg}
@@ -203,6 +206,11 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 			}
 			return inner
 		}
+		// No grace served: this consult falls through to the failure policy, so
+		// count exactly one miss (covers both fail-open and fail-closed).
+		if cache != nil {
+			metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+		}
 		if cfg.FailurePolicy == FailureOpen {
 			d.audit(req, actor, ctxReq, "allow", errType, layerFailOpen)
 			out := inner
@@ -214,9 +222,12 @@ func (d *Decorator) chain(ctx context.Context, actor principal.Principal, target
 	}
 
 	metrics.PDPRequestsTotal.WithLabelValues("allow", "", fp).Inc()
-	if cache != nil && cfg.Cache.TTLAllow > 0 {
-		cache.Put(key, DecisionAllow, "", cfg.Cache.TTLAllow, d.now())
-		metrics.PDPCacheEntries.Set(float64(cache.Len()))
+	if cache != nil {
+		metrics.PDPCacheTotal.WithLabelValues("miss", "").Inc()
+		if cfg.Cache.TTLAllow > 0 {
+			cache.Put(key, DecisionAllow, "", cfg.Cache.TTLAllow, d.now())
+			metrics.PDPCacheEntries.Set(float64(cache.Len()))
+		}
 	}
 	d.audit(req, actor, ctxReq, "allow", "", layerAllow)
 	return inner
@@ -250,6 +261,9 @@ func (d *Decorator) refresh(cfg Config) (*Client, *decisionCache) {
 			d.cache = nil
 		}
 		d.cacheGen = gen
+		// A rebuilt cache is empty and a dropped cache holds nothing, so the live
+		// entry count is 0 either way.
+		metrics.PDPCacheEntries.Set(0)
 	}
 
 	return d.client, d.cache
@@ -270,6 +284,7 @@ func (d *Decorator) release() {
 	}
 	d.cache = nil
 	d.cacheGen = ""
+	metrics.PDPCacheEntries.Set(0)
 }
 
 // configGen returns a stable hash of the config inputs that, when changed, must
