@@ -889,6 +889,16 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 				f.dekRefCounts[e.DekGen]++
 			}
 		}
+	} else {
+		// No DKVS trailer (the leader's keeper was empty when it snapshotted).
+		// Symmetrically RESET the pending DEK fields so the post-restore DEK
+		// install (installSnapshotDEKs on the live path, rebuildDEKKeeperFromRestore
+		// on boot) sees an empty version set and no-ops, rather than installing
+		// from STALE versions left over from a prior with-trailer restore. Without
+		// this reset the no-op contract would be violated on a repeated live restore.
+		f.pendingDEKVersions = nil
+		f.pendingDEKActive = 0
+		f.pendingActiveKEKVersion = 0
 	}
 	if restoreProtocolCredentials {
 		f.protocolCredentialStore.Restore(newProtocolCredentials)
