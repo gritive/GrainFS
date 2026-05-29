@@ -51,8 +51,14 @@ func runClusterECPutGet5Node(t testing.TB) {
 		nfs4Ports[i] = ports[i*4+2]
 		nbdPorts[i] = ports[i*4+3]
 	}
+	joinPorts := make([]int, numNodes)
+	jp := uniqueFreePorts(numNodes)
+	for i := range numNodes {
+		joinPorts[i] = jp[i]
+	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
+	joinAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", joinPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 
 	dataDirs := make([]string, numNodes)
@@ -64,10 +70,8 @@ func runClusterECPutGet5Node(t testing.TB) {
 	}
 	// Pre-seed the cluster transport PSK on every node's disk (replaces the
 	// removed cluster-key flag). Must run BEFORE any node boots.
-	for i := range dataDirs {
-		gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
-	}
-	startNode := func(i int) *exec.Cmd {
+	gomega.Expect(transport.NewKeystore(dataDirs[0]).WriteCurrent(clusterKey)).To(gomega.Succeed())
+	startNode := func(i int, extraEnv []string) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/ec5-node-%d-stderr.log", i))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create stderr file for node %d", i)
 		cmd := exec.Command(binary, "serve",
@@ -75,12 +79,16 @@ func runClusterECPutGet5Node(t testing.TB) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
+			"--join-listen-addr", joinAddr(i),
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
+		if len(extraEnv) > 0 {
+			cmd.Env = append(os.Environ(), extraEnv...)
+		}
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
 		gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
@@ -106,13 +114,14 @@ func runClusterECPutGet5Node(t testing.TB) {
 	}
 	ginkgo.DeferCleanup(killAll)
 
-	// Start seed node, then let followers join via .join-pending.
-	procs[0] = startNode(0)
+	// Start the seed node, then mint an invite bundle per follower and boot each
+	// with GRAINFS_INVITE_BUNDLE.
+	procs[0] = startNode(0, nil)
 	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
 	time.Sleep(2 * time.Second)
 	for i := 1; i < numNodes; i++ {
-		gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
-		procs[i] = startNode(i)
+		bundle := mintInvite(t, dataDirs[0])
+		procs[i] = startNode(i, []string{inviteBundleEnvKey + "=" + bundle})
 		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 90*time.Second)
@@ -403,8 +412,14 @@ func runClusterECTopologyChange(t testing.TB) {
 		nfs4Ports[i] = ports[i*4+2]
 		nbdPorts[i] = ports[i*4+3]
 	}
+	joinPorts := make([]int, numNodes)
+	jp := uniqueFreePorts(numNodes)
+	for i := range numNodes {
+		joinPorts[i] = jp[i]
+	}
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
+	joinAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", joinPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 
 	dataDirs := make([]string, numNodes)
@@ -416,16 +431,14 @@ func runClusterECTopologyChange(t testing.TB) {
 	}
 	// Pre-seed the cluster transport PSK on every node's disk (replaces the
 	// removed cluster-key flag). Must run BEFORE any node boots.
-	for i := range dataDirs {
-		gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
-	}
+	gomega.Expect(transport.NewKeystore(dataDirs[0]).WriteCurrent(clusterKey)).To(gomega.Succeed())
 	// All 6 nodes are configured with the full peer list from the start so the
 	// leader elected among the first 3 nodes already knows about nodes 3,4,5.
 	// Without this, stage-2 nodes timeout and send higher-term RequestVotes that
 	// force the existing leader to step down (standard Raft), causing a livelock.
 	// With a uniform 6-node config, quorum=4, so no election succeeds until ≥4
 	// nodes are up — handled by the Eventually 120s window on CreateBucket.
-	startNode := func(i int) *exec.Cmd {
+	startNode := func(i int, extraEnv []string) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/tp-node-%d-stderr.log", i))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create stderr file for node %d", i)
 		cmd := exec.Command(binary, "serve",
@@ -433,11 +446,15 @@ func runClusterECTopologyChange(t testing.TB) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
+			"--join-listen-addr", joinAddr(i),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
+		if len(extraEnv) > 0 {
+			cmd.Env = append(os.Environ(), extraEnv...)
+		}
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
 		gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
@@ -463,13 +480,14 @@ func runClusterECTopologyChange(t testing.TB) {
 	}
 	ginkgo.DeferCleanup(killAll)
 
-	// Start seed node, then let followers join sequentially via .join-pending.
-	procs[0] = startNode(0)
+	// Start the seed node, then mint an invite bundle per follower and boot each
+	// with GRAINFS_INVITE_BUNDLE sequentially.
+	procs[0] = startNode(0, nil)
 	gomega.Expect(waitForPortsParallelErrWithProcesses(httpPorts[:1], procs[:1], 60*time.Second)).To(gomega.Succeed())
 	time.Sleep(2 * time.Second)
 	for i := 1; i < numNodes; i++ {
-		gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
-		procs[i] = startNode(i)
+		bundle := mintInvite(t, dataDirs[0])
+		procs[i] = startNode(i, []string{inviteBundleEnvKey + "=" + bundle})
 		gomega.Expect(waitForPortsParallelErrWithProcesses(httpPorts[i:i+1], procs[i:i+1], 90*time.Second)).To(gomega.Succeed())
 	}
 	time.Sleep(4 * time.Second)

@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
+	"hash"
 )
 
 // InviteTranscript is the canonical material both InviteSig (Ed25519 invite key)
@@ -20,8 +22,7 @@ type InviteTranscript struct {
 }
 
 // CanonicalInviteTranscript returns the length-prefixed canonical digest signed
-// by both InviteSig and NodeSig. Uses the same writeLenPrefixed helper as
-// computeMACFromKEK (kek_handshake.go).
+// by both InviteSig and NodeSig. Uses the writeLenPrefixed helper below.
 func CanonicalInviteTranscript(t InviteTranscript) []byte {
 	h := sha256.New()
 	h.Write([]byte("grainfs-invite-v1"))
@@ -32,6 +33,15 @@ func CanonicalInviteTranscript(t InviteTranscript) []byte {
 	writeLenPrefixed(h, t.SPKI)
 	writeLenPrefixed(h, t.Bind)
 	return h.Sum(nil)
+}
+
+// writeLenPrefixed writes a 2-byte big-endian length followed by b, so distinct
+// field boundaries cannot be ambiguously concatenated in the signed transcript.
+func writeLenPrefixed(m hash.Hash, b []byte) {
+	var buf [2]byte
+	binary.BigEndian.PutUint16(buf[:], uint16(len(b)))
+	m.Write(buf[:])
+	m.Write(b)
 }
 
 // SignInviteTranscript signs the canonical transcript with the invite Ed25519

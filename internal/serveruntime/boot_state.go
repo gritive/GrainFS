@@ -57,15 +57,12 @@ type bootState struct {
 	raftAddr    string
 	peers       []string
 	clusterMode bool
-	// join-pending mode: set by bootValidateConfig when .join-pending file exists.
-	joinMode bool
-	joinAddr string
 	// inviteJoinMode: set by maybeInviteJoin (W9b) when this node boots from a
-	// Zero-CA invite bundle (FreshJoin/Resume). It mirrors joinMode's raft gating
+	// Zero-CA invite bundle (FreshJoin/Resume). It drives the joiner's raft gating
 	// (raftPeers=nil, raftCfg.JoinMode, skip Bootstrap), forces isGenesisBoot
 	// false (so the joiner uses NewEmptyDEKKeeper + strict cluster.id load against
-	// the secrets staged from Phase-1), and skips the legacy PerformMetaJoin/KEK
-	// handshake. Phase-2 membership ACK rides the dedicated QUIC join transport.
+	// the secrets staged from Phase-1). Phase-2 membership ACK rides the dedicated
+	// QUIC join transport (the invite-join is now the ONLY cluster-join path).
 	inviteJoinMode bool
 	// inviteJoin carries the Phase-1 outcome (resolved bundle, leaderID, node
 	// SPKI) so the post-boot Phase-2 ACK can redrive DialJoin without re-reading

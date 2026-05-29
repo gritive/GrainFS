@@ -1,35 +1,35 @@
 package e2e
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/gritive/GrainFS/internal/transport"
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster PSK", func() {
 	ginkgo.Context("SingleNode", func() {
-		ginkgo.It("refuses an empty cluster key in join mode", func() {
+		ginkgo.It("refuses a non-genesis node with no cluster key or invite bundle", func() {
 			t := ginkgo.GinkgoTB()
 
 			dir := t.TempDir()
 			port := freePort()
 			raft := freePort()
 
-			// Write .join-pending to trigger join mode (which requires a staged
-			// cluster transport key). A join-mode boot with no staged key and no
-			// invite bundle must trip the gate.
-			gomega.Expect(os.WriteFile(
-				fmt.Sprintf("%s/%s", dir, joinPendingFile),
-				[]byte(fmt.Sprintf("127.0.0.1:%d", freePort())), 0o600)).To(gomega.Succeed())
+			// Plant prior raft state so the node is NOT genesis-eligible. With no
+			// staged keys.d/current.key and no GRAINFS_INVITE_BUNDLE, genesis
+			// self-seed is refused (priorState), so the cluster-transport-key gate
+			// must trip. This replaces the retired .join-pending join-mode trigger.
+			// The wrong-PSK rejection path (a node holding a different cluster
+			// secret cannot join) is now covered by the invite-join cross-cluster
+			// and channel-binding rejection tests in cluster_invite_join_test.go.
+			gomega.Expect(os.MkdirAll(filepath.Join(dir, "raft"), 0o700)).To(gomega.Succeed())
+			gomega.Expect(os.WriteFile(filepath.Join(dir, "raft", "prior-state"), []byte("x"), 0o600)).To(gomega.Succeed())
 
 			cmd := exec.Command(getBinary(), "serve",
 				"--data", dir,
@@ -41,99 +41,10 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			out, err := cmd.CombinedOutput()
-			gomega.Expect(err).To(gomega.HaveOccurred(), "process must exit non-zero without a staged cluster transport key")
+			gomega.Expect(err).To(gomega.HaveOccurred(), "process must exit non-zero without a cluster transport key")
 			if !strings.Contains(string(out), "cluster transport key missing: stage keys.d/current.key, set GRAINFS_INVITE_BUNDLE, or start a fresh genesis node") {
 				t.Fatalf("expected the cluster-transport-key-missing gate message in output, got:\n%s", string(out))
 			}
-		})
-	})
-
-	ginkgo.Context("Cluster3Node", func() {
-		ginkgo.It("rejects a joiner with a different PSK", func() {
-			t := ginkgo.GinkgoTB()
-
-			keyA := strings.Repeat("a", 64)
-			keyB := strings.Repeat("b", 64)
-
-			leaderDataDir := shortTempDir(t)
-			joinerDataDir := shortTempDir(t)
-			leaderHTTP := freePort()
-			leaderRaft := freePort()
-			joinerHTTP := freePort()
-			joinerRaft := freePort()
-
-			// Start leader with keyA (solo bootstrap). Pre-stage keyA on disk
-			// (replaces the removed cluster-key flag).
-			gomega.Expect(transport.NewKeystore(leaderDataDir).WriteCurrent(keyA)).To(gomega.Succeed())
-			leaderCtx, leaderCancel := context.WithCancel(context.Background())
-
-			leaderArgs := []string{
-				"serve",
-				"--data", leaderDataDir,
-				"--port", fmt.Sprintf("%d", leaderHTTP),
-				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", leaderRaft),
-				"--node-id", "leader",
-				"--nfs4-port", "0",
-				"--nbd-port", "0",
-				"--scrub-interval", "0",
-				"--lifecycle-interval", "0",
-			}
-			leaderLog, err := os.CreateTemp("", "leader-*.log")
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			ginkgo.DeferCleanup(func() {
-				if t.Failed() {
-					if b, err := os.ReadFile(leaderLog.Name()); err == nil {
-						t.Logf("leader log:\n%s", b)
-					}
-				}
-				_ = os.Remove(leaderLog.Name())
-			})
-
-			leader := exec.CommandContext(leaderCtx, getBinary(), leaderArgs...)
-			leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			leader.Stdout = leaderLog
-			leader.Stderr = leaderLog
-			gomega.Expect(leader.Start()).To(gomega.Succeed())
-			ginkgo.DeferCleanup(func() {
-				leaderCancel()
-				_ = leader.Wait()
-			})
-
-			waitForPort(t, leaderHTTP, 15*time.Second)
-
-			// Joiner with keyB: stage the leader's KEK (keys/0.key) + cluster.id so
-			// the joiner passes the KEK boot gate and actually reaches the QUIC
-			// handshake (without the staged KEK it dies at "KEK not found" BEFORE
-			// the SPKI check this test asserts), and write .join-pending pointing at
-			// the leader.
-			gomega.Expect(writeNodeJoinPending(joinerDataDir, leaderDataDir,
-				fmt.Sprintf("127.0.0.1:%d", leaderRaft))).To(gomega.Succeed())
-			// Pre-stage the MISMATCHED keyB as the transport PSK (replaces the
-			// removed cluster-key flag). PSK->SPKI is deterministic, so the joiner's
-			// SPKI differs from the leader's and the QUIC handshake is rejected.
-			gomega.Expect(transport.NewKeystore(joinerDataDir).WriteCurrent(keyB)).To(gomega.Succeed())
-
-			joinerCtx, joinerCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			ginkgo.DeferCleanup(joinerCancel)
-
-			joinerArgs := []string{
-				"serve",
-				"--data", joinerDataDir,
-				"--port", fmt.Sprintf("%d", joinerHTTP),
-				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", joinerRaft),
-				"--node-id", "joiner",
-				"--nfs4-port", "0",
-				"--nbd-port", "0",
-				"--scrub-interval", "0",
-				"--lifecycle-interval", "0",
-			}
-			joiner := exec.CommandContext(joinerCtx, getBinary(), joinerArgs...)
-			joiner.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			out, joinErr := combinedOutputWithWaitDelay(joiner)
-
-			gomega.Expect(joinErr).To(gomega.HaveOccurred(), "joiner with mismatched PSK must not succeed. out: %s", string(out))
-			gomega.Expect(errors.Is(joinerCtx.Err(), context.DeadlineExceeded)).To(gomega.BeFalse(), "joiner must fail from PSK rejection, not from test timeout. out: %s", string(out))
-			gomega.Expect(string(out)).To(gomega.ContainSubstring("peer cert SPKI"), "joiner should surface the PSK/SPKI rejection. out: %s", string(out))
 		})
 	})
 })

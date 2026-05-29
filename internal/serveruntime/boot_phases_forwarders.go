@@ -126,13 +126,11 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
 		WithGateRefresh(func() { refreshCapabilityGate(state) })
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
-	// §7 B1 — share the same *encrypt.HandshakeVerifier instance between the
-	// Join receiver (reads issued-nonce map) and the Challenge receiver
-	// (writes it). state.handshakeVerifier is set by wireDEKKeeper bound to
-	// state.kekStore; the verifier is keyed by the local KEK so VerifyResponse
-	// passes iff the joiner holds the same KEK.
+	// Zero-CA invite-join receiver. It serves the two-phase invite flow over the
+	// dedicated join listener (HandleJoinStream); state.handshakeVerifier (set by
+	// wireDEKKeeper) supplies the 16-byte cluster id bound into the invite
+	// transcript via WithClusterID.
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
-		WithHandshakeVerifier(state.handshakeVerifier).
 		WithBootstrapSecretProvider(newBootstrapSecretProvider(state))
 	if state.handshakeVerifier != nil {
 		metaJoinReceiver = metaJoinReceiver.WithClusterID(state.handshakeVerifier.ClusterID())
@@ -143,7 +141,6 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		}
 		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
 	})
-	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
 	// Zero-CA QUIC join listener (W9, leader side): a dedicated QUIC listener on
 	// its own ALPN serving the two-phase invite handler. A brand-new joiner whose
 	// self-signed SPKI is in nobody's accept-set cannot reach the production
@@ -155,8 +152,6 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 			return fmt.Errorf("start join listener: %w", err)
 		}
 	}
-	metaChallengeReceiver := cluster.NewMetaChallengeReceiver(state.handshakeVerifier)
-	state.streamRouter.Handle(transport.StreamMetaJoinChallenge, metaChallengeReceiver.Handle)
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
 		reply, err := quicTransport.Call(callCtx, peer, msg)
@@ -171,19 +166,8 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	coalesceCfg.SizeCapBytes = state.cfg.AppendSizeCapBytes
 	state.coalesceCfg = coalesceCfg
 
-	if state.joinMode {
-		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr, state.kekStore, state.handshakeVerifier.ClusterID()); err != nil {
-			return err
-		}
-		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
-			return err
-		}
-		state.clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
-		state.clusterRouter.SetRequireExplicitAssignments(true)
-	}
-
-	// Zero-CA invite-join (W9b): post-boot Phase-2 ACK. Placed in the SAME window
-	// as the legacy join (after bootMetaRaftStart, before run.go's WaitDEKReady
+	// Zero-CA invite-join (W9b): post-boot Phase-2 ACK. Placed after
+	// bootMetaRaftStart and before run.go's WaitDEKReady
 	// gate) so the joiner finalizes raft membership and starts catching up the
 	// log — including the gen-0 DEK — before the DEK-readiness gate runs. The
 	// node key was sealed under the cluster KEK gen-0 (now staged + loaded by

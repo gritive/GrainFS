@@ -108,33 +108,3 @@ func TestPhaseA_KeyAcrossKEKStore_DEKKeeper_AAD(t *testing.T) {
 		t.Errorf("AAD-bound round-trip mismatch")
 	}
 }
-
-func TestPhaseA_HandshakeRoundTrip_ViaKEKStore(t *testing.T) {
-	// Two parties (joiner, verifier) sharing the same KEK + cluster_id
-	// complete a handshake via the new transcript-bound API.
-	dir := t.TempDir()
-	store, err := encrypt.LoadOrInitKEKStoreDir(filepath.Join(dir, "keys"))
-	if err != nil {
-		t.Fatalf("LoadOrInitKEKStoreDir: %v", err)
-	}
-	clusterID := bytes.Repeat([]byte{0xCD}, 16)
-	verifier := encrypt.NewHandshakeVerifier(store, clusterID)
-
-	nonce, err := verifier.IssueChallenge(verifier.Store().ActiveVersion())
-	if err != nil {
-		t.Fatalf("IssueChallenge: %v", err)
-	}
-	transcript := encrypt.JoinTranscript{
-		ClusterID: clusterID,
-		Nonce:     nonce,
-		NodeID:    "smoke-node",
-		Address:   "127.0.0.1:7000",
-	}
-	mac, err := encrypt.ComputeHandshakeResponse(store, verifier.Store().ActiveVersion(), transcript)
-	if err != nil {
-		t.Fatalf("ComputeHandshakeResponse: %v", err)
-	}
-	if err := verifier.VerifyResponse(verifier.Store().ActiveVersion(), transcript, mac); err != nil {
-		t.Errorf("VerifyResponse: %v", err)
-	}
-}

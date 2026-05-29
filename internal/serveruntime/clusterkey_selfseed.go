@@ -96,7 +96,7 @@ func selfSeedDecision(state *bootState) (bool, error) {
 	if state.cfg.ClusterKey != "" { // cond 1
 		return false, nil
 	}
-	if state.joinMode || state.inviteJoinMode || len(state.peers) > 0 { // cond 6 (genesis)
+	if state.inviteJoinMode || len(state.peers) > 0 { // cond 6 (genesis)
 		return false, nil
 	}
 	// Use inviteJoinPathsFor so the probes consult the SAME authoritative paths the

@@ -44,7 +44,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// single-node mode, opt-in packed blobs can sit on this routed path and
 	// avoid per-object shard-file commits for small objects.
 	var routed storage.Backend = state.clusterCoord
-	if cfg.PackThreshold > 0 && !cfg.RaftAddrExplicit && cfg.NodeID == "" && !state.joinMode {
+	if cfg.PackThreshold > 0 && !cfg.RaftAddrExplicit && cfg.NodeID == "" && !state.inviteJoinMode {
 		blobDir := filepath.Join(cfg.DataDir, "blobs")
 		// R1: prefer the gen-aware DEK seam for blob entries. bootBackendWrap runs
 		// after WaitDEKReady + bootLogicalWALOpen, so on the single-node path the

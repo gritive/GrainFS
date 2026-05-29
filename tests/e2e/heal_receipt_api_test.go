@@ -67,9 +67,13 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		// the same port between allocation and Listen.
 		httpPorts := [3]int{freePort(), freePort(), freePort()}
 		raftPorts := [3]int{freePort(), freePort(), freePort()}
+		joinPorts := [3]int{freePort(), freePort(), freePort()}
 
 		raftAddr := func(i int) string {
 			return fmt.Sprintf("127.0.0.1:%d", raftPorts[i])
+		}
+		joinAddr := func(i int) string {
+			return fmt.Sprintf("127.0.0.1:%d", joinPorts[i])
 		}
 		httpURL = func(i int) string {
 			return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i])
@@ -82,12 +86,11 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 			dataDirs[i] = d
 			ginkgo.DeferCleanup(removeE2EDir, d)
 		}
-		// Pre-seed the cluster transport PSK on every node's disk (replaces the
-		// removed cluster-key flag). Must run BEFORE any node boots. heal-receipt
-		// reads the resolved cfg.ClusterKey, so this also covers the no-flag path.
-		for i := range dataDirs {
-			gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
-		}
+		// Stage the cluster transport PSK on the SEED only (node 0). Followers join
+		// via invite-join; the bundle delivers the same sealed PSK. (The seeded
+		// receipts below are HMAC'd with the same clusterKey const, so they verify
+		// on whichever node inherits them.)
+		gomega.Expect(transport.NewKeystore(dataDirs[0]).WriteCurrent(clusterKey)).To(gomega.Succeed())
 		// ReceiptIDs used across the test — literal ids make log output readable.
 		const (
 			bucketName = "audit-test"
@@ -107,12 +110,13 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		seedReceipt(t, dataDirs[2], clusterKey, idCOld, baseTime.Add(10*time.Minute), bucketName, objectKey)
 		seedReceipt(t, dataDirs[2], clusterKey, idCHot, baseTime.Add(1*time.Hour), bucketName, objectKey)
 
-		startNode := func(i int) *exec.Cmd {
+		startNode := func(i int, extraEnv []string) *exec.Cmd {
 			cmd := exec.Command(binary, "serve",
 				"--data", dataDirs[i],
 				"--port", fmt.Sprintf("%d", httpPorts[i]),
 				"--node-id", raftAddr(i),
 				"--raft-addr", raftAddr(i),
+				"--join-listen-addr", joinAddr(i),
 				"--heal-receipt-window=1",
 				"--heal-receipt-gossip-interval=1s",
 				"--nfs4-port", "0",
@@ -120,15 +124,18 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			)
+			if len(extraEnv) > 0 {
+				cmd.Env = append(os.Environ(), extraEnv...)
+			}
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 			return cmd
 		}
 
-		// Spawn 3 nodes: seed first, then followers via .join-pending.
+		// Spawn 3 nodes: seed first, then followers via invite-join.
 		procs := make([]*exec.Cmd, 3)
-		procs[0] = startNode(0)
+		procs[0] = startNode(0, nil)
 		ginkgo.DeferCleanup(func() {
 			for _, p := range procs {
 				if p != nil && p.Process != nil {
@@ -144,8 +151,8 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
 
 		for i := 1; i < 3; i++ {
-			gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
-			procs[i] = startNode(i)
+			bundle := mintInvite(t, dataDirs[0])
+			procs[i] = startNode(i, []string{inviteBundleEnvKey + "=" + bundle})
 			time.Sleep(150 * time.Millisecond)
 		}
 		for i := range procs {

@@ -106,18 +106,24 @@ retired; joining is always `grainfs serve` with an invite bundle.
 
 A KEK was placed at the right path but doesn't match the one that wrapped the FSM DEK — usually a stale backup or a KEK from a different cluster. Replace with the right KEK (see "KEK not found" above for `scp` path) and confirm `<data>/cluster.id` matches the destination cluster.
 
-## Cluster join refused with 403
+## Invite-join refused
 
-```
-WARN: KEK handshake HMAC mismatch from <addr>
-```
+A `grainfs serve` started with `GRAINFS_INVITE_BUNDLE` fails Phase-1 and the
+node exits. Common causes:
 
-The joiner has the wrong KEK. Verify `<data>/keys/0.key` matches a healthy
-node's active KEK byte-for-byte (`sha256sum <data>/keys/0.key`), and that
-`<data>/cluster.id` matches the destination cluster's identity. The robust fix
-is to re-provision the node via invite-join (mint a fresh bundle on the leader),
-which carries the correct KEK and identity. Invite nonces are single-use and
-short-TTL — a fresh invite forces a fresh challenge automatically.
+- **Bundle is from a different cluster** — the invite transcript binds the
+  cluster identity, so a bundle minted on cluster A cannot redeem against
+  cluster B.
+- **Channel-binding mismatch** — the invite is bound to the leader's
+  join-listener TLS session (RFC 5705 exporter); a relayed or proxied dial
+  fails verification.
+- **Expired or already-redeemed bundle** — invites are single-use and TTL-bound
+  (`--ttl` on `cluster invite create`, default 1h).
+
+The fix is always to mint a fresh bundle on the current leader
+(`grainfs cluster invite create --endpoint <leader-data>/admin.sock`) and start
+the joiner with it. There is no KEK to hand-copy — the bundle carries the sealed
+KEK, transport key, and `cluster.id`.
 
 ## Audit table queries return zero rows
 

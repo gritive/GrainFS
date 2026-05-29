@@ -109,13 +109,6 @@ func TestSelfSeedDecision(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, seed)
 	})
-	t.Run("joinMode blocks", func(t *testing.T) {
-		st := freshGenesisState(t)
-		st.joinMode = true
-		seed, err := selfSeedDecision(st)
-		require.NoError(t, err)
-		require.False(t, seed)
-	})
 	t.Run("inviteJoinMode blocks", func(t *testing.T) {
 		st := freshGenesisState(t)
 		st.inviteJoinMode = true
