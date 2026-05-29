@@ -297,6 +297,56 @@ func newClusterTestEncryptor(t *testing.T) *encrypt.Encryptor {
 }
 
 // newClusterTestSeam returns a DataEncryptor over the static test encryptor so
+// TestEncryptedSpoolReader_MultiRecordByteExact reconstructs a payload spanning
+// several 1 MiB spool records (last one smaller) byte-for-byte. This is the
+// regression guard for the reader-owned plaintext/ciphertext buffer reuse
+// (OpenTo + r.cipherBuf): a slice/cap bug shows up here and nowhere else.
+func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
+	seam := newClusterTestSeam(t)
+	// 2.5 MiB → records of 1 MiB, 1 MiB, 0.5 MiB; the shrinking tail exercises
+	// dst[:0] capacity reuse on a smaller record.
+	payload := make([]byte, spoolCopyBufferSize*2+spoolCopyBufferSize/2)
+	for i := range payload {
+		payload[i] = byte(i*31 + 7)
+	}
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reuse")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, payload, got)
+}
+
+// TestEncryptedSpoolReader_ZeroizesPlaintextOnClose asserts the reader-owned
+// plaintext buffer is wiped on Close (no plaintext residue), preserving the
+// zeroization guarantee across the buffer-reuse refactor.
+func TestEncryptedSpoolReader_ZeroizesPlaintextOnClose(t *testing.T) {
+	seam := newClusterTestSeam(t)
+	payload := bytes.Repeat([]byte("S"), 4096)
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:zeroize")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	r, ok := rc.(*encryptedSpoolRecordReader)
+	require.True(t, ok, "expected *encryptedSpoolRecordReader")
+
+	// Load the first record by reading a few bytes (leaves undrained plaintext).
+	tmp := make([]byte, 10)
+	_, err = io.ReadFull(r, tmp)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+
+	for i, b := range r.plain {
+		require.Zerof(t, b, "r.plain[%d] not zeroized after Close", i)
+	}
+}
+
 // spool unit tests exercise the real seam-backed write/read path. clusterID is
 // fixed (16 bytes); the same seam instance seals and opens within a test.
 func newClusterTestSeam(t *testing.T) storage.DataEncryptor {
