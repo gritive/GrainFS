@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
@@ -18,37 +17,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
 )
-
-// JoinPendingFile is the sentinel written by an operator (or a test harness)
-// before boot and read at startup to perform a pending cluster join. Its
-// presence means the solo Raft state must be wiped so the node can bootstrap
-// cleanly in join mode. (The e2e/colima harnesses mirror this path locally to
-// avoid an import cycle rather than importing the symbol.)
-const JoinPendingFile = ".join-pending"
-
-// wipeSoloRaftState renames meta_raft/, raft/, and shared-raft-log/ to
-// *.pre-join-backup/ so the join-mode boot starts with no existing Raft state.
-// Backups are removed by Run after a successful join. On failure the caller
-// should not proceed with join mode.
-func wipeSoloRaftState(dataDir string) error {
-	for _, dir := range []string{"meta_raft", "raft", "shared-raft-log"} {
-		src := filepath.Join(dataDir, dir)
-		dst := src + ".pre-join-backup"
-		if _, err := os.Stat(src); os.IsNotExist(err) {
-			continue // nothing to back up
-		}
-		if _, err := os.Stat(dst); err == nil {
-			// Backup from a previous failed join attempt exists; overwrite it
-			// only now that we have a fresh src to replace it with.
-			log.Warn().Str("backup", dst).Msg("overwriting pre-join backup from prior attempt")
-			_ = os.RemoveAll(dst)
-		}
-		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("backup %s: %w", dir, err)
-		}
-	}
-	return nil
-}
 
 // bootValidateConfig validates flag combinations, resolves nodeID, computes
 // clusterMode (always true — cluster-key required in all modes), defaults
@@ -67,23 +35,6 @@ func bootValidateConfig(state *bootState) error {
 			return fmt.Errorf("generate node ID: %w", err)
 		}
 		log.Info().Str("component", "server").Str("node_id", state.nodeID).Msg("auto-generated node ID")
-	}
-
-	// File-based join detection: the .join-pending sentinel is written before
-	// boot by an operator or a test harness. Takes precedence over any other
-	// bootstrap logic.
-	pendingFile := filepath.Join(cfg.DataDir, JoinPendingFile)
-	if rawPeer, err := os.ReadFile(pendingFile); err == nil {
-		peerAddr := strings.TrimSpace(string(rawPeer))
-		if peerAddr != "" {
-			if err := wipeSoloRaftState(cfg.DataDir); err != nil {
-				return fmt.Errorf("wipe solo state for join: %w", err)
-			}
-			state.joinAddr = peerAddr
-			state.joinMode = true
-			state.peers = []string{peerAddr}
-			log.Info().Str("peer", peerAddr).Msg("join-pending: entering join mode")
-		}
 	}
 
 	// metaDir/raftDir/priorState are computed BEFORE the cluster-key gate so the
@@ -123,8 +74,8 @@ func bootValidateConfig(state *bootState) error {
 	// Solo mode: let the kernel pick a free loopback port so multiple instances
 	// (dev, tests) coexist without collisions.
 	if state.raftAddr == "" {
-		if state.joinMode {
-			return fmt.Errorf("--raft-addr is required in join mode")
+		if state.inviteJoinMode {
+			return fmt.Errorf("--raft-addr is required for invite-join")
 		}
 		state.raftAddr = "127.0.0.1:0"
 	}

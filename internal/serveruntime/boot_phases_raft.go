@@ -45,7 +45,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	// Phase-2 ACK. Without this, an invite-joiner forms a phantom single-node
 	// meta-raft and never replays the leader's FSM (gen-0 DEK), so it times out
 	// on WaitDEKReady. Mirror run.go's data-raft `joinLike` gating.
-	joinLike := state.joinMode || state.inviteJoinMode
+	joinLike := state.inviteJoinMode
 	metaPeers := state.peers
 	if joinLike {
 		metaPeers = nil
@@ -430,7 +430,7 @@ func bootRotationAndAdminAPI(state *bootState) error {
 func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocket func(context.Context, string, *cluster.MetaRaft) error) error {
 	// An invite-joiner (inviteJoinMode) must NOT bootstrap its own meta-raft —
 	// same as joinMode, the leader adds it as a voter via the Phase-2 ACK.
-	if !state.joinMode && !state.inviteJoinMode {
+	if !state.inviteJoinMode {
 		if err := state.metaRaft.Bootstrap(); err != nil {
 			return fmt.Errorf("meta-raft bootstrap: %w", err)
 		}

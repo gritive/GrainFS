@@ -195,7 +195,7 @@ func TestWireDEKKeeper_NonGenesisStartsEmpty(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cluster.id"),
 		bytes.Repeat([]byte{0x42}, 16), 0o600))
 
-	state := &bootState{cfg: Config{DataDir: dir}, joinMode: true}
+	state := &bootState{cfg: Config{DataDir: dir}, inviteJoinMode: true}
 	fsm := cluster.NewMetaFSM()
 	require.NoError(t, wireDEKKeeper(state, fsm))
 

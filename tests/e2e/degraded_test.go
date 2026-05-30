@@ -38,13 +38,16 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 
 			httpPorts := make([]int, numNodes)
 			raftPorts := make([]int, numNodes)
-			ports := uniqueFreePorts(numNodes * 2)
+			joinPorts := make([]int, numNodes)
+			ports := uniqueFreePorts(numNodes * 3)
 			for i := range numNodes {
 				httpPorts[i] = ports[i]
 				raftPorts[i] = ports[numNodes+i]
+				joinPorts[i] = ports[2*numNodes+i]
 			}
 
 			raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
+			joinAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", joinPorts[i]) }
 			httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 
 			dataDirs := make([]string, numNodes)
@@ -54,23 +57,26 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 				dataDirs[i] = d
 				ginkgo.DeferCleanup(removeE2EDir, d)
 			}
-			// Pre-seed the cluster transport PSK on every node's disk (replaces
-			// the removed cluster-key flag). Must run BEFORE any node boots.
-			for i := range dataDirs {
-				gomega.Expect(transport.NewKeystore(dataDirs[i]).WriteCurrent(clusterKey)).To(gomega.Succeed())
-			}
-			startNode := func(i int) *exec.Cmd {
+			// Stage the cluster transport PSK on the SEED only. Followers join via
+			// invite-join, which delivers the sealed KEK+PSK+cluster.id in the
+			// bundle — they need no pre-staged key.
+			gomega.Expect(transport.NewKeystore(dataDirs[0]).WriteCurrent(clusterKey)).To(gomega.Succeed())
+			startNode := func(i int, extraEnv []string) *exec.Cmd {
 				cmd := exec.Command(binary, "serve",
 					"--data", dataDirs[i],
 					"--port", fmt.Sprintf("%d", httpPorts[i]),
 					"--node-id", raftAddr(i),
 					"--raft-addr", raftAddr(i),
+					"--join-listen-addr", joinAddr(i),
 					"--nfs4-port", "0",
 					"--nbd-port", "0",
 					"--scrub-interval", "0",
 					"--lifecycle-interval", "0",
 					"--degraded-check-interval", "1s",
 				)
+				if len(extraEnv) > 0 {
+					cmd.Env = append(os.Environ(), extraEnv...)
+				}
 				if testing.Verbose() {
 					cmd.Stdout = os.Stdout
 					cmd.Stderr = os.Stderr
@@ -90,8 +96,9 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 			}
 			ginkgo.DeferCleanup(killAll)
 
-			// Start seed node first, then let followers join via .join-pending.
-			procs[0] = startNode(0)
+			// Start the seed node first, then mint a single-use invite bundle per
+			// follower and boot each with GRAINFS_INVITE_BUNDLE.
+			procs[0] = startNode(0, nil)
 			waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
 			time.Sleep(2 * time.Second)
 
@@ -99,8 +106,8 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 			accessKey, secretKey, saID = bootstrap.AccessKey, bootstrap.SecretKey, bootstrap.SAID
 
 			for i := 1; i < numNodes; i++ {
-				gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
-				procs[i] = startNode(i)
+				bundle := mintInvite(t, dataDirs[0])
+				procs[i] = startNode(i, []string{inviteBundleEnvKey + "=" + bundle})
 				time.Sleep(150 * time.Millisecond)
 			}
 			waitForPortsParallel(t, httpPorts, 60*time.Second)

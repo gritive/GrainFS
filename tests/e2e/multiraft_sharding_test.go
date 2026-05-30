@@ -41,6 +41,7 @@ type mrCluster struct {
 	dataDirs      []string
 	httpPorts     []int
 	raftPorts     []int
+	joinPorts     []int
 	nfs4Ports     []int
 	nbdPorts      []int
 	p9Ports       []int
@@ -106,6 +107,7 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	}
 	c.httpPorts = make([]int, maxNodes)
 	c.raftPorts = make([]int, maxNodes)
+	c.joinPorts = make([]int, maxNodes)
 	c.nfs4Ports = make([]int, maxNodes)
 	c.nbdPorts = make([]int, maxNodes)
 	c.p9Ports = make([]int, maxNodes)
@@ -113,7 +115,7 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	c.dataDirs = make([]string, maxNodes)
 	c.procs = make([]*exec.Cmd, maxNodes)
 
-	ports := uniqueFreePorts(maxNodes * 5)
+	ports := uniqueFreePorts(maxNodes * 6)
 	for i := 0; i < maxNodes; i++ {
 		c.httpPorts[i] = ports[i]
 		c.raftPorts[i] = ports[maxNodes+i]
@@ -126,6 +128,7 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 		if opts.enableP9 {
 			c.p9Ports[i] = ports[4*maxNodes+i]
 		}
+		c.joinPorts[i] = ports[5*maxNodes+i]
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 
 		d, err := os.MkdirTemp("", fmt.Sprintf("mrshard-%d-*", i))
@@ -136,13 +139,11 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 		c.dataDirs[i] = d
 	}
 
-	// Pre-seed the cluster transport PSK on every node's disk (replaces the
-	// removed cluster-key flag). Must run BEFORE any node boots.
-	for i := range c.dataDirs {
-		if err := transport.NewKeystore(c.dataDirs[i]).WriteCurrent(c.clusterKey); err != nil {
-			c.Stop()
-			return nil, fmt.Errorf("pre-seed keys.d/current.key for node %d: %w", i, err)
-		}
+	// Stage the cluster transport PSK on the SEED only (node 0). Followers join
+	// via invite-join; the bundle delivers the sealed KEK+PSK+cluster.id.
+	if err := transport.NewKeystore(c.dataDirs[0]).WriteCurrent(c.clusterKey); err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("pre-seed seed keys.d/current.key: %w", err)
 	}
 
 	ginkgo.DeferCleanup(c.Stop)
@@ -157,7 +158,7 @@ func tryStartStaticMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) 
 	}
 
 	// Start node 0 as seed leader, then let followers join via .join-pending.
-	c.procs[0] = c.startNode(0)
+	c.procs[0] = c.startNode(0, nil)
 	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
@@ -170,13 +171,8 @@ func tryStartStaticMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) 
 	c.saID = admin.SAID
 	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
 
-	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 	for i := 1; i < numNodes; i++ {
-		if err := writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr); err != nil {
-			c.Stop()
-			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
-		}
-		c.procs[i] = c.startNode(i)
+		c.procs[i] = c.startMRInviteFollower(i)
 		time.Sleep(150 * time.Millisecond)
 	}
 	if err := waitForPortsParallelErrWithProcesses(c.httpPorts, c.procs, 60*time.Second); err != nil {
@@ -242,7 +238,7 @@ func tryStartMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) (*mrCl
 	}
 
 	// Start seed node (node 0).
-	c.procs[0] = c.startNode(0)
+	c.procs[0] = c.startNode(0, nil)
 	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, fmt.Errorf("seed node not ready: %w", err)
@@ -257,13 +253,8 @@ func tryStartMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) (*mrCl
 	c.nodeCount = 1
 
 	// Start followers sequentially: wait for each before starting next.
-	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 	for i := 1; i < numNodes; i++ {
-		if err := writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr); err != nil {
-			c.Stop()
-			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
-		}
-		c.procs[i] = c.startNode(i)
+		c.procs[i] = c.startMRInviteFollower(i)
 		if err := waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second); err != nil {
 			c.Stop()
 			return nil, fmt.Errorf("node %d not ready: %w", i, err)
@@ -332,7 +323,10 @@ func startMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) *mrCluste
 	return nil
 }
 
-func (c *mrCluster) startNode(i int) *exec.Cmd {
+// startNode boots node i. extraEnv carries GRAINFS_INVITE_BUNDLE on a follower's
+// FIRST boot; seed and restart boots pass nil (a restarted node is an existing
+// member and must NOT re-receive the consumed bundle).
+func (c *mrCluster) startNode(i int, extraEnv []string) *exec.Cmd {
 	t := c.t
 	t.Helper()
 	binary := getBinary()
@@ -353,6 +347,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
+		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", c.joinPorts[i]),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", "0",
@@ -367,8 +362,18 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 	return cmd
+}
+
+// startMRInviteFollower mints a single-use invite bundle on the seed and boots
+// follower i with it (replaces legacy writeNodeJoinPending + startNode).
+func (c *mrCluster) startMRInviteFollower(i int) *exec.Cmd {
+	bundle := mintInvite(c.t, c.dataDirs[0])
+	return c.startNode(i, []string{inviteBundleEnvKey + "=" + bundle})
 }
 
 func (c *mrCluster) Stop() {
@@ -399,20 +404,17 @@ func (c *mrCluster) GrantAdminOnBuckets(buckets ...string) {
 	policyAttachAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }
 
-// addNode starts the next pre-allocated node slot and writes .join-pending so
-// it boots directly in join mode. Requires startMRCluster to have been called
-// with MaxNodes > current nodeCount. Blocks until the node is HTTP-ready, then
-// updates c.leaderIdx by probing the seed node's admin UDS.
+// addNode starts the next pre-allocated node slot via invite-join (mint a bundle
+// on the seed, boot with GRAINFS_INVITE_BUNDLE). Requires startMRCluster to have
+// been called with MaxNodes > current nodeCount. Blocks until the node is
+// HTTP-ready, then updates c.leaderIdx by probing the seed node's admin UDS.
 func (c *mrCluster) addNode(t testing.TB) {
 	t.Helper()
 	i := c.nodeCount
 	if i >= len(c.procs) {
 		t.Fatalf("addNode: nodeCount %d exceeds pre-allocated MaxNodes %d", i, len(c.procs))
 	}
-	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
-	gomega.Expect(writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr)).
-		To(gomega.Succeed(), "addNode: write join-pending node %d", i)
-	c.procs[i] = c.startNode(i)
+	c.procs[i] = c.startMRInviteFollower(i)
 	gomega.Expect(waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second)).
 		To(gomega.Succeed(), "addNode: node %d not ready", i)
 	c.nodeCount++
@@ -628,7 +630,7 @@ func runMultiRaftShardingRestartRecovery(t testing.TB) {
 	for i := range c.procs {
 		c.httpPorts[i] = freePort()
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		c.procs[i] = c.startNode(i)
+		c.procs[i] = c.startNode(i, nil)
 	}
 
 	// Wait for HTTP readiness and a leader together. A plain TCP port probe can
@@ -719,7 +721,7 @@ func runMultiRaftShardingPerGroupPersistence(t testing.TB) {
 	for i := range c.procs {
 		c.httpPorts[i] = freePort()
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
-		c.procs[i] = c.startNode(i)
+		c.procs[i] = c.startNode(i, nil)
 	}
 
 	probeBucket := fmt.Sprintf("per-group-restart-probe-%d", time.Now().UnixNano())

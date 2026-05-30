@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -125,8 +124,6 @@ func (n *inviteJoinNode) joinerArgs() []string {
 	}
 }
 
-const inviteBundleEnvKey = "GRAINFS_INVITE_BUNDLE"
-
 func startInviteProc(t testing.TB, n *inviteJoinNode, args []string, env []string) {
 	logFile, err := os.CreateTemp("", fmt.Sprintf("invite-%s-*.log", n.nodeID))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -150,27 +147,6 @@ func startInviteProc(t testing.TB, n *inviteJoinNode, args []string, env []strin
 	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start %s", n.nodeID)
 	n.cmd = cmd
 	ginkgo.DeferCleanup(func() { terminateProcess(cmd) })
-}
-
-// mintInvite runs `grainfs cluster invite create` against the leader's admin
-// UDS and returns the bundle token (the line after the "Set this..." prompt).
-func mintInvite(t testing.TB, leaderDataDir string) string {
-	sock := filepath.Join(leaderDataDir, "admin.sock")
-	var out []byte
-	var lastErr error
-	// The admin UDS + meta-raft leadership take a moment to settle after the
-	// HTTP port opens; retry until the mint succeeds.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		cmd := exec.Command(getBinary(), "cluster", "invite", "create", "--endpoint", sock)
-		out, lastErr = cmd.CombinedOutput()
-		if lastErr == nil {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	gomega.Expect(lastErr).NotTo(gomega.HaveOccurred(), "invite create must succeed; out:\n%s", string(out))
-	return parseBundleToken(t, string(out))
 }
 
 func runCompleteCutover(t testing.TB, leaderDataDir string) {
@@ -326,21 +302,6 @@ func shardGroupPeersContain(t testing.TB, base, nodeID string) bool {
 
 // parseBundleToken extracts the bundle token printed by RunInviteCreate: the
 // non-empty line following "Set this on the joining node as ...".
-func parseBundleToken(t testing.TB, output string) string {
-	sc := bufio.NewScanner(strings.NewReader(output))
-	seenPrompt := false
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if seenPrompt && line != "" {
-			return line
-		}
-		if strings.Contains(line, "GRAINFS_INVITE_BUNDLE") {
-			seenPrompt = true
-		}
-	}
-	t.Fatalf("could not parse invite bundle from output:\n%s", output)
-	return ""
-}
 
 // waitForVoter polls the leader's cluster status until nodeID appears in the
 // voter set (peers excludes self).
