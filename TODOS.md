@@ -421,17 +421,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 - [ ] **Retire dead `internal/encrypt/filekek.go`** [P3] (`FileKEK`) — no
   production callers; superseded by KEKStore + KeyProtector.
 
-- [ ] **Solo-leader full-process restart fails `WaitDEKReady` (pre-existing, found 2026-05-29)**.
-  A single-node genesis leader (whether started with `--cluster-key` OR self-seeded)
-  does not come back up after a terminate+restart on the same data dir: boot aborts with
-  `DEK readiness: WaitDEKReady: context deadline exceeded`. `bootGenesisDEKBootstrap`
-  only runs on `isGenesisBoot` (false on restart, priorState=true), so a solo node on
-  restart relies on the DEK being ready from restored meta-raft state and times out.
-  Verified independent of the genesis-self-seed change via a `--cluster-key` control
-  (both fail identically), so it is NOT a self-seed regression — surfaced while writing
-  the self-seed e2e. Investigate whether solo (RF=1) nodes can restart at all in the
-  current KEK/DEK readiness path; add a restart e2e once fixed. [P2]
-
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source
