@@ -14,7 +14,9 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/iceberg"
+	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
+	"github.com/gritive/GrainFS/internal/server/snapshotsvc"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -106,6 +108,17 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureReceipt) },
 		NewRespWriter:    func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
 		ToHTTPRequest:    toHTTPRequest,
+	})
+	s.incidentH = incidentsvc.NewHandler(incidentsvc.Deps{
+		IncidentStore:    s.incidentStore,
+		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureIncident) },
+	})
+	s.snapshotH = snapshotsvc.NewHandler(snapshotsvc.Deps{
+		SnapMgr:          s.snapMgr,
+		FeatureAvailable: func() bool { return s.routeFeatureAvailable(routeFeatureSnapshot) },
+		MutationDisabled: s.blockIfMutationDisabled,
+		LocalhostOnly:    localhostOnly,
+		EmitEvent:        s.emitEvent,
 	})
 	s.registerRoutes(h)
 	s.hertz = h

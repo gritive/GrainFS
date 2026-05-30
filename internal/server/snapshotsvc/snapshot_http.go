@@ -1,4 +1,4 @@
-package server
+package snapshotsvc
 
 import (
 	"errors"
