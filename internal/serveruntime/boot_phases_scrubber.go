@@ -14,7 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/serveruntime/executioncluster"
 	"github.com/gritive/GrainFS/internal/startuprecovery"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -54,7 +54,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	// case NewReceiptTrackingEmitter degrades to a pass-through.
 	var activeEmitter scrubber.Emitter = srv.HealEmitter()
 	if state.receiptWiring != nil && state.receiptWiring.Store() != nil {
-		rte := server.NewReceiptTrackingEmitter(srv.HealEmitter(), state.receiptWiring.Store(), state.receiptWiring.KeyStore())
+		rte := receiptsvc.NewTrackingEmitter(srv.HealEmitter(), state.receiptWiring.Store(), state.receiptWiring.KeyStore())
 		// Original: `defer rte.Close()` at Run() exit. Convert to AddCleanup
 		// so we close at Run() exit (LIFO with everything else).
 		state.AddCleanup(func() { rte.Close() })

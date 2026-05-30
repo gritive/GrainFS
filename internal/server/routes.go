@@ -28,7 +28,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerEventsAPI(h)
 	s.registerAuditAPI(h)
 	s.registerAlertsAPI(h)
-	s.registerReceiptAPI(h)
+	s.receipt.Register(h, routePathReceiptByID, routePathReceipts)
 	s.registerIncidentAPI(h)
 }
 
