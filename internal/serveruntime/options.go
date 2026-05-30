@@ -76,6 +76,10 @@ type ServeOptions struct {
 	AuditIceberg        bool          // --audit-iceberg
 	AuditCommitInterval time.Duration // --audit-commit-interval
 
+	// --- At-rest KEK protection (opt-in; default plaintext) ---
+	KEKProtector          string // --kek-protector (plaintext|env)
+	KEKRecoverySecretFile string // --kek-recovery-secret-file (env protector)
+
 	// --- Observability ---
 	OTelEndpoint   string  // --otel-endpoint
 	OTelSampleRate float64 // --otel-sample-rate

@@ -129,6 +129,15 @@ type Config struct {
 	VlogWatchEnabled      bool
 	VlogResourceGuardOpts resourceguard.VlogOptions
 
+	// At-rest KEK protection (opt-in; default plaintext keeps <V>.key byte-identical)
+	//   - "" / "plaintext": KEK stored as raw 32 bytes (current behavior).
+	//   - "env": KEK wrapped under a machine-bound key + recovery passphrase slot.
+	KEKProtector string
+	// KEKRecoverySecretFile is a file path holding the recovery passphrase for
+	// the "env" protector. The GRAINFS_KEK_RECOVERY_SECRET env var takes
+	// precedence. Secrets are passed by env/file only, never argv.
+	KEKRecoverySecretFile string
+
 	// Startup snapshot map (built once via cmd.Flags().VisitAll with secrets redacted)
 	FlagsSnapshot map[string]string
 }

@@ -85,6 +85,9 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.HealReceiptGossipInterval, _ = cmd.Flags().GetDuration("heal-receipt-gossip-interval")
 	opts.HealReceiptWindow, _ = cmd.Flags().GetInt("heal-receipt-window")
 
+	opts.KEKProtector, _ = cmd.Flags().GetString("kek-protector")
+	opts.KEKRecoverySecretFile, _ = cmd.Flags().GetString("kek-recovery-secret-file")
+
 	// Audit.
 	opts.AuditIceberg, _ = cmd.Flags().GetBool("audit-iceberg")
 	opts.AuditCommitInterval, _ = cmd.Flags().GetDuration("audit-commit-interval")

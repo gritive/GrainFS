@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -87,9 +88,16 @@ func loadKEKStoreAndClusterID(state *bootState) error {
 		}
 	}
 
-	store, err := encrypt.LoadOrInitKEKStoreDir(keysDir)
+	protector, err := buildKEKProtector(state.cfg)
+	if err != nil {
+		return fmt.Errorf("wireDEKKeeper: %w", err)
+	}
+	store, err := encrypt.LoadOrInitKEKStoreDirWithProtector(keysDir, protector)
 	if err != nil {
 		return fmt.Errorf("wireDEKKeeper: load keystore %s: %w", keysDir, err)
+	}
+	if protector.Name() != "plaintext" {
+		log.Printf("wireDEKKeeper: at-rest KEK protector active: %s", protector.Name())
 	}
 
 	// cluster.id load mode: strict when join mode OR prior state exists,
