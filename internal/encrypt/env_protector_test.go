@@ -200,15 +200,30 @@ func TestEnvProtector_BadHeaderRejected(t *testing.T) {
 	blob, err := p.Protect(freshKEK(t), []byte("aad"))
 	require.NoError(t, err)
 
-	// wrong magic
-	bad := append([]byte(nil), blob...)
-	bad[0] = 'X'
-	_, _, err = p.Unprotect(bad, []byte("aad"))
-	require.Error(t, err)
-
-	// truncated
+	// Truncated-but-valid-magic: still rejected (parseEnvKEK fails on a too-short
+	// container). The magic prefix is intact, so it is NOT misread as legacy raw.
 	_, _, err = p.Unprotect(blob[:envKEKHeaderLen-1], []byte("aad"))
 	require.Error(t, err)
+}
+
+// Slice 2 note: with variable-length secret support, a blob whose GKEK magic is
+// corrupted is indistinguishable from a legacy raw secret and is migrated (not
+// rejected) — env_protector no longer enforces any length. The KEK caller catches
+// resulting garbage via KEKStore.Add(len!=KEKSize); the PSK caller catches a
+// wrong-protector misread via a LooksLikeEnvKEK guard in readSlot. A corrupted
+// container read under the correct protector degrades to a garbage secret →
+// downstream handshake failure, same as a corrupted plaintext slot pre-feature.
+func TestEnvProtector_CorruptedMagicMigratesAsLegacy(t *testing.T) {
+	p, _ := newEnvProtector([]string{"machine-id:host-a"}, []byte("pass"))
+	blob, err := p.Protect(freshKEK(t), []byte("aad"))
+	require.NoError(t, err)
+	bad := append([]byte(nil), blob...)
+	bad[0] = 'X' // corrupt the magic
+	require.False(t, LooksLikeEnvKEK(bad))
+	got, rewrap, err := p.Unprotect(bad, []byte("aad"))
+	require.NoError(t, err)
+	require.True(t, rewrap, "corrupted-magic blob is migrated as legacy raw")
+	require.True(t, bytes.Equal(bad, got))
 }
 
 func TestLooksLikeEnvKEK(t *testing.T) {
@@ -255,4 +270,45 @@ func TestEnvProtector_StoredArgonParamsHonored(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, rewrap)
 	require.True(t, bytes.Equal(kek, got))
+}
+
+// --- Slice 2: variable-length secret support (PSK) ----------------------
+
+func TestEnvProtector_VariableLengthRoundTrip(t *testing.T) {
+	for _, secret := range [][]byte{
+		[]byte("deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"), // 64-char PSK
+		[]byte("short"),                 // 5 bytes
+		bytes.Repeat([]byte{0xAB}, 200), // 200 bytes, not KEKSize
+	} {
+		p, _ := newEnvProtector([]string{"machine-id:host-a"}, []byte("pass"))
+		blob, err := p.Protect(secret, []byte("aad"))
+		require.NoError(t, err)
+		require.True(t, LooksLikeEnvKEK(blob))
+		got, rewrap, err := p.Unprotect(blob, []byte("aad"))
+		require.NoError(t, err)
+		require.False(t, rewrap)
+		require.True(t, bytes.Equal(secret, got), "len=%d", len(secret))
+	}
+}
+
+func TestEnvProtector_LegacyVariableLengthMigrates(t *testing.T) {
+	// A legacy plaintext slot is a variable-length non-container blob; it must
+	// migrate (rewrap=true) regardless of length (no KEKSize requirement).
+	for _, raw := range [][]byte{
+		[]byte("a-64-char-cluster-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		[]byte("tiny"),
+	} {
+		p, spy := newEnvProtector([]string{"machine-id:host-a"}, []byte("pass"))
+		got, rewrap, err := p.Unprotect(raw, []byte("aad"))
+		require.NoError(t, err)
+		require.True(t, rewrap, "legacy raw -> migrate")
+		require.True(t, bytes.Equal(raw, got))
+		require.Equal(t, 1, spy.calls, "migration needs recovery secret")
+	}
+}
+
+func TestEnvProtector_LegacyVariableLengthRequiresRecovery(t *testing.T) {
+	p, _ := newEnvProtector([]string{"machine-id:host-a"}, nil) // absent
+	_, _, err := p.Unprotect([]byte("a-plaintext-cluster-key-string"), []byte("aad"))
+	require.Error(t, err, "legacy migrate without recovery secret -> fail")
 }
