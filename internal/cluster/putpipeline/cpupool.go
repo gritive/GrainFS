@@ -91,8 +91,38 @@ type putDispatchState struct {
 type dispatchMsg struct {
 	stripeIdx uint32
 	shards    [][]byte
+	backing   []byte // pooled EC-matrix backing that shards alias; recycled after the stripe is sealed
 	padding   uint32
 	lastInPut bool
+}
+
+// ecMatrixPool recycles the EC shard-matrix backing produced per stripe by
+// cluster.ECSplitRawInto (data + parity laid out contiguously). Without it,
+// reedsolomon allocated a fresh ~stripe-sized matrix per (stripe) split — the
+// single largest PUT-path allocation. The matrix is the sole input to
+// deliverStripe's seal loop (the shards alias it), so the dispatcher returns
+// it once the stripe's shards are sealed. Sole consumer = clean ownership.
+var ecMatrixPool = sync.Pool{
+	New: func() any { b := make([]byte, 0); return &b },
+}
+
+func getECMatrix() []byte {
+	bp := ecMatrixPool.Get().(*[]byte)
+	return (*bp)[:0]
+}
+
+// ecMatrixMaxPooled caps the backing capacity retained across stripes so an
+// abnormally large stripe doesn't pin an oversized matrix in the pool. A
+// 1 MiB stripe at the lowest data-shard count (k=1, hypothetical) yields a
+// 2-shard matrix; real configs (k>=2) stay well under this.
+const ecMatrixMaxPooled = (4 << 20) + 4096
+
+func putECMatrix(b []byte) {
+	if b == nil || cap(b) == 0 || cap(b) > ecMatrixMaxPooled {
+		return
+	}
+	b = b[:0]
+	ecMatrixPool.Put(&b)
 }
 
 // registerPut sets up per-shard chunked writers + the dispatcher
@@ -198,24 +228,28 @@ func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) err
 	if stripe.Padding > 0 && int(stripe.Padding) < len(data) {
 		data = data[:len(data)-int(stripe.Padding)]
 	}
-	shards, err := cluster.ECSplitRaw(p.ecCfg, data)
+	shards, backing, err := cluster.ECSplitRawInto(p.ecCfg, data, getECMatrix())
 	if err != nil {
+		putECMatrix(backing)
 		return fmt.Errorf("cpu pool ec split: %w", err)
 	}
 
 	ps, ok := p.loadPut(stripe.PutID)
 	if !ok {
+		putECMatrix(backing)
 		return nil
 	}
 	msg := dispatchMsg{
 		stripeIdx: stripe.StripeIdx,
 		shards:    shards,
+		backing:   backing,
 		padding:   stripe.Padding,
 		lastInPut: stripe.LastInPut,
 	}
 	select {
 	case ps.inbox <- msg:
 	case <-ctx.Done():
+		putECMatrix(backing)
 		return ctx.Err()
 	}
 	return nil
@@ -297,4 +331,7 @@ func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatch
 			LastInPut:  msg.lastInPut,
 		}
 	}
+	// Every shard aliasing msg.backing has been sealed (its bytes copied into
+	// the per-shard ciphertext above), so the matrix is free to recycle.
+	putECMatrix(msg.backing)
 }

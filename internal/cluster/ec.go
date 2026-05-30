@@ -167,6 +167,51 @@ func ecSplitBodies(cfg ECConfig, data []byte) ([][]byte, error) {
 	return shards, nil
 }
 
+// ecSplitRawInto is the allocation-reusing variant of ecSplitBodies: instead
+// of letting reedsolomon.Split allocate a fresh shard matrix per call (~1 MiB
+// for a 1 MiB stripe — the largest single PUT-path allocation), it lays the
+// data + parity shards out in the caller-supplied dst backing and computes
+// parity via the cached encoder's Encode. The returned shards alias dst, so
+// the caller must keep dst alive until every shard has been consumed, then may
+// recycle it. The returned []byte is dst's (possibly reallocated) backing for
+// the caller to pool. Output is byte-identical to ECSplitRaw — see
+// TestECSplitRawInto_ByteIdenticalToSplit.
+func ecSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, backing []byte, err error) {
+	n := cfg.NumShards()
+	if len(data) == 0 {
+		return make([][]byte, n), dst, nil
+	}
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return nil, dst, fmt.Errorf("ec encoder: %w", err)
+	}
+	perShard := (len(data) + cfg.DataShards - 1) / cfg.DataShards
+	total := perShard * n
+	if cap(dst) < total {
+		dst = make([]byte, total)
+	} else {
+		dst = dst[:total]
+	}
+	copy(dst, data)
+	clear(dst[len(data):total]) // zero the data-shard padding tail + parity region
+	shards = make([][]byte, n)
+	for i := 0; i < n; i++ {
+		shards[i] = dst[i*perShard : (i+1)*perShard : (i+1)*perShard]
+	}
+	if err := enc.Encode(shards); err != nil {
+		return nil, dst, fmt.Errorf("ec encode: %w", err)
+	}
+	return shards, dst, nil
+}
+
+// ECSplitRawInto is the exported wrapper over ecSplitRawInto for the
+// putpipeline actors. The returned shards alias the returned backing slice;
+// the caller pools the backing and must not recycle it until every shard has
+// been consumed. dst may be nil (a fresh backing is allocated).
+func ECSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, backing []byte, err error) {
+	return ecSplitRawInto(cfg, data, dst)
+}
+
 // ECSplitWithEncode is the exported wrapper for callers outside the
 // cluster package (the putpipeline actors). It returns k+m shards in
 // the same format as ECSplit: each shard is prefixed with an 8-byte
