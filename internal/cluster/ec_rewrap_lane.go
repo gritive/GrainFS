@@ -28,6 +28,15 @@ type ECRewrapShardBackend interface {
 	ScanGroupObjects(ctx context.Context) <-chan scrubber.ObjectRecord
 	OwnedShards(bucket, key, versionID, nodeID string) []int
 	RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error)
+	// ScanGroupSegmentShards streams one SegmentShardRecord per EC-distributed
+	// segment or coalesced sub-object stored in this group. The producer honors
+	// ctx so it never leaks when the consumer stops draining.
+	ScanGroupSegmentShards(ctx context.Context) <-chan SegmentShardRecord
+	// RewrapShardIfStaleAt migrates a single owned EC shard at canonicalKey
+	// onto activeGen. It is the canonical-key variant of RewrapShardIfStale,
+	// used for segment/coalesced shards whose key is not derived from
+	// (key, versionID).
+	RewrapShardIfStaleAt(bucket, canonicalKey string, shardIdx int, activeGen uint32) (bool, error)
 }
 
 var _ ECRewrapShardBackend = (*GroupBackend)(nil)
@@ -74,6 +83,27 @@ func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint
 					log.Warn().Err(err).Str("bucket", rec.Bucket).Str("key", rec.Key).
 						Int("shard", idx).Uint32("active_gen", activeGen).
 						Msg("ec rewrap: shard migration failed; skipping")
+					continue
+				}
+				if did {
+					RewrapECShardsTotal.WithLabelValues(strconv.FormatUint(uint64(activeGen), 10)).Inc()
+				}
+			}
+		}
+
+		for rec := range gb.ScanGroupSegmentShards(ctx) {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			for idx, holder := range rec.NodeIDs {
+				if holder != l.nodeID {
+					continue
+				}
+				did, err := gb.RewrapShardIfStaleAt(rec.Bucket, rec.ShardKey, idx, activeGen)
+				if err != nil {
+					log.Warn().Err(err).Str("bucket", rec.Bucket).Str("shardKey", rec.ShardKey).
+						Int("shard", idx).Uint32("active_gen", activeGen).
+						Msg("ec rewrap: segment shard migration failed; skipping")
 					continue
 				}
 				if did {

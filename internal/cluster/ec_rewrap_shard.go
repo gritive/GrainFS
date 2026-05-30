@@ -13,7 +13,7 @@ import (
 // config-upgrade re-split. nil in production.
 var rewrapTestHook func()
 
-// RewrapShardIfStale migrates a single owned EC shard onto activeGen if its
+// RewrapShardIfStaleAt migrates a single owned EC shard onto activeGen if its
 // on-disk DEK generation differs. It is idempotent (a shard already at activeGen
 // is a no-op) and multi-gen-safe (it inspects only the shard's own header, never
 // the rotation's oldGen). Returns true iff the shard was re-encrypted.
@@ -23,8 +23,7 @@ var rewrapTestHook func()
 // target the same path. Every primitive it calls below the lock takes NO
 // DistributedBackend shard lock — the lock here is non-reentrant, so re-locking
 // (e.g. via ReadShard/readShardIntegrity/WriteShard) would self-deadlock.
-func (b *DistributedBackend) RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error) {
-	canonicalKey := ecObjectShardKey(key, versionID)
+func (b *DistributedBackend) RewrapShardIfStaleAt(bucket, canonicalKey string, shardIdx int, activeGen uint32) (bool, error) {
 	unlock := b.acquireShardWriteLock(bucket, canonicalKey)
 	defer unlock()
 
@@ -60,6 +59,13 @@ func (b *DistributedBackend) RewrapShardIfStale(bucket, key, versionID string, s
 		return false, fmt.Errorf("rewrap write shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
 	}
 	return true, nil
+}
+
+// RewrapShardIfStale migrates a single owned EC shard of a regular versioned
+// object onto activeGen. It is a thin wrapper around RewrapShardIfStaleAt that
+// derives the canonical shard key from (key, versionID).
+func (b *DistributedBackend) RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error) {
+	return b.RewrapShardIfStaleAt(bucket, ecObjectShardKey(key, versionID), shardIdx, activeGen)
 }
 
 // readOwnedShardRaw locates and returns the raw on-disk shard bytes (pack-first,
