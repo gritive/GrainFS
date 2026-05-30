@@ -125,6 +125,36 @@ func putECMatrix(b []byte) {
 	ecMatrixPool.Put(&b)
 }
 
+// stripeBufPool recycles IngestActor's per-stripe read buffer. With MD5
+// computed inline (see IngestActor.Run), the stripe buffer's only consumer
+// after hand-off is CPUPool.processStripe, which copies it into the EC matrix
+// — so the buffer is freed (recycled) the moment the split returns. Sole
+// consumer = no cross-actor refcounting.
+var stripeBufPool = sync.Pool{
+	New: func() any { b := make([]byte, 0); return &b },
+}
+
+// stripeBufMaxPooled caps the retained capacity so an unusually large stripe
+// size doesn't pin oversized buffers. Typical stripe is 1 MiB.
+const stripeBufMaxPooled = (4 << 20) + 4096
+
+func getStripeBuf(size int) []byte {
+	bp := stripeBufPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) >= size {
+		return b[:size]
+	}
+	return make([]byte, size)
+}
+
+func putStripeBuf(b []byte) {
+	if b == nil || cap(b) == 0 || cap(b) > stripeBufMaxPooled {
+		return
+	}
+	b = b[:0]
+	stripeBufPool.Put(&b)
+}
+
 // registerPut sets up per-shard chunked writers + the dispatcher
 // goroutine for one PUT. bucket and shardKey are used to derive the
 // AAD so that shards are readable by the legacy ShardService reader
@@ -229,6 +259,10 @@ func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) err
 		data = data[:len(data)-int(stripe.Padding)]
 	}
 	shards, backing, err := cluster.ECSplitRawInto(p.ecCfg, data, getECMatrix())
+	// ECSplitRawInto has copied the stripe into backing (or failed without
+	// needing it); the stripe buffer is the sole responsibility of this
+	// goroutine now and is free to recycle either way.
+	putStripeBuf(stripe.Data)
 	if err != nil {
 		putECMatrix(backing)
 		return fmt.Errorf("cpu pool ec split: %w", err)

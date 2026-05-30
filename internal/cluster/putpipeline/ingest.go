@@ -43,27 +43,12 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 	}
 	h := newHashForBucket(bucket)
 
-	// Sidecar MD5 goroutine. Drains md5In and computes MD5; the result
-	// arrives on md5Out when md5In is closed. Keeps md5.Write off the
-	// read loop's critical path so the pipeline can advance while
-	// hashing happens in parallel.
-	var md5In chan []byte
-	md5Out := make(chan string, 1)
-	if h != nil {
-		md5In = make(chan []byte, 8)
-		go func() {
-			for chunk := range md5In {
-				_, _ = h.Write(chunk)
-			}
-			md5Out <- hex.EncodeToString(h.Sum(nil))
-		}()
-	}
-	cleanup := func() {
-		if md5In != nil {
-			close(md5In)
-			<-md5Out
-		}
-	}
+	// MD5 is computed inline (h.Write before the stripe is handed off) rather
+	// than in a sidecar goroutine. This makes the stripe buffer single-consumer
+	// — once it reaches CPUPool the hash is already done — so it can be pooled
+	// without cross-actor refcounting. MD5 is not the PUT throughput gate (a
+	// no-op MD5 experiment showed no change), so losing the sidecar overlap
+	// costs effectively nothing while removing a goroutine + channel per PUT.
 
 	// Wrap in bufio so we can peek one byte after a full read to detect
 	// whether the stream is exhausted (handles exact-multiple body sizes
@@ -72,9 +57,10 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 
 	stripeIdx := uint32(0)
 	for {
-		buf := make([]byte, a.stripeBytes)
+		buf := getStripeBuf(a.stripeBytes)
 		n, readErr := io.ReadFull(br, buf)
 		if n == 0 && (readErr == io.EOF || readErr == nil) {
+			putStripeBuf(buf)
 			break
 		}
 		last := readErr == io.ErrUnexpectedEOF || readErr == io.EOF
@@ -93,12 +79,10 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 				buf[i] = 0
 			}
 		}
-		if md5In != nil {
-			// Send the read bytes (excluding zero padding) to MD5
-			// goroutine. The stripe buffer remains owned by downstream
-			// (CPUPool); MD5 reads from the same backing array but the
-			// pipeline never mutates it before reaching DriveActor.
-			md5In <- buf[:n]
+		if h != nil {
+			// Hash the read bytes (excluding zero padding) before handing the
+			// buffer downstream, so CPUPool is the buffer's sole consumer.
+			_, _ = h.Write(buf[:n])
 		}
 		s := StripePlaintext{
 			PutID:     putID,
@@ -109,7 +93,7 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 		}
 		select {
 		case <-ctx.Done():
-			cleanup()
+			putStripeBuf(buf)
 			return "", total, ctx.Err()
 		case a.out <- s:
 		}
@@ -119,13 +103,11 @@ func (a *IngestActor) Run(ctx context.Context, putID uint64, bucket string, body
 			break
 		}
 		if readErr != nil && readErr != io.ErrUnexpectedEOF {
-			cleanup()
 			return "", total, readErr
 		}
 	}
-	if md5In != nil {
-		close(md5In)
-		etag = <-md5Out
+	if h != nil {
+		etag = hex.EncodeToString(h.Sum(nil))
 	}
 	// If the client supplied a Content-MD5, verify the body's actual
 	// MD5 matches. Mismatch = S3 BadDigest.
