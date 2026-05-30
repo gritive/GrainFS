@@ -123,9 +123,10 @@ type bootState struct {
 	// instance, created once via ensurePDPTokenSource (adminAuthorizer is
 	// called twice + the Deps literal references it). Its live encryptor is
 	// refreshed by wireIAMEncryptor on fresh boot and snapshot-restore swaps.
-	pdpTokenSource *pdpTokenSource
-	nfsExportSvc   *nfsexport.ExportService
-	dekKeeper      *encrypt.DEKKeeper
+	pdpTokenSource   *pdpTokenSource
+	nfsExportSvc     *nfsexport.ExportService
+	dekKeeper        *encrypt.DEKKeeper
+	rewrapController *encrypt.RewrapController // created in wireDEKKeeper (early); lanes registered post-backend in wireRewrapLanes
 	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
 	// restore) rebuildDEKKeeperFromRestore, threaded as the single source into
 	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ

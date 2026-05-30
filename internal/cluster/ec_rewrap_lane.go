@@ -8,33 +8,47 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-// ecRewrapBackend is the EC rewrap lane's use-site view of DistributedBackend.
-// *DistributedBackend satisfies it structurally (see the assertion below).
-type ecRewrapBackend interface {
-	NodeID() string
-	ListScrubBuckets() ([]string, error)
-	ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error)
+// ECRewrapShardBackend is the per-data-group backend surface the EC rewrap lane
+// drives. *GroupBackend satisfies it (it embeds *DistributedBackend, which
+// carries all three methods).
+//
+// The lane enumerates every data group's OWN stored objects (ScanGroupObjects),
+// not the router's per-bucket assignment: an object lives in the placement
+// group recorded in its metadata, which can differ from the bucket's current
+// routing after a reassignment. This mirrors the read path, which resolves an
+// object by its stored PlacementGroupID — the source of truth for "where the
+// data physically is" (the same principle as the packblob lane scanning its
+// index rather than asking the router).
+type ECRewrapShardBackend interface {
+	// ScanGroupObjects streams every live object stored in this group (all
+	// buckets), bypassing the per-bucket HeadBucket gate.
+	ScanGroupObjects() <-chan scrubber.ObjectRecord
 	OwnedShards(bucket, key, versionID, nodeID string) []int
-	ObjectExists(bucket, key string) (bool, error)
 	RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error)
 }
 
-var _ ecRewrapBackend = (*DistributedBackend)(nil)
+var _ ECRewrapShardBackend = (*GroupBackend)(nil)
 
 // ECRewrapLane is the encrypt.RewrapLane for EC shards. On a DEK rotation it
-// sweeps every owned shard of every live object and migrates any whose on-disk
-// gen differs from the active gen. The sweep IGNORES the rotation's oldGen, so
-// it is idempotent and tolerant of multiple un-migrated generations.
+// sweeps every owned shard of every live object across every data group and
+// migrates any whose on-disk gen differs from the active gen. The sweep IGNORES
+// the rotation's oldGen, so it is idempotent and tolerant of multiple
+// un-migrated generations.
 type ECRewrapLane struct {
-	be ecRewrapBackend
+	nodeID string
+	groups func() []ECRewrapShardBackend
 }
 
-// ECRewrapLane satisfies encrypt.RewrapLane (it is not registered here; a later
-// task wires it into the controller).
+// ECRewrapLane satisfies encrypt.RewrapLane (the wiring task registers it).
 var _ encrypt.RewrapLane = (*ECRewrapLane)(nil)
 
-// NewECRewrapLane constructs the EC rewrap lane over be.
-func NewECRewrapLane(be ecRewrapBackend) *ECRewrapLane { return &ECRewrapLane{be: be} }
+// NewECRewrapLane constructs the EC rewrap lane. groups enumerates the node's
+// data-group backends; nodeID is this node's stable id used for shard
+// ownership (the identity the placement vector records — NOT the transport
+// self-address).
+func NewECRewrapLane(nodeID string, groups func() []ECRewrapShardBackend) *ECRewrapLane {
+	return &ECRewrapLane{nodeID: nodeID, groups: groups}
+}
 
 // Name identifies the lane in rewrap orchestration.
 func (l *ECRewrapLane) Name() string { return "ec" }
@@ -42,25 +56,13 @@ func (l *ECRewrapLane) Name() string { return "ec" }
 // RewrapByGen sweeps owned EC shards onto activeGen. oldGen is intentionally
 // ignored (sweep semantics: migrate any shard whose gen != activeGen).
 func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint32) error {
-	buckets, err := l.be.ListScrubBuckets()
-	if err != nil {
-		return err
-	}
-	for _, bucket := range buckets {
-		ch, err := l.be.ScanObjects(bucket)
-		if err != nil {
-			return err
-		}
-		for rec := range ch {
+	for _, gb := range l.groups() {
+		for rec := range gb.ScanGroupObjects() {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// The latest version may have been deleted between the scan and now.
-			if ok, _ := l.be.ObjectExists(bucket, rec.Key); !ok {
-				continue
-			}
-			for _, idx := range l.be.OwnedShards(bucket, rec.Key, rec.VersionID, l.be.NodeID()) {
-				did, err := l.be.RewrapShardIfStale(bucket, rec.Key, rec.VersionID, idx, activeGen)
+			for _, idx := range gb.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, l.nodeID) {
+				did, err := gb.RewrapShardIfStale(rec.Bucket, rec.Key, rec.VersionID, idx, activeGen)
 				if err != nil {
 					return err
 				}

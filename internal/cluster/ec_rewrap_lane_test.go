@@ -247,18 +247,16 @@ func TestECRewrap_ConfigUpgradeLockSerializesWrite(t *testing.T) {
 		"shard 0 sealed at the active gen")
 }
 
-// fakeECRewrapBackend records RewrapShardIfStale calls and drives the lane sweep
-// without a real backend.
+// fakeECRewrapBackend is one fake data-group backend: it yields its objects via
+// ScanGroupObjects and records RewrapShardIfStale calls.
 type fakeECRewrapBackend struct {
 	nodeID     string
-	buckets    []string
-	objects    map[string][]scrubber.ObjectRecord // bucket -> records
-	owned      map[string][]int                   // bucket|key|version -> shard indices
-	exists     map[string]bool                    // bucket|key -> exists
+	objects    []scrubber.ObjectRecord // objects stored in this group
+	owned      map[string][]int        // key|version -> shard indices
 	rewrapErr  error
 	mu         sync.Mutex
 	calls      []rewrapCall
-	didOnFirst map[string]bool // bucket|key|version|idx -> already returned true
+	didOnFirst map[string]bool // key|version|idx -> already returned true
 }
 
 type rewrapCall struct {
@@ -267,28 +265,20 @@ type rewrapCall struct {
 	activeGen            uint32
 }
 
-func (f *fakeECRewrapBackend) NodeID() string { return f.nodeID }
-
-func (f *fakeECRewrapBackend) ListScrubBuckets() ([]string, error) { return f.buckets, nil }
-
-func (f *fakeECRewrapBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
-	ch := make(chan scrubber.ObjectRecord, len(f.objects[bucket]))
-	for _, r := range f.objects[bucket] {
+func (f *fakeECRewrapBackend) ScanGroupObjects() <-chan scrubber.ObjectRecord {
+	ch := make(chan scrubber.ObjectRecord, len(f.objects))
+	for _, r := range f.objects {
 		ch <- r
 	}
 	close(ch)
-	return ch, nil
+	return ch
 }
 
 func (f *fakeECRewrapBackend) OwnedShards(bucket, key, versionID, nodeID string) []int {
 	if nodeID != f.nodeID {
 		return nil
 	}
-	return f.owned[bucket+"|"+key+"|"+versionID]
-}
-
-func (f *fakeECRewrapBackend) ObjectExists(bucket, key string) (bool, error) {
-	return f.exists[bucket+"|"+key], nil
+	return f.owned[key+"|"+versionID]
 }
 
 func (f *fakeECRewrapBackend) RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error) {
@@ -298,7 +288,7 @@ func (f *fakeECRewrapBackend) RewrapShardIfStale(bucket, key, versionID string, 
 	if f.rewrapErr != nil {
 		return false, f.rewrapErr
 	}
-	k := bucket + "|" + key + "|" + versionID + "|" + strconv.Itoa(shardIdx)
+	k := key + "|" + versionID + "|" + strconv.Itoa(shardIdx)
 	if f.didOnFirst == nil {
 		f.didOnFirst = map[string]bool{}
 	}
@@ -309,19 +299,19 @@ func (f *fakeECRewrapBackend) RewrapShardIfStale(bucket, key, versionID string, 
 	return false, nil
 }
 
+func laneFromGroups(nodeID string, gbs ...ECRewrapShardBackend) *ECRewrapLane {
+	return NewECRewrapLane(nodeID, func() []ECRewrapShardBackend { return gbs })
+}
+
 func TestECRewrapLane_SweepAllOwnedShards(t *testing.T) {
 	fake := &fakeECRewrapBackend{
 		nodeID:  "n1",
-		buckets: []string{"b"},
-		objects: map[string][]scrubber.ObjectRecord{
-			"b": {{Bucket: "b", Key: "k1", VersionID: "v1"}},
-		},
-		owned:  map[string][]int{"b|k1|v1": {0, 2, 5}},
-		exists: map[string]bool{"b|k1": true},
+		objects: []scrubber.ObjectRecord{{Bucket: "b", Key: "k1", VersionID: "v1"}},
+		owned:   map[string][]int{"k1|v1": {0, 2, 5}},
 	}
 
 	before := counterValue(t, 7)
-	lane := NewECRewrapLane(fake)
+	lane := laneFromGroups("n1", fake)
 	require.Equal(t, "ec", lane.Name())
 	require.NoError(t, lane.RewrapByGen(context.Background(), 3, 7))
 
@@ -332,34 +322,35 @@ func TestECRewrapLane_SweepAllOwnedShards(t *testing.T) {
 	assert.Equal(t, float64(3), counterValue(t, 7)-before, "counter increments per did==true")
 }
 
-func TestECRewrapLane_SkipsDeletedObject(t *testing.T) {
-	fake := &fakeECRewrapBackend{
+// TestECRewrapLane_SweepsAllGroups proves the lane visits objects across EVERY
+// data group, not just one (the bug the e2e caught: an object can live in a
+// group different from its bucket's router assignment).
+func TestECRewrapLane_SweepsAllGroups(t *testing.T) {
+	g1 := &fakeECRewrapBackend{
 		nodeID:  "n1",
-		buckets: []string{"b"},
-		objects: map[string][]scrubber.ObjectRecord{
-			"b": {{Bucket: "b", Key: "gone", VersionID: "v1"}},
-		},
-		owned:  map[string][]int{"b|gone|v1": {0, 1}},
-		exists: map[string]bool{"b|gone": false},
+		objects: []scrubber.ObjectRecord{{Bucket: "b", Key: "in-g1", VersionID: "v1"}},
+		owned:   map[string][]int{"in-g1|v1": {0}},
 	}
-	lane := NewECRewrapLane(fake)
-	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 9))
-	assert.Empty(t, fake.calls, "deleted object must be skipped before per-shard rewrap")
+	g2 := &fakeECRewrapBackend{
+		nodeID:  "n1",
+		objects: []scrubber.ObjectRecord{{Bucket: "b", Key: "in-g2", VersionID: "v1"}},
+		owned:   map[string][]int{"in-g2|v1": {0}},
+	}
+	lane := laneFromGroups("n1", g1, g2)
+	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 5))
+	require.Len(t, g1.calls, 1, "group 1 object swept")
+	require.Len(t, g2.calls, 1, "group 2 object swept")
 }
 
 func TestECRewrapLane_CtxCancelStops(t *testing.T) {
 	fake := &fakeECRewrapBackend{
 		nodeID:  "n1",
-		buckets: []string{"b"},
-		objects: map[string][]scrubber.ObjectRecord{
-			"b": {{Bucket: "b", Key: "k1", VersionID: "v1"}},
-		},
-		owned:  map[string][]int{"b|k1|v1": {0}},
-		exists: map[string]bool{"b|k1": true},
+		objects: []scrubber.ObjectRecord{{Bucket: "b", Key: "k1", VersionID: "v1"}},
+		owned:   map[string][]int{"k1|v1": {0}},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	lane := NewECRewrapLane(fake)
+	lane := laneFromGroups("n1", fake)
 	err := lane.RewrapByGen(ctx, 0, 4)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Empty(t, fake.calls, "cancelled ctx stops before any rewrap")

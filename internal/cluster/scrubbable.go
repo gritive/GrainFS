@@ -339,13 +339,6 @@ func (b *DistributedBackend) RaftNodeID() string {
 	return b.node.ID()
 }
 
-// ListScrubBuckets returns every bucket name for the scrubber-style sweeps
-// (EC rewrap lane). It is a context-less wrapper around ListBuckets — the rewrap
-// lane has no request ctx of its own.
-func (b *DistributedBackend) ListScrubBuckets() ([]string, error) {
-	return b.ListBuckets(context.Background())
-}
-
 // OwnedShards implements scrubber.ShardOwner. Returns the shard indices of
 // placement that match the supplied nodeID. Returns nil when the object has no
 // placement record (non-EC / N× path) or when nodeID does not appear in the

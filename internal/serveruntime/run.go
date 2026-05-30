@@ -205,6 +205,10 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootBackendWrap(ctx, state); err != nil {
 		return err
 	}
+	// S6b: register the data-rewrap lanes now that distBackend (bootOwnedGroupsAndEC)
+	// and packedBackend (bootBackendWrap) exist. wireDEKKeeper ran too early (before
+	// the backends) to register them; it stored the controller on state for this.
+	wireRewrapLanes(state)
 	// §5 T45: reconcile the trusted-proxy.cidr atomic snapshot once after raft
 	// start. Snapshot Restore does NOT fire reload hooks, so if the node booted
 	// from a restored snapshot the ProxyTrust view is seeded here.
