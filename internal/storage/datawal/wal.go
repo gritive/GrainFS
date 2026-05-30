@@ -12,10 +12,30 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage/directio"
 )
+
+// syncWAL flushes the WAL file to stable storage, honoring the configurable
+// fsync policy (directio.CurrentSyncMode). SyncFull is full durability
+// (walFile.Sync = F_FULLFSYNC on darwin); SyncFast uses a plain fsync(2) on the
+// real *os.File; SyncOff skips the fsync entirely (durability delegated to
+// cross-node EC). Non-*os.File fakes (tests) take the Sync() path unless mode
+// is SyncOff.
+func syncWAL(f walFile) error {
+	switch directio.CurrentSyncMode() {
+	case directio.SyncOff:
+		return nil
+	case directio.SyncFast:
+		if osf, ok := f.(*os.File); ok {
+			return syscall.Fsync(int(osf.Fd()))
+		}
+	}
+	return f.Sync()
+}
 
 // errGenAdvanced is returned by appendRecordOnce when a record sealed under a
 // DEK generation that differs from the open segment's pinned header gen — i.e.
@@ -234,7 +254,10 @@ func (w *WAL) Flush() error {
 	file := w.file
 	w.mu.Unlock()
 
-	err := file.Sync()
+	// Hot path: per-flush group-commit durability fsync. Routed through
+	// syncWAL so the fsync policy (full F_FULLFSYNC vs fast fsync(2)) is
+	// configurable; default is full durability.
+	err := syncWAL(file)
 
 	w.mu.Lock()
 	w.isSyncing = false

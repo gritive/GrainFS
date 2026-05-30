@@ -89,3 +89,39 @@ func TestOpenFile_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 }
+
+func TestSyncMode_StateMapping(t *testing.T) {
+	t.Cleanup(func() { SetSyncMode(SyncFull) })
+
+	SetSyncMode(SyncFull)
+	assert.Equal(t, SyncFull, CurrentSyncMode())
+	assert.False(t, FastFsyncEnabled(), "full mode is not fast")
+
+	SetSyncMode(SyncFast)
+	assert.Equal(t, SyncFast, CurrentSyncMode())
+	assert.True(t, FastFsyncEnabled(), "fast mode skips F_FULLFSYNC")
+
+	SetSyncMode(SyncOff)
+	assert.Equal(t, SyncOff, CurrentSyncMode())
+	assert.True(t, FastFsyncEnabled(), "off mode also skips F_FULLFSYNC")
+}
+
+// TestSync_OffSkipsFsync proves SyncOff issues no fsync at all: a closed fd
+// errors under Full/Fast (the syscall reaches the bad descriptor) but returns
+// nil under Off (the call short-circuits before touching the fd).
+func TestSync_OffSkipsFsync(t *testing.T) {
+	t.Cleanup(func() { SetSyncMode(SyncFull) })
+
+	path := filepath.Join(t.TempDir(), "sync-off")
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	_, err = f.WriteString("payload")
+	require.NoError(t, err)
+	require.NoError(t, f.Close()) // close so the fd is invalid for fsync
+
+	SetSyncMode(SyncFull)
+	assert.Error(t, Sync(f), "full mode must attempt fsync on the (closed) fd and fail")
+
+	SetSyncMode(SyncOff)
+	assert.NoError(t, Sync(f), "off mode must skip fsync entirely, never touching the fd")
+}

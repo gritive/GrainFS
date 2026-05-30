@@ -16,8 +16,23 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
+	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// warnIfReducedDataFsync emits a loud startup warning when the data-plane fsync
+// policy (set at directio init from GRAINFS_FSYNC_MODE; default SyncFull) has
+// been weakened. The knob is env-only (measurement / dev), so this is the only
+// operator-visible signal that durability is reduced. SyncFull (the default)
+// logs nothing.
+func warnIfReducedDataFsync() {
+	switch directio.CurrentSyncMode() {
+	case directio.SyncFast:
+		log.Warn().Msg("GRAINFS_FSYNC_MODE=fast: data-plane fsync skips F_FULLFSYNC (no power-loss durability on macOS; no-op vs full on Linux)")
+	case directio.SyncOff:
+		log.Warn().Msg("GRAINFS_FSYNC_MODE=off: data-plane fsync DISABLED; durability relies on cross-node EC reconstruction — UNSAFE for single-node and correlated power loss")
+	}
+}
 
 // bootShardService completes the cluster topology bootstrap and constructs
 // the ShardService for distributed data replication.
@@ -33,6 +48,8 @@ import (
 // because seedGroups (cluster size * 4, min 8) is the durability headroom
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
+	// Warn if the data-plane fsync policy (GRAINFS_FSYNC_MODE) has been weakened.
+	warnIfReducedDataFsync()
 	// Open the data WAL before any cluster shard service is constructed so that
 	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
 	// before bootStreamRouter registers QUIC handlers that would otherwise
