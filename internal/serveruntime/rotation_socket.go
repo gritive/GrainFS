@@ -54,7 +54,7 @@ type RotationStatusResponse struct {
 // services rotation requests until ctx is cancelled. Returns an error only
 // for fatal listener-creation failures; per-request errors are encoded into
 // the response payload. nil metaRaft (solo mode) is a no-op.
-func StartRotationSocket(ctx context.Context, dataDir string, metaRaft *cluster.MetaRaft) error {
+func StartRotationSocket(ctx context.Context, dataDir string, cfg Config, metaRaft *cluster.MetaRaft) error {
 	if metaRaft == nil {
 		return nil
 	}
@@ -77,7 +77,7 @@ func StartRotationSocket(ctx context.Context, dataDir string, metaRaft *cluster.
 		hzserver.WithTransport(standard.NewTransporter),
 		hzserver.WithHostPorts(""),
 	)
-	registerRotationRoutes(h, dataDir, metaRaft)
+	registerRotationRoutes(h, dataDir, cfg, metaRaft)
 
 	go func() {
 		_ = h.Run()
@@ -93,7 +93,7 @@ func StartRotationSocket(ctx context.Context, dataDir string, metaRaft *cluster.
 	return nil
 }
 
-func registerRotationRoutes(h *hzserver.Hertz, dataDir string, metaRaft *cluster.MetaRaft) {
+func registerRotationRoutes(h *hzserver.Hertz, dataDir string, cfg Config, metaRaft *cluster.MetaRaft) {
 	g := h.Group("/v1/rotate-key")
 	g.GET("/status", func(c context.Context, ctx *app.RequestContext) {
 		resp := rotationStatusResp(metaRaft)
@@ -105,7 +105,7 @@ func registerRotationRoutes(h *hzserver.Hertz, dataDir string, metaRaft *cluster
 			ctx.JSON(200, RotationStatusResponse{Error: fmt.Sprintf("decode: %v", err)})
 			return
 		}
-		ctx.JSON(200, rotationBegin(c, req.NewKey, dataDir, metaRaft))
+		ctx.JSON(200, rotationBegin(c, req.NewKey, dataDir, cfg, metaRaft))
 	})
 	g.POST("/abort", func(c context.Context, ctx *app.RequestContext) {
 		var req RotationAbortRequest
@@ -132,7 +132,7 @@ func rotationStatusResp(metaRaft *cluster.MetaRaft) RotationStatusResponse {
 	return out
 }
 
-func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluster.MetaRaft) RotationStatusResponse {
+func rotationBegin(ctx context.Context, newKey, dataDir string, cfg Config, metaRaft *cluster.MetaRaft) RotationStatusResponse {
 	if !metaRaft.IsLeader() {
 		return RotationStatusResponse{Error: "rotate-key begin must be issued on the meta-raft leader (current leader: " + metaRaft.LeaderID() + ")"}
 	}
@@ -149,7 +149,10 @@ func rotationBegin(ctx context.Context, newKey, dataDir string, metaRaft *cluste
 	if err != nil {
 		return RotationStatusResponse{Error: fmt.Sprintf("derive identity: %v", err)}
 	}
-	ks := transport.NewKeystore(dataDir)
+	ks, err := newClusterKeystore(dataDir, cfg)
+	if err != nil {
+		return RotationStatusResponse{Error: fmt.Sprintf("build keystore: %v", err)}
+	}
 	if err := ks.WriteNext(newKey); err != nil {
 		return RotationStatusResponse{Error: fmt.Sprintf("write next.key: %v", err)}
 	}

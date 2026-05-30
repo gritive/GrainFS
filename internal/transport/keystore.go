@@ -8,7 +8,18 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
+
+// pskAAD is the slot-INVARIANT AEAD associated-data for every cluster-key PSK
+// slot. It deliberately contains NO slot name and NO version: MoveNextToCurrent
+// promotes slots by renaming the sealed blob (next→current→previous), so a blob
+// sealed for one slot must open after being renamed into another. Binding the
+// slot name into the AAD (as Slice 1 bound the KEK version) would break rename
+// promotion by construction. This is a deliberate inversion of the KEK design —
+// here the three slots are one key's lifecycle, not independent keys.
+const pskAAD = "grainfs-cluster-key-psk-v1"
 
 // Keystore manages the persistent on-disk cluster identity keys at
 // {dataDir}/keys.d/. Three slots:
@@ -20,20 +31,49 @@ import (
 // All file I/O is hardened: directory 0700, files 0600, atomic temp+rename
 // with fsync of file and parent dir, O_NOFOLLOW on every open to defeat
 // symlink traversal if an attacker has write access to keys.d/.
+//
+// At-rest protection: each slot's bytes pass through a KeyProtector (Slice 2).
+// PlaintextProtector (default) keeps the on-disk format byte-identical to the
+// historical `psk+"\n"`. EnvProtector wraps the PSK in a machine-bound container
+// (same seam + --kek-protector gate as the KEK store). readSlot only UNWRAPS;
+// rewrap-on-rebind is done by boot callers (see serveruntime), never inside the
+// primitive, because Keystore is mutated concurrently by the rotation worker and
+// the previous-key cleanup timer with no mutex.
 type Keystore struct {
-	dir string // {dataDir}/keys.d
+	dir       string // {dataDir}/keys.d
+	protector encrypt.KeyProtector
 }
 
-// NewKeystore returns a Keystore rooted at {dataDir}/keys.d/. The directory
-// is created on demand at write time; ReadCurrent on a fresh dataDir returns
-// os.ErrNotExist.
+// NewKeystore returns a Keystore rooted at {dataDir}/keys.d/ with the identity
+// (plaintext) protector — on-disk bytes stay byte-identical to the historical
+// format. The directory is created on demand at write time; ReadCurrent on a
+// fresh dataDir returns os.ErrNotExist.
 func NewKeystore(dataDir string) *Keystore {
-	return &Keystore{dir: filepath.Join(dataDir, "keys.d")}
+	return NewKeystoreWithProtector(dataDir, encrypt.PlaintextProtector{})
 }
+
+// NewKeystoreWithProtector is NewKeystore with an explicit at-rest KeyProtector.
+func NewKeystoreWithProtector(dataDir string, protector encrypt.KeyProtector) *Keystore {
+	return &Keystore{
+		dir:       filepath.Join(dataDir, "keys.d"),
+		protector: protector,
+	}
+}
+
+func (k *Keystore) isPlaintext() bool { return k.protector.Name() == "plaintext" }
 
 func (k *Keystore) ReadCurrent() (string, error)  { return k.readSlot("current.key") }
 func (k *Keystore) ReadNext() (string, error)     { return k.readSlot("next.key") }
 func (k *Keystore) ReadPrevious() (string, error) { return k.readSlot("previous.key") }
+
+// ReadCurrentForBoot reads current.key and also reports whether the protector
+// signalled a rewrap (env binding changed, or a legacy plaintext slot was
+// migrated). ONLY single-threaded boot callers may act on rewrap by calling
+// WriteCurrent — the runtime Read* path must never rewrite (no mutex; concurrent
+// rotation worker + cleanup timer).
+func (k *Keystore) ReadCurrentForBoot() (psk string, rewrap bool, err error) {
+	return k.readSlotRewrap("current.key")
+}
 
 func (k *Keystore) WriteCurrent(psk string) error  { return k.writeSlot("current.key", psk) }
 func (k *Keystore) WriteNext(psk string) error     { return k.writeSlot("next.key", psk) }
@@ -83,7 +123,20 @@ func (k *Keystore) writeSlot(name, psk string) error {
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
-	if _, err := io.WriteString(tmp, psk+"\n"); err != nil {
+	// Protect the at-rest bytes. Plaintext: the protector is identity, so we write
+	// EXACTLY the historical `psk+"\n"` (byte-identical). Env: the container is
+	// written RAW (no trailing newline — its bytes may end in any value).
+	blob, err := k.protector.Protect([]byte(psk), []byte(pskAAD))
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("protect %s: %w", name, err)
+	}
+	out := blob
+	if k.isPlaintext() {
+		out = append(blob, '\n')
+	}
+	if _, err := tmp.Write(out); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("write tmp: %w", err)
@@ -105,17 +158,43 @@ func (k *Keystore) writeSlot(name, psk string) error {
 }
 
 func (k *Keystore) readSlot(name string) (string, error) {
+	psk, _, err := k.readSlotRewrap(name)
+	return psk, err
+}
+
+// readSlotRewrap reads and unwraps a slot, also reporting whether the protector
+// signalled a rewrap (env binding changed, or legacy plaintext migrated). The
+// public Read* methods and the runtime callers (rotation worker, cleanup timer)
+// use readSlot and IGNORE rewrap — they MUST NOT rewrite, because Keystore has no
+// mutex and those callers run concurrently. Only single-threaded BOOT callers
+// (serveruntime cluster-key resolve) act on rewrap, via this method.
+func (k *Keystore) readSlotRewrap(name string) (string, bool, error) {
 	path := filepath.Join(k.dir, name)
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(f)
+	raw, err := io.ReadAll(f)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return strings.TrimSpace(string(b)), nil
+	// Fail-loud on a wrong-protector misread: a plaintext-default keystore reading
+	// an env container would otherwise return ~260 bytes of binary as a "PSK" with
+	// no error (length-only validation can't catch it), yielding a wrong identity
+	// that fails silently at the network handshake. The GKEK magic is the precise
+	// discriminator and never appears in a legitimate plaintext `psk+"\n"`.
+	if k.isPlaintext() && encrypt.LooksLikeEnvKEK(raw) {
+		return "", false, fmt.Errorf("readSlot %s: env-protected container on disk but --kek-protector is plaintext (config mismatch)", name)
+	}
+	// Unprotect the RAW, untrimmed bytes — a container ends in a GCM tag that may
+	// be a whitespace byte, so trimming before Unprotect would corrupt it (B1).
+	pt, rewrap, err := k.protector.Unprotect(raw, []byte(pskAAD))
+	if err != nil {
+		return "", false, fmt.Errorf("readSlot %s: %w", name, err)
+	}
+	// TrimSpace only the recovered plaintext (strips the plaintext path's `\n`).
+	return strings.TrimSpace(string(pt)), rewrap, nil
 }
 
 func (k *Keystore) deleteSlot(name string) error {

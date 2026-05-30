@@ -376,12 +376,30 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 ## Deferred Until Triggered
 
-- [ ] **At-rest KEK protection Slice 2 — cluster-key PSK** [P3]. The transport
-  cluster-key PSK (`internal/transport/keystore.go`, `keys.d`) is still written
-  plaintext. Apply the `encrypt.KeyProtector` seam (added in Slice 1, the
-  `--kek-protector` feature) to it so `env` mode also wraps the PSK. Mirror the
-  keystore integration: protector as a field, Protect on write, Unprotect+rewrap
-  on load, fail-closed.
+- [ ] **At-rest cluster-key PSK: distinguish rebind-rewrap from migrate-rewrap** [P3].
+  Slice 2 (cluster-key PSK protection) shipped, but the `KeyProtector.Unprotect`
+  contract collapses two cases into one `rewrap bool`: a REBIND (value came from a
+  successfully-opened recovery slot → trustworthy) and a MIGRATE (raw passthrough of
+  a non-container blob → untrustworthy). Consequence (code-gate MEDIUM): in env mode,
+  a container whose 4 GKEK magic bytes are corrupted (but AEAD slots intact) fails
+  `LooksLikeEnvKEK` → takes the legacy-raw branch → `ResolveClusterKey`
+  (`clusterkey.go`) persists the ~260-byte garbage via WriteCurrent on `hasDisk &&
+  rewrap` with no validate-before-persist → destroys the original slot, wrong identity
+  fails LATER at the QUIC handshake (not loud at boot). Narrow (needs env + corruption
+  hitting exactly the magic bytes). NOT fixable by `ValidateClusterKey` (length-only,
+  passes 260 bytes) NOR a hex gate (operator `--cluster-key` accepts non-hex 64-char
+  keys per psk.go — a hex gate would narrow the accepted key space = behavior change).
+  Correct structural fix: split `Unprotect`'s `rewrap` into rebind vs migrate (a
+  Slice-1 seam change touching the KEK path too) and only persist-on-rebind freely;
+  treat migrate as needing explicit validation. The KEK lane is immune by construction
+  (`KEKStore.Add` rejects `len!=32` BEFORE the rewrap-persist); the PSK lane has no
+  such exact-length invariant.
+- [ ] **M1 plaintext-guard latent footgun** [P3]. `keystore.go readSlotRewrap` fails
+  loud when a plaintext-protector keystore reads GKEK-magic bytes. Impossible today
+  (hex/random keys can't start with "GKEK"), but if PSK validation ever loosens to
+  accept arbitrary strings, a PSK literally starting with `GKEK` would make a node
+  unable to read its own key. Covered for free if the rewrap-split above adds a hex/
+  format gate.
 - [ ] **At-rest KEK protection Slice 3 — KMS/HSM/TPM providers** [P3]. Implement
   concrete `KeyProtector` backends behind the existing seam (envelope: external
   service wraps our KEK). No interface change; adds external SDK deps.
@@ -697,6 +715,12 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   helper 분리 검토.
 
 ## Pre-existing Test Failures (Phase B3 무관)
+
+- [ ] **`protocred.TestStoreRestoreIsDetachedAndPreservesNoPlaintextSecret` cross-package
+  flake [P3]**. FAILs intermittently in the full parallel `make test-unit` but PASSES
+  3/3 in isolation (`go test ./internal/protocred/`). Pure in-memory test (no env/files);
+  unrelated to the cluster-key-PSK-protection change (which doesn't touch protocred).
+  Likely shared-global/parallel-binary pollution. Surfaced 2026-05-30.
 
 - [ ] **Cluster4Node HeadObject가 expired object에 `MethodNotAllowed` 반환 [P1]**:
   `tests/e2e/lifecycle_expiration_test.go:111-118` TagFilter spec에서 expire 후

@@ -29,7 +29,7 @@ import (
 //  4. Both empty + cluster mode: rejected upstream by ValidateClusterKey.
 //     Both empty + solo mode: generate ephemeral so zero-config holds.
 func bootQUICTransport(ctx context.Context, state *bootState) error {
-	resolvedKey, warn, err := ResolveClusterKey(state.cfg.DataDir, state.cfg.ClusterKey)
+	resolvedKey, warn, err := ResolveClusterKey(state.cfg.DataDir, state.cfg.ClusterKey, state.cfg)
 	if err != nil {
 		return fmt.Errorf("resolve cluster key: %w", err)
 	}

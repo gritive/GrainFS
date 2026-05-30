@@ -342,7 +342,11 @@ func buildOnClusterKeyDroppedCallback(tr clusterKeyDropTarget) func() {
 // dependency but it shares the IAM gating with this phase, so co-locating
 // keeps the conditional check in one place.
 func bootRotationAndAdminAPI(state *bootState) error {
-	state.rotationKeystore = transport.NewKeystore(state.cfg.DataDir)
+	ks, err := newClusterKeystore(state.cfg.DataDir, state.cfg)
+	if err != nil {
+		return err
+	}
+	state.rotationKeystore = ks
 	state.rotationWorker = cluster.NewRotationWorker(state.rotationKeystore, state.quicTransport, state.nodeID)
 	worker := state.rotationWorker
 	state.metaRaft.FSM().SetOnRotationApplied(func(st cluster.RotationState) {
@@ -427,7 +431,7 @@ func bootRotationAndAdminAPI(state *bootState) error {
 // startRotationSocket is plumbed via parameter to keep this phase testable
 // without a real admin UDS. Production callers pass StartRotationSocket;
 // tests can pass a no-op.
-func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocket func(context.Context, string, *cluster.MetaRaft) error) error {
+func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocket func(context.Context, string, Config, *cluster.MetaRaft) error) error {
 	// An invite-joiner (inviteJoinMode) must NOT bootstrap its own meta-raft —
 	// same as joinMode, the leader adds it as a voter via the Phase-2 ACK.
 	if !state.inviteJoinMode {
@@ -460,7 +464,7 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 	// identical via raft); each node deletes its own local file.
 	state.metaRaft.StartPreviousKeyCleanup(ctx, state.rotationKeystore)
 	if startRotationSocket != nil {
-		if err := startRotationSocket(ctx, state.cfg.DataDir, state.metaRaft); err != nil {
+		if err := startRotationSocket(ctx, state.cfg.DataDir, state.cfg, state.metaRaft); err != nil {
 			log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 		}
 	}

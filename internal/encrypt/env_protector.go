@@ -128,14 +128,18 @@ func (p *EnvProtector) Protect(plaintext, aad []byte) ([]byte, error) {
 // migration). Fails closed: an unopenable container is an error, never a regen.
 func (p *EnvProtector) Unprotect(blob, aad []byte) ([]byte, bool, error) {
 	if !LooksLikeEnvKEK(blob) {
-		// Legacy raw KEK file: migrate into a container. Requires recovery.
-		if len(blob) != KEKSize {
-			return nil, false, fmt.Errorf("env protector: blob is neither a container nor a %d-byte raw KEK (len=%d)", KEKSize, len(blob))
+		// Legacy raw secret (plaintext KEK file OR cluster-key PSK slot): migrate
+		// into a container. The secret is arbitrary-length — no KEKSize requirement
+		// (the KEK caller enforces len==KEKSize downstream in KEKStore.Add; the PSK
+		// caller validates via a LooksLikeEnvKEK-mismatch guard in readSlot). An
+		// empty blob is never a valid secret.
+		if len(blob) == 0 {
+			return nil, false, fmt.Errorf("env protector: empty blob is neither a container nor a raw secret")
 		}
 		if _, err := p.requireRecovery(); err != nil {
 			return nil, false, fmt.Errorf("env protector: legacy migration needs a recovery secret: %w", err)
 		}
-		out := make([]byte, KEKSize)
+		out := make([]byte, len(blob))
 		copy(out, blob)
 		return out, true, nil
 	}

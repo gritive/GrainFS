@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/rs/zerolog/log"
 )
 
 // ResolveClusterKey applies the bootstrap conflict resolution rules from
@@ -17,10 +17,25 @@ import (
 //
 // Returns (resolved, warning_message, error). Warning is non-empty when the
 // caller should log.Warn the operator about a mismatch.
-func ResolveClusterKey(dataDir, flagKey string) (string, string, error) {
-	ks := transport.NewKeystore(dataDir)
-	diskKey, diskErr := ks.ReadCurrent()
+//
+// This is a BOOT read path (single-threaded, before the rotation worker and the
+// previous-key cleanup timer start), so it is the place where an env-protected
+// slot is REWRAPPED on a machine-binding change: ReadCurrentForBoot reports the
+// rewrap signal and we re-persist under the current factors. Persist failure is
+// NON-fatal (a read-only data dir must still boot) — log and proceed with the
+// in-memory key.
+func ResolveClusterKey(dataDir, flagKey string, cfg Config) (string, string, error) {
+	ks, err := newClusterKeystore(dataDir, cfg)
+	if err != nil {
+		return "", "", err
+	}
+	diskKey, rewrap, diskErr := ks.ReadCurrentForBoot()
 	hasDisk := diskErr == nil
+	if hasDisk && rewrap {
+		if werr := ks.WriteCurrent(diskKey); werr != nil {
+			log.Warn().Err(werr).Msg("cluster-key: rebind re-persist failed (continuing with in-memory key; will retry next boot)")
+		}
+	}
 
 	switch {
 	case hasDisk && flagKey != "" && diskKey != flagKey:

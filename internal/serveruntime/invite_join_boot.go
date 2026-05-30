@@ -261,8 +261,10 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions, dataDir string) (*
 		// Phase-1 mirrored to keys.d/current.key. ReadCurrent on a truly fresh
 		// dataDir returns ("", nil), so this is a no-op there.
 		if opts.ClusterKey == "" {
-			if psk, err := transport.NewKeystore(dataDir).ReadCurrent(); err == nil && psk != "" {
-				opts.ClusterKey = psk
+			if ks, kerr := clusterKeystoreFromOpts(dataDir, *opts); kerr == nil {
+				if psk, err := ks.ReadCurrent(); err == nil && psk != "" {
+					opts.ClusterKey = psk
+				}
 			}
 		}
 		return nil, nil
@@ -334,7 +336,11 @@ func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJo
 	if !ok {
 		return nil, fmt.Errorf("invite-join resume: sentinel missing or unreadable")
 	}
-	psk, err := transport.NewKeystore(dataDir).ReadCurrent()
+	ks, kerr := clusterKeystoreFromOpts(dataDir, *opts)
+	if kerr != nil {
+		return nil, fmt.Errorf("invite-join resume: build keystore: %w", kerr)
+	}
+	psk, err := ks.ReadCurrent()
 	if err != nil || psk == "" {
 		return nil, fmt.Errorf("invite-join resume: transport PSK (keys.d/current.key) missing or unreadable: %w", err)
 	}
@@ -571,7 +577,11 @@ func stageInviteJoinTransportKey(dataDir string, opts *ServeOptions, psk []byte,
 	}
 	opts.ClusterKey = transportKey
 	if transportKey != "" {
-		if err := transport.NewKeystore(dataDir).WriteCurrent(transportKey); err != nil {
+		ks, kerr := clusterKeystoreFromOpts(dataDir, *opts)
+		if kerr != nil {
+			return fmt.Errorf("build keystore: %w", kerr)
+		}
+		if err := ks.WriteCurrent(transportKey); err != nil {
 			return fmt.Errorf("mirror transport key to keystore: %w", err)
 		}
 	}
