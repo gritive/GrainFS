@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.486.0] - 2026-05-30
+
+### Fixed
+
+- **Fail-closed boot guard for a compacted raft log with a missing snapshot.** If a
+  node's raft log has been compacted (its early entries dropped after a snapshot)
+  but the snapshot itself is absent, the metadata state it covers cannot be
+  reconstructed. The node now refuses to start with a clear remediation message
+  instead of booting with incomplete state. This state does not arise from a normal
+  crash (snapshots are persisted before the log is compacted); reaching it indicates
+  storage corruption or an incomplete restore.
+
 ## [0.0.485.0] - 2026-05-30
 
 ### Changed
