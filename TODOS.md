@@ -716,6 +716,12 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 ## Pre-existing Test Failures (Phase B3 무관)
 
+- [ ] **`protocred.TestStoreRestoreIsDetachedAndPreservesNoPlaintextSecret` cross-package
+  flake [P3]**. FAILs intermittently in the full parallel `make test-unit` but PASSES
+  3/3 in isolation (`go test ./internal/protocred/`). Pure in-memory test (no env/files);
+  unrelated to the cluster-key-PSK-protection change (which doesn't touch protocred).
+  Likely shared-global/parallel-binary pollution. Surfaced 2026-05-30.
+
 - [ ] **Cluster4Node HeadObject가 expired object에 `MethodNotAllowed` 반환 [P1]**:
   `tests/e2e/lifecycle_expiration_test.go:111-118` TagFilter spec에서 expire 후
   HeadObject가 S3 표준 `NotFound` 대신 `MethodNotAllowed`를 반환. 기존 testify
