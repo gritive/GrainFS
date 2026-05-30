@@ -60,9 +60,10 @@ func readEncryptedObjectHeader(r io.Reader) (uint32, error) {
 // (pass io.Discard when no digest is needed). Returns the plaintext byte count.
 //
 // All chunks are sealed under one pinned generation: the gen returned by the
-// first chunk is captured and written into the file header; if a later chunk
-// seals at a different gen (e.g. a rotation raced the write) the whole write
-// fails so the header's dek_gen always describes every chunk.
+// first chunk is captured and written into the file header, and chunks 1+ seal
+// AT that pinned gen, so a DEK rotation racing the (possibly non-seekable) write
+// cannot split the object across generations — the header's dek_gen always
+// describes every chunk.
 func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encrypt.AADField, r io.Reader, plainSink io.Writer) (int64, error) {
 	f, err := os.Create(path)
 	if err != nil {
@@ -90,18 +91,28 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 				_, _ = plainSink.Write(plain)
 			}
 			fields[ordinalIdx] = encrypt.FieldUint32(uint32(chunk))
-			sealed, gen, err := enc.Seal(encrypt.DomainShard, fields, plain)
-			if err != nil {
-				return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
-			}
+			// chunk 0 seals at the active gen and pins it into the header;
+			// chunks 1+ seal AT the pinned gen so a DEK rotation racing this
+			// (possibly non-seekable) write can't split the object across
+			// generations.
+			var sealed []byte
+			var err error
 			if chunk == 0 {
+				var gen uint32
+				sealed, gen, err = enc.Seal(encrypt.DomainShard, fields, plain)
+				if err != nil {
+					return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
+				}
 				pinnedGen = gen
 				if err := writeEncryptedObjectHeader(bw, pinnedGen); err != nil {
 					return 0, err
 				}
 				headerWritten = true
-			} else if gen != pinnedGen {
-				return 0, fmt.Errorf("encrypt object chunk %d sealed at gen %d, pinned %d", chunk, gen, pinnedGen)
+			} else {
+				sealed, err = enc.SealAtGen(encrypt.DomainShard, fields, plain, pinnedGen)
+				if err != nil {
+					return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
+				}
 			}
 			if err := writeEncryptedObjectRecord(bw, uint32(n), sealed); err != nil {
 				return 0, err

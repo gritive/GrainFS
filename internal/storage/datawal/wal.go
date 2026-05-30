@@ -3,6 +3,7 @@ package datawal
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,6 +16,16 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
+
+// errGenAdvanced is returned by appendRecordOnce when a record sealed under a
+// DEK generation that differs from the open segment's pinned header gen — i.e.
+// a DEK rotation advanced the active gen since this segment was opened. The
+// attempt fully rolls back before returning it, so appendRecord can roll the
+// segment and retry cleanly. maxRotationRollRetries bounds the (astronomically
+// rare) case of repeated rotations within a single append.
+var errGenAdvanced = errors.New("datawal: dek gen advanced; segment roll required")
+
+const maxRotationRollRetries = 3
 
 const (
 	fileMagic       = uint32(0x4457414c) // "DWAL"
@@ -119,7 +130,34 @@ func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64
 	return w.appendRecord(ctx, rec)
 }
 
+// appendRecord appends rec, transparently rolling the segment and retrying if a
+// DEK rotation advanced the active gen since this segment was opened. The roll
+// happens BETWEEN independent appendRecordOnce attempts (each atomic under
+// w.mu), never inside one — so a parked attempt can never hold a claimed seq
+// while another appender claims the same seq (the seq-duplication corruption the
+// plan gate caught). Common case (no rotation): one attempt, zero extra work.
 func (w *WAL) appendRecord(ctx context.Context, rec Record) (uint64, error) {
+	for attempt := 0; ; attempt++ {
+		seq, err := w.appendRecordOnce(ctx, rec)
+		if !errors.Is(err, errGenAdvanced) {
+			return seq, err
+		}
+		if attempt >= maxRotationRollRetries {
+			// Repeated rotations within one append's locked attempts — a rotation
+			// storm. Astronomically unlikely (rotation is a deliberate operator
+			// action); fail with a clear message so the caller can retry upstream.
+			return 0, fmt.Errorf("datawal: append failed after %d rotation rolls (rotation storm?): %w", attempt, err)
+		}
+		// The mismatched attempt fully rolled back (no seq claimed). Roll the
+		// segment to the new gen via the public method (own lock, isSyncing-wait,
+		// no-op when already rolled by a concurrent appender), then retry.
+		if rerr := w.RollSegmentOnRotation(); rerr != nil {
+			return 0, fmt.Errorf("datawal: roll segment on rotation: %w", rerr)
+		}
+	}
+}
+
+func (w *WAL) appendRecordOnce(ctx context.Context, rec Record) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -149,7 +187,7 @@ func (w *WAL) appendRecord(ctx context.Context, rec Record) (uint64, error) {
 		var gen uint32
 		gen, err = encodeEncryptedRecordGen(w.file, rec, w.sealer, w.namespace)
 		if err == nil && gen != w.dekGen {
-			err = fmt.Errorf("datawal: record gen %d != pinned header gen %d", gen, w.dekGen)
+			err = fmt.Errorf("datawal: record gen %d != pinned header gen %d: %w", gen, w.dekGen, errGenAdvanced)
 		}
 	} else {
 		err = EncodeRecord(w.file, rec)

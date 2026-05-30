@@ -40,12 +40,11 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-// TestDispatcher_RotateConfigIsDeferred: R1 gates data-DEK rotation. Even on
-// the leader, an encryption.rotate-dek=now ConfigPut must NOT propose a rotate
-// (the active DEK gen stays 0 for the gen-pinning logical-WAL/packblob/pipeline
-// sealers). The operator-facing rejection lives at the config-set boundary
-// (internal/config/keys.go); this is the defensive dispatcher-side skip.
-func TestDispatcher_RotateConfigIsDeferred(t *testing.T) {
+// TestDispatcher_RotateConfigProposesRotate: S5 enables data-DEK rotation. On the
+// leader, an encryption.rotate-dek=now ConfigPut proposes exactly one rotation,
+// off the apply goroutine (the go func escape that avoids re-entering the raft
+// apply loop). A non-leader proposes none.
+func TestDispatcher_RotateConfigProposesRotate(t *testing.T) {
 	p := &fakeDEKProposer{}
 	d := &DEKPostCommitDispatcher{
 		proposer: p,
@@ -57,10 +56,24 @@ func TestDispatcher_RotateConfigIsDeferred(t *testing.T) {
 		t.Fatalf("encode: %v", err)
 	}
 	d.Handle(clusterpb.MetaCmdTypeConfigPut, payload)
+	waitFor(t, 2*time.Second, func() bool { return p.rotateCalls.Load() == 1 })
 
+	// Settle briefly and assert it proposed exactly once (not repeatedly).
+	time.Sleep(50 * time.Millisecond)
+	if got := p.rotateCalls.Load(); got != 1 {
+		t.Fatalf("leader must propose exactly one rotation, got %d", got)
+	}
+
+	// Non-leader: the dispatcher must not propose.
+	p2 := &fakeDEKProposer{}
+	d2 := &DEKPostCommitDispatcher{
+		proposer: p2,
+		isLeader: func() bool { return false },
+	}
+	d2.Handle(clusterpb.MetaCmdTypeConfigPut, payload)
 	time.Sleep(100 * time.Millisecond)
-	if p.rotateCalls.Load() != 0 {
-		t.Fatal("rotate-dek is deferred in R1; dispatcher must not propose a rotation")
+	if p2.rotateCalls.Load() != 0 {
+		t.Fatal("non-leader must not propose rotation")
 	}
 }
 

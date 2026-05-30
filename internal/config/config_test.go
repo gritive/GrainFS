@@ -181,16 +181,18 @@ func TestOIDCIssuersConfigRestoreDropsInvalidSnapshot(t *testing.T) {
 	require.Equal(t, "[]", got)
 }
 
-// TestRegisterClusterKeys_RotateDEKDeferred: encryption.rotate-dek stays
-// REGISTERED (catalog presence above) but its use is GATED — Set with the
-// only valid trigger value "now" must be rejected with the deferral error so
-// the active DEK gen can never advance past 0 (R1: per-segment gen framing for
-// the logical-WAL/packblob lanes is a future slice; spec decision #5).
-func TestRegisterClusterKeys_RotateDEKDeferred(t *testing.T) {
+// TestRegisterClusterKeys_RotateDEKEnabled: encryption.rotate-dek is ENABLED (S5).
+// The trigger ACCEPTS "now" as a no-op at apply time (it runs inside the raft
+// apply loop, where proposing would deadlock; the post-commit dispatcher does the
+// actual leader-gated rotation). A non-"now" value is still rejected by the
+// trigger's value validation.
+func TestRegisterClusterKeys_RotateDEKEnabled(t *testing.T) {
 	s := config.NewStore()
 	config.RegisterClusterKeys(s, config.ReloadHooks{})
 
-	err := s.Set(context.Background(), "encryption.rotate-dek", "now")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "deferred")
+	require.NoError(t, s.Set(context.Background(), "encryption.rotate-dek", "now"),
+		"rotate-dek trigger must accept \"now\" (no-op at apply; dispatcher proposes)")
+
+	err := s.Set(context.Background(), "encryption.rotate-dek", "bogus")
+	require.Error(t, err, "non-\"now\" trigger value must be rejected")
 }
