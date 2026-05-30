@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/iceberg"
 )
 
 // icebergSigV4SkewWindow is the maximum allowed clock drift between a SigV4
@@ -127,7 +128,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			}
 			if reason := icebergSkewReject(r); reason != "" {
 				s.recordAuditAuthFailure(ctx, c, consts.StatusUnauthorized, "authn")
-				writeIcebergError(c, 401, "NotAuthorizedException", reason)
+				iceberg.WriteError(c, 401, "NotAuthorizedException", reason)
 				c.Abort()
 				return
 			}
@@ -164,7 +165,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 					if failure != nil {
 						s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
 						if isIceberg {
-							writeIcebergError(c, 401, "NotAuthorizedException", failure.message)
+							iceberg.WriteError(c, 401, "NotAuthorizedException", failure.message)
 						} else {
 							writeXMLError(c, failure.status, failure.code, failure.message)
 						}
@@ -187,7 +188,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 				// authn failure; remap to 401 + NotAuthorizedException for Iceberg
 				// callers. failure.code (S3-XML) is dropped to keep S3-specific
 				// codes out of the Iceberg JSON.
-				writeIcebergError(c, 401, "NotAuthorizedException", failure.message)
+				iceberg.WriteError(c, 401, "NotAuthorizedException", failure.message)
 			} else {
 				writeXMLError(c, failure.status, failure.code, failure.message)
 			}
@@ -227,12 +228,6 @@ func icebergSkewReject(r *http.Request) string {
 // emits token_type:"bearer" (lowercase), so clients may send either form.
 func hasBearerPrefix(s string) bool {
 	return len(s) >= 7 && strings.EqualFold(s[:7], "Bearer ")
-}
-
-// trimBearerPrefix strips the case-insensitive "Bearer " prefix from s and
-// returns the remaining token. Callers must have checked hasBearerPrefix first.
-func trimBearerPrefix(s string) string {
-	return s[7:]
 }
 
 func s3authActionAllowsRO(action s3auth.S3Action) bool {

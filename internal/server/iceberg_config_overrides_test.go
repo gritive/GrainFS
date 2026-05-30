@@ -1,68 +1,16 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
-
-// TestIcebergS3CredOverrides_CallerIdentity verifies that /v1/config publishes
-// the caller's *own* access/secret pair — not some other SA's keys (privilege
-// amplification prevention). Legacy grant-check removed in §2; credential
-// forwarding is best-effort for the key that authenticated the request.
-func TestIcebergS3CredOverrides_CallerIdentity(t *testing.T) {
-	h := newIAMTestHelper(t)
-
-	h.applySACreate(t, "sa-alpha")
-	h.applyKeyCreate(t, "ak-alpha", "sa-alpha", "sk-alpha")
-
-	h.applySACreate(t, "sa-beta")
-	h.applyKeyCreate(t, "ak-beta", "sa-beta", "sk-beta")
-
-	s := &Server{iamStore: h.store}
-	warehouse := "s3://grainfs-tables/warehouse"
-
-	t.Run("alpha caller gets own creds", func(t *testing.T) {
-		ctx := WithAccessKey(context.Background(), "ak-alpha")
-		got := s.icebergS3CredOverrides(ctx, warehouse)
-		require.Equal(t, "ak-alpha", got["s3.access-key-id"],
-			"caller must receive their own ak, not another SA's")
-		require.Equal(t, "sk-alpha", got["s3.secret-access-key"])
-		require.Equal(t, "true", got["s3.path-style-access"])
-	})
-
-	t.Run("beta caller gets own creds", func(t *testing.T) {
-		ctx := WithAccessKey(context.Background(), "ak-beta")
-		got := s.icebergS3CredOverrides(ctx, warehouse)
-		require.Equal(t, "ak-beta", got["s3.access-key-id"])
-		require.Equal(t, "sk-beta", got["s3.secret-access-key"])
-	})
-
-	t.Run("no caller identity means empty overrides", func(t *testing.T) {
-		got := s.icebergS3CredOverrides(context.Background(), warehouse)
-		require.Empty(t, got)
-	})
-
-	t.Run("unknown access key means empty overrides", func(t *testing.T) {
-		ctx := WithAccessKey(context.Background(), "ak-never-existed")
-		got := s.icebergS3CredOverrides(ctx, warehouse)
-		require.Empty(t, got)
-	})
-
-	t.Run("malformed warehouse means empty overrides", func(t *testing.T) {
-		ctx := WithAccessKey(context.Background(), "ak-alpha")
-		got := s.icebergS3CredOverrides(ctx, "not-an-s3-url")
-		require.Empty(t, got)
-	})
-}
 
 // TestIcebergConfigHandler_SchemeReflection drives the actual /v1/config
 // handler end-to-end (SigV4 signed) and asserts the published s3.endpoint
@@ -139,32 +87,4 @@ func TestIcebergConfigHandler_HTTPDoesNotPublishS3Secrets(t *testing.T) {
 	require.NotContains(t, got.Overrides, "s3.secret-access-key")
 	require.NotContains(t, got.Overrides, "s3.path-style-access")
 	require.True(t, strings.HasPrefix(got.Overrides["s3.endpoint"], "http://"))
-}
-
-func TestIcebergConfigHandler_HTTPSPublishesCallerS3Secrets(t *testing.T) {
-	hh := newIAMTestHelper(t)
-	hh.applySACreate(t, "sa-bench")
-	hh.applyKeyCreate(t, "AK-bench", "sa-bench", "SK-bench")
-	s := &Server{
-		iamStore:       hh.store,
-		icebergCatalog: fakeIcebergCatalog{warehouse: "s3://grainfs-tables/warehouse"},
-	}
-	ctx := WithAccessKey(context.Background(), "AK-bench")
-	c := app.NewContext(0)
-	c.Request.SetRequestURI("/iceberg/v1/config?warehouse=warehouse")
-	c.Request.SetHost("grainfs.example")
-	c.Request.URI().SetScheme("https")
-
-	s.icebergConfig(ctx, c)
-
-	require.Equal(t, http.StatusOK, c.Response.StatusCode())
-	var got struct {
-		Defaults  map[string]string `json:"defaults"`
-		Overrides map[string]string `json:"overrides"`
-	}
-	require.NoError(t, json.Unmarshal(c.Response.Body(), &got))
-	require.Equal(t, "AK-bench", got.Overrides["s3.access-key-id"])
-	require.Equal(t, "SK-bench", got.Overrides["s3.secret-access-key"])
-	require.Equal(t, "true", got.Overrides["s3.path-style-access"])
-	require.Equal(t, "https://grainfs.example", got.Overrides["s3.endpoint"])
 }

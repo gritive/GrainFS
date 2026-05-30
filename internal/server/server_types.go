@@ -23,6 +23,7 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -125,17 +126,13 @@ type Server struct {
 	blockCache    *blockcache.Cache
 	shardCache    *shardcache.Cache
 	jwtKeys       *iamjwt.KeySet
-	oauthHandler  *icebergOAuthHandler
+	iceberg       *iceberg.Handler
 	proxyTrust    *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration
 
 	eventQueueSize int
-
-	// Iceberg §9.1 진단 계측 (default OFF). NewWithServerStorage가 boot 시 ENV에서 읽는다.
-	icebergAccessLogEnabled      atomic.Bool
-	icebergCommitSlowThresholdNs atomic.Int64
 
 	eventWorker *eventWorker
 

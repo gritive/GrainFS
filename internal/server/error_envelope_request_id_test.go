@@ -14,6 +14,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/server/iceberg"
 )
 
 // TestS3Error_IncludesRequestID: when WithRequestID has stashed a rid on the
@@ -59,7 +61,7 @@ func TestIcebergError_IncludesRequestID(t *testing.T) {
 	c := app.NewContext(0)
 	c.Set(requestIDHertzKey, rid)
 
-	writeIcebergError(c, 401, "NotAuthorizedException", "missing bearer token")
+	iceberg.WriteError(c, 401, "NotAuthorizedException", "missing bearer token")
 
 	body := string(c.Response.Body())
 	require.NotEmpty(t, body, "response body must not be empty")
@@ -77,7 +79,7 @@ func TestIcebergError_IncludesRequestID(t *testing.T) {
 func TestIcebergError_OmitsEmptyRequestID(t *testing.T) {
 	c := app.NewContext(0)
 
-	writeIcebergError(c, 500, "InternalServerError", "boom")
+	iceberg.WriteError(c, 500, "InternalServerError", "boom")
 	body := string(c.Response.Body())
 	assert.NotContains(t, body, `"request_id"`,
 		"missing rid must omit the request_id field entirely")

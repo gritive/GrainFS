@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -11,8 +11,8 @@ import (
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
-func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergCommitTable(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
 	var req struct {
@@ -20,10 +20,10 @@ func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) 
 		Updates      []json.RawMessage `json:"updates"`
 	}
 	if err := decodeIcebergBody(c.Request.Body(), &req); err != nil {
-		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid table commit request")
+		WriteError(c, consts.StatusBadRequest, "BadRequestException", "invalid table commit request")
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -48,7 +48,7 @@ func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) 
 			writeIcebergMappedError(c, err)
 			return
 		}
-		committed, applied, commitErr := s.commitIcebergTableFrom(ctx, c, store, tbl, req.Requirements, req.Updates)
+		committed, applied, commitErr := h.commitIcebergTableFrom(ctx, c, store, tbl, req.Requirements, req.Updates)
 		if applied {
 			writeIcebergTable(c, committed)
 			return
@@ -69,8 +69,8 @@ func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) 
 	writeIcebergMappedError(c, lastErr)
 }
 
-func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergCommitTransaction(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
 	var req struct {
@@ -81,10 +81,10 @@ func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestCon
 		} `json:"table-changes"`
 	}
 	if err := decodeIcebergBody(c.Request.Body(), &req); err != nil {
-		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction commit request")
+		WriteError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction commit request")
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -100,7 +100,7 @@ func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestCon
 				return
 			}
 		}
-		next, applied, commitErr := s.commitIcebergTableFrom(ctx, c, store, tbl, change.Requirements, change.Updates)
+		next, applied, commitErr := h.commitIcebergTableFrom(ctx, c, store, tbl, change.Requirements, change.Updates)
 		if !applied {
 			// For the transaction commit endpoint we deliberately do not
 			// retry: a transaction's table-changes may have inter-table

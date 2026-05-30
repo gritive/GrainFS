@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"bytes"
@@ -18,12 +18,13 @@ import (
 // The oauth.Handler parses form bodies via r.ParseForm(); we reconstruct
 // a stdlib http.Request with the raw POST body so ParseForm works correctly.
 type icebergOAuthHandler struct {
-	inner    *oauth.Handler
-	sourceIP func(*app.RequestContext) string
+	inner         *oauth.Handler
+	sourceIP      func(*app.RequestContext) string
+	newRespWriter func(*app.RequestContext) http.ResponseWriter
 }
 
-func newIcebergOAuthHandler(sa oauth.SAResolver, keys *iamjwt.KeySet, authz oauth.Authorizer, sourceIP func(*app.RequestContext) string) *icebergOAuthHandler {
-	return &icebergOAuthHandler{inner: oauth.NewHandler(sa, keys, authz), sourceIP: sourceIP}
+func newIcebergOAuthHandler(sa oauth.SAResolver, keys *iamjwt.KeySet, authz oauth.Authorizer, sourceIP func(*app.RequestContext) string, newRespWriter func(*app.RequestContext) http.ResponseWriter) *icebergOAuthHandler {
+	return &icebergOAuthHandler{inner: oauth.NewHandler(sa, keys, authz), sourceIP: sourceIP, newRespWriter: newRespWriter}
 }
 
 type auditInternalOAuthResolver struct {
@@ -79,16 +80,16 @@ func (h *icebergOAuthHandler) handle(ctx context.Context, c *app.RequestContext)
 	c.Request.Header.VisitAll(func(k, v []byte) {
 		r.Header.Set(string(k), string(v))
 	})
-	w := newResponseWriter(c)
+	w := h.newRespWriter(c)
 	h.inner.ServeHTTP(w, r)
 }
 
 // oauthHandlerFunc returns a Hertz handler function that delegates to the
 // wired icebergOAuthHandler.  Returns a 503 handler when no oauth handler
 // is configured (e.g. tests that don't call WithJWTKeySet + WithIAMStore).
-func (s *Server) oauthHandlerFunc() app.HandlerFunc {
-	if s.oauthHandler != nil {
-		return s.oauthHandler.handle
+func (h *Handler) oauthHandlerFunc() app.HandlerFunc {
+	if h.oauthHandler != nil {
+		return h.oauthHandler.handle
 	}
 	return func(_ context.Context, c *app.RequestContext) {
 		c.JSON(http.StatusServiceUnavailable,
