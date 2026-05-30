@@ -13,7 +13,12 @@ const (
 	routePrefixAdmin         = "/admin/"
 	routePrefixIceberg       = "/iceberg/"
 	routePrefixIcebergAIStor = "/_iceberg/"
-	routePrefixUI            = "/ui/"
+
+	// routePathOAuthTokenSuffix is the iceberg OAuth2 token endpoint suffix,
+	// appended to each iceberg route prefix. The iceberg package holds its own
+	// copy for route registration; core uses this for the route-surface manifest.
+	routePathOAuthTokenSuffix = "v1/oauth/tokens"
+	routePrefixUI             = "/ui/"
 
 	routePathEvents            = "/api/events"
 	routePathHealEventsStream  = "/api/events/heal/stream"
