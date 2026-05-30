@@ -321,6 +321,9 @@ start_grainfs_single() {
     GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
     extra+=(--pprof-port "$PPROF_BASE_PORT")
   fi
+  if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
+    extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
+  fi
   "$BINARY" serve \
     --data "$data_arg" \
     --port "$port" \
@@ -384,6 +387,9 @@ start_grainfs_cluster() {
     local extra=()
     if [[ "$BENCH_PPROF" == "1" ]]; then
       extra+=(--pprof-port "${pprof_ports[$zero_idx]}")
+    fi
+    if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
+      extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
     fi
     # Pre-stage the cluster transport PSK on disk (replaces the removed
     # cluster-key flag). Idempotent; must precede serve.
