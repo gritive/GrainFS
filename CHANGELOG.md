@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.485.0] - 2026-05-30
+
+### Changed
+
+- **A data-DEK rotation now re-encrypts existing at-rest data onto the new
+  generation.** Previously `encryption.rotate-dek` advanced the active key but
+  left already-stored data sealed under the old generation (still readable, but
+  never migrated). The rotation now sweeps the two at-rest data lanes — EC shards
+  (single-node and cluster) and packed blobs (single-node) — re-encrypting every
+  record onto the active generation. The sweep is idempotent and tolerant of
+  multiple un-migrated generations. Progress is exposed via two metrics,
+  `grainfs_rewrap_ec_shards_total` and `grainfs_rewrap_packblob_entries_total`
+  (labeled by active generation). This is migration-only: it does not yet report
+  completion or prune old generations. Note: packed-blob rewrap re-appends
+  entries to new blobs without reclaiming the old ones, so a rotation temporarily
+  increases packed-blob disk usage until blob reclamation lands.
+
 ## [0.0.483.0] - 2026-05-30
 
 ### Fixed
