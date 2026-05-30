@@ -1,4 +1,4 @@
-package server
+package receiptsvc
 
 import (
 	"testing"
@@ -48,13 +48,13 @@ func TestReceiptTrackingEmitter_SigningHealthy(t *testing.T) {
 
 	t.Run("healthy when keystore has active key", func(t *testing.T) {
 		ks := newTestKeyStore(t)
-		e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+		e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 		defer e.Close()
 		assert.True(t, e.SigningHealthy())
 	})
 
 	t.Run("unhealthy when keystore is nil", func(t *testing.T) {
-		e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, nil)
+		e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, nil)
 		defer e.Close()
 		assert.False(t, e.SigningHealthy())
 	})
@@ -63,7 +63,7 @@ func TestReceiptTrackingEmitter_SigningHealthy(t *testing.T) {
 func TestReceiptTrackingEmitter_FinalizeSession(t *testing.T) {
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 	defer e.Close()
 
 	cid := "test-correlation-id"
@@ -125,7 +125,7 @@ func TestReceiptTrackingEmitter_FinalizeSession(t *testing.T) {
 
 func TestReceiptTrackingEmitter_FinalizeSession_NoKeyStore(t *testing.T) {
 	store := newTestStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, nil)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, nil)
 	defer e.Close()
 
 	cid := "no-ks-cid"
@@ -146,7 +146,7 @@ func TestReceiptTrackingEmitter_FinalizeSession_NoKeyStore(t *testing.T) {
 func TestReceiptTrackingEmitter_OrphanSweep(t *testing.T) {
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 
 	cid := "orphan-session"
 	ev := scrubber.NewEvent(scrubber.PhaseDetect, scrubber.OutcomeFailed)
@@ -163,7 +163,7 @@ func TestReceiptTrackingEmitter_OrphanSweep(t *testing.T) {
 func TestReceiptTrackingEmitter_Emit_EmptyCorrelationID(t *testing.T) {
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 	defer e.Close()
 
 	ev := scrubber.NewEvent(scrubber.PhaseDetect, scrubber.OutcomeFailed)
@@ -178,7 +178,7 @@ func TestReceiptTrackingEmitter_Emit_EmptyCorrelationID(t *testing.T) {
 func TestReceiptTrackingEmitter_Emit_MaxEventsPerSession(t *testing.T) {
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 	defer e.Close()
 
 	cid := "cap-test"
@@ -202,7 +202,7 @@ func TestReceiptTrackingEmitter_Emit_MaxEventsPerSession(t *testing.T) {
 func TestReceiptTrackingEmitter_FinalizeSession_NotFound(t *testing.T) {
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 	defer e.Close()
 
 	// FinalizeSession for a cid that was never emitted must be a no-op.
@@ -215,7 +215,7 @@ func TestReceiptTrackingEmitter_FinalizeSession_NotFound(t *testing.T) {
 func TestReceiptTrackingEmitter_ConcurrentEmitAndFinalize(t *testing.T) {
 	store := newTestStore(t)
 	ks := newTestKeyStore(t)
-	e := NewReceiptTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
+	e := NewTrackingEmitter(scrubber.NoopEmitter{}, store, ks)
 	defer e.Close()
 
 	const goroutines = 20
