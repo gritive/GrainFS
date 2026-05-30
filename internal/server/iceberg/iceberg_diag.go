@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -37,12 +37,12 @@ func parseIcebergDiagEnv() (accessLog bool, slowThresholdNs int64) {
 	return accessLog, slowThresholdNs
 }
 
-// applyIcebergDiagEnv stores the parsed flags onto the server's atomics.
+// ApplyDiagEnv stores the parsed flags onto the handler's atomics.
 // Called once during NewWithServerStorage boot. Hot paths read via atomic.Load.
-func (s *Server) applyIcebergDiagEnv() {
+func (h *Handler) ApplyDiagEnv() {
 	access, slowNs := parseIcebergDiagEnv()
-	s.icebergAccessLogEnabled.Store(access)
-	s.icebergCommitSlowThresholdNs.Store(slowNs)
+	h.accessLogEnabled.Store(access)
+	h.commitSlowThresholdNs.Store(slowNs)
 }
 
 // logIcebergAccess emits a single iceberg_access zerolog line.
@@ -60,14 +60,14 @@ func logIcebergAccess(method, path string, status int, elapsed time.Duration) {
 // icebergAccessLog wraps a Hertz handler with a single-line zerolog emit
 // describing each request. When the access log flag is OFF, the closure
 // short-circuits with a single atomic.Bool load (zero alloc verified by test).
-func (s *Server) icebergAccessLog(h app.HandlerFunc) app.HandlerFunc {
+func (h *Handler) icebergAccessLog(next app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if !s.icebergAccessLogEnabled.Load() {
-			h(ctx, c)
+		if !h.accessLogEnabled.Load() {
+			next(ctx, c)
 			return
 		}
 		start := time.Now()
-		h(ctx, c)
+		next(ctx, c)
 		logIcebergAccess(
 			string(c.Request.Method()),
 			string(c.Request.Path()),

@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -12,12 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-// icebergClaimsKey is the context key under which *iamjwt.Claims are stored
-// after successful bearer authentication.
-type icebergClaimsKeyType struct{}
-
-var icebergClaimsKey = icebergClaimsKeyType{}
-
 // icebergGuarded wraps a Hertz handler with bearer-JWT authentication and
 // policy gating.  It intercepts only requests with an "Authorization: Bearer …"
 // header; all other requests pass through untouched (the existing SigV4
@@ -25,7 +19,7 @@ var icebergClaimsKey = icebergClaimsKeyType{}
 //
 // When jwtKeys is nil the wrapper is a transparent no-op (JWT not configured).
 // Emits one audit.s3 row per bearer-gated request (allow or deny).
-func (s *Server) icebergGuarded(action string, h app.HandlerFunc) app.HandlerFunc {
+func (h *Handler) icebergGuarded(action string, next app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		start := time.Now()
 
@@ -35,19 +29,19 @@ func (s *Server) icebergGuarded(action string, h app.HandlerFunc) app.HandlerFun
 			// Audit for SigV4-authenticated Iceberg requests is outside F29 scope;
 			// the S3 audit envelope middleware does not fire on /iceberg/* routes
 			// (they have no {bucket} path param), so this is a known gap.
-			h(ctx, c)
+			next(ctx, c)
 			return
 		}
 
-		claims, evalResult, authzLatencyUS, ok := s.icebergAuthnCheck(ctx, c, trimBearerPrefix(authHeader), action, start)
+		claims, evalResult, authzLatencyUS, ok := h.icebergAuthnCheck(ctx, c, trimBearerPrefix(authHeader), action, start)
 		if !ok {
 			return // response already written; deny audit emitted inside icebergAuthnCheck
 		}
 		if claims != nil {
-			ctx = context.WithValue(ctx, icebergClaimsKey, claims)
+			ctx = context.WithValue(ctx, ClaimsKey, claims)
 		}
-		h(ctx, c)
-		s.emitIcebergAuditAllow(ctx, c, action, claims, evalResult, authzLatencyUS, start)
+		next(ctx, c)
+		h.emitIcebergAuditAllow(ctx, c, action, claims, evalResult, authzLatencyUS, start)
 	}
 }
 
@@ -61,20 +55,20 @@ func (s *Server) icebergGuarded(action string, h app.HandlerFunc) app.HandlerFun
 //
 // start is the request start time, threaded in so deny rows share the same
 // timestamp baseline as the allow row that icebergGuarded would emit.
-func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, token, action string, start time.Time) (*iamjwt.Claims, *policy.EvalResult, int32, bool) {
+func (h *Handler) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, token, action string, start time.Time) (*iamjwt.Claims, *policy.EvalResult, int32, bool) {
 	// No JWT keys configured → bearer path unavailable.
-	if s.jwtKeys == nil {
-		writeIcebergError(c, 401, "NotAuthorizedException", "bearer authentication not configured")
+	if h.deps.JWTKeys == nil {
+		WriteError(c, 401, "NotAuthorizedException", "bearer authentication not configured")
 		c.Abort()
-		s.emitIcebergAuditDeny(ctx, c, action, "", "", 401, "bearer_not_configured", nil, 0, start)
+		h.emitIcebergAuditDeny(ctx, c, action, "", "", 401, "bearer_not_configured", nil, 0, start)
 		return nil, nil, 0, false
 	}
 
-	claims, err := s.jwtKeys.Verify(token)
+	claims, err := h.deps.JWTKeys.Verify(token)
 	if err != nil {
-		writeIcebergError(c, 401, "unauthorized", "invalid or expired bearer token: "+err.Error())
+		WriteError(c, 401, "unauthorized", "invalid or expired bearer token: "+err.Error())
 		c.Abort()
-		s.emitIcebergAuditDeny(ctx, c, action, "", "", 401, "invalid_token", nil, 0, start)
+		h.emitIcebergAuditDeny(ctx, c, action, "", "", 401, "invalid_token", nil, 0, start)
 		return nil, nil, 0, false
 	}
 
@@ -82,9 +76,9 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 	// warehouse claim. An empty claim indicates a malformed or tampered token;
 	// do not fall through to the SigV4 default-warehouse path.
 	if claims.Warehouse == "" {
-		writeIcebergError(c, 401, "unauthorized", "bearer token has empty warehouse claim")
+		WriteError(c, 401, "unauthorized", "bearer token has empty warehouse claim")
 		c.Abort()
-		s.emitIcebergAuditDeny(ctx, c, action, claims.Sub, "", 401, "empty_warehouse_claim", nil, 0, start)
+		h.emitIcebergAuditDeny(ctx, c, action, claims.Sub, "", 401, "empty_warehouse_claim", nil, 0, start)
 		return nil, nil, 0, false
 	}
 
@@ -96,30 +90,30 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 		reqWarehouse = c.Param("warehouse")
 	}
 	if reqWarehouse != "" && reqWarehouse != claims.Warehouse {
-		writeIcebergError(c, 403, "ForbiddenException", "warehouse claim mismatch (F#4)")
+		WriteError(c, 403, "ForbiddenException", "warehouse claim mismatch (F#4)")
 		c.Abort()
-		s.emitIcebergAuditDeny(ctx, c, action, claims.Sub, claims.Warehouse, 403, "warehouse_mismatch", nil, 0, start)
+		h.emitIcebergAuditDeny(ctx, c, action, claims.Sub, claims.Warehouse, 403, "warehouse_mismatch", nil, 0, start)
 		return nil, nil, 0, false
 	}
 
 	// Policy gate (F#5). §5 T45: SourceIP uses ProxyTrust-validated authoritative
 	// client IP rather than naive X-Forwarded-For first-hop — that prevents
 	// spoofing by direct clients and rejects untrusted-proxy forwarding chains.
-	if s.policyAuthorizer != nil {
+	if h.deps.PolicyAuthorizer != nil {
 		if claims.Sub == audit.SystemSA && claims.Warehouse == audit.Warehouse && auditInternalIcebergReadAction(action) {
 			return claims, nil, 0, true
 		}
 		authzStart := time.Now()
-		result := s.policyAuthorizer.Authorize(ctx, claims.Sub, claims.Warehouse, policy.RequestContext{
+		result := h.deps.PolicyAuthorizer.Authorize(ctx, claims.Sub, claims.Warehouse, policy.RequestContext{
 			Action:   action,
 			Resource: "arn:aws:s3:::" + claims.Warehouse,
-			SourceIP: s.authoritativeClientIP(c),
+			SourceIP: h.deps.ClientIP(c),
 		})
 		authzLatencyUS := int32(time.Since(authzStart).Microseconds())
 		if result.Decision != policy.DecisionAllow {
-			writeIcebergError(c, 403, "ForbiddenException", "policy denied: "+result.Reason)
+			WriteError(c, 403, "ForbiddenException", "policy denied: "+result.Reason)
 			c.Abort()
-			s.emitIcebergAuditDeny(ctx, c, action, claims.Sub, claims.Warehouse, 403, result.Reason, &result, authzLatencyUS, start)
+			h.emitIcebergAuditDeny(ctx, c, action, claims.Sub, claims.Warehouse, 403, result.Reason, &result, authzLatencyUS, start)
 			return nil, nil, 0, false
 		}
 		return claims, &result, authzLatencyUS, true
@@ -131,7 +125,7 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 // IcebergClaimsFromContext retrieves the *iamjwt.Claims stored by icebergGuarded.
 // Returns nil when no bearer authentication occurred (e.g., SigV4 path).
 func IcebergClaimsFromContext(ctx context.Context) *iamjwt.Claims {
-	v, _ := ctx.Value(icebergClaimsKey).(*iamjwt.Claims)
+	v, _ := ctx.Value(ClaimsKey).(*iamjwt.Claims)
 	return v
 }
 
