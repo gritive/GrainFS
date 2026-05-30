@@ -195,8 +195,7 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	// Wire the real DEK proposer (state.metaRaft) and leader gate now that
 	// metaRaft is already stored on state (boot_phases_raft.go:54 runs before
 	// this call at line 100). The leader gate collapses N-node post-commit
-	// fan-out to a single proposal. scrubberKick remains nil until the
-	// storage-layer adapter is implemented.
+	// fan-out to a single proposal.
 	//
 	// Unit tests that call wireDEKKeeper directly without a MetaRaft pass nil
 	// for both proposer and isLeader; nil isLeader is treated as not-leader
@@ -205,7 +204,12 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	if state.metaRaft != nil {
 		isLeaderFn = state.metaRaft.IsLeader
 	}
-	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, nil /* scrubberKick (§6) */)
+	// S6a: wire the rewrap controller behind scrubberKick. The controller has
+	// no lanes registered yet (real per-lane rewrap is S6b) and does not report
+	// completion, so this is behavior-neutral: a post-rotation kick enumerates
+	// zero lanes and returns. This closes the prior nil-kick gap.
+	rewrapCtrl := encrypt.NewRewrapController(keeper)
+	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl))
 	return nil
 }
 

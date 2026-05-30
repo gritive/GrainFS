@@ -91,6 +91,36 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, ref
 	return fbFinish(b, clusterpb.MetaDEKVersionSnapshotEnd(b)), nil
 }
 
+// encodeMetaDEKRewrapProgressCmd builds the inner payload for a per-node
+// rewrap-completion report: "nodeID finished rewrapping all its lanes for gen".
+//
+// No production caller in S6a by design: the rewrap controller deliberately
+// reports no completion until real lanes exist (a zero-lane "done" would let a
+// future Prune trust an un-migrated generation). This encoder is the wire-format
+// counterpart of decodeMetaDEKRewrapProgressCmd, exercised by the ledger unit
+// tests and reserved for the producer that lands in S6d.
+//
+//nolint:unused // wire-format encoder; producer lands in S6d (see DEK-rewrap spec §5)
+func encodeMetaDEKRewrapProgressCmd(nodeID string, gen uint32) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	nid := b.CreateString(nodeID)
+	clusterpb.MetaDEKRewrapProgressCmdStart(b)
+	clusterpb.MetaDEKRewrapProgressCmdAddNodeId(b, nid)
+	clusterpb.MetaDEKRewrapProgressCmdAddGen(b, gen)
+	return fbFinish(b, clusterpb.MetaDEKRewrapProgressCmdEnd(b)), nil
+}
+
+// decodeMetaDEKRewrapProgressCmd parses the inner DEKRewrapProgress payload bytes.
+func decodeMetaDEKRewrapProgressCmd(data []byte) (nodeID string, gen uint32, err error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaDEKRewrapProgressCmd {
+		return clusterpb.GetRootAsMetaDEKRewrapProgressCmd(d, 0)
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("dek_codec: MetaDEKRewrapProgressCmd: %w", err)
+	}
+	return string(t.NodeId()), t.Gen(), nil
+}
+
 // decodeMetaDEKVersionSnapshot parses a MetaDEKVersionSnapshot FlatBuffers buffer
 // and returns the versions map, active generation, per-generation ref counts,
 // and the active KEK version. refCounts is nil when the field was absent

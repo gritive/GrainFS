@@ -83,6 +83,7 @@ const (
 	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
 	MetaCmdTypeDEKReplicatedRotate          = clusterpb.MetaCmdTypeDEKReplicatedRotate
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
+	MetaCmdTypeDEKRewrapProgress            = clusterpb.MetaCmdTypeDEKRewrapProgress
 	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
 	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
 	MetaCmdTypeGroupPut                     = clusterpb.MetaCmdTypeGroupPut
@@ -387,6 +388,20 @@ type MetaFSM struct {
 	// applyPutObjectIndex, decremented on applyDeleteObjectIndex. Persisted
 	// in the DKVS snapshot trailer alongside DEK versions (Task 12).
 	dekRefCounts map[uint32]uint64
+
+	// dekRewrapDone tracks per-generation rewrap completion: gen → set of
+	// node_ids that finished. Populated by applyDEKRewrapProgress; read by
+	// IsGenFullyRewrapped (later prune-safety input). Not in the snapshot in
+	// S6a — behavior-neutral because nothing produces these commands yet;
+	// snapshot persistence lands with the producer in a later slice.
+	//
+	// S6d TODO: this field is currently mutated/read WITHOUT f.mu (safe today:
+	// the apply loop is the sole writer and the only reader is single-threaded
+	// tests — no producer fires, so -race cannot surface a race that does not
+	// exist yet). When S6d wires a producer AND a leader prune-decision reader
+	// off the apply goroutine, add f.mu guarding (mirror dekRefCounts) together
+	// with snapshot persistence — do BOTH in the same slice.
+	dekRewrapDone map[uint32]map[string]struct{}
 
 	// pendingDEKVersions and pendingDEKActive hold the DEK snapshot state decoded
 	// during Restore. The runtime uses PendingDEKVersions() after Restore to wire
@@ -932,6 +947,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyDEKReplicatedRotate(f.lastApplyIndex, cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKVersionPrune:
 		return f.applyDEKVersionPrune(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDEKRewrapProgress:
+		return f.applyDEKRewrapProgress(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeJWTSigningKeyRotate:
 		return f.applyJWTSigningKeyRotate(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeJWTSigningKeyPrune:
