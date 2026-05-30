@@ -11,6 +11,7 @@ import (
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/iceberg"
 )
 
 type protocolCredentialAuth struct {
@@ -79,7 +80,7 @@ func (a *protocolCredentialAuth) authenticate(ctx context.Context, r *http.Reque
 	ctx = WithAccessKey(ctx, accessKey)
 	ctx = iam.WithPrincipal(ctx, decision.SAID)
 	if protocol == protocred.ProtocolIceberg {
-		ctx = context.WithValue(ctx, icebergClaimsKey, &iamjwt.Claims{
+		ctx = context.WithValue(ctx, iceberg.ClaimsKey, &iamjwt.Claims{
 			Sub:       decision.SAID,
 			Warehouse: strings.TrimPrefix(resource, "catalog/"),
 		})

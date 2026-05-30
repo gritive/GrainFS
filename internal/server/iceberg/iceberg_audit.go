@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -19,8 +19,8 @@ import (
 // policy authorizer is configured (JWT verify is the only gate).
 // authzLatencyUS is the policy Authorize() window only (S3-parity); it is 0
 // when no policy gate ran.
-func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContext, action string, claims *iamjwt.Claims, evalResult *policy.EvalResult, authzLatencyUS int32, start time.Time) {
-	if !s.auditSinkConfigured() {
+func (h *Handler) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContext, action string, claims *iamjwt.Claims, evalResult *policy.EvalResult, authzLatencyUS int32, start time.Time) {
+	if !h.deps.AuditSinkConfigured() {
 		return
 	}
 	status := int32(c.Response.StatusCode())
@@ -30,10 +30,10 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 	ev := audit.S3Event{
 		Ts:             start.UnixMicro(),
 		EventID:        uuid.NewString(),
-		NodeID:         s.auditNodeID,
-		RequestID:      RequestIDFromContext(ctx),
+		NodeID:         h.deps.AuditNodeID,
+		RequestID:      h.deps.RequestID(ctx),
 		SAID:           icebergSAID(claims),
-		SourceIP:       s.authoritativeClientIP(c),
+		SourceIP:       h.deps.ClientIP(c),
 		Method:         auditString8(string(c.Method())),
 		Operation:      action,
 		Bucket:         icebergWarehouse(claims),
@@ -47,7 +47,7 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 		ev.MatchedSID = evalResult.MatchedSid
 		ev.ConditionContext = evalResult.ConditionContext
 	}
-	s.appendFinalizedAuditEvent(context.Background(), normalizeAuditEvent(ev))
+	h.deps.AppendAuditEvent(context.Background(), ev)
 }
 
 // emitIcebergAuditDeny emits an audit.s3 deny row for a bearer-gated Iceberg
@@ -57,17 +57,17 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 // authzLatencyUS is the policy Authorize() window only; callers pass 0 for
 // pre-policy denials where the authorization layer was never reached.
 // start is threaded from icebergGuarded so Ts and LatencyMs share the same baseline.
-func (s *Server) emitIcebergAuditDeny(ctx context.Context, c *app.RequestContext, action string, saID string, warehouse string, status int, reason string, evalResult *policy.EvalResult, authzLatencyUS int32, start time.Time) {
-	if !s.auditSinkConfigured() {
+func (h *Handler) emitIcebergAuditDeny(ctx context.Context, c *app.RequestContext, action string, saID string, warehouse string, status int, reason string, evalResult *policy.EvalResult, authzLatencyUS int32, start time.Time) {
+	if !h.deps.AuditSinkConfigured() {
 		return
 	}
 	ev := audit.S3Event{
 		Ts:             start.UnixMicro(),
 		EventID:        uuid.NewString(),
-		NodeID:         s.auditNodeID,
-		RequestID:      RequestIDFromContext(ctx),
+		NodeID:         h.deps.AuditNodeID,
+		RequestID:      h.deps.RequestID(ctx),
 		SAID:           saID,
-		SourceIP:       s.authoritativeClientIP(c),
+		SourceIP:       h.deps.ClientIP(c),
 		Method:         auditString8(string(c.Method())),
 		Operation:      action,
 		Bucket:         warehouse,
@@ -83,7 +83,7 @@ func (s *Server) emitIcebergAuditDeny(ctx context.Context, c *app.RequestContext
 		ev.MatchedSID = evalResult.MatchedSid
 		ev.ConditionContext = evalResult.ConditionContext
 	}
-	s.appendFinalizedAuditEvent(context.Background(), normalizeAuditEvent(ev))
+	h.deps.AppendAuditEvent(context.Background(), ev)
 }
 
 // icebergSAID returns the JWT sub claim or "" when claims is nil.

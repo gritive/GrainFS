@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -35,7 +35,7 @@ const maxIcebergUnconditionalCommitRetries = 5
 //     retry or surface the 409.
 //   - (nil,   false, other error): non-retryable failure; response already
 //     written (validation, storage, or any non-race propose error).
-func (s *Server) commitIcebergTableFrom(ctx context.Context, c *app.RequestContext, store icebergcatalog.Catalog, tbl *icebergcatalog.Table, requirements, updates []json.RawMessage) (*icebergcatalog.Table, bool, error) {
+func (h *Handler) commitIcebergTableFrom(ctx context.Context, c *app.RequestContext, store icebergcatalog.Catalog, tbl *icebergcatalog.Table, requirements, updates []json.RawMessage) (*icebergcatalog.Table, bool, error) {
 	ident := tbl.Identifier
 	if err := validateIcebergRequirements(tbl.Metadata, requirements); err != nil {
 		writeIcebergMappedError(c, err)
@@ -43,11 +43,11 @@ func (s *Server) commitIcebergTableFrom(ctx context.Context, c *app.RequestConte
 	}
 	metadata, err := applyIcebergUpdates(tbl.Metadata, updates)
 	if err != nil {
-		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction updates")
+		WriteError(c, consts.StatusBadRequest, "BadRequestException", "invalid transaction updates")
 		return nil, false, fmt.Errorf("apply updates: %w", err)
 	}
 	nextMetadataLocation := nextIcebergMetadataLocation(tbl.MetadataLocation)
-	if err := s.writeIcebergMetadataObject(ctx, nextMetadataLocation, metadata); err != nil {
+	if err := h.writeIcebergMetadataObject(ctx, nextMetadataLocation, metadata); err != nil {
 		writeIcebergStorageError(c, err)
 		return nil, false, fmt.Errorf("write metadata object: %w", err)
 	}

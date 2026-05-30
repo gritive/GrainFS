@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -6,15 +6,16 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
-func (s *Server) requireIceberg(c *app.RequestContext) (icebergcatalog.Catalog, bool) {
-	if !s.routeFeatureAvailable(routeFeatureIceberg) {
-		writeIcebergError(c, consts.StatusNotImplemented, "NotImplementedException", "Iceberg REST Catalog is not available: server started without --audit-iceberg or catalog initialization failed")
+func (h *Handler) requireIceberg(c *app.RequestContext) (icebergcatalog.Catalog, bool) {
+	if !h.deps.FeatureAvailable() {
+		WriteError(c, consts.StatusNotImplemented, "NotImplementedException", "Iceberg REST Catalog is not available: server started without --audit-iceberg or catalog initialization failed")
 		return nil, false
 	}
-	return s.icebergCatalogStore(), true
+	return h.icebergCatalogStore(), true
 }
 
 // s3URLPrefixProvider is satisfied by MetaCatalog (which splits the logical
@@ -23,8 +24,8 @@ type s3URLPrefixProvider interface {
 	S3URLPrefix() string
 }
 
-func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergConfig(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -41,7 +42,7 @@ func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 	}
 	overrides := map[string]string{}
 	if scheme == "https" {
-		overrides = s.icebergS3CredOverrides(ctx, s3Prefix)
+		overrides = h.icebergS3CredOverrides(ctx, s3Prefix)
 	}
 	// Publish the same host:port the client just connected to as s3.endpoint.
 	// Mirror the scheme the client used so an HTTPS caller doesn't get
@@ -91,28 +92,28 @@ func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 //
 // All lookups are read-only against the IAM store snapshot — no secrets
 // touch disk or env state in this path.
-func (s *Server) icebergS3CredOverrides(ctx context.Context, warehouse string) map[string]string {
-	if s.iamStore == nil {
+func (h *Handler) icebergS3CredOverrides(ctx context.Context, warehouse string) map[string]string {
+	if h.deps.IAMStore == nil {
 		return map[string]string{}
 	}
 	bucket := bucketFromS3Location(warehouse)
 	if bucket == "" {
 		return map[string]string{}
 	}
-	accessKey := AccessKeyFromContext(ctx)
+	accessKey := h.deps.AccessKey(ctx)
 	if accessKey == "" {
 		return map[string]string{}
 	}
-	key, ok := s.iamStore.LookupKey(accessKey)
+	key, ok := h.deps.IAMStore.LookupKey(accessKey)
 	if !ok || key == nil || key.SecretKey == "" {
 		return map[string]string{}
 	}
 	// T33: gate cred forwarding on iceberg:GetCatalogConfig policy check.
 	// If no authorizer is wired (e.g. test fixtures), skip the gate and
 	// forward creds as before (fail-open for legacy/test paths only).
-	if s.policyAuthorizer != nil {
-		result := s.policyAuthorizer.Authorize(ctx, key.SAID, bucket, policyIcebergConfigContext(bucket))
-		if result.Decision != policyDecisionAllow {
+	if h.deps.PolicyAuthorizer != nil {
+		result := h.deps.PolicyAuthorizer.Authorize(ctx, key.SAID, bucket, policyIcebergConfigContext(bucket))
+		if result.Decision != policy.DecisionAllow {
 			return map[string]string{}
 		}
 	}
@@ -146,11 +147,11 @@ func bucketFromS3Location(loc string) string {
 	return rest
 }
 
-func (s *Server) icebergEnsureWarehouse(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergEnsureWarehouse(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -160,18 +161,18 @@ func (s *Server) icebergEnsureWarehouse(ctx context.Context, c *app.RequestConte
 	})
 }
 
-func (s *Server) icebergDeleteWarehouse(_ context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergDeleteWarehouse(_ context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
-	if _, ok := s.requireIceberg(c); !ok {
+	if _, ok := h.requireIceberg(c); !ok {
 		return
 	}
 	c.Status(consts.StatusNoContent)
 }
 
-func (s *Server) icebergListNamespaces(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergListNamespaces(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -183,17 +184,17 @@ func (s *Server) icebergListNamespaces(ctx context.Context, c *app.RequestContex
 	c.JSON(consts.StatusOK, map[string]any{"namespaces": namespaces})
 }
 
-func (s *Server) icebergCreateNamespace(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergCreateNamespace(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
 	req, err := parseIcebergCreateNamespaceRequest(c.Request.Body())
 	if err != nil {
-		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid namespace request")
+		WriteError(c, consts.StatusBadRequest, "BadRequestException", "invalid namespace request")
 		return
 	}
 	if err := store.CreateNamespace(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), req.Namespace, req.Properties); err != nil {
@@ -203,8 +204,8 @@ func (s *Server) icebergCreateNamespace(ctx context.Context, c *app.RequestConte
 	c.JSON(consts.StatusOK, map[string]any{"namespace": req.Namespace, "properties": nonNilMap(req.Properties)})
 }
 
-func (s *Server) icebergLoadNamespace(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergLoadNamespace(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -217,8 +218,8 @@ func (s *Server) icebergLoadNamespace(ctx context.Context, c *app.RequestContext
 	c.JSON(consts.StatusOK, map[string]any{"namespace": ns, "properties": props})
 }
 
-func (s *Server) icebergHeadNamespace(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergHeadNamespace(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -229,11 +230,11 @@ func (s *Server) icebergHeadNamespace(ctx context.Context, c *app.RequestContext
 	c.Status(consts.StatusNoContent)
 }
 
-func (s *Server) icebergDeleteNamespace(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergDeleteNamespace(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -244,6 +245,6 @@ func (s *Server) icebergDeleteNamespace(ctx context.Context, c *app.RequestConte
 	c.Status(consts.StatusNoContent)
 }
 
-func (s *Server) icebergUnsupported(_ context.Context, c *app.RequestContext) {
-	writeIcebergError(c, consts.StatusNotImplemented, "NotImplementedException", "unsupported Iceberg REST Catalog operation")
+func (h *Handler) icebergUnsupported(_ context.Context, c *app.RequestContext) {
+	WriteError(c, consts.StatusNotImplemented, "NotImplementedException", "unsupported Iceberg REST Catalog operation")
 }

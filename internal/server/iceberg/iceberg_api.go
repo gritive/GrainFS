@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
-func (s *Server) icebergListTables(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergListTables(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -23,11 +23,11 @@ func (s *Server) icebergListTables(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, map[string]any{"identifiers": tables})
 }
 
-func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergCreateTable(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -35,7 +35,7 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 	ns := []string{c.Param("namespace")}
 	req, err := parseIcebergCreateTableRequest(c.Request.Body())
 	if err != nil {
-		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid table request")
+		WriteError(c, consts.StatusBadRequest, "BadRequestException", "invalid table request")
 		return
 	}
 	ident := icebergcatalog.Identifier{Namespace: ns, Name: req.Name}
@@ -56,7 +56,7 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 		writeIcebergMappedError(c, err)
 		return
 	}
-	if err := s.writeIcebergMetadataObject(ctx, metadataLocation, metadata); err != nil {
+	if err := h.writeIcebergMetadataObject(ctx, metadataLocation, metadata); err != nil {
 		writeIcebergStorageError(c, err)
 		return
 	}
@@ -72,8 +72,8 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 	writeIcebergTable(c, tbl)
 }
 
-func (s *Server) icebergLoadTable(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergLoadTable(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -85,8 +85,8 @@ func (s *Server) icebergLoadTable(ctx context.Context, c *app.RequestContext) {
 	writeIcebergTable(c, tbl)
 }
 
-func (s *Server) icebergHeadTable(ctx context.Context, c *app.RequestContext) {
-	store, ok := s.requireIceberg(c)
+func (h *Handler) icebergHeadTable(ctx context.Context, c *app.RequestContext) {
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}
@@ -97,11 +97,11 @@ func (s *Server) icebergHeadTable(ctx context.Context, c *app.RequestContext) {
 	c.Status(consts.StatusNoContent)
 }
 
-func (s *Server) icebergDeleteTable(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+func (h *Handler) icebergDeleteTable(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
-	store, ok := s.requireIceberg(c)
+	store, ok := h.requireIceberg(c)
 	if !ok {
 		return
 	}

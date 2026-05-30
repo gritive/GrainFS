@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"bytes"
@@ -79,8 +79,8 @@ func TestLogIcebergAccessFormat(t *testing.T) {
 }
 
 func TestIcebergAccessLogDisabledZeroAlloc(t *testing.T) {
-	s := &Server{} // access log OFF (default)
-	handler := s.icebergAccessLog(func(ctx context.Context, c *app.RequestContext) {})
+	h := &Handler{} // access log OFF (default)
+	handler := h.icebergAccessLog(func(ctx context.Context, c *app.RequestContext) {})
 
 	ctx := context.Background()
 	c := &app.RequestContext{} // OFF path doesn't read from c — safe

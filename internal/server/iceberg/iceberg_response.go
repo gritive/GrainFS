@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"encoding/json"
@@ -27,15 +27,15 @@ func writeIcebergTable(c *app.RequestContext, tbl *icebergcatalog.Table) {
 func writeIcebergMappedError(c *app.RequestContext, err error) {
 	switch {
 	case errors.Is(err, icebergcatalog.ErrNamespaceNotFound):
-		writeIcebergError(c, consts.StatusNotFound, "NoSuchNamespaceException", "namespace not found")
+		WriteError(c, consts.StatusNotFound, "NoSuchNamespaceException", "namespace not found")
 	case errors.Is(err, icebergcatalog.ErrNamespaceExists):
-		writeIcebergError(c, consts.StatusConflict, "AlreadyExistsException", "namespace already exists")
+		WriteError(c, consts.StatusConflict, "AlreadyExistsException", "namespace already exists")
 	case errors.Is(err, icebergcatalog.ErrNamespaceNotEmpty):
-		writeIcebergError(c, consts.StatusConflict, "NamespaceNotEmptyException", "namespace is not empty")
+		WriteError(c, consts.StatusConflict, "NamespaceNotEmptyException", "namespace is not empty")
 	case errors.Is(err, icebergcatalog.ErrTableNotFound):
-		writeIcebergError(c, consts.StatusNotFound, "NoSuchTableException", "table not found")
+		WriteError(c, consts.StatusNotFound, "NoSuchTableException", "table not found")
 	case errors.Is(err, icebergcatalog.ErrTableExists):
-		writeIcebergError(c, consts.StatusConflict, "AlreadyExistsException", "table already exists")
+		WriteError(c, consts.StatusConflict, "AlreadyExistsException", "table already exists")
 	case errors.Is(err, icebergcatalog.ErrCommitFailed):
 		// Message intentionally embeds the literal "409 Conflict" so
 		// client-side retry matchers that grep the err.Error() string —
@@ -44,7 +44,7 @@ func writeIcebergMappedError(c *app.RequestContext, err error) {
 		// iceberg-go's REST client otherwise emits
 		// "CommitFailedException: table metadata pointer changed" with
 		// no 4xx hint in the string, defeating those matchers.
-		writeIcebergError(c, consts.StatusConflict, "CommitFailedException", "409 Conflict: table metadata pointer changed")
+		WriteError(c, consts.StatusConflict, "CommitFailedException", "409 Conflict: table metadata pointer changed")
 	case errors.Is(err, icebergcatalog.ErrServiceUnavailable):
 		// 503 from the iceberg catalog is rare and structurally important —
 		// surface the full wrapped error in both the log AND the response
@@ -57,26 +57,26 @@ func writeIcebergMappedError(c *app.RequestContext, err error) {
 			Str("component", "iceberg").
 			Err(err).
 			Msg("iceberg: returning 503 ServiceUnavailable")
-		writeIcebergError(c, consts.StatusServiceUnavailable, "ServiceUnavailableException", err.Error())
+		WriteError(c, consts.StatusServiceUnavailable, "ServiceUnavailableException", err.Error())
 	default:
 		log.Warn().
 			Str("component", "iceberg").
 			Err(err).
 			Msg("iceberg: returning 500 InternalServerError")
-		writeIcebergError(c, consts.StatusInternalServerError, "InternalServerError", err.Error())
+		WriteError(c, consts.StatusInternalServerError, "InternalServerError", err.Error())
 	}
 }
 
 func writeIcebergStorageError(c *app.RequestContext, err error) {
 	switch {
 	case errors.Is(err, storage.ErrBucketNotFound), errors.Is(err, storage.ErrNoSuchBucket):
-		writeIcebergError(c, consts.StatusNotFound, "NoSuchBucketException", "warehouse bucket not found")
+		WriteError(c, consts.StatusNotFound, "NoSuchBucketException", "warehouse bucket not found")
 	default:
-		writeIcebergError(c, consts.StatusInternalServerError, "InternalServerError", err.Error())
+		WriteError(c, consts.StatusInternalServerError, "InternalServerError", err.Error())
 	}
 }
 
-func writeIcebergError(c *app.RequestContext, status int, typ, message string) {
+func WriteError(c *app.RequestContext, status int, typ, message string) {
 	body := map[string]any{
 		"error": map[string]any{
 			"message": message,

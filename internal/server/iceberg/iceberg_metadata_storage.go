@@ -1,4 +1,4 @@
-package server
+package iceberg
 
 import (
 	"bytes"
@@ -12,16 +12,16 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-func (s *Server) writeIcebergMetadataObject(ctx context.Context, location string, metadata json.RawMessage) error {
+func (h *Handler) writeIcebergMetadataObject(ctx context.Context, location string, metadata json.RawMessage) error {
 	bucket, key, ok := parseS3Location(location)
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
 	var err error
-	if s.iamStore != nil && s.iamStore.AuthEnabled() {
-		_, err = s.ops.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
+	if h.deps.IAMStore != nil && h.deps.IAMStore.AuthEnabled() {
+		_, err = h.deps.Ops.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
 	} else {
-		_, err = s.ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", uint8(s3auth.ACLPublicRead))
+		_, err = h.deps.Ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", uint8(s3auth.ACLPublicRead))
 	}
 	if errors.Is(err, io.EOF) {
 		return nil

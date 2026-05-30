@@ -2,14 +2,18 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"sync"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -77,7 +81,25 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 
 	h := s.newHertzEngine(addr)
 	s.ensureRuntimeDefaults(ss)
-	s.applyIcebergDiagEnv()
+	s.iceberg = iceberg.NewHandler(iceberg.Deps{
+		Ops:                    s.ops,
+		IAMStore:               s.iamStore,
+		PolicyAuthorizer:       s.policyAuthorizer,
+		JWTKeys:                s.jwtKeys,
+		Catalog:                s.icebergCatalog,
+		AuditInternalAccessKey: s.auditInternalAccessKey,
+		AuditInternalSecretKey: s.auditInternalSecretKey,
+		AuditNodeID:            s.auditNodeID,
+		ClientIP:               s.authoritativeClientIP,
+		MutationDisabled:       s.blockIfMutationDisabled,
+		FeatureAvailable:       func() bool { return s.routeFeatureAvailable(routeFeatureIceberg) },
+		AppendAuditEvent:       func(ctx context.Context, ev audit.S3Event) { s.appendFinalizedAuditEvent(ctx, normalizeAuditEvent(ev)) },
+		AuditSinkConfigured:    s.auditSinkConfigured,
+		RequestID:              RequestIDFromContext,
+		AccessKey:              AccessKeyFromContext,
+		NewRespWriter:          func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
+	})
+	s.iceberg.ApplyDiagEnv()
 	s.registerRoutes(h)
 	s.hertz = h
 	s.initMetrics()
@@ -221,19 +243,4 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // into scrubber.New via scrubber.WithEmitter.
 func (s *Server) HealEmitter() scrubber.Emitter {
 	return newHealEmitter(s.hub, s.emitEvent)
-}
-
-// policyDecisionAllow is an alias for the policy Allow decision used in
-// buildAuthorizer and iceberg cred-forwarding gate to avoid importing
-// policy.DecisionAllow at multiple call sites.
-const policyDecisionAllow = policy.DecisionAllow
-
-// policyIcebergConfigContext returns the policy.RequestContext for an
-// iceberg:GetCatalogConfig check against a warehouse bucket. Used by
-// icebergS3CredOverrides to gate credential forwarding.
-func policyIcebergConfigContext(bucket string) policy.RequestContext {
-	return policy.RequestContext{
-		Action:   "iceberg:GetCatalogConfig",
-		Resource: "arn:aws:s3:::" + bucket,
-	}
 }

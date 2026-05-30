@@ -50,6 +50,17 @@ func startSelfSeedLeader(t testing.TB, nodeID string) *inviteJoinNode {
 	return n
 }
 
+// restartSelfSeedLeader terminates the running solo leader and boots a fresh
+// process on the SAME data dir and ports (no bundle env → normal member boot).
+// On restart the node loads keys.d/current.key (does NOT re-seed) and must boot
+// past WaitDEKReady: the gen-0 DEK is re-delivered to the FSM apply loop by the
+// solo becomeLeader recovery path.
+func restartSelfSeedLeader(t testing.TB, n *inviteJoinNode) {
+	terminateProcess(n.cmd)
+	startInviteProc(t, n, selfSeedLeaderArgs(n), nil)
+	waitForPort(t, n.httpPort, 60*time.Second)
+}
+
 var _ = ginkgo.Describe("Genesis cluster-key self-seed", func() {
 	ginkgo.It("a keyless genesis self-seeds, persists current.key, and serves S3", func() {
 		t := ginkgo.GinkgoTB()
@@ -84,13 +95,49 @@ var _ = ginkgo.Describe("Genesis cluster-key self-seed", func() {
 		waitForVoter(t, leader.httpURL, "ss-joiner", 90*time.Second)
 	})
 
-	// NOTE: self-seed RESTART semantics (restart loads keys.d/current.key, does NOT
-	// re-seed) are covered by the unit test TestBootValidateConfigSelfSeeds. A
-	// full-process e2e restart of a SOLO leader is intentionally omitted: it fails
-	// `WaitDEKReady: context deadline exceeded` for BOTH a staged-key leader and a
-	// self-seeded one (verified with a control), i.e. a PRE-EXISTING solo-leader-
-	// restart limitation in the KEK/DEK path, unrelated to this cluster-key change.
-	// Captured in TODOS for separate investigation.
+	ginkgo.It("a solo self-seeded leader restarts and serves S3 (boots past WaitDEKReady)", func() {
+		t := ginkgo.GinkgoTB()
+		leader := startSelfSeedLeader(t, "selfseed-restart")
+		admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
+
+		bucket := "selfseed-restart-bucket"
+		gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+			[]string{leader.dataDir}, admin.SAID, bucket, 60*time.Second)).To(gomega.Succeed())
+		cli := s3ClientFor(leader.httpURL, admin.AccessKey, admin.SecretKey)
+		gomega.Expect(waitForIAMReady(cli, 60*time.Second)).To(gomega.Succeed())
+		gomega.Eventually(func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return tryPutObject(ctx, cli, bucket, "pre.txt", []byte("pre-restart"))
+		}, 60*time.Second, time.Second).Should(gomega.Succeed())
+
+		// Full-process terminate + restart on the same data dir. With the
+		// solo-restart DEK-readiness fix, boot completes (port binds) instead
+		// of hanging 60s on WaitDEKReady.
+		restartSelfSeedLeader(t, leader)
+
+		// A fresh client on the same (persisted) admin creds: data survives and
+		// new writes succeed — both require a populated DEK keeper post-restart.
+		cli2 := s3ClientFor(leader.httpURL, admin.AccessKey, admin.SecretKey)
+		gomega.Eventually(func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			got, gerr := getObjectBytes(ctx, cli2, bucket, "pre.txt")
+			if gerr != nil {
+				return gerr
+			}
+			if string(got) != "pre-restart" {
+				return fmt.Errorf("pre.txt = %q, want %q", got, "pre-restart")
+			}
+			return nil
+		}, 60*time.Second, time.Second).Should(gomega.Succeed(), "data must survive restart")
+		gomega.Eventually(func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return tryPutObject(ctx, cli2, bucket, "post.txt", []byte("post-restart"))
+		}, 60*time.Second, time.Second).Should(gomega.Succeed(), "writes must succeed after restart")
+	})
 
 	ginkgo.It("two keyless genesis nodes form two distinct clusters (no silent merge)", func() {
 		t := ginkgo.GinkgoTB()
