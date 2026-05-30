@@ -157,6 +157,67 @@ var _ = ginkgo.Describe("Recovery", func() {
 		_ = afterFirstRun
 	}, ginkgo.NodeTimeout(10*time.Second))
 
+	ginkgo.It("re-delivers committed entries to a solo voter on restart with no snapshot", func(ginkgo.SpecContext) {
+		// Run 1: propose 3 entries on a fresh solo node, then stop.
+		func() {
+			db, closeDB, err := openRecoveryDB(dir)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			logStore, err := newBadgerLogStore(db, []byte("raft/v2/log/"))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			stable, err := newBadgerStableStore(db, []byte("raft/v2/hardstate/"))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			node, err := NewNode(Config{ID: "n1", LogStore: logStore, StableStore: stable})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			node.Start()
+			go func(node *Node) {
+				for range node.ApplyCh() {
+				}
+			}(node)
+			gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
+			for i := 0; i < 3; i++ {
+				gomega.Expect(node.Propose([]byte("cmd"))).To(gomega.Succeed())
+			}
+			gomega.Expect(waitFor(2*time.Second, func() bool {
+				return node.CommittedIndex() >= 3
+			})).To(gomega.Succeed())
+			node.Stop()
+			closeDB()
+		}()
+
+		// Run 2: restart from the SAME store (no snapshot). The durably-committed
+		// log must be re-delivered to the FSM apply loop WITHOUT any new propose —
+		// a solo voter has no incoming AppendEntries to re-establish commitIndex,
+		// and nothing proposes during boot (boot is gated on this delivery).
+		db, closeDB, err := openRecoveryDB(dir)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(closeDB)
+		logStore, err := newBadgerLogStore(db, []byte("raft/v2/log/"))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		stable, err := newBadgerStableStore(db, []byte("raft/v2/hardstate/"))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		node, err := NewNode(Config{ID: "n1", LogStore: logStore, StableStore: stable})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(node.st.log.LastIndex()).To(gomega.Equal(uint64(3)))
+
+		var delivered atomic.Uint64
+		node.Start()
+		ginkgo.DeferCleanup(node.Stop)
+		go func(node *Node) {
+			for e := range node.ApplyCh() {
+				if e.Type == LogEntryCommand {
+					delivered.Add(1)
+				}
+			}
+		}(node)
+		gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
+		gomega.Expect(waitFor(2*time.Second, func() bool {
+			return node.CommittedIndex() >= 3
+		})).To(gomega.Succeed(), "solo restart must re-establish commitIndex over the durable log")
+		gomega.Expect(waitFor(2*time.Second, func() bool {
+			return delivered.Load() >= 3
+		})).To(gomega.Succeed(), "solo restart must re-deliver committed command entries to ApplyCh")
+	}, ginkgo.NodeTimeout(15*time.Second))
+
 	ginkgo.It("persists HardState across an election vote", func(ginkgo.SpecContext) {
 		net := newMemNetwork()
 		n2dir, err := os.MkdirTemp("", "raft-recovery-n2-*")

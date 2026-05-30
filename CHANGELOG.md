@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.483.0] - 2026-05-30
+
+### Fixed
+
+- **Single-node (RF=1) servers now restart cleanly.** A solo genesis node
+  (staged cluster key or self-seeded) failed to come back up after a
+  terminate+restart on the same data dir, aborting boot with
+  `DEK readiness: WaitDEKReady: context deadline exceeded`. On a sole voter the
+  durably-committed raft log — including the gen-0 data-encryption-key entry —
+  was not re-delivered to the metadata apply loop on restart, so the encryption
+  keeper stayed empty and serving never started. The node now recovers the
+  committed log on restart and boots normally. Multi-node clusters were
+  unaffected.
+
 ## [0.0.482.0] - 2026-05-30
 
 ### Added
