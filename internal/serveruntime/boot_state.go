@@ -31,6 +31,7 @@ import (
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -203,6 +204,7 @@ type bootState struct {
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
+	packedBackend    *packblob.PackedBackend // single-node packed-blob fast path; nil in cluster / when packing off (DEK rewrap lane source)
 	putPipeline      *putpipeline.Pipeline
 	shardCache       *shardcache.Cache
 	effectiveEC      cluster.ECConfig

@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
 )
 
 // wireDEKKeeper loads the cluster KEKStore (keys/<V>.key under dataDir),
@@ -204,11 +205,17 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	if state.metaRaft != nil {
 		isLeaderFn = state.metaRaft.IsLeader
 	}
-	// S6a: wire the rewrap controller behind scrubberKick. The controller has
-	// no lanes registered yet (real per-lane rewrap is S6b) and does not report
-	// completion, so this is behavior-neutral: a post-rotation kick enumerates
-	// zero lanes and returns. This closes the prior nil-kick gap.
+	// S6a: wire the rewrap controller behind scrubberKick. S6b registers the
+	// real data-rewrap lanes below; a post-rotation kick now sweeps each
+	// registered lane's records onto the active DEK gen (migration-only — no
+	// completion reporting or prune yet).
 	rewrapCtrl := encrypt.NewRewrapController(keeper)
+	if state.distBackend != nil {
+		rewrapCtrl.RegisterLane(cluster.NewECRewrapLane(state.distBackend))
+	}
+	if state.packedBackend != nil { // single-node packed-blob fast path only
+		rewrapCtrl.RegisterLane(packblob.NewPackblobRewrapLane(state.packedBackend))
+	}
 	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl))
 	return nil
 }
