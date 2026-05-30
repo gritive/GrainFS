@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **At-rest protection now also covers the cluster transport key.**
+  `--kek-protector=env` previously wrapped only the KEK store; it now also wraps
+  the cluster-key PSK slots (`<dataDir>/keys.d/{current,next,previous}.key`),
+  which were stored in plaintext. The same machine-binding + recovery-passphrase
+  protection (`GRAINFS_KEK_RECOVERY_SECRET` / `--kek-recovery-secret-file`)
+  applies, so a stolen disk no longer yields the cluster transport identity. The
+  flag is unchanged (`--kek-protector` now governs both the KEK and the
+  cluster-key PSK); `plaintext` (default) keeps the on-disk format byte-identical.
+  Enabling `env` is a one-way migration of the slot files. Key rotation
+  (next→current→previous promotion) is preserved unchanged.
+
 ## [0.0.479.0] - 2026-05-30
 
 ### Added
