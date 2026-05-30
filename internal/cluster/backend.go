@@ -3118,7 +3118,15 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		g.Go(func() error {
 			var werr error
 			if node == selfID {
+				// Serialise the local re-split write with the EC rewrap lane,
+				// which acquires the same per-(bucket, shardKey) write lock:
+				// shardKey == ecObjectShardKey(key, versionID), the exact key the
+				// lane locks on. Without this, a concurrent rewrap could read a
+				// shard between this write's tmp+rename and clobber the upgraded
+				// content with re-encrypted stale bytes.
+				unlock := b.acquireShardWriteLock(bucket, shardKey)
 				werr = b.shardSvc.WriteLocalShard(bucket, shardKey, i, newShards[i])
+				unlock()
 			} else {
 				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
 				defer writeCancel()
