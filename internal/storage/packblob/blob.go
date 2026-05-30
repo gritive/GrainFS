@@ -278,9 +278,18 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 
 // Read reads the data at the given location. Verifies CRC32.
 func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
+	data, _, err := bs.ReadWithGen(loc)
+	return data, err
+}
+
+// ReadWithGen returns the entry payload (decompressed) and the DEK gen it was
+// sealed under (0 for non-gen-framed entries). Identical decompressed-plaintext
+// semantics as Read; Read delegates here so the frame parser, CRC, AEAD-open and
+// downgrade-detection logic live in exactly one place.
+func (bs *BlobStore) ReadWithGen(loc BlobLocation) ([]byte, uint32, error) {
 	f, err := bs.getReadFile(loc.BlobID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	off := int64(loc.Offset)
 
@@ -289,23 +298,23 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 
 	// Read key_len
 	if err := readFullAt(f, header[:], &off); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	keyLen := binary.BigEndian.Uint32(header[:])
 	if keyLen > maxEntrySize {
-		return nil, fmt.Errorf("corrupt blob: keyLen %d exceeds max", keyLen)
+		return nil, 0, fmt.Errorf("corrupt blob: keyLen %d exceeds max", keyLen)
 	}
 
 	key := takeBlobReadKeyBuffer(int(keyLen))
 	if err := readFullAt(f, key, &off); err != nil {
 		releaseBlobReadBuffers(key, nil, false)
-		return nil, err
+		return nil, 0, err
 	}
 
 	var flagBuf [1]byte
 	if err := readFullAt(f, flagBuf[:], &off); err != nil {
 		releaseBlobReadBuffers(key, nil, false)
-		return nil, err
+		return nil, 0, err
 	}
 	flags := flagBuf[0]
 
@@ -313,23 +322,23 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	if flags&flagGenFramed != 0 {
 		if err := readFullAt(f, header[:], &off); err != nil {
 			releaseBlobReadBuffers(key, nil, false)
-			return nil, err
+			return nil, 0, err
 		}
 		dekGen = binary.BigEndian.Uint32(header[:])
 	}
 
 	if err := readFullAt(f, header[:], &off); err != nil {
 		releaseBlobReadBuffers(key, nil, false)
-		return nil, err
+		return nil, 0, err
 	}
 	dataLen := binary.BigEndian.Uint32(header[:])
 	if dataLen > maxEntrySize {
 		releaseBlobReadBuffers(key, nil, false)
-		return nil, fmt.Errorf("corrupt blob: dataLen %d exceeds max", dataLen)
+		return nil, 0, fmt.Errorf("corrupt blob: dataLen %d exceeds max", dataLen)
 	}
 	if dataLen != loc.Length {
 		releaseBlobReadBuffers(key, nil, false)
-		return nil, fmt.Errorf("corrupt blob: dataLen %d does not match location length %d", dataLen, loc.Length)
+		return nil, 0, fmt.Errorf("corrupt blob: dataLen %d does not match location length %d", dataLen, loc.Length)
 	}
 
 	payloadLen := int(dataLen)
@@ -341,12 +350,12 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	}
 	if err := readFullAt(f, payload, &off); err != nil {
 		releaseBlobReadBuffers(key, payload, pooledPayload)
-		return nil, err
+		return nil, 0, err
 	}
 
 	if err := readFullAt(f, header[:], &off); err != nil {
 		releaseBlobReadBuffers(key, payload, pooledPayload)
-		return nil, err
+		return nil, 0, err
 	}
 	expectedCRC := binary.BigEndian.Uint32(header[:])
 
@@ -354,11 +363,11 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		if blobEntryCRC(key, flags, dekGen, payload) != expectedCRC {
 			if legacyBlobEntryCRC(key, payload) != expectedCRC {
 				releaseBlobReadBuffers(key, payload, pooledPayload)
-				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
+				return nil, 0, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
 			}
 			if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, dekGen, payload); err != nil {
 				releaseBlobReadBuffers(key, payload, pooledPayload)
-				return nil, err
+				return nil, 0, err
 			}
 		}
 	}
@@ -374,12 +383,13 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		releaseBlobReadBuffers(key, nil, false)
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if flags&flagCompressed != 0 {
-		return decompress(payload)
+		out, derr := decompress(payload)
+		return out, dekGen, derr
 	}
-	return payload, nil
+	return payload, dekGen, nil
 }
 
 // Close closes the active blob file, every cached read-fd, and releases

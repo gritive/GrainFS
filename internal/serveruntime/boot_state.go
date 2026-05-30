@@ -31,6 +31,7 @@ import (
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -122,9 +123,10 @@ type bootState struct {
 	// instance, created once via ensurePDPTokenSource (adminAuthorizer is
 	// called twice + the Deps literal references it). Its live encryptor is
 	// refreshed by wireIAMEncryptor on fresh boot and snapshot-restore swaps.
-	pdpTokenSource *pdpTokenSource
-	nfsExportSvc   *nfsexport.ExportService
-	dekKeeper      *encrypt.DEKKeeper
+	pdpTokenSource   *pdpTokenSource
+	nfsExportSvc     *nfsexport.ExportService
+	dekKeeper        *encrypt.DEKKeeper
+	rewrapController *encrypt.RewrapController // created in wireDEKKeeper (early); lanes registered post-backend in wireRewrapLanes
 	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
 	// restore) rebuildDEKKeeperFromRestore, threaded as the single source into
 	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ
@@ -203,6 +205,7 @@ type bootState struct {
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
+	packedBackend    *packblob.PackedBackend // single-node packed-blob fast path; nil in cluster / when packing off (DEK rewrap lane source)
 	putPipeline      *putpipeline.Pipeline
 	shardCache       *shardcache.Cache
 	effectiveEC      cluster.ECConfig

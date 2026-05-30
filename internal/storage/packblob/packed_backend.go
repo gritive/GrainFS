@@ -211,6 +211,72 @@ func (pb *PackedBackend) deleteBucketIndex(bucket string) {
 	pb.listIndex.removeBucket(bucket)
 }
 
+// RewrapStaleEntries sweeps the live index and re-seals every entry whose
+// on-disk DEK generation differs from activeGen onto the active gen. It is the
+// packblob arm of the DEK rewrap lane (S6b).
+//
+// SWEEP semantics: it ignores any oldGen the controller passes and migrates
+// every live entry that is not already on activeGen, which makes it idempotent
+// (a second call after a clean sweep returns 0). It is migration-only: a new
+// blob entry is appended at the active gen and the index pointer is CAS'd to it;
+// the old blob bytes are NOT reclaimed (disk growth is accepted for S6b — a
+// later slice owns reclamation). Compact is deliberately NOT used: Compact
+// relocates survivors without updating pb.index, which would strand the index.
+//
+// Concurrency: each entry is migrated under a CAS on the original *indexEntry
+// pointer. A concurrent PutObject/DeleteObject Swaps a fresh pointer, so the CAS
+// loses and the entry is skipped — the live writer wins and its bytes are never
+// clobbered. Dead/deleting entries (Refcount <= 0) are skipped to avoid
+// resurrecting an object mid-delete. Returns the count of entries actually
+// migrated.
+func (pb *PackedBackend) RewrapStaleEntries(ctx context.Context, activeGen uint32) (int, error) {
+	n := 0
+	var rangeErr error
+	pb.index.Range(func(k, v any) bool {
+		if ctx.Err() != nil {
+			rangeErr = ctx.Err()
+			return false
+		}
+		pk := k.(packedKey)
+		old := v.(*indexEntry)
+		if old.Refcount.Load() <= 0 {
+			return true // dead/deleting — skip
+		}
+		data, gen, err := pb.blobStore.ReadWithGen(old.Location)
+		if err != nil {
+			rangeErr = err
+			return false
+		}
+		if gen == activeGen {
+			return true // already active (idempotent)
+		}
+		loc, err := pb.blobStore.Append(pk.String(), data) // sealed at active gen
+		if err != nil {
+			rangeErr = err
+			return false
+		}
+		next := &indexEntry{
+			Location:     loc,
+			OriginalSize: old.OriginalSize,
+			ContentType:  old.ContentType,
+			ETag:         old.ETag,
+			LastModified: old.LastModified,
+			UserMetadata: old.UserMetadata,
+			SSEAlgorithm: old.SSEAlgorithm,
+			Tags:         old.Tags,
+		}
+		next.Refcount.Store(old.Refcount.Load())
+		// CAS only succeeds if the entry pointer is unchanged; a lost CAS means a
+		// concurrent PUT/DELETE replaced it (already at the active gen, or gone) —
+		// skip it. Count only entries we actually migrated.
+		if pb.index.CompareAndSwap(pk, old, next) {
+			n++
+		}
+		return true
+	})
+	return n, rangeErr
+}
+
 // SaveIndex persists the in-memory index to {blobDir}/index.bin (FlatBuffers).
 // Range produces a weakly-consistent snapshot; entries inserted or deleted
 // concurrently may or may not appear, which is acceptable for the

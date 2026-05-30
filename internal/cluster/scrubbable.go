@@ -274,6 +274,16 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 	if err != nil {
 		return fmt.Errorf("encrypt shard: %w", err)
 	}
+	return b.writeEncodedShard(bucket, canonicalKey, shardIdx, path, encoded)
+}
+
+// writeEncodedShard is the race-safe write tail shared by WriteShard and the
+// EC rewrap lane: pack-first repair (last-wins) when the shard is pack-resident,
+// otherwise an atomic tmp+rename of the standalone file. It takes NO
+// DistributedBackend shard lock — callers must already hold the per-(bucket,key)
+// write lock. encoded is the already-sealed shard payload; path is the canonical
+// standalone on-disk location for the standalone branch.
+func (b *DistributedBackend) writeEncodedShard(bucket, canonicalKey string, shardIdx int, path string, encoded []byte) error {
 	// If the shard currently lives in the pack, repair INTO the pack: the
 	// pack-first read preference (readShardIntegrity) would otherwise shadow a
 	// standalone shard_N file with the stale/corrupt pack entry, so the repair

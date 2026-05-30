@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
 )
 
 // wireDEKKeeper loads the cluster KEKStore (keys/<V>.key under dataDir),
@@ -204,13 +205,52 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	if state.metaRaft != nil {
 		isLeaderFn = state.metaRaft.IsLeader
 	}
-	// S6a: wire the rewrap controller behind scrubberKick. The controller has
-	// no lanes registered yet (real per-lane rewrap is S6b) and does not report
-	// completion, so this is behavior-neutral: a post-rotation kick enumerates
-	// zero lanes and returns. This closes the prior nil-kick gap.
+	// S6a/S6b: wire the rewrap controller behind scrubberKick now (this phase
+	// runs before the backends exist), but register the real data-rewrap lanes
+	// LATER in wireRewrapLanes — once state.distBackend / state.packedBackend are
+	// constructed (bootOwnedGroupsAndEC / bootBackendWrap run after this). The
+	// scrubberKick closure captures the SAME controller, so lanes registered
+	// post-boot are seen by every post-rotation kick. Migration-only (no
+	// completion reporting or prune yet).
 	rewrapCtrl := encrypt.NewRewrapController(keeper)
+	state.rewrapController = rewrapCtrl
 	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl))
 	return nil
+}
+
+// wireRewrapLanes registers the S6b data-rewrap lanes on the controller created
+// in wireDEKKeeper. It MUST run after the backends are built (state.distBackend
+// from bootOwnedGroupsAndEC, state.packedBackend from bootBackendWrap) — see
+// run.go. A nil controller (encryption not wired) or nil backend is a no-op, so
+// it is safe to call unconditionally.
+func wireRewrapLanes(state *bootState) {
+	if state.rewrapController == nil {
+		return
+	}
+	// EC lane: sweep every data group the node owns. An object physically lives
+	// in the placement group recorded in its metadata, which can differ from the
+	// bucket's current router assignment after a reassignment — so the lane
+	// enumerates each group's own stored objects (ScanGroupObjects), not a
+	// per-bucket router lookup. Ownership uses the stable state.nodeID (the
+	// placement vector's identity), not the transport address.
+	if state.dgMgr != nil {
+		ecLane := cluster.NewECRewrapLane(
+			state.nodeID,
+			func() []cluster.ECRewrapShardBackend {
+				var out []cluster.ECRewrapShardBackend
+				for _, dg := range state.dgMgr.All() {
+					if gb := dg.Backend(); gb != nil {
+						out = append(out, gb)
+					}
+				}
+				return out
+			},
+		)
+		state.rewrapController.RegisterLane(ecLane)
+	}
+	if state.packedBackend != nil { // single-node packed-blob fast path only
+		state.rewrapController.RegisterLane(packblob.NewPackblobRewrapLane(state.packedBackend))
+	}
 }
 
 func zeroizeKEKCopy(b []byte) {

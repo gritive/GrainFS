@@ -59,6 +59,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 			return err
 		}
 		routed = pb
+		state.packedBackend = pb // DEK rewrap packblob lane source (single-node only; stays nil in cluster)
 		log.Info().Int("threshold", cfg.PackThreshold).Msg("single-node packed blob storage enabled on routed backend")
 	} else if cfg.PackThreshold > 0 {
 		log.Warn().Int("threshold", cfg.PackThreshold).Msg("packed blob fast path is currently single-node only; cluster routed backend keeps EC shard storage")
