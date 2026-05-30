@@ -83,6 +83,7 @@ const (
 	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
 	MetaCmdTypeDEKReplicatedRotate          = clusterpb.MetaCmdTypeDEKReplicatedRotate
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
+	MetaCmdTypeDEKRewrapProgress            = clusterpb.MetaCmdTypeDEKRewrapProgress
 	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
 	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
 	MetaCmdTypeGroupPut                     = clusterpb.MetaCmdTypeGroupPut

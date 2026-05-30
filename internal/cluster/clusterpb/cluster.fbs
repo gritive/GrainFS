@@ -530,6 +530,7 @@ enum MetaCmdType : uint8 {
   PreparePresentFlip           = 85, // zero-CA cutover: leader stamps voter set, records Prepare (PR-2a §8c)
   BeginPresentFlip             = 86, // zero-CA cutover: all voters flip present cert to per-node identity (PR-2a §8c)
   DropClusterKeyAccept         = 87, // zero-CA cutover: irreversibly drops cluster-key from accept-set (PR-2b §8 H2)
+  DEKRewrapProgress            = 88, // S6a: per-node DEK-generation rewrap completion ledger
 }
 
 table MetaNodeEntry {
@@ -575,6 +576,12 @@ table MetaConfigDeleteCmd {
 // DEKRotate has no payload — just the type byte.
 table MetaDEKVersionPruneCmd {
   gen:uint32;
+}
+
+// S6a: one node reporting it finished rewrapping all its lanes for a generation.
+table MetaDEKRewrapProgressCmd {
+  node_id:string;   // node that finished rewrapping all its lanes for gen
+  gen:uint32;       // the OLD generation this node finished migrating off
 }
 
 // MetaDEKReplicatedRotateCmd is the FSM command payload for DEK replication (Phase D).
