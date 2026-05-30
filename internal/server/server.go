@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/iceberg"
+	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -100,6 +101,12 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		NewRespWriter:          func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
 	})
 	s.iceberg.ApplyDiagEnv()
+	s.receipt = receiptsvc.NewHandler(receiptsvc.Deps{
+		API:              s.receiptAPI,
+		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureReceipt) },
+		NewRespWriter:    func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
+		ToHTTPRequest:    toHTTPRequest,
+	})
 	s.registerRoutes(h)
 	s.hertz = h
 	s.initMetrics()

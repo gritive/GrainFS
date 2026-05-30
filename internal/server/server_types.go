@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/iceberg"
+	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -127,6 +128,7 @@ type Server struct {
 	shardCache    *shardcache.Cache
 	jwtKeys       *iamjwt.KeySet
 	iceberg       *iceberg.Handler
+	receipt       *receiptsvc.Handler
 	proxyTrust    *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
