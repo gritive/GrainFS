@@ -29,7 +29,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerAuditAPI(h)
 	s.registerAlertsAPI(h)
 	s.receipt.Register(h, routePathReceiptByID, routePathReceipts)
-	s.registerIncidentAPI(h)
+	s.incidentH.Register(h, routePathIncidents, routePrefixIncidents)
 }
 
 func (s *Server) registerMetricsAPI(h *server.Hertz) {
