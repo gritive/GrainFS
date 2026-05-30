@@ -230,12 +230,6 @@ func hasBearerPrefix(s string) bool {
 	return len(s) >= 7 && strings.EqualFold(s[:7], "Bearer ")
 }
 
-// trimBearerPrefix strips the case-insensitive "Bearer " prefix from s and
-// returns the remaining token. Callers must have checked hasBearerPrefix first.
-func trimBearerPrefix(s string) string {
-	return s[7:]
-}
-
 func s3authActionAllowsRO(action s3auth.S3Action) bool {
 	switch action {
 	case s3auth.GetObject,

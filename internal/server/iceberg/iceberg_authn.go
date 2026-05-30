@@ -9,7 +9,6 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
-	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 // icebergGuarded wraps a Hertz handler with bearer-JWT authentication and
@@ -149,14 +148,3 @@ func catalogWarehouse(ctx context.Context, store warehouseProvider) string {
 type warehouseProvider interface {
 	Warehouse() string
 }
-
-// anonConfigReader is a minimal ConfigReader used in tests.
-type anonConfigReader map[string]bool
-
-func (a anonConfigReader) GetBool(key string) (bool, bool) {
-	v, ok := a[key]
-	return v, ok
-}
-
-// staticConfigReader satisfies s3auth.ConfigReader for test use.
-var _ s3auth.ConfigReader = anonConfigReader{}

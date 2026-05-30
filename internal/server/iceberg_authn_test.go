@@ -105,6 +105,16 @@ func denyAllAuthorizer(t *testing.T) *s3auth.Authorizer {
 	return s3auth.NewAuthorizer(res, cfg)
 }
 
+// anonConfigReader is a minimal s3auth.ConfigReader used in iceberg authn tests.
+type anonConfigReader map[string]bool
+
+func (a anonConfigReader) GetBool(key string) (bool, bool) {
+	v, ok := a[key]
+	return v, ok
+}
+
+var _ s3auth.ConfigReader = anonConfigReader{}
+
 // --- tests ---
 
 // TestIcebergAuthn_MissingToken_401: anon=false, no bearer header → 401.
