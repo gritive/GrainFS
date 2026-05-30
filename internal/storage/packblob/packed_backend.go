@@ -266,8 +266,11 @@ func (pb *PackedBackend) RewrapStaleEntries(ctx context.Context, activeGen uint3
 			Tags:         old.Tags,
 		}
 		next.Refcount.Store(old.Refcount.Load())
+		// CAS only succeeds if the entry pointer is unchanged; a lost CAS means a
+		// concurrent PUT/DELETE replaced it (already at the active gen, or gone) —
+		// skip it. Count only entries we actually migrated.
 		if pb.index.CompareAndSwap(pk, old, next) {
-			n++ // lost CAS = concurrent PUT/DELETE → skip
+			n++
 		}
 		return true
 	})

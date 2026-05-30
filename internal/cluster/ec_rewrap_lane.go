@@ -4,6 +4,8 @@ import (
 	"context"
 	"strconv"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -21,8 +23,9 @@ import (
 // index rather than asking the router).
 type ECRewrapShardBackend interface {
 	// ScanGroupObjects streams every live object stored in this group (all
-	// buckets), bypassing the per-bucket HeadBucket gate.
-	ScanGroupObjects() <-chan scrubber.ObjectRecord
+	// buckets), bypassing the per-bucket HeadBucket gate. The producer honors
+	// ctx so it never leaks when the consumer stops draining.
+	ScanGroupObjects(ctx context.Context) <-chan scrubber.ObjectRecord
 	OwnedShards(bucket, key, versionID, nodeID string) []int
 	RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error)
 }
@@ -57,14 +60,21 @@ func (l *ECRewrapLane) Name() string { return "ec" }
 // ignored (sweep semantics: migrate any shard whose gen != activeGen).
 func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint32) error {
 	for _, gb := range l.groups() {
-		for rec := range gb.ScanGroupObjects() {
+		for rec := range gb.ScanGroupObjects(ctx) {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			for _, idx := range gb.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, l.nodeID) {
 				did, err := gb.RewrapShardIfStale(rec.Bucket, rec.Key, rec.VersionID, idx, activeGen)
 				if err != nil {
-					return err
+					// Log + continue: one shard's transient error must not abort
+					// the whole sweep (and must not leave the ScanGroupObjects
+					// producer blocked on a full channel — see MAJOR-1). The sweep
+					// is idempotent; the next rotation re-attempts skipped shards.
+					log.Warn().Err(err).Str("bucket", rec.Bucket).Str("key", rec.Key).
+						Int("shard", idx).Uint32("active_gen", activeGen).
+						Msg("ec rewrap: shard migration failed; skipping")
+					continue
 				}
 				if did {
 					RewrapECShardsTotal.WithLabelValues(strconv.FormatUint(uint64(activeGen), 10)).Inc()

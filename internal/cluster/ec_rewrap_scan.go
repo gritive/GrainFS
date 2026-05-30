@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -20,7 +21,7 @@ import (
 // Delete markers are skipped. DataShards/ParityShards are left zero — the rewrap
 // lane resolves shard ownership per object via OwnedShards, so the record only
 // needs to identify (bucket, key, versionID).
-func (b *DistributedBackend) ScanGroupObjects() <-chan scrubber.ObjectRecord {
+func (b *DistributedBackend) ScanGroupObjects(ctx context.Context) <-chan scrubber.ObjectRecord {
 	ch := make(chan scrubber.ObjectRecord, 64)
 	go func() {
 		defer close(ch)
@@ -60,8 +61,15 @@ func (b *DistributedBackend) ScanGroupObjects() <-chan scrubber.ObjectRecord {
 					return nil // tombstone — no shards to rewrap
 				}
 
-				ch <- scrubber.ObjectRecord{Bucket: bucket, Key: key, VersionID: versionID}
-				return nil
+				// Honor ctx so the producer never blocks forever when the
+				// consumer stops draining (e.g. ctx-cancel) — otherwise this
+				// goroutine + its pinned badger read snapshot would leak.
+				select {
+				case ch <- scrubber.ObjectRecord{Bucket: bucket, Key: key, VersionID: versionID}:
+					return nil
+				case <-ctx.Done():
+					return errStopScan
+				}
 			})
 		})
 	}()

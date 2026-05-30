@@ -101,18 +101,12 @@ func startRewrapServer(t testing.TB, packThreshold int) (*s3.Client, string, str
 // objects (above packThreshold) are stored as EC shards via the distributed
 // backend. Both lanes run on every rotation kick.
 //
-// NOTE: this test exposes two bugs in S6b:
-//  1. Boot-ordering bug: wireDEKKeeper (in bootRaft) registers lanes when both
-//     state.distBackend and state.packedBackend are nil; the controller runs
-//     with zero lanes. Fix: move RegisterLane calls to after bootBackendWrap.
-//  2. EC rewrap lane gap: even with lanes registered after backends exist, the
-//     grainfs_rewrap_ec_shards_total counter stays 0 for single-node 1+0
-//     after a DEK rotation (investigation confirmed shard exists on disk at
-//     shards/{bucket}/{key}/{versionID}/shard_0 with GFSENC3 magic; OwnedShards
-//     or ScanObjects is not finding the shard for rewrap).
-//  3. packblob lane works correctly once the boot-ordering bug is fixed.
-//
-// See S6b task D report for the prototype diff and full diagnosis.
+// This test drove two S6b integration fixes that the fake-backed unit tests
+// could not: (1) lanes must be registered after the backends are built
+// (wireRewrapLanes runs post-bootBackendWrap, not in the early wireDEKKeeper);
+// (2) the EC lane must sweep every data group's own stored objects, because an
+// object lives in the placement group recorded in its metadata, which can
+// differ from the bucket's current router assignment after a reassignment.
 var _ = ginkgo.Describe("DEK rewrap lanes (DEK rotation S6b)", func() {
 	ginkgo.It("increments EC + packblob rewrap counters after rotate-dek and preserves object content", func() {
 		t := ginkgo.GinkgoTB()

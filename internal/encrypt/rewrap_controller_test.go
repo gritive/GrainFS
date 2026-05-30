@@ -3,6 +3,7 @@ package encrypt
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -62,4 +63,27 @@ func TestRewrapController_Kick_OldGenNotBelowActive_NoOp(t *testing.T) {
 	c.RegisterLane(l)
 	require.NoError(t, c.Kick(context.Background(), 1)) // oldGen == active
 	require.Equal(t, 0, l.calls)
+}
+
+// TestRewrapController_ConcurrentRegisterAndKick proves RegisterLane is safe to
+// call concurrently with Kick (the boot race: lanes are registered after the
+// controller is already reachable by a kick triggered during apply-loop replay).
+// Run under -race; the atomic copy-on-write lanes slice must not race.
+func TestRewrapController_ConcurrentRegisterAndKick(t *testing.T) {
+	k := newTestKeeper(t)
+	require.NoError(t, k.Rotate()) // active gen 1
+	c := NewRewrapController(k)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.RegisterLane(&fakeLane{name: "x"}) }()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = c.Kick(context.Background(), 0)
+		}
+	}()
+	wg.Wait()
 }

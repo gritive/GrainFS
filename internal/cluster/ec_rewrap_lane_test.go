@@ -265,7 +265,7 @@ type rewrapCall struct {
 	activeGen            uint32
 }
 
-func (f *fakeECRewrapBackend) ScanGroupObjects() <-chan scrubber.ObjectRecord {
+func (f *fakeECRewrapBackend) ScanGroupObjects(_ context.Context) <-chan scrubber.ObjectRecord {
 	ch := make(chan scrubber.ObjectRecord, len(f.objects))
 	for _, r := range f.objects {
 		ch <- r
@@ -340,6 +340,22 @@ func TestECRewrapLane_SweepsAllGroups(t *testing.T) {
 	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 5))
 	require.Len(t, g1.calls, 1, "group 1 object swept")
 	require.Len(t, g2.calls, 1, "group 2 object swept")
+}
+
+// TestECRewrapLane_ContinuesOnShardError proves a per-shard error does NOT
+// abort the sweep (MAJOR-1: a return-on-error would block the ScanGroupObjects
+// producer on a full channel). Every owned shard is still attempted and the
+// sweep returns nil.
+func TestECRewrapLane_ContinuesOnShardError(t *testing.T) {
+	fake := &fakeECRewrapBackend{
+		nodeID:    "n1",
+		objects:   []scrubber.ObjectRecord{{Bucket: "b", Key: "k1", VersionID: "v1"}},
+		owned:     map[string][]int{"k1|v1": {0, 1, 2}},
+		rewrapErr: assert.AnError,
+	}
+	lane := laneFromGroups("n1", fake)
+	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 5), "per-shard error must not abort the sweep")
+	require.Len(t, fake.calls, 3, "every owned shard attempted despite errors")
 }
 
 func TestECRewrapLane_CtxCancelStops(t *testing.T) {
