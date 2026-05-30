@@ -66,6 +66,15 @@ func (k *Keystore) ReadCurrent() (string, error)  { return k.readSlot("current.k
 func (k *Keystore) ReadNext() (string, error)     { return k.readSlot("next.key") }
 func (k *Keystore) ReadPrevious() (string, error) { return k.readSlot("previous.key") }
 
+// ReadCurrentForBoot reads current.key and also reports whether the protector
+// signalled a rewrap (env binding changed, or a legacy plaintext slot was
+// migrated). ONLY single-threaded boot callers may act on rewrap by calling
+// WriteCurrent — the runtime Read* path must never rewrite (no mutex; concurrent
+// rotation worker + cleanup timer).
+func (k *Keystore) ReadCurrentForBoot() (psk string, rewrap bool, err error) {
+	return k.readSlotRewrap("current.key")
+}
+
 func (k *Keystore) WriteCurrent(psk string) error  { return k.writeSlot("current.key", psk) }
 func (k *Keystore) WriteNext(psk string) error     { return k.writeSlot("next.key", psk) }
 func (k *Keystore) WritePrevious(psk string) error { return k.writeSlot("previous.key", psk) }

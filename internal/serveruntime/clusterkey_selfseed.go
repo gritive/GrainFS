@@ -153,7 +153,10 @@ func resolveOrSeedClusterKey(state *bootState) error {
 	if state.cfg.ClusterKey != "" {
 		return nil // flag path; ResolveClusterKey mirrors it to disk later
 	}
-	ks := transport.NewKeystore(state.cfg.DataDir)
+	ks, err := newClusterKeystore(state.cfg.DataDir, state.cfg)
+	if err != nil {
+		return err
+	}
 	diskKey, have, err := readCurrentKey(ks) // cond 2, fail-closed
 	if err != nil {
 		return err

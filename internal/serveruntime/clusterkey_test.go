@@ -12,7 +12,7 @@ import (
 
 func TestResolveClusterKey_BothEmpty(t *testing.T) {
 	dir := t.TempDir()
-	got, warn, err := ResolveClusterKey(dir, "")
+	got, warn, err := ResolveClusterKey(dir, "", Config{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestResolveClusterKey_BothEmpty(t *testing.T) {
 func TestResolveClusterKey_FlagOnlyMirrorsToDisk(t *testing.T) {
 	dir := t.TempDir()
 	flag := strings.Repeat("a", 64)
-	got, warn, err := ResolveClusterKey(dir, flag)
+	got, warn, err := ResolveClusterKey(dir, flag, Config{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestResolveClusterKey_DiskOnly(t *testing.T) {
 	if err := transport.NewKeystore(dir).WriteCurrent(disk); err != nil {
 		t.Fatalf("seed disk: %v", err)
 	}
-	got, warn, err := ResolveClusterKey(dir, "")
+	got, warn, err := ResolveClusterKey(dir, "", Config{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestResolveClusterKey_DiskWinsOnConflict(t *testing.T) {
 	if err := transport.NewKeystore(dir).WriteCurrent(disk); err != nil {
 		t.Fatalf("seed disk: %v", err)
 	}
-	got, warn, err := ResolveClusterKey(dir, flag)
+	got, warn, err := ResolveClusterKey(dir, flag, Config{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestResolveClusterKey_BothMatchNoWarn(t *testing.T) {
 	if err := transport.NewKeystore(dir).WriteCurrent(key); err != nil {
 		t.Fatalf("seed disk: %v", err)
 	}
-	got, warn, err := ResolveClusterKey(dir, key)
+	got, warn, err := ResolveClusterKey(dir, key, Config{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestResolveClusterKey_MirrorWriteFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "keys.d"), []byte("nope"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	_, _, err := ResolveClusterKey(dir, strings.Repeat("e", 64))
+	_, _, err := ResolveClusterKey(dir, strings.Repeat("e", 64), Config{})
 	if err == nil {
 		t.Fatalf("expected error when keys.d cannot be created")
 	}
