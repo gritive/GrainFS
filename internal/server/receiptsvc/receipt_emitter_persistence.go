@@ -1,4 +1,4 @@
-package server
+package receiptsvc
 
 import (
 	"github.com/rs/zerolog/log"

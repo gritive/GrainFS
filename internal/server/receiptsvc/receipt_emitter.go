@@ -1,4 +1,4 @@
-package server
+package receiptsvc
 
 import (
 	"sync"
@@ -36,9 +36,9 @@ type receiptTrackingEmitter struct {
 	stopCh     chan struct{}
 }
 
-// NewReceiptTrackingEmitter creates the emitter and starts the actor goroutine.
+// NewTrackingEmitter creates the emitter and starts the actor goroutine.
 // Call Close to stop it.
-func NewReceiptTrackingEmitter(base scrubber.Emitter, store *receipt.Store, ks *receipt.KeyStore) *receiptTrackingEmitter {
+func NewTrackingEmitter(base scrubber.Emitter, store *receipt.Store, ks *receipt.KeyStore) *receiptTrackingEmitter {
 	e := &receiptTrackingEmitter{
 		base:       base,
 		store:      store,

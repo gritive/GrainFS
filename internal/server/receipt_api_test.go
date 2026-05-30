@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	hertz "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 )
 
 func TestRegisterReceiptAPIDoesNotInstallRouteLevelAuth(t *testing.T) {
@@ -27,7 +29,13 @@ func TestRegisterReceiptAPIDoesNotInstallRouteLevelAuth(t *testing.T) {
 		receiptAPI: receipt.NewAPI(nil, nil, nil, 0),
 		verifier:   s3auth.NewCachingVerifier(s3auth.NewVerifier([]s3auth.Credentials{{AccessKey: "AK", SecretKey: "secret"}}), 4096, time.Minute),
 	}
-	srv.registerReceiptAPI(h)
+	rh := receiptsvc.NewHandler(receiptsvc.Deps{
+		API:              srv.receiptAPI,
+		FeatureAvailable: func() bool { return srv.routeFeatureRoutesVisible(routeFeatureReceipt) },
+		NewRespWriter:    func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
+		ToHTTPRequest:    toHTTPRequest,
+	})
+	rh.Register(h, routePathReceiptByID, routePathReceipts)
 
 	go h.Spin()
 	t.Cleanup(func() {
