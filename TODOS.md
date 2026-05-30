@@ -421,17 +421,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 - [ ] **Retire dead `internal/encrypt/filekek.go`** [P3] (`FileKEK`) — no
   production callers; superseded by KEKStore + KeyProtector.
 
-- [ ] **Solo-leader full-process restart fails `WaitDEKReady` (pre-existing, found 2026-05-29)**.
-  A single-node genesis leader (whether started with `--cluster-key` OR self-seeded)
-  does not come back up after a terminate+restart on the same data dir: boot aborts with
-  `DEK readiness: WaitDEKReady: context deadline exceeded`. `bootGenesisDEKBootstrap`
-  only runs on `isGenesisBoot` (false on restart, priorState=true), so a solo node on
-  restart relies on the DEK being ready from restored meta-raft state and times out.
-  Verified independent of the genesis-self-seed change via a `--cluster-key` control
-  (both fail identically), so it is NOT a self-seed regression — surfaced while writing
-  the self-seed e2e. Investigate whether solo (RF=1) nodes can restart at all in the
-  current KEK/DEK readiness path; add a restart e2e once fixed. [P2]
-
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source
@@ -452,6 +441,21 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   keeper, making this unreachable on a serving node today. Reopen as a hardening pass:
   detect `errors.Is(err, encrypt.ErrDEKGenUnknown)` in the commit coordinator and map it
   to a retriable 503 (not 500). The READ side already classifies it as transient (slice C).
+- [ ] **Solo `becomeLeader` full-replay: harden the corrupt-data-dir edge** [P3].
+  The solo-restart DEK-readiness fix (v0.0.483.0) makes a sole voter deliver its
+  durably-committed log on `becomeLeader` (`internal/raft/actor.go`). For a NORMAL
+  lifecycle every entry in a sole voter's log is committed (self-quorum at append),
+  and a former multi-voter node reconstructs its real config from the log/snapshot
+  (`reconstructConfig`), so it never hits the solo shortcut. The one new behavior:
+  a HAND-CORRUPTED data dir (command entries present, ConfChange entries absent, no
+  snapshot, mis-set empty `--peers`) seeds the effective config to `{self}` via the
+  `seedConfigFromCfg` fallback and would now apply a possibly-uncommitted command
+  tail — whereas before the fix it hung at `WaitDEKReady` (fail-safe). Not reachable
+  through normal operation; the live solo propose path already shares the exposure.
+  Harden: on the solo `becomeLeader` recovery path, only deliver up to the highest
+  index whose committedness is provable (e.g. require a snapshot floor or a
+  log-resident ConfChange establishing the `{self}` config) before treating the tail
+  as committed, or refuse boot on the no-snapshot + no-ConfChange + non-genesis combo.
 - [ ] **InstallSnapshot Restore failure should fatal-halt, not log-and-advance**.
   `meta_raft.go` apply-loop `LogEntrySnapshot` case logs a `Restore` error then
   advances `lastApplied` to the entry index regardless. A joiner that receives an

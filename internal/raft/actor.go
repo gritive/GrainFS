@@ -996,10 +996,18 @@ func (n *Node) becomeLeader() {
 	// term immediately on election so maybeAdvanceCommitIndex can satisfy
 	// the term gate (log[N].Term == currentTerm) without waiting for a
 	// client request, committing any prior-term uncommitted entries as a
-	// side effect. Single-voter clusters have self-quorum so entries commit
-	// at append time — there can never be a prior-term uncommitted entry
-	// at single-voter election, making the no-op unnecessary noise on the
-	// applyCh. FSM consumers MUST ignore LogEntryNoOp entries (Command nil).
+	// side effect. FSM consumers MUST ignore LogEntryNoOp entries (Command nil).
+	//
+	// Single-voter clusters need no no-op (self-quorum commits entries at
+	// append time), but they DO need a different recovery action: commitIndex
+	// is volatile and reset to the snapshot floor on restart (0 when no
+	// snapshot, node.go), while the durable log is the committed truth for a
+	// sole voter. A solo voter has no incoming AppendEntries to re-establish
+	// commitIndex, and nothing proposes during boot (boot is gated on this
+	// delivery, e.g. WaitDEKReady waiting on the replicated gen-0 DEK entry).
+	// So on the solo path we deliver the durably-committed log directly,
+	// mirroring the live solo propose path (handlePropose) which already
+	// commits prior-term entries without a no-op.
 	peers := n.st.peerSet()
 	if len(peers) > 0 {
 		noOpIdx := n.st.lastLogIndex() + 1
@@ -1010,6 +1018,8 @@ func (n *Node) becomeLeader() {
 		}}); err != nil {
 			panic("raftv2: Append no-op: " + err.Error())
 		}
+	} else {
+		n.applyCommitted(n.st.commitIndex, n.st.lastLogIndex())
 	}
 
 	// Initialise per-peer replication state per Raft §5.3: nextIndex starts
