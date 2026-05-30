@@ -108,6 +108,18 @@ func IsEncryptedShard(raw []byte) bool {
 	return true
 }
 
+// EncryptedShardGen returns the DEK generation of an encrypted shard header.
+func EncryptedShardGen(raw []byte) (gen uint32, ok bool) {
+	if !IsEncryptedShard(raw) || len(raw) < encryptedHeaderLen {
+		return 0, false
+	}
+	g, _, _, err := parseEncryptedShardHeader(raw[:encryptedHeaderLen])
+	if err != nil {
+		return 0, false
+	}
+	return g, true
+}
+
 // EncodeEncryptedShard streams r into the GFSENC3 format, sealing each chunk
 // via enc under DomainShard with baseFields plus the per-chunk ordinal. All
 // chunks are sealed under one pinned generation (chunk 0's): chunk 0 seals at

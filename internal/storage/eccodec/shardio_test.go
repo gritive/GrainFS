@@ -982,3 +982,22 @@ func BenchmarkReadEncryptedShardRangeAt5MiB(b *testing.B) {
 		require.Equal(b, len(data), n)
 	}
 }
+
+func TestEncryptedShardGen(t *testing.T) {
+	f := newFakeShardEncryptor(t)
+	f.gen = 3
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("payload")), f, shardBaseFields(), 1024))
+
+	gen, ok := EncryptedShardGen(encoded.Bytes())
+	require.True(t, ok)
+	assert.Equal(t, uint32(3), gen)
+
+	gen, ok = EncryptedShardGen(EncodeShard([]byte("plaintext")))
+	assert.False(t, ok)
+	assert.Equal(t, uint32(0), gen)
+
+	gen, ok = EncryptedShardGen([]byte("short"))
+	assert.False(t, ok)
+	assert.Equal(t, uint32(0), gen)
+}
