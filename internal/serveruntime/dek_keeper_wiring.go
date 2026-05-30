@@ -40,7 +40,7 @@ import (
 // SAME signal the KEK auto-generate branch and the cluster.id strict-mode branch
 // already trust.
 func isGenesisBoot(state *bootState) bool {
-	return !(state.joinMode || state.inviteJoinMode || len(state.peers) > 0 || state.priorState)
+	return !(state.inviteJoinMode || len(state.peers) > 0 || state.priorState)
 }
 
 func loadKEKStoreAndClusterID(state *bootState) error {

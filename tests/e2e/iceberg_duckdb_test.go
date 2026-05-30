@@ -381,7 +381,7 @@ func runAuditIcebergClusterLeaderFlap(t testing.TB) {
 	}
 
 	time.Sleep(2 * time.Second)
-	cluster.procs[oldLeaderIdx] = cluster.startNode(oldLeaderIdx)
+	cluster.procs[oldLeaderIdx] = cluster.startNode(oldLeaderIdx, nil)
 	waitForPort(t, cluster.httpPorts[oldLeaderIdx], 60*time.Second)
 
 	probeCtx, probeCancel := context.WithTimeout(ctx, 90*time.Second)

@@ -414,30 +414,6 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   the self-seed e2e. Investigate whether solo (RF=1) nodes can restart at all in the
   current KEK/DEK readiness path; add a restart e2e once fixed. [P2]
 
-- [ ] **`wipeSoloRaftState` does not clear `keys.d/raft-store.key.enc` on solo->join (found 2026-05-29)**.
-  A solo node that has booted self-seals its node-local raft-store key under its OWN
-  KEK. When converting to a cluster member via runtime `grainfs join` (after staging the
-  peer's `keys/0.key`), the orphaned `keys.d/raft-store.key.enc` can no longer be
-  AEAD-opened (`cipher: message authentication failed`) and the rejoin boot fails.
-  `wipeSoloRaftState` (`internal/serveruntime/boot_phases.go`) backs up `meta_raft`/`raft`/
-  `shared-raft-log` but not the raft-store key. Landed with #635 (raft-store sealing).
-  The runtime `grainfs join` CLI — the only trigger that staged a peer KEK *after* solo
-  boot, and the only thing that exercised this path — has since been retired (v0.0.473.0),
-  taking its parked e2e with it. The bug now stays LATENT in the `.join-pending` solo->join
-  boot path: reachable only by manually writing `.join-pending` on an already-bootstrapped
-  solo node. Invite-join is immune (it stages the KEK pre-boot, before any self-seal). Fix
-  if/when the manual `.join-pending` solo->join path is exercised again: have
-  `wipeSoloRaftState` also clear/re-derive the raft-store key (mind the `.pre-join-backup`
-  stores sealed under the old key). [P3]
-
-- [ ] **Retire the clientless KEK-challenge server admission gate**. Offline `grainfs
-  cluster join` was removed (v0.0.460.0); its KEK-challenge client is gone, but the
-  server-side `MetaChallengeReceiver` + the HMAC challenge path in
-  `MetaJoinReceiver.HandleJoin` (`internal/cluster/`) remain. With the runtime `grainfs
-  join` CLI also retired (v0.0.473.0), no shipping client drives the HMAC challenge path
-  at all — only invite-join uses the receiver now. They are entangled with the live
-  invite-join receiver, so disentangle and remove the clientless-dead admission path. [P3]
-
 - [ ] **KEK-envelope C-prune-followup: `SegmentRef.dek_gen` done right + with consumer**.
   Deferred from the D-seg-ec-activate slice (v0.0.368.0). Recording the sealing DEK
   generation in segment metadata was cut because the only cheap source

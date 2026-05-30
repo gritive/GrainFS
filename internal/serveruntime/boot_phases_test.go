@@ -312,45 +312,11 @@ func TestBootMetaDB_PreflightRejectsCorruptDB(t *testing.T) {
 	t.Skip("preflight rejection requires DB corruption that cannot be safely simulated in unit; covered by integration tests")
 }
 
-func TestBootValidateConfig_JoinPendingFile(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".join-pending"), []byte("127.0.0.1:9999"), 0o600))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta_raft"), 0o755))
-
-	state := newBootState(Config{
-		DataDir:    dir,
-		NodeID:     "n1",
-		RaftAddr:   "127.0.0.1:8301",
-		ClusterKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	})
-	require.NoError(t, bootValidateConfig(state))
-
-	assert.True(t, state.joinMode)
-	assert.Equal(t, "127.0.0.1:9999", state.joinAddr)
-	_, err := os.Stat(filepath.Join(dir, "meta_raft"))
-	assert.True(t, os.IsNotExist(err))
-	_, err = os.Stat(filepath.Join(dir, "meta_raft.pre-join-backup"))
-	assert.NoError(t, err)
-}
-
-func TestBootValidateConfig_JoinPendingFile_EmptyPeer(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".join-pending"), []byte("   "), 0o600))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta_raft"), 0o755))
-
-	state := newBootState(Config{DataDir: dir, NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
-	require.NoError(t, bootValidateConfig(state))
-
-	assert.False(t, state.joinMode)
-	_, err := os.Stat(filepath.Join(dir, "meta_raft"))
-	assert.NoError(t, err)
-}
-
-func TestBootValidateConfig_NoJoinPending_SoloBootstrap(t *testing.T) {
+func TestBootValidateConfig_NoInviteBundle_SoloBootstrap(t *testing.T) {
 	dir := t.TempDir()
 	state := newBootState(Config{DataDir: dir, NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
-	assert.False(t, state.joinMode)
+	assert.False(t, state.inviteJoinMode)
 }
 
 func TestBootValidateConfig_ExistingRaftState_Reconnect(t *testing.T) {
@@ -360,7 +326,8 @@ func TestBootValidateConfig_ExistingRaftState_Reconnect(t *testing.T) {
 
 	state := newBootState(Config{DataDir: dir, NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
-	assert.False(t, state.joinMode)
+	assert.False(t, state.inviteJoinMode)
+	// Prior raft state must be preserved (the legacy join-pending wipe is gone).
 	_, err := os.Stat(filepath.Join(dir, "meta_raft"))
 	assert.NoError(t, err)
 }

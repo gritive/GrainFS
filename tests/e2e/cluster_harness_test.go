@@ -56,6 +56,7 @@ type e2eCluster struct {
 	dataDirs      []string
 	httpPorts     []int
 	raftPorts     []int
+	joinPorts     []int
 	nfs4Ports     []int
 	nbdPorts      []int
 	pprofPorts    []int
@@ -173,12 +174,13 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 	c.dataDirs = make([]string, opts.Nodes)
 	c.httpPorts = make([]int, opts.Nodes)
 	c.raftPorts = make([]int, opts.Nodes)
+	c.joinPorts = make([]int, opts.Nodes)
 	c.nfs4Ports = make([]int, opts.Nodes)
 	c.nbdPorts = make([]int, opts.Nodes)
 	c.pprofPorts = make([]int, opts.Nodes)
 	c.httpURLs = make([]string, opts.Nodes)
 
-	portCount := opts.Nodes * 4
+	portCount := opts.Nodes * 5
 	if opts.EnablePprof {
 		portCount += opts.Nodes
 	}
@@ -196,8 +198,11 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 		} else {
 			c.nbdPorts[i] = ports[3*opts.Nodes+i]
 		}
+		// Zero-CA join-listener port: every clustered node gets a stable one so
+		// the seed can mint invites and any node remains addressable as leader.
+		c.joinPorts[i] = ports[4*opts.Nodes+i]
 		if opts.EnablePprof {
-			c.pprofPorts[i] = ports[4*opts.Nodes+i]
+			c.pprofPorts[i] = ports[5*opts.Nodes+i]
 		}
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 		// Use /tmp explicitly: on macOS, $TMPDIR resolves to a long
@@ -213,15 +218,14 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 		c.dataDirs[i] = dir
 	}
 
-	// Pre-seed the cluster transport PSK on every node's disk (replaces the
-	// removed cluster-key flag). WriteCurrent creates keys.d/. Must run BEFORE
-	// any node boots, else a node self-seeds a different key and the cluster
-	// cannot form. wipeSoloRaftState (join mode) does not touch keys.d/.
-	for i := range c.dataDirs {
-		if err := transport.NewKeystore(c.dataDirs[i]).WriteCurrent(c.clusterKey); err != nil {
-			c.Stop()
-			return nil, fmt.Errorf("pre-seed keys.d/current.key for node %d: %w", i, err)
-		}
+	// Stage the cluster transport PSK on the SEED only (node 0). The seed boots
+	// as genesis; followers join via invite-join, which delivers the sealed KEK
+	// + PSK + cluster.id in the bundle — they need NO pre-staged key. (Staging
+	// the seed's PSK deterministically, rather than letting it self-seed a random
+	// key, keeps c.clusterKey meaningful for tests that pre-seed crypto material.)
+	if err := transport.NewKeystore(c.dataDirs[0]).WriteCurrent(c.clusterKey); err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("pre-seed seed keys.d/current.key: %w", err)
 	}
 
 	switch opts.Mode {
@@ -255,14 +259,10 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 		c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
 	}
 
-	// Followers: write .join-pending before starting so they boot directly in
-	// join mode without a separate restart step.
+	// Followers: mint a single-use invite bundle on the seed and boot each with
+	// GRAINFS_INVITE_BUNDLE. Serial (minting needs the live seed leader+listener).
 	for i := 1; i < len(c.procs); i++ {
-		if err := c.writeJoinPending(i, c.raftAddr(0)); err != nil {
-			c.Stop()
-			return nil, err
-		}
-		c.procs[i] = c.startNode(c.t, i)
+		c.startInviteFollower(i)
 		if err := waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second); err != nil {
 			c.Stop()
 			return nil, err
@@ -285,13 +285,11 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		return nil, err
 	}
 
-	// Followers: write .join-pending before starting so they boot in join mode.
+	// Followers: mint a single-use invite bundle on the seed and boot each with
+	// GRAINFS_INVITE_BUNDLE. (Former parallel boot is now serial per-follower
+	// because minting requires the live seed leader + join listener.)
 	for i := 1; i < len(c.procs); i++ {
-		if err := c.writeJoinPending(i, c.raftAddr(0)); err != nil {
-			c.Stop()
-			return nil, err
-		}
-		c.procs[i] = c.startNode(c.t, i)
+		c.startInviteFollower(i)
 		time.Sleep(150 * time.Millisecond)
 	}
 	if err := waitForPortsParallelErrWithProcesses(c.httpPorts, c.procs, 60*time.Second); err != nil {
@@ -399,7 +397,18 @@ func (c *e2eCluster) EnsureBucketWritable(ctx context.Context, bucket string, ti
 	return waitForAdminBucketWritable(ctx, c.dataDirs, c.httpURLs, c.accessKey, c.secretKey, c.saID, bucket, timeout)
 }
 
+// startNode boots node i with no extra environment. Used for the seed and for
+// RestartNode — a restarted invite-joined node has its sealed key + cluster.id
+// on disk and boots as a normal existing member (it must NOT re-receive the
+// consumed invite bundle), so restart never carries GRAINFS_INVITE_BUNDLE.
 func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
+	return c.spawnNode(t, i, nil)
+}
+
+// spawnNode builds node i's serve args (including a stable Zero-CA
+// --join-listen-addr) and starts the process, optionally with extra env entries
+// (used to pass GRAINFS_INVITE_BUNDLE to a follower on its FIRST boot).
+func (c *e2eCluster) spawnNode(t testing.TB, i int, extraEnv []string) *exec.Cmd {
 	t.Helper()
 	logFile, err := os.CreateTemp("", fmt.Sprintf("%s-node-%d-*.log", c.logPrefix, i))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -418,6 +427,7 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", c.nodeID(i),
 		"--raft-addr", c.raftAddr(i),
+		"--join-listen-addr", c.joinAddr(i),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", c.scrubIntervalArg(),
@@ -435,8 +445,19 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start e2e cluster node %d", i)
 	return cmd
+}
+
+// startInviteFollower mints a single-use invite bundle on the seed's admin UDS
+// and boots follower i with it. Replaces the legacy .join-pending + KEK-staging
+// formation: invite-join delivers the sealed KEK/PSK/cluster.id in the bundle.
+func (c *e2eCluster) startInviteFollower(i int) {
+	bundle := mintInvite(c.t, c.dataDirs[0])
+	c.procs[i] = c.spawnNode(c.t, i, []string{inviteBundleEnvKey + "=" + bundle})
 }
 
 func (c *e2eCluster) scrubIntervalArg() string {
@@ -454,52 +475,8 @@ func (c *e2eCluster) raftAddr(i int) string {
 	return fmt.Sprintf("127.0.0.1:%d", c.raftPorts[i])
 }
 
-// writeJoinPending writes the .join-pending sentinel into node i's data dir
-// so that grainfs serve boots directly in join mode without a separate restart.
-// Also stages the seed's keystore (keys/0.key + cluster.id) into the joiner's
-// data dir — wireDEKKeeper refuses to auto-generate a KEK on a joining node
-// (§7 B3 / F#21) and Phase A binds the handshake to the cluster identity.
-func (c *e2eCluster) writeJoinPending(i int, seedRaftAddr string) error {
-	return writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr)
-}
-
-// writeNodeJoinPending writes the .join-pending sentinel into dataDir so that
-// grainfs serve boots directly in join mode. Use before starting non-seed nodes
-// in tests that manage processes directly (outside e2eCluster).
-//
-// seedDataDir is the seed node's data dir; the seed's keys/0.key + cluster.id
-// are copied into dataDir so the joiner can complete the KEK handshake. If
-// seedDataDir is empty, key-staging is skipped (legacy single-node tests).
-//
-// Phase A: mirrors the real operator workflow (scp <peer>:<dataDir>/keys/0.key
-// and <peer>:<dataDir>/cluster.id). Both files must exist on the seed before
-// followers boot.
-func writeNodeJoinPending(dataDir, seedDataDir, seedRaftAddr string) error {
-	if seedDataDir != "" {
-		seedKEK := filepath.Join(seedDataDir, "keys", "0.key")
-		if data, err := os.ReadFile(seedKEK); err == nil {
-			if werr := os.MkdirAll(filepath.Join(dataDir, "keys"), 0o700); werr != nil {
-				return fmt.Errorf("mkdir joiner keys dir: %w", werr)
-			}
-			if werr := os.WriteFile(filepath.Join(dataDir, "keys", "0.key"), data, 0o600); werr != nil {
-				return fmt.Errorf("stage joiner keys/0.key: %w", werr)
-			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("read seed keys/0.key: %w", err)
-		}
-		seedClusterID := filepath.Join(seedDataDir, "cluster.id")
-		if data, err := os.ReadFile(seedClusterID); err == nil {
-			if werr := os.WriteFile(filepath.Join(dataDir, "cluster.id"), data, 0o600); werr != nil {
-				return fmt.Errorf("stage joiner cluster.id: %w", werr)
-			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("read seed cluster.id: %w", err)
-		}
-	}
-	return os.WriteFile(
-		filepath.Join(dataDir, joinPendingFile),
-		[]byte(seedRaftAddr), 0o600,
-	)
+func (c *e2eCluster) joinAddr(i int) string {
+	return fmt.Sprintf("127.0.0.1:%d", c.joinPorts[i])
 }
 
 // KillNode terminates node i's process via SIGKILL while preserving its

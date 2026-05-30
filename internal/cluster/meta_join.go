@@ -26,10 +26,6 @@ import (
 
 type JoinStatus string
 
-// metaJoinTimeout is the maximum time a join operation waits for a Raft
-// commit (both the KEK path and the invite path use the same budget).
-const metaJoinTimeout = 60 * time.Second
-
 const (
 	JoinStatusOK            JoinStatus = "ok"
 	JoinStatusAlreadyMember JoinStatus = "already_member"
@@ -101,51 +97,6 @@ type BootstrapSecretProvider interface {
 	BootstrapSecrets() (kekGens []KEKGen, transportPSK []byte, err error)
 }
 
-type metaJoinDialer func(peer string, payload []byte) ([]byte, error)
-
-type MetaJoinSender struct {
-	dialer metaJoinDialer
-}
-
-func NewMetaJoinSender(d metaJoinDialer) *MetaJoinSender {
-	return &MetaJoinSender{dialer: d}
-}
-
-func (s *MetaJoinSender) SendJoin(ctx context.Context, peers []string, req JoinRequest) (*JoinReply, error) {
-	payload, err := encodeJoinRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	var lastErr error
-	for _, peer := range peers {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		replyBytes, err := s.dialer(peer, payload)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		reply, err := decodeJoinReply(replyBytes)
-		if err != nil {
-			return nil, err
-		}
-		if reply.Status == JoinStatusNotLeader && reply.LeaderAddr != "" {
-			replyBytes, err = s.dialer(reply.LeaderAddr, payload)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			return decodeJoinReply(replyBytes)
-		}
-		return reply, nil
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, fmt.Errorf("meta_join: no peers")
-}
-
 type metaJoinCoordinator interface {
 	IsLeader() bool
 	LeaderID() string
@@ -175,14 +126,9 @@ type MetaJoinReceiver struct {
 	meta         metaJoinCoordinator
 	joinMu       sync.Mutex
 	postJoinHook func(context.Context, JoinRequest) error
-	// verifier, when non-nil, gates admission on the KEK challenge-response
-	// HMAC. T55 ships the plumbing; T57 will require verifier != nil at boot.
-	// When nil (legacy callers, unit tests not exercising the handshake), the
-	// HMAC gate is skipped so existing behavior is preserved.
-	verifier *encrypt.HandshakeVerifier
 	// clusterID is the 16-byte cluster identifier bound into the invite
-	// transcript on the receiver side (sourced from the KEK verifier at boot).
-	// The invite gate requires it to be non-empty.
+	// transcript on the receiver side (sourced from the KEK verifier's
+	// ClusterID() at boot). The invite gate requires it to be non-empty.
 	clusterID []byte
 	// secretProvider supplies the bootstrap secrets (KEK generations and
 	// transport PSK) the invite handler seals to a joiner.
@@ -195,14 +141,6 @@ func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
 
 func (r *MetaJoinReceiver) WithPostJoinHook(fn func(context.Context, JoinRequest) error) *MetaJoinReceiver {
 	r.postJoinHook = fn
-	return r
-}
-
-// WithHandshakeVerifier installs the KEK handshake verifier used to gate
-// admission. The SAME verifier instance must be wired into the paired
-// MetaChallengeReceiver so the issued-nonce map is shared. §7 T55 (D#15, F#23).
-func (r *MetaJoinReceiver) WithHandshakeVerifier(v *encrypt.HandshakeVerifier) *MetaJoinReceiver {
-	r.verifier = v
 	return r
 }
 
@@ -222,77 +160,9 @@ func (r *MetaJoinReceiver) WithClusterID(cid []byte) *MetaJoinReceiver {
 	return r
 }
 
-func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
-	joinReq, err := decodeJoinRequest(req.Payload)
-	if err != nil {
-		return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: err.Error()})
-	}
-	if joinReq.NodeID == "" || joinReq.Address == "" {
-		return joinMessage(JoinReply{Accepted: false, Status: JoinStatusError, Message: "node_id and address are required"})
-	}
-	if !r.meta.IsLeader() {
-		// TODO(W7b/W9): return leader_join_addr+leader_join_spki from member state
-		// so an invite joiner can redirect its join-listener dial to the leader.
-		// The full join-listener redirect (MetaNodeEntry extension) is a separate
-		// task and is intentionally NOT implemented here.
-		return joinMessage(r.notLeaderReply())
-	}
-	// KEK handshake gate. Runs after the leader check so non-leaders return
-	// JoinStatusNotLeader without consuming a nonce on the leader's verifier
-	// (saves nonce churn on follower retries). §7 T55 (D#15, F#23).
-	//
-	// Phase A: transcript joiner_version and leader_active_version are
-	// pinned to 0 on both sides — the wire JoinRequest carries only
-	// (NodeID, Address, Nonce, Response); the version fields will be
-	// extended in Phase C. The verifier already holds cluster_id from
-	// boot; we reach it via ClusterID() so receivers stay decoupled from
-	// NodeConfig.
-	if r.verifier != nil {
-		transcript := encrypt.JoinTranscript{
-			ClusterID:           r.verifier.ClusterID(),
-			Nonce:               joinReq.HandshakeNonce,
-			NodeID:              joinReq.NodeID,
-			Address:             joinReq.Address,
-			JoinerVersion:       0,
-			LeaderActiveVersion: 0,
-		}
-		activeVer := r.verifier.Store().ActiveVersion()
-		if err := r.verifier.VerifyResponse(activeVer, transcript, joinReq.HandshakeResponse); err != nil {
-			return joinMessage(JoinReply{
-				Accepted: false,
-				Status:   JoinStatusKEKMismatch,
-				Message:  "KEK handshake failed: " + err.Error(),
-			})
-		}
-	}
-	r.joinMu.Lock()
-	defer r.joinMu.Unlock()
-	for _, n := range r.meta.Nodes() {
-		if n.ID == joinReq.NodeID {
-			if n.Address == joinReq.Address {
-				return joinMessage(JoinReply{Accepted: true, Status: JoinStatusAlreadyMember})
-			}
-			return joinMessage(JoinReply{Accepted: false, Status: JoinStatusAddrMismatch, Message: "node ID already exists with different address"})
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), metaJoinTimeout)
-	defer cancel()
-	if err := r.meta.Join(ctx, joinReq.NodeID, joinReq.Address); err != nil {
-		return joinMessage(joinReplyFromError(err))
-	}
-	if r.postJoinHook != nil {
-		if err := r.postJoinHook(ctx, joinReq); err != nil {
-			return joinMessage(joinReplyFromError(err))
-		}
-	}
-	return joinMessage(JoinReply{Accepted: true, Status: JoinStatusOK})
-}
-
 // HandleJoin runs the two-phase invite-join flow (W7). It receives the
-// JoinListener-captured TLS peer SPKI (W9 supplies the real value; the
-// in-process Handle entry passes the claimed SPKI). The caller must already
-// hold leadership; HandleJoin assumes IsLeader() is true.
+// JoinListener-captured TLS peer SPKI. The caller must already hold leadership;
+// HandleJoin assumes IsLeader() is true.
 //
 //   - Phase-1 (req.JoinPhase==1): run the invite gate, assert capturedSPKI ==
 //     req.SPKI, bind the invite to this (nodeID, spki) via ProposeInvitePending,
@@ -583,11 +453,6 @@ func joinReplyFromError(err error) JoinReply {
 	default:
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: err.Error()}
 	}
-}
-
-func joinMessage(reply JoinReply) *transport.Message {
-	data, _ := encodeJoinReply(reply)
-	return &transport.Message{Type: transport.StreamMetaJoin, Payload: data}
 }
 
 var metaJoinRequestMagic = []byte("GFSMJN2")

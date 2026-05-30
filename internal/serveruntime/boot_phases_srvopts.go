@@ -152,7 +152,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithSnapshotManager(state.objSnapMgr))
 	}
 	var metaCatalog *cluster.MetaCatalog
-	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.joinMode {
+	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.inviteJoinMode {
 		legacyStore := icebergcatalog.NewStore(state.db, "s3://grainfs-tables/warehouse")
 		metaCatalog = cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
 		if err := MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, state.backend); err != nil {
@@ -324,7 +324,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// 500 before the ClusterCoordinator forward path can route them to the real
 	// group leader (the same path PUTs already use). Skip the fence so reads reach
 	// the coordinator and forward correctly.
-	if !state.joinMode && !state.inviteJoinMode {
+	if !state.inviteJoinMode {
 		srvOpts = append(srvOpts, server.WithReadIndexer(state.distBackend))
 	}
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(state.distBackend))

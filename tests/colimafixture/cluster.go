@@ -41,6 +41,7 @@ import (
 type Cluster struct {
 	HTTPPorts []int    // S3/admin HTTP ports (bind :%d on host)
 	RaftPorts []int    // QUIC raft ports
+	JoinPorts []int    // Zero-CA QUIC join-listener ports
 	NFSPorts  []int    // NFSv4 ports (bind :%d)
 	NBDPorts  []int    // NBD ports (bind :%d)
 	P9Ports   []int    // 9P2000.L ports (bind 0.0.0.0 via --9p-bind)
@@ -101,6 +102,7 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	c := &Cluster{
 		HTTPPorts: make([]int, numNodes),
 		RaftPorts: make([]int, numNodes),
+		JoinPorts: make([]int, numNodes),
 		NFSPorts:  make([]int, numNodes),
 		NBDPorts:  make([]int, numNodes),
 		P9Ports:   make([]int, numNodes),
@@ -115,10 +117,11 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	// Allocate up to 5 ports/node (http, raft, nfs4, nbd, 9p). Even when a
 	// protocol is disabled we still reserve the slot so port indices are
 	// stable; serve will simply not listen on a `0` port.
-	ports := uniqueFreePorts(t, numNodes*5)
+	ports := uniqueFreePorts(t, numNodes*6)
 	for i := 0; i < numNodes; i++ {
 		c.HTTPPorts[i] = ports[i]
 		c.RaftPorts[i] = ports[numNodes+i]
+		c.JoinPorts[i] = ports[5*numNodes+i]
 		if opts.EnableNFS {
 			c.NFSPorts[i] = ports[2*numNodes+i]
 		}
@@ -138,18 +141,15 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 
 	clusterKey := "COLIMA-FIXTURE-CLUSTER-KEY"
 
-	// Pre-seed the cluster transport PSK on every node's disk (replaces the
-	// removed cluster-key flag). Must run BEFORE any node boots, else a node
-	// self-seeds a different key and the cluster cannot form.
-	for i := 0; i < numNodes; i++ {
-		if err := transport.NewKeystore(c.DataDirs[i]).WriteCurrent(clusterKey); err != nil {
-			c.Stop()
-			t.Fatalf("pre-seed keys.d/current.key for node %d: %v", i, err)
-		}
+	// Stage the cluster transport PSK on the SEED only (node 0). Followers join
+	// via invite-join; the minted bundle delivers the sealed KEK+PSK+cluster.id.
+	if err := transport.NewKeystore(c.DataDirs[0]).WriteCurrent(clusterKey); err != nil {
+		c.Stop()
+		t.Fatalf("pre-seed seed keys.d/current.key: %v", err)
 	}
 
 	// Seed (node 0) starts first.
-	c.procs[0], c.logs[0] = c.spawn(t, binary, 0)
+	c.procs[0], c.logs[0] = c.spawn(t, binary, 0, nil)
 	if err := waitHTTPReady(c.HTTPPorts[0], 60*time.Second); err != nil {
 		c.Stop()
 		t.Fatalf("seed node http not ready: %v", err)
@@ -168,43 +168,17 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	}
 	c.SAID, c.AccessKey, c.SecretKey = saID, ak, sk
 
-	// §7 B3 — followers must have the cluster KEK + cluster identity in
-	// place BEFORE serve boots; otherwise wireDEKKeeper refuses startup in
-	// join mode. Phase A binds the join handshake to per-cluster KEK +
-	// cluster_id, so both files must be staged. Mirror the real operator
-	// workflow (scp <peer>:<data>/keys/0.key and <peer>:<data>/cluster.id)
-	// by copying the seed's keystore + identity into each follower's data
-	// dir.
-	seedKEK := filepath.Join(c.DataDirs[0], "keys", "0.key")
-	if err := waitForFile(seedKEK, 30*time.Second); err != nil {
-		c.Stop()
-		t.Fatalf("seed keys/0.key did not appear: %v", err)
-	}
-	seedClusterID := filepath.Join(c.DataDirs[0], "cluster.id")
-	if err := waitForFile(seedClusterID, 30*time.Second); err != nil {
-		c.Stop()
-		t.Fatalf("seed cluster.id did not appear: %v", err)
-	}
-	// Followers join via .join-pending file containing seed raft addr.
-	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.RaftPorts[0])
+	// Followers join via invite-join: mint a single-use bundle on the seed's
+	// admin UDS and boot each follower with GRAINFS_INVITE_BUNDLE + a clean data
+	// dir. The bundle delivers the sealed KEK+PSK+cluster.id, so no key/identity
+	// pre-staging is needed.
 	for i := 1; i < numNodes; i++ {
-		if err := os.MkdirAll(filepath.Join(c.DataDirs[i], "keys"), 0o700); err != nil {
+		bundle, err := mintInvite(binary, sock)
+		if err != nil {
 			c.Stop()
-			t.Fatalf("mkdir follower %d keys dir: %v", i, err)
+			t.Fatalf("mint invite for follower %d: %v", i, err)
 		}
-		if err := copyFileMode(seedKEK, filepath.Join(c.DataDirs[i], "keys", "0.key"), 0o600); err != nil {
-			c.Stop()
-			t.Fatalf("copy keys/0.key to follower %d: %v", i, err)
-		}
-		if err := copyFileMode(seedClusterID, filepath.Join(c.DataDirs[i], "cluster.id"), 0o600); err != nil {
-			c.Stop()
-			t.Fatalf("copy cluster.id to follower %d: %v", i, err)
-		}
-		if err := writeJoinPending(c.DataDirs[i], seedRaftAddr); err != nil {
-			c.Stop()
-			t.Fatalf("write .join-pending node %d: %v", i, err)
-		}
-		c.procs[i], c.logs[i] = c.spawn(t, binary, i)
+		c.procs[i], c.logs[i] = c.spawn(t, binary, i, []string{"GRAINFS_INVITE_BUNDLE=" + bundle})
 	}
 	for i := 1; i < numNodes; i++ {
 		if err := waitHTTPReady(c.HTTPPorts[i], 90*time.Second); err != nil {
@@ -278,9 +252,10 @@ func (c *Cluster) HTTPURL(i int) string {
 // presence of a `.join-pending` file in the data dir (written by the caller
 // before calling spawn); the seed has no such file and bootstraps a new
 // cluster.
-func (c *Cluster) spawn(t testing.TB, binary string, i int) (*exec.Cmd, *os.File) {
+func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (*exec.Cmd, *os.File) {
 	t.Helper()
 	raftAddr := fmt.Sprintf("127.0.0.1:%d", c.RaftPorts[i])
+	joinAddr := fmt.Sprintf("127.0.0.1:%d", c.JoinPorts[i])
 	logFile, err := os.CreateTemp("", fmt.Sprintf("grainfs-colima-cluster-%d-*.log", i))
 	if err != nil {
 		t.Fatalf("create node %d log: %v", i, err)
@@ -291,6 +266,7 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int) (*exec.Cmd, *os.File
 		"--port", fmt.Sprintf("%d", c.HTTPPorts[i]),
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
+		"--join-listen-addr", joinAddr,
 		"--nfs4-port", fmt.Sprintf("%d", c.NFSPorts[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.NBDPorts[i]),
 		"--scrub-interval", "0",
@@ -305,6 +281,9 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int) (*exec.Cmd, *os.File
 	cmd := exec.Command(binary, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		_ = os.Remove(logFile.Name())
@@ -353,24 +332,35 @@ func uniqueFreePorts(t testing.TB, n int) []int {
 
 // writeJoinPending mirrors writeNodeJoinPending from
 // tests/e2e/cluster_harness_test.go: a 0o600 file at <dataDir>/.join-pending
-// whose contents are the seed's raft addr ("127.0.0.1:<raftPort>"). The
-// grainfs binary detects this on boot and joins instead of starting a new
-// cluster.
-func writeJoinPending(dataDir, seedRaftAddr string) error {
-	return os.WriteFile(filepath.Join(dataDir, ".join-pending"), []byte(seedRaftAddr), 0o600)
-}
-
-// copyFileMode copies src into dst with the given permission. Used by the
-// cluster fixture to plant the seed's keys/0.key + cluster.id on follower
-// data dirs before they boot in join mode — wireDEKKeeper refuses to
-// auto-generate a KEK on a joiner (§7 B3 / F#21) and Phase A binds the
-// handshake to the cluster identity.
-func copyFileMode(src, dst string, mode os.FileMode) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
+// mintInvite runs `grainfs cluster invite create` against the seed's admin UDS
+// and returns the single-use bundle token (the line after the
+// "GRAINFS_INVITE_BUNDLE" prompt). The admin UDS + meta-raft leadership + join
+// listener take a moment to settle after the HTTP port opens, so it retries.
+func mintInvite(binary, sock string) (string, error) {
+	var out []byte
+	var lastErr error
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		out, lastErr = exec.Command(binary, "cluster", "invite", "create", "--endpoint", sock).CombinedOutput()
+		if lastErr == nil {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
-	return os.WriteFile(dst, data, mode)
+	if lastErr != nil {
+		return "", fmt.Errorf("invite create: %w (out: %s)", lastErr, string(out))
+	}
+	seenPrompt := false
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if seenPrompt && line != "" {
+			return line, nil
+		}
+		if strings.Contains(line, "GRAINFS_INVITE_BUNDLE") {
+			seenPrompt = true
+		}
+	}
+	return "", fmt.Errorf("could not parse invite bundle from output:\n%s", string(out))
 }
 
 func waitForFile(path string, timeout time.Duration) error {
