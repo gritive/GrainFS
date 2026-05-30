@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.487.0] - 2026-05-30
+
+### Changed
+
+- **DEK rotation now also re-encrypts appendable/chunked-PUT segment and
+  coalesced EC shards** (`key/segments/...` and `key/coalesced/...`), not just
+  whole-object shards. A rotation previously left these sub-object shards sealed
+  under the prior generation. Latest-version objects only; counted in
+  `grainfs_rewrap_ec_shards_total`.
+
 ## [0.0.485.0] - 2026-05-30
 
 ### Changed
