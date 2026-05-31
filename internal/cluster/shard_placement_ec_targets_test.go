@@ -177,6 +177,117 @@ func TestIterECShardScanTargets(t *testing.T) {
 	require.False(t, legacyVerSet, "legacy fallback ref carries an empty VersionID")
 }
 
+// TestIterECShardScanTargetsAllVersions verifies that IterECShardScanTargetsAllVersions
+// covers non-latest versions AND legacy unversioned objects, unlike
+// IterECShardScanTargets which only covers the latest version per key.
+//
+// Setup:
+//   - "b/versioned": v0 (old, no lat: pointer) + v1-latest (lat: → v1). Plain
+//     single-blob EC objects. IterECShardScanTargets yields only v1.
+//     IterECShardScanTargetsAllVersions must yield BOTH v0 AND v1.
+//   - "b/legacy": unversioned object (obj:b/legacy, no lat: pointer). Both
+//     enumerators must yield it.
+func TestIterECShardScanTargetsAllVersions(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	v0Nodes := []string{"a1", "a2", "a3"}
+	v1Nodes := []string{"b1", "b2", "b3"}
+	legacyNodes := []string{"c1", "c2", "c3"}
+
+	// v0: non-latest, obj:b/versioned/v0 only (no lat: pointer).
+	seedObjectMetaVersion(t, backend, "b", "versioned", "v0", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: v0Nodes,
+	})
+	// v1: latest, obj:b/versioned/v1 + lat:b/versioned → v1.
+	seedLatestObjectMetaVersion(t, backend, "b", "versioned", "v1", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: v1Nodes,
+	})
+	// Legacy unversioned: real legacy format uses ObjectMetaKey (no trailing slash),
+	// not ObjectMetaKeyV with empty version. Seed directly to match the real write path.
+	{
+		f := backend.FSMRef()
+		m := objectMeta{ECData: 2, ECParity: 1, NodeIDs: legacyNodes, Key: "legacy"}
+		val, err := marshalObjectMeta(m)
+		require.NoError(t, err)
+		require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+			return f.setValue(txn, f.keys.ObjectMetaKey("b", "legacy"), val)
+		}))
+	}
+
+	collectAllVersions := func(t *testing.T, b *DistributedBackend) []ECShardScanTarget {
+		t.Helper()
+		var out []ECShardScanTarget
+		require.NoError(t, b.FSMRef().IterECShardScanTargetsAllVersions(func(tgt ECShardScanTarget) error {
+			out = append(out, tgt)
+			return nil
+		}))
+		return out
+	}
+
+	latestOnly := collectECTargets(t, backend) // IterECShardScanTargets
+	allVers := collectAllVersions(t, backend)  // IterECShardScanTargetsAllVersions
+
+	// Helper to find a target by VersionID.
+	findByVID := func(targets []ECShardScanTarget, vid string) *ECShardScanTarget {
+		for i := range targets {
+			if targets[i].VersionID == vid {
+				return &targets[i]
+			}
+		}
+		return nil
+	}
+
+	// IterECShardScanTargets must yield v1 + legacy, but NOT v0.
+	require.NotNil(t, findByVID(latestOnly, "v1"), "latest-only enumerator must yield v1")
+	require.Nil(t, findByVID(latestOnly, "v0"), "latest-only enumerator must NOT yield non-latest v0")
+
+	// IterECShardScanTargetsAllVersions must yield v0, v1, AND legacy.
+	tgtV0 := findByVID(allVers, "v0")
+	require.NotNil(t, tgtV0, "all-version enumerator must yield non-latest v0")
+	require.Equal(t, "b", tgtV0.Bucket)
+	require.Equal(t, "versioned", tgtV0.ObjectKey)
+	require.Equal(t, v0Nodes, tgtV0.NodeIDs)
+
+	tgtV1 := findByVID(allVers, "v1")
+	require.NotNil(t, tgtV1, "all-version enumerator must yield latest v1")
+	require.Equal(t, v1Nodes, tgtV1.NodeIDs)
+
+	// Legacy unversioned object: VersionID is "".
+	tgtLegacy := findByVID(allVers, "")
+	require.NotNil(t, tgtLegacy, "all-version enumerator must yield legacy unversioned object")
+	require.Equal(t, legacyNodes, tgtLegacy.NodeIDs)
+
+	// CollectECRewrapTargets glue: verify Kind switch, ecObjectShardKey derivation,
+	// and NodeIDs plumbing end-to-end over the same seeded backend.
+	rewrapTargets, err := backend.CollectECRewrapTargets()
+	require.NoError(t, err)
+	findRewrap := func(shardKey string) *ECRewrapTarget {
+		for i := range rewrapTargets {
+			if rewrapTargets[i].ShardKey == shardKey {
+				return &rewrapTargets[i]
+			}
+		}
+		return nil
+	}
+	// v0: ecObjectShardKey("versioned","v0") = "versioned/v0"
+	rtV0 := findRewrap(ecObjectShardKey("versioned", "v0"))
+	require.NotNil(t, rtV0, "CollectECRewrapTargets must include non-latest v0")
+	require.Equal(t, "b", rtV0.Bucket)
+	require.Equal(t, v0Nodes, rtV0.NodeIDs)
+
+	// v1: ecObjectShardKey("versioned","v1") = "versioned/v1"
+	rtV1 := findRewrap(ecObjectShardKey("versioned", "v1"))
+	require.NotNil(t, rtV1, "CollectECRewrapTargets must include latest v1")
+	require.Equal(t, v1Nodes, rtV1.NodeIDs)
+
+	// legacy: ecObjectShardKey("legacy","") = "legacy"
+	rtLegacy := findRewrap(ecObjectShardKey("legacy", ""))
+	require.NotNil(t, rtLegacy, "CollectECRewrapTargets must include legacy unversioned object")
+	require.Equal(t, legacyNodes, rtLegacy.NodeIDs)
+}
+
 // TestIterECShardScanTargets_DeletedChunkedObject reproduces Finding 2: when the
 // latest pointer is a delete marker, the lat: pass returns before adding the base
 // key to `seen`, so the legacy obj: fallback enumerates the OLDER versioned meta

@@ -230,9 +230,10 @@ func wireRewrapLanes(state *bootState) {
 	// EC lane: sweep every data group the node owns. An object physically lives
 	// in the placement group recorded in its metadata, which can differ from the
 	// bucket's current router assignment after a reassignment — so the lane
-	// enumerates each group's own stored objects (ScanGroupObjects), not a
-	// per-bucket router lookup. Ownership uses the stable state.nodeID (the
-	// placement vector's identity), not the transport address.
+	// collects all stored shards (all versions, all buckets) via
+	// CollectECRewrapTargets, not a per-bucket router lookup. Ownership uses the
+	// stable state.nodeID (the placement vector's identity), not the transport
+	// address.
 	if state.dgMgr != nil {
 		ecLane := cluster.NewECRewrapLane(
 			state.nodeID,
