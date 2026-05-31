@@ -79,6 +79,12 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        logical-WAL/FSM-value/IAM/snapshot) — large, may sub-slice; `scrubberKick` is `nil` today
        (`dek_keeper_wiring.go:200`).
      - S7 reference-safe `Prune` (DEKKeeper.Prune `safe` arg) + wire `scrubberKick` + rewrap-completion tracking.
+     - [P3] EC rewrap collect-then-sweep materializes a data group's entire shard-target set into a
+       slice inside one `db.View` (`CollectECRewrapTargets` → `IterECShardScanTargetsAllVersions`);
+       ctx-cancel is only checked between targets in the lane loop, not mid-scan, and the slice grows
+       unbounded. Deliberate (avoids held-txn/goroutine-leak of a channel producer) but a memory +
+       responsiveness regression on very large keyspaces — revisit with a batched/streaming cursor
+       if a group's object count grows large.
      - (out of epic) raft-log-command plaintext at rest — **separate spec** (DEK is boot-circular).
    - Full re-grounded design in the (gitignored) unified-at-rest-key spec
      (`docs/superpowers/specs/2026-05-28-unified-at-rest-key-hierarchy-design.md`) +

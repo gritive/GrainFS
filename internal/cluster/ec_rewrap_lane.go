@@ -59,7 +59,11 @@ func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint
 	for _, gb := range l.groups() {
 		targets, err := gb.CollectECRewrapTargets()
 		if err != nil {
-			return err
+			// Log + continue: one group's enumeration error must not starve the
+			// remaining groups of this sweep. Idempotent — retried next rotation.
+			log.Warn().Err(err).Uint32("active_gen", activeGen).
+				Msg("ec rewrap: collect targets failed; skipping group")
+			continue
 		}
 		for _, t := range targets {
 			if ctx.Err() != nil {

@@ -412,7 +412,7 @@ func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error
 			// same-bucket collision cases that the lat:-heuristic could not handle.
 			key := m.Key
 			var versionID string
-			if len(tail) > len(key) && tail[:len(key)+1] == key+"/" {
+			if len(tail) > len(key) && tail[len(key)] == '/' && tail[:len(key)] == key {
 				versionID = tail[len(key)+1:]
 			}
 			return f.buildECShardTargets(ObjectMetaRef{Bucket: bucket, Key: key, VersionID: versionID}, m, fn)

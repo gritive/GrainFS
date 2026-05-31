@@ -15,10 +15,10 @@ type ECRewrapTarget struct {
 // old ScanGroupObjects+OwnedShards+ScanGroupSegmentShards triple so the DEK
 // rewrap lane covers non-latest versions that the lat:-only scan missed.
 //
-// Owner-local (ECData==0) and malformed object-version refs are silently
-// skipped (validated inside IterECShardScanTargetsAllVersions via
-// buildECShardTargets). Segment/coalesced refs that fail validateECRefPlacement
-// are also dropped by buildECShardTargets.
+// Validation is split by kind: object-version refs (which buildECShardTargets
+// emits unconditionally) are filtered here — owner-local (ECData==0) and
+// malformed refs are skipped. Segment/coalesced refs are already validated
+// (and dropped on failure) inside buildECShardTargets, so they arrive clean.
 func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) {
 	var out []ECRewrapTarget
 	err := b.fsm.IterECShardScanTargetsAllVersions(func(t ECShardScanTarget) error {
