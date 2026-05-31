@@ -60,7 +60,7 @@ func TestNewRewrapScrubberKick_LaneErrorDoesNotPanic(t *testing.T) {
 }
 
 func TestScrubberKick_ReportsFullSweptSetOnlyOnCleanReadyKick(t *testing.T) {
-	// clean+ready: Kick==nil, RetiredGensBelowActive=={0,1} → report called for 0 and 1
+	// clean+ready: Kick==(active,nil), RetiredGensBelow(active)=={0,1} → report called for 0 and 1
 	t.Run("clean_ready_reports_full_set", func(t *testing.T) {
 		ctrl := encrypt.NewRewrapController(keeperAtGen2(t))
 		ctrl.RegisterLane(&recordingLane{}) // no-error lane

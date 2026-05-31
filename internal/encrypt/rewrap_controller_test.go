@@ -29,7 +29,8 @@ func TestRewrapController_ZeroLanes_NoOp(t *testing.T) {
 	require.NoError(t, k.Rotate()) // active gen 1
 	c := NewRewrapController(k)
 	c.MarkReady()
-	require.NoError(t, c.Kick(context.Background(), 0))
+	_, err := c.Kick(context.Background(), 0)
+	require.NoError(t, err)
 }
 
 func TestRewrapController_Kick_CallsLaneWithActiveGen(t *testing.T) {
@@ -40,7 +41,9 @@ func TestRewrapController_Kick_CallsLaneWithActiveGen(t *testing.T) {
 	l := &fakeLane{name: "fake"}
 	c.RegisterLane(l)
 	c.MarkReady()
-	require.NoError(t, c.Kick(context.Background(), 1))
+	active, err := c.Kick(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), active)
 	require.Equal(t, 1, l.calls)
 	require.Equal(t, uint32(1), l.gotOld)
 	require.Equal(t, uint32(2), l.gotActive)
@@ -53,7 +56,7 @@ func TestRewrapController_Kick_PropagatesLaneError(t *testing.T) {
 	c := NewRewrapController(k)
 	c.RegisterLane(&fakeLane{name: "boom", err: errors.New("disk full")})
 	c.MarkReady()
-	err := c.Kick(context.Background(), 1)
+	_, err := c.Kick(context.Background(), 1)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "disk full")
 }
@@ -65,7 +68,8 @@ func TestRewrapController_Kick_OldGenNotBelowActive_NoOp(t *testing.T) {
 	l := &fakeLane{name: "fake"}
 	c.RegisterLane(l)
 	c.MarkReady()
-	require.NoError(t, c.Kick(context.Background(), 1)) // oldGen == active
+	_, err := c.Kick(context.Background(), 1) // oldGen == active
+	require.NoError(t, err)
 	require.Equal(t, 0, l.calls)
 }
 
@@ -87,7 +91,7 @@ func TestRewrapController_ConcurrentRegisterAndKick(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			_ = c.Kick(context.Background(), 0)
+			_, _ = c.Kick(context.Background(), 0)
 		}
 	}()
 	wg.Wait()
@@ -99,7 +103,7 @@ func TestKick_RefusesBeforeReady(t *testing.T) {
 	require.NoError(t, k.Rotate()) // active gen 2
 	c := NewRewrapController(k)
 	c.RegisterLane(&fakeLane{name: "A"})
-	err := c.Kick(context.Background(), 1) // MarkReady 안 함
+	_, err := c.Kick(context.Background(), 1) // MarkReady 안 함
 	require.ErrorIs(t, err, errLanesNotReady)
 }
 
@@ -113,7 +117,7 @@ func TestKick_RunsAllLanesAndAggregatesWhenReady(t *testing.T) {
 	c.RegisterLane(laneA)
 	c.RegisterLane(laneB)
 	c.MarkReady()
-	err := c.Kick(context.Background(), 1)
+	_, err := c.Kick(context.Background(), 1)
 	require.Error(t, err)
 	require.Greater(t, laneB.calls, 0, "lane B must run even though lane A errored")
 }
@@ -125,7 +129,8 @@ func TestKick_NilWhenReadyAndAllClean(t *testing.T) {
 	c := NewRewrapController(k)
 	c.RegisterLane(&fakeLane{name: "A"})
 	c.MarkReady()
-	require.NoError(t, c.Kick(context.Background(), 1))
+	_, err := c.Kick(context.Background(), 1)
+	require.NoError(t, err)
 }
 
 func TestKick_NilWhenReadyAndNoLanes(t *testing.T) {
@@ -134,5 +139,6 @@ func TestKick_NilWhenReadyAndNoLanes(t *testing.T) {
 	require.NoError(t, k.Rotate()) // active gen 2
 	c := NewRewrapController(k)
 	c.MarkReady()
-	require.NoError(t, c.Kick(context.Background(), 1))
+	_, err := c.Kick(context.Background(), 1)
+	require.NoError(t, err)
 }

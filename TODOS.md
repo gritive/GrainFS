@@ -102,6 +102,16 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        encode on gen, AND reads ledger as "done for ENUMERATED lane categories only"
        (EC all-version #692 + packblob gate-3) -- ledger completion is necessary, not
        sufficient.
+     - [HARD S7 prerequisite — data-loss class] ledger-done AND dekRefCounts[gen]==0 are
+       NOT jointly sufficient: dekRefCounts is incremented ONLY by applyPutObjectIndex
+       (object placements). DEK-stamped at-rest data that is neither a rewrap lane NOR an
+       object-index entry is invisible to BOTH gates. Known instance: JWT signing-key
+       seeds carry a DekGen (meta_fsm_rotation.go) but are not rewrapped on rotation and
+       are not refcounted — S7 pruning a gen a live JWT key references makes that key
+       permanently unwrappable (auth/token loss). Before S7 prune ships, enumerate ALL
+       DEK-gen-stamped at-rest categories (JWT keys, datawal, logical-WAL, IAM, object
+       snapshots) and either rewrap each or add it to the prune-safety predicate. Do NOT
+       treat "ledger + refcount" as the complete gate.
      - [P3] EC rewrap collect-then-sweep materializes a data group's entire shard-target set into a
        slice inside one `db.View` (`CollectECRewrapTargets` → `IterECShardScanTargetsAllVersions`);
        ctx-cancel is only checked between targets in the lane loop, not mid-scan, and the slice grows

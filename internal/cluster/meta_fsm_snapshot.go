@@ -923,6 +923,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.pendingDEKVersions = nil
 		f.pendingDEKActive = 0
 		f.pendingActiveKEKVersion = 0
+		// Symmetric with the with-trailer branch: clear stale rewrap-done entries
+		// so a no-trailer restore onto an FSM that previously held completion
+		// records cannot leave phantom prune-safety input behind.
+		f.dekRewrapDone = nil
 	}
 	if restoreProtocolCredentials {
 		f.protocolCredentialStore.Restore(newProtocolCredentials)

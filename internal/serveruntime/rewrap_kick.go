@@ -25,14 +25,18 @@ func newRewrapScrubberKick(
 	report func(ctx context.Context, nodeID string, gen uint32) error,
 ) func(context.Context, uint32) {
 	return func(ctx context.Context, oldGen uint32) {
-		if err := ctrl.Kick(ctx, oldGen); err != nil {
+		activeGen, err := ctrl.Kick(ctx, oldGen)
+		if err != nil {
 			log.Warn().Err(err).Uint32("old_gen", oldGen).Msg("dek rewrap kick incomplete or not ready; not reporting completion")
 			return
 		}
 		if report == nil {
 			return
 		}
-		for _, g := range ctrl.RetiredGensBelowActive() {
+		// Report the gen-set derived from the SAME activeGen the sweep used, not
+		// a fresh keeper read — avoids reporting a gen just swept onto as done if
+		// a rotation races between the sweep and the report.
+		for _, g := range ctrl.RetiredGensBelow(activeGen) {
 			if err := report(ctx, nodeID, g); err != nil {
 				log.Warn().Err(err).Uint32("gen", g).Msg("dek rewrap: completion report failed; prune will stall until re-kick")
 			}

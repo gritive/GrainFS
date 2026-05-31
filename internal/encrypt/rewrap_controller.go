@@ -74,26 +74,32 @@ func (c *RewrapController) RegisterLane(l RewrapLane) {
 func (c *RewrapController) MarkReady() { c.ready.Store(true) }
 
 // Kick migrates every registered lane's records off oldGen onto the active
-// generation. It returns errLanesNotReady if MarkReady has not been called.
-// All lanes are run regardless of individual errors; the first error is
-// returned so that no lane is starved by a sibling's incomplete sweep.
-// nil means every registered lane reported success (the precondition a future
-// S6d producer will gate its completion report on). With zero lanes it is a
-// nil no-op (once ready).
-func (c *RewrapController) Kick(ctx context.Context, oldGen uint32) error {
+// generation. It returns the active generation it swept to plus an error. It
+// errors with errLanesNotReady if MarkReady has not been called. All lanes are
+// run regardless of individual errors; the first error is returned so that no
+// lane is starved by a sibling's incomplete sweep. A nil error means every
+// registered lane reported success (the precondition the S6d producer gates its
+// completion report on). With zero lanes it is a nil no-op (once ready).
+//
+// The returned activeGen is the SAME value used for the sweep; the producer
+// MUST derive its reported gen-set from it (via RetiredGensBelow) rather than a
+// fresh keeper read — otherwise a rotation racing between the sweep and the
+// report would let the producer report a generation it just swept onto (now
+// below the newer active) as fully rewrapped.
+func (c *RewrapController) Kick(ctx context.Context, oldGen uint32) (uint32, error) {
 	if c.keeper == nil {
-		return fmt.Errorf("rewrap: controller has no DEK keeper")
+		return 0, fmt.Errorf("rewrap: controller has no DEK keeper")
 	}
 	if !c.ready.Load() {
-		return errLanesNotReady
+		return 0, errLanesNotReady
 	}
 	activeGen := c.keeper.ActiveDEKGeneration()
 	if oldGen >= activeGen {
-		return nil // nothing older than active to migrate
+		return activeGen, nil // nothing older than active to migrate
 	}
 	lp := c.lanes.Load()
 	if lp == nil {
-		return nil // ready + zero lanes = vacuously clean
+		return activeGen, nil // ready + zero lanes = vacuously clean
 	}
 	var firstErr error
 	failed := 0
@@ -106,19 +112,20 @@ func (c *RewrapController) Kick(ctx context.Context, oldGen uint32) error {
 		}
 	}
 	if failed > 0 {
-		return firstErr
+		return activeGen, firstErr
 	}
-	return nil
+	return activeGen, nil
 }
 
-// RetiredGensBelowActive returns the sorted list of DEK generations that are
-// older than the active generation. The producer uses this to report the full
-// set of swept generations after a clean Kick.
-func (c *RewrapController) RetiredGensBelowActive() []uint32 {
+// RetiredGensBelow returns the sorted list of DEK generations the keeper still
+// retains that are older than active. The producer passes the activeGen that
+// Kick swept to (NOT a fresh keeper read) so the reported set is consistent
+// with the sweep even if a rotation lands concurrently.
+func (c *RewrapController) RetiredGensBelow(active uint32) []uint32 {
 	if c.keeper == nil {
 		return nil
 	}
-	versions, active := c.keeper.VersionsAndActive()
+	versions := c.keeper.Versions()
 	gens := make([]uint32, 0, len(versions))
 	for g := range versions {
 		if g < active {
