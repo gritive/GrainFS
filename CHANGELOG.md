@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.490.0] - 2026-05-31
+## [0.0.491.0] - 2026-06-01
 
 ### Changed
 
@@ -14,6 +14,10 @@
   zero live references and no in-flight encode pinned to the retired generation.
   Reporting is event-driven (fires on rotation) and self-heals across a missed
   kick by reporting the full swept set on the next successful sweep.
+
+## [0.0.490.0] - 2026-05-31
+
+### Changed
 
 - **DEK rotation now re-encrypts EC shards of every committed object version,
   not just the latest.** A rotation previously swept only each object's current
