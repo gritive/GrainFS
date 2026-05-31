@@ -2,9 +2,16 @@ package encrypt
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"sync/atomic"
 )
+
+// errLanesNotReady is returned by Kick when MarkReady has not yet been called.
+// This closes the restart-replay window where a zero/partial-lane Kick would
+// return nil and let the producer emit a false completion.
+var errLanesNotReady = errors.New("rewrap: lanes not registered yet")
 
 // RewrapLane migrates every record THIS NODE owns from oldGen to activeGen.
 // Implementations must be idempotent and safe under concurrent live writes.
@@ -32,6 +39,10 @@ type RewrapController struct {
 	// committed rotation on restart. atomic COW makes registration lock-free
 	// and the Kick read race-free.
 	lanes atomic.Pointer[[]RewrapLane]
+	// ready is set by MarkReady at the end of lane wiring. Kick refuses
+	// (errLanesNotReady) until ready is true, preventing the restart-replay
+	// race where Kick fires before all lanes are registered.
+	ready atomic.Bool
 }
 
 // NewRewrapController returns a controller bound to keeper with no lanes.
@@ -57,13 +68,24 @@ func (c *RewrapController) RegisterLane(l RewrapLane) {
 	}
 }
 
+// MarkReady signals that all lanes have been registered. Kick will refuse
+// with errLanesNotReady until MarkReady is called. Call this at the end of
+// wireRewrapLanes (or equivalent wiring) to close the premature-clean window.
+func (c *RewrapController) MarkReady() { c.ready.Store(true) }
+
 // Kick migrates every registered lane's records off oldGen onto the active
-// generation. It returns the first lane error encountered; nil means every
-// registered lane reported success (the precondition a future S6d producer
-// will gate its completion report on). With zero lanes it is a nil no-op.
+// generation. It returns errLanesNotReady if MarkReady has not been called.
+// All lanes are run regardless of individual errors; the first error is
+// returned so that no lane is starved by a sibling's incomplete sweep.
+// nil means every registered lane reported success (the precondition a future
+// S6d producer will gate its completion report on). With zero lanes it is a
+// nil no-op (once ready).
 func (c *RewrapController) Kick(ctx context.Context, oldGen uint32) error {
 	if c.keeper == nil {
 		return fmt.Errorf("rewrap: controller has no DEK keeper")
+	}
+	if !c.ready.Load() {
+		return errLanesNotReady
 	}
 	activeGen := c.keeper.ActiveDEKGeneration()
 	if oldGen >= activeGen {
@@ -71,12 +93,38 @@ func (c *RewrapController) Kick(ctx context.Context, oldGen uint32) error {
 	}
 	lp := c.lanes.Load()
 	if lp == nil {
-		return nil // no lanes registered yet
+		return nil // ready + zero lanes = vacuously clean
 	}
+	var firstErr error
+	failed := 0
 	for _, l := range *lp {
 		if err := l.RewrapByGen(ctx, oldGen, activeGen); err != nil {
-			return fmt.Errorf("rewrap: lane %s gen %d→%d: %w", l.Name(), oldGen, activeGen, err)
+			failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rewrap: lane %s gen %d→%d: %w", l.Name(), oldGen, activeGen, err)
+			}
 		}
 	}
+	if failed > 0 {
+		return firstErr
+	}
 	return nil
+}
+
+// RetiredGensBelowActive returns the sorted list of DEK generations that are
+// older than the active generation. The producer uses this to report the full
+// set of swept generations after a clean Kick.
+func (c *RewrapController) RetiredGensBelowActive() []uint32 {
+	if c.keeper == nil {
+		return nil
+	}
+	versions, active := c.keeper.VersionsAndActive()
+	gens := make([]uint32, 0, len(versions))
+	for g := range versions {
+		if g < active {
+			gens = append(gens, g)
+		}
+	}
+	sort.Slice(gens, func(i, j int) bool { return gens[i] < gens[j] })
+	return gens
 }

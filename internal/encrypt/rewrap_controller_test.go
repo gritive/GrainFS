@@ -28,6 +28,7 @@ func TestRewrapController_ZeroLanes_NoOp(t *testing.T) {
 	k := newTestKeeper(t)
 	require.NoError(t, k.Rotate()) // active gen 1
 	c := NewRewrapController(k)
+	c.MarkReady()
 	require.NoError(t, c.Kick(context.Background(), 0))
 }
 
@@ -38,6 +39,7 @@ func TestRewrapController_Kick_CallsLaneWithActiveGen(t *testing.T) {
 	c := NewRewrapController(k)
 	l := &fakeLane{name: "fake"}
 	c.RegisterLane(l)
+	c.MarkReady()
 	require.NoError(t, c.Kick(context.Background(), 1))
 	require.Equal(t, 1, l.calls)
 	require.Equal(t, uint32(1), l.gotOld)
@@ -50,6 +52,7 @@ func TestRewrapController_Kick_PropagatesLaneError(t *testing.T) {
 	require.NoError(t, k.Rotate())
 	c := NewRewrapController(k)
 	c.RegisterLane(&fakeLane{name: "boom", err: errors.New("disk full")})
+	c.MarkReady()
 	err := c.Kick(context.Background(), 1)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "disk full")
@@ -61,6 +64,7 @@ func TestRewrapController_Kick_OldGenNotBelowActive_NoOp(t *testing.T) {
 	c := NewRewrapController(k)
 	l := &fakeLane{name: "fake"}
 	c.RegisterLane(l)
+	c.MarkReady()
 	require.NoError(t, c.Kick(context.Background(), 1)) // oldGen == active
 	require.Equal(t, 0, l.calls)
 }
@@ -73,6 +77,7 @@ func TestRewrapController_ConcurrentRegisterAndKick(t *testing.T) {
 	k := newTestKeeper(t)
 	require.NoError(t, k.Rotate()) // active gen 1
 	c := NewRewrapController(k)
+	c.MarkReady()
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -86,4 +91,48 @@ func TestRewrapController_ConcurrentRegisterAndKick(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestKick_RefusesBeforeReady(t *testing.T) {
+	k := newTestKeeper(t)
+	require.NoError(t, k.Rotate())
+	require.NoError(t, k.Rotate()) // active gen 2
+	c := NewRewrapController(k)
+	c.RegisterLane(&fakeLane{name: "A"})
+	err := c.Kick(context.Background(), 1) // MarkReady 안 함
+	require.ErrorIs(t, err, errLanesNotReady)
+}
+
+func TestKick_RunsAllLanesAndAggregatesWhenReady(t *testing.T) {
+	k := newTestKeeper(t)
+	require.NoError(t, k.Rotate())
+	require.NoError(t, k.Rotate()) // active gen 2
+	c := NewRewrapController(k)
+	laneA := &fakeLane{name: "A", err: errors.New("A incomplete")}
+	laneB := &fakeLane{name: "B"}
+	c.RegisterLane(laneA)
+	c.RegisterLane(laneB)
+	c.MarkReady()
+	err := c.Kick(context.Background(), 1)
+	require.Error(t, err)
+	require.Greater(t, laneB.calls, 0, "lane B must run even though lane A errored")
+}
+
+func TestKick_NilWhenReadyAndAllClean(t *testing.T) {
+	k := newTestKeeper(t)
+	require.NoError(t, k.Rotate())
+	require.NoError(t, k.Rotate()) // active gen 2
+	c := NewRewrapController(k)
+	c.RegisterLane(&fakeLane{name: "A"})
+	c.MarkReady()
+	require.NoError(t, c.Kick(context.Background(), 1))
+}
+
+func TestKick_NilWhenReadyAndNoLanes(t *testing.T) {
+	k := newTestKeeper(t)
+	require.NoError(t, k.Rotate())
+	require.NoError(t, k.Rotate()) // active gen 2
+	c := NewRewrapController(k)
+	c.MarkReady()
+	require.NoError(t, c.Kick(context.Background(), 1))
 }
