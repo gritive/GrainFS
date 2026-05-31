@@ -33,6 +33,27 @@ func (f *MetaFSM) applyDEKRewrapProgress(data []byte) error {
 // set of nodes that can HOLD gen data (e.g. EC-shard owners), which is not
 // necessarily the meta-raft voter set — resolving that set is the later prune
 // consumer's responsibility. An empty node set is never "fully rewrapped".
+//
+// Semantics of a single completion record
+//
+// A record means "at the time this node reported, it held no at-rest data below
+// gen within the ENUMERATED LANE CATEGORIES": EC shards of all object versions
+// (S6c-allversions, #692) and packed-blob entries (S6b, #687). It does NOT
+// cover:
+//   - In-flight S4 seal-at-pinned-gen encodes: a shard currently being written
+//     by an ongoing PUT may still be pinned to an older gen even after this node
+//     reports done. The pin is released when the write completes.
+//   - At-rest categories not yet wired into the sweep (datawal, logical WAL,
+//     FSM values, IAM data, snapshots — all remain as future S6 sub-slices).
+//
+// Consequence for S7 prune
+//
+// The ledger is a necessary condition for pruning a retired generation, not a
+// sufficient one. A safe prune MUST additionally confirm:
+//   - dekRefCounts[gen] == 0 (no active reader holds a reference), AND
+//   - no in-flight S4-pinned encode is still writing under gen.
+// Treat IsGenFullyRewrapped as one gate in an AND-conjunction, not a standalone
+// prune authorization.
 func (f *MetaFSM) IsGenFullyRewrapped(gen uint32, nodes []string) bool {
 	if len(nodes) == 0 {
 		return false

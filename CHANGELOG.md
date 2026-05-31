@@ -4,6 +4,17 @@
 
 ### Changed
 
+- DEK rotation now tracks per-node rewrap completion in a replicated ledger.
+  After a rotation, each data-holding node reports completion for every retired
+  generation once all EC shards and packed-blob entries it owns are re-encrypted
+  to the active generation (an incomplete or not-yet-wired sweep is NOT reported,
+  so the ledger never overstates coverage). The ledger survives snapshot
+  compaction. This is a prerequisite for a future reference-safe prune; the
+  ledger alone does not authorize pruning — a prune must additionally confirm
+  zero live references and no in-flight encode pinned to the retired generation.
+  Reporting is event-driven (fires on rotation) and self-heals across a missed
+  kick by reporting the full swept set on the next successful sweep.
+
 - **DEK rotation now re-encrypts EC shards of every committed object version,
   not just the latest.** A rotation previously swept only each object's current
   version, leaving older versions and legacy unversioned objects sealed under

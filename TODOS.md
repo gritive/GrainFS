@@ -85,6 +85,23 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        invisible to the return value. So S6d's completion predicate MUST NOT treat `RewrapByGen==nil`
        as proof of coverage; it needs an independent per-shard/per-group done-accounting (e.g. probe
        that no shard remains below activeGen) rather than trusting the sweep's error return.
+     - [P2] S6d-reconcile: completion reporting is event-driven (rotation post-commit
+       kick). A node down for an entire rotation epoch, or whose rotation log entry
+       was snapshot-compacted before lanes were ready, never re-reports (conservative-
+       safe: delays prune, no data loss). Add a periodic reconcile that re-kicks +
+       reports any now-clean generation. (Back-to-back rotations and transient skips
+       already self-heal via the full-swept-set report.)
+     - [HARD S7 prerequisite — VERIFY] rebalance vs done-flag: if MoveReplica/rebalance
+       moves a shard onto a node that already reported gen G done, does it RE-ENCODE the
+       shard to active gen (then the done-flag stays valid) or COPY raw sealed bytes (then
+       the flag is stale and S7 would prune a gen this node now holds -> data loss)? Trace
+       MoveReplica's encode path. If raw-copy: S7 must re-verify residual at prune time OR
+       invalidate the per-node done-flag on shard inbound. Do NOT ship S7 prune before
+       resolving this.
+     - S7 prune ANDs ledger-done with dekRefCounts[gen]==0 AND no in-flight S4-pinned
+       encode on gen, AND reads ledger as "done for ENUMERATED lane categories only"
+       (EC all-version #692 + packblob gate-3) -- ledger completion is necessary, not
+       sufficient.
      - [P3] EC rewrap collect-then-sweep materializes a data group's entire shard-target set into a
        slice inside one `db.View` (`CollectECRewrapTargets` → `IterECShardScanTargetsAllVersions`);
        ctx-cancel is only checked between targets in the lane loop, not mid-scan, and the slice grows
