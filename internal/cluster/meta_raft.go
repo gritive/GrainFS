@@ -649,6 +649,17 @@ func (m *MetaRaft) ProposeDEKVersionPrune(ctx context.Context, gen uint32) error
 	return m.Propose(ctx, MetaCmdTypeDEKVersionPrune, payload)
 }
 
+// ProposeDEKRewrapProgress records that nodeID holds no at-rest data below gen.
+// Each data-holder node proposes its OWN completion (distinct node_id), so this
+// is NOT leader-gated; followers forward to the leader. Blocks until applied.
+func (m *MetaRaft) ProposeDEKRewrapProgress(ctx context.Context, nodeID string, gen uint32) error {
+	payload, err := encodeMetaDEKRewrapProgressCmd(nodeID, gen)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode DEKRewrapProgress: %w", err)
+	}
+	return m.Propose(ctx, MetaCmdTypeDEKRewrapProgress, payload)
+}
+
 func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) error {
 	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
 	requestID, err := icebergRequestID(cmd.Type(), cmd.DataBytes())

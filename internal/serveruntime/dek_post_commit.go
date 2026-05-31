@@ -15,6 +15,7 @@ import (
 type DEKProposer interface {
 	ProposeDEKRotate(ctx context.Context) error
 	ProposeDEKVersionPrune(ctx context.Context, gen uint32) error
+	ProposeDEKRewrapProgress(ctx context.Context, nodeID string, gen uint32) error
 }
 
 // DEKPostCommitDispatcher handles post-commit hooks related to DEK lifecycle.

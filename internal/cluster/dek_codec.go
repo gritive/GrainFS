@@ -133,14 +133,6 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, ref
 
 // encodeMetaDEKRewrapProgressCmd builds the inner payload for a per-node
 // rewrap-completion report: "nodeID finished rewrapping all its lanes for gen".
-//
-// No production caller in S6a by design: the rewrap controller deliberately
-// reports no completion until real lanes exist (a zero-lane "done" would let a
-// future Prune trust an un-migrated generation). This encoder is the wire-format
-// counterpart of decodeMetaDEKRewrapProgressCmd, exercised by the ledger unit
-// tests and reserved for the producer that lands in S6d.
-//
-//nolint:unused // wire-format encoder; producer lands in S6d (see DEK-rewrap spec §5)
 func encodeMetaDEKRewrapProgressCmd(nodeID string, gen uint32) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	nid := b.CreateString(nodeID)
