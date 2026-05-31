@@ -204,10 +204,17 @@ func TestIterECShardScanTargetsAllVersions(t *testing.T) {
 	seedLatestObjectMetaVersion(t, backend, "b", "versioned", "v1", objectMeta{
 		ECData: 2, ECParity: 1, NodeIDs: v1Nodes,
 	})
-	// Legacy unversioned: obj:b/legacy (first-slash = bucket boundary, no versionID).
-	seedObjectMetaVersion(t, backend, "b", "legacy", "", objectMeta{
-		ECData: 2, ECParity: 1, NodeIDs: legacyNodes,
-	})
+	// Legacy unversioned: real legacy format uses ObjectMetaKey (no trailing slash),
+	// not ObjectMetaKeyV with empty version. Seed directly to match the real write path.
+	{
+		f := backend.FSMRef()
+		m := objectMeta{ECData: 2, ECParity: 1, NodeIDs: legacyNodes, Key: "legacy"}
+		val, err := marshalObjectMeta(m)
+		require.NoError(t, err)
+		require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+			return f.setValue(txn, f.keys.ObjectMetaKey("b", "legacy"), val)
+		}))
+	}
 
 	collectAllVersions := func(t *testing.T, b *DistributedBackend) []ECShardScanTarget {
 		t.Helper()
@@ -251,6 +258,34 @@ func TestIterECShardScanTargetsAllVersions(t *testing.T) {
 	tgtLegacy := findByVID(allVers, "")
 	require.NotNil(t, tgtLegacy, "all-version enumerator must yield legacy unversioned object")
 	require.Equal(t, legacyNodes, tgtLegacy.NodeIDs)
+
+	// CollectECRewrapTargets glue: verify Kind switch, ecObjectShardKey derivation,
+	// and NodeIDs plumbing end-to-end over the same seeded backend.
+	rewrapTargets, err := backend.CollectECRewrapTargets()
+	require.NoError(t, err)
+	findRewrap := func(shardKey string) *ECRewrapTarget {
+		for i := range rewrapTargets {
+			if rewrapTargets[i].ShardKey == shardKey {
+				return &rewrapTargets[i]
+			}
+		}
+		return nil
+	}
+	// v0: ecObjectShardKey("versioned","v0") = "versioned/v0"
+	rtV0 := findRewrap(ecObjectShardKey("versioned", "v0"))
+	require.NotNil(t, rtV0, "CollectECRewrapTargets must include non-latest v0")
+	require.Equal(t, "b", rtV0.Bucket)
+	require.Equal(t, v0Nodes, rtV0.NodeIDs)
+
+	// v1: ecObjectShardKey("versioned","v1") = "versioned/v1"
+	rtV1 := findRewrap(ecObjectShardKey("versioned", "v1"))
+	require.NotNil(t, rtV1, "CollectECRewrapTargets must include latest v1")
+	require.Equal(t, v1Nodes, rtV1.NodeIDs)
+
+	// legacy: ecObjectShardKey("legacy","") = "legacy"
+	rtLegacy := findRewrap(ecObjectShardKey("legacy", ""))
+	require.NotNil(t, rtLegacy, "CollectECRewrapTargets must include legacy unversioned object")
+	require.Equal(t, legacyNodes, rtLegacy.NodeIDs)
 }
 
 // TestIterECShardScanTargets_DeletedChunkedObject reproduces Finding 2: when the

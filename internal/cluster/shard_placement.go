@@ -432,11 +432,10 @@ func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error
 				key, versionID = tail[:lslash], tail[lslash+1:]
 			}
 
-			metaItem, err := txn.Get(f.keys.ObjectMetaKeyV(bucket, key, versionID))
-			if err != nil {
-				return nil // key not present (race or mismatch); skip
-			}
-			v, err := f.itemValueCopy(metaItem)
+			// The scan item IS the meta entry — use it directly. Avoid
+			// constructing ObjectMetaKeyV(bucket, key, "") for legacy keys:
+			// that appends a trailing slash and misses "obj:b/key" records.
+			v, err := f.itemValueCopy(item)
 			if err != nil {
 				return nil
 			}
