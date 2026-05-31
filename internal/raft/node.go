@@ -190,6 +190,24 @@ func NewNode(cfg Config) (*Node, error) {
 					"likely crashed mid-CreateSnapshot; manual recovery required",
 				logStore.FirstIndex(), snap.LastIncludedIndex+1))
 		}
+	} else if logStore.FirstIndex() > 1 {
+		// Symmetric to the lag guard above: a compacted log (FirstIndex > 1)
+		// implies a snapshot was once persisted, because CreateSnapshot Saves
+		// the snapshot before CompactBefore (snapshot_actor.go). If the snapshot
+		// is now absent, the FSM state for [1, FirstIndex-1] is unreconstructable.
+		// Refuse boot fail-closed rather than fall through to the seed-config
+		// fallback (reconstructConfig) and replay the log tail as committed — a
+		// former cluster member could otherwise come up solo and apply entries
+		// that never reached quorum. Save-before-Compact means a crash can never
+		// produce this state, so reaching here is real storage corruption or an
+		// incomplete restore, never a normal lifecycle event.
+		return nil, fmt.Errorf(
+			"raftv2: NewNode: log is compacted (FirstIndex %d > 1) but no snapshot is present; "+
+				"the snapshot covering indices [1, %d] is missing, so FSM state cannot be reconstructed. "+
+				"This indicates storage corruption or an incomplete restore. "+
+				"Single-node: restore the data dir from a backup, or re-initialize this node (loses local state). "+
+				"Multi-node: restore the snapshot from a healthy peer, or decommission this node and rejoin from scratch",
+			logStore.FirstIndex(), logStore.FirstIndex()-1)
 	}
 
 	// Reconstruct the effective configuration. Per Raft §4.3, the live config
