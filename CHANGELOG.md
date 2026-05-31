@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.490.0] - 2026-05-31
+
+### Changed
+
+- **DEK rotation now re-encrypts EC shards of every committed object version,
+  not just the latest.** A rotation previously swept only each object's current
+  version, leaving older versions and legacy unversioned objects sealed under
+  the prior generation — so a key-compromise recovery rekey could not reach
+  them. The EC sweep now enumerates all stored versions (plus their segment and
+  coalesced shards) and migrates each onto the active generation. This completes
+  EC-lane rewrap coverage (all versions + segments + coalesced + legacy);
+  packed-blob non-latest coverage and rewrap-completion tracking remain before a
+  reference-safe prune of old generations. Counted in
+  `grainfs_rewrap_ec_shards_total`.
+
 ## [0.0.489.0] - 2026-05-31
 
 ### Fixed
