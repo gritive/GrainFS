@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -8,11 +9,22 @@ import (
 )
 
 // TestDKVSTrailer_RewrapDone tests that dekRewrapDone is preserved
-// through Snapshot/Restore round-trip.
-//
-// RED (before implementation): Restore doesn't repopulate f.dekRewrapDone,
-// so IsGenFullyRewrapped returns false after round-trip.
+// through Snapshot/Restore round-trip, and that pre-S6d snapshots without the
+// rewrap_done field decode cleanly to an empty set (backward compat).
 func TestDKVSTrailer_RewrapDone(t *testing.T) {
+	t.Run("compat-absent-field", func(t *testing.T) {
+		// Encode a DKVS payload with nil rewrapDone (wire-identical to a pre-S6d
+		// snapshot where the field is absent: Offset(12)==0 → RewrapDoneLength()==0).
+		// Decoding must return empty (nil) without panic — the backward-compat
+		// contract for all additive trailer fields.
+		versions := map[uint32][]byte{1: bytes.Repeat([]byte{0x01}, 60)}
+		payload, err := encodeMetaDEKVersionSnapshot(versions, 1, nil, 0, nil)
+		require.NoError(t, err)
+		_, _, _, _, done, err := decodeMetaDEKVersionSnapshot(payload)
+		require.NoError(t, err)
+		require.Empty(t, done, "absent rewrap_done field must decode to empty set")
+	})
+
 	t.Run("round-trip", func(t *testing.T) {
 		// newTestMetaFSMWithKEKAndDEK seeds gen 1 — without DEK versions the
 		// DKVS trailer is skipped entirely and rewrap_done would have nothing
