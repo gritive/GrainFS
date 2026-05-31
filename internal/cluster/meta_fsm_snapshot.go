@@ -98,6 +98,22 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 			dekRefCountsCopy[g] = c
 		}
 	}
+	// Deep-copy dekRewrapDone in the same RLock window as dekRefCounts so the
+	// two are captured atomically (skew between ref counts and done sets would
+	// allow prune-safety to race). The inner map must also be copied — after
+	// RUnlock a concurrent applyDEKRewrapProgress can mutate the inner set
+	// under f.mu.Lock while the encoder iterates the outer-only copy.
+	var dekRewrapDoneCopy map[uint32]map[string]struct{}
+	if len(f.dekRewrapDone) > 0 {
+		dekRewrapDoneCopy = make(map[uint32]map[string]struct{}, len(f.dekRewrapDone))
+		for g, nodeSet := range f.dekRewrapDone {
+			innerCopy := make(map[string]struct{}, len(nodeSet))
+			for n := range nodeSet {
+				innerCopy[n] = struct{}{}
+			}
+			dekRewrapDoneCopy[g] = innerCopy
+		}
+	}
 	// Capture active KEK version under the same RLock so a concurrent
 	// SetActiveKEKVersion can't race the DKVS trailer emission.
 	activeKEKVersionCopy := f.activeKEKVersion
@@ -358,7 +374,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
-	blob, err := f.appendSnapshotTrailers(bs, dekVersionsCopy, dekActiveCopy, dekRefCountsCopy, activeKEKVersionCopy)
+	blob, err := f.appendSnapshotTrailers(bs, dekVersionsCopy, dekActiveCopy, dekRefCountsCopy, activeKEKVersionCopy, dekRewrapDoneCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -717,10 +733,11 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newDEKActive        uint32
 		newDEKRefs          map[uint32]uint64
 		newActiveKEKVersion uint32
+		newDEKRewrapDone    map[uint32]map[string]struct{}
 		hasDEKData          bool
 	)
 	if len(trailers.dekData) > 0 {
-		versions, active, refs, activeKEK, err := decodeMetaDEKVersionSnapshot(trailers.dekData)
+		versions, active, refs, activeKEK, done, err := decodeMetaDEKVersionSnapshot(trailers.dekData)
 		if err != nil {
 			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
 		}
@@ -728,6 +745,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newDEKActive = active
 		newDEKRefs = refs
 		newActiveKEKVersion = activeKEK
+		newDEKRewrapDone = done
 		hasDEKData = true
 	}
 
@@ -888,6 +906,12 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			for _, e := range f.objectIndex {
 				f.dekRefCounts[e.DekGen]++
 			}
+		}
+		// Restore rewrap done set. Pre-S6d snapshots decode nil → empty map.
+		if newDEKRewrapDone != nil {
+			f.dekRewrapDone = newDEKRewrapDone
+		} else {
+			f.dekRewrapDone = nil
 		}
 	} else {
 		// No DKVS trailer (the leader's keeper was empty when it snapshotted).
