@@ -34,6 +34,7 @@ func TestNewRewrapScrubberKick_RoutesToController(t *testing.T) {
 	ctrl := encrypt.NewRewrapController(keeperAtGen1(t))
 	lane := &recordingLane{}
 	ctrl.RegisterLane(lane)
+	ctrl.MarkReady()
 	kick := newRewrapScrubberKick(ctrl)
 	kick(context.Background(), 0) // oldGen 0 < active 1 → lane runs
 	require.Equal(t, 1, lane.calls)
@@ -42,6 +43,7 @@ func TestNewRewrapScrubberKick_RoutesToController(t *testing.T) {
 func TestNewRewrapScrubberKick_LaneErrorDoesNotPanic(t *testing.T) {
 	ctrl := encrypt.NewRewrapController(keeperAtGen1(t))
 	ctrl.RegisterLane(&recordingLane{err: errors.New("boom")})
+	ctrl.MarkReady()
 	kick := newRewrapScrubberKick(ctrl)
 	require.NotPanics(t, func() { kick(context.Background(), 0) })
 }
