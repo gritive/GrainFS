@@ -1,4 +1,4 @@
-package server
+package snapshotsvc
 
 import (
 	"context"
@@ -15,17 +15,17 @@ import (
 // GET    /admin/snapshots           — list snapshots
 // POST   /admin/snapshots/:seq/restore — restore snapshot
 // DELETE /admin/snapshots/:seq      — delete snapshot
-func (s *Server) registerSnapshotAPI(h *server.Hertz) {
-	admin := h.Group(routePathAdminSnapshots, localhostOnly())
-	admin.POST("", s.createSnapshotHandler)
-	admin.GET("", s.listSnapshotsHandler)
-	admin.POST(routePathSnapshotSeqRestore, s.restoreSnapshotHandler)
-	admin.DELETE(routePathSnapshotSeq, s.deleteSnapshotHandler)
+func (h *Handler) Register(hz *server.Hertz, adminPath, seqRestorePath, seqPath string) {
+	admin := hz.Group(adminPath, h.deps.LocalhostOnly())
+	admin.POST("", h.createSnapshotHandler)
+	admin.GET("", h.listSnapshotsHandler)
+	admin.POST(seqRestorePath, h.restoreSnapshotHandler)
+	admin.DELETE(seqPath, h.deleteSnapshotHandler)
 }
 
 // POST /admin/snapshots
-func (s *Server) createSnapshotHandler(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "snapshot_create") {
+func (h *Handler) createSnapshotHandler(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "snapshot_create") {
 		return
 	}
 
@@ -34,7 +34,7 @@ func (s *Server) createSnapshotHandler(ctx context.Context, c *app.RequestContex
 	}
 	_ = c.BindJSON(&req) // reason is optional
 
-	snap, err := s.createSnapshot(req.Reason)
+	snap, err := h.createSnapshot(req.Reason)
 	if err != nil {
 		if errors.Is(err, errSnapshotUnavailable) {
 			c.JSON(consts.StatusInternalServerError, apiError("snapshot unavailable", err.Error()))
@@ -54,8 +54,8 @@ func (s *Server) createSnapshotHandler(ctx context.Context, c *app.RequestContex
 }
 
 // GET /admin/snapshots
-func (s *Server) listSnapshotsHandler(_ context.Context, c *app.RequestContext) {
-	snaps, err := s.listSnapshots()
+func (h *Handler) listSnapshotsHandler(_ context.Context, c *app.RequestContext) {
+	snaps, err := h.listSnapshots()
 	if err != nil {
 		if errors.Is(err, errSnapshotUnavailable) {
 			c.JSON(consts.StatusInternalServerError, apiError("snapshot unavailable", err.Error()))
@@ -69,8 +69,8 @@ func (s *Server) listSnapshotsHandler(_ context.Context, c *app.RequestContext) 
 }
 
 // POST /admin/snapshots/:seq/restore
-func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "snapshot_restore") {
+func (h *Handler) restoreSnapshotHandler(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "snapshot_restore") {
 		return
 	}
 	seq, ok := snapshotSeqParam(c)
@@ -78,7 +78,7 @@ func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestConte
 		return
 	}
 
-	count, stale, err := s.restoreSnapshot(seq)
+	count, stale, err := h.restoreSnapshot(seq)
 	if err != nil {
 		writeSnapshotCommandError(c, "restore", seq, err)
 		return
@@ -91,8 +91,8 @@ func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestConte
 }
 
 // DELETE /admin/snapshots/:seq
-func (s *Server) deleteSnapshotHandler(ctx context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "snapshot_delete") {
+func (h *Handler) deleteSnapshotHandler(ctx context.Context, c *app.RequestContext) {
+	if h.deps.MutationDisabled(c, "snapshot_delete") {
 		return
 	}
 	seq, ok := snapshotSeqParam(c)
@@ -100,7 +100,7 @@ func (s *Server) deleteSnapshotHandler(ctx context.Context, c *app.RequestContex
 		return
 	}
 
-	if err := s.deleteSnapshot(seq); err != nil {
+	if err := h.deleteSnapshot(seq); err != nil {
 		writeSnapshotCommandError(c, "delete", seq, err)
 		return
 	}

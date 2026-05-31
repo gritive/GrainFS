@@ -248,15 +248,18 @@ func TestECRewrap_ConfigUpgradeLockSerializesWrite(t *testing.T) {
 }
 
 // fakeECRewrapBackend is one fake data-group backend: it yields its objects via
-// ScanGroupObjects and records RewrapShardIfStale calls.
+// ScanGroupObjects and records RewrapShardIfStale / RewrapShardIfStaleAt calls.
 type fakeECRewrapBackend struct {
-	nodeID     string
-	objects    []scrubber.ObjectRecord // objects stored in this group
-	owned      map[string][]int        // key|version -> shard indices
-	rewrapErr  error
-	mu         sync.Mutex
-	calls      []rewrapCall
-	didOnFirst map[string]bool // key|version|idx -> already returned true
+	nodeID        string
+	objects       []scrubber.ObjectRecord // objects stored in this group
+	owned         map[string][]int        // key|version -> shard indices
+	segmentShards []SegmentShardRecord    // seeded segment/coalesced records
+	rewrapErr     error
+	mu            sync.Mutex
+	calls         []rewrapCall
+	atCalls       []rewrapAtCall
+	didOnFirst    map[string]bool // key|version|idx -> already returned true
+	didOnFirstAt  map[string]bool // canonicalKey|idx -> already returned true
 }
 
 type rewrapCall struct {
@@ -265,9 +268,24 @@ type rewrapCall struct {
 	activeGen            uint32
 }
 
+type rewrapAtCall struct {
+	bucket, canonicalKey string
+	idx                  int
+	activeGen            uint32
+}
+
 func (f *fakeECRewrapBackend) ScanGroupObjects(_ context.Context) <-chan scrubber.ObjectRecord {
 	ch := make(chan scrubber.ObjectRecord, len(f.objects))
 	for _, r := range f.objects {
+		ch <- r
+	}
+	close(ch)
+	return ch
+}
+
+func (f *fakeECRewrapBackend) ScanGroupSegmentShards(_ context.Context) <-chan SegmentShardRecord {
+	ch := make(chan SegmentShardRecord, len(f.segmentShards))
+	for _, r := range f.segmentShards {
 		ch <- r
 	}
 	close(ch)
@@ -294,6 +312,24 @@ func (f *fakeECRewrapBackend) RewrapShardIfStale(bucket, key, versionID string, 
 	}
 	if !f.didOnFirst[k] {
 		f.didOnFirst[k] = true
+		return true, nil
+	}
+	return false, nil
+}
+
+func (f *fakeECRewrapBackend) RewrapShardIfStaleAt(bucket, canonicalKey string, shardIdx int, activeGen uint32) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.atCalls = append(f.atCalls, rewrapAtCall{bucket, canonicalKey, shardIdx, activeGen})
+	if f.rewrapErr != nil {
+		return false, f.rewrapErr
+	}
+	k := canonicalKey + "|" + strconv.Itoa(shardIdx)
+	if f.didOnFirstAt == nil {
+		f.didOnFirstAt = map[string]bool{}
+	}
+	if !f.didOnFirstAt[k] {
+		f.didOnFirstAt[k] = true
 		return true, nil
 	}
 	return false, nil
@@ -370,6 +406,36 @@ func TestECRewrapLane_CtxCancelStops(t *testing.T) {
 	err := lane.RewrapByGen(ctx, 0, 4)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Empty(t, fake.calls, "cancelled ctx stops before any rewrap")
+}
+
+// TestECRewrapLane_SweepsSegmentShards verifies the lane visits segment/coalesced
+// shards that are positionally owned by this node and skips shards belonging to
+// other nodes. The fake group yields one SegmentShardRecord with NodeIDs
+// ["n1","other","n1"]; the lane must call RewrapShardIfStaleAt for indices 0
+// and 2 (both owned by "n1") and NOT for index 1 (owned by "other").
+func TestECRewrapLane_SweepsSegmentShards(t *testing.T) {
+	fake := &fakeECRewrapBackend{
+		nodeID: "n1",
+		segmentShards: []SegmentShardRecord{
+			{Bucket: "b", ShardKey: "k/segments/b1", NodeIDs: []string{"n1", "other", "n1"}},
+		},
+	}
+	lane := laneFromGroups("n1", fake)
+	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 9))
+
+	require.Len(t, fake.atCalls, 2, "only shards owned by n1 (idx 0 and 2) are visited")
+	idxs := map[int]bool{}
+	for _, c := range fake.atCalls {
+		assert.Equal(t, "b", c.bucket)
+		assert.Equal(t, "k/segments/b1", c.canonicalKey)
+		assert.Equal(t, uint32(9), c.activeGen)
+		idxs[c.idx] = true
+	}
+	assert.True(t, idxs[0], "shard idx 0 must be visited")
+	assert.True(t, idxs[2], "shard idx 2 must be visited")
+	assert.False(t, idxs[1], "shard idx 1 (owned by other) must NOT be visited")
+	// No regular object calls expected.
+	assert.Empty(t, fake.calls, "no regular object rewraps for this test")
 }
 
 func counterValue(t *testing.T, activeGen uint32) float64 {
