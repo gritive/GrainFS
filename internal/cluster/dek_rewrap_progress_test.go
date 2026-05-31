@@ -51,3 +51,19 @@ func TestDEKRewrapProgress_Apply_RejectsEmptyNodeID(t *testing.T) {
 	f := &MetaFSM{}
 	require.Error(t, f.applyDEKRewrapProgress(mustProgress(t, "", 1)))
 }
+
+func TestDEKRewrapDone_ConcurrentApplyAndRead(t *testing.T) {
+	f, _ := newTestMetaFSMWithKEKAndDEK(t)
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			data, _ := encodeMetaDEKRewrapProgressCmd("node-A", 1)
+			_ = f.applyDEKRewrapProgress(data)
+		}
+		close(done)
+	}()
+	for i := 0; i < 1000; i++ {
+		_ = f.IsGenFullyRewrapped(1, []string{"node-A"})
+	}
+	<-done
+}

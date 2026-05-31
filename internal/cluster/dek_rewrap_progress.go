@@ -14,6 +14,8 @@ func (f *MetaFSM) applyDEKRewrapProgress(data []byte) error {
 	if nodeID == "" {
 		return fmt.Errorf("meta_fsm: DEKRewrapProgress: empty node_id")
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.dekRewrapDone == nil {
 		f.dekRewrapDone = make(map[uint32]map[string]struct{})
 	}
@@ -35,6 +37,8 @@ func (f *MetaFSM) IsGenFullyRewrapped(gen uint32, nodes []string) bool {
 	if len(nodes) == 0 {
 		return false
 	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	set := f.dekRewrapDone[gen]
 	if set == nil {
 		return false
