@@ -16,16 +16,16 @@ import (
 // rewrap lane re-encrypts shards of ALL object versions (non-latest, legacy
 // unversioned) across ALL buckets.
 //
-// Cross-bucket RED-first (MAJOR-1) proof:
-// A bucket-aware (bucket+"\x00"+key) latestMap correctly rewraps a b2 versioned
-// SEGMENTED object whose tail (key+"/"+versionID) collides with a b1 lat: key.
-// A bare-key latestMap mis-classifies that entry as legacy (VersionID=""),
-// which triggers the VersionID=="" guard in buildECShardTargets, silently
-// dropping the segment target and leaving the segment shard un-rewrapped.
+// The authoritative-m.Key derivation closes two collision classes:
 //
-// The plain b2/obj1 case (legacy, tail has no slash) is included for
-// cross-bucket enumeration coverage but is NOT the teeth: it never consults
-// latestMap (lslash < 0 unconditional legacy branch). See comment below.
+//   - Cross-bucket: a lat: pointer in b1 for key "seg/vtag" would, under the old
+//     lat:-heuristic, cause the b2 versioned entry obj:b2/seg/vtag to be
+//     misclassified as legacy (VersionID=""). The m.Key field ("seg") gives the
+//     exact key, leaving "vtag" as the version ID.
+//
+//   - Same-bucket: a lat: pointer in b2 for key "seg/vtag" triggers the same
+//     misclassification even with the bucket-scoped heuristic — the fix replaces
+//     the lat:-heuristic entirely with the m.Key derive.
 func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	backend, keeper := setupECRewrapBackend(t)
 	ctx := context.Background()
@@ -75,39 +75,25 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	})
 
 	// 3. b2/obj1 (legacy unversioned in b2, same key-string as b1's versioned
-	// key). Cross-bucket ENUMERATION coverage: proves b2 objects are visited
-	// regardless of b1's lat: for the same key name. Note: this entry's tail
-	// "obj1" has no slash → always hits the lslash<0 branch → latestMap is
-	// NOT consulted. This is not the latestMap collision case (see below).
+	// key). Cross-bucket enumeration coverage: proves b2 objects are visited
+	// regardless of b1's lat: for the same key name.
 	seedMeta(t, f.keys.ObjectMetaKey("b2", "obj1"), "obj1", objectMeta{
 		ECData: ecData, ECParity: ecParity, NodeIDs: selfNodes,
 	})
 
-	// ---- MAJOR-1 teeth: cross-bucket latestMap collision via segmented object ----
+	// ---- Cross-bucket collision case ----
 	//
-	// The bare-key latestMap collision fires only when tail (rest after bucket
-	// slash in an obj: entry) HAS a slash AND that tail string equals a key
-	// stored in latestMap.
-	//
-	// Decoy: plant a lat: pointer in b1 for key "seg/vtag" (a key that contains
-	// a slash). This populates:
-	//   bucket-scoped: latestMap["b1\x00seg/vtag"] = "somevid"
-	//   bare-key bug:  latestMap["seg/vtag"]       = "somevid"
-	const decoyKey = "seg/vtag" // slash-containing key — matches b2's tail below
+	// A lat: pointer in b1 for key "seg/vtag" (a slash-containing key) would,
+	// under the old lat:-heuristic, cause obj:b2/seg/vtag to be misclassified
+	// as legacy (key="seg/vtag", versionID="") when looking up the bucket-scoped
+	// map for b2. With m.Key derivation, m.Key="seg" gives the exact key and
+	// "vtag" becomes the version ID — correctly emitting the segment target.
+	const decoyKey = "seg/vtag" // slash-containing key — collides with b2's tail
 	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(f.keys.LatestKey("b1", decoyKey), []byte("somevid"))
 	}))
-	// No b1 obj: entry for decoyKey needed; the lat: alone populates latestMap.
+	// No b1 obj: entry for decoyKey needed; the lat: alone populated latestMap.
 
-	// Target: b2 versioned SEGMENTED object with key="seg", versionID="vtag".
-	// Its obj: entry is obj:b2/seg/vtag, so tail = "seg/vtag".
-	//   • Bucket-scoped check: latestMap["b2\x00seg/vtag"] → absent →
-	//     CORRECTLY classified as versioned (key="seg", vid="vtag") →
-	//     VersionID non-empty → segment target emitted → shard rewrapped. ✓
-	//   • Bare-key bug:        latestMap["seg/vtag"]       → FOUND (b1 decoy) →
-	//     MIS-classified as legacy (key="seg/vtag", vid="") →
-	//     VersionID=="" guard in buildECShardTargets drops segment target →
-	//     segment shard NOT rewrapped. ✗ (RED assertion)
 	const (
 		segKey    = "seg"
 		segVID    = "vtag"
@@ -121,7 +107,23 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 			{BlobID: segBlobID, ECData: ecData, ECParity: ecParity, NodeIDs: selfNodes},
 		},
 	})
-	// No lat: in b2 for "seg" (entry is non-latest to keep setup minimal).
+
+	// ---- Same-bucket collision case ----
+	//
+	// A lat: pointer in b2 itself for key "seg/vtag" fires the same-bucket
+	// variant: latestMap["b2\x00seg/vtag"] is set, so obj:b2/seg/vtag would be
+	// misclassified as legacy even with the bucket-scoped heuristic. The m.Key
+	// derivation closes this class: m.Key="seg" is authoritative regardless of
+	// what any lat: entry says.
+	//
+	// We reuse the same versioned segment object already seeded above and add
+	// a same-bucket decoy lat: pointer. No second obj: record needed (two metas
+	// for obj:b2/seg/vtag would overwrite each other — they share the same key).
+	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(f.keys.LatestKey("b2", decoyKey), []byte("somevid2"))
+	}))
+	// segShardKey is already seeded above; the same-bucket decoy lat: just adds
+	// a second misclassification trigger for the same b2/seg/vtag entry.
 
 	// ---- Write GFSENC3 shards at gen 0 ----
 
@@ -141,7 +143,7 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	shardKeyB2Plain := ecObjectShardKey("obj1", "")
 	require.NoError(t, svc.WriteLocalShard("b2", shardKeyB2Plain, 0, shardContent("b2-obj1")))
 
-	// Segment shard for the MAJOR-1 case.
+	// Segment shard for both cross-bucket and same-bucket collision cases.
 	require.NoError(t, svc.WriteLocalShard("b2", segShardKey, 0, shardContent("b2-seg")))
 
 	// Verify all five shards start at gen 0.
@@ -169,10 +171,11 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 		"b1/legacyA (legacy unversioned) must be rewrapped")
 	assert.Equal(t, uint32(1), shardGenOnDisk(t, backend, "b2", shardKeyB2Plain, 0),
 		"b2/obj1 (cross-bucket legacy, enumeration coverage) must be rewrapped")
-	// MAJOR-1 assertion: the cross-bucket segment shard must be rewrapped.
-	// With bare-key latestMap the segment target is dropped → gen stays 0.
+	// Cross-bucket and same-bucket collision: both decoy lat: entries (b1 and b2
+	// for "seg/vtag") must not prevent the b2/seg@vtag segment shard from being
+	// re-encrypted.
 	assert.Equal(t, uint32(1), shardGenOnDisk(t, backend, "b2", segShardKey, 0),
-		"b2/seg@vtag segment shard (MAJOR-1 cross-bucket latestMap collision) must be rewrapped")
+		"b2/seg@vtag segment shard (cross+same-bucket lat: collision) must be rewrapped")
 
 	// ---- Plaintext preserved ----
 	for _, tc := range []struct {

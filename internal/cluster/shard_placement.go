@@ -366,39 +366,16 @@ func (f *FSM) buildECShardTargets(ref ObjectMetaRef, m objectMeta, fn func(ECSha
 // compromise-recovery rekey re-encrypts every stored shard, not only the
 // current head version.
 //
-// Enumeration strategy: iterate the obj: keyspace (which stores every version)
-// and disambiguate legacy unversioned keys using a pre-built latestMap from the
-// lat: pointers. Delete markers are skipped (same as iterLatestObjectMetas).
-// Segment/coalesced targets inherit the VersionID=="" guard from
-// buildECShardTargets.
+// Enumeration strategy: iterate the obj: keyspace (which stores every version).
+// Delete markers are skipped (same as iterLatestObjectMetas). The (key,
+// versionID) pair is derived from the authoritative m.Key field stored in each
+// meta record: if the on-disk tail (everything after "obj:{bucket}/") is longer
+// than m.Key and starts with m.Key+"/", the remainder is the versionID;
+// otherwise versionID is "" (legacy unversioned). This avoids the lat:-heuristic
+// which misclassified keys when a same-bucket lat: pointer had a slash-containing
+// key that collided with another object's {key}/{versionID} tail.
 func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error) error {
 	return f.db.View(func(txn *badger.Txn) error {
-		// Pre-scan lat: pointers to build a map for legacy/disambiguation.
-		// Key: bucket+"\x00"+key → latestVID (cross-bucket: must include bucket).
-		latestMap := map[string]string{}
-		rawLatPrefix := []byte("lat:")
-		if serr := f.keys.scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
-			rest := string(raw[len(rawLatPrefix):]) // "{bucket}/{key}"
-			slash := -1
-			for i, c := range rest {
-				if c == '/' {
-					slash = i
-					break
-				}
-			}
-			if slash <= 0 {
-				return nil
-			}
-			bucket := rest[:slash]
-			key := rest[slash+1:]
-			return item.Value(func(v []byte) error {
-				latestMap[bucket+"\x00"+key] = string(v)
-				return nil
-			})
-		}); serr != nil {
-			return serr
-		}
-
 		// Enumerate all obj: entries (every stored version).
 		rawObjPrefix := []byte("obj:")
 		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item *badger.Item) error {
@@ -416,22 +393,6 @@ func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error
 			bucket := rest[:bslash]
 			tail := rest[bslash+1:]
 
-			// Disambiguate versioned vs legacy unversioned:
-			//   - Legacy: tail has no slash OR tail itself is a lat: key (meaning
-			//     the whole tail is the object key with no embedded versionID).
-			//   - Versioned: tail is "{key}/{versionID}" — split on last slash.
-			var key, versionID string
-			lslash := lastIndexByte(tail, '/')
-			if lslash < 0 {
-				// No slash in tail → unambiguously legacy unversioned.
-				key, versionID = tail, ""
-			} else if _, isLegacy := latestMap[bucket+"\x00"+tail]; isLegacy {
-				// The whole tail matches a lat: key → legacy key containing '/'.
-				key, versionID = tail, ""
-			} else {
-				key, versionID = tail[:lslash], tail[lslash+1:]
-			}
-
 			// The scan item IS the meta entry — use it directly. Avoid
 			// constructing ObjectMetaKeyV(bucket, key, "") for legacy keys:
 			// that appends a trailing slash and misses "obj:b/key" records.
@@ -442,6 +403,17 @@ func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error
 			m, err := unmarshalObjectMeta(v)
 			if err != nil || m.ETag == deleteMarkerETag {
 				return nil // skip delete markers (like iterLatestObjectMetas)
+			}
+
+			// Derive (key, versionID) from the authoritative m.Key.
+			// On-disk layout: obj:{bucket}/{key}           → legacy (versionID="")
+			//                 obj:{bucket}/{key}/{versionID} → versioned
+			// Comparing tail to m.Key exactly closes both the cross-bucket and the
+			// same-bucket collision cases that the lat:-heuristic could not handle.
+			key := m.Key
+			var versionID string
+			if len(tail) > len(key) && tail[:len(key)+1] == key+"/" {
+				versionID = tail[len(key)+1:]
 			}
 			return f.buildECShardTargets(ObjectMetaRef{Bucket: bucket, Key: key, VersionID: versionID}, m, fn)
 		})
