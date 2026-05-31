@@ -155,6 +155,35 @@ func putStripeBuf(b []byte) {
 	stripeBufPool.Put(&b)
 }
 
+// encodeBufPool recycles the per-shard chunked-writer destination buffer (one
+// per shard per PUT). deliverStripe copies each stripe's ciphertext out via
+// getCiphertextBuf and Resets the buffer, so once a PUT's dispatcher loop exits
+// the buffer is fully drained and safe to recycle. Without pooling, every PUT
+// allocates n fresh bytes.Buffers that grow from zero — the dominant PUT-side
+// allocation churn under sustained load (see GCP Phase 0 alloc profile).
+var encodeBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+// encodeBufMaxPooled caps retained capacity so a large stripe's shard buffer
+// doesn't pin oversized backing. Each buffer holds one stripe's encoded shard
+// (~stripeBytes/k + chunk overhead); 4 MiB covers typical configs.
+const encodeBufMaxPooled = (4 << 20) + 4096
+
+func getEncodeBuf() *bytes.Buffer {
+	b := encodeBufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
+}
+
+func putEncodeBuf(b *bytes.Buffer) {
+	if b == nil || b.Cap() > encodeBufMaxPooled {
+		return
+	}
+	b.Reset()
+	encodeBufPool.Put(b)
+}
+
 // registerPut sets up per-shard chunked writers + the dispatcher
 // goroutine for one PUT. bucket and shardKey are used to derive the
 // AAD so that shards are readable by the legacy ShardService reader
@@ -167,7 +196,7 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 	encoders := make([]*shardEncoder, n)
 	header := cluster.ShardHeader(totalSize)
 	for i := 0; i < n; i++ {
-		buf := new(bytes.Buffer)
+		buf := getEncodeBuf()
 		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, cluster.ShardAADFields(bucket, shardKey, i), eccodec.DefaultEncryptedChunkSize)
 		if err != nil {
 			panic(fmt.Sprintf("cpu pool: build shard encoder %d for put %d: %v", i, putID, err))
@@ -310,6 +339,14 @@ func (p *CPUPool) runDispatcher(putID uint64, ps *putDispatchState) {
 			delete(pending, expected)
 			p.deliverStripe(putID, ps, cur)
 			expected++
+		}
+	}
+	// Inbox closed and drained: no more deliverStripe calls run for this PUT,
+	// so each shard's destination buffer has been fully consumed (copied out +
+	// Reset). Recycle the backing for the next PUT.
+	for _, enc := range ps.encoders {
+		if enc != nil {
+			putEncodeBuf(enc.buf)
 		}
 	}
 }
