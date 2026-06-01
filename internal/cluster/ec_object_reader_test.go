@@ -527,21 +527,6 @@ func TestECObjectReader_ReadAt_PartialFillAtEnd(t *testing.T) {
 	require.Equal(t, []byte("lo"), buf[:n])
 }
 
-func TestECObjectReader_CacheCanStore_NilCache(t *testing.T) {
-	r := ecObjectReader{cache: nil}
-	require.False(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
-}
-
-func TestECObjectReader_CacheCanStore_ZeroCapacity(t *testing.T) {
-	r := ecObjectReader{cache: newFakeCache(0)}
-	require.False(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
-}
-
-func TestECObjectReader_CacheCanStore_FitsInCache(t *testing.T) {
-	r := ecObjectReader{cache: newFakeCache(1 << 20)}
-	require.True(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
-}
-
 // fakeHotChecker for unit tests.
 type fakeHotChecker struct {
 	hot map[string]struct{}
@@ -669,7 +654,7 @@ func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
 		shards:   fetcher,
 		ecConfig: cfg,
 		bl:       newFakeHot("n0"),
-		// no cache → cacheCanStore=false → streaming branch
+		// no cache + large object → streaming branch
 	}
 	// shard 0 → node n0 (hot); shard 1 → node n1 (parity, cool)
 	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
@@ -685,4 +670,40 @@ func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
 	// k=1 satisfied by shard 1 → shard 0 must not be opened.
 	assert.Nil(t, readers[0], "hot data shard should not be opened when parity satisfies k")
 	assert.NotNil(t, readers[1], "parity shard should be opened as primary")
+}
+
+// S1 structural guard: objects larger than maxECPooledReadObjectSize must take
+// the bounded streaming path REGARDLESS of shard-cache capacity. Buffering a
+// large object (all data shards into []byte + cache populate) is the RSS
+// liability this slice removes. The streaming path opens shard streams
+// (ReadShardStream); the buffered path reads whole shards (ReadShard). With a
+// cache that CAN store the object, the old capacity-only gate (cacheCanStore →
+// bufferedShardReaders) used ReadShard; the structural fix must stream instead.
+func TestOpenShardReaders_LargeObject_StreamsEvenWhenCacheFits(t *testing.T) {
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	objectSize := int64(maxECPooledReadObjectSize + 1)
+
+	fetcher := &fakeECObjectShardFetcher{}
+	payload := bytes.Repeat([]byte("z"), int(objectSize))
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, payload)
+
+	r := ecObjectReader{
+		selfID:   "node-self", // not in rec.Nodes → all shards are remote
+		shards:   fetcher,
+		ecConfig: cfg,
+		// Cache large enough to store the object: the old gate buffered here.
+		cache: newFakeCache(1 << 30),
+	}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	require.NoError(t, err)
+	defer closeECShardReaders(readers)
+
+	// Streaming uses ReadShardStream; buffering uses ReadShard. A large object
+	// must stream even when the cache could store it.
+	require.Zero(t, fetcher.readShardCalls, "large object must NOT use the buffered (ReadShard) path")
+	require.Greater(t, fetcher.readShardStreamCalls, 0, "large object must stream (ReadShardStream)")
 }

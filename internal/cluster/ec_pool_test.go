@@ -96,3 +96,35 @@ func TestECReconstructStreamTo_MissingDataShardAllocBytesBounded(t *testing.T) {
 	require.LessOrEqualf(t, allocedBytes, int64(12*1024*1024),
 		"ECReconstructStreamTo missing data shard allocates %d B/op (want ≤12MiB)", allocedBytes)
 }
+
+// S1 routes large (>4MiB) reads through the streaming reconstruct path even
+// when the shard cache could store them. This asserts that path returns
+// BYTE-IDENTICAL data for a degraded large read (a data shard missing, forcing
+// parity reconstruction) on the 2+2 profile used by the single-node 4-drive
+// benchmark — the correctness the buffered-vs-streaming routing change relies
+// on. Non-trivial content (not zeros) so reconstruction is actually exercised.
+func TestECReconstructStreamTo_MissingDataShard_LargeObjectByteIdentical(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	const size = maxECPooledReadObjectSize + 1024*1024 // > 4MiB, multipart-sized
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i*31 + 7) // deterministic non-trivial pattern
+	}
+	shards, err := ECSplit(cfg, data)
+	require.NoError(t, err)
+
+	// Drop data shard 0 → reconstruct from data shard 1 + parity (2,3).
+	readers := make([]io.Reader, len(shards))
+	for i := range shards {
+		if i == 0 {
+			continue // missing data shard
+		}
+		readers[i] = bytes.NewReader(shards[i])
+	}
+
+	var out bytes.Buffer
+	require.NoError(t, ECReconstructStreamTo(&out, cfg, readers))
+	require.Equal(t, len(data), out.Len(), "reconstructed length must match original")
+	require.True(t, bytes.Equal(data, out.Bytes()),
+		"degraded large-object streaming reconstruct must be byte-identical to the original")
+}
