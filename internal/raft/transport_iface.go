@@ -33,4 +33,9 @@ type muxDriverTransport interface {
 var (
 	_ raftRPCTransport   = (*transport.QUICTransport)(nil)
 	_ muxDriverTransport = (*transport.QUICTransport)(nil)
+
+	// S1 TCP transport satisfies the transport-agnostic RPC surface. It does NOT
+	// satisfy muxDriverTransport (QUIC-shaped, *quic.Conn) — that is the S2
+	// RaftConn restructure's job.
+	_ raftRPCTransport = (*transport.TCPTransport)(nil)
 )
