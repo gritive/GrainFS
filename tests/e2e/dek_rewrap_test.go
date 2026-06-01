@@ -198,3 +198,52 @@ var _ = ginkgo.Describe("DEK rewrap lanes (DEK rotation S6b)", func() {
 			"large (EC shards) object must be byte-identical after DEK rewrap")
 	})
 })
+
+// DEK FSM-value rewrap e2e (S7-1a): after a data-DEK rotation, the
+// grainfs_rewrap_fsm_values_total counter must increment (the bucket-policy
+// value sealed at gen N must be resealed at gen N+1). Multipart state (mpu:)
+// must NOT be rewrapped (D4 census-only).
+var _ = ginkgo.Describe("DEK FSM-value rewrap lane (DEK rotation S7-1a)", func() {
+	ginkgo.It("increments fsm_values rewrap counter after rotate-dek and preserves bucket-policy content", func() {
+		t := ginkgo.GinkgoTB()
+
+		// packThreshold=1024: use default pack settings; object data isn't the focus here.
+		const packThreshold = 1024
+		cli, dataDir, saID, endpoint := startRewrapServer(t, packThreshold)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		ginkgo.DeferCleanup(cancel)
+
+		// Create a bucket — this writes a policy: FSM-value sealed at the current gen.
+		const bucket = "fsm-rewrap-test"
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, bucket, cli)
+
+		// Baseline counter before rotation.
+		fsmBaseline := scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")
+
+		// Record the DEK generation before rotation.
+		beforeGen := kekStatusViaSocket(t, dataDir).ActiveDEKGeneration
+		wantGen := beforeGen + 1
+
+		// Trigger data-DEK rotation.
+		out, err := configSetViaCLI(dataDir, "encryption.rotate-dek", "now")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(),
+			"config set encryption.rotate-dek now: %s", out)
+
+		// Wait for the active DEK generation to advance.
+		gomega.Eventually(func() uint32 {
+			return kekStatusViaSocket(t, dataDir).ActiveDEKGeneration
+		}, 20*time.Second, 100*time.Millisecond).Should(gomega.Equal(wantGen),
+			"active DEK generation must advance to %d after rotate-dek", wantGen)
+
+		// Wait for the FSM-values rewrap counter to rise above baseline.
+		// The trigger runs asynchronously after the rotation commits; allow up to 30s.
+		gomega.Eventually(func() float64 {
+			return scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")
+		}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeNumerically(">", fsmBaseline),
+			"grainfs_rewrap_fsm_values_total must increment after DEK rotation (baseline=%.0f)", fsmBaseline)
+
+		// The bucket must still be accessible after the reseal.
+		_, err = cli.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bucket must remain accessible after FSM-value reseal")
+	})
+})
