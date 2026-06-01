@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -146,6 +147,8 @@ func (f *FSM) ApplyTxn(txn *badger.Txn, raw []byte) error {
 		return f.applyCoalesceSegmentsFromCmd(txn, cmd.Data)
 	case CmdPutObjectQuarantine:
 		return f.applyPutObjectQuarantine(txn, cmd.Data)
+	case CmdResealFSMValues:
+		return f.applyResealFSMValues(txn, cmd.Data)
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
@@ -173,6 +176,53 @@ func (f *FSM) applyPutObjectQuarantine(txn *badger.Txn, data []byte) error {
 		return err
 	}
 	return txn.Set(f.keys.QuarantineKey(c.Bucket, c.Key, c.VersionID), value)
+}
+
+// applyResealFSMValues handles CmdResealFSMValues in the serialized apply loop.
+// For each key in the command, it reads the CURRENT value from the badger txn
+// and reseals it at cmd.ActiveGen. Keys already at activeGen are skipped
+// (idempotent). Keys not found (deleted since the leader scanned) are skipped.
+// The reseal is race-free because it runs in the single-threaded apply loop:
+// a concurrent SetBucketPolicy is Raft-ordered before or after, never clobbered.
+func (f *FSM) applyResealFSMValues(txn *badger.Txn, data []byte) error {
+	c, err := decodeResealFSMValuesCmd(data)
+	if err != nil {
+		return err
+	}
+	de := f.dataEncryptor()
+	if de == nil {
+		return nil // encryption disabled — nothing sealed
+	}
+	for _, k := range c.Keys {
+		key := []byte(k)
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			continue // key deleted since the leader scanned it — fine
+		}
+		if err != nil {
+			return err
+		}
+		raw, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		gen, ct, ok, derr := decodeFSMValueFrameV2(raw)
+		if derr != nil {
+			return derr
+		}
+		if !ok || gen == c.ActiveGen {
+			continue // plaintext or already active — idempotent skip
+		}
+		plain, err := de.Open(encrypt.DomainFSMValue, []encrypt.AADField{encrypt.FieldBytes(key)}, gen, ct)
+		if err != nil {
+			return err
+		}
+		if err := f.setValue(txn, key, plain); err != nil { // reseals at the live active gen
+			return err
+		}
+		RewrapFSMValuesTotal.WithLabelValues(strconv.FormatUint(uint64(c.ActiveGen), 10)).Inc()
+	}
+	return nil
 }
 
 // Badger key builders. Production code uses the FSM's KeySpace; these
