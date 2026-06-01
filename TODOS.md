@@ -83,21 +83,30 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        versions the S6d completion ledger by a lane-set epoch (`CurrentRewrapLaneSetEpoch`, stays 0 = EC+
        packblob; `IsGenFullyRewrapped(gen, nodes, requiredEpoch)`), dormant + behavior-neutral, so a future
        lane that widens the covered set cannot be mistaken as already-done (spec precondition 2). Remaining
-       roadmap: **S7-1a write-path = THIS PR** — FSM-value reseal MUTATION via apply-routing: new
+       roadmap: **S7-1a write-path MERGED #699 v0.0.496.0** — FSM-value reseal MUTATION via apply-routing: new
        `CmdResealFSMValues{keys}` data-group command (keys are a work-list, NOT ciphertext); apply
        reads-current-and-reseals in the serialized loop → race-free; leader-only per-group chunked
        orchestrator (`DrainFSMValueRewrap`) that **reads keeper-current each iteration** (NOT a pinned gen —
        pinning livelocks under back-to-back rotations + leaks the single-flight guard; code gate caught this)
        and proposes batched reseals (byte+count bounded vs ErrTxnTooBig) until the store is all-at-current;
        `policy:`+`obj:` only, `mpu:` excluded (D4); NOT the synchronous `RewrapLane` interface. **Epoch-neutral**
-       (does NOT bump `CurrentRewrapLaneSetEpoch`, does NOT report to the ledger). **S7-1a-2 ledger-path (NEXT)** —
-       per-node data-group post-commit hook → `ProposeDEKRewrapProgress` (off the apply loop); `FSMValueCheckLane`
-       (read-only RewrapLane: this node's `policy:`/`obj:` all at current?); re-Kick-on-reseal-apply so a node
-       reports after IT applies; bump epoch to 1 (MUST land with the check-lane, else false epoch-1). **The
-       check-lane must own per-node "is MY store all-current", AND the S6d-reconcile (existing [P2]) must
-       re-drive a meta-raft-lagged follower** — the leader-only drain skips a follower whose `activeDEKGen()`
-       still reads the old gen, so without reconcile the epoch can STALL (liveness, not safety; S7-0 blocks
-       prune so a transiently-lagged follower is inert). Residual (non-blocking): deposed-leader drain forwards
+       (does NOT bump `CurrentRewrapLaneSetEpoch`, does NOT report to the ledger). **S7-1a-2 ledger-path = THIS PR** —
+       per-node data-group post-commit callback (`SetOnFSMValueResealDone`, off the apply loop) fired by a
+       leader-proposed `CmdFSMValueResealDone` marker (raft-ordered after all reseal batches) → debounced re-Kick →
+       `ProposeDEKRewrapProgress`; `FSMValueCheckLane` (read-only RewrapLane: this node's `policy:`/`obj:` all at
+       keeper-current? else error → Kick suppresses the report); epoch bumped 0→1 (landed WITH the check-lane).
+       **Also fixed a pre-existing EC-scan data-loss-suppressor in `IterECShardScanTargetsAllVersions`**: a
+       versioning-on object dual-writes the bare `obj:{b}/{k}` alias + versioned `obj:{b}/{k}/{v}` with the same
+       EC-ref meta; the bare alias derived a version-less shardKey (`ecObjectShardKey(key,"")=key`) → shard-not-found
+       → EC lane aggregate-error → `Kick` first-error → **completion report permanently suppressed** (this silently
+       neutered S6d completion on every versioning-on cluster, dormant only because S7-0 blocks prune). Fix: skip the
+       bare alias when `lat:{b}/{k}` exists (the versioned entry covers its shards at `/{k}/{v}/`; pre-versioning
+       version-less objects have no `lat:` → kept). Invariant verified: every EC writer mints a non-empty UUIDv7
+       versionID, so a live `/{k}/` shard never coexists with a `lat:` key — no coverage lost, no false-positive
+       completion. **NEXT: the S6d-reconcile (existing [P2]) must re-drive a meta-raft-lagged follower** — the
+       leader-only drain skips a follower whose `activeDEKGen()` still reads the old gen; without reconcile the epoch
+       can STALL (liveness, not safety; S7-0 blocks prune + `RetiredGensBelow(follower-active)` excludes the not-yet-
+       retired gen, so a transiently-lagged follower is inert). Residual (non-blocking): deposed-leader drain forwards
        to the new leader (idempotent, converges, terminates) — ctx=Background, acceptable.
        **S7-1b** WAL rewrap lanes (datawal +
        logical-WAL, NEEDS-LANE confirmed — both keep old-gen segments with no deletion path; fix the stale
