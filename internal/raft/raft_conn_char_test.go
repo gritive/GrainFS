@@ -42,12 +42,14 @@ func newRaftConnPairQUIC(t *testing.T, poolSize int, clientCfg, serverCfg RaftCo
 	serverConn := <-accepted
 	require.NotNil(t, serverConn)
 
-	clientCfg.PoolSize = poolSize
-	serverCfg.PoolSize = poolSize
-	client := NewRaftConn(clientConn, clientCfg)
-	server := NewRaftConn(serverConn, serverCfg)
-	require.NoError(t, client.OpenOutboundStreams(ctx))
-	require.NoError(t, server.AcceptInboundStreams(ctx))
+	clientStreams, err := openQUICMuxStreams(ctx, clientConn, poolSize)
+	require.NoError(t, err)
+	serverStreams, err := acceptQUICMuxStreams(ctx, serverConn, poolSize)
+	require.NoError(t, err)
+	client := NewRaftConn(clientConn.RemoteAddr().String(), clientStreams,
+		func(c error) error { return clientConn.CloseWithError(0, c.Error()) }, clientCfg)
+	server := NewRaftConn(serverConn.RemoteAddr().String(), serverStreams,
+		func(c error) error { return serverConn.CloseWithError(0, c.Error()) }, serverCfg)
 	client.StartReaders()
 	server.StartReaders()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
