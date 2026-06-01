@@ -213,9 +213,19 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap lane (DEK rotation S7-1a)", func()
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		ginkgo.DeferCleanup(cancel)
 
-		// Create a bucket — this writes a policy: FSM-value sealed at the current gen.
+		// Create a bucket and PUT an object — this writes an obj: FSM-value in the
+		// data group, sealed at the current DEK generation (will be stale after rotation).
 		const bucket = "fsm-rewrap-test"
 		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, bucket, cli)
+
+		objKey := "seed.bin"
+		objBody := bytes.Repeat([]byte{0x5A}, 256)
+		_, putErr := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(objKey),
+			Body:   bytes.NewReader(objBody),
+		})
+		gomega.Expect(putErr).NotTo(gomega.HaveOccurred(), "PUT seed object to create stale obj: FSM value")
 
 		// Baseline counter before rotation.
 		fsmBaseline := scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")

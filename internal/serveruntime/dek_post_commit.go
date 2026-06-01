@@ -22,10 +22,10 @@ type DEKProposer interface {
 // It decodes ConfigPut payloads for DEK-related keys and dispatches proposals
 // asynchronously (via goroutines) so the FSM apply loop is never blocked.
 type DEKPostCommitDispatcher struct {
-	proposer        DEKProposer
-	isLeader        func() bool
-	scrubberKick    func(ctx context.Context, oldGen uint32)
-	fsmValueRewrap  func(ctx context.Context, activeGen uint32) // S7-1a: leader-only FSM-value drain
+	proposer       DEKProposer
+	isLeader       func() bool
+	scrubberKick   func(ctx context.Context, oldGen uint32)
+	fsmValueRewrap func(ctx context.Context, activeGen uint32) // S7-1a: leader-only FSM-value drain
 }
 
 // Handle implements cluster.PostCommitHook. It is called from the FSM apply
