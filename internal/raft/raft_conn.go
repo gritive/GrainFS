@@ -164,7 +164,7 @@ func NewRaftConn(peerAddr string, streams []io.ReadWriteCloser, closeHook func(e
 }
 
 // StartReaders launches one reader goroutine per stream. Must be called after
-// OpenOutboundStreams or AcceptInboundStreams.
+// construction (the carrier driver establishes the streams before NewRaftConn).
 func (rc *RaftConn) StartReaders() {
 	for _, s := range rc.streams {
 		go s.readLoop()

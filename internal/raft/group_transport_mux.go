@@ -130,6 +130,10 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 	// there is no RaftConn yet (so no OnBroken can fire); just evict and return.
 	streams, err := openQUICMuxStreams(ctx, conn, m.muxPoolSize)
 	if err != nil {
+		// Tear down the conn before evicting: EvictMux only deletes the cache
+		// entry, so without this close the (now unreferenced) conn would leak.
+		// Old flow closed it via rc.Close()->markBroken->CloseWithError; preserve that.
+		_ = conn.CloseWithError(0, err.Error())
 		m.tr.EvictMux(addr, conn)
 		return nil, fmt.Errorf("open mux streams to %s: %w", addr, err)
 	}

@@ -101,3 +101,58 @@ func TestRaftConnPipe_MarkBrokenFansOut(t *testing.T) {
 		t.Fatal("pending call did not error after the pipe conn broke")
 	}
 }
+
+// HBReply and Overload both issue a synchronous Write from inside the readLoop
+// goroutine (overload → sendErrorFrame; HB → reply sendFrame). An unbuffered
+// net.Pipe is the strictest carrier for in-readLoop writes, so exercising them
+// here is the highest-value carrier-agnosticism proof.
+
+func TestRaftConnPipe_HeartbeatBatchReply(t *testing.T) {
+	server := RaftConnConfig{HBBatchHandler: func(p []byte) []byte {
+		return append([]byte("reply:"), p...)
+	}}
+	replyCh := make(chan struct{}, 1)
+	var gotCorr uint64
+	var gotPayload []byte
+	client := RaftConnConfig{HBReplyHandler: func(corrID uint64, payload []byte) {
+		gotCorr = corrID
+		gotPayload = payload
+		replyCh <- struct{}{}
+	}}
+	clientRC, _ := newRaftConnPairPipe(t, 4, client, server)
+
+	corr := clientRC.NextHeartbeatCorrID()
+	require.NoError(t, clientRC.SendHeartbeatBatchWithCorrID(corr, []byte("hb")))
+	select {
+	case <-replyCh:
+		assert.Equal(t, corr, gotCorr)
+		assert.Equal(t, "reply:hb", string(gotPayload))
+	case <-time.After(3 * time.Second):
+		t.Fatal("no heartbeat reply received over net.Pipe")
+	}
+}
+
+func TestRaftConnPipe_HandlerOverload(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	entered := make(chan struct{})
+	var once sync.Once
+	server := RaftConnConfig{
+		HandlerPoolSize: 1,
+		RPCHandler: func(p []byte) ([]byte, error) {
+			once.Do(func() { close(entered) })
+			<-block
+			return p, nil
+		},
+	}
+	client, _ := newRaftConnPairPipe(t, 1, RaftConnConfig{}, server)
+
+	go func() { _, _ = client.Call(context.Background(), []byte("a")) }()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := client.Call(ctx, []byte("b"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overloaded")
+}
