@@ -98,7 +98,7 @@ type bootState struct {
 	// in-place by bootQUICTransport once Listen resolves a kernel-picked
 	// port (operator passed 127.0.0.1:0).
 	transportPSK  string
-	quicTransport *transport.QUICTransport
+	quicTransport transport.ClusterTransport
 	groupRaftMux  *raft.GroupRaftQUICMux
 
 	// Meta-raft + DataGroup wiring (populated by raft phases —
