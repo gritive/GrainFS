@@ -205,6 +205,12 @@ type DistributedBackend struct {
 	// F1 durability review is closed: Put() blocks on shard durability before
 	// returning). Tests may still construct a backend with it off.
 	putPipelineEnabled bool
+
+	// onFSMValueResealDone, if set, fires once per applied CmdFSMValueResealDone
+	// marker (on EVERY node, after raft-ordered reseal batches). It runs in the
+	// apply-actor goroutine, so the callback MUST dispatch a goroutine for any
+	// proposal/Kick. Wired by the serveruntime to re-Kick the RewrapController.
+	onFSMValueResealDone func()
 }
 
 type backendTopology struct {
@@ -730,6 +736,24 @@ func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
 	b.onApply = fn
 }
 
+// SetOnFSMValueResealDone registers a callback that fires once per applied
+// CmdFSMValueResealDone marker on every node. The marker is applied after all
+// preceding CmdResealFSMValues batches in raft order, so the callback fires
+// with this node's FSM-values already resealed. The callback runs in the
+// apply-actor goroutine and MUST dispatch a goroutine for any blocking work
+// (Kick/propose). Must be called before RunApplyLoop.
+func (b *DistributedBackend) SetOnFSMValueResealDone(fn func()) {
+	b.onFSMValueResealDone = fn
+}
+
+// ProposeFSMValueResealDone proposes a CmdFSMValueResealDone marker to the
+// data-group raft log. The marker is an ordering fence: it mutates no state but
+// its position in the log guarantees that every node applies it AFTER all
+// preceding CmdResealFSMValues batches. gen is a log hint for observability.
+func (b *DistributedBackend) ProposeFSMValueResealDone(ctx context.Context, gen uint32) error {
+	return b.propose(ctx, CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: gen})
+}
+
 // RunApplyLoop consumes committed entries from the Raft node and applies them to the FSM.
 // This must run in a goroutine. Delegates to applyActor, which opportunistically
 // batches command entries into a single BadgerDB transaction per commit.
@@ -742,6 +766,16 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	cmd, err := DecodeCommand(raw)
 	if err != nil {
+		return
+	}
+
+	// CmdFSMValueResealDone is an ordering-fence marker: it fires the per-node
+	// re-Kick callback and then returns early (no object-cache invalidation).
+	// The callback must dispatch its own goroutine for any blocking work.
+	if cmd.Type == CmdFSMValueResealDone {
+		if b.onFSMValueResealDone != nil {
+			b.onFSMValueResealDone()
+		}
 		return
 	}
 

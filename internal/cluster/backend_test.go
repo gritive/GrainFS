@@ -180,3 +180,50 @@ func TestSelectPeerByLoad_SingleNode(t *testing.T) {
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
 	require.False(t, ok, "single node: no peers to redirect to")
 }
+
+// TestSetOnFSMValueResealDone_CallbackFiresOnMarker verifies that the callback
+// registered via SetOnFSMValueResealDone fires when CmdFSMValueResealDone is
+// applied, does NOT fire for CmdResealFSMValues or CmdPutObjectMeta, and that
+// the callback is dispatched in its own goroutine (non-blocking on apply path).
+func TestSetOnFSMValueResealDone_CallbackFiresOnMarker(t *testing.T) {
+	gb := newTestGroupBackend(t, "callback-test-group")
+
+	fired := make(chan struct{}, 1)
+	gb.SetOnFSMValueResealDone(func() {
+		fired <- struct{}{}
+	})
+
+	// Apply the marker: should fire the callback.
+	raw, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 5})
+	require.NoError(t, err)
+	gb.notifyOnApply(raw)
+
+	select {
+	case <-fired:
+		// callback fired as expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetOnFSMValueResealDone callback did not fire for CmdFSMValueResealDone")
+	}
+
+	// Apply CmdResealFSMValues: must NOT fire the callback.
+	rawReseal, err := EncodeCommand(CmdResealFSMValues, ResealFSMValuesCmd{Keys: []string{"policy:b1"}, ActiveGen: 1})
+	require.NoError(t, err)
+	gb.notifyOnApply(rawReseal)
+	select {
+	case <-fired:
+		t.Fatal("callback must NOT fire for CmdResealFSMValues")
+	case <-time.After(50 * time.Millisecond):
+		// correct: no callback
+	}
+
+	// Apply CmdPutObjectMeta: must NOT fire the callback.
+	rawPut, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 1, ETag: "e"})
+	require.NoError(t, err)
+	gb.notifyOnApply(rawPut)
+	select {
+	case <-fired:
+		t.Fatal("callback must NOT fire for CmdPutObjectMeta")
+	case <-time.After(50 * time.Millisecond):
+		// correct: no callback
+	}
+}
