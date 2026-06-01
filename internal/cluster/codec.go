@@ -1590,6 +1590,7 @@ func encodeFSMValueResealDoneCmd(c FSMValueResealDoneCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.FSMValueResealDoneCmdEnd(b)), nil
 }
 
+//nolint:unused // referenced by codec_test.go (TestFSMValueResealDoneCmd_RoundTrip).
 func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.FSMValueResealDoneCmd {
 		return clusterpb.GetRootAsFSMValueResealDoneCmd(d, 0)
