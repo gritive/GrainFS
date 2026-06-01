@@ -36,7 +36,7 @@ func TestDKVSTrailer_RewrapDone(t *testing.T) {
 		require.NoError(t, fsm.applyDEKRewrapProgress(mustProgress(t, "node-B", 1)))
 
 		// Sanity: predicate true before snapshot.
-		require.True(t, fsm.IsGenFullyRewrapped(1, []string{"node-A", "node-B"}))
+		require.True(t, fsm.IsGenFullyRewrapped(1, []string{"node-A", "node-B"}, 0))
 
 		// Snapshot the FSM.
 		snapBytes, err := fsm.Snapshot()
@@ -48,13 +48,13 @@ func TestDKVSTrailer_RewrapDone(t *testing.T) {
 		require.NoError(t, fsm2.Restore(raft.SnapshotMeta{}, snapBytes))
 
 		// Both nodes must be present → true.
-		require.True(t, fsm2.IsGenFullyRewrapped(1, []string{"node-A", "node-B"}),
+		require.True(t, fsm2.IsGenFullyRewrapped(1, []string{"node-A", "node-B"}, 0),
 			"expected both nodes restored for gen 1")
 		// Only A is not enough for {A,C}.
-		require.False(t, fsm2.IsGenFullyRewrapped(1, []string{"node-A", "node-C"}),
+		require.False(t, fsm2.IsGenFullyRewrapped(1, []string{"node-A", "node-C"}, 0),
 			"node-C was never recorded, must return false")
 		// Gen 2 was never recorded.
-		require.False(t, fsm2.IsGenFullyRewrapped(2, []string{"node-A"}),
+		require.False(t, fsm2.IsGenFullyRewrapped(2, []string{"node-A"}, 0),
 			"gen 2 was never recorded, must return false")
 	})
 
