@@ -390,17 +390,10 @@ type MetaFSM struct {
 	dekRefCounts map[uint32]uint64
 
 	// dekRewrapDone tracks per-generation rewrap completion: gen → set of
-	// node_ids that finished. Populated by applyDEKRewrapProgress; read by
-	// IsGenFullyRewrapped (later prune-safety input). Not in the snapshot in
-	// S6a — behavior-neutral because nothing produces these commands yet;
-	// snapshot persistence lands with the producer in a later slice.
-	//
-	// S6d TODO: this field is currently mutated/read WITHOUT f.mu (safe today:
-	// the apply loop is the sole writer and the only reader is single-threaded
-	// tests — no producer fires, so -race cannot surface a race that does not
-	// exist yet). When S6d wires a producer AND a leader prune-decision reader
-	// off the apply goroutine, add f.mu guarding (mirror dekRefCounts) together
-	// with snapshot persistence — do BOTH in the same slice.
+	// node_ids that finished. Populated by applyDEKRewrapProgress (self-locks
+	// f.mu, mirroring dekRefCounts); read by IsGenFullyRewrapped (f.mu.RLock).
+	// Not in the snapshot yet — snapshot persistence lands with the S7 prune
+	// consumer in a later slice.
 	dekRewrapDone map[uint32]map[string]struct{}
 
 	// pendingDEKVersions and pendingDEKActive hold the DEK snapshot state decoded

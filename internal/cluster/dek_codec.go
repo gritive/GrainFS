@@ -29,12 +29,12 @@ func decodeMetaDEKVersionPruneCmd(data []byte) (gen uint32, err error) {
 }
 
 // encodeMetaDEKVersionSnapshot serializes the DEK versions map + active gen +
-// per-generation ref counts + active KEK version into a MetaDEKVersionSnapshot
-// FlatBuffers buffer used as the DKVS trailer payload. Entries are emitted in
-// ascending gen order for byte-determinism across replicas. refCounts may be
-// nil (emits empty list). activeKEKVersion defaults to 0 in Phase A (no
-// rotation yet).
-func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
+// per-generation ref counts + active KEK version + rewrap done set into a
+// MetaDEKVersionSnapshot FlatBuffers buffer used as the DKVS trailer payload.
+// Entries are emitted in ascending gen order for byte-determinism across
+// replicas. refCounts may be nil (emits empty list). activeKEKVersion defaults
+// to 0 in Phase A (no rotation yet). rewrapDone may be nil (emits empty list).
+func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
 	// Sort gens for deterministic output.
@@ -83,24 +83,56 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, ref
 	}
 	refVec := b.EndVector(len(refOffs))
 
+	// Build DEKRewrapDoneEntry offsets (ascending gen order; node_ids sorted
+	// within each entry for byte-determinism — mirrors refGens sort above).
+	doneGens := make([]uint32, 0, len(rewrapDone))
+	for g := range rewrapDone {
+		if len(rewrapDone[g]) > 0 {
+			doneGens = append(doneGens, g)
+		}
+	}
+	sort.Slice(doneGens, func(i, j int) bool { return doneGens[i] < doneGens[j] })
+	doneOffs := make([]flatbuffers.UOffsetT, len(doneGens))
+	for i := len(doneGens) - 1; i >= 0; i-- {
+		g := doneGens[i]
+		nodeSet := rewrapDone[g]
+		nodeIDs := make([]string, 0, len(nodeSet))
+		for n := range nodeSet {
+			nodeIDs = append(nodeIDs, n)
+		}
+		sort.Strings(nodeIDs)
+		// Build string offsets for node_ids (must precede DEKRewrapDoneEntryStart).
+		nodeOffs := make([]flatbuffers.UOffsetT, len(nodeIDs))
+		for j, id := range nodeIDs {
+			nodeOffs[j] = b.CreateString(id)
+		}
+		clusterpb.DEKRewrapDoneEntryStartNodeIdsVector(b, len(nodeOffs))
+		for j := len(nodeOffs) - 1; j >= 0; j-- {
+			b.PrependUOffsetT(nodeOffs[j])
+		}
+		nodeVec := b.EndVector(len(nodeOffs))
+		clusterpb.DEKRewrapDoneEntryStart(b)
+		clusterpb.DEKRewrapDoneEntryAddGen(b, g)
+		clusterpb.DEKRewrapDoneEntryAddNodeIds(b, nodeVec)
+		doneOffs[i] = clusterpb.DEKRewrapDoneEntryEnd(b)
+	}
+	clusterpb.MetaDEKVersionSnapshotStartRewrapDoneVector(b, len(doneOffs))
+	for i := len(doneOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(doneOffs[i])
+	}
+	rewrapDoneVec := b.EndVector(len(doneOffs))
+
 	clusterpb.MetaDEKVersionSnapshotStart(b)
 	clusterpb.MetaDEKVersionSnapshotAddVersions(b, versionsVec)
 	clusterpb.MetaDEKVersionSnapshotAddActive(b, active)
 	clusterpb.MetaDEKVersionSnapshotAddRefCounts(b, refVec)
 	clusterpb.MetaDEKVersionSnapshotAddActiveKekVersion(b, activeKEKVersion)
+	clusterpb.MetaDEKVersionSnapshotAddRewrapDone(b, rewrapDoneVec)
 	return fbFinish(b, clusterpb.MetaDEKVersionSnapshotEnd(b)), nil
 }
 
 // encodeMetaDEKRewrapProgressCmd builds the inner payload for a per-node
 // rewrap-completion report: "nodeID finished rewrapping all its lanes for gen".
-//
-// No production caller in S6a by design: the rewrap controller deliberately
-// reports no completion until real lanes exist (a zero-lane "done" would let a
-// future Prune trust an un-migrated generation). This encoder is the wire-format
-// counterpart of decodeMetaDEKRewrapProgressCmd, exercised by the ledger unit
-// tests and reserved for the producer that lands in S6d.
-//
-//nolint:unused // wire-format encoder; producer lands in S6d (see DEK-rewrap spec §5)
 func encodeMetaDEKRewrapProgressCmd(nodeID string, gen uint32) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	nid := b.CreateString(nodeID)
@@ -123,15 +155,16 @@ func decodeMetaDEKRewrapProgressCmd(data []byte) (nodeID string, gen uint32, err
 
 // decodeMetaDEKVersionSnapshot parses a MetaDEKVersionSnapshot FlatBuffers buffer
 // and returns the versions map, active generation, per-generation ref counts,
-// and the active KEK version. refCounts is nil when the field was absent
-// (pre-Task-12 snapshot backward compat). activeKEKVersion is 0 when the field
-// was absent (pre-Phase-A snapshot backward compat).
-func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, err error) {
+// active KEK version, and per-generation rewrap done sets. refCounts is nil when
+// the field was absent (pre-Task-12 snapshot backward compat). activeKEKVersion
+// is 0 when the field was absent (pre-Phase-A snapshot backward compat).
+// rewrapDone is nil when the field was absent (pre-S6d snapshot backward compat).
+func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}, err error) {
 	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaDEKVersionSnapshot {
 		return clusterpb.GetRootAsMetaDEKVersionSnapshot(d, 0)
 	})
 	if err != nil {
-		return nil, 0, nil, 0, fmt.Errorf("dek_codec: MetaDEKVersionSnapshot: %w", err)
+		return nil, 0, nil, 0, nil, fmt.Errorf("dek_codec: MetaDEKVersionSnapshot: %w", err)
 	}
 
 	out := make(map[uint32][]byte, snap.VersionsLength())
@@ -161,5 +194,27 @@ func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, acti
 			}
 		}
 	}
-	return out, snap.Active(), refs, snap.ActiveKekVersion(), nil
+
+	var done map[uint32]map[string]struct{}
+	if n := snap.RewrapDoneLength(); n > 0 {
+		done = make(map[uint32]map[string]struct{}, n)
+		var doneEntry clusterpb.DEKRewrapDoneEntry
+		for i := 0; i < n; i++ {
+			if !snap.RewrapDone(&doneEntry, i) {
+				continue
+			}
+			g := doneEntry.Gen()
+			nodeSet := make(map[string]struct{}, doneEntry.NodeIdsLength())
+			for j := 0; j < doneEntry.NodeIdsLength(); j++ {
+				id := string(doneEntry.NodeIds(j))
+				if id != "" {
+					nodeSet[id] = struct{}{}
+				}
+			}
+			if len(nodeSet) > 0 {
+				done[g] = nodeSet
+			}
+		}
+	}
+	return out, snap.Active(), refs, snap.ActiveKekVersion(), done, nil
 }

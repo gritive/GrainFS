@@ -275,6 +275,21 @@ func TestProposeDEKBootstrap_RejectsNonZeroGen(t *testing.T) {
 	}
 }
 
+func TestProposeDEKRewrapProgress_RoundTrip(t *testing.T) {
+	// ProposeDEKRewrapProgress drives applyCmdAtIndex via fakeDEKNode.ProposeWait,
+	// so the FSM state lands immediately; IsGenFullyRewrapped must see it.
+	m, _ := newTestMetaRaftForDEK(t, newFakeDEKNode(true))
+	if err := m.ProposeDEKRewrapProgress(context.Background(), "node-X", 1); err != nil {
+		t.Fatalf("ProposeDEKRewrapProgress: %v", err)
+	}
+	if !m.fsm.IsGenFullyRewrapped(1, []string{"node-X"}) {
+		t.Fatal("after ProposeDEKRewrapProgress, IsGenFullyRewrapped must return true for node-X gen=1")
+	}
+	if m.fsm.IsGenFullyRewrapped(1, []string{"node-X", "node-Y"}) {
+		t.Fatal("IsGenFullyRewrapped must return false when a required node has not yet reported")
+	}
+}
+
 // newTestKEKStore seeds a single-gen KEKStore for cluster tests. (Preserved
 // from the deleted offline_join_test.go, which owned this shared helper.)
 func newTestKEKStore(t *testing.T, kek []byte) *encrypt.KEKStore {

@@ -191,11 +191,11 @@ func (f *MetaFSM) appendConfigSnapshotTrailer(out []byte) ([]byte, error) {
 // appendDEKSnapshotTrailer serialises the DKVS trailer using caller-supplied
 // pre-captured values from the locked snapshot window. It does NOT call back
 // into DEKKeeper — callers must pass values captured while holding f.mu (Task 4b).
-func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
+func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}) ([]byte, error) {
 	if len(dekVersions) == 0 {
 		return out, nil
 	}
-	dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive, refCounts, activeKEKVersion)
+	dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive, refCounts, activeKEKVersion, rewrapDone)
 	if err != nil {
 		return nil, fmt.Errorf("meta_fsm: Snapshot: encode DEK versions: %w", err)
 	}
@@ -264,9 +264,10 @@ func (f *MetaFSM) appendJWTKeySnapshotTrailer(out []byte) []byte {
 }
 
 // appendSnapshotTrailers serialises all snapshot trailers. dekVersions,
-// dekActive, refCounts, and activeKEKVersion must be pre-captured inside the
-// f.mu+keeper.mu locked window in Snapshot() (Task 4b atomicity guarantee).
-func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32) ([]byte, error) {
+// dekActive, refCounts, activeKEKVersion, and rewrapDone must be pre-captured
+// inside the f.mu+keeper.mu locked window in Snapshot() (Task 4b atomicity
+// guarantee). rewrapDone is captured in the same window as dekRefCounts.
+func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}) ([]byte, error) {
 	out := append([]byte(nil), base...)
 	var err error
 	out, err = f.appendIAMSnapshotTrailer(out)
@@ -277,7 +278,7 @@ func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]b
 	if err != nil {
 		return nil, err
 	}
-	out, err = f.appendDEKSnapshotTrailer(out, dekVersions, dekActive, refCounts, activeKEKVersion)
+	out, err = f.appendDEKSnapshotTrailer(out, dekVersions, dekActive, refCounts, activeKEKVersion, rewrapDone)
 	if err != nil {
 		return nil, err
 	}

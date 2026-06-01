@@ -28,6 +28,10 @@ func (p *fakeDEKProposer) ProposeDEKVersionPrune(_ context.Context, gen uint32) 
 	return nil
 }
 
+func (p *fakeDEKProposer) ProposeDEKRewrapProgress(_ context.Context, _ string, _ uint32) error {
+	return nil
+}
+
 // waitFor polls cond until it returns true or the deadline is exceeded.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()

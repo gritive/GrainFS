@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	"github.com/rs/zerolog/log"
@@ -53,16 +54,34 @@ func NewECRewrapLane(nodeID string, groups func() []ECRewrapShardBackend) *ECRew
 // Name identifies the lane in rewrap orchestration.
 func (l *ECRewrapLane) Name() string { return "ec" }
 
-// RewrapByGen sweeps owned EC shards onto activeGen. oldGen is intentionally
-// ignored (sweep semantics: migrate any shard whose gen != activeGen).
-func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint32) error {
+// RewrapByGen sweeps owned EC shards onto activeGen. oldGen labels the error
+// message but is not used for sweep logic (migrate any shard whose gen != activeGen).
+// Forward progress is preserved: errors on individual shards or groups do not
+// abort the sweep. However, if any shard or group was skipped due to an error,
+// a non-nil aggregate error is returned so the caller can distinguish true
+// completion from a partial sweep.
+func (l *ECRewrapLane) RewrapByGen(ctx context.Context, oldGen uint32, activeGen uint32) error {
+	var skipped int
+	var firstErr error
+
+	note := func(err error) {
+		skipped++
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
 	for _, gb := range l.groups() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		targets, err := gb.CollectECRewrapTargets()
 		if err != nil {
 			// Log + continue: one group's enumeration error must not starve the
 			// remaining groups of this sweep. Idempotent — retried next rotation.
 			log.Warn().Err(err).Uint32("active_gen", activeGen).
 				Msg("ec rewrap: collect targets failed; skipping group")
+			note(err)
 			continue
 		}
 		for _, t := range targets {
@@ -81,6 +100,7 @@ func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint
 					log.Warn().Err(err).Str("bucket", t.Bucket).Str("shardKey", t.ShardKey).
 						Int("shard", idx).Uint32("active_gen", activeGen).
 						Msg("ec rewrap: shard migration failed; skipping")
+					note(err)
 					continue
 				}
 				if did {
@@ -88,6 +108,9 @@ func (l *ECRewrapLane) RewrapByGen(ctx context.Context, _ uint32, activeGen uint
 				}
 			}
 		}
+	}
+	if skipped > 0 {
+		return fmt.Errorf("ec rewrap gen %d→%d: %d skipped: %w", oldGen, activeGen, skipped, firstErr)
 	}
 	return nil
 }

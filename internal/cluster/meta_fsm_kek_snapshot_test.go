@@ -196,7 +196,7 @@ func verifySnapshotAtomicForTest(t *testing.T, fsm *MetaFSM, snapBytes []byte, k
 		// No DEK data → nothing to verify (pre-DEK snapshot).
 		return nil
 	}
-	dekVersions, _, _, activeKEKVersion, err := decodeMetaDEKVersionSnapshot(trailers.dekData)
+	dekVersions, _, _, activeKEKVersion, _, err := decodeMetaDEKVersionSnapshot(trailers.dekData)
 	if err != nil {
 		return fmt.Errorf("decode DKVS: %w", err)
 	}

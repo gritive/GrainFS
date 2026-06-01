@@ -251,6 +251,7 @@ func TestECRewrap_ConfigUpgradeLockSerializesWrite(t *testing.T) {
 // calls.
 type fakeECRewrapBackend struct {
 	targets    []ECRewrapTarget // shards to return from CollectECRewrapTargets
+	collectErr error
 	rewrapErr  error
 	mu         sync.Mutex
 	atCalls    []rewrapAtCall
@@ -264,7 +265,7 @@ type rewrapAtCall struct {
 }
 
 func (f *fakeECRewrapBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) {
-	return f.targets, nil
+	return f.targets, f.collectErr
 }
 
 func (f *fakeECRewrapBackend) RewrapShardIfStaleAt(bucket, canonicalKey string, shardIdx int, activeGen uint32) (bool, error) {
@@ -331,7 +332,8 @@ func TestECRewrapLane_SweepsAllGroups(t *testing.T) {
 }
 
 // TestECRewrapLane_ContinuesOnShardError proves a per-shard error does NOT abort
-// the sweep. Every owned shard is still attempted and the sweep returns nil.
+// the sweep (forward progress preserved), but the sweep returns an aggregate
+// error so the caller knows some shards were skipped.
 func TestECRewrapLane_ContinuesOnShardError(t *testing.T) {
 	fake := &fakeECRewrapBackend{
 		targets: []ECRewrapTarget{
@@ -340,8 +342,35 @@ func TestECRewrapLane_ContinuesOnShardError(t *testing.T) {
 		rewrapErr: assert.AnError,
 	}
 	lane := laneFromGroups("n1", fake)
-	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 5), "per-shard error must not abort the sweep")
-	require.Len(t, fake.atCalls, 3, "every owned shard attempted despite errors")
+	err := lane.RewrapByGen(context.Background(), 0, 5)
+	require.Error(t, err, "per-shard errors must produce an aggregate error")
+	require.Contains(t, err.Error(), "skipped", "error message must mention skipped shards")
+	require.Len(t, fake.atCalls, 3, "every owned shard attempted despite errors (forward progress)")
+}
+
+// TestECRewrapLane_ReturnsErrorWhenGroupEnumerationFails proves that a
+// CollectECRewrapTargets error causes RewrapByGen to return a non-nil error.
+func TestECRewrapLane_ReturnsErrorWhenGroupEnumerationFails(t *testing.T) {
+	fake := &fakeECRewrapBackend{
+		collectErr: assert.AnError,
+	}
+	lane := laneFromGroups("n1", fake)
+	err := lane.RewrapByGen(context.Background(), 0, 5)
+	require.Error(t, err, "group enumeration error must produce an aggregate error")
+	require.Contains(t, err.Error(), "skipped", "error message must mention skipped groups")
+}
+
+// TestECRewrapLane_NilWhenAllRewrapped proves the sweep returns nil when all
+// owned shards rewrap successfully.
+func TestECRewrapLane_NilWhenAllRewrapped(t *testing.T) {
+	fake := &fakeECRewrapBackend{
+		targets: []ECRewrapTarget{
+			{Bucket: "b", ShardKey: "k1/v1", NodeIDs: []string{"n1", "other"}},
+		},
+	}
+	lane := laneFromGroups("n1", fake)
+	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 5), "successful rewrap must return nil")
+	require.Len(t, fake.atCalls, 1, "one owned shard visited")
 }
 
 func TestECRewrapLane_CtxCancelStops(t *testing.T) {

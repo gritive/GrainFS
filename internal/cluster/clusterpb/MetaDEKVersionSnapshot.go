@@ -105,8 +105,28 @@ func (rcv *MetaDEKVersionSnapshot) MutateActiveKekVersion(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(10, n)
 }
 
+func (rcv *MetaDEKVersionSnapshot) RewrapDone(obj *DEKRewrapDoneEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaDEKVersionSnapshot) RewrapDoneLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaDEKVersionSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func MetaDEKVersionSnapshotAddVersions(builder *flatbuffers.Builder, versions flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(versions), 0)
@@ -125,6 +145,12 @@ func MetaDEKVersionSnapshotStartRefCountsVector(builder *flatbuffers.Builder, nu
 }
 func MetaDEKVersionSnapshotAddActiveKekVersion(builder *flatbuffers.Builder, activeKekVersion uint32) {
 	builder.PrependUint32Slot(3, activeKekVersion, 0)
+}
+func MetaDEKVersionSnapshotAddRewrapDone(builder *flatbuffers.Builder, rewrapDone flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(rewrapDone), 0)
+}
+func MetaDEKVersionSnapshotStartRewrapDoneVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func MetaDEKVersionSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
