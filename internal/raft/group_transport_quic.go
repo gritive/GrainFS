@@ -41,7 +41,7 @@ type RaftV2Handler interface {
 // handleMuxRequest, dispatchToLocalGroup) are agnostic to which raft engine
 // owns the group. Senders are unaffected — the wire format is byte-identical.
 type GroupRaftQUICMux struct {
-	tr    *transport.QUICTransport
+	tr    muxDriverTransport
 	nodes sync.Map // string(groupID) → RaftV2Handler
 
 	// metaNode is the meta-raft node registered for the magic groupID
@@ -62,7 +62,7 @@ type GroupRaftQUICMux struct {
 
 // NewGroupRaftQUICMux creates a mux and registers its incoming RPC handler on
 // the QUIC transport. The mux must outlive all registered nodes.
-func NewGroupRaftQUICMux(tr *transport.QUICTransport) *GroupRaftQUICMux {
+func NewGroupRaftQUICMux(tr muxDriverTransport) *GroupRaftQUICMux {
 	m := &GroupRaftQUICMux{tr: tr, muxPeers: make(map[string]*muxPeerState)}
 	tr.Handle(transport.StreamGroupRaft, m.handleRPC)
 	return m

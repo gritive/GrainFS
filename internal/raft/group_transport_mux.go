@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gritive/GrainFS/internal/transport"
 	quic "github.com/quic-go/quic-go"
 )
 
@@ -232,7 +231,7 @@ func (m *GroupRaftQUICMux) handleInboundMuxConn(ctx context.Context, conn *quic.
 // muxPeerState is the per-peer outbound mux state.
 type muxPeerState struct {
 	addr      string
-	transport *transport.QUICTransport
+	transport muxDriverTransport
 	conn      *quic.Conn
 	rc        *RaftConn
 	hc        *HeartbeatCoalescer
