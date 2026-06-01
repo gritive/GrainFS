@@ -389,12 +389,12 @@ type MetaFSM struct {
 	// in the DKVS snapshot trailer alongside DEK versions (Task 12).
 	dekRefCounts map[uint32]uint64
 
-	// dekRewrapDone tracks per-generation rewrap completion: gen → set of
-	// node_ids that finished. Populated by applyDEKRewrapProgress (self-locks
-	// f.mu, mirroring dekRefCounts); read by IsGenFullyRewrapped (f.mu.RLock).
-	// Not in the snapshot yet — snapshot persistence lands with the S7 prune
-	// consumer in a later slice.
-	dekRewrapDone map[uint32]map[string]struct{}
+	// dekRewrapDone tracks per-generation rewrap completion: gen → (nodeID →
+	// epoch). The epoch is the lane-set version the node swept; 0 = EC shards +
+	// packblob. max-monotonic on apply: a stale re-report cannot lower the epoch.
+	// Populated by applyDEKRewrapProgress (self-locks f.mu, mirroring
+	// dekRefCounts); read by IsGenFullyRewrapped (f.mu.RLock).
+	dekRewrapDone map[uint32]map[string]uint32
 
 	// pendingDEKVersions and pendingDEKActive hold the DEK snapshot state decoded
 	// during Restore. The runtime uses PendingDEKVersions() after Restore to wire

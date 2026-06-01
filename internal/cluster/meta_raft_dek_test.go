@@ -279,13 +279,13 @@ func TestProposeDEKRewrapProgress_RoundTrip(t *testing.T) {
 	// ProposeDEKRewrapProgress drives applyCmdAtIndex via fakeDEKNode.ProposeWait,
 	// so the FSM state lands immediately; IsGenFullyRewrapped must see it.
 	m, _ := newTestMetaRaftForDEK(t, newFakeDEKNode(true))
-	if err := m.ProposeDEKRewrapProgress(context.Background(), "node-X", 1); err != nil {
+	if err := m.ProposeDEKRewrapProgress(context.Background(), "node-X", 1, 0); err != nil {
 		t.Fatalf("ProposeDEKRewrapProgress: %v", err)
 	}
-	if !m.fsm.IsGenFullyRewrapped(1, []string{"node-X"}) {
+	if !m.fsm.IsGenFullyRewrapped(1, []string{"node-X"}, 0) {
 		t.Fatal("after ProposeDEKRewrapProgress, IsGenFullyRewrapped must return true for node-X gen=1")
 	}
-	if m.fsm.IsGenFullyRewrapped(1, []string{"node-X", "node-Y"}) {
+	if m.fsm.IsGenFullyRewrapped(1, []string{"node-X", "node-Y"}, 0) {
 		t.Fatal("IsGenFullyRewrapped must return false when a required node has not yet reported")
 	}
 }

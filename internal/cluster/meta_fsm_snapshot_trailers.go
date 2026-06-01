@@ -191,7 +191,7 @@ func (f *MetaFSM) appendConfigSnapshotTrailer(out []byte) ([]byte, error) {
 // appendDEKSnapshotTrailer serialises the DKVS trailer using caller-supplied
 // pre-captured values from the locked snapshot window. It does NOT call back
 // into DEKKeeper — callers must pass values captured while holding f.mu (Task 4b).
-func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}) ([]byte, error) {
+func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]uint32) ([]byte, error) {
 	if len(dekVersions) == 0 {
 		return out, nil
 	}
@@ -267,7 +267,7 @@ func (f *MetaFSM) appendJWTKeySnapshotTrailer(out []byte) []byte {
 // dekActive, refCounts, activeKEKVersion, and rewrapDone must be pre-captured
 // inside the f.mu+keeper.mu locked window in Snapshot() (Task 4b atomicity
 // guarantee). rewrapDone is captured in the same window as dekRefCounts.
-func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}) ([]byte, error) {
+func (f *MetaFSM) appendSnapshotTrailers(base []byte, dekVersions map[uint32][]byte, dekActive uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]uint32) ([]byte, error) {
 	out := append([]byte(nil), base...)
 	var err error
 	out, err = f.appendIAMSnapshotTrailer(out)

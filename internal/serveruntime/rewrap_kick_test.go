@@ -68,7 +68,7 @@ func TestScrubberKick_ReportsFullSweptSetOnlyOnCleanReadyKick(t *testing.T) {
 
 		var mu sync.Mutex
 		var reported []uint32
-		report := func(_ context.Context, _ string, gen uint32) error {
+		report := func(_ context.Context, _ string, gen, _ uint32) error {
 			mu.Lock()
 			reported = append(reported, gen)
 			mu.Unlock()
@@ -87,7 +87,7 @@ func TestScrubberKick_ReportsFullSweptSetOnlyOnCleanReadyKick(t *testing.T) {
 		// intentionally no ctrl.MarkReady()
 
 		called := false
-		report := func(_ context.Context, _ string, _ uint32) error {
+		report := func(_ context.Context, _ string, _, _ uint32) error {
 			called = true
 			return nil
 		}
@@ -104,7 +104,7 @@ func TestScrubberKick_ReportsFullSweptSetOnlyOnCleanReadyKick(t *testing.T) {
 		ctrl.MarkReady()
 
 		called := false
-		report := func(_ context.Context, _ string, _ uint32) error {
+		report := func(_ context.Context, _ string, _, _ uint32) error {
 			called = true
 			return nil
 		}

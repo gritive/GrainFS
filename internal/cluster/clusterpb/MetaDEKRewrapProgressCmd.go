@@ -61,14 +61,29 @@ func (rcv *MetaDEKRewrapProgressCmd) MutateGen(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(6, n)
 }
 
+func (rcv *MetaDEKRewrapProgressCmd) Epoch() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaDEKRewrapProgressCmd) MutateEpoch(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(8, n)
+}
+
 func MetaDEKRewrapProgressCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func MetaDEKRewrapProgressCmdAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
 }
 func MetaDEKRewrapProgressCmdAddGen(builder *flatbuffers.Builder, gen uint32) {
 	builder.PrependUint32Slot(1, gen, 0)
+}
+func MetaDEKRewrapProgressCmdAddEpoch(builder *flatbuffers.Builder, epoch uint32) {
+	builder.PrependUint32Slot(2, epoch, 0)
 }
 func MetaDEKRewrapProgressCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -579,9 +579,12 @@ table MetaDEKVersionPruneCmd {
 }
 
 // S6a: one node reporting it finished rewrapping all its lanes for a generation.
+// epoch (S7-1) records the lane-set version the node swept. epoch 0 = EC shards + packblob.
+// Old wire (pre-S7-1) decodes epoch as 0 (FlatBuffers default).
 table MetaDEKRewrapProgressCmd {
   node_id:string;   // node that finished rewrapping all its lanes for gen
   gen:uint32;       // the OLD generation this node finished migrating off
+  epoch:uint32;     // lane-set version; 0 = EC shards + packblob (S7-1)
 }
 
 // MetaDEKReplicatedRotateCmd is the FSM command payload for DEK replication (Phase D).
@@ -613,9 +616,12 @@ table DEKRefEntry {
 // DEKRewrapDoneEntry records which nodes finished rewrapping all their lanes
 // for a given DEK generation. One entry per generation in rewrap_done.
 // Appended in ascending gen order; node_ids sorted for byte-determinism.
+// node_epochs (S7-1) is PARALLEL to node_ids: node_epochs[i] is the epoch
+// for node_ids[i]. Absent (old wire) → all nodes decode as epoch 0.
 table DEKRewrapDoneEntry {
   gen:uint32;
   node_ids:[string];
+  node_epochs:[uint32];  // parallel to node_ids; absent → epoch 0 per node
 }
 
 // MetaDEKVersionSnapshot is the DKVS trailer payload: all wrapped DEK versions
