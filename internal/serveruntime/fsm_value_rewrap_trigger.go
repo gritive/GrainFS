@@ -22,9 +22,11 @@ import (
 // duplicate drain goroutines when two rotations land close together. The
 // sync.Map is allocated once at wire time and persists across rotations.
 //
-// Plan-gate fix #2 (pin activeGen): activeGen is passed as cmd.Gen from
-// handleDEKReplicatedRotate — it is NOT re-read from the keeper. This pins
-// the drain to the generation that triggered the rotation.
+// The rotation's activeGen (cmd.Gen) arrives as the trigger argument but is
+// intentionally NOT forwarded to the drain: DrainFSMValueRewrap reads
+// keeper-current at the top of each iteration so it converges toward whatever
+// the keeper's active gen currently is. Forwarding a fixed gen here is what
+// caused the back-to-back-rotation livelock; the argument is now ignored.
 //
 // Epoch-neutral: this trigger does NOT call ProposeDEKRewrapProgress or
 // advance CurrentRewrapLaneSetEpoch. That is S7-1a-2.
@@ -50,7 +52,8 @@ func newFSMValueRewrapTriggerLazy(state *bootState) func(ctx context.Context, ac
 			}
 			go func(gb *cluster.GroupBackend, groupID string) {
 				defer inProgress.Delete(groupID)
-				if err := cluster.DrainFSMValueRewrap(ctx, gb, activeGen, 0); err != nil {
+				// activeGen NOT forwarded: the drain tracks keeper-current.
+				if err := cluster.DrainFSMValueRewrap(ctx, gb, 0); err != nil {
 					log.Warn().Err(err).Str("group", groupID).Uint32("active_gen", activeGen).
 						Msg("fsm-value rewrap drain incomplete; will retry on next rotation")
 				}

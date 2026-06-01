@@ -28,67 +28,6 @@ func newFSMWithDEKAtGen(t *testing.T, activeGen uint32) (*FSM, *encrypt.DEKKeepe
 	return fsm, keeper
 }
 
-// seedFSMValueAtGen directly writes a V2-framed value sealed at the given gen
-// into the FSM DB. It temporarily installs a thin override that seals with an
-// old DEK by rewinding: since the keeper holds all gens, we seal at activeGen
-// then patch the frame's gen field to target.
-//
-// Design: we can't "seal at an old gen" directly because DataEncryptor.Seal
-// always uses the active gen. Instead:
-//  1. Seal using the FSM's current seam (seals at keeper's active gen = frame header gen).
-//  2. If targetGen != activeGen, patch the frame header gen field so the
-//     value appears to be from targetGen on disk — then store the CIPHERTEXT
-//     portion re-wrapped for targetGen's AEAD.
-//
-// Simpler approach: build a raw frame at targetGen by calling
-// encodeFSMValueFrameV2(targetGen, ct) where ct is the ciphertext from sealing
-// under targetGen directly via the keeper's Seal primitive.
-func seedFSMValueAtGen(t *testing.T, f *FSM, key []byte, plain []byte, targetGen uint32) {
-	t.Helper()
-	de := f.dataEncryptor()
-	require.NotNil(t, de, "DEK not wired on FSM")
-
-	// Seal under targetGen directly — the DataEncryptor.Seal method seals at
-	// the active gen; we build the frame manually by calling keeper.Seal with
-	// the domain so the AAD/gen match what openValue expects.
-	//
-	// Use the FSM's sealValue to produce a correctly-AAD-bound ciphertext at
-	// the ACTIVE gen (regardless of targetGen), then patch the frame to report
-	// targetGen. The open path (openValue → de.Open) uses the gen embedded in
-	// the frame to pick the AEAD key. Since the keeper holds all previous gens
-	// and they are random per rotation, we cannot produce valid ct for an old
-	// gen via the active seam.
-	//
-	// Correct approach: build the ciphertext at targetGen directly via the
-	// keeper's internal AEAD for that gen. The keeper exposes Rewrap but not
-	// raw Seal-at-gen. Use a two-step: create a separate ephemeral encryptor
-	// that was active at targetGen by sealing plaintext at gen=active, then
-	// rewrap it to appear as gen=targetGen — but that doesn't work either since
-	// Rewrap only moves ciphertext from an old gen onto the active gen, not the
-	// reverse.
-	//
-	// Real solution: seal when the keeper IS at targetGen. Call this helper
-	// BEFORE rotating to the final active gen, passing a keeper pinned to
-	// targetGen. The test helper newFSMWithDEKAtGen creates a keeper at
-	// activeGen. To seed at an older gen we need a keeper at that gen.
-	//
-	// Practical test pattern:
-	//   keeper starts at gen 0
-	//   sealAtGen0 (gen 0 sealed)
-	//   keeper.Rotate() → gen 1 active
-	//   sealAtGen1 (gen 1 sealed)
-	//   keeper.Rotate() → gen 2 active  ← activeGen for the test
-	//
-	// This helper receives a keeper whose active == targetGen and writes a
-	// frame at targetGen, using sealValue (which seals at active == targetGen).
-	raw, err := f.sealValue(key, plain)
-	require.NoError(t, err)
-
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, raw)
-	}))
-}
-
 // frameGenOf reads the frame gen from the raw DB value for key.
 func frameGenOf(t *testing.T, f *FSM, key []byte) uint32 {
 	t.Helper()

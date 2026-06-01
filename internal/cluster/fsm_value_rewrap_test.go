@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
@@ -128,7 +130,7 @@ func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
 	require.NoError(t, keeper.Rotate())
 
 	// Drain with maxBatch=3 (will take ceil(7/3) = 3 iterations).
-	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 1, 3))
+	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 3))
 
 	// All policy keys should now be at gen 1.
 	left, err := gb.CollectStaleFSMValueKeys(1, 100, 10<<20)
@@ -151,6 +153,93 @@ func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 	require.NoError(t, err)
 	dbSet(t, gb.db, key, raw)
 
-	// Drain with activeGen=1 — nothing to do, no error.
-	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 1, 100))
+	// Drain when keeper-current == 1 and value already at 1 — nothing to do.
+	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 100))
+}
+
+// TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges is the
+// regression test for the back-to-back-rotation livelock. The OLD code pinned
+// the drain to a fixed activeGen captured at trigger time: if a 2nd rotation
+// advanced the keeper WHILE the drain was iterating, the scan kept collecting
+// keys (gen != pinnedGen) that apply kept resealing onto keeper-current (a
+// DIFFERENT gen than pinnedGen), so every subsequent scan re-collected the same
+// keys → an infinite loop committing real raft entries, and the single-flight
+// guard (held by the never-returning drain goroutine) leaked forever, so that
+// group was skipped on all future rotations.
+//
+// To reproduce the LIVELOCK (not just a pre-drain rotation), this test uses the
+// fsmValueRewrapAfterProposeHook to advance the keeper's active gen between the
+// first and second drain iterations — exactly the "rotation lands mid-drain"
+// shape. With a fixed-gen drain, the per-iteration target never matches the
+// keeper-current reseal target after the rotation, so it never converges. With
+// the fix (drain reads keeper-current each iteration), the rotation just shifts
+// the target and the drain converges.
+//
+// Asserts: (a) the drain TERMINATES — bounded by a hard timeout so a regression
+// hangs the test rather than looping forever; (b) the store ends all-at-current
+// (the new gen, not the seed gen); (c) a SECOND drain on the same group runs
+// cleanly (the drain always returns → the single-flight guard's defer releases,
+// so the group is never permanently skipped).
+func TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	ks := gb.ks()
+	keeper := gb.shardSvc.dekKeeper
+
+	// Seed 6 stale policy: keys at gen 0, then rotate to gen 1 (initial active).
+	const n = 6
+	for i := 0; i < n; i++ {
+		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
+		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
+		require.NoError(t, err)
+		dbSet(t, gb.db, key, raw)
+	}
+	require.NoError(t, keeper.Rotate()) // gen 1 active; values at gen 0 → stale
+
+	// Mid-drain rotation: after the FIRST batch is proposed, advance the keeper
+	// to gen 2. This is the back-to-back-rotation race. Fire exactly once so the
+	// keeper settles and the drain can converge to gen 2.
+	var hookOnce sync.Once
+	fsmValueRewrapAfterProposeHook = func() {
+		hookOnce.Do(func() {
+			require.NoError(t, keeper.Rotate()) // gen 2, mid-drain
+		})
+	}
+	t.Cleanup(func() { fsmValueRewrapAfterProposeHook = nil })
+
+	// (a) Termination — bounded by a hard timeout. A regression livelocks here.
+	// maxBatch=2 forces multiple iterations so the hook fires before the drain
+	// would otherwise finish.
+	done := make(chan error, 1)
+	go func() {
+		done <- DrainFSMValueRewrap(context.Background(), gb, 2)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "drain must terminate without error")
+	case <-time.After(15 * time.Second):
+		t.Fatal("DrainFSMValueRewrap did not terminate — back-to-back-rotation livelock regression")
+	}
+
+	// (b) Store converged to keeper-current (gen 2): no key is stale against gen 2.
+	_, active := keeper.VersionsAndActive()
+	require.Equal(t, uint32(2), active, "keeper advanced to gen 2 mid-drain")
+	left, err := gb.CollectStaleFSMValueKeys(2, 100, 10<<20)
+	require.NoError(t, err)
+	require.Empty(t, left, "all values must be resealed onto keeper-current gen 2")
+	for i := 0; i < n; i++ {
+		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
+		require.Equal(t, uint32(2), gbFrameGenOf(t, gb, key), "value must end at keeper-current gen 2")
+	}
+
+	// (c) A second drain on the same group runs cleanly and terminates (no
+	// mid-drain rotation this time — hookOnce is spent). Proves the drain
+	// always returns so the single-flight guard releases.
+	done2 := make(chan error, 1)
+	go func() { done2 <- DrainFSMValueRewrap(context.Background(), gb, 2) }()
+	select {
+	case err := <-done2:
+		require.NoError(t, err, "second drain must run cleanly")
+	case <-time.After(15 * time.Second):
+		t.Fatal("second DrainFSMValueRewrap did not terminate")
+	}
 }

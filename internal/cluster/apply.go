@@ -180,8 +180,21 @@ func (f *FSM) applyPutObjectQuarantine(txn *badger.Txn, data []byte) error {
 
 // applyResealFSMValues handles CmdResealFSMValues in the serialized apply loop.
 // For each key in the command, it reads the CURRENT value from the badger txn
-// and reseals it at cmd.ActiveGen. Keys already at activeGen are skipped
-// (idempotent). Keys not found (deleted since the leader scanned) are skipped.
+// and reseals it at the KEEPER-CURRENT active gen (via setValue). The skip
+// decision compares the value's frame gen to the keeper-current gen — NOT to
+// cmd.ActiveGen, which is only a hint (used for the metric label). Tracking
+// keeper-current is what prevents a back-to-back-rotation livelock: if a 2nd
+// rotation lands mid-drain, this node reseals onto the new current gen and the
+// drain's next scan sees the values as already-current.
+//
+// We deliberately do NOT SealAtGen(cmd.ActiveGen): a follower may have applied
+// this data-group command before installing cmd.ActiveGen via meta-raft, so
+// SealAtGen would fail closed (ErrDEKGenUnknown). setValue seals at the gen the
+// keeper actually holds, which is always resident. Cross-node gen-determinism
+// is not required: FSM-value seals are already per-node non-deterministic
+// (random nonce), any node can open any node's value while the gen is resident,
+// and S7-0 blocks prune so a value never sits at a pruned gen.
+//
 // The reseal is race-free because it runs in the single-threaded apply loop:
 // a concurrent SetBucketPolicy is Raft-ordered before or after, never clobbered.
 func (f *FSM) applyResealFSMValues(txn *badger.Txn, data []byte) error {
@@ -191,6 +204,10 @@ func (f *FSM) applyResealFSMValues(txn *badger.Txn, data []byte) error {
 	}
 	de := f.dataEncryptor()
 	if de == nil {
+		return nil // encryption disabled — nothing sealed
+	}
+	current, ok := f.activeDEKGen()
+	if !ok {
 		return nil // encryption disabled — nothing sealed
 	}
 	for _, k := range c.Keys {
@@ -206,20 +223,27 @@ func (f *FSM) applyResealFSMValues(txn *badger.Txn, data []byte) error {
 		if err != nil {
 			return err
 		}
-		gen, ct, ok, derr := decodeFSMValueFrameV2(raw)
+		gen, ct, frameOK, derr := decodeFSMValueFrameV2(raw)
 		if derr != nil {
+			// Deliberate fail-closed-and-break: any non-NotFound error (decode,
+			// Open, seal) returns, failing the apply → ProposeResealFSMValues
+			// errors → DrainFSMValueRewrap returns and the single-flight guard
+			// releases via its defer. We do NOT skip-and-continue: that would
+			// re-livelock the drain on a persistently-stale key.
 			return derr
 		}
-		if !ok || gen == c.ActiveGen {
-			continue // plaintext or already active — idempotent skip
+		if !frameOK || gen == current {
+			continue // plaintext or already keeper-current — idempotent skip
 		}
 		plain, err := de.Open(encrypt.DomainFSMValue, []encrypt.AADField{encrypt.FieldBytes(key)}, gen, ct)
 		if err != nil {
-			return err
+			return err // fail-closed-and-break (see above)
 		}
-		if err := f.setValue(txn, key, plain); err != nil { // reseals at the live active gen
-			return err
+		if err := f.setValue(txn, key, plain); err != nil { // reseals at keeper-current gen
+			return err // fail-closed-and-break (see above)
 		}
+		// Metric label uses cmd.ActiveGen as a hint of the rotation that drove
+		// this batch; the actual reseal target is keeper-current.
 		RewrapFSMValuesTotal.WithLabelValues(strconv.FormatUint(uint64(c.ActiveGen), 10)).Inc()
 	}
 	return nil
