@@ -90,6 +90,13 @@ func TestDEKRewrapProgress_EpochAwareQuery(t *testing.T) {
 	require.True(t, f.IsGenFullyRewrapped(3, []string{"node-2"}, 1))
 }
 
+// TestCurrentRewrapLaneSetEpoch verifies that the constant exists and is 0
+// (behavior-neutral: epoch 0 covers EC shards + packblob).
+func TestCurrentRewrapLaneSetEpoch(t *testing.T) {
+	require.Equal(t, uint32(0), CurrentRewrapLaneSetEpoch,
+		"CurrentRewrapLaneSetEpoch must be 0 until a new lane registers")
+}
+
 func TestDEKRewrapDone_ConcurrentApplyAndRead(t *testing.T) {
 	f, _ := newTestMetaFSMWithKEKAndDEK(t)
 	done := make(chan struct{})

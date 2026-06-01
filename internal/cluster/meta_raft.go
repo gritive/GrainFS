@@ -649,13 +649,14 @@ func (m *MetaRaft) ProposeDEKVersionPrune(ctx context.Context, gen uint32) error
 	return m.Propose(ctx, MetaCmdTypeDEKVersionPrune, payload)
 }
 
-// ProposeDEKRewrapProgress records that nodeID holds no at-rest data below gen.
-// Each data-holder node proposes its OWN completion (distinct node_id), so this
-// is NOT leader-gated; followers forward to the leader. Blocks until applied.
+// ProposeDEKRewrapProgress records that nodeID holds no at-rest data below gen
+// within the lane set identified by epoch. Each data-holder node proposes its
+// OWN completion (distinct node_id), so this is NOT leader-gated; followers
+// forward to the leader. Blocks until applied.
 // NOTE: a record is necessary but NOT sufficient for S7 prune — see
 // IsGenFullyRewrapped for the full set of conditions a prune must AND together.
-func (m *MetaRaft) ProposeDEKRewrapProgress(ctx context.Context, nodeID string, gen uint32) error {
-	payload, err := encodeMetaDEKRewrapProgressCmd(nodeID, gen, 0)
+func (m *MetaRaft) ProposeDEKRewrapProgress(ctx context.Context, nodeID string, gen, epoch uint32) error {
+	payload, err := encodeMetaDEKRewrapProgressCmd(nodeID, gen, epoch)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode DEKRewrapProgress: %w", err)
 	}

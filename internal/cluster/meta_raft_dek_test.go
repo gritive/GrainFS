@@ -279,7 +279,7 @@ func TestProposeDEKRewrapProgress_RoundTrip(t *testing.T) {
 	// ProposeDEKRewrapProgress drives applyCmdAtIndex via fakeDEKNode.ProposeWait,
 	// so the FSM state lands immediately; IsGenFullyRewrapped must see it.
 	m, _ := newTestMetaRaftForDEK(t, newFakeDEKNode(true))
-	if err := m.ProposeDEKRewrapProgress(context.Background(), "node-X", 1); err != nil {
+	if err := m.ProposeDEKRewrapProgress(context.Background(), "node-X", 1, 0); err != nil {
 		t.Fatalf("ProposeDEKRewrapProgress: %v", err)
 	}
 	if !m.fsm.IsGenFullyRewrapped(1, []string{"node-X"}, 0) {

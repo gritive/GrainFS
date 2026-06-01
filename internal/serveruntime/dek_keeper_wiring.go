@@ -218,7 +218,7 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	// Wire the completion reporter: each data-holder node self-proposes its own
 	// completion (ProposeDEKRewrapProgress) after a clean Kick. nil metaRaft is
 	// treated as nil report (fail-safe for unit tests that boot without a raft).
-	var reportFn func(ctx context.Context, nodeID string, gen uint32) error
+	var reportFn func(ctx context.Context, nodeID string, gen, epoch uint32) error
 	if state.metaRaft != nil {
 		reportFn = state.metaRaft.ProposeDEKRewrapProgress
 	}
