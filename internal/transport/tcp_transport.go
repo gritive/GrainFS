@@ -220,6 +220,11 @@ func (t *TCPTransport) serveOne(conn net.Conn, from string, req *Message) bool {
 			if _, err := io.Copy(io.Discard, cbr); err != nil {
 				return false // could not reach terminator → conn dirty
 			}
+			if !cbr.done {
+				// io.Copy can return nil on a mid-chunk underlying EOF (the reader
+				// surfaces raw io.EOF), which is NOT the terminator → conn is dirty.
+				return false
+			}
 		}
 		// The response — OK or StatusError — is a single self-delimiting frame with
 		// NO chunk stream after it, so the conn is left clean either way. This is

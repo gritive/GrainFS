@@ -131,18 +131,23 @@ func (t *TCPTransport) CallWithBody(ctx context.Context, addr string, req *Messa
 		return nil, err
 	}
 	clean := false
-	// Defer LIFO is load-bearing: stop() (registered LAST, runs FIRST) tears down
-	// the ctx cancel-watcher, THEN this checkin/close defer runs — so by the time
-	// the conn re-enters the pool the watcher can no longer close it. Do not reorder.
+	// Defer LIFO: stop() (registered LAST, runs FIRST) closes the watcher's done
+	// channel; THEN this checkin/close defer runs.
 	defer func() {
-		if clean {
+		// Pool the conn only if the cycle was clean AND ctx never fired. stop() is
+		// an ASYNC signal (close(done)) — it does not synchronously tear down the
+		// applyCtx watcher, whose prefer-done recheck only narrows (not closes) the
+		// race. If ctx.Err()!=nil the watcher may still close this conn; pooling it
+		// would let a later transfer check out a conn the watcher then closes mid-I/O.
+		// If ctx.Err()==nil the watcher will take <-done and never close → safe to
+		// pool. (Mirrors CallRead's post-stop ctx.Err() handoff guard.)
+		if clean && ctx.Err() == nil {
 			// Clear the per-call deadline before reuse: a checked-in conn that kept
-			// it would fail the NEXT transfer's first I/O once the deadline passes
-			// (idle conns sit in the pool), silently turning reuse into churn.
+			// it would fail the NEXT transfer's first I/O once the deadline passes.
 			_ = conn.SetDeadline(time.Time{})
 			t.pool.checkin(addr, conn)
 		} else {
-			_ = conn.Close() // dirty/unknown state → never reuse
+			_ = conn.Close() // dirty / cancelled / unknown state → never reuse
 		}
 	}()
 	stop := t.applyCtx(ctx, conn)

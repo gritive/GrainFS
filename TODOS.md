@@ -52,6 +52,31 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      (`SetStreamHandler` → `streamRouter.Dispatch`), invisible to the conformance assertions. S1 pulled
      the catch-all forward (implemented + tested). Remaining `ClusterTransport` gap = the mux-connection
      methods (`SetMuxConnHandler`/`GetOrConnectMux`/`EvictMux`), which are the S2 RaftConn restructure.
+   - **S3a landed (data-plane chunked framing + minimal conn reuse):** `CallWithBody`/`CallRead` now use
+     length-prefixed chunk framing (`tcp_chunk.go`, terminator-delimited) instead of CloseWrite, + a
+     minimal per-peer conn pool (checkout/checkin, no cap) with drain-or-discard; `serveConn` is a
+     persistent loop. Dormant; local bench is non-regression-only (parity is **Linux@S5**). **S3b** items:
+   - [ ] **[P2→required bound] Server-side read deadline + idle-conn reaping (S3a ESCALATED this).** S3a's
+     persistent `serveConn` loop turned bounded per-RPC server-goroutine lifetime into UNBOUNDED: a
+     client that pools a conn and never reuses it pins a server goroutine + FD (blocked in `Decode`, no
+     deadline) until the client closes it. The S1-deferred server read-deadline is now a **required
+     server-resource bound, not an optimization** — pair it with the body-handler drain coupling (next).
+   - [ ] **[P1] Body-handler drain-on-all-paths + body-presence frame flag (pooled-conn hardening).** The
+     S1 drain hazard is worse under pooling: a `CallWithBody`-type served by a non-body handler (or a
+     `HandleBody` early-return that doesn't drain) leaves the request chunk stream unread → the **pooled**
+     conn desyncs and silently mis-pairs every subsequent transfer (no `req.ID`/`resp.ID` check; all
+     data-plane requests set `ID=0`). Not live today (all body types map to HandleBody/HandleRead;
+     `serveOne` now drops a non-drained conn via the `cbr.done` re-check). Two-layer fix: **(a) detection**
+     — transport stamps a per-request `Message.ID` on the pooled data-plane methods and verifies
+     `resp.ID` (turns silent desync LOUD, ~8 lines, could be pulled into S3a); **(b) prevention** — a
+     body-presence flag in the frame header + drain in ALL `serveOne` branches (structural, makes mismatch
+     impossible). (a) subsumes the severity; (b) is the real guard.
+   - [ ] **[P3] `hasBody` handler returning nil hangs the client until ctx deadline** (`serveOne` writes
+     no frame → client `Decode` blocks then discards; self-corrects, no corruption). Latent — the one
+     prod body handler always returns non-nil. Decide nil-resp semantics for body handlers in S3b.
+   - [ ] **[P2] Elastic pool policy (the rest of S3): cap + queue-when-saturated + growth + idle eviction**
+     + socket tuning (`TCP_NODELAY`, send/recv buffers, accept-rate/FD limits) + pool liveness-validation
+     on checkout (a half-open/server-reaped conn is currently only discarded on first-I/O failure).
 
 - [ ] **At-rest unification — R3 static-key retirement (last slice; cleanup, not migration)**
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
