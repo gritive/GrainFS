@@ -425,10 +425,14 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 		return ECConfig{}, nil, fmt.Errorf("shard service unavailable")
 	}
 
+	// Sub-multipart objects buffer all data shards (cheap, and warm re-reads hit
+	// the shard cache). Larger objects ALWAYS stream the bounded reconstruct
+	// path regardless of cache capacity: buffering every data shard into []byte
+	// (and populating the cache with full shards) is the dominant peak-RSS cost,
+	// and the in-heap cache is not load-bearing for warm GET throughput when the
+	// OS page cache already covers the working set. Decoupling the buffer
+	// decision from cache admission keeps large reads streaming-bounded.
 	if recCfg.Redundant() && objectSize >= 0 && objectSize <= maxECPooledReadObjectSize {
-		return r.bufferedShardReaders(ctx, bucket, shardKey, rec)
-	}
-	if r.cacheCanStore(bucket, shardKey, recCfg, objectSize) {
 		return r.bufferedShardReaders(ctx, bucket, shardKey, rec)
 	}
 
@@ -565,22 +569,6 @@ func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, e
 	if r.cache.CanStore(key, int64(n)) {
 		r.cache.Put(key, data)
 	}
-}
-
-// cacheCanStore reports whether every shard slot for this object fits in the
-// shard cache without evicting currently resident data.
-func (r ecObjectReader) cacheCanStore(bucket, shardKey string, cfg ECConfig, objectSize int64) bool {
-	if r.cache == nil || r.cache.Stats().CapacityByte <= 0 || cfg.DataShards <= 0 || objectSize < 0 {
-		return false
-	}
-	perDataShard := (objectSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
-	shardSize := int64(shardHeaderSize) + perDataShard
-	for i := 0; i < cfg.NumShards(); i++ {
-		if !r.cache.CanStore(shardCacheKey(bucket, shardKey, i), shardSize) {
-			return false
-		}
-	}
-	return true
 }
 
 // hasLocalDataShard reports whether any of the K data shards is stored on self.
