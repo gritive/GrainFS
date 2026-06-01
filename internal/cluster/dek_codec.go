@@ -34,7 +34,9 @@ func decodeMetaDEKVersionPruneCmd(data []byte) (gen uint32, err error) {
 // Entries are emitted in ascending gen order for byte-determinism across
 // replicas. refCounts may be nil (emits empty list). activeKEKVersion defaults
 // to 0 in Phase A (no rotation yet). rewrapDone may be nil (emits empty list).
-func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}) ([]byte, error) {
+// rewrapDone maps gen → (nodeID → epoch). The epoch is the lane-set version
+// the node swept; 0 = EC shards + packblob (S7-1 additive field).
+func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]uint32) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
 	// Sort gens for deterministic output.
@@ -111,9 +113,17 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, ref
 			b.PrependUOffsetT(nodeOffs[j])
 		}
 		nodeVec := b.EndVector(len(nodeOffs))
+		// Build node_epochs vector parallel to node_ids (same sort order).
+		// S7-1 additive field: epoch per node in the same sorted order as nodeIDs.
+		clusterpb.DEKRewrapDoneEntryStartNodeEpochsVector(b, len(nodeIDs))
+		for j := len(nodeIDs) - 1; j >= 0; j-- {
+			b.PrependUint32(nodeSet[nodeIDs[j]])
+		}
+		epochsVec := b.EndVector(len(nodeIDs))
 		clusterpb.DEKRewrapDoneEntryStart(b)
 		clusterpb.DEKRewrapDoneEntryAddGen(b, g)
 		clusterpb.DEKRewrapDoneEntryAddNodeIds(b, nodeVec)
+		clusterpb.DEKRewrapDoneEntryAddNodeEpochs(b, epochsVec)
 		doneOffs[i] = clusterpb.DEKRewrapDoneEntryEnd(b)
 	}
 	clusterpb.MetaDEKVersionSnapshotStartRewrapDoneVector(b, len(doneOffs))
@@ -133,24 +143,27 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, ref
 
 // encodeMetaDEKRewrapProgressCmd builds the inner payload for a per-node
 // rewrap-completion report: "nodeID finished rewrapping all its lanes for gen".
-func encodeMetaDEKRewrapProgressCmd(nodeID string, gen uint32) ([]byte, error) {
+// epoch is the lane-set version the node swept (S7-1); 0 = EC shards + packblob.
+func encodeMetaDEKRewrapProgressCmd(nodeID string, gen, epoch uint32) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	nid := b.CreateString(nodeID)
 	clusterpb.MetaDEKRewrapProgressCmdStart(b)
 	clusterpb.MetaDEKRewrapProgressCmdAddNodeId(b, nid)
 	clusterpb.MetaDEKRewrapProgressCmdAddGen(b, gen)
+	clusterpb.MetaDEKRewrapProgressCmdAddEpoch(b, epoch)
 	return fbFinish(b, clusterpb.MetaDEKRewrapProgressCmdEnd(b)), nil
 }
 
 // decodeMetaDEKRewrapProgressCmd parses the inner DEKRewrapProgress payload bytes.
-func decodeMetaDEKRewrapProgressCmd(data []byte) (nodeID string, gen uint32, err error) {
+// epoch is 0 when absent (old wire format, pre-S7-1).
+func decodeMetaDEKRewrapProgressCmd(data []byte) (nodeID string, gen, epoch uint32, err error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.MetaDEKRewrapProgressCmd {
 		return clusterpb.GetRootAsMetaDEKRewrapProgressCmd(d, 0)
 	})
 	if err != nil {
-		return "", 0, fmt.Errorf("dek_codec: MetaDEKRewrapProgressCmd: %w", err)
+		return "", 0, 0, fmt.Errorf("dek_codec: MetaDEKRewrapProgressCmd: %w", err)
 	}
-	return string(t.NodeId()), t.Gen(), nil
+	return string(t.NodeId()), t.Gen(), t.Epoch(), nil
 }
 
 // decodeMetaDEKVersionSnapshot parses a MetaDEKVersionSnapshot FlatBuffers buffer
@@ -159,7 +172,8 @@ func decodeMetaDEKRewrapProgressCmd(data []byte) (nodeID string, gen uint32, err
 // the field was absent (pre-Task-12 snapshot backward compat). activeKEKVersion
 // is 0 when the field was absent (pre-Phase-A snapshot backward compat).
 // rewrapDone is nil when the field was absent (pre-S6d snapshot backward compat).
-func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]struct{}, err error) {
+// rewrapDone maps gen → (nodeID → epoch). epoch is 0 for old wire without node_epochs.
+func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, activeKEKVersion uint32, rewrapDone map[uint32]map[string]uint32, err error) {
 	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaDEKVersionSnapshot {
 		return clusterpb.GetRootAsMetaDEKVersionSnapshot(d, 0)
 	})
@@ -195,21 +209,28 @@ func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, acti
 		}
 	}
 
-	var done map[uint32]map[string]struct{}
+	var done map[uint32]map[string]uint32
 	if n := snap.RewrapDoneLength(); n > 0 {
-		done = make(map[uint32]map[string]struct{}, n)
+		done = make(map[uint32]map[string]uint32, n)
 		var doneEntry clusterpb.DEKRewrapDoneEntry
 		for i := 0; i < n; i++ {
 			if !snap.RewrapDone(&doneEntry, i) {
 				continue
 			}
 			g := doneEntry.Gen()
-			nodeSet := make(map[string]struct{}, doneEntry.NodeIdsLength())
-			for j := 0; j < doneEntry.NodeIdsLength(); j++ {
+			nIDs := doneEntry.NodeIdsLength()
+			nEpochs := doneEntry.NodeEpochsLength()
+			nodeSet := make(map[string]uint32, nIDs)
+			for j := 0; j < nIDs; j++ {
 				id := string(doneEntry.NodeIds(j))
-				if id != "" {
-					nodeSet[id] = struct{}{}
+				if id == "" {
+					continue
 				}
+				var epoch uint32
+				if j < nEpochs {
+					epoch = doneEntry.NodeEpochs(j)
+				}
+				nodeSet[id] = epoch
 			}
 			if len(nodeSet) > 0 {
 				done[g] = nodeSet

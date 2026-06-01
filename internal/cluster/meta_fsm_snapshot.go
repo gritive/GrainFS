@@ -103,13 +103,13 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// allow prune-safety to race). The inner map must also be copied — after
 	// RUnlock a concurrent applyDEKRewrapProgress can mutate the inner set
 	// under f.mu.Lock while the encoder iterates the outer-only copy.
-	var dekRewrapDoneCopy map[uint32]map[string]struct{}
+	var dekRewrapDoneCopy map[uint32]map[string]uint32
 	if len(f.dekRewrapDone) > 0 {
-		dekRewrapDoneCopy = make(map[uint32]map[string]struct{}, len(f.dekRewrapDone))
+		dekRewrapDoneCopy = make(map[uint32]map[string]uint32, len(f.dekRewrapDone))
 		for g, nodeSet := range f.dekRewrapDone {
-			innerCopy := make(map[string]struct{}, len(nodeSet))
-			for n := range nodeSet {
-				innerCopy[n] = struct{}{}
+			innerCopy := make(map[string]uint32, len(nodeSet))
+			for n, epoch := range nodeSet {
+				innerCopy[n] = epoch
 			}
 			dekRewrapDoneCopy[g] = innerCopy
 		}
@@ -733,7 +733,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newDEKActive        uint32
 		newDEKRefs          map[uint32]uint64
 		newActiveKEKVersion uint32
-		newDEKRewrapDone    map[uint32]map[string]struct{}
+		newDEKRewrapDone    map[uint32]map[string]uint32
 		hasDEKData          bool
 	)
 	if len(trailers.dekData) > 0 {

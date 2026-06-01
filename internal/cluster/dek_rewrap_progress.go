@@ -7,7 +7,7 @@ import "fmt"
 // IsGenFullyRewrapped. (S6a produces no such commands — this path is exercised
 // by unit tests until a later slice wires a producer.)
 func (f *MetaFSM) applyDEKRewrapProgress(data []byte) error {
-	nodeID, gen, err := decodeMetaDEKRewrapProgressCmd(data)
+	nodeID, gen, _, err := decodeMetaDEKRewrapProgressCmd(data)
 	if err != nil {
 		return fmt.Errorf("meta_fsm: DEKRewrapProgress: %w", err)
 	}
@@ -17,14 +17,18 @@ func (f *MetaFSM) applyDEKRewrapProgress(data []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.dekRewrapDone == nil {
-		f.dekRewrapDone = make(map[uint32]map[string]struct{})
+		f.dekRewrapDone = make(map[uint32]map[string]uint32)
 	}
 	set := f.dekRewrapDone[gen]
 	if set == nil {
-		set = make(map[string]struct{})
+		set = make(map[string]uint32)
 		f.dekRewrapDone[gen] = set
 	}
-	set[nodeID] = struct{}{}
+	// Epoch is wired in Task 3; for now record presence with epoch 0.
+	// max-monotonic: a re-report does not lower a previously stored epoch.
+	if _, ok := set[nodeID]; !ok {
+		set[nodeID] = 0
+	}
 	return nil
 }
 

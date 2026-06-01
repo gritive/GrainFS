@@ -70,8 +70,34 @@ func (rcv *DEKRewrapDoneEntry) NodeIdsLength() int {
 	return 0
 }
 
+func (rcv *DEKRewrapDoneEntry) NodeEpochs(j int) uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetUint32(a + flatbuffers.UOffsetT(j*4))
+	}
+	return 0
+}
+
+func (rcv *DEKRewrapDoneEntry) NodeEpochsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *DEKRewrapDoneEntry) MutateNodeEpochs(j int, n uint32) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateUint32(a+flatbuffers.UOffsetT(j*4), n)
+	}
+	return false
+}
+
 func DEKRewrapDoneEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func DEKRewrapDoneEntryAddGen(builder *flatbuffers.Builder, gen uint32) {
 	builder.PrependUint32Slot(0, gen, 0)
@@ -80,6 +106,12 @@ func DEKRewrapDoneEntryAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuff
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(nodeIds), 0)
 }
 func DEKRewrapDoneEntryStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func DEKRewrapDoneEntryAddNodeEpochs(builder *flatbuffers.Builder, nodeEpochs flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(nodeEpochs), 0)
+}
+func DEKRewrapDoneEntryStartNodeEpochsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func DEKRewrapDoneEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

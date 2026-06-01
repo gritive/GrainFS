@@ -655,7 +655,7 @@ func (m *MetaRaft) ProposeDEKVersionPrune(ctx context.Context, gen uint32) error
 // NOTE: a record is necessary but NOT sufficient for S7 prune — see
 // IsGenFullyRewrapped for the full set of conditions a prune must AND together.
 func (m *MetaRaft) ProposeDEKRewrapProgress(ctx context.Context, nodeID string, gen uint32) error {
-	payload, err := encodeMetaDEKRewrapProgressCmd(nodeID, gen)
+	payload, err := encodeMetaDEKRewrapProgressCmd(nodeID, gen, 0)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode DEKRewrapProgress: %w", err)
 	}
