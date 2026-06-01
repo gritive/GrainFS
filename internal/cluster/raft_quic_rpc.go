@@ -35,7 +35,7 @@ const (
 // send callbacks (SetTransport / SetInstallSnapshotTransport /
 // SetTimeoutNowTransport) that the cluster layer hands to the RaftNode adapter.
 type RaftQUICRPCTransport struct {
-	transport *transport.QUICTransport
+	transport clusterRPCTransport
 
 	nodeMu sync.RWMutex
 	node   RaftNode
@@ -44,7 +44,7 @@ type RaftQUICRPCTransport struct {
 // NewRaftQUICRPCTransport wires the inbound StreamControl handler. The
 // returned struct exposes the send callbacks the cluster layer pumps into
 // RaftNode.SetTransport.
-func NewRaftQUICRPCTransport(tr *transport.QUICTransport, node RaftNode) *RaftQUICRPCTransport {
+func NewRaftQUICRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftQUICRPCTransport {
 	rpc := &RaftQUICRPCTransport{transport: tr, node: node}
 	tr.Handle(transport.StreamControl, rpc.handleRPC)
 	return rpc

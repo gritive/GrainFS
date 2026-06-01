@@ -30,7 +30,7 @@ type PeerProbeDialer interface {
 
 // QUICPeerProbeDialer is the production PeerProbeDialer backed by a
 // *transport.QUICTransport. Built once at boot.
-type QUICPeerProbeDialer struct{ T *transport.QUICTransport }
+type QUICPeerProbeDialer struct{ T callerTransport }
 
 // CallKEKDiskSpace dispatches a StreamKEKDiskSpaceProbe request to peer and
 // returns the response payload (or an error). On non-OK status the underlying

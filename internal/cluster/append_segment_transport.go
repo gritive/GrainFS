@@ -133,7 +133,7 @@ func decodeAppendSegmentRequest(buf []byte) (groupID, bucket, key, blobID string
 // data-group manager and the QUIC transport are available. lookup may
 // return nil for unknown groupIDs (peer doesn't host that group) — the
 // handler then answers ENOENT so the client iterates to the next peer.
-func RegisterAppendSegmentHandler(tr *transport.QUICTransport, lookup appendSegmentGroupLookup) {
+func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGroupLookup) {
 	if tr == nil || lookup == nil {
 		return
 	}

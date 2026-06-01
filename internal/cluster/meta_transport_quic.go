@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // MetaTransportQUIC is the QUIC-backed MetaTransport. As of M6.2 step 3 it
@@ -15,7 +14,7 @@ type MetaTransportQUIC = RaftV2MetaQUICTransport
 // via the compile-time check at raftnode.go:148, so existing callers that
 // pass metaRaft.Node() (still typed *raft.Node until M6.3 flips meta_raft.go)
 // continue to compile unchanged.
-func NewMetaTransportQUIC(tr *transport.QUICTransport, node RaftNode) *MetaTransportQUIC {
+func NewMetaTransportQUIC(tr clusterRPCTransport, node RaftNode) *MetaTransportQUIC {
 	return NewRaftV2MetaQUICTransport(tr, node)
 }
 
@@ -25,7 +24,7 @@ func NewMetaTransportQUIC(tr *transport.QUICTransport, node RaftNode) *MetaTrans
 // Kept here so internal/serveruntime/boot_phases_raft.go's three-arg call
 // continues to compile; PR 30b can clean up the signature once boot is
 // audited.
-func NewMetaTransportQUICMux(tr *transport.QUICTransport, node RaftNode, groupMux *raft.GroupRaftQUICMux) *MetaTransportQUIC {
+func NewMetaTransportQUICMux(tr clusterRPCTransport, node RaftNode, groupMux *raft.GroupRaftQUICMux) *MetaTransportQUIC {
 	_ = groupMux
 	return NewRaftV2MetaQUICTransport(tr, node)
 }

@@ -42,7 +42,7 @@ const (
 // registers an inbound handler on transport.StreamMetaRaft and exposes the
 // three outbound Send* methods that satisfy cluster.MetaTransport.
 type RaftV2MetaQUICTransport struct {
-	transport *transport.QUICTransport
+	transport clusterRPCTransport
 	node      RaftNode
 }
 
@@ -50,7 +50,7 @@ type RaftV2MetaQUICTransport struct {
 var _ MetaTransport = (*RaftV2MetaQUICTransport)(nil)
 
 // NewRaftV2MetaQUICTransport wires the inbound StreamMetaRaft handler.
-func NewRaftV2MetaQUICTransport(tr *transport.QUICTransport, node RaftNode) *RaftV2MetaQUICTransport {
+func NewRaftV2MetaQUICTransport(tr clusterRPCTransport, node RaftNode) *RaftV2MetaQUICTransport {
 	mt := &RaftV2MetaQUICTransport{transport: tr, node: node}
 	tr.Handle(transport.StreamMetaRaft, mt.handleRPC)
 	return mt

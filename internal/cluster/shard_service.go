@@ -55,7 +55,7 @@ type shardFileWriter func(path string, payload []byte) error
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
 	dataDirs      []string
-	transport     *transport.QUICTransport
+	transport     shardTransport
 	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
 	dekKeeper     *encrypt.DEKKeeper
 	clusterID     [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
@@ -177,12 +177,12 @@ func (s *ShardService) Close() error {
 }
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
-func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
+func NewShardService(dataDir string, tr shardTransport, opts ...ShardServiceOption) *ShardService {
 	return NewMultiRootShardService([]string{dataDir}, tr, opts...)
 }
 
 // NewMultiRootShardService creates a shard service rooted at multiple dataDirs/shards/.
-func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
+func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...ShardServiceOption) *ShardService {
 	resolvedDirs := make([]string, len(dataDirs))
 	for i, dir := range dataDirs {
 		resolvedDirs[i] = filepath.Join(dir, "shards")

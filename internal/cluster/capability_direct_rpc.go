@@ -38,7 +38,7 @@ type capabilityProbeDialer func(ctx context.Context, peer string, payload []byte
 // dispatches a StreamCapabilityProbe request over the shared QUIC transport and
 // returns the raw response payload. Used by serve-runtime boot to wire the
 // CapabilityGate's direct signed-assertion path.
-func NewQUICCapabilityProbeDialer(t *transport.QUICTransport) capabilityProbeDialer {
+func NewQUICCapabilityProbeDialer(t callerTransport) capabilityProbeDialer {
 	return func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 		resp, err := t.Call(ctx, peer, &transport.Message{
 			Type:    transport.StreamCapabilityProbe,
