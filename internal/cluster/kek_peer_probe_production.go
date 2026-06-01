@@ -28,8 +28,8 @@ type PeerProbeDialer interface {
 	CallKEKLeaseSnapshot(ctx context.Context, peer string, payload []byte) ([]byte, error)
 }
 
-// QUICPeerProbeDialer is the production PeerProbeDialer backed by a
-// *transport.QUICTransport. Built once at boot.
+// QUICPeerProbeDialer is the production PeerProbeDialer backed by the cluster
+// transport (callerTransport; *transport.QUICTransport at runtime). Built once at boot.
 type QUICPeerProbeDialer struct{ T callerTransport }
 
 // CallKEKDiskSpace dispatches a StreamKEKDiskSpaceProbe request to peer and
