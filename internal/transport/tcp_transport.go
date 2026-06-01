@@ -48,6 +48,7 @@ type TCPTransport struct {
 	snap      *IdentitySnapshot
 	serverTLS *tls.Config
 	clientTLS *tls.Config
+	pool      *connPool // per-peer idle data-plane conns (S3a checkout/checkin)
 }
 
 // NewTCPTransport derives the cluster identity from psk and builds a transport
@@ -70,6 +71,7 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 		ctx:    ctx,
 		cancel: cancel,
 		snap:   snap,
+		pool:   newConnPool(),
 	}
 	// Server pins the dialer's cert SPKI; ClientAuth forces the dialer to present
 	// one. crypto/tls runs VerifyPeerCertificate during the handshake and fails
@@ -176,9 +178,10 @@ func (t *TCPTransport) acceptLoop() {
 	}
 }
 
-// serveConn handles exactly one RPC on conn, then closes it. The TLS handshake
-// (and thus SPKI pinning via VerifyPeerCertificate) runs here; a mismatch fails
-// the handshake and the conn is dropped.
+// serveConn runs the TLS handshake (SPKI pinning) then serves requests on conn
+// in a persistent loop, so a pooled (reused) client conn carries many transfers.
+// The loop ends when the client closes the conn (Decode gets EOF) or a dispatch
+// leaves the conn in an unknown state.
 func (t *TCPTransport) serveConn(conn net.Conn) {
 	defer conn.Close()
 	if tc, ok := conn.(*tls.Conn); ok {
@@ -187,11 +190,21 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 		}
 	}
 	from := conn.RemoteAddr().String()
-	req, err := t.codec.Decode(conn)
-	if err != nil {
-		return
+	for {
+		req, err := t.codec.Decode(conn)
+		if err != nil {
+			return // client closed the conn (clean EOF) or a framing error
+		}
+		if !t.serveOne(conn, from, req) {
+			return // dispatch left the conn in an unknown state → drop it
+		}
 	}
+}
 
+// serveOne handles one request on a (possibly reused) conn. It returns true iff
+// the conn is left clean (positioned at the next frame) and may serve another
+// request; false means the conn must be dropped.
+func (t *TCPTransport) serveOne(conn net.Conn, from string, req *Message) bool {
 	bodyHandler, hasBody := t.router.LookupBody(req.Type)
 	readHandler, hasRead := t.router.LookupRead(req.Type)
 	typeHandler, hasType := t.router.Lookup(req.Type)
@@ -200,17 +213,25 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 	case hasBody:
 		// Request body is a chunk stream terminated by a zero-length chunk; the
 		// handler reads it via a chunkedBodyReader. Drain any remainder to the
-		// terminator so the conn is left clean (no CloseWrite — conn stays open).
+		// terminator so the conn is left clean for the next request.
 		cbr := &chunkedBodyReader{r: conn}
 		resp := bodyHandler(req, cbr)
 		if !cbr.done {
-			_, _ = io.Copy(io.Discard, cbr) // defensive drain to terminator
+			if _, err := io.Copy(io.Discard, cbr); err != nil {
+				return false // could not reach terminator → conn dirty
+			}
 		}
 		// The response — OK or StatusError — is a single self-delimiting frame with
-		// no chunk stream after it, so the conn is left clean either way.
+		// NO chunk stream after it, so the conn is left clean either way. This is
+		// what makes the client treat a StatusError as a reusable cycle. If a future
+		// body handler ever streams a partial body and THEN errors, that property
+		// (and the pool-reuse-on-error assumption) breaks.
 		if resp != nil {
-			_ = t.codec.Encode(conn, resp)
+			if err := t.codec.Encode(conn, resp); err != nil {
+				return false
+			}
 		}
+		return true
 	case hasRead:
 		resp, body := readHandler(req)
 		if resp != nil {
@@ -218,23 +239,26 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 				if body != nil {
 					_ = body.Close()
 				}
-				return
+				return false
 			}
 		}
 		if body != nil {
 			defer body.Close()
-			// Response body as a chunk stream + terminator (no CloseWrite): the
-			// client's chunkedBodyReader stops at the terminator and the conn stays
-			// open and reusable.
+			// Response body as a chunk stream + terminator: the client's
+			// chunkedBodyReader stops at the terminator and the conn stays reusable.
 			if err := writeChunkedBody(conn, body); err != nil {
-				return
+				return false
 			}
 		}
+		return true
 	case hasType:
 		resp := typeHandler(req)
 		if resp != nil {
-			_ = t.codec.Encode(conn, resp) // self-delimiting frame: no CloseWrite
+			if err := t.codec.Encode(conn, resp); err != nil {
+				return false
+			}
 		}
+		return true
 	default:
 		// No per-type handler: try the catch-all (boot routes StreamData shard
 		// RPCs through it via SetStreamHandler), then fall back to the inbox for
@@ -244,20 +268,26 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 		t.mu.RUnlock()
 		if catchAll != nil {
 			if resp := catchAll(req); resp != nil {
-				_ = t.codec.Encode(conn, resp) // self-delimiting frame: no CloseWrite
-				return
+				if err := t.codec.Encode(conn, resp); err != nil {
+					return false
+				}
+				return true
 			}
 		}
+		// Fire-and-forget (gossip): no response; conn stays clean for reuse.
 		select {
 		case t.inbox <- &ReceivedMessage{From: from, Message: req}:
 		case <-t.ctx.Done():
 		}
+		return true
 	}
 }
 
-// Close shuts the transport down: cancels in-flight context and closes the listener.
+// Close shuts the transport down: cancels in-flight context, drops pooled
+// data-plane conns, and closes the listener.
 func (t *TCPTransport) Close() error {
 	t.cancel()
+	t.pool.closeAll()
 	t.mu.Lock()
 	ln := t.listener
 	t.mu.Unlock()
