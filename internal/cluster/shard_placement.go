@@ -415,6 +415,26 @@ func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error
 			if len(tail) > len(key) && tail[len(key)] == '/' && tail[:len(key)] == key {
 				versionID = tail[len(key)+1:]
 			}
+			if versionID == "" {
+				// Bare key with no version suffix. persistPutObjectMetaUpdate writes
+				// the bare alias obj:{b}/{k} alongside the versioned obj:{b}/{k}/{v}
+				// (same EC ref) AND a lat:{b}/{k} pointer for every modern object
+				// (versioning on OR off — any put that generates a versionID). For
+				// those, the bare alias is an alias for the current latest version;
+				// its EC shard physically lives at /{k}/{v}/, and the versioned obj:
+				// entry already emits the correct /{k}/{v}/ target. Emitting the bare
+				// alias here would derive a version-less shardKey ("k") pointing at
+				// /{k}/, where no shard exists — the EC rewrap lane would skip it with
+				// an aggregate error and suppress the whole completion report on every
+				// Kick. So skip the bare alias when a lat: pointer exists.
+				//
+				// A pre-versioning legacy bare key (replay path, no lat:) is a
+				// genuinely version-less stored object whose shard DOES live at /{k}/,
+				// so it is KEPT (no lat: → not skipped).
+				if _, lerr := txn.Get(f.keys.LatestKey(bucket, key)); lerr == nil {
+					return nil
+				}
+			}
 			return f.buildECShardTargets(ObjectMetaRef{Bucket: bucket, Key: key, VersionID: versionID}, m, fn)
 		})
 	})

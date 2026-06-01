@@ -149,6 +149,12 @@ func (f *FSM) ApplyTxn(txn *badger.Txn, raw []byte) error {
 		return f.applyPutObjectQuarantine(txn, cmd.Data)
 	case CmdResealFSMValues:
 		return f.applyResealFSMValues(txn, cmd.Data)
+	case CmdFSMValueResealDone:
+		// Ordering fence: the marker mutates no state; its only effect is the
+		// per-node post-apply hook (notifyOnApply) firing a re-Kick after all
+		// preceding CmdResealFSMValues batches in raft order. Gen is carried
+		// for logging/observability only — the re-Kick is gen-agnostic. S7-1a-2.
+		return nil
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil

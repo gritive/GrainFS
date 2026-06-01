@@ -2,12 +2,23 @@ package serveruntime
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
+
+// rewrapProgressReportsTotal counts successful ProposeDEKRewrapProgress calls,
+// labelled by epoch. An increment at epoch="1" means every registered lane
+// (EC+packblob+FSMvalue-check) verified clean on this node. S7-1a-2.
+var rewrapProgressReportsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "grainfs_rewrap_progress_reports_total",
+	Help: "Successful DEK rewrap completion reports proposed to the meta-raft ledger, labelled by epoch.",
+}, []string{"epoch"})
 
 // newRewrapScrubberKick adapts a RewrapController into the scrubberKick
 // signature WireDEKPostCommit expects. The kick runs in a post-commit
@@ -38,10 +49,13 @@ func newRewrapScrubberKick(
 		// a fresh keeper read — avoids reporting a gen just swept onto as done if
 		// a rotation races between the sweep and the report.
 		epoch := cluster.CurrentRewrapLaneSetEpoch
+		epochLabel := fmt.Sprintf("%d", epoch)
 		for _, g := range ctrl.RetiredGensBelow(activeGen) {
 			if err := report(ctx, nodeID, g, epoch); err != nil {
 				log.Warn().Err(err).Uint32("gen", g).Msg("dek rewrap: completion report failed; prune will stall until re-kick")
+				continue
 			}
+			rewrapProgressReportsTotal.WithLabelValues(epochLabel).Inc()
 		}
 	}
 }

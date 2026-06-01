@@ -1491,6 +1491,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodePutObjectQuarantineCmd(payload.(PutObjectQuarantineCmd))
 	case CmdResealFSMValues:
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
+	case CmdFSMValueResealDone:
+		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
@@ -1579,6 +1581,24 @@ func decodeResealFSMValuesCmd(data []byte) (ResealFSMValuesCmd, error) {
 		keys[i] = string(t.Keys(i))
 	}
 	return ResealFSMValuesCmd{Keys: keys, ActiveGen: t.ActiveGen()}, nil
+}
+
+func encodeFSMValueResealDoneCmd(c FSMValueResealDoneCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	clusterpb.FSMValueResealDoneCmdStart(b)
+	clusterpb.FSMValueResealDoneCmdAddGen(b, c.Gen)
+	return fbFinish(b, clusterpb.FSMValueResealDoneCmdEnd(b)), nil
+}
+
+//nolint:unused // referenced by codec_test.go (TestFSMValueResealDoneCmd_RoundTrip).
+func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.FSMValueResealDoneCmd {
+		return clusterpb.GetRootAsFSMValueResealDoneCmd(d, 0)
+	})
+	if err != nil {
+		return FSMValueResealDoneCmd{}, err
+	}
+	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {

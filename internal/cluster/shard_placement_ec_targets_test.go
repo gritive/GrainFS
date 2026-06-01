@@ -328,3 +328,94 @@ func TestIterECShardScanTargets_DeletedChunkedObject(t *testing.T) {
 		}
 	}
 }
+
+// seedModernDualWriteObject mirrors persistPutObjectMetaUpdate's modern write
+// path: it writes BOTH the versioned key obj:{b}/{k}/{v} AND the bare alias
+// obj:{b}/{k} (same objectMeta, same EC ref) AND the lat:{b}/{k} pointer. This
+// is the on-disk shape of every object written through a put path that
+// generates a versionID (the normal case, versioning on OR off). The bare alias
+// is an alias for the current latest version, NOT a separately-stored blob —
+// its EC shard physically lives at /{k}/{v}/, not /{k}/.
+func seedModernDualWriteObject(t *testing.T, b *DistributedBackend, bucket, key, versionID string, m objectMeta) {
+	t.Helper()
+	m.Key = key
+	f := b.FSMRef()
+	val, err := marshalObjectMeta(m)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(bucket, key, versionID), val); err != nil {
+			return err
+		}
+		if err := f.setValue(txn, f.keys.ObjectMetaKey(bucket, key), val); err != nil {
+			return err
+		}
+		return txn.Set(f.keys.LatestKey(bucket, key), []byte(versionID))
+	}))
+}
+
+// TestIterECShardScanTargetsAllVersions_SkipsModernDualWriteAlias reproduces the
+// S7-1a-2 completion-report blocker: a modern object dual-writes the versioned
+// key obj:{b}/{k}/{v} AND the bare alias obj:{b}/{k} (same EC ref). The scan must
+// emit the VERSIONED target (shardKey "k/v", whose shard lives at /{k}/{v}/) but
+// must NOT emit the bare alias as a separate target — the alias would derive a
+// version-less shardKey "k" pointing at /{k}/, where no shard exists, so the EC
+// rewrap lane skips with an aggregate error and suppresses the whole completion
+// report on every Kick.
+//
+// A pre-versioning legacy bare key (obj:{b}/{k2}, NO lat: pointer, versionID="")
+// is a genuinely version-less stored object whose shard DOES live at /{k2}/ — it
+// must STILL be emitted.
+func TestIterECShardScanTargetsAllVersions_SkipsModernDualWriteAlias(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	modernNodes := []string{"m1", "m2", "m3"}
+	legacyNodes := []string{"l1", "l2", "l3"}
+
+	// Modern object "b/modern": versioned obj:b/modern/v9 + bare alias
+	// obj:b/modern + lat:b/modern → v9. Shard lives at /modern/v9/.
+	seedModernDualWriteObject(t, backend, "b", "modern", "v9", objectMeta{
+		ECData: 2, ECParity: 1, NodeIDs: modernNodes,
+	})
+
+	// Pre-versioning legacy object "b/legacy": bare obj:b/legacy only, no lat:.
+	// Shard genuinely lives at /legacy/ (version-less).
+	{
+		f := backend.FSMRef()
+		m := objectMeta{ECData: 2, ECParity: 1, NodeIDs: legacyNodes, Key: "legacy"}
+		val, err := marshalObjectMeta(m)
+		require.NoError(t, err)
+		require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+			return f.setValue(txn, f.keys.ObjectMetaKey("b", "legacy"), val)
+		}))
+	}
+
+	rewrapTargets, err := backend.CollectECRewrapTargets()
+	require.NoError(t, err)
+	findRewrap := func(shardKey string) *ECRewrapTarget {
+		for i := range rewrapTargets {
+			if rewrapTargets[i].ShardKey == shardKey {
+				return &rewrapTargets[i]
+			}
+		}
+		return nil
+	}
+
+	// The versioned modern target (shardKey "modern/v9") MUST be emitted.
+	rtModern := findRewrap(ecObjectShardKey("modern", "v9"))
+	require.NotNil(t, rtModern, "modern object's versioned shard target must be emitted")
+	require.Equal(t, "b", rtModern.Bucket)
+	require.Equal(t, modernNodes, rtModern.NodeIDs)
+
+	// The bare alias (shardKey "modern", version-less) MUST NOT be emitted —
+	// its derived path /modern/ has no shard and would suppress the report.
+	require.Nil(t, findRewrap(ecObjectShardKey("modern", "")),
+		"modern object's bare alias must NOT be emitted as a version-less target")
+
+	// The pre-versioning legacy bare key (shardKey "legacy", version-less) MUST
+	// still be emitted — its shard genuinely lives at the version-less path.
+	rtLegacy := findRewrap(ecObjectShardKey("legacy", ""))
+	require.NotNil(t, rtLegacy, "pre-versioning legacy object must still be emitted")
+	require.Equal(t, legacyNodes, rtLegacy.NodeIDs)
+}
