@@ -1489,6 +1489,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:
 		return encodePutObjectQuarantineCmd(payload.(PutObjectQuarantineCmd))
+	case CmdResealFSMValues:
+		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
@@ -1548,6 +1550,35 @@ func decodePutObjectQuarantineCmdStorage(data []byte) (cmd PutObjectQuarantineCm
 		Reason:    string(t.Reason()),
 	}
 	return cmd, nil
+}
+
+func encodeResealFSMValuesCmd(c ResealFSMValuesCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	var keysOff flatbuffers.UOffsetT
+	if len(c.Keys) > 0 {
+		keysOff = buildStringVector(b, c.Keys, clusterpb.ResealFSMValuesCmdStartKeysVector)
+	}
+	clusterpb.ResealFSMValuesCmdStart(b)
+	if len(c.Keys) > 0 {
+		clusterpb.ResealFSMValuesCmdAddKeys(b, keysOff)
+	}
+	clusterpb.ResealFSMValuesCmdAddActiveGen(b, c.ActiveGen)
+	return fbFinish(b, clusterpb.ResealFSMValuesCmdEnd(b)), nil
+}
+
+func decodeResealFSMValuesCmd(data []byte) (ResealFSMValuesCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.ResealFSMValuesCmd {
+		return clusterpb.GetRootAsResealFSMValuesCmd(d, 0)
+	})
+	if err != nil {
+		return ResealFSMValuesCmd{}, err
+	}
+	n := t.KeysLength()
+	keys := make([]string, n)
+	for i := 0; i < n; i++ {
+		keys[i] = string(t.Keys(i))
+	}
+	return ResealFSMValuesCmd{Keys: keys, ActiveGen: t.ActiveGen()}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {

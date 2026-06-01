@@ -49,6 +49,10 @@ const (
 	// VersionID!="" targets a specific versioned record only.
 	CmdSetObjectTags       CommandType = 20
 	CmdPutObjectQuarantine CommandType = 40
+	// CmdResealFSMValues re-seals a batch of data-group FSM state values
+	// (policy:, obj:) from a retired DEK generation onto the active generation.
+	// Applied in the serialized apply loop for race-freedom. S7-1a.
+	CmdResealFSMValues CommandType = 41
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -156,6 +160,15 @@ type PutObjectQuarantineCmd struct {
 	VersionID string
 	Cause     string
 	Reason    string
+}
+
+// ResealFSMValuesCmd carries a batch of full storage keys whose FSM-state values
+// (policy:, obj:) must be re-sealed onto ActiveGen. Applied in the serialized
+// apply loop; the apply handler reads the current value and reseals it — never
+// carries plaintext or ciphertext on the wire. S7-1a.
+type ResealFSMValuesCmd struct {
+	Keys      []string
+	ActiveGen uint32
 }
 
 type CreateMultipartUploadCmd struct {

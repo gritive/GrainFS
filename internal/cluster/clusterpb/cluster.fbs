@@ -173,6 +173,14 @@ table PutObjectQuarantineCmd {
   reason:string;
 }
 
+// ResealFSMValuesCmd: reseal a batch of data-group FSM state values (policy:,
+// obj:) from a retired DEK generation onto active_gen. Applied in the
+// serialized apply loop for race-freedom. S7-1a.
+table ResealFSMValuesCmd {
+  keys:[string];
+  active_gen:uint32;
+}
+
 table CreateMultipartUploadCmd {
   upload_id:string;
   bucket:string;
