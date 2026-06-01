@@ -28,8 +28,10 @@ import (
 // the keeper's active gen currently is. Forwarding a fixed gen here is what
 // caused the back-to-back-rotation livelock; the argument is now ignored.
 //
-// Epoch-neutral: this trigger does NOT call ProposeDEKRewrapProgress or
-// advance CurrentRewrapLaneSetEpoch. That is S7-1a-2.
+// After a successful drain, the leader proposes a CmdFSMValueResealDone marker.
+// Raft ordering guarantees every node applies the marker after all preceding
+// CmdResealFSMValues batches, so each node's post-apply hook fires exactly once
+// with its store already clean. S7-1a-2.
 func newFSMValueRewrapTriggerLazy(state *bootState) func(ctx context.Context, activeGen uint32) {
 	var inProgress sync.Map // allocated once; persists across rotations
 
@@ -56,6 +58,14 @@ func newFSMValueRewrapTriggerLazy(state *bootState) func(ctx context.Context, ac
 				if err := cluster.DrainFSMValueRewrap(ctx, gb, 0); err != nil {
 					log.Warn().Err(err).Str("group", groupID).Uint32("active_gen", activeGen).
 						Msg("fsm-value rewrap drain incomplete; will retry on next rotation")
+					return
+				}
+				// Drain converged: propose the ordering-fence marker so every node,
+				// after applying all reseal batches, fires its re-Kick and reports
+				// completion. activeGen is a log hint only — the re-Kick is gen-agnostic.
+				if err := gb.ProposeFSMValueResealDone(ctx, activeGen); err != nil {
+					log.Warn().Err(err).Str("group", groupID).Uint32("active_gen", activeGen).
+						Msg("fsm-value reseal-done marker propose failed; ledger report deferred to next rotation")
 				}
 			}(gb, groupID)
 		}
