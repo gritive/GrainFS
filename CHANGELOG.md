@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.492.0] - 2026-06-01
+
+### Added
+
+- **`GRAINFS_FSYNC_MODE` env (full/fast/off)** selects the data-plane fsync
+  policy. `full` (default) keeps the existing per-shard durability barrier;
+  `fast` skips the macOS `F_FULLFSYNC` platter flush (a no-op vs `full` on
+  Linux); `off` disables data-plane fsync entirely (UNSAFE — relies on
+  cross-node EC reconstruction, never for single-node or correlated power
+  loss). Default behavior is unchanged.
+
+### Changed
+
+- **Lower PUT/GET memory churn.** The PUT pipeline now pools the EC
+  shard-matrix, the ingest stripe buffer, and the per-shard encode destination
+  buffer, and the encrypted-shard reader/writer recycle their chunk and
+  ciphertext buffers. Encoded output and EC/ETag results are byte-identical;
+  this only removes transient allocation (`BenchmarkPipelinePut10MiBParallel`
+  B/op −94%).
+- **`--shard-cache-size` help now documents the RSS/throughput tradeoff** — the
+  in-heap EC shard cache (default 1 GiB) speeds warm GET but raises resident
+  memory; tuning it down leans on the OS page cache (warm sets that fit RAM stay
+  fast). Default unchanged.
+
 ## [0.0.491.0] - 2026-06-01
 
 ### Changed

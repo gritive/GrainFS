@@ -91,8 +91,97 @@ type putDispatchState struct {
 type dispatchMsg struct {
 	stripeIdx uint32
 	shards    [][]byte
+	backing   []byte // pooled EC-matrix backing that shards alias; recycled after the stripe is sealed
 	padding   uint32
 	lastInPut bool
+}
+
+// ecMatrixPool recycles the EC shard-matrix backing produced per stripe by
+// cluster.ECSplitRawInto (data + parity laid out contiguously). Without it,
+// reedsolomon allocated a fresh ~stripe-sized matrix per (stripe) split — the
+// single largest PUT-path allocation. The matrix is the sole input to
+// deliverStripe's seal loop (the shards alias it), so the dispatcher returns
+// it once the stripe's shards are sealed. Sole consumer = clean ownership.
+var ecMatrixPool = sync.Pool{
+	New: func() any { b := make([]byte, 0); return &b },
+}
+
+func getECMatrix() []byte {
+	bp := ecMatrixPool.Get().(*[]byte)
+	return (*bp)[:0]
+}
+
+// ecMatrixMaxPooled caps the backing capacity retained across stripes so an
+// abnormally large stripe doesn't pin an oversized matrix in the pool. A
+// 1 MiB stripe at the lowest data-shard count (k=1, hypothetical) yields a
+// 2-shard matrix; real configs (k>=2) stay well under this.
+const ecMatrixMaxPooled = (4 << 20) + 4096
+
+func putECMatrix(b []byte) {
+	if b == nil || cap(b) == 0 || cap(b) > ecMatrixMaxPooled {
+		return
+	}
+	b = b[:0]
+	ecMatrixPool.Put(&b)
+}
+
+// stripeBufPool recycles IngestActor's per-stripe read buffer. With MD5
+// computed inline (see IngestActor.Run), the stripe buffer's only consumer
+// after hand-off is CPUPool.processStripe, which copies it into the EC matrix
+// — so the buffer is freed (recycled) the moment the split returns. Sole
+// consumer = no cross-actor refcounting.
+var stripeBufPool = sync.Pool{
+	New: func() any { b := make([]byte, 0); return &b },
+}
+
+// stripeBufMaxPooled caps the retained capacity so an unusually large stripe
+// size doesn't pin oversized buffers. Typical stripe is 1 MiB.
+const stripeBufMaxPooled = (4 << 20) + 4096
+
+func getStripeBuf(size int) []byte {
+	bp := stripeBufPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) >= size {
+		return b[:size]
+	}
+	return make([]byte, size)
+}
+
+func putStripeBuf(b []byte) {
+	if b == nil || cap(b) == 0 || cap(b) > stripeBufMaxPooled {
+		return
+	}
+	b = b[:0]
+	stripeBufPool.Put(&b)
+}
+
+// encodeBufPool recycles the per-shard chunked-writer destination buffer (one
+// per shard per PUT). deliverStripe copies each stripe's ciphertext out via
+// getCiphertextBuf and Resets the buffer, so once a PUT's dispatcher loop exits
+// the buffer is fully drained and safe to recycle. Without pooling, every PUT
+// allocates n fresh bytes.Buffers that grow from zero — the dominant PUT-side
+// allocation churn under sustained load (see GCP Phase 0 alloc profile).
+var encodeBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+// encodeBufMaxPooled caps retained capacity so a large stripe's shard buffer
+// doesn't pin oversized backing. Each buffer holds one stripe's encoded shard
+// (~stripeBytes/k + chunk overhead); 4 MiB covers typical configs.
+const encodeBufMaxPooled = (4 << 20) + 4096
+
+func getEncodeBuf() *bytes.Buffer {
+	b := encodeBufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
+}
+
+func putEncodeBuf(b *bytes.Buffer) {
+	if b == nil || b.Cap() > encodeBufMaxPooled {
+		return
+	}
+	b.Reset()
+	encodeBufPool.Put(b)
 }
 
 // registerPut sets up per-shard chunked writers + the dispatcher
@@ -107,7 +196,7 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 	encoders := make([]*shardEncoder, n)
 	header := cluster.ShardHeader(totalSize)
 	for i := 0; i < n; i++ {
-		buf := new(bytes.Buffer)
+		buf := getEncodeBuf()
 		w, err := eccodec.NewEncryptedShardChunkedWriter(buf, p.enc, cluster.ShardAADFields(bucket, shardKey, i), eccodec.DefaultEncryptedChunkSize)
 		if err != nil {
 			panic(fmt.Sprintf("cpu pool: build shard encoder %d for put %d: %v", i, putID, err))
@@ -198,24 +287,32 @@ func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) err
 	if stripe.Padding > 0 && int(stripe.Padding) < len(data) {
 		data = data[:len(data)-int(stripe.Padding)]
 	}
-	shards, err := cluster.ECSplitRaw(p.ecCfg, data)
+	shards, backing, err := cluster.ECSplitRawInto(p.ecCfg, data, getECMatrix())
+	// ECSplitRawInto has copied the stripe into backing (or failed without
+	// needing it); the stripe buffer is the sole responsibility of this
+	// goroutine now and is free to recycle either way.
+	putStripeBuf(stripe.Data)
 	if err != nil {
+		putECMatrix(backing)
 		return fmt.Errorf("cpu pool ec split: %w", err)
 	}
 
 	ps, ok := p.loadPut(stripe.PutID)
 	if !ok {
+		putECMatrix(backing)
 		return nil
 	}
 	msg := dispatchMsg{
 		stripeIdx: stripe.StripeIdx,
 		shards:    shards,
+		backing:   backing,
 		padding:   stripe.Padding,
 		lastInPut: stripe.LastInPut,
 	}
 	select {
 	case ps.inbox <- msg:
 	case <-ctx.Done():
+		putECMatrix(backing)
 		return ctx.Err()
 	}
 	return nil
@@ -242,6 +339,14 @@ func (p *CPUPool) runDispatcher(putID uint64, ps *putDispatchState) {
 			delete(pending, expected)
 			p.deliverStripe(putID, ps, cur)
 			expected++
+		}
+	}
+	// Inbox closed and drained: no more deliverStripe calls run for this PUT,
+	// so each shard's destination buffer has been fully consumed (copied out +
+	// Reset). Recycle the backing for the next PUT.
+	for _, enc := range ps.encoders {
+		if enc != nil {
+			putEncodeBuf(enc.buf)
 		}
 	}
 }
@@ -297,4 +402,7 @@ func (p *CPUPool) deliverStripe(putID uint64, ps *putDispatchState, msg dispatch
 			LastInPut:  msg.lastInPut,
 		}
 	}
+	// Every shard aliasing msg.backing has been sealed (its bytes copied into
+	// the per-shard ciphertext above), so the matrix is free to recycle.
+	putECMatrix(msg.backing)
 }

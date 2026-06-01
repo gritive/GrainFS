@@ -28,6 +28,9 @@ type DataEncryptor interface {
 	// closed (ErrDEKGenUnknown for the gen-aware adapter). When gen is the active
 	// gen the output is byte-identical to Seal.
 	SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) (ct []byte, err error)
+	// SealAtGenTo is SealAtGen that appends the ciphertext into dst, reusing
+	// dst's capacity when it suffices. The output is byte-equivalent to SealAtGen.
+	SealAtGenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) (ct []byte, err error)
 	Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) (plain []byte, err error)
 	// OpenTo is Open that appends the plaintext into dst, reusing dst's
 	// capacity when it suffices. The output is byte-equivalent to Open.
@@ -100,6 +103,12 @@ func (a *DEKKeeperAdapter) SealAtGen(domain encrypt.AADDomain, fields []encrypt.
 	return a.keeper.SealWithAADToAtGen(nil, plain, aad, gen)
 }
 
+func (a *DEKKeeperAdapter) SealAtGenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	return withSeamAADErr2(a.clusterID, domain, fields, func(aad []byte) ([]byte, error) {
+		return a.keeper.SealWithAADToAtGen(dst, plain, aad, gen)
+	})
+}
+
 func (a *DEKKeeperAdapter) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
 	aad := buildSeamAAD(a.clusterID, domain, fields)
 	return a.keeper.OpenWithAAD(ct, gen, aad)
@@ -143,6 +152,10 @@ func (a *TransientDataEncryptor) SealTo(_ []byte, _ encrypt.AADDomain, _ []encry
 }
 
 func (a *TransientDataEncryptor) SealAtGen(_ encrypt.AADDomain, _ []encrypt.AADField, _ []byte, _ uint32) ([]byte, error) {
+	return nil, encrypt.ErrTransientReadOnly
+}
+
+func (a *TransientDataEncryptor) SealAtGenTo(_ []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ []byte, _ uint32) ([]byte, error) {
 	return nil, encrypt.ErrTransientReadOnly
 }
 

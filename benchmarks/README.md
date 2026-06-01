@@ -32,8 +32,11 @@ MINIO_BIN=$HOME/go/bin/minio make bench-s3-compat-compare
 The comparison reports PUT and GET as separate rows, using the same signed S3
 requests, object size, concurrency, duration, and lookup mode for every target.
 The default is a short local baseline: 64 KiB objects, concurrency 16, 30s per
-operation, `WARP_HOST_SELECT=roundrobin`, and `WARP_NOCLEAR=1` so GET measures
-a warm-read pass over the objects written by the preceding PUT pass.
+operation, `WARP_HOST_SELECT=roundrobin`, and `WARP_NOCLEAR=0` so each op clears
+the objects it created, bounding peak disk to a single op's working set (important
+for large object sizes). Set `WARP_NOCLEAR=1` to retain objects across ops so GET
+measures a warm-read pass over the preceding PUT, at the cost of unbounded
+accumulation across ops.
 
 ```bash
 WARP_OPS=put,get WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 WARP_DURATION=1m make bench-s3-compat-compare

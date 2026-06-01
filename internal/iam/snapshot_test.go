@@ -262,6 +262,11 @@ func (f *fakeDEKEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt.
 	return ct, err
 }
 
+func (f *fakeDEKEncryptor) SealAtGenTo(_ []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, _ uint32) ([]byte, error) {
+	ct, _, err := f.Seal(domain, fields, plain)
+	return ct, err
+}
+
 func (f *fakeDEKEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
 	if gen != f.gen {
 		return nil, fmt.Errorf("fakeDEKEncryptor: expected gen %d, got %d", f.gen, gen)

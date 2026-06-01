@@ -23,7 +23,79 @@
 // sync) is unchanged.
 package directio
 
-import "os"
+import (
+	"os"
+	"sync/atomic"
+	"syscall"
+)
+
+// SyncMode selects the data-plane fsync policy used by Sync. It governs the
+// single live data-plane durability fsync (shard finalize when no WAL is
+// wired, otherwise the datawal flush — the two are wiring-exclusive), so one
+// knob controls whichever is active. It does NOT touch the raft/consensus
+// fsync (raft state is not reconstructable from erasure coding, and its sync
+// is off the PUT hot path).
+type SyncMode int32
+
+const (
+	// SyncFull is full power-loss durability: os.File.Sync, which is
+	// F_FULLFSYNC on darwin (a full drive-cache→platter barrier, ~10-20ms,
+	// surviving power loss). The safe default.
+	SyncFull SyncMode = iota
+	// SyncFast issues a plain fsync(2): far cheaper but on darwin it only
+	// reaches the drive write cache (data lost on power loss). On Linux
+	// os.File.Sync and fsync(2) are the same call, so SyncFast == SyncFull
+	// there.
+	SyncFast
+	// SyncOff skips the fsync entirely. Data reaches the page cache only;
+	// durability is delegated to cross-node erasure-coding redundancy
+	// (reconstruct a lost node's shards from peers). This is UNSAFE for
+	// single-node and for correlated power loss across a cluster (EC tolerates
+	// node loss, not all nodes losing un-synced page cache at once). Opt-in
+	// only, with a loud startup warning.
+	SyncOff
+)
+
+// fsyncMode holds the current SyncMode. Default SyncFull.
+var fsyncMode atomic.Int32
+
+func init() {
+	switch os.Getenv("GRAINFS_FSYNC_MODE") {
+	case "fast":
+		fsyncMode.Store(int32(SyncFast))
+	case "off":
+		fsyncMode.Store(int32(SyncOff))
+	}
+	// Back-compat: GRAINFS_FSYNC_FAST=1 is equivalent to GRAINFS_FSYNC_MODE=fast.
+	if os.Getenv("GRAINFS_FSYNC_FAST") == "1" {
+		fsyncMode.Store(int32(SyncFast))
+	}
+}
+
+// SetSyncMode overrides the fsync policy at runtime (e.g. wired from a serve
+// flag). Default (SyncFull) keeps full power-loss durability.
+func SetSyncMode(m SyncMode) { fsyncMode.Store(int32(m)) }
+
+// CurrentSyncMode reports the active fsync policy (for logging/metrics).
+func CurrentSyncMode() SyncMode { return SyncMode(fsyncMode.Load()) }
+
+// FastFsyncEnabled reports whether the current mode skips the F_FULLFSYNC
+// barrier (true for SyncFast and SyncOff). Retained for datawal.syncWAL, which
+// branches on it before applying its own mode handling.
+func FastFsyncEnabled() bool { return CurrentSyncMode() != SyncFull }
+
+// Sync flushes f to stable storage per the active SyncMode. Shard / WAL
+// durability fsyncs route through here so the policy lives in one place.
+func Sync(f *os.File) error {
+	switch CurrentSyncMode() {
+	case SyncOff:
+		return nil
+	case SyncFast:
+		return syscall.Fsync(int(f.Fd()))
+	default:
+		return f.Sync()
+	}
+}
 
 // OpenFile opens path with direct-I/O hints applied. Semantically equivalent
 // to os.OpenFile from the caller's perspective once the file is returned —

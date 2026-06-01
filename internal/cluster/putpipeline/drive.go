@@ -195,7 +195,7 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 // shard and reports success.
 func (d *DriveActor) finalize(chunk EncryptedShardChunk, state *shardWriteState) {
 	if !d.skipFsync {
-		if err := state.f.Sync(); err != nil {
+		if err := directio.Sync(state.f); err != nil {
 			d.failChunk(chunk, state, fmt.Errorf("fsync shard: %w", err))
 			return
 		}

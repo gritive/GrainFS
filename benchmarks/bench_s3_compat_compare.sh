@@ -32,7 +32,7 @@ WARP_OBJ_SIZE="${WARP_OBJ_SIZE:-64KiB}"
 WARP_OBJECTS="${WARP_OBJECTS:-4096}"
 WARP_CONCURRENT="${WARP_CONCURRENT:-16}"
 WARP_OPS="${WARP_OPS:-put,get}"
-WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
+WARP_NOCLEAR="${WARP_NOCLEAR:-0}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
 GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-4}"
@@ -321,6 +321,9 @@ start_grainfs_single() {
     GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
     extra+=(--pprof-port "$PPROF_BASE_PORT")
   fi
+  if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
+    extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
+  fi
   "$BINARY" serve \
     --data "$data_arg" \
     --port "$port" \
@@ -384,6 +387,9 @@ start_grainfs_cluster() {
     local extra=()
     if [[ "$BENCH_PPROF" == "1" ]]; then
       extra+=(--pprof-port "${pprof_ports[$zero_idx]}")
+    fi
+    if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
+      extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
     fi
     # Pre-stage the cluster transport PSK on disk (replaces the removed
     # cluster-key flag). Idempotent; must precede serve.
@@ -768,7 +774,7 @@ write_summary_header() {
     echo "- raw artifacts: ${PROFILE_ROOT}"
     echo "- host preflight: ${PROFILE_ROOT}/host-preflight.txt"
     echo
-    echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. With WARP_NOCLEAR=1, GET measures a warm-read pass over the objects written by the preceding PUT pass; DELETE uses warp's batch delete workload."
+    echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. By default (WARP_NOCLEAR=0) each op clears the objects it created, bounding peak disk to a single op's working set; set WARP_NOCLEAR=1 to retain objects across ops (GET then measures a warm-read pass over the preceding PUT, at the cost of unbounded accumulation). DELETE uses warp's batch delete workload."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. Local MinIO/RustFS single-node targets use their default single-node durability; local \`*-cluster\` targets boot 4-node distributed clusters unless overridden."
     bench_print_host_preflight_warnings
@@ -867,6 +873,17 @@ run_warp_case() {
       args+=(--objects "$objects")
       ;;
   esac
+  # Write-heavy ops (put/multipart-put) have no --objects cap — they write for
+  # the full --duration. At large object sizes that is the dominant disk
+  # consumer, and grainfs does not synchronously reclaim deleted shards, so the
+  # bytes persist for the whole target. --autoterm stops the op once throughput
+  # has been stable for autoterm.dur, bounding the write volume while keeping a
+  # statistically stable rate (warp's analyze reports a duration-independent
+  # rate, so cross-target comparison stays valid). Disable with
+  # WARP_WRITE_AUTOTERM=0 to write for the full fixed duration.
+  if [[ "${WARP_WRITE_AUTOTERM:-1}" == "1" && ( "$op" == "put" || "$op" == "multipart-put" ) ]]; then
+    args+=(--autoterm)
+  fi
   if [[ "$op" == "delete" ]]; then
     args+=(--batch "$WARP_DELETE_BATCH")
   fi
@@ -1159,6 +1176,19 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
   fi
 
   stop_target_backends "$target_pid_start"
+
+  # Reclaim this target's on-disk working set before the next target starts.
+  # Targets run one at a time, so the previous store's data is dead weight — and
+  # grainfs does not synchronously reclaim deleted shards, so without this the
+  # peak disk would be the SUM of every target's footprint (this is what filled
+  # the disk mid-run). Removing it caps peak at a single target's footprint.
+  # Honors KEEP_BENCH_DIR for post-mortem inspection; only ever touches paths
+  # under BENCH_DIR.
+  if [[ "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
+    for ddir in "${TARGET_DATA_DIRS[@]:-}"; do
+      [[ -n "$ddir" && "$ddir" == "$BENCH_DIR"/* ]] && rm -rf "$ddir" 2>/dev/null || true
+    done
+  fi
 done
 
 append_summary_rows

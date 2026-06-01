@@ -492,9 +492,26 @@ func (f *fakeShardEncryptor) Seal(domain encrypt.AADDomain, fields []encrypt.AAD
 	return ct, g, nil
 }
 
+func (f *fakeShardEncryptor) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	ct, err := f.enc.SealValueAADTo(dst, f.aad(domain, fields), plain)
+	if err != nil {
+		return nil, 0, err
+	}
+	g := f.gen
+	if f.advance {
+		f.gen++
+	}
+	return ct, g, nil
+}
+
 func (f *fakeShardEncryptor) SealAtGen(domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
 	f.sealAtGenGens = append(f.sealAtGenGens, gen)
 	return f.enc.SealValueAADTo(nil, f.aad(domain, fields), plain)
+}
+
+func (f *fakeShardEncryptor) SealAtGenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte, gen uint32) ([]byte, error) {
+	f.sealAtGenGens = append(f.sealAtGenGens, gen)
+	return f.enc.SealValueAADTo(dst, f.aad(domain, fields), plain)
 }
 
 func (f *fakeShardEncryptor) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
@@ -720,8 +737,14 @@ type errInjectShardEncryptor struct {
 func (e *errInjectShardEncryptor) Seal(d encrypt.AADDomain, f []encrypt.AADField, p []byte) ([]byte, uint32, error) {
 	return e.inner.Seal(d, f, p)
 }
+func (e *errInjectShardEncryptor) SealTo(dst []byte, d encrypt.AADDomain, f []encrypt.AADField, p []byte) ([]byte, uint32, error) {
+	return e.inner.SealTo(dst, d, f, p)
+}
 func (e *errInjectShardEncryptor) SealAtGen(d encrypt.AADDomain, f []encrypt.AADField, p []byte, gen uint32) ([]byte, error) {
 	return e.inner.SealAtGen(d, f, p, gen)
+}
+func (e *errInjectShardEncryptor) SealAtGenTo(dst []byte, d encrypt.AADDomain, f []encrypt.AADField, p []byte, gen uint32) ([]byte, error) {
+	return e.inner.SealAtGenTo(dst, d, f, p, gen)
 }
 func (e *errInjectShardEncryptor) Open(_ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, _ []byte) ([]byte, error) {
 	return nil, e.openErr
@@ -1000,4 +1023,29 @@ func TestEncryptedShardGen(t *testing.T) {
 	gen, ok = EncryptedShardGen([]byte("short"))
 	assert.False(t, ok)
 	assert.Equal(t, uint32(0), gen)
+}
+
+// BenchmarkEncryptedShardChunkedWriterWrite5MiB measures the PUT-side chunk
+// seal allocation: each emitChunk currently allocates a fresh ciphertext slice
+// via enc.Seal. Used to verify the SealTo seam removes that per-chunk alloc.
+func BenchmarkEncryptedShardChunkedWriterWrite5MiB(b *testing.B) {
+	rawEnc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	require.NoError(b, err)
+	f := &fakeShardEncryptor{enc: rawEnc}
+	data := bytes.Repeat([]byte("y"), 5<<20)
+	fields := shardBaseFields()
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w, err := NewEncryptedShardChunkedWriter(io.Discard, f, fields, DefaultEncryptedChunkSize)
+		require.NoError(b, err)
+		if _, err := w.Write(data); err != nil {
+			b.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
