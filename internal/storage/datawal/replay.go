@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/rs/zerolog/log"
 )
 
 const checkpointName = "checkpoint"
@@ -54,10 +56,27 @@ func Recover(ctx context.Context, dir string, fromSeq uint64, sealer RecordSeale
 	if err != nil {
 		return err
 	}
-	if lastSeq == 0 {
-		return nil
+	if lastSeq != 0 {
+		if err := SaveCheckpoint(dir, lastSeq); err != nil {
+			return err
+		}
 	}
-	return SaveCheckpoint(dir, lastSeq)
+	// Drive GC off max(checkpoint, lastSeq): even when lastSeq==0 (no new records
+	// this boot), previously-failed-to-delete materialized segments should still be
+	// cleaned. checkpoint is the persisted value loaded at the top of Recover.
+	gcSeq := checkpoint
+	if lastSeq > gcSeq {
+		gcSeq = lastSeq
+	}
+	if gcSeq > 0 {
+		if n, gerr := GCMaterializedSegments(dir, gcSeq); gerr != nil {
+			// GC failure is non-fatal: recovery already succeeded; GC is cleanup.
+			log.Warn().Err(gerr).Str("dir", dir).Msg("datawal: checkpoint-GC failed (non-fatal)")
+		} else if n > 0 {
+			log.Info().Int("deleted", n).Uint64("checkpoint", gcSeq).Str("dir", dir).Msg("datawal: checkpoint-GC removed materialized segments")
+		}
+	}
+	return nil
 }
 
 func LoadCheckpoint(dir string) (uint64, error) {

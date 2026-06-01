@@ -108,9 +108,22 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        can STALL (liveness, not safety; S7-0 blocks prune + `RetiredGensBelow(follower-active)` excludes the not-yet-
        retired gen, so a transiently-lagged follower is inert). Residual (non-blocking): deposed-leader drain forwards
        to the new leader (idempotent, converges, terminates) — ctx=Background, acceptable.
-       **S7-1b** WAL rewrap lanes (datawal +
-       logical-WAL, NEEDS-LANE confirmed — both keep old-gen segments with no deletion path; fix the stale
-       gen-0 comment in `boot_phases_logical_wal.go`); **S7-2** generic `DEKGenSecretStore` reseal+census
+       **S7-1b datawal checkpoint-GC = THIS PR** — datawal accumulated old-gen segments with no deletion path;
+       investigation found its checkpoint is boot-driven (`SaveCheckpoint` only at end of `Recover`) and the only
+       roll is gen-driven `RollSegmentOnRotation` (contiguous `lastSeq+1` naming → a sealed segment's exact max
+       seq = `nextFirstSeq-1`). Added `GCMaterializedSegments`: after Recover advances the checkpoint, delete
+       sealed segments fully ≤ `max(LoadCheckpoint, lastSeq)` (never the active segment); pure delete, no rewrite.
+       Bounds datawal disk growth + shrinks the old-gen population S7-final's census gates on. **Boot-driven
+       limitation:** runtime-accumulated old-gen segments aren't GC'd until the next restart (S7-0 blocks prune
+       meanwhile; a future runtime-checkpoint-advance would relax it). Test-completeness note: the integration
+       test proves idempotence + low-segment GC; mid-segment-checkpoint survivor-replay is safe by construction
+       (GC's `nextFirstSeq-1 ≤ checkpoint` can't remove an above-checkpoint record) but not directly asserted —
+       optional hardening. **Remaining: S7-1b-logical** = logical/PITR WAL needs REWRAP (not delete) within the
+       24h PITR retention window (PITR restore replays every segment at its header gen); separate slice; fix the
+       stale gen-0 comment in `boot_phases_logical_wal.go`; consider retention-GC past the window. **S7-final
+       datawal census term**: block prune of gen G while any remaining datawal segment has header gen==G (cheap
+       plaintext header read at [12:16]); this GC bounds that census to checkpoint-ahead + active segments.
+       **S7-2** generic `DEKGenSecretStore` reseal+census
        (IAM/JWT/PDP-token/protocred/cluster-config — audit-derived, not hand-enumerated); **S7-final** unified
        predicate replacing S7-0's blanket refuse + ref-safe `Prune` + S4-pin barrier + ⑤ MoveReplica trace.
        Full design: `docs/superpowers/specs/2026-06-01-dek-rotation-s7-prune-safety-design.md` (gitignored).
@@ -601,6 +614,15 @@ Planning reference: operator trust roadmap note from 2026-05-15.
     datawal rollover boundary is wired (S2 method shipped #676; synchronous wiring at S5)
     AND (b) the legacy-WAL non-dropping boundary — **(b) DONE (S3, #678).** Legacy WAL
     shares the same gen-aware seam; (a) still pending.
+- [ ] **datawal `isSegmentName` 10-digit cap [P3]** (pre-existing, not introduced by S7-1b).
+  `isSegmentName` requires exactly 10 decimal digits (e.g. `datawal-0000000001.bin`). At
+  seq ≥ 10^10 (ten billion) the filename grows to 11 digits, `isSegmentName` returns false,
+  and the segment is invisible to `segmentFiles` / `GCMaterializedSegments`. Additionally,
+  lexicographic sort diverges from numeric order at 11 digits, so "active = files[last]"
+  breaks. The WAL cannot roll past seq 9,999,999,999 safely. Fix: use a variable-width
+  format with leading zeros only up to the max expected width, OR switch `isSegmentName` to
+  a prefix+suffix check with `strconv.ParseUint` validation instead of a fixed-length check.
+  Captured here per S7-1b plan-gate fix #4.
 - [ ] **WAL (legacy + datawal) rotation crash-window durability [P1]** (surfaced by the S3
   plan-gate; pre-existing, affects the plaintext WAL too). `rotate` creates `wal-<seq>.bin`
   then `writeHeader` with **no fsync** — a crash in between leaves a zero-length / torn-header
