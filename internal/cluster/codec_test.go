@@ -839,3 +839,14 @@ func TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, cmd, got)
 }
+
+func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
+	data, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 3})
+	require.NoError(t, err)
+	cmd, err := DecodeCommand(data)
+	require.NoError(t, err)
+	require.Equal(t, CmdFSMValueResealDone, cmd.Type)
+	got, err := decodeFSMValueResealDoneCmd(cmd.Data)
+	require.NoError(t, err)
+	require.Equal(t, uint32(3), got.Gen)
+}

@@ -181,6 +181,15 @@ table ResealFSMValuesCmd {
   active_gen:uint32;
 }
 
+// FSMValueResealDoneCmd: ordering-fence marker proposed by the group leader
+// after DrainFSMValueRewrap returns nil. Every node applies the marker after
+// all preceding CmdResealFSMValues batches (raft ordering), so the per-node
+// post-apply hook fires with the node's store already clean. Gen is a log
+// hint only — the re-Kick is gen-agnostic. S7-1a-2.
+table FSMValueResealDoneCmd {
+  gen:uint32;
+}
+
 table CreateMultipartUploadCmd {
   upload_id:string;
   bucket:string;

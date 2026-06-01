@@ -53,6 +53,12 @@ const (
 	// (policy:, obj:) from a retired DEK generation onto the active generation.
 	// Applied in the serialized apply loop for race-freedom. S7-1a.
 	CmdResealFSMValues CommandType = 41
+	// CmdFSMValueResealDone is an ordering-fence marker proposed by the group
+	// leader after DrainFSMValueRewrap returns nil. Every node applies the
+	// marker after all preceding CmdResealFSMValues batches (raft ordering),
+	// so the per-node post-apply hook fires with the node's store already
+	// clean. Gen is a log hint only — the re-Kick is gen-agnostic. S7-1a-2.
+	CmdFSMValueResealDone CommandType = 42
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -169,6 +175,13 @@ type PutObjectQuarantineCmd struct {
 type ResealFSMValuesCmd struct {
 	Keys      []string
 	ActiveGen uint32
+}
+
+// FSMValueResealDoneCmd is the ordering-fence marker for CmdFSMValueResealDone.
+// Gen is a log hint for observability only; the re-Kick triggered by the
+// post-apply hook is gen-agnostic. S7-1a-2.
+type FSMValueResealDoneCmd struct {
+	Gen uint32
 }
 
 type CreateMultipartUploadCmd struct {
