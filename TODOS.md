@@ -601,6 +601,15 @@ Planning reference: operator trust roadmap note from 2026-05-15.
     datawal rollover boundary is wired (S2 method shipped #676; synchronous wiring at S5)
     AND (b) the legacy-WAL non-dropping boundary — **(b) DONE (S3, #678).** Legacy WAL
     shares the same gen-aware seam; (a) still pending.
+- [ ] **datawal `isSegmentName` 10-digit cap [P3]** (pre-existing, not introduced by S7-1b).
+  `isSegmentName` requires exactly 10 decimal digits (e.g. `datawal-0000000001.bin`). At
+  seq ≥ 10^10 (ten billion) the filename grows to 11 digits, `isSegmentName` returns false,
+  and the segment is invisible to `segmentFiles` / `GCMaterializedSegments`. Additionally,
+  lexicographic sort diverges from numeric order at 11 digits, so "active = files[last]"
+  breaks. The WAL cannot roll past seq 9,999,999,999 safely. Fix: use a variable-width
+  format with leading zeros only up to the max expected width, OR switch `isSegmentName` to
+  a prefix+suffix check with `strconv.ParseUint` validation instead of a fixed-length check.
+  Captured here per S7-1b plan-gate fix #4.
 - [ ] **WAL (legacy + datawal) rotation crash-window durability [P1]** (surfaced by the S3
   plan-gate; pre-existing, affects the plaintext WAL too). `rotate` creates `wal-<seq>.bin`
   then `writeHeader` with **no fsync** — a crash in between leaves a zero-length / torn-header
