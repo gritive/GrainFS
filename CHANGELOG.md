@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.493.0] - 2026-06-01
+
+### Changed
+
+- **EC GET: large objects always stream, regardless of shard-cache capacity.**
+  Reads above the sub-multipart threshold (`maxECPooledReadObjectSize`, 4 MiB)
+  previously buffered every data shard into memory and populated the shard cache
+  whenever the cache had capacity. Under `GOGC=100` that buffered-read working
+  set was the dominant peak-RSS cost. The buffer decision is now decoupled from
+  cache admission: large reads always take the bounded streaming reconstruct
+  path, while sub-4 MiB reads still buffer. On a single-node 4-drive (2+2)
+  benchmark this drops peak RSS from ~4405 MiB (1 GiB cache) to ~1934 MiB at the
+  same default cache size, while warm GET throughput holds at 0.98x vs minio and
+  cold GET improves to ~1.30x. The in-heap shard cache is not load-bearing for
+  warm GET when the OS page cache already covers the working set; the
+  `--shard-cache-size` default is unchanged.
+
 ## [0.0.492.0] - 2026-06-01
 
 ### Added
