@@ -53,14 +53,14 @@ const (
 // SendInstallSnapshot stays on the legacy path always — the 60s budget +
 // large-payload semantics don't fit the per-message frame model.
 type MetaRaftQUICTransport struct {
-	tr       *transport.QUICTransport
+	tr       raftRPCTransport
 	node     *Node
 	groupMux *GroupRaftQUICMux // nil = legacy-only; set by NewMetaRaftQUICTransportMux.
 }
 
 // NewMetaRaftQUICTransport creates a meta-Raft RPC transport without mux
 // support. Tests and legacy callers use this constructor.
-func NewMetaRaftQUICTransport(tr *transport.QUICTransport, node *Node) *MetaRaftQUICTransport {
+func NewMetaRaftQUICTransport(tr raftRPCTransport, node *Node) *MetaRaftQUICTransport {
 	m := &MetaRaftQUICTransport{tr: tr, node: node}
 	tr.Handle(transport.StreamMetaRaft, m.handleRPC)
 	return m
@@ -74,7 +74,7 @@ func NewMetaRaftQUICTransport(tr *transport.QUICTransport, node *Node) *MetaRaft
 //
 // groupMux may be nil; in that case behaviour matches the legacy
 // constructor.
-func NewMetaRaftQUICTransportMux(tr *transport.QUICTransport, node *Node, groupMux *GroupRaftQUICMux) *MetaRaftQUICTransport {
+func NewMetaRaftQUICTransportMux(tr raftRPCTransport, node *Node, groupMux *GroupRaftQUICMux) *MetaRaftQUICTransport {
 	m := &MetaRaftQUICTransport{tr: tr, node: node, groupMux: groupMux}
 	tr.Handle(transport.StreamMetaRaft, m.handleRPC) // legacy receiver always on for fallback
 	if groupMux != nil {
