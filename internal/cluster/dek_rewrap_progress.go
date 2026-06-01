@@ -41,7 +41,7 @@ func (f *MetaFSM) applyDEKRewrapProgress(data []byte) error {
 // resolving that set is the later prune consumer's responsibility. An empty
 // node set is never "fully rewrapped".
 //
-// Semantics of a single completion record
+// # Semantics of a single completion record
 //
 // A record means "at the time this node reported, it held no at-rest data below
 // gen within the ENUMERATED LANE CATEGORIES covered by the reported epoch":
@@ -56,13 +56,14 @@ func (f *MetaFSM) applyDEKRewrapProgress(data []byte) error {
 //     reports done. The pin is released when the write completes.
 //   - Lanes whose epoch has not yet been included in the node's reported epoch.
 //
-// Consequence for S7 prune
+// # Consequence for S7 prune
 //
 // The ledger is a necessary condition for pruning a retired generation, not a
 // sufficient one. A safe prune MUST additionally confirm:
 //   - dekRefCounts[gen] == 0 (no active reader holds a reference), AND
 //   - no in-flight S4-pinned encode is still writing under gen, AND
 //   - requiredEpoch covers all lanes that hold data for gen.
+//
 // Treat IsGenFullyRewrapped as one gate in an AND-conjunction, not a standalone
 // prune authorization.
 func (f *MetaFSM) IsGenFullyRewrapped(gen uint32, nodes []string, requiredEpoch uint32) bool {

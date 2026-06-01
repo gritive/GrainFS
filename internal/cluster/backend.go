@@ -1416,6 +1416,13 @@ func (b *DistributedBackend) SetBucketPolicy(bucket string, policyJSON []byte) e
 	return b.SetBucketPolicyPropose(bucket, policyJSON)
 }
 
+// ProposeResealFSMValues proposes a CmdResealFSMValues command to re-seal the
+// given full storage keys onto activeGen. Called by DrainFSMValueRewrap on the
+// group leader. The command is applied in the serialized apply loop. S7-1a.
+func (b *DistributedBackend) ProposeResealFSMValues(ctx context.Context, keys []string, activeGen uint32) error {
+	return b.propose(ctx, CmdResealFSMValues, ResealFSMValuesCmd{Keys: keys, ActiveGen: activeGen})
+}
+
 // SetBucketPolicyPropose is the coordinator-facing entrypoint: it skips the
 // local bucket-existence pre-check after the coordinator has run a
 // cluster-aware HeadBucket.

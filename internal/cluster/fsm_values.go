@@ -37,6 +37,19 @@ func (f *FSM) dataEncryptor() storage.DataEncryptor {
 	return nil
 }
 
+// activeDEKGen returns the keeper-current active DEK generation and whether a
+// keeper is wired. The DEK-value rewrap lane (S7-1a) reads this to track the
+// keeper's live active gen — NOT a fixed command/parameter gen — so a rotation
+// landing mid-drain just shifts the convergence target instead of livelocking.
+func (f *FSM) activeDEKGen() (gen uint32, ok bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.dekKeeper == nil {
+		return 0, false
+	}
+	return f.dekKeeper.ActiveDEKGeneration(), true
+}
+
 func (f *FSM) sealValue(key []byte, plain []byte) ([]byte, error) {
 	de := f.dataEncryptor()
 	if de == nil {

@@ -222,7 +222,12 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	if state.metaRaft != nil {
 		reportFn = state.metaRaft.ProposeDEKRewrapProgress
 	}
-	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl, state.nodeID, reportFn))
+	// S7-1a: FSM-value rewrap trigger — leader-only per group, epoch-neutral.
+	// The trigger is created once here; it captures state (by pointer) so that
+	// it reads state.dgMgr at invocation time — after bootOwnedGroupsAndEC has
+	// registered the group backends. The sync.Map single-flight guard inside the
+	// returned closure persists across rotations (allocated once at wire time).
+	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl, state.nodeID, reportFn), newFSMValueRewrapTriggerLazy(state))
 	return nil
 }
 
