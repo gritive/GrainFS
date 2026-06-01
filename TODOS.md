@@ -78,6 +78,21 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      - S6 rewrap scrubber: old-gen→new-gen re-encryption across ALL lanes (EC/packblob/datawal/
        logical-WAL/FSM-value/IAM/snapshot) — large, may sub-slice; `scrubberKick` is `nil` today
        (`dek_keeper_wiring.go:200`).
+     - **S7 slice progress (2026-06-01):** S6a–d rewrap machinery SHIPPED; S7-0 fail-closed prune guard
+       SHIPPED (#695, blanket-refuses ALL prune until S7-final). **S7-1 ledger epoch-tag = THIS PR** —
+       versions the S6d completion ledger by a lane-set epoch (`CurrentRewrapLaneSetEpoch`, stays 0 = EC+
+       packblob; `IsGenFullyRewrapped(gen, nodes, requiredEpoch)`), dormant + behavior-neutral, so a future
+       lane that widens the covered set cannot be mistaken as already-done (spec precondition 2). Remaining
+       roadmap: **S7-1a** FSM-value rewrap lane — apply-routing (new `CmdResealFSMValues{keys, activeGen}`
+       data-group command; apply reads-current-and-reseals in the serialized loop → race-free; invented
+       chunked proposer bumps epoch to 1; per-node post-commit hook cross-proposes completion into the
+       MetaFSM ledger; NOT the synchronous `RewrapLane` interface — a side-goroutine local reseal RACES the
+       apply loop = data loss; multipart census → S7-final term); **S7-1b** WAL rewrap lanes (datawal +
+       logical-WAL, NEEDS-LANE confirmed — both keep old-gen segments with no deletion path; fix the stale
+       gen-0 comment in `boot_phases_logical_wal.go`); **S7-2** generic `DEKGenSecretStore` reseal+census
+       (IAM/JWT/PDP-token/protocred/cluster-config — audit-derived, not hand-enumerated); **S7-final** unified
+       predicate replacing S7-0's blanket refuse + ref-safe `Prune` + S4-pin barrier + ⑤ MoveReplica trace.
+       Full design: `docs/superpowers/specs/2026-06-01-dek-rotation-s7-prune-safety-design.md` (gitignored).
      - S7 reference-safe `Prune` (DEKKeeper.Prune `safe` arg) + wire `scrubberKick` + rewrap-completion tracking.
        **S6d completion-predicate invariant:** the EC lane's `RewrapByGen` returns `nil` even when
        individual shards (transient `RewrapShardIfStaleAt` error) OR an entire data group (transient
