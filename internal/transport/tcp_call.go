@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -87,17 +88,10 @@ func (t *TCPTransport) CallWithBody(ctx context.Context, addr string, req *Messa
 	if err := t.codec.Encode(conn, req); err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
-	if body != nil {
-		if _, err := io.Copy(conn, body); err != nil {
-			return nil, fmt.Errorf("stream body to %s: %w", addr, err)
-		}
-	}
-	// Legitimate CloseWrite (framing invariant): delimits the EOF-terminated
-	// upload body so the server's body handler sees io.EOF. The server reads the
-	// body to EOF (consuming this close_notify) before responding, so no unread
-	// data forces an RST.
-	if err := conn.CloseWrite(); err != nil {
-		return nil, fmt.Errorf("close write to %s: %w", addr, err)
+	// Body as a chunk stream + terminator (replaces S1's CloseWrite delimiter):
+	// the server reads to the terminator and the conn stays open and reusable.
+	if err := writeChunkedBody(conn, bodyOrEmpty(body)); err != nil {
+		return nil, fmt.Errorf("stream body to %s: %w", addr, err)
 	}
 	resp, err := t.codec.Decode(conn)
 	if err != nil {
@@ -106,14 +100,25 @@ func (t *TCPTransport) CallWithBody(ctx context.Context, addr string, req *Messa
 	return checkResponseStatus(addr, resp)
 }
 
-// tcpReadCloser exposes the response-body bytes remaining on the conn after the
-// metadata frame. Close closes the underlying conn (connection-per-RPC), once.
+// bodyOrEmpty returns an empty reader for a nil body so writeChunkedBody still
+// emits the terminator, keeping the wire format uniform.
+func bodyOrEmpty(r io.Reader) io.Reader {
+	if r == nil {
+		return bytes.NewReader(nil)
+	}
+	return r
+}
+
+// tcpReadCloser exposes the chunked response body after the metadata frame.
+// Close closes the underlying conn (connection-per-RPC), once. (Task 2 makes
+// Close return a fully-drained conn to the pool instead of closing it.)
 type tcpReadCloser struct {
 	conn net.Conn
+	body *chunkedBodyReader
 	once sync.Once
 }
 
-func (r *tcpReadCloser) Read(p []byte) (int, error) { return r.conn.Read(p) }
+func (r *tcpReadCloser) Read(p []byte) (int, error) { return r.body.Read(p) }
 func (r *tcpReadCloser) Close() error {
 	var err error
 	r.once.Do(func() { err = r.conn.Close() })
@@ -147,10 +152,8 @@ func (t *TCPTransport) CallRead(ctx context.Context, addr string, req *Message) 
 		stop()
 		return nil, nil, fmt.Errorf("encode request: %w", err)
 	}
-	// No CloseWrite on the request (framing invariant): it is a self-delimiting
-	// frame with no body. Sending close_notify would leave unread data in the
-	// server's buffer => RST on the server's close, truncating the response body.
-	// The SERVER CloseWrites after the body so this client sees a clean io.EOF.
+	// No request body (CallRead): the request frame is self-delimiting; the server
+	// replies with a metadata frame followed by the chunked response body.
 	resp, err := t.codec.Decode(conn)
 	if err != nil {
 		stop()
@@ -172,7 +175,7 @@ func (t *TCPTransport) CallRead(ctx context.Context, addr string, req *Message) 
 	// (matches QUIC). The body lifetime is owned by the caller's Close.
 	_ = conn.SetDeadline(time.Time{})
 	ok = true
-	return resp, &tcpReadCloser{conn: conn}, nil
+	return resp, &tcpReadCloser{conn: conn, body: &chunkedBodyReader{r: conn}}, nil
 }
 
 // CallFlatBuffer sends a FlatBuffers-framed request (zero-copy from the builder)

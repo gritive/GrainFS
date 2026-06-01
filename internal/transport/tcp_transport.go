@@ -198,12 +198,18 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 
 	switch {
 	case hasBody:
-		// body = raw bytes remaining on conn after the request frame, delimited
-		// by the client's CloseWrite (close_notify => io.EOF). The handler reads
-		// to EOF, consuming the close_notify, so nothing is left unread on conn.
-		resp := bodyHandler(req, conn)
+		// Request body is a chunk stream terminated by a zero-length chunk; the
+		// handler reads it via a chunkedBodyReader. Drain any remainder to the
+		// terminator so the conn is left clean (no CloseWrite — conn stays open).
+		cbr := &chunkedBodyReader{r: conn}
+		resp := bodyHandler(req, cbr)
+		if !cbr.done {
+			_, _ = io.Copy(io.Discard, cbr) // defensive drain to terminator
+		}
+		// The response — OK or StatusError — is a single self-delimiting frame with
+		// no chunk stream after it, so the conn is left clean either way.
 		if resp != nil {
-			_ = t.codec.Encode(conn, resp) // self-delimiting frame: no CloseWrite
+			_ = t.codec.Encode(conn, resp)
 		}
 	case hasRead:
 		resp, body := readHandler(req)
@@ -217,15 +223,13 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 		}
 		if body != nil {
 			defer body.Close()
-			if _, err := io.Copy(conn, body); err != nil {
+			// Response body as a chunk stream + terminator (no CloseWrite): the
+			// client's chunkedBodyReader stops at the terminator and the conn stays
+			// open and reusable.
+			if err := writeChunkedBody(conn, body); err != nil {
 				return
 			}
 		}
-		// This is ONE of the only two legitimate CloseWrites (framing invariant):
-		// it delimits the EOF-terminated response body so the client's body reader
-		// sees a clean io.EOF (not io.ErrUnexpectedEOF). The client sent no body
-		// and did NOT CloseWrite, so conn has no unread data => graceful close.
-		t.closeWrite(conn)
 	case hasType:
 		resp := typeHandler(req)
 		if resp != nil {
@@ -248,14 +252,6 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 		case t.inbox <- &ReceivedMessage{From: from, Message: req}:
 		case <-t.ctx.Done():
 		}
-	}
-}
-
-// closeWrite half-closes the write side (TLS close_notify) so the peer's read
-// terminates with a clean io.EOF. No-op for non-TLS conns.
-func (t *TCPTransport) closeWrite(conn net.Conn) {
-	if tc, ok := conn.(*tls.Conn); ok {
-		_ = tc.CloseWrite()
 	}
 }
 
