@@ -242,9 +242,10 @@ func (f *FSM) applyResealFSMValues(txn *badger.Txn, data []byte) error {
 		if err := f.setValue(txn, key, plain); err != nil { // reseals at keeper-current gen
 			return err // fail-closed-and-break (see above)
 		}
-		// Metric label uses cmd.ActiveGen as a hint of the rotation that drove
-		// this batch; the actual reseal target is keeper-current.
-		RewrapFSMValuesTotal.WithLabelValues(strconv.FormatUint(uint64(c.ActiveGen), 10)).Inc()
+		// Label with the actual reseal target (keeper-current), not cmd.ActiveGen
+		// (which is only a hint of the rotation that drove this batch and can lag
+		// keeper-current under back-to-back rotations).
+		RewrapFSMValuesTotal.WithLabelValues(strconv.FormatUint(uint64(current), 10)).Inc()
 	}
 	return nil
 }
