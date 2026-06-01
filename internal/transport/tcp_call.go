@@ -36,7 +36,13 @@ func (t *TCPTransport) applyCtx(ctx context.Context, conn net.Conn) func() {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close()
+			// Prefer done: if the RPC already completed (stop() closed done),
+			// do NOT close the conn — CallRead may have handed it to the caller.
+			select {
+			case <-done:
+			default:
+				_ = conn.Close()
+			}
 		case <-done:
 		}
 	}()
@@ -154,11 +160,16 @@ func (t *TCPTransport) CallRead(ctx context.Context, addr string, req *Message) 
 		stop()
 		return nil, nil, err
 	}
-	// Hand the conn to the caller. Release the ctx watcher (stop) and clear the
-	// dial deadline so the body read is unbounded by the RPC ctx (matches QUIC,
-	// whose body read is also unbounded after a successful CallRead return). The
-	// body lifetime is owned by the caller's Close.
+	// Hand the conn to the caller. Release the ctx watcher (stop) first, then
+	// guard the handoff: if ctx ended around the same time the RPC succeeded, the
+	// watcher may already have closed the conn (the prefer-done recheck only
+	// covers the post-stop window). Refuse to hand off a possibly-doomed conn.
 	stop()
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, nil, fmt.Errorf("context done before body handoff from %s: %w", addr, cerr)
+	}
+	// Clear the dial deadline so the body read is unbounded by the RPC ctx
+	// (matches QUIC). The body lifetime is owned by the caller's Close.
 	_ = conn.SetDeadline(time.Time{})
 	ok = true
 	return resp, &tcpReadCloser{conn: conn}, nil

@@ -13,6 +13,43 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 ## Now
 
+- [ ] **QUIC→TCP migration — S1 TCPTransport landed dormant; wiring-slice (S2/S3) must-fix items**
+   - S1 added `internal/transport/{tcp_transport,tcp_call}.go`: a TLS-1.3-over-TCP, connection-per-RPC
+     transport satisfying the transport-agnostic role interfaces (compile-time asserted in
+     `cluster/raft/transport_iface.go`). It is **dormant** (not wired into boot; QUIC stays live).
+     Code gate (3 reviewers + advisor) confirmed the framing invariant sound on all happy paths; the
+     items below are robustness/faithfulness gaps that **cannot fire in dormant S1** (loopback, well-
+     behaved peers) but MUST be addressed before S2/S3 wire TCPTransport into boot.
+   - [ ] **[P1] Body-handler drain-on-all-paths, OR transport drain+deadline (B2 / correctness Finding 1+3).**
+     The framing invariant requires a `HandleBody` handler to drain the body to `io.EOF` on **every**
+     return path; the only prod body handler `HandleWriteBody` (`shard_service.go:802/805/809` +
+     `readShardPayload` LimitReader) early-returns an error WITHOUT draining → unread client bytes →
+     server `conn.Close()` emits RST → client gets `ECONNRESET` instead of the structured `StatusError`
+     frame. Also a `CallWithBody`-vs-plain-`Handle` type mismatch truncates the same way. Fix at wire:
+     either make every body handler drain on all paths, OR have `serveConn`'s hasBody branch
+     `io.Copy(io.Discard, conn)` before close. **Coupling:** the transport-side drain is only safe with a
+     server read deadline (a client that never `CloseWrite`s makes the discard block forever) — so this
+     pairs with the deadline item below; do them together.
+   - [ ] **[P2] Server-side read deadline + conn reaping (correctness Finding 2 / concurrency #1).**
+     `serveConn` sets no deadline and `Decode` blocks on a bare `conn.Read`; `Close()` cancels `t.ctx`
+     and closes only the listener, never the accepted conns → a stalled/dead peer leaks a goroutine+FD
+     that survives shutdown (QUIC is backstopped by `MaxIdleTimeout`). Add a handshake/request-frame
+     read deadline (cleared before long body transfers) and reap in-flight conns on `Close()`. This is
+     spec §4c flow-control territory (deadlines, accept-rate, FD limits) — deferred by S1 design.
+   - [ ] **[P2] Inbound admission control / `StatusOverloaded` (B3 / concurrency #3).** TCPTransport has
+     no `TrafficLimiter`, so it never emits `StatusOverloaded` and `acceptLoop` spawns an unbounded
+     `serveConn` goroutine per conn with no backpressure; a full `inbox` (cap 256) wedges gossip
+     `serveConn`s until `Close()`. Spec §4b/S3 elastic pool is the intended throttle point.
+   - [ ] **[P3] Confirm gossip anti-spoof parity at wire (unconfirmed).** A code-gate subagent reported
+     QUIC and TCP both set `ReceivedMessage.From = conn.RemoteAddr()` (`host:ephemeralPort`) and gossip's
+     `nodeIDMatchesFrom` (`gossip.go:382`) compares host-only — implying parity. This was NOT
+     independently verified (rode in on a subagent report); confirm before wiring TCP into the gossip path.
+   - **Decision correction for the wiring slice:** the S1 plan's "skip `SetStreamHandler`" was WRONG —
+     boot routes `StreamData` shard RPCs (ReadShard/ReadShardRange/Ping) through the catch-all
+     (`SetStreamHandler` → `streamRouter.Dispatch`), invisible to the conformance assertions. S1 pulled
+     the catch-all forward (implemented + tested). Remaining `ClusterTransport` gap = the mux-connection
+     methods (`SetMuxConnHandler`/`GetOrConnectMux`/`EvictMux`), which are the S2 RaftConn restructure.
+
 - [ ] **At-rest unification — R3 static-key retirement (last slice; cleanup, not migration)**
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format
      version and an older dir loud-fails on a newer binary (no in-place re-encrypt,

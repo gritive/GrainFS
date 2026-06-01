@@ -195,6 +195,35 @@ func TestTCP_SendReceive_FireAndForget(t *testing.T) {
 	}
 }
 
+func TestTCP_CatchAllStreamHandler_RoutesAndPrioritizes(t *testing.T) {
+	const psk = "catchall-key"
+	srv := startTCP(t, psk)
+	// Catch-all (boot wires StreamData shard RPCs through this); a per-type
+	// handler for a different type must still take priority.
+	srv.SetStreamHandler(func(req *Message) *Message {
+		return NewResponse(req, []byte("catchall:"+string(req.Payload)))
+	})
+	srv.Handle(StreamAdmin, func(req *Message) *Message {
+		return NewResponse(req, []byte("pertype:"+string(req.Payload)))
+	})
+
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// StreamData has no per-type handler => must reach the catch-all (this is the
+	// shard-RPC routing path that the conformance assertions cannot verify).
+	resp, err := cli.Call(ctx, srv.LocalAddr(), &Message{Type: StreamData, Payload: []byte("d")})
+	require.NoError(t, err)
+	assert.Equal(t, "catchall:d", string(resp.Payload))
+
+	// StreamAdmin has a per-type handler => it wins over the catch-all.
+	resp, err = cli.Call(ctx, srv.LocalAddr(), &Message{Type: StreamAdmin, Payload: []byte("a")})
+	require.NoError(t, err)
+	assert.Equal(t, "pertype:a", string(resp.Payload))
+}
+
 func TestTCP_ConcurrentCalls_OnePeer(t *testing.T) {
 	const psk = "conc-key"
 	srv := startTCP(t, psk)

@@ -43,6 +43,8 @@ type TCPTransport struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
+	streamHandler StreamHandler // catch-all for types with no per-type handler
+
 	snap      *IdentitySnapshot
 	serverTLS *tls.Config
 	clientTLS *tls.Config
@@ -107,7 +109,23 @@ func MustNewTCPTransport(psk string) *TCPTransport {
 func (t *TCPTransport) Receive() <-chan *ReceivedMessage { return t.inbox }
 
 // LocalAddr returns the bound listen address.
-func (t *TCPTransport) LocalAddr() string { return t.localAddr }
+func (t *TCPTransport) LocalAddr() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.localAddr
+}
+
+// SetStreamHandler registers a catch-all handler for request types that have no
+// per-type handler (mirrors QUICTransport). Boot wires the cluster stream router
+// here, and StreamData shard RPCs reach the shard service only via this catch-all
+// — so a faithful TCP drop-in must implement it even though no use-site role
+// interface requires it. (Remaining ClusterTransport gap = the mux-connection
+// methods, which are the S2 RaftConn restructure's job.)
+func (t *TCPTransport) SetStreamHandler(h StreamHandler) {
+	t.mu.Lock()
+	t.streamHandler = h
+	t.mu.Unlock()
+}
 
 // Handle registers a per-type request/response handler.
 func (t *TCPTransport) Handle(st StreamType, h StreamHandler) { t.router.Handle(st, h) }
@@ -214,7 +232,18 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 			_ = t.codec.Encode(conn, resp) // self-delimiting frame: no CloseWrite
 		}
 	default:
-		// No registered handler: fire-and-forget (gossip Receive path).
+		// No per-type handler: try the catch-all (boot routes StreamData shard
+		// RPCs through it via SetStreamHandler), then fall back to the inbox for
+		// fire-and-forget (gossip Receive path). Mirrors QUIC handleStream order.
+		t.mu.RLock()
+		catchAll := t.streamHandler
+		t.mu.RUnlock()
+		if catchAll != nil {
+			if resp := catchAll(req); resp != nil {
+				_ = t.codec.Encode(conn, resp) // self-delimiting frame: no CloseWrite
+				return
+			}
+		}
 		select {
 		case t.inbox <- &ReceivedMessage{From: from, Message: req}:
 		case <-t.ctx.Done():
