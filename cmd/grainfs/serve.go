@@ -101,7 +101,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	// 1 GiB keeps repeated multipart range reads resident in 4-node cluster
 	// runs without the RSS jump seen at 2 GiB. Set 0 to disable when running
 	// --measure-read-amp baselines.
-	cmd.Flags().Int64("shard-cache-size", 1024*1024*1024, "EC shard cache capacity in bytes (0 disables)")
+	cmd.Flags().Int64("shard-cache-size", 1024*1024*1024, "EC shard cache capacity in bytes (0 disables). Held in-heap: larger speeds warm GET but raises RSS; smaller leans on the OS page cache (warm sets that fit RAM stay fast). Tune down to trade GET-cache footprint for lower RSS.")
 	// HealReceipt API + gossip.
 	cmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API")
 	cmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to the resolved cluster transport key in cluster mode)")
