@@ -3,7 +3,6 @@ package cluster
 import (
 	"testing"
 
-	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -98,7 +97,6 @@ func TestDEKVersionSnapshot_LegacyNoNodeEpochs(t *testing.T) {
 	clusterpb.MetaDEKVersionSnapshotAddRewrapDone(b, rewrapDoneVec)
 	root := clusterpb.MetaDEKVersionSnapshotEnd(b)
 	buf := fbFinish(b, root)
-	_ = flatbuffers.UOffsetT(0) // suppress unused import if needed
 
 	_, _, _, _, got, err := decodeMetaDEKVersionSnapshot(buf)
 	require.NoError(t, err)
