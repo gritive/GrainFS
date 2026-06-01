@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"crypto/rand"
+	"errors"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -140,7 +141,12 @@ func TestApply_DEKVersionPrune_RefusesIfReferenced(t *testing.T) {
 	}
 }
 
-func TestApply_DEKVersionPrune_SucceedsWhenUnreferenced(t *testing.T) {
+// S7-0 fail-closed guard: prune is refused even when the object-index refcount is
+// zero, because that refcount is blind to JWT/IAM/PDP/protocol-credential/
+// cluster-config/FSM-value/WAL secrets still sealed under the gen. The old
+// "SucceedsWhenUnreferenced" behavior was the live data-loss path; it is now an
+// always-refuse contract until S7 wires the full prune-safety predicate.
+func TestApply_DEKVersionPrune_RefusedUntilS7Predicate(t *testing.T) {
 	kek := make([]byte, 32)
 	if _, err := rand.Read(kek); err != nil {
 		t.Fatal(err)
@@ -152,19 +158,23 @@ func TestApply_DEKVersionPrune_SucceedsWhenUnreferenced(t *testing.T) {
 	if err := keeper.Rotate(); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
-	// gen 0 exists and active is gen 1; no ref count injection → ref = 0.
+	// gen 0 exists and active is gen 1; no ref count injection → object ref = 0.
 	fsm := newTestMetaFSMWithDEKKeeper(t, keeper)
 
 	payload := buildMetaDEKVersionPruneCmd(t, 0)
 	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeDEKVersionPrune, payload)
-	if err := fsm.applyCmd(cmd); err != nil {
-		t.Fatalf("applyCmd DEKVersionPrune: %v", err)
+	err = fsm.applyCmd(cmd)
+	if err == nil {
+		t.Fatal("expected DEK prune to be refused (S7-0 fail-closed), got nil")
+	}
+	if !errors.Is(err, ErrDEKPruneSafetyIncomplete) {
+		t.Fatalf("expected ErrDEKPruneSafetyIncomplete, got %v", err)
 	}
 
-	// gen 0 should be pruned; only gen 1 remains.
+	// No generation may be deleted while the guard is in force.
 	versions := keeper.Versions()
-	if _, ok := versions[0]; ok {
-		t.Fatal("expected gen 0 pruned, but still present")
+	if _, ok := versions[0]; !ok {
+		t.Fatal("expected gen 0 still present (prune refused), but it was deleted")
 	}
 	if _, ok := versions[1]; !ok {
 		t.Fatal("expected gen 1 still present")

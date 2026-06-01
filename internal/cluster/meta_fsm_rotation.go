@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -11,6 +12,12 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 )
+
+// ErrDEKPruneSafetyIncomplete is returned by applyDEKVersionPrune while the S7-0
+// fail-closed guard is in force: DEK-version prune is refused until S7 wires a
+// prune-safety predicate covering every DEK-gen-stamped at-rest category, not
+// just the object-index refcount.
+var ErrDEKPruneSafetyIncomplete = errors.New("dek prune refused: prune-safety predicate incomplete (S7 pending)")
 
 // dekBootstrapSentinel is the DEKReplicatedRotateCmd.ExpectedActiveGen value
 // that marks the gen-0 bootstrap path ("no existing DEK yet"). math.MaxUint32
@@ -374,8 +381,23 @@ func (f *MetaFSM) applyDEKVersionPrune(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: DEKVersionPrune: %w", err)
 	}
-	safe := f.dekRefCount(gen) == 0
-	return f.dekKeeper.Prune(gen, safe)
+	// S7-0 fail-closed guard. The only prune-safety signal today is the object-index
+	// refcount (dekRefCount), which is blind to every other DEK-gen-stamped at-rest
+	// category: JWT signing keys, IAM credentials, PDP/protocol credentials,
+	// cluster-config secrets, data-group FSM values (bucket policy / multipart /
+	// object meta), and WAL segments. Pruning a gen on the object refcount alone
+	// permanently destroys those (IAM = boot-brick on the next snapshot Restore).
+	// Refuse ALL DEK-version prune until S7 wires the full predicate. The refusal is
+	// a NON-FATAL apply error — runApplyLoop fatal-halts only on ErrFSMKEKFatal
+	// (meta_raft.go), and the proposer logs this (dek_post_commit.go); no generation
+	// is deleted. Design: docs/superpowers/specs/2026-06-01-dek-rotation-s7-prune-safety-design.md
+	//
+	// The object-index refcount is surfaced in the refusal so an operator sees that
+	// even a zero object-refcount does not authorize prune (the other categories are
+	// uncounted). The refcount machinery (incDEKRef/decDEKRef/dekRefCount) stays wired
+	// because S7's full predicate will consume it as one of its terms.
+	return fmt.Errorf("meta_fsm: DEKVersionPrune gen %d refused (object refs=%d; prune-safety predicate incomplete): %w",
+		gen, f.dekRefCount(gen), ErrDEKPruneSafetyIncomplete)
 }
 
 func (f *MetaFSM) applyJWTSigningKeyRotate(data []byte) error {

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.493.0] - 2026-06-01
+
+### Security
+
+- DEK-version prune is now fail-closed. The retired-generation prune
+  (`encryption.prune-dek-version`) previously deleted a DEK generation once no
+  object referenced it, but that check was blind to other data still sealed
+  under the generation — JWT signing keys, IAM and protocol credentials,
+  external-PDP and cluster-config secrets, bucket policies and multipart state,
+  and WAL segments. Pruning on the object refcount alone could permanently
+  destroy those (and brick a node's metadata restore). Prune is now refused
+  unconditionally (logged server-side) until a complete prune-safety predicate
+  covering every at-rest category lands. This is the first slice (S7-0) of the
+  DEK-rotation prune-safety work; no generation is deleted in the meantime.
+
 ## [0.0.492.0] - 2026-06-01
 
 ### Added
