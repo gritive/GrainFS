@@ -31,8 +31,10 @@ var (
 	_ raftRPCTransport   = (*transport.QUICTransport)(nil)
 	_ muxDriverTransport = (*transport.QUICTransport)(nil)
 
-	// S1 TCP transport satisfies the transport-agnostic RPC surface. It does NOT
-	// yet satisfy muxDriverTransport — the TCP mux carrier + GetOrConnectMux/
-	// EvictMux/SetMuxConnHandler on TCPTransport are the S2b-2 driver's job.
-	_ raftRPCTransport = (*transport.TCPTransport)(nil)
+	// TCP transport satisfies the transport-agnostic RPC surface (S1) AND, since
+	// S2b-2 added the mux carrier (GetOrConnectMux/EvictMux/SetMuxConnHandler),
+	// muxDriverTransport — proven multi-node over the carrier by S5b's
+	// raftv2_group_mux_tcp_test.go.
+	_ raftRPCTransport   = (*transport.TCPTransport)(nil)
+	_ muxDriverTransport = (*transport.TCPTransport)(nil)
 )

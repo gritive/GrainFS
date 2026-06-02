@@ -215,6 +215,19 @@ func (t *TCPTransport) GetOrConnectMux(ctx context.Context, addr string) (MuxCar
 	return c, nil
 }
 
+// InboundMuxSessionCount returns the number of live INBOUND mux sessions (accepted
+// mux-ALPN conns grouped by session-init). It is a positive signal that raft
+// traffic actually rode the mux carrier end-to-end: the legacy Call fallback dials
+// the data-plane ALPN and is never routed through routeInboundMuxConn, so it never
+// populates this. (Outbound carriers, by contrast, are registered at GetOrConnectMux
+// BEFORE any dial, so an outbound count cannot distinguish a used carrier from a
+// fallen-back one.)
+func (t *TCPTransport) InboundMuxSessionCount() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.muxInbound)
+}
+
 // EvictMux drops an outbound carrier from the reap-set. internal/raft calls this on
 // break (OnBroken) and on the race-loss path (rc.Close()→OnBroken). addr is part of
 // the interface signature but unused: outbound carriers are identity-keyed, not
