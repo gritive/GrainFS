@@ -188,7 +188,7 @@ func TestTCPDesync_MismatchedRespIDIsCaught(t *testing.T) {
 	t.Cleanup(func() { _ = srvTr.Close() })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	tln := tls.NewListener(ln, srvTr.serverTLS)
+	tln := tls.NewListener(ln, srvTr.buildServerTLS())
 	t.Cleanup(func() { _ = tln.Close() })
 	go func() {
 		conn, aerr := tln.Accept()
@@ -331,7 +331,7 @@ func TestTCPPool_NoRetryAfterBodyConsumed(t *testing.T) {
 	t.Cleanup(func() { _ = srvTr.Close() })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	tln := tls.NewListener(ln, srvTr.serverTLS)
+	tln := tls.NewListener(ln, srvTr.buildServerTLS())
 	t.Cleanup(func() { _ = tln.Close() })
 	go func() {
 		conn, aerr := tln.Accept()

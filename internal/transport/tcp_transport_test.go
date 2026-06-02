@@ -41,8 +41,8 @@ func TestNewTCPTransport_DerivesClusterIdentity(t *testing.T) {
 
 	_, wantSPKI, err := DeriveClusterIdentity(psk)
 	require.NoError(t, err)
-	assert.Equal(t, wantSPKI, tr.snap.PresentSPKI)
-	assert.True(t, tr.snap.Accepts(wantSPKI))
+	assert.Equal(t, wantSPKI, tr.identity.Load().PresentSPKI)
+	assert.True(t, tr.identity.Load().Accepts(wantSPKI))
 }
 
 func TestNewTCPTransport_EmptyPSKRejected(t *testing.T) {

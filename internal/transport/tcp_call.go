@@ -47,7 +47,7 @@ func (t *TCPTransport) dial(ctx context.Context, addr string) (*tls.Conn, error)
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 	t.tuneTCP(raw)
-	conn := tls.Client(raw, t.clientTLS)
+	conn := tls.Client(raw, t.buildClientTLS())
 	if err := conn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("tls handshake %s: %w", addr, err)
@@ -64,7 +64,7 @@ func (t *TCPTransport) dialMux(ctx context.Context, addr string) (*tls.Conn, err
 		return nil, fmt.Errorf("dial mux %s: %w", addr, err)
 	}
 	t.tuneTCP(raw)
-	conn := tls.Client(raw, t.muxClientTLS)
+	conn := tls.Client(raw, t.buildMuxClientTLS())
 	if err := conn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("tls handshake mux %s: %w", addr, err)

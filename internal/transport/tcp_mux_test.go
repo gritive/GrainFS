@@ -60,9 +60,9 @@ func TestTCPMux_SessionIDsUnique(t *testing.T) {
 func TestTCPMux_ServerAdvertisesBothALPNs(t *testing.T) {
 	tr := MustNewTCPTransport("alpn-key")
 	defer tr.Close()
-	assert.Equal(t, []string{tcpMuxALPN, tcpALPN}, tr.serverTLS.NextProtos)
-	assert.Equal(t, []string{tcpALPN}, tr.clientTLS.NextProtos)       // gate-check #1
-	assert.Equal(t, []string{tcpMuxALPN}, tr.muxClientTLS.NextProtos) // gate-check #1
+	assert.Equal(t, []string{tcpMuxALPN, tcpALPN}, tr.buildServerTLS().NextProtos)
+	assert.Equal(t, []string{tcpALPN}, tr.buildClientTLS().NextProtos)       // gate-check #1
+	assert.Equal(t, []string{tcpMuxALPN}, tr.buildMuxClientTLS().NextProtos) // gate-check #1
 }
 
 func TestTCPMux_OutboundCarrier_OpenAndClose(t *testing.T) {

@@ -60,10 +60,13 @@ type TCPTransport struct {
 
 	streamHandler StreamHandler // catch-all for types with no per-type handler
 
-	snap         *IdentitySnapshot
-	serverTLS    *tls.Config
-	clientTLS    *tls.Config
-	muxClientTLS *tls.Config // mux-ONLY dialer config (NextProtos = [tcpMuxALPN])
+	// Live-swappable identity (S5a), mirroring QUICTransport: the composer owns
+	// accept-set/present-cert mutations and atomically stores a fresh
+	// IdentitySnapshot into identity; the TLS configs are rebuilt per
+	// dial/handshake from identity.Load() so a post-Listen rotation/flip takes
+	// effect on NEW connections without a restart. (S1 used a single static snap.)
+	identity atomic.Pointer[IdentitySnapshot]
+	composer *identityComposer
 
 	cfg     TCPTransportConfig
 	pool    *connPool             // per-peer elastic data-plane conn pool (S3b)
@@ -100,41 +103,57 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 		router:      NewStreamRouter(),
 		ctx:         ctx,
 		cancel:      cancel,
-		snap:        snap,
 		conns:       make(map[net.Conn]struct{}),
 		muxInbound:  make(map[muxSessionID]*tcpInboundMuxCarrier),
 		muxOutbound: make(map[*tcpOutboundMuxCarrier]struct{}),
 	}
 	t.applyConfig(cfg)
-	// Server pins the dialer's cert SPKI; ClientAuth forces the dialer to present
-	// one. crypto/tls runs VerifyPeerCertificate during the handshake and fails
-	// closed on mismatch — unlike quic-go, no app-layer re-check is needed.
-	t.serverTLS = &tls.Config{
+	// Seed the live identity (base PSK accepted, present = PSK cert), then hand
+	// ownership to the composer whose swap closure atomically restores it — exactly
+	// as NewQUICTransport does — so rotation/flip mutations recompute the snapshot.
+	t.identity.Store(snap)
+	t.composer = newIdentityComposer(spki, func(s *IdentitySnapshot) { t.identity.Store(s) })
+	t.composer.setPresent(cert, spki)
+	return t, nil
+}
+
+// buildServerTLS returns the TLS config for an inbound handshake, read FRESH from
+// identity.Load() (via Listen's GetConfigForClient) so a post-Listen rotation/flip
+// takes effect on new connections. Advertises BOTH ALPNs (data-plane tcpALPN + mux
+// tcpMuxALPN); inbound conns route by negotiated protocol in serveConn (S2b-2).
+// Server pins the dialer's cert SPKI; ClientAuth forces the dialer to present one.
+func (t *TCPTransport) buildServerTLS() *tls.Config {
+	snap := t.identity.Load()
+	return &tls.Config{
 		MinVersion:            tls.VersionTLS13,
 		Certificates:          []tls.Certificate{snap.PresentCert},
 		ClientAuth:            tls.RequireAnyClientCert,
-		NextProtos:            []string{tcpALPN},
+		NextProtos:            []string{tcpMuxALPN, tcpALPN},
 		VerifyPeerCertificate: pinAcceptedSPKI(snap),
 	}
-	// Dialer presents the cluster cert and pins the server's SPKI. InsecureSkipVerify
-	// disables default CA/hostname verification; the real check is the SPKI pin in
-	// VerifyPeerCertificate (same pattern as quic.go buildClientTLSConfig; repo
-	// golangci excludes G402).
-	t.clientTLS = &tls.Config{
+}
+
+// buildClientTLS returns the data-plane dialer config, read FRESH from
+// identity.Load() per dial. InsecureSkipVerify disables default CA/hostname checks;
+// the real check is the SPKI pin in VerifyPeerCertificate (same as quic.go; repo
+// golangci excludes G402).
+func (t *TCPTransport) buildClientTLS() *tls.Config {
+	snap := t.identity.Load()
+	return &tls.Config{
 		MinVersion:            tls.VersionTLS13,
 		InsecureSkipVerify:    true,
 		Certificates:          []tls.Certificate{snap.PresentCert},
 		NextProtos:            []string{tcpALPN},
 		VerifyPeerCertificate: pinAcceptedSPKI(snap),
 	}
-	// Advertise BOTH ALPNs on the listener: data-plane (tcpALPN) and mux (tcpMuxALPN).
-	// Inbound conns route by negotiated protocol in serveConn (S2b-2).
-	t.serverTLS.NextProtos = []string{tcpMuxALPN, tcpALPN}
-	// Mux dials use a SEPARATE config offering ONLY the mux ALPN, so a data-plane dial
-	// can never negotiate mux (gate-check #1) and a non-mux peer fails a mux dial cleanly.
-	t.muxClientTLS = t.clientTLS.Clone()
-	t.muxClientTLS.NextProtos = []string{tcpMuxALPN}
-	return t, nil
+}
+
+// buildMuxClientTLS is buildClientTLS offering ONLY the mux ALPN, so a data-plane
+// dial can never negotiate mux and a non-mux peer fails a mux dial cleanly.
+func (t *TCPTransport) buildMuxClientTLS() *tls.Config {
+	cfg := t.buildClientTLS()
+	cfg.NextProtos = []string{tcpMuxALPN}
+	return cfg
 }
 
 // applyConfig (re)builds the config-derived components (pool, traffic limiter,
@@ -206,8 +225,17 @@ func (t *TCPTransport) Listen(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	// GetConfigForClient reads the live IdentitySnapshot per inbound handshake
+	// (via buildServerTLS), so a post-Listen SwapIdentity/FlipPresent/rotation
+	// takes effect on new connections without a restart (mirror quic.go Listen).
+	base := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		ClientAuth:         tls.RequireAnyClientCert,
+		NextProtos:         []string{tcpMuxALPN, tcpALPN},
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) { return t.buildServerTLS(), nil },
+	}
 	t.mu.Lock()
-	t.listener = tls.NewListener(ln, t.serverTLS)
+	t.listener = tls.NewListener(ln, base)
 	t.localAddr = ln.Addr().String()
 	t.mu.Unlock()
 	go t.acceptLoop()

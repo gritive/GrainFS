@@ -44,7 +44,7 @@ func TestTCPMux_VersionMismatchRejectedViaALPN(t *testing.T) {
 	// A future mux protocol version would bump the ALPN to "grainfs-tcp-mux-v2".
 	// The server advertises [tcpMuxALPN ("...-v1"), tcpALPN]; with no overlap the
 	// TLS handshake must fail — version is enforced at the ALPN.
-	wrongTLS := cli.muxClientTLS.Clone()
+	wrongTLS := cli.buildMuxClientTLS()
 	wrongTLS.NextProtos = []string{"grainfs-tcp-mux-v2"}
 	require.NotEqual(t, tcpMuxALPN, wrongTLS.NextProtos[0]) // sanity: it really is a mismatch
 
@@ -80,7 +80,7 @@ func TestTCPMux_VersionMatchHandshakeSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = raw.Close() }()
 
-	conn := tls.Client(raw, cli.muxClientTLS.Clone())
+	conn := tls.Client(raw, cli.buildMuxClientTLS())
 	require.NoError(t, conn.HandshakeContext(ctx))
 	require.Equal(t, tcpMuxALPN, conn.ConnectionState().NegotiatedProtocol)
 	_ = conn.SetDeadline(time.Now().Add(time.Second))

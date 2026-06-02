@@ -191,6 +191,23 @@ func (t *connPool) closeAll() {
 	closeConns(victims)
 }
 
+// closePeer closes the idle pooled conns for one peer (S5a ClosePeer / per-peer
+// recycle). Like closeAll, it leaves in-flight conns to their owner's discard but
+// keeps total accurate so the cap is not bypassed.
+func (t *connPool) closePeer(addr string) {
+	t.mu.Lock()
+	victims := make([]net.Conn, 0, len(t.idle[addr]))
+	for _, ic := range t.idle[addr] {
+		victims = append(victims, ic.c)
+		if t.cap > 0 {
+			t.total[addr]--
+		}
+	}
+	delete(t.idle, addr)
+	t.mu.Unlock()
+	closeConns(victims)
+}
+
 func closeConns(cs []net.Conn) {
 	for _, c := range cs {
 		_ = c.Close()
