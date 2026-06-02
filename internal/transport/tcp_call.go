@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,61 +12,41 @@ import (
 	"time"
 )
 
-// connPool is a minimal per-peer free-list of idle data-plane conns. S3a: no cap,
-// no queue, no eviction — grow by dialing on an empty list, shrink by discarding
-// (closing) any conn left dirty by an error/cancel. The elastic cap+queue policy
-// is S3b.
-type connPool struct {
-	mu   sync.Mutex
-	idle map[string][]net.Conn
-}
+// errStalePreBody marks a data-plane RPC that failed on a REUSED pooled conn
+// before any request-body byte was written. The body io.Reader is still pristine
+// in that window, so the RPC can be transparently retried once on a fresh dial —
+// closing the stale-pooled-conn failure mode that pooling introduces over the
+// S1 connection-per-RPC model.
+var errStalePreBody = errors.New("transport: reused conn failed before body write")
 
-func newConnPool() *connPool { return &connPool{idle: make(map[string][]net.Conn)} }
-
-func (p *connPool) checkout(addr string) (net.Conn, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	q := p.idle[addr]
-	if len(q) == 0 {
-		return nil, false
+// getDataConn returns a pooled (reused) conn or dials a fresh one. The bool
+// reports whether the conn was reused — only a reused conn is eligible for the
+// stale-conn retry-once (a fresh dial that fails is a real connectivity error).
+func (t *TCPTransport) getDataConn(ctx context.Context, addr string) (net.Conn, bool, error) {
+	c, err := t.pool.checkout(ctx, addr)
+	if err != nil {
+		return nil, false, err
 	}
-	c := q[len(q)-1]
-	p.idle[addr] = q[:len(q)-1]
-	return c, true
-}
-
-func (p *connPool) checkin(addr string, c net.Conn) {
-	p.mu.Lock()
-	p.idle[addr] = append(p.idle[addr], c)
-	p.mu.Unlock()
-}
-
-func (p *connPool) closeAll() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for addr, q := range p.idle {
-		for _, c := range q {
-			_ = c.Close()
-		}
-		delete(p.idle, addr)
+	if c != nil {
+		return c, true, nil // reused pooled conn
 	}
-}
-
-// getDataConn returns an idle pooled conn for addr or dials a fresh one.
-func (t *TCPTransport) getDataConn(ctx context.Context, addr string) (net.Conn, error) {
-	if c, ok := t.pool.checkout(addr); ok {
-		return c, nil
+	// checkout granted a (counted) dial slot — dial it.
+	dialed, derr := t.dial(ctx, addr)
+	if derr != nil {
+		t.pool.dialFailed(addr) // release the counted slot + wake a waiter
+		return nil, false, derr
 	}
-	return t.dial(ctx, addr)
+	return dialed, false, nil
 }
 
 // dial opens a fresh TLS-over-TCP connection to addr and completes the handshake
-// (running SPKI pinning). connection-per-RPC: callers own and close the conn.
+// (running SPKI pinning). The raw TCP conn is tuned (NODELAY + buffers) before TLS.
 func (t *TCPTransport) dial(ctx context.Context, addr string) (*tls.Conn, error) {
 	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
+	t.tuneTCP(raw)
 	conn := tls.Client(raw, t.clientTLS)
 	if err := conn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
@@ -99,7 +80,7 @@ func (t *TCPTransport) applyCtx(ctx context.Context, conn net.Conn) func() {
 }
 
 // Call dials a peer, writes the request frame, and reads the framed response.
-// connection-per-RPC: a new conn per call, closed on return.
+// connection-per-RPC: a new conn per call, closed on return (NOT pooled).
 func (t *TCPTransport) Call(ctx context.Context, addr string, req *Message) (*Message, error) {
 	conn, err := t.dial(ctx, addr)
 	if err != nil {
@@ -124,37 +105,46 @@ func (t *TCPTransport) Call(ctx context.Context, addr string, req *Message) (*Me
 
 // CallWithBody checks out a pooled (or fresh) data-plane conn, writes the request
 // frame + chunked body, reads the framed response, and returns the conn to the
-// pool ONLY after a fully-clean cycle; any error/cancel discards it.
+// pool ONLY after a fully-clean cycle. A reused conn that dies before the body is
+// written is retried once on a fresh dial (the body is still pristine).
 func (t *TCPTransport) CallWithBody(ctx context.Context, addr string, req *Message, body io.Reader) (*Message, error) {
-	conn, err := t.getDataConn(ctx, addr)
-	if err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		conn, reused, err := t.getDataConn(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		resp, rerr := t.callWithBodyOnce(ctx, addr, conn, req, body)
+		if rerr != nil && reused && attempt == 0 && errors.Is(rerr, errStalePreBody) {
+			continue // the stale conn was discarded inside callWithBodyOnce; dial fresh
+		}
+		return resp, rerr
 	}
+}
+
+func (t *TCPTransport) callWithBodyOnce(ctx context.Context, addr string, conn net.Conn, req *Message, body io.Reader) (*Message, error) {
 	clean := false
 	// Defer LIFO: stop() (registered LAST, runs FIRST) closes the watcher's done
-	// channel; THEN this checkin/close defer runs.
+	// channel; THEN this checkin/discard defer runs.
 	defer func() {
 		// Pool the conn only if the cycle was clean AND ctx never fired. stop() is
-		// an ASYNC signal (close(done)) — it does not synchronously tear down the
-		// applyCtx watcher, whose prefer-done recheck only narrows (not closes) the
-		// race. If ctx.Err()!=nil the watcher may still close this conn; pooling it
-		// would let a later transfer check out a conn the watcher then closes mid-I/O.
-		// If ctx.Err()==nil the watcher will take <-done and never close → safe to
-		// pool. (Mirrors CallRead's post-stop ctx.Err() handoff guard.)
+		// an ASYNC signal — if ctx.Err()!=nil the watcher may still close this conn,
+		// so pooling it would let a later transfer check out a doomed conn.
 		if clean && ctx.Err() == nil {
 			// Clear the per-call deadline before reuse: a checked-in conn that kept
 			// it would fail the NEXT transfer's first I/O once the deadline passes.
 			_ = conn.SetDeadline(time.Time{})
 			t.pool.checkin(addr, conn)
 		} else {
-			_ = conn.Close() // dirty / cancelled / unknown state → never reuse
+			t.pool.discard(addr, conn) // dirty / cancelled / stale → close + free slot
 		}
 	}()
 	stop := t.applyCtx(ctx, conn)
 	defer stop()
 
+	req.ID = t.nextDataPlaneID() // stamp for desync detection (resp must echo it)
 	if err := t.codec.Encode(conn, req); err != nil {
-		return nil, fmt.Errorf("encode request: %w", err)
+		// Pre-body failure: body untouched → safe to retry on a fresh conn.
+		return nil, fmt.Errorf("%w: encode request to %s: %v", errStalePreBody, addr, err)
 	}
 	if err := writeChunkedBody(conn, bodyOrEmpty(body)); err != nil {
 		return nil, fmt.Errorf("stream body to %s: %w", addr, err)
@@ -162,6 +152,11 @@ func (t *TCPTransport) CallWithBody(ctx context.Context, addr string, req *Messa
 	resp, err := t.codec.Decode(conn)
 	if err != nil {
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
+	}
+	if resp.ID != req.ID {
+		// Pooled-conn desync: the response belongs to a different transfer. Surface
+		// it LOUD (do not retry — this is a protocol/handler bug, not a dead conn).
+		return nil, fmt.Errorf("transport: response id %d != request id %d from %s (conn desync)", resp.ID, req.ID, addr)
 	}
 	resp, err = checkResponseStatus(addr, resp)
 	if err != nil {
@@ -185,7 +180,7 @@ func bodyOrEmpty(r io.Reader) io.Reader {
 
 // tcpReadCloser exposes the chunked response body after the metadata frame. On
 // Close it returns the conn to the pool iff the body was fully drained to the
-// terminator (clean), else closes it (dirty/early-close → discard).
+// terminator (clean), else discards it (dirty/early-close → free slot).
 type tcpReadCloser struct {
 	t    *TCPTransport
 	addr string
@@ -196,75 +191,83 @@ type tcpReadCloser struct {
 
 func (r *tcpReadCloser) Read(p []byte) (int, error) { return r.body.Read(p) }
 func (r *tcpReadCloser) Close() error {
-	var err error
 	r.once.Do(func() {
 		if r.body.done {
 			// Fully drained → clean → reuse. The per-call deadline was already
-			// cleared at handoff in CallRead and never re-armed during the body
-			// read, so the checked-in conn has no deadline.
+			// cleared at handoff in CallRead and never re-armed during the body read.
 			r.t.pool.checkin(r.addr, r.conn)
 		} else {
-			err = r.conn.Close() // closed early / mid-stream → discard
+			r.t.pool.discard(r.addr, r.conn) // closed early / mid-stream → discard + free slot
 		}
 	})
-	return err
+	return nil
 }
 
-// CallRead dials, writes the request frame, reads the framed metadata response,
-// then returns the remaining conn bytes as the response body. The caller MUST
-// Close the returned ReadCloser to release the connection.
-//
-// Note: the dial-time ctx deadline is cleared before the body ReadCloser is
-// returned, so body reads are unbounded by the RPC ctx (matches QUIC). Callers
-// needing a body-read timeout must set their own; the pooled data plane (S3)
-// revisits this.
+// CallRead dials/checks out a conn, writes the request frame, reads the framed
+// metadata response, then returns the remaining conn bytes as the response body.
+// The caller MUST Close the returned ReadCloser to release the connection. A
+// reused conn that fails before the body handoff is retried once on a fresh dial
+// (CallRead has no request body, so any pre-handoff failure is safely retryable).
 func (t *TCPTransport) CallRead(ctx context.Context, addr string, req *Message) (*Message, io.ReadCloser, error) {
-	conn, err := t.getDataConn(ctx, addr)
-	if err != nil {
-		return nil, nil, err
+	for attempt := 0; ; attempt++ {
+		conn, reused, err := t.getDataConn(ctx, addr)
+		if err != nil {
+			return nil, nil, err
+		}
+		resp, rc, rerr := t.callReadOnce(ctx, addr, conn, req)
+		if rerr != nil && reused && attempt == 0 && errors.Is(rerr, errStalePreBody) {
+			continue
+		}
+		return resp, rc, rerr
 	}
-	// On any error before returning the body, close the conn (discard, never
-	// pool a mid-cycle conn); on success the caller owns it via tcpReadCloser.
-	ok := false
+}
+
+func (t *TCPTransport) callReadOnce(ctx context.Context, addr string, conn net.Conn, req *Message) (*Message, io.ReadCloser, error) {
+	// On any non-handoff exit, discard the conn (never pool a mid-cycle conn); on
+	// success the caller owns it via tcpReadCloser.
+	handedOff := false
 	defer func() {
-		if !ok {
-			_ = conn.Close()
+		if !handedOff {
+			t.pool.discard(addr, conn)
 		}
 	}()
 	stop := t.applyCtx(ctx, conn)
 
+	req.ID = t.nextDataPlaneID()
 	if err := t.codec.Encode(conn, req); err != nil {
 		stop()
-		return nil, nil, fmt.Errorf("encode request: %w", err)
+		return nil, nil, fmt.Errorf("%w: encode request to %s: %v", errStalePreBody, addr, err)
 	}
-	// No request body (CallRead): the request frame is self-delimiting; the server
-	// replies with a metadata frame followed by the chunked response body.
 	resp, err := t.codec.Decode(conn)
 	if err != nil {
 		stop()
-		return nil, nil, fmt.Errorf("decode response from %s: %w", addr, err)
+		return nil, nil, fmt.Errorf("%w: decode response from %s: %v", errStalePreBody, addr, err)
+	}
+	if resp.ID != req.ID {
+		stop()
+		return nil, nil, fmt.Errorf("transport: response id %d != request id %d from %s (conn desync)", resp.ID, req.ID, addr)
 	}
 	if resp, err = checkResponseStatus(addr, resp); err != nil {
 		stop()
-		return nil, nil, err
+		return nil, nil, err // StatusError: not retryable (real server error, clean frame)
 	}
-	// Hand the conn to the caller. Release the ctx watcher (stop) first, then
-	// guard the handoff: if ctx ended around the same time the RPC succeeded, the
-	// watcher may already have closed the conn (the prefer-done recheck only
-	// covers the post-stop window). Refuse to hand off a possibly-doomed conn.
+	// Hand the conn to the caller. Release the ctx watcher (stop) first, then guard
+	// the handoff: if ctx ended around the same time the RPC succeeded, the watcher
+	// may already have closed the conn. Refuse to hand off a possibly-doomed conn.
 	stop()
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, nil, fmt.Errorf("context done before body handoff from %s: %w", addr, cerr)
 	}
-	// Clear the dial deadline so the body read is unbounded by the RPC ctx
-	// (matches QUIC). The body lifetime is owned by the caller's Close.
+	// Clear the dial deadline so the body read is unbounded by the RPC ctx (matches
+	// QUIC). The body lifetime is owned by the caller's Close.
 	_ = conn.SetDeadline(time.Time{})
-	ok = true
+	handedOff = true
 	return resp, &tcpReadCloser{t: t, addr: addr, conn: conn, body: &chunkedBodyReader{r: conn}}, nil
 }
 
 // CallFlatBuffer sends a FlatBuffers-framed request (zero-copy from the builder)
 // and reads the framed response. Builder must stay alive until this returns.
+// connection-per-RPC (NOT pooled).
 func (t *TCPTransport) CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error) {
 	conn, err := t.dial(ctx, addr)
 	if err != nil {

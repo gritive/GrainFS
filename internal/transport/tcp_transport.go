@@ -3,10 +3,13 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // tcpALPN is the single ALPN advertised by the TCP cluster transport (S1).
@@ -14,25 +17,31 @@ import (
 // S1 speaks one protocol over connection-per-RPC.
 const tcpALPN = "grainfs-tcp-v1"
 
+// tcpInboundBulkAcquireTimeout bounds inbound admission for Data/Bulk classes so a
+// saturated class fails fast with StatusOverloaded instead of queueing (parity with
+// QUIC acquireInboundTraffic). Control/Meta classes block on t.ctx (no overload).
+const tcpInboundBulkAcquireTimeout = 25 * time.Millisecond
+
+var (
+	errOverloaded         = errors.New("transport: server overloaded")
+	errNilHandlerResponse = errors.New("transport: handler returned no response")
+)
+
 // TCPTransport implements the transport-agnostic cluster RPC surface
-// (transport.Transport + Call*/Handle*) over TLS 1.3 on TCP, using a
-// connection-per-RPC model: every RPC dials a fresh conn, exchanges one
-// request/response (CloseWrite delimits bulk bodies), then closes.
+// (transport.Transport + Call*/Handle*) over TLS 1.3 on TCP. The data plane uses
+// a pooled, chunk-framed model (S3a); S3b adds resource bounds (read deadlines,
+// shutdown reaping), an elastic conn pool, socket tuning, and inbound admission.
 //
-// S1 is DORMANT and CORRECTNESS-ONLY: it is not wired into boot (QUIC stays the
-// live transport) and the per-RPC TLS handshake is intentionally un-pooled.
-// Throughput comes from the S2 (control-plane mux) and S3 (data-plane elastic
-// pool) slices; do NOT benchmark S1 as a transport baseline.
+// S1/S2/S3 are DORMANT: TCPTransport is not wired into boot (QUIC stays live), so
+// the bounds below are not yet load-bearing in production — they become operative
+// when S4/S5 wire it in.
 //
 // Identity is STATIC SPKI pinning (one IdentitySnapshot). The dynamic rotation/
-// registry surface (SwapIdentity/ApplyRotation/UpdateRegistryAccept/...) defers
-// to the wiring/join slice and is intentionally absent here.
+// registry surface defers to the wiring/join slice and is intentionally absent.
 //
-// Framing invariant (RST avoidance): CloseWrite (close_notify) is sent ONLY by
-// the side that just wrote an EOF-delimited body — the client in CallWithBody
-// and the server in the HandleRead branch. Request/response frames are length-
-// prefixed and self-delimiting, so no other path CloseWrites; the body reader
-// consumes the close_notify, leaving no unread data to force an RST on close.
+// Framing invariant (RST avoidance): bulk bodies are length-prefixed chunk streams
+// terminated by a zero-length chunk (S3a), so request/response frames are
+// self-delimiting and no path relies on a conn close to delimit data.
 type TCPTransport struct {
 	mu        sync.RWMutex
 	listener  net.Listener
@@ -48,11 +57,18 @@ type TCPTransport struct {
 	snap      *IdentitySnapshot
 	serverTLS *tls.Config
 	clientTLS *tls.Config
-	pool      *connPool // per-peer idle data-plane conns (S3a checkout/checkin)
+
+	cfg     TCPTransportConfig
+	pool    *connPool             // per-peer elastic data-plane conn pool (S3b)
+	traffic *TrafficLimiter       // inbound admission (nil-safe = unlimited)
+	connSem chan struct{}         // bounds concurrent serveConn goroutines (nil = unlimited)
+	conns   map[net.Conn]struct{} // accepted, in-flight conns; reaped on Close
+	dpSeq   uint64                // monotonic data-plane request ID (desync detection)
 }
 
 // NewTCPTransport derives the cluster identity from psk and builds a transport
-// pinned to it. Mirrors NewQUICTransport's empty-PSK contract (D6=B).
+// pinned to it. Mirrors NewQUICTransport's empty-PSK contract (D6=B). Resource
+// bounds and pool policy use the package defaults (see TCPTransportConfig).
 func NewTCPTransport(psk string) (*TCPTransport, error) {
 	if psk == "" {
 		return nil, ErrEmptyClusterKey
@@ -64,6 +80,7 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 	snap := NewIdentitySnapshot([][32]byte{spki}, cert, spki)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	cfg := TCPTransportConfig{MaxConnsPerPeer: defaultMaxConnsPerPeer}.withDefaults()
 	t := &TCPTransport{
 		inbox:  make(chan *ReceivedMessage, 256),
 		codec:  &BinaryCodec{},
@@ -71,8 +88,9 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 		ctx:    ctx,
 		cancel: cancel,
 		snap:   snap,
-		pool:   newConnPool(),
+		conns:  make(map[net.Conn]struct{}),
 	}
+	t.applyConfig(cfg)
 	// Server pins the dialer's cert SPKI; ClientAuth forces the dialer to present
 	// one. crypto/tls runs VerifyPeerCertificate during the handshake and fails
 	// closed on mismatch — unlike quic-go, no app-layer re-check is needed.
@@ -85,7 +103,7 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 	}
 	// Dialer presents the cluster cert and pins the server's SPKI. InsecureSkipVerify
 	// disables default CA/hostname verification; the real check is the SPKI pin in
-	// VerifyPeerCertificate (same pattern as quic.go buildClientTLSConfig:1565; repo
+	// VerifyPeerCertificate (same pattern as quic.go buildClientTLSConfig; repo
 	// golangci excludes G402).
 	t.clientTLS = &tls.Config{
 		MinVersion:            tls.VersionTLS13,
@@ -97,6 +115,15 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 	return t, nil
 }
 
+// applyConfig (re)builds the config-derived components (pool, traffic limiter,
+// accept semaphore). Used by NewTCPTransport and setConfigForTest.
+func (t *TCPTransport) applyConfig(cfg TCPTransportConfig) {
+	t.cfg = cfg
+	t.pool = newConnPool(cfg.MaxConnsPerPeer, cfg.PoolIdleTimeout)
+	t.traffic = NewTrafficLimiter(cfg.TrafficLimits)
+	t.connSem = makeLimit(cfg.MaxConcurrentConns)
+}
+
 // MustNewTCPTransport panics on error. Test setup only — production must surface
 // the error to the operator.
 func MustNewTCPTransport(psk string) *TCPTransport {
@@ -105,6 +132,12 @@ func MustNewTCPTransport(psk string) *TCPTransport {
 		panic(fmt.Sprintf("MustNewTCPTransport: %v", err))
 	}
 	return t
+}
+
+// nextDataPlaneID returns a unique nonzero request ID for pooled data-plane RPCs,
+// used to detect a desynced pooled conn (the response must echo req.ID).
+func (t *TCPTransport) nextDataPlaneID() uint64 {
+	return atomic.AddUint64(&t.dpSeq, 1)
 }
 
 // Receive returns the channel of fire-and-forget inbound messages (gossip).
@@ -119,10 +152,7 @@ func (t *TCPTransport) LocalAddr() string {
 
 // SetStreamHandler registers a catch-all handler for request types that have no
 // per-type handler (mirrors QUICTransport). Boot wires the cluster stream router
-// here, and StreamData shard RPCs reach the shard service only via this catch-all
-// — so a faithful TCP drop-in must implement it even though no use-site role
-// interface requires it. (Remaining ClusterTransport gap = the mux-connection
-// methods, which are the S2 RaftConn restructure's job.)
+// here, and StreamData shard RPCs reach the shard service only via this catch-all.
 func (t *TCPTransport) SetStreamHandler(h StreamHandler) {
 	t.mu.Lock()
 	t.streamHandler = h
@@ -132,26 +162,23 @@ func (t *TCPTransport) SetStreamHandler(h StreamHandler) {
 // Handle registers a per-type request/response handler.
 func (t *TCPTransport) Handle(st StreamType, h StreamHandler) { t.router.Handle(st, h) }
 
-// HandleBody registers a per-type handler that receives the request frame plus
-// raw body bytes (read to EOF / peer CloseWrite) on the same conn. The handler
-// MUST drain the body to io.EOF before returning: under connection-per-RPC TCP,
-// leaving unread client data means the server's subsequent Close emits an RST
-// that truncates the response mid-flight (framing invariant). This is stronger
-// than QUIC's HandleBody contract — S2/S3 body handlers must honor it.
+// HandleBody registers a per-type handler that receives the request frame plus the
+// chunked body stream. The handler reads the body via the provided io.Reader; the
+// transport drains any un-read remainder to the terminator so the pooled conn is
+// left clean (S3a serveOne drain).
 func (t *TCPTransport) HandleBody(st StreamType, h StreamBodyHandler) { t.router.HandleBody(st, h) }
 
-// HandleRead registers a per-type handler that returns a framed metadata
-// response followed by a streamed response body.
+// HandleRead registers a per-type handler that returns a framed metadata response
+// followed by a streamed (chunked) response body.
 func (t *TCPTransport) HandleRead(st StreamType, h StreamReadHandler) { t.router.HandleRead(st, h) }
 
-// Connect is a no-op for the connection-per-RPC TCP transport: each Send/Call
-// dials a fresh conn, so there is no persistent connection to establish. Kept to
-// satisfy transport.Transport (gossip calls Connect before Send); peer-reachability
-// errors surface at Send instead. Pooling slices (S2/S3) may give this meaning.
+// Connect is a no-op for the pooled TCP transport: Call/CallWithBody dial or check
+// out conns on demand. Kept to satisfy transport.Transport (gossip calls Connect
+// before Send); peer-reachability errors surface at Send/Call instead.
 func (t *TCPTransport) Connect(ctx context.Context, addr string) error { return nil }
 
 // Listen binds a TCP listener wrapped in the server TLS config and serves each
-// accepted connection as a single RPC (connection-per-RPC).
+// accepted connection in a persistent request loop (conns are pooled by clients).
 func (t *TCPTransport) Listen(ctx context.Context, addr string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -174,46 +201,96 @@ func (t *TCPTransport) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
-		go t.serveConn(conn)
+		// Bound concurrent serveConn goroutines (accept-rate / FD ceiling). A full
+		// semaphore applies natural backpressure on accept.
+		if t.connSem != nil {
+			select {
+			case t.connSem <- struct{}{}:
+			case <-t.ctx.Done():
+				_ = conn.Close()
+				return
+			}
+		}
+		go func() {
+			defer func() {
+				if t.connSem != nil {
+					<-t.connSem
+				}
+			}()
+			t.serveConn(conn)
+		}()
 	}
 }
 
-// serveConn runs the TLS handshake (SPKI pinning) then serves requests on conn
-// in a persistent loop, so a pooled (reused) client conn carries many transfers.
-// The loop ends when the client closes the conn (Decode gets EOF) or a dispatch
-// leaves the conn in an unknown state.
+// trackConn / untrackConn manage the accepted-conn set so Close can reap in-flight
+// conns (an idle Decode otherwise survives shutdown).
+func (t *TCPTransport) trackConn(c net.Conn) {
+	t.mu.Lock()
+	t.conns[c] = struct{}{}
+	t.mu.Unlock()
+}
+
+func (t *TCPTransport) untrackConn(c net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
+}
+
+// serveConn runs the TLS handshake (SPKI pinning) then serves requests on conn in
+// a persistent loop, so a pooled (reused) client conn carries many transfers. A
+// read deadline bounds idle waits and stalled body transfers (S3b resource bound).
 func (t *TCPTransport) serveConn(conn net.Conn) {
+	t.trackConn(conn)
+	defer t.untrackConn(conn)
 	defer conn.Close()
+	t.tuneTCP(conn)
 	if tc, ok := conn.(*tls.Conn); ok {
+		_ = tc.SetDeadline(time.Now().Add(t.cfg.ServerIdleTimeout)) // bound the handshake too
 		if err := tc.HandshakeContext(t.ctx); err != nil {
 			return
 		}
 	}
 	from := conn.RemoteAddr().String()
 	for {
+		// Idle bound: a pooled conn waiting for its next request must not pin a
+		// goroutine forever. A stalled/dead peer trips this and the loop exits.
+		_ = conn.SetReadDeadline(time.Now().Add(t.cfg.ServerIdleTimeout))
 		req, err := t.codec.Decode(conn)
 		if err != nil {
-			return // client closed the conn (clean EOF) or a framing error
+			return // EOF (client closed), framing error, or idle deadline → drop
 		}
+		// The body phase may run long; widen the read deadline to bound only a stall
+		// (covers the handler body read AND the serveOne drain). The next loop
+		// iteration re-arms a fresh idle bound.
+		_ = conn.SetReadDeadline(time.Now().Add(t.cfg.ServerBodyTimeout))
 		if !t.serveOne(conn, from, req) {
 			return // dispatch left the conn in an unknown state → drop it
 		}
 	}
 }
 
-// serveOne handles one request on a (possibly reused) conn. It returns true iff
-// the conn is left clean (positioned at the next frame) and may serve another
-// request; false means the conn must be dropped.
+// serveOne handles one request on a (possibly reused) conn. Returns true iff the
+// conn is left clean (positioned at the next frame) and may serve another request.
 func (t *TCPTransport) serveOne(conn net.Conn, from string, req *Message) bool {
 	bodyHandler, hasBody := t.router.LookupBody(req.Type)
 	readHandler, hasRead := t.router.LookupRead(req.Type)
 	typeHandler, hasType := t.router.Lookup(req.Type)
 
+	// Inbound admission (parity with QUIC acquireInboundTraffic): gate per-type
+	// handlers; the catch-all/inbox (gossip) path is not class-limited.
+	if hasBody || hasRead || hasType {
+		release, aerr := t.acquireInboundTraffic(req.Type)
+		if aerr != nil {
+			return t.rejectOverloaded(conn, req, hasBody)
+		}
+		defer release()
+	}
+
 	switch {
 	case hasBody:
-		// Request body is a chunk stream terminated by a zero-length chunk; the
-		// handler reads it via a chunkedBodyReader. Drain any remainder to the
-		// terminator so the conn is left clean for the next request.
+		// Request body is a chunk stream terminated by a zero-length chunk. Drain
+		// any remainder to the terminator so the conn is left clean for the next
+		// request (the handler is not required to drain on every path).
 		cbr := &chunkedBodyReader{r: conn}
 		resp := bodyHandler(req, cbr)
 		if !cbr.done {
@@ -221,62 +298,57 @@ func (t *TCPTransport) serveOne(conn net.Conn, from string, req *Message) bool {
 				return false // could not reach terminator → conn dirty
 			}
 			if !cbr.done {
-				// io.Copy can return nil on a mid-chunk underlying EOF (the reader
-				// surfaces raw io.EOF), which is NOT the terminator → conn is dirty.
+				// io.Copy can return nil on a mid-chunk underlying EOF, which is NOT
+				// the terminator → conn is dirty.
 				return false
 			}
 		}
-		// The response — OK or StatusError — is a single self-delimiting frame with
-		// NO chunk stream after it, so the conn is left clean either way. This is
-		// what makes the client treat a StatusError as a reusable cycle. If a future
-		// body handler ever streams a partial body and THEN errors, that property
-		// (and the pool-reuse-on-error assumption) breaks.
-		if resp != nil {
-			if err := t.codec.Encode(conn, resp); err != nil {
-				return false
-			}
+		if resp == nil {
+			return t.writeNilRespError(conn, req)
 		}
-		return true
+		return t.writeResp(conn, req, resp)
 	case hasRead:
 		resp, body := readHandler(req)
-		if resp != nil {
-			if err := t.codec.Encode(conn, resp); err != nil {
-				if body != nil {
-					_ = body.Close()
-				}
-				return false
+		if resp == nil {
+			if body != nil {
+				_ = body.Close()
 			}
+			return t.writeNilRespError(conn, req)
+		}
+		resp.ID = req.ID // echo for client desync detection
+		if err := t.codec.Encode(conn, resp); err != nil {
+			if body != nil {
+				_ = body.Close()
+			}
+			return false
 		}
 		if body != nil {
 			defer body.Close()
-			// Response body as a chunk stream + terminator: the client's
-			// chunkedBodyReader stops at the terminator and the conn stays reusable.
+			// Egress bound: a slow-reading client must not pin this goroutine on the
+			// response-body Write. Cleared before the next idle wait.
+			_ = conn.SetWriteDeadline(time.Now().Add(t.cfg.ServerBodyTimeout))
 			if err := writeChunkedBody(conn, body); err != nil {
 				return false
 			}
+			_ = conn.SetWriteDeadline(time.Time{})
 		}
 		return true
 	case hasType:
 		resp := typeHandler(req)
-		if resp != nil {
-			if err := t.codec.Encode(conn, resp); err != nil {
-				return false
-			}
+		if resp == nil {
+			return t.writeNilRespError(conn, req)
 		}
-		return true
+		return t.writeResp(conn, req, resp)
 	default:
-		// No per-type handler: try the catch-all (boot routes StreamData shard
-		// RPCs through it via SetStreamHandler), then fall back to the inbox for
+		// No per-type handler: try the catch-all (boot routes StreamData shard RPCs
+		// through it via SetStreamHandler), then fall back to the inbox for
 		// fire-and-forget (gossip Receive path). Mirrors QUIC handleStream order.
 		t.mu.RLock()
 		catchAll := t.streamHandler
 		t.mu.RUnlock()
 		if catchAll != nil {
 			if resp := catchAll(req); resp != nil {
-				if err := t.codec.Encode(conn, resp); err != nil {
-					return false
-				}
-				return true
+				return t.writeResp(conn, req, resp)
 			}
 		}
 		// Fire-and-forget (gossip): no response; conn stays clean for reuse.
@@ -288,14 +360,95 @@ func (t *TCPTransport) serveOne(conn net.Conn, from string, req *Message) bool {
 	}
 }
 
+// writeResp echoes the request ID into resp (desync detection) and encodes it as a
+// single self-delimiting frame, leaving the conn clean.
+func (t *TCPTransport) writeResp(conn net.Conn, req, resp *Message) bool {
+	resp.ID = req.ID
+	if err := t.codec.Encode(conn, resp); err != nil {
+		return false
+	}
+	return true
+}
+
+// writeNilRespError turns a misbehaving per-type handler's nil response into a
+// deterministic StatusError frame, so the client gets a structured error instead
+// of hanging until its ctx deadline. The conn stays clean/reusable.
+func (t *TCPTransport) writeNilRespError(conn net.Conn, req *Message) bool {
+	resp := NewErrorResponse(req, StatusError, errNilHandlerResponse)
+	return t.writeResp(conn, req, resp)
+}
+
+// acquireInboundTraffic bounds Data/Bulk admission with a short timeout (fail fast
+// to StatusOverloaded when saturated) and blocks Control/Meta on t.ctx. Mirrors
+// QUICTransport.acquireInboundTraffic for cross-transport parity.
+func (t *TCPTransport) acquireInboundTraffic(st StreamType) (func(), error) {
+	switch ClassOf(st) {
+	case StreamClassData, StreamClassBulk:
+		ctx, cancel := context.WithTimeout(t.ctx, tcpInboundBulkAcquireTimeout)
+		release, err := t.traffic.Acquire(ctx, st)
+		cancel()
+		return release, err
+	default:
+		return t.traffic.Acquire(t.ctx, st)
+	}
+}
+
+// rejectOverloaded handles an inbound admission rejection. For a body RPC the
+// client is mid-streaming a body and will not read a response until its own write
+// completes, and draining a refused body is amplification — so the conn is dropped
+// (mirrors QUIC's stream cancel on bulk overload). For a non-body RPC a single
+// StatusOverloaded frame is written and the conn stays clean/reusable.
+func (t *TCPTransport) rejectOverloaded(conn net.Conn, req *Message, hasBody bool) bool {
+	if hasBody {
+		return false
+	}
+	resp := NewErrorResponse(req, StatusOverloaded, errOverloaded)
+	return t.writeResp(conn, req, resp)
+}
+
+// tuneTCP applies NODELAY + optional buffer sizes to the underlying *net.TCPConn.
+// Best-effort: failures are non-fatal. A wrapped tls.Conn exposes NetConn().
+func (t *TCPTransport) tuneTCP(c net.Conn) {
+	tcp, ok := underlyingTCP(c)
+	if !ok {
+		return
+	}
+	_ = tcp.SetNoDelay(true)
+	if t.cfg.ReadBufferBytes > 0 {
+		_ = tcp.SetReadBuffer(t.cfg.ReadBufferBytes)
+	}
+	if t.cfg.WriteBufferBytes > 0 {
+		_ = tcp.SetWriteBuffer(t.cfg.WriteBufferBytes)
+	}
+}
+
+func underlyingTCP(c net.Conn) (*net.TCPConn, bool) {
+	switch v := c.(type) {
+	case *net.TCPConn:
+		return v, true
+	case *tls.Conn:
+		tcp, ok := v.NetConn().(*net.TCPConn)
+		return tcp, ok
+	}
+	return nil, false
+}
+
 // Close shuts the transport down: cancels in-flight context, drops pooled
-// data-plane conns, and closes the listener.
+// data-plane conns, closes the listener, and reaps accepted (in-flight) conns so a
+// stalled peer's serveConn goroutine/FD does not survive shutdown.
 func (t *TCPTransport) Close() error {
 	t.cancel()
 	t.pool.closeAll()
 	t.mu.Lock()
 	ln := t.listener
+	conns := make([]net.Conn, 0, len(t.conns))
+	for c := range t.conns {
+		conns = append(conns, c)
+	}
 	t.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close() // unblocks serveConn's Decode → untrackConn
+	}
 	if ln != nil {
 		return ln.Close()
 	}
@@ -303,6 +456,6 @@ func (t *TCPTransport) Close() error {
 }
 
 // TCPTransport satisfies the transport-agnostic Transport surface (gossip uses
-// Connect/Send/Receive). The dynamic identity + mux surface of ClusterTransport
-// is intentionally NOT implemented in S1 (see type doc).
+// Connect/Send/Receive). The dynamic identity + mux surface of ClusterTransport is
+// intentionally NOT implemented (see type doc).
 var _ Transport = (*TCPTransport)(nil)
