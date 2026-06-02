@@ -45,9 +45,5 @@ type ClusterTransport interface {
 	SetDropped()
 }
 
-var _ ClusterTransport = (*QUICTransport)(nil)
-
-// S5a: TCPTransport now satisfies the full cluster surface (identity/rotation +
-// recycle), so a later slice can construct a TCP cluster stack in boot. Dormant —
-// boot still selects QUIC.
+// TCPTransport is the sole cluster transport (S6 removed the QUIC stack).
 var _ ClusterTransport = (*TCPTransport)(nil)

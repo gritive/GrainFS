@@ -60,11 +60,6 @@ type Config struct {
 	QUICMuxPoolSize       int
 	QUICMuxFlushWindow    time.Duration
 
-	// useTCPTransport selects the TCP cluster transport at boot (the default after
-	// the S5c-3 flip). optionsToConfig sets it from `--transport` (default tcp; a
-	// `--transport quic` opt-out clears it to build the legacy QUIC stack).
-	useTCPTransport bool
-
 	// Storage / EC
 	DirectIO           bool
 	MeasureReadAmp     bool

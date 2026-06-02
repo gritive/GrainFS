@@ -18,7 +18,6 @@ import (
 // the base-transport selection branch fires.
 func TestBootClusterTransport_TCPBindsLoopbackPort0(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
-	state.cfg.useTCPTransport = true
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 
@@ -28,7 +27,7 @@ func TestBootClusterTransport_TCPBindsLoopbackPort0(t *testing.T) {
 	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NotNil(t, state.quicTransport)
 	_, isTCP := state.quicTransport.(*transport.TCPTransport)
-	assert.True(t, isTCP, "useTCPTransport must construct a *TCPTransport")
+	assert.True(t, isTCP, "bootClusterTransport must construct a *TCPTransport")
 
 	resolved := state.raftAddr
 	assert.NotEqual(t, "127.0.0.1:0", resolved, "Listen must resolve :0 to kernel-picked port")
@@ -174,7 +173,6 @@ func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
 		ClusterKey:     "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 		QUICMuxEnabled: true, QUICMuxPoolSize: 4, QUICMuxFlushWindow: 2 * time.Millisecond,
 	})
-	state.cfg.useTCPTransport = true
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
 

@@ -40,14 +40,9 @@ type appendSegRegistrar interface {
 	HandleRead(st transport.StreamType, h transport.StreamReadHandler)
 }
 
-// Compile-time conformance: both the live QUIC transport and the S1 TCP transport
-// satisfy every transport-agnostic role interface in this package.
+// Compile-time conformance: the TCP transport (the sole cluster transport, S6)
+// satisfies every transport-agnostic role interface in this package.
 var (
-	_ clusterRPCTransport = (*transport.QUICTransport)(nil)
-	_ callerTransport     = (*transport.QUICTransport)(nil)
-	_ shardTransport      = (*transport.QUICTransport)(nil)
-	_ appendSegRegistrar  = (*transport.QUICTransport)(nil)
-
 	_ clusterRPCTransport = (*transport.TCPTransport)(nil)
 	_ callerTransport     = (*transport.TCPTransport)(nil)
 	_ shardTransport      = (*transport.TCPTransport)(nil)

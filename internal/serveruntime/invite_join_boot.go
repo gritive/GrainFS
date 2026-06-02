@@ -469,7 +469,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 5. dial the seed join listener (Phase-1), pinning its SPKI. The transcript
 	// is signed inside buildPhase1 over the resulting channel binding.
-	reply, err := inviteJoinDialWith(ctx, joinDialerForOpts(opts), bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
+	reply, err := inviteJoinDialWith(ctx, transport.DialJoinTCP, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
 	if err != nil {
 		return fmt.Errorf("phase-1 dial: %w", err)
 	}
@@ -648,7 +648,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		SPKI:      spki[:],
 		InviteID:  st.inviteID,
 	}
-	reply, err := inviteJoinDialWith(ctx, joinDialerForConfig(state.cfg), st.seedAddr, st.seedSPKI, cert,
+	reply, err := inviteJoinDialWith(ctx, transport.DialJoinTCP, st.seedAddr, st.seedSPKI, cert,
 		func([]byte) (cluster.JoinRequest, error) { return req, nil })
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2 dial: %w", err)
@@ -690,32 +690,9 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 // choreography below.
 type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error)
 
-// selectJoinDialer picks the join dialer to match the cluster transport: the TCP
-// join dialer (transport.DialJoinTCP, the default after the S5c-3 flip), else the
-// QUIC dialer (transport.DialJoin, the `--transport quic` opt-out). The joiner
-// must dial over the SAME transport the leader's join listener runs.
-func selectJoinDialer(useTCP bool) joinDialer {
-	if useTCP {
-		return transport.DialJoinTCP
-	}
-	return transport.DialJoin
-}
-
-// joinDialerForOpts / joinDialerForConfig wrap the per-call-site transport
-// predicate so the wiring (which field selects TCP) is unit-tested rather than an
-// untested inline expression at each invite-join phase. Phase-1 has *ServeOptions
-// (pre-boot), Phase-2 has the boot Config; both reduce to the same "is this a TCP
-// cluster" bool (optionsToConfig sets cfg.useTCPTransport = opts.Transport=="tcp").
-func joinDialerForOpts(opts *ServeOptions) joinDialer {
-	return selectJoinDialer(opts.Transport == "tcp")
-}
-func joinDialerForConfig(cfg Config) joinDialer {
-	return selectJoinDialer(cfg.useTCPTransport)
-}
-
-// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer so either
-// transport's join path (TCP transport.DialJoinTCP / QUIC transport.DialJoin) can
-// drive the SAME consumer choreography in tests.
+// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer (always
+// transport.DialJoinTCP in production; tests may inject a fake) so it can drive the
+// SAME consumer choreography in tests.
 func inviteJoinDialWith(ctx context.Context, dial joinDialer, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, inviteJoinDialTimeout)
 	defer cancel()

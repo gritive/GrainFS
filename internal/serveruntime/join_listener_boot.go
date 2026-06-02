@@ -56,15 +56,9 @@ func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) err
 		defer cancel()
 		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)
 	}
-	// The join listener pairs with the cluster transport: a TCP cluster must run
-	// the TCP join listener (the joiner dials it over crypto/tls). Default TCP after
-	// the flip; QUIC under the `--transport quic` opt-out.
-	var ln joinListener
-	if state.cfg.useTCPTransport {
-		ln, err = transport.NewTCPJoinListener(addr, cert, handler)
-	} else {
-		ln, err = transport.NewJoinListener(addr, cert, handler)
-	}
+	// The join listener pairs with the cluster transport: the joiner dials the TCP
+	// join listener over crypto/tls (S6 removed the QUIC join listener).
+	ln, err := transport.NewTCPJoinListener(addr, cert, handler)
 	if err != nil {
 		return err
 	}

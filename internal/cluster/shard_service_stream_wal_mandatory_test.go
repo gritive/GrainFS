@@ -13,7 +13,7 @@ import (
 // write path too: with no WAL wired the stream write must be rejected rather
 // than silently writing a shard file the WAL never observed.
 func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
-	tr := transport.MustNewQUICTransport("test-cluster-psk")
+	tr := transport.MustNewTCPTransport("test-cluster-psk")
 	t.Cleanup(func() { _ = tr.Close() })
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID)) // no WithDataWAL
@@ -26,7 +26,7 @@ func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
 // TestWriteLocalShardStream_WithWALReadable asserts the stream write goes
 // through the WAL/[]byte path and the shard is readable afterward.
 func TestWriteLocalShardStream_WithWALReadable(t *testing.T) {
-	tr := transport.MustNewQUICTransport("test-cluster-psk")
+	tr := transport.MustNewTCPTransport("test-cluster-psk")
 	t.Cleanup(func() { _ = tr.Close() })
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))

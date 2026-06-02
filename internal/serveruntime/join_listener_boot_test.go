@@ -10,23 +10,21 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// TestStartJoinListener_TCPBranch proves the join listener tracks the cluster
-// transport: under the dormant useTCPTransport flag, startJoinListener starts a
-// *transport.TCPJoinListener (not the QUIC one), binds a loopback port, and
-// exposes the persisted cert's SPKI. The handler is not invoked here (no joiner
-// dials), so a nil receiver is fine.
+// TestStartJoinListener_TCPBranch proves startJoinListener starts a
+// *transport.TCPJoinListener (TCP is the sole cluster transport), binds a
+// loopback port, and exposes the persisted cert's SPKI. The handler is not
+// invoked here (no joiner dials), so a nil receiver is fine.
 func TestStartJoinListener_TCPBranch(t *testing.T) {
 	dir := t.TempDir()
 	_, wantSPKI, err := LoadOrCreateJoinListenerCert(dir)
 	require.NoError(t, err)
 
 	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
-	state.cfg.useTCPTransport = true
 	t.Cleanup(state.Cleanup)
 
 	require.NoError(t, startJoinListener(state, nil))
 	_, isTCP := state.joinListener.(*transport.TCPJoinListener)
-	assert.True(t, isTCP, "useTCPTransport must start a *TCPJoinListener")
+	assert.True(t, isTCP, "startJoinListener must start a *TCPJoinListener")
 	assert.True(t, strings.HasPrefix(state.JoinListenerAddr(), "127.0.0.1:"),
 		"join listener bound on loopback, got %q", state.JoinListenerAddr())
 	assert.Equal(t, wantSPKI, state.JoinListenerSPKI(), "listener SPKI matches the persisted cert")

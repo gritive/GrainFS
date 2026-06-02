@@ -46,24 +46,15 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 		state.transportPSK = ephemeral
 	}
 
-	// Transport selection. The default is now TCP (the S5c-3 flip): useTCPTransport
-	// is set unless the operator passes `--transport quic` to opt back into the
-	// legacy QUIC transport. All post-construction setup below is transport-agnostic
-	// (ClusterTransport interface methods), so only the constructor branches.
+	// TCP is the sole cluster transport (S6 removed the legacy QUIC stack). All
+	// post-construction setup below is transport-agnostic (ClusterTransport interface
+	// methods); state.quicTransport is the interface-typed field (legacy name).
 	var clusterTransport transport.ClusterTransport
-	if state.cfg.useTCPTransport {
-		tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
-		if terr != nil {
-			return fmt.Errorf("init TCP transport: %w", terr)
-		}
-		clusterTransport = tcpTransport
-	} else {
-		quicTransport, qerr := transport.NewQUICTransport(state.transportPSK)
-		if qerr != nil {
-			return fmt.Errorf("init QUIC transport: %w", qerr)
-		}
-		clusterTransport = quicTransport
+	tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
+	if terr != nil {
+		return fmt.Errorf("init cluster transport: %w", terr)
 	}
+	clusterTransport = tcpTransport
 	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.

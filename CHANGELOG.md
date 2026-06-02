@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.501.0] - 2026-06-03
+
+### Removed
+
+- **Legacy QUIC cluster transport and the quic-go dependency are gone (S6).** After
+  the S5c-3 flip to TCP, the QUIC transport (`internal/transport/quic.go`), the QUIC
+  zero-CA join listener (`join_listener.go`), and all `quic-go/quic-go` imports were
+  removed; TCP is now the sole cluster transport with no opt-out. The experimental
+  `--transport` flag is removed (a no-flag `grainfs serve` was already TCP). The
+  transport-agnostic types that lived in `quic.go` (StreamHandler/StreamRouter,
+  TrafficLimiter, IdentitySnapshot, DeriveClusterIdentity) were extracted to
+  `transport_shared.go`/`join_wire.go` unchanged. **This is irreversible — there is
+  no longer a QUIC arm, so the §6 parity benchmark (TCP vs QUIC) can no longer be
+  run, and a node cannot fall back to QUIC.** Validation: `quic-go` import count is
+  zero, `go vet ./...` clean, full unit suite green. (The `--quic-mux-*` flags and
+  `QUICMux*` config keys are retained — they tune the transport-agnostic mux carrier,
+  not QUIC specifically; renaming them is a separate cleanup.)
+
 ## [0.0.500.0] - 2026-06-03
 
 ### Changed

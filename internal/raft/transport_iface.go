@@ -28,13 +28,10 @@ type muxDriverTransport interface {
 }
 
 var (
-	_ raftRPCTransport   = (*transport.QUICTransport)(nil)
-	_ muxDriverTransport = (*transport.QUICTransport)(nil)
-
-	// TCP transport satisfies the transport-agnostic RPC surface (S1) AND, since
-	// S2b-2 added the mux carrier (GetOrConnectMux/EvictMux/SetMuxConnHandler),
-	// muxDriverTransport — proven multi-node over the carrier by S5b's
-	// raftv2_group_mux_tcp_test.go.
+	// TCPTransport (the sole cluster transport, S6) satisfies the transport-agnostic
+	// RPC surface (S1) AND, since S2b-2 added the mux carrier
+	// (GetOrConnectMux/EvictMux/SetMuxConnHandler), muxDriverTransport — proven
+	// multi-node over the carrier by S5b's raftv2_group_mux_tcp_test.go.
 	_ raftRPCTransport   = (*transport.TCPTransport)(nil)
 	_ muxDriverTransport = (*transport.TCPTransport)(nil)
 )

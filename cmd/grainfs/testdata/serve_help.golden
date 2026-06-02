@@ -83,7 +83,6 @@ Flags:
       --shard-cache-size int                                EC shard cache capacity in bytes (0 disables). Held in-heap: larger speeds warm GET but raises RSS; smaller leans on the OS page cache (warm sets that fit RAM stay fast). Tune down to trade GET-cache footprint for lower RSS. (default 1073741824)
       --shard-pack-threshold int                            pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65545) (default 65545)
       --strict-vlog-registry                                fatal on vlog registry smoke mismatch (e2e: true)
-      --transport string                                    cluster transport: tcp|quic (default tcp; pass quic to opt back into the legacy QUIC transport) (default "tcp")
       --vlog-critical-ratio float                           vlog/disk ratio that fires critical (default 0.7)
       --vlog-eta-window duration                            ETA projection window for vlog warnings (default 30m0s)
       --vlog-poll-interval duration                         vlog watcher sampling cadence (default 1m0s)
