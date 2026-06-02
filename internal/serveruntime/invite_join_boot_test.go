@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -770,7 +770,7 @@ func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
 		t.Fatalf("seed identity: %v", err)
 	}
 	ln, err := transport.NewJoinListener("127.0.0.1:0", srvCert,
-		func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+		func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 			defer stream.Close()
 			_, _ = transport.JoinReadFields(stream, 1)
 			blob, _ := cluster.EncodeJoinReplyForTest(cluster.JoinReply{Accepted: true, Status: cluster.JoinStatusOK})

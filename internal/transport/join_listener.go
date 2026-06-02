@@ -54,8 +54,16 @@ const joinMaxFrame = 1 << 20
 // captured SPKI (sha256 of the presented leaf cert's RawSubjectPublicKeyInfo),
 // the RFC 5705 channel-binding value derived from this connection's TLS session
 // (binds the invite transcript to this exact handshake), and the connection's
-// first accepted stream. The handler owns the stream.
-type JoinHandler func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream)
+// first accepted stream as an io.ReadWriteCloser (a *quic.Stream on the QUIC
+// listener; a *tls.Conn-backed half-close wrapper on the TCP listener, S4).
+//
+// HALF-CLOSE CONTRACT: stream.Close() closes only the WRITE direction (it sends
+// a FIN; the read side stays open so the reply can still be read). This is the
+// existing *quic.Stream.Close() semantic the consumer relies on (write request →
+// stream.Close() → read reply); full teardown of the underlying connection is a
+// separate concern owned by the listener (server side) / the closer returned by
+// DialJoin (client side). The handler owns the stream.
+type JoinHandler func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser)
 
 // JoinListener is a dedicated QUIC listener for the Zero-CA join handshake.
 type JoinListener struct {
@@ -168,10 +176,15 @@ func (l *JoinListener) handleConn(conn *quic.Conn) {
 // node identity, and pins the leader: the client TLS VerifyPeerCertificate
 // REJECTS unless sha256(leaf.RawSubjectPublicKeyInfo) == expectedServerSPKI
 // (relay/MITM defense — client-side verification is reliably enforced). It
-// returns the opened stream, the RFC 5705 channel-binding value for this TLS
-// session (which the joiner signs into its invite transcript), plus a func that
-// closes the connection; the caller owns the stream and the closer.
-func DialJoin(ctx context.Context, addr string, expectedServerSPKI [32]byte, clientCert tls.Certificate) (*quic.Stream, []byte, func() error, error) {
+// returns the opened stream as an io.ReadWriteCloser, the RFC 5705 channel-
+// binding value for this TLS session (which the joiner signs into its invite
+// transcript), plus a func that closes the connection; the caller owns the
+// stream and the closer.
+//
+// HALF-CLOSE CONTRACT (see JoinHandler): the returned stream's Close() closes
+// only the WRITE direction (read stays open for the reply); use the returned
+// closer for full connection teardown.
+func DialJoin(ctx context.Context, addr string, expectedServerSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error) {
 	clientTLS := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		NextProtos:   []string{JoinALPN},

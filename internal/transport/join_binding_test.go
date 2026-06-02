@@ -16,7 +16,7 @@ func TestDialJoin_ReturnsBindMatchingHandler(t *testing.T) {
 		t.Fatalf("server identity: %v", err)
 	}
 	gotBind := make(chan []byte, 1)
-	handler := func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+	handler := func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 		gotBind <- append([]byte(nil), bind...)
 		_ = stream.Close()
 	}
@@ -62,7 +62,7 @@ func TestJoinListener_SingleRequestPerConnection(t *testing.T) {
 		t.Fatalf("server identity: %v", err)
 	}
 	calls := make(chan struct{}, 8)
-	handler := func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+	handler := func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 		calls <- struct{}{}
 		_ = stream.Close()
 	}

@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -17,7 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -40,7 +40,7 @@ func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) err
 		return err
 	}
 	addr := resolveJoinListenAddr(state.cfg.JoinListenAddr, state.raftAddr)
-	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 		ctx, cancel := context.WithTimeout(handlerCtx, joinListenerHandlerTimeout)
 		defer cancel()
 		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)

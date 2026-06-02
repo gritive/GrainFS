@@ -9,11 +9,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"testing"
 	"time"
-
-	"github.com/quic-go/quic-go"
 )
 
 // newTestJoinCert generates a fresh self-signed P-256 cert whose SPKI is in NO
@@ -53,7 +52,7 @@ func TestJoinListenerCapturesUnknownPeerSPKI(t *testing.T) {
 		spki [32]byte
 	}
 	got := make(chan captured, 1)
-	handler := func(_ context.Context, peerSPKI [32]byte, _ []byte, stream *quic.Stream) {
+	handler := func(_ context.Context, peerSPKI [32]byte, _ []byte, stream io.ReadWriteCloser) {
 		got <- captured{spki: peerSPKI}
 		_ = stream.Close()
 	}
@@ -95,7 +94,7 @@ func TestDialJoinRejectsWrongServerSPKI(t *testing.T) {
 	clientCert, _ := newTestJoinCert(t, "join-joiner")
 	_, wrongSPKI := newTestJoinCert(t, "not-the-leader")
 
-	handler := func(_ context.Context, _ [32]byte, _ []byte, stream *quic.Stream) {
+	handler := func(_ context.Context, _ [32]byte, _ []byte, stream io.ReadWriteCloser) {
 		_ = stream.Close()
 	}
 	ln, err := NewJoinListener("127.0.0.1:0", serverCert, handler)
