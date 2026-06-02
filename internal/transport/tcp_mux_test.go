@@ -134,6 +134,41 @@ func TestTCPMux_GetOrConnectMux_FreshEachCall(t *testing.T) {
 	require.NoError(t, a.Close(nil))
 }
 
+func TestTCPMux_RaceLoserOwnsOnlyOwnConns(t *testing.T) {
+	// The headline claim of S2b-2: GetOrConnectMux returns a FRESH carrier per call,
+	// so closing the race-loser (A) tears down ONLY its own session's conns and never
+	// touches the winner's (B) live conn. This is the QUIC shared-conn-teardown hazard
+	// dissolving — proven by execution, not inspection.
+	const psk = "mux-raceloser-key"
+	srv := startTCP(t, psk)
+	srv.SetMuxConnHandler(func(ctx context.Context, carrier MuxCarrier) {
+		for {
+			if _, err := carrier.AcceptStream(ctx); err != nil {
+				return
+			}
+		}
+	})
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := cli.GetOrConnectMux(ctx, srv.LocalAddr())
+	require.NoError(t, err)
+	_, err = a.OpenStream(ctx)
+	require.NoError(t, err)
+
+	b, err := cli.GetOrConnectMux(ctx, srv.LocalAddr())
+	require.NoError(t, err)
+	b1, err := b.OpenStream(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, a.Close(nil)) // loser closes its own session's conns
+	// Winner B's conn stays live: a write succeeds (closing A did not touch it).
+	_, err = b1.Write([]byte{1})
+	require.NoError(t, err)
+}
+
 func TestTCPMux_InboundDemux_OneCarrierPerSession(t *testing.T) {
 	const psk = "mux-demux-key"
 	srv := startTCP(t, psk)

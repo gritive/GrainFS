@@ -157,6 +157,18 @@ func (c *tcpInboundMuxCarrier) AcceptStream(ctx context.Context) (io.ReadWriteCl
 		if !ok {
 			return nil, errMuxCarrierClosed
 		}
+		// A select with both incoming and done ready picks one at random; if Close
+		// already ran, the popped conn is in c.conns and was closed there. Re-check
+		// so AcceptStream returns an error, never an already-dead conn. (incoming is
+		// never closed — a concurrent routeInboundMuxConn send would panic — so this
+		// post-pop check is the safe way to tighten the closed-at-pop window.)
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			_ = conn.Close()
+			return nil, errMuxCarrierClosed
+		}
 		return conn, nil
 	case <-c.done:
 		return nil, errMuxCarrierClosed
