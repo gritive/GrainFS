@@ -65,7 +65,7 @@ chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
 <summary>Cluster (zero-CA join)</summary>
 
 A brand-new node can join with no pre-shared secrets — no `scp` of the KEK or
-`cluster.id`, no `--cluster-key` on the joiner. The leader serves a QUIC
+`cluster.id`, no `--cluster-key` on the joiner. The leader serves a TCP
 join-listener (started automatically in cluster mode; pass `--join-listen-addr`
 to pin a stable host:port), mints a single-use invite bundle, and seals the
 cluster secrets to the joining node's key during the handshake.

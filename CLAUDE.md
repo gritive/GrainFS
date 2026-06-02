@@ -25,7 +25,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - Language: Go 1.26+
 - HTTP Framework: Hertz (cloudwego/hertz)
 - CLI: Cobra (spf13/cobra)
-- Transport: QUIC (quic-go/quic-go)
+- Transport: TCP (crypto/tls TLS 1.3, cluster-PSK SPKI pinning) — QUIC/quic-go removed in S6
 - Metadata DB: BadgerDB (dgraph-io/badger/v4)
 - Erasure Coding: klauspost/reedsolomon
 - NFSv4: 자체 구현 (internal/nfs4server, XDR/RPC)
@@ -35,8 +35,8 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 ### 아키텍처 원칙
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + NFSv4 + NBD + Web UI를 하나로 제공
-- 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(QUIC/Raft)
-- internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, server/execution, server/iceberg, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, chunkref, config, nodeconfig
+- 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(TCP/Raft)
+- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/execution, server/iceberg, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, chunkref, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### cmd 경계 계약 (cmd thin-runner)
@@ -62,7 +62,7 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 
 ### 성능 규칙
 - Erasure Coding: Reed-Solomon 4+2 기본, 가변 설정 가능
-- QUIC 멀티플렉싱으로 클러스터 통신
+- TCP 멀티플렉싱(mux carrier)으로 클러스터 통신
 - 벤치마크: `make bench`/`make bench-cluster`/`make bench-s3-compat-compare`로 MinIO warp 기반 S3 PUT/GET/DELETE 측정, `make bench-iceberg-table`/`make bench-iceberg-table-cluster`로 `warp iceberg` 기반 Iceberg REST Catalog 측정
 
 ## Persona Test
