@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.503.0] - 2026-06-03
+
+### Internal
+
+- **Docs: clean up stale QUIC references in the R+H design record (S6 follow-up).**
+  `docs/architecture/quic-stream-multiplex.md` (a historical "DELIVERED" design
+  doc) now notes that `--quic-mux-pool`/`--quic-mux-flush` were renamed to
+  `--mux-pool`/`--mux-flush` in v0.0.502.0 and that its `internal/transport/quic.go`
+  code references are from the QUIC era (the carrier abstraction it introduced is
+  what made the QUIC→TCP migration behavior-neutral). `docs/index.md` link text
+  dropped the now-inaccurate "QUIC" qualifier. Doc-only; no code change.
+
 ## [0.0.502.0] - 2026-06-03
 
 ### Changed
