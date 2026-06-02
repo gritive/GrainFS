@@ -156,3 +156,32 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 	require.NoError(t, bootGroupRaftMux(state))
 	require.NotNil(t, state.groupRaftMux, "mux ready for downstream metaTransport")
 }
+
+// TestBootGroupRaftMux_TCPAssemblesOverTCPTransport proves the serveruntime boot
+// PHASES assemble the raft mux over a TCP-constructed transport: bootClusterTransport
+// (TCP) → bootGroupRaftMux must construct the GroupRaftQUICMux on the *TCPTransport
+// and leave it mux-enabled (TCP raft rides the S2b-2 mux carrier; mux is always on
+// via QUICMuxEnabled). This is the in-process boot-assembly half; the full multi-node
+// serveruntime TCP cluster formation (invite-join + replicate + S3) rides the S5c-2
+// parity bench, which stands up a real multi-node TCP cluster.
+func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
+	state := newBootState(Config{
+		DataDir: t.TempDir(), NodeID: "n1",
+		ClusterKey:     "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		QUICMuxEnabled: true, QUICMuxPoolSize: 4, QUICMuxFlushWindow: 2 * time.Millisecond,
+	})
+	state.cfg.useTCPTransport = true
+	require.NoError(t, bootValidateConfig(state))
+	t.Cleanup(state.Cleanup)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, bootClusterTransport(ctx, state))
+	_, isTCP := state.quicTransport.(*transport.TCPTransport)
+	require.True(t, isTCP, "transport phase must construct a *TCPTransport")
+
+	require.NoError(t, bootGroupRaftMux(state))
+	require.NotNil(t, state.groupRaftMux, "mux phase must construct the group raft mux over the TCP transport")
+	require.True(t, state.groupRaftMux.MuxEnabled(), "TCP raft must ride the mux carrier (mux enabled in boot)")
+}
