@@ -98,10 +98,14 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        Write with `ServerBodyTimeout` (wall-clock, not idle-stall), so a *sustained-slow* (not stalled)
        reader of a large shard read can be dropped at 5m where QUIC's flow control would not. Generous,
        but a divergence to confirm acceptable at wire-in benchmark.
-     - [ ] **Pool maps never delete empty keys.** `idle`/`total`/`waiters` retain a (tiny) entry per
-       distinct peer addr forever; `waiters[addr]=q[1:]` advances without shrinking the backing array.
-       Bounded by cluster peer count, negligible, but unbounded over process lifetime — delete empty keys
-       if a churning-membership cluster ever makes it matter.
+     - [x] **Pool map hygiene — DONE.** `idle`/`total`/`waiters` no longer retain a per-peer key after
+       a peer drains: `storeIdleLocked` deletes the `idle` key at empty, `decTotalLocked` deletes the
+       `total` key at zero, and `popWaiterLocked`/`removeWaiter` delete the `waiters` key at empty +
+       zero the freed backing-array slots (`q[0]=nil` / tail-clear) so the prior `waiters[addr]=q[1:]`
+       slice-aliasing no longer pins popped channels. Behavior-neutral (absent key == empty == 0 to
+       every reader; FIFO + cap accounting unchanged — `decTotalLocked` is a representation no-op).
+       Dormant; no CHANGELOG. FIRING tests: `TestConnPool_EmptyKeysReclaimedAfterPeerDrains`,
+       `TestConnPool_WaiterBackingArrayReleasedOnDrain`, `TestConnPool_RemoveWaiterCompactsWithoutAliasing`.
      - [ ] **Thundering-herd cancel = O(N) serial redistribution.** N waiters cancelling near-simultaneously
        produce a serial chain of `removeWaiter`→`checkin`/`dialFailed` hand-offs (each takes `mu` once).
        Correct (no leak), but a latency smell under a cancel storm. Revisit only if it shows in benchmarks.

@@ -139,8 +139,10 @@ func (t *connPool) checkout(ctx context.Context, addr string) (net.Conn, error) 
 // close after unlocking.
 func (t *connPool) popFreshIdleLocked(addr string, victims *[]net.Conn) net.Conn {
 	q := t.idle[addr]
+	var found net.Conn
 	for len(q) > 0 {
 		ic := q[len(q)-1]
+		q[len(q)-1] = idleConn{} // release the popped entry from the backing array
 		q = q[:len(q)-1]
 		// Evict an idle conn that is expired (presumed server-reaped) OR stamped
 		// below the current identity generation. The staleness check makes the
@@ -153,16 +155,38 @@ func (t *connPool) popFreshIdleLocked(addr string, victims *[]net.Conn) net.Conn
 		if expired || t.staleLocked(addr, ic.c) {
 			*victims = append(*victims, ic.c)
 			delete(t.connGen, ic.c)
-			if t.cap > 0 {
-				t.total[addr]--
-			}
+			t.decTotalLocked(addr)
 			continue
 		}
-		t.idle[addr] = q
-		return ic.c
+		found = ic.c
+		break
+	}
+	t.storeIdleLocked(addr, q)
+	return found
+}
+
+// storeIdleLocked writes back a peer's idle queue, deleting the map key when the queue
+// is empty so a fully-drained peer leaves no lingering entry (and the empty slice's
+// backing array becomes collectable). Caller holds t.mu.
+func (t *connPool) storeIdleLocked(addr string, q []idleConn) {
+	if len(q) == 0 {
+		delete(t.idle, addr)
+		return
 	}
 	t.idle[addr] = q
-	return nil
+}
+
+// decTotalLocked decrements a peer's counted-conn total (cap>0 only) and deletes the
+// key once it reaches zero, so a drained peer leaves no lingering total entry. Caller
+// holds t.mu.
+func (t *connPool) decTotalLocked(addr string) {
+	if t.cap == 0 {
+		return
+	}
+	t.total[addr]--
+	if t.total[addr] == 0 {
+		delete(t.total, addr)
+	}
 }
 
 // checkin returns a clean conn: hand it to a waiter, else add it to the idle list.
@@ -197,9 +221,7 @@ func (t *connPool) discard(addr string, c net.Conn) {
 // a canceled grant) and hands the next queued waiter a fresh dial slot if any.
 func (t *connPool) dialFailed(addr string) {
 	t.mu.Lock()
-	if t.cap > 0 {
-		t.total[addr]--
-	}
+	t.decTotalLocked(addr)
 	if w := t.popWaiterLocked(addr); w != nil {
 		if t.cap > 0 {
 			t.total[addr]++ // reassign the freed slot to the waiter's dial
@@ -217,7 +239,13 @@ func (t *connPool) popWaiterLocked(addr string) chan net.Conn {
 		return nil
 	}
 	w := q[0]
-	t.waiters[addr] = q[1:]
+	q[0] = nil // release the popped channel so the q[1:] advance can't pin it alive
+	q = q[1:]
+	if len(q) == 0 {
+		delete(t.waiters, addr) // drained → reclaim the key and the backing array
+	} else {
+		t.waiters[addr] = q
+	}
 	return w
 }
 
@@ -233,7 +261,14 @@ func (t *connPool) removeWaiter(addr string, ch chan net.Conn) {
 	q := t.waiters[addr]
 	for i, w := range q {
 		if w == ch {
-			t.waiters[addr] = append(q[:i], q[i+1:]...)
+			n := copy(q[i:], q[i+1:])
+			q[i+n] = nil // clear the freed tail slot (no aliasing retention)
+			q = q[:len(q)-1]
+			if len(q) == 0 {
+				delete(t.waiters, addr)
+			} else {
+				t.waiters[addr] = q
+			}
 			t.mu.Unlock()
 			return // dequeued before any sender committed
 		}
@@ -255,10 +290,10 @@ func (t *connPool) closeAll() {
 		for _, ic := range q {
 			victims = append(victims, ic.c)
 			delete(t.connGen, ic.c)
-			if t.cap > 0 {
-				t.total[addr]-- // keep total accurate; do NOT reset to a fresh map, or a
-				// still-in-flight conn's later discard would drive total negative and bypass the cap
-			}
+			// Decrement per idle conn (keep total accurate; do NOT reset to a fresh map,
+			// or a still-in-flight conn's later discard would drive total negative and
+			// bypass the cap). decTotalLocked deletes the key once it reaches zero.
+			t.decTotalLocked(addr)
 		}
 		delete(t.idle, addr)
 	}
@@ -275,9 +310,7 @@ func (t *connPool) closePeer(addr string) {
 	for _, ic := range t.idle[addr] {
 		victims = append(victims, ic.c)
 		delete(t.connGen, ic.c)
-		if t.cap > 0 {
-			t.total[addr]--
-		}
+		t.decTotalLocked(addr)
 	}
 	delete(t.idle, addr)
 	t.mu.Unlock()

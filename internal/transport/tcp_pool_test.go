@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -119,6 +120,98 @@ func TestTCPPool_CallReadEarlyCloseDiscardsConn(t *testing.T) {
 	_, _ = io.Copy(io.Discard, rc2)
 	require.NoError(t, rc2.Close())
 	assert.Equal(t, 1, poolLen(cli, addr), "drained CallRead returns its conn")
+}
+
+// TestConnPool_EmptyKeysReclaimedAfterPeerDrains guards the line-101 residual: the
+// idle/total/waiters maps must not retain a per-peer entry forever. After a peer's
+// conns fully drain, none of the three maps should hold a key for that addr (an
+// unbounded leak over process lifetime under churning membership otherwise).
+func TestConnPool_EmptyKeysReclaimedAfterPeerDrains(t *testing.T) {
+	p := newConnPool(4, time.Minute)
+	addr := "10.0.0.1:9000"
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+
+	// Grant a dial slot (saturated-from-empty), stamp + check the conn in (total=1).
+	conn, err := p.checkout(context.Background(), addr)
+	require.NoError(t, err)
+	require.Nil(t, conn, "first checkout grants a dial slot")
+	p.stampWith(a, p.genSnapshot(addr))
+	p.checkin(addr, a)
+
+	// Drain: check the idle conn out, then discard it (frees the counted slot).
+	got, err := p.checkout(context.Background(), addr)
+	require.NoError(t, err)
+	require.Equal(t, a, got)
+	p.discard(addr, got)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, hasIdle := p.idle[addr]
+	_, hasTotal := p.total[addr]
+	_, hasWaiters := p.waiters[addr]
+	require.False(t, hasIdle, "idle map key must be reclaimed after the peer drains")
+	require.False(t, hasTotal, "total map key must be reclaimed after the peer drains")
+	require.False(t, hasWaiters, "waiters map key must never linger")
+}
+
+// TestConnPool_WaiterBackingArrayReleasedOnDrain guards the second half of line 101:
+// popWaiterLocked advanced the queue via waiters[addr]=q[1:], which keeps the popped
+// channels pinned in the original backing array (slice-aliasing retention) and never
+// removes the key. Each pop must release its slot, and the key must be reclaimed once
+// the queue drains.
+func TestConnPool_WaiterBackingArrayReleasedOnDrain(t *testing.T) {
+	p := newConnPool(1, time.Minute)
+	addr := "10.0.0.2:9000"
+	w1 := make(chan net.Conn, 1)
+	w2 := make(chan net.Conn, 1)
+	w3 := make(chan net.Conn, 1)
+
+	p.mu.Lock()
+	p.waiters[addr] = []chan net.Conn{w1, w2, w3}
+	backing := p.waiters[addr] // alias the original backing array
+	require.Equal(t, w1, p.popWaiterLocked(addr))
+	require.Equal(t, w2, p.popWaiterLocked(addr))
+	require.Equal(t, w3, p.popWaiterLocked(addr))
+	_, has := p.waiters[addr]
+	p.mu.Unlock()
+
+	require.False(t, has, "waiters key must be reclaimed once the queue drains")
+	require.Nil(t, backing[0], "popped waiter[0] must be released from the backing array")
+	require.Nil(t, backing[1], "popped waiter[1] must be released from the backing array")
+	require.Nil(t, backing[2], "popped waiter[2] must be released from the backing array")
+}
+
+// TestConnPool_RemoveWaiterCompactsWithoutAliasing guards removeWaiter's hygiene: a
+// canceled waiter is dequeued by in-place compaction that must (a) preserve FIFO order,
+// (b) clear the freed tail slot so the removed channel isn't pinned in the backing
+// array, and (c) reclaim the key once the queue drains.
+func TestConnPool_RemoveWaiterCompactsWithoutAliasing(t *testing.T) {
+	p := newConnPool(1, time.Minute)
+	addr := "10.0.0.3:9000"
+	w1 := make(chan net.Conn, 1)
+	w2 := make(chan net.Conn, 1)
+	w3 := make(chan net.Conn, 1)
+	p.mu.Lock()
+	p.waiters[addr] = []chan net.Conn{w1, w2, w3}
+	backing := p.waiters[addr]
+	p.mu.Unlock()
+
+	p.removeWaiter(addr, w2) // dequeue the middle waiter (not yet sender-committed)
+
+	p.mu.Lock()
+	q := p.waiters[addr]
+	p.mu.Unlock()
+	require.Equal(t, []chan net.Conn{w1, w3}, q, "removeWaiter must compact preserving FIFO order")
+	require.Nil(t, backing[2], "the freed tail slot must be cleared (no aliasing retention)")
+
+	// Drain the rest → the key is reclaimed.
+	p.removeWaiter(addr, w1)
+	p.removeWaiter(addr, w3)
+	p.mu.Lock()
+	_, has := p.waiters[addr]
+	p.mu.Unlock()
+	require.False(t, has, "waiters key reclaimed once all waiters are removed")
 }
 
 func TestTCPPool_ConcurrentTransfersGetExclusiveConns(t *testing.T) {
