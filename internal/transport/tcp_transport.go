@@ -17,6 +17,12 @@ import (
 // S1 speaks one protocol over connection-per-RPC.
 const tcpALPN = "grainfs-tcp-v1"
 
+// tcpMuxALPN is the ALPN for the raft control-plane mux carrier (S2b-2). An accepted
+// conn negotiating it routes into the mux demux instead of the data-plane request
+// loop. The data plane keeps speaking tcpALPN only; a dialer offers exactly one of
+// the two ALPNs (data-plane clientTLS vs mux muxClientTLS).
+const tcpMuxALPN = "grainfs-tcp-mux-v1"
+
 // tcpInboundBulkAcquireTimeout bounds inbound admission for Data/Bulk classes so a
 // saturated class fails fast with StatusOverloaded instead of queueing (parity with
 // QUIC acquireInboundTraffic). Control/Meta classes block on t.ctx (no overload).
@@ -54,9 +60,10 @@ type TCPTransport struct {
 
 	streamHandler StreamHandler // catch-all for types with no per-type handler
 
-	snap      *IdentitySnapshot
-	serverTLS *tls.Config
-	clientTLS *tls.Config
+	snap         *IdentitySnapshot
+	serverTLS    *tls.Config
+	clientTLS    *tls.Config
+	muxClientTLS *tls.Config // mux-ONLY dialer config (NextProtos = [tcpMuxALPN])
 
 	cfg     TCPTransportConfig
 	pool    *connPool             // per-peer elastic data-plane conn pool (S3b)
@@ -64,6 +71,12 @@ type TCPTransport struct {
 	connSem chan struct{}         // bounds concurrent serveConn goroutines (nil = unlimited)
 	conns   map[net.Conn]struct{} // accepted, in-flight conns; reaped on Close
 	dpSeq   uint64                // monotonic data-plane request ID (desync detection)
+
+	// Mux carrier state (S2b-2, dormant — set only when internal/raft registers a
+	// mux handler; not wired into boot, which still selects QUIC).
+	muxHandler  MuxConnHandler                         // nil = reject mux conns at accept
+	muxInbound  map[muxSessionID]*tcpInboundMuxCarrier // accepted mux sessions (demux); reaped on Close
+	muxOutbound map[*tcpOutboundMuxCarrier]struct{}    // dialed carriers; reaped on Close
 }
 
 // NewTCPTransport derives the cluster identity from psk and builds a transport
@@ -82,13 +95,15 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := TCPTransportConfig{MaxConnsPerPeer: defaultMaxConnsPerPeer}.withDefaults()
 	t := &TCPTransport{
-		inbox:  make(chan *ReceivedMessage, 256),
-		codec:  &BinaryCodec{},
-		router: NewStreamRouter(),
-		ctx:    ctx,
-		cancel: cancel,
-		snap:   snap,
-		conns:  make(map[net.Conn]struct{}),
+		inbox:       make(chan *ReceivedMessage, 256),
+		codec:       &BinaryCodec{},
+		router:      NewStreamRouter(),
+		ctx:         ctx,
+		cancel:      cancel,
+		snap:        snap,
+		conns:       make(map[net.Conn]struct{}),
+		muxInbound:  make(map[muxSessionID]*tcpInboundMuxCarrier),
+		muxOutbound: make(map[*tcpOutboundMuxCarrier]struct{}),
 	}
 	t.applyConfig(cfg)
 	// Server pins the dialer's cert SPKI; ClientAuth forces the dialer to present
@@ -112,6 +127,13 @@ func NewTCPTransport(psk string) (*TCPTransport, error) {
 		NextProtos:            []string{tcpALPN},
 		VerifyPeerCertificate: pinAcceptedSPKI(snap),
 	}
+	// Advertise BOTH ALPNs on the listener: data-plane (tcpALPN) and mux (tcpMuxALPN).
+	// Inbound conns route by negotiated protocol in serveConn (S2b-2).
+	t.serverTLS.NextProtos = []string{tcpMuxALPN, tcpALPN}
+	// Mux dials use a SEPARATE config offering ONLY the mux ALPN, so a data-plane dial
+	// can never negotiate mux (gate-check #1) and a non-mux peer fails a mux dial cleanly.
+	t.muxClientTLS = t.clientTLS.Clone()
+	t.muxClientTLS.NextProtos = []string{tcpMuxALPN}
 	return t, nil
 }
 
@@ -244,7 +266,12 @@ func (t *TCPTransport) untrackConn(c net.Conn) {
 // read deadline bounds idle waits and stalled body transfers (S3b resource bound).
 func (t *TCPTransport) serveConn(conn net.Conn) {
 	defer t.untrackConn(conn) // trackConn ran in acceptLoop before launch (reap-on-Close)
-	defer conn.Close()
+	needClose := true
+	defer func() {
+		if needClose {
+			_ = conn.Close()
+		}
+	}()
 	t.tuneTCP(conn)
 	if tc, ok := conn.(*tls.Conn); ok {
 		_ = tc.SetDeadline(time.Now().Add(t.cfg.ServerIdleTimeout)) // bound the handshake (read+write)
@@ -257,6 +284,14 @@ func (t *TCPTransport) serveConn(conn net.Conn) {
 		// conn reused past that instant fail with i/o timeout. Only writeChunkedBody
 		// (the hasRead body egress) re-arms its own write deadline.
 		_ = tc.SetWriteDeadline(time.Time{})
+		// Route by negotiated ALPN: a mux carrier conn goes to the demux (grouped by
+		// session id into one inbound carrier); everything else is the data plane. The
+		// mux carrier takes over the conn lifetime, so suppress the deferred close.
+		if tc.ConnectionState().NegotiatedProtocol == tcpMuxALPN {
+			needClose = false
+			t.routeInboundMuxConn(conn)
+			return
+		}
 	}
 	from := conn.RemoteAddr().String()
 	for {
@@ -453,7 +488,24 @@ func (t *TCPTransport) Close() error {
 	for c := range t.conns {
 		conns = append(conns, c)
 	}
+	// Reap mux carriers (dialed + accepted sessions) so a dormant mux session does
+	// not survive shutdown. Collected under the lock; closed outside it (carrier
+	// Close re-locks via drop{Inbound,Outbound}Mux).
+	outbound := make([]*tcpOutboundMuxCarrier, 0, len(t.muxOutbound))
+	for c := range t.muxOutbound {
+		outbound = append(outbound, c)
+	}
+	inbound := make([]*tcpInboundMuxCarrier, 0, len(t.muxInbound))
+	for _, c := range t.muxInbound {
+		inbound = append(inbound, c)
+	}
 	t.mu.Unlock()
+	for _, c := range outbound {
+		_ = c.Close(nil)
+	}
+	for _, c := range inbound {
+		_ = c.Close(nil)
+	}
 	for _, c := range conns {
 		_ = c.Close() // unblocks serveConn's Decode → untrackConn
 	}

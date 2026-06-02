@@ -301,7 +301,7 @@ func (s *IdentitySnapshot) Accepts(spki [32]byte) bool {
 type QUICTransport struct {
 	mu            sync.RWMutex
 	listener      *quic.Listener
-	conns         map[string]*quic.Conn // legacy ALPN: addr -> conn (Send/Call/CallFlatBuffer)
+	conns         map[string]*quic.Conn     // legacy ALPN: addr -> conn (Send/Call/CallFlatBuffer)
 	muxConns      map[string]quicMuxCarrier // mux ALPN: addr -> carrier (raft RPC, owned by internal/raft)
 	inbox         chan *ReceivedMessage
 	codec         *BinaryCodec

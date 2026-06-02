@@ -55,6 +55,27 @@ func (t *TCPTransport) dial(ctx context.Context, addr string) (*tls.Conn, error)
 	return conn, nil
 }
 
+// dialMux opens a fresh TLS-over-TCP conn using the mux-ONLY client config and fails
+// closed if the peer did not negotiate the mux ALPN (gate-check #1: a mux carrier
+// must never carry a data-plane-protocol conn). Used by tcpOutboundMuxCarrier.
+func (t *TCPTransport) dialMux(ctx context.Context, addr string) (*tls.Conn, error) {
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial mux %s: %w", addr, err)
+	}
+	t.tuneTCP(raw)
+	conn := tls.Client(raw, t.muxClientTLS)
+	if err := conn.HandshakeContext(ctx); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("tls handshake mux %s: %w", addr, err)
+	}
+	if p := conn.ConnectionState().NegotiatedProtocol; p != tcpMuxALPN {
+		_ = conn.Close()
+		return nil, fmt.Errorf("peer at %s negotiated %q (expected mux %q)", addr, p, tcpMuxALPN)
+	}
+	return conn, nil
+}
+
 // applyCtx wires ctx cancellation/deadline to conn: a deadline sets the conn
 // deadline; cancellation closes the conn (spec §4b: cancel = discard conn). The
 // returned stop func must be called when the RPC completes to release the watcher.
