@@ -159,11 +159,15 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 
 // TestBootGroupRaftMux_TCPAssemblesOverTCPTransport proves the serveruntime boot
 // PHASES assemble the raft mux over a TCP-constructed transport: bootClusterTransport
-// (TCP) → bootGroupRaftMux must construct the GroupRaftQUICMux on the *TCPTransport
-// and leave it mux-enabled (TCP raft rides the S2b-2 mux carrier; mux is always on
-// via QUICMuxEnabled). This is the in-process boot-assembly half; the full multi-node
-// serveruntime TCP cluster formation (invite-join + replicate + S3) rides the S5c-2
-// parity bench, which stands up a real multi-node TCP cluster.
+// (TCP) → bootGroupRaftMux constructs the GroupRaftQUICMux on the *TCPTransport and
+// runs EnableMux against it cleanly (i.e. *TCPTransport satisfies the muxDriverTransport
+// surface EnableMux→SetMuxConnHandler lands on). NOTE: MuxEnabled() here is a config
+// echo — the test injects QUICMuxEnabled:true, which also drives QUIC — so the
+// TCP-SPECIFIC signal is the *TCPTransport assertion + the clean assembly, NOT
+// mux-over-TCP behavior (that is the raft-layer carrier test raftv2_group_mux_tcp_test.go).
+// This is the in-process boot-assembly half; the full multi-node serveruntime TCP
+// cluster formation (invite-join + replicate + S3) rides the S5c-2 parity bench, which
+// stands up a real multi-node TCP cluster.
 func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
 	state := newBootState(Config{
 		DataDir: t.TempDir(), NodeID: "n1",

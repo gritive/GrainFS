@@ -786,7 +786,7 @@ func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
 		t.Fatalf("joiner identity: %v", err)
 	}
 	var gotBind []byte
-	_, err = inviteJoinDial(context.Background(), ln.Addr(), srvSPKI, cliCert,
+	_, err = inviteJoinDialWith(context.Background(), transport.DialJoin, ln.Addr(), srvSPKI, cliCert,
 		func(bind []byte) (cluster.JoinRequest, error) {
 			gotBind = append([]byte(nil), bind...)
 			return cluster.JoinRequest{JoinPhase: 1, NodeID: "joiner", Address: "127.0.0.1:1"}, nil
