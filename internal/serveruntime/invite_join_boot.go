@@ -331,7 +331,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions, dataDir string) (*
 // landed), regardless of whether the bundle env is set on this restart. It also
 // populates opts.ClusterKey from the transport PSK Phase-1 mirrored to
 // keys.d/current.key, because bootValidateConfig's cluster-key gate runs
-// BEFORE bootQUICTransport's ResolveClusterKey reads disk.
+// BEFORE bootClusterTransport's ResolveClusterKey reads disk.
 func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJoinState, error) {
 	rec, ok := readInvitePendingSentinel(dataDir)
 	if !ok {
@@ -517,7 +517,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 8. SealNodeKey where the next boot phase can open it. Use the cluster's
 	// ACTIVE KEK generation. Post-drop joins present the per-node cert before
-	// QUIC Listen, so bootQUICTransport loads this same KEK directly from disk
+	// QUIC Listen, so bootClusterTransport loads this same KEK directly from disk
 	// before wireDEKKeeper has populated state.kekStore.
 	sealGen, sealKEK, err := inviteNodeKeySealKey(kekGens)
 	if err != nil {
@@ -550,7 +550,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	// 9. set a transport construction key in memory so bootValidateConfig's
 	// cluster-key gate passes, and mirror it to keys.d/current.key for crash
 	// resume. In a post-drop cluster the leader intentionally omits the revoked
-	// cluster PSK; use a local random placeholder instead. bootQUICTransport
+	// cluster PSK; use a local random placeholder instead. bootClusterTransport
 	// immediately calls FlipPresent+SetDropped for post-drop joiners, so this
 	// placeholder is never accepted by peers and never reintroduces the dropped
 	// cluster-key SPKI.

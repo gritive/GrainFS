@@ -8,10 +8,36 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
+// TestBootClusterTransport_TCPBindsLoopbackPort0 — with the internal/test-only
+// useTCPTransport flag set, bootClusterTransport must construct the TCP stack
+// (dormant; production defaults to QUIC), Listen, and resolve state.raftAddr to
+// the kernel-picked TCP port. Proves the base-transport selection branch fires.
+func TestBootClusterTransport_TCPBindsLoopbackPort0(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
+	state.cfg.useTCPTransport = true
+	require.NoError(t, bootValidateConfig(state))
+	t.Cleanup(state.Cleanup)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, bootClusterTransport(ctx, state))
+	require.NotNil(t, state.quicTransport)
+	_, isTCP := state.quicTransport.(*transport.TCPTransport)
+	assert.True(t, isTCP, "useTCPTransport must construct a *TCPTransport")
+
+	resolved := state.raftAddr
+	assert.NotEqual(t, "127.0.0.1:0", resolved, "Listen must resolve :0 to kernel-picked port")
+	assert.True(t, strings.HasPrefix(resolved, "127.0.0.1:"), "kept on loopback in solo mode")
+	assert.Equal(t, state.quicTransport.LocalAddr(), resolved, "state.raftAddr matches LocalAddr")
+}
+
 // TestBootQUICTransport_BindsLoopbackPort0 — happy path: solo-mode bootstrap
-// (no peers) uses 127.0.0.1:0; bootQUICTransport must Listen, then resolve
+// (no peers) uses 127.0.0.1:0; bootClusterTransport must Listen, then resolve
 // state.raftAddr to the kernel-picked port so peers see a dialable self.
 func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
@@ -21,7 +47,7 @@ func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NotNil(t, state.quicTransport, "state.quicTransport populated")
 	assert.NotEmpty(t, state.transportPSK, "ephemeral PSK generated in solo mode")
 
@@ -33,7 +59,7 @@ func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
 
 // TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode — when neither cfg.
 // ClusterKey nor keys.d/current.key exists and no peers are configured,
-// bootQUICTransport must generate an ephemeral key so zero-config holds.
+// bootClusterTransport must generate an ephemeral key so zero-config holds.
 func TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
@@ -42,7 +68,7 @@ func TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	assert.NotEmpty(t, state.transportPSK, "ephemeral PSK populates state")
 	assert.GreaterOrEqual(t, len(state.transportPSK), 32, "ephemeral PSK is at least 32 chars")
 }
@@ -58,7 +84,7 @@ func TestBootPeerConnections_EmptyPeersIsNoOp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NoError(t, bootPeerConnections(ctx, state), "empty peer list is a clean no-op")
 }
 
@@ -73,7 +99,7 @@ func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 	require.NotNil(t, state.groupRaftMux, "state.groupRaftMux populated")
 }
@@ -96,7 +122,7 @@ func TestBootGroupRaftMux_EnabledHonorsConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 	require.NotNil(t, state.groupRaftMux)
 }
@@ -120,7 +146,7 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 	assert.Nil(t, state.quicTransport)
 	assert.Nil(t, state.groupRaftMux)
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NotNil(t, state.quicTransport, "QUIC up first")
 	assert.Nil(t, state.groupRaftMux, "mux not yet constructed")
 

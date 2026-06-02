@@ -92,10 +92,10 @@ type bootState struct {
 	db          *badger.DB // bootOpenMetaDB
 	sharedFSMDB *badger.DB // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
 
-	// Transport (populated by transport phases — bootQUICTransport,
+	// Transport (populated by transport phases — bootClusterTransport,
 	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
 	// resolved cluster key (disk > flag > ephemeral). raftAddr is updated
-	// in-place by bootQUICTransport once Listen resolves a kernel-picked
+	// in-place by bootClusterTransport once Listen resolves a kernel-picked
 	// port (operator passed 127.0.0.1:0).
 	transportPSK  string
 	quicTransport transport.ClusterTransport

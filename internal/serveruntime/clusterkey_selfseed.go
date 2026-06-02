@@ -163,7 +163,7 @@ func resolveOrSeedClusterKey(state *bootState) error {
 	}
 	if have {
 		// Restart: load the disk key so the cluster-key gate (which runs before
-		// bootQUICTransport's ResolveClusterKey) passes; ResolveClusterKey then
+		// bootClusterTransport's ResolveClusterKey) passes; ResolveClusterKey then
 		// sees flag == disk and returns disk with no conflict.
 		state.cfg.ClusterKey = diskKey
 		return nil

@@ -45,7 +45,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NoError(t, bootPeerConnections(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 

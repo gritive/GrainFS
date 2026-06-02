@@ -25,7 +25,7 @@ func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NoError(t, bootPeerConnections(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 	return ctx, state

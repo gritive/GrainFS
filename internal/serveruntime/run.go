@@ -53,7 +53,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// PR 3: transport.
-	if err := bootQUICTransport(ctx, state); err != nil {
+	if err := bootClusterTransport(ctx, state); err != nil {
 		return err
 	}
 	if err := bootPeerConnections(ctx, state); err != nil {
