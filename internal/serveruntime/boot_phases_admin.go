@@ -205,7 +205,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				completeCutoverH := &CompleteCutoverHandler{
 					RunDrop: func(ctx context.Context) error {
 						dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-							resp, err := state.quicTransport.Call(ctx, peer, &transport.Message{
+							resp, err := state.clusterTransport.Call(ctx, peer, &transport.Message{
 								Type:    transport.StreamAppliedIndexProbe,
 								Payload: payload,
 							})
@@ -227,7 +227,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 
 				revokeNodeH := &RevokeNodeHandler{
 					RunRevoke: func(ctx context.Context, nodeID string) error {
-						return state.metaRaft.RevokeNode(ctx, nodeID, state.quicTransport.ClosePeer)
+						return state.metaRaft.RevokeNode(ctx, nodeID, state.clusterTransport.ClosePeer)
 					},
 				}
 				h.POST("/v1/cluster/revoke-node", wrapStdlibNoParam(revokeNodeH.ServeHTTP))

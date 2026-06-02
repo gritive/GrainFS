@@ -324,7 +324,7 @@ func (r *peerRegistry) nodeIDToSPKI() map[string][32]byte {
 }
 
 // raftAddrToSPKI returns a snapshot of the raftAddr→SPKI mapping for all peers.
-// Production raft server IDs are QUIC addresses (MetaRaftConfig.RaftID), so
+// Production raft server IDs are transport addresses (MetaRaftConfig.RaftID), so
 // callers that receive a voter list from EffectiveConfiguration must use this
 // map (not nodeIDToSPKI) to cross-reference voters with their SPKIs.
 func (r *peerRegistry) raftAddrToSPKI() map[string][32]byte {

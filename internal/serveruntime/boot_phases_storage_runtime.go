@@ -52,7 +52,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	warnIfReducedDataFsync()
 	// Open the data WAL before any cluster shard service is constructed so that
 	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
-	// before bootStreamRouter registers QUIC handlers that would otherwise
+	// before bootStreamRouter registers transport handlers that would otherwise
 	// surface partially-recovered state to peers.
 	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
 	sealer, err := dataWALSealerForState(state)
@@ -148,7 +148,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		return fmt.Errorf("bootShardService: DEK keeper wired but clusterID is %d bytes (want 16)", len(state.clusterID))
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithShardDEKKeeper(state.dekKeeper, state.clusterID))
-	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.quicTransport, shardSvcOpts...)
+	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.clusterTransport, shardSvcOpts...)
 	// Stop the shard-pack actor goroutine (spawned when a WAL is wired) on
 	// shutdown. Registered after the data WAL cleanup so the LIFO cleanup stack
 	// closes the shard service first — the actor must not write into a WAL that
@@ -156,7 +156,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	state.AddCleanup(func() { _ = state.shardSvc.Close() })
 
 	// Replay the data WAL into the shard service before bootStreamRouter
-	// registers QUIC handlers; this keeps peers from observing partially-
+	// registers transport handlers; this keeps peers from observing partially-
 	// recovered local shard state.
 	if state.shardSvc != nil {
 		if err := state.shardSvc.RecoverDataWAL(ctx); err != nil {
@@ -178,9 +178,9 @@ func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
 	}
 }
 
-// bootStreamRouter sets up the QUIC stream multiplexer (Raft RPCs on the
+// bootStreamRouter sets up the transport stream multiplexer (Raft RPCs on the
 // Control stream, Shard RPCs on the Data stream) and registers the body
-// handlers that consume body streams directly off the QUIC transport. Then
+// handlers that consume body streams directly off the cluster transport. Then
 // fires raft.Node.Start to begin the apply loop on the data-plane raft.
 //
 // The body handler registration is critical: without it, every
@@ -196,21 +196,21 @@ func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
 func bootStreamRouterShell(state *bootState) {
 	if state.streamRouter == nil {
 		state.streamRouter = transport.NewStreamRouter()
-		state.quicTransport.SetStreamHandler(state.streamRouter.Dispatch)
+		state.clusterTransport.SetStreamHandler(state.streamRouter.Dispatch)
 	}
 }
 
 func bootStreamRouter(state *bootState) error {
 	bootStreamRouterShell(state)
 	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
-	state.quicTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
-	state.quicTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
+	state.clusterTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
+	state.clusterTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
 	// Phase B1: node-level append-segment peer-fetch handler. Each node
 	// hosts multiple group backends — the request payload carries groupID
 	// so the handler resolves the right per-group root via DataGroupManager.
 	// Lookups happen lazily at RPC time, so it's fine that groups are added
 	// to the manager AFTER this registration (bootOwnedGroupsAndEC).
-	cluster.RegisterAppendSegmentHandler(state.quicTransport, dataGroupAppendSegmentLookup{m: state.dgMgr})
+	cluster.RegisterAppendSegmentHandler(state.clusterTransport, dataGroupAppendSegmentLookup{m: state.dgMgr})
 
 	state.node.Start()
 	// state.node.Close() goes through the cluster.RaftNode interface.

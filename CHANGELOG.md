@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.0.502.0] - 2026-06-03
+
+### Changed
+
+- **Operator flags `--quic-mux-pool` / `--quic-mux-flush` renamed to `--mux-pool` /
+  `--mux-flush`.** These tune the transport-agnostic raft RPC mux carrier, which has
+  used TCP since the S6 QUIC removal — the `quic-` prefix was misleading. The flag
+  semantics, defaults (pool 4, flush 2ms), and help text ("multiplexed raft RPCs")
+  are unchanged. **Breaking:** scripts or systemd units passing `--quic-mux-pool` /
+  `--quic-mux-flush` must switch to the new names (there is no alias). The
+  Prometheus metric `grainfs_transport_ce_total` is unchanged; only its help string
+  dropped the now-inaccurate "QUIC" qualifier.
+
+### Internal
+
+- **Stale "QUIC" naming purged after the S6 transport removal (behavior-neutral
+  rename only).** Renamed transport-agnostic files (`group_transport_quic.go`,
+  `meta_transport_quic.go`, `quic_rpc.go`, `quic_rpc_codec.go`, `raft_quic_rpc.go`,
+  `raftv2_meta_quic.go`, `raftv2_quic_codec.go`, …), types/funcs
+  (`GroupRaftQUICMux`→`GroupRaftMux`, `MetaRaftQUICTransport`→`MetaRaftTransport`,
+  `RaftV2MetaQUICTransport`→`RaftV2MetaTransport`, `RaftQUICRPCTransport`→
+  `RaftRPCTransport`, `QUICPeerProbeDialer`→`ClusterPeerProbeDialer`,
+  `NewQUICCapabilityProbeDialer`→`NewCapabilityProbeDialer`, `quicMuxCarrier`→
+  `muxCarrier`, …), the `bootState.quicTransport` field (→`clusterTransport`), and
+  the `QUICMux*` config keys (→`Mux*`). Comments that asserted QUIC as the current
+  transport were corrected; comments documenting QUIC migration history/rationale
+  were kept. No logic, control flow, or wire format changed.
+
+## [0.0.501.0] - 2026-06-03
+
+### Removed
+
+- **Legacy QUIC cluster transport and the quic-go dependency are gone (S6).** After
+  the S5c-3 flip to TCP, the QUIC transport (`internal/transport/quic.go`), the QUIC
+  zero-CA join listener (`join_listener.go`), and all `quic-go/quic-go` imports were
+  removed; TCP is now the sole cluster transport with no opt-out. The experimental
+  `--transport` flag is removed (a no-flag `grainfs serve` was already TCP). The
+  transport-agnostic types that lived in `quic.go` (StreamHandler/StreamRouter,
+  TrafficLimiter, IdentitySnapshot, DeriveClusterIdentity) were extracted to
+  `transport_shared.go`/`join_wire.go` unchanged. **This is irreversible — there is
+  no longer a QUIC arm, so the §6 parity benchmark (TCP vs QUIC) can no longer be
+  run, and a node cannot fall back to QUIC.** Validation: `quic-go` import count is
+  zero, `go vet ./...` clean, full unit suite green. (The `--quic-mux-*` flags and
+  `QUICMux*` config keys are retained — they tune the transport-agnostic mux carrier,
+  not QUIC specifically; renaming them is a separate cleanup.)
+
+## [0.0.500.0] - 2026-06-03
+
+### Changed
+
+- **Cluster transport default flipped from QUIC to TCP.** `--transport` now
+  defaults to `tcp`; pass `--transport quic` to opt back into the legacy QUIC
+  transport. This is the production flip of the QUIC→TCP migration: on Linux the
+  userspace-QUIC data plane measured 0.36x the throughput of kernel TCP (a
+  structural CPU cost GSO does not close), so TCP becomes the default cluster
+  transport for raft, the mux carrier, zero-CA join, and the data plane. A node's
+  transport is not persisted, so `--transport quic` must be passed consistently
+  across restarts to keep a node on QUIC (a no-flag restart now boots TCP).
+- **Validation — be precise about what was and was not measured.** On **macOS**,
+  the representative multi-node cluster e2e paths run green under the TCP default:
+  invite-join + serveruntime formation, EC data-plane + mux raft replication,
+  Append, and 3-node kill/restart-rejoin; serveruntime and cluster unit/integration
+  suites are green. The only e2e failures (5–6 node EC cluster boot) reproduce
+  identically under a QUIC baseline run (**delta-zero** for those specs) — a macOS
+  resource limit, not a TCP regression. (The green paths were run under TCP only,
+  not baseline-compared against QUIC.) **Not validated:** the full e2e suite
+  (representative specs only), the colima suites (NBD/NFS/FUSE over TCP), **Linux**
+  runtime behavior (this validation is macOS; the QUIC→TCP performance thesis is
+  Linux-specific), and the §6 multi-node parity benchmark (throughput ≥1.0x),
+  which was deliberately not run before this flip.
+
 ## [0.0.494.0] - 2026-06-01
 
 ### Changed

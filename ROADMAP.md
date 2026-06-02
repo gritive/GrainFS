@@ -21,7 +21,7 @@ observable recovery, and compatibility gates for rolling upgrades.
 
 | Layer | Responsibility | Implementation |
 | --- | --- | --- |
-| Transport | Node-to-node streams and RPC framing | QUIC via `quic-go` |
+| Transport | Node-to-node streams and RPC framing | TCP (`crypto/tls` TLS 1.3, mux carrier) |
 | Consensus | Leader election, metadata agreement, shard group state | Custom Raft |
 | Data plane | EC shards, blob files, packed blobs, volume blocks | Reed-Solomon, BadgerDB metadata, local files |
 | API layer | S3, NFSv4, 9P, NBD, Iceberg REST, admin UDS | Hertz, Cobra, protocol-specific servers |
@@ -38,12 +38,12 @@ into the shared storage and cluster layers.
 - Multipart upload and SigV4 authentication.
 - Local files plus BadgerDB metadata.
 
-### QUIC And Raft
+### Cluster Transport And Raft
 
-- QUIC transport with stream multiplexing.
+- TCP transport with stream multiplexing (migrated from QUIC/quic-go over S0–S6; TLS 1.3 + cluster-PSK SPKI pinning).
 - Custom Raft with leader election, log replication, persistence, snapshots, and
   InstallSnapshot.
-- Raft-over-QUIC transport, membership changes, leadership transfer, and
+- Raft over the cluster transport, membership changes, leadership transfer, and
   rolling-upgrade compatibility tests.
 
 ### Clustered Object Storage
@@ -51,7 +51,7 @@ into the shared storage and cluster layers.
 - Runtime conversion from local node to clustered seed.
 - Object-level placement through the metadata index.
 - EC split/write/read/repair paths.
-- Non-leader large-write forwarding over QUIC.
+- Non-leader large-write forwarding over the cluster transport.
 - CRC-backed shard envelopes.
 - Reshard manager wiring.
 - AppendObject (S3 Express semantics): segments + EC coalesce, owner-routed via
@@ -150,7 +150,7 @@ specific bottleneck.
 - NBD direct I/O write path and per-block file layout.
 - Iceberg REST high-concurrency Raft proposal ceiling.
 - EC shard cache sizing.
-- QUIC mux pool sizing and meta-mux post-deploy measurement.
+- Mux pool sizing (`--mux-pool`) and meta-mux post-deploy measurement.
 
 ## Deferred Ideas
 
@@ -171,6 +171,6 @@ concrete.
 | --- | --- | --- |
 | Default shard size | 4 MiB | Balance metadata pressure and I/O size |
 | Default EC profile | 4+2 when topology allows it | Runtime chooses smaller profiles for smaller clusters |
-| Transport | QUIC | TLS 1.3 and multiplexed streams |
+| Transport | TCP | TLS 1.3 and multiplexed streams (mux carrier) |
 | Metadata KV | BadgerDB | MVCC, LSM-tree storage |
 | License | Apache 2.0 | Permissive commercial use |

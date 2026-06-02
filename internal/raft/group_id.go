@@ -18,7 +18,7 @@ var ErrReservedGroupID = errors.New("groupID uses reserved namespace")
 
 // ValidateGroupID rejects empty, reserved-prefix ("__"), or system-reserved
 // names. Callers: meta_fsm.applyPutShardGroup, group_lifecycle.instantiateLocalGroup,
-// GroupRaftQUICMux.Register, MetaRaft.ProposeShardGroup. The "__" prefix is
+// GroupRaftMux.Register, MetaRaft.ProposeShardGroup. The "__" prefix is
 // reserved so future internal IDs don't break wire compatibility.
 func ValidateGroupID(id string) error {
 	if id == "" {

@@ -176,7 +176,7 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 		return JoinReply{Accepted: false, Status: JoinStatusError, Message: "invite path unavailable: cluster id not configured"}
 	}
 	// Required-field guard, mirroring the in-process Handle path. The dedicated
-	// QUIC join listener dispatches decoded requests straight here, so without
+	// join listener dispatches decoded requests straight here, so without
 	// this a malformed client could sign Phase-1 with an empty node_id/address;
 	// Phase-2 would then register/promote a learner keyed by the address and only
 	// ProposeAddNode rejects the empty id AFTER promotion.
@@ -197,7 +197,7 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 }
 
 // HandleJoinStream is the JoinListener (W9) glue: it reads the framed JoinRequest
-// off the QUIC stream, runs HandleJoin with the TLS-captured peer SPKI, and
+// off the transport stream, runs HandleJoin with the TLS-captured peer SPKI, and
 // writes the framed JoinReply back. The wire is length-prefixed binary (NO
 // JSON) using transport.JoinReadFields/JoinPutField: exactly ONE field in each
 // direction, carrying the magic-prefixed FlatBuffers JoinRequest/JoinReply blob.
@@ -525,7 +525,7 @@ func joinStatusFromFB(s clusterpb.JoinStatus) JoinStatus {
 
 // EncodeJoinRequest serializes a JoinRequest to the magic-prefixed FlatBuffers
 // blob carried in one length-prefixed join-wire field. Used by the W9b joiner
-// to drive Phase-1/Phase-2 over transport.DialJoin.
+// to drive Phase-1/Phase-2 over transport.DialJoinTCP.
 func EncodeJoinRequest(req JoinRequest) ([]byte, error) {
 	return encodeJoinRequest(req)
 }

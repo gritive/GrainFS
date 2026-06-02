@@ -27,7 +27,7 @@ type AlertSender interface {
 }
 
 // probeTimeout is the maximum time to wait for a UDP response when probing a
-// peer's QUIC port. On a loopback interface "connection refused" arrives in
+// peer's transport port. On a loopback interface "connection refused" arrives in
 // microseconds; using 200 ms gives plenty of headroom while keeping the total
 // probe round short.
 var probeTimeout = 200 * time.Millisecond
@@ -38,9 +38,9 @@ var probeTimeout = 200 * time.Millisecond
 //
 // The first check waits for the first interval tick. This avoids turning
 // normal rolling startup into a sticky degraded state while peers are still
-// binding their QUIC sockets.
+// binding their transport sockets.
 //
-// Node liveness is determined by a real QUIC shard-service ping when the
+// Node liveness is determined by a real transport shard-service ping when the
 // backend has a shard service. Unit tests and partially-wired backends fall
 // back to a UDP probe.
 type DegradedMonitor struct {
@@ -198,7 +198,7 @@ func (m *DegradedMonitor) configuredPlacementNodes() []string {
 }
 
 // countLiveNodes probes all configured nodes and returns the count of nodes
-// that can accept a QUIC shard-service RPC. A UDP fallback remains for unit
+// that can accept a transport shard-service RPC. A UDP fallback remains for unit
 // tests and partially-wired backends.
 //
 // As a side-effect, dead peer addresses are marked unhealthy in peerHealth so
@@ -256,7 +256,7 @@ func (m *DegradedMonitor) probePeer(addr string) bool {
 
 // probeUDPPort checks whether a UDP port is open by sending a single byte and
 // waiting for either a response (alive), "connection refused" (dead), or a
-// timeout (alive — no response expected from QUIC to arbitrary bytes).
+// timeout (alive — no response expected from the transport to arbitrary bytes).
 func probeUDPPort(addr string, timeout time.Duration) bool {
 	conn, err := net.DialTimeout("udp", addr, timeout)
 	if err != nil {

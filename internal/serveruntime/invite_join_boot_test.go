@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -267,7 +267,7 @@ func stageResumeArtifacts(t *testing.T, dir string) string {
 }
 
 // TestMaybeInviteJoin_ResumePopulatesClusterKey: on Resume, opts.ClusterKey is
-// read from keys.d/current.key (the gate runs BEFORE bootQUICTransport, so an
+// read from keys.d/current.key (the gate runs BEFORE bootClusterTransport, so an
 // empty key would trip the cluster-transport-key-missing gate).
 func TestMaybeInviteJoin_ResumePopulatesClusterKey(t *testing.T) {
 	dir := t.TempDir()
@@ -769,8 +769,8 @@ func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
-	ln, err := transport.NewJoinListener("127.0.0.1:0", srvCert,
-		func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+	ln, err := transport.NewTCPJoinListener("127.0.0.1:0", srvCert,
+		func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 			defer stream.Close()
 			_, _ = transport.JoinReadFields(stream, 1)
 			blob, _ := cluster.EncodeJoinReplyForTest(cluster.JoinReply{Accepted: true, Status: cluster.JoinStatusOK})
@@ -786,7 +786,7 @@ func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
 		t.Fatalf("joiner identity: %v", err)
 	}
 	var gotBind []byte
-	_, err = inviteJoinDial(context.Background(), ln.Addr(), srvSPKI, cliCert,
+	_, err = inviteJoinDialWith(context.Background(), transport.DialJoinTCP, ln.Addr(), srvSPKI, cliCert,
 		func(bind []byte) (cluster.JoinRequest, error) {
 			gotBind = append([]byte(nil), bind...)
 			return cluster.JoinRequest{JoinPhase: 1, NodeID: "joiner", Address: "127.0.0.1:1"}, nil

@@ -1,6 +1,6 @@
 // Package cluster: KEK in-flight lease snapshot probe RPC (Task 8).
 //
-// RPC mechanism: QUICTransport.Call / Handle with StreamKEKLeaseSnapshotProbe (0x19).
+// RPC mechanism: the cluster transport.Call / Handle with StreamKEKLeaseSnapshotProbe (0x19).
 // The leader uses this to collect per-voter lease counts before proposing a
 // MetaKEKPruneCmd. A version can only be pruned when every voter attests
 // lease_count == 0 (no in-flight consumers hold a reference to K_old).
@@ -49,7 +49,7 @@ type KEKLeaseSnapshotResp struct {
 }
 
 // kekLeaseSnapshotDialer abstracts the outbound transport.Call so tests can
-// inject a fake without a real QUIC link. Production wires:
+// inject a fake without a real transport link. Production wires:
 //
 //	func(ctx, peer, payload) ([]byte, error) {
 //	    resp, err := quic.Call(ctx, peer, &transport.Message{
@@ -141,7 +141,7 @@ func decodeKEKLeaseSnapshotResp(data []byte) (KEKLeaseSnapshotResp, error) {
 }
 
 // KEKLeaseSnapshotHandler is the server-side handler for StreamKEKLeaseSnapshotProbe.
-// Register it with: quicTransport.Handle(transport.StreamKEKLeaseSnapshotProbe, h.Handle)
+// Register it with: clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe, h.Handle)
 type KEKLeaseSnapshotHandler struct {
 	nodeID             string
 	tracker            *encrypt.KEKLeaseTracker

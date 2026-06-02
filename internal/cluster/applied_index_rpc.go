@@ -90,7 +90,7 @@ func decodeAppliedIndexResp(data []byte) (AppliedIndexResp, error) {
 }
 
 // AppliedIndexDialer is the production-injected outbound. In production this
-// wraps QUICTransport.Call with StreamAppliedIndexProbe; tests inject a fake.
+// wraps the cluster transport.Call with StreamAppliedIndexProbe; tests inject a fake.
 type AppliedIndexDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 // WaitVotersApplied blocks until every voter's LastApplied >= target, or the
@@ -175,7 +175,7 @@ func WaitVotersApplied(
 // HandleAppliedIndexProbe is the server-side handler. Returns the response
 // payload (or an error) for a StreamAppliedIndexProbe inbound request.
 //
-// Wire it on QUICTransport at boot:
+// Wire it on the cluster transport at boot:
 //
 //	t.Handle(transport.StreamAppliedIndexProbe, func(req *Message) *Message {
 //	    respPayload, err := HandleAppliedIndexProbe(req.Payload, selfID, mr.LastApplied)

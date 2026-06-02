@@ -35,8 +35,8 @@ var (
 
 const defaultMaxForwardStreams = 64
 
-// forwardDialer abstracts the request-response QUIC transport for testability.
-// Production wires it to quicTransport.Call; tests pass a fake that returns
+// forwardDialer abstracts the request-response cluster transport for testability.
+// Production wires it to clusterTransport.Call; tests pass a fake that returns
 // canned replies.
 type forwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 type forwardStreamDialer func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error)
@@ -70,7 +70,7 @@ func NewForwardSender(d forwardDialer) *ForwardSender {
 
 // WithStreamDialer enables streamed body forwarding for PutObject and
 // UploadPart. The metadata payload is sent as the first frame; body is copied
-// behind it on the same QUIC stream.
+// behind it on the same transport stream.
 func (s *ForwardSender) WithStreamDialer(d forwardStreamDialer) *ForwardSender {
 	s.streamDialer = d
 	return s
@@ -78,7 +78,7 @@ func (s *ForwardSender) WithStreamDialer(d forwardStreamDialer) *ForwardSender {
 
 // WithReadStreamDialer enables streamed response forwarding for GetObject and
 // GetObjectVersion. The metadata reply is a ForwardReply frame; object bytes
-// follow as the raw response body on the same QUIC stream.
+// follow as the raw response body on the same transport stream.
 func (s *ForwardSender) WithReadStreamDialer(d forwardReadStreamDialer) *ForwardSender {
 	s.readDialer = d
 	return s

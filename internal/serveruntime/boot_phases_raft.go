@@ -23,7 +23,7 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// bootMetaRaftWiring constructs the meta-raft control plane and its QUIC
+// bootMetaRaftWiring constructs the meta-raft control plane and its cluster-transport
 // transport. NO callbacks are registered and Start is NOT called here — that
 // split is the central invariant of PRs 3-4: callbacks register on the FSM
 // (bootDataGroupRouter, bootRotationAndAdminAPI) and Start runs only after
@@ -70,7 +70,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	// Mux-aware constructor: auto-registers metaRaft.Node() on groupRaftMux
 	// under the magic groupID "__meta__" so receiver-side mux dispatch is
 	// wired before any meta heartbeat hits the wire.
-	state.metaTransport = cluster.NewMetaTransportQUICMux(state.quicTransport, metaRaft.Node(), state.groupRaftMux)
+	state.metaTransport = cluster.NewMetaTransportMux(state.clusterTransport, metaRaft.Node(), state.groupRaftMux)
 	metaRaft.SetTransport(state.metaTransport)
 
 	exportStore, err := nfsexport.OpenStore(state.db)
@@ -270,7 +270,7 @@ func bootDataGroupRouter(state *bootState) error {
 // bootRotationAndAdminAPI registers the cluster-key rotation worker callbacks
 // on the meta-FSM and constructs the IAM AdminAPI (when IAM is configured).
 //
-// presentFlipTarget narrows the QUICTransport surface for the onPresentFlip
+// presentFlipTarget narrows the cluster transport surface for the onPresentFlip
 // callback — keeps the wiring testable with a small fake (PR-2a §8c step 5).
 type presentFlipTarget interface {
 	FlipPresent(cert tls.Certificate, spki [32]byte)
@@ -313,7 +313,7 @@ func buildOnPresentFlipCallbackWithRegistrar(st *bootState, tr presentFlipTarget
 	}
 }
 
-// clusterKeyDropTarget narrows the QUICTransport surface for the
+// clusterKeyDropTarget narrows the cluster transport surface for the
 // onClusterKeyDropped callback.
 type clusterKeyDropTarget interface {
 	SetDropped()
@@ -321,7 +321,7 @@ type clusterKeyDropTarget interface {
 }
 
 // buildOnClusterKeyDroppedCallback drops the cluster-key base and recycles
-// existing QUIC connections so peers re-handshake without the cluster key.
+// existing transport connections so peers re-handshake without the cluster key.
 func buildOnClusterKeyDroppedCallback(tr clusterKeyDropTarget) func() {
 	if tr == nil {
 		return nil
@@ -347,7 +347,7 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		return err
 	}
 	state.rotationKeystore = ks
-	state.rotationWorker = cluster.NewRotationWorker(state.rotationKeystore, state.quicTransport, state.nodeID)
+	state.rotationWorker = cluster.NewRotationWorker(state.rotationKeystore, state.clusterTransport, state.nodeID)
 	worker := state.rotationWorker
 	state.metaRaft.FSM().SetOnRotationApplied(func(st cluster.RotationState) {
 		_ = worker.OnPhaseChange(st)
@@ -357,21 +357,21 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		// a delta. The composer recomputes base PSK ∪ rotation window ∪ registry,
 		// so the registry never clobbers the steady-state PSK SPKI or a live
 		// rotation window (spec §6 D-rev3 step 3).
-		state.quicTransport.UpdateRegistryAccept(accept)
+		state.clusterTransport.UpdateRegistryAccept(accept)
 	})
 	// Persisted drop bit (spec §8 H3): if a restored snapshot says the cluster
 	// key was dropped (a PR-2 feature; ALWAYS false in PR-1), drop the
 	// cluster-key base on this node too. Dormant in PR-1 — no snapshot carries true.
-	state.metaRaft.FSM().SetOnClusterKeyDropped(buildOnClusterKeyDroppedCallback(state.quicTransport))
+	state.metaRaft.FSM().SetOnClusterKeyDropped(buildOnClusterKeyDroppedCallback(state.clusterTransport))
 	// PR-2a §8c step 5: lazy present-flip — FlipPresent only, no RecycleConns.
-	if cb := buildOnPresentFlipCallbackWithRegistrar(state, state.quicTransport, state.metaRaft); cb != nil {
+	if cb := buildOnPresentFlipCallbackWithRegistrar(state, state.clusterTransport, state.metaRaft); cb != nil {
 		state.metaRaft.FSM().SetOnPresentFlip(func() {
 			cb()
 			log.Info().Msg("present-flip applied: transport now presents per-node cert; presentsPerNode registered")
 		})
 	}
 	// PR-2a §8b: applied-index probe handler for the leader's barrier fan-out.
-	state.quicTransport.Handle(transport.StreamAppliedIndexProbe,
+	state.clusterTransport.Handle(transport.StreamAppliedIndexProbe,
 		func(req *transport.Message) *transport.Message {
 			respPayload, err := cluster.HandleAppliedIndexProbe(req.Payload, state.nodeID, state.metaRaft.LastApplied)
 			if err != nil {

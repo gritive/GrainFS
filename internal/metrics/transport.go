@@ -5,7 +5,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// TransportCECounter counts QUIC mux capability exchange outcomes.
+// TransportCECounter counts mux capability exchange outcomes.
 //
 //	role:    "dialer" | "acceptor"
 //	outcome: "success" | "failure"
@@ -13,5 +13,5 @@ import (
 //	         payload_length, feature_unsupported, timeout, io_error on failure.
 var TransportCECounter = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "grainfs_transport_ce_total",
-	Help: "QUIC mux capability exchange outcomes by role/outcome/reason.",
+	Help: "mux capability exchange outcomes by role/outcome/reason.",
 }, []string{"role", "outcome", "reason"})

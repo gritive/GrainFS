@@ -14,7 +14,7 @@ import (
 
 // buildCapGateWiringState assembles the minimal bootState that
 // wireCapabilityGateDirectProbe touches: a real MetaRaft (for FSM()), a real
-// QUIC transport (for Handle), a CapabilityGate, a KEKStore, and a
+// cluster transport (for Handle), a CapabilityGate, a KEKStore, and a
 // HandshakeVerifier bound to a 16-byte cluster.id.
 func buildCapGateWiringState(t *testing.T) *bootState {
 	t.Helper()
@@ -22,9 +22,9 @@ func buildCapGateWiringState(t *testing.T) *bootState {
 	require.NoError(t, err)
 	t.Cleanup(func() { meta.Close() })
 
-	quic, err := transport.NewQUICTransport("test-psk")
+	tr, err := transport.NewTCPTransport("test-psk")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = quic.Close() })
+	t.Cleanup(func() { _ = tr.Close() })
 
 	kekStore := encrypt.NewKEKStore()
 	require.NoError(t, kekStore.Add(0, make([]byte, encrypt.KEKSize)))
@@ -41,7 +41,7 @@ func buildCapGateWiringState(t *testing.T) *bootState {
 	return &bootState{
 		cfg:               Config{Version: "0.0.356.0"},
 		metaRaft:          meta,
-		quicTransport:     quic,
+		clusterTransport:  tr,
 		kekStore:          kekStore,
 		capabilityGate:    gate,
 		handshakeVerifier: verifier,

@@ -63,7 +63,7 @@ type bootState struct {
 	// (raftPeers=nil, raftCfg.JoinMode, skip Bootstrap), forces isGenesisBoot
 	// false (so the joiner uses NewEmptyDEKKeeper + strict cluster.id load against
 	// the secrets staged from Phase-1). Phase-2 membership ACK rides the dedicated
-	// QUIC join transport (the invite-join is now the ONLY cluster-join path).
+	// join transport (the invite-join is now the ONLY cluster-join path).
 	inviteJoinMode bool
 	// inviteJoin carries the Phase-1 outcome (resolved bundle, leaderID, node
 	// SPKI) so the post-boot Phase-2 ACK can redrive DialJoin without re-reading
@@ -92,14 +92,14 @@ type bootState struct {
 	db          *badger.DB // bootOpenMetaDB
 	sharedFSMDB *badger.DB // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
 
-	// Transport (populated by transport phases — bootQUICTransport,
+	// Transport (populated by transport phases — bootClusterTransport,
 	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
 	// resolved cluster key (disk > flag > ephemeral). raftAddr is updated
-	// in-place by bootQUICTransport once Listen resolves a kernel-picked
+	// in-place by bootClusterTransport once Listen resolves a kernel-picked
 	// port (operator passed 127.0.0.1:0).
-	transportPSK  string
-	quicTransport *transport.QUICTransport
-	groupRaftMux  *raft.GroupRaftQUICMux
+	transportPSK     string
+	clusterTransport transport.ClusterTransport
+	groupRaftMux     *raft.GroupRaftMux
 
 	// Meta-raft + DataGroup wiring (populated by raft phases —
 	// bootMetaRaftWiring, bootDataGroupRouter, bootRotationAndAdminAPI,
@@ -109,7 +109,7 @@ type bootState struct {
 	// against state.metaRaft.FSM(); bootMetaRaftStart then calls Start.
 	metaRaft         *cluster.MetaRaft
 	capabilityGate   *cluster.CapabilityGate
-	metaTransport    *cluster.MetaTransportQUIC
+	metaTransport    *cluster.MetaTransportMux
 	dgMgr            *cluster.DataGroupManager
 	clusterRouter    *cluster.Router
 	rotationKeystore *transport.Keystore
@@ -151,7 +151,7 @@ type bootState struct {
 	// perNodeCert is this node's per-node identity TLS certificate,
 	// populated alongside perNodeSPKI (PR-2a §8d F5 fix). The Task-5
 	// onPresentFlip callback closure captures BOTH cert and SPKI to call
-	// QUICTransport.FlipPresent.
+	// the cluster transport.FlipPresent.
 	perNodeCert tls.Certificate
 	// kekStore is the cluster-wide KEK store loaded by wireDEKKeeper. Phase
 	// A holds a single version (0). Later phases use it for rotation,
@@ -193,7 +193,7 @@ type bootState struct {
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
-	// service, stream multiplexing on QUIC, distributed backend, per-group
+	// service, stream multiplexing on the cluster transport, distributed backend, per-group
 	// raft instantiation, and EC config. effectiveEC is captured here so
 	// downstream phases (PR 6: balancer, healreceipt) can re-read the
 	// resolved EC profile without re-deriving from cluster size.
@@ -201,7 +201,7 @@ type bootState struct {
 	// interface.
 	node cluster.RaftNode
 	//nolint:unused // assigned by boot_phases_storage_runtime_test.go to seed the RPC transport for tests.
-	rpcTransport     *cluster.RaftQUICRPCTransport
+	rpcTransport     *cluster.RaftRPCTransport
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
@@ -236,7 +236,7 @@ type bootState struct {
 	placementStatsStore *cluster.NodeStatsStore // nil when balancer disabled
 
 	// bootShardService (data WAL — opened before the cluster shard service so
-	// shard writes can be logged and replayed before any QUIC stream handler
+	// shard writes can be logged and replayed before any transport stream handler
 	// is registered downstream by bootStreamRouter).
 	dataWAL    *datawal.WAL
 	dataWALDir string
@@ -254,12 +254,12 @@ type bootState struct {
 	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
-	// joinListener is the Zero-CA QUIC join listener (leader side, W9) serving
+	// joinListener is the Zero-CA join listener (leader side, W9) serving
 	// the two-phase invite handler on cfg.JoinListenAddr with a persisted stable
 	// cert. Nil in single-node mode. Closed via AddCleanup on shutdown; its
 	// Addr()/SPKI() are exposed to W10 (invite-bundle advertisement) via
 	// JoinListenerAddr()/JoinListenerSPKI().
-	joinListener *transport.JoinListener
+	joinListener joinListener
 	// coalesceCfg is the cluster-wide coalesce/cap configuration derived from
 	// CLI flags. Stored here so that GroupBackends instantiated after
 	// bootWALAndForwardersPart1 (including dynamically created shard groups) can

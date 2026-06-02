@@ -28,7 +28,7 @@ import (
 // before the gate. forwardReceiver.Register is now in bootRegisterForwardHandlers
 // (R-FSM-α) so bootShardService can run past WaitDEKReady.
 //
-// Inputs:  state.cfg.DataDir, state.quicTransport, state.metaRaft,
+// Inputs:  state.cfg.DataDir, state.clusterTransport, state.metaRaft,
 //
 //	state.streamRouter, state.dgMgr, state.clusterRouter,
 //	state.distBackend, state.nodeID, state.raftAddr, state.peers,
@@ -53,13 +53,13 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// ClusterCoordinator implements storage.Backend and routes bucket-scoped ops to the
 	// correct group leader via ForwardSender. 0x08 handler (ForwardReceiver) receives
 	// forwarded calls on voter nodes and dispatches to local GroupBackend.
-	quicTransport := state.quicTransport
+	clusterTransport := state.clusterTransport
 	metaRaft := state.metaRaft
 	peers := state.peers
 
 	forwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-		reply, err := quicTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.Call(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +67,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}
 	forwardStreamDialer := func(callCtx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}
-		reply, err := quicTransport.CallWithBody(callCtx, peer, msg, body)
+		reply, err := clusterTransport.CallWithBody(callCtx, peer, msg, body)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +75,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}
 	forwardReadStreamDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
 		msg := &transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload}
-		reply, body, err := quicTransport.CallRead(callCtx, peer, msg)
+		reply, body, err := clusterTransport.CallRead(callCtx, peer, msg)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -102,7 +102,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
-		reply, err := quicTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.Call(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +141,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		}
 		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
 	})
-	// Zero-CA QUIC join listener (W9, leader side): a dedicated QUIC listener on
+	// Zero-CA join listener (W9, leader side): a dedicated listener on
 	// its own ALPN serving the two-phase invite handler. A brand-new joiner whose
 	// self-signed SPKI is in nobody's accept-set cannot reach the production
 	// cluster listener, so the invite flow rides this isolated transport. The
@@ -154,7 +154,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
-		reply, err := quicTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.Call(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +266,7 @@ func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembe
 	if addr == "" {
 		return fmt.Errorf("add joined node to legacy data raft: node %q not found in meta membership", nodeID)
 	}
-	// Legacy group-0 data raft uses voter IDs directly as QUIC dial targets;
+	// Legacy group-0 data raft uses voter IDs directly as transport dial targets;
 	// v2 AddVoterCtx currently ignores its addr parameter. Only auto-extend
 	// this raft when the node ID is already the dialable raft address. Stable
 	// node IDs continue through the per-group/meta paths until this legacy

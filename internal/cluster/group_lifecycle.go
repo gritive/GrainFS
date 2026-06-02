@@ -34,7 +34,7 @@ type GroupLifecycleConfig struct {
 
 // groupTransport is the optional wiring for raft RPCs. Tests with no peers can
 // pass nil; production wires a transport that dispatches per-group RPCs over
-// QUIC streams labeled with the group ID.
+// transport streams labeled with the group ID.
 type groupTransport interface {
 	RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
 	AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)

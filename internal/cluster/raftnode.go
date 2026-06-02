@@ -110,7 +110,7 @@ type RaftNode interface {
 	// ChangeMembership transitions the cluster membership.
 	ChangeMembership(ctx context.Context, adds []raft.ServerEntry, removes []string) error
 
-	// Inbound Raft RPC handlers — invoked by the QUIC RPC server when a peer
+	// Inbound Raft RPC handlers — invoked by the cluster-transport RPC server when a peer
 	// delivers a Raft message.
 	HandleRequestVote(args *raft.RequestVoteArgs) *raft.RequestVoteReply
 	HandleAppendEntries(args *raft.AppendEntriesArgs) *raft.AppendEntriesReply

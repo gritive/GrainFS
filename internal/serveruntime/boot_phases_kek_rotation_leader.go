@@ -10,8 +10,8 @@
 //   - PeerKEKProbe is the production impl from kek_peer_probe_production.go.
 //     The local-self closures wrap statfs on the keystore directory and the
 //     state.kekLeaseTracker count.
-//   - The two QUIC handlers (StreamKEKDiskSpaceProbe,
-//     StreamKEKLeaseSnapshotProbe) are registered on state.quicTransport so
+//   - The two transport handlers (StreamKEKDiskSpaceProbe,
+//     StreamKEKLeaseSnapshotProbe) are registered on state.clusterTransport so
 //     the leader's fan-out reaches every voter.
 //   - The KEK audit sink is opened at <dataDir>/audit/kek.log (0o600,
 //     O_APPEND|O_CREATE|O_WRONLY) and set on the MetaFSM. Append-only file
@@ -53,7 +53,7 @@ func statfsDiskFreeBytes(dir string) (uint64, error) {
 // audit log. Skipped (warn-only) when prerequisites are absent — keeps
 // non-cluster test configurations boot-clean.
 func bootKEKRotationLeader(state *bootState) error {
-	if state.metaRaft == nil || state.quicTransport == nil || state.kekStore == nil {
+	if state.metaRaft == nil || state.clusterTransport == nil || state.kekStore == nil {
 		log.Debug().Msg("bootKEKRotationLeader: prerequisites unavailable; skipping (non-cluster mode)")
 		return nil
 	}
@@ -99,22 +99,22 @@ func bootKEKRotationLeader(state *bootState) error {
 		return snapshot.CountSnapshotsSealedUnderKEK(snapshotsDir, version)
 	}
 
-	// 2. Peer probe RPC handlers. Register on the shared QUIC transport so a
+	// 2. Peer probe RPC handlers. Register on the shared cluster transport so a
 	//    leader's GetKEKDiskSpace / GetKEKLeaseSnapshot reaches this node as a
 	//    voter.
-	state.quicTransport.Handle(transport.StreamKEKDiskSpaceProbe,
+	state.clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe,
 		cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */).Handle)
-	state.quicTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
+	state.clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
 		cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
 			return state.metaRaft.LastApplied()
 		}, snapRefCount).Handle)
 
 	// 3. Production PeerKEKProbe with self-shortcut. Self-call computes the
 	//    disk-space + lease values directly (no wire codec roundtrip) so the
-	//    leader's own readings are always available even if the QUIC
+	//    leader's own readings are always available even if the transport
 	//    transport is degraded mid-rotation.
 	raftConfig := cluster.NewMetaRaftConfigReader(state.metaRaft)
-	dialer := &cluster.QUICPeerProbeDialer{T: state.quicTransport}
+	dialer := &cluster.ClusterPeerProbeDialer{T: state.clusterTransport}
 	leaseTracker := state.kekLeaseTracker
 	mr := state.metaRaft
 	selfID := raftServerID
@@ -190,7 +190,7 @@ func bootKEKRotationLeader(state *bootState) error {
 }
 
 // wireCapabilityGateDirectProbe registers the StreamCapabilityProbe handler on
-// the shared QUIC transport and populates the CapabilityGate's direct signed-
+// the shared cluster transport and populates the CapabilityGate's direct signed-
 // assertion path. Extracted from bootKEKRotationLeader so the wiring contract
 // is directly unit-testable (capability_gate_wiring_test.go). The handler and
 // the gate's per-voter probe target MUST use the SAME raft ServerID
@@ -210,9 +210,9 @@ func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error 
 		state.kekStore,
 		state.metaRaft.FSM(),
 	)
-	state.quicTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+	state.clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
 
-	dialer := cluster.NewQUICCapabilityProbeDialer(state.quicTransport)
+	dialer := cluster.NewCapabilityProbeDialer(state.clusterTransport)
 	state.capabilityGate.WithDirectProbe(clusterID, state.kekStore, dialer)
 
 	log.Info().Str("server_id", raftServerID).Msg("capability gate direct-RPC signed-assertion path wired")

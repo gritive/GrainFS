@@ -15,10 +15,11 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// bootQUICTransport resolves the cluster key (disk wins over flag, ephemeral
-// when both empty in solo mode), constructs the QUIC transport, applies bulk
+// bootClusterTransport resolves the cluster key (disk wins over flag, ephemeral
+// when both empty in solo mode), constructs the cluster transport (TCP, the sole
+// cluster transport since S6), applies bulk
 // traffic limits for forwarded S3 PUT fan-outs, and Listens on raftAddr. On
-// success state.quicTransport is populated, state.raftAddr is updated to the
+// success state.clusterTransport is populated, state.raftAddr is updated to the
 // kernel-picked port (when operator passed 127.0.0.1:0), and Close is queued
 // on the cleanup stack.
 //
@@ -28,7 +29,7 @@ import (
 //  3. Flag only: use flag, mirror to keys.d/current.key on first boot.
 //  4. Both empty + cluster mode: rejected upstream by ValidateClusterKey.
 //     Both empty + solo mode: generate ephemeral so zero-config holds.
-func bootQUICTransport(ctx context.Context, state *bootState) error {
+func bootClusterTransport(ctx context.Context, state *bootState) error {
 	resolvedKey, warn, err := ResolveClusterKey(state.cfg.DataDir, state.cfg.ClusterKey, state.cfg)
 	if err != nil {
 		return fmt.Errorf("resolve cluster key: %w", err)
@@ -40,20 +41,25 @@ func bootQUICTransport(ctx context.Context, state *bootState) error {
 	if state.transportPSK == "" {
 		ephemeral, err := GenerateEphemeralClusterKey()
 		if err != nil {
-			return fmt.Errorf("init QUIC transport: %w", err)
+			return fmt.Errorf("init cluster transport: %w", err)
 		}
 		state.transportPSK = ephemeral
 	}
 
-	quicTransport, err := transport.NewQUICTransport(state.transportPSK)
-	if err != nil {
-		return fmt.Errorf("init QUIC transport: %w", err)
+	// TCP is the sole cluster transport (S6 removed the legacy QUIC stack). All
+	// post-construction setup below is transport-agnostic (ClusterTransport interface
+	// methods); state.clusterTransport is the interface-typed field (legacy name).
+	var clusterTransport transport.ClusterTransport
+	tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
+	if terr != nil {
+		return fmt.Errorf("init cluster transport: %w", terr)
 	}
+	clusterTransport = tcpTransport
 	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.
-	quicTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 64})
-	if err := applyPostDropInviteJoinIdentity(state, quicTransport); err != nil {
+	clusterTransport.SetTrafficLimits(transport.TrafficLimits{Bulk: 64})
+	if err := applyPostDropInviteJoinIdentity(state, clusterTransport); err != nil {
 		return err
 	}
 	// M3: pre-seed peer SPKIs from the invite-join bootstrap so the joiner
@@ -61,18 +67,18 @@ func bootQUICTransport(ctx context.Context, state *bootState) error {
 	// (PR-2a §8f). No-op on normal (non-invite) boot and when peer_spkis is
 	// empty (rolling-upgrade compat — old leader omitted the field, M5).
 	if state.inviteJoin != nil && len(state.inviteJoin.peerSPKIs) > 0 {
-		quicTransport.SeedInitialPeerSPKIs(state.inviteJoin.peerSPKIs)
+		clusterTransport.SeedInitialPeerSPKIs(state.inviteJoin.peerSPKIs)
 	}
-	if err := quicTransport.Listen(ctx, state.raftAddr); err != nil {
-		return fmt.Errorf("start QUIC transport on %s: %w\n  recovery: confirm UDP port is free (lsof -i UDP:%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", state.raftAddr, err, state.raftAddr)
+	if err := clusterTransport.Listen(ctx, state.raftAddr); err != nil {
+		return fmt.Errorf("start cluster transport on %s: %w\n  recovery: confirm the port is free (lsof -i :%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", state.raftAddr, err, state.raftAddr)
 	}
-	state.quicTransport = quicTransport
-	state.AddCleanup(func() { quicTransport.Close() })
+	state.clusterTransport = clusterTransport
+	state.AddCleanup(func() { clusterTransport.Close() })
 
 	// Resolve raftAddr to the actual bound port. When the operator asked for
-	// 127.0.0.1:0 (singleton default) QUIC picks a free UDP port; we need
+	// 127.0.0.1:0 (singleton default) the transport picks a free port; we need
 	// that concrete address for shard placement so peers see a dialable self.
-	if local := quicTransport.LocalAddr(); local != "" {
+	if local := clusterTransport.LocalAddr(); local != "" {
 		state.raftAddr = local
 	}
 	return nil
@@ -83,16 +89,16 @@ type postDropInviteJoinTransport interface {
 	SetDropped()
 }
 
-func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInviteJoinTransport) error {
-	if state == nil || quicTransport == nil || state.inviteJoin == nil || !state.inviteJoin.clusterKeyDropped {
+func applyPostDropInviteJoinIdentity(state *bootState, clusterTransport postDropInviteJoinTransport) error {
+	if state == nil || clusterTransport == nil || state.inviteJoin == nil || !state.inviteJoin.clusterKeyDropped {
 		return nil
 	}
 	cert, spki, err := loadPostDropInviteNodeKey(state)
 	if err != nil {
 		return fmt.Errorf("post-drop invite-join: load per-node cert: %w", err)
 	}
-	quicTransport.FlipPresent(cert, spki)
-	quicTransport.SetDropped()
+	clusterTransport.FlipPresent(cert, spki)
+	clusterTransport.SetDropped()
 	state.perNodeCert = cert
 	state.perNodeSPKI = spki
 	state.perNodeKeyKEKGen = state.inviteJoin.nodeKeyKEKGen
@@ -120,31 +126,31 @@ func loadInviteNodeKeyKEKFromDisk(dataDir string, gen uint32) ([]byte, error) {
 	return kek, nil
 }
 
-// bootPeerConnections opens a QUIC connection to each peer. Connection
-// failures are logged but non-fatal — the transport retries lazily on the
-// first send. Empty peer list (solo mode) is a clean no-op.
+// bootPeerConnections opens a cluster-transport connection to each peer.
+// Connection failures are logged but non-fatal — the transport retries lazily on
+// the first send. Empty peer list (solo mode) is a clean no-op.
 func bootPeerConnections(ctx context.Context, state *bootState) error {
 	for _, peer := range state.peers {
-		if err := state.quicTransport.Connect(ctx, peer); err != nil {
+		if err := state.clusterTransport.Connect(ctx, peer); err != nil {
 			log.Warn().Str("peer", peer).Err(err).Msg("failed to connect to peer (will retry lazily)")
 		}
 	}
 	return nil
 }
 
-// bootGroupRaftMux constructs the GroupRaftQUICMux that multiplexes per-group
-// raft RPCs over StreamGroupRaft. Must run BEFORE NewMetaTransportQUICMux so
+// bootGroupRaftMux constructs the GroupRaftMux that multiplexes per-group
+// raft RPCs over StreamGroupRaft. Must run BEFORE NewMetaTransportMux so
 // the meta-raft transport can auto-register its node on the mux at
 // construction time. If the mux were created later, a startup race would let
 // inbound meta calls hit "mux: unknown group __meta__" and stall meta
 // election (codex P1 #3).
 func bootGroupRaftMux(state *bootState) error {
-	state.groupRaftMux = raft.NewGroupRaftQUICMux(state.quicTransport)
-	if state.cfg.QUICMuxEnabled {
-		state.groupRaftMux.EnableMux(state.cfg.QUICMuxPoolSize, state.cfg.QUICMuxFlushWindow)
+	state.groupRaftMux = raft.NewGroupRaftMux(state.clusterTransport)
+	if state.cfg.MuxEnabled {
+		state.groupRaftMux.EnableMux(state.cfg.MuxPoolSize, state.cfg.MuxFlushWindow)
 		log.Info().
-			Int("pool", state.cfg.QUICMuxPoolSize).
-			Dur("flush", state.cfg.QUICMuxFlushWindow).
+			Int("pool", state.cfg.MuxPoolSize).
+			Dur("flush", state.cfg.MuxFlushWindow).
 			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
 	}
 	return nil

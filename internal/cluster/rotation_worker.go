@@ -7,7 +7,7 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// IdentitySwapper is the subset of *transport.QUICTransport the worker needs.
+// IdentitySwapper is the subset of *transport.TCPTransport the worker needs.
 // Defined here as an interface so tests can use a fake. ApplyRotation routes a
 // phase change through the transport's identity composer as a single atomic op
 // so rotation deltas compose with (not clobber) the peer-registry accept-set

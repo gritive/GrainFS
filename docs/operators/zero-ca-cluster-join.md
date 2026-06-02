@@ -163,8 +163,8 @@ Zero-CA node revoked: node-b
 ```
 
 The command removes the peer from meta-Raft membership, burns pending invites
-for the same node ID, deny-lists the node transport SPKI, and closes cached QUIC
-connections to that peer.
+for the same node ID, deny-lists the node transport SPKI, and closes cached cluster
+transport connections to that peer.
 
 ### Data-group voter eviction
 

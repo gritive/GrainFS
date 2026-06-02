@@ -53,13 +53,13 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// PR 3: transport.
-	if err := bootQUICTransport(ctx, state); err != nil {
+	if err := bootClusterTransport(ctx, state); err != nil {
 		return err
 	}
 	if err := bootPeerConnections(ctx, state); err != nil {
 		return err
 	}
-	// groupRaftMux must exist BEFORE NewMetaTransportQUICMux so the meta-raft
+	// groupRaftMux must exist BEFORE NewMetaTransportMux so the meta-raft
 	// transport auto-registers on construction.
 	if err := bootGroupRaftMux(state); err != nil {
 		return err
@@ -113,15 +113,15 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	state.node = v2Node
-	// M5 PR 27: wire the v2 QUIC RPC bridge so multi-node v2 clusters can
-	// exchange Raft RPCs. The bridge re-implements v1's QUIC RPC dispatch on
+	// M5 PR 27: wire the v2 Raft RPC bridge so multi-node v2 clusters can
+	// exchange Raft RPCs. The bridge re-implements v1's Raft RPC dispatch on
 	// top of cluster.RaftNode.Handle* (the v2 adapter translates to
 	// raftv2.Node). Wire format is byte-identical to v1; v1 is frozen until
 	// PR 30 deletes it.
-	v2RPCTransport := cluster.NewRaftQUICRPCTransport(state.quicTransport, v2Node)
+	v2RPCTransport := cluster.NewRaftRPCTransport(state.clusterTransport, v2Node)
 	v2RPCTransport.SetTransport()
 	v2RPCTransport.SetTimeoutNowTransport()
-	log.Info().Msg("raft v2: QUIC RPC transport wired (TimeoutNow enabled)")
+	log.Info().Msg("raft v2: Raft RPC transport wired (TimeoutNow enabled)")
 
 	// PR 4: meta-raft callback registration BEFORE Start.
 	if err := bootMetaRaftWiring(state); err != nil {

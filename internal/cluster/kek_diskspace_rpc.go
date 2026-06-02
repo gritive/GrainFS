@@ -1,6 +1,6 @@
 // Package cluster: KEK keystore-directory disk-space probe RPC (Task 5).
 //
-// RPC mechanism: QUICTransport.Call / Handle with StreamKEKDiskSpaceProbe (0x18).
+// RPC mechanism: the cluster transport.Call / Handle with StreamKEKDiskSpaceProbe (0x18).
 // The leader uses this to verify every voter has at least MinKeystoreFreeBytes
 // free in its keystore directory before proposing a MetaKEKRotateCmd. A node
 // that runs out of disk between persist of K_new and the snapshot-atomic
@@ -41,7 +41,7 @@ type KEKDiskSpaceResp struct {
 }
 
 // kekDiskSpaceProbeDialer abstracts the outbound transport.Call so tests can
-// inject a fake without a real QUIC link. Production wires:
+// inject a fake without a real transport link. Production wires:
 //
 //	func(ctx, peer, payload) ([]byte, error) {
 //	    resp, err := quic.Call(ctx, peer, &transport.Message{
@@ -135,7 +135,7 @@ func statfsDiskSpace(dir string) (uint64, error) {
 }
 
 // KEKDiskSpaceHandler is the server-side handler for StreamKEKDiskSpaceProbe.
-// Register it with: quicTransport.Handle(transport.StreamKEKDiskSpaceProbe, h.Handle)
+// Register it with: clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe, h.Handle)
 type KEKDiskSpaceHandler struct {
 	nodeID      string
 	keystoreDir string

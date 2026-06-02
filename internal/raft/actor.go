@@ -21,7 +21,7 @@ var proposeAppendBatchLimit = maxProposeAppendBatch
 // command queue drains. 200 µs is well below the network round trips on the
 // PUT critical path (sub-millisecond LAN), so it does not regress p50/p99 in
 // practice — but it lets the actor accumulate multi-entry batches, amortizing
-// log-store fsync, AppendEntries broadcast, and QUIC sendmsg overhead.
+// log-store fsync, AppendEntries broadcast, and transport sendmsg overhead.
 const defaultProposeLingerWindow = 200 * time.Microsecond
 
 // proposeLingerWindow is mutable so tests can disable the linger for

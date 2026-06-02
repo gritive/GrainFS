@@ -30,7 +30,7 @@ import (
 // (Task 13 of the Volume Scrub plan).
 // peerReader is the minimal interface RepairReplica needs to fetch a candidate
 // replica from another node. Satisfied by *ShardService. Extracted so that
-// repairReplicaWith can be unit-tested without standing up a real QUIC stream
+// repairReplicaWith can be unit-tested without standing up a real transport stream
 // service or raft cluster.
 type peerReader interface {
 	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
@@ -46,7 +46,7 @@ func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key stri
 
 // repairReplicaWith runs the orchestration that RepairReplica wraps after the
 // HEAD lookup. Split out so unit tests can exercise the full guard +
-// peer-iteration + ETag verify (MD5/xxhash3) + write path without hitting BadgerDB or QUIC.
+// peer-iteration + ETag verify (MD5/xxhash3) + write path without hitting BadgerDB or the transport.
 //
 // Strategy:
 //  1. iterate b.liveNodes() with peerHealth priority (healthy first)

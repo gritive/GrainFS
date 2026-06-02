@@ -53,12 +53,14 @@ Flags:
       --heal-receipt-retention duration                     HealReceipt retention window (older entries are GC'd) (default 720h0m0s)
       --heal-receipt-window int                             rolling window size — how many recent receipt IDs to gossip per tick (default 50)
   -h, --help                                                help for serve
-      --join-listen-addr string                             Zero-CA QUIC join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host
+      --join-listen-addr string                             Zero-CA join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host
       --kek-protector string                                at-rest KEK protection: "plaintext" (raw 32-byte key files) or "env" (machine-bound wrap + recovery passphrase slot) (default "plaintext")
       --kek-recovery-secret-file string                     file path holding the recovery passphrase for --kek-protector=env (GRAINFS_KEK_RECOVERY_SECRET env var takes precedence)
       --lifecycle-interval duration                         lifecycle rule evaluation interval (0 to disable) (default 1h0m0s)
       --measure-read-amp                                    enable read-amplification simulator (informs Unified Buffer Cache decision)
       --meta-dir string                                     dedicated fast metadata storage directory (defaults to first path in --data)
+      --mux-flush duration                                  heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval) (default 2ms)
+      --mux-pool int                                        stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining) (default 4)
       --nbd-port int                                        NBD server port (0 = disabled). Client-side nbd-client still requires Linux. (default 10809)
       --nfs-write-buffer-dir string                         directory for NFS write coalescing buffer files (empty = derive from --data)
       --nfs-write-buffer-idle duration                      idle timeout before write buffer auto-flushes (0 = disable buffering) (default 30s)
@@ -70,11 +72,9 @@ Flags:
   -p, --port int                                            listen port (default 9000)
       --pprof-port int                                      expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)
       --public-url grainfs dashboard                        public dashboard base URL (e.g. https://node1:9000); defaults to localhost in grainfs dashboard output
-      --quic-mux-flush duration                             heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval) (default 2ms)
-      --quic-mux-pool int                                   stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining) (default 4)
       --raft-addr string                                    Raft listen address for cluster communication (required in cluster mode)
       --raft-election-timeout duration                      per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load. (default 1s)
-      --raft-heartbeat-interval duration                    per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost. (default 200ms)
+      --raft-heartbeat-interval duration                    per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with transport stream-open cost. (default 200ms)
       --raft-log-gc-interval duration                       how often Raft log GC runs (default 30s)
       --reshard-interval duration                           background EC reshard interval (always on; 0 resets to default 24h) (default 24h0m0s)
       --scrub-interval duration                             EC shard scrub interval (always on; 0 resets to default 24h) (default 24h0m0s)

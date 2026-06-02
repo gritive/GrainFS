@@ -23,7 +23,7 @@ const (
 	metaMuxAttemptTimeout = 200 * time.Millisecond
 )
 
-// RPC type constants for meta-Raft QUIC transport (legacy path).
+// RPC type constants for meta-Raft transport (legacy path).
 //
 // On the mux path the receiver's handleMuxRequest switches on the unified
 // rpcType* (RequestVote / AppendEntries) constants because meta-raft *Node
@@ -39,7 +39,7 @@ const (
 	metaRPCInstallSnapshotReply = "MetaInstallSnapshotReply"
 )
 
-// MetaRaftQUICTransport delivers meta-Raft RPCs over the shared QUIC transport.
+// MetaRaftTransport delivers meta-Raft RPCs over the shared cluster transport.
 //
 // Two paths coexist:
 //
@@ -52,21 +52,21 @@ const (
 //
 // SendInstallSnapshot stays on the legacy path always — the 60s budget +
 // large-payload semantics don't fit the per-message frame model.
-type MetaRaftQUICTransport struct {
-	tr       *transport.QUICTransport
+type MetaRaftTransport struct {
+	tr       raftRPCTransport
 	node     *Node
-	groupMux *GroupRaftQUICMux // nil = legacy-only; set by NewMetaRaftQUICTransportMux.
+	groupMux *GroupRaftMux // nil = legacy-only; set by NewMetaRaftTransportMux.
 }
 
-// NewMetaRaftQUICTransport creates a meta-Raft RPC transport without mux
+// NewMetaRaftTransport creates a meta-Raft RPC transport without mux
 // support. Tests and legacy callers use this constructor.
-func NewMetaRaftQUICTransport(tr *transport.QUICTransport, node *Node) *MetaRaftQUICTransport {
-	m := &MetaRaftQUICTransport{tr: tr, node: node}
+func NewMetaRaftTransport(tr raftRPCTransport, node *Node) *MetaRaftTransport {
+	m := &MetaRaftTransport{tr: tr, node: node}
 	tr.Handle(transport.StreamMetaRaft, m.handleRPC)
 	return m
 }
 
-// NewMetaRaftQUICTransportMux is the mux-aware constructor. It auto-registers
+// NewMetaRaftTransportMux is the mux-aware constructor. It auto-registers
 // node on groupMux so the receiver-side __meta__ branch is wired up before
 // EnableMux installs the mux accept handler. Auto-registration removes a
 // startup-order race: if EnableMux ran before metaNode was registered, all
@@ -74,8 +74,8 @@ func NewMetaRaftQUICTransport(tr *transport.QUICTransport, node *Node) *MetaRaft
 //
 // groupMux may be nil; in that case behaviour matches the legacy
 // constructor.
-func NewMetaRaftQUICTransportMux(tr *transport.QUICTransport, node *Node, groupMux *GroupRaftQUICMux) *MetaRaftQUICTransport {
-	m := &MetaRaftQUICTransport{tr: tr, node: node, groupMux: groupMux}
+func NewMetaRaftTransportMux(tr raftRPCTransport, node *Node, groupMux *GroupRaftMux) *MetaRaftTransport {
+	m := &MetaRaftTransport{tr: tr, node: node, groupMux: groupMux}
 	tr.Handle(transport.StreamMetaRaft, m.handleRPC) // legacy receiver always on for fallback
 	if groupMux != nil {
 		groupMux.RegisterMetaNode(node)
@@ -83,7 +83,7 @@ func NewMetaRaftQUICTransportMux(tr *transport.QUICTransport, node *Node, groupM
 	return m
 }
 
-func (m *MetaRaftQUICTransport) muxOn() bool {
+func (m *MetaRaftTransport) muxOn() bool {
 	return m.groupMux != nil && m.groupMux.MuxEnabled()
 }
 
@@ -140,7 +140,7 @@ func errIsCtxBudget(err error) bool {
 	return err == context.DeadlineExceeded || (err != nil && strings.Contains(err.Error(), "context deadline exceeded"))
 }
 
-func (m *MetaRaftQUICTransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+func (m *MetaRaftTransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
 	if m.muxOn() {
 		muxCtx, cancel := context.WithTimeout(context.Background(), metaMuxAttemptTimeout)
 		reply, err := m.muxRequestVote(muxCtx, peer, args)
@@ -174,7 +174,7 @@ func (m *MetaRaftQUICTransport) SendRequestVote(peer string, args *RequestVoteAr
 	return decodeRequestVoteReply(data)
 }
 
-func (m *MetaRaftQUICTransport) muxRequestVote(ctx context.Context, peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+func (m *MetaRaftTransport) muxRequestVote(ctx context.Context, peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
 	ps, err := m.groupMux.muxConnFor(ctx, peer)
 	if err != nil {
 		return nil, err
@@ -202,7 +202,7 @@ func (m *MetaRaftQUICTransport) muxRequestVote(ctx context.Context, peer string,
 	return decodeRequestVoteReply(data)
 }
 
-func (m *MetaRaftQUICTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+func (m *MetaRaftTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
 	if m.muxOn() {
 		muxCtx, cancel := context.WithTimeout(context.Background(), metaMuxAttemptTimeout)
 		reply, err := m.muxAppendEntries(muxCtx, peer, args)
@@ -236,13 +236,14 @@ func (m *MetaRaftQUICTransport) SendAppendEntries(peer string, args *AppendEntri
 	return decodeAppendEntriesReply(data)
 }
 
-func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+func (m *MetaRaftTransport) muxAppendEntries(ctx context.Context, peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
 	ps, err := m.groupMux.muxConnFor(ctx, peer)
 	if err != nil {
 		return nil, err
 	}
 	// Entries-empty heartbeats ride the shared coalescer; entries-bearing
-	// AE goes direct via RaftConn.Call. Same pattern as GroupRaftSender.
+	// AE goes direct via RaftConn.CallBulk (bulk lane). Same pattern as
+	// GroupRaftSender.
 	if len(args.Entries) == 0 {
 		reply, hcErr := ps.hc.AppendEntries(ctx, metaGroupID, args)
 		if hcErr == nil {
@@ -254,7 +255,7 @@ func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer strin
 	if err != nil {
 		return nil, err
 	}
-	respBytes, err := ps.rc.Call(ctx, prefixGroupID(metaGroupID, env))
+	respBytes, err := ps.rc.CallBulk(ctx, prefixGroupID(metaGroupID, env))
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +271,7 @@ func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer strin
 	return decodeAppendEntriesReply(data)
 }
 
-func (m *MetaRaftQUICTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+func (m *MetaRaftTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
 	// Snapshot install bypasses mux unconditionally — large payloads + 60s
 	// timeout don't fit the per-frame mux model, and mixing them in would
 	// break the R+H invariant that the mux only carries small frames.
@@ -294,7 +295,7 @@ func (m *MetaRaftQUICTransport) SendInstallSnapshot(peer string, args *InstallSn
 	return decodeInstallSnapshotReply(data)
 }
 
-func (m *MetaRaftQUICTransport) handleRPC(req *transport.Message) *transport.Message {
+func (m *MetaRaftTransport) handleRPC(req *transport.Message) *transport.Message {
 	rpcType, data, err := decodeRPC(req.Payload)
 	if err != nil {
 		return nil

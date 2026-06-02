@@ -143,7 +143,7 @@ S3 Express의 `AppendObject` API를 구현한 객체 형태. PutObject로 생성
 한 객체에 여러 번 write가 이어지며, 각 write는 raw segment blob 파일로 저장된다.
 HTTP `x-amz-write-offset-bytes` 헤더가 expected offset을 가져오고, 서버는 owner 노드의
 data-Raft 그룹을 통해 단조 증가 offset을 강제한다. 비 owner 노드가 받은 append는
-QUIC forward로 owner에게 위임된다.
+클러스터 transport(TCP) forward로 owner에게 위임된다.
 
 객체 metadata는 두 가지 referent slice를 가진다. `Segments[]`는 아직 합쳐지지 않은
 원시 segment blob ID(`<bucket>/<key>_segments/<blobID>` 파일)를 시간순으로 가리키고,

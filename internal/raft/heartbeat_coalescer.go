@@ -1,7 +1,7 @@
 // Package raft — heartbeat_coalescer.go
 //
 // HeartbeatCoalescer batches per-group heartbeat AppendEntries calls destined
-// for the same peer into a single QUIC frame, then dispatches the batched
+// for the same peer into a single mux frame, then dispatches the batched
 // replies back to the original callers. The synchronous AppendEntries(peer, args)
 // (*Reply, error) contract is preserved — the coalescer just shifts the wire
 // transmission from N small frames to one batched frame.

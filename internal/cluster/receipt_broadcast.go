@@ -15,9 +15,9 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// Caller is the narrow subset of transport.QUICTransport the broadcaster
+// Caller is the narrow subset of transport.the cluster transport the broadcaster
 // uses. Declared as an interface so tests inject a mock without spinning up
-// a real QUIC listener.
+// a real transport listener.
 type Caller interface {
 	Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
 }

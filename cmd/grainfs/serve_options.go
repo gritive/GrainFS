@@ -47,8 +47,8 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")
 	opts.AppendForwardBufferMaxPerRequest, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-max-per-request")
 	opts.AppendSizeCapBytes, _ = cmd.Flags().GetInt64("append-size-cap-bytes")
-	opts.QUICMuxPoolSize, _ = cmd.Flags().GetInt("quic-mux-pool")
-	opts.QUICMuxFlushWindow, _ = cmd.Flags().GetDuration("quic-mux-flush")
+	opts.MuxPoolSize, _ = cmd.Flags().GetInt("mux-pool")
+	opts.MuxFlushWindow, _ = cmd.Flags().GetDuration("mux-flush")
 
 	// Storage knobs.
 	opts.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")

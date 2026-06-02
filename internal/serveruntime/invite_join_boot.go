@@ -3,7 +3,7 @@ package serveruntime
 // Zero-CA invite-join boot orchestration (W9b, JOINER side).
 //
 // A brand-new node holding NO cluster secrets boots into a running voter using
-// only an InviteBundle (W1) over the dedicated QUIC join transport (W4). This
+// only an InviteBundle (W1) over the dedicated join transport (W4). This
 // productionizes the throwaway de-risk spike (commit 48c7bdb's zero_ca_spike.go)
 // into the real two-phase flow against W7's server handler:
 //
@@ -49,6 +49,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -330,7 +331,7 @@ func maybeInviteJoin(ctx context.Context, opts *ServeOptions, dataDir string) (*
 // landed), regardless of whether the bundle env is set on this restart. It also
 // populates opts.ClusterKey from the transport PSK Phase-1 mirrored to
 // keys.d/current.key, because bootValidateConfig's cluster-key gate runs
-// BEFORE bootQUICTransport's ResolveClusterKey reads disk.
+// BEFORE bootClusterTransport's ResolveClusterKey reads disk.
 func inviteJoinResumeFromSentinel(opts *ServeOptions, dataDir string) (*inviteJoinState, error) {
 	rec, ok := readInvitePendingSentinel(dataDir)
 	if !ok {
@@ -468,7 +469,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 5. dial the seed join listener (Phase-1), pinning its SPKI. The transcript
 	// is signed inside buildPhase1 over the resulting channel binding.
-	reply, err := inviteJoinDial(ctx, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
+	reply, err := inviteJoinDialWith(ctx, transport.DialJoinTCP, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
 	if err != nil {
 		return fmt.Errorf("phase-1 dial: %w", err)
 	}
@@ -516,7 +517,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 8. SealNodeKey where the next boot phase can open it. Use the cluster's
 	// ACTIVE KEK generation. Post-drop joins present the per-node cert before
-	// QUIC Listen, so bootQUICTransport loads this same KEK directly from disk
+	// transport Listen, so bootClusterTransport loads this same KEK directly from disk
 	// before wireDEKKeeper has populated state.kekStore.
 	sealGen, sealKEK, err := inviteNodeKeySealKey(kekGens)
 	if err != nil {
@@ -549,7 +550,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 	// 9. set a transport construction key in memory so bootValidateConfig's
 	// cluster-key gate passes, and mirror it to keys.d/current.key for crash
 	// resume. In a post-drop cluster the leader intentionally omits the revoked
-	// cluster PSK; use a local random placeholder instead. bootQUICTransport
+	// cluster PSK; use a local random placeholder instead. bootClusterTransport
 	// immediately calls FlipPresent+SetDropped for post-drop joiners, so this
 	// placeholder is never accepted by peers and never reintroduces the dropped
 	// cluster-key SPKI.
@@ -647,7 +648,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		SPKI:      spki[:],
 		InviteID:  st.inviteID,
 	}
-	reply, err := inviteJoinDial(ctx, st.seedAddr, st.seedSPKI, cert,
+	reply, err := inviteJoinDialWith(ctx, transport.DialJoinTCP, st.seedAddr, st.seedSPKI, cert,
 		func([]byte) (cluster.JoinRequest, error) { return req, nil })
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2 dial: %w", err)
@@ -657,8 +658,8 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	}
 
 	// reply.PeerSPKIs (the cluster per-node accept-set) is intentionally NOT
-	// installed here: the joiner's normal cluster QUIC transport derives its
-	// accept-set from the shared transport PSK (NewQUICTransport(transportPSK) →
+	// installed here: the joiner's normal cluster transport derives its accept-set
+	// from the shared transport PSK (NewTCPTransport(transportPSK) →
 	// DeriveClusterIdentity), which Phase-1 already delivered. The leader dials
 	// the freshly-joined node using that SAME PSK-derived cluster identity, so
 	// AppendEntries catch-up (and thus the gen-0 DEK Apply the WaitDEKReady gate
@@ -682,10 +683,19 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 // AFTER the dial so the joiner can sign over the channel binding (Bind); on a
 // resumed Phase-1 each dial yields a fresh bind, so the request is re-signed and
 // never persisted.
-func inviteJoinDial(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
+// joinDialer dials a join listener and returns the half-close join stream, the
+// RFC5705 channel binding, and a full-teardown closer. transport.DialJoinTCP
+// (S4) implements it, so the dialer is the single seam that selects the join
+// transport without touching the consumer choreography below.
+type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error)
+
+// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer (always
+// transport.DialJoinTCP in production; tests may inject a fake) so it can drive the
+// SAME consumer choreography in tests.
+func inviteJoinDialWith(ctx context.Context, dial joinDialer, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, inviteJoinDialTimeout)
 	defer cancel()
-	stream, bind, closeConn, err := transport.DialJoin(dialCtx, addr, serverSPKI, clientCert)
+	stream, bind, closeConn, err := dial(dialCtx, addr, serverSPKI, clientCert)
 	if err != nil {
 		return cluster.JoinReply{}, err
 	}

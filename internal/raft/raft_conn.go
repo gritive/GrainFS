@@ -1,6 +1,6 @@
 // Package raft — raft_conn.go
 //
-// RaftConn is a multiplexed bidirectional QUIC connection used exclusively
+// RaftConn is a multiplexed bidirectional connection used exclusively
 // for per-group and meta raft RPCs. Unlike the per-message stream open/close
 // pattern in internal/transport/quic.go, RaftConn maintains a small pool of
 // long-lived streams and frames messages on them. Each frame carries a
@@ -25,8 +25,11 @@
 // payload: raft RPC envelope (opaque bytes). Encoders/decoders are owned
 // by the caller — RaftConn does not interpret payload contents.
 //
-// HoL avoidance: streams[N] (default N=4) round-robin. Pending map is at
-// the conn level so responses can arrive on any stream.
+// HoL avoidance: streams[N] (default N=4) split into a control lane (Call/
+// Notify/heartbeat) and a bulk lane (CallBulk, entries-bearing AppendEntries),
+// each round-robining its own stream subset; the zero-split default is a single
+// shared pool over all streams (the original round-robin). Pending map is at the
+// conn level so responses can arrive on any stream.
 package raft
 
 import (
@@ -37,8 +40,6 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
-
-	quic "github.com/quic-go/quic-go"
 )
 
 // Wire op codes.
@@ -96,26 +97,48 @@ type HeartbeatReplyHandler func(corrID uint64, payload []byte)
 // NotifyHandler dispatches an inbound Notify frame (one-way).
 type NotifyHandler func(payload []byte)
 
-// RaftStream wraps one bidirectional QUIC stream within a RaftConn pool.
+// RaftStream wraps one bidirectional byte-stream carrier within a RaftConn pool.
+// The carrier is an io.ReadWriteCloser — a *quic.Stream (QUIC mux driver) or a
+// net.Conn (TCP control-plane driver, S2b). RaftConn does not know which.
 type RaftStream struct {
 	parent *RaftConn
-	stream *quic.Stream
+	stream io.ReadWriteCloser
 	sendMu sync.Mutex
 }
 
-// RaftConn maintains a pool of long-lived QUIC streams to one peer for raft RPCs.
+// lanePool is a round-robin pool of streams for ONE lane (control or bulk).
+// Splitting the streams into lanes keeps a large entries-bearing AppendEntries
+// (bulk) from head-of-line blocking a heartbeat/vote (control) on the same
+// stream. Lane selection is sender-local: the peer replies on the arrival
+// stream and applies no lane policy, so no wire change or stream-index
+// correspondence between dialer and acceptor is needed.
+type lanePool struct {
+	streams []*RaftStream
+	next    atomic.Uint64
+}
+
+func (p *lanePool) pick() *RaftStream {
+	if len(p.streams) == 1 {
+		return p.streams[0]
+	}
+	idx := p.next.Add(1) % uint64(len(p.streams))
+	return p.streams[idx]
+}
+
+// RaftConn maintains a pool of long-lived byte-streams to one peer for raft RPCs.
 type RaftConn struct {
-	conn       *quic.Conn
-	peerAddr   string
-	streams    []*RaftStream
-	next       atomic.Uint64 // RR stream picker
-	nextID     atomic.Uint64 // conn-level corrID generator
-	pending    sync.Map      // corrID(uint64) -> chan callResult
-	closed     atomic.Bool
-	closeErr   atomic.Pointer[error]
-	closeOnce  sync.Once
-	closeChan  chan struct{}
-	handlerSem chan struct{} // bounded handler pool
+	peerAddr    string
+	streams     []*RaftStream
+	closeHook   func(error) error // tears down the underlying carrier on break (may be nil)
+	controlLane *lanePool         // Call/Notify/heartbeat lane
+	bulkLane    *lanePool         // CallBulk (entries-bearing AppendEntries) lane
+	nextID      atomic.Uint64     // conn-level corrID generator
+	pending     sync.Map          // corrID(uint64) -> chan callResult
+	closed      atomic.Bool
+	closeErr    atomic.Pointer[error]
+	closeOnce   sync.Once
+	closeChan   chan struct{}
+	handlerSem  chan struct{} // bounded handler pool
 
 	// Handlers (set by owner before startReaders).
 	rpcHandler     RPCHandler
@@ -127,29 +150,33 @@ type RaftConn struct {
 
 // RaftConnConfig configures a new RaftConn.
 type RaftConnConfig struct {
-	PoolSize        int // number of streams; default 4
 	HandlerPoolSize int // bounded inbound handler workers; default 64
 	RPCHandler      RPCHandler
 	HBBatchHandler  HeartbeatBatchHandler
 	HBReplyHandler  HeartbeatReplyHandler
 	NotifyHandler   NotifyHandler
 	OnBroken        func(*RaftConn, error)
+	// BulkLaneStreams dedicates the last N streams to the bulk lane (CallBulk);
+	// the rest serve the control lane. 0 (or >= len(streams)) = a single shared
+	// lane over all streams = the pre-S2c round-robin picker (neutral default;
+	// QUIC keeps this). The TCP control-plane driver (S4) sets a split.
+	BulkLaneStreams int
 }
 
-// NewRaftConn wraps an established QUIC connection and prepares the stream
-// pool. The caller must invoke OpenOutboundStreams (dialer side) or
-// AcceptInboundStreams (acceptor side) before StartReaders.
-func NewRaftConn(conn *quic.Conn, cfg RaftConnConfig) *RaftConn {
-	if cfg.PoolSize <= 0 {
-		cfg.PoolSize = 4
-	}
+// NewRaftConn wraps a set of already-established byte-stream carriers (one per
+// pool slot) for raft RPCs to peerAddr. The caller (carrier driver) opens or
+// accepts the streams; closeHook tears down the underlying transport when the
+// conn breaks (QUIC: conn.CloseWithError over the shared *quic.Conn; a single
+// net.Conn carrier may pass nil and rely on per-stream Close). Call StartReaders
+// after construction.
+func NewRaftConn(peerAddr string, streams []io.ReadWriteCloser, closeHook func(error) error, cfg RaftConnConfig) *RaftConn {
 	if cfg.HandlerPoolSize <= 0 {
 		cfg.HandlerPoolSize = 64
 	}
 	rc := &RaftConn{
-		conn:           conn,
-		peerAddr:       conn.RemoteAddr().String(),
-		streams:        make([]*RaftStream, cfg.PoolSize),
+		peerAddr:       peerAddr,
+		streams:        make([]*RaftStream, len(streams)),
+		closeHook:      closeHook,
 		closeChan:      make(chan struct{}),
 		handlerSem:     make(chan struct{}, cfg.HandlerPoolSize),
 		rpcHandler:     cfg.RPCHandler,
@@ -158,83 +185,29 @@ func NewRaftConn(conn *quic.Conn, cfg RaftConnConfig) *RaftConn {
 		notifyHandler:  cfg.NotifyHandler,
 		onBroken:       cfg.OnBroken,
 	}
-	for i := range rc.streams {
-		rc.streams[i] = &RaftStream{parent: rc}
+	for i, s := range streams {
+		rc.streams[i] = &RaftStream{parent: rc, stream: s}
+	}
+	// Lane assignment. k<=0 or k>=N → a single shared pool over all streams,
+	// which is byte-identical to the pre-S2c single round-robin picker (the
+	// QUIC-neutral default). Otherwise the last k streams form the bulk lane.
+	if k := cfg.BulkLaneStreams; k <= 0 || k >= len(rc.streams) {
+		shared := &lanePool{streams: rc.streams}
+		rc.controlLane = shared
+		rc.bulkLane = shared
+	} else {
+		rc.controlLane = &lanePool{streams: rc.streams[:len(rc.streams)-k]}
+		rc.bulkLane = &lanePool{streams: rc.streams[len(rc.streams)-k:]}
 	}
 	return rc
 }
 
-// OpenOutboundStreams opens N bidirectional streams as the dialer.
-//
-// quic-go behavior: a newly-opened stream is not visible to the peer's
-// AcceptStream until the first byte is written. We send a one-byte
-// opStreamInit frame so the peer's AcceptStream returns and the stream
-// reader can begin draining frames. The init frame is consumed by the
-// peer's reader and not surfaced to handlers.
-func (rc *RaftConn) OpenOutboundStreams(ctx context.Context) error {
-	for i, s := range rc.streams {
-		stream, err := rc.conn.OpenStreamSync(ctx)
-		if err != nil {
-			rc.closeOpenedSoFar(i)
-			return fmt.Errorf("open stream %d: %w", i, err)
-		}
-		s.stream = stream
-		if err := writeInitFrame(stream); err != nil {
-			rc.closeOpenedSoFar(i + 1)
-			return fmt.Errorf("init stream %d: %w", i, err)
-		}
-	}
-	return nil
-}
-
-// writeInitFrame sends a single opStreamInit frame so the peer's AcceptStream
-// returns. corrID=0, payload empty.
-func writeInitFrame(stream *quic.Stream) error {
-	hdr := make([]byte, frameHeaderSize)
-	binary.BigEndian.PutUint32(hdr[0:4], uint32(frameHeaderSize-4))
-	hdr[4] = opStreamInit
-	hdr[5] = 0
-	binary.BigEndian.PutUint64(hdr[6:14], 0)
-	_, err := stream.Write(hdr)
-	return err
-}
-
-// AcceptInboundStreams accepts N bidirectional streams as the acceptor.
-func (rc *RaftConn) AcceptInboundStreams(ctx context.Context) error {
-	for i, s := range rc.streams {
-		stream, err := rc.conn.AcceptStream(ctx)
-		if err != nil {
-			rc.closeOpenedSoFar(i)
-			return fmt.Errorf("accept stream %d: %w", i, err)
-		}
-		s.stream = stream
-	}
-	return nil
-}
-
-func (rc *RaftConn) closeOpenedSoFar(n int) {
-	for i := 0; i < n; i++ {
-		if s := rc.streams[i].stream; s != nil {
-			_ = s.Close()
-		}
-	}
-}
-
 // StartReaders launches one reader goroutine per stream. Must be called after
-// OpenOutboundStreams or AcceptInboundStreams.
+// construction (the carrier driver establishes the streams before NewRaftConn).
 func (rc *RaftConn) StartReaders() {
 	for _, s := range rc.streams {
 		go s.readLoop()
 	}
-}
-
-// pickStream returns a stream via round-robin.
-func (rc *RaftConn) pickStream() *RaftStream {
-	if len(rc.streams) == 1 {
-		return rc.streams[0]
-	}
-	idx := rc.next.Add(1) % uint64(len(rc.streams))
-	return rc.streams[idx]
 }
 
 // PeerAddr returns the remote address.
@@ -243,9 +216,23 @@ func (rc *RaftConn) PeerAddr() string { return rc.peerAddr }
 // Closed reports whether the conn is closed.
 func (rc *RaftConn) Closed() bool { return rc.closed.Load() }
 
-// Call sends a Request frame and blocks until a Response/ResponseError arrives
-// or ctx is cancelled. It returns the response payload bytes.
+// Call sends a control-lane Request frame (RequestVote, small control RPCs) and
+// blocks until a Response/ResponseError arrives or ctx is cancelled, returning
+// the response payload. Entries-bearing AppendEntries must use CallBulk so a
+// large transfer cannot head-of-line block a control frame on the same stream.
 func (rc *RaftConn) Call(ctx context.Context, payload []byte) ([]byte, error) {
+	return rc.call(ctx, rc.controlLane, payload)
+}
+
+// CallBulk is Call on the bulk lane: for entries-bearing AppendEntries (up to
+// MaxFrameSize). On a single-lane RaftConn (BulkLaneStreams==0, the QUIC default)
+// the bulk lane is the same shared pool as the control lane, so CallBulk behaves
+// exactly as Call — the split is only active on the TCP control-plane driver.
+func (rc *RaftConn) CallBulk(ctx context.Context, payload []byte) ([]byte, error) {
+	return rc.call(ctx, rc.bulkLane, payload)
+}
+
+func (rc *RaftConn) call(ctx context.Context, lane *lanePool, payload []byte) ([]byte, error) {
 	if rc.closed.Load() {
 		if errPtr := rc.closeErr.Load(); errPtr != nil {
 			return nil, *errPtr
@@ -257,7 +244,7 @@ func (rc *RaftConn) Call(ctx context.Context, payload []byte) ([]byte, error) {
 	rc.pending.Store(id, ch)
 	defer rc.pending.Delete(id)
 
-	if err := rc.sendFrame(rc.pickStream(), opRequest, id, payload); err != nil {
+	if err := rc.sendFrame(lane.pick(), opRequest, id, payload); err != nil {
 		return nil, err
 	}
 
@@ -279,7 +266,7 @@ func (rc *RaftConn) Notify(payload []byte) error {
 	if rc.closed.Load() {
 		return ErrConnClosed
 	}
-	return rc.sendFrame(rc.pickStream(), opNotify, 0, payload)
+	return rc.sendFrame(rc.controlLane.pick(), opNotify, 0, payload)
 }
 
 // NextHeartbeatCorrID reserves a fresh corrID without sending. Pair with
@@ -297,7 +284,7 @@ func (rc *RaftConn) SendHeartbeatBatchWithCorrID(corrID uint64, payload []byte) 
 	if rc.closed.Load() {
 		return ErrConnClosed
 	}
-	return rc.sendFrame(rc.pickStream(), opHeartbeatBatch, corrID, payload)
+	return rc.sendFrame(rc.controlLane.pick(), opHeartbeatBatch, corrID, payload)
 }
 
 // sendFrame writes one frame on the given stream under sendMu.
@@ -485,14 +472,14 @@ func (rc *RaftConn) markBroken(err error) {
 			return true
 		})
 
-		// Best-effort: close streams + conn.
+		// Best-effort: close streams + tear down the underlying carrier.
 		for _, s := range rc.streams {
 			if s.stream != nil {
 				_ = s.stream.Close()
 			}
 		}
-		if rc.conn != nil {
-			_ = rc.conn.CloseWithError(0, err.Error())
+		if rc.closeHook != nil {
+			_ = rc.closeHook(err)
 		}
 
 		if rc.onBroken != nil {

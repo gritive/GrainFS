@@ -3,7 +3,7 @@
 //
 // The leader-side orchestrator (KEKRotationLeader) consumes these interfaces;
 // tests inject fakes. Production injection happens at serve-runtime boot
-// once MetaRaft + QUICTransport are constructed.
+// once MetaRaft + the cluster transport are constructed.
 package cluster
 
 import (
@@ -15,27 +15,27 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// PeerProbeDialer abstracts a QUIC stream call: caller hands the leader a
-// concrete impl bound to a *transport.QUICTransport, the leader uses it to
-// reach voter QUIC addresses. Keeping this an interface rather than the raw
-// *QUICTransport keeps the cluster package independent of QUIC connection
+// PeerProbeDialer abstracts a transport stream call: caller hands the leader a
+// concrete impl bound to a *transport.TCPTransport, the leader uses it to
+// reach voter transport addresses. Keeping this an interface rather than the raw
+// *TCPTransport keeps the cluster package independent of transport connection
 // pooling and the boot-time dialer plumbing.
 //
-// Both dialer variants delegate to QUICTransport.Call. Production uses the
+// Both dialer variants delegate to the cluster transport.Call. Production uses the
 // same instance for both — the StreamType byte routes to the right handler.
 type PeerProbeDialer interface {
 	CallKEKDiskSpace(ctx context.Context, peer string, payload []byte) ([]byte, error)
 	CallKEKLeaseSnapshot(ctx context.Context, peer string, payload []byte) ([]byte, error)
 }
 
-// QUICPeerProbeDialer is the production PeerProbeDialer backed by a
-// *transport.QUICTransport. Built once at boot.
-type QUICPeerProbeDialer struct{ T *transport.QUICTransport }
+// ClusterPeerProbeDialer is the production PeerProbeDialer backed by the cluster
+// transport (callerTransport; *transport.TCPTransport at runtime). Built once at boot.
+type ClusterPeerProbeDialer struct{ T callerTransport }
 
 // CallKEKDiskSpace dispatches a StreamKEKDiskSpaceProbe request to peer and
 // returns the response payload (or an error). On non-OK status the underlying
-// QUIC layer surfaces an error.
-func (d *QUICPeerProbeDialer) CallKEKDiskSpace(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+// transport layer surfaces an error.
+func (d *ClusterPeerProbeDialer) CallKEKDiskSpace(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 	resp, err := d.T.Call(ctx, peer, &transport.Message{
 		Type:    transport.StreamKEKDiskSpaceProbe,
 		Payload: payload,
@@ -47,7 +47,7 @@ func (d *QUICPeerProbeDialer) CallKEKDiskSpace(ctx context.Context, peer string,
 }
 
 // CallKEKLeaseSnapshot dispatches a StreamKEKLeaseSnapshotProbe request.
-func (d *QUICPeerProbeDialer) CallKEKLeaseSnapshot(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+func (d *ClusterPeerProbeDialer) CallKEKLeaseSnapshot(ctx context.Context, peer string, payload []byte) ([]byte, error) {
 	resp, err := d.T.Call(ctx, peer, &transport.Message{
 		Type:    transport.StreamKEKLeaseSnapshotProbe,
 		Payload: payload,
@@ -59,7 +59,7 @@ func (d *QUICPeerProbeDialer) CallKEKLeaseSnapshot(ctx context.Context, peer str
 }
 
 // peerKEKProbeImpl is the production PeerKEKProbe. It fans out
-// GetKEKDiskSpace / GetKEKLeaseSnapshot to every voter via the QUIC dialer,
+// GetKEKDiskSpace / GetKEKLeaseSnapshot to every voter via the transport dialer,
 // with a self-shortcut that invokes the local handlers directly so the
 // leader's own disk + lease count counts toward the cluster check without
 // taking a network roundtrip.
@@ -71,7 +71,7 @@ type peerKEKProbeImpl struct {
 	localLeaseFn func(version uint32) (KEKLeaseSnapshotResp, error)
 }
 
-// NewPeerKEKProbe constructs a PeerKEKProbe wired against a QUIC dialer for
+// NewPeerKEKProbe constructs a PeerKEKProbe wired against a transport dialer for
 // remote voters and a pair of local-self closures for the leader's own
 // keystore-dir free bytes + in-flight lease snapshot.
 //

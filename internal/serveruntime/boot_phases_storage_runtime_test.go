@@ -45,7 +45,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	require.NoError(t, bootQUICTransport(ctx, state))
+	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NoError(t, bootPeerConnections(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 
@@ -62,7 +62,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	})
 	t.Cleanup(state.Cleanup)
 	state.node = node
-	state.rpcTransport = cluster.NewRaftQUICRPCTransport(state.quicTransport, node)
+	state.rpcTransport = cluster.NewRaftRPCTransport(state.clusterTransport, node)
 	state.rpcTransport.SetTransport()
 
 	require.NoError(t, bootMetaRaftWiring(state))

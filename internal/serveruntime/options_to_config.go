@@ -41,9 +41,9 @@ func optionsToConfig(
 	cfg.RaftLogGCInterval = opts.RaftLogGCInterval
 	cfg.RaftHeartbeatInterval = opts.RaftHeartbeatInterval
 	cfg.RaftElectionTimeout = opts.RaftElectionTimeout
-	cfg.QUICMuxEnabled = true // mux is always on; the --quic-mux flag was removed
-	cfg.QUICMuxPoolSize = opts.QUICMuxPoolSize
-	cfg.QUICMuxFlushWindow = opts.QUICMuxFlushWindow
+	cfg.MuxEnabled = true // mux is always on; the --mux flag was removed
+	cfg.MuxPoolSize = opts.MuxPoolSize
+	cfg.MuxFlushWindow = opts.MuxFlushWindow
 
 	cfg.AppendForwardBufferTotalBytes = opts.AppendForwardBufferTotalBytes
 	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest

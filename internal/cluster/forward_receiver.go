@@ -242,7 +242,7 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 
 // HandleBody implements streamed-body forwarding for PutObject and UploadPart.
 // The request payload carries group/op/metadata; body bytes follow the frame on
-// the same QUIC stream and are passed directly into the local GroupBackend.
+// the same transport stream and are passed directly into the local GroupBackend.
 func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *transport.Message {
 	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
 	if err != nil {
@@ -286,7 +286,7 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 
 // HandleRead implements streamed-response forwarding for GetObject and
 // GetObjectVersion. The returned ForwardReply carries metadata only; object
-// bytes follow as the raw response body on the same QUIC stream.
+// bytes follow as the raw response body on the same transport stream.
 func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message, io.ReadCloser) {
 	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
 	if err != nil {
@@ -824,7 +824,7 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 }
 
 // handleAppendObjectStream dispatches a forwarded AppendObject. Body bytes are
-// streamed on the same QUIC stream and consumed by the owner-side
+// streamed on the same transport stream and consumed by the owner-side
 // DistributedBackend.AppendObject directly (no buffering on the receiver).
 // After successful apply we commit the ObjectIndex entry so the meta-Raft view
 // reflects the new size/etag — mirrors handlePutObject's commit pattern.

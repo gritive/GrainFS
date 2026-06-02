@@ -317,7 +317,7 @@ func waitForVoter(t testing.TB, leaderURL, nodeID string, timeout time.Duration)
 //
 // These drive the seed join listener DIRECTLY in-process (the e2e suite already
 // imports internal/cluster/transport/encrypt), mirroring the joiner boot path in
-// internal/serveruntime/invite_join_boot.go: GenerateNodeIdentity → DialJoin
+// internal/serveruntime/invite_join_boot.go: GenerateNodeIdentity → DialJoinTCP
 // (capturing the live RFC 5705 exporter), sign the InviteTranscript over a chosen
 // bind, frame the Phase-1 JoinRequest, send it, and read the framed JoinReply.
 // They let us forge the bind a Phase-1 transcript is signed over without going
@@ -420,14 +420,14 @@ func sendPhase1(stream interface {
 func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *inviteJoinNode) (cluster.JoinReply, []byte, []byte, error) {
 	m, clusterID := newPhase1Material(t, leader, "relay-joiner")
 
-	streamA, bindA, closeA, err := transport.DialJoin(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
+	streamA, bindA, closeA, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session A dial")
 	defer func() { _ = closeA() }()
 	_ = streamA // session A is opened only to capture its live exporter (bindA).
 
 	reqA := buildSignedPhase1(m, clusterID, bindA)
 
-	streamB, bindB, closeB, err := transport.DialJoin(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
+	streamB, bindB, closeB, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session B dial")
 	defer func() { _ = closeB() }()
 
@@ -441,7 +441,7 @@ func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *invite
 func dialPhase1WithForgedBind(ctx context.Context, t testing.TB, leader *inviteJoinNode, forged []byte) (cluster.JoinReply, error) {
 	m, clusterID := newPhase1Material(t, leader, "forged-bind-joiner")
 
-	stream, _, closeConn, err := transport.DialJoin(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
+	stream, _, closeConn, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "forged-bind dial")
 	defer func() { _ = closeConn() }()
 

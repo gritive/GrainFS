@@ -369,7 +369,7 @@ func buildListPartsArgs(bucket, key, uploadID string, maxParts int32) []byte {
 }
 
 // buildAppendObjectForwardArgs builds the header for an AppendObject forward.
-// Body bytes are streamed separately on the same QUIC stream (forwardBodyStream).
+// Body bytes are streamed separately on the same transport stream (forwardBodyStream).
 func buildAppendObjectForwardArgs(bucket, key string, expectedOffset int64) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)

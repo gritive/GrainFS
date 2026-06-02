@@ -51,11 +51,11 @@ func getShardBuilder(minSize int) *flatbuffers.Builder {
 
 type shardFileWriter func(path string, payload []byte) error
 
-// ShardService handles remote shard storage via QUIC Data Streams.
+// ShardService handles remote shard storage via the cluster transport Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
 	dataDirs      []string
-	transport     *transport.QUICTransport
+	transport     shardTransport
 	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
 	dekKeeper     *encrypt.DEKKeeper
 	clusterID     [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
@@ -122,7 +122,7 @@ func WithShardPackThreshold(threshold int) ShardServiceOption {
 }
 
 // WithNodeAddressBook lets shard RPC callers keep nodeID membership lists while
-// dialing the QUIC address stored in MetaFSM.
+// dialing the transport address stored in MetaFSM.
 func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 	return func(s *ShardService) { s.addrBook = book }
 }
@@ -177,12 +177,12 @@ func (s *ShardService) Close() error {
 }
 
 // NewShardService creates a shard service rooted at dataDir/shards/.
-func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
+func NewShardService(dataDir string, tr shardTransport, opts ...ShardServiceOption) *ShardService {
 	return NewMultiRootShardService([]string{dataDir}, tr, opts...)
 }
 
 // NewMultiRootShardService creates a shard service rooted at multiple dataDirs/shards/.
-func NewMultiRootShardService(dataDirs []string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
+func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...ShardServiceOption) *ShardService {
 	resolvedDirs := make([]string, len(dataDirs))
 	for i, dir := range dataDirs {
 		resolvedDirs[i] = filepath.Join(dir, "shards")
@@ -303,7 +303,7 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	return s.transport.Call(ctx, peerAddr, msg)
 }
 
-// Ping verifies that the peer's QUIC shard service can accept a bidirectional
+// Ping verifies that the peer's transport shard service can accept a bidirectional
 // RPC. The handler returns an application-level error for the synthetic RPC
 // type, but a transport-level response still proves the peer process is alive.
 func (s *ShardService) Ping(ctx context.Context, peer string) error {
@@ -851,7 +851,7 @@ func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Mes
 }
 
 // WriteLocalShard stores a shard on the local node's disk without involving
-// the QUIC transport. Used by PutObject when this node is the destination for
+// the cluster transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // The shard is sealed via the DEK keeper (GFSENC3) before writing.
 // Writes are crash-safe: the encoded payload is appended to the data WAL

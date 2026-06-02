@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -17,7 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -28,24 +28,37 @@ import (
 // budget mirrors cluster.metaJoinTimeout, which is unexported; 60s matches it).
 const joinListenerHandlerTimeout = 60 * time.Second
 
+// joinListener is the transport-agnostic surface boot needs from the Zero-CA join
+// listener. *transport.TCPJoinListener (S4) satisfies it, so startJoinListener
+// stays decoupled from the transport without the rest of
+// boot caring (the handler is already io.ReadWriteCloser-based since S4).
+type joinListener interface {
+	Addr() string
+	SPKI() [32]byte
+	Close() error
+}
+
 // startJoinListener loads-or-creates the persisted stable join-listener cert,
-// starts a transport.JoinListener on the resolved address, and stores it on
-// state (closed on shutdown via AddCleanup). The handler reads the framed
-// JoinRequest off the stream, runs the two-phase invite handler against the
-// TLS-captured peer SPKI, and writes the framed JoinReply back — all binary
-// (no JSON), delegated to MetaJoinReceiver.HandleJoinStream.
+// starts a join listener (TCP, the sole join transport since S6) on the resolved
+// address, and stores it on state (closed on shutdown via
+// AddCleanup). The handler reads the framed JoinRequest off the stream, runs the
+// two-phase invite handler against the TLS-captured peer SPKI, and writes the
+// framed JoinReply back — all binary (no JSON), delegated to
+// MetaJoinReceiver.HandleJoinStream.
 func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) error {
 	cert, spki, err := LoadOrCreateJoinListenerCert(state.cfg.DataDir)
 	if err != nil {
 		return err
 	}
 	addr := resolveJoinListenAddr(state.cfg.JoinListenAddr, state.raftAddr)
-	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, stream *quic.Stream) {
+	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
 		ctx, cancel := context.WithTimeout(handlerCtx, joinListenerHandlerTimeout)
 		defer cancel()
 		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)
 	}
-	ln, err := transport.NewJoinListener(addr, cert, handler)
+	// The join listener pairs with the cluster transport: the joiner dials the TCP
+	// join listener over crypto/tls (S6 removed the join listener).
+	ln, err := transport.NewTCPJoinListener(addr, cert, handler)
 	if err != nil {
 		return err
 	}
