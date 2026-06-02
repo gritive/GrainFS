@@ -28,12 +28,23 @@ import (
 // budget mirrors cluster.metaJoinTimeout, which is unexported; 60s matches it).
 const joinListenerHandlerTimeout = 60 * time.Second
 
+// joinListener is the transport-agnostic surface boot needs from the Zero-CA join
+// listener. Both *transport.JoinListener (QUIC) and *transport.TCPJoinListener
+// (S4) satisfy it, so startJoinListener selects the transport without the rest of
+// boot caring (the handler is already io.ReadWriteCloser-based since S4).
+type joinListener interface {
+	Addr() string
+	SPKI() [32]byte
+	Close() error
+}
+
 // startJoinListener loads-or-creates the persisted stable join-listener cert,
-// starts a transport.JoinListener on the resolved address, and stores it on
-// state (closed on shutdown via AddCleanup). The handler reads the framed
-// JoinRequest off the stream, runs the two-phase invite handler against the
-// TLS-captured peer SPKI, and writes the framed JoinReply back — all binary
-// (no JSON), delegated to MetaJoinReceiver.HandleJoinStream.
+// starts a join listener (QUIC by default, TCP under the dormant useTCPTransport
+// flag) on the resolved address, and stores it on state (closed on shutdown via
+// AddCleanup). The handler reads the framed JoinRequest off the stream, runs the
+// two-phase invite handler against the TLS-captured peer SPKI, and writes the
+// framed JoinReply back — all binary (no JSON), delegated to
+// MetaJoinReceiver.HandleJoinStream.
 func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) error {
 	cert, spki, err := LoadOrCreateJoinListenerCert(state.cfg.DataDir)
 	if err != nil {
@@ -45,7 +56,15 @@ func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) err
 		defer cancel()
 		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)
 	}
-	ln, err := transport.NewJoinListener(addr, cert, handler)
+	// The join listener pairs with the cluster transport: a TCP cluster must run
+	// the TCP join listener (the joiner dials it over crypto/tls). Dormant: QUIC
+	// unless the internal useTCPTransport flag is set.
+	var ln joinListener
+	if state.cfg.useTCPTransport {
+		ln, err = transport.NewTCPJoinListener(addr, cert, handler)
+	} else {
+		ln, err = transport.NewJoinListener(addr, cert, handler)
+	}
 	if err != nil {
 		return err
 	}

@@ -259,7 +259,7 @@ type bootState struct {
 	// cert. Nil in single-node mode. Closed via AddCleanup on shutdown; its
 	// Addr()/SPKI() are exposed to W10 (invite-bundle advertisement) via
 	// JoinListenerAddr()/JoinListenerSPKI().
-	joinListener *transport.JoinListener
+	joinListener joinListener
 	// coalesceCfg is the cluster-wide coalesce/cap configuration derived from
 	// CLI flags. Stored here so that GroupBackends instantiated after
 	// bootWALAndForwardersPart1 (including dynamically created shard groups) can
