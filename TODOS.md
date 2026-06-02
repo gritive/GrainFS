@@ -55,28 +55,40 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - **S3a landed (data-plane chunked framing + minimal conn reuse):** `CallWithBody`/`CallRead` now use
      length-prefixed chunk framing (`tcp_chunk.go`, terminator-delimited) instead of CloseWrite, + a
      minimal per-peer conn pool (checkout/checkin, no cap) with drain-or-discard; `serveConn` is a
-     persistent loop. Dormant; local bench is non-regression-only (parity is **Linux@S5**). **S3b** items:
-   - [ ] **[P2→required bound] Server-side read deadline + idle-conn reaping (S3a ESCALATED this).** S3a's
-     persistent `serveConn` loop turned bounded per-RPC server-goroutine lifetime into UNBOUNDED: a
-     client that pools a conn and never reuses it pins a server goroutine + FD (blocked in `Decode`, no
-     deadline) until the client closes it. The S1-deferred server read-deadline is now a **required
-     server-resource bound, not an optimization** — pair it with the body-handler drain coupling (next).
-   - [ ] **[P1] Body-handler drain-on-all-paths + body-presence frame flag (pooled-conn hardening).** The
-     S1 drain hazard is worse under pooling: a `CallWithBody`-type served by a non-body handler (or a
-     `HandleBody` early-return that doesn't drain) leaves the request chunk stream unread → the **pooled**
-     conn desyncs and silently mis-pairs every subsequent transfer (no `req.ID`/`resp.ID` check; all
-     data-plane requests set `ID=0`). Not live today (all body types map to HandleBody/HandleRead;
-     `serveOne` now drops a non-drained conn via the `cbr.done` re-check). Two-layer fix: **(a) detection**
-     — transport stamps a per-request `Message.ID` on the pooled data-plane methods and verifies
-     `resp.ID` (turns silent desync LOUD, ~8 lines, could be pulled into S3a); **(b) prevention** — a
-     body-presence flag in the frame header + drain in ALL `serveOne` branches (structural, makes mismatch
-     impossible). (a) subsumes the severity; (b) is the real guard.
-   - [ ] **[P3] `hasBody` handler returning nil hangs the client until ctx deadline** (`serveOne` writes
-     no frame → client `Decode` blocks then discards; self-corrects, no corruption). Latent — the one
-     prod body handler always returns non-nil. Decide nil-resp semantics for body handlers in S3b.
-   - [ ] **[P2] Elastic pool policy (the rest of S3): cap + queue-when-saturated + growth + idle eviction**
-     + socket tuning (`TCP_NODELAY`, send/recv buffers, accept-rate/FD limits) + pool liveness-validation
-     on checkout (a half-open/server-reaped conn is currently only discarded on first-I/O failure).
+     persistent loop. Dormant; local bench is non-regression-only (parity is **Linux@S5**).
+   - **S3b LANDED (data-plane resource bounds + elastic pool, `tcp_config.go`/`tcp_pool.go` + serveConn/serveOne/pool):**
+     all S3b items above are now implemented (dormant, TCP-local, NO shared-codec change):
+     server read/write deadlines (idle bound on the request Decode + body bound on handler read/drain +
+     response-body egress Write); accepted-conn tracking + reaping on `Close`; transport-local desync
+     detection via `Message.ID` stamp+echo+verify (the body-presence header flag was DROPPED — it would
+     change the shared QUIC wire header (neutrality BLOCKER) and is redundant given detection + the type
+     system); deterministic nil-resp→`StatusError`; elastic per-peer pool (cap+queue+growth+idle-age
+     eviction, `cap=0` = S3a behavior); socket tuning (`TCP_NODELAY` + buffers); inbound admission
+     (`TrafficLimiter` parity, Data/Bulk fail-fast to `StatusOverloaded`, Control/Meta block) + a
+     concurrent-`serveConn` semaphore; retry-once on a stale reused conn that fails pre-body. Code gate
+     (3 finders + advisor) caught a BLOCKER (handshake `SetDeadline` left an absolute WRITE deadline that
+     killed any conn reused past `ServerIdleTimeout` — only the hasRead-body path cleared it; fixed +
+     RED test) plus track-before-launch reap TOCTOU and a `closeAll` negative-total cap-bypass.
+   - **S3b residual follow-ups (code-gate finders, [P3] unless noted):**
+     - [ ] **Client-side body-read has no deadline (QUIC-parity gap).** `tcpReadCloser` hands the conn to
+       the caller with the RPC-ctx deadline cleared (matches QUIC), so a server that stalls mid-body
+       (without closing) pins a client goroutine + pooled slot until the caller's `Close`. The server
+       side IS bounded (`ServerBodyTimeout`); the client read side is not. Revisit at S4/S5 wiring
+       (client body-read idle deadline).
+     - [ ] **Egress write-deadline has no QUIC counterpart.** `serveOne` hasRead bounds the response-body
+       Write with `ServerBodyTimeout` (wall-clock, not idle-stall), so a *sustained-slow* (not stalled)
+       reader of a large shard read can be dropped at 5m where QUIC's flow control would not. Generous,
+       but a divergence to confirm acceptable at wire-in benchmark.
+     - [ ] **Pool maps never delete empty keys.** `idle`/`total`/`waiters` retain a (tiny) entry per
+       distinct peer addr forever; `waiters[addr]=q[1:]` advances without shrinking the backing array.
+       Bounded by cluster peer count, negligible, but unbounded over process lifetime — delete empty keys
+       if a churning-membership cluster ever makes it matter.
+     - [ ] **Thundering-herd cancel = O(N) serial redistribution.** N waiters cancelling near-simultaneously
+       produce a serial chain of `removeWaiter`→`checkin`/`dialFailed` hand-offs (each takes `mu` once).
+       Correct (no leak), but a latency smell under a cancel storm. Revisit only if it shows in benchmarks.
+     - [ ] **`cap==0` unlimited contract rests on "no waiter ever enqueued when cap==0".** `checkout`
+       returns the dial slot before the enqueue path, so `dialFailed`/`discard` never hand a slot to a
+       (nonexistent) waiter under `cap==0`. Defensive note: any future enqueue path must preserve this.
 
 - [ ] **At-rest unification — R3 static-key retirement (last slice; cleanup, not migration)**
    - At-rest is **greenfield** — each format-changing slice bumps the on-disk format

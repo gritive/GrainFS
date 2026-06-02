@@ -180,10 +180,13 @@ func (t *connPool) closeAll() {
 	for addr, q := range t.idle {
 		for _, ic := range q {
 			victims = append(victims, ic.c)
+			if t.cap > 0 {
+				t.total[addr]-- // keep total accurate; do NOT reset to a fresh map, or a
+				// still-in-flight conn's later discard would drive total negative and bypass the cap
+			}
 		}
 		delete(t.idle, addr)
 	}
-	t.total = make(map[string]int)
 	t.mu.Unlock()
 	closeConns(victims)
 }

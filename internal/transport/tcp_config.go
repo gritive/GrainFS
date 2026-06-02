@@ -6,7 +6,7 @@ import "time"
 // policy (S3b). These are not yet load-bearing in production (TCPTransport is not
 // wired into boot); they become operative when S4/S5 wire it in.
 const (
-	defaultServerIdleTimeout = 60 * time.Second // ≈ QUIC MaxIdleTimeout; bounds an idle pooled-conn goroutine
+	defaultServerIdleTimeout = 60 * time.Second // bounds an idle pooled-conn goroutine/FD (pooled conns are longer-lived than QUIC's 10s per-conn idle, so this is intentionally larger)
 	defaultServerBodyTimeout = 5 * time.Minute  // generous for 16MiB+ shard bodies over LAN
 	defaultMaxConnsPerPeer   = 64               // elastic cap (NOT a fixed 4; see spec §4 — fixed pool caps throughput)
 	defaultPoolIdleTimeout   = 60 * time.Second // idle conn eviction; matches the server idle reap

@@ -211,6 +211,9 @@ func (t *TCPTransport) acceptLoop() {
 				return
 			}
 		}
+		// Track before launch so a concurrent Close() reaps this conn (tracking inside
+		// serveConn would leave an accept-vs-Close window where the snapshot misses it).
+		t.trackConn(conn)
 		go func() {
 			defer func() {
 				if t.connSem != nil {
@@ -240,15 +243,20 @@ func (t *TCPTransport) untrackConn(c net.Conn) {
 // a persistent loop, so a pooled (reused) client conn carries many transfers. A
 // read deadline bounds idle waits and stalled body transfers (S3b resource bound).
 func (t *TCPTransport) serveConn(conn net.Conn) {
-	t.trackConn(conn)
-	defer t.untrackConn(conn)
+	defer t.untrackConn(conn) // trackConn ran in acceptLoop before launch (reap-on-Close)
 	defer conn.Close()
 	t.tuneTCP(conn)
 	if tc, ok := conn.(*tls.Conn); ok {
-		_ = tc.SetDeadline(time.Now().Add(t.cfg.ServerIdleTimeout)) // bound the handshake too
+		_ = tc.SetDeadline(time.Now().Add(t.cfg.ServerIdleTimeout)) // bound the handshake (read+write)
 		if err := tc.HandshakeContext(t.ctx); err != nil {
 			return
 		}
+		// Clear the handshake WRITE deadline. SetDeadline above set an ABSOLUTE
+		// (handshakeStart + idle) write deadline, but the steady-state loop re-arms
+		// only the READ deadline — so leaving it would make every response Encode on a
+		// conn reused past that instant fail with i/o timeout. Only writeChunkedBody
+		// (the hasRead body egress) re-arms its own write deadline.
+		_ = tc.SetWriteDeadline(time.Time{})
 	}
 	from := conn.RemoteAddr().String()
 	for {

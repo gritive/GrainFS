@@ -94,6 +94,35 @@ func TestTCPDeadline_SlowResponseReaderReaped(t *testing.T) {
 	_ = body.Close()
 }
 
+// TestTCPDeadline_ActiveConnNotKilledByStaleWriteDeadline is the code-gate BLOCKER
+// guard: the handshake SetDeadline arms an ABSOLUTE write deadline, and the loop
+// re-arms only the read deadline. A conn actively reused past that instant must NOT
+// have its response Encode (a write) killed by the stale handshake write deadline.
+func TestTCPDeadline_ActiveConnNotKilledByStaleWriteDeadline(t *testing.T) {
+	srv := listenTCP(t, "wdl", TCPTransportConfig{
+		ServerIdleTimeout: 250 * time.Millisecond, // short, so the bug (if present) fires fast
+		ServerBodyTimeout: 10 * time.Second,
+	})
+	srv.HandleBody(StreamShardWriteBody, func(req *Message, body io.Reader) *Message {
+		_, _ = io.Copy(io.Discard, body)
+		return NewResponse(req, []byte("ok"))
+	})
+	cli := MustNewTCPTransport("wdl")
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := srv.LocalAddr()
+	// Back-to-back transfers, each gap < idle timeout (conn stays active, read
+	// deadline never trips) but total wall-clock > idle timeout. With the stale
+	// write-deadline bug, the server's response Encode fails once age > 250ms.
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		resp, err := cli.CallWithBody(context.Background(), addr, &Message{Type: StreamShardWriteBody}, bytes.NewReader([]byte("x")))
+		require.NoError(t, err, "an actively-reused conn must not be killed by a stale server write deadline")
+		require.Equal(t, []byte("ok"), resp.Payload)
+		require.Equal(t, 1, poolLen(cli, addr), "the conn must stay pooled (reused), not churned")
+		time.Sleep(60 * time.Millisecond)
+	}
+}
+
 // --- Task 2: Close reaps in-flight conns ------------------------------------
 
 func TestTCPClose_ReapsInFlightConns(t *testing.T) {
