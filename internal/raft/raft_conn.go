@@ -25,8 +25,11 @@
 // payload: raft RPC envelope (opaque bytes). Encoders/decoders are owned
 // by the caller — RaftConn does not interpret payload contents.
 //
-// HoL avoidance: streams[N] (default N=4) round-robin. Pending map is at
-// the conn level so responses can arrive on any stream.
+// HoL avoidance: streams[N] (default N=4) split into a control lane (Call/
+// Notify/heartbeat) and a bulk lane (CallBulk, entries-bearing AppendEntries),
+// each round-robining its own stream subset; the zero-split default is a single
+// shared pool over all streams (the original round-robin). Pending map is at the
+// conn level so responses can arrive on any stream.
 package raft
 
 import (

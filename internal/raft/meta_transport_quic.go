@@ -242,7 +242,8 @@ func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer strin
 		return nil, err
 	}
 	// Entries-empty heartbeats ride the shared coalescer; entries-bearing
-	// AE goes direct via RaftConn.Call. Same pattern as GroupRaftSender.
+	// AE goes direct via RaftConn.CallBulk (bulk lane). Same pattern as
+	// GroupRaftSender.
 	if len(args.Entries) == 0 {
 		reply, hcErr := ps.hc.AppendEntries(ctx, metaGroupID, args)
 		if hcErr == nil {

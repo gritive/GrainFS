@@ -5,8 +5,8 @@
 // wraps it in a RaftConn, and routes:
 //
 //   - Heartbeat AppendEntries (entries-empty) → HeartbeatCoalescer (batched)
-//   - Entries-bearing AppendEntries           → RaftConn.Call (direct, single frame)
-//   - RequestVote                              → RaftConn.Call (direct)
+//   - Entries-bearing AppendEntries           → RaftConn.CallBulk (bulk lane, single frame)
+//   - RequestVote                              → RaftConn.Call (control lane, direct)
 //
 // Wire payload INSIDE a mux frame (opRequest / opHeartbeatBatch / etc) is
 // the same `[groupIDLen|groupID|rpcEnvelope(FB)]` shape used by the legacy

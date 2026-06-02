@@ -221,7 +221,8 @@ func (s *GroupRaftSender) AppendEntries(peer string, args *AppendEntriesArgs) (*
 	defer cancel()
 
 	// Mux path: route entries-empty heartbeats through the per-peer
-	// HeartbeatCoalescer; entries-bearing AE goes direct via RaftConn.Call.
+	// HeartbeatCoalescer; entries-bearing AE goes direct via RaftConn.CallBulk
+	// (bulk lane, so a large AE cannot HoL-block a control-lane heartbeat/vote).
 	// Both preserve the synchronous (*Reply, error) caller contract.
 	if s.mux.muxEnabled.Load() {
 		ps, err := s.mux.muxConnFor(ctx, peer)
