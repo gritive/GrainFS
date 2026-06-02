@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.500.0] - 2026-06-03
+
+### Changed
+
+- **Cluster transport default flipped from QUIC to TCP.** `--transport` now
+  defaults to `tcp`; pass `--transport quic` to opt back into the legacy QUIC
+  transport. This is the production flip of the QUIC→TCP migration: on Linux the
+  userspace-QUIC data plane measured 0.36x the throughput of kernel TCP (a
+  structural CPU cost GSO does not close), so TCP becomes the default cluster
+  transport for raft, the mux carrier, zero-CA join, and the data plane. A node's
+  transport is not persisted, so `--transport quic` must be passed consistently
+  across restarts to keep a node on QUIC (a no-flag restart now boots TCP).
+- **Validation — be precise about what was and was not measured.** On **macOS**,
+  the representative multi-node cluster e2e paths run green under the TCP default:
+  invite-join + serveruntime formation, EC data-plane + mux raft replication,
+  Append, and 3-node kill/restart-rejoin; serveruntime and cluster unit/integration
+  suites are green. The only e2e failures (5–6 node EC cluster boot) reproduce
+  identically under a QUIC baseline run (**delta-zero** for those specs) — a macOS
+  resource limit, not a TCP regression. (The green paths were run under TCP only,
+  not baseline-compared against QUIC.) **Not validated:** the full e2e suite
+  (representative specs only), the colima suites (NBD/NFS/FUSE over TCP), **Linux**
+  runtime behavior (this validation is macOS; the QUIC→TCP performance thesis is
+  Linux-specific), and the §6 multi-node parity benchmark (throughput ≥1.0x),
+  which was deliberately not run before this flip.
+
 ## [0.0.494.0] - 2026-06-01
 
 ### Changed

@@ -12,10 +12,10 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// TestBootClusterTransport_TCPBindsLoopbackPort0 — with the internal/test-only
-// useTCPTransport flag set, bootClusterTransport must construct the TCP stack
-// (dormant; production defaults to QUIC), Listen, and resolve state.raftAddr to
-// the kernel-picked TCP port. Proves the base-transport selection branch fires.
+// TestBootClusterTransport_TCPBindsLoopbackPort0 — with useTCPTransport set (the
+// default after the S5c-3 flip), bootClusterTransport must construct the TCP
+// stack, Listen, and resolve state.raftAddr to the kernel-picked TCP port. Proves
+// the base-transport selection branch fires.
 func TestBootClusterTransport_TCPBindsLoopbackPort0(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	state.cfg.useTCPTransport = true

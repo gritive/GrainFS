@@ -658,8 +658,8 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 	}
 
 	// reply.PeerSPKIs (the cluster per-node accept-set) is intentionally NOT
-	// installed here: the joiner's normal cluster QUIC transport derives its
-	// accept-set from the shared transport PSK (NewQUICTransport(transportPSK) →
+	// installed here: the joiner's normal cluster transport derives its accept-set
+	// from the shared transport PSK (NewTCPTransport/NewQUICTransport(transportPSK) →
 	// DeriveClusterIdentity), which Phase-1 already delivered. The leader dials
 	// the freshly-joined node using that SAME PSK-derived cluster identity, so
 	// AppendEntries catch-up (and thus the gen-0 DEK Apply the WaitDEKReady gate
@@ -691,9 +691,9 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error)
 
 // selectJoinDialer picks the join dialer to match the cluster transport: the TCP
-// join dialer (transport.DialJoinTCP) under the dormant --transport tcp flag
-// (S5c-1), else the QUIC dialer (transport.DialJoin, the production default). The
-// joiner must dial over the SAME transport the leader's join listener runs.
+// join dialer (transport.DialJoinTCP, the default after the S5c-3 flip), else the
+// QUIC dialer (transport.DialJoin, the `--transport quic` opt-out). The joiner
+// must dial over the SAME transport the leader's join listener runs.
 func selectJoinDialer(useTCP bool) joinDialer {
 	if useTCP {
 		return transport.DialJoinTCP
@@ -713,10 +713,9 @@ func joinDialerForConfig(cfg Config) joinDialer {
 	return selectJoinDialer(cfg.useTCPTransport)
 }
 
-// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer so the
-// dormant TCP join path (transport.DialJoinTCP) can drive the SAME consumer
-// choreography in tests. Behavior-neutral: inviteJoinDial delegates here with
-// transport.DialJoin, so production is byte-identical.
+// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer so either
+// transport's join path (TCP transport.DialJoinTCP / QUIC transport.DialJoin) can
+// drive the SAME consumer choreography in tests.
 func inviteJoinDialWith(ctx context.Context, dial joinDialer, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, inviteJoinDialTimeout)
 	defer cancel()

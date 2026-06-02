@@ -16,7 +16,8 @@ import (
 )
 
 // bootClusterTransport resolves the cluster key (disk wins over flag, ephemeral
-// when both empty in solo mode), constructs the QUIC transport, applies bulk
+// when both empty in solo mode), constructs the cluster transport (TCP by default
+// after the S5c-3 flip; QUIC under the `--transport quic` opt-out), applies bulk
 // traffic limits for forwarded S3 PUT fan-outs, and Listens on raftAddr. On
 // success state.quicTransport is populated, state.raftAddr is updated to the
 // kernel-picked port (when operator passed 127.0.0.1:0), and Close is queued
@@ -45,11 +46,10 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 		state.transportPSK = ephemeral
 	}
 
-	// Transport selection. Production always takes the QUIC branch (byte-identical
-	// to before); the dormant TCP branch is reached only by the internal/test-only
-	// useTCPTransport flag (the flip is S5(c)). All post-construction setup below is
-	// transport-agnostic (ClusterTransport interface methods), so only the
-	// constructor branches.
+	// Transport selection. The default is now TCP (the S5c-3 flip): useTCPTransport
+	// is set unless the operator passes `--transport quic` to opt back into the
+	// legacy QUIC transport. All post-construction setup below is transport-agnostic
+	// (ClusterTransport interface methods), so only the constructor branches.
 	var clusterTransport transport.ClusterTransport
 	if state.cfg.useTCPTransport {
 		tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
@@ -135,9 +135,9 @@ func loadInviteNodeKeyKEKFromDisk(dataDir string, gen uint32) ([]byte, error) {
 	return kek, nil
 }
 
-// bootPeerConnections opens a QUIC connection to each peer. Connection
-// failures are logged but non-fatal — the transport retries lazily on the
-// first send. Empty peer list (solo mode) is a clean no-op.
+// bootPeerConnections opens a cluster-transport connection to each peer.
+// Connection failures are logged but non-fatal — the transport retries lazily on
+// the first send. Empty peer list (solo mode) is a clean no-op.
 func bootPeerConnections(ctx context.Context, state *bootState) error {
 	for _, peer := range state.peers {
 		if err := state.quicTransport.Connect(ctx, peer); err != nil {

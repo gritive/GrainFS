@@ -60,11 +60,9 @@ type Config struct {
 	QUICMuxPoolSize       int
 	QUICMuxFlushWindow    time.Duration
 
-	// useTCPTransport selects the dormant TCP cluster transport (S1–S5a) instead
-	// of QUIC at boot. INTERNAL / TEST-ONLY (unexported): the QUIC→TCP flip is not
-	// sanctioned, so there is no operator flag and no CHANGELOG entry. Only
-	// serveruntime tests set it; production always builds the QUIC stack. The flip
-	// (promoting this to a real flag) is S5(c), sign-off-gated.
+	// useTCPTransport selects the TCP cluster transport at boot (the default after
+	// the S5c-3 flip). optionsToConfig sets it from `--transport` (default tcp; a
+	// `--transport quic` opt-out clears it to build the legacy QUIC stack).
 	useTCPTransport bool
 
 	// Storage / EC

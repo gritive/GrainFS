@@ -36,9 +36,9 @@ type ServeOptions struct {
 	AppendSizeCapBytes               int64         // --append-size-cap-bytes
 	QUICMuxPoolSize                  int           // --quic-mux-pool
 	QUICMuxFlushWindow               time.Duration // --quic-mux-flush
-	// Transport selects the cluster transport: "" / "quic" (default) or "tcp"
-	// (EXPERIMENTAL — the dormant TCP stack, for the QUIC→TCP migration bench; not a
-	// supported operator surface until the flip). Validated at the cmd boundary.
+	// Transport selects the cluster transport: "tcp" (default, incl. "") or "quic"
+	// (the opt-out into the legacy QUIC stack). Validated at the cmd boundary;
+	// optionsToConfig maps anything other than "quic" to TCP.
 	Transport string // --transport
 
 	// --- Storage knobs ---

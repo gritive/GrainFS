@@ -619,8 +619,8 @@ Zero-CA cutover complete: cluster key dropped, connections recycled.
 Use `revoke-node` when the node identity itself should be blocked from future
 membership, not only removed from the current voter set. The command removes the
 peer from meta-Raft membership, burns pending invites for the same node ID, adds
-the node transport SPKI to the replicated denylist, and closes cached QUIC
-connections to that peer.
+the node transport SPKI to the replicated denylist, and closes cached cluster
+transport connections to that peer.
 
 Run the command on the leader through the admin socket:
 

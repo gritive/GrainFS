@@ -44,10 +44,12 @@ func optionsToConfig(
 	cfg.QUICMuxEnabled = true // mux is always on; the --quic-mux flag was removed
 	cfg.QUICMuxPoolSize = opts.QUICMuxPoolSize
 	cfg.QUICMuxFlushWindow = opts.QUICMuxFlushWindow
-	// Cluster transport selection (S5c-1): "tcp" selects the dormant TCP stack;
-	// anything else (incl. "" / "quic") keeps QUIC. The enum is validated at the cmd
-	// boundary (serveOptionsFromCmd); this mapping is the only set-site of the flag.
-	cfg.useTCPTransport = opts.Transport == "tcp"
+	// Cluster transport selection (S5c-3 flip): TCP is the default — only an explicit
+	// "quic" opts back into the legacy QUIC stack, so an empty Transport (e.g. an
+	// in-process caller that doesn't set it) resolves to TCP, matching the cobra flag
+	// default. The enum is validated at the cmd boundary (serveOptionsFromCmd); this
+	// mapping is the only set-site of the flag.
+	cfg.useTCPTransport = opts.Transport != "quic"
 
 	cfg.AppendForwardBufferTotalBytes = opts.AppendForwardBufferTotalBytes
 	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest

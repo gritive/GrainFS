@@ -121,7 +121,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	// binaries). These two knobs tune the always-on mux path.
 	cmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining)")
 	cmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval)")
-	cmd.Flags().String("transport", "quic", "cluster transport: quic|tcp (EXPERIMENTAL — TCP is the dormant QUIC→TCP migration stack for the parity bench; not a supported operator surface)")
+	cmd.Flags().String("transport", "tcp", "cluster transport: tcp|quic (default tcp; pass quic to opt back into the legacy QUIC transport)")
 	cmd.Flags().Bool("audit-iceberg", true, "enable audit log lake: S3 ops → Iceberg table on grainfs-audit bucket")
 	cmd.Flags().Duration("audit-commit-interval", 60*time.Second, "how often the audit committer flushes the ring buffer to Iceberg")
 }

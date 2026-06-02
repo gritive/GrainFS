@@ -182,9 +182,9 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "<redacted>", opts.FlagsSnapshot["heal-receipt-psk"], "secret redaction")
 }
 
-// TestServeOptionsFromCmd_TransportFlag covers the --transport experimental flag:
-// default is quic, tcp is accepted, and an unknown value is rejected at the cmd
-// boundary (before boot).
+// TestServeOptionsFromCmd_TransportFlag covers the --transport flag after the
+// S5c-3 flip: default is now tcp, quic is the explicit opt-out, tcp is accepted,
+// and an unknown value is rejected at the cmd boundary (before boot).
 func TestServeOptionsFromCmd_TransportFlag(t *testing.T) {
 	build := func(args ...string) (string, error) {
 		cmd := &cobra.Command{Use: "serve"}
@@ -196,7 +196,11 @@ func TestServeOptionsFromCmd_TransportFlag(t *testing.T) {
 
 	got, err := build()
 	require.NoError(t, err)
-	require.Equal(t, "quic", got, "default transport is quic")
+	require.Equal(t, "tcp", got, "default transport is tcp (S5c-3 flip)")
+
+	got, err = build("--transport", "quic")
+	require.NoError(t, err)
+	require.Equal(t, "quic", got, "--transport quic is the QUIC opt-out")
 
 	got, err = build("--transport", "tcp")
 	require.NoError(t, err)
