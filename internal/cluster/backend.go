@@ -36,7 +36,7 @@ import (
 // shardRPCTimeout is the per-shard RPC deadline for remote writes/reads.
 // EC PUTs stream shard bodies during the caller's write path; cold multi-raft
 // startup can legitimately spend more than a few seconds opening and draining
-// QUIC shard streams before the metadata propose completes.
+// transport shard streams before the metadata propose completes.
 const shardRPCTimeout = 2 * time.Minute
 
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
@@ -812,7 +812,7 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	}
 }
 
-// forwardPropose는 팔로워에서 리더로 propose 요청을 QUIC RPC로 전달한다.
+// forwardPropose는 팔로워에서 리더로 propose 요청을 cluster-transport RPC로 전달한다.
 // 응답 형식: [8B index big-endian][4B errLen big-endian][errBytes...]
 func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr string, data []byte) (uint64, error) {
 	if b.shardSvc == nil {
@@ -846,7 +846,7 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	return index, nil
 }
 
-// RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 QUIC 라우터에 등록한다.
+// RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 transport 라우터에 등록한다.
 // 리더 노드에서 호출해야 하며, 팔로워의 propose를 대신 처리한다.
 //
 // Phase A (Task 16): the leader also waits for the entry to be applied locally
@@ -941,7 +941,7 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 
 // ReadIndex returns a linearizable read fence index.
 // On the leader it confirms leadership via heartbeat quorum.
-// On a follower it forwards to the leader via StreamReadIndex QUIC RPC.
+// On a follower it forwards to the leader via StreamReadIndex cluster-transport RPC.
 func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
 	var lastErr error
 	for {

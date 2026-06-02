@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-// StreamType distinguishes the purpose of a QUIC stream.
+// StreamType distinguishes the purpose of a transport stream.
 type StreamType byte
 
 const (
@@ -27,7 +27,7 @@ const (
 	StreamGroupForwardRead        StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
 	StreamShardWriteBody          StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
 	StreamShardReadBody           StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
-	StreamCapabilityExchange      StreamType = 0x12 // protocol version handshake; first stream on every mux QUIC conn
+	StreamCapabilityExchange      StreamType = 0x12 // protocol version handshake; first stream on every mux conn
 	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
@@ -103,7 +103,7 @@ type ReceivedMessage struct {
 	Message *Message
 }
 
-// Transport provides node-to-node communication over QUIC.
+// Transport provides node-to-node communication over the cluster transport.
 type Transport interface {
 	// Listen starts accepting incoming connections on the given address.
 	Listen(ctx context.Context, addr string) error

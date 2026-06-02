@@ -44,7 +44,7 @@ type CommitterConfig struct {
 	Catalog  icebergcatalog.Catalog
 	Backend  auditBackend
 	IsLeader func() bool
-	// ShipToLeader sends audit events to the current leader via QUIC.
+	// ShipToLeader sends audit events to the current leader via the cluster transport.
 	// Set on all nodes; the committer ignores it when IsLeader() returns true.
 	ShipToLeader func(ctx context.Context, events []S3Event) error
 	NodeID       string

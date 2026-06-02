@@ -1,13 +1,13 @@
-// raft_quic_rpc.go — QUIC RPC bridge for raft v2 (renamed from
+// raft_rpc.go — Raft RPC bridge for raft v2 (renamed from
 // raftv2_quic_rpc.go in M5 PR 29 now that v2 is the only path).
 //
-// Mirrors internal/raft.QUICRPCTransport: it registers a transport.StreamControl
+// Mirrors internal/raft.RPCTransport: it registers a transport.StreamControl
 // handler that decodes inbound Raft RPCs via the v2 wire codec
-// (raftv2_quic_codec.go) and dispatches them through cluster.RaftNode.Handle*
+// (raftv2_codec.go) and dispatches them through cluster.RaftNode.Handle*
 // (the v2 adapter forwards to raftv2.Node). Outbound RPCs go through the
 // v1-style callback pair the cluster layer already wires into the v2 adapter.
 //
-// Wire format is byte-identical to v1's quic_rpc.go (frozen until PR 30
+// Wire format is byte-identical to v1's raft_rpc.go (frozen until PR 30
 // deletes the v1 package).
 
 package cluster
@@ -30,22 +30,22 @@ const (
 	v2RaftSnapshotTimeout = 60 * time.Second
 )
 
-// RaftQUICRPCTransport bridges Raft RPCs over QUIC for raft v2. It registers
+// RaftRPCTransport bridges Raft RPCs over the cluster transport for raft v2. It registers
 // an inbound handler on transport.StreamControl and exposes v1-style outbound
 // send callbacks (SetTransport / SetInstallSnapshotTransport /
 // SetTimeoutNowTransport) that the cluster layer hands to the RaftNode adapter.
-type RaftQUICRPCTransport struct {
+type RaftRPCTransport struct {
 	transport clusterRPCTransport
 
 	nodeMu sync.RWMutex
 	node   RaftNode
 }
 
-// NewRaftQUICRPCTransport wires the inbound StreamControl handler. The
+// NewRaftRPCTransport wires the inbound StreamControl handler. The
 // returned struct exposes the send callbacks the cluster layer pumps into
 // RaftNode.SetTransport.
-func NewRaftQUICRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftQUICRPCTransport {
-	rpc := &RaftQUICRPCTransport{transport: tr, node: node}
+func NewRaftRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftRPCTransport {
+	rpc := &RaftRPCTransport{transport: tr, node: node}
 	tr.Handle(transport.StreamControl, rpc.handleRPC)
 	return rpc
 }
@@ -53,26 +53,26 @@ func NewRaftQUICRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftQUICRPC
 // SetNode replaces the RaftNode the transport dispatches to. Safe for
 // concurrent use with the inbound handler (handleRPC); callers that wrap the
 // existing node should pair this with GetNode to read the current value.
-func (r *RaftQUICRPCTransport) SetNode(n RaftNode) {
+func (r *RaftRPCTransport) SetNode(n RaftNode) {
 	r.nodeMu.Lock()
 	defer r.nodeMu.Unlock()
 	r.node = n
 }
 
 // GetNode returns the current RaftNode. Safe for concurrent use.
-func (r *RaftQUICRPCTransport) GetNode() RaftNode {
+func (r *RaftRPCTransport) GetNode() RaftNode {
 	r.nodeMu.RLock()
 	defer r.nodeMu.RUnlock()
 	return r.node
 }
 
 // SetTransport wires the outbound callbacks into the RaftNode (matches the
-// v1-style API used by *raft.QUICRPCTransport).
-func (r *RaftQUICRPCTransport) SetTransport() {
+// v1-style API used by *raft.MetaRaftTransport).
+func (r *RaftRPCTransport) SetTransport() {
 	r.GetNode().SetTransport(r.sendRequestVote, r.sendAppendEntries)
 }
 
-func (r *RaftQUICRPCTransport) sendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+func (r *RaftRPCTransport) sendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
 	defer cancel()
 
@@ -95,7 +95,7 @@ func (r *RaftQUICRPCTransport) sendRequestVote(peer string, args *raft.RequestVo
 	return v2DecodeRequestVoteReply(data)
 }
 
-func (r *RaftQUICRPCTransport) sendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+func (r *RaftRPCTransport) sendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
 	defer cancel()
 
@@ -118,7 +118,7 @@ func (r *RaftQUICRPCTransport) sendAppendEntries(peer string, args *raft.AppendE
 	return v2DecodeAppendEntriesReply(data)
 }
 
-func (r *RaftQUICRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
+func (r *RaftRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
 	defer cancel()
 
@@ -142,14 +142,14 @@ func (r *RaftQUICRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNow
 }
 
 // SetTimeoutNowTransport wires the outbound TimeoutNow callback into the RaftNode.
-func (r *RaftQUICRPCTransport) SetTimeoutNowTransport() {
+func (r *RaftRPCTransport) SetTimeoutNowTransport() {
 	r.GetNode().SetTimeoutNowTransport(r.sendTimeoutNow)
 }
 
 // handleRPC dispatches inbound Raft RPCs to the v2 node via the RaftNode
 // interface. The interface methods accept v1 wire types (raft.*); the v2
 // adapter translates to v2 native types and back (see raftv2adapter.go).
-func (r *RaftQUICRPCTransport) handleRPC(req *transport.Message) *transport.Message {
+func (r *RaftRPCTransport) handleRPC(req *transport.Message) *transport.Message {
 	rpcType, data, err := v2DecodeRPC(req.Payload)
 	if err != nil {
 		return nil

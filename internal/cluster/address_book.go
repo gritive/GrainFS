@@ -5,7 +5,7 @@ import (
 	"net"
 )
 
-// NodeAddressResolver resolves a cluster node identifier to its dialable QUIC
+// NodeAddressResolver resolves a cluster node identifier to its dialable transport
 // address. MetaFSM implements this; tests can use fakes.
 type NodeAddressResolver interface {
 	ResolveNodeAddress(idOrAddr string) (string, bool)

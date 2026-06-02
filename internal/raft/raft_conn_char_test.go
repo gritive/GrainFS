@@ -16,7 +16,7 @@ import (
 // newRaftConnPairTCP brings up two real TCPTransports and builds a client+server
 // RaftConn over a TCP MuxCarrier (S2b-2). This is the deferred S2b-1 proof that the
 // carrier abstraction is genuinely carrier-agnostic: a non-QUIC carrier yields N
-// streams the same way. The dialer flow mirrors GroupRaftQUICMux.muxConnFor; the
+// streams the same way. The dialer flow mirrors GroupRaftMux.muxConnFor; the
 // acceptor flow mirrors handleInboundMuxConn.
 func newRaftConnPairTCP(t *testing.T, poolSize int, clientCfg, serverCfg RaftConnConfig) (*RaftConn, *RaftConn) {
 	t.Helper()

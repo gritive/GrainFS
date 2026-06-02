@@ -41,7 +41,7 @@ func buildCapGateWiringState(t *testing.T) *bootState {
 	return &bootState{
 		cfg:               Config{Version: "0.0.356.0"},
 		metaRaft:          meta,
-		quicTransport:     tr,
+		clusterTransport:  tr,
 		kekStore:          kekStore,
 		capabilityGate:    gate,
 		handshakeVerifier: verifier,

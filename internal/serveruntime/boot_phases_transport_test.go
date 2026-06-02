@@ -25,20 +25,20 @@ func TestBootClusterTransport_TCPBindsLoopbackPort0(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NotNil(t, state.quicTransport)
-	_, isTCP := state.quicTransport.(*transport.TCPTransport)
+	require.NotNil(t, state.clusterTransport)
+	_, isTCP := state.clusterTransport.(*transport.TCPTransport)
 	assert.True(t, isTCP, "bootClusterTransport must construct a *TCPTransport")
 
 	resolved := state.raftAddr
 	assert.NotEqual(t, "127.0.0.1:0", resolved, "Listen must resolve :0 to kernel-picked port")
 	assert.True(t, strings.HasPrefix(resolved, "127.0.0.1:"), "kept on loopback in solo mode")
-	assert.Equal(t, state.quicTransport.LocalAddr(), resolved, "state.raftAddr matches LocalAddr")
+	assert.Equal(t, state.clusterTransport.LocalAddr(), resolved, "state.raftAddr matches LocalAddr")
 }
 
-// TestBootQUICTransport_BindsLoopbackPort0 — happy path: solo-mode bootstrap
+// TestBootClusterTransport_BindsLoopbackPort0 — happy path: solo-mode bootstrap
 // (no peers) uses 127.0.0.1:0; bootClusterTransport must Listen, then resolve
 // state.raftAddr to the kernel-picked port so peers see a dialable self.
-func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
+func TestBootClusterTransport_BindsLoopbackPort0(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
@@ -47,19 +47,19 @@ func TestBootQUICTransport_BindsLoopbackPort0(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NotNil(t, state.quicTransport, "state.quicTransport populated")
+	require.NotNil(t, state.clusterTransport, "state.clusterTransport populated")
 	assert.NotEmpty(t, state.transportPSK, "ephemeral PSK generated in solo mode")
 
 	resolved := state.raftAddr
 	assert.NotEqual(t, "127.0.0.1:0", resolved, "Listen must resolve :0 to kernel-picked port")
 	assert.True(t, strings.HasPrefix(resolved, "127.0.0.1:"), "kept on loopback in solo mode")
-	assert.Equal(t, state.quicTransport.LocalAddr(), resolved, "state.raftAddr matches LocalAddr")
+	assert.Equal(t, state.clusterTransport.LocalAddr(), resolved, "state.raftAddr matches LocalAddr")
 }
 
-// TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode — when neither cfg.
+// TestBootClusterTransport_GeneratesEphemeralKeyInSoloMode — when neither cfg.
 // ClusterKey nor keys.d/current.key exists and no peers are configured,
 // bootClusterTransport must generate an ephemeral key so zero-config holds.
-func TestBootQUICTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
+func TestBootClusterTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
@@ -88,7 +88,7 @@ func TestBootPeerConnections_EmptyPeersIsNoOp(t *testing.T) {
 }
 
 // TestBootGroupRaftMux_CreatesMux — phase constructs the mux from
-// state.quicTransport. With QUICMuxEnabled=false, EnableMux must NOT fire
+// state.clusterTransport. With MuxEnabled=false, EnableMux must NOT fire
 // (default mux mode).
 func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
@@ -103,17 +103,17 @@ func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
 	require.NotNil(t, state.groupRaftMux, "state.groupRaftMux populated")
 }
 
-// TestBootGroupRaftMux_EnabledHonorsConfig — with QUICMuxEnabled=true the
+// TestBootGroupRaftMux_EnabledHonorsConfig — with MuxEnabled=true the
 // phase must wire EnableMux with the operator-supplied pool size + flush
 // window (the R+H Phase 2 prototype mode).
 func TestBootGroupRaftMux_EnabledHonorsConfig(t *testing.T) {
 	state := newBootState(Config{
-		DataDir:            t.TempDir(),
-		NodeID:             "n1",
-		ClusterKey:         "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		QUICMuxEnabled:     true,
-		QUICMuxPoolSize:    8,
-		QUICMuxFlushWindow: 2 * time.Millisecond,
+		DataDir:        t.TempDir(),
+		NodeID:         "n1",
+		ClusterKey:     "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		MuxEnabled:     true,
+		MuxPoolSize:    8,
+		MuxFlushWindow: 2 * time.Millisecond,
 	})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
@@ -128,7 +128,7 @@ func TestBootGroupRaftMux_EnabledHonorsConfig(t *testing.T) {
 
 // TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant —
 // the central invariant: groupRaftMux must be constructed BEFORE any code
-// that builds NewMetaTransportQUICMux. After PR 3 the phase ordering makes
+// that builds NewMetaTransportMux. After PR 3 the phase ordering makes
 // this explicit (mux phase runs before any raft-meta phase). This test
 // asserts the bootState surface witnesses that ordering: after running the
 // transport phase trio, state.groupRaftMux is non-nil and observable to a
@@ -142,11 +142,11 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 	defer cancel()
 
 	// Before any transport phase: nil.
-	assert.Nil(t, state.quicTransport)
+	assert.Nil(t, state.clusterTransport)
 	assert.Nil(t, state.groupRaftMux)
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NotNil(t, state.quicTransport, "QUIC up first")
+	require.NotNil(t, state.clusterTransport, "transport up first")
 	assert.Nil(t, state.groupRaftMux, "mux not yet constructed")
 
 	require.NoError(t, bootPeerConnections(ctx, state))
@@ -158,10 +158,10 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 
 // TestBootGroupRaftMux_TCPAssemblesOverTCPTransport proves the serveruntime boot
 // PHASES assemble the raft mux over a TCP-constructed transport: bootClusterTransport
-// (TCP) → bootGroupRaftMux constructs the GroupRaftQUICMux on the *TCPTransport and
+// (TCP) → bootGroupRaftMux constructs the GroupRaftMux on the *TCPTransport and
 // runs EnableMux against it cleanly (i.e. *TCPTransport satisfies the muxDriverTransport
 // surface EnableMux→SetMuxConnHandler lands on). NOTE: MuxEnabled() here is a config
-// echo — the test injects QUICMuxEnabled:true, which also drives QUIC — so the
+// echo — the test injects MuxEnabled:true, which also drives the mux — so the
 // TCP-SPECIFIC signal is the *TCPTransport assertion + the clean assembly, NOT
 // mux-over-TCP behavior (that is the raft-layer carrier test raftv2_group_mux_tcp_test.go).
 // This is the in-process boot-assembly half; the full multi-node serveruntime TCP
@@ -170,8 +170,8 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
 	state := newBootState(Config{
 		DataDir: t.TempDir(), NodeID: "n1",
-		ClusterKey:     "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		QUICMuxEnabled: true, QUICMuxPoolSize: 4, QUICMuxFlushWindow: 2 * time.Millisecond,
+		ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		MuxEnabled: true, MuxPoolSize: 4, MuxFlushWindow: 2 * time.Millisecond,
 	})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
@@ -180,7 +180,7 @@ func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	_, isTCP := state.quicTransport.(*transport.TCPTransport)
+	_, isTCP := state.clusterTransport.(*transport.TCPTransport)
 	require.True(t, isTCP, "transport phase must construct a *TCPTransport")
 
 	require.NoError(t, bootGroupRaftMux(state))

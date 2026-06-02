@@ -1,6 +1,6 @@
 // Package raft — raft_conn.go
 //
-// RaftConn is a multiplexed bidirectional QUIC connection used exclusively
+// RaftConn is a multiplexed bidirectional connection used exclusively
 // for per-group and meta raft RPCs. Unlike the per-message stream open/close
 // pattern in internal/transport/quic.go, RaftConn maintains a small pool of
 // long-lived streams and frames messages on them. Each frame carries a

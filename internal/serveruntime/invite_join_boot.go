@@ -3,7 +3,7 @@ package serveruntime
 // Zero-CA invite-join boot orchestration (W9b, JOINER side).
 //
 // A brand-new node holding NO cluster secrets boots into a running voter using
-// only an InviteBundle (W1) over the dedicated QUIC join transport (W4). This
+// only an InviteBundle (W1) over the dedicated join transport (W4). This
 // productionizes the throwaway de-risk spike (commit 48c7bdb's zero_ca_spike.go)
 // into the real two-phase flow against W7's server handler:
 //
@@ -517,7 +517,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 8. SealNodeKey where the next boot phase can open it. Use the cluster's
 	// ACTIVE KEK generation. Post-drop joins present the per-node cert before
-	// QUIC Listen, so bootClusterTransport loads this same KEK directly from disk
+	// transport Listen, so bootClusterTransport loads this same KEK directly from disk
 	// before wireDEKKeeper has populated state.kekStore.
 	sealGen, sealKEK, err := inviteNodeKeySealKey(kekGens)
 	if err != nil {
@@ -659,7 +659,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 
 	// reply.PeerSPKIs (the cluster per-node accept-set) is intentionally NOT
 	// installed here: the joiner's normal cluster transport derives its accept-set
-	// from the shared transport PSK (NewTCPTransport/NewQUICTransport(transportPSK) →
+	// from the shared transport PSK (NewTCPTransport(transportPSK) →
 	// DeriveClusterIdentity), which Phase-1 already delivered. The leader dials
 	// the freshly-joined node using that SAME PSK-derived cluster identity, so
 	// AppendEntries catch-up (and thus the gen-0 DEK Apply the WaitDEKReady gate
@@ -684,10 +684,9 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 // resumed Phase-1 each dial yields a fresh bind, so the request is re-signed and
 // never persisted.
 // joinDialer dials a join listener and returns the half-close join stream, the
-// RFC5705 channel binding, and a full-teardown closer. transport.DialJoin (QUIC)
-// and transport.DialJoinTCP (S4) share this EXACT signature, so the dialer is the
-// single seam that selects the join transport without touching the consumer
-// choreography below.
+// RFC5705 channel binding, and a full-teardown closer. transport.DialJoinTCP
+// (S4) implements it, so the dialer is the single seam that selects the join
+// transport without touching the consumer choreography below.
 type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error)
 
 // inviteJoinDialWith is inviteJoinDial parameterized by the join dialer (always

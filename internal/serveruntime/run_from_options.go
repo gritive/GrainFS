@@ -65,7 +65,7 @@ func RunFromOptions(ctx context.Context, opts ServeOptions) error {
 	}
 
 	// 3b. Zero-CA invite-join (W9b): when an invite bundle is present and the
-	// resume gate says FreshJoin/Resume, run Phase-1 over the dedicated QUIC join
+	// resume gate says FreshJoin/Resume, run Phase-1 over the dedicated join
 	// transport to pull + stage the cluster bootstrap secrets (KEK generations,
 	// cluster.id, transport PSK) BEFORE the earliest secret gate. It writes back opts.NodeID and
 	// opts.ClusterKey so the normal boot resolves the identical node id and the

@@ -20,11 +20,11 @@ import (
 )
 
 // PresentFlipDeps wires the orchestration against the live MetaRaft +
-// QUICTransport. Production wires:
+// the cluster transport. Production wires:
 //
 //	Voters:           NewMetaRaftConfigReader(metaRaft).EffectiveConfiguration
 //	RegistrySPKIs:    func() map[string][32]byte { return metaFSM.PeerRaftAddrToSPKI() }
-//	  NOTE: EffectiveConfiguration returns raft server IDs (= QUIC addresses in
+//	  NOTE: EffectiveConfiguration returns raft server IDs (= transport addresses in
 //	  production, set via MetaRaftConfig.RaftID). RegistrySPKIs MUST use the same
 //	  key space — PeerRaftAddrToSPKI(), NOT PeerNodeIDToSPKI().
 //	ProposeWithIndex: func(ctx, typ, payload) (uint64, error) that wraps

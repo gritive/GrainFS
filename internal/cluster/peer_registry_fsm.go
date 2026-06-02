@@ -11,7 +11,7 @@ func (f *MetaFSM) Peers() *peerRegistry { return f.peers }
 
 // SetOnPeersChanged wires a side-effect callback fired after each peer-registry
 // command commits. The callback receives the new transport accept-set and is
-// expected to rebuild the QUIC listener's accepted-SPKI window. Called from the
+// expected to rebuild the transport listener's accepted-SPKI window. Called from the
 // FSM apply goroutine; set before MetaRaft.Start().
 //
 // TODO(phase-2-followup): membership vs rotation accept-set union. A concurrent
@@ -81,7 +81,7 @@ func (f *MetaFSM) PeerNodeIDToSPKI() map[string][32]byte {
 // PeerRaftAddrToSPKI returns a snapshot of the raftAddr→SPKI map for all
 // registered peers. Use this (not PeerNodeIDToSPKI) when cross-referencing
 // a voter list from EffectiveConfiguration — production raft server IDs are
-// QUIC addresses, not node UUIDs. Safe for concurrent use.
+// transport addresses, not node UUIDs. Safe for concurrent use.
 func (f *MetaFSM) PeerRaftAddrToSPKI() map[string][32]byte {
 	return f.peers.raftAddrToSPKI()
 }
@@ -96,7 +96,7 @@ func (f *MetaFSM) ClusterKeyDropped() bool {
 
 // AllVotersPresentsPerNode reports whether every voter in the given list has a
 // registered registry entry with PresentsPerNode=true. Voters are raft server
-// IDs, which are QUIC addresses in production.
+// IDs, which are transport addresses in production.
 func (f *MetaFSM) AllVotersPresentsPerNode(voters []string) bool {
 	return f.peers.allVotersPresentsPerNode(voters)
 }

@@ -1,7 +1,7 @@
 // Package raft — group_transport_mux.go
 //
 // Mux-mode wiring for per-group raft RPCs. When mux mode is enabled,
-// GroupRaftQUICMux dials a separate (mux-ALPN) QUIC connection per peer,
+// GroupRaftMux dials a separate (mux-ALPN) connection per peer,
 // wraps it in a RaftConn, and routes:
 //
 //   - Heartbeat AppendEntries (entries-empty) → HeartbeatCoalescer (batched)
@@ -87,11 +87,11 @@ func writeInitFrame(w io.Writer) error {
 	return err
 }
 
-// EnableMux flips the GroupRaftQUICMux into mux mode. Must be called before
+// EnableMux flips the GroupRaftMux into mux mode. Must be called before
 // any sender call returns through this mux. flushWindow is the heartbeat
 // coalescer flush window; 0 falls back to DefaultCoalescerFlushWindow.
 // poolSize is the per-peer RaftConn stream pool; 0 falls back to 4.
-func (m *GroupRaftQUICMux) EnableMux(poolSize int, flushWindow time.Duration) {
+func (m *GroupRaftMux) EnableMux(poolSize int, flushWindow time.Duration) {
 	if poolSize <= 0 {
 		poolSize = 4
 	}
@@ -106,18 +106,18 @@ func (m *GroupRaftQUICMux) EnableMux(poolSize int, flushWindow time.Duration) {
 }
 
 // MuxEnabled reports whether mux mode is active.
-func (m *GroupRaftQUICMux) MuxEnabled() bool { return m.muxEnabled.Load() }
+func (m *GroupRaftMux) MuxEnabled() bool { return m.muxEnabled.Load() }
 
 // SetMuxBulkLaneStreams configures how many of the per-peer pool streams are
 // dedicated to the bulk lane (CallBulk / entries-bearing AppendEntries) on the
-// OUTBOUND RaftConn. 0 keeps the single-lane (QUIC-neutral) default. The TCP
-// control-plane wiring (S4) sets this; it is dormant until then. Set before the
-// first muxConnFor dial.
-func (m *GroupRaftQUICMux) SetMuxBulkLaneStreams(n int) { m.muxBulkLaneStreams = n }
+// OUTBOUND RaftConn. 0 keeps the single-lane default; a positive value dedicates
+// the last k streams to the bulk lane (TCP control-plane wiring, S4). Set before
+// the first muxConnFor dial.
+func (m *GroupRaftMux) SetMuxBulkLaneStreams(n int) { m.muxBulkLaneStreams = n }
 
 // muxConnFor returns (or dials) a *muxPeerState for addr. Idempotent and
 // goroutine-safe.
-func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPeerState, error) {
+func (m *GroupRaftMux) muxConnFor(ctx context.Context, addr string) (*muxPeerState, error) {
 	m.muxMu.RLock()
 	if ps, ok := m.muxPeers[addr]; ok {
 		m.muxMu.RUnlock()
@@ -151,7 +151,7 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 	rc := NewRaftConn(carrier.RemoteAddr(), streams, func(cause error) error {
 		return carrier.Close(cause)
 	}, RaftConnConfig{
-		// Bulk-lane split for the OUTBOUND conn (dormant: 0 on QUIC, set by S4 TCP
+		// Bulk-lane split for the OUTBOUND conn (0 = single-lane, set by S4 TCP
 		// wiring). Inbound (handleInboundMuxConn) replies on the arrival stream and
 		// never picks a lane, so it stays single-lane.
 		BulkLaneStreams: m.muxBulkLaneStreams,
@@ -207,7 +207,7 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 // rpcType* (not metaRPC*) constants so the inner switch stays unified —
 // the meta-raft Node has the same HandleRequestVote / HandleAppendEntries
 // methods as a per-group Node.
-func (m *GroupRaftQUICMux) handleMuxRequest(payload []byte) ([]byte, error) {
+func (m *GroupRaftMux) handleMuxRequest(payload []byte) ([]byte, error) {
 	groupID, body, err := extractGroupID(payload)
 	if err != nil {
 		return nil, fmt.Errorf("mux: extract group id: %w", err)
@@ -248,7 +248,7 @@ func (m *GroupRaftQUICMux) handleMuxRequest(payload []byte) ([]byte, error) {
 // here. Returns "mux: unknown group <id>" so senders can detect mixed-version
 // peers via the unknown-group sentinel and fall back to the legacy
 // StreamMetaRaft path (codex P1 #6).
-func (m *GroupRaftQUICMux) lookupNode(groupID string) (RaftV2Handler, error) {
+func (m *GroupRaftMux) lookupNode(groupID string) (RaftV2Handler, error) {
 	if groupID == metaGroupID {
 		if mn := m.metaNode.Load(); mn != nil {
 			return mn, nil
@@ -271,7 +271,7 @@ func (m *GroupRaftQUICMux) lookupNode(groupID string) (RaftV2Handler, error) {
 // codex P0 #1: this path is the SECOND place a __meta__ branch is required.
 // handleMuxRequest covers direct calls; this covers coalesced heartbeats.
 // Missing the branch here = silent meta heartbeat drop.
-func (m *GroupRaftQUICMux) dispatchToLocalGroup(groupID string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+func (m *GroupRaftMux) dispatchToLocalGroup(groupID string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
 	node, err := m.lookupNode(groupID)
 	if err != nil {
 		return nil, err
@@ -282,7 +282,7 @@ func (m *GroupRaftQUICMux) dispatchToLocalGroup(groupID string, args *AppendEntr
 // handleInboundMuxConn owns an accepted mux conn. It wraps the conn in a
 // RaftConn, accepts the dialer's stream pool, and starts the reader loop.
 // The conn lives until either side closes it.
-func (m *GroupRaftQUICMux) handleInboundMuxConn(ctx context.Context, carrier transport.MuxCarrier) {
+func (m *GroupRaftMux) handleInboundMuxConn(ctx context.Context, carrier transport.MuxCarrier) {
 	streams, err := acceptMuxStreams(ctx, carrier, m.muxPoolSize)
 	if err != nil {
 		_ = carrier.Close(errors.New("accept mux streams failed"))

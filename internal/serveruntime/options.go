@@ -34,8 +34,8 @@ type ServeOptions struct {
 	AppendForwardBufferTotalBytes    int64         // --cluster-append-forward-buffer-total-bytes
 	AppendForwardBufferMaxPerRequest int64         // --cluster-append-forward-buffer-max-per-request
 	AppendSizeCapBytes               int64         // --append-size-cap-bytes
-	QUICMuxPoolSize                  int           // --quic-mux-pool
-	QUICMuxFlushWindow               time.Duration // --quic-mux-flush
+	MuxPoolSize                      int           // --mux-pool
+	MuxFlushWindow                   time.Duration // --mux-flush
 
 	// --- Storage knobs ---
 	PackThreshold      int   // --pack-threshold

@@ -7,7 +7,7 @@ import (
 )
 
 // Cluster identity / rotation surface for TCPTransport (S5a), mirroring the
-// QUICTransport implementations (quic.go:372-497). Each mutator delegates to the
+// prior QUIC identity surface. Each mutator delegates to the
 // shared identityComposer, whose swap closure atomically restores a fresh
 // IdentitySnapshot into t.identity; the per-handshake TLS builders read it live.
 // RecycleConns/ClosePeer close live conns so peers re-handshake under the new

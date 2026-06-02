@@ -16,10 +16,10 @@ import (
 )
 
 // bootClusterTransport resolves the cluster key (disk wins over flag, ephemeral
-// when both empty in solo mode), constructs the cluster transport (TCP by default
-// after the S5c-3 flip; QUIC under the `--transport quic` opt-out), applies bulk
+// when both empty in solo mode), constructs the cluster transport (TCP, the sole
+// cluster transport since S6), applies bulk
 // traffic limits for forwarded S3 PUT fan-outs, and Listens on raftAddr. On
-// success state.quicTransport is populated, state.raftAddr is updated to the
+// success state.clusterTransport is populated, state.raftAddr is updated to the
 // kernel-picked port (when operator passed 127.0.0.1:0), and Close is queued
 // on the cleanup stack.
 //
@@ -48,7 +48,7 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 
 	// TCP is the sole cluster transport (S6 removed the legacy QUIC stack). All
 	// post-construction setup below is transport-agnostic (ClusterTransport interface
-	// methods); state.quicTransport is the interface-typed field (legacy name).
+	// methods); state.clusterTransport is the interface-typed field (legacy name).
 	var clusterTransport transport.ClusterTransport
 	tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
 	if terr != nil {
@@ -72,7 +72,7 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 	if err := clusterTransport.Listen(ctx, state.raftAddr); err != nil {
 		return fmt.Errorf("start cluster transport on %s: %w\n  recovery: confirm the port is free (lsof -i :%s), check firewall, or pass --raft-addr=127.0.0.1:0 to pick any free port", state.raftAddr, err, state.raftAddr)
 	}
-	state.quicTransport = clusterTransport
+	state.clusterTransport = clusterTransport
 	state.AddCleanup(func() { clusterTransport.Close() })
 
 	// Resolve raftAddr to the actual bound port. When the operator asked for
@@ -89,16 +89,16 @@ type postDropInviteJoinTransport interface {
 	SetDropped()
 }
 
-func applyPostDropInviteJoinIdentity(state *bootState, quicTransport postDropInviteJoinTransport) error {
-	if state == nil || quicTransport == nil || state.inviteJoin == nil || !state.inviteJoin.clusterKeyDropped {
+func applyPostDropInviteJoinIdentity(state *bootState, clusterTransport postDropInviteJoinTransport) error {
+	if state == nil || clusterTransport == nil || state.inviteJoin == nil || !state.inviteJoin.clusterKeyDropped {
 		return nil
 	}
 	cert, spki, err := loadPostDropInviteNodeKey(state)
 	if err != nil {
 		return fmt.Errorf("post-drop invite-join: load per-node cert: %w", err)
 	}
-	quicTransport.FlipPresent(cert, spki)
-	quicTransport.SetDropped()
+	clusterTransport.FlipPresent(cert, spki)
+	clusterTransport.SetDropped()
 	state.perNodeCert = cert
 	state.perNodeSPKI = spki
 	state.perNodeKeyKEKGen = state.inviteJoin.nodeKeyKEKGen
@@ -131,26 +131,26 @@ func loadInviteNodeKeyKEKFromDisk(dataDir string, gen uint32) ([]byte, error) {
 // the first send. Empty peer list (solo mode) is a clean no-op.
 func bootPeerConnections(ctx context.Context, state *bootState) error {
 	for _, peer := range state.peers {
-		if err := state.quicTransport.Connect(ctx, peer); err != nil {
+		if err := state.clusterTransport.Connect(ctx, peer); err != nil {
 			log.Warn().Str("peer", peer).Err(err).Msg("failed to connect to peer (will retry lazily)")
 		}
 	}
 	return nil
 }
 
-// bootGroupRaftMux constructs the GroupRaftQUICMux that multiplexes per-group
-// raft RPCs over StreamGroupRaft. Must run BEFORE NewMetaTransportQUICMux so
+// bootGroupRaftMux constructs the GroupRaftMux that multiplexes per-group
+// raft RPCs over StreamGroupRaft. Must run BEFORE NewMetaTransportMux so
 // the meta-raft transport can auto-register its node on the mux at
 // construction time. If the mux were created later, a startup race would let
 // inbound meta calls hit "mux: unknown group __meta__" and stall meta
 // election (codex P1 #3).
 func bootGroupRaftMux(state *bootState) error {
-	state.groupRaftMux = raft.NewGroupRaftQUICMux(state.quicTransport)
-	if state.cfg.QUICMuxEnabled {
-		state.groupRaftMux.EnableMux(state.cfg.QUICMuxPoolSize, state.cfg.QUICMuxFlushWindow)
+	state.groupRaftMux = raft.NewGroupRaftMux(state.clusterTransport)
+	if state.cfg.MuxEnabled {
+		state.groupRaftMux.EnableMux(state.cfg.MuxPoolSize, state.cfg.MuxFlushWindow)
 		log.Info().
-			Int("pool", state.cfg.QUICMuxPoolSize).
-			Dur("flush", state.cfg.QUICMuxFlushWindow).
+			Int("pool", state.cfg.MuxPoolSize).
+			Dur("flush", state.cfg.MuxFlushWindow).
 			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
 	}
 	return nil

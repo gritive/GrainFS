@@ -25,7 +25,7 @@ import (
 // group it participates in). The request payload carries the groupID so the
 // receiver can look up the right *DistributedBackend via DataGroupManager
 // and resolve the segment path against THAT backend's root. Registering one
-// handler per backend would not work — QUIC's per-StreamType router keeps
+// handler per backend would not work — the per-StreamType transport router keeps
 // a single handler, and only the last group to register would win.
 
 // Wire format for the request payload:
@@ -130,7 +130,7 @@ func decodeAppendSegmentRequest(buf []byte) (groupID, bucket, key, blobID string
 
 // RegisterAppendSegmentHandler installs the node-level handler for
 // StreamReadAppendSegment. Called from the boot path AFTER both the
-// data-group manager and the QUIC transport are available. lookup may
+// data-group manager and the cluster transport are available. lookup may
 // return nil for unknown groupIDs (peer doesn't host that group) — the
 // handler then answers ENOENT so the client iterates to the next peer.
 func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGroupLookup) {

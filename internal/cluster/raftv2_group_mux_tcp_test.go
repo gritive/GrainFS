@@ -1,6 +1,6 @@
 // raftv2_group_mux_tcp_test.go — the dormant-TCP twin of the QUIC group-raft mux
 // integration test. Unlike the meta-raft spec (which rides the data-plane Call
-// path), per-group raft dispatches via raft.GroupRaftQUICMux.ForGroup →
+// path), per-group raft dispatches via raft.GroupRaftMux.ForGroup →
 // GroupRaftSender, which routes RequestVote/AppendEntries over the per-peer mux
 // carrier (StreamControl). With a TCP transport + EnableMux, that exercises the
 // S2b-2 TCP mux CARRIER end-to-end — its only multi-node proof (unit/char before).
@@ -24,9 +24,9 @@ import (
 )
 
 // buildTCPGroupMuxNodes wires N per-group v2 raft nodes over real TCP transports,
-// each registered on its own GroupRaftQUICMux under groupID. No explicit Connect
+// each registered on its own GroupRaftMux under groupID. No explicit Connect
 // (TCP dials lazily; the mux carrier dials on the first muxConnFor).
-func buildTCPGroupMuxNodes(t *testing.T, n int, groupID string) ([]RaftNode, []*transport.TCPTransport, []*raft.GroupRaftQUICMux) {
+func buildTCPGroupMuxNodes(t *testing.T, n int, groupID string) ([]RaftNode, []*transport.TCPTransport, []*raft.GroupRaftMux) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -39,9 +39,9 @@ func buildTCPGroupMuxNodes(t *testing.T, n int, groupID string) ([]RaftNode, []*
 	for i, tr := range transports {
 		addrs[i] = tr.LocalAddr()
 	}
-	muxes := make([]*raft.GroupRaftQUICMux, n)
+	muxes := make([]*raft.GroupRaftMux, n)
 	for i := range muxes {
-		muxes[i] = raft.NewGroupRaftQUICMux(transports[i])
+		muxes[i] = raft.NewGroupRaftMux(transports[i])
 	}
 
 	nodes := make([]RaftNode, n)

@@ -39,9 +39,9 @@ var _ io.ReadWriteCloser = tcpJoinStream{}
 // dialer's client-side SPKI pin (relay/MITM defense) — NOT on server-side cert
 // verification — so permissive accept is correct here, exactly as on QUIC.
 //
-// Dormant (S4): not wired into boot until the boot flip (S5); boot keeps the QUIC
-// JoinListener. On TCP the join "stream" IS the connection (one request per
-// connection), so the handler receives a half-close wrapper over the *tls.Conn.
+// This is the sole join listener (S6). On TCP the join "stream" IS the
+// connection (one request per connection), so the handler receives a
+// half-close wrapper over the *tls.Conn.
 type TCPJoinListener struct {
 	listener net.Listener
 	handler  JoinHandler
@@ -52,7 +52,7 @@ type TCPJoinListener struct {
 }
 
 // NewTCPJoinListener starts a TLS-over-TCP join listener on addr using cert as the
-// stable server identity. Mirrors NewJoinListener (QUIC).
+// stable server identity. Mirrors the prior QUIC join listener.
 func NewTCPJoinListener(addr string, cert tls.Certificate, handler JoinHandler) (*TCPJoinListener, error) {
 	if handler == nil {
 		return nil, errors.New("tcp join listener: nil handler")
@@ -153,7 +153,7 @@ func (l *TCPJoinListener) handleConn(conn net.Conn) {
 // connection as the io.ReadWriteCloser stream (HALF-CLOSE contract: stream.Close()
 // closes only the write side; use the returned closer for full teardown), the
 // RFC5705 channel binding for this session, and the full-teardown closer. Mirrors
-// DialJoin (QUIC).
+// the prior QUIC join dialer.
 func DialJoinTCP(ctx context.Context, addr string, expectedServerSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error) {
 	clientTLS := &tls.Config{
 		Certificates:       []tls.Certificate{clientCert},

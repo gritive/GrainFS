@@ -42,7 +42,7 @@ import (
 //
 //	state.distBackend, state.db, state.backend, state.diskCollector,
 //	state.balancerProposer, state.metaForwardSender, state.metaReadSender,
-//	state.quicTransport, state.streamRouter, state.gossipReceiver,
+//	state.clusterTransport, state.streamRouter, state.gossipReceiver,
 //	state.roleRegistry, state.recoveryReadOnly, state.shardCache,
 //	state.joinMode.
 //
@@ -212,7 +212,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	newSrvOpts, receiptWiring, err := SetupClusterReceiptWithPeerProvider(
 		ctx, rcptOpts, dataDir, nodeID, receiptPeerProvider,
-		state.quicTransport, state.streamRouter, state.gossipReceiver, srvOpts,
+		state.clusterTransport, state.streamRouter, state.gossipReceiver, srvOpts,
 	)
 	if err != nil {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
@@ -397,7 +397,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			if len(targets) == 0 {
 				return fmt.Errorf("audit ship: no leader elected")
 			}
-			return state.quicTransport.Send(ctx, targets[0], &transport.Message{
+			return state.clusterTransport.Send(ctx, targets[0], &transport.Message{
 				Type:    transport.StreamAuditShip,
 				Payload: payload,
 			})

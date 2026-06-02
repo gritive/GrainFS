@@ -29,8 +29,8 @@ import (
 const joinListenerHandlerTimeout = 60 * time.Second
 
 // joinListener is the transport-agnostic surface boot needs from the Zero-CA join
-// listener. Both *transport.JoinListener (QUIC) and *transport.TCPJoinListener
-// (S4) satisfy it, so startJoinListener selects the transport without the rest of
+// listener. *transport.TCPJoinListener (S4) satisfies it, so startJoinListener
+// stays decoupled from the transport without the rest of
 // boot caring (the handler is already io.ReadWriteCloser-based since S4).
 type joinListener interface {
 	Addr() string
@@ -39,8 +39,8 @@ type joinListener interface {
 }
 
 // startJoinListener loads-or-creates the persisted stable join-listener cert,
-// starts a join listener (TCP by default after the S5c-3 flip, QUIC under the
-// `--transport quic` opt-out) on the resolved address, and stores it on state (closed on shutdown via
+// starts a join listener (TCP, the sole join transport since S6) on the resolved
+// address, and stores it on state (closed on shutdown via
 // AddCleanup). The handler reads the framed JoinRequest off the stream, runs the
 // two-phase invite handler against the TLS-captured peer SPKI, and writes the
 // framed JoinReply back — all binary (no JSON), delegated to
@@ -57,7 +57,7 @@ func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) err
 		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)
 	}
 	// The join listener pairs with the cluster transport: the joiner dials the TCP
-	// join listener over crypto/tls (S6 removed the QUIC join listener).
+	// join listener over crypto/tls (S6 removed the join listener).
 	ln, err := transport.NewTCPJoinListener(addr, cert, handler)
 	if err != nil {
 		return err

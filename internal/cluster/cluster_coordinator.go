@@ -179,7 +179,7 @@ func NewClusterCoordinator(
 	return c
 }
 
-// WithForwardSender attaches the QUIC dialer used to send 0x08 forward calls
+// WithForwardSender attaches the transport dialer used to send 0x08 forward calls
 // to peer nodes. Returns the receiver for builder-style chaining in serve.go.
 func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordinator {
 	c.forward = s
@@ -188,7 +188,7 @@ func (c *ClusterCoordinator) WithForwardSender(s *ForwardSender) *ClusterCoordin
 }
 
 // WithNodeAddressResolver attaches the cluster address book used to translate
-// nodeID PeerIDs into dialable QUIC addresses for runtime forwarding.
+// nodeID PeerIDs into dialable transport addresses for runtime forwarding.
 func (c *ClusterCoordinator) WithNodeAddressResolver(book NodeAddressBook) *ClusterCoordinator {
 	c.addr = book
 	c.rebuild()

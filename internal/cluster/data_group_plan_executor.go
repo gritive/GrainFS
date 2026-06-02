@@ -22,7 +22,7 @@ var ErrRefuseLastVoter = errors.New("refusing to evict last voter")
 // process to lead a data group but leadership is elsewhere or not established.
 var ErrDataGroupNotLocalLeader = errors.New("data group not led locally")
 
-// NodeAddressBook resolves cluster nodeIDs to their QUIC addresses.
+// NodeAddressBook resolves cluster nodeIDs to their transport addresses.
 // *MetaFSM implements this interface.
 type NodeAddressBook interface {
 	Nodes() []MetaNodeEntry
@@ -99,7 +99,7 @@ func NewDataGroupPlanExecutor(
 	return e
 }
 
-// resolveAddr returns the QUIC address for nodeID from the address book.
+// resolveAddr returns the transport address for nodeID from the address book.
 func (e *DataGroupPlanExecutor) resolveAddr(nodeID string) (string, error) {
 	for _, n := range e.addrBook.Nodes() {
 		if n.ID == nodeID {

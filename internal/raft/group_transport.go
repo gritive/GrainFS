@@ -26,7 +26,7 @@ type RaftV2Handler interface {
 	HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply
 }
 
-// GroupRaftQUICMux multiplexes per-group raft RPCs over the StreamGroupRaft
+// GroupRaftMux multiplexes per-group raft RPCs over the StreamGroupRaft
 // stream type. A single mux instance is shared across all per-group raft nodes
 // on a server; incoming RPCs are dispatched to the correct node by group ID.
 //
@@ -40,7 +40,7 @@ type RaftV2Handler interface {
 // satisfy that interface, so the dispatch sites (handleRPC,
 // handleMuxRequest, dispatchToLocalGroup) are agnostic to which raft engine
 // owns the group. Senders are unaffected — the wire format is byte-identical.
-type GroupRaftQUICMux struct {
+type GroupRaftMux struct {
 	tr    muxDriverTransport
 	nodes sync.Map // string(groupID) → RaftV2Handler
 
@@ -61,10 +61,10 @@ type GroupRaftQUICMux struct {
 	muxPeers           map[string]*muxPeerState
 }
 
-// NewGroupRaftQUICMux creates a mux and registers its incoming RPC handler on
-// the QUIC transport. The mux must outlive all registered nodes.
-func NewGroupRaftQUICMux(tr muxDriverTransport) *GroupRaftQUICMux {
-	m := &GroupRaftQUICMux{tr: tr, muxPeers: make(map[string]*muxPeerState)}
+// NewGroupRaftMux creates a mux and registers its incoming RPC handler on
+// the cluster transport. The mux must outlive all registered nodes.
+func NewGroupRaftMux(tr muxDriverTransport) *GroupRaftMux {
+	m := &GroupRaftMux{tr: tr, muxPeers: make(map[string]*muxPeerState)}
 	tr.Handle(transport.StreamGroupRaft, m.handleRPC)
 	return m
 }
@@ -80,28 +80,28 @@ func NewGroupRaftQUICMux(tr muxDriverTransport) *GroupRaftQUICMux {
 // callers pass the cluster-layer v2 adapter via the RaftV2Handler interface.
 // *Node (v1) still satisfies RaftV2Handler — v1 tests use it — but the
 // production path is v2-only.
-func (m *GroupRaftQUICMux) Register(groupID string, h RaftV2Handler) {
+func (m *GroupRaftMux) Register(groupID string, h RaftV2Handler) {
 	if err := ValidateGroupID(groupID); err != nil {
-		panic(fmt.Sprintf("GroupRaftQUICMux.Register: invalid groupID: %v", err))
+		panic(fmt.Sprintf("GroupRaftMux.Register: invalid groupID: %v", err))
 	}
 	if h == nil {
-		panic(fmt.Sprintf("GroupRaftQUICMux.Register: nil handler for groupID %q", groupID))
+		panic(fmt.Sprintf("GroupRaftMux.Register: nil handler for groupID %q", groupID))
 	}
 	m.nodes.Store(groupID, h)
 }
 
 // RegisterMetaNode wires the meta-raft node onto the shared mux. Idempotent;
-// the last registration wins. Called by NewMetaRaftQUICTransport so the
+// the last registration wins. Called by NewMetaRaftTransport so the
 // receiver-side __meta__ branch has somewhere to dispatch before
 // EnableMux installs the accept handler. Passing nil is treated as
 // deregistration (used by tests during teardown).
-func (m *GroupRaftQUICMux) RegisterMetaNode(node *Node) {
+func (m *GroupRaftMux) RegisterMetaNode(node *Node) {
 	m.metaNode.Store(node)
 }
 
 // ForGroup returns a GroupRaftSender for the given group. The returned sender
 // satisfies cluster.groupTransport and can be passed to GroupLifecycleConfig.
-func (m *GroupRaftQUICMux) ForGroup(groupID string) *GroupRaftSender {
+func (m *GroupRaftMux) ForGroup(groupID string) *GroupRaftSender {
 	return &GroupRaftSender{mux: m, groupID: groupID}
 }
 
@@ -125,7 +125,7 @@ func extractGroupID(buf []byte) (groupID string, payload []byte, err error) {
 	return string(buf[4 : 4+gidLen]), buf[4+gidLen:], nil
 }
 
-func (m *GroupRaftQUICMux) handleRPC(req *transport.Message) *transport.Message {
+func (m *GroupRaftMux) handleRPC(req *transport.Message) *transport.Message {
 	groupID, payload, err := extractGroupID(req.Payload)
 	if err != nil {
 		return nil
@@ -162,10 +162,10 @@ func (m *GroupRaftQUICMux) handleRPC(req *transport.Message) *transport.Message 
 	return &transport.Message{Type: transport.StreamGroupRaft, Payload: replyEnv}
 }
 
-// GroupRaftSender is the per-group sender returned by GroupRaftQUICMux.ForGroup.
+// GroupRaftSender is the per-group sender returned by GroupRaftMux.ForGroup.
 // It satisfies cluster.groupTransport (RequestVote + AppendEntries).
 type GroupRaftSender struct {
-	mux     *GroupRaftQUICMux
+	mux     *GroupRaftMux
 	groupID string
 }
 

@@ -1,6 +1,6 @@
-// raftv2_quic_codec.go — wire codec for the v2 QUIC RPC bridge.
+// raftv2_codec.go — wire codec for the v2 Raft RPC bridge.
 //
-// This file duplicates internal/raft/quic_rpc_codec.go's encode/decode logic
+// This file duplicates internal/raft/rpc_codec.go's encode/decode logic
 // byte-identically. The duplication is intentional: v1's encodeRPC/decodeRPC
 // are unexported and v1 is frozen for M5; once v1 is deleted (PR 30) this
 // becomes the sole implementation and can absorb the meta-raft variants.

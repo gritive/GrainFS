@@ -146,7 +146,7 @@ func TestGroupRaftSender_EntriesAEUsesBulkLane_VoteUsesControlLane(t *testing.T)
 	t.Cleanup(func() { _ = server.Close() })
 
 	carrier := &laneFakeCarrier{streams: cliStreams, addr: peer}
-	mux := NewGroupRaftQUICMux(&laneFakeTransport{carrier: carrier})
+	mux := NewGroupRaftMux(&laneFakeTransport{carrier: carrier})
 	mux.EnableMux(n, 10*time.Millisecond)
 	mux.SetMuxBulkLaneStreams(k) // MUST precede the first muxConnFor dial
 	sender := mux.ForGroup("g1")

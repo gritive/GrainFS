@@ -1,7 +1,7 @@
 package raft
 
 // Transport sends RPCs to peer nodes. Implementations are responsible for
-// network details (QUIC, TCP, etc). The actor goroutine never calls Transport
+// network details (TCP, etc). The actor goroutine never calls Transport
 // methods directly; outbound RPCs are sent by separate worker goroutines that
 // the Transport implementation owns. PR 4 only defines the interface; the
 // outbound side is wired in PR 5.

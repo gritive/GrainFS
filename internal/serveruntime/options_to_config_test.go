@@ -30,8 +30,8 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		AppendForwardBufferTotalBytes:    int64(1 << 24),
 		AppendForwardBufferMaxPerRequest: int64(1 << 20),
 		AppendSizeCapBytes:               int64(1 << 26),
-		QUICMuxPoolSize:                  17,
-		QUICMuxFlushWindow:               3 * time.Millisecond,
+		MuxPoolSize:                      17,
+		MuxFlushWindow:                   3 * time.Millisecond,
 
 		PackThreshold:      31,
 		ShardPackThreshold: 41,
@@ -119,9 +119,9 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.RaftLogGCInterval, cfg.RaftLogGCInterval)
 	require.Equal(t, opts.RaftHeartbeatInterval, cfg.RaftHeartbeatInterval)
 	require.Equal(t, opts.RaftElectionTimeout, cfg.RaftElectionTimeout)
-	require.True(t, cfg.QUICMuxEnabled, "QUICMuxEnabled is always true")
-	require.Equal(t, opts.QUICMuxPoolSize, cfg.QUICMuxPoolSize)
-	require.Equal(t, opts.QUICMuxFlushWindow, cfg.QUICMuxFlushWindow)
+	require.True(t, cfg.MuxEnabled, "MuxEnabled is always true")
+	require.Equal(t, opts.MuxPoolSize, cfg.MuxPoolSize)
+	require.Equal(t, opts.MuxFlushWindow, cfg.MuxFlushWindow)
 
 	// Append forward buffer + size cap.
 	require.Equal(t, opts.AppendForwardBufferTotalBytes, cfg.AppendForwardBufferTotalBytes)

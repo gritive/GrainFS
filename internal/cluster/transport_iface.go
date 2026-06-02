@@ -8,8 +8,8 @@ import (
 )
 
 // Use-site transport role interfaces. Each consumer in this package depends on
-// the minimal method subset it actually calls, so a TCP transport (later QUIC->TCP
-// migration slices) can be slotted in without changing consumers. *transport.QUICTransport
+// the minimal method subset it actually calls, so the cluster transport can be
+// swapped without changing consumers. *transport.TCPTransport
 // satisfies all of them today (compile-time assertions below).
 
 // clusterRPCTransport: small request/response RPC + inbound handler registration.

@@ -41,8 +41,8 @@ type MetaTransport interface {
 // MetaRaftConfig configures a MetaRaft instance.
 type MetaRaftConfig struct {
 	NodeID           string
-	RaftID           string   // raft peer ID; production uses the QUIC address
-	Peers            []string // raft peer IDs; production uses peer QUIC addresses
+	RaftID           string   // raft peer ID; production uses the transport address
+	Peers            []string // raft peer IDs; production uses peer transport addresses
 	JoinMode         bool     // suppresses solo self-election until dynamic join installs membership
 	DataDir          string   // directory for BadgerDB; meta store lives at DataDir/meta_raft
 	Transport        MetaTransport
@@ -117,7 +117,7 @@ type MetaRaft struct {
 
 // NewMetaRaft constructs a MetaRaft from config. The node is not started yet;
 // call Bootstrap then Start. Transport may be nil here and set later via
-// SetTransport (needed when the QUIC transport requires the node handle first).
+// SetTransport (needed when the cluster transport requires the node handle first).
 func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	if cfg.RaftID == "" && containsNetworkPeerID(cfg.Peers) {
 		return nil, fmt.Errorf("meta_raft: RaftID is required when Peers contain network addresses")
@@ -129,7 +129,7 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	}
 	nodeCfg := raft.DefaultConfig(raftID, cfg.Peers)
 	nodeCfg.JoinMode = cfg.JoinMode
-	// Meta-Raft shares the QUIC transport and process with data Raft, shard RPC,
+	// Meta-Raft shares the cluster transport and process with data Raft, shard RPC,
 	// S3 startup probes, and per-group Raft workers. Give the control plane a
 	// wider election window so local/CI CPU contention does not leave bucket
 	// assignment without a stable leader during multi-process cold starts.

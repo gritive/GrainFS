@@ -15,8 +15,8 @@ import (
 // Meta-Raft integration over TCP is the dormant-TCP twin of the QUIC meta-raft
 // spec: it boots three in-process nodes and asserts they elect a leader and
 // replicate a bucket assignment over the TCP transport. NOTE — meta-raft does NOT
-// ride the per-group mux carrier: NewMetaTransportQUICMux discards groupMux
-// ("StreamMetaRaft != StreamControl") and dispatches via RaftV2MetaQUICTransport,
+// ride the per-group mux carrier: NewMetaTransportMux discards groupMux
+// ("StreamMetaRaft != StreamControl") and dispatches via RaftV2MetaTransport,
 // whose every send is transport.Call(StreamMetaRaft) — the data-plane
 // connection-per-RPC path (tcp_call.go). So this proves meta-raft assembles over
 // the TCP Call path; the S2b-2 mux CARRIER is proven separately by the group-raft
@@ -35,7 +35,7 @@ var _ = Describe("Meta-Raft integration over TCP", func() {
 		}
 
 		transports := make([]*transport.TCPTransport, numNodes)
-		muxes := make([]*raft.GroupRaftQUICMux, numNodes)
+		muxes := make([]*raft.GroupRaftMux, numNodes)
 		metaNodes := make([]*MetaRaft, numNodes)
 		for i := range metaNodes {
 			peers := make([]string, 0, numNodes-1)
@@ -48,11 +48,11 @@ var _ = Describe("Meta-Raft integration over TCP", func() {
 			tr := transport.MustNewTCPTransport("meta-mux-tcp-e2e-psk")
 			Expect(tr.Listen(context.Background(), addrs[i])).To(Succeed())
 
-			// Mux on every node, before NewMetaTransportQUICMux. The constructor
+			// Mux on every node, before NewMetaTransportMux. The constructor
 			// auto-registers the meta node so receiver-side __meta__ dispatch is
-			// wired before any inbound call lands. NewGroupRaftQUICMux takes the
+			// wired before any inbound call lands. NewGroupRaftMux takes the
 			// muxDriverTransport interface, which TCPTransport satisfies (S2b-2).
-			mux := raft.NewGroupRaftQUICMux(tr)
+			mux := raft.NewGroupRaftMux(tr)
 			mux.EnableMux(2, 5*time.Millisecond)
 
 			m, err := NewMetaRaft(fastMetaRaftConfig(MetaRaftConfig{
@@ -63,7 +63,7 @@ var _ = Describe("Meta-Raft integration over TCP", func() {
 			}))
 			Expect(err).NotTo(HaveOccurred())
 
-			metaTransport := NewMetaTransportQUICMux(tr, m.Node(), mux)
+			metaTransport := NewMetaTransportMux(tr, m.Node(), mux)
 			m.SetTransport(metaTransport)
 
 			transports[i] = tr

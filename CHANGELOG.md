@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.502.0] - 2026-06-03
+
+### Changed
+
+- **Operator flags `--quic-mux-pool` / `--quic-mux-flush` renamed to `--mux-pool` /
+  `--mux-flush`.** These tune the transport-agnostic raft RPC mux carrier, which has
+  used TCP since the S6 QUIC removal — the `quic-` prefix was misleading. The flag
+  semantics, defaults (pool 4, flush 2ms), and help text ("multiplexed raft RPCs")
+  are unchanged. **Breaking:** scripts or systemd units passing `--quic-mux-pool` /
+  `--quic-mux-flush` must switch to the new names (there is no alias). The
+  Prometheus metric `grainfs_transport_ce_total` is unchanged; only its help string
+  dropped the now-inaccurate "QUIC" qualifier.
+
+### Internal
+
+- **Stale "QUIC" naming purged after the S6 transport removal (behavior-neutral
+  rename only).** Renamed transport-agnostic files (`group_transport_quic.go`,
+  `meta_transport_quic.go`, `quic_rpc.go`, `quic_rpc_codec.go`, `raft_quic_rpc.go`,
+  `raftv2_meta_quic.go`, `raftv2_quic_codec.go`, …), types/funcs
+  (`GroupRaftQUICMux`→`GroupRaftMux`, `MetaRaftQUICTransport`→`MetaRaftTransport`,
+  `RaftV2MetaQUICTransport`→`RaftV2MetaTransport`, `RaftQUICRPCTransport`→
+  `RaftRPCTransport`, `QUICPeerProbeDialer`→`ClusterPeerProbeDialer`,
+  `NewQUICCapabilityProbeDialer`→`NewCapabilityProbeDialer`, `quicMuxCarrier`→
+  `muxCarrier`, …), the `bootState.quicTransport` field (→`clusterTransport`), and
+  the `QUICMux*` config keys (→`Mux*`). Comments that asserted QUIC as the current
+  transport were corrected; comments documenting QUIC migration history/rationale
+  were kept. No logic, control flow, or wire format changed.
+
 ## [0.0.501.0] - 2026-06-03
 
 ### Removed

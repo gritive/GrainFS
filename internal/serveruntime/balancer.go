@@ -54,7 +54,7 @@ func StartBalancer(
 	node cluster.RaftNode,
 	peers []string,
 	fsm *cluster.FSM,
-	quicTransport transport.Transport,
+	clusterTransport transport.Transport,
 	shardSvc *cluster.ShardService,
 	numShards int,
 	clusterCfg cluster.BalancerClusterCfg,
@@ -94,12 +94,12 @@ func StartBalancer(
 		}
 		return []string{addr}
 	}
-	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval).
+	sender := cluster.NewGossipSender(nodeID, peers, clusterTransport, statsStore, gossipInterval).
 		WithPeerProvider(gossipPeerProvider).
 		WithCapabilityEvidenceSource(capabilityEvidence).
 		WithCapabilityGate(capabilityGate).
 		WithCapabilityEvidenceAliasProvider(capabilityEvidenceAliasProvider)
-	receiver := cluster.NewGossipReceiver(quicTransport, statsStore).
+	receiver := cluster.NewGossipReceiver(clusterTransport, statsStore).
 		WithCapabilityGate(capabilityGate).
 		WithNodeAddressBook(addrBook)
 

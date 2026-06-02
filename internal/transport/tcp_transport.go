@@ -38,9 +38,8 @@ var (
 // a pooled, chunk-framed model (S3a); S3b adds resource bounds (read deadlines,
 // shutdown reaping), an elastic conn pool, socket tuning, and inbound admission.
 //
-// S1/S2/S3 are DORMANT: TCPTransport is not wired into boot (QUIC stays live), so
-// the bounds below are not yet load-bearing in production — they become operative
-// when S4/S5 wire it in.
+// TCPTransport is the sole cluster transport (S6), so the resource bounds below
+// are load-bearing in production.
 //
 // Identity is STATIC SPKI pinning (one IdentitySnapshot). The dynamic rotation/
 // registry surface defers to the wiring/join slice and is intentionally absent.
@@ -75,8 +74,8 @@ type TCPTransport struct {
 	conns   map[net.Conn]struct{} // accepted, in-flight conns; reaped on Close
 	dpSeq   uint64                // monotonic data-plane request ID (desync detection)
 
-	// Mux carrier state (S2b-2, dormant — set only when internal/raft registers a
-	// mux handler; not wired into boot, which still selects QUIC).
+	// Mux carrier state (S2b-2 — set only when internal/raft registers a
+	// mux handler).
 	muxHandler  MuxConnHandler                         // nil = reject mux conns at accept
 	muxInbound  map[muxSessionID]*tcpInboundMuxCarrier // accepted mux sessions (demux); reaped on Close
 	muxOutbound map[*tcpOutboundMuxCarrier]struct{}    // dialed carriers; reaped on Close

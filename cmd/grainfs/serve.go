@@ -25,7 +25,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().String("public-url", "", "public dashboard base URL (e.g. https://node1:9000); defaults to localhost in `grainfs dashboard` output")
 	cmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	cmd.Flags().String("raft-addr", "", "Raft listen address for cluster communication (required in cluster mode)")
-	cmd.Flags().String("join-listen-addr", "", "Zero-CA QUIC join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host")
+	cmd.Flags().String("join-listen-addr", "", "Zero-CA join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host")
 	cmd.Flags().Int64("cluster-append-forward-buffer-total-bytes", 512*1024*1024,
 		"Total byte budget for AppendObject forward-body reservation pool (default 512 MiB).")
 	cmd.Flags().Int64("cluster-append-forward-buffer-max-per-request", 64*1024*1024,
@@ -113,14 +113,14 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	cmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	cmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
-	cmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with QUIC stream-open cost.")
+	cmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with transport stream-open cost.")
 	cmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
-	// Multiplexed QUIC raft RPCs are always on (idle-N8 measurement: 78pct drop
+	// Multiplexed raft RPCs are always on (idle-N8 measurement: 78pct drop
 	// in CPU samples, 17x drop in recvmsg syscalls vs the legacy per-message
 	// path; per-peer ALPN fallback to the legacy path is retained for older
 	// binaries). These two knobs tune the always-on mux path.
-	cmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining)")
-	cmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval)")
+	cmd.Flags().Int("mux-pool", 4, "stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining)")
+	cmd.Flags().Duration("mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval)")
 	cmd.Flags().Bool("audit-iceberg", true, "enable audit log lake: S3 ops → Iceberg table on grainfs-audit bucket")
 	cmd.Flags().Duration("audit-commit-interval", 60*time.Second, "how often the audit committer flushes the ring buffer to Iceberg")
 }

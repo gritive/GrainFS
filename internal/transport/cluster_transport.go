@@ -12,8 +12,8 @@ import (
 // narrower constructors (Go interface-to-interface assignment).
 //
 // The mux-connection methods speak MuxCarrier (S2b-1), so this interface is no
-// longer QUIC-shaped: a TCP mux carrier (S2b-2) can satisfy it. *QUICTransport
-// satisfies it today via quicMuxCarrier.
+// longer QUIC-shaped: a TCP mux carrier (S2b-2) can satisfy it. *TCPTransport
+// satisfies it today via muxCarrier.
 type ClusterTransport interface {
 	// Transport covers Listen/Connect/Send/Receive/Close.
 	Transport

@@ -62,7 +62,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	})
 	t.Cleanup(state.Cleanup)
 	state.node = node
-	state.rpcTransport = cluster.NewRaftQUICRPCTransport(state.quicTransport, node)
+	state.rpcTransport = cluster.NewRaftRPCTransport(state.clusterTransport, node)
 	state.rpcTransport.SetTransport()
 
 	require.NoError(t, bootMetaRaftWiring(state))

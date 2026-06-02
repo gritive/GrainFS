@@ -130,12 +130,12 @@ func SetupClusterReceipt(
 	opts ReceiptOptions,
 	dataDir, nodeID string,
 	peers []string,
-	quicTransport transport.ClusterTransport,
+	clusterTransport transport.ClusterTransport,
 	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
-	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, quicTransport, router, gossipReceiver, srvOpts)
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, clusterTransport, router, gossipReceiver, srvOpts)
 }
 
 func SetupClusterReceiptWithPeerProvider(
@@ -143,12 +143,12 @@ func SetupClusterReceiptWithPeerProvider(
 	opts ReceiptOptions,
 	dataDir, nodeID string,
 	peerProvider func() []string,
-	quicTransport transport.ClusterTransport,
+	clusterTransport transport.ClusterTransport,
 	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
-	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, quicTransport, router, gossipReceiver, srvOpts)
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, clusterTransport, router, gossipReceiver, srvOpts)
 }
 
 func setupClusterReceipt(
@@ -157,7 +157,7 @@ func setupClusterReceipt(
 	dataDir, nodeID string,
 	peers []string,
 	peerProvider func() []string,
-	quicTransport transport.ClusterTransport,
+	clusterTransport transport.ClusterTransport,
 	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
@@ -209,14 +209,14 @@ func setupClusterReceipt(
 	var broadcaster *cluster.ReceiptBroadcaster
 	var gossipSender *cluster.ReceiptGossipSender
 	if peerProvider != nil {
-		broadcaster = cluster.NewReceiptBroadcasterWithPeerProvider(quicTransport, peerProvider, 3*time.Second)
+		broadcaster = cluster.NewReceiptBroadcasterWithPeerProvider(clusterTransport, peerProvider, 3*time.Second)
 		gossipSender = cluster.NewReceiptGossipSenderWithPeerProvider(
-			nodeID, peerProvider, quicTransport, store, opts.GossipInterval, opts.WindowSize,
+			nodeID, peerProvider, clusterTransport, store, opts.GossipInterval, opts.WindowSize,
 		)
 	} else {
-		broadcaster = cluster.NewReceiptBroadcaster(quicTransport, peers, 3*time.Second)
+		broadcaster = cluster.NewReceiptBroadcaster(clusterTransport, peers, 3*time.Second)
 		gossipSender = cluster.NewReceiptGossipSender(
-			nodeID, peers, quicTransport, store, opts.GossipInterval, opts.WindowSize,
+			nodeID, peers, clusterTransport, store, opts.GossipInterval, opts.WindowSize,
 		)
 	}
 	broadcaster.SetMetrics(receipt.BroadcastMetrics{})

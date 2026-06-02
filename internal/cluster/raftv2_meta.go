@@ -1,11 +1,11 @@
-// raftv2_meta_quic.go — v2 meta-raft QUIC bridge.
+// raftv2_meta.go — v2 meta-raft RPC bridge.
 //
-// Mirrors internal/cluster/raft_quic_rpc.go (per-group v2 bridge from PR 27)
+// Mirrors internal/cluster/raft_rpc.go (per-group v2 bridge from PR 27)
 // but registers transport.StreamMetaRaft instead of transport.StreamControl.
-// v1's internal/raft/meta_transport_quic.go is the reference; this file is
+// v1's internal/raft/meta_transport.go is the reference; this file is
 // the v2 equivalent. PR 30b deletes v1 and renames this file.
 //
-// Wire codec is shared with raft_quic_rpc.go (raftv2_quic_codec.go). The same
+// Wire codec is shared with raft_rpc.go (raftv2_codec.go). The same
 // RPC type strings ("RequestVote", "AppendEntries", "InstallSnapshot") flow
 // over StreamMetaRaft here — that means this bridge is byte-identical to the
 // per-group v2 bridge at the codec layer, not byte-identical to v1's
@@ -38,27 +38,27 @@ const (
 	v2MetaSnapshotTimeout = 60 * time.Second
 )
 
-// RaftV2MetaQUICTransport bridges meta-Raft RPCs over QUIC for raft v2. It
+// RaftV2MetaTransport bridges meta-Raft RPCs over the cluster transport for raft v2. It
 // registers an inbound handler on transport.StreamMetaRaft and exposes the
 // three outbound Send* methods that satisfy cluster.MetaTransport.
-type RaftV2MetaQUICTransport struct {
+type RaftV2MetaTransport struct {
 	transport clusterRPCTransport
 	node      RaftNode
 }
 
-// compile-time check: RaftV2MetaQUICTransport must satisfy MetaTransport.
-var _ MetaTransport = (*RaftV2MetaQUICTransport)(nil)
+// compile-time check: RaftV2MetaTransport must satisfy MetaTransport.
+var _ MetaTransport = (*RaftV2MetaTransport)(nil)
 
-// NewRaftV2MetaQUICTransport wires the inbound StreamMetaRaft handler.
-func NewRaftV2MetaQUICTransport(tr clusterRPCTransport, node RaftNode) *RaftV2MetaQUICTransport {
-	mt := &RaftV2MetaQUICTransport{transport: tr, node: node}
+// NewRaftV2MetaTransport wires the inbound StreamMetaRaft handler.
+func NewRaftV2MetaTransport(tr clusterRPCTransport, node RaftNode) *RaftV2MetaTransport {
+	mt := &RaftV2MetaTransport{transport: tr, node: node}
 	tr.Handle(transport.StreamMetaRaft, mt.handleRPC)
 	return mt
 }
 
-// SendRequestVote mirrors v1's MetaRaftQUICTransport.SendRequestVote — the
+// SendRequestVote mirrors v1's MetaRaftTransport.SendRequestVote — the
 // wire envelope uses the shared v2 codec.
-func (m *RaftV2MetaQUICTransport) SendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+func (m *RaftV2MetaTransport) SendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2MetaRPCTimeout)
 	defer cancel()
 
@@ -80,8 +80,8 @@ func (m *RaftV2MetaQUICTransport) SendRequestVote(peer string, args *raft.Reques
 	return v2DecodeRequestVoteReply(data)
 }
 
-// SendAppendEntries mirrors v1's MetaRaftQUICTransport.SendAppendEntries.
-func (m *RaftV2MetaQUICTransport) SendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+// SendAppendEntries mirrors v1's MetaRaftTransport.SendAppendEntries.
+func (m *RaftV2MetaTransport) SendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2MetaRPCTimeout)
 	defer cancel()
 
@@ -105,7 +105,7 @@ func (m *RaftV2MetaQUICTransport) SendAppendEntries(peer string, args *raft.Appe
 
 // SendTimeoutNow sends a TimeoutNow RPC to the transfer target, triggering an
 // immediate election. Called by the raft node during TransferLeadership.
-func (m *RaftV2MetaQUICTransport) SendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
+func (m *RaftV2MetaTransport) SendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2MetaRPCTimeout)
 	defer cancel()
 
@@ -127,9 +127,9 @@ func (m *RaftV2MetaQUICTransport) SendTimeoutNow(peer string, args *raft.Timeout
 	return &raft.TimeoutNowReply{}, nil
 }
 
-// SendInstallSnapshot mirrors v1's MetaRaftQUICTransport.SendInstallSnapshot.
+// SendInstallSnapshot mirrors v1's MetaRaftTransport.SendInstallSnapshot.
 // The 60s timeout accommodates large snapshot payloads.
-func (m *RaftV2MetaQUICTransport) SendInstallSnapshot(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
+func (m *RaftV2MetaTransport) SendInstallSnapshot(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), v2MetaSnapshotTimeout)
 	defer cancel()
 
@@ -154,7 +154,7 @@ func (m *RaftV2MetaQUICTransport) SendInstallSnapshot(peer string, args *raft.In
 // handleRPC decodes an inbound StreamMetaRaft message and dispatches via the
 // RaftNode interface (the v2 adapter translates v1 wire types ↔ v2 native).
 // Mirrors raft_quic_rpc.go::handleRPC for the per-group bridge.
-func (m *RaftV2MetaQUICTransport) handleRPC(req *transport.Message) *transport.Message {
+func (m *RaftV2MetaTransport) handleRPC(req *transport.Message) *transport.Message {
 	rpcType, data, err := v2DecodeRPC(req.Payload)
 	if err != nil {
 		return nil
