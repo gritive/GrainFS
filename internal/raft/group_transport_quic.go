@@ -52,12 +52,13 @@ type GroupRaftQUICMux struct {
 
 	// Mux mode state. Set by EnableMux. When muxEnabled is false, all sends
 	// use the legacy per-message tr.Call path.
-	muxEnabled      atomic.Bool
-	muxPoolSize     int
-	muxFlushWindow  time.Duration
-	muxRegisterOnce sync.Once
-	muxMu           sync.RWMutex
-	muxPeers        map[string]*muxPeerState
+	muxEnabled         atomic.Bool
+	muxPoolSize        int
+	muxFlushWindow     time.Duration
+	muxBulkLaneStreams int // 0 = single lane (QUIC default); TCP wiring (S4) sets a split
+	muxRegisterOnce    sync.Once
+	muxMu              sync.RWMutex
+	muxPeers           map[string]*muxPeerState
 }
 
 // NewGroupRaftQUICMux creates a mux and registers its incoming RPC handler on
@@ -234,7 +235,7 @@ func (s *GroupRaftSender) AppendEntries(peer string, args *AppendEntriesArgs) (*
 			}
 			env, encErr := encodeRPC(rpcTypeAppendEntries, args)
 			if encErr == nil {
-				respBytes, callErr := ps.rc.Call(ctx, prefixGroupID(s.groupID, env))
+				respBytes, callErr := ps.rc.CallBulk(ctx, prefixGroupID(s.groupID, env))
 				if callErr == nil {
 					_, data, dErr := decodeRPC(respBytes)
 					if dErr != nil {

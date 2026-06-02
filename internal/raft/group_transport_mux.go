@@ -108,6 +108,13 @@ func (m *GroupRaftQUICMux) EnableMux(poolSize int, flushWindow time.Duration) {
 // MuxEnabled reports whether mux mode is active.
 func (m *GroupRaftQUICMux) MuxEnabled() bool { return m.muxEnabled.Load() }
 
+// SetMuxBulkLaneStreams configures how many of the per-peer pool streams are
+// dedicated to the bulk lane (CallBulk / entries-bearing AppendEntries) on the
+// OUTBOUND RaftConn. 0 keeps the single-lane (QUIC-neutral) default. The TCP
+// control-plane wiring (S4) sets this; it is dormant until then. Set before the
+// first muxConnFor dial.
+func (m *GroupRaftQUICMux) SetMuxBulkLaneStreams(n int) { m.muxBulkLaneStreams = n }
+
 // muxConnFor returns (or dials) a *muxPeerState for addr. Idempotent and
 // goroutine-safe.
 func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPeerState, error) {
@@ -144,6 +151,10 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 	rc := NewRaftConn(carrier.RemoteAddr(), streams, func(cause error) error {
 		return carrier.Close(cause)
 	}, RaftConnConfig{
+		// Bulk-lane split for the OUTBOUND conn (dormant: 0 on QUIC, set by S4 TCP
+		// wiring). Inbound (handleInboundMuxConn) replies on the arrival stream and
+		// never picks a lane, so it stays single-lane.
+		BulkLaneStreams: m.muxBulkLaneStreams,
 		RPCHandler: func(payload []byte) ([]byte, error) {
 			return m.handleMuxRequest(payload)
 		},

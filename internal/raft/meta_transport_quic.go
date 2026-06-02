@@ -254,7 +254,7 @@ func (m *MetaRaftQUICTransport) muxAppendEntries(ctx context.Context, peer strin
 	if err != nil {
 		return nil, err
 	}
-	respBytes, err := ps.rc.Call(ctx, prefixGroupID(metaGroupID, env))
+	respBytes, err := ps.rc.CallBulk(ctx, prefixGroupID(metaGroupID, env))
 	if err != nil {
 		return nil, err
 	}
