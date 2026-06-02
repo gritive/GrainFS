@@ -103,19 +103,39 @@ type RaftStream struct {
 	sendMu sync.Mutex
 }
 
+// lanePool is a round-robin pool of streams for ONE lane (control or bulk).
+// Splitting the streams into lanes keeps a large entries-bearing AppendEntries
+// (bulk) from head-of-line blocking a heartbeat/vote (control) on the same
+// stream. Lane selection is sender-local: the peer replies on the arrival
+// stream and applies no lane policy, so no wire change or stream-index
+// correspondence between dialer and acceptor is needed.
+type lanePool struct {
+	streams []*RaftStream
+	next    atomic.Uint64
+}
+
+func (p *lanePool) pick() *RaftStream {
+	if len(p.streams) == 1 {
+		return p.streams[0]
+	}
+	idx := p.next.Add(1) % uint64(len(p.streams))
+	return p.streams[idx]
+}
+
 // RaftConn maintains a pool of long-lived byte-streams to one peer for raft RPCs.
 type RaftConn struct {
-	peerAddr   string
-	streams    []*RaftStream
-	closeHook  func(error) error // tears down the underlying carrier on break (may be nil)
-	next       atomic.Uint64     // RR stream picker
-	nextID     atomic.Uint64     // conn-level corrID generator
-	pending    sync.Map          // corrID(uint64) -> chan callResult
-	closed     atomic.Bool
-	closeErr   atomic.Pointer[error]
-	closeOnce  sync.Once
-	closeChan  chan struct{}
-	handlerSem chan struct{} // bounded handler pool
+	peerAddr    string
+	streams     []*RaftStream
+	closeHook   func(error) error // tears down the underlying carrier on break (may be nil)
+	controlLane *lanePool         // Call/Notify/heartbeat lane
+	bulkLane    *lanePool         // CallBulk (entries-bearing AppendEntries) lane
+	nextID      atomic.Uint64     // conn-level corrID generator
+	pending     sync.Map          // corrID(uint64) -> chan callResult
+	closed      atomic.Bool
+	closeErr    atomic.Pointer[error]
+	closeOnce   sync.Once
+	closeChan   chan struct{}
+	handlerSem  chan struct{} // bounded handler pool
 
 	// Handlers (set by owner before startReaders).
 	rpcHandler     RPCHandler
@@ -133,6 +153,11 @@ type RaftConnConfig struct {
 	HBReplyHandler  HeartbeatReplyHandler
 	NotifyHandler   NotifyHandler
 	OnBroken        func(*RaftConn, error)
+	// BulkLaneStreams dedicates the last N streams to the bulk lane (CallBulk);
+	// the rest serve the control lane. 0 (or >= len(streams)) = a single shared
+	// lane over all streams = the pre-S2c round-robin picker (neutral default;
+	// QUIC keeps this). The TCP control-plane driver (S4) sets a split.
+	BulkLaneStreams int
 }
 
 // NewRaftConn wraps a set of already-established byte-stream carriers (one per
@@ -160,6 +185,17 @@ func NewRaftConn(peerAddr string, streams []io.ReadWriteCloser, closeHook func(e
 	for i, s := range streams {
 		rc.streams[i] = &RaftStream{parent: rc, stream: s}
 	}
+	// Lane assignment. k<=0 or k>=N → a single shared pool over all streams,
+	// which is byte-identical to the pre-S2c single round-robin picker (the
+	// QUIC-neutral default). Otherwise the last k streams form the bulk lane.
+	if k := cfg.BulkLaneStreams; k <= 0 || k >= len(rc.streams) {
+		shared := &lanePool{streams: rc.streams}
+		rc.controlLane = shared
+		rc.bulkLane = shared
+	} else {
+		rc.controlLane = &lanePool{streams: rc.streams[:len(rc.streams)-k]}
+		rc.bulkLane = &lanePool{streams: rc.streams[len(rc.streams)-k:]}
+	}
 	return rc
 }
 
@@ -171,24 +207,29 @@ func (rc *RaftConn) StartReaders() {
 	}
 }
 
-// pickStream returns a stream via round-robin.
-func (rc *RaftConn) pickStream() *RaftStream {
-	if len(rc.streams) == 1 {
-		return rc.streams[0]
-	}
-	idx := rc.next.Add(1) % uint64(len(rc.streams))
-	return rc.streams[idx]
-}
-
 // PeerAddr returns the remote address.
 func (rc *RaftConn) PeerAddr() string { return rc.peerAddr }
 
 // Closed reports whether the conn is closed.
 func (rc *RaftConn) Closed() bool { return rc.closed.Load() }
 
-// Call sends a Request frame and blocks until a Response/ResponseError arrives
-// or ctx is cancelled. It returns the response payload bytes.
+// Call sends a control-lane Request frame (RequestVote, small control RPCs) and
+// blocks until a Response/ResponseError arrives or ctx is cancelled, returning
+// the response payload. Entries-bearing AppendEntries must use CallBulk so a
+// large transfer cannot head-of-line block a control frame on the same stream.
 func (rc *RaftConn) Call(ctx context.Context, payload []byte) ([]byte, error) {
+	return rc.call(ctx, rc.controlLane, payload)
+}
+
+// CallBulk is Call on the bulk lane: for entries-bearing AppendEntries (up to
+// MaxFrameSize). On a single-lane RaftConn (BulkLaneStreams==0, the QUIC default)
+// the bulk lane is the same shared pool as the control lane, so CallBulk behaves
+// exactly as Call — the split is only active on the TCP control-plane driver.
+func (rc *RaftConn) CallBulk(ctx context.Context, payload []byte) ([]byte, error) {
+	return rc.call(ctx, rc.bulkLane, payload)
+}
+
+func (rc *RaftConn) call(ctx context.Context, lane *lanePool, payload []byte) ([]byte, error) {
 	if rc.closed.Load() {
 		if errPtr := rc.closeErr.Load(); errPtr != nil {
 			return nil, *errPtr
@@ -200,7 +241,7 @@ func (rc *RaftConn) Call(ctx context.Context, payload []byte) ([]byte, error) {
 	rc.pending.Store(id, ch)
 	defer rc.pending.Delete(id)
 
-	if err := rc.sendFrame(rc.pickStream(), opRequest, id, payload); err != nil {
+	if err := rc.sendFrame(lane.pick(), opRequest, id, payload); err != nil {
 		return nil, err
 	}
 
@@ -222,7 +263,7 @@ func (rc *RaftConn) Notify(payload []byte) error {
 	if rc.closed.Load() {
 		return ErrConnClosed
 	}
-	return rc.sendFrame(rc.pickStream(), opNotify, 0, payload)
+	return rc.sendFrame(rc.controlLane.pick(), opNotify, 0, payload)
 }
 
 // NextHeartbeatCorrID reserves a fresh corrID without sending. Pair with
@@ -240,7 +281,7 @@ func (rc *RaftConn) SendHeartbeatBatchWithCorrID(corrID uint64, payload []byte) 
 	if rc.closed.Load() {
 		return ErrConnClosed
 	}
-	return rc.sendFrame(rc.pickStream(), opHeartbeatBatch, corrID, payload)
+	return rc.sendFrame(rc.controlLane.pick(), opHeartbeatBatch, corrID, payload)
 }
 
 // sendFrame writes one frame on the given stream under sendMu.
