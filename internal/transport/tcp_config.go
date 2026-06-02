@@ -8,6 +8,7 @@ import "time"
 const (
 	defaultServerIdleTimeout = 60 * time.Second // bounds an idle pooled-conn goroutine/FD (pooled conns are longer-lived than QUIC's 10s per-conn idle, so this is intentionally larger)
 	defaultServerBodyTimeout = 5 * time.Minute  // generous for 16MiB+ shard bodies over LAN
+	defaultClientBodyTimeout = 5 * time.Minute  // idle bound (reset per Read) on the client response-body read; mirrors ServerBodyTimeout so a stalled mid-body server can't pin a client goroutine + pooled slot forever
 	defaultMaxConnsPerPeer   = 64               // elastic cap (NOT a fixed 4; see spec §4 — fixed pool caps throughput)
 	defaultPoolIdleTimeout   = 60 * time.Second // idle conn eviction; matches the server idle reap
 )
@@ -18,7 +19,8 @@ const (
 type TCPTransportConfig struct {
 	ServerIdleTimeout  time.Duration
 	ServerBodyTimeout  time.Duration
-	MaxConnsPerPeer    int // 0 = unlimited (S3a behavior)
+	ClientBodyTimeout  time.Duration // idle bound (reset per Read) on the client-side response-body read; 0 = default
+	MaxConnsPerPeer    int           // 0 = unlimited (S3a behavior)
 	PoolIdleTimeout    time.Duration
 	ReadBufferBytes    int // 0 = OS default
 	WriteBufferBytes   int // 0 = OS default
@@ -36,6 +38,9 @@ func (c TCPTransportConfig) withDefaults() TCPTransportConfig {
 	}
 	if c.ServerBodyTimeout == 0 {
 		c.ServerBodyTimeout = defaultServerBodyTimeout
+	}
+	if c.ClientBodyTimeout == 0 {
+		c.ClientBodyTimeout = defaultClientBodyTimeout
 	}
 	if c.PoolIdleTimeout == 0 {
 		c.PoolIdleTimeout = defaultPoolIdleTimeout

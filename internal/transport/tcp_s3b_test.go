@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -43,6 +44,7 @@ func TestTCPConfig_Defaults(t *testing.T) {
 	t.Cleanup(func() { _ = tr.Close() })
 	assert.Equal(t, defaultServerIdleTimeout, tr.cfg.ServerIdleTimeout)
 	assert.Equal(t, defaultServerBodyTimeout, tr.cfg.ServerBodyTimeout)
+	assert.Equal(t, defaultClientBodyTimeout, tr.cfg.ClientBodyTimeout)
 	assert.Equal(t, defaultMaxConnsPerPeer, tr.cfg.MaxConnsPerPeer)
 	assert.Equal(t, defaultPoolIdleTimeout, tr.cfg.PoolIdleTimeout)
 }
@@ -215,6 +217,113 @@ func TestTCPDesync_MismatchedRespIDIsCaught(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "desync")
 	require.Equal(t, 0, poolLen(cli, addr), "a desynced conn must be discarded, not pooled")
+}
+
+// TestTCPClientBody_StalledServerReadTimesOut is the QUIC-parity gap guard (TODOS
+// S3b residual line 87): at body handoff CallRead clears the per-call deadline so the
+// response-body read is unbounded by the RPC ctx (matches QUIC). The server side IS
+// bounded (ServerBodyTimeout), but a server that sends the metadata frame then stalls
+// mid-body (without closing) must NOT pin the client read goroutine + pooled slot
+// forever. A short ClientBodyTimeout arms an idle read deadline that trips the stall.
+func TestTCPClientBody_StalledServerReadTimesOut(t *testing.T) {
+	const psk = "client-body-stall"
+	srvTr := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = srvTr.Close() })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tln := tls.NewListener(ln, srvTr.buildServerTLS())
+	t.Cleanup(func() { _ = tln.Close() })
+
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) })
+	go func() {
+		conn, aerr := tln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer conn.Close()
+		codec := &BinaryCodec{}
+		req, derr := codec.Decode(conn)
+		if derr != nil {
+			return
+		}
+		// Metadata response (echo id) + ONE chunk header promising 64 bytes but only 8
+		// sent, then stall forever (never terminator, never close).
+		if eerr := codec.Encode(conn, &Message{Type: req.Type, ID: req.ID, Status: StatusOK}); eerr != nil {
+			return
+		}
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], 64)
+		_, _ = conn.Write(hdr[:])
+		_, _ = conn.Write(make([]byte, 8))
+		<-stall // hold the conn open without making progress
+	}()
+
+	cli := MustNewTCPTransport(psk)
+	cli.setConfigForTest(TCPTransportConfig{ClientBodyTimeout: 150 * time.Millisecond})
+	t.Cleanup(func() { _ = cli.Close() })
+
+	resp, body, err := cli.CallRead(context.Background(), ln.Addr().String(), &Message{Type: StreamShardReadBody})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	// Draining the stalled body must error (timeout) rather than block forever.
+	done := make(chan error, 1)
+	go func() {
+		_, derr := io.Copy(io.Discard, body)
+		done <- derr
+	}()
+	select {
+	case derr := <-done:
+		require.Error(t, derr, "a stalled mid-body server must trip the client idle read deadline")
+	case <-time.After(2 * time.Second):
+		t.Fatal("client body read blocked past the idle deadline (goroutine + pooled slot pinned)")
+	}
+	_ = body.Close()
+}
+
+// TestTCPClientBody_CleanDrainClearsDeadlineBeforeReuse is the FIRING guard for the
+// clean-branch clear in tcpReadCloser.Close: a fully-drained body-read conn carries an
+// absolute read deadline (T_lastread + ClientBodyTimeout) from the per-Read idle
+// arming, and Close MUST clear it before pool checkin. The clear is correctness-
+// load-bearing (not mere hygiene): a CallRead→CallWithBody reuse writes its body first
+// (writes ignore a stale READ deadline), then the response Decode hits the expired
+// deadline — a plain error that is NOT errStalePreBody, so it is NOT retried. With
+// ClientBodyTimeout < PoolIdleTimeout the conn is reused after its deadline expires but
+// before idle eviction, so removing the clear makes this RED.
+func TestTCPClientBody_CleanDrainClearsDeadlineBeforeReuse(t *testing.T) {
+	srv := startTCP(t, "bodyclear")
+	srv.HandleRead(StreamShardReadBody, func(req *Message) (*Message, io.ReadCloser) {
+		return NewResponse(req, nil), io.NopCloser(bytes.NewReader([]byte("hello")))
+	})
+	srv.HandleBody(StreamShardWriteBody, func(req *Message, body io.Reader) *Message {
+		_, _ = io.Copy(io.Discard, body)
+		return NewResponse(req, []byte("ok"))
+	})
+	cli := MustNewTCPTransport("bodyclear")
+	cli.setConfigForTest(TCPTransportConfig{ClientBodyTimeout: 50 * time.Millisecond})
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := srv.LocalAddr()
+
+	// 1) CallRead + full drain pools the conn carrying a read deadline of ~T+50ms.
+	resp, body, err := cli.CallRead(context.Background(), addr, &Message{Type: StreamShardReadBody})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	_, err = io.Copy(io.Discard, body)
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, 1, poolLen(cli, addr), "the cleanly-drained conn must be pooled for reuse")
+
+	// 2) Wait past ClientBodyTimeout (but under PoolIdleTimeout) so a NOT-cleared
+	//    deadline is now in the past, then reuse the SAME conn via CallWithBody (a
+	//    Background ctx is required — a ctx deadline would re-arm SetDeadline and mask
+	//    the bug). Only the Close-time clear keeps the reuse alive.
+	time.Sleep(150 * time.Millisecond)
+	wresp, err := cli.CallWithBody(context.Background(), addr,
+		&Message{Type: StreamShardWriteBody}, bytes.NewReader([]byte("x")))
+	require.NoError(t, err, "a conn reused past ClientBodyTimeout must not fail on a stale read deadline")
+	require.Equal(t, []byte("ok"), wresp.Payload)
+	require.Equal(t, 1, poolLen(cli, addr), "the conn must stay pooled (reused, not churned)")
 }
 
 // --- Task 4: nil-resp semantics ---------------------------------------------

@@ -84,11 +84,16 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      killed any conn reused past `ServerIdleTimeout` — only the hasRead-body path cleared it; fixed +
      RED test) plus track-before-launch reap TOCTOU and a `closeAll` negative-total cap-bypass.
    - **S3b residual follow-ups (code-gate finders, [P3] unless noted):**
-     - [ ] **Client-side body-read has no deadline (QUIC-parity gap).** `tcpReadCloser` hands the conn to
-       the caller with the RPC-ctx deadline cleared (matches QUIC), so a server that stalls mid-body
-       (without closing) pins a client goroutine + pooled slot until the caller's `Close`. The server
-       side IS bounded (`ServerBodyTimeout`); the client read side is not. Revisit at S4/S5 wiring
-       (client body-read idle deadline).
+     - [x] **Client-side body-read idle deadline — DONE (QUIC-parity gap closed).** `tcpReadCloser.Read`
+       now arms an IDLE read deadline (`ClientBodyTimeout`, default 5m, reset per Read) before each
+       delegated body read, so a server that stalls mid-body (without closing) trips a timeout instead
+       of pinning a client goroutine + pooled slot until the caller's `Close`. Idle (per-Read reset)
+       semantics never kill a progressing transfer — strictly MORE QUIC-faithful than the sibling
+       egress wall-clock divergence (line 92). `Close` clears the deadline before pool checkin —
+       correctness-load-bearing (a CallRead→CallWithBody reuse past the deadline fails its post-body
+       Decode with a non-`errStalePreBody` error that is NOT retried; neuter-verified RED). Dormant
+       (TCP not wired into boot); no CHANGELOG. FIRING tests: `TestTCPClientBody_StalledServerReadTimesOut`
+       (stall trips the bound) + `TestTCPClientBody_CleanDrainClearsDeadlineBeforeReuse` (clear is load-bearing).
      - [ ] **Egress write-deadline has no QUIC counterpart.** `serveOne` hasRead bounds the response-body
        Write with `ServerBodyTimeout` (wall-clock, not idle-stall), so a *sustained-slow* (not stalled)
        reader of a large shard read can be dropped at 5m where QUIC's flow control would not. Generous,

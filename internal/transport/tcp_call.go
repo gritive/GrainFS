@@ -215,12 +215,25 @@ type tcpReadCloser struct {
 	once sync.Once
 }
 
-func (r *tcpReadCloser) Read(p []byte) (int, error) { return r.body.Read(p) }
+func (r *tcpReadCloser) Read(p []byte) (int, error) {
+	// Arm an IDLE read deadline before each delegated body read (QUIC-parity bound):
+	// CallRead cleared the per-call deadline at handoff so the body read is unbounded
+	// by the RPC ctx, but a server that stalls mid-body (without closing) would
+	// otherwise pin this goroutine + the pooled slot forever. Re-arming per Read gives
+	// idle semantics — a progressing transfer keeps resetting the window, only a
+	// genuine stall trips it.
+	if d := r.t.cfg.ClientBodyTimeout; d > 0 {
+		_ = r.conn.SetReadDeadline(time.Now().Add(d))
+	}
+	return r.body.Read(p)
+}
 func (r *tcpReadCloser) Close() error {
 	r.once.Do(func() {
 		if r.body.done {
-			// Fully drained → clean → reuse. The per-call deadline was already
-			// cleared at handoff in CallRead and never re-armed during the body read.
+			// Fully drained → clean → reuse. Clear the idle read deadline armed during
+			// the body read before checkin, so the next transfer on this pooled conn
+			// is not killed by a stale deadline (the S3b stale-deadline reuse class).
+			_ = r.conn.SetDeadline(time.Time{})
 			r.t.pool.checkin(r.addr, r.conn)
 		} else {
 			r.t.pool.discard(r.addr, r.conn) // closed early / mid-stream → discard + free slot
