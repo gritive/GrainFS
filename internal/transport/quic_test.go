@@ -752,7 +752,7 @@ func TestVersionHandshakeSuccess(t *testing.T) {
 	defer client.Close()
 
 	connReady := make(chan struct{})
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		close(connReady)
 		<-ctx.Done()
 	})
@@ -780,7 +780,7 @@ func TestMixedVersionRejection(t *testing.T) {
 	defer server.Close()
 
 	handlerCalled := make(chan struct{})
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		close(handlerCalled)
 		<-ctx.Done()
 	})
@@ -876,7 +876,7 @@ func TestCapabilityWrongFirstStream(t *testing.T) {
 	defer server.Close()
 
 	handlerCalled := make(chan struct{})
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		close(handlerCalled)
 		<-ctx.Done()
 	})
@@ -922,7 +922,7 @@ func TestCE_ShortPayload_Rejected(t *testing.T) {
 	defer server.Close()
 
 	handlerCalled := make(chan struct{})
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		close(handlerCalled)
 		<-ctx.Done()
 	})
@@ -967,7 +967,7 @@ func TestCE_VersionMismatch_DistinctReason(t *testing.T) {
 
 	server := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) { <-ctx.Done() })
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) { <-ctx.Done() })
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
 	raw := MustNewQUICTransport("test-cluster-psk")
@@ -1011,7 +1011,7 @@ func TestCE_Counter_EmitsOnSuccess(t *testing.T) {
 	defer client.Close()
 
 	connReady := make(chan struct{})
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		close(connReady)
 		<-ctx.Done()
 	})
@@ -1040,7 +1040,7 @@ func TestCE_Counter_EmitsOnFailure(t *testing.T) {
 
 	server := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) { <-ctx.Done() })
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) { <-ctx.Done() })
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
 	raw := MustNewQUICTransport("test-cluster-psk")
@@ -1078,7 +1078,7 @@ func TestCE_FeatureBit_Unsupported_Rejected(t *testing.T) {
 	defer server.Close()
 
 	handlerCalled := make(chan struct{})
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		close(handlerCalled)
 		<-ctx.Done()
 	})
@@ -1123,7 +1123,7 @@ func TestCE_ConcurrentDial_Dedup(t *testing.T) {
 	var handlerCalls atomic.Int32
 	server := MustNewQUICTransport("test-cluster-psk")
 	defer server.Close()
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		handlerCalls.Add(1)
 		<-ctx.Done()
 	})
@@ -1135,7 +1135,7 @@ func TestCE_ConcurrentDial_Dedup(t *testing.T) {
 
 	addr := server.LocalAddr()
 	const N = 8
-	conns := make([]*quic.Conn, N)
+	conns := make([]MuxCarrier, N)
 	errs := make([]error, N)
 
 	var wg sync.WaitGroup

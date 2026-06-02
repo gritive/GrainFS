@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +21,7 @@ func TestQUICTransport_ALPNRouting(t *testing.T) {
 	defer server.Close()
 
 	var muxCalls atomic.Int64
-	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn MuxCarrier) {
 		muxCalls.Add(1)
 		// Accept one stream so the dialer's OpenStreamSync returns; no further
 		// processing needed for this test.
@@ -60,7 +59,7 @@ func TestQUICTransport_ALPNRouting(t *testing.T) {
 	require.NotNil(t, conn)
 	// Server's mux handler accepts a stream; trigger that here so the test
 	// observes the handler running.
-	stream, err := conn.OpenStreamSync(ctx)
+	stream, err := conn.OpenStream(ctx)
 	require.NoError(t, err)
 	_, _ = stream.Write([]byte{0})
 
@@ -110,7 +109,7 @@ func TestQUICTransport_PSKMismatch_Mux(t *testing.T) {
 
 	server := MustNewQUICTransport("psk-server")
 	defer server.Close()
-	server.SetMuxConnHandler(func(_ context.Context, _ *quic.Conn) {})
+	server.SetMuxConnHandler(func(_ context.Context, _ MuxCarrier) {})
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
 	client := MustNewQUICTransport("psk-client")

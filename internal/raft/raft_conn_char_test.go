@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -10,7 +11,31 @@ import (
 	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// quicCarrierForTest adapts a raw *quic.Conn to transport.MuxCarrier for the
+// characterization harness (the production quicMuxCarrier is unexported in the
+// transport package). It mirrors quicMuxCarrier exactly.
+type quicCarrierForTest struct{ conn *quic.Conn }
+
+func (c quicCarrierForTest) OpenStream(ctx context.Context) (io.ReadWriteCloser, error) {
+	return c.conn.OpenStreamSync(ctx)
+}
+func (c quicCarrierForTest) AcceptStream(ctx context.Context) (io.ReadWriteCloser, error) {
+	return c.conn.AcceptStream(ctx)
+}
+func (c quicCarrierForTest) RemoteAddr() string { return c.conn.RemoteAddr().String() }
+func (c quicCarrierForTest) Close(cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+	return c.conn.CloseWithError(0, msg)
+}
+
+var _ transport.MuxCarrier = quicCarrierForTest{}
 
 // newRaftConnPairQUIC brings up a QUIC loopback pair and builds a client
 // (dialer) + server (acceptor) RaftConn with the given handler configs.
@@ -42,9 +67,9 @@ func newRaftConnPairQUIC(t *testing.T, poolSize int, clientCfg, serverCfg RaftCo
 	serverConn := <-accepted
 	require.NotNil(t, serverConn)
 
-	clientStreams, err := openQUICMuxStreams(ctx, clientConn, poolSize)
+	clientStreams, err := openMuxStreams(ctx, quicCarrierForTest{clientConn}, poolSize)
 	require.NoError(t, err)
-	serverStreams, err := acceptQUICMuxStreams(ctx, serverConn, poolSize)
+	serverStreams, err := acceptMuxStreams(ctx, quicCarrierForTest{serverConn}, poolSize)
 	require.NoError(t, err)
 	client := NewRaftConn(clientConn.RemoteAddr().String(), clientStreams,
 		func(c error) error { return clientConn.CloseWithError(0, c.Error()) }, clientCfg)

@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
-
-	"github.com/quic-go/quic-go"
 )
 
 // ClusterTransport is the full node-to-node transport surface the composition
@@ -13,11 +11,9 @@ import (
 // interface in cluster/raft, so the boot-held value can be passed to those
 // narrower constructors (Go interface-to-interface assignment).
 //
-// It is intentionally QUIC-shaped — GetOrConnectMux/EvictMux/SetMuxConnHandler
-// reference *quic.Conn — because the per-group mux driver still multiplexes
-// over QUIC streams. The S1 TCPTransport will satisfy the transport-agnostic
-// subset; the mux-connection methods are reshaped in S2 when the RaftConn
-// connection model changes. *QUICTransport satisfies this today.
+// The mux-connection methods speak MuxCarrier (S2b-1), so this interface is no
+// longer QUIC-shaped: a TCP mux carrier (S2b-2) can satisfy it. *QUICTransport
+// satisfies it today via quicMuxCarrier.
 type ClusterTransport interface {
 	// Transport covers Listen/Connect/Send/Receive/Close.
 	Transport
@@ -33,8 +29,8 @@ type ClusterTransport interface {
 	SetStreamHandler(h StreamHandler)
 
 	SetMuxConnHandler(h MuxConnHandler)
-	GetOrConnectMux(ctx context.Context, addr string) (*quic.Conn, error)
-	EvictMux(addr string, conn *quic.Conn)
+	GetOrConnectMux(ctx context.Context, addr string) (MuxCarrier, error)
+	EvictMux(addr string, carrier MuxCarrier)
 
 	RecycleConns()
 	ClosePeer(addr string)

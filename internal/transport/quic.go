@@ -217,12 +217,31 @@ func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
 	return h, ok
 }
 
-// MuxConnHandler is invoked once per accepted mux QUIC connection (ALPN
-// ProtocolVersionMux). The handler owns the conn lifetime: it must arrange
-// for stream accept/read and conn close. The handler is registered by
-// internal/raft (the only consumer of mux connections); the transport package
-// does not interpret mux frames.
-type MuxConnHandler func(ctx context.Context, conn *quic.Conn)
+// quicMuxCarrier adapts a *quic.Conn to MuxCarrier. It is a comparable value
+// (wraps only the conn pointer), so the muxConns cache and EvictMux keep their
+// identity-comparison semantics. Stream open/accept/close are byte-for-byte the
+// same quic-go calls the driver made before S2b-1 — behavior-neutral.
+type quicMuxCarrier struct{ conn *quic.Conn }
+
+func (c quicMuxCarrier) OpenStream(ctx context.Context) (io.ReadWriteCloser, error) {
+	return c.conn.OpenStreamSync(ctx)
+}
+
+func (c quicMuxCarrier) AcceptStream(ctx context.Context) (io.ReadWriteCloser, error) {
+	return c.conn.AcceptStream(ctx)
+}
+
+func (c quicMuxCarrier) RemoteAddr() string { return c.conn.RemoteAddr().String() }
+
+func (c quicMuxCarrier) Close(cause error) error {
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+	return c.conn.CloseWithError(0, msg)
+}
+
+var _ MuxCarrier = quicMuxCarrier{}
 
 // IdentitySnapshot is the active TLS identity state of a QUICTransport.
 // During steady-state, AcceptSPKIs has one entry. During phases 2/3 of a
@@ -283,7 +302,7 @@ type QUICTransport struct {
 	mu            sync.RWMutex
 	listener      *quic.Listener
 	conns         map[string]*quic.Conn // legacy ALPN: addr -> conn (Send/Call/CallFlatBuffer)
-	muxConns      map[string]*quic.Conn // mux ALPN: addr -> conn (raft RPC, owned by internal/raft)
+	muxConns      map[string]quicMuxCarrier // mux ALPN: addr -> carrier (raft RPC, owned by internal/raft)
 	inbox         chan *ReceivedMessage
 	codec         *BinaryCodec
 	tlsConfig     *tls.Config
@@ -325,7 +344,7 @@ func NewQUICTransport(psk string) (*QUICTransport, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &QUICTransport{
 		conns:        make(map[string]*quic.Conn),
-		muxConns:     make(map[string]*quic.Conn),
+		muxConns:     make(map[string]quicMuxCarrier),
 		inbox:        make(chan *ReceivedMessage, 256),
 		codec:        &BinaryCodec{},
 		router:       NewStreamRouter(),
@@ -403,7 +422,7 @@ func (t *QUICTransport) RecycleConns() {
 	}
 	mux := make([]*quic.Conn, 0, len(t.muxConns))
 	for addr, c := range t.muxConns {
-		mux = append(mux, c)
+		mux = append(mux, c.conn)
 		delete(t.muxConns, addr)
 	}
 	t.mu.Unlock()
@@ -438,8 +457,8 @@ func (t *QUICTransport) ClosePeer(addr string) {
 	if legacy != nil {
 		_ = legacy.CloseWithError(0, "peer revoked")
 	}
-	if mux != nil {
-		_ = mux.CloseWithError(0, "peer revoked")
+	if mux.conn != nil {
+		_ = mux.conn.CloseWithError(0, "peer revoked")
 	}
 }
 
@@ -635,7 +654,7 @@ func (t *QUICTransport) acceptLoop() {
 					}()
 					return
 				}
-				h(t.ctx, conn)
+				h(t.ctx, quicMuxCarrier{conn: conn})
 			}()
 		case alpn == t.pskALPN():
 			go t.handleInboundConnection(conn)
@@ -920,16 +939,16 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 	return nil
 }
 
-// GetOrConnectMux dials (or returns the cached) mux QUIC connection for addr.
-// Used by internal/raft to wrap the conn in a RaftConn for raft RPC traffic.
-// The returned *quic.Conn is owned by the transport; callers must not close it.
-// Eviction is automatic on idle timeout / connection failure.
-func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (*quic.Conn, error) {
+// GetOrConnectMux dials (or returns the cached) mux QUIC connection for addr,
+// wrapped as a MuxCarrier. Used by internal/raft to wrap the carrier in a
+// RaftConn for raft RPC traffic. The carrier is owned by the transport; callers
+// must not close it. Eviction is automatic on idle timeout / connection failure.
+func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (MuxCarrier, error) {
 	t.mu.RLock()
-	conn, ok := t.muxConns[addr]
+	carrier, ok := t.muxConns[addr]
 	t.mu.RUnlock()
 	if ok {
-		return conn, nil
+		return carrier, nil
 	}
 
 	tlsConf := t.buildClientTLSConfig()
@@ -958,17 +977,18 @@ func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (*quic
 		_ = dialed.CloseWithError(quicAppErrCode, "duplicate mux connection")
 		return existing, nil
 	}
-	t.muxConns[addr] = dialed
+	carrier = quicMuxCarrier{conn: dialed}
+	t.muxConns[addr] = carrier
 	t.mu.Unlock()
-	return dialed, nil
+	return carrier, nil
 }
 
 // EvictMux removes the mux connection for addr from the cache. internal/raft
 // calls this when its RaftConn becomes broken so the next dial creates a fresh
 // connection.
-func (t *QUICTransport) EvictMux(addr string, conn *quic.Conn) {
+func (t *QUICTransport) EvictMux(addr string, carrier MuxCarrier) {
 	t.mu.Lock()
-	if t.muxConns[addr] == conn {
+	if t.muxConns[addr] == carrier {
 		delete(t.muxConns, addr)
 	}
 	t.mu.Unlock()
@@ -1454,8 +1474,8 @@ func (t *QUICTransport) Close() error {
 		delete(t.conns, addr)
 	}
 
-	for addr, conn := range t.muxConns {
-		_ = conn.CloseWithError(0, "transport closing")
+	for addr, carrier := range t.muxConns {
+		_ = carrier.conn.CloseWithError(0, "transport closing")
 		delete(t.muxConns, addr)
 	}
 

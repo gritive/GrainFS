@@ -22,22 +22,24 @@ package raft
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// openQUICMuxStreams opens n bidirectional QUIC streams on conn (dialer side) and
+// openMuxStreams opens n bidirectional streams on the carrier (dialer side) and
 // writes an opStreamInit frame on each so the peer's AcceptStream returns. Returns
-// carrier-agnostic io.ReadWriteCloser handles for NewRaftConn. QUIC-specific: a
-// freshly opened quic stream is invisible to the peer until the first byte.
-func openQUICMuxStreams(ctx context.Context, conn *quic.Conn, n int) ([]io.ReadWriteCloser, error) {
+// io.ReadWriteCloser handles for NewRaftConn. The init frame is a QUIC-stream-
+// visibility concern (a freshly opened quic stream is invisible to the peer until
+// the first byte) that is harmless on other carriers.
+func openMuxStreams(ctx context.Context, carrier transport.MuxCarrier, n int) ([]io.ReadWriteCloser, error) {
 	streams := make([]io.ReadWriteCloser, 0, n)
 	for i := 0; i < n; i++ {
-		s, err := conn.OpenStreamSync(ctx)
+		s, err := carrier.OpenStream(ctx)
 		if err != nil {
 			closeStreams(streams)
 			return nil, fmt.Errorf("open stream %d: %w", i, err)
@@ -52,11 +54,11 @@ func openQUICMuxStreams(ctx context.Context, conn *quic.Conn, n int) ([]io.ReadW
 	return streams, nil
 }
 
-// acceptQUICMuxStreams accepts n bidirectional QUIC streams on conn (acceptor side).
-func acceptQUICMuxStreams(ctx context.Context, conn *quic.Conn, n int) ([]io.ReadWriteCloser, error) {
+// acceptMuxStreams accepts n bidirectional streams on the carrier (acceptor side).
+func acceptMuxStreams(ctx context.Context, carrier transport.MuxCarrier, n int) ([]io.ReadWriteCloser, error) {
 	streams := make([]io.ReadWriteCloser, 0, n)
 	for i := 0; i < n; i++ {
-		s, err := conn.AcceptStream(ctx)
+		s, err := carrier.AcceptStream(ctx)
 		if err != nil {
 			closeStreams(streams)
 			return nil, fmt.Errorf("accept stream %d: %w", i, err)
@@ -122,25 +124,25 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 	}
 
 	// Race-safe creation: lock, double-check, dial outside lock, then store.
-	conn, err := m.tr.GetOrConnectMux(ctx, addr)
+	carrier, err := m.tr.GetOrConnectMux(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 	// Open the carrier streams before constructing the RaftConn. If this fails
 	// there is no RaftConn yet (so no OnBroken can fire); just evict and return.
-	streams, err := openQUICMuxStreams(ctx, conn, m.muxPoolSize)
+	streams, err := openMuxStreams(ctx, carrier, m.muxPoolSize)
 	if err != nil {
-		// Tear down the conn before evicting: EvictMux only deletes the cache
-		// entry, so without this close the (now unreferenced) conn would leak.
+		// Tear down the carrier before evicting: EvictMux only deletes the cache
+		// entry, so without this close the (now unreferenced) carrier would leak.
 		// Old flow closed it via rc.Close()->markBroken->CloseWithError; preserve that.
-		_ = conn.CloseWithError(0, err.Error())
-		m.tr.EvictMux(addr, conn)
+		_ = carrier.Close(err)
+		m.tr.EvictMux(addr, carrier)
 		return nil, fmt.Errorf("open mux streams to %s: %w", addr, err)
 	}
 
-	ps := &muxPeerState{addr: addr, transport: m.tr, conn: conn}
-	rc := NewRaftConn(conn.RemoteAddr().String(), streams, func(cause error) error {
-		return conn.CloseWithError(0, cause.Error())
+	ps := &muxPeerState{addr: addr, transport: m.tr, conn: carrier}
+	rc := NewRaftConn(carrier.RemoteAddr(), streams, func(cause error) error {
+		return carrier.Close(cause)
 	}, RaftConnConfig{
 		RPCHandler: func(payload []byte) ([]byte, error) {
 			return m.handleMuxRequest(payload)
@@ -158,7 +160,7 @@ func (m *GroupRaftQUICMux) muxConnFor(ctx context.Context, addr string) (*muxPee
 			if ps.hc != nil {
 				ps.hc.FailAll(brokenErr)
 			}
-			m.tr.EvictMux(addr, conn)
+			m.tr.EvictMux(addr, carrier)
 			m.muxMu.Lock()
 			if cur := m.muxPeers[addr]; cur == ps {
 				delete(m.muxPeers, addr)
@@ -269,14 +271,14 @@ func (m *GroupRaftQUICMux) dispatchToLocalGroup(groupID string, args *AppendEntr
 // handleInboundMuxConn owns an accepted mux conn. It wraps the conn in a
 // RaftConn, accepts the dialer's stream pool, and starts the reader loop.
 // The conn lives until either side closes it.
-func (m *GroupRaftQUICMux) handleInboundMuxConn(ctx context.Context, conn *quic.Conn) {
-	streams, err := acceptQUICMuxStreams(ctx, conn, m.muxPoolSize)
+func (m *GroupRaftQUICMux) handleInboundMuxConn(ctx context.Context, carrier transport.MuxCarrier) {
+	streams, err := acceptMuxStreams(ctx, carrier, m.muxPoolSize)
 	if err != nil {
-		_ = conn.CloseWithError(0, "accept mux streams failed")
+		_ = carrier.Close(errors.New("accept mux streams failed"))
 		return
 	}
-	rc := NewRaftConn(conn.RemoteAddr().String(), streams, func(cause error) error {
-		return conn.CloseWithError(0, cause.Error())
+	rc := NewRaftConn(carrier.RemoteAddr(), streams, func(cause error) error {
+		return carrier.Close(cause)
 	}, RaftConnConfig{
 		RPCHandler: func(payload []byte) ([]byte, error) {
 			return m.handleMuxRequest(payload)
@@ -296,7 +298,7 @@ func (m *GroupRaftQUICMux) handleInboundMuxConn(ctx context.Context, conn *quic.
 type muxPeerState struct {
 	addr      string
 	transport muxDriverTransport
-	conn      *quic.Conn
+	conn      transport.MuxCarrier
 	rc        *RaftConn
 	hc        *HeartbeatCoalescer
 	broken    atomic.Bool
