@@ -66,6 +66,11 @@ func (t *TCPTransport) SetTrafficLimits(l TrafficLimits) {
 // Mirrors QUIC's RecycleConns; the caller orchestrates (e.g. SetDropped then
 // RecycleConns), the method itself does not mutate identity.
 func (t *TCPTransport) RecycleConns() {
+	// Bump the pool generation FIRST so any data-plane conn checked out before this
+	// call is discarded (not re-pooled) when it checks in, even if it is still
+	// in-flight here. closeAll below drains the already-idle conns.
+	t.pool.bumpGlobalGen()
+
 	t.mu.Lock()
 	inbound := make([]net.Conn, 0, len(t.conns))
 	for c := range t.conns {
@@ -106,6 +111,9 @@ func (t *TCPTransport) RecycleConns() {
 // using a pre-revocation connection. Inbound conns are not addr-keyed on TCP
 // (matching QUIC, which only closes its addr-keyed outbound caches).
 func (t *TCPTransport) ClosePeer(addr string) {
+	// Bump the peer generation FIRST so an in-flight conn to this peer is discarded
+	// on checkin (not re-pooled); closePeer drains the already-idle conns.
+	t.pool.bumpPeerGen(addr)
 	t.pool.closePeer(addr)
 
 	t.mu.Lock()

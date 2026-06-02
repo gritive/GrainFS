@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -185,4 +187,99 @@ func TestTCPIdentity_ClosePeerDropsPeerPool(t *testing.T) {
 	_ = peerConn.SetReadDeadline(time.Now().Add(time.Second))
 	_, rerr := peerConn.Read(make([]byte, 1))
 	assert.Error(t, rerr, "ClosePeer must close the peer's pooled conn")
+}
+
+// TestTCPIdentity_RecycleDiscardsInFlightConnViaCheckin proves the security-critical
+// invariant the idle-only recycle missed, over the REAL data path: a CallRead checks
+// out + dials + stamps a conn (getDataConn) and holds it via the ReadCloser; a drop +
+// RecycleConns fires WHILE it is checked out (closeAll drains only idle, so this conn
+// is untouched there); on clean Close the generation guard DISCARDS it on checkin
+// instead of re-pooling a conn whose handshake ran under the now-dropped identity.
+// (The narrower bump-strictly-during-the-handshake window is closed by construction:
+// getDataConn captures the generation BEFORE dialing, so the stamp is never newer
+// than the dial-start gen — see genSnapshot.)
+func TestTCPIdentity_RecycleDiscardsInFlightConnViaCheckin(t *testing.T) {
+	const psk = "recycle-inflight-key"
+	srv := startTCP(t, psk)
+	srv.HandleRead(StreamShardReadBody, func(req *Message) (*Message, io.ReadCloser) {
+		return NewResponse(req, []byte("meta")), io.NopCloser(bytes.NewReader([]byte("body")))
+	})
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := srv.LocalAddr()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, rc, err := cli.CallRead(ctx, addr, &Message{Type: StreamShardReadBody})
+	require.NoError(t, err) // conn checked out + stamped via the real getDataConn path
+
+	cli.SetDropped()
+	cli.RecycleConns() // bumps gen; closeAll drains idle (this conn is checked out)
+
+	_, _ = io.Copy(io.Discard, rc) // fully drain → clean checkin on Close
+	require.NoError(t, rc.Close())
+	assert.Equal(t, 0, poolLen(cli, addr),
+		"a conn checked out before RecycleConns must be discarded on checkin, not re-pooled")
+}
+
+// TestTCPIdentity_ClosePeerDiscardsInFlightConnViaCheckin is the per-peer analogue.
+func TestTCPIdentity_ClosePeerDiscardsInFlightConnViaCheckin(t *testing.T) {
+	const psk = "closepeer-inflight-key"
+	srv := startTCP(t, psk)
+	srv.HandleRead(StreamShardReadBody, func(req *Message) (*Message, io.ReadCloser) {
+		return NewResponse(req, []byte("meta")), io.NopCloser(bytes.NewReader([]byte("body")))
+	})
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := srv.LocalAddr()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, rc, err := cli.CallRead(ctx, addr, &Message{Type: StreamShardReadBody})
+	require.NoError(t, err)
+
+	cli.ClosePeer(addr) // bumps this peer's gen; closePeer drains idle only
+
+	_, _ = io.Copy(io.Discard, rc)
+	require.NoError(t, rc.Close())
+	assert.Equal(t, 0, poolLen(cli, addr),
+		"a conn checked out before ClosePeer must be discarded on checkin, not re-pooled")
+}
+
+// TestTCPIdentity_CheckoutEvictsStaleIdleConn proves the read-side half of the
+// recycle guard: an idle conn stamped below the current generation must be EVICTED
+// on checkout, not handed back for reuse. RecycleConns' gen-bump and closeAll are
+// separate lock acquisitions, so a checkout racing between them could pop a
+// not-yet-drained stale conn; rejecting it on checkout closes that window
+// independently of the bump-vs-drain timing. Deterministic: bumpGlobalGen alone
+// (no closeAll) leaves the stale conn in idle so the checkout path is exercised.
+func TestTCPIdentity_CheckoutEvictsStaleIdleConn(t *testing.T) {
+	const psk = "checkout-stale-key"
+	srv := startTCP(t, psk)
+	srv.HandleBody(StreamShardWriteBody, func(req *Message, body io.Reader) *Message {
+		_, _ = io.ReadAll(body)
+		return NewResponse(req, nil)
+	})
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := srv.LocalAddr()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := cli.CallWithBody(ctx, addr, &Message{Type: StreamShardWriteBody}, bytes.NewReader([]byte("x")))
+	require.NoError(t, err)
+	require.Equal(t, 1, poolLen(cli, addr), "one idle conn pooled after a clean transfer")
+
+	// Bump the generation WITHOUT draining idle (isolate the checkout guard;
+	// closeAll would otherwise remove the conn and hide a checkout-side regression).
+	cli.pool.bumpGlobalGen()
+
+	// The next checkout must EVICT the stale idle conn and grant a fresh dial slot
+	// (nil conn) rather than return the stale one.
+	c, err := cli.pool.checkout(ctx, addr)
+	require.NoError(t, err)
+	assert.Nil(t, c, "checkout must not return a stale idle conn (evict it, grant a fresh dial slot)")
+	assert.Equal(t, 0, poolLen(cli, addr), "stale idle conn must be evicted from the pool on checkout")
 }

@@ -30,12 +30,17 @@ func (t *TCPTransport) getDataConn(ctx context.Context, addr string) (net.Conn, 
 	if c != nil {
 		return c, true, nil // reused pooled conn
 	}
-	// checkout granted a (counted) dial slot — dial it.
+	// checkout granted a (counted) dial slot — dial it. Capture the identity
+	// generation BEFORE dialing: if a recycle/revoke fires DURING the handshake, the
+	// pre-dial stamp is below the bumped gen, so this conn (whose handshake ran under
+	// the now-stale identity) is discarded on checkin instead of re-pooled (S5a).
+	gen := t.pool.genSnapshot(addr)
 	dialed, derr := t.dial(ctx, addr)
 	if derr != nil {
 		t.pool.dialFailed(addr) // release the counted slot + wake a waiter
 		return nil, false, derr
 	}
+	t.pool.stampWith(dialed, gen)
 	return dialed, false, nil
 }
 

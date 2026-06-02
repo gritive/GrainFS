@@ -32,7 +32,19 @@ type connPool struct {
 	idle        map[string][]idleConn
 	total       map[string]int             // in-flight + idle per peer (cap>0 only)
 	waiters     map[string][]chan net.Conn // FIFO; a nil conn == "dial slot granted"
+
+	// Identity-generation guard (S5a). Every dialed conn is stamped with the
+	// (global, per-peer) generation at dial. RecycleConns bumps the global gen and
+	// ClosePeer bumps a peer's gen; checkin then DISCARDS (never re-pools) any conn
+	// stamped below the current gen, so a conn handshaked under a now-dropped/revoked
+	// identity that was in-flight during the recycle cannot be reused afterwards.
+	// (closeAll/closePeer already drain IDLE conns; this closes the in-flight hole.)
+	globalGen uint64
+	peerGen   map[string]uint64
+	connGen   map[net.Conn]connStamp
 }
+
+type connStamp struct{ global, peer uint64 }
 
 func newConnPool(capPerPeer int, idleTimeout time.Duration) *connPool {
 	return &connPool{
@@ -41,7 +53,49 @@ func newConnPool(capPerPeer int, idleTimeout time.Duration) *connPool {
 		idle:        make(map[string][]idleConn),
 		total:       make(map[string]int),
 		waiters:     make(map[string][]chan net.Conn),
+		peerGen:     make(map[string]uint64),
+		connGen:     make(map[net.Conn]connStamp),
 	}
+}
+
+// genSnapshot reads the current (global, per-peer) generation. The dialer captures
+// this BEFORE dialing so a recycle/revoke that fires DURING the handshake stamps
+// the conn with the pre-dial generation (→ discarded on checkin). Capturing after
+// the handshake would record the post-bump generation and let the conn — whose TLS
+// handshake ran under the now-stale identity — be re-pooled.
+func (t *connPool) genSnapshot(addr string) connStamp {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return connStamp{global: t.globalGen, peer: t.peerGen[addr]}
+}
+
+// stampWith records a conn's identity generation (captured pre-dial via
+// genSnapshot). Pooled conns keep their original stamp across checkout/checkin.
+func (t *connPool) stampWith(c net.Conn, cs connStamp) {
+	t.mu.Lock()
+	t.connGen[c] = cs
+	t.mu.Unlock()
+}
+
+// bumpGlobalGen invalidates every existing conn (cluster-wide recycle).
+func (t *connPool) bumpGlobalGen() {
+	t.mu.Lock()
+	t.globalGen++
+	t.mu.Unlock()
+}
+
+// bumpPeerGen invalidates every existing conn to one peer (per-peer revoke).
+func (t *connPool) bumpPeerGen(addr string) {
+	t.mu.Lock()
+	t.peerGen[addr]++
+	t.mu.Unlock()
+}
+
+// staleLocked reports whether c's stamp predates the current generation for addr.
+// Caller holds t.mu.
+func (t *connPool) staleLocked(addr string, c net.Conn) bool {
+	cs, ok := t.connGen[c]
+	return ok && (cs.global < t.globalGen || cs.peer < t.peerGen[addr])
 }
 
 // checkout returns a pooled conn, or (nil, nil) meaning "dial slot granted — the
@@ -80,15 +134,25 @@ func (t *connPool) checkout(ctx context.Context, addr string) (net.Conn, error) 
 	}
 }
 
-// popFreshIdleLocked returns the newest non-expired idle conn for addr, appending
-// any evicted (expired) conns to *victims for the caller to close after unlocking.
+// popFreshIdleLocked returns the newest idle conn for addr that is neither expired
+// nor identity-stale, appending any evicted conns to *victims for the caller to
+// close after unlocking.
 func (t *connPool) popFreshIdleLocked(addr string, victims *[]net.Conn) net.Conn {
 	q := t.idle[addr]
 	for len(q) > 0 {
 		ic := q[len(q)-1]
 		q = q[:len(q)-1]
-		if t.idleTimeout > 0 && time.Since(ic.lastUsed) >= t.idleTimeout {
-			*victims = append(*victims, ic.c) // presumed server-reaped → evict
+		// Evict an idle conn that is expired (presumed server-reaped) OR stamped
+		// below the current identity generation. The staleness check makes the
+		// recycle guard order-independent: RecycleConns' bumpGlobalGen and closeAll
+		// are separate lock acquisitions, so a checkout racing between them could
+		// otherwise pop a not-yet-drained stale idle conn and reuse it for one
+		// transfer under the dropped identity. Rejecting it here (in addition to the
+		// checkin guard) closes that read-side window.
+		expired := t.idleTimeout > 0 && time.Since(ic.lastUsed) >= t.idleTimeout
+		if expired || t.staleLocked(addr, ic.c) {
+			*victims = append(*victims, ic.c)
+			delete(t.connGen, ic.c)
 			if t.cap > 0 {
 				t.total[addr]--
 			}
@@ -102,8 +166,15 @@ func (t *connPool) popFreshIdleLocked(addr string, victims *[]net.Conn) net.Conn
 }
 
 // checkin returns a clean conn: hand it to a waiter, else add it to the idle list.
+// A conn whose identity generation is stale (a recycle/revoke fired while it was
+// in-flight) is DISCARDED instead of reused — the security-critical invariant.
 func (t *connPool) checkin(addr string, c net.Conn) {
 	t.mu.Lock()
+	if t.staleLocked(addr, c) {
+		t.mu.Unlock()
+		t.discard(addr, c) // stale identity → close + free slot, never reuse
+		return
+	}
 	if w := t.popWaiterLocked(addr); w != nil {
 		t.mu.Unlock()
 		w <- c // stays counted; the waiter uses it directly
@@ -115,6 +186,9 @@ func (t *connPool) checkin(addr string, c net.Conn) {
 
 // discard closes a dirty/dead conn and frees its slot (waking a waiter).
 func (t *connPool) discard(addr string, c net.Conn) {
+	t.mu.Lock()
+	delete(t.connGen, c)
+	t.mu.Unlock()
 	_ = c.Close()
 	t.dialFailed(addr)
 }
@@ -180,6 +254,7 @@ func (t *connPool) closeAll() {
 	for addr, q := range t.idle {
 		for _, ic := range q {
 			victims = append(victims, ic.c)
+			delete(t.connGen, ic.c)
 			if t.cap > 0 {
 				t.total[addr]-- // keep total accurate; do NOT reset to a fresh map, or a
 				// still-in-flight conn's later discard would drive total negative and bypass the cap
@@ -199,6 +274,7 @@ func (t *connPool) closePeer(addr string) {
 	victims := make([]net.Conn, 0, len(t.idle[addr]))
 	for _, ic := range t.idle[addr] {
 		victims = append(victims, ic.c)
+		delete(t.connGen, ic.c)
 		if t.cap > 0 {
 			t.total[addr]--
 		}
