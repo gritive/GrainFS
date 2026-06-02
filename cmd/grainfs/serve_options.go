@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -49,6 +50,10 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.AppendSizeCapBytes, _ = cmd.Flags().GetInt64("append-size-cap-bytes")
 	opts.QUICMuxPoolSize, _ = cmd.Flags().GetInt("quic-mux-pool")
 	opts.QUICMuxFlushWindow, _ = cmd.Flags().GetDuration("quic-mux-flush")
+	opts.Transport, _ = cmd.Flags().GetString("transport")
+	if opts.Transport != "" && opts.Transport != "quic" && opts.Transport != "tcp" {
+		return serveruntime.ServeOptions{}, fmt.Errorf("--transport: unknown value %q (want quic|tcp)", opts.Transport)
+	}
 
 	// Storage knobs.
 	opts.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")

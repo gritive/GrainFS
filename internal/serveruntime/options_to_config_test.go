@@ -192,3 +192,14 @@ func TestOptionsToConfigRaftAddrExplicitFalse(t *testing.T) {
 	require.False(t, cfg.RaftAddrExplicit, "empty RaftAddr implies explicit=false")
 	require.Equal(t, "", cfg.RaftAddr)
 }
+
+// TestOptionsToConfig_TransportSelection asserts the --transport flag maps to the
+// dormant TCP selector: "tcp" → useTCPTransport, everything else → QUIC (default).
+func TestOptionsToConfig_TransportSelection(t *testing.T) {
+	require.True(t, optionsToConfig(ServeOptions{Transport: "tcp"}, ":0", nil, nil, nil).useTCPTransport,
+		`Transport "tcp" must select the TCP stack`)
+	require.False(t, optionsToConfig(ServeOptions{Transport: "quic"}, ":0", nil, nil, nil).useTCPTransport,
+		`Transport "quic" must keep QUIC`)
+	require.False(t, optionsToConfig(ServeOptions{Transport: ""}, ":0", nil, nil, nil).useTCPTransport,
+		"empty Transport (default) must keep QUIC")
+}

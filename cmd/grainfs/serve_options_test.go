@@ -181,3 +181,28 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "/tmp/sentinel-data", opts.FlagsSnapshot["data"])
 	require.Equal(t, "<redacted>", opts.FlagsSnapshot["heal-receipt-psk"], "secret redaction")
 }
+
+// TestServeOptionsFromCmd_TransportFlag covers the --transport experimental flag:
+// default is quic, tcp is accepted, and an unknown value is rejected at the cmd
+// boundary (before boot).
+func TestServeOptionsFromCmd_TransportFlag(t *testing.T) {
+	build := func(args ...string) (string, error) {
+		cmd := &cobra.Command{Use: "serve"}
+		registerAllServeFlags(cmd)
+		require.NoError(t, cmd.ParseFlags(args))
+		opts, err := serveOptionsFromCmd(cmd)
+		return opts.Transport, err
+	}
+
+	got, err := build()
+	require.NoError(t, err)
+	require.Equal(t, "quic", got, "default transport is quic")
+
+	got, err = build("--transport", "tcp")
+	require.NoError(t, err)
+	require.Equal(t, "tcp", got)
+
+	_, err = build("--transport", "bogus")
+	require.Error(t, err, "unknown transport must be rejected at the cmd boundary")
+	require.Contains(t, err.Error(), "want quic|tcp")
+}
