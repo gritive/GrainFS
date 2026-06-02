@@ -3,7 +3,9 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -175,6 +177,46 @@ func TestTCPDesync_HappyPathStampsAndMatches(t *testing.T) {
 	}
 }
 
+// TestTCPDesync_MismatchedRespIDIsCaught is the FIRING test for desync detection
+// (the prevention header-flag was dropped because this mechanism makes a desync
+// loud — so the mechanism doing its job must be tested, not just the happy path).
+// A hand-rolled server echoes the WRONG id; the client must error loudly and
+// discard the conn rather than pool a desynced one.
+func TestTCPDesync_MismatchedRespIDIsCaught(t *testing.T) {
+	const psk = "desync-fire"
+	srvTr := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = srvTr.Close() })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tln := tls.NewListener(ln, srvTr.serverTLS)
+	t.Cleanup(func() { _ = tln.Close() })
+	go func() {
+		conn, aerr := tln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer conn.Close()
+		codec := &BinaryCodec{}
+		req, derr := codec.Decode(conn)
+		if derr != nil {
+			return
+		}
+		// Drain the chunked request body to its terminator so the frame is consumed.
+		_, _ = io.Copy(io.Discard, &chunkedBodyReader{r: conn})
+		// Respond with a deliberately mismatched ID → the client must flag a desync.
+		_ = codec.Encode(conn, &Message{Type: req.Type, ID: req.ID + 1, Status: StatusOK})
+	}()
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := ln.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = cli.CallWithBody(ctx, addr, &Message{Type: StreamShardWriteBody}, bytes.NewReader([]byte("payload")))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "desync")
+	require.Equal(t, 0, poolLen(cli, addr), "a desynced conn must be discarded, not pooled")
+}
+
 // --- Task 4: nil-resp semantics ---------------------------------------------
 
 func TestTCPNilResp_BodyHandlerReturnsError(t *testing.T) {
@@ -257,6 +299,75 @@ func breakPooledConnForTest(t *testing.T, cli *TCPTransport, addr string) {
 	q := cli.pool.idle[addr]
 	require.NotEmpty(t, q, "expected a pooled conn to break")
 	_ = q[len(q)-1].c.Close()
+}
+
+// countingReader counts how many times it is fully consumed (EOF returned). A
+// wrongly-retried body would be read a second time → fullReads > 1.
+type countingReader struct {
+	data      []byte
+	off       int
+	fullReads int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.off >= len(c.data) {
+		c.fullReads++
+		return 0, io.EOF
+	}
+	n := copy(p, c.data[c.off:])
+	c.off += n
+	return n, nil
+}
+
+// TestTCPPool_NoRetryAfterBodyConsumed guards the retry-once invariant's dangerous
+// edge: a reused conn that fails AFTER the body has been written must NOT retry, or
+// the (now-consumed) body would replay truncated. A persistent server serves one OK
+// transfer (pooling the conn), then reads transfer 2's req+body and closes without
+// responding → the client's post-body Decode fails on the reused conn. The body
+// must have been consumed exactly once and no retry attempted.
+func TestTCPPool_NoRetryAfterBodyConsumed(t *testing.T) {
+	const psk = "noretry"
+	srvTr := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = srvTr.Close() })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tln := tls.NewListener(ln, srvTr.serverTLS)
+	t.Cleanup(func() { _ = tln.Close() })
+	go func() {
+		conn, aerr := tln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer conn.Close()
+		codec := &BinaryCodec{}
+		// Transfer 1: respond OK (echoing the id) so the client pools the conn.
+		req1, derr := codec.Decode(conn)
+		if derr != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, &chunkedBodyReader{r: conn})
+		_ = codec.Encode(conn, &Message{Type: req1.Type, ID: req1.ID, Status: StatusOK})
+		// Transfer 2: read req + body, then close WITHOUT responding → client Decode fails.
+		if _, derr = codec.Decode(conn); derr != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, &chunkedBodyReader{r: conn})
+		// defer conn.Close() — no response
+	}()
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := ln.Addr().String()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = cli.CallWithBody(ctx, addr, &Message{Type: StreamShardWriteBody}, bytes.NewReader([]byte("a")))
+	require.NoError(t, err) // transfer 1 pooled the conn
+	require.Equal(t, 1, poolLen(cli, addr))
+
+	body := &countingReader{data: []byte("payload")}
+	_, err = cli.CallWithBody(ctx, addr, &Message{Type: StreamShardWriteBody}, body)
+	require.Error(t, err)                          // post-body Decode failure on the reused conn
+	require.NotContains(t, err.Error(), "context") // not a retry-induced hang to the ctx deadline
+	require.Equal(t, 1, body.fullReads, "body must be consumed exactly once (no retry-replay)")
 }
 
 func TestTCPPool_RetryOnceOnStaleReusedConn(t *testing.T) {
