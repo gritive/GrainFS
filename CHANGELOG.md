@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.503.0] - 2026-06-03
+
+### Removed
+
+- **`quic-go` dependency dropped from `go.mod`/`go.sum` (S6 follow-up).** S6 removed
+  the last `quic-go` import; `go mod tidy` now drops `github.com/quic-go/quic-go
+  v0.59.1` and its transitive-only entries. Build + vet stay green — nothing in the
+  tree imports it anymore.
+
+### Internal
+
+- **Docs: clean up stale QUIC references in the R+H design record (S6 follow-up).**
+  `docs/architecture/quic-stream-multiplex.md` (a historical "DELIVERED" design
+  doc) now notes that `--quic-mux-pool`/`--quic-mux-flush` were renamed to
+  `--mux-pool`/`--mux-flush` in v0.0.502.0 and that its `internal/transport/quic.go`
+  code references are from the QUIC era (the carrier abstraction it introduced is
+  what made the QUIC→TCP migration behavior-neutral). `docs/index.md` link text
+  dropped the now-inaccurate "QUIC" qualifier.
+
 ## [0.0.502.0] - 2026-06-03
 
 ### Changed

@@ -1,6 +1,6 @@
 # Raft RPC Persistent Stream + Heartbeat Coalescing (R+H)
 
-> **Status**: **DELIVERED** (2026-05-02). Design v3 shipped as v0.0.16.0 (#135), v0.0.16.1 (#136 nil panic fix), v0.0.17.0 (#137 default ON). The `--quic-mux` flag was removed in v0.0.151.0 — mux is now unconditionally on; the per-peer ALPN fallback to the legacy path (cross-version peers) is retained. `--quic-mux-pool` / `--quic-mux-flush` remain as tuning knobs.
+> **Status**: **DELIVERED** (2026-05-02). Design v3 shipped as v0.0.16.0 (#135), v0.0.16.1 (#136 nil panic fix), v0.0.17.0 (#137 default ON). The `--quic-mux` flag was removed in v0.0.151.0 — mux is now unconditionally on; the per-peer ALPN fallback to the legacy path (cross-version peers) is retained. `--quic-mux-pool` / `--quic-mux-flush` remain as tuning knobs (renamed to `--mux-pool` / `--mux-flush` in v0.0.502.0 when the cluster transport flipped from QUIC to TCP and the QUIC stack was removed; #702). **Historical note:** this document describes the R+H design as it shipped on the QUIC transport. The code references below (`internal/transport/quic.go`, `group_transport_quic.go`, etc.) are from that era; the carrier abstraction it introduced is exactly what made the QUIC→TCP migration (S0–S6, v0.0.502.0) behavior-neutral — the mux carrier is now TCP.
 >
 > **Validation (idle-N8, 5 nodes × 8 raft groups, shared raft-log BadgerDB):**
 >

@@ -64,4 +64,4 @@ Use these when you need the design rationale behind the system.
 | Storage operation boundaries | [Storage operations facade](architecture/storage-operations-facade.md) |
 | Cache invalidation | [Cache invalidation flow](architecture/cache-invalidation-flow.md) |
 | NFS client testing approach | [NFS client spike](architecture/nfs-client-spike.md) |
-| Raft RPC stream multiplexing | [QUIC stream multiplexing](architecture/quic-stream-multiplex.md) |
+| Raft RPC stream multiplexing | [Stream multiplexing + heartbeat coalescing](architecture/quic-stream-multiplex.md) |

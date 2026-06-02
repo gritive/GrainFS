@@ -23,7 +23,6 @@ require (
 	github.com/onsi/gomega v1.34.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
-	github.com/quic-go/quic-go v0.59.1
 	github.com/rs/zerolog v1.35.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
