@@ -469,7 +469,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 5. dial the seed join listener (Phase-1), pinning its SPKI. The transcript
 	// is signed inside buildPhase1 over the resulting channel binding.
-	reply, err := inviteJoinDial(ctx, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
+	reply, err := inviteJoinDialWith(ctx, selectJoinDialer(opts.Transport == "tcp"), bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
 	if err != nil {
 		return fmt.Errorf("phase-1 dial: %w", err)
 	}
@@ -648,7 +648,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		SPKI:      spki[:],
 		InviteID:  st.inviteID,
 	}
-	reply, err := inviteJoinDial(ctx, st.seedAddr, st.seedSPKI, cert,
+	reply, err := inviteJoinDialWith(ctx, selectJoinDialer(state.cfg.useTCPTransport), st.seedAddr, st.seedSPKI, cert,
 		func([]byte) (cluster.JoinRequest, error) { return req, nil })
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2 dial: %w", err)
@@ -693,6 +693,17 @@ type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clie
 func inviteJoinDial(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	// Production keeps QUIC (transport.DialJoin) until the S5 boot flip.
 	return inviteJoinDialWith(ctx, transport.DialJoin, addr, serverSPKI, clientCert, buildReq)
+}
+
+// selectJoinDialer picks the join dialer to match the cluster transport: the TCP
+// join dialer (transport.DialJoinTCP) under the dormant --transport tcp flag
+// (S5c-1), else the QUIC dialer (transport.DialJoin, the production default). The
+// joiner must dial over the SAME transport the leader's join listener runs.
+func selectJoinDialer(useTCP bool) joinDialer {
+	if useTCP {
+		return transport.DialJoinTCP
+	}
+	return transport.DialJoin
 }
 
 // inviteJoinDialWith is inviteJoinDial parameterized by the join dialer so the

@@ -108,3 +108,45 @@ func TestInviteJoinDialWith_RealConsumerOverDormantTCP(t *testing.T) {
 		t.Fatal("leader handler never completed")
 	}
 }
+
+// TestSelectJoinDialer_PicksTCPForTCPCluster proves the joiner dials over the same
+// transport the leader's join listener runs: selectJoinDialer(true) drives a real
+// join over a NewTCPJoinListener (succeeds), while selectJoinDialer(false) (the
+// QUIC dialer) cannot reach the TCP listener.
+func TestSelectJoinDialer_PicksTCPForTCPCluster(t *testing.T) {
+	srvCert, srvSPKI, err := transport.GenerateNodeIdentity("cid", "leader")
+	require.NoError(t, err)
+	ln, err := transport.NewTCPJoinListener("127.0.0.1:0", srvCert,
+		func(_ context.Context, _ [32]byte, _ []byte, stream io.ReadWriteCloser) {
+			if _, rerr := transport.JoinReadFields(stream, 1); rerr != nil {
+				return
+			}
+			blob, eerr := cluster.EncodeJoinReplyForTest(cluster.JoinReply{Accepted: true, Status: cluster.JoinStatusOK})
+			if eerr != nil {
+				return
+			}
+			_, _ = stream.Write(transport.JoinPutField(nil, blob))
+			_ = stream.Close()
+		})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	cliCert, _, err := transport.GenerateNodeIdentity("cid", "joiner")
+	require.NoError(t, err)
+	buildReq := func([]byte) (cluster.JoinRequest, error) {
+		return cluster.JoinRequest{JoinPhase: 1, NodeID: "joiner", Address: "127.0.0.1:1"}, nil
+	}
+
+	// TCP dialer → real join over the TCP listener succeeds.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	reply, err := inviteJoinDialWith(ctx, selectJoinDialer(true), ln.Addr(), srvSPKI, cliCert, buildReq)
+	require.NoError(t, err, "selectJoinDialer(true) must dial the TCP join listener over TCP")
+	assert.True(t, reply.Accepted)
+
+	// QUIC dialer → cannot reach the TCP listener (UDP vs TCP); bounded by a short ctx.
+	nctx, ncancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer ncancel()
+	_, qerr := inviteJoinDialWith(nctx, selectJoinDialer(false), ln.Addr(), srvSPKI, cliCert, buildReq)
+	require.Error(t, qerr, "selectJoinDialer(false) (QUIC) must not reach a TCP join listener")
+}
