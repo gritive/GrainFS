@@ -49,6 +49,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -682,10 +683,26 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 // AFTER the dial so the joiner can sign over the channel binding (Bind); on a
 // resumed Phase-1 each dial yields a fresh bind, so the request is re-signed and
 // never persisted.
+// joinDialer dials a join listener and returns the half-close join stream, the
+// RFC5705 channel binding, and a full-teardown closer. transport.DialJoin (QUIC)
+// and transport.DialJoinTCP (S4) share this EXACT signature, so the dialer is the
+// single seam that selects the join transport without touching the consumer
+// choreography below.
+type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error)
+
 func inviteJoinDial(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
+	// Production keeps QUIC (transport.DialJoin) until the S5 boot flip.
+	return inviteJoinDialWith(ctx, transport.DialJoin, addr, serverSPKI, clientCert, buildReq)
+}
+
+// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer so the
+// dormant TCP join path (transport.DialJoinTCP) can drive the SAME consumer
+// choreography in tests. Behavior-neutral: inviteJoinDial delegates here with
+// transport.DialJoin, so production is byte-identical.
+func inviteJoinDialWith(ctx context.Context, dial joinDialer, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, inviteJoinDialTimeout)
 	defer cancel()
-	stream, bind, closeConn, err := transport.DialJoin(dialCtx, addr, serverSPKI, clientCert)
+	stream, bind, closeConn, err := dial(dialCtx, addr, serverSPKI, clientCert)
 	if err != nil {
 		return cluster.JoinReply{}, err
 	}
