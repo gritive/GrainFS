@@ -15,12 +15,12 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// delayedReadStream wraps a join stream and delays ONLY the first read (the
-// reply read in inviteJoinDialWith). This forces the joiner to read the reply
-// strictly AFTER the leader has written it, half-closed, drained the joiner's
-// close_notify, and full-closed — the worst case for RST-truncation. If the
-// leader's full close were abortive (no drain), the delayed read would see a
-// truncated/failed reply; the leader drain makes the close clean (FIN).
+// delayedReadStream wraps a join stream and delays ONLY the first read (the reply
+// read in inviteJoinDialWith). This forces a deterministic ORDERING: the joiner
+// reads the reply strictly AFTER the leader has written it, half-closed, and the
+// listener's handleConn has drained + full-closed. It proves the consumer
+// choreography survives reading past the leader's close — it does NOT, on its own,
+// distinguish a clean FIN from an abortive RST (see the test's boundary note).
 type delayedReadStream struct {
 	inner io.ReadWriteCloser
 	delay time.Duration
@@ -46,18 +46,24 @@ func latencyJoinTCPDialer(readDelay time.Duration) joinDialer {
 	}
 }
 
-// TestInviteJoinDialWith_TCPReadsFullReplyAfterLeaderClose discharges S5
-// acceptance criterion 3 (deferred from S4) within dormant scope: drive the REAL
-// invite-join consumer (inviteJoinDialWith) over the dormant TCP join transport
-// against NewTCPJoinListener, with a latency-wrapped read so the joiner reads the
-// reply strictly after the leader's drain + full close. The full reply must
-// decode (no RST-truncation) — a stronger robustness signal than the S4
-// immediate-read loopback test.
+// TestInviteJoinDialWith_RealConsumerOverDormantTCP partially discharges S5
+// acceptance criterion 3 (deferred from S4). It drives the REAL invite-join
+// consumer body (inviteJoinDialWith — the same code production reaches via
+// inviteJoinDial) over the dormant TCP join transport (transport.DialJoinTCP)
+// against NewTCPJoinListener, with the reply read forced to happen strictly after
+// the leader's drain + full close. It proves end-to-end over TCP:
+//   - the real consumer's choreography (write request → half-close → read reply),
+//   - the tcpJoinStream half-close (CloseWrite) keeps the read side open, and
+//   - the full JoinReply decodes when read after the leader has already closed.
 //
-// NOTE (boundary): this proves the full reply survives a delayed read after the
-// leader's clean close. The kernel-hard "no RST under real network latency" proof
-// stays an S5 criterion (it needs netem / multi-node, not in-process loopback).
-func TestInviteJoinDialWith_TCPReadsFullReplyAfterLeaderClose(t *testing.T) {
+// BOUNDARY — what this does NOT prove (stays an S5 criterion): the leader-side
+// drain (tcp_join.go handleConn) and its RST-robustness are NOT discriminated
+// here. On in-process loopback the tiny reply is buffered in the joiner's socket
+// before the leader closes, so a clean FIN and an abortive RST are
+// indistinguishable — removing the drain keeps this test green. An empirical
+// "no RST-truncation under real latency" proof requires netem / multi-node that
+// forces the abortive-close path to surface as a read error. That is S5.
+func TestInviteJoinDialWith_RealConsumerOverDormantTCP(t *testing.T) {
 	srvCert, srvSPKI, err := transport.GenerateNodeIdentity("cid", "leader")
 	require.NoError(t, err)
 
@@ -87,12 +93,12 @@ func TestInviteJoinDialWith_TCPReadsFullReplyAfterLeaderClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// 150ms read delay >> the leader's microsecond-scale drain+close, so the joiner
-	// reliably reads after the leader has fully closed.
+	// reliably reads the reply AFTER the leader has fully closed (ordering, not RST).
 	reply, err := inviteJoinDialWith(ctx, latencyJoinTCPDialer(150*time.Millisecond), ln.Addr(), srvSPKI, cliCert,
 		func([]byte) (cluster.JoinRequest, error) {
 			return cluster.JoinRequest{JoinPhase: 1, NodeID: "joiner", Address: "127.0.0.1:1"}, nil
 		})
-	require.NoError(t, err, "joiner failed to read the full reply after the leader's drain+close (RST-truncation?)")
+	require.NoError(t, err, "real consumer failed to read+decode the full reply over TCP after the leader closed")
 	assert.True(t, reply.Accepted)
 	assert.Equal(t, cluster.JoinStatusOK, reply.Status)
 

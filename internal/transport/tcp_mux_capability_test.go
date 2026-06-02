@@ -16,8 +16,15 @@ import (
 // exchange (quic.go doCapabilityExchangeDial / handleCapabilityExchange) puts
 // exactly two bytes on the wire: []byte{ceVersion, ceFeatures}. ceFeatures is
 // always 0x00 and ceFeaturesSupportedMask is 0x00, so NO feature is negotiated —
-// the feature byte is a reserved, always-zero placeholder. The ONLY load-bearing
-// field is the version byte (ceVersion = 0x01).
+// the feature byte is a reserved, currently-zero placeholder. The ONLY load-bearing
+// field today is the version byte (ceVersion = 0x01).
+//
+// POINT-IN-TIME: ceFeatures is a dormant-but-live negotiation channel (quic.go
+// documents ceFeaturesSupportedMask as the extension point for future features).
+// The TCP mux ALPN carries ONLY the version, not features — so the FIRST time a CE
+// feature bit goes live on QUIC (ceFeaturesSupportedMask != 0), this parity must be
+// re-audited and a TCP equivalent added, or the TCP path silently fails to mirror
+// it. This test/audit is valid only while ceFeaturesSupportedMask == 0x00.
 //
 // The TCP mux carrier carries that version in the ALPN suffix (tcpMuxALPN =
 // "grainfs-tcp-mux-v1"). A version mismatch fails the TLS handshake itself
@@ -49,7 +56,13 @@ func TestTCPMux_VersionMismatchRejectedViaALPN(t *testing.T) {
 
 	conn := tls.Client(raw, wrongTLS)
 	err = conn.HandshakeContext(ctx)
-	require.Error(t, err, "a mux dial offering a mismatched ALPN version must fail the handshake (no_application_protocol)")
+	require.Error(t, err, "a mux dial offering a mismatched ALPN version must fail the handshake")
+	// Assert the failure REASON is ALPN enforcement (no_application_protocol), not
+	// an incidental error — otherwise a future unrelated handshake break would let
+	// this test false-pass. Cert/SPKI come from the correct muxClientTLS clone, so
+	// today the only possible failure IS the ALPN mismatch; pin that.
+	require.Contains(t, err.Error(), "no application protocol",
+		"handshake must fail specifically on ALPN mismatch, got: %v", err)
 }
 
 // TestTCPMux_VersionMatchHandshakeSucceeds is the positive control: the correct
