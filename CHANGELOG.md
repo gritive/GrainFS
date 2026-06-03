@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.510.0] - 2026-06-03
+
+### Changed
+
+- **Concentrated the NFSv4 parent-SA filehandle-inheritance rule behind one
+  helper** (behavior-neutral). The T12 "inherit the parent fh's saID binding,
+  else fall back to a generation-only binding" block was copy-pasted verbatim
+  across three COMPOUND op handlers (`opOpen`, `opLookup`, `opCreate`). It now
+  lives in a single `Dispatcher.bindFHInheritingParent(fh, bucket, gen)` helper
+  so the inheritance precedence invariant (the `(pending)` sentinel + readOnly
+  propagation) has one home. Pure refactor, no behavior change.
+
 ## [0.0.509.0] - 2026-06-03
 
 ### Changed
