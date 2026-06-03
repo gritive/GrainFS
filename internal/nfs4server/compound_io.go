@@ -284,14 +284,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	if d.server != nil {
 		bucket, _ := extractBucketAndKey(childPath)
 		gen := d.server.exportGeneration(bucket)
-		// T12: propagate parent's saID so the new fh inherits the session
-		// binding (anon "" vs mount-SA "<name>").
-		parentBind, ok := d.state.FHBinding(d.currentFH)
-		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
-			d.state.BindFHWithBinding(fh, bucket, parentBind.saID, parentBind.readOnly, gen)
-		} else {
-			d.state.BindFHGeneration(fh, bucket, gen)
-		}
+		d.bindFHInheritingParent(fh, bucket, gen)
 	}
 	d.currentFH = fh
 	d.currentPath = childPath
