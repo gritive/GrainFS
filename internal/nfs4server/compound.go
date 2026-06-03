@@ -885,6 +885,11 @@ func (d *Dispatcher) isPathReadOnly(p string) bool {
 	return d.server.isExportReadOnly(bucket)
 }
 
+// resolveContentType returns the existing object's Content-Type, or
+// "application/octet-stream" for new objects. It is used at write sites that do
+// not have a prior HeadObject result available (SETATTR truncate). One
+// HeadObject RTT is acceptable because these paths are not on the hot data
+// path (they imply a full object rewrite anyway).
 func (d *Dispatcher) resolveContentType(ctx context.Context, bucket, key string) string {
 	if obj, err := d.backend.HeadObject(ctx, bucket, key); err == nil && obj.ContentType != "" {
 		return obj.ContentType

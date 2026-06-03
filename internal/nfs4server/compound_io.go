@@ -234,12 +234,6 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-// resolveContentType returns the existing object's Content-Type, or
-// "application/octet-stream" for new objects. It is used at write sites that do
-// not have a prior HeadObject result available (SETATTR truncate). One
-// HeadObject RTT is acceptable because these paths are not on the hot data
-// path (they imply a full object rewrite anyway).
-
 func (d *Dispatcher) opOpen(data []byte) OpResult {
 	if d.anonRejected(d.currentFH) {
 		return OpResult{OpCode: OpOpen, Status: NFS4ERR_ACCESS}
