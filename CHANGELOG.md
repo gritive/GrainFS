@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.509.0] - 2026-06-03
+
+### Changed
+
+- **Zero-alloc per-chunk reads in the encrypted object reader** (GET hot path,
+  GC-hygiene; throughput unchanged). The streaming reader for at-rest-encrypted
+  objects allocated twice per 128 KiB chunk: a fresh AAD field slice
+  (`append`-to-nil) and a heap-escaping `[8]byte` record header. A 5 MiB GET
+  streams as ~40 chunks, so ~80 throwaway allocations per request. The reader now
+  reuses a per-reader AAD scratch slice (rewriting only the chunk ordinal each
+  iteration, mirroring the writer) and a caller-owned header buffer passed into
+  `readEncryptedObjectRecordInto`, so the per-record header read no longer
+  escapes. Microbench (`BenchmarkEncryptedObjectFileRead`, 8 MiB = 64 chunks):
+  **393 -> 202 allocs/op (-49%)**, B/op -3.4%, ns/op within noise. Behavior-neutral:
+  the AAD blob is byte-identical per chunk (existing multi-chunk round-trip and
+  chunk-swap-fails-decrypt tests prove the ordinal is still correct), and the
+  plaintext-zeroize invariant is untouched. Resolves the reader's own deferred
+  "zero-alloc reader pass" TODO. The remaining GET throughput gap vs plaintext
+  stores is inherent (mandatory at-rest XAES-256-GCM decrypt defeats sendfile),
+  not allocation.
+
 ## [0.0.508.0] - 2026-06-03
 
 ### Changed
