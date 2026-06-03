@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.508.0] - 2026-06-03
+
+### Changed
+
+- **Removed the superseded v1 meta-Raft transport** (`raft.MetaRaftTransport`,
+  behavior-neutral). The v2 `cluster.RaftV2MetaTransport` took over meta-Raft
+  RPC delivery on the `StreamMetaRaft` wire during the M6.2 migration; the v1
+  stack (struct + constructors + `Send{RequestVote,AppendEntries,InstallSnapshot}`
+  + mux fallback + `handleRPC`, ~330 LOC) had zero call sites in production or
+  tests and was fully orphaned. The dead implementation and its v1-only
+  InstallSnapshot decoders are deleted. Live symbols that happened to live in
+  the deleted file are relocated byte-identical to their consumers: the
+  `metaRPC*` legacy-envelope constants move to `rpc_codec.go` (the decoders
+  still accept that envelope so cross-version peers keep talking — wire-compat
+  retained), and `isMuxFallbackErr`/`errIsCtxBudget` move to `meta_mux_send.go`
+  (behind the existing `IsMuxFallbackErr`). No runtime behavior changes.
+
 ## [0.0.507.0] - 2026-06-03
 
 ### Changed

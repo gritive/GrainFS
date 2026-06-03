@@ -11,6 +11,22 @@ import (
 
 var raftBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
 
+// RPC type constants for meta-Raft transport (legacy StreamMetaRaft envelope).
+//
+// On the mux path the receiver's handleMuxRequest switches on the unified
+// rpcType* (RequestVote / AppendEntries) constants because meta-raft *Node
+// has the same Handle* methods as a per-group Node. The metaRPC* constants
+// stay reserved for the legacy StreamMetaRaft envelope so cross-version
+// peers keep talking to each other; the decoders below accept both forms.
+const (
+	metaRPCRequestVote          = "MetaRequestVote"
+	metaRPCRequestVoteReply     = "MetaRequestVoteReply"
+	metaRPCAppendEntries        = "MetaAppendEntries"
+	metaRPCAppendEntriesReply   = "MetaAppendEntriesReply"
+	metaRPCInstallSnapshot      = "MetaInstallSnapshot"
+	metaRPCInstallSnapshotReply = "MetaInstallSnapshotReply"
+)
+
 func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -345,52 +361,3 @@ func decodeAppendEntriesReply(data []byte) (reply *AppendEntriesReply, err error
 	}, nil
 }
 
-func decodeInstallSnapshotArgs(data []byte) (args *InstallSnapshotArgs, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode InstallSnapshotArgs: invalid flatbuffer: %v", r)
-		}
-	}()
-	a := pb.GetRootAsInstallSnapshotArgs(data, 0)
-	servers := make([]Server, 0, a.ServersLength())
-	cfg := make([]string, 0, a.ServersLength())
-	learners := make(map[string]string)
-	var se pb.ServerEntry
-	for i := 0; i < a.ServersLength(); i++ {
-		if a.Servers(&se, i) {
-			id := string(se.Id())
-			suffrage := ServerSuffrage(se.Suffrage())
-			servers = append(servers, Server{ID: id, Suffrage: suffrage})
-			if suffrage == NonVoter {
-				learners[id] = ""
-				continue
-			}
-			cfg = append(cfg, id)
-		}
-	}
-	if len(learners) == 0 {
-		learners = nil
-	}
-	return &InstallSnapshotArgs{
-		Term:              a.Term(),
-		LeaderID:          string(a.LeaderId()),
-		LastIncludedIndex: a.LastIncludedIndex(),
-		LastIncludedTerm:  a.LastIncludedTerm(),
-		Data:              a.DataBytes(),
-		Servers:           servers,
-		Configuration:     cfg,
-		Learners:          learners,
-	}, nil
-}
-
-func decodeInstallSnapshotReply(data []byte) (reply *InstallSnapshotReply, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode InstallSnapshotReply: invalid flatbuffer: %v", r)
-		}
-	}()
-	r := pb.GetRootAsInstallSnapshotReply(data, 0)
-	return &InstallSnapshotReply{
-		Term: r.Term(),
-	}, nil
-}

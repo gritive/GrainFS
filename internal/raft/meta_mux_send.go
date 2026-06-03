@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Meta-raft over the shared mux carrier.
@@ -14,9 +15,11 @@ import (
 // PUT throughput bottleneck). The wire path is identical to GroupRaftSender:
 // payload is prefixed with the magic groupID metaGroupID ("__meta__"), the
 // receiver's handleMuxRequest routes it to the node registered via
-// RegisterMetaNode. The internal logic mirrors what v1 MetaRaftTransport's
-// mux path did; it lives here (on GroupRaftMux) so both the v1 transport and
-// the cluster-layer v2 transport share one implementation.
+// RegisterMetaNode. This is the single meta-raft mux send path; it lives here
+// (on GroupRaftMux) so the cluster-layer v2 transport reuses the group-raft
+// carrier implementation. (Historically a v1 raft.MetaRaftTransport carried
+// the same logic inline; it was the legacy per-RPC transport, removed once v2
+// took over StreamMetaRaft.)
 //
 // Callers decide fallback via IsMuxFallbackErr: on a fallback-worthy error
 // (dial failure, mux-disabled peer, closed conn, ctx budget) the caller retries
@@ -84,6 +87,59 @@ func (m *GroupRaftMux) SendMetaRequestVote(ctx context.Context, peer string, arg
 
 // IsMuxFallbackErr reports whether a mux-path error should fall back to the
 // legacy per-RPC Call path. Exported wrapper over the internal classifier so
-// the cluster-layer meta transport can make the same decision the v1 transport
-// makes.
+// the cluster-layer meta transport classifies mux errors with the same rules
+// the send path here uses.
 func IsMuxFallbackErr(err error) bool { return isMuxFallbackErr(err) }
+
+// isMuxFallbackErr decides whether a mux-path error should fall back to
+// legacy StreamMetaRaft. Whitelist (fallback-worthy):
+//   - ctx deadline exceeded — mux-attempt budget exhausted; legacy gets fresh
+//     ctx (codex P1 #4)
+//   - "mux: unknown group __meta__" remote — peer mux-enabled but on a binary
+//     without RegisterMetaNode (codex P1 #6, mixed-version cluster)
+//   - "raft_conn: connection closed" / "raft_conn: frame exceeds" — mux conn
+//     itself is broken
+//   - dial errors ("dial mux", "no mux handler") — peer doesn't speak mux ALPN
+//
+// Everything else propagates. Specifically:
+//   - "raft_conn: handler pool overloaded" — peer is signalling backpressure;
+//     legacy fallback would just amplify the load (codex P1 #3)
+//   - "raft_conn: unknown op code" / "unsupported rpc" — protocol mismatch,
+//     not recoverable by retrying on a different transport
+//   - "mux: decode rpc" / "decode reply batch" — corruption, retry won't help
+//   - "remote: handler panic" — peer-side bug; surface to caller
+//
+// Genuine RPC failures (term mismatch, etc.) are encoded inside the reply
+// payload, not surfaced as transport errors, so they don't reach this gate.
+func isMuxFallbackErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errIsCtxBudget(err) {
+		return true
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "mux: unknown group"):
+		return true
+	case strings.Contains(s, "raft_conn: connection closed"):
+		return true
+	case strings.Contains(s, "raft_conn: frame exceeds"):
+		return true
+	case strings.Contains(s, "no mux handler"):
+		return true
+	case strings.Contains(s, "dial mux"):
+		return true
+	case strings.Contains(s, "open mux streams"):
+		return true
+	case strings.Contains(s, "GetOrConnectMux"):
+		return true
+	}
+	// Backpressure & protocol errors propagate so the caller sees the truth
+	// (and so we don't double the load on an overloaded peer).
+	return false
+}
+
+func errIsCtxBudget(err error) bool {
+	return err == context.DeadlineExceeded || (err != nil && strings.Contains(err.Error(), "context deadline exceeded"))
+}
