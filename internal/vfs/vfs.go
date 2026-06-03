@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	billy "github.com/go-git/go-billy/v5"
@@ -47,13 +46,12 @@ type GrainVFS struct {
 	backend storage.Backend
 	bucket  string
 	root    string // chroot prefix
-	// Caching — CoW + atomic.Pointer: readers do zero-lock Load(), writers clone under thin Mutex.
+	// Caching — copy-on-write: readers do zero-lock load(), writers clone under
+	// the cowMap's thin write mutex. See cowmap.go.
 	statCacheTTL time.Duration
-	statCache    atomic.Pointer[map[string]*statCacheEntry]
-	statWriteMu  sync.Mutex
+	statCache    cowMap[*statCacheEntry]
 	dirCacheTTL  time.Duration
-	dirCache     atomic.Pointer[map[string]*dirCacheEntry]
-	dirWriteMu   sync.Mutex
+	dirCache     cowMap[*dirCacheEntry]
 	// Optional thin-provisioning accounting.
 	volMgr  *volume.Manager
 	volName string
@@ -109,12 +107,10 @@ func New(backend storage.Backend, volumeName string, opts ...VFSOption) (*GrainV
 		o(fs)
 	}
 	if fs.statCacheTTL > 0 {
-		m := make(map[string]*statCacheEntry)
-		fs.statCache.Store(&m)
+		fs.statCache.enable()
 	}
 	if fs.dirCacheTTL > 0 {
-		m := make(map[string]*dirCacheEntry)
-		fs.dirCache.Store(&m)
+		fs.dirCache.enable()
 	}
 	return fs, nil
 }
@@ -131,12 +127,10 @@ func NewDirect(backend storage.Backend, bucketName string, opts ...VFSOption) (*
 		o(fs)
 	}
 	if fs.statCacheTTL > 0 {
-		m := make(map[string]*statCacheEntry)
-		fs.statCache.Store(&m)
+		fs.statCache.enable()
 	}
 	if fs.dirCacheTTL > 0 {
-		m := make(map[string]*dirCacheEntry)
-		fs.dirCache.Store(&m)
+		fs.dirCache.enable()
 	}
 	return fs, nil
 }
@@ -734,11 +728,11 @@ func (f *grainFile) Truncate(size int64) error {
 // --- Stat cache helpers ---
 
 func (fs *GrainVFS) getStatCache(fp string) os.FileInfo {
-	m := fs.statCache.Load()
+	m := fs.statCache.load()
 	if m == nil {
 		return nil
 	}
-	entry, ok := (*m)[fp]
+	entry, ok := m[fp]
 	if !ok || time.Now().After(entry.expires) {
 		return nil
 	}
@@ -747,49 +741,38 @@ func (fs *GrainVFS) getStatCache(fp string) os.FileInfo {
 }
 
 func (fs *GrainVFS) putStatCache(fp string, info os.FileInfo) {
-	m := fs.statCache.Load()
-	if m == nil {
-		return
-	}
-	fs.statWriteMu.Lock()
-	m = fs.statCache.Load()
-	next := make(map[string]*statCacheEntry, len(*m)+1)
-	for k, v := range *m {
-		next[k] = v
-	}
-	next[fp] = &statCacheEntry{info: info, expires: time.Now().Add(fs.statCacheTTL)}
-	fs.statCache.Store(&next)
-	fs.statWriteMu.Unlock()
+	fs.statCache.update(func(cur map[string]*statCacheEntry) map[string]*statCacheEntry {
+		next := make(map[string]*statCacheEntry, len(cur)+1)
+		for k, v := range cur {
+			next[k] = v
+		}
+		next[fp] = &statCacheEntry{info: info, expires: time.Now().Add(fs.statCacheTTL)}
+		return next
+	})
 }
 
 func (fs *GrainVFS) invalidateStatCache(fp string) {
-	m := fs.statCache.Load()
-	if m == nil {
-		return
-	}
-	fs.statWriteMu.Lock()
-	m = fs.statCache.Load()
-	if _, ok := (*m)[fp]; !ok {
-		fs.statWriteMu.Unlock()
-		return
-	}
-	next := make(map[string]*statCacheEntry, len(*m))
-	for k, v := range *m {
-		next[k] = v
-	}
-	delete(next, fp)
-	fs.statCache.Store(&next)
-	fs.statWriteMu.Unlock()
+	fs.statCache.update(func(cur map[string]*statCacheEntry) map[string]*statCacheEntry {
+		if _, ok := cur[fp]; !ok {
+			return nil // absent: abort without cloning, readers keep the snapshot
+		}
+		next := make(map[string]*statCacheEntry, len(cur))
+		for k, v := range cur {
+			next[k] = v
+		}
+		delete(next, fp)
+		return next
+	})
 }
 
 // --- Dir cache helpers ---
 
 func (fs *GrainVFS) getDirCache(fp string) []os.FileInfo {
-	m := fs.dirCache.Load()
+	m := fs.dirCache.load()
 	if m == nil {
 		return nil
 	}
-	entry, ok := (*m)[fp]
+	entry, ok := m[fp]
 	if !ok || time.Now().After(entry.expires) {
 		return nil
 	}
@@ -797,45 +780,34 @@ func (fs *GrainVFS) getDirCache(fp string) []os.FileInfo {
 }
 
 func (fs *GrainVFS) putDirCache(fp string, entries []os.FileInfo) {
-	m := fs.dirCache.Load()
-	if m == nil {
-		return
-	}
-	fs.dirWriteMu.Lock()
-	m = fs.dirCache.Load()
-	next := make(map[string]*dirCacheEntry, len(*m)+1)
-	for k, v := range *m {
-		next[k] = v
-	}
-	next[fp] = &dirCacheEntry{entries: entries, expires: time.Now().Add(fs.dirCacheTTL)}
-	fs.dirCache.Store(&next)
-	fs.dirWriteMu.Unlock()
+	fs.dirCache.update(func(cur map[string]*dirCacheEntry) map[string]*dirCacheEntry {
+		next := make(map[string]*dirCacheEntry, len(cur)+1)
+		for k, v := range cur {
+			next[k] = v
+		}
+		next[fp] = &dirCacheEntry{entries: entries, expires: time.Now().Add(fs.dirCacheTTL)}
+		return next
+	})
 }
 
 // invalidateParentDirCache invalidates the dir cache for the parent directory
 // of the given path, so subsequent ReadDir calls reflect the change.
 func (fs *GrainVFS) invalidateParentDirCache(fp string) {
-	m := fs.dirCache.Load()
-	if m == nil {
-		return
-	}
 	parent := path.Dir(fp)
 	if parent == "." {
 		parent = ""
 	}
-	fs.dirWriteMu.Lock()
-	m = fs.dirCache.Load()
-	if _, ok := (*m)[parent]; !ok {
-		fs.dirWriteMu.Unlock()
-		return
-	}
-	next := make(map[string]*dirCacheEntry, len(*m))
-	for k, v := range *m {
-		next[k] = v
-	}
-	delete(next, parent)
-	fs.dirCache.Store(&next)
-	fs.dirWriteMu.Unlock()
+	fs.dirCache.update(func(cur map[string]*dirCacheEntry) map[string]*dirCacheEntry {
+		if _, ok := cur[parent]; !ok {
+			return nil // absent: abort without cloning, readers keep the snapshot
+		}
+		next := make(map[string]*dirCacheEntry, len(cur))
+		for k, v := range cur {
+			next[k] = v
+		}
+		delete(next, parent)
+		return next
+	})
 }
 
 // MarkDeleted marks a file as deleted in the VFS deleted file tracking.
@@ -856,22 +828,21 @@ func (fs *GrainVFS) invalidateParentDirCache(fp string) {
 //
 // Note: Bucket is included in cache key to support multi-bucket VFS instances.
 func (fs *GrainVFS) MarkDeleted(bucket, key string) error {
-	m := fs.statCache.Load()
-	if m == nil {
-		return nil
+	if fs.statCache.load() == nil {
+		return nil // cache disabled: no marker, no metric (matches prior behavior)
 	}
 
 	cacheKey := "deleted:" + bucket + ":" + key
-	fs.statWriteMu.Lock()
-	m = fs.statCache.Load()
-	_, exists := (*m)[cacheKey]
-	next := make(map[string]*statCacheEntry, len(*m)+1)
-	for k, v := range *m {
-		next[k] = v
-	}
-	next[cacheKey] = &statCacheEntry{info: nil, expires: time.Now().Add(24 * time.Hour)}
-	fs.statCache.Store(&next)
-	fs.statWriteMu.Unlock()
+	exists := false
+	fs.statCache.update(func(cur map[string]*statCacheEntry) map[string]*statCacheEntry {
+		_, exists = cur[cacheKey]
+		next := make(map[string]*statCacheEntry, len(cur)+1)
+		for k, v := range cur {
+			next[k] = v
+		}
+		next[cacheKey] = &statCacheEntry{info: nil, expires: time.Now().Add(24 * time.Hour)}
+		return next
+	})
 
 	if !exists {
 		metrics.DeletedMarkersTotal.Inc()
@@ -888,12 +859,12 @@ func (fs *GrainVFS) MarkDeleted(bucket, key string) error {
 //
 // Returns true if file is marked as deleted and marker hasn't expired.
 func (fs *GrainVFS) IsDeleted(bucket, key string) bool {
-	m := fs.statCache.Load()
+	m := fs.statCache.load()
 	if m == nil {
 		return false
 	}
 	cacheKey := "deleted:" + bucket + ":" + key
-	entry, ok := (*m)[cacheKey]
+	entry, ok := m[cacheKey]
 	if !ok {
 		return false
 	}
@@ -921,23 +892,20 @@ func (fs *GrainVFS) Invalidate(bucket, key string) {
 		return // Different bucket, not our concern
 	}
 
-	// CoW: remove deleted marker + stat entry atomically in one clone
+	// CoW: remove deleted marker + stat entry atomically in one clone. When the
+	// cache is disabled, update() is a no-op and hadDeletedMarker stays false.
 	hadDeletedMarker := false
-	m := fs.statCache.Load()
-	if m != nil {
-		deletedKey := "deleted:" + bucket + ":" + key
-		fs.statWriteMu.Lock()
-		m = fs.statCache.Load()
-		_, hadDeletedMarker = (*m)[deletedKey]
-		next := make(map[string]*statCacheEntry, len(*m))
-		for k, v := range *m {
+	deletedKey := "deleted:" + bucket + ":" + key
+	fs.statCache.update(func(cur map[string]*statCacheEntry) map[string]*statCacheEntry {
+		_, hadDeletedMarker = cur[deletedKey]
+		next := make(map[string]*statCacheEntry, len(cur))
+		for k, v := range cur {
 			next[k] = v
 		}
 		delete(next, deletedKey)
 		delete(next, key)
-		fs.statCache.Store(&next)
-		fs.statWriteMu.Unlock()
-	}
+		return next
+	})
 
 	if hadDeletedMarker {
 		metrics.DeletedMarkersTotal.Dec()
