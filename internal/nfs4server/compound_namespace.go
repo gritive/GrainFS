@@ -73,18 +73,7 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 		if (d.server.mountSAStore != nil || d.server.protocolCredentials != nil) && childKey == "" {
 			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
 		} else {
-			// T12 propagation fix: a fresh subdir fh must inherit the parent's
-			// saID binding so mount-SA-bound subdir sessions stay bound to the
-			// same principal.
-			// BindFHGeneration preserves an existing saID, but a freshly-
-			// created fh has saID="" which would mis-classify as anon. Pull
-			// parent's saID explicitly when it is set.
-			parentBind, ok := d.state.FHBinding(d.currentFH)
-			if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
-				d.state.BindFHWithBinding(fh, childBucket, parentBind.saID, parentBind.readOnly, gen)
-			} else {
-				d.state.BindFHGeneration(fh, childBucket, gen)
-			}
+			d.bindFHInheritingParent(fh, childBucket, gen)
 		}
 	}
 	d.currentFH = fh
@@ -120,14 +109,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	if d.server != nil {
 		bucket, _ := extractBucketAndKey(newPath)
 		gen := d.server.exportGeneration(bucket)
-		// T12: propagate parent's saID so the new fh inherits the session
-		// binding (anon "" vs mount-SA "<name>").
-		parentBind, ok := d.state.FHBinding(d.currentFH)
-		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
-			d.state.BindFHWithBinding(fh, bucket, parentBind.saID, parentBind.readOnly, gen)
-		} else {
-			d.state.BindFHGeneration(fh, bucket, gen)
-		}
+		d.bindFHInheritingParent(fh, bucket, gen)
 	}
 	d.currentFH = fh
 	d.currentPath = newPath
