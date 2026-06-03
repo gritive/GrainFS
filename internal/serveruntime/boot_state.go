@@ -28,6 +28,7 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
@@ -279,7 +280,7 @@ type bootState struct {
 
 	// bootSrvOptsAndReceipt
 	srvOpts           []server.Option
-	clusterAlerts     *server.AlertsState
+	clusterAlerts     *alertssvc.State
 	receiptWiring     *HealReceiptWiring
 	incidentRecorder  *incident.Recorder
 	lifecycleSvc      *lifecycle.Service

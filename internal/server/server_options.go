@@ -7,6 +7,7 @@ import (
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -84,7 +85,7 @@ func WithMutationGate(gate *MutationGate) Option {
 	}
 }
 
-func WithAlerts(state *AlertsState) Option {
+func WithAlerts(state *alertssvc.State) Option {
 	return func(s *Server) {
 		s.alerts = state
 	}

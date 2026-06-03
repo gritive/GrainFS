@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -43,7 +44,7 @@ func TestBadgerHealth_RemoteDenied(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	srv := New(fmt.Sprintf("0.0.0.0:%d", port), backend)
 	go srv.Run() //nolint:errcheck
 
@@ -94,7 +95,7 @@ func TestRaftHealth_RemoteDenied(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	srv := New(fmt.Sprintf("0.0.0.0:%d", port), backend)
 	go srv.Run() //nolint:errcheck
 

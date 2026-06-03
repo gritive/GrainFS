@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -33,16 +34,16 @@ var _ = Describe("Zero-copy sendfile integration", func() {
 	})
 
 	startServer := func() string {
-		port := freePort(GinkgoT())
+		port := servertest.FreePort(GinkgoT())
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		s := New(addr, backend)
-		DeferCleanup(shutdownTestServer, GinkgoT(), s)
+		DeferCleanup(servertest.ShutdownServer, GinkgoT(), s)
 		go func() {
 			if err := s.Run(); err != nil && err != http.ErrServerClosed {
 				GinkgoWriter.Printf("server error: %v\n", err)
 			}
 		}()
-		waitForTCP(GinkgoT(), addr)
+		servertest.WaitTCP(GinkgoT(), addr)
 		return "http://" + addr
 	}
 

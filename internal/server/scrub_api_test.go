@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -47,7 +48,7 @@ func TestScrubAPI_RemoteDenied(t *testing.T) {
 	t.Cleanup(func() { backend.Close() })
 
 	// Bind to all interfaces so we can reach the server via the non-loopback IP.
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	srv := New(addr, backend)
 	go srv.Run() //nolint:errcheck

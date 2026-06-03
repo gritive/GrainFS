@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/klauspost/compress/zstd"
@@ -39,15 +40,15 @@ func TestRestoreSnapshotUnsupportedFormatReturnsConflict(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	kek, cid := testSnapshotKEK(t)
 	srv := New(addr, backend, WithDataDir(dataDir), WithSnapshotKEK(kek, cid))
 	go srv.Run() //nolint:errcheck
 	t.Cleanup(func() {
-		shutdownTestServer(t, srv)
+		servertest.ShutdownServer(t, srv)
 	})
-	waitForTCP(t, addr)
+	servertest.WaitTCP(t, addr)
 
 	resp, err := http.Post("http://"+addr+"/admin/snapshots/1/restore", "application/json", nil)
 	require.NoError(t, err)
@@ -70,15 +71,15 @@ func TestRestoreLegacyGzipSnapshotReturnsConflict(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	kek, cid := testSnapshotKEK(t)
 	srv := New(addr, backend, WithDataDir(dataDir), WithSnapshotKEK(kek, cid))
 	go srv.Run() //nolint:errcheck
 	t.Cleanup(func() {
-		shutdownTestServer(t, srv)
+		servertest.ShutdownServer(t, srv)
 	})
-	waitForTCP(t, addr)
+	servertest.WaitTCP(t, addr)
 
 	resp, err := http.Post("http://"+addr+"/admin/snapshots/1/restore", "application/json", nil)
 	require.NoError(t, err)
