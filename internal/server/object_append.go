@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -55,22 +56,44 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 		return true
 	}
 
-	body, err := putObjectBody(c)
-	if err != nil {
-		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
-		return true
-	}
-	if len(body) > appendBodyMaxBytes {
-		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", fmt.Sprintf("AppendObject body exceeds %d byte limit", appendBodyMaxBytes))
-		return true
-	}
-
 	ap, ok := s.backend.(storage.AppendObjecter)
 	if !ok {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "backend does not support AppendObject")
 		return true
 	}
-	obj, err := ap.AppendObject(ctx, bucket, key, off, bytes.NewReader(body))
+
+	// Large aws-chunked/streaming appends are streamed rather than buffered whole
+	// in Hertz's bytebufferpool (the retained pool is the PUT-path RSS driver).
+	// The coordinator's appendObjectLocalWithRetry re-buffers a non-seekable
+	// reader once under the same cap for stale-placement retry, so streaming the
+	// HTTP body here stays retry-safe. Small/unknown-length bodies keep the
+	// buffered path (cheap, and the cap is enforced after the read).
+	var bodyReader io.Reader
+	if putObjectShouldStream(c) {
+		streamLength := putObjectStreamLength(c)
+		if streamLength > appendBodyMaxBytes {
+			writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", fmt.Sprintf("AppendObject body exceeds %d byte limit", appendBodyMaxBytes))
+			return true
+		}
+		stream, err := putObjectPayloadReader(c)
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
+			return true
+		}
+		bodyReader = newExactLengthReader(stream, streamLength)
+	} else {
+		body, err := putObjectBody(c)
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
+			return true
+		}
+		if len(body) > appendBodyMaxBytes {
+			writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", fmt.Sprintf("AppendObject body exceeds %d byte limit", appendBodyMaxBytes))
+			return true
+		}
+		bodyReader = bytes.NewReader(body)
+	}
+	obj, err := ap.AppendObject(ctx, bucket, key, off, bodyReader)
 	switch {
 	case errors.Is(err, storage.ErrAppendOffsetMismatch):
 		writeXMLError(c, consts.StatusBadRequest, "InvalidWriteOffset", "the write offset does not match the object size")
