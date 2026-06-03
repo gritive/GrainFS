@@ -23,7 +23,7 @@ func buildACLCapabilityPlan(backend Backend) aclCapabilityPlan {
 			}
 		}
 		if plan.rollback == nil {
-			if _, blocksWrites := b.(*RecoveryWriteGate); !blocksWrites {
+			if _, blocksWrites := b.(writeBlocker); !blocksWrites {
 				if deleter, ok := b.(ObjectVersionDeleter); ok {
 					plan.rollback = deleter
 				}

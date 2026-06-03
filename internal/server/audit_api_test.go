@@ -62,7 +62,7 @@ func TestAuditHealthAPIReportsBacklog(t *testing.T) {
 	require.Equal(t, int64(123), got.OldestPendingUS)
 }
 
-func TestAuditHealthAPIAllowsUnsignedLocalDashboardWithS3AuthEnabled(t *testing.T) {
+func TestAuditHealthAPIAllowsUnsignedLocalDashboardWithS3AuthOn(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()

@@ -819,6 +819,22 @@ Planning reference: operator trust roadmap note from 2026-05-15.
   client workloads require it. Owner: TBD.
 - [ ] [nfs-audit] bit 76 charset capability flags [P2] [Skipped]: add after UTF-8
   policy is explicit. Owner: TBD.
+- [ ] **NFS object-I/O facade — do NOT re-extract [P3] [Decided].** The 2026-06-03
+  architecture review proposed collapsing the writeBuffer/PartialIO/RMW ladders in
+  `opRead`/`opWrite`/`opSetAttr`-truncate into one "object-I/O" module. **Rejected at the
+  plan gate:** (1) the duplication premise was false — the capability probes
+  (`partialIOBackend`/`preferReadAt`/`preferWriteAt`/`truncatableBackend` in
+  `backend_capabilities.go`) are already shared one-line functions, not inline templates;
+  (2) the three ladders genuinely differ (opSetAttr discards the writeBuffer ONLY inside
+  the truncatable branch); (3) a merged module would need three methods + a pooling
+  escape hatch for opRead's `opReadAtBufPool`/`readPoolSize` hot path, so its interface is
+  not smaller than what the call sites already know — it fails the deletion test (relocates
+  complexity rather than concentrating it). Future architecture reviews should not re-suggest
+  this without new evidence.
+- [ ] **opWrite double `partialIOBackend` walk [P3]** (trivial): `opWrite`
+  (`compound_io.go:186` and again `:219`) walks `partialIOBackend(d.backend)` twice on the
+  RMW-with-ReadAt fallback. A single probe reused across both branches would save one
+  decorator-chain walk. Micro-optimization only; no behavior change.
 
 ## Chunking / Large-Object Follow-Ups
 

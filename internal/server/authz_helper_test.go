@@ -26,7 +26,7 @@ func (s stubPolicyChecker) Allow(ctx context.Context, in s3auth.PermCheckInput) 
 func newAuthzHelperServer(policyAllow bool) *Server {
 	return &Server{
 		authz: s3auth.NewRequestAuthorizer(
-			nil, // iam disabled — Layer 1 skipped
+			false, // auth disabled — Layer 1 skipped
 			nil,
 			stubPolicyChecker{allow: policyAllow},
 			nil,

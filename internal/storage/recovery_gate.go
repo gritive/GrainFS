@@ -13,10 +13,21 @@ type RecoveryWriteGate struct {
 	err error
 }
 
+// writeBlocker is the capability a decorator advertises to declare that it
+// refuses all mutations, exposing the error it returns for blocked writes.
+// Plan sites key off this marker rather than a concrete type so any
+// write-blocking decorator is treated identically.
+type writeBlocker interface {
+	writeBlockError() error
+}
+
 var (
-	_ Backend     = (*RecoveryWriteGate)(nil)
-	_ Truncatable = (*RecoveryWriteGate)(nil)
+	_ Backend      = (*RecoveryWriteGate)(nil)
+	_ Truncatable  = (*RecoveryWriteGate)(nil)
+	_ writeBlocker = (*RecoveryWriteGate)(nil)
 )
+
+func (g *RecoveryWriteGate) writeBlockError() error { return g.err }
 
 func NewRecoveryWriteGate(inner Backend, err error) *RecoveryWriteGate {
 	if err == nil {
