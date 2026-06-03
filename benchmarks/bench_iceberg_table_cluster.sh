@@ -56,10 +56,15 @@ fi
 
 HTTP_PORTS=()
 RAFT_PORTS=()
+JOIN_PORTS=()
 PPROF_PORTS=()
 for idx in $(seq 1 "$NODE_COUNT"); do
   HTTP_PORTS+=("$(bench_free_port)")
   RAFT_PORTS+=("$(bench_free_port)")
+  # Stable Zero-CA join-listener port per node: the genesis seed serves the
+  # invite handler here; joiners dial the seed's port (the invite bundle carries
+  # the seed's join-listener address).
+  JOIN_PORTS+=("$(bench_free_port)")
   PPROF_PORTS+=("$(bench_free_port)")
 done
 
@@ -90,6 +95,10 @@ raft_addr() {
   echo "127.0.0.1:${RAFT_PORTS[$1]}"
 }
 
+join_addr() {
+  echo "127.0.0.1:${JOIN_PORTS[$1]}"
+}
+
 http_port() {
   echo "${HTTP_PORTS[$1]}"
 }
@@ -98,22 +107,40 @@ pprof_port() {
   echo "${PPROF_PORTS[$1]}"
 }
 
+# start_node <node_idx> [invite_bundle]
+#
+# node 0 (no bundle) is the genesis seed: it pre-stages the cluster transport PSK
+# and bootstraps the meta-raft group. Nodes 1..N (with a bundle) join via the
+# Zero-CA invite flow — GRAINFS_INVITE_BUNDLE carries the sealed PSK/KEK +
+# cluster.id + the seed's join-listener address, so joiners need NO pre-staged
+# keys. (The legacy `.join-pending` file + KEK copy this harness used were dead
+# code: nodes 1..N booted as isolated solo clusters, so the SA bootstrapped on
+# node 0 was unknown to the others — warp iceberg then failed with
+# NotAuthorizedException against whichever node it round-robined to.)
 start_node() {
   local i="$1"
+  local invite_bundle="${2:-}"
   extra=()
   if [[ "$PROFILE" == "1" ]]; then
     extra+=(--pprof-port "$(pprof_port "$i")")
   fi
 
-  # Pre-stage the cluster transport PSK on disk (replaces the removed
-  # cluster-key flag). Idempotent; must precede serve.
-  mkdir -p "$BENCH_DIR/n$i/keys.d"
-  printf '%s\n' "bench-iceberg-cluster-key" >"$BENCH_DIR/n$i/keys.d/current.key"
-  "$BINARY" serve \
+  local -a env_prefix=()
+  if [[ -z "$invite_bundle" ]]; then
+    # Genesis seed: pre-stage the cluster transport PSK (replaces the removed
+    # cluster-key flag). Idempotent; must precede serve.
+    mkdir -p "$BENCH_DIR/n$i/keys.d"
+    printf '%s\n' "bench-iceberg-cluster-key" >"$BENCH_DIR/n$i/keys.d/current.key"
+  else
+    # Joiner: the invite bundle delivers all cluster crypto + identity.
+    env_prefix=(env "GRAINFS_INVITE_BUNDLE=$invite_bundle")
+  fi
+  "${env_prefix[@]}" "$BINARY" serve \
     --data "$BENCH_DIR/n$i" \
     --port "$(http_port "$i")" \
     --node-id "bench-iceberg-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
+    --join-listen-addr "$(join_addr "$i")" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \
@@ -136,15 +163,17 @@ bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n0" "bench-iceberg-cluster
 bench_wait_file "$BENCH_DIR/n0/keys/0.key" "node-0 KEK" 100 0.2
 bench_wait_file "$BENCH_DIR/n0/cluster.id" "node-0 cluster.id" 100 0.2
 
+# Nodes 1..N-1 join the seed (node 0) via single-use Zero-CA invite bundles minted
+# on the seed's admin socket. Serial: each mint needs the live seed leader, and the
+# leader's post-join hook grows the cluster membership to the joined node set.
 for i in $(seq 1 $((NODE_COUNT - 1))); do
-  mkdir -p "$BENCH_DIR/n$i/keys"
-  cp "$BENCH_DIR/n0/keys/0.key" "$BENCH_DIR/n$i/keys/0.key"
-  chmod 600 "$BENCH_DIR/n$i/keys/0.key"
-  cp "$BENCH_DIR/n0/cluster.id" "$BENCH_DIR/n$i/cluster.id"
-  chmod 600 "$BENCH_DIR/n$i/cluster.id"
-  printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
-  chmod 600 "$BENCH_DIR/n$i/.join-pending"
-  start_node "$i"
+  bundle=$("$BINARY" cluster invite create --endpoint "$BENCH_DIR/n0/admin.sock" 2>/dev/null \
+    | awk 'f{print;exit} /GRAINFS_INVITE_BUNDLE:/{f=1}')
+  if [[ -z "$bundle" ]]; then
+    echo "[error] failed to mint invite bundle for node-$i via $BENCH_DIR/n0/admin.sock" >&2
+    exit 1
+  fi
+  start_node "$i" "$bundle"
   bench_wait_tcp_port "127.0.0.1" "$(http_port "$i")" "node-$i HTTP" 180 0.2
   if [[ "$PROFILE" == "1" ]]; then
     bench_wait_tcp_port "127.0.0.1" "$(pprof_port "$i")" "node-$i pprof" 180 0.2

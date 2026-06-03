@@ -400,24 +400,7 @@ func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
 	}
 }
 
-func TestIcebergClusterBenchCopiesKEKBeforeJoinersStart(t *testing.T) {
-	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(body)
-
-	copyKEK := strings.Index(script, `cp "$BENCH_DIR/n0/keys/0.key" "$BENCH_DIR/n$i/keys/0.key"`)
-	copyClusterID := strings.Index(script, `cp "$BENCH_DIR/n0/cluster.id" "$BENCH_DIR/n$i/cluster.id"`)
-	joinPending := strings.Index(script, `printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"`)
-	startJoiner := strings.Index(script, `start_node "$i"`)
-	if copyKEK < 0 {
-		t.Fatalf("bench_iceberg_table_cluster.sh must copy n0 keys/0.key before starting joiners")
-	}
-	if copyClusterID < 0 {
-		t.Fatalf("bench_iceberg_table_cluster.sh must copy n0 cluster.id before starting joiners")
-	}
-	if !(copyKEK < joinPending && copyClusterID < joinPending && joinPending < startJoiner) {
-		t.Fatalf("Iceberg cluster joiner KEK + cluster.id copy must happen before join-pending and start_node")
-	}
-}
+// (TestIcebergClusterBenchCopiesKEKBeforeJoinersStart removed: it asserted the dead
+// `.join-pending` + KEK-copy join model. The iceberg harness now joins via invite
+// bundles — see TestBenchIcebergClusterJoinsViaInviteBundle in
+// bench_iceberg_table_cluster_test.go.)
