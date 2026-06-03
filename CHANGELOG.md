@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.514.0] - 2026-06-04
+
+### Changed
+
+- **Stream aws-chunked PUT/AppendObject bodies ≥8MiB instead of buffering the
+  whole object** (single-node PUT-path memory). `putObjectShouldStream` excluded
+  aws-chunked payloads, and every real S3 client (minio-go, AWS SDK) over HTTP
+  sends `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` (aws-chunked) — so every PUT ≥8MiB
+  fell to the buffered `c.Request.Body()` path and materialized the full object
+  in Hertz's `bytebufferpool`. A GCP single-node 1-drive Linux profile (10MiB,
+  conc16) showed that pool at **252 MB / 43% of live heap**, the top RSS
+  contributor. The streaming machinery already decodes aws-chunked incrementally
+  (`NewAWSChunkedReader`) and the put pipeline reads stripe-by-stripe, so the body
+  need not be buffered; SigV4 verification is header-based and never re-hashes the
+  body. Fix: enable streaming for aws-chunked using `X-Amz-Decoded-Content-Length`
+  (the true object size; wire `Content-Length` is the larger encoded size incl.
+  chunk framing) for the exact-length reader. AppendObject gets the same treatment
+  (shared `putObjectStreamLength` helper) under its 64MiB cap; stale-placement
+  retry stays safe because the coordinator re-buffers a non-seekable reader once.
+  Absent/malformed decoded length falls back to the buffered path. **Measured
+  (same GCP profile): grainfs avg RSS 970 → 474 MiB (2.13x → 1.05x of MinIO's
+  453); peak 1278 → 781 MiB; PUT-load live heap 588 → 114 MB with `bytebufferpool`
+  eliminated. Throughput preserved (PUT 1.02x, GET warm 1.01x, cold 1.23x vs
+  MinIO).** The win applies to the all-local placement path (single-node);
+  multi-node remote placement spools to disk / re-buffers separately (no
+  regression, no measured change there).
+
 ## [0.0.513.0] - 2026-06-03
 
 ### Changed
