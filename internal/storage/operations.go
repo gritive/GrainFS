@@ -188,7 +188,7 @@ func buildOperationsPlan(backend Backend) operationsPlan {
 			}
 		}
 		if p.deleteObjectVersionForUndo == nil {
-			if _, blocksWrites := b.(*RecoveryWriteGate); !blocksWrites {
+			if _, blocksWrites := b.(writeBlocker); !blocksWrites {
 				if v, ok := b.(ObjectVersionDeleter); ok {
 					p.deleteObjectVersionForUndo = v
 				}
