@@ -56,3 +56,18 @@ func (d *Dispatcher) opRestoreFH() OpResult {
 	d.currentPath = d.savedPath
 	return OpResult{OpCode: OpRestoreFH, Status: NFS4_OK}
 }
+
+// bindFHInheritingParent binds fh for bucket at the given export generation,
+// propagating the current fh's saID binding (T12). A freshly created fh has
+// saID="" which would mis-classify as anon, so when the parent fh (d.currentFH)
+// carries a concrete principal — saID set and not the "(pending)" sentinel —
+// the child inherits its saID + readOnly; otherwise it gets a generation-only
+// binding. Shared by opOpen, opLookup, and opCreate.
+func (d *Dispatcher) bindFHInheritingParent(fh FileHandle, bucket string, gen uint64) {
+	parentBind, ok := d.state.FHBinding(d.currentFH)
+	if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+		d.state.BindFHWithBinding(fh, bucket, parentBind.saID, parentBind.readOnly, gen)
+	} else {
+		d.state.BindFHGeneration(fh, bucket, gen)
+	}
+}

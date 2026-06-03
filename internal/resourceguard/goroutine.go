@@ -76,54 +76,11 @@ func recordGoroutineMetrics(nodeID string, sample resourcewatch.Sample, decision
 }
 
 func recordGoroutineDecision(ctx context.Context, recorder IncidentRecorder, nodeID string, decision *resourcewatch.Decision) error {
-	if recorder == nil || decision == nil {
-		return nil
-	}
-	at := decision.Snapshot.CollectedAt
-	if at.IsZero() {
-		at = time.Now()
-	}
-	facts := []incident.Fact{{
-		CorrelationID: goroutineIncidentID(nodeID),
-		Type:          incident.FactObserved,
-		Cause:         incident.CauseGoroutineRunaway,
-		Scope:         incident.Scope{Kind: incident.ScopeNode, NodeID: nodeID},
-		Message:       decision.Message,
-		At:            at,
-	}}
-	switch decision.Level {
-	case resourcewatch.LevelOK:
-		facts = append(facts, incident.Fact{
-			CorrelationID: goroutineIncidentID(nodeID),
-			Type:          incident.FactResolved,
-			Message:       decision.Message,
-			At:            at,
-		})
-	case resourcewatch.LevelWarn:
-		facts = append(facts, incident.Fact{
-			CorrelationID: goroutineIncidentID(nodeID),
-			Type:          incident.FactDiagnosed,
-			Action:        incident.ActionResourceWarning,
-			Message:       decision.Message,
-			At:            at,
-		})
-	case resourcewatch.LevelCritical:
-		facts = append(facts, incident.Fact{
-			CorrelationID: goroutineIncidentID(nodeID),
-			Type:          incident.FactDiagnosed,
-			Action:        incident.ActionResourceWarning,
-			Message:       decision.Message,
-			At:            at,
-		}, incident.Fact{
-			CorrelationID: goroutineIncidentID(nodeID),
-			Type:          incident.FactActionFailed,
-			Action:        incident.ActionResourceWarning,
-			ErrorCode:     "goroutine_critical",
-			Message:       decision.Message,
-			At:            at,
-		})
-	}
-	return recorder.Record(ctx, facts)
+	return recordResourceDecision(ctx, recorder, nodeID, decision, decisionIncidentSpec{
+		correlationID: goroutineIncidentID(nodeID),
+		cause:         incident.CauseGoroutineRunaway,
+		criticalCode:  "goroutine_critical",
+	})
 }
 
 func sendGoroutineAlert(nodeID string, sender AlertsSender, decision *resourcewatch.Decision) {

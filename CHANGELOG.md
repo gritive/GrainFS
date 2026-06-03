@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.0.513.0] - 2026-06-03
+
+### Changed
+
+- **Split `internal/cluster/backend.go` into themed files** (navigability, no
+  behavior change). The `DistributedBackend` data-plane API (~149 methods) lived
+  in one 4610-LOC file. Moved the object operations into 8 same-package files —
+  `bucket.go`, `object_put.go`, `object_get.go`, `ec_maintenance.go`,
+  `object_delete.go`, `object_list.go`, `multipart.go`, `object_version.go` —
+  leaving the struct, constructors, config setters, topology/snapshot/propose/
+  apply core, and path helpers in `backend.go` (now 1302 LOC). This does **not**
+  decompose the god-struct (a prior seam-check ruled that infeasible); it is
+  pure file-organization. Proven behavior-neutral by a sorted-line diff (only
+  import/package/blank lines redistribute; zero code or comment lines change).
+
+## [0.0.512.0] - 2026-06-03
+
+### Added
+
+- **Uniform genesis shard-group seeding (Option B, EXPERIMENTAL, opt-in via
+  `--bootstrap-expect-nodes N`).** Today a cluster bootstrapped by starting a
+  genesis node solo and growing it with invite-join seeds its first batch of
+  shard groups while solo — at replication factor 1 (single voter = the genesis
+  node, no redundancy). Roughly half the keyspace then lives on one node with
+  **zero fault tolerance** (node loss = data loss), and that half is structurally
+  pinned to the genesis node (its leader can never move — a single-voter group
+  has no transfer target). `--bootstrap-expect-nodes N` (>1) defers the genesis
+  seed until N nodes have joined, then seeds **all** initial groups uniformly at
+  the target size's EC width — eliminating the RF=1 batch.
+  - **Result (deterministic):** RF distribution goes from `{1:8, 3:4, 4:4}` to
+    `{4:16}` on a 4-node cluster — no RF=1 zero-redundancy groups, and the
+    genesis-node pin is gone. This is a **durability/balance fix**, not a memory
+    win: with uniform EC every GET pays the cross-node erasure path, so absolute
+    per-node RSS rises (the prior RF=1 half served cheap whole-object local
+    reads). Directional supporting evidence from one paired local run: per-node
+    GET RSS skew 1.37x → 1.09x and leadership no longer genesis-dominated.
+  - **Default unchanged:** `0`/unset keeps today's seed-immediately behavior, so
+    existing single-node and cluster deployments are byte-for-byte unaffected.
+  - **Mechanism:** the genesis node derives its EC width from the declared N at
+    boot (so every boot consumer latches the final uniform width) and keeps the
+    router closed until seed; the leader-side post-join hook seeds the missing
+    groups once the target count joins. The "should I seed" decision is derived
+    from the flag + replicated group count + live node count (no persistent
+    marker), so it survives a leader change mid-bootstrap, and the seed proposes
+    only-absent groups so it is idempotent and convergent under re-entry. Joiners
+    skip the groups-visible boot gate under `--bootstrap-expect-nodes>1` (the DEK
+    readiness gate is meta-raft based, independent of shard groups); groups and
+    bucket assignments propagate live to every node once seeded.
+  - `--bootstrap-expect-timeout` (default 10m) bounds the wait.
+  - Scope: decision logic + seed wiring are unit/integration tested (suppress
+    below quorum, uniform RF at quorum, leader-change re-entry, idempotency); the
+    end-to-end joiner boot path is validated via the cluster benchmark
+    (`optionb-ab-221445`), not yet by an automated multi-node boot test.
+
+### Fixed
+
+- **`make build` / `make lint` on master** — `internal/raft/rpc_codec.go` carried
+  a trailing blank line (introduced by #708) that failed the `gofmt -l` lint gate.
+  Re-formatted; no behavior change.
+
+## [0.0.511.0] - 2026-06-03
+
+### Changed
+
+- **Three behavior-neutral architecture-deepening refactors** (concentrate
+  scattered behavior behind small seams; no behavior change), each in its own
+  commit:
+  - **s3auth**: collapsed a private `deriveSigningKey` in `post_policy.go` that
+    was a byte-identical clone of the public `DeriveSigningKey` in `sigv4.go`.
+    Its single caller now uses the public function (already exercised by 4 other
+    call sites), so this security-critical SigV4 key-derivation chain has one
+    implementation and one test surface.
+  - **resourceguard**: concentrated the three hand-copied `recordXDecision`
+    functions (FD / goroutine / vlog, ~50 identical lines each) behind one
+    `recordResourceDecision(spec)`. The control flow — an Observed fact plus a
+    Level→fact-type switch — is identical across resources; only data and two
+    vlog-specific toggles (`diagMessage` breakdown, `causeOnDerived`) vary,
+    captured in a `decisionIncidentSpec`. A new facts-capturing test pins both
+    toggles in each direction.
+  - **vfs**: concentrated the copy-on-write stat/dir cache protocol
+    (Load→Lock→reLoad→clone→Store, hand-copied at six mutation sites) behind a
+    generic `cowMap[V]` with a closure-`update` method. The closure form
+    preserves the absent-key abort (zero-allocation) and the
+    multi-delete / existed-reporting sites exactly; verified under `-race`.
+
+## [0.0.510.0] - 2026-06-03
+
+### Changed
+
+- **Concentrated the NFSv4 parent-SA filehandle-inheritance rule behind one
+  helper** (behavior-neutral). The T12 "inherit the parent fh's saID binding,
+  else fall back to a generation-only binding" block was copy-pasted verbatim
+  across three COMPOUND op handlers (`opOpen`, `opLookup`, `opCreate`). It now
+  lives in a single `Dispatcher.bindFHInheritingParent(fh, bucket, gen)` helper
+  so the inheritance precedence invariant (the `(pending)` sentinel + readOnly
+  propagation) has one home. Pure refactor, no behavior change.
+
 ## [0.0.509.0] - 2026-06-03
 
 ### Changed

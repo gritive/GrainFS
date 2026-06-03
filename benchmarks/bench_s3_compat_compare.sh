@@ -407,6 +407,10 @@ start_grainfs_cluster() {
     if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
       extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
     fi
+    if [[ -n "${GRAINFS_BOOTSTRAP_EXPECT_NODES:-}" ]]; then
+      # Option B: defer genesis seed until N nodes join → uniform RF (no RF=1 batch).
+      extra+=(--bootstrap-expect-nodes "$GRAINFS_BOOTSTRAP_EXPECT_NODES")
+    fi
     local -a env_prefix=()
     if [[ -z "$invite_bundle" ]]; then
       # Genesis seed: pre-stage the cluster transport PSK on disk (replaces the
