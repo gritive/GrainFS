@@ -15,6 +15,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -147,7 +148,7 @@ func TestAuditSearcherClosedOnShutdown(t *testing.T) {
 	defer backend.Close()
 
 	searcher := &closingAuditSearcher{}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithAuditSearcher(searcher))
 	go srv.Run() //nolint:errcheck
@@ -160,7 +161,7 @@ func TestAuditSearcherClosedOnShutdown(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	shutdownTestServer(t, srv)
+	servertest.ShutdownServer(t, srv)
 	require.True(t, searcher.closed)
 }
 

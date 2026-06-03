@@ -1,11 +1,15 @@
-// Phase 16 Week 4 — alert state surfaced to the dashboard banner.
+// Package alertssvc owns the dashboard's view of the cluster's alert plumbing
+// (degraded tracker + last-failed alert + delivery counters) and the
+// /api/admin/alerts/* HTTP surface. It was extracted from internal/server as a
+// satellite (closure-rich Deps pattern) so the server god-package no longer
+// owns the alerts subsystem directly.
 //
-// Endpoints (registered in server.go):
+// Endpoints (registered via Handler.Register):
 //
 //	GET  /api/admin/alerts/status   → JSON snapshot for the banner
 //	POST /api/admin/alerts/resend   → operator-driven retry of the last
 //	                                  failed alert (Force Resend button)
-package server
+package alertssvc
 
 import (
 	"sync/atomic"
@@ -15,29 +19,29 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
-// alertFailureSnapshot is the immutable last-failed-alert record swapped via
+// failureSnapshot is the immutable last-failed-alert record swapped via
 // atomic.Pointer so readers (StatusSnapshot, ResendLastFailed) never block.
-type alertFailureSnapshot struct {
+type failureSnapshot struct {
 	Alert      alerts.Alert
 	ErrMessage string
 	At         time.Time
 }
 
-// AlertsState owns the dashboard's view of the cluster's alert plumbing:
+// State owns the dashboard's view of the cluster's alert plumbing:
 // degraded tracker + last-failed alert + delivery counters. The Server
-// holds a single AlertsState and exposes it via /api/admin/alerts/*.
+// holds a single State and exposes it via /api/admin/alerts/*.
 //
 // All fields are lock-free: counters are atomic.Uint64, the last-failed slot
-// is atomic.Pointer[alertFailureSnapshot] (COW), and secondary callbacks live
+// is atomic.Pointer[failureSnapshot] (COW), and secondary callbacks live
 // in atomic.Pointer[[]func(bool)]. Dispatcher delivery is fire-and-forget;
 // success/failure bookkeeping happens in onResult (controller goroutine).
-type AlertsState struct {
+type State struct {
 	dispatcher *alerts.Dispatcher
 	tracker    *alerts.DegradedTracker
 
 	deliveredOK    atomic.Uint64
 	deliveryFailed atomic.Uint64
-	lastFailed     atomic.Pointer[alertFailureSnapshot]
+	lastFailed     atomic.Pointer[failureSnapshot]
 
 	// Secondary OnStateChange callbacks wired after construction (e.g. by Server).
 	// Lock-free: append-only via CompareAndSwap, snapshot-read in the tracker's
@@ -53,7 +57,7 @@ type AlertsState struct {
 // Lock-free CAS: read the current slice, build next, swap; retry if another
 // caller raced. In practice all registrations happen at startup so the loop
 // rarely iterates more than once.
-func (s *AlertsState) AddOnStateChange(fn func(bool)) {
+func (s *State) AddOnStateChange(fn func(bool)) {
 	for {
 		cur := s.secondaryCallbacks.Load()
 		var existing []func(bool)
@@ -74,13 +78,13 @@ func (s *AlertsState) AddOnStateChange(fn func(bool)) {
 // onResult (invoked from the dispatcher's controller goroutine).
 //
 // Safe to call from any goroutine.
-func (s *AlertsState) Send(a alerts.Alert) {
+func (s *State) Send(a alerts.Alert) {
 	s.dispatcher.Send(a)
 }
 
 // onResult is registered on the dispatcher Options.OnResult. Called from the
 // controller goroutine — must not block. atomic stores only.
-func (s *AlertsState) onResult(a alerts.Alert, err error) {
+func (s *State) onResult(a alerts.Alert, err error) {
 	if err == nil {
 		s.deliveredOK.Add(1)
 		metrics.AlertDeliveryAttempts.WithLabelValues("success").Inc()
@@ -89,7 +93,7 @@ func (s *AlertsState) onResult(a alerts.Alert, err error) {
 	s.deliveryFailed.Add(1)
 	metrics.AlertDeliveryAttempts.WithLabelValues("failed").Inc()
 	metrics.AlertDeliveryFailedTotal.Inc()
-	s.lastFailed.Store(&alertFailureSnapshot{
+	s.lastFailed.Store(&failureSnapshot{
 		Alert:      a,
 		ErrMessage: err.Error(),
 		At:         time.Now(),
@@ -101,17 +105,12 @@ func (s *AlertsState) onResult(a alerts.Alert, err error) {
 // used to live here was removed; gauge mirroring now happens inside the
 // tracker via DegradedConfig.OnStateChange, which is bit-exact-consistent
 // with tracker state.
-func (s *AlertsState) Tracker() *alerts.DegradedTracker {
+func (s *State) Tracker() *alerts.DegradedTracker {
 	return s.tracker
 }
 
 // Close stops the DegradedTracker actor goroutine. Call once when the server
 // shuts down. Idempotent.
-func (s *AlertsState) Close() {
+func (s *State) Close() {
 	s.tracker.Stop()
 }
-
-// Alerts returns the AlertsState wired into this server, or nil if alerts
-// were not configured. Used by other server components (raft monitor, disk
-// collector) to push fault/healthy reports.
-func (s *Server) Alerts() *AlertsState { return s.alerts }

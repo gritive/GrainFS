@@ -1,11 +1,10 @@
-package server
+package alertssvc
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,11 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	hertz "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 )
 
 type fakeReceiver struct {
@@ -46,23 +47,27 @@ func newFailingReceiver(t *testing.T, fails int) *fakeReceiver {
 
 // startTestAlertsServer spins up a real Hertz server on a free localhost port
 // with only the alerts endpoints registered. Returns its base URL and a
-// shutdown helper. Real localhost is required because /api/admin/alerts/*
-// runs through localhostOnly() — synthetic ut requests fail with 403.
+// shutdown helper.
 //
 // Also starts the dispatcher actor and registers a Cleanup that stops it
-// before st.Close — production wiring will start the dispatcher in a later
-// task; until then, tests that exercise Send must start it here.
-func startTestAlertsServer(t *testing.T, st *AlertsState) string {
+// before st.Close — tests that exercise Send must start it here.
+func startTestAlertsServer(t *testing.T, st *State) string {
 	t.Helper()
-	port := freeLocalPort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	h := hertz.Default(
 		hertz.WithHostPorts(addr),
-		hertz.WithExitWaitTime(testServerShutdownTimeout),
+		hertz.WithExitWaitTime(servertest.ShutdownTimeout),
 	)
-	srv := &Server{alerts: st}
-	srv.registerAlertsAPI(h)
+	NewHandler(Deps{
+		State:            st,
+		LocalhostOnly:    func() app.HandlerFunc { return func(c context.Context, rc *app.RequestContext) { rc.Next(c) } },
+		MutationDisabled: func(*app.RequestContext, string) bool { return false },
+		FeatureVisible:   func() bool { return true },
+		StatusPath:       "/api/admin/alerts/status",
+		ResendPath:       "/api/admin/alerts/resend",
+	}).Register(h)
 
 	go h.Spin()
 
@@ -76,21 +81,13 @@ func startTestAlertsServer(t *testing.T, st *AlertsState) string {
 	}
 
 	t.Cleanup(func() {
-		shutdownTestServer(t, h)
+		servertest.ShutdownServer(t, h)
 	})
 	t.Cleanup(st.Close)
 
 	base := "http://" + addr
-	waitForTCP(t, addr)
+	servertest.WaitTCP(t, addr)
 	return base
-}
-
-func freeLocalPort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
 }
 
 func getJSON(t *testing.T, url string, into any) {
@@ -119,7 +116,7 @@ func postJSON(t *testing.T, url string, into any) int {
 
 func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
 	r := newFailingReceiver(t, 0)
-	st := NewAlertsState(r.srv.URL, alerts.Options{
+	st := NewState(r.srv.URL, alerts.Options{
 		MaxRetries:  0,
 		BackoffBase: time.Millisecond,
 	}, alerts.DegradedConfig{})
@@ -128,7 +125,7 @@ func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
 	st.Send(alerts.Alert{Type: "ok", Severity: alerts.SeverityWarning, Message: "ok"})
 	st.dispatcher.DrainForTest()
 
-	var got alertsStatusResponse
+	var got StatusResponse
 	getJSON(t, base+"/api/admin/alerts/status", &got)
 
 	assert.False(t, got.Degraded)
@@ -139,7 +136,7 @@ func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
 
 func TestAlertsStatus_FailureSurfacesForBanner(t *testing.T) {
 	r := newFailingReceiver(t, 999)
-	st := NewAlertsState(r.srv.URL, alerts.Options{
+	st := NewState(r.srv.URL, alerts.Options{
 		MaxRetries:  1,
 		BackoffBase: time.Millisecond,
 		BackoffCap:  2 * time.Millisecond,
@@ -154,7 +151,7 @@ func TestAlertsStatus_FailureSurfacesForBanner(t *testing.T) {
 	})
 	st.dispatcher.DrainForTest()
 
-	var got alertsStatusResponse
+	var got StatusResponse
 	getJSON(t, base+"/api/admin/alerts/status", &got)
 	assert.EqualValues(t, 0, got.DeliveredOK)
 	assert.EqualValues(t, 1, got.DeliveryFailed)
@@ -166,7 +163,7 @@ func TestAlertsResend_ClearsBannerOnSuccess(t *testing.T) {
 	// 1 try + 1 retry both fail (2 failures), then resend tries lands on
 	// the third (now-healthy) attempt.
 	r := newFailingReceiver(t, 2)
-	st := NewAlertsState(r.srv.URL, alerts.Options{
+	st := NewState(r.srv.URL, alerts.Options{
 		MaxRetries:  1,
 		BackoffBase: time.Millisecond,
 		BackoffCap:  2 * time.Millisecond,
@@ -186,13 +183,13 @@ func TestAlertsResend_ClearsBannerOnSuccess(t *testing.T) {
 	require.True(t, resend.Resent, "resend must succeed once receiver heals: %s", resend.Error)
 	st.dispatcher.DrainForTest()
 
-	var got alertsStatusResponse
+	var got StatusResponse
 	getJSON(t, base+"/api/admin/alerts/status", &got)
 	assert.Empty(t, got.LastFailedType, "successful resend must clear the banner")
 }
 
 func TestAlertsResend_NoFailedAlertReturnsFalse(t *testing.T) {
-	st := NewAlertsState("", alerts.Options{}, alerts.DegradedConfig{})
+	st := NewState("", alerts.Options{}, alerts.DegradedConfig{})
 	base := startTestAlertsServer(t, st)
 
 	var out map[string]any
@@ -209,7 +206,7 @@ func TestAlertsResend_NoFailedAlertReturnsFalse(t *testing.T) {
 // read — concurrent writers could interleave between those two steps, and the
 // race detector caught the split.
 func TestAlertsState_ConcurrentReportsHaveNoRace(t *testing.T) {
-	st := NewAlertsState("", alerts.Options{}, alerts.DegradedConfig{
+	st := NewState("", alerts.Options{}, alerts.DegradedConfig{
 		// Non-default FlapWindow bypasses the zero-config production-defaults
 		// fallback so ExitStableWindow stays at 0 (immediate exit per report).
 		FlapWindow:    1 * time.Second,
@@ -241,7 +238,7 @@ func TestAlertsState_ConcurrentReportsHaveNoRace(t *testing.T) {
 func TestGaugeTracker_MirrorsDegradedState(t *testing.T) {
 	// Pass ExitStableWindow=-1 to suppress the "all-zero = production
 	// defaults" fallback so we get exit-on-tick semantics.
-	st := NewAlertsState("", alerts.Options{}, alerts.DegradedConfig{
+	st := NewState("", alerts.Options{}, alerts.DegradedConfig{
 		ExitStableWindow: -1,
 	})
 	defer st.Close()
@@ -255,7 +252,7 @@ func TestGaugeTracker_MirrorsDegradedState(t *testing.T) {
 
 	// Use a fresh state with explicitly-zero (immediate exit) window via
 	// a non-empty FlapWindow to bypass the zero-config fallback.
-	st2 := NewAlertsState("", alerts.Options{}, alerts.DegradedConfig{
+	st2 := NewState("", alerts.Options{}, alerts.DegradedConfig{
 		ExitStableWindow: 0,
 		FlapWindow:       1 * time.Second,
 		FlapThreshold:    99,

@@ -1,4 +1,4 @@
-package server
+package alertssvc
 
 import (
 	"bytes"
@@ -100,7 +100,7 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
 	fsm.SetDEKKeeper(keeper) // required before any patch carrying AlertWebhookSecretWrapped
 
-	state := NewAlertsStateWithConfig(
+	state := NewStateWithConfig(
 		fsm.ClusterConfig(),
 		enc,
 		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},

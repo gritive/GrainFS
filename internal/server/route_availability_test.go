@@ -6,6 +6,7 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/receipt"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 )
 
 func TestRouteAvailabilityManifestDocumentsHiddenOptionalFeatures(t *testing.T) {
@@ -114,7 +115,7 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenFeatures(t *testing
 
 func TestRouteFeatureRoutesVisibleWhenDependencyExists(t *testing.T) {
 	s := &Server{
-		alerts:        &AlertsState{},
+		alerts:        &alertssvc.State{},
 		incidentStore: &incidentStoreStub{},
 		receiptAPI:    receipt.NewAPI(nil, nil, nil, 0),
 		auditOutbox:   &audit.Outbox{},

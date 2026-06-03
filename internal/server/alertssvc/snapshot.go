@@ -1,9 +1,9 @@
-package server
+package alertssvc
 
 import "time"
 
-// alertsStatusResponse mirrors the dashboard banner contract.
-type alertsStatusResponse struct {
+// StatusResponse mirrors the dashboard banner contract.
+type StatusResponse struct {
 	Degraded          bool      `json:"degraded"`
 	Held              bool      `json:"held"`
 	LastReason        string    `json:"last_reason,omitempty"`
@@ -18,9 +18,9 @@ type alertsStatusResponse struct {
 	WebhookConfigured bool      `json:"webhook_configured"`
 }
 
-func (s *AlertsState) StatusSnapshot() alertsStatusResponse {
+func (s *State) StatusSnapshot() StatusResponse {
 	st := s.tracker.Status()
-	resp := alertsStatusResponse{
+	resp := StatusResponse{
 		Degraded:          st.Degraded,
 		Held:              st.Held,
 		LastReason:        st.LastReason,
@@ -44,7 +44,7 @@ func (s *AlertsState) StatusSnapshot() alertsStatusResponse {
 // (fire-and-forget — the actual delivery result lands in onResult). The
 // last-failed slot is cleared optimistically so the banner disappears on the
 // next status poll; if the resend ultimately fails, onResult re-populates it.
-func (s *AlertsState) ResendLastFailed() (bool, error) {
+func (s *State) ResendLastFailed() (bool, error) {
 	snap := s.lastFailed.Load()
 	if snap == nil {
 		return false, nil

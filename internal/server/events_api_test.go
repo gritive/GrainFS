@@ -17,6 +17,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -47,7 +48,7 @@ func setupTestServerWithEventsAndBackend(t *testing.T) (string, *storage.LocalBa
 	t.Cleanup(func() { db.Close() })
 	evStore := eventstore.New(db)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithEventStore(evStore), withEventQueueSize(testEventQueueSize))
 	go srv.Run() //nolint:errcheck

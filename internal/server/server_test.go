@@ -25,60 +25,9 @@ import (
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
-
-type serverTestTB interface {
-	Helper()
-	Errorf(format string, args ...interface{})
-	FailNow()
-}
-
-func freePort(t serverTestTB) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "freePort")
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port
-}
-
-const testServerShutdownTimeout = 10 * time.Millisecond
-
-func waitForTCP(t interface {
-	serverTestTB
-	Fatalf(format string, args ...interface{})
-}, addr string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		lastErr = err
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("server %s did not become ready: %v", addr, lastErr)
-}
-
-type serverCleanupTB interface {
-	Helper()
-	Logf(format string, args ...any)
-}
-
-func shutdownTestServer(t serverCleanupTB, srv interface {
-	Shutdown(context.Context) error
-}) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), testServerShutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		t.Logf("test server shutdown: %v", err)
-	}
-}
 
 func withoutReadAfterWriteRetry() Option {
 	return func(s *Server) {
@@ -93,9 +42,9 @@ func startTestServer(t testing.TB, addr string, backend storage.Backend, opts ..
 	testOpts = append(testOpts, opts...)
 	srv := New(addr, backend, testOpts...)
 	go func() { _ = srv.Run() }()
-	waitForTCP(t, addr)
+	servertest.WaitTCP(t, addr)
 	t.Cleanup(func() {
-		shutdownTestServer(t, srv)
+		servertest.ShutdownServer(t, srv)
 	})
 	return srv
 }
@@ -118,7 +67,7 @@ func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.
 	require.NoError(t, err, "NewLocalBackend")
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	startTestServer(t, addr, backend, opts...)
 	return "http://" + addr, backend
@@ -128,7 +77,7 @@ func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.
 // data plane. Use in tests that need a bucket to exist as precondition without
 // testing the CreateBucket endpoint itself (D#8: CreateBucket is admin-UDS-only
 // on the S3 plane).
-func mustCreateBucket(t serverTestTB, backend *storage.LocalBackend, name string) {
+func mustCreateBucket(t servertest.TB, backend *storage.LocalBackend, name string) {
 	t.Helper()
 	ctx := context.Background()
 	if ctxT, ok := t.(interface{ Context() context.Context }); ok {
@@ -1410,7 +1359,7 @@ func TestGracefulShutdown(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend)
 	go srv.Run()

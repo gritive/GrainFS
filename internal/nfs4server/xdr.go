@@ -342,6 +342,24 @@ func ParseCompound(data []byte, req *CompoundRequest) error {
 	return nil
 }
 
+// skipWords consumes and discards n uint32 XDR words. Errors are ignored to
+// match the per-op arg decoders below, which tolerate truncated optional
+// sections rather than failing the whole COMPOUND.
+func skipWords(r *XDRReader, n uint32) {
+	for i := uint32(0); i < n; i++ {
+		r.ReadUint32() //nolint:errcheck
+	}
+}
+
+// skipBitmap reads a bitmap4 length prefix then skips that many words. This is
+// the recurring "read bitmapLen, loop to discard" idiom used by the CREATE,
+// OPEN, EXCHANGE_ID and IO_ADVISE arg decoders for attribute/hint bitmaps they
+// do not need to forward to the handler.
+func skipBitmap(r *XDRReader) {
+	n, _ := r.ReadUint32()
+	skipWords(r, n)
+}
+
 // readOpArgs reads the XDR arguments for a specific op.
 // Returns (data, poolKey, err). poolKey 0=no pool, 8/16/32=opArgPool{8,16,32}.
 func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
@@ -404,10 +422,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		}
 		name, _ := r.ReadString()
 		// fattr4 createattrs: bitmap4 + opaque attrlist
-		bitmapLen, _ := r.ReadUint32()
-		for i := uint32(0); i < bitmapLen; i++ {
-			r.ReadUint32()
-		}
+		skipBitmap(r)
 		r.ReadOpaque()
 		w := getXDRWriter()
 		w.WriteUint32(objType)
@@ -505,19 +520,13 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 			createMode, _ := r.ReadUint32()
 			switch createMode {
 			case 0, 1: // UNCHECKED4, GUARDED4: both carry fattr4
-				bitmapLen, _ := r.ReadUint32()
-				for i := uint32(0); i < bitmapLen; i++ {
-					r.ReadUint32()
-				}
+				skipBitmap(r)
 				r.ReadOpaque() // attrvals
 			case 2: // EXCLUSIVE4: 8-byte verifier
 				r.ReadFixed(8)
 			case 3: // EXCLUSIVE4_1: verifier + fattr4
 				r.ReadFixed(8)
-				bitmapLen, _ := r.ReadUint32()
-				for i := uint32(0); i < bitmapLen; i++ {
-					r.ReadUint32()
-				}
+				skipBitmap(r)
 				r.ReadOpaque()
 			}
 		}
@@ -627,10 +636,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		// For SP4_MACH_CRED skip two bitmaps; we only support SP4_NONE
 		if spaHow == 1 {
 			for i := 0; i < 2; i++ {
-				blen, _ := r.ReadUint32()
-				for j := uint32(0); j < blen; j++ {
-					r.ReadUint32()
-				}
+				skipBitmap(r)
 			}
 		}
 		// eia_client_impl_id: nfs_impl_id4<1>
@@ -666,9 +672,8 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		if secCount > 64 {
 			secCount = 0
 		}
-		for i := uint32(0); i < secCount; i++ {
-			r.ReadUint32() // cb_secflavor; we only expect AUTH_NONE=0
-		}
+		// cb_secflavor list; we only expect AUTH_NONE=0
+		skipWords(r, secCount)
 		w := getXDRWriter()
 		w.WriteUint64(clientID)
 		w.WriteUint32(seq)
@@ -766,10 +771,7 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		r.ReadFixed(16) //nolint:errcheck // stateid
 		r.ReadUint64()  // offset
 		r.ReadUint64()  // count
-		blen, _ := r.ReadUint32()
-		for i := uint32(0); i < blen; i++ {
-			r.ReadUint32()
-		}
+		skipBitmap(r)
 		return nil, 0, nil
 
 	case OpDestroyClientID:

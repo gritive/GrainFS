@@ -14,6 +14,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -31,7 +32,7 @@ func setupCacheTestServer(t *testing.T, blockCap, shardCap int64) (string, *bloc
 	bc := blockcache.New(blockCap)
 	sc := shardcache.New(shardCap)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithBlockCache(bc), WithShardCache(sc))
 	go srv.Run() //nolint:errcheck
