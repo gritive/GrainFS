@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.507.0] - 2026-06-03
+
+### Changed
+
+- **Removed the vestigial `AuthEnabled()` indirection from the authorizer**
+  (behavior-neutral). `iam.Store.AuthEnabled()` had been a constant-`true`
+  compatibility shim ever since v0.0.107.0 made authz always-on, yet the
+  `s3auth.RequestAuthorizer` still reached it through a one-method
+  `s3auth.IAMStore` interface. The interface and the shim method are deleted;
+  the authorizer now carries a plain `authEnabled bool` set at construction
+  (`buildAuthorizer` computes `s.iamStore != nil`, exactly the prior derivation
+  since the shim was constant-true). The no-IAM / `anonymous_pass` path is
+  preserved verbatim and still tested. `grep AuthEnabled` is now empty.
+- **Write-blocking decorators are detected by capability, not concrete type**
+  (behavior-neutral). The three storage-facade plan sites that special-cased the
+  recovery write gate asserted the concrete `*storage.RecoveryWriteGate` type;
+  they now key off a small unexported `writeBlocker` capability the gate
+  advertises (exposing the error it returns for blocked mutations). Only
+  `RecoveryWriteGate` satisfies it today, so runtime behavior is identical, and a
+  future write-blocking decorator (quota gate, read-only-mount gate) is handled
+  without editing the plan sites.
+
 ## [0.0.506.0] - 2026-06-03
 
 ### Fixed
