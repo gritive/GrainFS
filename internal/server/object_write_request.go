@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -38,11 +39,35 @@ func putObjectContentType(c *app.RequestContext) string {
 	return "application/octet-stream"
 }
 
+// putObjectDecodedContentLength parses the X-Amz-Decoded-Content-Length header
+// (the true object size that real S3 clients send alongside an aws-chunked
+// STREAMING-* payload, since Content-Length there is the encoded size including
+// per-chunk framing). Returns -1 when the header is absent or malformed.
+func putObjectDecodedContentLength(c *app.RequestContext) int64 {
+	raw := string(c.GetHeader("X-Amz-Decoded-Content-Length"))
+	if raw == "" {
+		return -1
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
+}
+
 func putObjectShouldStream(c *app.RequestContext) bool {
-	contentLength := c.Request.Header.ContentLength()
-	return c.Request.IsBodyStream() &&
-		contentLength >= putObjectStreamingThresholdBytes &&
-		!isAWSChunkedPayload(c)
+	if !c.Request.IsBodyStream() {
+		return false
+	}
+	// aws-chunked: Content-Length is the ENCODED size (chunk framing), so gate on
+	// the decoded object size. putObjectPayloadReader decodes the chunked stream
+	// incrementally (NewAWSChunkedReader), so a large chunked body streams without
+	// buffering the whole object. Falls back to buffered when the decoded size is
+	// absent/unusable so the exact-length reader always has a trustworthy size.
+	if isAWSChunkedPayload(c) {
+		return putObjectDecodedContentLength(c) >= putObjectStreamingThresholdBytes
+	}
+	return int64(c.Request.Header.ContentLength()) >= putObjectStreamingThresholdBytes
 }
 
 func putObjectBody(c *app.RequestContext) ([]byte, error) {

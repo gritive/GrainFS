@@ -109,10 +109,18 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 			c.AbortWithMsg(err.Error(), consts.StatusBadRequest)
 			return
 		}
-		contentLength := int64(c.Request.Header.ContentLength())
-		sizeHint = &contentLength
-		bodyBytes = contentLength
-		body = newExactLengthReader(stream, contentLength)
+		// For aws-chunked the wire Content-Length includes per-chunk framing;
+		// the decoded stream (NewAWSChunkedReader) yields only the object bytes,
+		// so the exact-length reader must enforce the decoded size, not the
+		// encoded one (else it short-reads and fails the PUT). putObjectShouldStream
+		// guarantees a valid decoded length for the aws-chunked streaming case.
+		streamLength := int64(c.Request.Header.ContentLength())
+		if isAWSChunkedPayload(c) {
+			streamLength = putObjectDecodedContentLength(c)
+		}
+		sizeHint = &streamLength
+		bodyBytes = streamLength
+		body = newExactLengthReader(stream, streamLength)
 	} else {
 		rawBody, err := putObjectBody(c)
 		if err != nil {
