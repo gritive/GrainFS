@@ -300,7 +300,10 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	if err != nil {
 		return nil, err
 	}
-	return s.transport.Call(ctx, peerAddr, msg)
+	// CallPooled (reused conn) not Call (connection-per-RPC): SendRequest forwards
+	// every PUT's index/group proposal to the leader, so a fresh TLS handshake per
+	// forward was a PUT-hot-path cost (alongside meta-raft + shard writes).
+	return s.transport.CallPooled(ctx, peerAddr, msg)
 }
 
 // Ping verifies that the peer's transport shard service can accept a bidirectional

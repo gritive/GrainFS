@@ -374,6 +374,61 @@ func (t *TCPTransport) callFlatBufferOnce(ctx context.Context, addr string, conn
 	return resp, nil
 }
 
+// CallPooled is Call over a pooled (reused) connection. Same clean request →
+// framed response cycle as Call, but it checks a conn out of the data-plane pool
+// and returns it only after a fully-clean cycle (so the conn stays frame-aligned
+// for the next transfer). Used by hot-path control RPCs that are clean
+// request/response with no body — e.g. ShardService.SendRequest, which forwards
+// every PUT's index/group proposal to the leader; leaving that on Call made each
+// forward pay a fresh TLS handshake. Framing safety + clean-cycle discipline are
+// identical to CallFlatBuffer (length-prefixed BinaryCodec, no trailing bytes);
+// no resp-ID desync guard for the same reason documented there. A reused conn
+// that dies before the request frame is written is retried once on a fresh dial.
+func (t *TCPTransport) CallPooled(ctx context.Context, addr string, req *Message) (*Message, error) {
+	for attempt := 0; ; attempt++ {
+		conn, reused, err := t.getDataConn(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		resp, rerr := t.callPooledOnce(ctx, addr, conn, req)
+		if rerr != nil && reused && attempt == 0 && errors.Is(rerr, errStalePreBody) {
+			continue // stale reused conn discarded inside; dial fresh
+		}
+		return resp, rerr
+	}
+}
+
+func (t *TCPTransport) callPooledOnce(ctx context.Context, addr string, conn net.Conn, req *Message) (*Message, error) {
+	clean := false
+	defer func() {
+		if clean && ctx.Err() == nil {
+			_ = conn.SetDeadline(time.Time{})
+			t.pool.checkin(addr, conn)
+		} else {
+			t.pool.discard(addr, conn)
+		}
+	}()
+	stop := t.applyCtx(ctx, conn)
+	defer stop()
+
+	if err := t.codec.Encode(conn, req); err != nil {
+		// Pre-response failure: nothing useful delivered (a reused-but-dead conn
+		// fails the write fast) → safe to retry once on a fresh dial.
+		return nil, fmt.Errorf("%w: encode request to %s: %v", errStalePreBody, addr, err)
+	}
+	resp, err := t.codec.Decode(conn)
+	if err != nil {
+		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
+	}
+	resp, err = checkResponseStatus(addr, resp)
+	if err != nil {
+		clean = true // complete frame, no body → conn clean/reusable
+		return nil, err
+	}
+	clean = true
+	return resp, nil
+}
+
 // Send delivers a fire-and-forget message (no response). connection-per-RPC:
 // dial, write the frame, close. Used by gossip/receipt-gossip.
 func (t *TCPTransport) Send(ctx context.Context, addr string, msg *Message) error {

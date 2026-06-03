@@ -26,6 +26,7 @@ type callerTransport interface {
 // shardTransport: the rich surface ShardService uses (bulk body + flatbuffer + handlers).
 type shardTransport interface {
 	Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
+	CallPooled(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
 	CallWithBody(ctx context.Context, addr string, req *transport.Message, body io.Reader) (*transport.Message, error)
 	CallRead(ctx context.Context, addr string, req *transport.Message) (*transport.Message, io.ReadCloser, error)
 	CallFlatBuffer(ctx context.Context, addr string, fw *transport.FlatBuffersWriter) (*transport.Message, error)
