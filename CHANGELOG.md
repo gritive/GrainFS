@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.511.0] - 2026-06-03
+
+### Changed
+
+- **Three behavior-neutral architecture-deepening refactors** (concentrate
+  scattered behavior behind small seams; no behavior change), each in its own
+  commit:
+  - **s3auth**: collapsed a private `deriveSigningKey` in `post_policy.go` that
+    was a byte-identical clone of the public `DeriveSigningKey` in `sigv4.go`.
+    Its single caller now uses the public function (already exercised by 4 other
+    call sites), so this security-critical SigV4 key-derivation chain has one
+    implementation and one test surface.
+  - **resourceguard**: concentrated the three hand-copied `recordXDecision`
+    functions (FD / goroutine / vlog, ~50 identical lines each) behind one
+    `recordResourceDecision(spec)`. The control flow — an Observed fact plus a
+    Level→fact-type switch — is identical across resources; only data and two
+    vlog-specific toggles (`diagMessage` breakdown, `causeOnDerived`) vary,
+    captured in a `decisionIncidentSpec`. A new facts-capturing test pins both
+    toggles in each direction.
+  - **vfs**: concentrated the copy-on-write stat/dir cache protocol
+    (Load→Lock→reLoad→clone→Store, hand-copied at six mutation sites) behind a
+    generic `cowMap[V]` with a closure-`update` method. The closure form
+    preserves the absent-key abort (zero-allocation) and the
+    multi-delete / existed-reporting sites exactly; verified under `-race`.
+
 ## [0.0.510.0] - 2026-06-03
 
 ### Changed
