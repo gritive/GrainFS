@@ -794,6 +794,7 @@ write_summary_header() {
     echo "- delete batch: ${WARP_DELETE_BATCH}"
     echo "- duration: ${WARP_DURATION}"
     echo "- concurrency: ${WARP_CONCURRENT}"
+    echo "- grainfs fsync mode: ${GRAINFS_FSYNC_MODE:-full} ($([ "${GRAINFS_FSYNC_MODE:-full}" = "fast" ] && echo "plain fsync(2) — matches MinIO's macOS durability" || echo "SyncFull = F_FULLFSYNC on macOS, full power-loss barrier"))"
     echo "- noclear: ${WARP_NOCLEAR}"
     echo "- host select: ${WARP_HOST_SELECT}"
     echo "- raw artifacts: ${PROFILE_ROOT}"
@@ -802,6 +803,8 @@ write_summary_header() {
     echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. By default (WARP_NOCLEAR=0) each op clears the objects it created, bounding peak disk to a single op's working set; set WARP_NOCLEAR=1 to retain objects across ops (GET then measures a warm-read pass over the preceding PUT, at the cost of unbounded accumulation). DELETE uses warp's batch delete workload."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. Local MinIO/RustFS single-node targets use their default single-node durability; local \`*-cluster\` targets boot 4-node distributed clusters unless overridden."
+    echo
+    echo "> Durability caveat (PUT): GrainFS defaults to \`SyncFull\` = \`F_FULLFSYNC\` on macOS — a full drive-cache→platter barrier (~10-40ms per group-commit) for power-loss durability. MinIO's observed PUT median (~3.7ms) is far below one F_FULLFSYNC, so it does not pay that barrier per object on macOS. For a durability-MATCHED PUT comparison, run GrainFS with \`GRAINFS_FSYNC_MODE=fast\` (plain fsync(2)); at matched durability GrainFS beats MinIO on macOS (measured PUT ~1.48x, GET ~2.58x, same-run). On Linux \`SyncFull\` == plain fsync(2) (no F_FULLFSYNC), so the GrainFS default already runs at the \`fast\` throughput level there — the gap is a macOS-only durability artifact, not a throughput deficiency."
     bench_print_host_preflight_warnings
     echo
     echo "| target | mode | op | MiB/s | obj/s | errors | ratio vs MinIO | ratio vs RustFS | artifacts |"
