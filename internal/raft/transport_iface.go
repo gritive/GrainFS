@@ -6,8 +6,8 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// raftRPCTransport is the transport-agnostic RPC sender surface used by the
-// meta-Raft transport (Call to send, Handle to register the inbound handler).
+// raftRPCTransport is the transport-agnostic RPC sender surface (Call to send,
+// Handle to register the inbound handler) embedded by muxDriverTransport below.
 // *transport.TCPTransport satisfies this today.
 type raftRPCTransport interface {
 	Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
