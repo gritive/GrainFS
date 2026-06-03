@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.504.0] - 2026-06-03
+
+### Changed
+
+- **Cluster PUT hot-path RPCs reuse pooled TCP connections instead of dialing per
+  request.** Three node-to-node control RPCs on the PUT path each previously paid a
+  fresh TLS 1.3 handshake per call: meta-raft AppendEntries/RequestVote (now routed
+  over the persistent mux carrier with a `Call` fallback), the shard-write
+  `CallFlatBuffer`, and `ShardService.SendRequest` (the leader index/group-proposal
+  forward). They now check a connection out of the data-plane pool and return it
+  after a clean request/response cycle. On a 4-node cluster PUT benchmark this drops
+  per-RPC handshake CPU from ~62% to ~0% of the PUT profile. No throughput-parity
+  claim on macOS — that path is latency-bound; the win is eliminated handshake CPU
+  plus full connection reuse across every PUT hot-path RPC.
+- **Dependency refresh** (`go.mod`/`go.sum`): aws-sdk-go-v2 (s3 1.101→1.103,
+  smithy 1.25.1→1.27.0), OpenTelemetry 1.43→1.44, duckdb-go 2.10503.0→.1, and their
+  transitive pins. Build + vet + unit suite stay green.
+
+### Fixed
+
+- **Benchmark harness forms a real 4-node cluster.** `bench_s3_compat_compare.sh`
+  replaced a dead `.join-pending` follower-join path — which left nodes 2..N as
+  isolated single-node clusters, so every shard group ended up single-voter (RF=1)
+  on the seed — with the Zero-CA invite-bundle join flow. The genesis seed mints a
+  single-use `GRAINFS_INVITE_BUNDLE` per joiner on its admin socket; joiners boot
+  with the bundle (sealed PSK/KEK + cluster.id + seed join-listener address) and
+  pre-stage no keys. `grainfs-cluster` benchmarks now measure an actual distributed
+  cluster.
+
 ## [0.0.503.0] - 2026-06-03
 
 ### Removed
