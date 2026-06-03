@@ -365,6 +365,7 @@ start_grainfs_cluster() {
   local cluster_dir="$BENCH_DIR/gfc"
   local http_ports=()
   local raft_ports=()
+  local join_ports=()
   local pprof_ports=()
   local urls=()
   local idx
@@ -374,6 +375,10 @@ start_grainfs_cluster() {
     register_target_data_dir "$cluster_dir/n${idx}"
     http_ports+=("$(bench_free_port)")
     raft_ports+=("$(bench_free_port)")
+    # Stable Zero-CA join-listener port per node. The genesis node serves the
+    # invite handler here; joiners bind their own (the invite bundle carries the
+    # seed's join-listener address, so joiners dial the seed's port).
+    join_ports+=("$(bench_free_port)")
     if [[ "$BENCH_PPROF" == "1" ]]; then
       pprof_ports+=("$((PPROF_BASE_PORT + idx - 1))")
     fi
@@ -381,8 +386,19 @@ start_grainfs_cluster() {
   if [[ "$BENCH_PPROF" == "1" ]]; then
     GRAINFS_PPROF_PORTS=("${pprof_ports[@]}")
   fi
+  # start_grainfs_cluster_node <node_idx> [invite_bundle]
+  #
+  # node 1 (no bundle) is the genesis seed: it pre-stages the cluster transport
+  # PSK and bootstraps the meta-raft group + initial shard groups. Nodes 2..N
+  # (with a bundle) join via the Zero-CA invite flow — GRAINFS_INVITE_BUNDLE
+  # carries the sealed PSK/KEK + cluster.id + the seed's join-listener address,
+  # so joiners need NO pre-staged keys. The legacy `.join-pending` file the bench
+  # used to write is dead code (never read at boot since the invite-join model
+  # landed) — without a real join, nodes 2..N booted as isolated solo clusters,
+  # which is why every shard group ended up single-voter (RF=1) on the seed.
   start_grainfs_cluster_node() {
     local node_idx="$1"
+    local invite_bundle="${2:-}"
     local zero_idx=$((node_idx - 1))
     local extra=()
     if [[ "$BENCH_PPROF" == "1" ]]; then
@@ -391,15 +407,22 @@ start_grainfs_cluster() {
     if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
       extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
     fi
-    # Pre-stage the cluster transport PSK on disk (replaces the removed
-    # cluster-key flag). Idempotent; must precede serve.
-    mkdir -p "$cluster_dir/n${node_idx}/keys.d"
-    printf '%s\n' "bench-s3-compat-cluster-key" >"$cluster_dir/n${node_idx}/keys.d/current.key"
-    "$BINARY" serve \
+    local -a env_prefix=()
+    if [[ -z "$invite_bundle" ]]; then
+      # Genesis seed: pre-stage the cluster transport PSK on disk (replaces the
+      # removed cluster-key flag). Idempotent; must precede serve.
+      mkdir -p "$cluster_dir/n${node_idx}/keys.d"
+      printf '%s\n' "bench-s3-compat-cluster-key" >"$cluster_dir/n${node_idx}/keys.d/current.key"
+    else
+      # Joiner: the invite bundle delivers all cluster crypto + identity.
+      env_prefix=(env "GRAINFS_INVITE_BUNDLE=$invite_bundle")
+    fi
+    "${env_prefix[@]}" "$BINARY" serve \
       --data "$cluster_dir/n${node_idx}" \
       --port "${http_ports[$zero_idx]}" \
       --node-id "bench-node-${node_idx}" \
       --raft-addr "127.0.0.1:${raft_ports[$zero_idx]}" \
+      --join-listen-addr "127.0.0.1:${join_ports[$zero_idx]}" \
       $(bench_encryption_args) \
       --nfs4-port 0 \
       --nbd-port 0 \
@@ -416,20 +439,22 @@ start_grainfs_cluster() {
   }
 
   start_grainfs_cluster_node 1
-  local kek_file="$cluster_dir/n1/keys/0.key"
-  local cluster_id_file="$cluster_dir/n1/cluster.id"
-  bench_wait_file "$kek_file" "grainfs-cluster node1 KEK" 100 0.2 >&2
-  bench_wait_file "$cluster_id_file" "grainfs-cluster node1 cluster.id" 100 0.2 >&2
+  bench_wait_file "$cluster_dir/n1/keys/0.key" "grainfs-cluster node1 KEK" 100 0.2 >&2
+  bench_wait_file "$cluster_dir/n1/cluster.id" "grainfs-cluster node1 cluster.id" 100 0.2 >&2
   bench_bootstrap_iam_credentials "$BINARY" "$cluster_dir/n1" "bench-s3-compat-cluster" >&2
+  # Nodes 2..N join the seed via single-use Zero-CA invite bundles minted on the
+  # seed's admin socket. Serial: each mint needs the live seed leader, and the
+  # leader's post-join hook (expandShardGroupsForJoinedNode) grows the shard-group
+  # set to the joined node count with RF=3 multi-node voters.
   for idx in $(seq 2 "$GRAINFS_CLUSTER_NODES"); do
-    mkdir -p "$cluster_dir/n${idx}/keys"
-    cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"
-    chmod 600 "$cluster_dir/n${idx}/keys/0.key"
-    cp "$cluster_id_file" "$cluster_dir/n${idx}/cluster.id"
-    chmod 600 "$cluster_dir/n${idx}/cluster.id"
-    printf '%s' "127.0.0.1:${raft_ports[0]}" >"$cluster_dir/n${idx}/.join-pending"
-    chmod 600 "$cluster_dir/n${idx}/.join-pending"
-    start_grainfs_cluster_node "$idx"
+    local bundle
+    bundle=$("$BINARY" cluster invite create --endpoint "$cluster_dir/n1/admin.sock" 2>/dev/null \
+      | awk 'f{print;exit} /GRAINFS_INVITE_BUNDLE:/{f=1}')
+    if [[ -z "$bundle" ]]; then
+      echo "[error] grainfs-cluster: failed to mint invite bundle for node${idx} via $cluster_dir/n1/admin.sock" >&2
+      return 1
+    fi
+    start_grainfs_cluster_node "$idx" "$bundle"
   done
 
   for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
