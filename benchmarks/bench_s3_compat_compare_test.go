@@ -255,7 +255,7 @@ func TestBenchBootstrapIAMSeedsTrustedProxyCIDR(t *testing.T) {
 	}
 }
 
-func TestBenchS3CompatClusterStagesKEKBeforeJoinersStart(t *testing.T) {
+func TestBenchS3CompatClusterJoinsViaInviteBundle(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -275,23 +275,40 @@ func TestBenchS3CompatClusterStagesKEKBeforeJoinersStart(t *testing.T) {
 	if !strings.Contains(cluster, `local cluster_dir="$BENCH_DIR/gfc"`) {
 		t.Fatalf("start_grainfs_cluster must keep data dir names short so admin.sock does not exceed Unix socket path limits")
 	}
+	// The cluster forms via the Zero-CA invite-bundle flow: the genesis seed
+	// (node 1) boots first and stages only its own cluster-transport PSK; nodes
+	// 2..N join by starting with a single-use GRAINFS_INVITE_BUNDLE minted on the
+	// seed's admin socket. Joiners pre-stage NO keys — the bundle carries the
+	// sealed PSK/KEK + cluster.id + the seed's join-listener address.
 	for _, want := range []string{
-		`local kek_file="$cluster_dir/n1/keys/0.key"`,
-		`local cluster_id_file="$cluster_dir/n1/cluster.id"`,
-		`bench_wait_file "$kek_file" "grainfs-cluster node1 KEK"`,
-		`bench_wait_file "$cluster_id_file" "grainfs-cluster node1 cluster.id"`,
-		`mkdir -p "$cluster_dir/n${idx}/keys"`,
-		`cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"`,
-		`chmod 600 "$cluster_dir/n${idx}/keys/0.key"`,
-		`cp "$cluster_id_file" "$cluster_dir/n${idx}/cluster.id"`,
-		`chmod 600 "$cluster_dir/n${idx}/cluster.id"`,
+		// Seed stages only its own transport PSK (replaces the cluster-key flag).
+		`mkdir -p "$cluster_dir/n${node_idx}/keys.d"`,
+		// Seed boots first, with no bundle argument.
+		`start_grainfs_cluster_node 1`,
+		// Seed's KEK + cluster.id must exist before joiners are minted bundles.
+		`bench_wait_file "$cluster_dir/n1/keys/0.key" "grainfs-cluster node1 KEK"`,
+		`bench_wait_file "$cluster_dir/n1/cluster.id" "grainfs-cluster node1 cluster.id"`,
+		// Each joiner gets a single-use bundle minted on the seed's admin socket.
+		`cluster invite create --endpoint "$cluster_dir/n1/admin.sock"`,
+		// Joiners start WITH the bundle (env), not with copied keys.
+		`env "GRAINFS_INVITE_BUNDLE=$invite_bundle"`,
+		`start_grainfs_cluster_node "$idx" "$bundle"`,
 	} {
 		if !strings.Contains(cluster, want) {
-			t.Fatalf("start_grainfs_cluster must stage KEK + cluster.id for joiners with %q", want)
+			t.Fatalf("start_grainfs_cluster must join nodes via the invite-bundle flow; missing %q", want)
 		}
 	}
-	if strings.Index(cluster, `cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"`) > strings.Index(cluster, `start_grainfs_cluster_node "$idx"`) {
-		t.Fatalf("start_grainfs_cluster must copy KEK before starting joiner nodes")
+	// The legacy KEK-copy-to-joiners staging is gone: it left nodes 2..N as
+	// isolated solo clusters (RF=1 shard groups on the seed). Its presence would
+	// mean the dead pre-invite-join model crept back in.
+	if strings.Contains(cluster, `cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"`) {
+		t.Fatalf("start_grainfs_cluster must NOT copy the seed KEK to joiners; joiners receive crypto via GRAINFS_INVITE_BUNDLE")
+	}
+	// The seed must boot before the join loop mints bundles (mint needs the live
+	// seed leader). Assert ordering: `start_grainfs_cluster_node 1` precedes the
+	// joiner start `start_grainfs_cluster_node "$idx"`.
+	if strings.Index(cluster, `start_grainfs_cluster_node 1`) > strings.Index(cluster, `start_grainfs_cluster_node "$idx" "$bundle"`) {
+		t.Fatalf("start_grainfs_cluster must boot the genesis seed before minting joiner bundles")
 	}
 }
 
