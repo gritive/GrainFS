@@ -67,6 +67,18 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	state.AddCleanup(func() { _ = dw.Close() })
 
 	clusterSize := 1 + len(state.peers)
+	// Option B (uniform genesis seeding): a solo genesis node that declares a
+	// target size via --bootstrap-expect-nodes derives its EC width and seed
+	// group count from the DECLARED target N, not the solo size of 1, so every
+	// boot consumer (balancer/backend/DEK/router) latches the final uniform EC.
+	// The actual seed is deferred to seed-on-quorum in the post-join hook.
+	deferGenesisSeed := !state.inviteJoinMode &&
+		len(state.metaRaft.FSM().ShardGroups()) == 0 &&
+		state.cfg.BootstrapExpectNodes > 1 &&
+		clusterSize == 1
+	if deferGenesisSeed {
+		clusterSize = state.cfg.BootstrapExpectNodes
+	}
 	seedGroups := seedGroupCountForClusterSize(clusterSize)
 
 	var ecWidth int
@@ -112,14 +124,29 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		}
 		addNodeCancel()
 
-		if err := SeedInitialShardGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, state.peers, seedGroups, normalGroupVoters); err != nil {
-			return err
+		if deferGenesisSeed {
+			// Defer the seed until --bootstrap-expect-nodes have joined. Leave the
+			// router closed (no groups to route to) so writes are rejected until
+			// seed-on-quorum fires in the leader-side post-join hook
+			// (handleDeferredSeed). The "pending" condition is DERIVED there from
+			// the flag + replicated group count + live nodes, so no in-process flag
+			// is needed and the decision survives a leader change mid-bootstrap.
+			log.Warn().
+				Int("expect_nodes", state.cfg.BootstrapExpectNodes).
+				Int("seed_groups", seedGroups).
+				Int("k", state.effectiveEC.DataShards).
+				Int("m", state.effectiveEC.ParityShards).
+				Msg("Option B: deferring genesis shard-group seed until target node count joins (uniform EC)")
+		} else {
+			if err := SeedInitialShardGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, state.peers, seedGroups, normalGroupVoters); err != nil {
+				return err
+			}
+			if err := WaitForShardGroupCount(ctx, state.metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+				return err
+			}
+			state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
+			state.clusterRouter.SetRequireExplicitAssignments(true)
 		}
-		if err := WaitForShardGroupCount(ctx, state.metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
-			return err
-		}
-		state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
-		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
 	state.dataWALRepairCollector = cluster.NewDataWALRepairCollector()

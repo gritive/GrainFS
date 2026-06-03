@@ -42,6 +42,8 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.NodeID, _ = cmd.Flags().GetString("node-id")
 	opts.RaftAddr, _ = cmd.Flags().GetString("raft-addr")
 	opts.JoinListenAddr, _ = cmd.Flags().GetString("join-listen-addr")
+	opts.BootstrapExpectNodes, _ = cmd.Flags().GetInt("bootstrap-expect-nodes")
+	opts.BootstrapExpectTimeout, _ = cmd.Flags().GetDuration("bootstrap-expect-timeout")
 
 	// Cluster transport tuning.
 	opts.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")

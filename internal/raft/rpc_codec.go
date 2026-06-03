@@ -360,4 +360,3 @@ func decodeAppendEntriesReply(data []byte) (reply *AppendEntriesReply, err error
 		ConflictIndex: r.ConflictIndex(),
 	}, nil
 }
-
