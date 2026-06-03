@@ -22,7 +22,6 @@ func TestDecision_ZeroValueDeny(t *testing.T) {
 func TestDependencyInterfaces_Compile(t *testing.T) {
 	// Compile-time check: nil values of each interface type must be assignable.
 	var (
-		_ IAMStore          = (IAMStore)(nil)
 		_ IAMChecker        = IAMChecker(nil)
 		_ PolicyChecker     = (PolicyChecker)(nil)
 		_ AuditEmitter      = (AuditEmitter)(nil)
@@ -50,10 +49,6 @@ func (f *fakeAudit) RecordDeny(_ context.Context, sa, b, k string, a S3Action, r
 	f.denies = append(f.denies, auditEntry{sa, b, k, a, r})
 }
 
-type stubStore struct{ enabled bool }
-
-func (s stubStore) AuthEnabled() bool { return s.enabled }
-
 type stubPolicy struct{ allow bool }
 
 func (p stubPolicy) Allow(_ context.Context, _ PermCheckInput) bool { return p.allow }
@@ -69,7 +64,7 @@ func basicInput(action S3Action) PermCheckInput {
 func TestRequestAuthorizer_PreLoad_AuthDisabled_AllowsViaPolicy(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: false},
+		false,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return false, AuthzDetail{} }, // would deny if consulted
 		stubPolicy{allow: true},
 		audit,
@@ -82,10 +77,10 @@ func TestRequestAuthorizer_PreLoad_AuthDisabled_AllowsViaPolicy(t *testing.T) {
 	assert.Empty(t, audit.denies)
 }
 
-func TestRequestAuthorizer_PreLoad_AuthEnabled_NoGrant_Denies(t *testing.T) {
+func TestRequestAuthorizer_PreLoad_AuthOn_NoGrant_Denies(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return false, AuthzDetail{} },
 		stubPolicy{allow: true},
 		audit,
@@ -102,10 +97,10 @@ func TestRequestAuthorizer_PreLoad_AuthEnabled_NoGrant_Denies(t *testing.T) {
 	assert.Empty(t, audit.allows)
 }
 
-func TestRequestAuthorizer_PreLoad_AuthEnabled_GrantOnly_Allows(t *testing.T) {
+func TestRequestAuthorizer_PreLoad_AuthOn_GrantOnly_Allows(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(saID, bucket, _ string, a S3Action) (bool, AuthzDetail) {
 			return saID == "sa-1" && bucket == "b" && a == GetObject, AuthzDetail{}
 		},
@@ -126,7 +121,7 @@ func TestRequestAuthorizer_PreLoad_AuthEnabled_GrantOnly_Allows(t *testing.T) {
 func TestRequestAuthorizer_PreLoad_PolicyDenies(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return true, AuthzDetail{} },
 		stubPolicy{allow: false},
 		audit,
@@ -144,7 +139,7 @@ func TestRequestAuthorizer_PreLoad_PolicyDenies(t *testing.T) {
 func TestRequestAuthorizer_PreLoad_PolicyExempt_BucketPolicyCRUD(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return true, AuthzDetail{} }, // IAM allows
 		stubPolicy{allow: false}, // policy would deny
 		audit,
@@ -160,7 +155,7 @@ func TestRequestAuthorizer_PreLoad_PolicyExempt_BucketPolicyCRUD(t *testing.T) {
 func TestRequestAuthorizer_PreLoad_AnonymousMode_PolicyDenies(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: false}, // auth disabled
+		false, // auth disabled
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return false, AuthzDetail{} },
 		stubPolicy{allow: false},
 		audit,
@@ -201,7 +196,7 @@ func TestRequestAuthorizer_PostLoad_ACLMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			audit := &fakeAudit{}
 			r := NewRequestAuthorizer(
-				stubStore{enabled: false}, // skip Layer 1 to isolate Layer 3
+				false, // skip Layer 1 to isolate Layer 3
 				func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return true, AuthzDetail{} },
 				stubPolicy{allow: true},
 				audit,
@@ -259,7 +254,7 @@ func (f *fakeDetailedAudit) RecordAnonAllow(_ context.Context, _, _ string, _ S3
 func TestRequestAuthorizer_PreLoad_ThreadsPolicyDetailToDetailedEmitter(t *testing.T) {
 	audit := &fakeDetailedAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) {
 			return true, AuthzDetail{
 				MatchedPolicyID:  "readonly",
@@ -287,7 +282,7 @@ func TestRequestAuthorizer_PreLoad_ThreadsPolicyDetailToDetailedEmitter(t *testi
 func TestRequestAuthorizer_PreLoad_AnonAllowRoutesToRecordAnonAllow(t *testing.T) {
 	audit := &fakeDetailedAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) {
 			return true, AuthzDetail{AnonAllow: true, Reason: ReasonDefaultBucketImplicitAnon}
 		},
@@ -305,7 +300,7 @@ func TestRequestAuthorizer_PreLoad_AnonAllowRoutesToRecordAnonAllow(t *testing.T
 func TestRequestAuthorizer_PreLoad_DenyThreadsPolicyDetail(t *testing.T) {
 	audit := &fakeDetailedAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) {
 			return false, AuthzDetail{
 				MatchedPolicyID: "deny-puts",
@@ -331,7 +326,7 @@ func TestRequestAuthorizer_PostLoad_ReRunsLayer1(t *testing.T) {
 	// Even if ACL would allow (public-read-write), Layer 1 must still gate.
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
-		stubStore{enabled: true},
+		true,
 		func(_, _, _ string, _ S3Action) (bool, AuthzDetail) { return false, AuthzDetail{} },
 		stubPolicy{allow: true},
 		audit,

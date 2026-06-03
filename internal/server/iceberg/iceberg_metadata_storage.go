@@ -18,7 +18,7 @@ func (h *Handler) writeIcebergMetadataObject(ctx context.Context, location strin
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
 	var err error
-	if h.deps.IAMStore != nil && h.deps.IAMStore.AuthEnabled() {
+	if h.deps.IAMStore != nil {
 		_, err = h.deps.Ops.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
 	} else {
 		_, err = h.deps.Ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", uint8(s3auth.ACLPublicRead))

@@ -131,10 +131,9 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 // dependencies. Call after Options have populated iamStore, iamAudit,
 // policyStore, and policyAuthorizer so the authorizer captures their final values.
 func (s *Server) buildAuthorizer() {
-	var iamStore s3auth.IAMStore
-	if s.iamStore != nil {
-		iamStore = s.iamStore
-	}
+	// authEnabled mirrors the historical gate: the old auth-enabled shim was
+	// constant-true, so authz is enabled iff the IAM store is wired.
+	authEnabled := s.iamStore != nil
 
 	// iamCheck: when a policy authorizer is wired, Layer 1 evaluates
 	// policy.Evaluate for the (saID, bucket, action) triple. Without one
@@ -183,7 +182,7 @@ func (s *Server) buildAuthorizer() {
 	}
 
 	s.authz = s3auth.NewRequestAuthorizer(
-		iamStore,
+		authEnabled,
 		iamCheck,
 		s.policyStore,
 		s.iamAudit,
