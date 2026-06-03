@@ -55,6 +55,18 @@ func putObjectDecodedContentLength(c *app.RequestContext) int64 {
 	return n
 }
 
+// putObjectStreamLength is the object's true (decoded) byte length for the
+// streaming PUT/append path. For aws-chunked the wire Content-Length is the
+// encoded size (incl. per-chunk framing), so the decoded header is the object
+// size the exact-length reader must enforce. putObjectShouldStream guarantees a
+// usable value before this is consulted on the streaming branch.
+func putObjectStreamLength(c *app.RequestContext) int64 {
+	if isAWSChunkedPayload(c) {
+		return putObjectDecodedContentLength(c)
+	}
+	return int64(c.Request.Header.ContentLength())
+}
+
 func putObjectShouldStream(c *app.RequestContext) bool {
 	if !c.Request.IsBodyStream() {
 		return false

@@ -85,6 +85,23 @@ func TestPutObjectShouldNotStreamAWSChunkedBodyBelowThreshold(t *testing.T) {
 	require.False(t, putObjectShouldStream(c))
 }
 
+func TestPutObjectStreamLength(t *testing.T) {
+	// non-chunked: Content-Length (set via SetBodyStream's length arg)
+	t.Run("plain uses content-length", func(t *testing.T) {
+		c := app.NewContext(0)
+		c.Request.SetBodyStream(bytes.NewReader(nil), 10485760)
+		require.Equal(t, int64(10485760), putObjectStreamLength(c))
+	})
+	// aws-chunked: decoded length, NOT the larger encoded Content-Length
+	t.Run("aws-chunked uses decoded length", func(t *testing.T) {
+		c := app.NewContext(0)
+		c.Request.SetBodyStream(bytes.NewReader(nil), 10500246) // encoded (framing)
+		c.Request.Header.Set("Content-Encoding", "aws-chunked")
+		c.Request.Header.Set("X-Amz-Decoded-Content-Length", "10485760") // decoded
+		require.Equal(t, int64(10485760), putObjectStreamLength(c))
+	})
+}
+
 func TestPutObjectDecodedContentLength(t *testing.T) {
 	cases := []struct {
 		name   string
