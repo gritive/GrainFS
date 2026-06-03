@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4"
@@ -255,6 +256,11 @@ type bootState struct {
 	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
+	// seedMu (Option B) serializes the leader-side deferred seed-on-quorum across
+	// overlapping post-join hooks within one process. The "should I seed" decision
+	// itself is derived (handleDeferredSeed), not stored, so it survives a leader
+	// change; seedMu only guards the one-shot critical section on a single leader.
+	seedMu sync.Mutex
 	// joinListener is the Zero-CA join listener (leader side, W9) serving
 	// the two-phase invite handler on cfg.JoinListenAddr with a persisted stable
 	// cert. Nil in single-node mode. Closed via AddCleanup on shutdown; its

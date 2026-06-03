@@ -181,8 +181,18 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		// then sync the cluster router so reads routed THROUGH this joiner resolve
 		// to the right group leader. Without this the joiner is a voter but its
 		// router has no bucket assignments, so GETs return "not the leader".
-		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
-			return err
+		//
+		// Option B: in a deferred-seed cluster (--bootstrap-expect-nodes>1) genesis
+		// has not seeded groups yet — it waits for the target node count. With
+		// sequential joins, hard-blocking here deadlocks: this joiner would wait
+		// for groups that only appear once LATER joiners arrive. Skip the wait;
+		// groups + bucket assignments propagate live via OnShardGroupAdded /
+		// OnBucketAssigned (router.AssignBucket) once seed-on-quorum fires. The DEK
+		// gate (WaitDEKReady) is meta-raft based and independent of shard groups.
+		if state.cfg.BootstrapExpectNodes <= 1 {
+			if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+				return err
+			}
 		}
 		state.clusterRouter.Sync(metaRaft.FSM().BucketAssignments())
 		state.clusterRouter.SetRequireExplicitAssignments(true)
@@ -291,6 +301,19 @@ func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeI
 	// Voter-candidate pool and cluster-size count must exclude revoked nodes so a
 	// revoked node is never (re-)seeded as a data-group voter (pairs with the evacuator).
 	liveNodes := liveNonRevokedNodes(state.metaRaft.FSM())
+
+	// Option B deferred seed: while a deferred genesis seed is pending, the
+	// deferred-seed lifecycle OWNS shard-group creation — it seeds all groups
+	// once at the uniform EC width when the target count joins, and suppresses
+	// the per-join expand below until then. Running the normal expand while
+	// pending would create partial-RF groups at the current (sub-target) size
+	// and defeat uniform seeding. handled=true means this hook is done.
+	if handled, err := handleDeferredSeed(ctx, state, liveNodes); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
 	missingGroups := MissingSeedShardGroups(
 		state.nodeID,
 		state.raftAddr,
@@ -309,6 +332,64 @@ func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeI
 	}
 
 	return nil
+}
+
+// handleDeferredSeed drives the Option B deferred-seed lifecycle for one
+// post-join hook invocation. The "pending" condition is DERIVED, not stored:
+// any leader (original or one elected mid-bootstrap) computes it from its own
+// --bootstrap-expect-nodes flag + the replicated shard-group count + live node
+// count, so the decision survives a leader change with no persistent marker.
+//
+// Contract (the early-return guard the caller relies on):
+//   - not a deferred-seed cluster (expect<=1), OR the deferred batch is already
+//     fully seeded → (false, nil): caller runs the normal per-join expand.
+//   - deferred batch incomplete, quorum NOT yet reached → (true, nil): caller
+//     returns; the per-join expand is SUPPRESSED so no partial-RF groups are
+//     created before the target size is reached.
+//   - deferred batch incomplete, quorum reached → seed the MISSING initial groups
+//     at the uniform EC width (propose-only-absent = idempotent + convergent under
+//     leader-change re-entry), open the router, return (true, nil).
+//
+// seedMu serializes overlapping post-join hooks within one process; the
+// recheck-under-lock + MissingSeedShardGroups idempotency together prevent a
+// double-seed even across a leader move.
+func handleDeferredSeed(ctx context.Context, state *bootState, liveNodes []cluster.MetaNodeEntry) (bool, error) {
+	expectN := state.cfg.BootstrapExpectNodes
+	if expectN <= 1 {
+		return false, nil // not a deferred-seed cluster
+	}
+	targetGroups := seedGroupCountForClusterSize(expectN)
+	if len(state.metaRaft.FSM().ShardGroups()) >= targetGroups {
+		return false, nil // deferred batch already seeded; normal expand handles growth beyond N
+	}
+	if len(liveNodes) < expectN {
+		// Below target: suppress the per-join expand so the deferred batch is
+		// seeded uniformly in one shot once quorum is reached (no partial RF).
+		return true, nil
+	}
+	state.seedMu.Lock()
+	defer state.seedMu.Unlock()
+	if len(state.metaRaft.FSM().ShardGroups()) >= targetGroups {
+		return true, nil // another hook seeded it while we waited on the lock
+	}
+	voters := cluster.AutoECConfigForClusterSize(expectN).NumShards()
+	missing := MissingSeedShardGroups(state.nodeID, state.raftAddr, liveNodes, state.metaRaft.FSM().ShardGroups(), voters)
+	for _, group := range missing {
+		if err := state.metaRaft.ProposeShardGroup(ctx, group); err != nil {
+			return false, fmt.Errorf("option-B seed-on-quorum: propose %s: %w", group.ID, err)
+		}
+	}
+	if err := WaitForShardGroupCount(ctx, state.metaRaft.FSM(), targetGroups, 30*time.Second); err != nil {
+		return false, fmt.Errorf("option-B seed-on-quorum wait: %w", err)
+	}
+	state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
+	state.clusterRouter.SetRequireExplicitAssignments(true)
+	log.Info().
+		Int("nodes", len(liveNodes)).
+		Int("groups", targetGroups).
+		Int("voters", voters).
+		Msg("Option B: seed-on-quorum complete — uniform EC seeded across target node set")
+	return true, nil
 }
 
 // bootRegisterForwardHandlers registers the data-shard RPC handlers into the
