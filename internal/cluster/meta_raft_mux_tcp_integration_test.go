@@ -12,19 +12,20 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// Meta-Raft integration over TCP is the dormant-TCP twin of the QUIC meta-raft
-// spec: it boots three in-process nodes and asserts they elect a leader and
-// replicate a bucket assignment over the TCP transport. NOTE — meta-raft does NOT
-// ride the per-group mux carrier: NewMetaTransportMux discards groupMux
-// ("StreamMetaRaft != StreamControl") and dispatches via RaftV2MetaTransport,
-// whose every send is transport.Call(StreamMetaRaft) — the data-plane
-// connection-per-RPC path (tcp_call.go). So this proves meta-raft assembles over
-// the TCP Call path; the S2b-2 mux CARRIER is proven separately by the group-raft
-// spec (raftv2_group_mux_tcp_test.go, which asserts inbound mux sessions). The full
-// serveruntime multi-node boot + parity bench stay S5(c). Construction is a
-// near-mechanical swap of MustNewQUICTransport → MustNewTCPTransport.
+// Meta-Raft integration over TCP boots three in-process nodes and asserts they
+// elect a leader and replicate a bucket assignment over the TCP transport.
+//
+// As of the meta-raft-over-carrier perf fix, meta-raft RIDES the shared per-peer
+// mux carrier (the same one group-raft uses) instead of connection-per-RPC
+// transport.Call. NewMetaTransportMux now stores groupMux + RegisterMetaNode, and
+// RaftV2MetaTransport.Send{AppendEntries,RequestVote} try the mux first
+// (RaftConn over groupID "__meta__") with a Call fallback. Before the fix every
+// meta send did a fresh TLS handshake (tcp_call.go connection-per-RPC) — the
+// cluster PUT throughput bottleneck. This spec asserts replication AND that the
+// traffic actually rode the mux carrier (InboundMuxSessionCount > 0), which is
+// the regression guard: reverting meta to Call-only drops mux sessions to 0.
 var _ = Describe("Meta-Raft integration over TCP", func() {
-	It("bootstraps three TCP nodes and replicates bucket assignment over the TCP Call path", func() {
+	It("bootstraps three TCP nodes and replicates bucket assignment over the mux carrier", func() {
 		t := GinkgoT()
 
 		const numNodes = 3
@@ -115,6 +116,22 @@ var _ = Describe("Meta-Raft integration over TCP", func() {
 			}
 			return true
 		}, 5*time.Second, 50*time.Millisecond).Should(BeTrue(), "bucket assignment must replicate over the TCP mux to every meta-Raft node")
+
+		// Regression guard: meta-raft must ride the mux CARRIER, not the legacy
+		// connection-per-RPC Call fallback. The Call path (tcp_call.go) dials the
+		// data-plane ALPN per RPC and never populates muxInbound, so a non-zero
+		// inbound mux session count proves meta AppendEntries/heartbeats actually
+		// rode the shared persistent carrier. This is a meta-only cluster (no group
+		// raft), so any mux session here is meta traffic. Reverting meta to
+		// Call-only (the pre-fix bottleneck) drops this to 0 and fails the test.
+		total := 0
+		counts := make([]int, len(transports))
+		for i, tr := range transports {
+			counts[i] = tr.InboundMuxSessionCount()
+			total += counts[i]
+		}
+		Expect(total).To(BeNumerically(">", 0),
+			"meta-raft must ride the TCP mux carrier (inbound mux sessions), not the Call fallback; per-node=%v", counts)
 	})
 })
 

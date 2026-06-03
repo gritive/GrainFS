@@ -52,6 +52,32 @@ func TestTCPPool_ReuseAcrossSequentialTransfers(t *testing.T) {
 	assert.Equal(t, 1, poolLen(cli, addr), "clean transfers must reuse one conn")
 }
 
+func TestTCPPool_CallPooledReusesConn(t *testing.T) {
+	const psk = "callpooled-reuse"
+	srv := startTCP(t, psk)
+	srv.Handle(StreamAdmin, func(req *Message) *Message {
+		return NewResponse(req, append([]byte("ok:"), req.Payload...))
+	})
+	cli := MustNewTCPTransport(psk)
+	t.Cleanup(func() { _ = cli.Close() })
+	addr := srv.LocalAddr()
+
+	// CallPooled is the bodyless hot-path RPC (ShardService.SendRequest leader
+	// forward). Like the CallWithBody reuse guard above, a SHORT per-call deadline
+	// plus an idle gap that exceeds it proves the clean path clears the deadline
+	// before checkin — a connection-per-RPC implementation (the pre-fix Call) would
+	// instead leave poolLen at 0.
+	for i := 0; i < 4; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		resp, err := cli.CallPooled(ctx, addr, &Message{Type: StreamAdmin, Payload: []byte(fmt.Sprintf("r%d", i))})
+		cancel()
+		require.NoErrorf(t, err, "CallPooled transfer %d", i)
+		assert.Equal(t, fmt.Sprintf("ok:r%d", i), string(resp.Payload))
+		time.Sleep(500 * time.Millisecond) // exceed the 400ms per-call deadline
+	}
+	assert.Equal(t, 1, poolLen(cli, addr), "clean CallPooled transfers must reuse one conn")
+}
+
 func TestTCPPool_ErroredTransferKeepsCleanConn(t *testing.T) {
 	const psk = "pool-err"
 	srv := startTCP(t, psk)

@@ -44,11 +44,12 @@ type GroupRaftMux struct {
 	tr    muxDriverTransport
 	nodes sync.Map // string(groupID) → RaftV2Handler
 
-	// metaNode is the meta-raft node registered for the magic groupID
+	// metaNode is the meta-raft handler registered for the magic groupID
 	// metaGroupID ("__meta__"). Atomic so receiver paths
 	// (handleMuxRequest, dispatchToLocalGroup) can read without locking.
-	// Set via RegisterMetaNode; nil until then.
-	metaNode atomic.Pointer[Node]
+	// Set via RegisterMetaNode; nil until then. Boxed so the stored value can be
+	// any RaftV2Handler (v1 *Node OR the cluster-layer v2 adapter), not only *Node.
+	metaNode atomic.Pointer[metaHandlerBox]
 
 	// Mux mode state. Set by EnableMux. When muxEnabled is false, all sends
 	// use the legacy per-message tr.Call path.
@@ -90,13 +91,22 @@ func (m *GroupRaftMux) Register(groupID string, h RaftV2Handler) {
 	m.nodes.Store(groupID, h)
 }
 
-// RegisterMetaNode wires the meta-raft node onto the shared mux. Idempotent;
-// the last registration wins. Called by NewMetaRaftTransport so the
-// receiver-side __meta__ branch has somewhere to dispatch before
-// EnableMux installs the accept handler. Passing nil is treated as
+// metaHandlerBox boxes the registered meta handler so metaNode can hold any
+// RaftV2Handler via atomic.Pointer (v1 *Node or the cluster v2 adapter).
+type metaHandlerBox struct{ h RaftV2Handler }
+
+// RegisterMetaNode wires the meta-raft handler onto the shared mux. Idempotent;
+// the last registration wins. Called by the meta-raft transport constructor so
+// the receiver-side __meta__ branch has somewhere to dispatch before EnableMux
+// installs the accept handler. Accepts any RaftV2Handler (v1 *Node and the
+// cluster-layer v2 adapter both satisfy it). Passing nil is treated as
 // deregistration (used by tests during teardown).
-func (m *GroupRaftMux) RegisterMetaNode(node *Node) {
-	m.metaNode.Store(node)
+func (m *GroupRaftMux) RegisterMetaNode(node RaftV2Handler) {
+	if node == nil {
+		m.metaNode.Store(nil)
+		return
+	}
+	m.metaNode.Store(&metaHandlerBox{h: node})
 }
 
 // ForGroup returns a GroupRaftSender for the given group. The returned sender

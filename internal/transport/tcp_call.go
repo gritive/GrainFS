@@ -306,25 +306,127 @@ func (t *TCPTransport) callReadOnce(ctx context.Context, addr string, conn net.C
 
 // CallFlatBuffer sends a FlatBuffers-framed request (zero-copy from the builder)
 // and reads the framed response. Builder must stay alive until this returns.
-// connection-per-RPC (NOT pooled).
+//
+// Pooled, like CallWithBody: it checks out a reused (or fresh) data-plane conn
+// and returns it to the pool only after a fully-clean request/response cycle.
+// This is the shard-write hot path (ShardService.WriteShard); leaving it
+// connection-per-RPC made every EC shard write to a peer pay a fresh TLS
+// handshake. The request is a self-delimiting frame with no body, so a clean
+// cycle leaves the conn at a frame boundary (safe to reuse, HTTP-keep-alive
+// style). A reused conn that dies before the request frame is written is retried
+// once on a fresh dial (the builder is still pristine).
+//
+// Intentional divergence from CallWithBody: no response-ID desync guard. The
+// BinaryCodec is strictly length-prefixed — Decode reads a fixed 14-byte header
+// then exactly payloadLen bytes (codec.go:94, two io.ReadFull, no trailing
+// bytes) — so a clean cycle always leaves the conn on a frame boundary and a
+// pooled conn cannot mis-frame. CallWithBody's resp.ID==req.ID check is extra
+// belt over the same framing; CallFlatBuffer's request carries no app-stamped ID
+// to echo, so it relies on the framing guarantee alone.
 func (t *TCPTransport) CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error) {
-	conn, err := t.dial(ctx, addr)
-	if err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		conn, reused, err := t.getDataConn(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		resp, rerr := t.callFlatBufferOnce(ctx, addr, conn, fw)
+		if rerr != nil && reused && attempt == 0 && errors.Is(rerr, errStalePreBody) {
+			continue // stale reused conn discarded inside callFlatBufferOnce; dial fresh
+		}
+		return resp, rerr
 	}
-	defer conn.Close()
+}
+
+func (t *TCPTransport) callFlatBufferOnce(ctx context.Context, addr string, conn net.Conn, fw *FlatBuffersWriter) (*Message, error) {
+	clean := false
+	defer func() {
+		// Pool only on a clean cycle with no ctx fire (matches callWithBodyOnce):
+		// a checked-in conn must be frame-aligned for the next transfer.
+		if clean && ctx.Err() == nil {
+			_ = conn.SetDeadline(time.Time{})
+			t.pool.checkin(addr, conn)
+		} else {
+			t.pool.discard(addr, conn)
+		}
+	}()
 	stop := t.applyCtx(ctx, conn)
 	defer stop()
 
 	if err := t.codec.EncodeWriterTo(conn, fw); err != nil {
-		return nil, fmt.Errorf("encode flatbuffer: %w", err)
+		// Pre-response failure: the request frame is untouched/undelivered (a
+		// reused-but-dead conn fails the write fast), so retry on a fresh dial is
+		// safe. errStalePreBody gates the single retry in CallFlatBuffer.
+		return nil, fmt.Errorf("%w: encode flatbuffer to %s: %v", errStalePreBody, addr, err)
 	}
 	// No CloseWrite (framing invariant): self-delimiting frame, no body (see Call).
 	resp, err := t.codec.Decode(conn)
 	if err != nil {
 		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
 	}
-	return checkResponseStatus(addr, resp)
+	resp, err = checkResponseStatus(addr, resp)
+	if err != nil {
+		// A StatusError response is a complete frame with no body → conn is clean
+		// and reusable; mark clean and surface the error.
+		clean = true
+		return nil, err
+	}
+	clean = true
+	return resp, nil
+}
+
+// CallPooled is Call over a pooled (reused) connection. Same clean request →
+// framed response cycle as Call, but it checks a conn out of the data-plane pool
+// and returns it only after a fully-clean cycle (so the conn stays frame-aligned
+// for the next transfer). Used by hot-path control RPCs that are clean
+// request/response with no body — e.g. ShardService.SendRequest, which forwards
+// every PUT's index/group proposal to the leader; leaving that on Call made each
+// forward pay a fresh TLS handshake. Framing safety + clean-cycle discipline are
+// identical to CallFlatBuffer (length-prefixed BinaryCodec, no trailing bytes);
+// no resp-ID desync guard for the same reason documented there. A reused conn
+// that dies before the request frame is written is retried once on a fresh dial.
+func (t *TCPTransport) CallPooled(ctx context.Context, addr string, req *Message) (*Message, error) {
+	for attempt := 0; ; attempt++ {
+		conn, reused, err := t.getDataConn(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		resp, rerr := t.callPooledOnce(ctx, addr, conn, req)
+		if rerr != nil && reused && attempt == 0 && errors.Is(rerr, errStalePreBody) {
+			continue // stale reused conn discarded inside; dial fresh
+		}
+		return resp, rerr
+	}
+}
+
+func (t *TCPTransport) callPooledOnce(ctx context.Context, addr string, conn net.Conn, req *Message) (*Message, error) {
+	clean := false
+	defer func() {
+		if clean && ctx.Err() == nil {
+			_ = conn.SetDeadline(time.Time{})
+			t.pool.checkin(addr, conn)
+		} else {
+			t.pool.discard(addr, conn)
+		}
+	}()
+	stop := t.applyCtx(ctx, conn)
+	defer stop()
+
+	if err := t.codec.Encode(conn, req); err != nil {
+		// Pre-response failure: nothing useful delivered (a reused-but-dead conn
+		// fails the write fast) → safe to retry once on a fresh dial.
+		return nil, fmt.Errorf("%w: encode request to %s: %v", errStalePreBody, addr, err)
+	}
+	resp, err := t.codec.Decode(conn)
+	if err != nil {
+		return nil, fmt.Errorf("decode response from %s: %w", addr, err)
+	}
+	resp, err = checkResponseStatus(addr, resp)
+	if err != nil {
+		clean = true // complete frame, no body → conn clean/reusable
+		return nil, err
+	}
+	clean = true
+	return resp, nil
 }
 
 // Send delivers a fire-and-forget message (no response). connection-per-RPC:

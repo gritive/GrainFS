@@ -19,6 +19,7 @@ type ClusterTransport interface {
 	Transport
 
 	Call(ctx context.Context, addr string, req *Message) (*Message, error)
+	CallPooled(ctx context.Context, addr string, req *Message) (*Message, error)
 	CallWithBody(ctx context.Context, addr string, req *Message, body io.Reader) (*Message, error)
 	CallRead(ctx context.Context, addr string, req *Message) (*Message, io.ReadCloser, error)
 	CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error)
