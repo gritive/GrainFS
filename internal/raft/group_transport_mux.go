@@ -250,8 +250,8 @@ func (m *GroupRaftMux) handleMuxRequest(payload []byte) ([]byte, error) {
 // StreamMetaRaft path (codex P1 #6).
 func (m *GroupRaftMux) lookupNode(groupID string) (RaftV2Handler, error) {
 	if groupID == metaGroupID {
-		if mn := m.metaNode.Load(); mn != nil {
-			return mn, nil
+		if box := m.metaNode.Load(); box != nil {
+			return box.h, nil
 		}
 		return nil, fmt.Errorf("mux: unknown group %s", groupID)
 	}
