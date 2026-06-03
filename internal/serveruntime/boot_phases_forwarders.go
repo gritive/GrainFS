@@ -353,25 +353,48 @@ func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeI
 // seedMu serializes overlapping post-join hooks within one process; the
 // recheck-under-lock + MissingSeedShardGroups idempotency together prevent a
 // double-seed even across a leader move.
+// deferredSeedDecision is the pure post-join verdict for Option B. It is a
+// function ONLY of replicated/declared state (the --bootstrap-expect-nodes flag,
+// the replicated shard-group count, and the live node count), so every leader —
+// original or one elected mid-bootstrap — computes the same verdict. That is
+// what makes deferred seeding leader-change-safe without a persistent marker.
+type deferredSeedDecision int
+
+const (
+	seedPassthrough deferredSeedDecision = iota // not deferred, or batch already seeded → run normal expand
+	seedSuppress                                // deferred, quorum not yet reached → skip expand (no partial RF)
+	seedNow                                     // deferred, quorum reached, batch incomplete → seed missing groups
+)
+
+func decideDeferredSeed(expectNodes, existingGroups, liveNodes int) deferredSeedDecision {
+	if expectNodes <= 1 {
+		return seedPassthrough // not a deferred-seed cluster (default behavior)
+	}
+	if existingGroups >= seedGroupCountForClusterSize(expectNodes) {
+		return seedPassthrough // deferred batch complete; normal expand handles growth beyond N
+	}
+	if liveNodes < expectNodes {
+		return seedSuppress // below target: suppress per-join expand until quorum (no partial-RF groups)
+	}
+	return seedNow // quorum reached, batch incomplete (incl. leader-change re-entry mid-seed)
+}
+
 func handleDeferredSeed(ctx context.Context, state *bootState, liveNodes []cluster.MetaNodeEntry) (bool, error) {
 	expectN := state.cfg.BootstrapExpectNodes
-	if expectN <= 1 {
-		return false, nil // not a deferred-seed cluster
-	}
-	targetGroups := seedGroupCountForClusterSize(expectN)
-	if len(state.metaRaft.FSM().ShardGroups()) >= targetGroups {
-		return false, nil // deferred batch already seeded; normal expand handles growth beyond N
-	}
-	if len(liveNodes) < expectN {
-		// Below target: suppress the per-join expand so the deferred batch is
-		// seeded uniformly in one shot once quorum is reached (no partial RF).
+	switch decideDeferredSeed(expectN, len(state.metaRaft.FSM().ShardGroups()), len(liveNodes)) {
+	case seedPassthrough:
+		return false, nil
+	case seedSuppress:
 		return true, nil
 	}
+	// seedNow: take the lock and re-decide under it (a concurrent hook may have
+	// completed the seed while we waited), then seed the MISSING groups only.
 	state.seedMu.Lock()
 	defer state.seedMu.Unlock()
-	if len(state.metaRaft.FSM().ShardGroups()) >= targetGroups {
+	if decideDeferredSeed(expectN, len(state.metaRaft.FSM().ShardGroups()), len(liveNodes)) != seedNow {
 		return true, nil // another hook seeded it while we waited on the lock
 	}
+	targetGroups := seedGroupCountForClusterSize(expectN)
 	voters := cluster.AutoECConfigForClusterSize(expectN).NumShards()
 	missing := MissingSeedShardGroups(state.nodeID, state.raftAddr, liveNodes, state.metaRaft.FSM().ShardGroups(), voters)
 	for _, group := range missing {
