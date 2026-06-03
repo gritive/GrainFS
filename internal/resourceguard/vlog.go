@@ -145,59 +145,13 @@ func recordVlogMetrics(nodeID string, sample resourcewatch.Sample, decision *res
 }
 
 func recordVlogDecision(ctx context.Context, recorder IncidentRecorder, nodeID string, decision *resourcewatch.Decision) error {
-	if recorder == nil || decision == nil {
-		return nil
-	}
-	at := decision.Snapshot.CollectedAt
-	if at.IsZero() {
-		at = time.Now()
-	}
-	facts := []incident.Fact{{
-		CorrelationID: vlogIncidentID(nodeID),
-		Type:          incident.FactObserved,
-		Cause:         incident.CauseVlogPressure,
-		Scope:         incident.Scope{Kind: incident.ScopeNode, NodeID: nodeID},
-		Message:       decision.Message,
-		At:            at,
-	}}
-	switch decision.Level {
-	case resourcewatch.LevelOK:
-		facts = append(facts, incident.Fact{
-			CorrelationID: vlogIncidentID(nodeID),
-			Type:          incident.FactResolved,
-			Cause:         incident.CauseVlogPressure,
-			Message:       decision.Message,
-			At:            at,
-		})
-	case resourcewatch.LevelWarn:
-		facts = append(facts, incident.Fact{
-			CorrelationID: vlogIncidentID(nodeID),
-			Type:          incident.FactDiagnosed,
-			Cause:         incident.CauseVlogPressure,
-			Action:        incident.ActionResourceWarning,
-			Message:       vlogDecisionMessageWithBreakdown(decision),
-			At:            at,
-		})
-	case resourcewatch.LevelCritical:
-		msg := vlogDecisionMessageWithBreakdown(decision)
-		facts = append(facts, incident.Fact{
-			CorrelationID: vlogIncidentID(nodeID),
-			Type:          incident.FactDiagnosed,
-			Cause:         incident.CauseVlogPressure,
-			Action:        incident.ActionResourceWarning,
-			Message:       msg,
-			At:            at,
-		}, incident.Fact{
-			CorrelationID: vlogIncidentID(nodeID),
-			Type:          incident.FactActionFailed,
-			Cause:         incident.CauseVlogPressure,
-			Action:        incident.ActionResourceWarning,
-			ErrorCode:     "vlog_critical",
-			Message:       msg,
-			At:            at,
-		})
-	}
-	return recorder.Record(ctx, facts)
+	return recordResourceDecision(ctx, recorder, nodeID, decision, decisionIncidentSpec{
+		correlationID:  vlogIncidentID(nodeID),
+		cause:          incident.CauseVlogPressure,
+		criticalCode:   "vlog_critical",
+		diagMessage:    vlogDecisionMessageWithBreakdown,
+		causeOnDerived: true,
+	})
 }
 
 // vlogDecisionMessageWithBreakdown appends the top-3 categories sorted desc by
