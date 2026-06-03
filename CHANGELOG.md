@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.506.0] - 2026-06-03
+
+### Fixed
+
+- **Iceberg cluster benchmark now forms a real cluster.** `bench_iceberg_table_cluster.sh`
+  used the dead `.join-pending` + KEK-copy follower-join (the same pattern fixed for the
+  S3 harness): nodes 1..N booted as isolated solo clusters, so the SA bootstrapped on
+  node 0 was unknown to the others and `warp iceberg` failed at catalog-pool creation
+  with "NotAuthorizedException: unknown access key". Joiners now boot with a single-use
+  `GRAINFS_INVITE_BUNDLE` minted on the seed's admin socket (per-node `--join-listen-addr`,
+  seed-only PSK staging). All four warp modes (catalog-read/commits/mixed/sustained) run.
+
+### Changed
+
+- **S3-compat benchmark reports the active fsync mode + a durability caveat.** The grainfs
+  vs minio PUT comparison was durability-asymmetric on macOS (grainfs defaults to
+  `SyncFull` = `F_FULLFSYNC`, a full drive-cache barrier minio's ~3.7ms PUT median shows
+  it does not pay). `summary.md` now records the fsync mode and documents that a
+  durability-matched comparison runs grainfs with `GRAINFS_FSYNC_MODE=fast`; at matched
+  durability grainfs beats minio on macOS (PUT ~1.48x, GET ~2.58x), and on Linux
+  `SyncFull` == plain `fsync(2)` so the default already runs at that level.
+
 ## [0.0.505.0] - 2026-06-03
 
 ### Changed
