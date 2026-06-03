@@ -37,6 +37,14 @@ type Config struct {
 	// invite bundle (W10).
 	JoinListenAddr string
 
+	// BootstrapExpectNodes (Option B) is the declared target node count for a
+	// fresh cluster. >1 defers genesis shard-group seeding until this many nodes
+	// have joined, then seeds all initial groups at the target size's uniform EC
+	// width (eliminating the RF=1 solo-genesis batch). 0/unset = seed-immediately
+	// (today's behavior). BootstrapExpectTimeout bounds the wait.
+	BootstrapExpectNodes   int
+	BootstrapExpectTimeout time.Duration
+
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts []server.Option
 

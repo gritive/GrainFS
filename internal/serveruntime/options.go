@@ -30,6 +30,10 @@ type ServeOptions struct {
 	JoinListenAddr string // --join-listen-addr
 	ClusterKey     string // resolved cluster transport key (disk / self-seed / invite-join)
 
+	// --- Cluster bootstrap (Option B: uniform genesis seeding) ---
+	BootstrapExpectNodes   int           // --bootstrap-expect-nodes (0/unset = seed-immediately)
+	BootstrapExpectTimeout time.Duration // --bootstrap-expect-timeout
+
 	// --- Cluster transport tuning ---
 	AppendForwardBufferTotalBytes    int64         // --cluster-append-forward-buffer-total-bytes
 	AppendForwardBufferMaxPerRequest int64         // --cluster-append-forward-buffer-max-per-request

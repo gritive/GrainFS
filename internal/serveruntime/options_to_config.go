@@ -30,8 +30,11 @@ func optionsToConfig(
 		JoinListenAddr:   opts.JoinListenAddr,
 		ClusterKey:       opts.ClusterKey,
 		AuthOpts:         authOpts,
-		IAMStore:         iamStore,
-		IAMApplier:       iamApplier,
+
+		BootstrapExpectNodes:   opts.BootstrapExpectNodes,
+		BootstrapExpectTimeout: opts.BootstrapExpectTimeout,
+		IAMStore:               iamStore,
+		IAMApplier:             iamApplier,
 	}
 
 	if len(cfg.DataDirs) > 0 {
