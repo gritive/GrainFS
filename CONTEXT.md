@@ -528,11 +528,15 @@ Bucket-scoped operations (`ListBucket`, `CreateBucket`, `DeleteBucket`,
 `*BucketPolicy`) have no Layer 3 input. They are decided by the pre-load
 phase only.
 
-Authentication-enabled state has a single source of truth:
-`iamStore.AuthEnabled()`. The SigV4 verifier (`s.verifier`) is a separate
-concern about whether request signatures are checked, not about whether
-bucket policy or object ACL apply. The authorizer must depend on the IAM
-predicate only; handlers and middleware must not gate authorization on
+Authentication-enabled state has a single source of truth: whether an IAM
+store is wired. The authorizer captures this once at construction as its
+`authEnabled` flag (`RequestAuthorizer`), which `buildAuthorizer` sets to
+`s.iamStore != nil`. (The former `iamStore.AuthEnabled()` shim — constant-true
+since v0.0.107.0 made authz always-on — was removed; the flag now carries the
+"is IAM wired" predicate directly.) The SigV4 verifier (`s.verifier`) is a
+separate concern about whether request signatures are checked, not about
+whether bucket policy or object ACL apply. The authorizer must depend on the
+IAM predicate only; handlers and middleware must not gate authorization on
 verifier presence.
 
 Every decision the authorizer returns — allow or deny — is audited through
@@ -550,7 +554,7 @@ authorizer call. The source ACL check is part of the authorization decision,
 not of copy-source validation, which remains responsible for existence,
 delete-marker state, and copy-source preconditions only.
 
-Anonymous mode (`AuthEnabled()==false`) skips Layer 1. Bucket policy and
+Anonymous mode (`authEnabled==false`, i.e. no IAM store wired) skips Layer 1. Bucket policy and
 object ACL remain authoritative. ACL `public-read` allows read actions from
 empty access keys; ACL `public-read-write` additionally allows write actions;
 ACL `private` requires a non-empty access key. Multi-tenant ownership
