@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.513.0] - 2026-06-03
+
+### Changed
+
+- **Split `internal/cluster/backend.go` into themed files** (navigability, no
+  behavior change). The `DistributedBackend` data-plane API (~149 methods) lived
+  in one 4610-LOC file. Moved the object operations into 8 same-package files —
+  `bucket.go`, `object_put.go`, `object_get.go`, `ec_maintenance.go`,
+  `object_delete.go`, `object_list.go`, `multipart.go`, `object_version.go` —
+  leaving the struct, constructors, config setters, topology/snapshot/propose/
+  apply core, and path helpers in `backend.go` (now 1302 LOC). This does **not**
+  decompose the god-struct (a prior seam-check ruled that infeasible); it is
+  pure file-organization. Proven behavior-neutral by a sorted-line diff (only
+  import/package/blank lines redistribute; zero code or comment lines change).
+
 ## [0.0.512.0] - 2026-06-03
 
 ### Added
