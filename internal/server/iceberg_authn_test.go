@@ -18,6 +18,7 @@ import (
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -229,7 +230,7 @@ func TestIcebergAuthn_InvalidBearerRejectedWithoutAnonBypass(t *testing.T) {
 	_, err = ks.GenerateCurrent()
 	require.NoError(t, err)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend,
 		WithJWTKeySet(ks),
@@ -289,7 +290,7 @@ func TestIcebergAuthn_ValidBearer_Passes(t *testing.T) {
 	_, err = ks.GenerateCurrent()
 	require.NoError(t, err)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithJWTKeySet(ks))
 	go srv.Run() //nolint:errcheck

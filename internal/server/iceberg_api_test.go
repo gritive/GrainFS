@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -430,7 +431,7 @@ func setupNoIcebergStoreServer(t *testing.T) string {
 	require.NoError(t, err, "NewLocalBackend")
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, noDBProviderBackend{Backend: backend})
 	go srv.Run() //nolint:errcheck

@@ -15,7 +15,7 @@ import (
 )
 
 // AlertsSender is the slim interface resourceguard needs from the cluster
-// alerts plumbing. Implemented by *server.AlertsState; defined here so the
+// alerts plumbing. Implemented by *alertssvc.State; defined here so the
 // package does not import internal/server. Send is fire-and-forget.
 type AlertsSender interface {
 	Send(alerts.Alert)

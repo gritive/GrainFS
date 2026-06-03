@@ -29,6 +29,7 @@ import (
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -84,7 +85,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	if state.dekKeeper != nil {
 		alertDecrypter = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
 	}
-	state.clusterAlerts = server.NewAlertsStateWithConfig(
+	state.clusterAlerts = alertssvc.NewStateWithConfig(
 		state.metaRaft.FSM().ClusterConfig(),
 		alertDecrypter,
 		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},

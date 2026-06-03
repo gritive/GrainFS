@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -212,7 +213,7 @@ func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) 
 
 	gate := NewMutationGate(nil)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	opts := []Option{WithMutationGate(gate), WithEventStore(evStore), withEventQueueSize(testEventQueueSize)}

@@ -19,7 +19,7 @@ type RaftStateProvider interface {
 	LeaderID() string
 }
 
-// AlertSender is the minimal slice of *server.AlertsState used by the quorum
+// AlertSender is the minimal slice of *alertssvc.State used by the quorum
 // monitor — a single fire-and-forget Send call. Defined here to avoid a
 // cluster→server circular import.
 type AlertSender interface {

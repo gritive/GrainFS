@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -25,7 +26,7 @@ func setupAuthServer(t *testing.T) string {
 	require.NoError(t, err, "NewLocalBackend")
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	creds := []s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}
 	srv := New(addr, backend, WithAuth(creds))
@@ -96,7 +97,7 @@ func TestAuthAcceptsValidSignature(t *testing.T) {
 	require.NoError(t, backend.CreateBucket(t.Context(), "mybucket"))
 
 	base := "http://" + func() string {
-		port := freePort(t)
+		port := servertest.FreePort(t)
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		creds := []s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}
 		srv := New(addr, backend, WithAuth(creds))
@@ -172,7 +173,7 @@ func TestAuthAcceptsSignedPostPolicyFormUpload(t *testing.T) {
 	t.Cleanup(func() { backend.Close() })
 	require.NoError(t, backend.CreateBucket(t.Context(), "form-auth"))
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	creds := []s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}
 	srv := New(addr, backend, WithAuth(creds))

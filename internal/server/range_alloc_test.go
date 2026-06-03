@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -132,13 +133,13 @@ func TestGetAndHeadObjectRetryTransientReadAfterWriteNotFound(t *testing.T) {
 	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
 	backend := &transientNotFoundBackend{Backend: local}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj", port))
 	require.NoError(t, err)
@@ -202,13 +203,13 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
 	backend := &countingReadAtBackend{Backend: local}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/obj", port), nil)
 	require.NoError(t, err)
@@ -251,13 +252,13 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 			},
 		},
 	}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	resp, err := http.Get(base + "/b/obj?partNumber=2")
@@ -297,13 +298,13 @@ func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
 			},
 		},
 	}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj?partNumber=1", port))
 	require.NoError(t, err)
@@ -336,16 +337,16 @@ func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testin
 	require.NoError(t, local.SetObjectACL("b", "private", uint8(s3auth.ACLPrivate)))
 
 	backend := &countingReadAtBackend{Backend: local}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend, WithAuth([]s3auth.Credentials{{
 		AccessKey: "ak",
 		SecretKey: "sk",
 	}}))
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/private", port), nil)
 	require.NoError(t, err)
@@ -372,13 +373,13 @@ func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, backend.SetObjectACL("b", "large.bin", 1)) // ACLPublicRead
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/large.bin", port), nil)
 	require.NoError(t, err)

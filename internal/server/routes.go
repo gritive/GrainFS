@@ -5,6 +5,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -27,7 +28,14 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerConfigAPI(h)
 	s.registerEventsAPI(h)
 	s.registerAuditAPI(h)
-	s.registerAlertsAPI(h)
+	alertssvc.NewHandler(alertssvc.Deps{
+		State:            s.alerts,
+		LocalhostOnly:    localhostOnly,
+		MutationDisabled: s.blockIfMutationDisabled,
+		FeatureVisible:   func() bool { return s.routeFeatureRoutesVisible(routeFeatureAlerts) },
+		StatusPath:       routePathAlertsStatus,
+		ResendPath:       routePathAlertsResend,
+	}).Register(h)
 	s.receipt.Register(h, routePathReceiptByID, routePathReceipts)
 	s.incidentH.Register(h, routePathIncidents, routePrefixIncidents)
 }

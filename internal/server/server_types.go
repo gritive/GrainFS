@@ -23,6 +23,7 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
@@ -121,7 +122,7 @@ type Server struct {
 	joinCluster   JoinClusterFunc
 	balancer      BalancerInfo
 	evStore       *eventstore.Store
-	alerts        *AlertsState
+	alerts        *alertssvc.State
 	receiptAPI    *receipt.API
 	incidentStore incident.StateStore
 	mutationGate  *MutationGate

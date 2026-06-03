@@ -17,6 +17,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -58,7 +59,7 @@ func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service, ba
 	store := lifecycle.NewStore(db)
 	svc = lifecycle.NewService(store, &directProposer{store: store}, noopLeadership{}, nil, nil, 0)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithLifecycleService(svc))
 	go srv.Run() //nolint:errcheck

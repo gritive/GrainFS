@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -21,7 +22,7 @@ func setupECTestServer(t *testing.T) (string, *cluster.DistributedBackend) {
 	t.Helper()
 	b := cluster.NewSingletonBackendForTest(t)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, b)
 	go srv.Run() //nolint:errcheck

@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.505.0] - 2026-06-03
+
+### Changed
+
+- **NFSv4 COMPOUND dispatcher split into op-family files** (behavior-neutral). The
+  2185-LOC `internal/nfs4server/compound.go` god-file had its 28 op-handler methods
+  relocated into five family files (`compound_fh.go`, `compound_namespace.go`,
+  `compound_attr.go`, `compound_io.go`, `compound_session.go`), mirroring the
+  documented `meta_fsm_*` family-file pattern. `Dispatch` and the op switch are the
+  unchanged interface; every moved method body is byte-identical. compound.go drops
+  to 1086 LOC. Locality/navigability only — no behavior change.
+- **Shared `skipWords`/`skipBitmap` helper in NFSv4 arg decoding** (behavior-neutral).
+  The recurring "read a bitmap4 length prefix, loop to discard N words" idiom in
+  `readOpArgs` (CREATE / OPEN / EXCHANGE_ID / IO_ADVISE / CREATE_SESSION) is now one
+  helper. The pooled encode paths (`getOpArg8/16/32` for GETATTR/READDIR) and the
+  underflow-sensitive SETATTR partial skip are left untouched — the per-op pooling is
+  a hot-path optimization a generic table would obscure, so no opcode→schema table was
+  introduced.
+- **Alerts subsystem extracted from the `server` god-package into an
+  `internal/server/alertssvc` satellite** (behavior-neutral), using the established
+  closure-rich `Deps` pattern (iceberg / receiptsvc / incidentsvc / snapshotsvc).
+  `AlertsState` becomes `alertssvc.State`; the HTTP handlers move behind a
+  `Deps{State, LocalhostOnly, MutationDisabled, FeatureVisible, StatusPath,
+  ResendPath}` seam. Production wiring keeps the real `localhostOnly` middleware,
+  mutation gate, and feature predicate, so `/api/admin/alerts/*` access control is
+  unchanged. The new `internal/server/servertest` package lifts the transport-level
+  test helpers (`FreePort`/`WaitTCP`/`ShutdownServer`) into an importable seam so both
+  `server` and `alertssvc` test suites share one harness. `servertest` does not reach
+  the production binary. Build + vet + full unit suite green.
+
 ## [0.0.504.0] - 2026-06-03
 
 ### Changed
