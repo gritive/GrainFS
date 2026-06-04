@@ -58,6 +58,11 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		// pipeline dispatch to K == 1 and let K >= 2 fall through to the spool
 		// writer (contiguous layout). Covered by the K>=2 multi-stripe round-trip
 		// integration test.
+		//
+		// Load-bearing: the K read here (placementPlan.Config.DataShards) must be
+		// the same K the pipeline splits on (its Config.ECConfig.DataShards). Both
+		// derive from boot's effectiveEC today; a future per-bucket EC config must
+		// keep them equal or this guard could pass while the pipeline interleaves.
 		pipelineLayoutSafe := planErr == nil && placementPlan.Config.DataShards == 1
 		allLocal := false
 		if planErr == nil {
