@@ -141,6 +141,12 @@ func (c *CommitCoord) handle(res ShardWriteResult) {
 					if sz <= 0 {
 						continue
 					}
+					// A remote shard lives on a peer, which records it in ITS
+					// own data WAL; recording it here would point local recovery
+					// at a file that isn't on this node.
+					if i < len(w.remoteShards) && w.remoteShards[i] {
+						continue
+					}
 					records = append(records, ShardWALRecord{
 						Bucket:   w.metadata.Bucket,
 						Key:      w.metadata.Key,

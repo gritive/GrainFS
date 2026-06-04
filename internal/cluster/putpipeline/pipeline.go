@@ -28,6 +28,10 @@ type Config struct {
 	FlushAfter   time.Duration // metadata flush deadline; defaults to 5 ms if 0
 	BadgerDB     *badger.DB    // metadata sink; nil = no-op flush (tests)
 	WAL          ShardWALAppender
+	// Transport streams sealed shards to peers for mixed-placement PUTs
+	// (PutRequest.Placement). nil is fine for an all-local pipeline; a PUT
+	// that routes a remote shard with no transport fails that shard cleanly.
+	Transport shardTransport
 }
 
 // ShardWALAppender lets CommitCoord record the per-PUT shard layout in
@@ -189,14 +193,80 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 	totalSize := *req.SizeHint
 	putID := p.nextPutID.Add(1)
 
-	// Map each shard index to its target drive (round-robin by index).
-	// CPUPool's per-shard fan-out for shard i points at the DriveActor's
-	// long-lived in channel — the DriveActor demultiplexes by PutID via
-	// its pending+registry maps.
 	numShards := p.cfg.ECConfig.NumShards()
+	if req.Placement != nil && len(req.Placement) != numShards {
+		return nil, fmt.Errorf("pipeline: placement length %d != shards %d", len(req.Placement), numShards)
+	}
+
+	// Map each shard index to its target drive. Local shards (round-robin by
+	// index) use the long-lived drives — today's behavior, untouched. CPUPool's
+	// per-shard fan-out for shard i points at the chosen DriveActor's in
+	// channel; the DriveActor demultiplexes by PutID via its pending+registry
+	// maps.
+	//
+	// A remote shard (Placement[i] != "") instead gets its OWN ephemeral
+	// DriveActor for this PUT (S2-sender-b-2, Option B): a remote sink's Write
+	// blocks on network backpressure, so giving each remote stream a dedicated
+	// goroutine keeps a stalled peer from head-of-line blocking co-located
+	// shards. The ephemeral drives are torn down when the PUT returns.
 	shardChans := make([]chan<- EncryptedShardChunk, numShards)
+	var remoteShards []bool
+	// usedLocalDrives guards the mixed-placement case only. A DriveActor keys
+	// its registry/pending by PutID alone, so it can hold ONE shard per PUT;
+	// the all-local path relies on the DataDirs>=numShards invariant to give
+	// each shard a distinct round-robin drive. A multi-node coordinator stores
+	// only a SUBSET of shards (it has fewer drives than numShards by design),
+	// so two local shards can collide on one drive — which would silently
+	// overwrite the registry entry and hang the PUT. Fail loudly instead. The
+	// real fix (a distinct drive, or an ephemeral pump, per local shard) is a
+	// step-2 wiring constraint; here we only refuse the unsafe routing.
+	var usedLocalDrives map[int]bool
+	// remoteCtx scopes the ephemeral remote-shard pumps to this PUT; cancel +
+	// Wait on return tears them down (an all-local PUT spawns none, so the
+	// teardown is a no-op). The remote pumps are only created for non-empty
+	// Placement entries, leaving the shipped all-local drive wiring untouched.
+	var remoteWG sync.WaitGroup
+	remoteCtx, cancelRemote := context.WithCancel(ctx)
+	defer func() {
+		cancelRemote()
+		remoteWG.Wait()
+	}()
 	for i := 0; i < numShards; i++ {
+		peerAddr := ""
+		if req.Placement != nil {
+			peerAddr = req.Placement[i]
+		}
+		if peerAddr != "" {
+			if remoteShards == nil {
+				remoteShards = make([]bool, numShards)
+			}
+			remoteShards[i] = true
+			in := make(chan EncryptedShardChunk, p.cfg.ChannelDepth)
+			d := &DriveActor{
+				in:        in,
+				commitCh:  p.commitIn,
+				pending:   make(map[uint64]*shardWriteState),
+				transport: p.cfg.Transport,
+			}
+			// registerRemotePut must happen BEFORE the first chunk arrives. The
+			// RPC ctx is the PUT-scoped remoteCtx so cancellation (teardown or a
+			// PUT abort) unblocks a Write parked on a dead peer.
+			d.registerRemotePut(remoteCtx, putID, req.Bucket, req.Key, i, peerAddr)
+			shardChans[i] = in
+			remoteWG.Add(1)
+			go func() { defer remoteWG.Done(); d.Run(remoteCtx) }()
+			continue
+		}
 		driveIdx := i % len(p.driveIns)
+		if req.Placement != nil {
+			if usedLocalDrives == nil {
+				usedLocalDrives = make(map[int]bool, numShards)
+			}
+			if usedLocalDrives[driveIdx] {
+				return nil, fmt.Errorf("pipeline: mixed-placement local shard %d collides on drive %d (a drive holds one shard per PUT; placement must give each local shard a distinct drive)", i, driveIdx)
+			}
+			usedLocalDrives[driveIdx] = true
+		}
 		shardChans[i] = p.driveIns[driveIdx]
 		// registerPut must happen BEFORE the first chunk for (PutID, shardIdx)
 		// arrives on the DriveActor's channel.
@@ -208,10 +278,11 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 	earlyAck := make(chan error, 1)
 	finalDone := make(chan error, 1)
 	p.commit.registerPut(putID, &putWaiter{
-		shardsTotal: numShards,
-		cfg:         p.cfg.ECConfig,
-		earlyAck:    earlyAck,
-		finalDone:   finalDone,
+		shardsTotal:  numShards,
+		cfg:          p.cfg.ECConfig,
+		earlyAck:     earlyAck,
+		finalDone:    finalDone,
+		remoteShards: remoteShards,
 		metadata: MetadataRecord{
 			Bucket:   req.Bucket,
 			Key:      req.Key,
