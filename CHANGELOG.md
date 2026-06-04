@@ -19,6 +19,17 @@
   requires the StripeBytes-aware reader). Forward-only. Default is OFF; legacy spool
   path is unchanged when disabled.
 
+### Operator note (durability)
+
+- The streaming path commits **data-shards-required, parity-best-effort** (inherited
+  unchanged from the all-local pipeline): a PUT returns success once all K data shards
+  are durable, even if one or more parity shards failed to write. Across peers a parity
+  write failure (peer down, network) is more *likely* than across a single node's disks,
+  so an operator opting in should expect that some PUTs may commit with reduced erasure
+  redundancy (still fully readable; reconstruct margin is thinner until the scrubber
+  re-encodes). A stricter quorum that guarantees parity-at-commit is tracked as a
+  deferred follow-up (see `TODOS.md`).
+
 ## [0.0.516.0] - 2026-06-05
 
 ### Added
