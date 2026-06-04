@@ -321,9 +321,10 @@ func (b *DistributedBackend) openCoalescedECReader(ctx context.Context, bucket s
 		return nil, nil
 	}
 	rec := PlacementRecord{
-		Nodes: append([]string(nil), ref.NodeIDs...),
-		K:     int(ref.ECData),
-		M:     int(ref.ECParity),
+		Nodes:       append([]string(nil), ref.NodeIDs...),
+		K:           int(ref.ECData),
+		M:           int(ref.ECParity),
+		StripeBytes: int(ref.StripeBytes),
 	}
 	return b.newECObjectReader().OpenObject(ctx, bucket, ref.ShardKey, rec, ref.Size)
 }

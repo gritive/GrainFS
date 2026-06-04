@@ -265,4 +265,119 @@ var _ = Describe("Backend put pipeline integration", func() {
 		Expect(closeErr).NotTo(HaveOccurred())
 		Expect(got).To(Equal(payload), "object content must survive EC upgrade from a striped source")
 	})
+
+	// Versioned GET must take the same striped de-interleave path as latest GET.
+	// headObjectMetaV builds its own storage.Object + PlacementMeta; if it drops
+	// the StripeBytes marker, ResolvePlacement hands the reader a zero marker and
+	// GetObjectVersion reads a K>=2 multi-stripe version as contiguous garbage.
+	It("round-trips a K>=2 multi-stripe object through versioned GET (GetObjectVersion de-interleaves)", func() {
+		_ = wireK2InterleavedPipeline(b)
+		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
+		Expect(b.SetBucketVersioning("bucket", "Enabled")).To(Succeed())
+
+		payload := make([]byte, 3*1024*1024+123)
+		for i := range payload {
+			payload[i] = byte((i*7)%251 + 1)
+		}
+		size := int64(len(payload))
+		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket:   "bucket",
+			Key:      "ver.bin",
+			Body:     bytes.NewReader(payload),
+			SizeHint: &size,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj.StripeBytes).To(BeNumerically(">", uint32(0)))
+		Expect(obj.VersionID).NotTo(BeEmpty())
+
+		rc, _, err := b.GetObjectVersion("bucket", "ver.bin", obj.VersionID)
+		Expect(err).NotTo(HaveOccurred())
+		got, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(closeErr).NotTo(HaveOccurred())
+		Expect(got).To(Equal(payload), "versioned GET of a striped object must de-interleave, not read contiguous garbage")
+	})
+
+	// Appending to a plain (pipeline-written, interleaved) object transitions it
+	// to appendable and captures its base shards as a coalesced ref via
+	// appendBaseCoalescedRef. Pre-flip a K>=2 base was always contiguous (spool),
+	// so the base coalesced ref dropping StripeBytes was harmless; the all-local
+	// K>=2 flip makes the base interleaved, so the marker MUST carry forward
+	// through CoalescedShardRef -> storage.CoalescedRef -> the appendable reader,
+	// or the base portion reads back as contiguous garbage.
+	It("round-trips a K>=2 multi-stripe base after it transitions to appendable (base coalesced ref carries StripeBytes)", func() {
+		_ = wireK2InterleavedPipeline(b)
+		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
+
+		base := make([]byte, 3*1024*1024+123)
+		for i := range base {
+			base[i] = byte((i*7)%251 + 1)
+		}
+		bsize := int64(len(base))
+		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket:   "bucket",
+			Key:      "app.bin",
+			Body:     bytes.NewReader(base),
+			SizeHint: &bsize,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj.StripeBytes).To(BeNumerically(">", uint32(0)))
+
+		tail := []byte("appended-tail-bytes")
+		apObj, err := b.AppendObject(ctx, "bucket", "app.bin", bsize, bytes.NewReader(tail))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apObj.IsAppendable).To(BeTrue())
+		Expect(apObj.Size).To(Equal(bsize + int64(len(tail))))
+
+		rc, _, err := b.GetObject(ctx, "bucket", "app.bin")
+		Expect(err).NotTo(HaveOccurred())
+		got, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(closeErr).NotTo(HaveOccurred())
+		want := append(append([]byte(nil), base...), tail...)
+		Expect(got).To(Equal(want), "appended object's interleaved base must de-interleave, not read contiguous garbage")
+	})
 })
+
+// wireK2InterleavedPipeline configures b with a K=2/parity=1 multi-root shard
+// service and a streaming put pipeline whose DataDirs match the shard service,
+// so all-local PUTs take the interleaved streaming path (StripeBytes > 0). It
+// mirrors boot wiring. Returns the per-shard data roots for degraded-shard
+// manipulation. Must be called from within a spec node (uses Ginkgo cleanup).
+func wireK2InterleavedPipeline(b *cluster.DistributedBackend) []string {
+	clusterID := bytes.Repeat([]byte{0x42}, 16)
+	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x91}, encrypt.KEKSize), clusterID)
+	Expect(err).NotTo(HaveOccurred())
+	dwal, err := datawal.Open(filepath.Join(b.Root(), "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { _ = dwal.Close() })
+
+	ec := cluster.ECConfig{DataShards: 2, ParityShards: 1}
+	b.SetECConfig(ec)
+	dataRoots := make([]string, ec.NumShards())
+	for i := range dataRoots {
+		dataRoots[i] = GinkgoT().TempDir()
+	}
+	svc := cluster.NewMultiRootShardService(dataRoots, nil, cluster.WithShardDEKKeeper(keeper, clusterID), cluster.WithDataWAL(dwal))
+	nodes := make([]string, ec.NumShards())
+	for i := range nodes {
+		nodes[i] = b.SelfAddr()
+	}
+	b.SetShardService(svc, nodes)
+
+	pipeline := putpipeline.New(putpipeline.Config{
+		DataDirs:  svc.DataDirs(),
+		DEKKeeper: keeper,
+		ClusterID: clusterID,
+		ECConfig:  ec,
+	})
+	DeferCleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = pipeline.Shutdown(shutdownCtx)
+	})
+	b.SetPutPipeline(pipeline, true)
+	return dataRoots
+}

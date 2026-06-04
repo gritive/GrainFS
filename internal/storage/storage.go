@@ -89,6 +89,7 @@ type CoalescedRef struct {
 	ShardKey    string // "<key>/coalesced/<coalescedID>" — used by EC reader (B3)
 	ECData      uint8
 	ECParity    uint8
+	StripeBytes uint32 // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs     []string
 }
 
