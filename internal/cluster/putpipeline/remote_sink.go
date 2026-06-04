@@ -10,16 +10,11 @@ import (
 )
 
 // shardTransport is the subset of the cluster transport the remote shard sink
-// needs: stream a request + body to a peer and return the response. Dormant
-// until S2-sender-b wires the sink into the pipeline's per-shard placement
-// routing; proven in isolation by remote_sink_test.go.
-//
-//nolint:unused // dormant until S2-sender-b wiring (proven by remote_sink_test.go)
+// needs: stream a request + body to a peer and return the response.
 type shardTransport interface {
 	CallWithBody(ctx context.Context, addr string, req *transport.Message, body io.Reader) (*transport.Message, error)
 }
 
-//nolint:unused // dormant — see shardTransport.
 var errShardSinkAborted = errors.New("remote shard sink: aborted")
 
 // Compile-time assertion that the remote sink satisfies the DriveActor's
@@ -56,7 +51,6 @@ type remoteSealedShardSink struct {
 	done chan error
 }
 
-//nolint:unused // dormant — see shardTransport.
 func newRemoteSealedShardSink(ctx context.Context, tr shardTransport, peerAddr, bucket, shardKey string, shardIdx int) *remoteSealedShardSink {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)

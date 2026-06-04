@@ -27,11 +27,15 @@ type DriveActor struct {
 	// Set by Pipeline.New when Config.WAL != nil.
 	skipFsync bool
 
-	// newSink opens the destination for one shard's sealed ciphertext chunks.
-	// nil ⟹ the default local-file sink (tmp file + atomic rename), which is
-	// today's behavior. A remote-stream sink (S2) overrides this to ship the
-	// same sealed bytes to a peer's WriteSealedShard RPC. Called outside d.mu.
+	// newSink opens the LOCAL destination for one shard's sealed ciphertext
+	// chunks. nil ⟹ the default local-file sink (tmp file + atomic rename),
+	// which is today's behavior. Called outside d.mu. (Remote shards bypass this
+	// and use a remoteSealedShardSink — see registerRemotePut / stateFor.)
 	newSink func(bucket, shardKey string, shardIdx int) (shardSink, error)
+
+	// transport is required only for shards registered via registerRemotePut
+	// (peer placement); nil is fine for an all-local pipeline.
+	transport shardTransport
 
 	// panicOnPut is a test-only seam: when non-zero, handle() panics on
 	// the first chunk whose PutID matches, to exercise recover().
@@ -125,15 +129,24 @@ func (d *DriveActor) openLocalFileSink(bucket, shardKey string, shardIdx int) (s
 	return &localFileSink{f: f, finalPath: finalPath, tmpPath: tmpPath, skipFsync: d.skipFsync}, nil
 }
 
-// registryEntry records where a registered PUT's shard file lives.
+// registryEntry records where a registered PUT's shard goes. A local entry
+// (remote == false) lands a shard_N file under the drive's data dir; a remote
+// entry streams the sealed shard to peerAddr's WriteSealedShard RPC.
 type registryEntry struct {
 	bucket   string
 	shardKey string
 	shardIdx int
+
+	// Remote-placement fields (set only by registerRemotePut). The ctx carries
+	// the per-PUT RPC deadline; it is stored transiently in this per-PUT entry
+	// (dropped when the PUT finalizes) rather than threaded through every chunk.
+	remote   bool
+	peerAddr string
+	ctx      context.Context //nolint:containedctx // transient per-PUT routing entry, dropped on finalize
 }
 
 // registerPut tells this drive that PutID will arrive with shard
-// chunks, and where the final shard file should land.
+// chunks, and where the final LOCAL shard file should land.
 func (d *DriveActor) registerPut(putID uint64, bucket, shardKey string, shardIdx int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -141,6 +154,29 @@ func (d *DriveActor) registerPut(putID uint64, bucket, shardKey string, shardIdx
 		d.registry = make(map[uint64]registryEntry)
 	}
 	d.registry[putID] = registryEntry{bucket: bucket, shardKey: shardKey, shardIdx: shardIdx}
+}
+
+// registerRemotePut tells this drive that PutID's shard streams to a peer
+// (peerAddr) via the verbatim WriteSealedShard RPC instead of a local file. ctx
+// MUST carry an RPC deadline (a dead peer would otherwise block the shard write
+// forever; see remoteSealedShardSink). Dormant until S2-sender-b wires
+// per-shard placement in Pipeline.Put.
+//
+//nolint:unused // dormant until S2-sender-b wiring (proven by drive_test.go)
+func (d *DriveActor) registerRemotePut(ctx context.Context, putID uint64, bucket, shardKey string, shardIdx int, peerAddr string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.registry == nil {
+		d.registry = make(map[uint64]registryEntry)
+	}
+	d.registry[putID] = registryEntry{
+		bucket:   bucket,
+		shardKey: shardKey,
+		shardIdx: shardIdx,
+		remote:   true,
+		peerAddr: peerAddr,
+		ctx:      ctx,
+	}
 }
 
 // Run consumes from d.in until ctx is done. A panic inside chunk
@@ -231,18 +267,34 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 		}
 		return nil
 	}
-	newSink := d.newSink
-	if newSink == nil {
-		newSink = d.openLocalFileSink
-	}
-	sink, err := newSink(entry.bucket, entry.shardKey, entry.shardIdx)
-	if err != nil {
-		d.commitCh <- ShardWriteResult{
-			PutID:    chunk.PutID,
-			ShardIdx: chunk.ShardIdx,
-			Err:      err,
+	var sink shardSink
+	if entry.remote {
+		if d.transport == nil {
+			d.commitCh <- ShardWriteResult{
+				PutID:    chunk.PutID,
+				ShardIdx: chunk.ShardIdx,
+				Err:      fmt.Errorf("drive actor: remote shard %d has no transport", entry.shardIdx),
+			}
+			return nil
 		}
-		return nil
+		// The remote sink streams the sealed bytes to the peer; failures surface
+		// at Finalize/Abort (it spawns its RPC goroutine here, no open error).
+		sink = newRemoteSealedShardSink(entry.ctx, d.transport, entry.peerAddr, entry.bucket, entry.shardKey, entry.shardIdx)
+	} else {
+		newSink := d.newSink
+		if newSink == nil {
+			newSink = d.openLocalFileSink
+		}
+		s, err := newSink(entry.bucket, entry.shardKey, entry.shardIdx)
+		if err != nil {
+			d.commitCh <- ShardWriteResult{
+				PutID:    chunk.PutID,
+				ShardIdx: chunk.ShardIdx,
+				Err:      err,
+			}
+			return nil
+		}
+		sink = s
 	}
 	s := &shardWriteState{
 		sink:     sink,

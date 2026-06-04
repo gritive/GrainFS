@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -113,4 +114,58 @@ func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
 
 	_, statErr := os.Stat(filepath.Join(recvDir, "shards", "bkt", "obj", "shard_1"))
 	require.True(t, os.IsNotExist(statErr), "aborted sink must commit NO shard file on the peer (not even a corrupt partial)")
+}
+
+// TestDriveActor_RemoteDestination proves the DriveActor routes a shard
+// registered via registerRemotePut through a remoteSealedShardSink to the peer
+// (instead of a local file), and the peer stores it verbatim + reads back to
+// plaintext. This is the dormant S2-sender-b-1 routing seam.
+func TestDriveActor_RemoteDestination(t *testing.T) {
+	ctx := context.Background()
+	keeper := testDEKKeeper(t)
+	clusterID := testClusterID()
+
+	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	recv := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
+
+	sealer := newSinkTestShardService(t, tr1, keeper, clusterID)
+	plaintext := bytes.Repeat([]byte("drive remote shard "), 4096)
+	sealed, err := sealer.EncodeEncryptedShardBuffer("bkt", "obj", 0, plaintext)
+	require.NoError(t, err)
+
+	in := make(chan EncryptedShardChunk, 4)
+	commit := make(chan ShardWriteResult, 4)
+	d := &DriveActor{
+		in:        in,
+		commitCh:  commit,
+		pending:   make(map[uint64]*shardWriteState),
+		transport: tr1,
+	}
+	d.registerRemotePut(ctx, 1, "bkt", "obj", 0, tr2.LocalAddr())
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go d.Run(runCtx)
+
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: append([]byte(nil), sealed[:1000]...), LastInPut: false}
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: append([]byte(nil), sealed[1000:]...), LastInPut: true}
+
+	select {
+	case res := <-commit:
+		require.NoError(t, res.Err, "remote shard write through DriveActor must succeed")
+	case <-time.After(3 * time.Second):
+		t.Fatal("no commit result for remote shard")
+	}
+
+	got, err := recv.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
 }
