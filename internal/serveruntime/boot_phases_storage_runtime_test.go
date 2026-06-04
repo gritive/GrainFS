@@ -216,3 +216,30 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	require.NotNil(t, state.loadReporterStor, "loadReporter store after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.stopApply, "stopApply channel after bootOwnedGroupsAndEC")
 }
+
+// TestPutMultiNodeStreamEnabled verifies the EXPERIMENTAL multi-node streaming
+// PUT opt-in honours GRAINFS_PUT_MULTINODE_STREAM=1 and defaults OFF for every
+// other value (unset / "0" / "true"), matching the strict == "1" idiom.
+func TestPutMultiNodeStreamEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		set  bool
+		val  string
+		want bool
+	}{
+		{name: "unset defaults off", set: false, want: false},
+		{name: "explicit 1 enables", set: true, val: "1", want: true},
+		{name: "zero stays off", set: true, val: "0", want: false},
+		{name: "true is not 1", set: true, val: "true", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("GRAINFS_PUT_MULTINODE_STREAM", tc.val)
+			} else {
+				t.Setenv("GRAINFS_PUT_MULTINODE_STREAM", "")
+			}
+			assert.Equal(t, tc.want, putMultiNodeStreamEnabled())
+		})
+	}
+}

@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -32,6 +33,13 @@ func warnIfReducedDataFsync() {
 	case directio.SyncOff:
 		log.Warn().Msg("GRAINFS_FSYNC_MODE=off: data-plane fsync DISABLED; durability relies on cross-node EC reconstruction — UNSAFE for single-node and correlated power loss")
 	}
+}
+
+// putMultiNodeStreamEnabled reports whether the EXPERIMENTAL multi-node
+// streaming-EC PUT path is opted in via GRAINFS_PUT_MULTINODE_STREAM=1. It is
+// a debug/measurement knob read once at boot (before any PUT); default OFF.
+func putMultiNodeStreamEnabled() bool {
+	return os.Getenv("GRAINFS_PUT_MULTINODE_STREAM") == "1"
 }
 
 // bootShardService completes the cluster topology bootstrap and constructs
@@ -444,18 +452,22 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			// multi-node streaming path (gated off below); the same transport
 			// the ShardService dials peers with, so resolved addresses match.
 			Transport: state.clusterTransport,
+			// Bound each remote shard write RPC so a dead peer cannot deadlock
+			// the streaming PUT, using the same deadline value as the spool path
+			// (the streaming path arms it earlier, so it bounds a broader window;
+			// see Pipeline.Put).
+			ShardRPCTimeout: cluster.ShardRPCTimeout(),
 		})
 		state.putPipeline = pipeline
 		// Enabled in prod (F1 durability review closed): Put() blocks on shard
 		// durability before returning and the drive-write path rejects ".."
 		// key traversal. Dispatch stays bounded to all-local EC placements.
 		distBackend.SetPutPipeline(pipeline, true)
-		// Multi-node streaming-EC dispatch stays FAIL-CLOSED: the sender writes
-		// stripe-interleaved shards that the current GET reader (contiguous
-		// layout) cannot reconstruct for K>1, and the always-on scrubber would
-		// corrupt them on heal. No enable path is wired until the de-interleave
-		// reader + write-quorum (S3) land; the field/setter exist for that work.
-		distBackend.SetPutPipelineMultiNode(false)
+		// EXPERIMENTAL opt-in (default OFF). Streams remote shards via
+		// WriteSealedShard instead of spooling. data-shards-required/
+		// parity-best-effort (inherited from the all-local path); forward-only
+		// (rollback corrupts reads of K>=2 multi-node streamed objects).
+		distBackend.SetPutPipelineMultiNode(putMultiNodeStreamEnabled())
 		log.Info().
 			Int("drives", len(state.shardSvc.DataDirs())).
 			Int("k", state.effectiveEC.DataShards).

@@ -31,6 +31,11 @@ import (
 // transport shard streams before the metadata propose completes.
 const shardRPCTimeout = 2 * time.Minute
 
+// ShardRPCTimeout exposes shardRPCTimeout so the streaming PUT pipeline (built
+// in serveruntime, which cannot see the unexported const) can bound each remote
+// shard write RPC with the same deadline as the spool path.
+func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
+
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
 
 // EC in-memory shard fast path size caps. Replication (parity == 0) keeps the
