@@ -200,19 +200,27 @@ func TestPipeline_MixedPlacementWALSkipsRemote(t *testing.T) {
 		"only local shards 0,1 may be WAL-recorded here; remote shards 2,3 live in the peer's WAL")
 }
 
-// TestPipeline_MixedPlacementLocalDriveCollision proves a mixed-placement PUT
-// whose local shards would share a drive fails loudly instead of hanging. A
-// DriveActor keys its registry by PutID, so two local shards on one drive would
-// overwrite the registry entry and starve CommitCoord of a result. With fewer
-// drives than shards (a real multi-node coordinator that stores only a subset),
-// local shard 2 round-robins onto drive 0 alongside shard 0 → guarded error.
-func TestPipeline_MixedPlacementLocalDriveCollision(t *testing.T) {
+// TestPipeline_MixedPlacementDenseLocalDrives proves mixed placement does NOT
+// require one drive per shard: with fewer drives than shards (a real multi-node
+// coordinator stores only a subset), shards 0,2 both map to drive 0 and 1,3 to
+// drive 1. The PutID-keyed DriveActor registry would alias these on a shared
+// long-lived drive, but the mixed path gives each shard its own ephemeral pump,
+// so the PUT completes and every shard reconstructs.
+func TestPipeline_MixedPlacementDenseLocalDrives(t *testing.T) {
 	ctx := context.Background()
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
+	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
+	defer tr.Close()
+	ss := cluster.NewMultiRootShardService(
+		[]string{t.TempDir(), t.TempDir()}, tr, // 2 drives, 4 shards
+		cluster.WithShardDEKKeeper(keeper, clusterID),
+		cluster.WithDataWAL(fakeShardWAL{}))
+
 	p := New(Config{
-		DataDirs:    []string{t.TempDir(), t.TempDir()}, // 2 drives, 4 shards
+		DataDirs:    ss.DataDirs(),
 		DEKKeeper:   keeper,
 		ClusterID:   clusterID,
 		ECConfig:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
@@ -225,16 +233,29 @@ func TestPipeline_MixedPlacementLocalDriveCollision(t *testing.T) {
 	}()
 
 	body := make([]byte, 64*1024)
+	for i := range body {
+		body[i] = byte((i * 5) % 251)
+	}
 	size := int64(len(body))
-	// Placement non-nil (engages the local-collision guard) but all-local:
-	// shards 0,2 both map to drive 0, shards 1,3 to drive 1.
+	bucket, shardKey := "external", "obj-dense/v1"
+	// Placement non-nil + all-local: forces every shard through an ephemeral
+	// local pump; shards 0,2 share drive dir 0, shards 1,3 share dir 1.
 	_, err := p.Put(ctx, PutRequest{
-		Bucket:    "external",
-		Key:       "obj-collide/v1",
+		Bucket:    bucket,
+		Key:       shardKey,
 		Body:      bytes.NewReader(body),
 		SizeHint:  &size,
 		Placement: []string{"", "", "", ""},
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "collides on drive")
+	require.NoError(t, err, "dense local placement (shards aliasing a drive dir) must complete via ephemeral pumps")
+
+	shards := make([][]byte, 4)
+	for i := 0; i < 4; i++ {
+		s, rerr := ss.ReadLocalShard(bucket, shardKey, i)
+		require.NoError(t, rerr, "shard %d must read back", i)
+		shards[i] = s
+	}
+	got, err := cluster.ECReconstruct(cluster.ECConfig{DataShards: 2, ParityShards: 2}, shards)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }
