@@ -49,6 +49,20 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      writer; lifting the streaming path cluster-wide (remote shard fetch in the de-interleave reader,
      cross-node repair, reshard re-verify under striped layout) is a separate slice — see memory
      `project_grains_cluster_put_streaming_ec`.
+   - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
+     The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
+     (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees
+     parity-at-commit (or reconstruct-from-interleaved when committing with a data shard missing) is an
+     epic-level decision, NOT needed for read correctness. Separate slice if ever wanted.
+   - [ ] **[P2] Multi-node shard repair.** Verify `RepairShard` / the scrubber reconstructs a shard
+     living on a *peer* for a multi-node interleaved object. The bench has no failures, and #716's
+     reconstruct was validated all-local — peer-resident shard repair under the striped layout is unproven.
+   - [ ] **[P3] Partial-write orphan reaping.** On a `PutShardPlaced` error, already-streamed remote
+     sealed shards have no metadata commit (orphan garbage, not corruption — the object never commits).
+     Confirm the scrubber reaps unreferenced shards.
+   - [ ] **[P3] Sealed-shard receiver streams body to disk.** `HandleWriteBody` buffers the sealed shard
+     body in memory (`shard_service.go`, bounded per-shard by `datawal.MaxPayloadBytes`); streaming to
+     disk without buffering is a later refinement.
    - [ ] **[P3] `buildInterleavedShards` test-helper fidelity debt.** The `stripe_codec_test.go` helper
      claims to mirror the CPUPool pipeline layout but diverges for multi-stripe objects (this was the
      root of the repair-layout bug). Tests built on it validate only codec self-consistency, not pipeline

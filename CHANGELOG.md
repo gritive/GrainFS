@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.517.0] - 2026-06-05
+
+### Added
+
+- **Opt-in multi-node streaming-EC PUT (`GRAINFS_PUT_MULTINODE_STREAM=1`, default off).**
+  When enabled, K>=2 PUTs whose erasure-coded shards land on multiple cluster nodes
+  stream through the EC pipeline (shards written stripe-interleaved, peers sealing
+  their shard over the shard RPC) and stamp a `StripeBytes` marker, instead of
+  spooling to disk and re-encoding. The StripeBytes-aware GET reader (shipped in
+  v0.0.516.0) de-interleaves these objects on read. With the env var unset the path
+  is inert: K>=2 multi-node PUTs keep using the legacy spool writer exactly as before.
+
+### Upgrade / rollback note
+
+- After the first K>=2 multi-node streamed PUT (opt-in), rolling this binary back
+  past this release corrupts reads of those objects (interleaved shard layout
+  requires the StripeBytes-aware reader). Forward-only. Default is OFF; legacy spool
+  path is unchanged when disabled.
+
 ## [0.0.516.0] - 2026-06-05
 
 ### Added
