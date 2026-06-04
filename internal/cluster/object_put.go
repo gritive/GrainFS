@@ -50,6 +50,15 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			Operation: "put_object",
 			ShardKey:  ecObjectShardKey(key, ""),
 		})
+		// The put pipeline writes a stripe-INTERLEAVED shard layout (one fragment
+		// per stripe per shard); the GET reader expects each shard to be a
+		// CONTIGUOUS 1/K object slice. Those agree only when DataShards == 1 (the
+		// fragment IS the whole stripe), so for K >= 2 a multi-stripe object would
+		// round-trip to garbage. Until a de-interleaving reader lands, restrict
+		// pipeline dispatch to K == 1 and let K >= 2 fall through to the spool
+		// writer (contiguous layout). Covered by the K>=2 multi-stripe round-trip
+		// integration test.
+		pipelineLayoutSafe := planErr == nil && placementPlan.Config.DataShards == 1
 		allLocal := false
 		if planErr == nil {
 			// Actor-eligible: all shards local and EC config is non-zero.
@@ -61,7 +70,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				}
 			}
 		}
-		if allLocal {
+		if allLocal && pipelineLayoutSafe {
 			versionID := newVersionID()
 			shardKey := ecObjectShardKey(key, versionID)
 			obj, err := b.putPipeline.PutShard(ctx, shardKey, storage.PutObjectRequest{
@@ -114,7 +123,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				ECParity:         uint8(placementPlan.Config.ParityShards),
 				NodeIDs:          cloneStringSlice(nodeIDs),
 			}, nil
-		} else if b.putPipelineMultiNode && planErr == nil && placementPlan.Config.NumShards() > 0 {
+		} else if b.putPipelineMultiNode && pipelineLayoutSafe && placementPlan.Config.NumShards() > 0 {
 			// EXPERIMENTAL multi-node streaming EC: stream remote shards to their
 			// peers (verbatim WriteSealedShard) instead of spooling. Mirrors the
 			// all-local block but records the real per-shard NodeIDs. all-N
