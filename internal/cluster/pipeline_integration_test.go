@@ -438,6 +438,73 @@ var _ = Describe("Backend put pipeline integration", func() {
 		Expect(closeErr).NotTo(HaveOccurred())
 		Expect(got).To(Equal(payload), "repaired shard must be re-interleaved to match its striped siblings")
 	})
+
+	// The production scrubber (scrubber.go -> RepairShardLocal) repairs a missing shard via
+	// RepairShard -> readPlacementMeta + ResolvePlacement -> reconstructShardAtKey, a
+	// DIFFERENT placement-resolve path than the startup-repair test above (which passes a
+	// pre-resolved ShardKey/Placement and so bypasses ResolvePlacement). If readPlacementMeta
+	// (object_get.go) or ResolvePlacement (placement_resolver.go) drops StripeBytes, the
+	// scrubber rebuilds the missing shard with a contiguous layout that no longer matches its
+	// striped siblings, and a later GET de-interleaves garbage.
+	It("repairs a missing shard of a K>=2 striped object via the scrubber RepairShard path (readPlacementMeta + ResolvePlacement carry StripeBytes)", func() {
+		// K=3 (not the K=2 helper): at K=2 the per-stripe interleaved shard length
+		// happens to equal ceil(objectSize/2), so the contiguous ECReconstruct+ECSplit
+		// repair branch coincidentally reproduces the interleaved layout and a dropped
+		// StripeBytes would NOT corrupt — a degenerate geometry. At K>=3 (production
+		// default is 4+2) per-stripe fragment padding diverges from a single contiguous
+		// split, so a contiguous-branch repair of a striped object yields a wrong-layout
+		// shard. K=3 makes this test actually discriminate the StripeBytes-carrying path.
+		dataRoots, _ := wireInterleavedPipeline(b, cluster.ECConfig{DataShards: 3, ParityShards: 2}, 0)
+		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
+
+		payload := make([]byte, 3*1024*1024+123)
+		for i := range payload {
+			payload[i] = byte((i*11)%251 + 1)
+		}
+		size := int64(len(payload))
+		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket:   "bucket",
+			Key:      "scrub.bin",
+			Body:     bytes.NewReader(payload),
+			SizeHint: &size,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj.StripeBytes).To(BeNumerically(">", uint32(0)))
+
+		// Control: a healthy GET must round-trip, isolating any failure to the repair path.
+		rcBase, _, baseErr := b.GetObject(ctx, "bucket", "scrub.bin")
+		Expect(baseErr).NotTo(HaveOccurred())
+		gotBase, baseReadErr := io.ReadAll(rcBase)
+		Expect(baseReadErr).NotTo(HaveOccurred())
+		Expect(rcBase.Close()).To(Succeed())
+		Expect(gotBase).To(Equal(payload), "control: healthy GET must round-trip before testing repair")
+
+		// Delete data shard 0 on disk, then drive the production scrubber entrypoint
+		// (RepairShardLocal, no ShardKey) which resolves placement via readPlacementMeta +
+		// ResolvePlacement rather than a caller-supplied record.
+		shard0Glob := filepath.Join(dataRoots[0], "shards", "bucket", "scrub.bin", "*", "shard_0")
+		matches, globErr := filepath.Glob(shard0Glob)
+		Expect(globErr).NotTo(HaveOccurred())
+		Expect(matches).To(HaveLen(1))
+		Expect(os.Remove(matches[0])).To(Succeed())
+
+		Expect(b.RepairShardLocal("bucket", "scrub.bin", obj.VersionID, 0)).To(Succeed())
+
+		// Shards are encrypted at rest, so the repaired shard_0 ciphertext is never byte-equal
+		// to the original even on a correct repair — comparing on-disk bytes is meaningless. The
+		// decrypt-and-de-interleave through GET is the discriminator: a GET reads the K data
+		// shards (0,1,2) directly, so the just-repaired shard_0 IS on the read path. If
+		// readPlacementMeta/ResolvePlacement drops StripeBytes, reconstructShardAtKey takes the
+		// contiguous ECReconstruct+ECSplit branch and writes a wrong-layout shard_0 at K>=3, so
+		// this GET de-interleaves garbage.
+		rc, _, err := b.GetObject(ctx, "bucket", "scrub.bin")
+		Expect(err).NotTo(HaveOccurred())
+		got, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(closeErr).NotTo(HaveOccurred())
+		Expect(got).To(Equal(payload), "scrubber-repaired shard_0 must be re-interleaved so a GET that reads it recovers the payload")
+	})
 })
 
 // wireK2InterleavedPipeline configures b with a K=2/parity=1 multi-root shard
