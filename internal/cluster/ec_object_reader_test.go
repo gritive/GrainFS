@@ -287,6 +287,35 @@ func TestECObjectReader_ReadObject_PrefersDataShardsBeforeParity(t *testing.T) {
 	require.Equal(t, cfg.DataShards, fetcher.readShardCalls)
 }
 
+func TestECObjectReader_ReadObject_DeinterleavesStripedObject(t *testing.T) {
+	const stripeBytes = 1 << 20
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	payload := make([]byte, 3*1024*1024+5)
+	for i := range payload {
+		payload[i] = byte((i*7 + 3) % 251)
+	}
+
+	// CPUPool stores each shard with an 8-byte full-object-size header (same
+	// convention as ECSplit). Prepend it to the stripe-interleaved bodies.
+	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
+	header := ShardHeader(int64(len(payload)))
+	fetcher := &fakeECObjectShardFetcher{localShards: make(map[string][]byte)}
+	for i, body := range bodies {
+		shard := append(append([]byte(nil), header[:]...), body...)
+		fetcher.localShards[shardCacheKey("bucket", "key", i)] = shard
+	}
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+	rec.StripeBytes = stripeBytes
+
+	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
 func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	fetcher := &fakeECObjectShardFetcher{} // empty — no shards available

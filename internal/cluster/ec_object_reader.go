@@ -65,6 +65,20 @@ func (r ecObjectReader) ReadObject(ctx context.Context, bucket, shardKey string,
 	if err != nil {
 		return nil, err
 	}
+	if rec.StripeBytes > 0 {
+		// Stripe-interleaved objects: ecReconstructBodies yields the same
+		// origSize (first present shard's header) and header-stripped bodies
+		// that ECReconstruct uses, so de-interleave matches the contiguous
+		// path's size source exactly.
+		origSize, bodies, err := ecReconstructBodies(recCfg, shards)
+		if err != nil {
+			return nil, err
+		}
+		if origSize == 0 {
+			return []byte{}, nil
+		}
+		return stripeDeinterleave(recCfg, bodies, rec.StripeBytes, origSize)
+	}
 	return ECReconstruct(recCfg, shards)
 }
 
