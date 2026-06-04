@@ -3,7 +3,6 @@ package serveruntime
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -451,10 +450,12 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		// durability before returning and the drive-write path rejects ".."
 		// key traversal. Dispatch stays bounded to all-local EC placements.
 		distBackend.SetPutPipeline(pipeline, true)
-		// EXPERIMENTAL: route non-all-local placements through the streaming-EC
-		// path instead of the spool writer. OFF by default; opt in until S3
-		// wires write-quorum + a real multi-node PUT->GET acceptance.
-		distBackend.SetPutPipelineMultiNode(os.Getenv("GRAINFS_PUT_STREAM_MULTINODE") == "1")
+		// Multi-node streaming-EC dispatch stays FAIL-CLOSED: the sender writes
+		// stripe-interleaved shards that the current GET reader (contiguous
+		// layout) cannot reconstruct for K>1, and the always-on scrubber would
+		// corrupt them on heal. No enable path is wired until the de-interleave
+		// reader + write-quorum (S3) land; the field/setter exist for that work.
+		distBackend.SetPutPipelineMultiNode(false)
 		log.Info().
 			Int("drives", len(state.shardSvc.DataDirs())).
 			Int("k", state.effectiveEC.DataShards).
