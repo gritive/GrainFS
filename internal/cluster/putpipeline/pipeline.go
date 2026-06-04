@@ -28,6 +28,10 @@ type Config struct {
 	FlushAfter   time.Duration // metadata flush deadline; defaults to 5 ms if 0
 	BadgerDB     *badger.DB    // metadata sink; nil = no-op flush (tests)
 	WAL          ShardWALAppender
+	// Transport streams sealed shards to peers for mixed-placement PUTs
+	// (PutRequest.Placement). nil is fine for an all-local pipeline; a PUT
+	// that routes a remote shard with no transport fails that shard cleanly.
+	Transport shardTransport
 }
 
 // ShardWALAppender lets CommitCoord record the per-PUT shard layout in
@@ -189,18 +193,72 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 	totalSize := *req.SizeHint
 	putID := p.nextPutID.Add(1)
 
-	// Map each shard index to its target drive (round-robin by index).
-	// CPUPool's per-shard fan-out for shard i points at the DriveActor's
-	// long-lived in channel — the DriveActor demultiplexes by PutID via
-	// its pending+registry maps.
 	numShards := p.cfg.ECConfig.NumShards()
+	if req.Placement != nil && len(req.Placement) != numShards {
+		return nil, fmt.Errorf("pipeline: placement length %d != shards %d", len(req.Placement), numShards)
+	}
+
+	// Map each shard index to its target drive.
+	//
+	// All-local PUT (Placement nil): the long-lived round-robin drives — the
+	// shipped path, untouched. CPUPool's per-shard fan-out for shard i points at
+	// the chosen DriveActor's in channel; the DriveActor demultiplexes by PutID
+	// via its pending+registry maps (one shard per drive per PUT, safe under the
+	// DataDirs>=numShards invariant).
+	//
+	// Mixed-placement PUT (S2-sender-b-2): each shard gets its OWN ephemeral
+	// DriveActor for this PUT — local shards write to a file sink, remote shards
+	// stream to a peer's WriteSealedShard RPC. One actor per shard means (a) a
+	// stalled remote stream (whose Write blocks on network backpressure) cannot
+	// head-of-line block another shard, and (b) two local shards never collide
+	// on a shared drive's PutID-keyed registry (a multi-node coordinator stores
+	// only a SUBSET of shards, so round-robin by index would otherwise alias).
+	// The ephemeral actors are torn down (cancel + Wait) when the PUT returns.
 	shardChans := make([]chan<- EncryptedShardChunk, numShards)
+	var remoteShards []bool
+	mixed := req.Placement != nil
+	var pumpWG sync.WaitGroup
+	pumpCtx, cancelPumps := context.WithCancel(ctx)
+	defer func() {
+		cancelPumps()
+		pumpWG.Wait()
+	}()
 	for i := 0; i < numShards; i++ {
-		driveIdx := i % len(p.driveIns)
-		shardChans[i] = p.driveIns[driveIdx]
-		// registerPut must happen BEFORE the first chunk for (PutID, shardIdx)
-		// arrives on the DriveActor's channel.
-		p.drives[driveIdx].registerPut(putID, req.Bucket, req.Key, i)
+		if !mixed {
+			driveIdx := i % len(p.driveIns)
+			shardChans[i] = p.driveIns[driveIdx]
+			// registerPut must happen BEFORE the first chunk for (PutID, shardIdx)
+			// arrives on the DriveActor's channel.
+			p.drives[driveIdx].registerPut(putID, req.Bucket, req.Key, i)
+			continue
+		}
+		if remoteShards == nil {
+			remoteShards = make([]bool, numShards)
+		}
+		in := make(chan EncryptedShardChunk, p.cfg.ChannelDepth)
+		d := &DriveActor{
+			in:       in,
+			commitCh: p.commitIn,
+			pending:  make(map[uint64]*shardWriteState),
+		}
+		// registerPut/registerRemotePut must happen BEFORE the first chunk arrives.
+		if peerAddr := req.Placement[i]; peerAddr != "" {
+			remoteShards[i] = true
+			d.transport = p.cfg.Transport
+			// The RPC ctx is the PUT-scoped pumpCtx so cancellation (teardown or
+			// a PUT abort) unblocks a Write parked on a dead peer.
+			d.registerRemotePut(pumpCtx, putID, req.Bucket, req.Key, i, peerAddr)
+		} else {
+			// Local shard via an ephemeral pump: write to the same drive dir the
+			// ShardService reader expects (DataDirs[i % n]) and honor the
+			// long-lived drives' WAL-only fsync contract.
+			d.dataDir = p.cfg.DataDirs[i%len(p.cfg.DataDirs)]
+			d.skipFsync = p.cfg.WAL != nil
+			d.registerPut(putID, req.Bucket, req.Key, i)
+		}
+		shardChans[i] = in
+		pumpWG.Add(1)
+		go func() { defer pumpWG.Done(); d.Run(pumpCtx) }()
 	}
 	p.cpu.registerPut(putID, req.Bucket, req.Key, totalSize, shardChans)
 	defer p.cpu.unregisterPut(putID)
@@ -208,10 +266,11 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 	earlyAck := make(chan error, 1)
 	finalDone := make(chan error, 1)
 	p.commit.registerPut(putID, &putWaiter{
-		shardsTotal: numShards,
-		cfg:         p.cfg.ECConfig,
-		earlyAck:    earlyAck,
-		finalDone:   finalDone,
+		shardsTotal:  numShards,
+		cfg:          p.cfg.ECConfig,
+		earlyAck:     earlyAck,
+		finalDone:    finalDone,
+		remoteShards: remoteShards,
 		metadata: MetadataRecord{
 			Bucket:   req.Bucket,
 			Key:      req.Key,
@@ -298,6 +357,24 @@ func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.Pu
 		UserMeta:        req.UserMetadata,
 		System:          req.SystemMetadata,
 		PrecomputedETag: req.ContentMD5Hex,
+	})
+}
+
+// PutShardPlaced is PutShard for a multi-node placement: placement[i] is the
+// already-resolved peer address shard i streams to via the verbatim
+// WriteSealedShard RPC, or "" when shard i is local. It is the mixed-placement
+// entry point; PutShard stays the all-local one (placement nil).
+func (p *Pipeline) PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error) {
+	return p.Put(ctx, PutRequest{
+		Bucket:          req.Bucket,
+		Key:             shardKey,
+		Body:            req.Body,
+		SizeHint:        req.SizeHint,
+		ContentType:     req.ContentType,
+		UserMeta:        req.UserMetadata,
+		System:          req.SystemMetadata,
+		PrecomputedETag: req.ContentMD5Hex,
+		Placement:       placement,
 	})
 }
 

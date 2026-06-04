@@ -2,7 +2,6 @@ package putpipeline
 
 import (
 	"io"
-	"os"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -59,15 +58,15 @@ type MetadataRecord struct {
 	UserMeta   map[string]string
 }
 
-// shardWriteState lives inside DriveActor: per-PUT tmp file + bookkeeping.
-// Writes go straight to f without a bufio.Writer — encrypted chunks already
-// arrive at ~1 MiB granularity, so an extra user-space buffer only adds a
-// memcpy hop without amortizing syscalls further. Removing it cut the
-// per-chunk runtime.memmove dominator from the PUT CPU profile.
+// shardWriteState lives inside DriveActor: per-PUT shard destination +
+// bookkeeping. The destination is a shardSink — by default a local-file sink
+// (tmp file + atomic rename), which writes straight to the file without a
+// bufio.Writer: encrypted chunks already arrive at ~1 MiB granularity, so an
+// extra user-space buffer only adds a memcpy hop without amortizing syscalls
+// further (removing it cut the per-chunk runtime.memmove dominator from the PUT
+// CPU profile). A remote-stream sink (S2) ships the same sealed bytes to a peer.
 type shardWriteState struct {
-	f            *os.File
-	finalPath    string
-	tmpPath      string
+	sink         shardSink
 	bucket       string
 	shardKey     string
 	shardIdx     int
@@ -85,6 +84,11 @@ type putWaiter struct {
 	finalDone    chan<- error
 	metadata     MetadataRecord
 	earlyAckSent bool
+	// remoteShards[i] is true when shard i streamed to a peer (mixed
+	// placement). The peer's own data WAL records the shard, so this node's
+	// WAL must NOT record it — recovery here would otherwise look for a local
+	// file that lives on another node. nil/empty ⟹ all-local (record all).
+	remoteShards []bool
 	// dekGenUnknown is set when any shard failed with an error wrapping
 	// encrypt.ErrDEKGenUnknown (sealing DEK gen not yet local). When set,
 	// the early-ack fail error (the client-observable path) wraps the
@@ -108,4 +112,11 @@ type PutRequest struct {
 	// return without computing MD5 over Body. Wired from
 	// PutObjectRequest.ContentMD5Hex (client-supplied Content-MD5).
 	PrecomputedETag string
+	// Placement, when non-nil, gives the per-shard destination for a
+	// multi-node PUT: Placement[i] == "" routes shard i to a local drive
+	// (today's behavior), a non-empty value is the already-resolved peer
+	// address that shard i streams to via the verbatim WriteSealedShard RPC.
+	// nil ⟹ all-local (every shard on a local drive). Its length, when set,
+	// MUST equal ECConfig.NumShards().
+	Placement []string
 }

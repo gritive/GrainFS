@@ -460,6 +460,35 @@ func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key s
 	return nil
 }
 
+// BuildSealedShardWriteRequest builds the StreamShardWriteBody request frame for
+// the verbatim sealed-shard write RPC ("WriteSealedShard"). The body — the
+// already-GFSENC3-sealed shard bytes — is streamed separately via
+// transport.CallWithBody. Exported so the put pipeline's remote shard sink (which
+// lives in a package that imports cluster, not vice-versa) can drive the RPC
+// without re-implementing the FlatBuffers envelope.
+func BuildSealedShardWriteRequest(bucket, shardKey string, shardIdx int) *transport.Message {
+	fw := buildShardEnvelope("WriteSealedShard", bucket, shardKey, int32(shardIdx), nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	return &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
+}
+
+// CheckShardWriteResponse interprets a shard-write RPC response: nil on success,
+// or the remote-reported error. Pairs with BuildSealedShardWriteRequest for
+// out-of-package callers (unmarshalEnvelope is unexported).
+func CheckShardWriteResponse(resp *transport.Message) error {
+	if resp == nil {
+		return fmt.Errorf("nil shard write response")
+	}
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote shard write rejected: %s", string(data))
+	}
+	return nil
+}
+
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
 	peerAddr, err := s.resolvePeerAddress(peer)
@@ -804,7 +833,11 @@ func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *tr
 		if err != nil {
 			return s.errorResponse("unmarshal request: " + err.Error())
 		}
-		if rpcType != "WriteShard" {
+		// "WriteShard" carries a PLAINTEXT shard body that the destination seals
+		// (seal-at-dest). "WriteSealedShard" carries an ALREADY-SEALED GFSENC3
+		// body that the S2 streaming sender produced at the source (seal-at-
+		// source); it is stored verbatim, never re-encrypted.
+		if rpcType != "WriteShard" && rpcType != "WriteSealedShard" {
 			return s.errorResponse("unexpected shard body RPC: " + rpcType)
 		}
 		sr, err := unmarshalShardRequest(srData)
@@ -813,6 +846,21 @@ func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *tr
 		}
 		observePutStage("shard_stream_server", "parse_request", stageStart)
 		stageStart = time.Now()
+		if rpcType == "WriteSealedShard" {
+			// The body is the final encoded payload, so it is bounded directly by
+			// the data WAL's MaxPayloadBytes (no further encode grows it). Buffer
+			// is per-shard, not whole-object; streaming the sealed body to disk
+			// without buffering is a later refinement.
+			sealed, rerr := readShardPayload(body, datawal.MaxPayloadBytes, -1, false)
+			if rerr != nil {
+				return s.errorResponse(rerr.Error())
+			}
+			if werr := s.writeLocalSealedShard(context.Background(), sr.Bucket, sr.Key, int(sr.ShardIdx), sealed); werr != nil {
+				return s.errorResponse(werr.Error())
+			}
+			observePutStage("shard_stream_server", "write_local_sealed", stageStart)
+			return s.okResponse(nil)
+		}
 		if err := s.WriteLocalShardStream(sr.Bucket, sr.Key, int(sr.ShardIdx), body); err != nil {
 			return s.errorResponse(err.Error())
 		}
@@ -997,6 +1045,32 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		ShardTargetClass: "local",
 	})
 	return nil
+}
+
+// writeLocalSealedShard stores an ALREADY-SEALED shard payload verbatim — no
+// re-encryption at the destination. Used by the S2 streaming path: the
+// coordinator's CPUPool seals the shard at the source (seal-at-source), so the
+// bytes on the wire and on disk are identical GFSENC3 ciphertext. This mirrors
+// writeLocalShard's tail (mkdir → WAL-append-before-file crash-safety →
+// tmp+rename) MINUS the encode step. Packing is intentionally bypassed: the
+// streaming path is the large-object band (shard ≫ pack threshold), so a
+// sealed-stream shard always materializes as a shard_N file. `sealed` must be
+// EncodeEncryptedShard output for ShardAADFields(bucket,key,shardIdx) (the same
+// identity this node will use on read), or the read-side AEAD/AAD check fails.
+func (s *ShardService) writeLocalSealedShard(ctx context.Context, bucket, key string, shardIdx int, sealed []byte) error {
+	dir, err := s.getShardDir(bucket, key, shardIdx)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureShardDir(dir); err != nil {
+		return fmt.Errorf("create shard dir: %w", err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
+	requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, sealed)
+	if err != nil {
+		return err
+	}
+	return s.writeEncryptedShardFile(ctx, dir, path, sealed, shardIdx, requireFsync)
 }
 
 // writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes

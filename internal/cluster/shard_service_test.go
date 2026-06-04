@@ -135,6 +135,67 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+// TestShardService_WriteLocalSealedShardVerbatim proves the S2 seal-at-source
+// receiver path: an already-sealed shard (sealed by the "source" via
+// EncodeEncryptedShardBuffer, mirroring the coordinator's CPUPool) is stored
+// VERBATIM — no re-encryption at the destination — and reads back to the
+// original plaintext. A double-encrypt bug would make the on-disk bytes differ
+// from the sealed bytes and corrupt the plaintext read; both assertions catch it.
+func TestShardService_WriteLocalSealedShardVerbatim(t *testing.T) {
+	keeper, clusterID := testDEKKeeper(t)
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"),
+		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+
+	plaintext := bytes.Repeat([]byte("sealed-at-source shard "), 8192)
+	// Source seals (mirrors CPUPool / coordinator seal-at-source).
+	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 0, plaintext)
+	require.NoError(t, err)
+	require.True(t, eccodec.IsEncryptedShard(sealed))
+
+	// Receiver stores the sealed bytes verbatim — no re-encode.
+	require.NoError(t, svc.writeLocalSealedShard(context.Background(), "bkt", "obj", 0, sealed))
+
+	// On-disk bytes must equal the sealed bytes exactly (verbatim, not re-sealed).
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Equal(t, sealed, raw, "sealed shard must be stored verbatim (no double-encryption)")
+
+	// And reads back to the original plaintext through the normal decoder.
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+// TestShardService_HandleWriteBody_SealedShardRoundTrip drives the receiver RPC
+// branch end-to-end: a "WriteSealedShard" envelope + already-sealed body is
+// stored verbatim by the handler and reads back to the original plaintext. This
+// is the dormant S2 receiver entry point (no sender ships WriteSealedShard yet).
+func TestShardService_HandleWriteBody_SealedShardRoundTrip(t *testing.T) {
+	keeper, clusterID := testDEKKeeper(t)
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"),
+		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+
+	plaintext := bytes.Repeat([]byte("rpc sealed shard "), 8192)
+	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 3, plaintext)
+	require.NoError(t, err)
+
+	fw := buildShardEnvelope("WriteSealedShard", "bkt", "obj", 3, nil)
+	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
+	fw.Builder.Reset()
+
+	resp := svc.HandleWriteBody()(req, bytes.NewReader(sealed))
+	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	require.NoError(t, err)
+	require.NotEqual(t, "Error", rpcType, "sealed-shard write must not error")
+
+	got, err := svc.ReadLocalShard("bkt", "obj", 3)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
 func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 

@@ -65,6 +65,38 @@ func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 	}
 }
 
+// BenchmarkPutObjectEC_Spool2plus2_10MiB measures the all-local SPOOL write path
+// at EC 2+2 / 10 MiB so it is config- and size-matched to
+// putpipeline.BenchmarkPipelinePut10MiB (the STREAM path, also 2+2 / 10 MiB,
+// all-local). The pair isolates the spool double-staging penalty (spool_object +
+// spool_shards) with no network and no EC-width confound — the conservative
+// lower bound on the streaming-EC win (multi-node adds network/ingest overlap on
+// top, common to both). putPipeline is NOT enabled here, so a >1 MiB parity
+// object takes putObjectECSpooled -> writeSpooledShards.
+func BenchmarkPutObjectEC_Spool2plus2_10MiB(b *testing.B) {
+	bk := newTestDistributedBackend(b)
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	bk.SetECConfig(cfg)
+	keeper, clusterID := testDEKKeeper(b)
+	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(b, keeper, clusterID))
+	allNodes := make([]string, cfg.NumShards())
+	for i := range allNodes {
+		allNodes[i] = bk.selfAddr
+	}
+	bk.SetShardService(svc, allNodes)
+	require.True(b, bk.ECActive())
+	require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+
+	data := make([]byte, 10<<20)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, err := bk.PutObject(context.Background(), "bench", "key", bytes.NewReader(data), "application/octet-stream")
+		require.NoError(b, err)
+	}
+}
+
 func BenchmarkPutObjectSingleLocal5MiB(b *testing.B) {
 	bk := newTestDistributedBackend(b)
 	require.NoError(b, bk.CreateBucket(context.Background(), "bench"))

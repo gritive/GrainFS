@@ -5,11 +5,127 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// captureSink records every chunk written through the shardSink seam and
+// whether the shard was finalized/aborted. It proves the DriveActor streams the
+// exact sealed bytes through the seam — the same bytes the S2 remote sink will
+// ship to a peer's WriteSealedShard RPC. A nil DriveActor.newSink keeps today's
+// local-file behavior (covered byte-identically by the other tests here).
+type captureSink struct {
+	mu        sync.Mutex
+	written   []byte
+	writeErr  error // when set, Write returns it (drives the failure dispatch)
+	finalized bool
+	aborted   bool
+}
+
+func (c *captureSink) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	c.written = append(c.written, p...)
+	return len(p), nil
+}
+
+func (c *captureSink) Finalize() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.finalized = true
+	return nil
+}
+
+func (c *captureSink) Abort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.aborted = true
+}
+
+// TestDriveActor_StreamsSealedBytesThroughSink proves the shardSink seam: with
+// an injected sink the DriveActor writes the exact concatenated ciphertext and
+// finalizes through the seam, without touching the local filesystem. This is
+// the dormant S1 contract a remote-stream sink reuses in S2.
+func TestDriveActor_StreamsSealedBytesThroughSink(t *testing.T) {
+	in := make(chan EncryptedShardChunk, 4)
+	commit := make(chan ShardWriteResult, 4)
+	sink := &captureSink{}
+	d := &DriveActor{
+		in:       in,
+		dataDir:  t.TempDir(),
+		commitCh: commit,
+		pending:  make(map[uint64]*shardWriteState),
+		newSink: func(bucket, shardKey string, shardIdx int) (shardSink, error) {
+			return sink, nil
+		},
+	}
+	d.registerPut(1, "bucket", "key", 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: []byte("hello"), LastInPut: false}
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: []byte(" world"), LastInPut: true}
+
+	select {
+	case res := <-commit:
+		require.NoError(t, res.Err)
+		require.Equal(t, uint64(1), res.PutID)
+		require.Equal(t, int64(11), res.Bytes)
+	case <-time.After(2 * time.Second):
+		t.Fatal("commit result not received")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	require.Equal(t, "hello world", string(sink.written), "sink must receive the exact sealed bytes")
+	require.True(t, sink.finalized, "shard must be finalized through the sink")
+	require.False(t, sink.aborted, "successful write must not abort")
+}
+
+// TestDriveActor_AbortsSinkOnWriteError locks the seam-level failure dispatch
+// the S2 remote sink depends on: a Write error must drive DriveActor to call
+// Abort (and emit a failed result), independent of any filesystem behavior.
+func TestDriveActor_AbortsSinkOnWriteError(t *testing.T) {
+	in := make(chan EncryptedShardChunk, 1)
+	commit := make(chan ShardWriteResult, 1)
+	sink := &captureSink{writeErr: fmt.Errorf("injected write failure")}
+	d := &DriveActor{
+		in:       in,
+		dataDir:  t.TempDir(),
+		commitCh: commit,
+		pending:  make(map[uint64]*shardWriteState),
+		newSink: func(bucket, shardKey string, shardIdx int) (shardSink, error) {
+			return sink, nil
+		},
+	}
+	d.registerPut(1, "bucket", "key", 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.Run(ctx)
+
+	in <- EncryptedShardChunk{PutID: 1, ShardIdx: 0, Ciphertext: []byte("data"), LastInPut: true}
+
+	select {
+	case res := <-commit:
+		require.Error(t, res.Err, "write failure must surface as a failed result")
+	case <-time.After(2 * time.Second):
+		t.Fatal("commit result not received")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	require.True(t, sink.aborted, "a Write error must drive DriveActor to Abort the sink")
+	require.False(t, sink.finalized, "a failed shard must not be finalized")
+}
 
 func TestDriveActor_WritesAndFinalizes(t *testing.T) {
 	tmp := t.TempDir()

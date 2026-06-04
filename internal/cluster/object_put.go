@@ -50,6 +50,20 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			Operation: "put_object",
 			ShardKey:  ecObjectShardKey(key, ""),
 		})
+		// The put pipeline writes a stripe-INTERLEAVED shard layout (one fragment
+		// per stripe per shard); the GET reader expects each shard to be a
+		// CONTIGUOUS 1/K object slice. Those agree only when DataShards == 1 (the
+		// fragment IS the whole stripe), so for K >= 2 a multi-stripe object would
+		// round-trip to garbage. Until a de-interleaving reader lands, restrict
+		// pipeline dispatch to K == 1 and let K >= 2 fall through to the spool
+		// writer (contiguous layout). Covered by the K>=2 multi-stripe round-trip
+		// integration test.
+		//
+		// Load-bearing: the K read here (placementPlan.Config.DataShards) must be
+		// the same K the pipeline splits on (its Config.ECConfig.DataShards). Both
+		// derive from boot's effectiveEC today; a future per-bucket EC config must
+		// keep them equal or this guard could pass while the pipeline interleaves.
+		pipelineLayoutSafe := planErr == nil && placementPlan.Config.DataShards == 1
 		allLocal := false
 		if planErr == nil {
 			// Actor-eligible: all shards local and EC config is non-zero.
@@ -61,7 +75,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				}
 			}
 		}
-		if allLocal {
+		if allLocal && pipelineLayoutSafe {
 			versionID := newVersionID()
 			shardKey := ecObjectShardKey(key, versionID)
 			obj, err := b.putPipeline.PutShard(ctx, shardKey, storage.PutObjectRequest{
@@ -82,6 +96,64 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			for i := range nodeIDs {
 				nodeIDs[i] = selfID
 			}
+			if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+				Bucket:           bucket,
+				Key:              key,
+				Size:             obj.Size,
+				ContentType:      contentType,
+				ETag:             obj.ETag,
+				ModTime:          obj.LastModified,
+				VersionID:        versionID,
+				PlacementGroupID: placementGroupID,
+				ECData:           uint8(placementPlan.Config.DataShards),
+				ECParity:         uint8(placementPlan.Config.ParityShards),
+				NodeIDs:          nodeIDs,
+				UserMetadata:     cloneStringMap(userMetadata),
+				SSEAlgorithm:     sseAlgorithm,
+			}); merr != nil {
+				go b.deleteShardsAsync(bucket, nodeIDs, shardKey)
+				return nil, merr
+			}
+			return &storage.Object{
+				Key:              key,
+				Size:             obj.Size,
+				ContentType:      contentType,
+				ETag:             obj.ETag,
+				LastModified:     obj.LastModified,
+				VersionID:        versionID,
+				UserMetadata:     cloneStringMap(userMetadata),
+				SSEAlgorithm:     sseAlgorithm,
+				PlacementGroupID: placementGroupID,
+				ECData:           uint8(placementPlan.Config.DataShards),
+				ECParity:         uint8(placementPlan.Config.ParityShards),
+				NodeIDs:          cloneStringSlice(nodeIDs),
+			}, nil
+		} else if b.putPipelineMultiNode && pipelineLayoutSafe && placementPlan.Config.NumShards() > 0 {
+			// EXPERIMENTAL multi-node streaming EC: stream remote shards to their
+			// peers (verbatim WriteSealedShard) instead of spooling. Mirrors the
+			// all-local block but records the real per-shard NodeIDs. all-N
+			// required + no respool until S3 wires write-quorum.
+			placement, rerr := resolveShardPlacement(placementPlan.NodeIDs, selfID, b.shardSvc.resolvePeerAddress)
+			if rerr != nil {
+				return nil, rerr
+			}
+			versionID := newVersionID()
+			shardKey := ecObjectShardKey(key, versionID)
+			obj, err := b.putPipeline.PutShardPlaced(ctx, shardKey, storage.PutObjectRequest{
+				Bucket:         bucket,
+				Key:            shardKey,
+				Body:           r,
+				SizeHint:       req.SizeHint,
+				ContentType:    contentType,
+				UserMetadata:   userMetadata,
+				SystemMetadata: req.SystemMetadata,
+				ContentMD5Hex:  req.ContentMD5Hex,
+			}, placement)
+			if err != nil {
+				return nil, err
+			}
+			placementGroupID := placementPlan.PlacementGroupID
+			nodeIDs := cloneStringSlice(placementPlan.NodeIDs)
 			if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 				Bucket:           bucket,
 				Key:              key,
@@ -145,6 +217,24 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm)
+}
+
+// resolveShardPlacement maps each shard's target node to the address the put
+// pipeline streams to: "" when the shard is local (node == selfID), otherwise
+// the resolved peer address. Used only on the multi-node streaming PUT path.
+func resolveShardPlacement(nodeIDs []string, selfID string, resolve func(node string) (string, error)) ([]string, error) {
+	placement := make([]string, len(nodeIDs))
+	for i, node := range nodeIDs {
+		if node == selfID {
+			continue
+		}
+		addr, err := resolve(node)
+		if err != nil {
+			return nil, fmt.Errorf("put object: resolve shard %d peer %q: %w", i, node, err)
+		}
+		placement[i] = addr
+	}
+	return placement, nil
 }
 
 func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(

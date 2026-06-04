@@ -440,12 +440,22 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			ClusterID: state.clusterID,
 			ECConfig:  state.effectiveEC,
 			WAL:       shardServiceWALAdapter{s: state.shardSvc},
+			// Transport carries sealed shards to peers for the EXPERIMENTAL
+			// multi-node streaming path (gated off below); the same transport
+			// the ShardService dials peers with, so resolved addresses match.
+			Transport: state.clusterTransport,
 		})
 		state.putPipeline = pipeline
 		// Enabled in prod (F1 durability review closed): Put() blocks on shard
 		// durability before returning and the drive-write path rejects ".."
 		// key traversal. Dispatch stays bounded to all-local EC placements.
 		distBackend.SetPutPipeline(pipeline, true)
+		// Multi-node streaming-EC dispatch stays FAIL-CLOSED: the sender writes
+		// stripe-interleaved shards that the current GET reader (contiguous
+		// layout) cannot reconstruct for K>1, and the always-on scrubber would
+		// corrupt them on heal. No enable path is wired until the de-interleave
+		// reader + write-quorum (S3) land; the field/setter exist for that work.
+		distBackend.SetPutPipelineMultiNode(false)
 		log.Info().
 			Int("drives", len(state.shardSvc.DataDirs())).
 			Int("k", state.effectiveEC.DataShards).

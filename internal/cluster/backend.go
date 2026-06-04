@@ -98,6 +98,9 @@ type BucketAssigner interface {
 // The caller is responsible for proposing the Raft metadata commit.
 type PutPipelineRunner interface {
 	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error)
+	// PutShardPlaced writes a multi-node placement: placement[i] is the
+	// resolved peer address shard i streams to, or "" for a local shard.
+	PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error)
 }
 
 // DistributedBackend implements storage.Backend with Raft-replicated metadata
@@ -197,6 +200,12 @@ type DistributedBackend struct {
 	// F1 durability review is closed: Put() blocks on shard durability before
 	// returning). Tests may still construct a backend with it off.
 	putPipelineEnabled bool
+	// putPipelineMultiNode gates the EXPERIMENTAL streaming-EC path for
+	// non-all-local placements (shards streamed to peers via WriteSealedShard
+	// instead of spooled). OFF by default; the all-N-required + no-respool
+	// semantics still apply until S3 wires write-quorum. Enabled opt-in via the
+	// serveruntime (env), gated separately from putPipelineEnabled.
+	putPipelineMultiNode bool
 
 	// onFSMValueResealDone, if set, fires once per applied CmdFSMValueResealDone
 	// marker (on EVERY node, after raft-ordered reseal batches). It runs in the
@@ -403,6 +412,13 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 func (b *DistributedBackend) SetPutPipeline(p PutPipelineRunner, enabled bool) {
 	b.putPipeline = p
 	b.putPipelineEnabled = enabled
+}
+
+// SetPutPipelineMultiNode toggles the EXPERIMENTAL streaming-EC path for
+// non-all-local placements. OFF routes such PUTs to the legacy spool writer
+// (today's behavior). Requires the pipeline to be wired with a Transport.
+func (b *DistributedBackend) SetPutPipelineMultiNode(enabled bool) {
+	b.putPipelineMultiNode = enabled
 }
 
 // SetClusterNodes refreshes the configured placement node set without

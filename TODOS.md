@@ -13,6 +13,27 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 ## Now
 
+- [ ] **[P1] Streaming-EC put pipeline restricted to K==1; restore K>=2 with a de-interleaving reader.**
+  The put pipeline (enabled for all-local PUT since v0.0.473.0) writes a stripe-INTERLEAVED shard
+  layout, but the GET reader (`ecObjectReader`) reconstructs each shard as a CONTIGUOUS 1/K object
+  slice — they agree only for `DataShards == 1`. For K>=2 a multi-stripe object (> StripeBytes,
+  default 1 MiB) round-trips to garbage. This was a **shipped silent data-corruption bug**: a
+  single-node, multi-drive deployment runs `N-2 + 2` EC (`AutoECConfigForClusterSize`), so the
+  default 4+2 corrupted every object >1 MiB on read. Fixed by gating pipeline dispatch on
+  `placementPlan.Config.DataShards == 1` (`object_put.go`); K>=2 falls through to the spool writer
+  (contiguous, readable). Consequences/follow-ups:
+   - K>=2 cluster PUT no longer uses the streaming path → the 2.89x write-side win is unrealized for
+     K>=2 until a striping-aware reader lands. Lifting the guard is the **read-side goal of the
+     cluster-PUT streaming-EC epic** (B1: shared stripe codec → mark StripeBytes at write → branch the
+     6 reconstruct/re-split sites → scrubber re-interleave on heal → Range stream-fallback). See memory
+     `project_grains_cluster_put_streaming_ec` for the B1 design + de-risk.
+   - **No auto-recovery of already-written striped objects** in affected deployments — they were never
+     readable; they need re-upload. The always-on scrubber's behavior on any pre-existing striped
+     object is undefined (it would reconstruct on the contiguous assumption) — must be made
+     striping-aware (or such objects quarantined) as part of the same reader work.
+   - Guard correctness depends on the K read at dispatch (`placementPlan.Config.DataShards`) equaling
+     the K the pipeline splits on (`Config.ECConfig.DataShards`); both derive from boot's `effectiveEC`
+     today. A future per-bucket EC config must keep them equal (asserted in the guard comment).
 - [x] **Concentrated NFSv4 parent-SA filehandle-inheritance behind one helper (`Dispatcher.bindFHInheritingParent`, v0.0.509.0, behavior-neutral).** The T12 "inherit parent fh's saID else generation-only bind" block was copy-pasted verbatim in `opOpen`/`opLookup`/`opCreate`; now a single helper owns the precedence invariant (`(pending)` sentinel + readOnly propagation). Mechanical extraction, build/vet/lint + nfs4server tests green, production diff purely mechanical.
 - [x] **Removed superseded v1 meta-Raft transport (`raft.MetaRaftTransport`, v0.0.508.0, behavior-neutral).** The M6.2 raft migration moved meta-Raft RPC delivery to v2 `cluster.RaftV2MetaTransport` on the same `StreamMetaRaft` wire; the v1 stack (~330 LOC) had zero call sites in production/tests and was fully orphaned. Deleted the dead implementation + its v1-only InstallSnapshot decoders; relocated byte-identical the live symbols that lived in the file (`metaRPC*` envelope constants → `rpc_codec.go` keeping cross-version wire-compat; `isMuxFallbackErr`/`errIsCtxBudget` → `meta_mux_send.go`). `raftRPCTransport` survives as `muxDriverTransport`'s embedded base. Gates: build/vet/lint + full test-unit green, byte-identity diff-verified.
 - [x] **QUIC→TCP migration — S6 DONE: legacy QUIC transport + quic-go fully removed (fa28a4c5, v0.0.501.0).** TCP is the sole cluster transport; `quic-go` import count is zero; `--transport` flag removed. quic.go (1606 LOC) + join_listener.go deleted; the transport-agnostic types they housed (StreamHandler/StreamRouter/TrafficLimiter/IdentitySnapshot/DeriveClusterIdentity/checkResponseStatus/recycleJitter/pinAcceptedSPKI + JoinHandler/JoinPutField/JoinReadFields/JoinALPN/certSPKI) extracted byte-identical (diff-verified) to transport_shared.go/join_wire.go. The `*_quic.go` mux/meta files (group_transport_quic/meta_transport_quic/raftv2_meta_quic) are KEPT — they import no quic-go and the TCP path uses them. **IRREVERSIBLE: no QUIC arm → §6 parity bench can never run, no QUIC fallback.** Gates: quic-go=0, vet clean, test-unit + lint green.
