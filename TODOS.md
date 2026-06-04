@@ -44,10 +44,15 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      shard from siblings' on-disk fragments, byte-identical to the pipeline). reshard
      (`upgradeObjectEC`) investigated and confirmed a non-issue — it re-resolves placement via
      `headObjectMeta`/`ResolvePlacement`, which already carry `StripeBytes`. Remaining deferred work below.
-   - [ ] **[P2] Multi-node streaming-EC (S3): striped reader/repair/reshard across cluster nodes.** This
-     slice covers ONLY all-local single-node K>=2. Multi-node PUT still falls through to the spool
-     writer; lifting the streaming path cluster-wide (remote shard fetch in the de-interleave reader,
-     cross-node repair, reshard re-verify under striped layout) is a separate slice — see memory
+   - [ ] **[P2] Multi-node streaming-EC PUT: opt-in path exists; default flip + follow-ups remain.** The
+     multi-node streaming-EC PUT path now EXISTS as an opt-in (env `GRAINFS_PUT_MULTINODE_STREAM=1`,
+     default OFF; K>=2; data-shards-required / parity-best-effort): K>=2 PUTs whose shards span peers
+     stream stripe-interleaved and stamp `StripeBytes`, which the v0.0.516.0 reader de-interleaves. With
+     the env var unset, multi-node K>=2 PUT keeps falling through to the spool writer (contiguous,
+     unchanged). Remaining work: (1) the **default flip** — turning streaming on by default is a gated,
+     separate decision (the QUIC→TCP flip cadence is the template: dormant runway → opt-in → bench/
+     sign-off → flip); (2) the follow-ups already listed as nested bullets below (stricter quorum,
+     multi-node shard repair, partial-write orphan reaping, receiver streams-to-disk). See memory
      `project_grains_cluster_put_streaming_ec`.
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
