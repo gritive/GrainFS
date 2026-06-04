@@ -100,25 +100,24 @@ func (b *DistributedBackend) reconstructShardAtKey(ctx context.Context, bucket, 
 			available, len(rec.Nodes)-1, recCfg.DataShards)
 	}
 
-	// Reconstruct the whole object, then regenerate the missing shard's body in
-	// the SAME layout the surviving siblings use. For a STRIPED object the
-	// siblings are stripe-interleaved, so a contiguous ECSplit would produce a
-	// shard that does not match them — future reads/reconstructs would break.
-	// stripeDeinterleave/stripeInterleaveShard want header-stripped bodies, so
-	// strip the on-disk 8-byte headers via ecReconstructBodies first.
+	// Regenerate the missing shard's body in the SAME layout the surviving
+	// siblings use. For a STRIPED object the siblings are stripe-interleaved, so a
+	// contiguous ECSplit would produce a shard that does not match them — future
+	// reads/reconstructs would break. stripeReconstructShardBody slices each
+	// surviving sibling at the per-stripe fragment offsets the de-interleave
+	// reader uses and Reed-Solomon Reconstructs the missing fragment per stripe,
+	// so the regenerated shard is byte-identical to what the pipeline wrote.
+	// ecReconstructBodies only strips the on-disk 8-byte headers (missing shard
+	// stays nil); it does NOT itself reconstruct.
 	var freshShardBody []byte
 	if rec.StripeBytes > 0 {
 		origSize, bodies, berr := ecReconstructBodies(recCfg, shards)
 		if berr != nil {
 			return fmt.Errorf("repair reconstruct bodies: %w", berr)
 		}
-		data, derr := stripeDeinterleave(recCfg, bodies, rec.StripeBytes, origSize)
-		if derr != nil {
-			return fmt.Errorf("repair reconstruct: %w", derr)
-		}
-		body, serr := stripeInterleaveShard(recCfg, data, rec.StripeBytes, shardIdx)
+		body, serr := stripeReconstructShardBody(recCfg, bodies, int(rec.StripeBytes), shardIdx, origSize)
 		if serr != nil {
-			return fmt.Errorf("repair re-interleave: %w", serr)
+			return fmt.Errorf("repair stripe reconstruct shard: %w", serr)
 		}
 		// Match on-disk format: 8-byte header + interleaved body (same as ECSplit's
 		// header-prefixed shard). Header records the full object size.

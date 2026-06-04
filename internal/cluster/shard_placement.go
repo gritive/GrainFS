@@ -646,9 +646,10 @@ func (f *FSM) LookupObjectPlacement(bucket, key, versionID string) (PlacementRec
 			return nil
 		}
 		rec = PlacementRecord{
-			K:     int(meta.ECData),
-			M:     int(meta.ECParity),
-			Nodes: append([]string(nil), meta.NodeIDs...),
+			K:           int(meta.ECData),
+			M:           int(meta.ECParity),
+			StripeBytes: int(meta.StripeBytes),
+			Nodes:       append([]string(nil), meta.NodeIDs...),
 		}
 		return nil
 	})

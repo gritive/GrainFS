@@ -271,7 +271,7 @@ var _ = Describe("Backend put pipeline integration", func() {
 	// the StripeBytes marker, ResolvePlacement hands the reader a zero marker and
 	// GetObjectVersion reads a K>=2 multi-stripe version as contiguous garbage.
 	It("round-trips a K>=2 multi-stripe object through versioned GET (GetObjectVersion de-interleaves)", func() {
-		_ = wireK2InterleavedPipeline(b)
+		_, _ = wireK2InterleavedPipeline(b)
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 		Expect(b.SetBucketVersioning("bucket", "Enabled")).To(Succeed())
 
@@ -307,7 +307,7 @@ var _ = Describe("Backend put pipeline integration", func() {
 	// through CoalescedShardRef -> storage.CoalescedRef -> the appendable reader,
 	// or the base portion reads back as contiguous garbage.
 	It("round-trips a K>=2 multi-stripe base after it transitions to appendable (base coalesced ref carries StripeBytes)", func() {
-		_ = wireK2InterleavedPipeline(b)
+		_, _ = wireK2InterleavedPipeline(b)
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 
 		base := make([]byte, 3*1024*1024+123)
@@ -339,6 +339,105 @@ var _ = Describe("Backend put pipeline integration", func() {
 		want := append(append([]byte(nil), base...), tail...)
 		Expect(got).To(Equal(want), "appended object's interleaved base must de-interleave, not read contiguous garbage")
 	})
+
+	// Range GET (ReadAt) over an appendable object's interleaved base goes through
+	// readAtChunk -> ec_object_reader.ReadAt, which gates the stripe de-interleave
+	// path on rec.StripeBytes > 0. If readAtChunk's PlacementRecord drops the
+	// marker, a range spanning the multi-stripe base reads as contiguous garbage.
+	It("range-reads (ReadAt) a K>=2 multi-stripe appendable base via readAtChunk (carries StripeBytes)", func() {
+		_, _ = wireK2InterleavedPipeline(b)
+		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
+
+		base := make([]byte, 3*1024*1024+123)
+		for i := range base {
+			base[i] = byte((i*7)%251 + 1)
+		}
+		bsize := int64(len(base))
+		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket:   "bucket",
+			Key:      "rng.bin",
+			Body:     bytes.NewReader(base),
+			SizeHint: &bsize,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj.StripeBytes).To(BeNumerically(">", uint32(0)))
+
+		tail := []byte("appended-tail-bytes")
+		_, err = b.AppendObject(ctx, "bucket", "rng.bin", bsize, bytes.NewReader(tail))
+		Expect(err).NotTo(HaveOccurred())
+
+		// Read a window inside the base that straddles the 1 MiB stripe boundary
+		// (offset 1.5 MiB, length 1 MiB) so interleaved != contiguous.
+		off := int64(1536 * 1024)
+		buf := make([]byte, 1024*1024)
+		n, err := b.ReadAt(ctx, "bucket", "rng.bin", off, buf)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n).To(Equal(len(buf)))
+		Expect(buf).To(Equal(base[off:off+int64(len(buf))]), "range read over the interleaved base must de-interleave, not read contiguous garbage")
+	})
+
+	// Startup data-WAL repair regenerates a missing shard via
+	// ResolveShardKeyPlacement -> reconstructShardAtKey, which re-interleaves when
+	// StripeBytes > 0. The ObjectVersion resolve goes through LookupObjectPlacement;
+	// if it drops the marker, the repaired shard is rebuilt with a contiguous (not
+	// interleaved) layout and no longer matches its striped siblings, so a later
+	// GET that reads the repaired data shard de-interleaves garbage.
+	It("repairs a missing shard of a K>=2 striped object with the correct interleaved layout (LookupObjectPlacement carries StripeBytes)", func() {
+		dataRoots, _ := wireK2InterleavedPipeline(b)
+		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
+
+		payload := make([]byte, 3*1024*1024+123)
+		for i := range payload {
+			payload[i] = byte((i*7)%251 + 1)
+		}
+		size := int64(len(payload))
+		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket:   "bucket",
+			Key:      "repair.bin",
+			Body:     bytes.NewReader(payload),
+			SizeHint: &size,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj.StripeBytes).To(BeNumerically(">", uint32(0)))
+
+		shardKey := "repair.bin/" + obj.VersionID
+
+		// Control: a healthy GET (no repair) must already round-trip, isolating any
+		// failure below to the repair path rather than PUT/GET for this config.
+		rcBase, _, baseErr := b.GetObject(ctx, "bucket", "repair.bin")
+		Expect(baseErr).NotTo(HaveOccurred())
+		gotBase, baseReadErr := io.ReadAll(rcBase)
+		Expect(baseReadErr).NotTo(HaveOccurred())
+		Expect(rcBase.Close()).To(Succeed())
+		Expect(gotBase).To(Equal(payload), "control: healthy GET must round-trip before testing repair")
+
+		// Delete data shard 0 on disk, then drive the startup-repair path that
+		// resolves placement via LookupObjectPlacement (ObjectVersion shard key).
+		shard0Glob := filepath.Join(dataRoots[0], "shards", "bucket", "repair.bin", "*", "shard_0")
+		matches, globErr := filepath.Glob(shard0Glob)
+		Expect(globErr).NotTo(HaveOccurred())
+		Expect(matches).To(HaveLen(1))
+		Expect(os.Remove(matches[0])).To(Succeed())
+
+		rec, _, rerr := b.ResolveShardKeyPlacement(ctx, "bucket", shardKey, nil)
+		Expect(rerr).NotTo(HaveOccurred())
+		Expect(rec.Nodes).NotTo(BeEmpty())
+		Expect(b.RepairShardLocalWithIncident(ctx, cluster.IncidentRepairRequest{
+			Bucket:    "bucket",
+			Key:       "repair.bin",
+			ShardKey:  shardKey,
+			ShardIdx:  0,
+			Placement: rec,
+		})).To(Succeed())
+
+		rc, _, err := b.GetObject(ctx, "bucket", "repair.bin")
+		Expect(err).NotTo(HaveOccurred())
+		got, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(closeErr).NotTo(HaveOccurred())
+		Expect(got).To(Equal(payload), "repaired shard must be re-interleaved to match its striped siblings")
+	})
 })
 
 // wireK2InterleavedPipeline configures b with a K=2/parity=1 multi-root shard
@@ -346,7 +445,15 @@ var _ = Describe("Backend put pipeline integration", func() {
 // so all-local PUTs take the interleaved streaming path (StripeBytes > 0). It
 // mirrors boot wiring. Returns the per-shard data roots for degraded-shard
 // manipulation. Must be called from within a spec node (uses Ginkgo cleanup).
-func wireK2InterleavedPipeline(b *cluster.DistributedBackend) []string {
+func wireK2InterleavedPipeline(b *cluster.DistributedBackend) ([]string, *cluster.ShardService) {
+	return wireInterleavedPipeline(b, cluster.ECConfig{DataShards: 2, ParityShards: 1}, 0)
+}
+
+// wireInterleavedPipeline is the parametric form: it wires the pipeline at ec
+// and lays out `drives` single-node data roots (drives==0 means one root per
+// shard, i.e. ec.NumShards()). Use drives > ec.NumShards() to pre-provision
+// headroom for an in-place EC upgrade (reshard) on the same node.
+func wireInterleavedPipeline(b *cluster.DistributedBackend, ec cluster.ECConfig, drives int) ([]string, *cluster.ShardService) {
 	clusterID := bytes.Repeat([]byte{0x42}, 16)
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x91}, encrypt.KEKSize), clusterID)
 	Expect(err).NotTo(HaveOccurred())
@@ -354,14 +461,16 @@ func wireK2InterleavedPipeline(b *cluster.DistributedBackend) []string {
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { _ = dwal.Close() })
 
-	ec := cluster.ECConfig{DataShards: 2, ParityShards: 1}
 	b.SetECConfig(ec)
-	dataRoots := make([]string, ec.NumShards())
+	if drives == 0 {
+		drives = ec.NumShards()
+	}
+	dataRoots := make([]string, drives)
 	for i := range dataRoots {
 		dataRoots[i] = GinkgoT().TempDir()
 	}
 	svc := cluster.NewMultiRootShardService(dataRoots, nil, cluster.WithShardDEKKeeper(keeper, clusterID), cluster.WithDataWAL(dwal))
-	nodes := make([]string, ec.NumShards())
+	nodes := make([]string, drives)
 	for i := range nodes {
 		nodes[i] = b.SelfAddr()
 	}
@@ -379,5 +488,5 @@ func wireK2InterleavedPipeline(b *cluster.DistributedBackend) []string {
 		_ = pipeline.Shutdown(shutdownCtx)
 	})
 	b.SetPutPipeline(pipeline, true)
-	return dataRoots
+	return dataRoots, svc
 }

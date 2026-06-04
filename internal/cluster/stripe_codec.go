@@ -78,25 +78,56 @@ func stripeDeinterleave(cfg ECConfig, bodies [][]byte, stripeBytes int, objectSi
 	return out, nil
 }
 
-// stripeInterleaveShard rebuilds ONE shard's interleaved body (no 8-byte header)
-// from the full object, matching what the pipeline wrote: per stripe, ECSplitRaw
-// and take fragment shardIdx. Used by repair to regenerate a missing shard so it
-// matches its interleaved siblings.
-func stripeInterleaveShard(cfg ECConfig, object []byte, stripeBytes, shardIdx int) ([]byte, error) {
+// stripeReconstructShardBody regenerates ONE missing shard's interleaved body
+// (no 8-byte header) directly from its surviving siblings, per stripe. bodies
+// holds the header-stripped shard bodies (nil = missing); exactly the shard at
+// shardIdx is regenerated. It slices each surviving sibling at the same
+// per-stripe fragment offsets the de-interleave reader uses and runs the
+// Reed-Solomon Reconstruct on those fragments. Because it operates on the
+// siblings' actual on-disk fragments (not on a re-split of the reconstructed
+// object), the regenerated fragments are byte-identical to what the pipeline
+// wrote, so the repaired shard matches its interleaved siblings.
+func stripeReconstructShardBody(cfg ECConfig, bodies [][]byte, stripeBytes, shardIdx int, objectSize int64) ([]byte, error) {
+	k, n := cfg.DataShards, cfg.NumShards()
+	if len(bodies) != n {
+		return nil, fmt.Errorf("stripe reconstruct shard: got %d shards, want %d", len(bodies), n)
+	}
+	if shardIdx < 0 || shardIdx >= n {
+		return nil, fmt.Errorf("stripe reconstruct shard: shardIdx %d out of range [0,%d)", shardIdx, n)
+	}
 	if stripeBytes <= 0 {
-		return nil, fmt.Errorf("stripe interleave: stripeBytes must be > 0")
+		return nil, fmt.Errorf("stripe reconstruct shard: stripeBytes must be > 0")
+	}
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("stripe reconstruct shard encoder: %w", err)
 	}
 	var body []byte
-	for off := 0; off < len(object); off += stripeBytes {
-		end := off + stripeBytes
-		if end > len(object) {
-			end = len(object)
+	stripes := numStripes(objectSize, stripeBytes)
+	offset := 0
+	remaining := int(objectSize)
+	for s := 0; s < stripes; s++ {
+		dS := stripeBytes
+		if remaining < dS {
+			dS = remaining
 		}
-		frags, err := ECSplitRaw(cfg, object[off:end])
-		if err != nil {
-			return nil, fmt.Errorf("stripe interleave split: %w", err)
+		fragSize := stripeFragSize(dS, k)
+		frags := make([][]byte, n)
+		for i := 0; i < n; i++ {
+			if bodies[i] == nil {
+				continue
+			}
+			if offset+fragSize > len(bodies[i]) {
+				return nil, fmt.Errorf("stripe reconstruct shard: shard %d short at stripe %d (have %d need %d)", i, s, len(bodies[i]), offset+fragSize)
+			}
+			frags[i] = append([]byte(nil), bodies[i][offset:offset+fragSize]...)
+		}
+		if err := enc.Reconstruct(frags); err != nil {
+			return nil, fmt.Errorf("stripe reconstruct shard stripe %d: %w", s, err)
 		}
 		body = append(body, frags[shardIdx]...)
+		offset += fragSize
+		remaining -= dS
 	}
 	return body, nil
 }
