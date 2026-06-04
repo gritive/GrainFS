@@ -135,10 +135,12 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				NodeIDs:          cloneStringSlice(nodeIDs),
 			}, nil
 		} else if b.putPipelineMultiNode && pipelineLayoutSafe && placementPlan.Config.NumShards() > 0 {
-			// EXPERIMENTAL multi-node streaming EC: stream remote shards to their
-			// peers (verbatim WriteSealedShard) instead of spooling. Mirrors the
-			// all-local block but records the real per-shard NodeIDs. all-N
-			// required + no respool until S3 wires write-quorum.
+			// EXPERIMENTAL multi-node streaming EC (opt-in via putPipelineMultiNode):
+			// stream remote shards to their peers (verbatim WriteSealedShard) instead
+			// of spooling. Mirrors the all-local block but records the real per-shard
+			// NodeIDs. Commit semantics inherited from the all-local path: data-shards-
+			// required, parity best-effort (commit.go:132); de-interleave needs only
+			// the K data shards, so any K reads correctly.
 			placement, rerr := resolveShardPlacement(placementPlan.NodeIDs, selfID, b.shardSvc.resolvePeerAddress)
 			if rerr != nil {
 				return nil, rerr
