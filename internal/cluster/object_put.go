@@ -61,7 +61,10 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		// read needs only the K data shards (guaranteed present at commit), so any K
 		// reads correctly; parity is for erasure-reconstruct, not the happy-path read.
 		// The multi-node branch is opt-in via putPipelineMultiNode (env at boot).
-		pipelineLayoutSafe := planErr == nil && placementPlan.Config.DataShards == 1
+		// StripeBytes is stamped on the multi-node branch too (see above), so any K
+		// de-interleaves correctly — no DataShards==1 restriction. The branch dispatch
+		// still requires a real EC config via NumShards()>0.
+		pipelineLayoutSafe := planErr == nil
 		allLocal := false
 		if planErr == nil {
 			// Actor-eligible: all shards local and EC config is non-zero.
