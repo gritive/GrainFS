@@ -460,6 +460,35 @@ func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key s
 	return nil
 }
 
+// BuildSealedShardWriteRequest builds the StreamShardWriteBody request frame for
+// the verbatim sealed-shard write RPC ("WriteSealedShard"). The body — the
+// already-GFSENC3-sealed shard bytes — is streamed separately via
+// transport.CallWithBody. Exported so the put pipeline's remote shard sink (which
+// lives in a package that imports cluster, not vice-versa) can drive the RPC
+// without re-implementing the FlatBuffers envelope.
+func BuildSealedShardWriteRequest(bucket, shardKey string, shardIdx int) *transport.Message {
+	fw := buildShardEnvelope("WriteSealedShard", bucket, shardKey, int32(shardIdx), nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	return &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
+}
+
+// CheckShardWriteResponse interprets a shard-write RPC response: nil on success,
+// or the remote-reported error. Pairs with BuildSealedShardWriteRequest for
+// out-of-package callers (unmarshalEnvelope is unexported).
+func CheckShardWriteResponse(resp *transport.Message) error {
+	if resp == nil {
+		return fmt.Errorf("nil shard write response")
+	}
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return fmt.Errorf("unmarshal response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote shard write rejected: %s", string(data))
+	}
+	return nil
+}
+
 // ReadShard fetches a shard from a remote node.
 func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
 	peerAddr, err := s.resolvePeerAddress(peer)
