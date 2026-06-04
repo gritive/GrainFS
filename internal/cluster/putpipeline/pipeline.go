@@ -360,6 +360,24 @@ func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.Pu
 	})
 }
 
+// PutShardPlaced is PutShard for a multi-node placement: placement[i] is the
+// already-resolved peer address shard i streams to via the verbatim
+// WriteSealedShard RPC, or "" when shard i is local. It is the mixed-placement
+// entry point; PutShard stays the all-local one (placement nil).
+func (p *Pipeline) PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error) {
+	return p.Put(ctx, PutRequest{
+		Bucket:          req.Bucket,
+		Key:             shardKey,
+		Body:            req.Body,
+		SizeHint:        req.SizeHint,
+		ContentType:     req.ContentType,
+		UserMeta:        req.UserMetadata,
+		System:          req.SystemMetadata,
+		PrecomputedETag: req.ContentMD5Hex,
+		Placement:       placement,
+	})
+}
+
 // Shutdown cancels all actor goroutines and waits for them to drain.
 func (p *Pipeline) Shutdown(ctx context.Context) error {
 	p.cancel()

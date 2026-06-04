@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -440,12 +441,20 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			ClusterID: state.clusterID,
 			ECConfig:  state.effectiveEC,
 			WAL:       shardServiceWALAdapter{s: state.shardSvc},
+			// Transport carries sealed shards to peers for the EXPERIMENTAL
+			// multi-node streaming path (gated off below); the same transport
+			// the ShardService dials peers with, so resolved addresses match.
+			Transport: state.clusterTransport,
 		})
 		state.putPipeline = pipeline
 		// Enabled in prod (F1 durability review closed): Put() blocks on shard
 		// durability before returning and the drive-write path rejects ".."
 		// key traversal. Dispatch stays bounded to all-local EC placements.
 		distBackend.SetPutPipeline(pipeline, true)
+		// EXPERIMENTAL: route non-all-local placements through the streaming-EC
+		// path instead of the spool writer. OFF by default; opt in until S3
+		// wires write-quorum + a real multi-node PUT->GET acceptance.
+		distBackend.SetPutPipelineMultiNode(os.Getenv("GRAINFS_PUT_STREAM_MULTINODE") == "1")
 		log.Info().
 			Int("drives", len(state.shardSvc.DataDirs())).
 			Int("k", state.effectiveEC.DataShards).
