@@ -68,6 +68,13 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - [ ] **[P3] Sealed-shard receiver streams body to disk.** `HandleWriteBody` buffers the sealed shard
      body in memory (`shard_service.go`, bounded per-shard by `datawal.MaxPayloadBytes`); streaming to
      disk without buffering is a later refinement.
+   - [ ] **[P2-before-flip] Streaming shard-RPC: fixed wall-clock → idle deadline.** The streaming path
+     arms `ShardRPCTimeout` (2 min) in the dispatch loop *before* the first stripe, so it bounds the whole
+     ingest+seal+RPC window — not just the RPC (the spool path arms it after the shard is materialized).
+     A slow/large *legitimate* upload that takes >2 min to feed one shard would spuriously abort. Acceptable
+     while opt-in/experimental (prior behavior was infinite-hang; 2 min is generous for the bench), but it
+     becomes production-reachable on the **default flip**. Switch to a reset-per-read *idle* deadline (the
+     `S3b-cbd` client-body pattern) so in-progress transfers aren't killed, before flipping the default.
    - [ ] **[P3] `buildInterleavedShards` test-helper fidelity debt.** The `stripe_codec_test.go` helper
      claims to mirror the CPUPool pipeline layout but diverges for multi-stripe objects (this was the
      root of the repair-layout bug). Tests built on it validate only codec self-consistency, not pipeline
