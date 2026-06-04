@@ -136,6 +136,11 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 // ReadAt reads len(buf) bytes at offset within the EC object without
 // reconstructing the full object.
 func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize, offset int64, buf []byte) (int, error) {
+	if rec.StripeBytes > 0 {
+		// Interleaved layout: the contiguous offset→shard mapping below is wrong.
+		// Delegate to a bounded stream-fallback that de-interleaves on the fly.
+		return r.readAtStripedStreaming(ctx, bucket, shardKey, rec, objectSize, offset, buf)
+	}
 	if r.shards == nil {
 		return 0, fmt.Errorf("shard service unavailable")
 	}
@@ -187,6 +192,32 @@ func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec
 		}
 	}
 	return done, nil
+}
+
+// readAtStripedStreaming serves a Range read of a stripe-interleaved object by
+// opening the bounded de-interleave stream, discarding `offset` bytes, and
+// filling buf. The stream reader buffers at most one stripe, so memory stays
+// bounded. (The offset→stripe seek optimization is a deferred follow-up.)
+func (r ecObjectReader) readAtStripedStreaming(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize, offset int64, buf []byte) (int, error) {
+	rc, err := r.OpenObject(ctx, bucket, shardKey, rec, objectSize)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	if offset > 0 {
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			return 0, fmt.Errorf("striped range seek: %w", err)
+		}
+	}
+	want := len(buf)
+	if rem := objectSize - offset; int64(want) > rem {
+		want = int(rem)
+	}
+	n, err := io.ReadFull(rc, buf[:want])
+	if err == io.ErrUnexpectedEOF || err == io.EOF {
+		err = nil
+	}
+	return n, err
 }
 
 // computeAttemptOrder returns primary and fallback shard idx lists.

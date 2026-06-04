@@ -449,6 +449,35 @@ func TestECObjectReader_ReadAt_ReturnsCorrectRange(t *testing.T) {
 	require.Equal(t, []byte("4567"), buf)
 }
 
+func TestECObjectReader_ReadAt_StripedRange(t *testing.T) {
+	const stripeBytes = 1 << 20
+	const off, n = 2_500_000, 4096
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	// >maxECPooledReadObjectSize forces the bounded streaming fallback.
+	payload := make([]byte, 4*1024*1024+10)
+	for i := range payload {
+		payload[i] = byte((i*7 + 3) % 251)
+	}
+
+	shards := buildStripedShardsWithHeader(t, cfg, payload, stripeBytes)
+	fetcher := &fakeECObjectShardFetcher{localShards: make(map[string][]byte)}
+	for i, shard := range shards {
+		fetcher.localShards[shardCacheKey("bucket", "key", i)] = shard
+	}
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+	rec.StripeBytes = stripeBytes
+
+	buf := make([]byte, n)
+	got, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(payload)), off, buf)
+	require.NoError(t, err)
+	require.Equal(t, n, got)
+	require.Equal(t, payload[off:off+n], buf)
+}
+
 func TestECObjectReader_ReadAt_PastEOFReturnsEOF(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 0}
 	data := []byte("short")
