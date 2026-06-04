@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.515.0] - 2026-06-04
+
+### Fixed
+
+- **Multi-drive single-node EC silently corrupted objects larger than 1 MiB on
+  read (since v0.0.473.0).** The all-local put pipeline writes a stripe-interleaved
+  shard layout, but the GET reader reconstructs each shard as a contiguous 1/K slice
+  of the object. Those layouts only agree when there is one data shard. A single node
+  with N drives runs `N-2 + 2` erasure coding (`AutoECConfigForClusterSize`) — the
+  default 4+2 with 6 drives — so any multi-drive single-node deployment dispatched
+  K>=2 writes through the pipeline and returned garbage when reading back any object
+  that spanned more than one stripe (objects larger than the 1 MiB stripe size). The
+  bug was never caught because every test pinned the pipeline to a single data shard.
+  Fix: pipeline dispatch is now restricted to `DataShards == 1`; K>=2 writes fall
+  through to the spool writer, which produces the contiguous layout the reader
+  expects. A `K=2` multi-stripe PUT->GET integration test covers the round-trip.
+  - **Consequence:** K>=2 cluster PUT no longer uses the streaming path — it spools
+    to disk and re-encodes, the same as before v0.0.473.0. The streaming path returns
+    for K>=2 once a stripe-aware (de-interleaving) reader lands.
+  - **Recovery:** objects already written in the broken state were never readable and
+    are not auto-recovered — re-upload them. The background scrubber's behavior on any
+    such pre-existing striped object is undefined; making the scrubber striping-aware
+    is part of the same follow-up (tracked in TODOS.md).
+
+### For contributors
+
+- **Dormant multi-node streaming-EC sender machinery landed (default off, no operator
+  knob).** Internal infrastructure for streaming erasure-coded shards to remote peers
+  during PUT — a `shardSink` seam in the drive actor, a sealed-shard remote sink, a
+  verbatim `WriteSealedShard` receiver, per-shard placement routing, and ephemeral
+  per-shard pumps for mixed placement. None of it is reachable: the multi-node dispatch
+  is hard-coded off (it would also write the K>=2 interleaved layout the GET reader can
+  not yet read), and the all-local guard above keeps every reachable PUT on a readable
+  layout. The machinery exists for the de-interleaving-reader work that will re-enable
+  K>=2 streaming.
+
 ## [0.0.514.0] - 2026-06-04
 
 ### Changed
