@@ -95,6 +95,32 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 			readers[i] = shard
 		}
 	}
+
+	if rec.StripeBytes > 0 {
+		// Stripe-interleaved objects: the contiguous stream path strips the
+		// 8-byte shard header inside ecReconstructStreamBodies, which the
+		// de-interleave path bypasses. Skip the header on each present reader
+		// (lazily, no eager blocking read) before handing bodies to the bounded
+		// de-interleave reader. skipReader is not an io.Closer, so the stripe
+		// reader's Close is a no-op on it — the underlying shardReaders are
+		// closed exactly once by closeECShardReaders below.
+		for i, shard := range readers {
+			if shard != nil {
+				readers[i] = &skipReader{r: shard, skip: shardHeaderSize}
+			}
+		}
+		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize)
+		if err != nil {
+			closeECShardReaders(shardReaders)
+			return nil, err
+		}
+		return &multiReadCloser{Reader: rc, close: func() error {
+			err := rc.Close()
+			closeECShardReaders(shardReaders)
+			return err
+		}}, nil
+	}
+
 	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, r.hasLocalDataShard(rec, recCfg))
 	if err != nil {
 		closeECShardReaders(shardReaders)
@@ -593,6 +619,31 @@ func (r ecObjectReader) hasLocalDataShard(rec PlacementRecord, cfg ECConfig) boo
 		}
 	}
 	return false
+}
+
+// skipReader discards the first `skip` bytes from the underlying reader before
+// passing subsequent reads through. It skips lazily (no eager blocking read) so
+// shard readers are not forced to materialize their header until first Read.
+// It deliberately does NOT implement io.Closer: the underlying shard readers
+// are owned and closed elsewhere (closeECShardReaders).
+type skipReader struct {
+	r    io.Reader
+	skip int
+}
+
+func (s *skipReader) Read(p []byte) (int, error) {
+	for s.skip > 0 {
+		n := s.skip
+		if n > len(p) {
+			n = len(p)
+		}
+		m, err := s.r.Read(p[:n])
+		s.skip -= m
+		if err != nil {
+			return 0, err
+		}
+	}
+	return s.r.Read(p)
 }
 
 func closeECShardReaders(shards []io.ReadCloser) {

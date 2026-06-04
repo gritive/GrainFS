@@ -316,6 +316,86 @@ func TestECObjectReader_ReadObject_DeinterleavesStripedObject(t *testing.T) {
 	require.Equal(t, payload, got)
 }
 
+// buildStripedShardsWithHeader returns K+M shard byte slices, each = 8-byte
+// full-object-size header + stripe-interleaved body, matching the on-disk
+// convention used by CPUPool/ECSplit.
+func buildStripedShardsWithHeader(t testing.TB, cfg ECConfig, payload []byte, stripeBytes int) [][]byte {
+	t.Helper()
+	bodies := buildInterleavedShards(t.(*testing.T), cfg, payload, stripeBytes)
+	header := ShardHeader(int64(len(payload)))
+	out := make([][]byte, len(bodies))
+	for i, body := range bodies {
+		out[i] = append(append([]byte(nil), header[:]...), body...)
+	}
+	return out
+}
+
+func TestECObjectReader_OpenObject_StreamsStripedObject(t *testing.T) {
+	const stripeBytes = 1 << 20
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	// >maxECPooledReadObjectSize forces the bounded streaming path (not buffered).
+	payload := make([]byte, 5*1024*1024+321)
+	for i := range payload {
+		payload[i] = byte((i*7 + 3) % 251)
+	}
+
+	shards := buildStripedShardsWithHeader(t, cfg, payload, stripeBytes)
+	fetcher := &fakeECObjectShardFetcher{localShards: make(map[string][]byte)}
+	for i, shard := range shards {
+		fetcher.localShards[shardCacheKey("bucket", "key", i)] = shard
+	}
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	// Non-self nodes for data shards 0,1 force the ReadShardStream path so we can
+	// assert streaming (OpenLocalShard does not bump readShardStreamCalls).
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+	rec.StripeBytes = stripeBytes
+
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(payload)))
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+	// Off-by-8 (skip-0 or double-skip) guard: leading bytes must match exactly.
+	require.Equal(t, payload[:16], got[:16])
+	require.Zero(t, fetcher.readShardCalls)
+	require.Greater(t, fetcher.readShardStreamCalls, 0)
+}
+
+func TestECObjectReader_OpenObject_StreamsStripedObjectDegraded(t *testing.T) {
+	const stripeBytes = 1 << 20
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	payload := make([]byte, 5*1024*1024+321)
+	for i := range payload {
+		payload[i] = byte((i*7 + 3) % 251)
+	}
+
+	shards := buildStripedShardsWithHeader(t, cfg, payload, stripeBytes)
+	fetcher := &fakeECObjectShardFetcher{localShards: make(map[string][]byte)}
+	for i, shard := range shards {
+		fetcher.localShards[shardCacheKey("bucket", "key", i)] = shard
+	}
+	// Drop data shard 0: openShardReaders falls back to parity → RS reconstruct
+	// per stripe in the de-interleave stream reader.
+	delete(fetcher.localShards, shardCacheKey("bucket", "key", 0))
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+	rec.StripeBytes = stripeBytes
+
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(payload)))
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
 func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	fetcher := &fakeECObjectShardFetcher{} // empty — no shards available
