@@ -342,6 +342,11 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 	return obj, nil
 }
 
+// StripeBytes returns the stripe size the pipeline splits PUTs on. The
+// caller stamps this into the object metadata so GET de-interleaves the
+// interleaved shard layout; both read this live config so they cannot drift.
+func (p *Pipeline) StripeBytes() int { return p.cfg.StripeBytes }
+
 // PutShard implements cluster.PutPipelineRunner. shardKey is the
 // ecObjectShardKey(key, versionID) form that the DriveActor writes
 // under and that the legacy ShardService reader expects. The returned

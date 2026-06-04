@@ -101,6 +101,9 @@ type PutPipelineRunner interface {
 	// PutShardPlaced writes a multi-node placement: placement[i] is the
 	// resolved peer address shard i streams to, or "" for a local shard.
 	PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error)
+	// StripeBytes is the stripe size the pipeline splits PUTs on; the
+	// caller stamps it into object metadata so GET de-interleaves.
+	StripeBytes() int
 }
 
 // DistributedBackend implements storage.Backend with Raft-replicated metadata
