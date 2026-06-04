@@ -55,6 +55,7 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 		VersionID:        obj.VersionID,
 		ECData:           obj.ECData,
 		ECParity:         obj.ECParity,
+		StripeBytes:      obj.StripeBytes,
 		NodeIDs:          obj.NodeIDs,
 		PlacementGroupID: obj.PlacementGroupID,
 	}
@@ -333,6 +334,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				PlacementGroupID: m.PlacementGroupID,
 				ECData:           m.ECData,
 				ECParity:         m.ECParity,
+				StripeBytes:      m.StripeBytes,
 				NodeIDs:          cloneStringSlice(m.NodeIDs),
 				Segments:         m.Segments,
 				Parts:            m.Parts,
@@ -346,6 +348,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				VersionID:        versionID,
 				ECData:           m.ECData,
 				ECParity:         m.ECParity,
+				StripeBytes:      m.StripeBytes,
 				NodeIDs:          m.NodeIDs,
 				PlacementGroupID: m.PlacementGroupID,
 			}
@@ -432,6 +435,7 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 		}
 		meta.ECData = m.ECData
 		meta.ECParity = m.ECParity
+		meta.StripeBytes = m.StripeBytes
 		meta.NodeIDs = m.NodeIDs
 		return nil
 	})

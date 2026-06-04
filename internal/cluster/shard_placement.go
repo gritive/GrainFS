@@ -21,8 +21,9 @@ import (
 // the object was written. K=0, M=0 means legacy V0 record — callers should
 // fall back to the global ecConfig for reconstruction parameters.
 type PlacementRecord struct {
-	Nodes []string
-	K, M  int
+	Nodes       []string
+	K, M        int
+	StripeBytes int
 }
 
 // ECConfigOrFallback returns an ECConfig from stored K,M, or falls back to
@@ -36,14 +37,15 @@ func (r PlacementRecord) ECConfigOrFallback(def ECConfig) ECConfig {
 
 // ObjectMetaRef is the tuple IterObjectMetas yields for each object.
 type ObjectMetaRef struct {
-	Bucket    string
-	Key       string
-	VersionID string
-	Size      int64
-	ETag      string
-	ECData    uint8
-	ECParity  uint8
-	NodeIDs   []string
+	Bucket      string
+	Key         string
+	VersionID   string
+	Size        int64
+	ETag        string
+	ECData      uint8
+	ECParity    uint8
+	StripeBytes uint32
+	NodeIDs     []string
 	// PlacementGroupID is the data raft group that owns this object version.
 	PlacementGroupID string
 }
@@ -129,6 +131,7 @@ func (f *FSM) iterLatestObjectMetas(fn func(ref ObjectMetaRef, m objectMeta) err
 			ref.ETag = m.ETag
 			ref.ECData = m.ECData
 			ref.ECParity = m.ECParity
+			ref.StripeBytes = m.StripeBytes
 			ref.NodeIDs = m.NodeIDs
 			ref.PlacementGroupID = m.PlacementGroupID
 			if skip {
@@ -192,6 +195,7 @@ func (f *FSM) iterLatestObjectMetas(fn func(ref ObjectMetaRef, m objectMeta) err
 			ref.ETag = m.ETag
 			ref.ECData = m.ECData
 			ref.ECParity = m.ECParity
+			ref.StripeBytes = m.StripeBytes
 			ref.NodeIDs = m.NodeIDs
 			ref.PlacementGroupID = m.PlacementGroupID
 			seen[bucket+"\x00"+key] = struct{}{}

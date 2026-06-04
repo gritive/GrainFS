@@ -86,6 +86,7 @@ type PutObjectMetaCmd struct {
 	VersionID   string
 	ECData      uint8    // EC k (data shards)
 	ECParity    uint8    // EC m (parity shards)
+	StripeBytes uint32   // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs     []string // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
@@ -130,6 +131,7 @@ type SegmentMetaEntry struct {
 	NodeIDs          []string
 	ECData           uint8
 	ECParity         uint8
+	StripeBytes      uint32
 }
 
 // virtualNode는 SetRingCmd 역직렬화 경로에서 사용되는 레거시 타입이다.

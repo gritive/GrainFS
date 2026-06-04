@@ -24,6 +24,7 @@ type objectMeta struct {
 	ACL          uint8    // s3auth.ACLGrant bitmask; 0 = private (backward compat)
 	ECData       uint8    // EC k (data shards)
 	ECParity     uint8    // EC m (parity shards)
+	StripeBytes  uint32   // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
@@ -58,6 +59,7 @@ type CoalescedShardRef struct {
 	Version     int32
 	ECData      uint8
 	ECParity    uint8
+	StripeBytes uint32
 	NodeIDs     []string
 }
 
@@ -201,6 +203,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 			}
 			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
 			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
+			clusterpb.SegmentMetaEntryAddStripeBytes(b, s.StripeBytes)
 			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
 		}
 		clusterpb.PutObjectMetaCmdStartSegmentsVector(b, len(segOffs))
@@ -238,6 +241,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddVersionId(b, vidOff)
 	clusterpb.PutObjectMetaCmdAddEcData(b, c.ECData)
 	clusterpb.PutObjectMetaCmdAddEcParity(b, c.ECParity)
+	clusterpb.PutObjectMetaCmdAddStripeBytes(b, c.StripeBytes)
 	if nodeIDsOff != 0 {
 		clusterpb.PutObjectMetaCmdAddNodeIds(b, nodeIDsOff)
 	}
@@ -327,6 +331,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 				NodeIDs:          nodeIDs,
 				ECData:           se.EcData(),
 				ECParity:         se.EcParity(),
+				StripeBytes:      se.StripeBytes(),
 			}
 		}
 	}
@@ -340,6 +345,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		VersionID:        string(t.VersionId()),
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
+		StripeBytes:      t.StripeBytes(),
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
@@ -502,6 +508,7 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 			}
 			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
 			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
+			clusterpb.SegmentMetaEntryAddStripeBytes(b, s.StripeBytes)
 			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
 		}
 		clusterpb.CompleteMultipartCmdStartSegmentsVector(b, len(segOffs))
@@ -596,6 +603,7 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 				NodeIDs:          nodeIDs,
 				ECData:           se.EcData(),
 				ECParity:         se.EcParity(),
+				StripeBytes:      se.StripeBytes(),
 			}
 		}
 	}
@@ -799,6 +807,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 			if s.ECParity != 0 {
 				clusterpb.SegmentRefAddEcParity(b, s.ECParity)
 			}
+			if s.StripeBytes != 0 {
+				clusterpb.SegmentRefAddStripeBytes(b, s.StripeBytes)
+			}
 			segOffs[i] = clusterpb.SegmentRefEnd(b)
 		}
 		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
@@ -829,6 +840,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
 			clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
 			clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
+			clusterpb.CoalescedShardRefAddStripeBytes(b, c.StripeBytes)
 			if nodesOff != 0 {
 				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
 			}
@@ -885,6 +897,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddAcl(b, m.ACL)
 	clusterpb.ObjectMetaAddEcData(b, m.ECData)
 	clusterpb.ObjectMetaAddEcParity(b, m.ECParity)
+	clusterpb.ObjectMetaAddStripeBytes(b, m.StripeBytes)
 	if nodeIDsOff != 0 {
 		clusterpb.ObjectMetaAddNodeIds(b, nodeIDsOff)
 	}
@@ -957,6 +970,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				ShardSize:        seg.ShardSize(),
 				ECData:           seg.EcData(),
 				ECParity:         seg.EcParity(),
+				StripeBytes:      seg.StripeBytes(),
 				NodeIDs:          nodeIDs,
 			}
 		}
@@ -984,6 +998,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				Version:     c.Version(),
 				ECData:      c.EcData(),
 				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
 				NodeIDs:     nodeIDs,
 			}
 		}
@@ -1022,6 +1037,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		ACL:              t.Acl(),
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
+		StripeBytes:      t.StripeBytes(),
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
