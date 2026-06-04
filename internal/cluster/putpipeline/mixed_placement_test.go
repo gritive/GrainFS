@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"io"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -37,6 +39,71 @@ func (w *recordingWAL) recorded() []int {
 	out := append([]int(nil), w.indices...)
 	sort.Ints(out)
 	return out
+}
+
+// blockingTransport is a shardTransport whose CallWithBody never reads the body
+// and blocks until its ctx is cancelled/expired, then returns ctx.Err() — it
+// models a dead peer. The remote sink's Write parks on this; without a per-shard
+// RPC deadline the PUT would deadlock (the pump cancel only fires after Put
+// returns, which never happens while a remote shard write is blocked).
+type blockingTransport struct{}
+
+func (blockingTransport) CallWithBody(ctx context.Context, _ string, _ *transport.Message, _ io.Reader) (*transport.Message, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestMixedPlacement_DeadPeerDoesNotHangPastDeadline proves the streaming remote
+// path bounds each shard RPC with Config.ShardRPCTimeout: a dead peer must make
+// the PUT fail by the injected deadline, not hang. Shard 0 is a DATA shard routed
+// to the blocking peer; commit requires ALL K data shards (parity is best-effort,
+// there is no count threshold to fall back to), so the single data-shard failure
+// alone is sufficient — once shard 0's RPC times out, earlyAck errors. Blocking a
+// parity shard instead would let the PUT succeed on the K data shards and not
+// exercise this guard.
+func TestMixedPlacement_DeadPeerDoesNotHangPastDeadline(t *testing.T) {
+	keeper := testDEKKeeper(t)
+	clusterID := testClusterID()
+
+	p := New(Config{
+		DataDirs:        []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()},
+		DEKKeeper:       keeper,
+		ClusterID:       clusterID,
+		ECConfig:        cluster.ECConfig{DataShards: 3, ParityShards: 2},
+		StripeBytes:     1 << 20,
+		Transport:       blockingTransport{},
+		ShardRPCTimeout: 200 * time.Millisecond,
+	})
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, p.Shutdown(sctx))
+	}()
+
+	body := make([]byte, 3<<20+7)
+	for i := range body {
+		body[i] = byte((i * 7) % 251)
+	}
+	size := int64(len(body))
+	// Shard 0 (a data shard) streams to the blocking peer; shards 1..4 are local.
+	// The outer ctx is deadline-FREE: the only thing that can bound the PUT is the
+	// per-shard ShardRPCTimeout, so a pass proves that guard fired (not ctx.Done()).
+	start := time.Now()
+	_, err := p.PutShardPlaced(context.Background(), "external/obj-dead/v1",
+		storage.PutObjectRequest{
+			Bucket:   "external",
+			Body:     bytes.NewReader(body),
+			SizeHint: &size,
+		},
+		[]string{"peer:1", "", "", "", ""})
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	require.Less(t, elapsed, 2*time.Second, "must fail by the injected deadline, not hang")
+	// Lower bound: the failure must arrive VIA the 200ms deadline, not from some
+	// earlier path (which would pass the upper bound vacuously). The ShardRPCTimeout
+	// clock starts inside Put (strictly after start), so failure cannot arrive
+	// before ~200ms; 150ms is a flake-safe floor.
+	require.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "must fail via the deadline, not earlier")
 }
 
 // TestPipeline_MixedPlacementRoundTrip is the S2-sender-b-2 acceptance test:
@@ -78,6 +145,12 @@ func TestPipeline_MixedPlacementRoundTrip(t *testing.T) {
 		ECConfig:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
 		StripeBytes: 1 << 20,
 		Transport:   tr1,
+		// Mirror the production config: the remote shard RPCs run under a
+		// ShardRPCTimeout-bounded ctx. A value comfortably above the write time
+		// exercises the timeout branch in the SUCCESS case (the dead-peer test
+		// covers failure), proving a real streaming PUT round-trips with the
+		// per-shard deadline active.
+		ShardRPCTimeout: 5 * time.Second,
 	})
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

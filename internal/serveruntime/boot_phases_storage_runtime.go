@@ -444,6 +444,11 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			// multi-node streaming path (gated off below); the same transport
 			// the ShardService dials peers with, so resolved addresses match.
 			Transport: state.clusterTransport,
+			// Bound each remote shard write RPC so a dead peer cannot deadlock
+			// the streaming PUT, using the same deadline value as the spool path
+			// (the streaming path arms it earlier, so it bounds a broader window;
+			// see Pipeline.Put).
+			ShardRPCTimeout: cluster.ShardRPCTimeout(),
 		})
 		state.putPipeline = pipeline
 		// Enabled in prod (F1 durability review closed): Put() blocks on shard

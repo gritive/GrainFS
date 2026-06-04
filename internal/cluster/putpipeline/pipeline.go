@@ -32,6 +32,11 @@ type Config struct {
 	// (PutRequest.Placement). nil is fine for an all-local pipeline; a PUT
 	// that routes a remote shard with no transport fails that shard cleanly.
 	Transport shardTransport
+	// ShardRPCTimeout bounds each remote shard write RPC. The remote sink's
+	// CallWithBody blocks Write on a dead peer; without a deadline that deadlocks
+	// the PUT (a blocked Write keeps PutShardPlaced from returning, so the pump
+	// cancel never fires). Injected by the cluster backend (= shardRPCTimeout).
+	ShardRPCTimeout time.Duration
 }
 
 // ShardWALAppender lets CommitCoord record the per-PUT shard layout in
@@ -245,9 +250,25 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		if peerAddr := req.Placement[i]; peerAddr != "" {
 			remoteShards[i] = true
 			d.transport = p.cfg.Transport
-			// The RPC ctx is the PUT-scoped pumpCtx so cancellation (teardown or
-			// a PUT abort) unblocks a Write parked on a dead peer.
-			d.registerRemotePut(pumpCtx, putID, req.Bucket, req.Key, i, peerAddr)
+			// The RPC ctx is the PUT-scoped pumpCtx (so teardown or a PUT abort
+			// unblocks a Write parked on a dead peer) further bounded by
+			// ShardRPCTimeout: without a deadline a dead peer blocks Write forever
+			// and the PUT deadlocks, since the pump cancel only fires after Put
+			// returns. Note this is a BROADER window than the spool path's
+			// per-shard timeout: the spool path arms WithTimeout after the shard
+			// is fully materialized (bounding only the RPC), whereas here the
+			// deadline is armed in the dispatch loop before the first stripe
+			// arrives, so it bounds ingest + seal + RPC. The cancel is deferred
+			// to release the timer when Put returns (rpcCtx is a child of pumpCtx,
+			// so it would be cancelled by cancelPumps regardless; the defer just
+			// frees the timer promptly).
+			rpcCtx := pumpCtx
+			if p.cfg.ShardRPCTimeout > 0 {
+				var cancel context.CancelFunc
+				rpcCtx, cancel = context.WithTimeout(pumpCtx, p.cfg.ShardRPCTimeout)
+				defer cancel()
+			}
+			d.registerRemotePut(rpcCtx, putID, req.Bucket, req.Key, i, peerAddr)
 		} else {
 			// Local shard via an ephemeral pump: write to the same drive dir the
 			// ShardService reader expects (DataDirs[i % n]) and honor the
