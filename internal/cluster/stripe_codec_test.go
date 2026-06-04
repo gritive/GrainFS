@@ -57,6 +57,26 @@ func cloneShards(in [][]byte) [][]byte {
 	return out
 }
 
+// stripeInterleaveShard must reproduce, for every shard index, the exact
+// interleaved body that buildInterleavedShards (the CPUPool mirror) produced.
+// Repair relies on this to regenerate a missing shard so it matches its
+// surviving interleaved siblings.
+func TestStripeInterleaveShard(t *testing.T) {
+	const k, m, stripeBytes = 2, 2, 1 << 20
+	cfg := ECConfig{DataShards: k, ParityShards: m}
+	payload := make([]byte, 4*1024*1024+777)
+	for i := range payload {
+		payload[i] = byte((i * 7) % 251)
+	}
+	want := buildInterleavedShards(t, cfg, payload, stripeBytes)
+
+	for idx := 0; idx < cfg.NumShards(); idx++ {
+		got, err := stripeInterleaveShard(cfg, payload, stripeBytes, idx)
+		require.NoError(t, err)
+		require.Equal(t, want[idx], got, "shard %d body mismatch", idx)
+	}
+}
+
 func TestStripeDeinterleaveStreaming(t *testing.T) {
 	const k, m, stripeBytes = 2, 2, 1 << 20
 	cfg := ECConfig{DataShards: k, ParityShards: m}

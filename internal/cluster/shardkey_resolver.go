@@ -199,9 +199,10 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 					// Aliasing ref.NodeIDs is safe: unmarshalObjectMeta builds
 					// NodeIDs as Go-owned string copies, not FlatBuffer-backed
 					// views, so the cached record aliases no transient buffer.
-					Nodes: ref.NodeIDs,
-					K:     int(ref.ECData),
-					M:     int(ref.ECParity),
+					Nodes:       ref.NodeIDs,
+					K:           int(ref.ECData),
+					M:           int(ref.ECParity),
+					StripeBytes: int(ref.StripeBytes),
 				}
 			}
 			for _, ref := range m.Coalesced {
@@ -209,9 +210,10 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 					continue
 				}
 				res.coalesced[ref.ShardKey] = PlacementRecord{
-					Nodes: ref.NodeIDs,
-					K:     int(ref.ECData),
-					M:     int(ref.ECParity),
+					Nodes:       ref.NodeIDs,
+					K:           int(ref.ECData),
+					M:           int(ref.ECParity),
+					StripeBytes: int(ref.StripeBytes),
 				}
 			}
 		}

@@ -315,9 +315,10 @@ func (f *FSM) buildECShardTargets(ref ObjectMetaRef, m objectMeta, fn func(ECSha
 			VersionID: ref.VersionID,
 			ShardKey:  ref.Key + "/segments/" + seg.BlobID,
 			Placement: PlacementRecord{
-				Nodes: seg.NodeIDs,
-				K:     int(seg.ECData),
-				M:     int(seg.ECParity),
+				Nodes:       seg.NodeIDs,
+				K:           int(seg.ECData),
+				M:           int(seg.ECParity),
+				StripeBytes: int(seg.StripeBytes),
 			},
 		}); err != nil {
 			return err
@@ -353,9 +354,10 @@ func (f *FSM) buildECShardTargets(ref ObjectMetaRef, m objectMeta, fn func(ECSha
 			VersionID: ref.VersionID,
 			ShardKey:  cs.ShardKey,
 			Placement: PlacementRecord{
-				Nodes: cs.NodeIDs,
-				K:     int(cs.ECData),
-				M:     int(cs.ECParity),
+				Nodes:       cs.NodeIDs,
+				K:           int(cs.ECData),
+				M:           int(cs.ECParity),
+				StripeBytes: int(cs.StripeBytes),
 			},
 		}); err != nil {
 			return err

@@ -78,6 +78,29 @@ func stripeDeinterleave(cfg ECConfig, bodies [][]byte, stripeBytes int, objectSi
 	return out, nil
 }
 
+// stripeInterleaveShard rebuilds ONE shard's interleaved body (no 8-byte header)
+// from the full object, matching what the pipeline wrote: per stripe, ECSplitRaw
+// and take fragment shardIdx. Used by repair to regenerate a missing shard so it
+// matches its interleaved siblings.
+func stripeInterleaveShard(cfg ECConfig, object []byte, stripeBytes, shardIdx int) ([]byte, error) {
+	if stripeBytes <= 0 {
+		return nil, fmt.Errorf("stripe interleave: stripeBytes must be > 0")
+	}
+	var body []byte
+	for off := 0; off < len(object); off += stripeBytes {
+		end := off + stripeBytes
+		if end > len(object) {
+			end = len(object)
+		}
+		frags, err := ECSplitRaw(cfg, object[off:end])
+		if err != nil {
+			return nil, fmt.Errorf("stripe interleave split: %w", err)
+		}
+		body = append(body, frags[shardIdx]...)
+	}
+	return body, nil
+}
+
 type stripeDeinterleaveStreamReader struct {
 	cfg         ECConfig
 	enc         reedsolomon.Encoder

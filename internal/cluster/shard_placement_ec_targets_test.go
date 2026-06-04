@@ -419,3 +419,57 @@ func TestIterECShardScanTargetsAllVersions_SkipsModernDualWriteAlias(t *testing.
 	require.NotNil(t, rtLegacy, "pre-versioning legacy object must still be emitted")
 	require.Equal(t, legacyNodes, rtLegacy.NodeIDs)
 }
+
+// TestECShardTargets_CarryStripeBytes asserts both repair-reaching ShardKey-path
+// rec sources propagate StripeBytes (not just K/M) onto the PlacementRecord that
+// flows into RepairShardAtShardKey -> reconstructShardAtKey. Today segments are
+// stored contiguously (StripeBytes==0), so this is a forward-looking carry-forward:
+// reverting the StripeBytes one-liners at shard_placement.go (monitor scan
+// targets) and shardkey_resolver.go (datawal scan results) makes this RED. Without
+// it, repair would regenerate a contiguous shard for a striped segment and corrupt
+// it on heal.
+func TestECShardTargets_CarryStripeBytes(t *testing.T) {
+	ctx := context.Background()
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(ctx, "b"))
+
+	const segStripe, coalStripe = 1 << 20, 1 << 19
+	segNodes := []string{"n1", "n2", "n3"}
+	coalNodes := []string{"n4", "n5", "n6"}
+	seedLatestObjectMetaVersion(t, backend, "b", "striped", "sv1", objectMeta{
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-s", ECData: 2, ECParity: 1, NodeIDs: segNodes, StripeBytes: segStripe},
+		},
+		Coalesced: []CoalescedShardRef{
+			{CoalescedID: "c1", ShardKey: "striped/coalesced/c1", ECData: 2, ECParity: 1, NodeIDs: coalNodes, StripeBytes: coalStripe},
+		},
+	})
+
+	// Monitor path: IterECShardScanTargets -> onMissing -> RepairShardAtShardKey.
+	var segTgt, coalTgt *ECShardScanTarget
+	for _, tgt := range collectECTargets(t, backend) {
+		tgt := tgt
+		switch tgt.Kind {
+		case ECShardSegment:
+			segTgt = &tgt
+		case ECShardCoalesced:
+			coalTgt = &tgt
+		}
+	}
+	require.NotNil(t, segTgt)
+	require.NotNil(t, coalTgt)
+	require.Equal(t, segStripe, segTgt.Placement.StripeBytes, "monitor segment target must carry StripeBytes")
+	require.Equal(t, coalStripe, coalTgt.Placement.StripeBytes, "monitor coalesced target must carry StripeBytes")
+
+	// Datawal path: ResolveShardKeyPlacement -> RepairShardAtShardKey.
+	scan := NewShardKeyPlacementScanCache()
+	segRec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "striped/segments/seg-s", scan)
+	require.NoError(t, err)
+	require.Empty(t, skip)
+	require.Equal(t, segStripe, segRec.StripeBytes, "datawal segment placement must carry StripeBytes")
+
+	coalRec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "striped/coalesced/c1", scan)
+	require.NoError(t, err)
+	require.Empty(t, skip)
+	require.Equal(t, coalStripe, coalRec.StripeBytes, "datawal coalesced placement must carry StripeBytes")
+}
