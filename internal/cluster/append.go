@@ -181,6 +181,13 @@ func appendObjectResult(existing *storage.Object, key, versionID, placementGroup
 		if versionID != "" {
 			coalescedID = "base-" + versionID
 		}
+		// This synthetic base ref is metadata-only (client-facing Size/ETag on the
+		// optimistic append response); it is NOT an EC read source. It intentionally
+		// omits ECData/ECParity/NodeIDs/ShardKey/StripeBytes — every coalesced read
+		// path gates on ECData>0 (openCoalescedECReader, readAtChunk), so this ref
+		// never reaches EC reconstruction. The persisted, read-capable base ref is
+		// built independently by appendBaseCoalescedRef (carries StripeBytes). Do not
+		// turn this into a read source without populating the full EC fields.
 		obj.Coalesced = []storage.CoalescedRef{{
 			CoalescedID: coalescedID,
 			Size:        existing.Size,
@@ -321,9 +328,10 @@ func (b *DistributedBackend) openCoalescedECReader(ctx context.Context, bucket s
 		return nil, nil
 	}
 	rec := PlacementRecord{
-		Nodes: append([]string(nil), ref.NodeIDs...),
-		K:     int(ref.ECData),
-		M:     int(ref.ECParity),
+		Nodes:       append([]string(nil), ref.NodeIDs...),
+		K:           int(ref.ECData),
+		M:           int(ref.ECParity),
+		StripeBytes: int(ref.StripeBytes),
 	}
 	return b.newECObjectReader().OpenObject(ctx, bucket, ref.ShardKey, rec, ref.Size)
 }
@@ -506,9 +514,10 @@ func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string
 	// B3 coalesced: prefer EC ReadAt when params are present.
 	if kind == appendSegKindCoalesced && ec != nil && len(ec.NodeIDs) > 0 && ec.ECData > 0 {
 		rec := PlacementRecord{
-			Nodes: append([]string(nil), ec.NodeIDs...),
-			K:     int(ec.ECData),
-			M:     int(ec.ECParity),
+			Nodes:       append([]string(nil), ec.NodeIDs...),
+			K:           int(ec.ECData),
+			M:           int(ec.ECParity),
+			StripeBytes: int(ec.StripeBytes),
 		}
 		n, err := b.newECObjectReader().ReadAt(ctx, bucket, ec.ShardKey, rec, ec.Size, offset, buf)
 		if err == nil {

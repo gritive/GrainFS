@@ -19,6 +19,7 @@ func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 		LastModified:     cmd.ModTime,
 		ECData:           cmd.ECData,
 		ECParity:         cmd.ECParity,
+		StripeBytes:      cmd.StripeBytes,
 		NodeIDs:          cmd.NodeIDs,
 		PlacementGroupID: cmd.PlacementGroupID,
 		UserMetadata:     cmd.UserMetadata,

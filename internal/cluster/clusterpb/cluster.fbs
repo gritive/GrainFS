@@ -133,6 +133,7 @@ table PutObjectMetaCmd {
   // for backward-compatible readers.
   segments:[SegmentMetaEntry];
   tags:[Tag];
+  stripe_bytes:uint32 = 0;
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked
@@ -149,6 +150,7 @@ table SegmentMetaEntry {
   node_ids:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
+  stripe_bytes:uint32 = 0;
 }
 
 table DeleteObjectCmd {
@@ -262,6 +264,7 @@ table ObjectMeta {
   is_appendable:bool = false;
   parts:[MultipartPartEntry];
   tags:[Tag];
+  stripe_bytes:uint32 = 0;
 }
 
 // CoalescedShardRef references one coalesced blob produced by merging a
@@ -285,6 +288,7 @@ table CoalescedShardRef {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
+  stripe_bytes:uint32 = 0;
 }
 
 // CoalesceSegmentsCmd records a single coalesce operation: consume the listed
@@ -322,6 +326,7 @@ table SegmentRef {
   node_ids:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
+  stripe_bytes:uint32 = 0;
 }
 
 table SetBucketVersioningCmd {

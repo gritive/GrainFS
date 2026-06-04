@@ -145,9 +145,10 @@ func (s *clusterSegmentStore) segmentRef(blobID string) (storage.SegmentRef, boo
 func (s *clusterSegmentStore) placementRecord(ref storage.SegmentRef) (PlacementRecord, error) {
 	if len(ref.NodeIDs) > 0 && ref.ECData > 0 {
 		return PlacementRecord{
-			Nodes: cloneStringSlice(ref.NodeIDs),
-			K:     int(ref.ECData),
-			M:     int(ref.ECParity),
+			Nodes:       cloneStringSlice(ref.NodeIDs),
+			K:           int(ref.ECData),
+			M:           int(ref.ECParity),
+			StripeBytes: int(ref.StripeBytes),
 		}, nil
 	}
 
@@ -195,6 +196,7 @@ func segmentMetaEntriesToRefs(entries []SegmentMetaEntry) []storage.SegmentRef {
 			ShardSize:        entry.ShardSize,
 			ECData:           entry.ECData,
 			ECParity:         entry.ECParity,
+			StripeBytes:      entry.StripeBytes,
 			NodeIDs:          cloneStringSlice(entry.NodeIDs),
 		}
 	}

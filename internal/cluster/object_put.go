@@ -51,18 +51,15 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			ShardKey:  ecObjectShardKey(key, ""),
 		})
 		// The put pipeline writes a stripe-INTERLEAVED shard layout (one fragment
-		// per stripe per shard); the GET reader expects each shard to be a
-		// CONTIGUOUS 1/K object slice. Those agree only when DataShards == 1 (the
-		// fragment IS the whole stripe), so for K >= 2 a multi-stripe object would
-		// round-trip to garbage. Until a de-interleaving reader lands, restrict
-		// pipeline dispatch to K == 1 and let K >= 2 fall through to the spool
-		// writer (contiguous layout). Covered by the K>=2 multi-stripe round-trip
-		// integration test.
+		// per stripe per shard). The GET reader now de-interleaves when the object
+		// metadata carries StripeBytes > 0 (the all-local branch stamps it below),
+		// so all-local PUTs of any K round-trip correctly.
 		//
-		// Load-bearing: the K read here (placementPlan.Config.DataShards) must be
-		// the same K the pipeline splits on (its Config.ECConfig.DataShards). Both
-		// derive from boot's effectiveEC today; a future per-bucket EC config must
-		// keep them equal or this guard could pass while the pipeline interleaves.
+		// pipelineLayoutSafe still gates ONLY the multi-node branch (below): that
+		// path needs write-quorum + a per-shard RPC deadline (S3) before it can
+		// safely stamp its own StripeBytes marker, so it stays restricted to
+		// K == 1 until S3 lands. b.putPipelineMultiNode is hard-coded false at
+		// boot, so the multi-node branch never fires today regardless.
 		pipelineLayoutSafe := planErr == nil && placementPlan.Config.DataShards == 1
 		allLocal := false
 		if planErr == nil {
@@ -75,7 +72,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				}
 			}
 		}
-		if allLocal && pipelineLayoutSafe {
+		if allLocal {
 			versionID := newVersionID()
 			shardKey := ecObjectShardKey(key, versionID)
 			obj, err := b.putPipeline.PutShard(ctx, shardKey, storage.PutObjectRequest{
@@ -96,6 +93,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			for i := range nodeIDs {
 				nodeIDs[i] = selfID
 			}
+			stripeBytes := uint32(b.putPipeline.StripeBytes())
 			if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 				Bucket:           bucket,
 				Key:              key,
@@ -107,9 +105,12 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				PlacementGroupID: placementGroupID,
 				ECData:           uint8(placementPlan.Config.DataShards),
 				ECParity:         uint8(placementPlan.Config.ParityShards),
-				NodeIDs:          nodeIDs,
-				UserMetadata:     cloneStringMap(userMetadata),
-				SSEAlgorithm:     sseAlgorithm,
+				// load-bearing: this marker MUST equal the StripeBytes the pipeline
+				// split on; both read the live pipeline config so they cannot drift.
+				StripeBytes:  stripeBytes,
+				NodeIDs:      nodeIDs,
+				UserMetadata: cloneStringMap(userMetadata),
+				SSEAlgorithm: sseAlgorithm,
 			}); merr != nil {
 				go b.deleteShardsAsync(bucket, nodeIDs, shardKey)
 				return nil, merr
@@ -126,6 +127,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				PlacementGroupID: placementGroupID,
 				ECData:           uint8(placementPlan.Config.DataShards),
 				ECParity:         uint8(placementPlan.Config.ParityShards),
+				StripeBytes:      stripeBytes,
 				NodeIDs:          cloneStringSlice(nodeIDs),
 			}, nil
 		} else if b.putPipelineMultiNode && pipelineLayoutSafe && placementPlan.Config.NumShards() > 0 {

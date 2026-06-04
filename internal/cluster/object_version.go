@@ -64,6 +64,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			PlacementGroupID: m.PlacementGroupID,
 			ECData:           m.ECData,
 			ECParity:         m.ECParity,
+			StripeBytes:      m.StripeBytes,
 			NodeIDs:          cloneStringSlice(m.NodeIDs),
 			Segments:         m.Segments,
 			Parts:            m.Parts,
@@ -77,6 +78,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			VersionID:        versionID,
 			ECData:           m.ECData,
 			ECParity:         m.ECParity,
+			StripeBytes:      m.StripeBytes,
 			NodeIDs:          m.NodeIDs,
 			PlacementGroupID: m.PlacementGroupID,
 		}

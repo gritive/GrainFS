@@ -94,3 +94,47 @@ func (r *readAtRangeReader) Close() error {
 	r.pooled = false
 	return nil
 }
+
+// streamingRangeReader serves a byte range from a single sequential object
+// stream: it skips `skip` bytes once, then yields the next `remaining` bytes.
+//
+// It exists for stripe-interleaved objects, whose ReadAt is O(offset) (the
+// de-interleave reader has no random-access seek yet). The generic
+// readAtRangeReader refills in maxRangeReadAtChunk-sized ReadAt calls at growing
+// offsets; on a striped object each call re-opens a full de-interleave stream and
+// re-discards the whole prefix, turning a single Range GET into O(N^2) decode
+// work. Holding ONE stream and skipping once collapses that back to O(N) for a
+// full-range GET (and O(start) for a tail range — a single pass, not quadratic).
+type streamingRangeReader struct {
+	rc        io.ReadCloser
+	skip      int64
+	remaining int64
+	didSkip   bool
+}
+
+func (r *streamingRangeReader) Read(p []byte) (int, error) {
+	if !r.didSkip {
+		if r.skip > 0 {
+			if _, err := io.CopyN(io.Discard, r.rc, r.skip); err != nil {
+				return 0, err
+			}
+		}
+		r.didSkip = true
+	}
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.rc.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
+func (r *streamingRangeReader) Close() error {
+	if r.rc != nil {
+		return r.rc.Close()
+	}
+	return nil
+}

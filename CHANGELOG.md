@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.0.516.0] - 2026-06-05
+
+### Added
+
+- **All-local multi-drive K>=2 PUT now streams through the erasure-coding pipeline
+  again, with a striping-aware reader.** v0.0.515.0 fixed a silent corruption by
+  forcing K>=2 all-local writes through the spool writer (re-encode to a contiguous
+  layout). This release re-enables the streaming pipeline for that case: writes lay
+  shards out stripe-interleaved and stamp a `StripeBytes` marker, and every read path
+  de-interleaves through a shared stripe codec. A single multi-drive node (default
+  `4+2`) now gets the streaming PUT path without the >1 MiB read corruption.
+  - The marker is threaded through every reconstruct path that this configuration
+    reaches: full GET (`ReadObject` buffered + `OpenObject` bounded streaming),
+    versioned GET, appendable base and range reads, range GET, and shard repair
+    (startup-WAL repair and the background scrubber both regenerate a missing shard
+    in the correct interleaved layout). `StripeBytes == 0` stays the contiguous
+    default, so objects written before this format read back unchanged.
+
+### Changed
+
+- **Striped range reads (`Range:` / `partNumber=`) are served from a single
+  sequential stream instead of chunked random-access reads.** The de-interleave
+  reader has no random-access seek, so a striped `ReadAt(offset)` decodes the whole
+  prefix; the generic range reader's per-chunk `ReadAt` calls would have turned one
+  `Range: bytes=0-` into O(N^2) decode work. Striped objects now open one
+  de-interleave stream, skip to the range start once, and read sequentially — O(N)
+  for a full-range GET. (NBD-style high-offset random `ReadAt` is still O(offset) per
+  call until stripe-aligned seek lands; see TODOS.)
+
+### Fixed
+
+- A test deflake: two TCP transport deadline-reaper tests polled for connection
+  reaping inside a 1s window that a CPU-saturated full parallel suite could exceed
+  (the deadline fires deterministically; observing it depends on goroutine
+  scheduling). Widened to 5s. Production is untouched.
+
+### Upgrade / rollback note
+
+- **The on-disk striped format is forward-only.** After the first all-local K>=2
+  striped PUT, rolling this binary back past this release corrupts reads of those
+  objects: an older binary ignores the `StripeBytes` marker, reconstructs the
+  interleaved shards as if contiguous, and returns garbage with no error. This
+  release scopes striped writes to single-node all-local placement (no peer stores a
+  striped shard), so the only exposure is same-node binary rollback; a cluster-wide
+  minimum-version capability gate is deferred to the multi-node slice. Deploy
+  forward, do not roll back past this release once striped objects exist.
+- Numbers from this work are directional macOS-dev measurements, not Linux
+  throughput/memory parity figures.
+
 ## [0.0.515.0] - 2026-06-04
 
 ### Fixed

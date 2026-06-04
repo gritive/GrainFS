@@ -343,6 +343,27 @@ into a byte slice), `OpenObject` (streaming reconstruction via an
 the k-of-n fan-out strategy, local data-shard fast paths, cache pre-pass,
 parity-shard fallback, and peer-health transitions from shard fetch outcomes.
 
+All three operations branch on the on-disk shard layout. The `StripeBytes`
+marker (0 = legacy contiguous, >0 = stripe-interleaved fragment size) is carried
+through the placement metadata chain. When it is set, the streaming put pipeline
+wrote each shard as per-stripe interleaved fragments rather than a contiguous
+1/K object slice, so the reader de-interleaves through the shared stripe codec
+(`stripe_codec.go`): a bounded-memory streaming reader for `OpenObject`/`ReadAt`
+and a buffered de-interleave for `ReadObject`. Shard repair regenerates a missing
+shard's interleaved body directly from the surviving siblings' on-disk fragments,
+byte-identical to what the pipeline wrote.
+
+`StripeBytes == 0` is the legacy/contiguous default, so objects written before
+this format existed still read correctly. The marker is **forward-only**: once a
+node writes a striped object (`StripeBytes > 0`, which happens for all-local K>=2
+PUTs), a binary predating the marker cannot read it — it ignores the unknown
+field, reconstructs on the contiguous assumption, and returns garbage with no
+error. Rolling a node back past the release that introduced striped writes
+therefore corrupts reads of any object written striped. Today this is scoped to
+single-node all-local placement (no peer stores a striped shard), so the only
+hazard is same-node binary rollback; a cluster-wide minimum-version capability
+gate is deferred to the multi-node streaming slice.
+
 Shard-key derivation (key + versionID) and the decision to invoke the reader
 stay at the `DistributedBackend` seam. This concentrates the data-plane read
 side effects in one testable place and leaves object placement policy outside

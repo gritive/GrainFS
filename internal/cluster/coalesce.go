@@ -63,6 +63,7 @@ func coalescedRefsToStorage(in []CoalescedShardRef) []storage.CoalescedRef {
 			ShardKey:    c.ShardKey,
 			ECData:      c.ECData,
 			ECParity:    c.ECParity,
+			StripeBytes: c.StripeBytes,
 			NodeIDs:     append([]string(nil), c.NodeIDs...),
 		}
 	}

@@ -130,8 +130,20 @@ func (rcv *CoalescedShardRef) NodeIdsLength() int {
 	return 0
 }
 
+func (rcv *CoalescedShardRef) StripeBytes() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CoalescedShardRef) MutateStripeBytes(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(20, n)
+}
+
 func CoalescedShardRefStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func CoalescedShardRefAddCoalescedId(builder *flatbuffers.Builder, coalescedId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(coalescedId), 0)
@@ -159,6 +171,9 @@ func CoalescedShardRefAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffe
 }
 func CoalescedShardRefStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func CoalescedShardRefAddStripeBytes(builder *flatbuffers.Builder, stripeBytes uint32) {
+	builder.PrependUint32Slot(8, stripeBytes, 0)
 }
 func CoalescedShardRefEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

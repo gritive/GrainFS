@@ -30,6 +30,7 @@ type Object struct {
 	PlacementGroupID string
 	ECData           uint8
 	ECParity         uint8
+	StripeBytes      uint32
 	NodeIDs          []string
 	Segments         []SegmentRef
 	// Coalesced lists merged segment refs produced by background coalesce.
@@ -71,6 +72,7 @@ type SegmentRef struct {
 	ShardSize        int32  // EC shard size for this segment; 0 for legacy
 	ECData           uint8  // EC data shard count; 0 for legacy/local segments
 	ECParity         uint8  // EC parity shard count; 0 for legacy/local segments
+	StripeBytes      uint32 // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs          []string
 }
 
@@ -87,6 +89,7 @@ type CoalescedRef struct {
 	ShardKey    string // "<key>/coalesced/<coalescedID>" — used by EC reader (B3)
 	ECData      uint8
 	ECParity    uint8
+	StripeBytes uint32 // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs     []string
 }
 

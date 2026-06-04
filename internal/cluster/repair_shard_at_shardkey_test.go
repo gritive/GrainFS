@@ -44,6 +44,64 @@ func TestRepairShardAtShardKey_SegmentKey(t *testing.T) {
 	require.Equal(t, freshShards[0], rebuilt)
 }
 
+// TestRepairShardAtShardKey_StripedReinterleaves proves repair regenerates a
+// missing shard in the SAME stripe-interleaved layout its surviving siblings use,
+// not the contiguous ECSplit layout. Geometry matters: stripeBytes must NOT be
+// divisible by K — otherwise the wrong-Join and wrong-re-Split of the contiguous
+// path coincidentally cancel and produce the interleaved bytes anyway, masking the
+// bug. K=3 with a 1 MiB stripe (1048576 % 3 == 1) accumulates intra-stripe padding
+// so the layouts genuinely diverge. We repair DATA shard 0, then drop a DIFFERENT
+// data shard (1) and de-interleave from {0,2,3} — the repaired shard 0 is in the
+// data join, so this recovery only succeeds if it is correctly interleaved.
+func TestRepairShardAtShardKey_StripedReinterleaves(t *testing.T) {
+	backend := setupECBackend(t)
+	svc := backend.shardSvc
+	require.NoError(t, backend.CreateBucket(t.Context(), "b"))
+
+	const shardKey = "obj/segments/striped-blob-0001"
+	const stripeBytes = 1 << 20 // 1048576 % 3 != 0 — breaks the divisible-geometry cancellation
+	const repairIdx = 0         // a data shard; participates in the de-interleave join below
+	cfg := ECConfig{DataShards: 3, ParityShards: 2}
+	payload := make([]byte, 4*1024*1024+777) // multi-stripe, non-aligned tail
+	for i := range payload {
+		payload[i] = byte((i*131 + 7) % 251)
+	}
+
+	// On-disk convention: each shard = 8-byte origSize header + interleaved body.
+	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
+	hdr := ShardHeader(int64(len(payload)))
+	for i := range bodies {
+		shard := append(append([]byte(nil), hdr[:]...), bodies[i]...)
+		require.NoError(t, svc.WriteLocalShard("b", shardKey, i, shard))
+	}
+
+	// Drop data shard 0 and repair it from the survivors.
+	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, repairIdx)))
+	rec := PlacementRecord{Nodes: []string{"self", "self", "self", "self", "self"}, K: 3, M: 2, StripeBytes: stripeBytes}
+	require.NoError(t, backend.RepairShardAtShardKey(t.Context(), "b", shardKey, rec, repairIdx))
+
+	// The repaired shard must byte-equal a sibling-format shard (header + interleaved body).
+	rebuilt, err := svc.ReadLocalShard("b", shardKey, repairIdx)
+	require.NoError(t, err)
+	wantShard := append(append([]byte(nil), hdr[:]...), bodies[repairIdx]...)
+	require.Equal(t, wantShard, rebuilt, "repaired data shard must match the interleaved sibling layout, not contiguous ECSplit")
+
+	// Cross-shard-drop recovery: provide EXACTLY {0,2,3} (drop data shard 1 and
+	// both parity) so RS must use the repaired shard 0 in the join. The object
+	// recovers only if shard 0 was regenerated in the correct interleaved layout.
+	survivors := make([][]byte, cfg.NumShards())
+	for _, i := range []int{0, 2, 3} {
+		raw, rerr := svc.ReadLocalShard("b", shardKey, i)
+		require.NoError(t, rerr)
+		_, body, derr := decodeShardHeader(raw)
+		require.NoError(t, derr)
+		survivors[i] = body
+	}
+	got, err := stripeDeinterleave(cfg, survivors, stripeBytes, int64(len(payload)))
+	require.NoError(t, err)
+	require.Equal(t, payload, got, "object must recover from {0,2,3} after repairing data shard 0")
+}
+
 func TestRepairShardAtShardKey_InsufficientSurvivors(t *testing.T) {
 	backend := setupECBackend(t)
 	svc := backend.shardSvc

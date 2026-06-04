@@ -34,6 +34,63 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - Guard correctness depends on the K read at dispatch (`placementPlan.Config.DataShards`) equaling
      the K the pipeline splits on (`Config.ECConfig.DataShards`); both derive from boot's `effectiveEC`
      today. A future per-bucket EC config must keep them equal (asserted in the guard comment).
+   - **[RESOLVED for all-local single-node — read-side reader landed]** B1 reader shipped: shared
+     stripe codec (`stripe_codec.go`), `StripeBytes` marker threaded through the metadata chain, and
+     the K>=2 all-local guard flipped so multi-drive single-node PUT now rides the interleaved pipeline.
+     The reconstruct paths reachable in this config were corrected to honor `StripeBytes>0`: ReadObject
+     de-interleave, OpenObject/Range bounded stream, versioned GET (`headObjectMetaV`), appendable base
+     + range read (`CoalescedRef`/`readAtChunk`), startup-repair (`LookupObjectPlacement` →
+     `reconstructShardAtKey`), and scrubber heal (`stripeReconstructShardBody` regenerates the missing
+     shard from siblings' on-disk fragments, byte-identical to the pipeline). reshard
+     (`upgradeObjectEC`) investigated and confirmed a non-issue — it re-resolves placement via
+     `headObjectMeta`/`ResolvePlacement`, which already carry `StripeBytes`. Remaining deferred work below.
+   - [ ] **[P2] Multi-node streaming-EC (S3): striped reader/repair/reshard across cluster nodes.** This
+     slice covers ONLY all-local single-node K>=2. Multi-node PUT still falls through to the spool
+     writer; lifting the streaming path cluster-wide (remote shard fetch in the de-interleave reader,
+     cross-node repair, reshard re-verify under striped layout) is a separate slice — see memory
+     `project_grains_cluster_put_streaming_ec`.
+   - [ ] **[P3] `buildInterleavedShards` test-helper fidelity debt.** The `stripe_codec_test.go` helper
+     claims to mirror the CPUPool pipeline layout but diverges for multi-stripe objects (this was the
+     root of the repair-layout bug). Tests built on it validate only codec self-consistency, not pipeline
+     fidelity. Replace with a real-pipeline fixture so helper-based tests assert against true on-disk bytes.
+   - [ ] **[P3] Streaming-EC review follow-ups (ship pre-landing specialists, none blocking).**
+     - Stripe-geometry skeleton is triplicated across `stripeDeinterleave`, `stripeReconstructShardBody`,
+       and the streaming `fill()` (same per-stripe `dS/fragSize/offset` loop, padding-trim written two
+       equal-but-different ways). Extract one per-stripe iterator so buffered and streaming de-interleave
+       cannot silently diverge.
+     - `ecReconstructBodies` is misnamed — it only strips the 8-byte shard headers (missing stays nil), it
+       does NOT reconstruct. Three separate "does NOT itself reconstruct" disclaimer comments are the tell.
+       Rename (family-wide: also the stream sibling) to e.g. `ecStripShardHeaders`.
+     - Degraded-read/repair tests only ever drop ONE shard even with m=2 configs; add drop-m (RS limit) and
+       drop-(m+1)-errors cases, and run at least one repair round-trip at a non-divisible K (K=2 with a
+       divisible stripe is degenerate — contiguous and interleaved repair coincide; the new K=3 scrubber
+       test discriminates, but the codec unit tests still don't). Add a segment-level striped round-trip
+       once a writer stamps nonzero `SegmentMetaEntry.StripeBytes` (today it is dead read-plumbing).
+     - Defense-in-depth: `stripeDeinterleave`/`ECReconstruct` allocate `make([]byte, 0, objectSize)` where
+       `objectSize` comes from the 8-byte shard header of a peer-stored shard; a corrupt/huge/negative size
+       could OOM or panic. Inherited from master's `ECReconstruct` (not introduced here) and unreachable
+       from the client GET path (which is one-stripe bounded), but validate the decoded size before
+       allocating when the shared header decode is hardened.
+     - The multi-node PUT branch (`object_put.go`) omits the `StripeBytes` stamp — safe today (gated by
+       K==1 + hard-coded-false `putPipelineMultiNode`), a latent garbage-read trap the moment the [P2]
+       multi-node slice lifts K==1 without also stamping it. Pin with a comment + assertion in that slice.
+     - **Striped random-access `ReadAt` is O(offset) per call** (`ec_object_reader.go` `readAtStripedStreaming`):
+       the de-interleave reader has no stripe-aligned seek, so a single `ReadAt(offset)` decrypts+reconstructs
+       the whole prefix. The HTTP Range path was fixed to serve striped objects from one sequential stream
+       (`server.serveStripedRange` → O(N) for a full-range GET, not the prior O(N^2) chunked-ReadAt
+       amplification), but a high-offset NBD/random `ReadAt` still pays O(offset) per call. Proper fix:
+       stripe-aligned seek-without-decrypt in the shard read path (skip whole stripes by advancing the
+       underlying shard readers `fragSize` bytes, decrypting only the target stripe onward).
+     - **Striped streaming reader skips shard-header validation** (`ec_object_reader.go` `OpenObject` wraps
+       shards in `skipReader` and trusts metadata `objectSize`): the contiguous stream path parsed present
+       shard headers and failed CLOSED on a size mismatch; this path does not. A stale or cross-wired-but-
+       valid shard would de-interleave against the wrong size and return wrong bytes instead of erroring.
+       Lower priority (needs internal inconsistency to trigger) but exactly the silent-corruption class this
+       epic exists to prevent — validate the present shards' header sizes against metadata before de-interleave.
+     - `server.serveStripedRange`'s versioned branch (`obj.VersionID != ""` → `GetObjectVersion`) is
+       unexercised by the unit test (`TestGetObjectRange_StripedUsesSingleStreamNotReadAt` uses an
+       unversioned object). The byte-Range and partNumber handlers are both covered; add a versioned-object
+       striped-range assertion so the version-pinned stream path doesn't regress silently.
 - [x] **Concentrated NFSv4 parent-SA filehandle-inheritance behind one helper (`Dispatcher.bindFHInheritingParent`, v0.0.509.0, behavior-neutral).** The T12 "inherit parent fh's saID else generation-only bind" block was copy-pasted verbatim in `opOpen`/`opLookup`/`opCreate`; now a single helper owns the precedence invariant (`(pending)` sentinel + readOnly propagation). Mechanical extraction, build/vet/lint + nfs4server tests green, production diff purely mechanical.
 - [x] **Removed superseded v1 meta-Raft transport (`raft.MetaRaftTransport`, v0.0.508.0, behavior-neutral).** The M6.2 raft migration moved meta-Raft RPC delivery to v2 `cluster.RaftV2MetaTransport` on the same `StreamMetaRaft` wire; the v1 stack (~330 LOC) had zero call sites in production/tests and was fully orphaned. Deleted the dead implementation + its v1-only InstallSnapshot decoders; relocated byte-identical the live symbols that lived in the file (`metaRPC*` envelope constants → `rpc_codec.go` keeping cross-version wire-compat; `isMuxFallbackErr`/`errIsCtxBudget` → `meta_mux_send.go`). `raftRPCTransport` survives as `muxDriverTransport`'s embedded base. Gates: build/vet/lint + full test-unit green, byte-identity diff-verified.
 - [x] **QUIC→TCP migration — S6 DONE: legacy QUIC transport + quic-go fully removed (fa28a4c5, v0.0.501.0).** TCP is the sole cluster transport; `quic-go` import count is zero; `--transport` flag removed. quic.go (1606 LOC) + join_listener.go deleted; the transport-agnostic types they housed (StreamHandler/StreamRouter/TrafficLimiter/IdentitySnapshot/DeriveClusterIdentity/checkResponseStatus/recycleJitter/pinAcceptedSPKI + JoinHandler/JoinPutField/JoinReadFields/JoinALPN/certSPKI) extracted byte-identical (diff-verified) to transport_shared.go/join_wire.go. The `*_quic.go` mux/meta files (group_transport_quic/meta_transport_quic/raftv2_meta_quic) are KEPT — they import no quic-go and the TCP path uses them. **IRREVERSIBLE: no QUIC arm → §6 parity bench can never run, no QUIC fallback.** Gates: quic-go=0, vet clean, test-unit + lint green.

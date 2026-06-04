@@ -65,8 +65,12 @@ func TestTCPDeadline_IdlePooledConnReaped(t *testing.T) {
 	require.NoError(t, err)
 	// The server conn for that transfer is pooled on the client; idle on the server.
 	// The server's idle read deadline must reap it (untrackConn) within idle+slack.
+	// Same scheduling-slack caveat as TestTCPDeadline_SlowResponseReaderReaped: the
+	// 150ms idle deadline fires deterministically, but a starved serveConn goroutine
+	// under the full parallel suite may take longer than 1s to observe it. The window is
+	// generous on purpose — it bounds scheduling, not the deadline mechanism under test.
 	require.Eventually(t, func() bool { return srv.acceptedConnCount() == 0 },
-		1*time.Second, 20*time.Millisecond, "idle server conn must be reaped by the read deadline")
+		5*time.Second, 20*time.Millisecond, "idle server conn must be reaped by the read deadline")
 }
 
 // infiniteReader always returns data and never EOFs, so writeChunkedBody keeps
@@ -93,8 +97,14 @@ func TestTCPDeadline_SlowResponseReaderReaped(t *testing.T) {
 	require.NotNil(t, resp)
 	// Deliberately do NOT read body: the server blocks in writeChunkedBody until the
 	// write deadline trips, drops the conn, and untracks it.
+	// The write deadline is absolute (now + ServerBodyTimeout=150ms) and the netpoller
+	// enforces it on the blocked Write, so reaping is bounded by that 150ms PLUS however
+	// long the starved serveConn goroutine waits to be scheduled to observe the timeout.
+	// Under the full parallel unit suite (dozens of packages, CPU-saturated on macOS) that
+	// scheduling slack can exceed a 1s window — so this bound is generous on purpose. It
+	// bounds goroutine scheduling, not the deadline mechanism under test.
 	require.Eventually(t, func() bool { return srv.acceptedConnCount() == 0 },
-		1*time.Second, 20*time.Millisecond, "slow response reader must be reaped by the write deadline")
+		5*time.Second, 20*time.Millisecond, "slow response reader must be reaped by the write deadline")
 	_ = body.Close()
 }
 

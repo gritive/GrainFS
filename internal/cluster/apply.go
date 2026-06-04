@@ -811,6 +811,7 @@ func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) Coalesc
 		ShardKey:    ecObjectShardKey(key, versionID),
 		ECData:      existing.ECData,
 		ECParity:    existing.ECParity,
+		StripeBytes: existing.StripeBytes,
 		NodeIDs:     append([]string(nil), existing.NodeIDs...),
 	}
 }

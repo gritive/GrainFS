@@ -100,24 +100,48 @@ func (b *DistributedBackend) reconstructShardAtKey(ctx context.Context, bucket, 
 			available, len(rec.Nodes)-1, recCfg.DataShards)
 	}
 
-	// ECReconstruct rebuilds the whole object; we then re-split to get the
-	// canonical byte layout of each shard (including the missing one).
-	data, rerr := ECReconstruct(recCfg, shards)
-	if rerr != nil {
-		return fmt.Errorf("repair reconstruct: %w", rerr)
-	}
-	freshShards, serr := ECSplit(recCfg, data)
-	if serr != nil {
-		return fmt.Errorf("repair re-split: %w", serr)
+	// Regenerate the missing shard's body in the SAME layout the surviving
+	// siblings use. For a STRIPED object the siblings are stripe-interleaved, so a
+	// contiguous ECSplit would produce a shard that does not match them — future
+	// reads/reconstructs would break. stripeReconstructShardBody slices each
+	// surviving sibling at the per-stripe fragment offsets the de-interleave
+	// reader uses and Reed-Solomon Reconstructs the missing fragment per stripe,
+	// so the regenerated shard is byte-identical to what the pipeline wrote.
+	// ecReconstructBodies only strips the on-disk 8-byte headers (missing shard
+	// stays nil); it does NOT itself reconstruct.
+	var freshShardBody []byte
+	if rec.StripeBytes > 0 {
+		origSize, bodies, berr := ecReconstructBodies(recCfg, shards)
+		if berr != nil {
+			return fmt.Errorf("repair reconstruct bodies: %w", berr)
+		}
+		body, serr := stripeReconstructShardBody(recCfg, bodies, int(rec.StripeBytes), shardIdx, origSize)
+		if serr != nil {
+			return fmt.Errorf("repair stripe reconstruct shard: %w", serr)
+		}
+		// Match on-disk format: 8-byte header + interleaved body (same as ECSplit's
+		// header-prefixed shard). Header records the full object size.
+		hdr := ShardHeader(origSize)
+		freshShardBody = append(hdr[:], body...)
+	} else {
+		data, rerr := ECReconstruct(recCfg, shards)
+		if rerr != nil {
+			return fmt.Errorf("repair reconstruct: %w", rerr)
+		}
+		freshShards, serr := ECSplit(recCfg, data)
+		if serr != nil {
+			return fmt.Errorf("repair re-split: %w", serr)
+		}
+		freshShardBody = freshShards[shardIdx]
 	}
 
 	// Write just the missing shard back to its placement node.
 	target := rec.Nodes[shardIdx]
 	var werr error
 	if target == selfID {
-		werr = b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShards[shardIdx])
+		werr = b.shardSvc.WriteLocalShard(bucket, shardKey, shardIdx, freshShardBody)
 	} else {
-		werr = b.shardSvc.WriteShard(ctx, target, bucket, shardKey, shardIdx, freshShards[shardIdx])
+		werr = b.shardSvc.WriteShard(ctx, target, bucket, shardKey, shardIdx, freshShardBody)
 	}
 	if werr == nil && b.shardCache != nil {
 		// Repaired shard bytes may differ from any cached copy of the
