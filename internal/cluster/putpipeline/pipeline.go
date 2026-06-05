@@ -382,7 +382,7 @@ func (p *Pipeline) StripeBytes() int { return p.cfg.StripeBytes }
 // under and that the legacy ShardService reader expects. The returned
 // *storage.Object has Key set to shardKey (not the logical key); the
 // caller overwrites it and fills in VersionID before Raft propose.
-func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error) {
+func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest, ec cluster.ECConfig) (*storage.Object, error) {
 	return p.Put(ctx, PutRequest{
 		Bucket:          req.Bucket,
 		Key:             shardKey,
@@ -392,6 +392,11 @@ func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.Pu
 		UserMeta:        req.UserMetadata,
 		System:          req.SystemMetadata,
 		PrecomputedETag: req.ContentMD5Hex,
+		// All-local path: encode at the object's placement EC, not the
+		// pipeline's boot ECConfig (which can be stale on a joiner — the
+		// pipeline may have frozen at a different width than this object's
+		// per-group placement). Placement stays nil (every shard local).
+		PlacementEC: ec,
 	})
 }
 

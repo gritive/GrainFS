@@ -102,7 +102,7 @@ type BucketAssigner interface {
 // populated *storage.Object (Key=shardKey, Size, ETag, LastModified set).
 // The caller is responsible for proposing the Raft metadata commit.
 type PutPipelineRunner interface {
-	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error)
+	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest, ec ECConfig) (*storage.Object, error)
 	// PutShardPlaced writes a multi-node placement: placement[i] is the
 	// resolved peer address shard i streams to, or "" for a local shard.
 	// placementEC is the per-object EC width to encode at (the per-group

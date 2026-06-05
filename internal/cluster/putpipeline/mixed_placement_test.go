@@ -416,3 +416,63 @@ func TestPipeline_PlacedEC_OverridesStalePipelineEC(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, body, got, "object reconstructs at the placement EC width (4 shards), not the pipeline's stale 1")
 }
+
+// TestPipeline_PutShard_AllLocalUsesPerPutEC is the symmetric (all-local)
+// half of the EC-width fix: the all-local PutShard path must also encode at
+// the object's per-placement EC, not the pipeline's stale boot ECConfig. The
+// genesis node's pipeline can freeze at a WIDE width (it served wide multi-node
+// PUTs), so a solo-group all-local placement (1+0) routed there would otherwise
+// write the pipeline's width of shards while metadata records 1+0 → corruption.
+func TestPipeline_PutShard_AllLocalUsesPerPutEC(t *testing.T) {
+	ctx := context.Background()
+	keeper := testDEKKeeper(t)
+	clusterID := testClusterID()
+	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
+	defer tr.Close()
+
+	// 4 drives so the (stale) wide pipeline EC could place 4 local shards.
+	ss := cluster.NewMultiRootShardService(
+		[]string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()}, tr,
+		cluster.WithShardDEKKeeper(keeper, clusterID),
+		cluster.WithDataWAL(fakeShardWAL{}))
+
+	// Pipeline frozen WIDE (2+2) — the genesis-style stale width.
+	p := New(Config{
+		DataDirs:        ss.DataDirs(),
+		DEKKeeper:       keeper,
+		ClusterID:       clusterID,
+		ECConfig:        cluster.ECConfig{DataShards: 2, ParityShards: 2}, // STALE wide
+		StripeBytes:     1 << 20,
+		Transport:       tr,
+		ShardRPCTimeout: 5 * time.Second,
+	})
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, p.Shutdown(sctx))
+	}()
+
+	body := make([]byte, 400*1024)
+	for i := range body {
+		body[i] = byte((i * 11) % 251)
+	}
+	size := int64(len(body))
+	bucket, shardKey := "external", "obj-local/v1"
+
+	// Solo-group all-local placement: EC 1+0.
+	_, err := p.PutShard(ctx, shardKey,
+		storage.PutObjectRequest{Bucket: bucket, Body: bytes.NewReader(body), SizeHint: &size},
+		cluster.ECConfig{DataShards: 1, ParityShards: 0})
+	require.NoError(t, err)
+
+	// Exactly ONE shard must exist (placement EC 1+0), NOT the pipeline's 4.
+	s0, rerr := ss.ReadLocalShard(bucket, shardKey, 0)
+	require.NoError(t, rerr, "shard 0 must exist")
+	_, rerr1 := ss.ReadLocalShard(bucket, shardKey, 1)
+	require.Error(t, rerr1, "no shard 1 — all-local must encode at placement EC 1+0, not the pipeline's stale 2+2")
+
+	got, err := cluster.ECReconstruct(cluster.ECConfig{DataShards: 1, ParityShards: 0}, [][]byte{s0})
+	require.NoError(t, err)
+	require.Equal(t, body, got, "object reconstructs from the single placement-EC shard")
+}
