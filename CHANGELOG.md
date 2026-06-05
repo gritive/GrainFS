@@ -15,6 +15,18 @@
   it is not itself a performance change — the streaming-vs-spool delta is measured
   separately once the path runs on a real cluster.
 
+### Known limitation (EXPERIMENTAL streaming, default OFF — do not enable)
+
+- A 4-node GCP A/B run with the flag enabled surfaced a pre-existing #717 bug in the
+  multi-node streaming path that the spool fallback had been masking: the put pipeline
+  is built once at boot with a fixed EC config, so on non-coordinator nodes a multi-node
+  PUT fails with `pipeline: placement length N != shards M` (placement uses the per-group
+  EC width; the pipeline still holds the boot-time solo width). PUTs to the coordinator
+  succeed; PUTs to other nodes error. Net: with the flag ON, multi-node PUT throughput
+  collapsed (10.97 MiB/s, 102 errors) vs spool (328 MiB/s, 0 errors, 0.50x of MinIO).
+  `GRAINFS_PUT_MULTINODE_STREAM` stays OFF by default and must not be enabled until the
+  pipeline resolves shards from the per-placement EC width (tracked in TODOS).
+
 ## [0.0.517.0] - 2026-06-05
 
 ### Added
