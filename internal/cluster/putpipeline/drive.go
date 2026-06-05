@@ -143,6 +143,7 @@ type registryEntry struct {
 	remote   bool
 	peerAddr string
 	ctx      context.Context //nolint:containedctx // transient per-PUT routing entry, dropped on finalize
+	reset    func()          // idle-deadline progress signal for the remote sink (nil if no deadline)
 }
 
 // registerPut tells this drive that PutID will arrive with shard
@@ -158,12 +159,10 @@ func (d *DriveActor) registerPut(putID uint64, bucket, shardKey string, shardIdx
 
 // registerRemotePut tells this drive that PutID's shard streams to a peer
 // (peerAddr) via the verbatim WriteSealedShard RPC instead of a local file. ctx
-// MUST carry an RPC deadline (a dead peer would otherwise block the shard write
-// forever; see remoteSealedShardSink). Dormant until S2-sender-b wires
-// per-shard placement in Pipeline.Put.
-//
-//nolint:unused // dormant until S2-sender-b wiring (proven by drive_test.go)
-func (d *DriveActor) registerRemotePut(ctx context.Context, putID uint64, bucket, shardKey string, shardIdx int, peerAddr string) {
+// MUST cancel on a stall (a dead peer would otherwise block the shard write
+// forever; see remoteSealedShardSink). reset (may be nil) is the idle-deadline
+// progress signal the sink fires after each successful Write.
+func (d *DriveActor) registerRemotePut(ctx context.Context, reset func(), putID uint64, bucket, shardKey string, shardIdx int, peerAddr string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.registry == nil {
@@ -176,6 +175,7 @@ func (d *DriveActor) registerRemotePut(ctx context.Context, putID uint64, bucket
 		remote:   true,
 		peerAddr: peerAddr,
 		ctx:      ctx,
+		reset:    reset,
 	}
 }
 
@@ -279,7 +279,7 @@ func (d *DriveActor) stateFor(chunk EncryptedShardChunk) *shardWriteState {
 		}
 		// The remote sink streams the sealed bytes to the peer; failures surface
 		// at Finalize/Abort (it spawns its RPC goroutine here, no open error).
-		sink = newRemoteSealedShardSink(entry.ctx, d.transport, entry.peerAddr, entry.bucket, entry.shardKey, entry.shardIdx)
+		sink = newRemoteSealedShardSink(entry.ctx, entry.reset, d.transport, entry.peerAddr, entry.bucket, entry.shardKey, entry.shardIdx)
 	} else {
 		newSink := d.newSink
 		if newSink == nil {

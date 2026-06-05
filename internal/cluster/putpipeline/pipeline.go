@@ -237,6 +237,24 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		cancelPumps()
 		pumpWG.Wait()
 	}()
+
+	// Per-PUT IDLE deadline for the remote shard RPCs (mixed placement only).
+	// All remote shards share one idle-watchdog ctx that resets on ANY data-plane
+	// progress: a client byte ingested (the body is wrapped below) OR a sealed
+	// stripe flushed to a peer (the remote sink calls reset on each Write). It
+	// fires only after ShardRPCTimeout of NO progress — bounding a stalled/dead
+	// peer without aborting a slow-but-progressing upload. Replaces the former
+	// per-shard fixed WithTimeout(pumpCtx, ShardRPCTimeout), which armed a TOTAL
+	// wall-clock before the first stripe and so could abort a slow large upload
+	// even while bytes kept flowing. rpcCtx is a child of pumpCtx, so PUT teardown
+	// still cancels it regardless.
+	rpcCtx := pumpCtx
+	reset := func() {}
+	if mixed && p.cfg.ShardRPCTimeout > 0 {
+		var stop func()
+		rpcCtx, reset, stop = idleTimeoutContext(pumpCtx, p.cfg.ShardRPCTimeout)
+		defer stop()
+	}
 	for i := 0; i < numShards; i++ {
 		if !mixed {
 			driveIdx := i % len(p.driveIns)
@@ -259,25 +277,11 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		if peerAddr := req.Placement[i]; peerAddr != "" {
 			remoteShards[i] = true
 			d.transport = p.cfg.Transport
-			// The RPC ctx is the PUT-scoped pumpCtx (so teardown or a PUT abort
-			// unblocks a Write parked on a dead peer) further bounded by
-			// ShardRPCTimeout: without a deadline a dead peer blocks Write forever
-			// and the PUT deadlocks, since the pump cancel only fires after Put
-			// returns. Note this is a BROADER window than the spool path's
-			// per-shard timeout: the spool path arms WithTimeout after the shard
-			// is fully materialized (bounding only the RPC), whereas here the
-			// deadline is armed in the dispatch loop before the first stripe
-			// arrives, so it bounds ingest + seal + RPC. The cancel is deferred
-			// to release the timer when Put returns (rpcCtx is a child of pumpCtx,
-			// so it would be cancelled by cancelPumps regardless; the defer just
-			// frees the timer promptly).
-			rpcCtx := pumpCtx
-			if p.cfg.ShardRPCTimeout > 0 {
-				var cancel context.CancelFunc
-				rpcCtx, cancel = context.WithTimeout(pumpCtx, p.cfg.ShardRPCTimeout)
-				defer cancel()
-			}
-			d.registerRemotePut(rpcCtx, putID, req.Bucket, req.Key, i, peerAddr)
+			// All remote shards share the per-PUT idle rpcCtx + reset built above:
+			// the ctx unblocks a Write parked on a dead peer (teardown or idle
+			// timeout), and reset (fired by the sink on each Write) keeps it alive
+			// while the peer makes progress.
+			d.registerRemotePut(rpcCtx, reset, putID, req.Bucket, req.Key, i, peerAddr)
 		} else {
 			// Local shard via an ephemeral pump: write to the same drive dir the
 			// ShardService reader expects (DataDirs[i % n]) and honor the
@@ -321,8 +325,15 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		stripeBytes:     p.cfg.StripeBytes,
 		precomputedETag: req.PrecomputedETag,
 	}
+	// Feed the idle deadline the client-upload progress signal: each body read
+	// resets the timer, so a slow client keeps a remote shard RPC alive even
+	// while a stripe is still accumulating (before any sealed chunk flushes).
+	ingestBody := req.Body
+	if mixed && p.cfg.ShardRPCTimeout > 0 {
+		ingestBody = &progressReader{r: req.Body, onProgress: reset}
+	}
 	go func() {
-		etag, total, err := ingest.Run(ctx, putID, req.Bucket, req.Body)
+		etag, total, err := ingest.Run(ctx, putID, req.Bucket, ingestBody)
 		ingestCh <- ingestResult{etag: etag, total: total, err: err}
 	}()
 

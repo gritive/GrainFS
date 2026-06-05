@@ -2,9 +2,28 @@ package putpipeline
 
 import (
 	"context"
+	"io"
 	"sync"
 	"time"
 )
+
+// progressReader wraps an io.Reader and calls onProgress after each read that
+// yields bytes. It feeds the idle deadline the "client is still uploading"
+// signal: while a slow client keeps delivering bytes, the per-PUT idle timer
+// keeps resetting and never fires, even before a full stripe has accumulated to
+// flush downstream.
+type progressReader struct {
+	r          io.Reader
+	onProgress func()
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	if n > 0 && pr.onProgress != nil {
+		pr.onProgress()
+	}
+	return n, err
+}
 
 // idleTimeoutContext returns a context that cancels when no reset() occurs
 // within d of the previous progress event (or of creation). reset() is cheap and
