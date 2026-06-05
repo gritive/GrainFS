@@ -429,6 +429,14 @@ func (b *DistributedBackend) SetPutPipelineMultiNode(enabled bool) {
 	b.putPipelineMultiNode = enabled
 }
 
+// PutPipelineMultiNodeEnabled reports whether the EXPERIMENTAL multi-node
+// streaming-EC PUT path is enabled on this backend. Exposed so boot-wiring
+// tests can assert the flag reaches every group backend (not only group-0,
+// which is excluded from object placement — see candidateGroupsFor).
+func (b *DistributedBackend) PutPipelineMultiNodeEnabled() bool {
+	return b.putPipelineMultiNode
+}
+
 // SetClusterNodes refreshes the configured placement node set without
 // replacing the ShardService. Runtime join paths use this after meta-raft
 // membership grows so new writes do not stay pinned to boot-time topology.

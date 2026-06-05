@@ -243,3 +243,42 @@ func TestPutMultiNodeStreamEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestBootWiring_PropagatesMultiNodeStreamToServingGroups is the regression
+// test for the #717 wiring gap: SetPutPipelineMultiNode was wired on the
+// group-0 distBackend only, but group-0 is excluded from object placement
+// (candidateGroupsFor), so PUTs route to per-group backends created via
+// instantiateGroupWithConfig — which propagated SetPutPipeline but not the
+// multi-node flag. Result was a silent spool fallback on every multi-node PUT.
+func TestBootWiring_PropagatesMultiNodeStreamToServingGroups(t *testing.T) {
+	cases := []struct {
+		name   string
+		envVal string // "" means unset
+		want   bool
+	}{
+		{name: "env enabled propagates to per-group backend", envVal: "1", want: true},
+		{name: "env unset keeps default OFF", envVal: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GRAINFS_PUT_MULTINODE_STREAM", tc.envVal)
+
+			ctx, state := storagePhasePrereqs(t)
+			require.NoError(t, bootShardService(ctx, state))
+			require.NoError(t, bootOwnedGroupsAndEC(ctx, state, func(badgerrole.Decision) {}))
+			require.NotNil(t, state.putPipeline, "boot must construct the PUT pipeline")
+
+			// Assert on the REAL per-group backend that boot instantiated via
+			// instantiateGroupWithConfig and registered with the DataGroupManager
+			// — i.e. the exact object the router dispatches non-group-0 PUTs to.
+			// candidateGroupsFor excludes group-0 from placement, so group-1 is a
+			// representative serving group.
+			dg := state.dgMgr.Get("group-1")
+			require.NotNil(t, dg, "boot must instantiate group-1 as a serving group")
+			require.NotNil(t, dg.Backend(), "group-1 must have a wired backend")
+
+			assert.Equal(t, tc.want, dg.Backend().PutPipelineMultiNodeEnabled(),
+				"per-group serving backend multi-node flag must track the env gate")
+		})
+	}
+}
