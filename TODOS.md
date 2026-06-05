@@ -60,17 +60,20 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      B2 benchmark was spool-vs-spool); a profile-gated re-bench is required before any default-flip
      decision. **v0.0.518.0 re-bench (4-node GCP, flag ON) surfaced [P1] below — streaming is NOT
      usable under multi-node load yet; spool reconfirmed 0.50x/0 errors.**
-   - [ ] **[P1] Multi-node streaming pipeline EC width mismatch (`placement length N != shards M`).**
-     Surfaced by the v0.0.518.0 wiring fix + 4-node GCP A/B (flag ON): PUTs to NON-coordinator nodes
-     fail with `pipeline: placement length 4 != shards 1` (`putpipeline/pipeline.go:203`). The put
-     pipeline is built once at boot with a fixed `ECConfig = state.effectiveEC`; on joiner nodes that
-     boot-time width is the solo width (NumShards()==1) while a multi-node object's placement is the
-     per-group EC width (4) → mismatch → PUT rejected. Coordinator PUTs (matching EC) succeed, which is
-     why the CPU-profile gate showed streaming executing there. Result: flag ON collapses multi-node PUT
-     to 10.97 MiB/s / 102 errors vs spool 328 MiB/s / 0 errors. Fix: pipeline must resolve shard count
-     from the per-PUT placement / per-group EC width (not a boot-time snapshot), or non-coordinator nodes
-     must refresh their pipeline EC once the cluster reaches target width. **`GRAINFS_PUT_MULTINODE_STREAM`
-     must stay OFF until fixed.** All-local path (#716) is unaffected (placement length always == local EC).
+   - [x] **[P1] Multi-node streaming pipeline EC width mismatch — FIXED in v0.0.518.0 (PR #718).**
+     Surfaced by the wiring fix + 4-node GCP A/B (flag ON): PUTs to non-coordinator nodes failed with
+     `pipeline: placement length 4 != shards 1` because the put pipeline froze `ECConfig` at boot while a
+     multi-node object's placement uses the per-group width. Fixed by threading the per-object placement
+     EC through both dispatch paths (`PutShardPlaced` multi-node + `PutShard` all-local → `PutRequest.
+     PlacementEC` → `Put`/`CPUPool`); the RS encoder cache already keys by config. In-process RED→GREEN
+     (+ neuter-verified) reproduces the failure without a cluster. Re-bench (4-node GCP, flag ON): clean —
+     PUT 319 MiB/s / GET 1637/1370 warm/cold, **0 errors across all ops, GET round-trip verified.**
+     **Throughput finding: streaming PUT ≈ spool (319 vs 328 MiB/s, within noise), NOT the projected
+     0.50x→0.70x — eliminating the spool double-staging is not the dominant PUT cost.** The B2 epic's
+     "0.70x floor" goal is therefore not met by streaming; the remaining gap to MinIO is encryption + EC
+     compute + Raft (MinIO runs plaintext here). Streaming is now correct/safe to enable but is not a
+     standalone PUT win, so the default-flip lever loses its main rationale — revisit only if a future
+     change makes the encryption/EC/consensus path cheaper.
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees
