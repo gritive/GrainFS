@@ -31,7 +31,7 @@ func TestCPUPool_RegisterAndDispatch_OneShardPerChannel(t *testing.T) {
 	for i := range shardChans {
 		sends[i] = shardChans[i]
 	}
-	pool.registerPut(1, "testbucket", "testkey", 1<<20, sends)
+	pool.registerPut(1, "testbucket", "testkey", 1<<20, sends, pool.ecCfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -71,7 +71,7 @@ func TestCPUPool_OrderedPerShard_FiveStripes(t *testing.T) {
 		shardChans[i] = make(chan EncryptedShardChunk, 8)
 		sends[i] = shardChans[i]
 	}
-	pool.registerPut(7, "testbucket", "testkey", 5<<20, sends)
+	pool.registerPut(7, "testbucket", "testkey", 5<<20, sends, pool.ecCfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -113,7 +113,7 @@ func TestCPUPool_ConcatenatedShardIsValidGFSENC3(t *testing.T) {
 		shardChans[i] = make(chan EncryptedShardChunk, 16)
 		sends[i] = shardChans[i]
 	}
-	pool.registerPut(11, "testbucket", "testobj/v1", 3<<20, sends)
+	pool.registerPut(11, "testbucket", "testobj/v1", 3<<20, sends, pool.ecCfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -255,7 +255,7 @@ func TestCPUPool_SealError_PropagatesToCommitCh(t *testing.T) {
 		go drives[i].Run(ctx)
 	}
 
-	pool.registerPut(42, "b", "k", 2<<20, shardChans)
+	pool.registerPut(42, "b", "k", 2<<20, shardChans, pool.ecCfg)
 
 	for i := 0; i < 2; i++ {
 		in <- StripePlaintext{

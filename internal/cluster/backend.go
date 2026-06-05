@@ -102,10 +102,12 @@ type BucketAssigner interface {
 // populated *storage.Object (Key=shardKey, Size, ETag, LastModified set).
 // The caller is responsible for proposing the Raft metadata commit.
 type PutPipelineRunner interface {
-	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error)
+	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest, ec ECConfig) (*storage.Object, error)
 	// PutShardPlaced writes a multi-node placement: placement[i] is the
 	// resolved peer address shard i streams to, or "" for a local shard.
-	PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error)
+	// placementEC is the per-object EC width to encode at (the per-group
+	// placement EC), overriding the pipeline's possibly-stale boot ECConfig.
+	PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string, placementEC ECConfig) (*storage.Object, error)
 	// StripeBytes is the stripe size the pipeline splits PUTs on; the
 	// caller stamps it into object metadata so GET de-interleaves.
 	StripeBytes() int
@@ -427,6 +429,14 @@ func (b *DistributedBackend) SetPutPipeline(p PutPipelineRunner, enabled bool) {
 // (today's behavior). Requires the pipeline to be wired with a Transport.
 func (b *DistributedBackend) SetPutPipelineMultiNode(enabled bool) {
 	b.putPipelineMultiNode = enabled
+}
+
+// PutPipelineMultiNodeEnabled reports whether the EXPERIMENTAL multi-node
+// streaming-EC PUT path is enabled on this backend. Exposed so boot-wiring
+// tests can assert the flag reaches every group backend (not only group-0,
+// which is excluded from object placement — see candidateGroupsFor).
+func (b *DistributedBackend) PutPipelineMultiNodeEnabled() bool {
+	return b.putPipelineMultiNode
 }
 
 // SetClusterNodes refreshes the configured placement node set without

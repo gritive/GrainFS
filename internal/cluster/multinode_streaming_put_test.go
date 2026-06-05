@@ -311,3 +311,32 @@ func TestMultiNodeStreamingPUT_DataShardFailure_NoCommit(t *testing.T) {
 	_, gerr := coord.HeadObject(ctxBg(), "bucket", "datafail.bin")
 	require.Error(t, gerr, "no metadata committed")
 }
+
+// TestMultiNodeStreamingPUT_FlagOff_FallsBackToSpool is the cluster-layer
+// reproduction of the #717 wiring bug: on multi-node placement (allLocal=false),
+// if putPipelineMultiNode is OFF on the SERVING backend, the multi-node streaming
+// branch (object_put.go:137) is skipped and the PUT falls back off the streaming
+// path — which does NOT stamp StripeBytes. Paired with the K3 test (flag ON ->
+// streaming + StripeBytes>0), this proves the flag on the serving backend is the
+// dispatch gate, i.e. the missing boot wiring (#717) silently disabled streaming.
+func TestMultiNodeStreamingPUT_FlagOff_FallsBackToSpool(t *testing.T) {
+	ec := cluster.ECConfig{DataShards: 3, ParityShards: 2}
+	cl := newInProcessCluster(t, 5, ec)
+	coord := cl.coord
+	// Flag intentionally NOT set (default OFF) — mirrors the production bug
+	// where boot wired SetPutPipelineMultiNode on group-0 only.
+	require.NoError(t, coord.CreateBucket(ctxBg(), "bucket"))
+
+	nodeIDs, _, err := coord.PlanPlacementForTest(ctxBg(), "spool.bin")
+	require.NoError(t, err)
+	requireSpansNodes(t, cl, nodeIDs) // genuinely multi-node (allLocal=false)
+
+	payload := randBytes(t, 3<<20+123)
+	obj, err := coord.PutObjectWithRequest(ctxBg(), putReq("bucket", "spool.bin", bytes.NewReader(payload), int64(len(payload))))
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), obj.StripeBytes,
+		"flag OFF on multi-node placement must NOT take the streaming path (no StripeBytes stamp = spool fallback)")
+
+	got := getAll(t, coord, "bucket", "spool.bin")
+	require.True(t, bytes.Equal(payload, got), "spool fallback must still round-trip")
+}

@@ -117,6 +117,15 @@ type PutRequest struct {
 	// (today's behavior), a non-empty value is the already-resolved peer
 	// address that shard i streams to via the verbatim WriteSealedShard RPC.
 	// nil ⟹ all-local (every shard on a local drive). Its length, when set,
-	// MUST equal ECConfig.NumShards().
+	// MUST equal the effective EC width for this PUT (PlacementEC if set,
+	// else the pipeline's ECConfig).
 	Placement []string
+	// PlacementEC, when set (NumShards() > 0), is the per-PUT EC config the
+	// multi-node placed path encodes at — the object's per-group placement EC.
+	// It overrides the pipeline's boot-time ECConfig, which can be stale on a
+	// joiner node (the pipeline is built once at boot and is NOT refreshed when
+	// the cluster reaches its target EC width; the placement plan is the
+	// authoritative per-object width). Zero value ⟹ use the pipeline ECConfig
+	// (the all-local PutShard path keeps today's behavior).
+	PlacementEC cluster.ECConfig
 }

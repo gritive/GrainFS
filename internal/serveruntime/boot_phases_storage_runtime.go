@@ -412,6 +412,12 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 		// precede shard fsync, and the drive-write path rejects ".." key
 		// traversal. Dispatch is still bounded to all-local EC placements.
 		gb.SetPutPipeline(state.putPipeline, true)
+		// EXPERIMENTAL multi-node streaming-EC (opt-in via env, default OFF).
+		// Must propagate here too: candidateGroupsFor excludes group-0 from
+		// object placement, so PUTs route to these per-group backends — wiring
+		// the flag only on the group-0 distBackend (bootOwnedGroupsAndEC) left
+		// every serving group on the spool fallback (#717 regression).
+		gb.SetPutPipelineMultiNode(putMultiNodeStreamEnabled())
 	}
 	return gb, nil
 }

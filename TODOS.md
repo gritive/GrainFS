@@ -53,7 +53,27 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      separate decision (the QUIC→TCP flip cadence is the template: dormant runway → opt-in → bench/
      sign-off → flip); (2) the follow-ups already listed as nested bullets below (stricter quorum,
      multi-node shard repair, partial-write orphan reaping, receiver streams-to-disk). See memory
-     `project_grains_cluster_put_streaming_ec`.
+     `project_grains_cluster_put_streaming_ec`. **v0.0.518.0 fixed a #717 boot-wiring bug**: the opt-in
+     flag was wired on group-0 only (excluded from placement), so the path silently spool-fell-back on
+     every serving group despite `multinode_stream:true` in the boot log — the opt-in now genuinely
+     dispatches. The streaming-vs-spool perf delta is still **unmeasured on a real cluster** (the prior
+     B2 benchmark was spool-vs-spool); a profile-gated re-bench is required before any default-flip
+     decision. **v0.0.518.0 re-bench (4-node GCP, flag ON) surfaced [P1] below — streaming is NOT
+     usable under multi-node load yet; spool reconfirmed 0.50x/0 errors.**
+   - [x] **[P1] Multi-node streaming pipeline EC width mismatch — FIXED in v0.0.518.0 (PR #718).**
+     Surfaced by the wiring fix + 4-node GCP A/B (flag ON): PUTs to non-coordinator nodes failed with
+     `pipeline: placement length 4 != shards 1` because the put pipeline froze `ECConfig` at boot while a
+     multi-node object's placement uses the per-group width. Fixed by threading the per-object placement
+     EC through both dispatch paths (`PutShardPlaced` multi-node + `PutShard` all-local → `PutRequest.
+     PlacementEC` → `Put`/`CPUPool`); the RS encoder cache already keys by config. In-process RED→GREEN
+     (+ neuter-verified) reproduces the failure without a cluster. Re-bench (4-node GCP, flag ON): clean —
+     PUT 319 MiB/s / GET 1637/1370 warm/cold, **0 errors across all ops, GET round-trip verified.**
+     **Throughput finding: streaming PUT ≈ spool (319 vs 328 MiB/s, within noise), NOT the projected
+     0.50x→0.70x — eliminating the spool double-staging is not the dominant PUT cost.** The B2 epic's
+     "0.70x floor" goal is therefore not met by streaming; the remaining gap to MinIO is encryption + EC
+     compute + Raft (MinIO runs plaintext here). Streaming is now correct/safe to enable but is not a
+     standalone PUT win, so the default-flip lever loses its main rationale — revisit only if a future
+     change makes the encryption/EC/consensus path cheaper.
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees

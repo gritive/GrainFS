@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.0.518.0] - 2026-06-05
+
+### Fixed
+
+- **Multi-node streaming-EC PUT (`GRAINFS_PUT_MULTINODE_STREAM=1`) now actually
+  dispatches; it was silently falling back to spool.** v0.0.517.0 wired the
+  opt-in flag onto the group-0 backend only, but group-0 is excluded from object
+  placement, so every PUT routed to a per-group serving backend (group-1..N) —
+  none of which received the flag — and took the legacy spool path despite the
+  boot log reporting `multinode_stream:true`. The flag is now propagated to every
+  per-group backend at boot (`instantiateGroupWithConfig`), env-gated, default
+  unchanged (OFF). This is a wiring fix that lets the experimental path execute;
+  it is not itself a performance change — the streaming-vs-spool delta is measured
+  separately once the path runs on a real cluster.
+
+- **Multi-node streaming-EC PUT now encodes at the per-object placement EC, not the
+  pipeline's stale boot ECConfig.** Enabling the flag (above) on a 4-node cluster
+  surfaced a pre-existing #717 bug the spool fallback had masked: the put pipeline froze
+  its EC config at boot (`refreshRuntimeTopologyFromMetaNodes` updates `state.effectiveEC`
+  but not the pipeline), so on a joiner the pipeline held the solo width while a
+  multi-node object's placement used the per-group width → every non-coordinator PUT
+  failed with `pipeline: placement length N != shards M` (10.97 MiB/s, 102 errors). The
+  per-object placement EC is now threaded through both dispatch paths (multi-node
+  `PutShardPlaced` and all-local `PutShard`) so no path trusts the boot EC. After the fix
+  a 4-node GCP run streams clean: PUT 319 MiB/s, GET 1637/1370 MiB/s warm/cold, **0 errors
+  across all ops** (PUT + GET round-trip verified).
+
+### Performance note (EXPERIMENTAL streaming, default OFF)
+
+- With the path now correct, the measured multi-node streaming PUT throughput is **on par
+  with the spool path, not faster**: grainfs streaming PUT ≈ 319 MiB/s vs spool ≈ 328 MiB/s
+  (within Spot noise; cross-run vs-MinIO ratios 0.54x vs 0.50x, with the MinIO anchor itself
+  drifting ~10% between runs). Eliminating the encrypt→spool→read-back→re-encode double
+  staging did **not** materially improve PUT throughput at 10 MiB / 16-concurrent — the
+  dominant cost is elsewhere (at-rest encryption + EC compute + Raft commit; MinIO runs
+  plaintext in this harness). `GRAINFS_PUT_MULTINODE_STREAM` stays OFF by default; it is
+  now correct and safe to enable, but it is not a PUT-throughput win on its own.
+
 ## [0.0.517.0] - 2026-06-05
 
 ### Added
