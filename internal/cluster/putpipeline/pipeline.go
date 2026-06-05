@@ -198,7 +198,16 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 	totalSize := *req.SizeHint
 	putID := p.nextPutID.Add(1)
 
-	numShards := p.cfg.ECConfig.NumShards()
+	// Effective EC for THIS put: the placed (multi-node) path carries the
+	// object's per-group placement EC, which is authoritative; the pipeline's
+	// boot ECConfig can be stale on a joiner (built once at boot, not refreshed
+	// when the cluster reaches target width). All-local PutShard leaves
+	// PlacementEC zero and keeps the pipeline ECConfig.
+	ecCfg := p.cfg.ECConfig
+	if req.PlacementEC.NumShards() > 0 {
+		ecCfg = req.PlacementEC
+	}
+	numShards := ecCfg.NumShards()
 	if req.Placement != nil && len(req.Placement) != numShards {
 		return nil, fmt.Errorf("pipeline: placement length %d != shards %d", len(req.Placement), numShards)
 	}
@@ -281,14 +290,14 @@ func (p *Pipeline) Put(ctx context.Context, req PutRequest) (*storage.Object, er
 		pumpWG.Add(1)
 		go func() { defer pumpWG.Done(); d.Run(pumpCtx) }()
 	}
-	p.cpu.registerPut(putID, req.Bucket, req.Key, totalSize, shardChans)
+	p.cpu.registerPut(putID, req.Bucket, req.Key, totalSize, shardChans, ecCfg)
 	defer p.cpu.unregisterPut(putID)
 
 	earlyAck := make(chan error, 1)
 	finalDone := make(chan error, 1)
 	p.commit.registerPut(putID, &putWaiter{
 		shardsTotal:  numShards,
-		cfg:          p.cfg.ECConfig,
+		cfg:          ecCfg,
 		earlyAck:     earlyAck,
 		finalDone:    finalDone,
 		remoteShards: remoteShards,
@@ -390,7 +399,7 @@ func (p *Pipeline) PutShard(ctx context.Context, shardKey string, req storage.Pu
 // already-resolved peer address shard i streams to via the verbatim
 // WriteSealedShard RPC, or "" when shard i is local. It is the mixed-placement
 // entry point; PutShard stays the all-local one (placement nil).
-func (p *Pipeline) PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error) {
+func (p *Pipeline) PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string, placementEC cluster.ECConfig) (*storage.Object, error) {
 	return p.Put(ctx, PutRequest{
 		Bucket:          req.Bucket,
 		Key:             shardKey,
@@ -401,6 +410,7 @@ func (p *Pipeline) PutShardPlaced(ctx context.Context, shardKey string, req stor
 		System:          req.SystemMetadata,
 		PrecomputedETag: req.ContentMD5Hex,
 		Placement:       placement,
+		PlacementEC:     placementEC,
 	})
 }
 

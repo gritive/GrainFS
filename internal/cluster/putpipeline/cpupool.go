@@ -84,6 +84,11 @@ type putDispatchState struct {
 	shardChans []chan<- EncryptedShardChunk
 	inbox      chan dispatchMsg
 	failed     []bool // failed[i] true after the first error for shard i; guards exactly-one terminal result
+	// ecCfg is the per-PUT EC config the stripe split encodes at (the object's
+	// placement EC for the multi-node path, else the pipeline ECConfig). The
+	// CPUPool is shared across PUTs, so the split must read this per-PUT value
+	// rather than the pool's boot ecCfg, which can be stale on a joiner node.
+	ecCfg cluster.ECConfig
 }
 
 // dispatchMsg carries the result of EC split from a worker to the
@@ -191,8 +196,8 @@ func putEncodeBuf(b *bytes.Buffer) {
 // at the start of every shard's plaintext stream as the 8-byte shard
 // size header so the EC reader knows the exact byte count across all
 // stripes. Per-stripe ECSplitRaw never re-emits the header.
-func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize int64, shardChans []chan<- EncryptedShardChunk) {
-	n := p.ecCfg.NumShards()
+func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize int64, shardChans []chan<- EncryptedShardChunk, ecCfg cluster.ECConfig) {
+	n := ecCfg.NumShards()
 	encoders := make([]*shardEncoder, n)
 	header := cluster.ShardHeader(totalSize)
 	for i := 0; i < n; i++ {
@@ -216,6 +221,7 @@ func (p *CPUPool) registerPut(putID uint64, bucket, shardKey string, totalSize i
 		shardChans: shardChans,
 		inbox:      make(chan dispatchMsg, inboxCap),
 		failed:     make([]bool, n),
+		ecCfg:      ecCfg,
 	}
 	p.puts.Store(putID, ps)
 
@@ -283,11 +289,20 @@ func (p *CPUPool) workerLoop(ctx context.Context) {
 // alignment. We trim the padding before EC split so each shard receives
 // only real bytes — the per-PUT shard header tells the reader where to stop.
 func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) error {
+	// Resolve the per-PUT EC config BEFORE the split: the CPUPool is shared
+	// across PUTs and p.ecCfg is the (possibly stale) boot width; the split
+	// must use the width this PUT was registered with (the placement EC for
+	// the multi-node path).
+	ps, ok := p.loadPut(stripe.PutID)
+	if !ok {
+		putStripeBuf(stripe.Data)
+		return nil
+	}
 	data := stripe.Data
 	if stripe.Padding > 0 && int(stripe.Padding) < len(data) {
 		data = data[:len(data)-int(stripe.Padding)]
 	}
-	shards, backing, err := cluster.ECSplitRawInto(p.ecCfg, data, getECMatrix())
+	shards, backing, err := cluster.ECSplitRawInto(ps.ecCfg, data, getECMatrix())
 	// ECSplitRawInto has copied the stripe into backing (or failed without
 	// needing it); the stripe buffer is the sole responsibility of this
 	// goroutine now and is free to recycle either way.
@@ -295,12 +310,6 @@ func (p *CPUPool) processStripe(ctx context.Context, stripe StripePlaintext) err
 	if err != nil {
 		putECMatrix(backing)
 		return fmt.Errorf("cpu pool ec split: %w", err)
-	}
-
-	ps, ok := p.loadPut(stripe.PutID)
-	if !ok {
-		putECMatrix(backing)
-		return nil
 	}
 	msg := dispatchMsg{
 		stripeIdx: stripe.StripeIdx,

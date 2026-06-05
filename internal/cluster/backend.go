@@ -105,7 +105,9 @@ type PutPipelineRunner interface {
 	PutShard(ctx context.Context, shardKey string, req storage.PutObjectRequest) (*storage.Object, error)
 	// PutShardPlaced writes a multi-node placement: placement[i] is the
 	// resolved peer address shard i streams to, or "" for a local shard.
-	PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string) (*storage.Object, error)
+	// placementEC is the per-object EC width to encode at (the per-group
+	// placement EC), overriding the pipeline's possibly-stale boot ECConfig.
+	PutShardPlaced(ctx context.Context, shardKey string, req storage.PutObjectRequest, placement []string, placementEC ECConfig) (*storage.Object, error)
 	// StripeBytes is the stripe size the pipeline splits PUTs on; the
 	// caller stamps it into object metadata so GET de-interleaves.
 	StripeBytes() int

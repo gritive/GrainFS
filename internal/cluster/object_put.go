@@ -156,7 +156,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				UserMetadata:   userMetadata,
 				SystemMetadata: req.SystemMetadata,
 				ContentMD5Hex:  req.ContentMD5Hex,
-			}, placement)
+			}, placement, placementPlan.Config)
 			if err != nil {
 				return nil, err
 			}
