@@ -53,7 +53,12 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      separate decision (the QUIC→TCP flip cadence is the template: dormant runway → opt-in → bench/
      sign-off → flip); (2) the follow-ups already listed as nested bullets below (stricter quorum,
      multi-node shard repair, partial-write orphan reaping, receiver streams-to-disk). See memory
-     `project_grains_cluster_put_streaming_ec`.
+     `project_grains_cluster_put_streaming_ec`. **v0.0.518.0 fixed a #717 boot-wiring bug**: the opt-in
+     flag was wired on group-0 only (excluded from placement), so the path silently spool-fell-back on
+     every serving group despite `multinode_stream:true` in the boot log — the opt-in now genuinely
+     dispatches. The streaming-vs-spool perf delta is still **unmeasured on a real cluster** (the prior
+     B2 benchmark was spool-vs-spool); a profile-gated re-bench is required before any default-flip
+     decision.
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees

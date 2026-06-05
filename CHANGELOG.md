@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.518.0] - 2026-06-05
+
+### Fixed
+
+- **Multi-node streaming-EC PUT (`GRAINFS_PUT_MULTINODE_STREAM=1`) now actually
+  dispatches; it was silently falling back to spool.** v0.0.517.0 wired the
+  opt-in flag onto the group-0 backend only, but group-0 is excluded from object
+  placement, so every PUT routed to a per-group serving backend (group-1..N) —
+  none of which received the flag — and took the legacy spool path despite the
+  boot log reporting `multinode_stream:true`. The flag is now propagated to every
+  per-group backend at boot (`instantiateGroupWithConfig`), env-gated, default
+  unchanged (OFF). This is a wiring fix that lets the experimental path execute;
+  it is not itself a performance change — the streaming-vs-spool delta is measured
+  separately once the path runs on a real cluster.
+
 ## [0.0.517.0] - 2026-06-05
 
 ### Added
