@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,11 +36,19 @@ func warnIfReducedDataFsync() {
 	}
 }
 
-// putMultiNodeStreamEnabled reports whether the EXPERIMENTAL multi-node
-// streaming-EC PUT path is opted in via GRAINFS_PUT_MULTINODE_STREAM=1. It is
-// a debug/measurement knob read once at boot (before any PUT); default OFF.
+// putMultiNodeStreamEnabled reports whether the multi-node streaming-EC PUT path
+// is active. It is now the DEFAULT (seal-at-source, no whole-object spool); set
+// GRAINFS_PUT_MULTINODE_STREAM to a falsey value (0/false/no/off, case-
+// insensitive) to opt OUT and fall back to the spool path. Read once at boot
+// (before any PUT). The parse is a falsey-set, not == "1"/!= "0": the latter
+// would silently ENABLE on "false", a footgun now that ON is the default.
 func putMultiNodeStreamEnabled() bool {
-	return os.Getenv("GRAINFS_PUT_MULTINODE_STREAM") == "1"
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRAINFS_PUT_MULTINODE_STREAM"))) {
+	case "0", "false", "no", "off":
+		return false
+	default: // unset / empty / anything-else = ON (default)
+		return true
+	}
 }
 
 // bootShardService completes the cluster topology bootstrap and constructs

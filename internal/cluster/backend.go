@@ -33,7 +33,10 @@ const shardRPCTimeout = 2 * time.Minute
 
 // ShardRPCTimeout exposes shardRPCTimeout so the streaming PUT pipeline (built
 // in serveruntime, which cannot see the unexported const) can bound each remote
-// shard write RPC with the same deadline as the spool path.
+// shard write RPC. The spool path uses it as a TOTAL per-RPC wall-clock (the
+// shard is materialized before the RPC); the streaming pipeline reinterprets the
+// SAME value as an IDLE deadline (reset on each progress event), since there it
+// would otherwise bound ingest+seal+RPC and abort a slow-but-progressing upload.
 func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
 
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20

@@ -217,9 +217,10 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	require.NotNil(t, state.stopApply, "stopApply channel after bootOwnedGroupsAndEC")
 }
 
-// TestPutMultiNodeStreamEnabled verifies the EXPERIMENTAL multi-node streaming
-// PUT opt-in honours GRAINFS_PUT_MULTINODE_STREAM=1 and defaults OFF for every
-// other value (unset / "0" / "true"), matching the strict == "1" idiom.
+// TestPutMultiNodeStreamEnabled verifies multi-node streaming PUT is now the
+// DEFAULT (unset/empty = ON) and opts OUT only on an explicit falsey value
+// (0/false/no/off, case-insensitive, trimmed). A parse that keyed off == "1"
+// (or != "0") would be a footgun here — e.g. "false" must disable, not enable.
 func TestPutMultiNodeStreamEnabled(t *testing.T) {
 	tests := []struct {
 		name string
@@ -227,10 +228,17 @@ func TestPutMultiNodeStreamEnabled(t *testing.T) {
 		val  string
 		want bool
 	}{
-		{name: "unset defaults off", set: false, want: false},
-		{name: "explicit 1 enables", set: true, val: "1", want: true},
-		{name: "zero stays off", set: true, val: "0", want: false},
-		{name: "true is not 1", set: true, val: "true", want: false},
+		{name: "unset defaults ON", set: false, want: true},
+		{name: "empty defaults ON", set: true, val: "", want: true},
+		{name: "explicit 1 stays ON", set: true, val: "1", want: true},
+		{name: "true stays ON", set: true, val: "true", want: true},
+		{name: "garbage stays ON", set: true, val: "anything", want: true},
+		{name: "zero opts out", set: true, val: "0", want: false},
+		{name: "false opts out", set: true, val: "false", want: false},
+		{name: "no opts out", set: true, val: "no", want: false},
+		{name: "off opts out", set: true, val: "off", want: false},
+		{name: "FALSE opts out (case-insensitive)", set: true, val: "FALSE", want: false},
+		{name: "Off opts out (case + spaces)", set: true, val: "  Off  ", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -257,7 +265,8 @@ func TestBootWiring_PropagatesMultiNodeStreamToServingGroups(t *testing.T) {
 		want   bool
 	}{
 		{name: "env enabled propagates to per-group backend", envVal: "1", want: true},
-		{name: "env unset keeps default OFF", envVal: "", want: false},
+		{name: "env unset = default ON (streaming dispatched on every serving group)", envVal: "", want: true},
+		{name: "explicit opt-out propagates OFF", envVal: "0", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
