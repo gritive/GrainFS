@@ -38,13 +38,15 @@ func warnIfReducedDataFsync() {
 
 // putMultiNodeStreamEnabled reports whether the multi-node streaming-EC PUT path
 // is active. It is now the DEFAULT (seal-at-source, no whole-object spool); set
-// GRAINFS_PUT_MULTINODE_STREAM to a falsey value (0/false/no/off, case-
-// insensitive) to opt OUT and fall back to the spool path. Read once at boot
-// (before any PUT). The parse is a falsey-set, not == "1"/!= "0": the latter
-// would silently ENABLE on "false", a footgun now that ON is the default.
+// GRAINFS_PUT_MULTINODE_STREAM to a falsey value to opt OUT and fall back to the
+// spool path. Read once at boot (before any PUT). The parse is a falsey-set, not
+// == "1"/!= "0": the latter would silently ENABLE on "false", a footgun now that
+// ON is the default. The set is deliberately wide (covers strconv.ParseBool's
+// false tokens 0/f/false plus the human variants no/n/off/disable/disabled) so a
+// near-miss spelling of an opt-out does not silently leave streaming ON.
 func putMultiNodeStreamEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRAINFS_PUT_MULTINODE_STREAM"))) {
-	case "0", "false", "no", "off":
+	case "0", "f", "false", "n", "no", "off", "disable", "disabled":
 		return false
 	default: // unset / empty / anything-else = ON (default)
 		return true

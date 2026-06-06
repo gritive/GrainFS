@@ -80,6 +80,17 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      compute + Raft (MinIO runs plaintext here). Streaming is now correct/safe to enable but is not a
      standalone PUT win, so the default-flip lever loses its main rationale — revisit only if a future
      change makes the encryption/EC/consensus path cheaper.
+   - [ ] **[P3] Streaming PUT has no ABSOLUTE wall-clock cap (slowloris backstop).** v0.0.519.0's idle
+     deadline replaced the fixed 2-min total per-shard timeout, so a streaming PUT's lifetime is now bounded
+     only by inactivity (`upload_duration + ShardRPCTimeout`), not by an absolute total. A client that
+     trickles bytes forever keeps the PUT — and any dead-parity-peer RPC/goroutine/conn riding the shared
+     idle timer — alive indefinitely. There is currently NO per-request backstop on the external S3 PUT path
+     (no Hertz `ReadTimeout`, no `context.WithTimeout` in the mutation path; only `MaxRequestBodySize` caps
+     bytes, not wall-clock). This is the intended trade for not aborting slow-but-progressing uploads, but it
+     shifts abuse protection onto a deadline that doesn't exist. Follow-up: add an outer per-PUT absolute
+     wall-clock cap (generous, e.g. minutes-to-hours so realistic large uploads pass) or a server-side
+     read/idle timeout on the S3 listener. Separate axis (abuse protection) from this slice (progress-friendly
+     deadline); broad blast radius, so deferred.
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees

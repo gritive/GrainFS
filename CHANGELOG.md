@@ -27,7 +27,10 @@
   progress (a client byte ingested, or a sealed stripe flushed to a peer) and fires only
   after `ShardRPCTimeout` of NO progress. A dead/stalled peer is still bounded; a
   slow-but-steady upload is no longer aborted. Required before making streaming the
-  default (above).
+  default (above). Note: this intentionally removes the former *absolute* ~2-min cap
+  on a streaming PUT's lifetime — a PUT is now bounded by inactivity, not total wall
+  clock — so a forever-trickling client is no longer aborted by this deadline. An
+  absolute per-PUT/slowloris backstop is tracked as a separate follow-up (TODOS).
 
 ## [0.0.518.0] - 2026-06-05
 

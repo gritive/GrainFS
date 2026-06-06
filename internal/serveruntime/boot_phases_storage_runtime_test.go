@@ -235,8 +235,12 @@ func TestPutMultiNodeStreamEnabled(t *testing.T) {
 		{name: "garbage stays ON", set: true, val: "anything", want: true},
 		{name: "zero opts out", set: true, val: "0", want: false},
 		{name: "false opts out", set: true, val: "false", want: false},
+		{name: "f opts out", set: true, val: "f", want: false},
 		{name: "no opts out", set: true, val: "no", want: false},
+		{name: "n opts out", set: true, val: "n", want: false},
 		{name: "off opts out", set: true, val: "off", want: false},
+		{name: "disable opts out", set: true, val: "disable", want: false},
+		{name: "disabled opts out", set: true, val: "disabled", want: false},
 		{name: "FALSE opts out (case-insensitive)", set: true, val: "FALSE", want: false},
 		{name: "Off opts out (case + spaces)", set: true, val: "  Off  ", want: false},
 	}
