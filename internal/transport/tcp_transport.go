@@ -67,12 +67,18 @@ type TCPTransport struct {
 	identity atomic.Pointer[IdentitySnapshot]
 	composer *identityComposer
 
-	cfg     TCPTransportConfig
-	pool    *connPool             // per-peer elastic data-plane conn pool (S3b)
-	traffic *TrafficLimiter       // inbound admission (nil-safe = unlimited)
-	connSem chan struct{}         // bounds concurrent serveConn goroutines (nil = unlimited)
-	conns   map[net.Conn]struct{} // accepted, in-flight conns; reaped on Close
-	dpSeq   uint64                // monotonic data-plane request ID (desync detection)
+	cfg  TCPTransportConfig
+	pool *connPool // per-peer elastic data-plane conn pool (S3b)
+	// controlPool is a SEPARATE per-peer pool for control-plane forwards
+	// (CallPooled). Splitting control off the bulk pool stops a flood of
+	// large-object shard streams from exhausting the shared cap and starving the
+	// short metadata forward (the multipart-under-load 500 fix). Identity rotation
+	// (RecycleConns/ClosePeer) and Close recycle BOTH pools.
+	controlPool *connPool
+	traffic     *TrafficLimiter       // inbound admission (nil-safe = unlimited)
+	connSem     chan struct{}         // bounds concurrent serveConn goroutines (nil = unlimited)
+	conns       map[net.Conn]struct{} // accepted, in-flight conns; reaped on Close
+	dpSeq       uint64                // monotonic data-plane request ID (desync detection)
 
 	// Mux carrier state (S2b-2 — set only when internal/raft registers a
 	// mux handler).
@@ -160,6 +166,7 @@ func (t *TCPTransport) buildMuxClientTLS() *tls.Config {
 func (t *TCPTransport) applyConfig(cfg TCPTransportConfig) {
 	t.cfg = cfg
 	t.pool = newConnPool(cfg.MaxConnsPerPeer, cfg.PoolIdleTimeout)
+	t.controlPool = newConnPool(cfg.MaxControlConnsPerPeer, cfg.PoolIdleTimeout)
 	t.traffic = NewTrafficLimiter(cfg.TrafficLimits)
 	t.connSem = makeLimit(cfg.MaxConcurrentConns)
 }
@@ -509,6 +516,7 @@ func underlyingTCP(c net.Conn) (*net.TCPConn, bool) {
 func (t *TCPTransport) Close() error {
 	t.cancel()
 	t.pool.closeAll()
+	t.controlPool.closeAll()
 	t.mu.Lock()
 	ln := t.listener
 	conns := make([]net.Conn, 0, len(t.conns))

@@ -44,6 +44,28 @@ func (t *TCPTransport) getDataConn(ctx context.Context, addr string) (net.Conn, 
 	return dialed, false, nil
 }
 
+// getControlConn is getDataConn against the SEPARATE control-plane pool: control
+// forwards (CallPooled) must not compete for the bulk pool's slots. Same gen-guard
+// discipline (snapshot BEFORE dial → discard on checkin if a recycle/revoke fired
+// during the handshake), so the S5a identity invariant holds for controlPool too.
+func (t *TCPTransport) getControlConn(ctx context.Context, addr string) (net.Conn, bool, error) {
+	c, err := t.controlPool.checkout(ctx, addr)
+	if err != nil {
+		return nil, false, err
+	}
+	if c != nil {
+		return c, true, nil // reused pooled conn
+	}
+	gen := t.controlPool.genSnapshot(addr)
+	dialed, derr := t.dial(ctx, addr)
+	if derr != nil {
+		t.controlPool.dialFailed(addr)
+		return nil, false, derr
+	}
+	t.controlPool.stampWith(dialed, gen)
+	return dialed, false, nil
+}
+
 // dial opens a fresh TLS-over-TCP connection to addr and completes the handshake
 // (running SPKI pinning). The raw TCP conn is tuned (NODELAY + buffers) before TLS.
 func (t *TCPTransport) dial(ctx context.Context, addr string) (*tls.Conn, error) {
@@ -386,7 +408,7 @@ func (t *TCPTransport) callFlatBufferOnce(ctx context.Context, addr string, conn
 // that dies before the request frame is written is retried once on a fresh dial.
 func (t *TCPTransport) CallPooled(ctx context.Context, addr string, req *Message) (*Message, error) {
 	for attempt := 0; ; attempt++ {
-		conn, reused, err := t.getDataConn(ctx, addr)
+		conn, reused, err := t.getControlConn(ctx, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -401,11 +423,12 @@ func (t *TCPTransport) CallPooled(ctx context.Context, addr string, req *Message
 func (t *TCPTransport) callPooledOnce(ctx context.Context, addr string, conn net.Conn, req *Message) (*Message, error) {
 	clean := false
 	defer func() {
+		// Control-plane conn returns to the CONTROL pool (not the bulk pool).
 		if clean && ctx.Err() == nil {
 			_ = conn.SetDeadline(time.Time{})
-			t.pool.checkin(addr, conn)
+			t.controlPool.checkin(addr, conn)
 		} else {
-			t.pool.discard(addr, conn)
+			t.controlPool.discard(addr, conn)
 		}
 	}()
 	stop := t.applyCtx(ctx, conn)

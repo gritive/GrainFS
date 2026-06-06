@@ -91,6 +91,32 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      wall-clock cap (generous, e.g. minutes-to-hours so realistic large uploads pass) or a server-side
      read/idle timeout on the S3 listener. Separate axis (abuse protection) from this slice (progress-friendly
      deadline); broad blast radius, so deferred.
+   - [x] **[P1] CompleteMultipartUpload 500s under concurrent large-object load — FIXED (v0.0.520.0).**
+     Two orthogonal premature-failure bugs on the cluster metadata-forward path, surfaced by the
+     object-size sweep (multipart 64/256MiB at conc≥16): **(1) sender control-pool starvation** —
+     `CallPooled` (control forward) shared one per-peer conn pool with bulk shard streams
+     (`CallWithBody`/`CallFlatBuffer`/read-stream); bulk exhausted the cap (`MaxConnsPerPeer`=64) and
+     starved the short forward → `forward: no reachable peer (dial :7000 i/o timeout)`. Fixed with a
+     SEPARATE control pool (`MaxControlConnsPerPeer`, default 16); `RecycleConns`/`ClosePeer`/`Close`
+     recycle BOTH pools (S5a gen-guard mirrored). **(2) receiver hardcoded 5s deadline** — the leader's
+     forwarded propose/read-index handlers (`forward_receiver.go` `HandleGroupPropose`, `backend.go`
+     `RegisterProposeForwardHandler`/`RegisterReadIndexHandler`) rebuilt `context.Background()`+5s,
+     ignoring the caller's budget and aborting a commit at 5s (`context deadline exceeded`, the dominant
+     ~77% mode). Replaced with `proposeForwardTimeout` (30s). Both RED→GREEN in-process; real-cluster
+     re-bench (multipart under conc≥16 → 0 errors) is the post-merge confirmation.
+   - [ ] **[P3] Wire-propagate the caller's exact deadline to receiver forward handlers.** `proposeForwardTimeout`
+     (above) is a fixed 30s because the transport handler signature `func(*Message) *Message` carries no
+     caller ctx. Aligning the leader-side `ProposeWait`/`ReadIndex` deadline with the originator's actual
+     budget needs a deadline field in the forward payload (wire change). Low priority — the fixed bound
+     removes the premature-abort; exact alignment is a refinement.
+   - [ ] **[P3] Pre-existing `-race` flake: `TestForwardSender_SendStream*` data race on the SendStream
+     attempt counters (`forward_sender.go:420`).** `go test ./internal/cluster/ -race` intermittently fails
+     (race detector attributes it to whichever test was running; the goroutines are from
+     `TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency`). Confirmed present on
+     origin/master (reproduced with this PR's changes stashed) — NOT introduced here. The deferred
+     `ObservePutTraceStage` closure reads `attempts`/`notLeaderRetries`/`leaderHintUsed` while concurrent
+     SendStream goroutines write them. Guard with a mutex or atomics. (Matches the prior S5a `[P3] -race
+     deadline flake는 base 귀속` note.)
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees

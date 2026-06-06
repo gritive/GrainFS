@@ -15,11 +15,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// poolLen returns the idle-conn count for addr (test-only introspection).
+// poolLen returns the idle-conn count for addr in the bulk data-plane pool
+// (test-only introspection).
 func poolLen(t *TCPTransport, addr string) int {
 	t.pool.mu.Lock()
 	defer t.pool.mu.Unlock()
 	return len(t.pool.idle[addr])
+}
+
+// controlPoolLen returns the idle-conn count for addr in the control-plane pool
+// (CallPooled lives here, separate from the bulk pool).
+func controlPoolLen(t *TCPTransport, addr string) int {
+	t.controlPool.mu.Lock()
+	defer t.controlPool.mu.Unlock()
+	return len(t.controlPool.idle[addr])
 }
 
 func TestTCPPool_ReuseAcrossSequentialTransfers(t *testing.T) {
@@ -75,7 +84,7 @@ func TestTCPPool_CallPooledReusesConn(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("ok:r%d", i), string(resp.Payload))
 		time.Sleep(500 * time.Millisecond) // exceed the 400ms per-call deadline
 	}
-	assert.Equal(t, 1, poolLen(cli, addr), "clean CallPooled transfers must reuse one conn")
+	assert.Equal(t, 1, controlPoolLen(cli, addr), "clean CallPooled transfers must reuse one conn in the control pool")
 }
 
 func TestTCPPool_ErroredTransferKeepsCleanConn(t *testing.T) {

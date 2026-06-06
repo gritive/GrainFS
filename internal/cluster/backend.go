@@ -31,6 +31,19 @@ import (
 // transport shard streams before the metadata propose completes.
 const shardRPCTimeout = 2 * time.Minute
 
+// proposeForwardTimeout bounds the leader-side raft commit for a forwarded
+// propose/read-index RPC. The receiver handlers carry no caller ctx (the
+// transport handler signature is `func(*Message) *Message`), so they cannot
+// honor the originator's budget without a wire change — this generous bound
+// replaces a hardcoded 5s that aborted commits the caller was still willing to
+// wait for (the dominant CompleteMultipartUpload-under-load 500 mode). 30s sits
+// above burst raft-commit p99 and below typical S3 client timeouts, so the
+// phantom-commit window (a commit landing after the caller gave up — already
+// possible at 5s, since ProposeWait cancellation does not un-propose) stays
+// bounded. TODO: wire-propagate the caller's exact deadline (needs a payload
+// field) to align with the originator's budget instead of a fixed bound.
+const proposeForwardTimeout = 30 * time.Second
+
 // ShardRPCTimeout exposes shardRPCTimeout so the streaming PUT pipeline (built
 // in serveruntime, which cannot see the unexported const) can bound each remote
 // shard write RPC. The spool path uses it as a TOTAL per-RPC wall-clock (the
@@ -887,7 +900,7 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 		return
 	}
 	b.shardSvc.RegisterHandler(transport.StreamProposeForward, func(req *transport.Message) *transport.Message {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		idx, err := b.node.ProposeWait(ctx, req.Payload)
 		if err == nil {
@@ -951,7 +964,7 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 		return
 	}
 	b.shardSvc.RegisterHandler(transport.StreamReadIndex, func(req *transport.Message) *transport.Message {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		resp := make([]byte, 12)
 		idx, err := b.node.ReadIndex(ctx)

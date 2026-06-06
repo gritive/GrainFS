@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.520.0] - 2026-06-07
+
+### Fixed
+
+- **CompleteMultipartUpload no longer 500s under concurrent large-object load.** Two
+  orthogonal premature-failure bugs on the cluster metadata-forward path are fixed:
+  - **(sender) control-plane forward starvation.** Control metadata forwards
+    (`CallPooled`) shared one per-peer connection pool with bulk shard-stream
+    transfers (`CallWithBody`/`CallFlatBuffer`/read-streams). A flood of large-object
+    shard streams exhausted the shared cap and starved the short control forward,
+    surfacing as `forward: no reachable peer (dial :7000 i/o timeout)`. Control forwards
+    now use a SEPARATE per-peer pool (`MaxControlConnsPerPeer`, internal default 16), so
+    bulk saturation can no longer block them. Identity rotation/revocation
+    (`RecycleConns`/`ClosePeer`) and shutdown recycle BOTH pools (the S5a gen-guard
+    invariant holds for the control pool identically).
+  - **(receiver) hardcoded 5s forward deadline.** The leader-side forwarded
+    propose/read-index handlers rebuilt a `context.Background()` + hardcoded 5s timeout,
+    ignoring the originator's budget and aborting a raft commit at 5s that the caller was
+    still willing to wait for (`context deadline exceeded`, exactly 5000ms — the dominant
+    mode observed under load). The bound is now `proposeForwardTimeout` (30s), above burst
+    raft-commit p99 and below typical S3 client timeouts.
+
 ## [0.0.519.0] - 2026-06-06
 
 ### Changed
