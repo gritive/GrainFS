@@ -220,6 +220,106 @@ func TestPipeline_MixedPlacementRoundTrip(t *testing.T) {
 	require.Equal(t, body, recovered, "object must recover from data1 + remote parity (remote shards are valid EC parity)")
 }
 
+// slowReader paces a body: each Read sleeps `gap` then returns up to `chunk`
+// bytes, so a caller draining it spends ~ceil(len/chunk)*gap total. It models a
+// slow client upload — bytes keep arriving, but the whole body takes longer than
+// a single fixed wall-clock RPC deadline would allow.
+type slowReader struct {
+	data  []byte
+	pos   int
+	chunk int
+	gap   time.Duration
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	time.Sleep(r.gap)
+	n := r.chunk
+	if n > len(p) {
+		n = len(p)
+	}
+	if r.pos+n > len(r.data) {
+		n = len(r.data) - r.pos
+	}
+	copy(p, r.data[r.pos:r.pos+n])
+	r.pos += n
+	return n, nil
+}
+
+// TestPipeline_SlowProgressingClientDoesNotAbort is the idle-deadline acceptance
+// test: a slow-but-steadily-progressing upload whose TOTAL duration exceeds
+// ShardRPCTimeout must NOT abort, because the per-shard RPC deadline is an IDLE
+// deadline that resets on each progress event (client bytes ingested or a sealed
+// stripe flushed to the peer), not a fixed total wall-clock.
+//
+// It is RED on the pre-idle code (a fixed WithTimeout(pumpCtx, ShardRPCTimeout)
+// armed before the first stripe fires mid-upload). It also discriminates against
+// a sink-Write-ONLY reset: the body is a single stripe, so no sealed stripe is
+// flushed until the full body is read (~total upload time), meaning only the
+// per-INGEST-read reset keeps the deadline alive while the stripe accumulates.
+func TestPipeline_SlowProgressingClientDoesNotAbort(t *testing.T) {
+	ctx := context.Background()
+	keeper := testDEKKeeper(t)
+	clusterID := testClusterID()
+
+	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
+
+	p := New(Config{
+		DataDirs:    []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()},
+		DEKKeeper:   keeper,
+		ClusterID:   clusterID,
+		ECConfig:    cluster.ECConfig{DataShards: 2, ParityShards: 2},
+		StripeBytes: 1 << 20, // 800 KiB body below => single stripe, no flush until EOF
+		Transport:   tr1,
+		// Short idle deadline; the upload below runs ~8x longer in TOTAL but never
+		// idles longer than `gap`. On the old fixed-total timeout this aborts.
+		ShardRPCTimeout: 200 * time.Millisecond,
+	})
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, p.Shutdown(sctx))
+	}()
+
+	body := make([]byte, 800*1024)
+	for i := range body {
+		body[i] = byte((i * 7) % 251)
+	}
+	size := int64(len(body))
+	// 100 KiB per read, 50 ms gap => ~8 reads, ~400 ms total (>> 200 ms deadline),
+	// each gap 50 ms (<< 200 ms) so the idle deadline never elapses.
+	slow := &slowReader{data: body, chunk: 100 * 1024, gap: 50 * time.Millisecond}
+	start := time.Now()
+	// Route a DATA shard (shard 0) to the remote peer so the PUT genuinely DEPENDS
+	// on the remote RPC: commit requires all K data shards. (Routing only PARITY
+	// shards remote would let the PUT succeed on the local data shards regardless
+	// of the remote RPC's deadline, making the test vacuous.)
+	obj, err := p.Put(ctx, PutRequest{
+		Bucket:    "external",
+		Key:       "obj-slow/v1",
+		Body:      slow,
+		SizeHint:  &size,
+		Placement: []string{tr2.LocalAddr(), "", "", ""},
+	})
+	require.NoError(t, err, "a slow-but-progressing upload must not be aborted by the idle deadline")
+	require.NotNil(t, obj)
+	require.Equal(t, size, obj.Size)
+	// Sanity: the upload really did outlast the fixed deadline (else the test is vacuous).
+	require.Greater(t, time.Since(start), 300*time.Millisecond,
+		"upload must outlast ShardRPCTimeout for this test to be meaningful")
+}
+
 // TestPipeline_MixedPlacementWALSkipsRemote proves this node's data WAL records
 // only the LOCAL shards of a mixed-placement PUT. A remote shard is durable in
 // the peer's own WAL (its WriteSealedShard receiver appends it there); recording

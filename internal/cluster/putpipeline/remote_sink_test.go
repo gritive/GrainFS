@@ -61,7 +61,7 @@ func TestRemoteSealedShardSink_RoundTrip(t *testing.T) {
 	sealed, err := sealer.EncodeEncryptedShardBuffer("bkt", "obj", 0, plaintext)
 	require.NoError(t, err)
 
-	sink := newRemoteSealedShardSink(ctx, tr1, tr2.LocalAddr(), "bkt", "obj", 0)
+	sink := newRemoteSealedShardSink(ctx, nil, tr1, tr2.LocalAddr(), "bkt", "obj", 0)
 	// Two chunks to exercise streaming/backpressure, not a single Write.
 	_, err = sink.Write(sealed[:1000])
 	require.NoError(t, err)
@@ -108,7 +108,7 @@ func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
 	sealed, err := sealer.EncodeEncryptedShardBuffer("bkt", "obj", 1, plaintext)
 	require.NoError(t, err)
 
-	sink := newRemoteSealedShardSink(ctx, tr1, tr2.LocalAddr(), "bkt", "obj", 1)
+	sink := newRemoteSealedShardSink(ctx, nil, tr1, tr2.LocalAddr(), "bkt", "obj", 1)
 	_, _ = sink.Write(sealed[:len(sealed)/2]) // partial
 	sink.Abort()
 
@@ -149,7 +149,7 @@ func TestDriveActor_RemoteDestination(t *testing.T) {
 		pending:   make(map[uint64]*shardWriteState),
 		transport: tr1,
 	}
-	d.registerRemotePut(ctx, 1, "bkt", "obj", 0, tr2.LocalAddr())
+	d.registerRemotePut(ctx, nil, 1, "bkt", "obj", 0, tr2.LocalAddr())
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

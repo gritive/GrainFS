@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.519.0] - 2026-06-06
+
+### Changed
+
+- **Multi-node streaming-EC PUT is now the DEFAULT.** `GRAINFS_PUT_MULTINODE_STREAM`
+  flips from opt-IN to opt-OUT: multi-node PUTs now stream sealed shards straight to
+  peers (seal-at-source), eliminating the whole-object encrypt→spool→read-back→re-encode
+  double-staging. Set `GRAINFS_PUT_MULTINODE_STREAM` to a falsey value
+  (`0`/`false`/`no`/`off`, case-insensitive) to fall back to the legacy spool path.
+  **Durability note:** the streaming path commits *data-shards-required /
+  parity-best-effort* — a PUT acks once all K data shards are durable, with parity
+  written best-effort. As the default, a multi-node PUT may therefore commit with
+  thinner-than-target parity if a peer parity write fails (likelier than a single-node
+  disk write). This matches the previously-opt-in streaming semantics; it is a
+  deliberate, documented trade for removing the spool staging. Throughput is on par with
+  spool (the win is lower RSS/CPU from no double-staging, not speed — see v0.0.518.0).
+
+### Fixed
+
+- **Streaming shard-RPC deadline is now an IDLE deadline, not a fixed total wall-clock.**
+  The per-shard remote-write RPC was bounded by a fixed `ShardRPCTimeout` (2 min) armed
+  before the first stripe — which, on the streaming path, covered ingest + seal + RPC and
+  so could abort a slow-but-progressing large upload even while bytes kept flowing. It is
+  now a per-PUT idle watchdog shared by all remote shards that resets on any data-plane
+  progress (a client byte ingested, or a sealed stripe flushed to a peer) and fires only
+  after `ShardRPCTimeout` of NO progress. A dead/stalled peer is still bounded; a
+  slow-but-steady upload is no longer aborted. Required before making streaming the
+  default (above). Note: this intentionally removes the former *absolute* ~2-min cap
+  on a streaming PUT's lifetime — a PUT is now bounded by inactivity, not total wall
+  clock — so a forever-trickling client is no longer aborted by this deadline. An
+  absolute per-PUT/slowloris backstop is tracked as a separate follow-up (TODOS).
+
 ## [0.0.518.0] - 2026-06-05
 
 ### Fixed

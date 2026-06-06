@@ -44,8 +44,14 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      shard from siblings' on-disk fragments, byte-identical to the pipeline). reshard
      (`upgradeObjectEC`) investigated and confirmed a non-issue — it re-resolves placement via
      `headObjectMeta`/`ResolvePlacement`, which already carry `StripeBytes`. Remaining deferred work below.
-   - [ ] **[P2] Multi-node streaming-EC PUT: opt-in path exists; default flip + follow-ups remain.** The
-     multi-node streaming-EC PUT path now EXISTS as an opt-in (env `GRAINFS_PUT_MULTINODE_STREAM=1`,
+   - [x] **[P2] Multi-node streaming-EC PUT: DEFAULT FLIP LANDED (v0.0.519.0).** `GRAINFS_PUT_MULTINODE_STREAM`
+     is now opt-OUT (falsey set `0/false/no/off` falls back to spool); streaming seal-at-source is the default
+     multi-node PUT path. Gated on the idle-deadline below (also landed) so the flip doesn't regress slow/large
+     uploads. Perf is on par with spool (the win is RSS/CPU from no double-staging, not throughput — see
+     v0.0.518.0); the flip ships the efficiency win + simpler path, not a speed gain. Remaining follow-ups stay
+     as their own bullets below (stricter quorum, multi-node shard repair, orphan reaping, receiver-streams-to-disk).
+     The opt-in history (below) is kept for context. The multi-node streaming-EC PUT path EXISTED as an opt-in (env
+     `GRAINFS_PUT_MULTINODE_STREAM=1`,
      default OFF; K>=2; data-shards-required / parity-best-effort): K>=2 PUTs whose shards span peers
      stream stripe-interleaved and stamp `StripeBytes`, which the v0.0.516.0 reader de-interleaves. With
      the env var unset, multi-node K>=2 PUT keeps falling through to the spool writer (contiguous,
@@ -74,6 +80,17 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      compute + Raft (MinIO runs plaintext here). Streaming is now correct/safe to enable but is not a
      standalone PUT win, so the default-flip lever loses its main rationale — revisit only if a future
      change makes the encryption/EC/consensus path cheaper.
+   - [ ] **[P3] Streaming PUT has no ABSOLUTE wall-clock cap (slowloris backstop).** v0.0.519.0's idle
+     deadline replaced the fixed 2-min total per-shard timeout, so a streaming PUT's lifetime is now bounded
+     only by inactivity (`upload_duration + ShardRPCTimeout`), not by an absolute total. A client that
+     trickles bytes forever keeps the PUT — and any dead-parity-peer RPC/goroutine/conn riding the shared
+     idle timer — alive indefinitely. There is currently NO per-request backstop on the external S3 PUT path
+     (no Hertz `ReadTimeout`, no `context.WithTimeout` in the mutation path; only `MaxRequestBodySize` caps
+     bytes, not wall-clock). This is the intended trade for not aborting slow-but-progressing uploads, but it
+     shifts abuse protection onto a deadline that doesn't exist. Follow-up: add an outer per-PUT absolute
+     wall-clock cap (generous, e.g. minutes-to-hours so realistic large uploads pass) or a server-side
+     read/idle timeout on the S3 listener. Separate axis (abuse protection) from this slice (progress-friendly
+     deadline); broad blast radius, so deferred.
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees
@@ -88,13 +105,14 @@ Planning reference: operator trust roadmap note from 2026-05-15.
    - [ ] **[P3] Sealed-shard receiver streams body to disk.** `HandleWriteBody` buffers the sealed shard
      body in memory (`shard_service.go`, bounded per-shard by `datawal.MaxPayloadBytes`); streaming to
      disk without buffering is a later refinement.
-   - [ ] **[P2-before-flip] Streaming shard-RPC: fixed wall-clock → idle deadline.** The streaming path
-     arms `ShardRPCTimeout` (2 min) in the dispatch loop *before* the first stripe, so it bounds the whole
-     ingest+seal+RPC window — not just the RPC (the spool path arms it after the shard is materialized).
-     A slow/large *legitimate* upload that takes >2 min to feed one shard would spuriously abort. Acceptable
-     while opt-in/experimental (prior behavior was infinite-hang; 2 min is generous for the bench), but it
-     becomes production-reachable on the **default flip**. Switch to a reset-per-read *idle* deadline (the
-     `S3b-cbd` client-body pattern) so in-progress transfers aren't killed, before flipping the default.
+   - [x] **[P2-before-flip] Streaming shard-RPC: fixed wall-clock → idle deadline — DONE (v0.0.519.0).** The
+     streaming path armed `ShardRPCTimeout` (2 min) in the dispatch loop *before* the first stripe, bounding the
+     whole ingest+seal+RPC window so a slow/large legitimate upload could spuriously abort. Replaced with a
+     per-PUT idle watchdog (`idleTimeoutContext`) shared by all remote shards: it resets on any data-plane
+     progress (a client byte ingested via a wrapped body, or a sealed stripe flushed to a peer via the sink's
+     Write) and fires only after `ShardRPCTimeout` of NO progress. Dead/stalled peer still bounded
+     (`TestMixedPlacement_DeadPeerDoesNotHangPastDeadline`); slow-but-progressing upload no longer aborted
+     (`TestPipeline_SlowProgressingClientDoesNotAbort`). Landed with the default flip above.
    - [ ] **[P3] `buildInterleavedShards` test-helper fidelity debt.** The `stripe_codec_test.go` helper
      claims to mirror the CPUPool pipeline layout but diverges for multi-stripe objects (this was the
      root of the repair-layout bug). Tests built on it validate only codec self-consistency, not pipeline

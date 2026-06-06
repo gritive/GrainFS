@@ -37,9 +37,13 @@ var _ shardSink = (*remoteSealedShardSink)(nil)
 //   - Abort closes the pipe with an error, so the receiver's body Read returns a
 //     NON-EOF error and rejects the write: no partial shard is committed.
 //
-// The caller MUST pass a ctx with a deadline (e.g. shardRPCTimeout): a dead peer
-// that never reads would otherwise block Write forever; ctx cancellation makes
-// CallWithBody return, which unblocks Write via the pipe-reader CloseWithError.
+// The caller MUST pass a ctx that cancels on a stall (e.g. an idle-deadline ctx;
+// see idleTimeoutContext): a dead peer that never reads would otherwise block
+// Write forever; ctx cancellation makes CallWithBody return, which unblocks Write
+// via the pipe-reader CloseWithError. The sink reports downstream progress by
+// calling reset() after each successful Write (the peer consumed that chunk), so
+// the idle deadline only fires when the peer stops making progress, not on a
+// slow-but-steady transfer.
 //
 // INVARIANT (S2-sender-b wiring): shardKey here MUST equal the shardKey the
 // CPUPool sealed the AAD with (ShardAADFields). Seal-at-source binds the AAD at
@@ -47,11 +51,15 @@ var _ shardSink = (*remoteSealedShardSink)(nil)
 // they drift the shard stores fine but is silently unreadable until GET. Derive
 // both from one source.
 type remoteSealedShardSink struct {
-	pw   *io.PipeWriter
-	done chan error
+	pw    *io.PipeWriter
+	done  chan error
+	reset func() // progress signal for the idle deadline; nil if no deadline
 }
 
-func newRemoteSealedShardSink(ctx context.Context, tr shardTransport, peerAddr, bucket, shardKey string, shardIdx int) *remoteSealedShardSink {
+// newRemoteSealedShardSink streams a sealed shard to peerAddr. reset (may be nil)
+// is invoked after each successful Write to signal downstream progress to the
+// ctx's idle deadline.
+func newRemoteSealedShardSink(ctx context.Context, reset func(), tr shardTransport, peerAddr, bucket, shardKey string, shardIdx int) *remoteSealedShardSink {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	req := cluster.BuildSealedShardWriteRequest(bucket, shardKey, shardIdx)
@@ -66,10 +74,18 @@ func newRemoteSealedShardSink(ctx context.Context, tr shardTransport, peerAddr, 
 		_ = pr.Close()
 		done <- cluster.CheckShardWriteResponse(resp)
 	}()
-	return &remoteSealedShardSink{pw: pw, done: done}
+	return &remoteSealedShardSink{pw: pw, done: done, reset: reset}
 }
 
-func (s *remoteSealedShardSink) Write(p []byte) (int, error) { return s.pw.Write(p) }
+func (s *remoteSealedShardSink) Write(p []byte) (int, error) {
+	n, err := s.pw.Write(p)
+	// A successful pipe write means the peer's CallWithBody reader consumed the
+	// chunk — real downstream progress, so refresh the idle deadline.
+	if err == nil && s.reset != nil {
+		s.reset()
+	}
+	return n, err
+}
 
 func (s *remoteSealedShardSink) Finalize() error {
 	_ = s.pw.Close() // clean EOF: the receiver reads the full body and commits
