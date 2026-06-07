@@ -91,9 +91,27 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      wall-clock cap (generous, e.g. minutes-to-hours so realistic large uploads pass) or a server-side
      read/idle timeout on the S3 listener. Separate axis (abuse protection) from this slice (progress-friendly
      deadline); broad blast radius, so deferred.
-   - [x] **[P1] CompleteMultipartUpload 500s under concurrent large-object load — FIXED (v0.0.520.0).**
-     Three orthogonal premature-failure bugs on the cluster metadata-forward path, surfaced by the
-     object-size sweep (multipart 64/256MiB at conc≥16): **(1) sender control-pool starvation** —
+   - [ ] **[P1] CompleteMultipartUpload 500s under concurrent large-object load — NOT FIXED by v0.0.520.0
+     (re-bench refuted; re-diagnosed).** A 4-node GCP re-bench (64MiB/conc32) with the v0.0.520.0 binary
+     STILL shows ~190 5xx + 32 NoSuchUpload, ALL on `CompleteMultipartUpload`. The regime lives on a
+     **different path** than v0.0.520.0's fixes: `S3 handler → forwardRuntime.completeMultipartUpload →
+     state.forwardSender.Send`. Three distinct modes: **(1) deadline-500 @~5006ms (129×)** — the forward
+     ctx carries NO caller deadline (Hertz sets no ReadTimeout; no deadline middleware; forwardSender
+     `timeout=0`), so `ForwardSender.readinessRetry` (5s, `boot_phases_forwarders.go:88`) is the binding
+     bound. (Confirmed by code-read + the 5006ms clustering. THIS is the site I wrongly dismissed as
+     "not in path" — my dismissal reasoned about the data-group propose path, but the multipart forward
+     is a deadline-less caller.) **(2) `:7000` dial i/o timeout @~5000ms (50×)** — `forwardDialer` uses
+     `clusterTransport.Call` (connection-per-RPC), NOT `CallPooled`, so v0.0.520.0's control-pool
+     isolation does NOT help it; a conc32 fresh-TLS-handshake storm to `:7000` dial-times-out inside the
+     5s. This is transport saturation, not a deadline — widening readinessRetry alone won't clear it.
+     **(3) fast-404 NoSuchUpload @~1467ms (32×)** — uploadId not visible on the completing node
+     (cross-node multipart session / read-your-write; see the [P3] verify-whether below). FIX SCOPE
+     (re-diagnosed, bigger than the original "fold deadline sites"): bump readinessRetry→generous +
+     map its timeout to retryable 503; pool/raise the `forwardDialer` `Call` path (or pre-warm conns) for
+     mode 2; fix cross-node session visibility for mode 3. **Reproduce in-process (multi-node cluster +
+     CompleteMultipart through the forward path) BEFORE the next GCP run** — GCP is not the diagnosis
+     instrument. **What v0.0.520.0 DID land (correct hardening, kept, but insufficient for this incident):**
+     **(1) sender control-pool starvation** —
      `CallPooled` (control forward) shared one per-peer conn pool with bulk shard streams
      (`CallWithBody`/`CallFlatBuffer`/read-stream); bulk exhausted the cap (`MaxConnsPerPeer`=64) and
      starved the short forward → `forward: no reachable peer (dial :7000 i/o timeout)`. Fixed with a
@@ -109,8 +127,10 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      and a propose that exhausts its deadline surfaces a retryable **503 SlowDown** (sentinel
      `cluster.ErrProposeTimeout`, fires only on `DeadlineExceeded`, masks the follower loop's transient
      `ErrNotLeader`) instead of a 500. Scope note: this is *make-retryable*, NOT load-shedding backpressure
-     (see [P3] admission control below). All three RED→GREEN in-process; real-cluster re-bench (multipart
-     under conc≥16 → 0 errors) is the post-merge confirmation.
+     (see [P3] admission control below). All three landed fixes are RED→GREEN in-process and are correct
+     hardening — but the re-bench proves they do NOT touch the CompleteMultipart forward path above, so the
+     [P1] incident remains OPEN (re-diagnosed). PR #720 reframed from "fixes multipart 500s" to "metadata-forward
+     hardening"; do NOT claim the incident is fixed without an in-process repro + GCP re-bench showing 0 errors.
    - [ ] **[P3] Verify-whether: CompleteMultipart 200-then-404 (NoSuchUpload) on a follower's immediate
      read-after-write.** `meta_raft.go:933` `waitForwardedAppliedResult` swallows a local-apply timeout as
      SUCCESS (`return nil`) — the forwarded command committed on the leader but the LOCAL object-index apply

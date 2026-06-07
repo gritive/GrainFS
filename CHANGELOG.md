@@ -4,8 +4,18 @@
 
 ### Fixed
 
-- **CompleteMultipartUpload no longer 500s under concurrent large-object load.** Three
-  orthogonal premature-failure bugs on the cluster metadata-forward path are fixed:
+- **Cluster metadata-forward hardening: control-pool isolation + generous propose
+  deadlines + retryable-503 mapping.** Three correctness/robustness fixes on the
+  cluster propose path. **NOTE — this does NOT close the CompleteMultipartUpload-under-load
+  500 regime** (a 4-node GCP re-bench at 64MiB/conc32 still shows ~190 5xx + 32 NoSuchUpload).
+  That regime lives on a *different* path than these fixes touch — the S3
+  `CompleteMultipartUpload` forward (`forwardRuntime.completeMultipartUpload →
+  forwardSender.Send`) has no caller deadline, so `ForwardSender.readinessRetry` (5s,
+  `boot_phases_forwarders.go`) is the binding bound, and `forwardDialer` uses
+  connection-per-RPC `Call` (not the pooled path fixed here), so a conc32 fresh-TLS
+  handshake storm to `:7000` dial-times-out. Plus a separate cross-node multipart-session
+  404. Tracked as [P3] in TODOS; these three fixes are correct hardening but insufficient
+  for that incident:
   - **(sender) control-plane forward starvation.** Control metadata forwards
     (`CallPooled`) shared one per-peer connection pool with bulk shard-stream
     transfers (`CallWithBody`/`CallFlatBuffer`/read-streams). A flood of large-object
