@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -27,6 +28,24 @@ func TestMapError_DEKGenUnknownIsServiceUnavailable(t *testing.T) {
 	var got s3Error
 	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
 	assert.Equal(t, "ServiceUnavailable", got.Code)
+}
+
+// TestMapError_ProposeTimeoutIsRetryableSlowDown: a propose that exhausts its
+// raft-commit deadline under load must map to a retryable 503 SlowDown, not a
+// fatal 500. S3 clients auto-retry SlowDown; they do not retry 500. This is the
+// CompleteMultipartUpload-under-load 500 fix.
+func TestMapError_ProposeTimeoutIsRetryableSlowDown(t *testing.T) {
+	c := app.NewContext(0)
+
+	err := fmt.Errorf("complete multipart: %w",
+		fmt.Errorf("propose: forward timed out: %w", cluster.ErrProposeTimeout))
+	mapError(c, err)
+
+	require.Equal(t, consts.StatusServiceUnavailable, c.Response.StatusCode())
+
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "SlowDown", got.Code)
 }
 
 // TestMapError_GenericErrorIsInternalError: a plain error that matches no

@@ -92,7 +92,7 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      read/idle timeout on the S3 listener. Separate axis (abuse protection) from this slice (progress-friendly
      deadline); broad blast radius, so deferred.
    - [x] **[P1] CompleteMultipartUpload 500s under concurrent large-object load — FIXED (v0.0.520.0).**
-     Two orthogonal premature-failure bugs on the cluster metadata-forward path, surfaced by the
+     Three orthogonal premature-failure bugs on the cluster metadata-forward path, surfaced by the
      object-size sweep (multipart 64/256MiB at conc≥16): **(1) sender control-pool starvation** —
      `CallPooled` (control forward) shared one per-peer conn pool with bulk shard streams
      (`CallWithBody`/`CallFlatBuffer`/read-stream); bulk exhausted the cap (`MaxConnsPerPeer`=64) and
@@ -102,8 +102,27 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      forwarded propose/read-index handlers (`forward_receiver.go` `HandleGroupPropose`, `backend.go`
      `RegisterProposeForwardHandler`/`RegisterReadIndexHandler`) rebuilt `context.Background()`+5s,
      ignoring the caller's budget and aborting a commit at 5s (`context deadline exceeded`, the dominant
-     ~77% mode). Replaced with `proposeForwardTimeout` (30s). Both RED→GREEN in-process; real-cluster
-     re-bench (multipart under conc≥16 → 0 errors) is the post-merge confirmation.
+     ~77% mode). Replaced with `proposeForwardTimeout` (30s). **(3) sender propose path STILL capped at 5s,
+     and a residual timeout returned 500** — the (2) fix only touched the *receiver*; `DistributedBackend.propose`
+     itself wrapped both leader-commit and follower-forward branches in a hardcoded 5s (this was the INERT
+     gap: the earlier PR did not reach the request-side bound). Both branches now use `proposeForwardTimeout`,
+     and a propose that exhausts its deadline surfaces a retryable **503 SlowDown** (sentinel
+     `cluster.ErrProposeTimeout`, fires only on `DeadlineExceeded`, masks the follower loop's transient
+     `ErrNotLeader`) instead of a 500. Scope note: this is *make-retryable*, NOT load-shedding backpressure
+     (see [P3] admission control below). All three RED→GREEN in-process; real-cluster re-bench (multipart
+     under conc≥16 → 0 errors) is the post-merge confirmation.
+   - [ ] **[P3] Verify-whether: CompleteMultipart 200-then-404 (NoSuchUpload) on a follower's immediate
+     read-after-write.** `meta_raft.go:933` `waitForwardedAppliedResult` swallows a local-apply timeout as
+     SUCCESS (`return nil`) — the forwarded command committed on the leader but the LOCAL object-index apply
+     may still lag, so CompleteMultipart can return 200 while an immediate HEAD/GET on that node 404s. This
+     was deliberately NOT changed in v0.0.520.0: "fixing" it (returning the timeout) converts those 404s into
+     500s — strictly worse. Confirm whether the observed 404s are this (read-your-write lag) vs a separate
+     cross-node multipart-session routing bug before deciding any change.
+   - [ ] **[P3] Admission control (reject-before-work backpressure) for the propose path.** v0.0.520.0's
+     503-on-timeout makes a residual timeout retryable but does the full 30s of work first; under sustained
+     >30s overload the client retry can add load (retry-storm tail). True backpressure sheds load *before*
+     the commit — bound in-flight proposes and reject fast with 503 (the etcd/TiKV pattern). This is the (b)
+     throughput-redesign lever, not the bounded bug fix.
    - [ ] **[P3] Wire-propagate the caller's exact deadline to receiver forward handlers.** `proposeForwardTimeout`
      (above) is a fixed 30s because the transport handler signature `func(*Message) *Message` carries no
      caller ctx. Aligning the leader-side `ProposeWait`/`ReadIndex` deadline with the originator's actual

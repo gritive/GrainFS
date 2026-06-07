@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **CompleteMultipartUpload no longer 500s under concurrent large-object load.** Two
+- **CompleteMultipartUpload no longer 500s under concurrent large-object load.** Three
   orthogonal premature-failure bugs on the cluster metadata-forward path are fixed:
   - **(sender) control-plane forward starvation.** Control metadata forwards
     (`CallPooled`) shared one per-peer connection pool with bulk shard-stream
@@ -21,6 +21,19 @@
     still willing to wait for (`context deadline exceeded`, exactly 5000ms — the dominant
     mode observed under load). The bound is now `proposeForwardTimeout` (30s), above burst
     raft-commit p99 and below typical S3 client timeouts.
+  - **(sender) propose path shared the same 5s cap, and a residual timeout returned a
+    fatal 500.** The earlier fix only touched the *receiver* handlers; the originating
+    `DistributedBackend.propose` still wrapped both the leader-commit and the
+    follower-forward branches in a hardcoded 5s, so the request-side bound aborted the
+    same commits the receiver was now willing to wait 30s for. Both branches now use
+    `proposeForwardTimeout`. Additionally, a propose that *does* exhaust its deadline now
+    surfaces a retryable **503 SlowDown** (sentinel `cluster.ErrProposeTimeout`) instead
+    of a 500 — S3 clients auto-retry SlowDown but not 500. The sentinel fires only on
+    `DeadlineExceeded` (never client cancellation) and masks the transient `ErrNotLeader`
+    the follower loop accumulates, which bare context-error matching would otherwise leak
+    as a 500. **Scope note:** this makes a residual timeout *retryable*; it is not
+    load-shedding backpressure — under sustained >30s overload the retry can still add
+    load. True admission control (reject-before-work) is tracked separately.
 
 ## [0.0.519.0] - 2026-06-06
 
