@@ -53,7 +53,6 @@ type indexGroup struct {
 	applyErrs     map[uint64]error
 }
 
-//nolint:unused // Slice 4a dormant primitive — referenced only by tests until Slice 4b boot-wires the index groups.
 func newIndexGroup(node RaftNode, fsm *MetaFSM, forward indexGroupForwardFunc) *indexGroup {
 	return &indexGroup{
 		node:        node,
