@@ -22,9 +22,10 @@ const indexGroupForwardLocalApplyTimeout = 10 * time.Second
 type indexGroupForwardFunc func(ctx context.Context, data []byte) (uint64, error)
 
 // indexGroup is a dormant object-index-only raft replica: a *MetaFSM driven
-// object-index-only by an apply loop over a raft.Node's ApplyCh. It implements
-// objectIndexLookup, objectIndexProposer, and objectIndexListSource so it drops
-// into ObjectIndexShard{Reader, Writer, Lister} (Slice 4b boot-wires N of them).
+// object-index-only by an apply loop over a raft.Node's ApplyCh. Later slices add
+// the objectIndexLookup/objectIndexProposer/objectIndexListSource methods +
+// compile-time assertions so it drops into ObjectIndexShard{Reader, Writer,
+// Lister}; Slice 4b boot-wires N of them.
 type indexGroup struct {
 	node    RaftNode // nil only in the channel-driven apply-loop unit test
 	fsm     *MetaFSM
@@ -74,9 +75,17 @@ func (g *indexGroup) runApplyLoop(ctx context.Context, applyCh <-chan raft.LogEn
 					g.recordApplyResult(entry.Index, err)
 				}
 			case raft.LogEntrySnapshot:
+				// Unlike MetaRaft.applySnapshotEntry (meta_raft.go:1041), the index
+				// group intentionally skips installSnapshotDEKs() after Restore: an
+				// object-index replica never decrypts object data — it only tracks
+				// DekGen refcounts in the in-memory dekRefCounts map, which Restore
+				// already rebuilds. No keeper material is needed.
 				if err := g.fsm.Restore(raft.SnapshotMeta{Index: entry.Index, Term: entry.Term}, entry.Command); err != nil {
-					// Unrecoverable: record and halt without advancing.
-					g.recordApplyResult(entry.Index, err)
+					// A failed snapshot Restore is unrecoverable, so the loop halts
+					// (returns) without advancing lastApplied. Waiters observe the
+					// halt via the closed done channel (recording the error here would
+					// be a dead store: applyError is only read after waitApplied
+					// succeeds, which it never does for an unadvanced index).
 					return
 				}
 			default:
