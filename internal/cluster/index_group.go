@@ -187,3 +187,147 @@ func (g *indexGroup) waitAppliedResult(ctx context.Context, idx uint64) error {
 	}
 	return nil
 }
+
+// Start restores from any persisted snapshot, then launches the node and the
+// apply loop. It mirrors MetaRaft.Start but is scoped to the object index.
+// Callers must not call Start more than once.
+func (g *indexGroup) Start(ctx context.Context) error {
+	if g.node == nil {
+		return fmt.Errorf("index group: Start called with nil node")
+	}
+	if snap, err := g.node.LatestSnapshot(); err != nil {
+		return fmt.Errorf("index group: load latest snapshot: %w", err)
+	} else if snap != nil && snap.Index > 0 {
+		meta := raft.SnapshotMeta{Index: snap.Index, Term: snap.Term}
+		if err := g.fsm.Restore(meta, snap.Data); err != nil {
+			return fmt.Errorf("index group: restore latest snapshot: %w", err)
+		}
+		g.lastApplied.Store(snap.Index)
+	}
+	loopCtx, cancel := context.WithCancel(ctx)
+	g.cancel = cancel
+	g.node.Start()
+	go g.runApplyLoop(loopCtx, g.node.ApplyCh())
+	return nil
+}
+
+// Close cancels the apply loop, waits for it to drain, then closes the raft
+// node. Safe to call even if Start was never called.
+func (g *indexGroup) Close() {
+	if g.cancel != nil {
+		g.cancel()
+		<-g.done
+	}
+	if g.node != nil {
+		g.node.Close()
+	}
+}
+
+// ProposeObjectIndex encodes an object-index put command and proposes it
+// through the raft node (or forwards to the leader if not leader).
+func (g *indexGroup) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error {
+	payload, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
+	if err != nil {
+		return fmt.Errorf("index group: encode put object index: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, payload)
+	if err != nil {
+		return fmt.Errorf("index group: encode meta cmd: %w", err)
+	}
+	return g.proposeOrForward(ctx, data)
+}
+
+// ProposeDeleteObjectIndex encodes an object-index delete command and proposes it.
+func (g *indexGroup) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error {
+	payload, err := encodeMetaDeleteObjectIndexCmd(bucket, key, versionID)
+	if err != nil {
+		return fmt.Errorf("index group: encode delete object index: %w", err)
+	}
+	data, err := encodeMetaCmd(MetaCmdTypeDeleteObjectIndex, payload)
+	if err != nil {
+		return fmt.Errorf("index group: encode meta cmd: %w", err)
+	}
+	return g.proposeOrForward(ctx, data)
+}
+
+// proposeOrForward proposes data locally when this node is the leader (or
+// no forward func is set), otherwise forwards to the leader.
+func (g *indexGroup) proposeOrForward(ctx context.Context, data []byte) error {
+	if g.forward == nil || g.node.IsLeader() {
+		idx, err := g.node.ProposeWait(ctx, data)
+		if err != nil {
+			return err
+		}
+		return g.waitAppliedResult(ctx, idx)
+	}
+	idx, err := g.forward(ctx, data)
+	if err != nil {
+		return err
+	}
+	if idx > 0 {
+		return g.waitForwardedApplied(ctx, idx)
+	}
+	return nil
+}
+
+// waitForwardedApplied waits for a forwarded command (whose log index is
+// known) to be applied locally. If the caller supplied no deadline, a
+// bounded local-apply timeout is applied; a local timeout does NOT surface
+// as an error to the caller (the commit already succeeded on the leader).
+func (g *indexGroup) waitForwardedApplied(ctx context.Context, idx uint64) error {
+	localCtx := ctx
+	var localCancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		localCtx, localCancel = context.WithTimeout(ctx, indexGroupForwardLocalApplyTimeout)
+		defer localCancel()
+	}
+	if err := g.waitAppliedResult(localCtx, idx); err != nil {
+		// If the caller's context is still alive but the local timeout fired,
+		// treat it as a non-error (the commit succeeded; we just didn't observe
+		// local apply in time). This mirrors meta_bucket_assigner.go:132.
+		if ctx.Err() == nil && localCtx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// snapshot captures the current FSM state into a durable raft snapshot and
+// returns the raw snapshot bytes plus the committed index it covers.
+func (g *indexGroup) snapshot() ([]byte, uint64, error) {
+	data, err := g.fsm.Snapshot()
+	if err != nil {
+		return nil, 0, fmt.Errorf("index group: FSM snapshot: %w", err)
+	}
+	idx := g.node.CommittedIndex()
+	if err := g.node.CreateSnapshot(idx, data); err != nil {
+		return nil, 0, fmt.Errorf("index group: create snapshot at %d: %w", idx, err)
+	}
+	return data, idx, nil
+}
+
+// ObjectIndexLatest delegates to the FSM.
+func (g *indexGroup) ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool) {
+	return g.fsm.ObjectIndexLatest(bucket, key)
+}
+
+// ObjectIndexVersion delegates to the FSM.
+func (g *indexGroup) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool) {
+	return g.fsm.ObjectIndexVersion(bucket, key, versionID)
+}
+
+// ObjectIndexLatestEntries delegates to the FSM.
+func (g *indexGroup) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	return g.fsm.ObjectIndexLatestEntries(bucket, prefix, maxKeys)
+}
+
+// ObjectIndexLatestEntriesPage delegates to the FSM.
+func (g *indexGroup) ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) ([]ObjectIndexEntry, bool) {
+	return g.fsm.ObjectIndexLatestEntriesPage(bucket, prefix, marker, maxKeys)
+}
+
+// ObjectIndexVersionEntries delegates to the FSM.
+func (g *indexGroup) ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	return g.fsm.ObjectIndexVersionEntries(bucket, prefix, maxKeys)
+}
