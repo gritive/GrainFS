@@ -42,6 +42,7 @@ const (
 	MetaCmdTypeAddNode                      = clusterpb.MetaCmdTypeAddNode
 	MetaCmdTypeRemoveNode                   = clusterpb.MetaCmdTypeRemoveNode
 	MetaCmdTypePutShardGroup                = clusterpb.MetaCmdTypePutShardGroup        // PR-C
+	MetaCmdTypePutIndexGroup                = clusterpb.MetaCmdTypePutIndexGroup        // sharded object index registry
 	MetaCmdTypePutBucketAssignment          = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
 	MetaCmdTypeSetLoadSnapshot              = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
 	MetaCmdTypeProposeRebalancePlan         = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
@@ -261,6 +262,7 @@ type MetaFSM struct {
 	mu                sync.RWMutex
 	nodes             map[string]MetaNodeEntry
 	shardGroups       map[string]ShardGroupEntry // key = group ID
+	indexGroups       map[string]IndexGroupEntry // key = index group ID; separate from shardGroups
 	bucketAssignments map[string]string          // bucket → group_id (PR-D)
 	objectIndex       map[string]ObjectIndexEntry
 	objectLatest      map[string]string
@@ -672,6 +674,7 @@ func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
 		nodes:                      make(map[string]MetaNodeEntry),
 		shardGroups:                make(map[string]ShardGroupEntry),
+		indexGroups:                make(map[string]IndexGroupEntry),
 		bucketAssignments:          make(map[string]string),
 		objectIndex:                make(map[string]ObjectIndexEntry),
 		objectLatest:               make(map[string]string),
@@ -787,6 +790,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyRemoveNode(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutShardGroup:
 		return f.applyPutShardGroup(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePutIndexGroup:
+		return f.applyPutIndexGroup(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutObjectIndex:
