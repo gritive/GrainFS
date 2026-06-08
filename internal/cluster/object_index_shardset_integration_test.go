@@ -30,3 +30,26 @@ func TestObjectIndexShardSet_N1_IdenticalToDirectMetaFSM(t *testing.T) {
 	assert.Equal(t, directVOK, setVOK)
 	assert.Equal(t, directVer, setVer)
 }
+
+// TestShardSet_N1_ListIdenticalToDirectMetaFSM proves that the N=1 ObjectIndexShardSet
+// façade produces byte-identical LIST output to calling the MetaFSM directly.
+// This is the behavior-neutral seam proof for the LIST path introduced in Slice 2.
+func TestShardSet_N1_ListIdenticalToDirectMetaFSM(t *testing.T) {
+	fsm := NewMetaFSM()
+	for _, e := range []ObjectIndexEntry{
+		{Bucket: "b", Key: "a", VersionID: "1", PlacementGroupID: "g"},
+		{Bucket: "b", Key: "c", VersionID: "1", PlacementGroupID: "g"},
+		{Bucket: "b", Key: "b", VersionID: "1", PlacementGroupID: "g"},
+	} {
+		payload, err := encodeMetaPutObjectIndexCmd(e, false)
+		require.NoError(t, err)
+		require.NoError(t, fsm.applyPutObjectIndex(payload))
+	}
+	set, err := NewObjectIndexShardSet([]ObjectIndexShard{{Reader: fsm, Lister: fsm}})
+	require.NoError(t, err)
+
+	dPage, dTrunc := fsm.ObjectIndexLatestEntriesPage("b", "", "", 0)
+	sPage, sTrunc := set.ObjectIndexLatestEntriesPage("b", "", "", 0)
+	assert.Equal(t, dTrunc, sTrunc)
+	assert.Equal(t, dPage, sPage)
+}

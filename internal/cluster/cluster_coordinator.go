@@ -139,11 +139,6 @@ type clusterCoordinatorRuntime struct {
 	ecConfig  ECConfig
 }
 
-type objectIndexSource interface {
-	ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool)
-	ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool)
-}
-
 type objectIndexListSource interface {
 	ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
 	ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) (entries []ObjectIndexEntry, truncated bool)
@@ -299,7 +294,7 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 
 // routeReadOrBucket picks RouteObjectRead when an object index is configured
 // (production wiring), and falls back to RouteBucket when not (test wiring
-// without an objectIndexProposer / objectIndexSource). Preserves the legacy
+// without an objectIndexProposer / objectIndexLookup). Preserves the legacy
 // routeObjectLatest/Version dispatch behavior that callers depended on.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
 	target, _, _, err := c.routeIndexedReadOrBucket(bucket, key, versionID)
@@ -339,7 +334,7 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 
 func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOffset int64) (RouteTarget, ShardGroupEntry, error) {
 	state := c.runtimeState()
-	if c.indexWriter != nil && metaObjectIndexAdapter(c.meta) != nil && !storage.IsInternalBucket(bucket) {
+	if c.indexWriter != nil && c.objectIndexReadSource() != nil && !storage.IsInternalBucket(bucket) {
 		target, entry, err := state.opRouter.RouteObjectRead(bucket, key, "")
 		if err == nil {
 			if entry.Size > expectedOffset {
@@ -835,9 +830,24 @@ func objectIndexEntryToVersion(entry ObjectIndexEntry, isLatest bool) *storage.O
 	}
 }
 
+// objectIndexReadSource returns the point-read index source: the injected
+// façade (c.indexReader) when set, else the meta adapter (byte-identical
+// fallback for tests / single-node).
+func (c *ClusterCoordinator) objectIndexReadSource() objectIndexLookup {
+	if c.indexReader != nil {
+		return c.indexReader
+	}
+	return metaObjectIndexAdapter(c.meta)
+}
+
 func (c *ClusterCoordinator) objectIndexListSource() (objectIndexListSource, bool) {
 	if c.indexWriter == nil {
 		return nil, false
+	}
+	if c.indexReader != nil {
+		if ls, ok := c.indexReader.(objectIndexListSource); ok {
+			return ls, true
+		}
 	}
 	src, ok := c.meta.(objectIndexListSource)
 	return src, ok
@@ -1188,7 +1198,7 @@ func (c *ClusterCoordinator) ListObjectVersions(
 		if err := c.HeadBucket(ctx, bucket); err != nil {
 			return nil, err
 		}
-		latestSrc, _ := c.meta.(objectIndexSource)
+		latestSrc := c.objectIndexReadSource()
 		entries := src.ObjectIndexVersionEntries(bucket, prefix, maxKeys)
 		versions := make([]*storage.ObjectVersion, 0, len(entries))
 		for _, entry := range entries {
@@ -1370,7 +1380,7 @@ func (c *ClusterCoordinator) PutObjectWithRequestResult(ctx context.Context, req
 
 func (c *ClusterCoordinator) previousObjectForMutation(ctx context.Context, bucket, key string) (storage.PreviousObject, error) {
 	if !storage.IsInternalBucket(bucket) && c.indexWriter != nil {
-		if src := metaObjectIndexAdapter(c.meta); src != nil {
+		if src := c.objectIndexReadSource(); src != nil {
 			entry, ok := src.ObjectIndexLatest(bucket, key)
 			if !ok || entry.IsDeleteMarker {
 				return storage.PreviousObject{}, nil
