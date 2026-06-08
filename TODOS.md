@@ -104,13 +104,27 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      `clusterTransport.Call` (connection-per-RPC), NOT `CallPooled`, so v0.0.520.0's control-pool
      isolation does NOT help it; a conc32 fresh-TLS-handshake storm to `:7000` dial-times-out inside the
      5s. This is transport saturation, not a deadline — widening readinessRetry alone won't clear it.
-     **(3) fast-404 NoSuchUpload @~1467ms (32×)** — uploadId not visible on the completing node
-     (cross-node multipart session / read-your-write; see the [P3] verify-whether below). FIX SCOPE
-     (re-diagnosed, bigger than the original "fold deadline sites"): bump readinessRetry→generous +
-     map its timeout to retryable 503; pool/raise the `forwardDialer` `Call` path (or pre-warm conns) for
-     mode 2; fix cross-node session visibility for mode 3. **Reproduce in-process (multi-node cluster +
-     CompleteMultipart through the forward path) BEFORE the next GCP run** — GCP is not the diagnosis
-     instrument. **What v0.0.520.0 DID land (correct hardening, kept, but insufficient for this incident):**
+     **(3) fast-404 NoSuchUpload (32×)** — NOT part-scatter: log-correlation proved 100% of 404s
+     (32/32, and 66/66 in the CallPooled re-bench) had a PRIOR 5xx on the SAME uploadId, zero
+     first-attempt. It is the **phantom-commit retry-tail** of mode 1: the sender gives up at the 5s
+     readiness cap, the commit actually lands at ~5.5s, the uploadId is consumed, the client retries →
+     NoSuchUpload. **ERRORS LEVER (identified, applied, pending final GCP confirm): the readiness cap was
+     simply BELOW the commit's normal under-load latency.** Decisive data: a CallPooled re-bench barely
+     moved errors (CallPooled is correct hygiene but trimmed only dial failures ~50→37) — and SUCCESSFUL
+     completes take ~5.5s p50 / 9.4s p99 at conc32. Those successes are the LOCAL-leader path (uncapped);
+     the deadline-500s are the FORWARD path guillotined at 5s. Same ~5.5s commit, knife set below it only
+     on the forward path = a misconfigured timeout. FIX APPLIED: `ForwardSender.readinessRetry`
+     `5s → cluster.ProposeForwardTimeout()` (30s), matching the receiver bound — converts the forward
+     deadline-500s into ~5.5s successes and kills the 404 retry-tail at the source (no phantom). CallPooled
+     kept as hygiene. **Risk to watch on the confirm re-bench:** removing the 5s shed raises meta-raft
+     in-flight (already 2× "node stepped down"); if p99 climbs toward 30s or step-downs multiply → the fix
+     is admission control (fast retryable 503 when meta-raft in-flight exceeds a bound), not a longer
+     deadline. **SEPARATE DELIVERABLE — throughput (142 vs ~717 MiB/s):** CompleteMultipart commit is
+     ~5.5s because every object-index commit funnels through the SINGLE cluster meta-raft, which serializes
+     (and sheds leadership) under conc32. That is the architectural write-path-consensus bound (consistent
+     with the streaming-EC epic); confirm the meta-raft-serialization hypothesis (COMPLETE-path stage
+     breakdown / concurrent in-flight meta-propose count) before any redesign. Errors→0 does NOT touch it.
+     **What v0.0.520.0 DID land (correct hardening, kept, but NOT the errors lever):**
      **(1) sender control-pool starvation** —
      `CallPooled` (control forward) shared one per-peer conn pool with bulk shard streams
      (`CallWithBody`/`CallFlatBuffer`/read-stream); bulk exhausted the cap (`MaxConnsPerPeer`=64) and

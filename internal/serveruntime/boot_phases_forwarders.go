@@ -93,7 +93,15 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	state.forwardSender = cluster.NewForwardSender(forwardDialer).
 		WithStreamDialer(forwardStreamDialer).
 		WithReadStreamDialer(forwardReadStreamDialer).
-		WithReadinessRetry(5 * time.Second).
+		// A deadline-less forward (e.g. CompleteMultipartUpload, which carries no
+		// caller deadline) is bounded by this readiness retry. A hardcoded 5s
+		// guillotined forwards whose leader-side commit legitimately takes ~5.5s
+		// under conc≥16 load — the local-leader path is uncapped and finishes at
+		// the same latency, proving 5s sat BELOW the operation's normal under-load
+		// time. That premature cut also caused the NoSuchUpload retry-tail
+		// (phantom commit: sender gave up at 5s, commit landed at ~5.5s, uploadId
+		// consumed, warp retried → 404). Align with the receiver's commit bound.
+		WithReadinessRetry(cluster.ProposeForwardTimeout()).
 		WithLeaderHintResolver(func(hint string) string {
 			if addr, ok := cluster.ResolveNodeAddress(metaRaft.FSM(), hint); ok {
 				return addr

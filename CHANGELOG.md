@@ -4,18 +4,25 @@
 
 ### Fixed
 
-- **Cluster metadata-forward hardening: control-pool isolation + generous propose
-  deadlines + retryable-503 mapping.** Three correctness/robustness fixes on the
-  cluster propose path. **NOTE — this does NOT close the CompleteMultipartUpload-under-load
-  500 regime** (a 4-node GCP re-bench at 64MiB/conc32 still shows ~190 5xx + 32 NoSuchUpload).
-  That regime lives on a *different* path than these fixes touch — the S3
-  `CompleteMultipartUpload` forward (`forwardRuntime.completeMultipartUpload →
-  forwardSender.Send`) has no caller deadline, so `ForwardSender.readinessRetry` (5s,
-  `boot_phases_forwarders.go`) is the binding bound, and `forwardDialer` uses
-  connection-per-RPC `Call` (not the pooled path fixed here), so a conc32 fresh-TLS
-  handshake storm to `:7000` dial-times-out. Plus a separate cross-node multipart-session
-  404. Tracked as [P3] in TODOS; these three fixes are correct hardening but insufficient
-  for that incident:
+- **Cluster CompleteMultipartUpload-under-load: forward readiness deadline aligned to
+  commit latency (the errors lever) + metadata-forward hardening.** The errors lever
+  (pending a final GCP confirmation re-bench): the follower→leader `CompleteMultipartUpload`
+  forward carries **no caller deadline**, so `ForwardSender.readinessRetry` was the binding
+  bound — and it was hardcoded to **5s, BELOW the operation's normal under-load commit
+  latency (~5.5s p50, 9.4s p99 at conc32)**. Proof: the local-leader path is uncapped and
+  finishes at that same ~5.5s without erroring; only the forward path had a knife set below
+  it. That premature 5s cut produced the dominant `context deadline exceeded` 500s AND the
+  `NoSuchUpload` retry-tail (phantom commit: sender gave up at 5s, the commit landed at
+  ~5.5s, the uploadId was consumed, the client retried → 404 — confirmed: 100% of observed
+  404s had a prior 5xx on the same uploadId, zero first-attempt). The readiness bound now
+  uses `ProposeForwardTimeout` (30s), matching the receiver's commit bound. Plus correct
+  conn-reuse hygiene (below). **NOTE — this closes the *errors* regime, NOT throughput
+  parity:** CompleteMultipart commit is ~5.5s under conc32 because every object-index commit
+  funnels through the single cluster meta-raft (which serializes — and occasionally sheds
+  leadership — under load). That throughput gap (142 vs ~717 MiB/s) is a separate
+  meta-raft-serialization problem tracked as [P1]/[P3] in TODOS, not addressed here.
+  Supporting hardening (correct, but NOT the lever — a re-bench showed it only trimmed dials
+  ~50→37, not the dominant deadline cut):
   - **(sender) control-plane forward starvation.** Control metadata forwards
     (`CallPooled`) shared one per-peer connection pool with bulk shard-stream
     transfers (`CallWithBody`/`CallFlatBuffer`/read-streams). A flood of large-object
@@ -44,6 +51,12 @@
     as a 500. **Scope note:** this makes a residual timeout *retryable*; it is not
     load-shedding backpressure — under sustained >30s overload the retry can still add
     load. True admission control (reject-before-work) is tracked separately.
+  - **forward dialers use `CallPooled` (conn-reuse hygiene).** The boot follower→leader
+    forward dialers (group propose, meta propose, meta read) used connection-per-RPC `Call`,
+    opening a fresh TLS handshake per forward; the bounded control pool now backs them, same
+    as `shardSvc.SendRequest`. Correct hygiene — but a re-bench showed it only trimmed dial
+    failures (~50→37), so it is NOT the errors lever (the readiness-deadline alignment above
+    is).
 
 ## [0.0.519.0] - 2026-06-06
 

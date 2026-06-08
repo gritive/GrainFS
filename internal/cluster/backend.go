@@ -62,6 +62,17 @@ var ErrProposeTimeout = errors.New("cluster: propose deadline exceeded")
 // would otherwise bound ingest+seal+RPC and abort a slow-but-progressing upload.
 func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
 
+// ProposeForwardTimeout exposes proposeForwardTimeout so the boot wiring in
+// serveruntime (which cannot see the unexported const) can set the forward
+// SENDER's readiness deadline to the SAME generous bound the receiver commit
+// uses. A follower→leader CompleteMultipartUpload forward carries no caller
+// deadline, so ForwardSender.readinessRetry was the binding bound; a hardcoded
+// 5s there guillotined forwards whose commit legitimately takes ~5.5s under
+// load (proven by the local-leader path, which is uncapped and finishes at the
+// same latency). Aligning the sender bound with the receiver's removes that
+// mismatch.
+func ProposeForwardTimeout() time.Duration { return proposeForwardTimeout }
+
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
 
 // EC in-memory shard fast path size caps. Replication (parity == 0) keeps the
