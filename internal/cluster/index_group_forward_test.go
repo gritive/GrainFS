@@ -222,10 +222,19 @@ func TestIndexGroupForward_SenderRetriesNotReady(t *testing.T) {
 
 // TestIndexGroupForward_NotLeaderIsTerminal verifies that when the receiver
 // resolves to a FOLLOWER (so node.ProposeWait returns ErrNotLeader), the sender
-// surfaces a TERMINAL error — NOT a retryable not-ready. This slice intentionally
-// does not retry not-leader inside Send (the reply wire carries no leader hint
-// and Send's leaderHint is fixed per call); leadership-change retry is caller /
-// Task-5 hook scope, matching the existing 0x14 forwardPropose ErrNotLeader path.
+// surfaces a TERMINAL error from a SINGLE Send call — NOT a retryable not-ready.
+// Send itself does not loop on not-leader (its leaderHint is fixed per call and
+// the reply wire carries no leader-hint slot).
+//
+// IMPORTANT (do not mis-read as "matches the data-group path"): unlike the
+// data-group DistributedBackend propose, which runs an INTERNAL bounded
+// convergence loop (re-checks IsLeader, retries ErrNotLeader until proposeCtx,
+// reconstructs the typed raft.ErrNotLeader sentinel — backend.go:1130-1199 /
+// :904-905), neither Send nor the Slice-4a proposeOrForward loops today. That
+// convergence loop is REQUIRED and lives in Task 4.7 (re-read LeaderID + re-check
+// local IsLeader + treat not-leader AND empty-hint as retryable until ctx). This
+// test pins ONLY the single-call terminal classification, which the Task-4.7 loop
+// builds on; it does NOT claim the overall write path is terminal on not-leader.
 func TestIndexGroupForward_NotLeaderIsTerminal(t *testing.T) {
 	c := startForward2(t, "ig0")
 	require.True(t, c.lookup("n1").IsLeader(), "n1 must be leader")
