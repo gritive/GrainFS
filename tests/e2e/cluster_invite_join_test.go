@@ -635,7 +635,13 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 		// Full path: a 2-node invite-join cluster at N>1 deferred forms and
 		// round-trips an S3 PUT/GET — proving the façade is assembled before S3
 		// serves (a GET-after-PUT through the sharded index would miss if writes
-		// had routed to the meta-FSM placeholder).
+		// had routed to the meta-FSM placeholder for reads but not writes, or vice
+		// versa — the divergent-rewire correctness hazard). It does NOT assert that
+		// sharding is *perf-engaged* vs a self-consistent total fallback to the
+		// meta-FSM placeholder (both rewires happen in one bootIndexGroupsPostSeed
+		// call, so divergence is structurally impossible); engagement (the
+		// meta_index_propose inflation drop) is the 4b-2 GCP bench's job, not this
+		// correctness test's.
 		ginkgo.It("forms a 2-node invite-join deferred N>1 cluster and round-trips S3 PUT/GET", func() {
 			t := ginkgo.GinkgoTB()
 			leader := startInviteLeaderIndexed(t, inviteJoinClusterKey, 4, 2)
