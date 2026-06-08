@@ -32,8 +32,8 @@ type ObjectIndexShardSet struct {
 }
 
 var (
-	_ objectIndexLookup    = (*ObjectIndexShardSet)(nil)
-	_ objectIndexProposer  = (*ObjectIndexShardSet)(nil)
+	_ objectIndexLookup     = (*ObjectIndexShardSet)(nil)
+	_ objectIndexProposer   = (*ObjectIndexShardSet)(nil)
 	_ objectIndexListSource = (*ObjectIndexShardSet)(nil)
 )
 

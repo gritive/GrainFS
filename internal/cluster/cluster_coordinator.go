@@ -139,11 +139,6 @@ type clusterCoordinatorRuntime struct {
 	ecConfig  ECConfig
 }
 
-type objectIndexSource interface {
-	ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool)
-	ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool)
-}
-
 type objectIndexListSource interface {
 	ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
 	ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) (entries []ObjectIndexEntry, truncated bool)
@@ -299,7 +294,7 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 
 // routeReadOrBucket picks RouteObjectRead when an object index is configured
 // (production wiring), and falls back to RouteBucket when not (test wiring
-// without an objectIndexProposer / objectIndexSource). Preserves the legacy
+// without an objectIndexProposer / objectIndexLookup). Preserves the legacy
 // routeObjectLatest/Version dispatch behavior that callers depended on.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
 	target, _, _, err := c.routeIndexedReadOrBucket(bucket, key, versionID)
