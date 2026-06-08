@@ -264,13 +264,29 @@ Planning reference: operator trust roadmap note from 2026-05-15.
          batches land = re-entry convergent), with RF=N voters derived from the joined `liveNodes` (not the
          empty deferred-mode `state.peers`, which would yield a self-only RF=1 group). `TestHandleDeferredSeed_
          SeedsIndexGroupsAtQuorum` proves (unit) that the deferred `seedNow` block now fills the FSM with the
-         configured N index groups at RF=N (resolved node IDs). The end-to-end multi-node boot-completion
-         (genesis blocks on `WaitForIndexGroupCount(30s)` then unblocks when the last joiner — already an FSM
-         member before it reaches its own wait — trips the seed) is correct BY CONSTRUCTION (verified by
-         code-reading: join listener up before this phase, no count-before-block deadlock) and will be
-         execution-proven by the 4b-2 GCP multi-node bench, NOT by this unit test. The GCP bench harness (which
-         boots via `--bootstrap-expect-nodes`) can now run N>1 — but still needs `--object-index-groups N` added
-         to its `serve` invocation to actually exercise it (see 4b-2 bench prep).
+         configured N index groups at RF=N (resolved node IDs). NOTE: this entry's earlier "boot-completion
+         correct BY CONSTRUCTION" claim was INCOMPLETE — it missed a SECOND, distinct boot-ordering deadlock
+         (the seeding was fixed, but `bootIndexGroupsPostSeed` blocked before `admin.sock` opened, and
+         invite-join joiners need a bundle minted on admin.sock to join → quorum → seed). That deadlock is fixed
+         in the entry below. With both fixes the GCP bench harness (boots via `--bootstrap-expect-nodes`) can run
+         N>1 — but still needs `--object-index-groups N` added to its `serve` invocation to exercise it.
+   - [x] **[4b-2 BLOCKER — RESOLVED] invite-join deferred N>1 boot-ordering deadlock.** Distinct from the
+         seeding fix above: `bootIndexGroupsPostSeed` (run.go) ran at :206, BEFORE `bootHTTPServerAndAdmin`
+         (:250) opened `admin.sock` — on which the invite-mint endpoint (`/v1/cluster/invite/create`) lives. So
+         a genesis at N>1 deferred blocked on `WaitForIndexGroupCount` before admin.sock existed; invite-join
+         joiners could not mint a bundle to join → quorum never reached → index groups never seeded → 30s
+         timeout, `Error: boot index groups: only 0/N index groups visible after 30s`. Also a 4b-3 flip
+         prerequisite (production greenfield N=16 via invite-join hits the same path). FIX: relocate the phase
+         to just AFTER admin.sock opens and BEFORE the S3 listener starts (`srv.Run()` in bootResharderAndDegraded/
+         bootNodeServices, run.go ~:304-307), preserving the "object-index façade assembled before S3 serves"
+         invariant; the forwardReceiver + clusterCoord rewires are pointer-receiver in-place so the earlier-
+         registered forward handler sees them, and the leader's deferred-seed post-join hook is wired even
+         earlier (bootWALAndForwardersPart1, run.go:164) so it fires while this phase blocks. Also raised the
+         deferred-mode index wait to `--bootstrap-expect-timeout` (was hardcoded 30s) so a slow multi-node join
+         does not fail boot. Proven by `tests/e2e/cluster_invite_join_test.go`: solo N>1 opens admin.sock
+         (RED-on-revert verified — pre-fix it times out at 25s) + a 2-node invite-join deferred N>1 cluster forms
+         and round-trips an S3 PUT/GET. N=1 byte-identical (early-return). **The 4b-2 GCP bench is now unblocked
+         on the real invite-join path** (pending the harness `--object-index-groups N` flag-add).
    - [ ] **[4b-3 pre-flip BLOCKER] façade-bypass void reads at N>1.** These read the meta-FSM object index
          DIRECTLY (not via the `ObjectIndexShardSet` façade), so at N>1 they return the empty void. Harmless at
          default N=1; MUST be routed through the façade before the 4b-3 default→N flip. Discriminator: "reads
