@@ -62,7 +62,18 @@ func bootIndexGroupsPostSeed(ctx context.Context, state *bootState) error {
 	peers := state.peers
 
 	// 1. Confirm the seed (genesis) / replay (restart) landed before assembling.
-	if err := WaitForIndexGroupCount(ctx, metaRaft.FSM(), count, 30*time.Second); err != nil {
+	// At N>1 with --bootstrap-expect-nodes this wait IS the cluster-formation
+	// deadline (since 4b-2 this phase runs after admin.sock opens and blocks here
+	// until the target node count joins and the deferred seed fires). Match the
+	// deferred SHARD seed's budget (--bootstrap-expect-timeout, default 10m)
+	// instead of a hardcoded 30s, or a slow multi-node join (GCP: sequential
+	// bundle-mint + IAP-SSH startup) fails boot. Immediate-genesis (ExpectNodes<=1)
+	// keeps 30s: the groups are already seeded so this returns at once.
+	indexWaitTimeout := 30 * time.Second
+	if state.cfg.BootstrapExpectNodes > 1 && state.cfg.BootstrapExpectTimeout > indexWaitTimeout {
+		indexWaitTimeout = state.cfg.BootstrapExpectTimeout
+	}
+	if err := WaitForIndexGroupCount(ctx, metaRaft.FSM(), count, indexWaitTimeout); err != nil {
 		return fmt.Errorf("boot index groups: %w", err)
 	}
 
