@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -67,40 +68,40 @@ func newIndexGroup(node RaftNode, fsm *MetaFSM, forward indexGroupForwardFunc) *
 // exit (the ONLY closer of done — Close waits on it). Object-index commands only
 // (coupling guard); a LogEntrySnapshot whose Restore fails halts the loop without
 // advancing lastApplied (mirrors MetaRaft.applySnapshotEntry's no-advance-on-failure).
+//
+// The loop exits ONLY when the node closes applyCh (driven by Close→node.Close()),
+// NOT on ctx cancellation. This keeps the apply-bridge (raftnode_adapter.go:200, a
+// 64-buffered channel a single goroutine pushes committed entries into) draining
+// into a live consumer; if this loop returned on ctx.Done() while >64 entries were
+// backlogged, the bridge would block forever on `ch <- entry` and leak. The ctx
+// parameter is retained for signature parity with MetaRaft.runApplyLoop(ctx).
 func (g *indexGroup) runApplyLoop(ctx context.Context, applyCh <-chan raft.LogEntry) {
+	_ = ctx
 	defer close(g.done)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case entry, ok := <-applyCh:
-			if !ok {
+	for entry := range applyCh {
+		switch entry.Type {
+		case raft.LogEntryCommand:
+			if err := g.applyGuarded(entry.Command); err != nil {
+				g.recordApplyResult(entry.Index, err)
+			}
+		case raft.LogEntrySnapshot:
+			// Unlike MetaRaft.applySnapshotEntry (meta_raft.go:1041), the index
+			// group intentionally skips installSnapshotDEKs() after Restore: an
+			// object-index replica never decrypts object data — it only tracks
+			// DekGen refcounts in the in-memory dekRefCounts map, which Restore
+			// already rebuilds. No keeper material is needed.
+			if err := g.fsm.Restore(raft.SnapshotMeta{Index: entry.Index, Term: entry.Term}, entry.Command); err != nil {
+				// A failed snapshot Restore is unrecoverable, so the loop halts
+				// (returns) without advancing lastApplied. Waiters observe the
+				// halt via the closed done channel (recording the error here would
+				// be a dead store: applyError is only read after waitApplied
+				// succeeds, which it never does for an unadvanced index).
 				return
 			}
-			switch entry.Type {
-			case raft.LogEntryCommand:
-				if err := g.applyGuarded(entry.Command); err != nil {
-					g.recordApplyResult(entry.Index, err)
-				}
-			case raft.LogEntrySnapshot:
-				// Unlike MetaRaft.applySnapshotEntry (meta_raft.go:1041), the index
-				// group intentionally skips installSnapshotDEKs() after Restore: an
-				// object-index replica never decrypts object data — it only tracks
-				// DekGen refcounts in the in-memory dekRefCounts map, which Restore
-				// already rebuilds. No keeper material is needed.
-				if err := g.fsm.Restore(raft.SnapshotMeta{Index: entry.Index, Term: entry.Term}, entry.Command); err != nil {
-					// A failed snapshot Restore is unrecoverable, so the loop halts
-					// (returns) without advancing lastApplied. Waiters observe the
-					// halt via the closed done channel (recording the error here would
-					// be a dead store: applyError is only read after waitApplied
-					// succeeds, which it never does for an unadvanced index).
-					return
-				}
-			default:
-				// NoOp / membership entries are filtered by the adapter ApplyCh.
-			}
-			g.advanceApplied(entry.Index)
+		default:
+			// NoOp / membership entries are filtered by the adapter ApplyCh.
 		}
+		g.advanceApplied(entry.Index)
 	}
 }
 
@@ -219,12 +220,19 @@ func (g *indexGroup) Start(ctx context.Context) error {
 	return nil
 }
 
-// Close cancels the apply loop, waits for it to drain, then closes the raft
-// node. Safe to call even if Start was never called.
+// Close shuts down the node and waits for the apply loop to exit. Mirrors
+// MetaRaft.Close (meta_raft.go:326-332): cancel, then close the node (which
+// closes ApplyCh), THEN wait on done. The loop exits on ApplyCh close, so
+// node.Close() must precede the <-done wait or Close would hang. Safe to call
+// even if Start was never called.
 func (g *indexGroup) Close() {
 	if g.cancel != nil {
 		g.cancel()
+		if g.node != nil {
+			g.node.Close()
+		}
 		<-g.done
+		return
 	}
 	if g.node != nil {
 		g.node.Close()
@@ -283,21 +291,22 @@ func (g *indexGroup) proposeOrForward(ctx context.Context, data []byte) error {
 }
 
 // waitForwardedApplied waits for a forwarded command (whose log index is
-// known) to be applied locally. If the caller supplied no deadline, a
-// bounded local-apply timeout is applied; a local timeout does NOT surface
-// as an error to the caller (the commit already succeeded on the leader).
+// known) to be applied locally. If the caller supplied no deadline, a bounded
+// local-apply timeout is applied.
 func (g *indexGroup) waitForwardedApplied(ctx context.Context, idx uint64) error {
 	localCtx := ctx
-	var localCancel context.CancelFunc
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		localCtx, localCancel = context.WithTimeout(ctx, indexGroupForwardLocalApplyTimeout)
-		defer localCancel()
+		var cancel context.CancelFunc
+		localCtx, cancel = context.WithTimeout(ctx, indexGroupForwardLocalApplyTimeout)
+		defer cancel()
 	}
 	if err := g.waitAppliedResult(localCtx, idx); err != nil {
-		// If the caller's context is still alive but the local timeout fired,
-		// treat it as a non-error (the commit succeeded; we just didn't observe
-		// local apply in time). This mirrors meta_bucket_assigner.go:132.
-		if ctx.Err() == nil && localCtx.Err() != nil {
+		// Committed-but-local-apply-pending is non-fatal (the entry is committed
+		// cluster-wide; replication will apply it). Mirror meta_raft.go:932-943:
+		// suppress ONLY context timeout/cancel, propagate FSM apply / stopped-loop
+		// errors. Inspecting the error (not localCtx) avoids masking a real apply
+		// error that races a concurrently-firing local timeout.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err

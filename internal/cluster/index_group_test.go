@@ -72,9 +72,10 @@ func TestIndexGroup_ApplyLoop_RoundTripAndWatermark(t *testing.T) {
 	fsm := NewMetaFSM()
 	ig := newIndexGroup(nil, fsm, nil)
 	ch := make(chan raft.LogEntry, 4)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go ig.runApplyLoop(ctx, ch)
+	// runApplyLoop now exits only on applyCh close (not ctx cancel), so close ch
+	// to stop the loop. Deferred close runs after the assertions below.
+	defer close(ch)
+	go ig.runApplyLoop(context.Background(), ch)
 
 	ch <- raft.LogEntry{Index: 1, Term: 1, Type: raft.LogEntryCommand, Command: putCmd(t, "b", "k", "v1", "g0")}
 
@@ -91,9 +92,10 @@ func TestIndexGroup_ApplyLoop_GuardRejectsNonIndexAndMalformed(t *testing.T) {
 	fsm := NewMetaFSM()
 	ig := newIndexGroup(nil, fsm, nil)
 	ch := make(chan raft.LogEntry, 4)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go ig.runApplyLoop(ctx, ch)
+	// runApplyLoop now exits only on applyCh close (not ctx cancel), so close ch
+	// to stop the loop. Deferred close runs after the assertions below.
+	defer close(ch)
+	go ig.runApplyLoop(context.Background(), ch)
 
 	// (a) non-object-index command (AddNode): guarded out, recorded as error,
 	//     watermark still advances (entry consumed). FSM untouched.
@@ -128,9 +130,10 @@ func TestIndexGroup_ApplyLoop_SnapshotEntryRestores(t *testing.T) {
 	wireTestKEK(t, fsm) // Restore() requires a KEK store wired
 	ig := newIndexGroup(nil, fsm, nil)
 	ch := make(chan raft.LogEntry, 2)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go ig.runApplyLoop(ctx, ch)
+	// runApplyLoop now exits only on applyCh close (not ctx cancel), so close ch
+	// to stop the loop. Deferred close runs after the assertions below.
+	defer close(ch)
+	go ig.runApplyLoop(context.Background(), ch)
 
 	ch <- raft.LogEntry{Index: 5, Term: 2, Type: raft.LogEntrySnapshot, Command: snapData}
 
