@@ -116,14 +116,20 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      on the forward path = a misconfigured timeout. FIX APPLIED: `ForwardSender.readinessRetry`
      `5s → cluster.ProposeForwardTimeout()` (30s), matching the receiver bound — converts the forward
      deadline-500s into ~5.5s successes and kills the 404 retry-tail at the source (no phantom). CallPooled
-     kept as hygiene. **Risk to watch on the confirm re-bench:** removing the 5s shed raises meta-raft
-     in-flight (already 2× "node stepped down"); if p99 climbs toward 30s or step-downs multiply → the fix
-     is admission control (fast retryable 503 when meta-raft in-flight exceeds a bound), not a longer
-     deadline. **SEPARATE DELIVERABLE — throughput (142 vs ~717 MiB/s):** CompleteMultipart commit is
-     ~5.5s because every object-index commit funnels through the SINGLE cluster meta-raft, which serializes
-     (and sheds leadership) under conc32. That is the architectural write-path-consensus bound (consistent
-     with the streaming-EC epic); confirm the meta-raft-serialization hypothesis (COMPLETE-path stage
-     breakdown / concurrent in-flight meta-propose count) before any redesign. Errors→0 does NOT touch it.
+     kept as hygiene. **CONFIRM RE-BENCH RESULT (4-node GCP 64MiB/conc32, commit f97dd32a): errors 171 → 28,
+     throughput 142 → 291 MiB/s (~2×); the dominant `context deadline exceeded`, `:7000` dial-timeout, AND
+     `NoSuchUpload` 404 modes ALL → 0.** Complete success p99 9.0s (<30s, no full collapse). **The residual
+     28 are dominated by `forward: internal reply error` = leader-side `forward: ProposeObjectIndex failed;
+     orphan may be created` (21×) + meta-raft step-downs (9) + a few genuine part-scatter `invalid part:
+     part N unavailable` (9, parts node-local) + transport blips.** So the deadline bump closed the dominant
+     regime; the residual is meta-raft contention — **the SAME root as the throughput gap.** **CONVERGENCE:
+     the last 28 errors AND throughput parity are ONE problem = the SINGLE cluster meta-raft serializing
+     every object-index commit (ProposeObjectIndex) under conc32, shedding leadership.** That is the
+     architectural write-path-consensus bound (consistent with the streaming-EC epic); confirm via
+     COMPLETE-path stage breakdown / concurrent in-flight meta-propose count before any redesign. The
+     deadline bump (errors 84%↓, throughput 2×) is a landable win; closing the last 28 + throughput is the
+     meta-raft work. (Note: `ProposeObjectIndex failed` also leaves ORPHAN shards → GC/durability concern,
+     not just an error count.)
      **What v0.0.520.0 DID land (correct hardening, kept, but NOT the errors lever):**
      **(1) sender control-pool starvation** —
      `CallPooled` (control forward) shared one per-peer conn pool with bulk shard streams

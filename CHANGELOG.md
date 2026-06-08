@@ -5,8 +5,10 @@
 ### Fixed
 
 - **Cluster CompleteMultipartUpload-under-load: forward readiness deadline aligned to
-  commit latency (the errors lever) + metadata-forward hardening.** The errors lever
-  (pending a final GCP confirmation re-bench): the follower→leader `CompleteMultipartUpload`
+  commit latency (the errors lever) + metadata-forward hardening.** Measured (4-node GCP,
+  64MiB/conc32): errors **171 → 28** and throughput **142 → 291 MiB/s (~2×)**; the dominant
+  `context deadline exceeded` 500s, `:7000` dial-timeouts, and `NoSuchUpload` 404s all went
+  to **0**. The errors lever: the follower→leader `CompleteMultipartUpload`
   forward carries **no caller deadline**, so `ForwardSender.readinessRetry` was the binding
   bound — and it was hardcoded to **5s, BELOW the operation's normal under-load commit
   latency (~5.5s p50, 9.4s p99 at conc32)**. Proof: the local-leader path is uncapped and
@@ -16,11 +18,13 @@
   ~5.5s, the uploadId was consumed, the client retried → 404 — confirmed: 100% of observed
   404s had a prior 5xx on the same uploadId, zero first-attempt). The readiness bound now
   uses `ProposeForwardTimeout` (30s), matching the receiver's commit bound. Plus correct
-  conn-reuse hygiene (below). **NOTE — this closes the *errors* regime, NOT throughput
-  parity:** CompleteMultipart commit is ~5.5s under conc32 because every object-index commit
-  funnels through the single cluster meta-raft (which serializes — and occasionally sheds
-  leadership — under load). That throughput gap (142 vs ~717 MiB/s) is a separate
-  meta-raft-serialization problem tracked as [P1]/[P3] in TODOS, not addressed here.
+  conn-reuse hygiene (below). **NOTE — the residual 28 errors and the throughput gap are the
+  SAME root, NOT closed here:** the residual is dominated by `forward: ProposeObjectIndex
+  failed` (meta-raft step-down under load) — and CompleteMultipart commit is ~5.5s for the
+  same reason: every object-index commit funnels through the single cluster meta-raft, which
+  serializes (and sheds leadership) under conc32. Both the last errors and throughput parity
+  (291 vs ~719 MiB/s) are that one meta-raft-serialization problem, tracked as [P1] in TODOS,
+  not addressed here.
   Supporting hardening (correct, but NOT the lever — a re-bench showed it only trimmed dials
   ~50→37, not the dominant deadline cut):
   - **(sender) control-plane forward starvation.** Control metadata forwards
