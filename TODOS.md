@@ -258,15 +258,16 @@ Planning reference: operator trust roadmap note from 2026-05-15.
          trusting throughput; if degenerate (leaders pile on one node → all writes forward to it, partially
          reproducing single-raft serialization), real per-group election staggering must be implemented before
          the 4b-3 flip. NOT index-specific (data groups share the inert field) — repo-wide pre-existing.
-   - [ ] **[4b-2 BLOCKER] deferred-seed (Option B) does NOT seed index groups → `--object-index-groups N>1`
-         + `--bootstrap-expect-nodes` hangs boot 30s then fails.** The genesis index-group seed
-         (`SeedInitialIndexGroups`, `boot_phases_storage_runtime.go:174`) is in the immediate-genesis branch
-         only. Under Option B, `handleDeferredSeed` (`boot_phases_forwarders.go`) seeds SHARD groups only — it
-         never proposes the N `IndexGroupEntry` records, so `bootIndexGroupsPostSeed`'s
-         `WaitForIndexGroupCount(N, 30s)` times out and boot fails. Before the 4b-2 multi-node N>1 bench: either
-         add index-group seeding to `handleDeferredSeed` (propose the N entries on quorum, alongside the shard
-         groups), OR pin the bench cluster to immediate-genesis (no `--bootstrap-expect-nodes`) and rely on
-         raft-replication + `onIndexGroupAdded` for joiners. 4b-1 covers only the immediate-genesis path.
+   - [x] **[4b-2 BLOCKER — RESOLVED] deferred-seed (Option B) now seeds index groups.** `handleDeferredSeed`
+         (`boot_phases_forwarders.go`) seeds the N `IndexGroupEntry` records in its `seedNow` block (index
+         groups first, then shard groups, so the `ShardGroups()`-keyed verdict stays at `seedNow` until both
+         batches land = re-entry convergent), with RF=N voters derived from the joined `liveNodes` (not the
+         empty deferred-mode `state.peers`, which would yield a self-only RF=1 group). So `--object-index-groups
+         N>1` + `--bootstrap-expect-nodes` boots on both the immediate-genesis and the deferred-seed paths;
+         `bootIndexGroupsPostSeed`'s `WaitForIndexGroupCount(30s)` resolves when the last joiner trips the seed.
+         Proven by `TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum`. The GCP bench harness (which boots via
+         `--bootstrap-expect-nodes`) can now run N>1 — but still needs `--object-index-groups N` added to its
+         `serve` invocation to actually exercise it (see 4b-2 bench prep).
    - [ ] **[4b-3 pre-flip BLOCKER] façade-bypass void reads at N>1.** These read the meta-FSM object index
          DIRECTLY (not via the `ObjectIndexShardSet` façade), so at N>1 they return the empty void. Harmless at
          default N=1; MUST be routed through the façade before the 4b-3 default→N flip. Discriminator: "reads
