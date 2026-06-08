@@ -283,14 +283,23 @@ func TestIndexGroup_ThreeNode_FollowerForwardReplicates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Propose from the follower — forward hook must route to leader.
+	// Phase 1: propose a Put from the follower — forward hook must route to the
+	// leader, replicate, and become visible (with the put's value) on all nodes.
 	require.NoError(t, n2.ProposeObjectIndex(ctx,
 		ObjectIndexEntry{Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "g0", Size: 7, ModTime: 1}, false),
 		"follower forward (put) must succeed")
+	for id, g := range c.groups {
+		g := g
+		require.Eventually(t, func() bool {
+			got, ok := g.ObjectIndexLatest("b", "k")
+			return ok && got.VersionID == "v1"
+		}, 5*time.Second, 20*time.Millisecond, "node %s should see the put replicated", id)
+	}
+
+	// Phase 2: propose a Delete from the follower — delete-forward must replicate
+	// and the entry must become absent on all nodes.
 	require.NoError(t, n2.ProposeDeleteObjectIndex(ctx, "b", "k", "v1"),
 		"follower forward (delete) must succeed")
-
-	// All three nodes must eventually see the delete replicated.
 	for id, g := range c.groups {
 		g := g
 		require.Eventually(t, func() bool {
@@ -312,16 +321,17 @@ func TestIndexGroup_ThreeNode_ForwardDisabled_FollowerProposeFails(t *testing.T)
 	defer cancel()
 	err := n2.ProposeObjectIndex(ctx,
 		ObjectIndexEntry{Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "g0", Size: 1, ModTime: 1}, false)
-	require.Error(t, err, "follower propose without forwarding must fail")
+	require.ErrorIs(t, err, raft.ErrNotLeader, "follower propose without forwarding must fail with ErrNotLeader")
 }
 
 // TestIndexGroup_ThreeNode_LaggingFollowerInstallSnapshot verifies the
 // apply-loop LogEntrySnapshot path over a real RPC. n1 (fast) + n3 (slow) form
 // quorum while n2 is held unregistered. After several puts, g1.snapshot() →
 // CreateSnapshot → CompactBefore(idx) advances the leader's log FirstIndex past
-// n2's nextIndex (initialized at election time, ~2). When n2 is brought online,
-// the leader dispatches InstallSnapshot (not AppendEntries) and n2's apply loop
-// must restore state from it.
+// the compaction boundary. When n2 (a late joiner) is brought online, the leader
+// on first contact finds n2's required prevLogIndex below the compacted
+// FirstIndex, so it dispatches InstallSnapshot (not AppendEntries) and n2's apply
+// loop must restore state from it.
 func TestIndexGroup_ThreeNode_LaggingFollowerInstallSnapshot(t *testing.T) {
 	c := newIGCluster()
 
