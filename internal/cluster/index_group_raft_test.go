@@ -222,9 +222,6 @@ func (c *igCluster) startNode(t *testing.T, id string, peers []string, election 
 	rcfg := raft.DefaultConfig(id, peers)
 	rcfg.ElectionTimeout = election
 	rcfg.HeartbeatTimeout = igHeartbeat
-	// Lower TrailingLogs so CreateSnapshot truly compacts entries n2 needs,
-	// forcing InstallSnapshot instead of AppendEntries catch-up.
-	rcfg.TrailingLogs = 1
 	node, closeStore, err := newRaftNode(rcfg, t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = closeStore() })
