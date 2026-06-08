@@ -240,6 +240,31 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        unexercised by the unit test (`TestGetObjectRange_StripedUsesSingleStreamNotReadAt` uses an
        unversioned object). The byte-Range and partNumber handlers are both covered; add a versioned-object
        striped-range assertion so the version-pinned stream path doesn't regress silently.
+- [ ] **Sharded object index — Slice 4a BUILT (dormant); Slice 4b next.**
+  Slice 1 (façade, N=1, v0.0.521.0), Slice 2 (LIST k-way merge + read seams, v0.0.522.0), and
+  Slice 4a (dormant index-group raft primitive, v0.0.523.0) are landed. Slice 3 (DEK prune path)
+  was descoped (no deletion path in current DEK lifecycle; deferred to a future epic). Slice 4b
+  (greenfield N=16 flip) is next — needs its own plan-eng-review and is GCP-gated.
+   - [ ] **[P3] Index-group forward robustness (deferred to Slice 4b).** Slice 4a's index-group forward
+         hook covers Put + Delete forwarding and a bounded local-apply timeout. It does NOT cover
+         no-leader / stale-leader forwarding (forwarding to a node that just lost leadership) — those are
+         Slice 4b robustness concerns once index groups are boot-wired and subject to real leadership
+         churn. Context: `internal/cluster/index_group.go` `proposeOrForward` / `waitForwardedApplied`.
+         Depends on: Slice 4b boot wiring.
+   - [ ] **[P3] Index-group: two thinly-tested correctness paths (cover in Slice 4b).**
+         (a) `waitForwardedApplied`'s ctx-error suppression (`errors.Is(err, context.DeadlineExceeded|Canceled)`
+         → nil, mirroring meta_raft.go:932-943) has no direct test — Task 3's forward path always passes a
+         deadline'd ctx so the bounded-timeout/suppression branch never fires; a deterministic test needs a
+         concurrent local-timeout-vs-apply-error race. Cover under 4b forward-under-churn.
+         (b) The snapshot-restore-failure halt path in `runApplyLoop` (Restore err → loop returns without
+         advancing; waiters observe via closed `done`) is untested. Cheaply addable via the channel-driven
+         Task-1 harness (feed garbage `LogEntrySnapshot` bytes → Restore fails → loop halts); add when convenient.
+   - [ ] **[P3] Index-group: vestigial `cancel`/loopCtx after the apply-loop-exit fix.** Since `runApplyLoop`
+         now exits only on `ApplyCh` close (mirror MetaRaft; `_ = ctx`), `Start`'s `g.cancel`/loopCtx and
+         `Close`'s `g.cancel()` no longer stop the loop — `g.cancel` survives only as a "Start was called"
+         sentinel gating the `<-g.done` wait. Harmless but can mislead ("cancel() stops the loop"). Either drop
+         it (use an explicit started flag) or keep a clarifying comment. Context: `internal/cluster/index_group.go`
+         `Start`/`Close`/`runApplyLoop`.
 - [x] **Concentrated NFSv4 parent-SA filehandle-inheritance behind one helper (`Dispatcher.bindFHInheritingParent`, v0.0.509.0, behavior-neutral).** The T12 "inherit parent fh's saID else generation-only bind" block was copy-pasted verbatim in `opOpen`/`opLookup`/`opCreate`; now a single helper owns the precedence invariant (`(pending)` sentinel + readOnly propagation). Mechanical extraction, build/vet/lint + nfs4server tests green, production diff purely mechanical.
 - [x] **Removed superseded v1 meta-Raft transport (`raft.MetaRaftTransport`, v0.0.508.0, behavior-neutral).** The M6.2 raft migration moved meta-Raft RPC delivery to v2 `cluster.RaftV2MetaTransport` on the same `StreamMetaRaft` wire; the v1 stack (~330 LOC) had zero call sites in production/tests and was fully orphaned. Deleted the dead implementation + its v1-only InstallSnapshot decoders; relocated byte-identical the live symbols that lived in the file (`metaRPC*` envelope constants → `rpc_codec.go` keeping cross-version wire-compat; `isMuxFallbackErr`/`errIsCtxBudget` → `meta_mux_send.go`). `raftRPCTransport` survives as `muxDriverTransport`'s embedded base. Gates: build/vet/lint + full test-unit green, byte-identity diff-verified.
 - [x] **QUIC→TCP migration — S6 DONE: legacy QUIC transport + quic-go fully removed (fa28a4c5, v0.0.501.0).** TCP is the sole cluster transport; `quic-go` import count is zero; `--transport` flag removed. quic.go (1606 LOC) + join_listener.go deleted; the transport-agnostic types they housed (StreamHandler/StreamRouter/TrafficLimiter/IdentitySnapshot/DeriveClusterIdentity/checkResponseStatus/recycleJitter/pinAcceptedSPKI + JoinHandler/JoinPutField/JoinReadFields/JoinALPN/certSPKI) extracted byte-identical (diff-verified) to transport_shared.go/join_wire.go. The `*_quic.go` mux/meta files (group_transport_quic/meta_transport_quic/raftv2_meta_quic) are KEPT — they import no quic-go and the TCP path uses them. **IRREVERSIBLE: no QUIC arm → §6 parity bench can never run, no QUIC fallback.** Gates: quic-go=0, vet clean, test-unit + lint green.
