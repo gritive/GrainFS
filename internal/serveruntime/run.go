@@ -197,15 +197,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootClusterCoordinatorRouting(state); err != nil {
 		return err
 	}
-	// Slice 4b: assemble the sharded object-index façade when IndexGroupCount>1.
-	// Placed right after bootClusterCoordinatorRouting — the earliest point where
-	// BOTH rewire targets (forwardReceiver, clusterCoord) exist AND the index
-	// groups have been seeded (bootShardService) / replayed into the meta-FSM.
-	// The two façade sites ran before seeding with the meta-FSM placeholder; this
-	// phase rewires them to the manager-backed shardset. Early-returns at N=1.
-	if err := bootIndexGroupsPostSeed(ctx, state); err != nil {
-		return err
-	}
 
 	// PR 6: snapshot + apply-loop.
 	if err := bootSnapshotAndApplyLoop(state); err != nil {
@@ -250,6 +241,26 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootHTTPServerAndAdmin(state); err != nil {
 		return err
 	}
+
+	// Slice 4b / 4b-2: assemble the sharded object-index façade when
+	// IndexGroupCount>1. MUST run AFTER bootHTTPServerAndAdmin (admin.sock — and
+	// its /v1/cluster/invite/create endpoint — is now live in its own goroutine)
+	// and BEFORE the S3 listener starts (bootResharderAndDegraded/bootNodeServices
+	// → srv.Run()). At N>1 with --bootstrap-expect-nodes this phase BLOCKS on
+	// WaitForIndexGroupCount until the target node count joins and the deferred
+	// seed fires; placing it before admin.sock (its original site) deadlocked
+	// invite-join — joiners need a bundle minted on admin.sock, which was gated
+	// behind this very block. The "façade assembled before S3 serves" invariant
+	// still holds (srv.Run() is well after this point). The forwardReceiver +
+	// clusterCoord rewires are pointer-receiver in-place, so the forward handler
+	// registered earlier (bootRegisterForwardHandlers) sees the rewire, and the
+	// leader's deferred-seed post-join hook is wired even earlier
+	// (bootWALAndForwardersPart1) so it fires while this phase blocks. N=1
+	// early-returns (no-op).
+	if err := bootIndexGroupsPostSeed(ctx, state); err != nil {
+		return err
+	}
+
 	// §5 T44: refuse to start with anon-disabled + no TLS cert + no trusted
 	// proxy. Must run AFTER bootHTTPServerAndAdmin (state.cfgStore + state.srv
 	// populated) and BEFORE bootResharderAndDegraded (which goroutines
