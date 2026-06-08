@@ -175,7 +175,7 @@ func (r *ForwardReceiver) HandleGroupPropose(req *transport.Message) *transport.
 	if dg == nil || dg.Backend() == nil || dg.Backend().Node() == nil {
 		return groupProposeReply(0, errors.New("group propose: not voter"))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 	defer cancel()
 	idx, err := dg.Backend().Node().ProposeWait(ctx, data)
 	if err == nil {

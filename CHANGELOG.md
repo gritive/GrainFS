@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.0.520.0] - 2026-06-07
+
+### Fixed
+
+- **Cluster CompleteMultipartUpload-under-load: forward readiness deadline aligned to
+  commit latency (the errors lever) + metadata-forward hardening.** Measured (4-node GCP,
+  64MiB/conc32): errors **171 → 28** and throughput **142 → 291 MiB/s (~2×)**; the dominant
+  `context deadline exceeded` 500s, `:7000` dial-timeouts, and `NoSuchUpload` 404s all went
+  to **0**. The errors lever: the follower→leader `CompleteMultipartUpload`
+  forward carries **no caller deadline**, so `ForwardSender.readinessRetry` was the binding
+  bound — and it was hardcoded to **5s, BELOW the operation's normal under-load commit
+  latency (~5.5s p50, 9.4s p99 at conc32)**. Proof: the local-leader path is uncapped and
+  finishes at that same ~5.5s without erroring; only the forward path had a knife set below
+  it. That premature 5s cut produced the dominant `context deadline exceeded` 500s AND the
+  `NoSuchUpload` retry-tail (phantom commit: sender gave up at 5s, the commit landed at
+  ~5.5s, the uploadId was consumed, the client retried → 404 — confirmed: 100% of observed
+  404s had a prior 5xx on the same uploadId, zero first-attempt). The readiness bound now
+  uses `ProposeForwardTimeout` (30s), matching the receiver's commit bound. Plus correct
+  conn-reuse hygiene (below). **NOTE — the residual 28 errors and the throughput gap are the
+  SAME root, NOT closed here:** the residual is dominated by `forward: ProposeObjectIndex
+  failed` (meta-raft step-down under load) — and CompleteMultipart commit is ~5.5s for the
+  same reason: every object-index commit funnels through the single cluster meta-raft, which
+  serializes (and sheds leadership) under conc32. Both the last errors and throughput parity
+  (291 vs ~719 MiB/s) are that one meta-raft-serialization problem, tracked as [P1] in TODOS,
+  not addressed here.
+  Supporting hardening (correct, but NOT the lever — a re-bench showed it only trimmed dials
+  ~50→37, not the dominant deadline cut):
+  - **(sender) control-plane forward starvation.** Control metadata forwards
+    (`CallPooled`) shared one per-peer connection pool with bulk shard-stream
+    transfers (`CallWithBody`/`CallFlatBuffer`/read-streams). A flood of large-object
+    shard streams exhausted the shared cap and starved the short control forward,
+    surfacing as `forward: no reachable peer (dial :7000 i/o timeout)`. Control forwards
+    now use a SEPARATE per-peer pool (`MaxControlConnsPerPeer`, internal default 16), so
+    bulk saturation can no longer block them. Identity rotation/revocation
+    (`RecycleConns`/`ClosePeer`) and shutdown recycle BOTH pools (the S5a gen-guard
+    invariant holds for the control pool identically).
+  - **(receiver) hardcoded 5s forward deadline.** The leader-side forwarded
+    propose/read-index handlers rebuilt a `context.Background()` + hardcoded 5s timeout,
+    ignoring the originator's budget and aborting a raft commit at 5s that the caller was
+    still willing to wait for (`context deadline exceeded`, exactly 5000ms — the dominant
+    mode observed under load). The bound is now `proposeForwardTimeout` (30s), above burst
+    raft-commit p99 and below typical S3 client timeouts.
+  - **(sender) propose path shared the same 5s cap, and a residual timeout returned a
+    fatal 500.** The earlier fix only touched the *receiver* handlers; the originating
+    `DistributedBackend.propose` still wrapped both the leader-commit and the
+    follower-forward branches in a hardcoded 5s, so the request-side bound aborted the
+    same commits the receiver was now willing to wait 30s for. Both branches now use
+    `proposeForwardTimeout`. Additionally, a propose that *does* exhaust its deadline now
+    surfaces a retryable **503 SlowDown** (sentinel `cluster.ErrProposeTimeout`) instead
+    of a 500 — S3 clients auto-retry SlowDown but not 500. The sentinel fires only on
+    `DeadlineExceeded` (never client cancellation) and masks the transient `ErrNotLeader`
+    the follower loop accumulates, which bare context-error matching would otherwise leak
+    as a 500. **Scope note:** this makes a residual timeout *retryable*; it is not
+    load-shedding backpressure — under sustained >30s overload the retry can still add
+    load. True admission control (reject-before-work) is tracked separately.
+  - **forward dialers use `CallPooled` (conn-reuse hygiene).** The boot follower→leader
+    forward dialers (group propose, meta propose, meta read) used connection-per-RPC `Call`,
+    opening a fresh TLS handshake per forward; the bounded control pool now backs them, same
+    as `shardSvc.SendRequest`. Correct hygiene — but a re-bench showed it only trimmed dial
+    failures (~50→37), so it is NOT the errors lever (the readiness-deadline alignment above
+    is).
+
 ## [0.0.519.0] - 2026-06-06
 
 ### Changed

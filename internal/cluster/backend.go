@@ -31,6 +31,29 @@ import (
 // transport shard streams before the metadata propose completes.
 const shardRPCTimeout = 2 * time.Minute
 
+// proposeForwardTimeout bounds the leader-side raft commit for a forwarded
+// propose/read-index RPC. The receiver handlers carry no caller ctx (the
+// transport handler signature is `func(*Message) *Message`), so they cannot
+// honor the originator's budget without a wire change — this generous bound
+// replaces a hardcoded 5s that aborted commits the caller was still willing to
+// wait for (the dominant CompleteMultipartUpload-under-load 500 mode). 30s sits
+// above burst raft-commit p99 and below typical S3 client timeouts, so the
+// phantom-commit window (a commit landing after the caller gave up — already
+// possible at 5s, since ProposeWait cancellation does not un-propose) stays
+// bounded. TODO: wire-propagate the caller's exact deadline (needs a payload
+// field) to align with the originator's budget instead of a fixed bound.
+const proposeForwardTimeout = 30 * time.Second
+
+// ErrProposeTimeout marks a propose that exhausted its server-side deadline
+// (the raft commit could not complete in time under load). The S3 layer maps it
+// to a retryable 503 SlowDown rather than a fatal 500, so clients auto-retry.
+// It is surfaced only when the propose context expired by DeadlineExceeded —
+// never on client cancellation, and it masks the transient ErrNotLeader the
+// follower forward loop accumulates while waiting (which would otherwise leak
+// as a 500). NOTE: this makes residual timeouts retryable; it does NOT shed
+// load before doing the work — true admission-control backpressure is separate.
+var ErrProposeTimeout = errors.New("cluster: propose deadline exceeded")
+
 // ShardRPCTimeout exposes shardRPCTimeout so the streaming PUT pipeline (built
 // in serveruntime, which cannot see the unexported const) can bound each remote
 // shard write RPC. The spool path uses it as a TOTAL per-RPC wall-clock (the
@@ -38,6 +61,17 @@ const shardRPCTimeout = 2 * time.Minute
 // SAME value as an IDLE deadline (reset on each progress event), since there it
 // would otherwise bound ingest+seal+RPC and abort a slow-but-progressing upload.
 func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
+
+// ProposeForwardTimeout exposes proposeForwardTimeout so the boot wiring in
+// serveruntime (which cannot see the unexported const) can set the forward
+// SENDER's readiness deadline to the SAME generous bound the receiver commit
+// uses. A follower→leader CompleteMultipartUpload forward carries no caller
+// deadline, so ForwardSender.readinessRetry was the binding bound; a hardcoded
+// 5s there guillotined forwards whose commit legitimately takes ~5.5s under
+// load (proven by the local-leader path, which is uncapped and finishes at the
+// same latency). Aligning the sender bound with the receiver's removes that
+// mismatch.
+func ProposeForwardTimeout() time.Duration { return proposeForwardTimeout }
 
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
 
@@ -887,7 +921,7 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 		return
 	}
 	b.shardSvc.RegisterHandler(transport.StreamProposeForward, func(req *transport.Message) *transport.Message {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		idx, err := b.node.ProposeWait(ctx, req.Payload)
 		if err == nil {
@@ -951,7 +985,7 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 		return
 	}
 	b.shardSvc.RegisterHandler(transport.StreamReadIndex, func(req *transport.Message) *transport.Message {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		resp := make([]byte, 12)
 		idx, err := b.node.ReadIndex(ctx)
@@ -1029,6 +1063,19 @@ func (b *DistributedBackend) WaitApplied(ctx context.Context, index uint64) erro
 	}
 }
 
+// proposeDeadlineSentinel returns a wrapped ErrProposeTimeout when proposeCtx
+// expired by DeadlineExceeded (the server-side propose bound fired), and nil
+// otherwise. Callers use it at every return point that a propose deadline can
+// reach so the S3 layer maps the failure to a retryable 503 instead of a 500.
+// Client cancellation (context.Canceled) returns nil — the caller is gone and
+// keeps its natural error.
+func proposeDeadlineSentinel(proposeCtx context.Context, where string) error {
+	if errors.Is(proposeCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("propose: %s timed out: %w", where, ErrProposeTimeout)
+	}
+	return nil
+}
+
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
 	if b.groupID != "" {
 		if _, ok := PlacementGroupFromContext(ctx); !ok {
@@ -1041,15 +1088,21 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	}
 
 	if b.node.IsLeader() {
-		proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		proposeCtx, cancel := context.WithTimeout(ctx, proposeForwardTimeout)
 		defer cancel()
 		idx, err := b.node.ProposeWait(proposeCtx, data)
 		if err != nil {
+			if sentinel := proposeDeadlineSentinel(proposeCtx, "leader commit"); sentinel != nil {
+				return sentinel
+			}
 			return err
 		}
 		for b.lastApplied.Load() < idx {
 			select {
 			case <-proposeCtx.Done():
+				if sentinel := proposeDeadlineSentinel(proposeCtx, "leader apply-wait"); sentinel != nil {
+					return sentinel
+				}
 				return proposeCtx.Err()
 			default:
 				time.Sleep(time.Millisecond)
@@ -1074,7 +1127,7 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	// race the very first request to land on a non-leader). Retry on
 	// ErrNotLeader with bounded backoff so the propose converges as soon
 	// as the election settles rather than failing with a 500.
-	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	proposeCtx, cancel := context.WithTimeout(ctx, proposeForwardTimeout)
 	defer cancel()
 	const retryInterval = 50 * time.Millisecond
 	var lastErr error
@@ -1082,11 +1135,17 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		if b.node.IsLeader() {
 			idx, err := b.node.ProposeWait(proposeCtx, data)
 			if err != nil {
+				if sentinel := proposeDeadlineSentinel(proposeCtx, "leader commit"); sentinel != nil {
+					return sentinel
+				}
 				return err
 			}
 			for b.lastApplied.Load() < idx {
 				select {
 				case <-proposeCtx.Done():
+					if sentinel := proposeDeadlineSentinel(proposeCtx, "leader apply-wait"); sentinel != nil {
+						return sentinel
+					}
 					return proposeCtx.Err()
 				default:
 					time.Sleep(time.Millisecond)
@@ -1119,11 +1178,25 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 			// been attempted, so a transient transport error on peer #1 doesn't
 			// mask peer #2 being the actual leader.
 			if !allNotLeader {
+				// A non-ErrNotLeader error includes a deadline-induced transport
+				// i/o timeout (proposeCtx expiring mid-SendRequest); surface the
+				// retryable sentinel in that case so it doesn't leak as a 500. A
+				// genuine (pre-deadline) leader-reject keeps its real error.
+				if sentinel := proposeDeadlineSentinel(proposeCtx, "forward"); sentinel != nil {
+					return sentinel
+				}
 				return lastErr
 			}
 		}
 		select {
 		case <-proposeCtx.Done():
+			// On a server-side deadline, surface the retryable sentinel even
+			// though lastErr (transient ErrNotLeader / transport error) is set —
+			// otherwise that lastErr leaks to the client as a fatal 500 instead
+			// of the retryable 503 the deadline warrants.
+			if sentinel := proposeDeadlineSentinel(proposeCtx, "forward"); sentinel != nil {
+				return sentinel
+			}
 			if lastErr != nil {
 				return lastErr
 			}

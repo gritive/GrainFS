@@ -91,6 +91,91 @@ Planning reference: operator trust roadmap note from 2026-05-15.
      wall-clock cap (generous, e.g. minutes-to-hours so realistic large uploads pass) or a server-side
      read/idle timeout on the S3 listener. Separate axis (abuse protection) from this slice (progress-friendly
      deadline); broad blast radius, so deferred.
+   - [ ] **[P1] CompleteMultipartUpload 500s under concurrent large-object load — NOT FIXED by v0.0.520.0
+     (re-bench refuted; re-diagnosed).** A 4-node GCP re-bench (64MiB/conc32) with the v0.0.520.0 binary
+     STILL shows ~190 5xx + 32 NoSuchUpload, ALL on `CompleteMultipartUpload`. The regime lives on a
+     **different path** than v0.0.520.0's fixes: `S3 handler → forwardRuntime.completeMultipartUpload →
+     state.forwardSender.Send`. Three distinct modes: **(1) deadline-500 @~5006ms (129×)** — the forward
+     ctx carries NO caller deadline (Hertz sets no ReadTimeout; no deadline middleware; forwardSender
+     `timeout=0`), so `ForwardSender.readinessRetry` (5s, `boot_phases_forwarders.go:88`) is the binding
+     bound. (Confirmed by code-read + the 5006ms clustering. THIS is the site I wrongly dismissed as
+     "not in path" — my dismissal reasoned about the data-group propose path, but the multipart forward
+     is a deadline-less caller.) **(2) `:7000` dial i/o timeout @~5000ms (50×)** — `forwardDialer` uses
+     `clusterTransport.Call` (connection-per-RPC), NOT `CallPooled`, so v0.0.520.0's control-pool
+     isolation does NOT help it; a conc32 fresh-TLS-handshake storm to `:7000` dial-times-out inside the
+     5s. This is transport saturation, not a deadline — widening readinessRetry alone won't clear it.
+     **(3) fast-404 NoSuchUpload (32×)** — NOT part-scatter: log-correlation proved 100% of 404s
+     (32/32, and 66/66 in the CallPooled re-bench) had a PRIOR 5xx on the SAME uploadId, zero
+     first-attempt. It is the **phantom-commit retry-tail** of mode 1: the sender gives up at the 5s
+     readiness cap, the commit actually lands at ~5.5s, the uploadId is consumed, the client retries →
+     NoSuchUpload. **ERRORS LEVER (identified, applied, pending final GCP confirm): the readiness cap was
+     simply BELOW the commit's normal under-load latency.** Decisive data: a CallPooled re-bench barely
+     moved errors (CallPooled is correct hygiene but trimmed only dial failures ~50→37) — and SUCCESSFUL
+     completes take ~5.5s p50 / 9.4s p99 at conc32. Those successes are the LOCAL-leader path (uncapped);
+     the deadline-500s are the FORWARD path guillotined at 5s. Same ~5.5s commit, knife set below it only
+     on the forward path = a misconfigured timeout. FIX APPLIED: `ForwardSender.readinessRetry`
+     `5s → cluster.ProposeForwardTimeout()` (30s), matching the receiver bound — converts the forward
+     deadline-500s into ~5.5s successes and kills the 404 retry-tail at the source (no phantom). CallPooled
+     kept as hygiene. **CONFIRM RE-BENCH RESULT (4-node GCP 64MiB/conc32, commit f97dd32a): errors 171 → 28,
+     throughput 142 → 291 MiB/s (~2×); the dominant `context deadline exceeded`, `:7000` dial-timeout, AND
+     `NoSuchUpload` 404 modes ALL → 0.** Complete success p99 9.0s (<30s, no full collapse). **The residual
+     28 are dominated by `forward: internal reply error` = leader-side `forward: ProposeObjectIndex failed;
+     orphan may be created` (21×) + meta-raft step-downs (9) + a few genuine part-scatter `invalid part:
+     part N unavailable` (9, parts node-local) + transport blips.** So the deadline bump closed the dominant
+     regime; the residual is meta-raft contention — **the SAME root as the throughput gap.** **CONVERGENCE:
+     the last 28 errors AND throughput parity are ONE problem = the SINGLE cluster meta-raft serializing
+     every object-index commit (ProposeObjectIndex) under conc32, shedding leadership.** That is the
+     architectural write-path-consensus bound (consistent with the streaming-EC epic); confirm via
+     COMPLETE-path stage breakdown / concurrent in-flight meta-propose count before any redesign. The
+     deadline bump (errors 84%↓, throughput 2×) is a landable win; closing the last 28 + throughput is the
+     meta-raft work. (Note: `ProposeObjectIndex failed` also leaves ORPHAN shards → GC/durability concern,
+     not just an error count.)
+     **What v0.0.520.0 DID land (correct hardening, kept, but NOT the errors lever):**
+     **(1) sender control-pool starvation** —
+     `CallPooled` (control forward) shared one per-peer conn pool with bulk shard streams
+     (`CallWithBody`/`CallFlatBuffer`/read-stream); bulk exhausted the cap (`MaxConnsPerPeer`=64) and
+     starved the short forward → `forward: no reachable peer (dial :7000 i/o timeout)`. Fixed with a
+     SEPARATE control pool (`MaxControlConnsPerPeer`, default 16); `RecycleConns`/`ClosePeer`/`Close`
+     recycle BOTH pools (S5a gen-guard mirrored). **(2) receiver hardcoded 5s deadline** — the leader's
+     forwarded propose/read-index handlers (`forward_receiver.go` `HandleGroupPropose`, `backend.go`
+     `RegisterProposeForwardHandler`/`RegisterReadIndexHandler`) rebuilt `context.Background()`+5s,
+     ignoring the caller's budget and aborting a commit at 5s (`context deadline exceeded`, the dominant
+     ~77% mode). Replaced with `proposeForwardTimeout` (30s). **(3) sender propose path STILL capped at 5s,
+     and a residual timeout returned 500** — the (2) fix only touched the *receiver*; `DistributedBackend.propose`
+     itself wrapped both leader-commit and follower-forward branches in a hardcoded 5s (this was the INERT
+     gap: the earlier PR did not reach the request-side bound). Both branches now use `proposeForwardTimeout`,
+     and a propose that exhausts its deadline surfaces a retryable **503 SlowDown** (sentinel
+     `cluster.ErrProposeTimeout`, fires only on `DeadlineExceeded`, masks the follower loop's transient
+     `ErrNotLeader`) instead of a 500. Scope note: this is *make-retryable*, NOT load-shedding backpressure
+     (see [P3] admission control below). All three landed fixes are RED→GREEN in-process and are correct
+     hardening — but the re-bench proves they do NOT touch the CompleteMultipart forward path above, so the
+     [P1] incident remains OPEN (re-diagnosed). PR #720 reframed from "fixes multipart 500s" to "metadata-forward
+     hardening"; do NOT claim the incident is fixed without an in-process repro + GCP re-bench showing 0 errors.
+   - [ ] **[P3] Verify-whether: CompleteMultipart 200-then-404 (NoSuchUpload) on a follower's immediate
+     read-after-write.** `meta_raft.go:933` `waitForwardedAppliedResult` swallows a local-apply timeout as
+     SUCCESS (`return nil`) — the forwarded command committed on the leader but the LOCAL object-index apply
+     may still lag, so CompleteMultipart can return 200 while an immediate HEAD/GET on that node 404s. This
+     was deliberately NOT changed in v0.0.520.0: "fixing" it (returning the timeout) converts those 404s into
+     500s — strictly worse. Confirm whether the observed 404s are this (read-your-write lag) vs a separate
+     cross-node multipart-session routing bug before deciding any change.
+   - [ ] **[P3] Admission control (reject-before-work backpressure) for the propose path.** v0.0.520.0's
+     503-on-timeout makes a residual timeout retryable but does the full 30s of work first; under sustained
+     >30s overload the client retry can add load (retry-storm tail). True backpressure sheds load *before*
+     the commit — bound in-flight proposes and reject fast with 503 (the etcd/TiKV pattern). This is the (b)
+     throughput-redesign lever, not the bounded bug fix.
+   - [ ] **[P3] Wire-propagate the caller's exact deadline to receiver forward handlers.** `proposeForwardTimeout`
+     (above) is a fixed 30s because the transport handler signature `func(*Message) *Message` carries no
+     caller ctx. Aligning the leader-side `ProposeWait`/`ReadIndex` deadline with the originator's actual
+     budget needs a deadline field in the forward payload (wire change). Low priority — the fixed bound
+     removes the premature-abort; exact alignment is a refinement.
+   - [ ] **[P3] Pre-existing `-race` flake: `TestForwardSender_SendStream*` data race on the SendStream
+     attempt counters (`forward_sender.go:420`).** `go test ./internal/cluster/ -race` intermittently fails
+     (race detector attributes it to whichever test was running; the goroutines are from
+     `TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency`). Confirmed present on
+     origin/master (reproduced with this PR's changes stashed) — NOT introduced here. The deferred
+     `ObservePutTraceStage` closure reads `attempts`/`notLeaderRetries`/`leaderHintUsed` while concurrent
+     SendStream goroutines write them. Guard with a mutex or atomics. (Matches the prior S5a `[P3] -race
+     deadline flake는 base 귀속` note.)
    - [ ] **[P3] Multi-node streaming stricter quorum (e.g. DataShards+1 with parity guaranteed).**
      The opt-in multi-node streaming path commits data-shards-required / parity-best-effort
      (inherited from the prod all-local path, `commit.go:132-133`). A stricter gate that guarantees

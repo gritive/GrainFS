@@ -11,20 +11,30 @@ const (
 	defaultClientBodyTimeout = 5 * time.Minute  // idle bound (reset per Read) on the client response-body read; mirrors ServerBodyTimeout so a stalled mid-body server can't pin a client goroutine + pooled slot forever
 	defaultMaxConnsPerPeer   = 64               // elastic cap (NOT a fixed 4; see spec §4 — fixed pool caps throughput)
 	defaultPoolIdleTimeout   = 60 * time.Second // idle conn eviction; matches the server idle reap
+
+	// defaultMaxControlConnsPerPeer caps the SEPARATE control-plane conn pool
+	// (CallPooled — short metadata forwards). Control RPCs are small/fast, so a
+	// modest reserved cap keeps them flowing even when the bulk data-plane pool is
+	// saturated by large-object shard streams (the multipart-under-load 500 fix).
+	defaultMaxControlConnsPerPeer = 16
 )
 
 // TCPTransportConfig tunes the dormant TCP cluster transport. A zero-value field
 // falls back to the matching default via withDefaults(), except MaxConnsPerPeer
 // where 0 deliberately means "unlimited" (S3a behavior, used by S3a tests).
 type TCPTransportConfig struct {
-	ServerIdleTimeout  time.Duration
-	ServerBodyTimeout  time.Duration
-	ClientBodyTimeout  time.Duration // idle bound (reset per Read) on the client-side response-body read; 0 = default
-	MaxConnsPerPeer    int           // 0 = unlimited (S3a behavior)
-	PoolIdleTimeout    time.Duration
-	ReadBufferBytes    int // 0 = OS default
-	WriteBufferBytes   int // 0 = OS default
-	MaxConcurrentConns int // 0 = unlimited serveConn goroutines
+	ServerIdleTimeout time.Duration
+	ServerBodyTimeout time.Duration
+	ClientBodyTimeout time.Duration // idle bound (reset per Read) on the client-side response-body read; 0 = default
+	MaxConnsPerPeer   int           // 0 = unlimited (S3a behavior)
+	// MaxControlConnsPerPeer caps the separate control-plane (CallPooled) pool;
+	// 0 falls back to defaultMaxControlConnsPerPeer (unlike MaxConnsPerPeer, a
+	// control pool is always bounded — that bounded reserve is the whole point).
+	MaxControlConnsPerPeer int
+	PoolIdleTimeout        time.Duration
+	ReadBufferBytes        int // 0 = OS default
+	WriteBufferBytes       int // 0 = OS default
+	MaxConcurrentConns     int // 0 = unlimited serveConn goroutines
 	// TrafficLimits gates inbound per-class admission; the zero value is unlimited
 	// (parity with a nil QUIC TrafficLimiter).
 	TrafficLimits TrafficLimits
@@ -44,6 +54,9 @@ func (c TCPTransportConfig) withDefaults() TCPTransportConfig {
 	}
 	if c.PoolIdleTimeout == 0 {
 		c.PoolIdleTimeout = defaultPoolIdleTimeout
+	}
+	if c.MaxControlConnsPerPeer == 0 {
+		c.MaxControlConnsPerPeer = defaultMaxControlConnsPerPeer
 	}
 	return c
 }

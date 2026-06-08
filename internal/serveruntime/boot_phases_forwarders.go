@@ -57,9 +57,17 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	metaRaft := state.metaRaft
 	peers := state.peers
 
+	// All follower→leader forward dialers (group propose, meta propose, meta read)
+	// use CallPooled, NOT Call: connection-per-RPC Call opens a fresh TLS handshake
+	// per forward, so a conc≥16 multipart-under-load burst becomes a handshake storm
+	// against :7000 and forwards dial-time-out ("no reachable peer") or blow the
+	// readiness deadline. CallPooled reuses the bounded control pool
+	// (MaxControlConnsPerPeer) — same pattern shardSvc.SendRequest already uses —
+	// turning the storm into bounded backpressure. (This mirrors 730222ee, which
+	// only covered shardSvc; these boot dialers were the remaining conn-per-RPC path.)
 	forwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-		reply, err := clusterTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +93,15 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	state.forwardSender = cluster.NewForwardSender(forwardDialer).
 		WithStreamDialer(forwardStreamDialer).
 		WithReadStreamDialer(forwardReadStreamDialer).
-		WithReadinessRetry(5 * time.Second).
+		// A deadline-less forward (e.g. CompleteMultipartUpload, which carries no
+		// caller deadline) is bounded by this readiness retry. A hardcoded 5s
+		// guillotined forwards whose leader-side commit legitimately takes ~5.5s
+		// under conc≥16 load — the local-leader path is uncapped and finishes at
+		// the same latency, proving 5s sat BELOW the operation's normal under-load
+		// time. That premature cut also caused the NoSuchUpload retry-tail
+		// (phantom commit: sender gave up at 5s, commit landed at ~5.5s, uploadId
+		// consumed, warp retried → 404). Align with the receiver's commit bound.
+		WithReadinessRetry(cluster.ProposeForwardTimeout()).
 		WithLeaderHintResolver(func(hint string) string {
 			if addr, ok := cluster.ResolveNodeAddress(metaRaft.FSM(), hint); ok {
 				return addr
@@ -102,7 +118,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
-		reply, err := clusterTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -154,7 +170,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
-		reply, err := clusterTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
