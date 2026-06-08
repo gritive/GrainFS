@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -39,6 +41,13 @@ type indexGroup struct {
 	fsm     *MetaFSM
 	forward indexGroupForwardFunc
 
+	// snapshotInterval, when > 0, makes runApplyLoop fire snapshot() every
+	// snapshotInterval applied command entries so an N>1 index-group raft log is
+	// compacted under load. 0 (the default) disables it — keeping the Slice-4a
+	// solo/channel-driven tests (which set node==nil and never snapshot)
+	// byte-identical. Set via setSnapshotInterval before Start.
+	snapshotInterval uint64
+
 	cancel context.CancelFunc // set by Start; cancels the apply loop
 	done   chan struct{}      // closed by runApplyLoop on exit
 
@@ -63,6 +72,12 @@ func newIndexGroup(node RaftNode, fsm *MetaFSM, forward indexGroupForwardFunc) *
 	}
 }
 
+// setSnapshotInterval configures periodic apply-loop snapshotting. interval 0
+// disables it (the default). Must be called before Start.
+func (g *indexGroup) setSnapshotInterval(interval uint64) {
+	g.snapshotInterval = interval
+}
+
 // runApplyLoop drains committed entries and drives the FSM. It closes g.done on
 // exit (the ONLY closer of done — Close waits on it). Object-index commands only
 // (coupling guard); a LogEntrySnapshot whose Restore fails halts the loop without
@@ -83,6 +98,19 @@ func (g *indexGroup) runApplyLoop(ctx context.Context, applyCh <-chan raft.LogEn
 			if err := g.applyGuarded(entry.Command); err != nil {
 				g.recordApplyResult(entry.Index, err)
 			}
+			g.advanceApplied(entry.Index)
+			// Periodic compaction, mirroring MetaRaft (meta_raft.go:1010): snapshot
+			// INSIDE the apply loop at the just-applied entry.Index (snapshot()
+			// stamps at lastApplied, which advanceApplied above set to entry.Index).
+			// External-goroutine snapshotting would hit the applied-vs-committed
+			// truncation hazard documented at snapshot() above. A failed snapshot is
+			// logged and the loop continues — it must never halt apply.
+			if g.snapshotInterval > 0 && entry.Index%g.snapshotInterval == 0 {
+				if _, _, err := g.snapshot(); err != nil {
+					log.Error().Err(err).Uint64("index", entry.Index).Msg("index group: periodic snapshot error")
+				}
+			}
+			continue
 		case raft.LogEntrySnapshot:
 			// Unlike MetaRaft.applySnapshotEntry (meta_raft.go:1041), the index
 			// group intentionally skips installSnapshotDEKs() after Restore: an
@@ -327,8 +355,6 @@ func (g *indexGroup) waitForwardedApplied(ctx context.Context, idx uint64) error
 // idempotent puts on restart is harmless; truncating past real state is not.
 // (MetaRaft sidesteps this by snapshotting inside the apply loop at the just-
 // applied entry.Index — meta_raft.go:1126-1139.)
-//
-//nolint:unused // Slice 4a dormant primitive — referenced only by tests until Slice 4b boot-wires the index groups.
 func (g *indexGroup) snapshot() ([]byte, uint64, error) {
 	idx := g.lastApplied.Load()
 	if idx == 0 {

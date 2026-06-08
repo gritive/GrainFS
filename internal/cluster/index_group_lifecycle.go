@@ -34,6 +34,10 @@ type IndexGroupLifecycleConfig struct {
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
+	// SnapshotInterval, when > 0, makes the index group's apply loop fire a
+	// periodic snapshot every SnapshotInterval applied command entries so the
+	// raft log is compacted under load. 0 (the default) disables it.
+	SnapshotInterval uint64
 }
 
 // instantiateLocalIndexGroup boots a raft.Node + MetaFSM + indexGroup for one
@@ -110,7 +114,9 @@ func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupE
 
 	// Not started: Start launches the node + apply loop. The caller owns Start
 	// (and Close), mirroring the indexGroup unit tests.
-	return newIndexGroup(node, fsm, cfg.Forward), nil
+	g := newIndexGroup(node, fsm, cfg.Forward)
+	g.setSnapshotInterval(cfg.SnapshotInterval)
+	return g, nil
 }
 
 // InstantiateLocalIndexGroup is the exported wrapper for
