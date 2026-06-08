@@ -240,11 +240,61 @@ Planning reference: operator trust roadmap note from 2026-05-15.
        unexercised by the unit test (`TestGetObjectRange_StripedUsesSingleStreamNotReadAt` uses an
        unversioned object). The byte-Range and partNumber handlers are both covered; add a versioned-object
        striped-range assertion so the version-pinned stream path doesn't regress silently.
-- [ ] **Sharded object index — Slice 4a BUILT (dormant); Slice 4b next.**
-  Slice 1 (façade, N=1, v0.0.521.0), Slice 2 (LIST k-way merge + read seams, v0.0.522.0), and
-  Slice 4a (dormant index-group raft primitive, v0.0.523.0) are landed. Slice 3 (DEK prune path)
-  was descoped (no deletion path in current DEK lifecycle; deferred to a future epic). Slice 4b
-  (greenfield N=16 flip) is next — needs its own plan-eng-review and is GCP-gated.
+- [ ] **Sharded object index — Slice 4b-1 BUILT (boot-wire N groups, default N=1); 4b-2 bench next.**
+  Slice 1 (façade, N=1, v0.0.521.0), Slice 2 (LIST k-way merge + read seams, v0.0.522.0),
+  Slice 4a (dormant index-group raft primitive, v0.0.523.0), and Slice 4b-1 (boot-wire N
+  object-index groups behind `--object-index-groups`, default 1 = meta-FSM byte-identical,
+  v0.0.524.0) are landed. Slice 3 (DEK prune path) was descoped (no deletion path in current DEK
+  lifecycle; deferred to a future epic). **Slice 4b-2 (GCP A/B bench) is next**, then 4b-3 (default→N
+  flip, gated by 4b-2). 4b-1 is a ROUTING/correctness proof — N>1 index-group raft replicates over
+  the real groupRaftMux carrier and writes route by hash%N to the right shard; it is NOT a
+  commit-parallelism proof (that is 4b-2 under concurrent multi-key load).
+   - [ ] **[4b-2 BLOCKER] `ElectionPriorityKey` (raft.Config) is INERT — leader distribution NOT staggered.**
+         Set by BOTH data and index group lifecycle (`group_lifecycle.go:122`, `index_group_lifecycle.go`),
+         but NEVER read by the raft node: defined `raft/types.go:284`, copied `raft/raftfactory.go:48`, zero
+         read sites; the election-timeout RNG seeds on `cfg.ID` only (`raft/node.go:254`). So per-group leader
+         distribution is probabilistic, not staggered (verified flaky: under -race all 8 group leaders landed
+         on node 0). 4b-2 MUST measure actual per-node leader distribution across the N index groups before
+         trusting throughput; if degenerate (leaders pile on one node → all writes forward to it, partially
+         reproducing single-raft serialization), real per-group election staggering must be implemented before
+         the 4b-3 flip. NOT index-specific (data groups share the inert field) — repo-wide pre-existing.
+   - [ ] **[4b-2 BLOCKER] deferred-seed (Option B) does NOT seed index groups → `--object-index-groups N>1`
+         + `--bootstrap-expect-nodes` hangs boot 30s then fails.** The genesis index-group seed
+         (`SeedInitialIndexGroups`, `boot_phases_storage_runtime.go:174`) is in the immediate-genesis branch
+         only. Under Option B, `handleDeferredSeed` (`boot_phases_forwarders.go`) seeds SHARD groups only — it
+         never proposes the N `IndexGroupEntry` records, so `bootIndexGroupsPostSeed`'s
+         `WaitForIndexGroupCount(N, 30s)` times out and boot fails. Before the 4b-2 multi-node N>1 bench: either
+         add index-group seeding to `handleDeferredSeed` (propose the N entries on quorum, alongside the shard
+         groups), OR pin the bench cluster to immediate-genesis (no `--bootstrap-expect-nodes`) and rely on
+         raft-replication + `onIndexGroupAdded` for joiners. 4b-1 covers only the immediate-genesis path.
+   - [ ] **[4b-3 pre-flip BLOCKER] façade-bypass void reads at N>1.** These read the meta-FSM object index
+         DIRECTLY (not via the `ObjectIndexShardSet` façade), so at N>1 they return the empty void. Harmless at
+         default N=1; MUST be routed through the façade before the 4b-3 default→N flip. Discriminator: "reads
+         object index from meta-FSM directly, not via the façade → N>1 empty."
+         (a) `serveruntime/adapters.go:92` — `VolumePlacementAdapter.VolumeReplicaSummaries` →
+             `fsm.ObjectIndexLatestEntries(...)` direct read → volume replica summaries empty at N>1.
+         (b) `cluster_coordinator.go:248` (and twin `:838`/:840) — the `indexReader==nil` fallback
+             `metaObjectIndexAdapter(c.meta)`. Harmless when the façade is injected (always, in cluster boot),
+             but a void if ever reached at N>1. Audit/remove the fallback before the flip.
+   - [ ] **[4b-1 honest residual → verify in 4b-2/4b-3] serveruntime post-seed glue not driven by an e2e boot.**
+         Task 6's acceptance proves the cluster-layer wiring (manager `InstantiateAndStart` with `GroupMux` →
+         per-group `groupRaftMux.ForGroup`/`Register`, real-mux replication, façade round-trip) over an in-proc
+         multi-node harness. It does NOT drive `Run()`, so `bootIndexGroupsPostSeed`'s genesis-seed +
+         `WaitForIndexGroupCount` + replay-scan + restart re-instantiate TIMING is covered only by structural
+         identity with the data-group post-seed phase (`boot_phases_storage_runtime.go:633-663`) + the N=1
+         byte-identical unit (`serveruntime.TestBuildObjectIndexShards_N1MetaFSM`). The follower→leader proposal
+         FORWARD over `clusterTransport.CallPooled` is likewise structural-identical to the data/meta forward
+         dialers (the receiver/sender wire LOGIC is proven in `index_group_forward_test.go`); the Task-6 harness
+         exercises the forward via an in-proc dialer onto the production `receiver.Handle`. Confirm the full boot
+         path (genesis + restart) on the GCP multi-node cluster in 4b-2.
+   - [ ] **[4b-3 follow-up] late-join index-group instantiation.** Genesis forms the N index groups across the
+         boot node set (RF=N). Nodes that join AFTER genesis rely on raft AddVoter replication + the
+         `onIndexGroupAdded` callback to instantiate their local replicas — confirm/handle on a real join in 4b-3.
+   - [ ] **[INVARIANT — 4b-2/4b-3] bench the EXACT config the flip ships.** 4b-1 uses RF=N (every node a voter,
+         local reads, writes forward to the group leader). 4b-2 measures RF=N → therefore 4b-3 flips RF=N (the
+         measured config). Do NOT flip a config the bench did not measure. RF=3 + remote-read shard is a SEPARATE
+         follow-up epic with its own A/B (it adds a GET cost — non-voter groups forward reads to the leader — that
+         the RF=N bench does NOT measure; shipping RF=3 off an RF=N bench would be an unmeasured GET regression).
    - [ ] **[P3] Index-group forward robustness (deferred to Slice 4b).** Slice 4a's index-group forward
          hook covers Put + Delete forwarding and a bounded local-apply timeout. It does NOT cover
          no-leader / stale-leader forwarding (forwarding to a node that just lost leadership) — those are

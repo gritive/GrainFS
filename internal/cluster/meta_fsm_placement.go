@@ -669,6 +669,17 @@ func (f *MetaFSM) SetOnShardGroupAdded(fn func(ShardGroupEntry)) {
 	f.mu.Unlock()
 }
 
+// SetOnIndexGroupAdded registers a callback fired after each PutIndexGroup is
+// applied (mirrors SetOnShardGroupAdded for object-index groups). Fires on every
+// applied entry, including idempotent overwrites — the boot wiring's
+// InstantiateAndStart is idempotent so duplicates are harmless. Must not block.
+// Set before Start() to avoid races with the apply loop.
+func (f *MetaFSM) SetOnIndexGroupAdded(fn func(IndexGroupEntry)) {
+	f.mu.Lock()
+	f.onIndexGroupAdded = fn
+	f.mu.Unlock()
+}
+
 // SetOnBucketAssigned registers a callback fired after each PutBucketAssignment is applied.
 // Must be called before MetaRaft.Start() to avoid a data race with the apply loop.
 func (f *MetaFSM) SetOnBucketAssigned(fn func(bucket, groupID string)) {

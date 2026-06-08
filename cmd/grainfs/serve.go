@@ -28,6 +28,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().String("join-listen-addr", "", "Zero-CA join-listener bind address (leader serves the invite handler); empty derives an ephemeral port on the raft-addr host")
 	cmd.Flags().Int("bootstrap-expect-nodes", 0, "EXPERIMENTAL: declared target node count for a fresh cluster. >1 defers genesis shard-group seeding until this many nodes have joined, then seeds all initial groups at the target size's uniform EC width (no RF=1 batch). 0/unset = today's behavior (seed immediately at solo genesis).")
 	cmd.Flags().Duration("bootstrap-expect-timeout", 10*time.Minute, "EXPERIMENTAL: with --bootstrap-expect-nodes, max wait for the target node count before seeding with whatever joined (loud WARN). Never blocks forever.")
+	cmd.Flags().Int("object-index-groups", 1, "EXPERIMENTAL: number of sharded object-index raft groups (default 1 = single meta-FSM index; >1 is greenfield-only)")
 	cmd.Flags().Int64("cluster-append-forward-buffer-total-bytes", 512*1024*1024,
 		"Total byte budget for AppendObject forward-body reservation pool (default 512 MiB).")
 	cmd.Flags().Int64("cluster-append-forward-buffer-max-per-request", 64*1024*1024,

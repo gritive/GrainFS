@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -21,6 +23,11 @@ const indexGroupForwardLocalApplyTimeout = 10 * time.Second
 // leader and returns the committed log index. nil ⇒ no peer to forward to
 // (single-node / leader-only test), so the proposer proposes locally.
 type indexGroupForwardFunc func(ctx context.Context, data []byte) (uint64, error)
+
+// IndexGroupForwardFunc is the exported alias for indexGroupForwardFunc, so the
+// boot wiring (serveruntime, a different package) can build the per-group forward
+// hook InstantiateAndStart installs. Interchangeable with the unexported type.
+type IndexGroupForwardFunc = indexGroupForwardFunc
 
 // Compile-time assertions: *indexGroup must satisfy all three ObjectIndexShard
 // component interfaces so it drops into ObjectIndexShard{Reader, Writer, Lister}
@@ -39,6 +46,13 @@ type indexGroup struct {
 	fsm     *MetaFSM
 	forward indexGroupForwardFunc
 
+	// snapshotInterval, when > 0, makes runApplyLoop fire snapshot() every
+	// snapshotInterval applied command entries so an N>1 index-group raft log is
+	// compacted under load. 0 (the default) disables it — keeping the Slice-4a
+	// solo/channel-driven tests (which set node==nil and never snapshot)
+	// byte-identical. Set via setSnapshotInterval before Start.
+	snapshotInterval uint64
+
 	cancel context.CancelFunc // set by Start; cancels the apply loop
 	done   chan struct{}      // closed by runApplyLoop on exit
 
@@ -53,7 +67,6 @@ type indexGroup struct {
 	applyErrs     map[uint64]error
 }
 
-//nolint:unused // Slice 4a dormant primitive — referenced only by tests until Slice 4b boot-wires the index groups.
 func newIndexGroup(node RaftNode, fsm *MetaFSM, forward indexGroupForwardFunc) *indexGroup {
 	return &indexGroup{
 		node:        node,
@@ -62,6 +75,12 @@ func newIndexGroup(node RaftNode, fsm *MetaFSM, forward indexGroupForwardFunc) *
 		applyNotify: make(chan struct{}),
 		done:        make(chan struct{}),
 	}
+}
+
+// setSnapshotInterval configures periodic apply-loop snapshotting. interval 0
+// disables it (the default). Must be called before Start.
+func (g *indexGroup) setSnapshotInterval(interval uint64) {
+	g.snapshotInterval = interval
 }
 
 // runApplyLoop drains committed entries and drives the FSM. It closes g.done on
@@ -84,6 +103,19 @@ func (g *indexGroup) runApplyLoop(ctx context.Context, applyCh <-chan raft.LogEn
 			if err := g.applyGuarded(entry.Command); err != nil {
 				g.recordApplyResult(entry.Index, err)
 			}
+			g.advanceApplied(entry.Index)
+			// Periodic compaction, mirroring MetaRaft (meta_raft.go:1010): snapshot
+			// INSIDE the apply loop at the just-applied entry.Index (snapshot()
+			// stamps at lastApplied, which advanceApplied above set to entry.Index).
+			// External-goroutine snapshotting would hit the applied-vs-committed
+			// truncation hazard documented at snapshot() above. A failed snapshot is
+			// logged and the loop continues — it must never halt apply.
+			if g.snapshotInterval > 0 && entry.Index%g.snapshotInterval == 0 {
+				if _, _, err := g.snapshot(); err != nil {
+					log.Error().Err(err).Uint64("index", entry.Index).Msg("index group: periodic snapshot error")
+				}
+			}
+			continue
 		case raft.LogEntrySnapshot:
 			// Unlike MetaRaft.applySnapshotEntry (meta_raft.go:1041), the index
 			// group intentionally skips installSnapshotDEKs() after Restore: an
@@ -266,28 +298,52 @@ func (g *indexGroup) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, 
 	return g.proposeOrForward(ctx, data)
 }
 
-// proposeOrForward proposes data locally when this node is the leader (or
-// no forward func is set), otherwise forwards to the leader.
+// proposeOrForward proposes data locally when this node is the leader (or no
+// forward func is set), otherwise forwards to the current leader. It runs a
+// bounded convergence loop (mirroring the data-group DistributedBackend propose,
+// backend.go:1130-1199): a freshly-booted index group may not have elected a
+// leader when the first write arrives (cold boot → empty LeaderID), and a
+// leadership change can leave a stale LeaderID hint that dials a follower
+// (not-leader). Both are transient, so the loop re-checks local IsLeader and
+// re-invokes the forward hook (which re-reads LeaderID via the Task-5 closure)
+// on a bounded backoff until the group converges or ctx expires.
+//
+// The solo / leader-local path (g.forward == nil || g.node.IsLeader()) takes the
+// first branch and returns immediately — no loop spin — keeping the Slice-4a
+// behavior byte-identical. Local promotion mid-write is handled by re-checking
+// IsLeader at the top of each iteration.
 func (g *indexGroup) proposeOrForward(ctx context.Context, data []byte) error {
-	if g.forward == nil || g.node.IsLeader() {
-		idx, err := g.node.ProposeWait(ctx, data)
-		if err != nil {
-			return fmt.Errorf("index group: propose: %w", err)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return g.waitAppliedResult(ctx, idx)
+		if g.forward == nil || g.node.IsLeader() {
+			idx, err := g.node.ProposeWait(ctx, data)
+			if err != nil {
+				return fmt.Errorf("index group: propose: %w", err)
+			}
+			return g.waitAppliedResult(ctx, idx)
+		}
+		idx, err := g.forward(ctx, data)
+		if err != nil {
+			if isRetryableForwardErr(err) {
+				// Not converged yet (cold boot / stale leader). Back off and retry.
+				if !sleepCtx(ctx, indexGroupForwardRetryBackoff) {
+					return ctx.Err()
+				}
+				continue
+			}
+			return fmt.Errorf("index group: forward: %w", err)
+		}
+		if idx > 0 {
+			return g.waitForwardedApplied(ctx, idx)
+		}
+		// idx==0 means the forwarder did not report a committed index, so there is
+		// nothing to wait on. The index-group forward hook always returns the
+		// leader's committed index from ProposeWait, so idx==0 only occurs with a
+		// degenerate/legacy forwarder we don't use.
+		return nil
 	}
-	idx, err := g.forward(ctx, data)
-	if err != nil {
-		return fmt.Errorf("index group: forward: %w", err)
-	}
-	if idx > 0 {
-		return g.waitForwardedApplied(ctx, idx)
-	}
-	// idx==0 means the forwarder did not report a committed index, so there is
-	// nothing to wait on. The index-group forward hook always returns the
-	// leader's committed index from ProposeWait, so idx==0 only occurs with a
-	// degenerate/legacy forwarder we don't use.
-	return nil
 }
 
 // waitForwardedApplied waits for a forwarded command (whose log index is
@@ -328,8 +384,6 @@ func (g *indexGroup) waitForwardedApplied(ctx context.Context, idx uint64) error
 // idempotent puts on restart is harmless; truncating past real state is not.
 // (MetaRaft sidesteps this by snapshotting inside the apply loop at the just-
 // applied entry.Index — meta_raft.go:1126-1139.)
-//
-//nolint:unused // Slice 4a dormant primitive — referenced only by tests until Slice 4b boot-wires the index groups.
 func (g *indexGroup) snapshot() ([]byte, uint64, error) {
 	idx := g.lastApplied.Load()
 	if idx == 0 {

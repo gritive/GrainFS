@@ -553,6 +553,7 @@ enum MetaCmdType : uint8 {
   BeginPresentFlip             = 86, // zero-CA cutover: all voters flip present cert to per-node identity (PR-2a §8c)
   DropClusterKeyAccept         = 87, // zero-CA cutover: irreversibly drops cluster-key from accept-set (PR-2b §8 H2)
   DEKRewrapProgress            = 88, // S6a: per-node DEK-generation rewrap completion ledger
+  PutIndexGroup                = 89, // sharded object index → Raft 그룹 매핑 (data-group과 별개 레지스트리)
 }
 
 table MetaNodeEntry {
@@ -671,6 +672,18 @@ table ShardGroupEntry {
 // PR-C: MetaPutShardGroup 커맨드 — shard group 매핑을 기록·갱신한다.
 table MetaPutShardGroupCmd {
   group:ShardGroupEntry;
+}
+
+// IndexGroupEntry는 sharded object index Raft 그룹 멤버십을 기술한다.
+// ShardGroupEntry(데이터 그룹)와 별개의 레지스트리로, 절대 섞이지 않는다.
+table IndexGroupEntry {
+  id:string;           // e.g. "index-0"
+  peer_ids:[string];   // 이 인덱스 그룹의 Raft voter 노드 ID 목록
+}
+
+// MetaPutIndexGroup 커맨드 — index group 매핑을 기록·갱신한다.
+table MetaPutIndexGroupCmd {
+  group:IndexGroupEntry;
 }
 
 // PR-D: bucket→group 매핑 엔트리 1건
@@ -953,6 +966,7 @@ table MetaStateSnapshot {
   cluster_key_dropped:bool = false;                        // zero-CA cutover: slot 15 (H3); PR-2 sets it, PR-1 always false
   present_flip_begun:bool = false;                         // zero-CA cutover: slot 16 (PR-2a §8c); set by BeginPresentFlip(86) Apply
   revoked_node_ids:[string];                               // zero-CA revoked-node set: slot 17 (data-group evacuation)
+  index_groups:[IndexGroupEntry];                          // sharded object index registry: slot 18 (separate from shard_groups)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

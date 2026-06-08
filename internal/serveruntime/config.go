@@ -45,6 +45,11 @@ type Config struct {
 	BootstrapExpectNodes   int
 	BootstrapExpectTimeout time.Duration
 
+	// IndexGroupCount is the number of sharded object-index raft groups.
+	// 0/unset (normalized to 1) = the behavior-neutral single meta-FSM index;
+	// >1 activates the greenfield-only sharded index-group boot path.
+	IndexGroupCount int
+
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts []server.Option
 

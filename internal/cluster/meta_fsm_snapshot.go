@@ -41,6 +41,10 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for _, sg := range f.shardGroups {
 		shardGroups = append(shardGroups, sg)
 	}
+	indexGroups := make([]IndexGroupEntry, 0, len(f.indexGroups))
+	for _, ig := range f.indexGroups {
+		indexGroups = append(indexGroups, ig)
+	}
 	type bucketKV struct{ bucket, groupID string }
 	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
 	for bucket, groupID := range f.bucketAssignments {
@@ -185,6 +189,31 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		b.PrependUOffsetT(sgOffs[i])
 	}
 	sgVec := b.EndVector(len(sgOffs))
+
+	// Build IndexGroupEntry offsets (separate registry from shard groups).
+	igOffs := make([]flatbuffers.UOffsetT, len(indexGroups))
+	for i := len(indexGroups) - 1; i >= 0; i-- {
+		ig := indexGroups[i]
+		idOff := b.CreateString(ig.ID)
+		peerOffs := make([]flatbuffers.UOffsetT, len(ig.PeerIDs))
+		for j := len(ig.PeerIDs) - 1; j >= 0; j-- {
+			peerOffs[j] = b.CreateString(ig.PeerIDs[j])
+		}
+		clusterpb.IndexGroupEntryStartPeerIdsVector(b, len(peerOffs))
+		for j := len(peerOffs) - 1; j >= 0; j-- {
+			b.PrependUOffsetT(peerOffs[j])
+		}
+		peerVec := b.EndVector(len(peerOffs))
+		clusterpb.IndexGroupEntryStart(b)
+		clusterpb.IndexGroupEntryAddId(b, idOff)
+		clusterpb.IndexGroupEntryAddPeerIds(b, peerVec)
+		igOffs[i] = clusterpb.IndexGroupEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartIndexGroupsVector(b, len(igOffs))
+	for i := len(igOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(igOffs[i])
+	}
+	igVec := b.EndVector(len(igOffs))
 
 	// Build MetaNodeEntry offsets
 	nodeOffs := make([]flatbuffers.UOffsetT, len(nodes))
@@ -353,6 +382,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
+	clusterpb.MetaStateSnapshotAddIndexGroups(b, igVec)
 	clusterpb.MetaStateSnapshotAddBucketAssignments(b, baVec)
 	clusterpb.MetaStateSnapshotAddLoadSnapshot(b, lsVec)
 	if activePlanCopy != nil {
@@ -453,6 +483,28 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			continue
 		}
 		newShardGroups[e.ID] = e
+	}
+
+	// Index groups: separate registry. Mirror applyPutIndexGroup (no ValidateGroupID,
+	// skip empty IDs) so log-replay and snapshot-restore land on identical state.
+	newIndexGroups := make(map[string]IndexGroupEntry, snap.IndexGroupsLength())
+	var igEntry clusterpb.IndexGroupEntry
+	for i := 0; i < snap.IndexGroupsLength(); i++ {
+		if !snap.IndexGroups(&igEntry, i) {
+			return fmt.Errorf("meta_fsm: Restore: index group %d decode failed", i)
+		}
+		peers := make([]string, igEntry.PeerIdsLength())
+		for j := 0; j < igEntry.PeerIdsLength(); j++ {
+			peers[j] = string(igEntry.PeerIds(j))
+		}
+		e := IndexGroupEntry{
+			ID:      string(igEntry.Id()),
+			PeerIDs: peers,
+		}
+		if e.ID == "" {
+			continue
+		}
+		newIndexGroups[e.ID] = e
 	}
 
 	newBucketAssignments := make(map[string]string, snap.BucketAssignmentsLength())
@@ -876,6 +928,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
+	f.indexGroups = newIndexGroups
 	f.bucketAssignments = newBucketAssignments
 	f.objectIndex = newObjectIndex
 	f.objectLatest = newObjectLatest

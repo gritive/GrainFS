@@ -483,6 +483,21 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeIndexGroup proposes a PutIndexGroup command to the cluster and blocks
+// until it is applied to the local FSM. Index groups are a registry separate
+// from data shard groups.
+func (m *MetaRaft) ProposeIndexGroup(ctx context.Context, ig IndexGroupEntry) error {
+	data, err := encodeMetaIndexGroupCmd(ig)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode PutIndexGroup: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitAppliedResult(ctx, idx)
+}
+
 // ProposeShardGroupForwarding is ProposeShardGroup that forwards to the meta
 // leader when this node is a follower (P1-1 convergence). proposeOrForward waits
 // for apply equivalently (leader applies locally; follower forwards), so a

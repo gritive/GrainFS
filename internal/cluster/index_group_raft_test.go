@@ -124,6 +124,63 @@ func TestIndexGroup_SingleNode_SnapshotRestoreOnRestart(t *testing.T) {
 	assert.Equal(t, "v2", got.VersionID)
 }
 
+// TestIndexGroup_PeriodicSnapshotCompactsAndRestores verifies Task 4.6: when a
+// snapshot interval is set, the apply loop fires snapshot() periodically (so the
+// raft log is compacted under load), and a FRESH indexGroup on the same dir
+// restores rows from that snapshot.
+func TestIndexGroup_PeriodicSnapshotCompactsAndRestores(t *testing.T) {
+	dir := t.TempDir()
+
+	// ── Phase 1: solo group with a small snapshot interval ──────────────────
+	node, closeStore := newSoloNode(t, dir)
+	fsm := NewMetaFSM()
+	wireTestKEK(t, fsm)
+	ig := newIndexGroup(node, fsm, nil)
+	ig.setSnapshotInterval(8)
+	require.NoError(t, ig.Start(context.Background()))
+	require.Eventually(t, node.IsLeader, 5*time.Second, 20*time.Millisecond,
+		"solo node should elect itself leader")
+
+	ctx := context.Background()
+	// Apply well past the interval so the modulo trigger fires at least once.
+	for i := 0; i < 20; i++ {
+		require.NoError(t, ig.ProposeObjectIndex(ctx, ObjectIndexEntry{
+			Bucket:           "b",
+			Key:              fmt.Sprintf("k%02d", i),
+			VersionID:        "v1",
+			PlacementGroupID: "g0",
+			Size:             1,
+			ModTime:          int64(i + 1),
+		}, false), "propose %d", i)
+	}
+
+	// The apply loop snapshots inside itself, so wait for compaction to fire.
+	require.Eventually(t, func() bool {
+		snap, err := node.LatestSnapshot()
+		return err == nil && snap != nil && snap.Index > 0
+	}, 5*time.Second, 20*time.Millisecond, "periodic snapshot must fire (LatestSnapshot.Index > 0)")
+
+	// ── Phase 2: fresh group on the same dir restores from the snapshot ─────
+	ig.Close()
+	require.NoError(t, closeStore())
+
+	node2, closeStore2 := newSoloNode(t, dir)
+	t.Cleanup(func() { _ = closeStore2() })
+	fsm2 := NewMetaFSM()
+	wireTestKEK(t, fsm2)
+	ig2 := newIndexGroup(node2, fsm2, nil)
+	require.NoError(t, ig2.Start(ctx))
+	t.Cleanup(func() { ig2.Close() })
+
+	// Rows from before the snapshot boundary must be present after restore.
+	got, ok := ig2.ObjectIndexLatest("b", "k00")
+	require.True(t, ok, "k00 should be present after snapshot restore")
+	assert.Equal(t, "v1", got.VersionID)
+	got, ok = ig2.ObjectIndexLatest("b", "k07")
+	require.True(t, ok, "k07 (at the first snapshot boundary) should be present after restore")
+	assert.Equal(t, "v1", got.VersionID)
+}
+
 // ── Task 3: 3-node in-process loopback ───────────────────────────────────────
 
 const (
@@ -243,6 +300,34 @@ func (c *igCluster) startNode(t *testing.T, id string, peers []string, election 
 		}
 	}
 	ig := newIndexGroup(node, fsm, fwd)
+	require.NoError(t, ig.Start(context.Background()))
+	t.Cleanup(ig.Close)
+	c.mu.Lock()
+	c.groups[id] = ig
+	c.mu.Unlock()
+	return ig
+}
+
+// startNodeWithForward mirrors startNode but installs a caller-supplied forward
+// hook (built from the node's own *indexGroup so the hook can read LeaderID()),
+// instead of the direct-ProposeWait shortcut. Used by index_group_forward_test
+// to drive the production sender+receiver path.
+func (c *igCluster) startNodeWithForward(t *testing.T, id string, peers []string, election time.Duration, hookFor func(self *indexGroup) indexGroupForwardFunc) *indexGroup {
+	t.Helper()
+	rcfg := raft.DefaultConfig(id, peers)
+	rcfg.ElectionTimeout = election
+	rcfg.HeartbeatTimeout = igHeartbeat
+	node, closeStore, err := newRaftNode(rcfg, t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = closeStore() })
+	c.register(id, node)
+	c.wireTransport(id, node)
+
+	fsm := NewMetaFSM()
+	wireTestKEK(t, fsm)
+
+	ig := newIndexGroup(node, fsm, nil)
+	ig.forward = hookFor(ig) // installed before Start so the hook is live immediately
 	require.NoError(t, ig.Start(context.Background()))
 	t.Cleanup(ig.Close)
 	c.mu.Lock()

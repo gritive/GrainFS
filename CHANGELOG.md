@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.524.0] - 2026-06-09
+
+### Added
+
+- **Sharded object index — Slice 4b-1: boot-wire N object-index raft groups (EXPERIMENTAL,
+  default 1 = meta-FSM, byte-identical).** Behind the experimental `--object-index-groups` flag
+  (default 1): at N>1 the boot path seeds N fixed `IndexGroupEntry` records at genesis, instantiates
+  one Slice-4a `indexGroup` per record on every node (RF=N) over the shared `groupRaftMux` carrier,
+  assembles the `ObjectIndexShardSet` façade from them, and rewires the coordinator + forward
+  receiver in a post-seed boot phase — so object-index point-reads/writes/lists route by
+  `hash(bucket,key) % N` to separate index-group raft FSMs. At the default N=1 the meta-FSM
+  single-shard path is unchanged (**byte-identical**). Per-group raft RPCs ride
+  `raft.GroupRaftMux.ForGroup`/`Register`, identical to data groups (this fixed a `Transport: nil`
+  gap that left multi-node index groups unable to elect/replicate). Greenfield-only; **this is NOT
+  the default flip** (4b-3, gated by the 4b-2 GCP bench).
+  - **Proven:** N>1 index-group raft replicates over the real TCP mux carrier (inbound-mux-session
+    discriminator, the same bar as the data-group proof) and writes route by `hash%N` to the correct
+    shard's own FSM with PUT/DELETE round-trip + read-back across nodes (in-proc multi-node harness,
+    RED-on-revert verified); N=1 byte-identical (façade reader is the meta-FSM).
+  - **Scoped (not yet proven here):** 4b-1 is a ROUTING/correctness proof, **not** a
+    commit-parallelism proof (that is 4b-2 under concurrent multi-key load). Per-group leader
+    distribution is NOT staggered — `ElectionPriorityKey` is an inert raft.Config field (4b-2
+    BLOCKER). The follower→leader proposal-forward over `CallPooled` and the `Run()` post-seed boot
+    timing are covered by structural identity with the data/meta paths + unit tests, to be confirmed
+    on the GCP multi-node cluster in 4b-2.
+
 ## [0.0.523.0] - 2026-06-08
 
 ### Added
