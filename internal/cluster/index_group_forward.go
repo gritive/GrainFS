@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -36,6 +37,36 @@ func isIndexGroupNotReady(err error) bool {
 // boot race. Small so a follower that beats its leader's group registration only
 // pauses briefly.
 const indexGroupForwardRetryBackoff = 50 * time.Millisecond
+
+// errIndexGroupNoLeaderHint is the empty-leader-hint sentinel returned by Send
+// when the caller has no leader to dial (cold boot before an election settles).
+// proposeOrForward's convergence loop classifies it as RETRYABLE (mirroring the
+// data-group backend, which retries while no leader is known). It stays a single
+// Send call's terminal error — the LOOP that retries it lives in proposeOrForward.
+var errIndexGroupNoLeaderHint = errors.New("index group forward: no leader to forward to")
+
+// isRetryableForwardErr reports whether a forward error from Send is transient
+// (the group has not yet converged on a leader) and should be retried by
+// proposeOrForward's bounded convergence loop. Three cases are retryable:
+//   - empty leader hint (cold boot, no leader known yet)
+//   - not-leader (stale LeaderID hint dialed a follower; raft.ErrNotLeader
+//     round-trips the wire as a plain errors.New("not the leader"), so match on
+//     the canonical string — mirrors backend.go:904/973)
+//   - index-group-not-ready (leader's group not yet registered — boot race)
+//
+// Anything else (FSM apply error, transport failure) is TERMINAL.
+func isRetryableForwardErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errIndexGroupNoLeaderHint) {
+		return true
+	}
+	if isIndexGroupNotReady(err) {
+		return true
+	}
+	return errors.Is(err, raft.ErrNotLeader) || strings.Contains(err.Error(), raft.ErrNotLeader.Error())
+}
 
 // IndexGroupProposeForwardReceiver handles StreamIndexGroupProposeForward on the
 // leader side: it resolves the forwarded group ID to a local index group via the
@@ -147,7 +178,7 @@ func (s *IndexGroupProposeForwardSender) Send(ctx context.Context, leaderHint, g
 		}
 		target := s.target(leaderHint)
 		if target == "" {
-			return 0, fmt.Errorf("index group forward: no leader to forward to")
+			return 0, errIndexGroupNoLeaderHint
 		}
 		reply, err := s.dialer(ctx, target, payload)
 		if err != nil {

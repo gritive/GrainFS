@@ -293,28 +293,52 @@ func (g *indexGroup) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, 
 	return g.proposeOrForward(ctx, data)
 }
 
-// proposeOrForward proposes data locally when this node is the leader (or
-// no forward func is set), otherwise forwards to the leader.
+// proposeOrForward proposes data locally when this node is the leader (or no
+// forward func is set), otherwise forwards to the current leader. It runs a
+// bounded convergence loop (mirroring the data-group DistributedBackend propose,
+// backend.go:1130-1199): a freshly-booted index group may not have elected a
+// leader when the first write arrives (cold boot → empty LeaderID), and a
+// leadership change can leave a stale LeaderID hint that dials a follower
+// (not-leader). Both are transient, so the loop re-checks local IsLeader and
+// re-invokes the forward hook (which re-reads LeaderID via the Task-5 closure)
+// on a bounded backoff until the group converges or ctx expires.
+//
+// The solo / leader-local path (g.forward == nil || g.node.IsLeader()) takes the
+// first branch and returns immediately — no loop spin — keeping the Slice-4a
+// behavior byte-identical. Local promotion mid-write is handled by re-checking
+// IsLeader at the top of each iteration.
 func (g *indexGroup) proposeOrForward(ctx context.Context, data []byte) error {
-	if g.forward == nil || g.node.IsLeader() {
-		idx, err := g.node.ProposeWait(ctx, data)
-		if err != nil {
-			return fmt.Errorf("index group: propose: %w", err)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return g.waitAppliedResult(ctx, idx)
+		if g.forward == nil || g.node.IsLeader() {
+			idx, err := g.node.ProposeWait(ctx, data)
+			if err != nil {
+				return fmt.Errorf("index group: propose: %w", err)
+			}
+			return g.waitAppliedResult(ctx, idx)
+		}
+		idx, err := g.forward(ctx, data)
+		if err != nil {
+			if isRetryableForwardErr(err) {
+				// Not converged yet (cold boot / stale leader). Back off and retry.
+				if !sleepCtx(ctx, indexGroupForwardRetryBackoff) {
+					return ctx.Err()
+				}
+				continue
+			}
+			return fmt.Errorf("index group: forward: %w", err)
+		}
+		if idx > 0 {
+			return g.waitForwardedApplied(ctx, idx)
+		}
+		// idx==0 means the forwarder did not report a committed index, so there is
+		// nothing to wait on. The index-group forward hook always returns the
+		// leader's committed index from ProposeWait, so idx==0 only occurs with a
+		// degenerate/legacy forwarder we don't use.
+		return nil
 	}
-	idx, err := g.forward(ctx, data)
-	if err != nil {
-		return fmt.Errorf("index group: forward: %w", err)
-	}
-	if idx > 0 {
-		return g.waitForwardedApplied(ctx, idx)
-	}
-	// idx==0 means the forwarder did not report a committed index, so there is
-	// nothing to wait on. The index-group forward hook always returns the
-	// leader's committed index from ProposeWait, so idx==0 only occurs with a
-	// degenerate/legacy forwarder we don't use.
-	return nil
 }
 
 // waitForwardedApplied waits for a forwarded command (whose log index is

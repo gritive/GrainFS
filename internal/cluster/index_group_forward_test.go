@@ -266,6 +266,89 @@ func TestIndexGroupForward_NotLeaderIsTerminal(t *testing.T) {
 		"sender must NOT retry a not-leader reply (single dial, terminal)")
 }
 
+// TestIndexGroupForward_ProposeOrForwardConvergesPastNotLeader is the Task 4.7
+// test: a follower whose forward hook initially fails with a not-leader (and an
+// empty-leader-hint) error — as happens at cold boot before an election settles,
+// or during leadership churn with a stale LeaderID — must NOT fail terminally.
+// proposeOrForward must re-invoke the hook on a bounded backoff until the group
+// converges, then the write must land.
+func TestIndexGroupForward_ProposeOrForwardConvergesPastNotLeader(t *testing.T) {
+	c := startForward2(t, "ig0")
+	n2 := c.groups["n2"]
+	require.False(t, c.lookup("n2").IsLeader(), "n2 must be a follower")
+
+	// Build a production sender whose dial routes to the leader-side receiver.
+	sender := NewIndexGroupProposeForwardSender(c.dial)
+
+	var calls atomic.Int64
+	// Case 2 must yield a real not-leader reply, so route it to a receiver whose
+	// manager maps ig0 → the FOLLOWER (n2). Case 1 uses the empty leader hint
+	// (cold-boot). Case 3+ forwards to the real leader and lands the write.
+	followerMgr := NewIndexGroupManager()
+	followerMgr.register("ig0", c.groups["n2"], func() error { return nil })
+	followerReceiver := NewIndexGroupProposeForwardReceiver(followerMgr)
+	n2.forward = func(ctx context.Context, data []byte) (uint64, error) {
+		switch calls.Add(1) {
+		case 1:
+			return sender.Send(ctx, "", "ig0", data) // empty-hint
+		case 2:
+			s := NewIndexGroupProposeForwardSender(func(ctx context.Context, _ string, payload []byte) ([]byte, error) {
+				reply := followerReceiver.Handle(&transport.Message{Type: transport.StreamIndexGroupProposeForward, Payload: payload})
+				return reply.Payload, nil
+			})
+			return s.Send(ctx, "n2", "ig0", data) // resolves to follower → not-leader
+		default:
+			return sender.Send(ctx, c.leaderID(), "ig0", data) // real leader
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, n2.ProposeObjectIndex(ctx,
+		ObjectIndexEntry{Bucket: "b", Key: "kconv", VersionID: "v1", PlacementGroupID: "ig0", Size: 1, ModTime: 1}, false),
+		"proposeOrForward must converge past not-leader / empty-hint and land the write")
+	require.GreaterOrEqual(t, calls.Load(), int64(3),
+		"proposeOrForward must have retried the forward hook past the retryable failures")
+
+	for id, g := range c.groups {
+		g := g
+		require.Eventually(t, func() bool {
+			got, ok := g.ObjectIndexLatest("b", "kconv")
+			return ok && got.VersionID == "v1"
+		}, 5*time.Second, 20*time.Millisecond, "node %s should see the converged write", id)
+	}
+}
+
+// TestIndexGroupForward_ProposeOrForwardRespectsCtxCancel verifies the
+// convergence loop is bounded by the caller ctx: a forward hook that never
+// converges (always not-leader) must return promptly when ctx is cancelled,
+// not spin forever.
+func TestIndexGroupForward_ProposeOrForwardRespectsCtxCancel(t *testing.T) {
+	c := startForward2(t, "ig0")
+	n2 := c.groups["n2"]
+	require.False(t, c.lookup("n2").IsLeader(), "n2 must be a follower")
+
+	// Hook always fails not-leader (forwards to the follower receiver forever).
+	followerMgr := NewIndexGroupManager()
+	followerMgr.register("ig0", c.groups["n2"], func() error { return nil })
+	followerReceiver := NewIndexGroupProposeForwardReceiver(followerMgr)
+	sender := NewIndexGroupProposeForwardSender(func(ctx context.Context, _ string, payload []byte) ([]byte, error) {
+		reply := followerReceiver.Handle(&transport.Message{Type: transport.StreamIndexGroupProposeForward, Payload: payload})
+		return reply.Payload, nil
+	})
+	n2.forward = func(ctx context.Context, data []byte) (uint64, error) {
+		return sender.Send(ctx, "n2", "ig0", data)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := n2.ProposeObjectIndex(ctx,
+		ObjectIndexEntry{Bucket: "b", Key: "kcancel", VersionID: "v1", PlacementGroupID: "ig0", Size: 1, ModTime: 1}, false)
+	require.Error(t, err, "a never-converging forward must surface ctx error, not hang")
+	require.Less(t, time.Since(start), 2*time.Second, "loop must return promptly after ctx deadline, not spin")
+}
+
 func mustEncodePutIndex(t *testing.T, entry ObjectIndexEntry) []byte {
 	t.Helper()
 	payload, err := encodeMetaPutObjectIndexCmd(entry, false)
