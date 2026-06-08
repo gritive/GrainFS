@@ -16,19 +16,21 @@ import (
 // reads it back, and closes cleanly.
 func TestInstantiateLocalIndexGroup_SoloRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	db := openTestFSMStore(t, dir)
 
-	g, err := instantiateLocalIndexGroup(IndexGroupLifecycleConfig{
-		NodeID:   "n1",
-		DataDir:  dir,
-		FSMStore: db,
+	g, v2Close, err := instantiateLocalIndexGroup(IndexGroupLifecycleConfig{
+		NodeID:  "n1",
+		DataDir: dir,
 		// Deterministic K0 active KEK — mirrors wireTestKEK's store, the minimum
 		// the index-group MetaFSM needs to seal/open its raft-snapshot envelope.
 		KEKStore: newTestKEKStore(t, bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)),
 	}, IndexGroupEntry{ID: "index-0", PeerIDs: []string{"n1"}})
 	require.NoError(t, err)
 	require.NoError(t, g.Start(context.Background()))
-	defer g.Close()
+	// Close the node THEN the v2 store (mirrors solo tests' ig.Close()→closeStore()).
+	defer func() {
+		g.Close()
+		require.NoError(t, v2Close())
+	}()
 
 	// Solo node must elect itself leader before a local propose can succeed
 	// (mirrors startSoloIndexGroup's wait in index_group_raft_test.go).

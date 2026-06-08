@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"time"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -15,16 +13,16 @@ import (
 // IndexGroupLifecycleConfig collects the wiring needed to instantiate a local
 // object-index raft group. It mirrors GroupLifecycleConfig (group_lifecycle.go:22)
 // but builds an indexGroup instead of a GroupBackend.
+//
+// Unlike GroupLifecycleConfig there is no FSMStore here: the index group's
+// *MetaFSM is in-memory and persists only via raft snapshots under groupDir, so
+// the per-node shared FSM-state DB is never consumed (carrying it would be a
+// footgun — a required-but-unused field). The durable state is the raft-v2 log +
+// snapshots under <DataDir>/groups/<id>/, whose store is closed by the v2Close
+// func instantiateLocalIndexGroup now returns.
 type IndexGroupLifecycleConfig struct {
-	NodeID  string
-	DataDir string
-	// FSMStore is the per-node shared FSM-state DB. The data-group path threads
-	// it into NewGroupBackend's BadgerDB-backed *FSM; the index group's *MetaFSM
-	// is in-memory and persists only via raft snapshots under groupDir, so this
-	// field is reserved for parity with GroupLifecycleConfig and validated
-	// non-nil (mirroring instantiateLocalGroup's nil-check) but not otherwise
-	// consumed here.
-	FSMStore *badger.DB
+	NodeID   string
+	DataDir  string
 	KEKStore *encrypt.KEKStore
 	// Forward is the optional leader-forward hook. nil ⇒ solo / leader-local
 	// (the proposer proposes locally). A later slice wires the real forward.
@@ -42,24 +40,22 @@ type IndexGroupLifecycleConfig struct {
 
 // instantiateLocalIndexGroup boots a raft.Node + MetaFSM + indexGroup for one
 // object-index group. It mirrors instantiateLocalGroup (group_lifecycle.go:80)
-// but returns an indexGroup (NOT started — the caller calls Start).
-func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupEntry) (*indexGroup, error) {
+// but returns an indexGroup (NOT started — the caller calls Start) plus the
+// v2Close func for the raft-v2 store so the manager can close it on shutdown.
+func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupEntry) (*indexGroup, func() error, error) {
 	if entry.ID == "" {
-		return nil, fmt.Errorf("instantiateLocalIndexGroup: empty group ID")
+		return nil, nil, fmt.Errorf("instantiateLocalIndexGroup: empty group ID")
 	}
 	if err := raft.ValidateGroupID(entry.ID); err != nil {
-		return nil, fmt.Errorf("instantiateLocalIndexGroup: %w", err)
+		return nil, nil, fmt.Errorf("instantiateLocalIndexGroup: %w", err)
 	}
 	if cfg.NodeID == "" {
-		return nil, fmt.Errorf("instantiateLocalIndexGroup: empty NodeID")
-	}
-	if cfg.FSMStore == nil {
-		return nil, fmt.Errorf("instantiateLocalIndexGroup: nil FSMStore")
+		return nil, nil, fmt.Errorf("instantiateLocalIndexGroup: empty NodeID")
 	}
 
 	groupDir := filepath.Join(cfg.DataDir, "groups", entry.ID)
 	if err := os.MkdirAll(groupDir, 0o755); err != nil {
-		return nil, fmt.Errorf("index group %s: mkdir: %w", entry.ID, err)
+		return nil, nil, fmt.Errorf("index group %s: mkdir: %w", entry.ID, err)
 	}
 
 	// peers = all PeerIDs except self
@@ -83,13 +79,13 @@ func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupE
 	// this when "mirroring" instantiateLocalGroup (group_lifecycle.go:122).
 	rcfg.ElectionPriorityKey = entry.ID
 
-	// v2Close (raft-v2 BadgerDB close) is discarded here: indexGroup.Close()
-	// closes only the node (Slice-4a design), and the solo tests own the store
-	// close externally. The boot/shutdown-wiring slice must capture and close it
-	// — until then this is the deferred close-ownership gap (see task report).
-	node, _, err := newRaftNode(rcfg, groupDir)
+	// v2Close (raft-v2 BadgerDB close) is RETURNED so the IndexGroupManager can
+	// close it on shutdown after closing the node — fixing the Slice-4a leak where
+	// indexGroup.Close() closed only the node and the store was orphaned. The solo
+	// tests close it directly.
+	node, v2Close, err := newRaftNode(rcfg, groupDir)
 	if err != nil {
-		return nil, fmt.Errorf("index group %s: newRaftNode: %w", entry.ID, err)
+		return nil, nil, fmt.Errorf("index group %s: newRaftNode: %w", entry.ID, err)
 	}
 	if cfg.Transport != nil {
 		tr := cfg.Transport
@@ -116,12 +112,5 @@ func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupE
 	// (and Close), mirroring the indexGroup unit tests.
 	g := newIndexGroup(node, fsm, cfg.Forward)
 	g.setSnapshotInterval(cfg.SnapshotInterval)
-	return g, nil
-}
-
-// InstantiateLocalIndexGroup is the exported wrapper for
-// instantiateLocalIndexGroup. Slice 4b boot-wires the index groups through it
-// (mirrors InstantiateLocalGroup).
-func InstantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupEntry) (*indexGroup, error) {
-	return instantiateLocalIndexGroup(cfg, entry)
+	return g, v2Close, nil
 }
