@@ -258,6 +258,15 @@ Planning reference: operator trust roadmap note from 2026-05-15.
          trusting throughput; if degenerate (leaders pile on one node → all writes forward to it, partially
          reproducing single-raft serialization), real per-group election staggering must be implemented before
          the 4b-3 flip. NOT index-specific (data groups share the inert field) — repo-wide pre-existing.
+   - [ ] **[4b-2 BLOCKER] deferred-seed (Option B) does NOT seed index groups → `--object-index-groups N>1`
+         + `--bootstrap-expect-nodes` hangs boot 30s then fails.** The genesis index-group seed
+         (`SeedInitialIndexGroups`, `boot_phases_storage_runtime.go:174`) is in the immediate-genesis branch
+         only. Under Option B, `handleDeferredSeed` (`boot_phases_forwarders.go`) seeds SHARD groups only — it
+         never proposes the N `IndexGroupEntry` records, so `bootIndexGroupsPostSeed`'s
+         `WaitForIndexGroupCount(N, 30s)` times out and boot fails. Before the 4b-2 multi-node N>1 bench: either
+         add index-group seeding to `handleDeferredSeed` (propose the N entries on quorum, alongside the shard
+         groups), OR pin the bench cluster to immediate-genesis (no `--bootstrap-expect-nodes`) and rely on
+         raft-replication + `onIndexGroupAdded` for joiners. 4b-1 covers only the immediate-genesis path.
    - [ ] **[4b-3 pre-flip BLOCKER] façade-bypass void reads at N>1.** These read the meta-FSM object index
          DIRECTLY (not via the `ObjectIndexShardSet` façade), so at N>1 they return the empty void. Harmless at
          default N=1; MUST be routed through the façade before the 4b-3 default→N flip. Discriminator: "reads
