@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.525.0] - 2026-06-09
+
+### Fixed
+
+- **Sharded object index — Slice 4b-2 prerequisite: seed object-index groups on the Option-B
+  deferred-seed boot path.** `handleDeferredSeed` (`--bootstrap-expect-nodes`) seeded only the shard
+  groups, so `--object-index-groups N>1` combined with `--bootstrap-expect-nodes` never seeded the N
+  `IndexGroupEntry` records and boot failed when `bootIndexGroupsPostSeed`'s `WaitForIndexGroupCount`
+  (30s) timed out (4b-1 seeded index groups on the immediate-genesis path only). The deferred
+  `seedNow` block now seeds the index groups before the shard groups — the deferred-seed verdict keys
+  on the shard-group count, so seeding shard groups last keeps a re-entry after an index-seed failure
+  convergent instead of silently skipping — with RF=N voters derived from the joined live nodes (not
+  the empty deferred-mode peer list, which would yield a self-only RF=1 group). At the default N=1 the
+  deferred path is **byte-identical**. Unit-proven (`TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum`)
+  that the deferred path now fills the meta-FSM with the configured N index groups at RF=N; the
+  end-to-end multi-node deferred N>1 boot is correct by construction and will be execution-proven by
+  the 4b-2 GCP multi-node benchmark. EXPERIMENTAL flag, so this is the only doc surface (no
+  README/runbook entry, per the `--transport` / Slice 4b-1 precedent); **not** the default flip (4b-3).
+
 ## [0.0.524.0] - 2026-06-09
 
 ### Added
