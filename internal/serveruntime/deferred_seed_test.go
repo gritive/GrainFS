@@ -156,14 +156,29 @@ func TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum(t *testing.T) {
 	require.True(t, handled, "below quorum must be handled (suppressed)")
 	require.Empty(t, state.metaRaft.FSM().IndexGroups(), "no index groups may be seeded before the target node count is reached")
 
+	// Register the joined nodes in the meta-FSM address book, exactly as a real
+	// join does (ProposeAddNode). This makes SeedInitialIndexGroups resolve the
+	// liveNodes-derived peer ADDRESSES back to node IDs via the FSM book — the
+	// production path — instead of falling through as raw-address aliases. The
+	// PeerIDs assertion below then proves the resolution, not just the count.
+	for _, n := range mkNodes(4)[1:] { // skip self (already recorded)
+		require.NoError(t, state.metaRaft.ProposeAddNode(ctx, n))
+	}
+
 	// At quorum (4 of 4): seed exactly IndexGroupCount index groups at uniform RF=4.
 	handled, err = handleDeferredSeed(ctx, state, mkNodes(4))
 	require.NoError(t, err)
 	require.True(t, handled)
 	idx := state.metaRaft.FSM().IndexGroups()
 	require.Len(t, idx, 8, "deferred seed must create the configured object-index group count (IndexGroupCount, not the shard target)")
+	wantPeers := map[string]bool{state.nodeID: true, "n2": true, "n3": true, "n4": true}
 	for _, g := range idx {
 		require.Lenf(t, g.PeerIDs, 4, "index group %s must be RF=4 (full joined node set), not self-only RF=1", g.ID)
+		got := map[string]bool{}
+		for _, p := range g.PeerIDs {
+			got[p] = true
+		}
+		require.Equalf(t, wantPeers, got, "index group %s PeerIDs must resolve to the joined node IDs (address→ID via FSM book), not raw addresses", g.ID)
 	}
 
 	// The shard-group batch is still seeded (index seeding must not regress it).
