@@ -317,9 +317,11 @@ func TestIndexGroup_ThreeNode_ForwardDisabled_FollowerProposeFails(t *testing.T)
 
 // TestIndexGroup_ThreeNode_LaggingFollowerInstallSnapshot verifies the
 // apply-loop LogEntrySnapshot path over a real RPC. n1 (fast) + n3 (slow) form
-// quorum while n2 is held unregistered. After several puts and a snapshot
-// (TrailingLogs=1 forces real log compaction), n2 is brought online. The leader
-// must send InstallSnapshot and n2's apply loop must restore state from it.
+// quorum while n2 is held unregistered. After several puts, g1.snapshot() →
+// CreateSnapshot → CompactBefore(idx) advances the leader's log FirstIndex past
+// n2's nextIndex (initialized at election time, ~2). When n2 is brought online,
+// the leader dispatches InstallSnapshot (not AppendEntries) and n2's apply loop
+// must restore state from it.
 func TestIndexGroup_ThreeNode_LaggingFollowerInstallSnapshot(t *testing.T) {
 	c := newIGCluster()
 
@@ -337,8 +339,9 @@ func TestIndexGroup_ThreeNode_LaggingFollowerInstallSnapshot(t *testing.T) {
 			"put %s on leader", v)
 	}
 
-	// Snapshot the leader to compact the log. With TrailingLogs=1 and 5+ entries
-	// applied, this forces n2's firstNeededIndex to be past the leader's firstIndex.
+	// Snapshot the leader: CreateSnapshot → CompactBefore(idx) advances the log's
+	// FirstIndex past n2's nextIndex, so the leader must catch n2 up via
+	// InstallSnapshot rather than AppendEntries.
 	_, _, err := g1.snapshot()
 	require.NoError(t, err, "leader snapshot must succeed")
 
