@@ -21,11 +21,18 @@ const indexGroupForwardLocalApplyTimeout = 10 * time.Second
 // (single-node / leader-only test), so the proposer proposes locally.
 type indexGroupForwardFunc func(ctx context.Context, data []byte) (uint64, error)
 
-// indexGroup is a dormant object-index-only raft replica: a *MetaFSM driven
-// object-index-only by an apply loop over a raft.Node's ApplyCh. Later slices add
-// the objectIndexLookup/objectIndexProposer/objectIndexListSource methods +
-// compile-time assertions so it drops into ObjectIndexShard{Reader, Writer,
-// Lister}; Slice 4b boot-wires N of them.
+// Compile-time assertions: *indexGroup must satisfy all three ObjectIndexShard
+// component interfaces so it drops into ObjectIndexShard{Reader, Writer, Lister}
+// without any façade change. Slice 4b boot-wires N of them.
+var (
+	_ objectIndexLookup     = (*indexGroup)(nil)
+	_ objectIndexProposer   = (*indexGroup)(nil)
+	_ objectIndexListSource = (*indexGroup)(nil)
+)
+
+// indexGroup is an object-index-only raft replica: a *MetaFSM driven
+// object-index-only by an apply loop over a raft.Node's ApplyCh. Slice 4b
+// boot-wires N of them into ObjectIndexShard{Reader, Writer, Lister}.
 type indexGroup struct {
 	node    RaftNode // nil only in the channel-driven apply-loop unit test
 	fsm     *MetaFSM

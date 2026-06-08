@@ -10,6 +10,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestIndexGroup_SatisfiesShardInterfaces is a compile-time assertion that
+// *indexGroup satisfies all three ObjectIndexShard component interfaces.
+func TestIndexGroup_SatisfiesShardInterfaces(t *testing.T) {
+	var g *indexGroup
+	var _ objectIndexLookup = g
+	var _ objectIndexProposer = g
+	var _ objectIndexListSource = g
+}
+
+// TestIndexGroup_BehindFacade_RoundTrip verifies that an *indexGroup drops into
+// ObjectIndexShard{Reader, Writer, Lister} and the shardset correctly routes
+// proposes and reads through it.
+func TestIndexGroup_BehindFacade_RoundTrip(t *testing.T) {
+	node, closeStore := newSoloNode(t, t.TempDir())
+	t.Cleanup(func() { _ = closeStore() })
+	ig := startSoloIndexGroup(t, node)
+	t.Cleanup(ig.Close)
+
+	set, err := NewObjectIndexShardSet([]ObjectIndexShard{{Reader: ig, Writer: ig, Lister: ig}})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, set.ProposeObjectIndex(ctx, ObjectIndexEntry{
+		Bucket: "b", Key: "k1", VersionID: "v1", PlacementGroupID: "g0", Size: 1, ModTime: 1,
+	}, false))
+	require.NoError(t, set.ProposeObjectIndex(ctx, ObjectIndexEntry{
+		Bucket: "b", Key: "k2", VersionID: "v1", PlacementGroupID: "g0", Size: 1, ModTime: 1,
+	}, false))
+
+	got, ok := set.ObjectIndexLatest("b", "k1")
+	require.True(t, ok, "k1 must be visible after propose")
+	assert.Equal(t, "v1", got.VersionID)
+
+	entries := set.ObjectIndexLatestEntries("b", "", 10)
+	assert.Len(t, entries, 2, "shardset list must return both entries")
+}
+
 func putCmd(t *testing.T, bucket, key, versionID, group string) []byte {
 	t.Helper()
 	payload, err := encodeMetaPutObjectIndexCmd(ObjectIndexEntry{
