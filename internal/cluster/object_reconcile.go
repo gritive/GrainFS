@@ -63,8 +63,8 @@ func (c *ClusterCoordinator) ReconcileObjectIndexLatest(ctx context.Context, buc
 // FindObjectIndexOrphans scans group-local object metadata and reports versions
 // that are not represented in the global object index.
 func (c *ClusterCoordinator) FindObjectIndexOrphans(ctx context.Context) ([]ObjectIndexIssue, error) {
-	src, ok := c.meta.(objectIndexSource)
-	if !ok {
+	src := c.objectIndexReadSource()
+	if src == nil {
 		return nil, ErrObjectIndexRequired
 	}
 	issues := make([]ObjectIndexIssue, 0)

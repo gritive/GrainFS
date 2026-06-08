@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,4 +54,43 @@ func TestCoordinator_NoReader_FallsBackToMetaAdapter(t *testing.T) {
 	require.NotNil(t, liveRouter)
 	_, _, err := liveRouter.RouteObjectRead("b", "k", "")
 	require.Error(t, err) // index nil → ErrObjectIndexRequired, unchanged
+}
+
+// recordingListReader embeds recordingLookup and additionally records LIST calls.
+type recordingListReader struct {
+	recordingLookup
+	pageCalls int
+}
+
+func (r *recordingListReader) ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) ([]ObjectIndexEntry, bool) {
+	r.pageCalls++
+	return nil, false
+}
+func (r *recordingListReader) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	return nil
+}
+func (r *recordingListReader) ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	return nil
+}
+
+// stubProposer is a minimal objectIndexProposer that satisfies the interface.
+type stubProposer struct{}
+
+func (stubProposer) ProposeObjectIndex(_ context.Context, _ ObjectIndexEntry, _ bool) error {
+	return nil
+}
+func (stubProposer) ProposeDeleteObjectIndex(_ context.Context, _, _, _ string) error { return nil }
+
+// TestCoordinator_ListSource_PrefersInjectedReader proves that objectIndexListSource()
+// returns the injected reader's LIST implementation rather than c.meta's.
+func TestCoordinator_ListSource_PrefersInjectedReader(t *testing.T) {
+	r := &recordingListReader{}
+	c := NewClusterCoordinator(nil, nil, nil, nil, "self").
+		WithObjectIndexProposer(stubProposer{}). // indexWriter non-nil so objectIndexListSource() is enabled
+		WithObjectIndexReader(r)
+	src, ok := c.objectIndexListSource()
+	require.True(t, ok)
+	require.NotNil(t, src)
+	_, _ = src.ObjectIndexLatestEntriesPage("b", "", "", 0)
+	assert.Equal(t, 1, r.pageCalls, "LIST must go through the injected façade reader")
 }
