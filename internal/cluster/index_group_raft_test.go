@@ -35,7 +35,9 @@ func startSoloIndexGroup(t *testing.T, node RaftNode) *indexGroup {
 }
 
 // TestIndexGroup_SingleNode_PutGetDeleteRoundTrip verifies propose + read-your-write
-// + delete on a real solo raft node.
+// + delete on a real solo raft node. Happy path only: every propose waits for
+// apply, so committed==applied throughout. The forward path + lagging cases
+// (committed > applied) are exercised by Task 3's 3-node loopback test.
 func TestIndexGroup_SingleNode_PutGetDeleteRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	node, closeStore := newSoloNode(t, dir)
@@ -72,7 +74,9 @@ func TestIndexGroup_SingleNode_PutGetDeleteRoundTrip(t *testing.T) {
 }
 
 // TestIndexGroup_SingleNode_SnapshotRestoreOnRestart verifies that snapshot()
-// persists state and a freshly-opened node + indexGroup restores from it.
+// persists state and a freshly-opened node + indexGroup restores from it. Happy
+// path only: every propose waits for apply, so committed==applied at snapshot
+// time. The forward path + lagging cases are exercised by Task 3's 3-node loopback.
 func TestIndexGroup_SingleNode_SnapshotRestoreOnRestart(t *testing.T) {
 	dir := t.TempDir()
 

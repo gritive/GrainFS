@@ -256,17 +256,21 @@ func (g *indexGroup) proposeOrForward(ctx context.Context, data []byte) error {
 	if g.forward == nil || g.node.IsLeader() {
 		idx, err := g.node.ProposeWait(ctx, data)
 		if err != nil {
-			return err
+			return fmt.Errorf("index group: propose: %w", err)
 		}
 		return g.waitAppliedResult(ctx, idx)
 	}
 	idx, err := g.forward(ctx, data)
 	if err != nil {
-		return err
+		return fmt.Errorf("index group: forward: %w", err)
 	}
 	if idx > 0 {
 		return g.waitForwardedApplied(ctx, idx)
 	}
+	// idx==0 means the forwarder did not report a committed index, so there is
+	// nothing to wait on. The index-group forward hook always returns the
+	// leader's committed index from ProposeWait, so idx==0 only occurs with a
+	// degenerate/legacy forwarder we don't use.
 	return nil
 }
 
@@ -294,13 +298,28 @@ func (g *indexGroup) waitForwardedApplied(ctx context.Context, idx uint64) error
 }
 
 // snapshot captures the current FSM state into a durable raft snapshot and
-// returns the raw snapshot bytes plus the committed index it covers.
+// returns the raw snapshot bytes plus the applied index it covers.
+//
+// The snapshot is stamped at the APPLIED index (captured BEFORE fsm.Snapshot()),
+// NOT the committed index: CreateSnapshot physically truncates the log via
+// CompactBefore(idx) (internal/raft/snapshot_actor.go:75). fsm.Snapshot() data
+// only reflects state up to lastApplied, and lastApplied can structurally trail
+// committedIndex (in-flight proposals, or committed non-object-index entries the
+// adapter ApplyCh drops). Stamping at committedIndex would truncate entries in
+// (applied, committed] that the snapshot data does not contain, losing them on the
+// next Start/Restore. The applied index is a safe lower bound — replaying a few
+// idempotent puts on restart is harmless; truncating past real state is not.
+// (MetaRaft sidesteps this by snapshotting inside the apply loop at the just-
+// applied entry.Index — meta_raft.go:1126-1139.)
 func (g *indexGroup) snapshot() ([]byte, uint64, error) {
+	idx := g.lastApplied.Load()
+	if idx == 0 {
+		return nil, 0, fmt.Errorf("index group: snapshot before any apply")
+	}
 	data, err := g.fsm.Snapshot()
 	if err != nil {
 		return nil, 0, fmt.Errorf("index group: FSM snapshot: %w", err)
 	}
-	idx := g.node.CommittedIndex()
 	if err := g.node.CreateSnapshot(idx, data); err != nil {
 		return nil, 0, fmt.Errorf("index group: create snapshot at %d: %w", idx, err)
 	}
