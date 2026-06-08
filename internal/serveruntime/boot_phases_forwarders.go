@@ -113,9 +113,11 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
 		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	})
-	indexShards, err := cluster.NewObjectIndexShardSet([]cluster.ObjectIndexShard{
-		{Reader: metaRaft.FSM(), Writer: indexProposer, Lister: metaRaft.FSM()},
-	})
+	indexShardSlice, err := buildObjectIndexShards(state, indexProposer)
+	if err != nil {
+		return err
+	}
+	indexShards, err := cluster.NewObjectIndexShardSet(indexShardSlice)
 	if err != nil {
 		return fmt.Errorf("boot: object index shard set: %w", err)
 	}
@@ -246,9 +248,11 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
 		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	})
-	indexShards, err := cluster.NewObjectIndexShardSet([]cluster.ObjectIndexShard{
-		{Reader: metaRaft.FSM(), Writer: indexProposer, Lister: metaRaft.FSM()},
-	})
+	indexShardSlice, err := buildObjectIndexShards(state, indexProposer)
+	if err != nil {
+		return err
+	}
+	indexShards, err := cluster.NewObjectIndexShardSet(indexShardSlice)
 	if err != nil {
 		return fmt.Errorf("boot: object index shard set: %w", err)
 	}

@@ -43,8 +43,11 @@ func (m *IndexGroupManager) Lookup(groupID string) (*indexGroup, bool) {
 }
 
 // register installs a local index group under groupID with its close func.
-// Unexported: only the boot wiring (Task 5) registers groups; tests use it to
-// stand up the manager. Last-writer-wins on a key.
+// Last-writer-wins on a key. buildAndRegister does its own registration inline
+// (it must clear the inFlight reservation under the same lock), so this helper is
+// referenced only by index_group_forward_test.go to stand up a manager directly.
+//
+//nolint:unused // referenced by index_group_forward_test.go (run.tests:false hides it).
 func (m *IndexGroupManager) register(groupID string, g *indexGroup, closeFn func() error) {
 	m.mu.Lock()
 	m.groups[groupID] = g
@@ -52,20 +55,17 @@ func (m *IndexGroupManager) register(groupID string, g *indexGroup, closeFn func
 	m.mu.Unlock()
 }
 
-// indexGroupForwardFactory builds the forward hook for a group, given the group
-// ID. The factory is invoked once per group during InstantiateAndStart; the hook
-// it returns reads the freshly-built *indexGroup's node LeaderID() lazily at
-// call-time (the boot wiring closes over a sender), so the factory itself only
-// needs the group ID. A factory that returns nil yields a leader-local / solo
-// group (proposeOrForward proposes locally).
+// IndexGroupForwardSend is the follower→leader forward primitive the manager
+// binds into each group's hook. It matches IndexGroupProposeForwardSender.Send:
+// given the current leader hint, the group ID, and the encoded command, it
+// returns the leader's committed index. nil ⇒ leader-local / solo groups (the
+// hook is left nil, so proposeOrForward proposes locally).
 //
-// The chicken-and-egg between the hook (needs the group's node for LeaderID) and
-// the group (needs the forward in its config) is resolved INSIDE
-// InstantiateAndStart: the group is built first with the factory-supplied hook,
-// which the boot closure binds to the sender + group ID, not to the *indexGroup —
-// it re-reads LeaderID() through the group's own node every call. (Same pattern
-// the data-group forward path and index_group_forward_test's startNodeWithForward
-// use.)
+// The manager binds the per-group hook INTERNALLY (it owns the *indexGroup, whose
+// node provides LeaderID()), resolving the chicken-and-egg the boot wiring cannot:
+// serveruntime cannot name *indexGroup, so it supplies only this Send func and the
+// manager closes the hook over each group's own node LeaderID() at call-time.
+type IndexGroupForwardSend func(ctx context.Context, leaderHint, groupID string, data []byte) (uint64, error)
 
 // InstantiateAndStart builds, starts, and registers a local index group for each
 // entry (entries arrive sorted by ID from MetaFSM.IndexGroups()). It is
@@ -81,7 +81,7 @@ func (m *IndexGroupManager) InstantiateAndStart(
 	ctx context.Context,
 	cfg IndexGroupLifecycleConfig,
 	entries []IndexGroupEntry,
-	senderFor func(groupID string) indexGroupForwardFunc,
+	send IndexGroupForwardSend,
 ) error {
 	for _, entry := range entries {
 		m.mu.Lock()
@@ -99,7 +99,7 @@ func (m *IndexGroupManager) InstantiateAndStart(
 		m.inFlight[entry.ID] = true
 		m.mu.Unlock()
 
-		if err := m.buildAndRegister(ctx, cfg, entry, senderFor); err != nil {
+		if err := m.buildAndRegister(ctx, cfg, entry, send); err != nil {
 			m.mu.Lock()
 			delete(m.inFlight, entry.ID)
 			m.mu.Unlock()
@@ -111,24 +111,37 @@ func (m *IndexGroupManager) InstantiateAndStart(
 
 // buildAndRegister builds one group (outside the manager lock), starts it, and
 // registers it — clearing the inFlight reservation atomically with registration.
+// The forward hook is bound here AFTER construction (mirroring the test harness's
+// startNodeWithForward): build with nil forward, then set g.forward over the
+// group's own node before Start, so the hook reads LeaderID() live every call.
 func (m *IndexGroupManager) buildAndRegister(
 	ctx context.Context,
 	cfg IndexGroupLifecycleConfig,
 	entry IndexGroupEntry,
-	senderFor func(groupID string) indexGroupForwardFunc,
+	send IndexGroupForwardSend,
 ) error {
 	groupCfg := cfg
-	if senderFor != nil {
-		groupCfg.Forward = senderFor(entry.ID)
-	}
+	groupCfg.Forward = nil // bound below, after the group (and its node) exist
 	g, v2Close, err := instantiateLocalIndexGroup(groupCfg, entry)
 	if err != nil {
 		return err
+	}
+	if send != nil {
+		groupID := entry.ID
+		g.forward = func(hookCtx context.Context, data []byte) (uint64, error) {
+			return send(hookCtx, g.node.LeaderID(), groupID, data)
+		}
 	}
 	if err := g.Start(ctx); err != nil {
 		g.Close()
 		_ = v2Close()
 		return err
+	}
+	// Inbound per-group raft RPCs: register the STARTED node on the shared mux
+	// (mirrors the data-group ordering — register after Start, not before — so an
+	// inbound AppendEntries/RequestVote never reaches an un-started node).
+	if cfg.GroupMux != nil {
+		cfg.GroupMux.Register(entry.ID, g.node)
 	}
 	m.mu.Lock()
 	m.groups[entry.ID] = g

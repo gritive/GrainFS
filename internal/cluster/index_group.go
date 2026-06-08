@@ -24,6 +24,11 @@ const indexGroupForwardLocalApplyTimeout = 10 * time.Second
 // (single-node / leader-only test), so the proposer proposes locally.
 type indexGroupForwardFunc func(ctx context.Context, data []byte) (uint64, error)
 
+// IndexGroupForwardFunc is the exported alias for indexGroupForwardFunc, so the
+// boot wiring (serveruntime, a different package) can build the per-group forward
+// hook InstantiateAndStart installs. Interchangeable with the unexported type.
+type IndexGroupForwardFunc = indexGroupForwardFunc
+
 // Compile-time assertions: *indexGroup must satisfy all three ObjectIndexShard
 // component interfaces so it drops into ObjectIndexShard{Reader, Writer, Lister}
 // without any façade change. Slice 4b boot-wires N of them.

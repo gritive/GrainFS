@@ -61,7 +61,12 @@ func (f *MetaFSM) applyPutIndexGroup(data []byte) error {
 	}
 	f.mu.Lock()
 	f.indexGroups[entry.ID] = entry
+	cb := f.onIndexGroupAdded
 	f.mu.Unlock()
+	if cb != nil {
+		// Defensive copy of peers — callback may keep references.
+		cb(IndexGroupEntry{ID: entry.ID, PeerIDs: cloneStringSlice(entry.PeerIDs)})
+	}
 	return nil
 }
 

@@ -273,6 +273,7 @@ type MetaFSM struct {
 	onBucketAssigned  func(string, string)                        // protected by mu; set before Start() (PR-D)
 	onRebalancePlan   func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
 	onShardGroupAdded func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onIndexGroupAdded func(IndexGroupEntry)                       // fired after PutIndexGroup applies; protected by mu (Slice 4b)
 	onIcebergResult   func(string, error)                         // requestID, typed catalog result; must not block
 	onScrubTrigger    func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
 	onNfsExportChange func()                                      // fired after NFS export registry apply; must not block

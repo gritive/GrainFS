@@ -37,12 +37,11 @@ func TestIndexGroupManager_InstantiateAndStart_OrderedShards(t *testing.T) {
 		KEKStore: newTestKEKStore(t, bytes.Repeat([]byte{0xA0}, encrypt.KEKSize)),
 	}
 
-	// The forward hook each group gets: route to its own node's leader. On a solo
-	// group the node IS the leader so proposeOrForward never forwards; this just
-	// mirrors the production hook shape.
-	senderFor := func(groupID string) indexGroupForwardFunc { return nil }
+	// Solo groups: the node IS the leader so proposeOrForward never forwards; pass
+	// a nil send (leader-local) — the manager leaves each hook nil.
+	var send IndexGroupForwardSend = nil
 
-	require.NoError(t, mgr.InstantiateAndStart(context.Background(), cfg, entries, senderFor))
+	require.NoError(t, mgr.InstantiateAndStart(context.Background(), cfg, entries, send))
 	t.Cleanup(mgr.Close)
 
 	shards := mgr.Shards()
@@ -86,7 +85,7 @@ func TestIndexGroupManager_InstantiateAndStart_OrderedShards(t *testing.T) {
 
 	// Idempotency: re-running InstantiateAndStart over the same entries must be a
 	// no-op (skip already-registered), not a second BadgerDB open on the same dir.
-	require.NoError(t, mgr.InstantiateAndStart(context.Background(), cfg, entries, senderFor),
+	require.NoError(t, mgr.InstantiateAndStart(context.Background(), cfg, entries, send),
 		"InstantiateAndStart must be idempotent (restart/replay-scan + callback both call it)")
 	require.Len(t, mgr.Shards(), n, "idempotent re-run must not add shards")
 }

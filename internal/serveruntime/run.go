@@ -197,6 +197,15 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootClusterCoordinatorRouting(state); err != nil {
 		return err
 	}
+	// Slice 4b: assemble the sharded object-index façade when IndexGroupCount>1.
+	// Placed right after bootClusterCoordinatorRouting — the earliest point where
+	// BOTH rewire targets (forwardReceiver, clusterCoord) exist AND the index
+	// groups have been seeded (bootShardService) / replayed into the meta-FSM.
+	// The two façade sites ran before seeding with the meta-FSM placeholder; this
+	// phase rewires them to the manager-backed shardset. Early-returns at N=1.
+	if err := bootIndexGroupsPostSeed(ctx, state); err != nil {
+		return err
+	}
 
 	// PR 6: snapshot + apply-loop.
 	if err := bootSnapshotAndApplyLoop(state); err != nil {

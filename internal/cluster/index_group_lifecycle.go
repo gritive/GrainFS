@@ -29,6 +29,14 @@ type IndexGroupLifecycleConfig struct {
 	Forward   indexGroupForwardFunc
 	Transport groupTransport
 	AddrBook  NodeAddressBook
+	// GroupMux, when set, is the per-server group-raft mux that production boot
+	// uses to carry per-group raft RPCs (mirrors the data-group wiring at
+	// boot_phases_storage_runtime.go:608/623). When non-nil it OVERRIDES Transport:
+	// the outbound transport is GroupMux.ForGroup(entry.ID) and the node is
+	// registered for inbound RPCs via GroupMux.Register(entry.ID, node). The 4a
+	// unit tests leave it nil (they wire an in-process Transport or run solo), so
+	// those paths stay byte-identical.
+	GroupMux *raft.GroupRaftMux
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
@@ -87,8 +95,18 @@ func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupE
 	if err != nil {
 		return nil, nil, fmt.Errorf("index group %s: newRaftNode: %w", entry.ID, err)
 	}
-	if cfg.Transport != nil {
-		tr := cfg.Transport
+	// Production boot (GroupMux set) carries per-group raft RPCs over the shared
+	// group-raft mux, exactly like data groups: OUTBOUND via ForGroup(id) wired
+	// here (the transport must be live before Start so elections can send), and
+	// INBOUND via Register(id, node) which the manager performs AFTER Start (so a
+	// STARTED node is registered, mirroring the data-group boot ordering at
+	// boot_phases_storage_runtime.go:623). When GroupMux is nil the 4a paths apply
+	// unchanged (explicit in-process Transport, else the no-transport stub).
+	var tr groupTransport = cfg.Transport
+	if cfg.GroupMux != nil {
+		tr = cfg.GroupMux.ForGroup(entry.ID)
+	}
+	if tr != nil {
 		if cfg.AddrBook != nil {
 			tr = resolvingGroupTransport{inner: tr, addrBook: cfg.AddrBook}
 		}

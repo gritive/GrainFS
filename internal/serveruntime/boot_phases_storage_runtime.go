@@ -165,6 +165,17 @@ func bootShardService(ctx context.Context, state *bootState) error {
 			}
 			state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
 			state.clusterRouter.SetRequireExplicitAssignments(true)
+			// Slice 4b: seed the N fixed-count object-index groups alongside the
+			// data-group seed (gated count>1; <=1 is a no-op so the default N=1
+			// meta-FSM single-shard path is unperturbed). The post-seed phase
+			// (bootIndexGroupsPostSeed) instantiates + façades them after the
+			// coordinator exists. Deferred-seed (Option B) index seeding is a
+			// Task 6 concern — the immediate-seed branch covers genesis here.
+			if idxCount := normalizeIndexGroupCount(state.cfg.IndexGroupCount); idxCount > 1 {
+				if err := SeedInitialIndexGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, state.peers, idxCount, normalGroupVoters); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
