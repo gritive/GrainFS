@@ -81,10 +81,15 @@ func instantiateLocalIndexGroup(cfg IndexGroupLifecycleConfig, entry IndexGroupE
 	if cfg.HeartbeatTimeout > 0 {
 		rcfg.HeartbeatTimeout = cfg.HeartbeatTimeout
 	}
-	// LOAD-BEARING: keying election priority by the group ID staggers leader
-	// preference across the N index groups so they don't all pile their leaders
-	// onto one node — the whole point of sharding the object index. Do NOT drop
-	// this when "mirroring" instantiateLocalGroup (group_lifecycle.go:122).
+	// Set to mirror instantiateLocalGroup (group_lifecycle.go:122), but NOTE:
+	// ElectionPriorityKey is currently an INERT raft.Config field — it is defined
+	// (types.go:284) and copied (raftfactory.go:48) but NEVER read by the raft node.
+	// The election timeout RNG seeds on cfg.ID only (node.go:254), so per-group
+	// leader staggering is NOT in effect; leader distribution across the N index
+	// groups is probabilistic. This matters for 4b-2 perf (leaders could pile on one
+	// node → degenerate all-forward topology), NOT for 4b-1 correctness (writes
+	// route/replicate/read-back correctly regardless of which node leads a group).
+	// Recorded as a 4b-2 BLOCKER in TODOS. Pre-existing repo-wide (data groups too).
 	rcfg.ElectionPriorityKey = entry.ID
 
 	// v2Close (raft-v2 BadgerDB close) is RETURNED so the IndexGroupManager can
