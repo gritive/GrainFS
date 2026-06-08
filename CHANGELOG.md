@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.526.0] - 2026-06-09
+
+### Fixed
+
+- **Sharded object index — Slice 4b-2 prerequisite #2: open the admin socket before the N>1
+  index-group boot wait (invite-join deferred boot-ordering deadlock).** With
+  `--object-index-groups N>1` and `--bootstrap-expect-nodes`, `bootIndexGroupsPostSeed` ran (and
+  blocked on `WaitForIndexGroupCount`) *before* `bootHTTPServerAndAdmin` opened `admin.sock`. But
+  invite-join needs the genesis node's admin endpoint (`/v1/cluster/invite/create`) to mint the join
+  bundle, so the genesis node blocked waiting for joiners that could never join (no bundle could be
+  minted) — quorum was never reached, the deferred seed never fired, and boot died at the 30s
+  `WaitForIndexGroupCount` timeout. The post-seed index-group phase now runs *after*
+  `bootHTTPServerAndAdmin` (so `admin.sock` and invite-minting are live before the blocking wait) but
+  still *before* `srv.Run()` serves S3 — the consumers (forward receiver, coordinator) are rewired
+  in place, so the "object-index façade assembled before S3 serves" invariant holds and no PUT is
+  ever routed to the placeholder meta-FSM. The wait timeout now tracks `--bootstrap-expect-timeout`
+  (default 10m) instead of a hardcoded 30s, so a slow multi-node join (sequential bundle-mint +
+  IAP-SSH startup on GCP) does not fail boot; immediate-genesis (`--bootstrap-expect-nodes<=1`) keeps
+  30s. At the default N=1 this is **byte-identical** (`bootIndexGroupsPostSeed` early-returns at
+  `IndexGroupCount<=1`).
+  - **Proven:** a local 2-node invite-join deferred N>1 e2e (`tests/e2e/cluster_invite_join_test.go`)
+    opens `admin.sock` and round-trips an S3 PUT/GET, with RED-on-revert verified (reverting the boot
+    reorder reproduces the 30s admin-socket-never-opens deadlock). The N=1 invite-join regression and
+    the full `serveruntime` unit suite stay green. The GCP multi-node deferred N>1 boot at scale is
+    still the 4b-2 benchmark's job — this slice unblocks running it, it does not stand in for it.
+
 ## [0.0.525.0] - 2026-06-09
 
 ### Fixed
@@ -14,9 +40,11 @@
   convergent instead of silently skipping — with RF=N voters derived from the joined live nodes (not
   the empty deferred-mode peer list, which would yield a self-only RF=1 group). At the default N=1 the
   deferred path is **byte-identical**. Unit-proven (`TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum`)
-  that the deferred path now fills the meta-FSM with the configured N index groups at RF=N; the
-  end-to-end multi-node deferred N>1 boot is correct by construction and will be execution-proven by
-  the 4b-2 GCP multi-node benchmark. EXPERIMENTAL flag, so this is the only doc surface (no
+  that the deferred path now fills the meta-FSM with the configured N index groups at RF=N. (This
+  entry originally claimed the end-to-end multi-node deferred N>1 boot was "correct by construction";
+  that overstated it — #725 fixed only the *seeding* gap, while a second boot-ordering deadlock kept
+  the invite-join deferred N>1 path from booting at all. That deadlock is fixed in 0.0.526.0 below.)
+  EXPERIMENTAL flag, so this is the only doc surface (no
   README/runbook entry, per the `--transport` / Slice 4b-1 precedent); **not** the default flip (4b-3).
 
 ## [0.0.524.0] - 2026-06-09
