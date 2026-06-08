@@ -43,6 +43,13 @@ func NewObjectIndexShardSet(shards []ObjectIndexShard) (*ObjectIndexShardSet, er
 }
 
 func (s *ObjectIndexShardSet) shardFor(bucket, key string) int {
+	// N=1 fast path: the only shard is 0. Skips hashObjectPlacementKey (a fresh
+	// fnv hasher + []byte conversions) so the N=1 façade adds zero per-op alloc
+	// over the pre-façade direct lookup — keeping "behavior-neutral pass-through"
+	// literally true on the read/write hot path.
+	if len(s.shards) == 1 {
+		return 0
+	}
 	return int(hashObjectPlacementKey(bucket, key) % uint64(len(s.shards)))
 }
 
