@@ -169,15 +169,11 @@ func bootShardService(ctx context.Context, state *bootState) error {
 			// data-group seed (gated count>1; <=1 is a no-op so the default N=1
 			// meta-FSM single-shard path is unperturbed). The post-seed phase
 			// (bootIndexGroupsPostSeed) instantiates + façades them after the
-			// coordinator exists. This is the IMMEDIATE-genesis branch only.
-			// LIMITATION: deferred-seed (Option B, --bootstrap-expect-nodes) takes
-			// the !deferGenesisSeed=false path and seeds via handleDeferredSeed,
-			// which seeds SHARD groups only — index groups are NOT seeded there, so
-			// --object-index-groups N>1 + --bootstrap-expect-nodes would hang
-			// bootIndexGroupsPostSeed's WaitForIndexGroupCount (30s) then fail boot.
-			// Recorded as a 4b-2 BLOCKER in TODOS (must add index seeding to the
-			// deferred-seed path, or pin the bench to immediate-genesis, before the
-			// 4b-2 multi-node N>1 bench).
+			// coordinator exists. This is the IMMEDIATE-genesis branch.
+			// The deferred-seed branch (Option B, --bootstrap-expect-nodes) seeds
+			// its index groups in handleDeferredSeed's seedNow block (index groups
+			// first, then shard groups), so --object-index-groups N>1 boots on both
+			// the immediate-genesis and the deferred-seed paths.
 			if idxCount := normalizeIndexGroupCount(state.cfg.IndexGroupCount); idxCount > 1 {
 				if err := SeedInitialIndexGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, state.peers, idxCount, normalGroupVoters); err != nil {
 					return err

@@ -429,6 +429,25 @@ func handleDeferredSeed(ctx context.Context, state *bootState, liveNodes []clust
 	}
 	targetGroups := seedGroupCountForClusterSize(expectN)
 	voters := cluster.AutoECConfigForClusterSize(expectN).NumShards()
+
+	// Slice 4b-2: seed the N object-index groups BEFORE the shard groups. The
+	// deferred-seed verdict (decideDeferredSeed) keys on ShardGroups() count, so
+	// seeding shard groups LAST keeps the verdict at seedNow until BOTH batches
+	// land — a re-entry after an index-seed failure re-fires seedNow instead of
+	// passing through with index groups missing. Derive index voters from the
+	// JOINED liveNodes (NOT state.peers, which is empty in deferred mode →
+	// SeedInitialIndexGroups would yield a self-only RF=1 group). count<=1 is a
+	// no-op so the default N=1 meta-FSM single-shard path is byte-identical.
+	// (SeedInitialIndexGroups re-proposes all N on a re-entry — NOT propose-only-
+	// missing like the shard path; safe here because the deferred bootstrap window
+	// sees no membership churn.)
+	if idxCount := normalizeIndexGroupCount(state.cfg.IndexGroupCount); idxCount > 1 {
+		indexPeers := seedShardGroupPeerAddrsFromNodes(state.nodeID, state.raftAddr, liveNodes)
+		if err := SeedInitialIndexGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, indexPeers, idxCount, voters); err != nil {
+			return false, fmt.Errorf("option-B seed-on-quorum index groups: %w", err)
+		}
+	}
+
 	missing := MissingSeedShardGroups(state.nodeID, state.raftAddr, liveNodes, state.metaRaft.FSM().ShardGroups(), voters)
 	for _, group := range missing {
 		if err := state.metaRaft.ProposeShardGroup(ctx, group); err != nil {

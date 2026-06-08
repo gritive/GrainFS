@@ -122,3 +122,51 @@ func TestHandleDeferredSeed_WiringSuppressThenUniformSeed(t *testing.T) {
 	require.False(t, handled, "completed batch must pass through to the normal expand, not re-seed")
 	require.Len(t, state.metaRaft.FSM().ShardGroups(), target, "re-entry must not duplicate or grow the batch")
 }
+
+// TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum drives the seedNow wiring with
+// --object-index-groups>1 and asserts the deferred path seeds the object-index
+// groups too (the 4b-1 BLOCKER: it used to seed shard groups only, so a deferred
+// N>1 cluster hung bootIndexGroupsPostSeed's WaitForIndexGroupCount). Asserts the
+// positive FSM state (index groups EXIST), not just the decideDeferredSeed verdict:
+//   - below quorum  → suppressed, ZERO index groups
+//   - at quorum     → exactly IndexGroupCount groups, each at uniform RF=N (the
+//     full joined node set), never a self-only RF=1 group (which is what passing
+//     state.peers instead of liveNodes would give)
+func TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
+	require.NoError(t, WaitForMetaRaftLeader(ctx, state.metaRaft, 5*time.Second))
+	state.cfg.BootstrapExpectNodes = 4
+	// 8 != seedGroupCountForClusterSize(4)==16 on purpose: a distinct count makes
+	// the assertion discriminate the index-group count SOURCE — a miswiring that
+	// fed the shard target (16) into the index seed instead of idxCount (8) would
+	// otherwise pass silently. Index registry is separate from ShardGroups.
+	state.cfg.IndexGroupCount = 8
+
+	mkNodes := func(n int) []cluster.MetaNodeEntry {
+		out := []cluster.MetaNodeEntry{{ID: state.nodeID, Address: state.raftAddr}}
+		for i := 2; i <= n; i++ {
+			out = append(out, cluster.MetaNodeEntry{ID: fmt.Sprintf("n%d", i), Address: fmt.Sprintf("127.0.0.1:70%02d", i)})
+		}
+		return out
+	}
+
+	// Below quorum (2 of 4): suppressed → no index groups (and no shard groups).
+	handled, err := handleDeferredSeed(ctx, state, mkNodes(2))
+	require.NoError(t, err)
+	require.True(t, handled, "below quorum must be handled (suppressed)")
+	require.Empty(t, state.metaRaft.FSM().IndexGroups(), "no index groups may be seeded before the target node count is reached")
+
+	// At quorum (4 of 4): seed exactly IndexGroupCount index groups at uniform RF=4.
+	handled, err = handleDeferredSeed(ctx, state, mkNodes(4))
+	require.NoError(t, err)
+	require.True(t, handled)
+	idx := state.metaRaft.FSM().IndexGroups()
+	require.Len(t, idx, 8, "deferred seed must create the configured object-index group count (IndexGroupCount, not the shard target)")
+	for _, g := range idx {
+		require.Lenf(t, g.PeerIDs, 4, "index group %s must be RF=4 (full joined node set), not self-only RF=1", g.ID)
+	}
+
+	// The shard-group batch is still seeded (index seeding must not regress it).
+	require.Len(t, state.metaRaft.FSM().ShardGroups(), seedGroupCountForClusterSize(4),
+		"shard groups must still be seeded alongside the index groups")
+}
