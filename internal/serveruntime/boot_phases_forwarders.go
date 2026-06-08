@@ -113,8 +113,14 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
 		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	})
+	indexShards, err := cluster.NewObjectIndexShardSet([]cluster.ObjectIndexShard{
+		{Reader: metaRaft.FSM(), Writer: indexProposer},
+	})
+	if err != nil {
+		return fmt.Errorf("boot: object index shard set: %w", err)
+	}
 	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr).
-		WithObjectIndexProposer(indexProposer)
+		WithObjectIndexProposer(indexShards)
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
@@ -240,6 +246,12 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
 		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	})
+	indexShards, err := cluster.NewObjectIndexShardSet([]cluster.ObjectIndexShard{
+		{Reader: metaRaft.FSM(), Writer: indexProposer},
+	})
+	if err != nil {
+		return fmt.Errorf("boot: object index shard set: %w", err)
+	}
 
 	state.clusterCoord = cluster.NewClusterCoordinator(
 		state.distBackend, // base for cluster-wide ops (CreateBucket, etc.)
@@ -251,7 +263,8 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 		WithNodeAddressResolver(metaRaft.FSM()).
 		WithSelfPeerAlias(state.raftAddr).
 		WithECConfig(state.effectiveEC).
-		WithObjectIndexProposer(indexProposer).
+		WithObjectIndexProposer(indexShards).
+		WithObjectIndexReader(indexShards).
 		WithCapabilityGate(state.capabilityGate)
 	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
 		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,

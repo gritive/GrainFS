@@ -123,6 +123,7 @@ type ClusterCoordinator struct {
 	ecConfig    ECConfig
 	runtime     atomic.Pointer[clusterCoordinatorRuntime]
 	indexWriter objectIndexProposer
+	indexReader objectIndexLookup // overrides metaObjectIndexAdapter(meta) when set (sharded index façade)
 	capGate     *CapabilityGate
 
 	opRouter  *OpRouter
@@ -226,6 +227,17 @@ func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *Clu
 	return c
 }
 
+// WithObjectIndexReader injects the point-read index source used by the
+// embedded OpRouter. When set (production: the ObjectIndexShardSet façade), it
+// overrides metaObjectIndexAdapter(c.meta). When nil, rebuild() falls back to
+// the meta adapter — preserving the pre-façade path for tests and the
+// single-node/no-index wiring.
+func (c *ClusterCoordinator) WithObjectIndexReader(r objectIndexLookup) *ClusterCoordinator {
+	c.indexReader = r
+	c.rebuild()
+	return c
+}
+
 func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCoordinator {
 	c.capGate = gate
 	return c
@@ -236,10 +248,14 @@ func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCo
 // NewClusterCoordinator. Keeping the modules embedded rather than passed
 // per-call avoids per-request allocations on the hot path.
 func (c *ClusterCoordinator) rebuild() {
+	indexReader := c.indexReader
+	if indexReader == nil {
+		indexReader = metaObjectIndexAdapter(c.meta)
+	}
 	opRouter := NewOpRouter(
 		c.router,
 		c.meta,
-		metaObjectIndexAdapter(c.meta),
+		indexReader,
 		c.addr,
 		dataGroupManagerLeaderProbe{m: c.groups},
 		c.ecConfig,

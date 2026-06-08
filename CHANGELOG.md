@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.521.0] - 2026-06-08
+
+### Added
+
+- **Sharded object index — Slice 1: `ObjectIndexShardSet` façade (N=1, behavior-neutral
+  groundwork).** First slice of the epic that attacks the single-meta-raft object-index
+  serialization flagged as [P1] in 0.0.520.0 — the structural cluster-PUT bottleneck where
+  every PUT's object-index commit funnels through one global meta-raft (~341 ms/put at
+  conc32, 15-26× queueing inflation), while the data-group raft that holds the object's full
+  metadata is already ~16-way parallel at 0.09 ms. Introduces an `ObjectIndexShardSet` that
+  routes object-index point-reads and writes to one of N shards by `hash(bucket,key)`, wired
+  at boot with **N=1** so it is a pass-through to today's single meta-raft. **No behavior
+  change in this slice** — at N=1 the selector always returns shard 0 and every call
+  delegates to the existing meta-FSM reader and forwarding proposer (byte-identical: boot
+  `c.meta == metaRaft.FSM()`, so the new shard-0 reader resolves to the same `*MetaFSM`). This
+  installs the realization-agnostic seam for the later slices that deliver the throughput win
+  (LIST scatter-gather merge, per-shard DEK refcount, and the greenfield-only N>1 flip). No
+  performance change yet.
+
 ## [0.0.520.0] - 2026-06-07
 
 ### Fixed
