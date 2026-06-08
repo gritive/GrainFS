@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.522.0] - 2026-06-08
+
+### Added
+
+- **Sharded object index — Slice 2: LIST k-way merge + remaining read seams (N=1,
+  behavior-neutral).** Extends the `ObjectIndexShardSet` façade (0.0.521.0) to implement the
+  object-index LIST surface (`ObjectIndexLatestEntriesPage` / `ObjectIndexLatestEntries` /
+  `ObjectIndexVersionEntries`) via a scatter-gather k-way merge across shards, and routes the
+  coordinator's LIST source plus every remaining direct meta-FSM object-index point-read
+  (`previousObjectForMutation`, `ListObjectVersions` latest check, append routing, object-index
+  orphan reconcile) through the façade. **No behavior change in this slice** — at N=1 the merge
+  returns shard 0 verbatim (fast path, zero added alloc) and the façade reader/lister resolve to
+  the same `*MetaFSM` the coordinator already used (byte-identical; fallback to the meta adapter
+  when no façade reader is injected is preserved exactly). Merge correctness is independently
+  verified: marker-exclusive pagination, prefix, maxKeys cap, and `truncated` accounting match the
+  meta-FSM contract, and `truncated` is provably never wrongly false (no silent listing gaps).
+  This completes the read/write/LIST seam; later slices add per-shard DEK refcount and the
+  greenfield-only N>1 flip. No performance change yet.
+
 ## [0.0.521.0] - 2026-06-08
 
 ### Added
