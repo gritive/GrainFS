@@ -46,6 +46,25 @@ type inviteJoinNode struct {
 	httpURL  string
 	cmd      *exec.Cmd
 	logPath  string
+
+	// 4b-2 deadlock test: when >0, the serve invocation gets
+	// --object-index-groups / --bootstrap-expect-nodes (deferred N>1 sharded
+	// object index). Zero ⇒ flags omitted ⇒ existing tests byte-identical.
+	indexGroups int
+	expectNodes int
+}
+
+// indexFlags returns the deferred sharded-index serve flags for this node, or
+// nil when unset. Declared on EVERY node (leader + joiners) because the deferred
+// uniform-RF seed lifecycle requires --bootstrap-expect-nodes on all of them.
+func (n *inviteJoinNode) indexFlags() []string {
+	if n.indexGroups <= 0 && n.expectNodes <= 0 {
+		return nil
+	}
+	return []string{
+		"--object-index-groups", fmt.Sprintf("%d", n.indexGroups),
+		"--bootstrap-expect-nodes", fmt.Sprintf("%d", n.expectNodes),
+	}
 }
 
 const inviteJoinClusterKey = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
@@ -111,7 +130,7 @@ func restartInviteJoiner(t testing.TB, n *inviteJoinNode, bundle string) {
 }
 
 func (n *inviteJoinNode) joinerArgs() []string {
-	return []string{
+	return append([]string{
 		"serve",
 		"--data", n.dataDir,
 		"--port", fmt.Sprintf("%d", n.httpPort),
@@ -121,7 +140,58 @@ func (n *inviteJoinNode) joinerArgs() []string {
 		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+	}, n.indexFlags()...)
+}
+
+// startInviteLeaderIndexed boots a genesis leader with the deferred sharded
+// object-index flags (--object-index-groups / --bootstrap-expect-nodes). Unlike
+// startInviteLeader it does NOT wait for the S3 port: at N>1 deferred the leader
+// blocks in bootIndexGroupsPostSeed (after admin.sock opens) until the target
+// node count joins, so S3 only comes up once the cluster forms. Callers wait on
+// admin.sock (e.g. bootstrapAdminResultViaUDSForTestMain) instead.
+func startInviteLeaderIndexed(t testing.TB, clusterKey string, indexGroups, expectNodes int) *inviteJoinNode {
+	n := &inviteJoinNode{
+		nodeID:      "leader",
+		dataDir:     shortTempDir(t),
+		httpPort:    freePort(),
+		raftPort:    freePort(),
+		joinPort:    freePort(),
+		indexGroups: indexGroups,
+		expectNodes: expectNodes,
 	}
+	n.httpURL = fmt.Sprintf("http://127.0.0.1:%d", n.httpPort)
+	gomega.Expect(transport.NewKeystore(n.dataDir).WriteCurrent(clusterKey)).To(gomega.Succeed())
+	args := append([]string{
+		"serve",
+		"--data", n.dataDir,
+		"--port", fmt.Sprintf("%d", n.httpPort),
+		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
+		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
+		"--node-id", n.nodeID,
+		"--nfs4-port", "0",
+		"--nbd-port", "0",
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
+	}, n.indexFlags()...)
+	startInviteProc(t, n, args, nil)
+	return n
+}
+
+// startInviteJoinerIndexed boots a secret-less joiner carrying the same deferred
+// sharded object-index flags (required on every node for the uniform-RF seed).
+func startInviteJoinerIndexed(t testing.TB, nodeID, dataDir, bundle string, indexGroups, expectNodes int) *inviteJoinNode {
+	n := &inviteJoinNode{
+		nodeID:      nodeID,
+		dataDir:     dataDir,
+		httpPort:    freePort(),
+		raftPort:    freePort(),
+		indexGroups: indexGroups,
+		expectNodes: expectNodes,
+	}
+	n.httpURL = fmt.Sprintf("http://127.0.0.1:%d", n.httpPort)
+	env := append(os.Environ(), inviteBundleEnvKey+"="+bundle)
+	startInviteProc(t, n, n.joinerArgs(), env)
+	return n
 }
 
 func startInviteProc(t testing.TB, n *inviteJoinNode, args []string, env []string) {
@@ -540,6 +610,71 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return getObjectBytes(ctx, joinerCli, bucket, key)
 			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
 				"GetObject through the invite-joined node must return the PUT bytes")
+		})
+
+		// 4b-2 boot-ordering deadlock: at N>1 with deferred seed
+		// (--bootstrap-expect-nodes), the index-group façade phase used to block
+		// BEFORE admin.sock opened — but invite-join joiners need a bundle minted
+		// on admin.sock to join → quorum → deferred index seed. That deadlocked
+		// boot ("boot index groups: only 0/N index groups visible after 30s").
+		// The fix relocates the phase to AFTER admin.sock opens. RED-on-revert:
+		// reverting run.go/index_group_boot.go makes admin.sock never appear here.
+		ginkgo.It("opens the admin socket at N>1 deferred-seed (no boot deadlock)", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeaderIndexed(t, inviteJoinClusterKey, 4 /*indexGroups*/, 2 /*expectNodes*/)
+			adminSock := filepath.Join(leader.dataDir, "admin.sock")
+			gomega.Eventually(func() bool {
+				_, err := os.Stat(adminSock)
+				return err == nil
+			}, 25*time.Second, 250*time.Millisecond).Should(gomega.BeTrue(),
+				"admin.sock must open at N>1 deferred — pre-fix it never appears (index-group boot deadlock)")
+			// The 2nd node never joins, so the cluster intentionally never fully
+			// forms (S3 stays down); the admin-socket appearance is the discriminator.
+		})
+
+		// Full path: a 2-node invite-join cluster at N>1 deferred forms and
+		// round-trips an S3 PUT/GET — proving the façade is assembled before S3
+		// serves (a GET-after-PUT through the sharded index would miss if writes
+		// had routed to the meta-FSM placeholder).
+		ginkgo.It("forms a 2-node invite-join deferred N>1 cluster and round-trips S3 PUT/GET", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeaderIndexed(t, inviteJoinClusterKey, 4, 2)
+			// bootstrap waits on admin.sock (the leader blocks in the relocated
+			// index phase until the joiner arrives, so S3 is not up yet).
+			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA via admin.sock")
+			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
+
+			bundle := mintInvite(t, leader.dataDir)
+
+			joinerDir := shortTempDir(t)
+			joiner := startInviteJoinerIndexed(t, "joiner", joinerDir, bundle, 4, 2)
+
+			// The 2nd join trips the deferred seed → quorum → index+shard groups
+			// seed → both nodes' index phase unblocks → S3 comes up.
+			waitForVoter(t, leader.httpURL, "joiner", 120*time.Second)
+			waitForPort(t, joiner.httpPort, 90*time.Second)
+
+			bucket := "invite-join-n2-index"
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
+
+			joinerCli := s3ClientFor(joiner.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(joinerCli, 60*time.Second)).To(gomega.Succeed())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			body := []byte("invite-join N>1 deferred round-trip payload")
+			key := "n2-index-roundtrip.txt"
+			gomega.Eventually(func() error {
+				return tryPutObject(ctx, joinerCli, bucket, key, body)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed(),
+				"PutObject through the joiner must succeed at N>1 deferred")
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, joinerCli, bucket, key)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
+				"GetObject must return the PUT bytes — façade assembled before S3 serves")
 		})
 
 		ginkgo.It("runs complete-cutover and accepts a post-drop invite-join without a shared PSK", func() {
