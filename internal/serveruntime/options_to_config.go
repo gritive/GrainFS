@@ -33,6 +33,7 @@ func optionsToConfig(
 
 		BootstrapExpectNodes:   opts.BootstrapExpectNodes,
 		BootstrapExpectTimeout: opts.BootstrapExpectTimeout,
+		IndexGroupCount:        normalizeIndexGroupCount(opts.IndexGroupCount),
 		IAMStore:               iamStore,
 		IAMApplier:             iamApplier,
 	}
