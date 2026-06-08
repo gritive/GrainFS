@@ -251,6 +251,34 @@ func (c *igCluster) startNode(t *testing.T, id string, peers []string, election 
 	return ig
 }
 
+// startNodeWithForward mirrors startNode but installs a caller-supplied forward
+// hook (built from the node's own *indexGroup so the hook can read LeaderID()),
+// instead of the direct-ProposeWait shortcut. Used by index_group_forward_test
+// to drive the production sender+receiver path.
+func (c *igCluster) startNodeWithForward(t *testing.T, id string, peers []string, election time.Duration, hookFor func(self *indexGroup) indexGroupForwardFunc) *indexGroup {
+	t.Helper()
+	rcfg := raft.DefaultConfig(id, peers)
+	rcfg.ElectionTimeout = election
+	rcfg.HeartbeatTimeout = igHeartbeat
+	node, closeStore, err := newRaftNode(rcfg, t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = closeStore() })
+	c.register(id, node)
+	c.wireTransport(id, node)
+
+	fsm := NewMetaFSM()
+	wireTestKEK(t, fsm)
+
+	ig := newIndexGroup(node, fsm, nil)
+	ig.forward = hookFor(ig) // installed before Start so the hook is live immediately
+	require.NoError(t, ig.Start(context.Background()))
+	t.Cleanup(ig.Close)
+	c.mu.Lock()
+	c.groups[id] = ig
+	c.mu.Unlock()
+	return ig
+}
+
 // start3 brings up n1(fast→leader), n2, n3(slow) and waits for n1 leadership.
 func start3(t *testing.T, forwardEnabled bool) *igCluster {
 	t.Helper()
