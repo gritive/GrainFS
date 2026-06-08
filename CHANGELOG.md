@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.523.0] - 2026-06-08
+
+### Added
+
+- **Sharded object index — Slice 4a: dormant index-group raft primitive.** Introduces
+  `internal/cluster/index_group.go` — an object-index-only raft replica that reuses `MetaFSM` as
+  its store (applying only `PutObjectIndex`/`DeleteObjectIndex` via the FSM leaf methods, bypassing
+  the meta-FSM post-commit hooks) on the generic `newRaftNode` machinery. It carries its own
+  FSM-applied watermark (read-your-write), a panic-safe command-type coupling guard,
+  follower→leader forward with a bounded local-apply timeout, and snapshot take / restore-on-restart
+  / lagging-follower InstallSnapshot. It satisfies the `ObjectIndexShard{Reader, Writer, Lister}`
+  façade interfaces. Proven in-process (single-node round-trip, 3-node loopback follower-forward,
+  and lagging-follower InstallSnapshot). **Dormant: NOT wired into boot** — the object-index shard
+  façade remains N=1 over the meta-FSM. No behavior change. Slice 4b (greenfield N>1 flip) is next,
+  GCP-gated.
+
 ## [0.0.522.0] - 2026-06-08
 
 ### Added

@@ -52,6 +52,7 @@ type indexGroup struct {
 	applyErrs     map[uint64]error
 }
 
+//nolint:unused // Slice 4a dormant primitive — referenced only by tests until Slice 4b boot-wires the index groups.
 func newIndexGroup(node RaftNode, fsm *MetaFSM, forward indexGroupForwardFunc) *indexGroup {
 	return &indexGroup{
 		node:        node,
@@ -318,6 +319,8 @@ func (g *indexGroup) waitForwardedApplied(ctx context.Context, idx uint64) error
 // idempotent puts on restart is harmless; truncating past real state is not.
 // (MetaRaft sidesteps this by snapshotting inside the apply loop at the just-
 // applied entry.Index — meta_raft.go:1126-1139.)
+//
+//nolint:unused // Slice 4a dormant primitive — referenced only by tests until Slice 4b boot-wires the index groups.
 func (g *indexGroup) snapshot() ([]byte, uint64, error) {
 	idx := g.lastApplied.Load()
 	if idx == 0 {
