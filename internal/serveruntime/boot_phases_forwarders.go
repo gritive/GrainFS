@@ -57,9 +57,17 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	metaRaft := state.metaRaft
 	peers := state.peers
 
+	// All follower→leader forward dialers (group propose, meta propose, meta read)
+	// use CallPooled, NOT Call: connection-per-RPC Call opens a fresh TLS handshake
+	// per forward, so a conc≥16 multipart-under-load burst becomes a handshake storm
+	// against :7000 and forwards dial-time-out ("no reachable peer") or blow the
+	// readiness deadline. CallPooled reuses the bounded control pool
+	// (MaxControlConnsPerPeer) — same pattern shardSvc.SendRequest already uses —
+	// turning the storm into bounded backpressure. (This mirrors 730222ee, which
+	// only covered shardSvc; these boot dialers were the remaining conn-per-RPC path.)
 	forwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-		reply, err := clusterTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -102,7 +110,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
-		reply, err := clusterTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -154,7 +162,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	}
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
-		reply, err := clusterTransport.Call(callCtx, peer, msg)
+		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
