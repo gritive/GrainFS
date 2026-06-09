@@ -57,6 +57,7 @@ type ServeOptions struct {
 	NBDPort            int           // --nbd-port
 	P9Bind             string        // --9p-bind
 	P9Port             int           // --9p-port
+	EnableIceberg      bool          // --enable-iceberg
 
 	// --- Intervals ---
 	ScrubInterval            time.Duration // --scrub-interval

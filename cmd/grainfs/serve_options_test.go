@@ -88,6 +88,7 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--mux-flush", "3ms",
 		"--audit-iceberg=false",
 		"--audit-commit-interval", "67s",
+		"--enable-iceberg=true",
 	}
 	require.NoError(t, cmd.ParseFlags(args))
 
@@ -127,6 +128,7 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, 20809, opts.NBDPort)
 	require.Equal(t, "127.0.0.99", opts.P9Bind)
 	require.Equal(t, 1564, opts.P9Port)
+	require.True(t, opts.EnableIceberg)
 
 	// Intervals.
 	require.Equal(t, "7s", opts.ScrubInterval.String())

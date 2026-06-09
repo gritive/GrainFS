@@ -41,6 +41,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("nbd-port", 0, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")
 	cmd.Flags().String("9p-bind", "127.0.0.1", "9P2000.L bind address; set 0.0.0.0 only on trusted networks")
 	cmd.Flags().Int("9p-port", 0, "9P2000.L server port (0 = disabled); unauthenticated, use firewall")
+	cmd.Flags().Bool("enable-iceberg", false, "enable Iceberg REST Catalog endpoint (disabled by default in Phase 1)")
 	cmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
 	cmd.Flags().Int("shard-pack-threshold", 65545, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65545)")
 	cmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")

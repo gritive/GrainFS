@@ -94,6 +94,7 @@ func optionsToConfig(
 	cfg.NBDPort = opts.NBDPort
 	cfg.P9Bind = opts.P9Bind
 	cfg.P9Port = opts.P9Port
+	cfg.EnableIceberg = opts.EnableIceberg
 
 	cfg.FDWatchEnabled = opts.FDWatchEnabled
 	cfg.FDOpts = opts.FDOpts
