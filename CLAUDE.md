@@ -36,7 +36,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + NFSv4 + NBD + Web UI를 하나로 제공
 - 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(TCP/Raft)
-- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/execution, server/iceberg, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, chunkref, config, nodeconfig
+- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/iceberg, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot, chunkref, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### cmd 경계 계약 (cmd thin-runner)
@@ -85,7 +85,7 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 - README.md: Quick Start 및 CLI 옵션
 - CHANGELOG.md: 버전별 변경 기록 (`VERSION` 파일과 함께 릴리스 source of truth)
 - docs/adr/: 아키텍처 결정 기록
-- docs/architecture/request-single-cluster-flow.md: single/cluster request execution actor 설계
+- docs/architecture/request-single-cluster-flow.md: single/cluster request execution actor 설계 (Phase 1에서 actor 모델 제거됨 — 역사적 참고용)
 - docs/operators/runbook.md, docs/operators/sli-slo.md: 운영/SLO 문서
 
 ### 테스트 레이아웃

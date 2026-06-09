@@ -52,10 +52,11 @@
 - **한계(정직)**: raft가 *여전히 도므로* stage-tail ≠ end-to-end. raft의 *부재* 효과(contention 해소+overlap 붕괴)는 측정 불가 — 64KiB서 meta_index 17→11ms인데 http_put_total flat이었던 바로 그 confound. **necessary-not-sufficient: 통과해도 green-light 아님, 진짜 confirm은 Phase 5 벤치.**
 - **검증**: quorum-write 꼬리가 raft-commit 꼬리 대비 비상식적으로 크지 않음. 크면 STOP·재평가.
 
-### Phase 1 — Strip-down (disable, 삭제 아님)
+### Phase 1 — Strip-down (disable, 삭제 아님) ✅ DONE
 - 비-S3 프로토콜(NFS/NBD/Iceberg/9p)을 seam 뒤로 **비활성화**(재연결 경계 보존, 삭제 아님), request actor 모델 → API 단일 라인.
 - **목표**: S3-only 최소 코어·단일 경로로 data-plane 수술 전 surface 축소. greenfield = 하위호환 제거지 *프로토콜은 skip*(재연결 대비)이지 삭제 아님.
 - **검증**: S3 PUT/GET/LIST/DELETE green, 단일 경로. 토글로 프로토콜 복구 가능.
+- **결과**: NFS4/NBD port=0 기본, `--enable-iceberg` 플래그 추가, executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip 처리.
 
 ### Phase 2 — 결정론 placement
 - placement 선택을 결정론으로 교체: group = `hash % numGroups` 동결, HRW static-weighted 노드 선택, Bounded Load → soft 격하.
