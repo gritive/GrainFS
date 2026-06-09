@@ -124,6 +124,38 @@ type shadowTestErr struct{}
 
 func (*shadowTestErr) Error() string { return "forced failure" }
 
+// Real-transport carrier proof: the remote WriteShadowMeta RPC must actually
+// round-trip through the TCP transport, inbound dispatch, handleRPC, the new
+// case, handleShadowMeta, and land a file on the remote node. The fake-transport
+// unit tests only prove the coordinator's fan-out logic — this proves the wire
+// path the GCP run depends on (neuter-verify: deleting the "WriteShadowMeta"
+// case in handleRPC makes this RED).
+func TestWriteShadowMeta_RealTransportRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	tr2.SetStreamHandler(svc2.HandleRPC())
+
+	blob := []byte("shadow-meta-over-the-wire")
+	require.NoError(t, svc1.WriteShadowMeta(ctx, tr2.LocalAddr(), "bkt", "key", blob))
+
+	// The remote node must have durably written the shadow meta.
+	got, err := os.ReadFile(filepath.Join(dir2, "shards", ".shadow_meta", "bkt", "key"))
+	require.NoError(t, err)
+	require.Equal(t, blob, got)
+}
+
 func TestQuorumMetaShadow_DisabledIsInert(t *testing.T) {
 	prev := quorumMetaShadowEnabled
 	quorumMetaShadowEnabled = false

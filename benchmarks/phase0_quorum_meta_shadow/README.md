@@ -50,6 +50,14 @@ The ratio is computed on `Error==""` events only (transient timeouts must not bl
 p99) and is a within-run comparison (both stages under identical load), so it is valid
 regardless of absolute load level.
 
+**Measurement-hygiene caveat (not strictly one-directional).** The shadow returns at
+K acks, then cancels the in-flight `N-K` trailing remote writes. Those cancellations
+churn the shared cluster conn pool, which can perturb *other* stages (e.g.
+`shard_write_remote`) and is not guaranteed to bias only one way. It is bounded and
+second-order against a 10x threshold, but if the ratio lands near the artifact band and
+you need a tighter read, re-run with EC where K=N (no trailing writes to cancel) to
+remove this axis.
+
 ## Procedure (user-run; needs a real multi-node cluster — e.g. GCP)
 
 1. **Build** baseline binary from this branch.
