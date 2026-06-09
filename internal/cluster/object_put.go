@@ -466,7 +466,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	return obj, func() error { return nil }, err
 }
 
-func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore, bl *BoundedLoads) []ObjectWritePlacementNodeState {
+func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore) []ObjectWritePlacementNodeState {
 	if store == nil {
 		return nil
 	}
@@ -475,9 +475,6 @@ func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeSt
 		state := ObjectWritePlacementNodeState{NodeID: nodeID}
 		if ns, ok := store.Get(nodeID); ok {
 			state.DiskAvailBytes = ns.DiskAvailBytes
-		}
-		if bl != nil && bl.IsHot(nodeID) {
-			state.Hot = true
 		}
 		states = append(states, state)
 	}
@@ -490,7 +487,6 @@ func selectECPlacementFromNodeStates(
 	shardKey string,
 	nodeStates []ObjectWritePlacementNodeState,
 	weightedEnabled bool,
-	blEnabled bool,
 ) []string {
 	if !weightedEnabled || len(nodeStates) == 0 {
 		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
@@ -509,11 +505,6 @@ func selectECPlacementFromNodeStates(
 			skipReason[i] = "stale"
 			continue
 		}
-		if blEnabled && state.Hot {
-			weights[i] = 0
-			skipReason[i] = "bl_hot"
-			continue
-		}
 		weights[i] = float64(state.DiskAvailBytes)
 		active++
 	}
@@ -525,28 +516,10 @@ func selectECPlacementFromNodeStates(
 		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
 	}
 
-	// If fewer than k+m active nodes remain after BL skip, bypass BL.
-	if active < cfg.NumShards() {
-		for i := range weights {
-			if skipReason[i] == "bl_hot" {
-				state := stateByNode[liveNodes[i]]
-				if state.DiskAvailBytes > 0 {
-					weights[i] = float64(state.DiskAvailBytes)
-					skipReason[i] = ""
-					active++
-				}
-			}
-		}
-		metrics.ClusterBLBypassedWrites.Inc()
-	}
-
 	// Emit per-reason skip metrics.
 	for i, r := range skipReason {
 		if r != "" {
 			metrics.ClusterPlacementSkipped.WithLabelValues(liveNodes[i], r).Inc()
-			if r == "bl_hot" {
-				metrics.ClusterBLSpilledWrites.WithLabelValues(liveNodes[i]).Inc()
-			}
 		}
 	}
 

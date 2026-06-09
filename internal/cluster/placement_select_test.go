@@ -17,7 +17,7 @@ func TestSelectECPlacement_AllLive(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	liveNodes := []string{"a", "b", "c"}
 
-	placement := selectECPlacementFromNodeStates(cfg, liveNodes, "obj/v1", nil, false, false)
+	placement := selectECPlacementFromNodeStates(cfg, liveNodes, "obj/v1", nil, false)
 
 	assert.Len(t, placement, cfg.NumShards())
 	expected := PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
@@ -28,7 +28,7 @@ func TestSelectECPlacement_DeadNode(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	liveNodes := []string{"a", "b", "c"}
 
-	placement := selectECPlacementFromNodeStates(cfg, liveNodes, "obj/v1", nil, false, false)
+	placement := selectECPlacementFromNodeStates(cfg, liveNodes, "obj/v1", nil, false)
 
 	assert.Len(t, placement, cfg.NumShards())
 	expected := PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
@@ -59,7 +59,7 @@ func TestSelectECPlacement_PartialDead(t *testing.T) {
 	}
 	require.NotEmpty(t, triggerKey, "HRW never selected a dead node candidate")
 
-	placement := selectECPlacementFromNodeStates(cfg, liveNodes, triggerKey, nil, false, false)
+	placement := selectECPlacementFromNodeStates(cfg, liveNodes, triggerKey, nil, false)
 	expected := PlaceShards(triggerKey, liveNodes, nil, cfg.NumShards())
 	assert.Equal(t, expected, placement)
 }

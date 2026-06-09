@@ -6,25 +6,23 @@ import (
 )
 
 type ObjectWritePlacementInput struct {
-	Operation           string
-	PlacementGroupID    string
-	PlacementGroup      *ShardGroupEntry
-	LiveNodes           []string
-	CurrentECConfig     ECConfig
-	BypassBucketCheck   bool
-	ShardKey            string
-	NodeStates          []ObjectWritePlacementNodeState
-	WeightedHRWEnabled  bool
-	BoundedLoadsEnabled bool
-	PeerHealth          []PeerHealthEntry
-	HasPeerHealth       bool
-	SelfID              string
+	Operation          string
+	PlacementGroupID   string
+	PlacementGroup     *ShardGroupEntry
+	LiveNodes          []string
+	CurrentECConfig    ECConfig
+	BypassBucketCheck  bool
+	ShardKey           string
+	NodeStates         []ObjectWritePlacementNodeState
+	WeightedHRWEnabled bool
+	PeerHealth         []PeerHealthEntry
+	HasPeerHealth      bool
+	SelfID             string
 }
 
 type ObjectWritePlacementNodeState struct {
 	NodeID         string
 	DiskAvailBytes uint64
-	Hot            bool
 }
 
 type ObjectWritePlacementPlan struct {
@@ -64,7 +62,6 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 		in.ShardKey,
 		in.NodeStates,
 		in.WeightedHRWEnabled,
-		in.BoundedLoadsEnabled,
 	)
 	plan := ObjectWritePlacementPlan{
 		PlacementGroupID: placementGroupID,
@@ -171,8 +168,7 @@ func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, in Ob
 		in.HasPeerHealth = true
 	}
 	in.SelfID = b.currentSelfAddr()
-	in.NodeStates = objectWritePlacementNodeStatesFromRuntime(in.LiveNodes, b.nodeStatsStore, b.bl)
+	in.NodeStates = objectWritePlacementNodeStatesFromRuntime(in.LiveNodes, b.nodeStatsStore)
 	in.WeightedHRWEnabled = b.clusterCfg.WeightedHRWEnabled()
-	in.BoundedLoadsEnabled = b.clusterCfg.BoundedLoadsEnabled()
 	return PlanObjectWritePlacement(in)
 }
