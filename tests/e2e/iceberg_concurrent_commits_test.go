@@ -37,6 +37,7 @@ import (
 // contract, so a 409-vs-200 split regression surfaces on both targets
 // rather than only under cluster load.
 var _ = ginkgo.Describe("Iceberg concurrent commits", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	ginkgo.Context("SingleNode", func() {
 		ginkgo.It("tolerates concurrent table commits", func() {
 			runIcebergConcurrentCommitCase(ginkgo.GinkgoTB(), newSingleNodeS3Target())

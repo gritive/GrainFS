@@ -133,6 +133,7 @@ type Config struct {
 	NBDPort            int
 	P9Bind             string
 	P9Port             int
+	EnableIceberg      bool
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool

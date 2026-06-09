@@ -68,6 +68,7 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.NBDPort, _ = cmd.Flags().GetInt("nbd-port")
 	opts.P9Bind, _ = cmd.Flags().GetString("9p-bind")
 	opts.P9Port, _ = cmd.Flags().GetInt("9p-port")
+	opts.EnableIceberg, _ = cmd.Flags().GetBool("enable-iceberg")
 
 	// Intervals.
 	opts.ScrubInterval, _ = cmd.Flags().GetDuration("scrub-interval")

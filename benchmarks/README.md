@@ -155,3 +155,12 @@ NUM_BUCKETS=8 FIO_WORKERS_PER_BUCKET=8 READDIR_SAMPLES=1000 make bench-nfs-multi
 Use `go tool pprof -top -focus='LockPath' cpu.pprof` to inspect export-level
 contention. Measure pseudo-root latency through a separate `host:/` mount and
 bucket throughput through `host:/bench-<i>` mounts.
+
+## Phase 0 — Quorum-Meta Shadow Write (kill-only perf spike)
+
+Experimental, measurement-only developer harness for ROADMAP Phase 0 — measures
+whether a leaderless quorum-meta-write tail is egregiously slower than the
+raft-commit tail at conc32. Gated OFF by default (`GRAINFS_QUORUM_META_SHADOW`),
+not a user feature. Procedure, pre-registered decision rule, and the
+`analyze_put_trace.py` verdict tool: see
+[`phase0_quorum_meta_shadow/README.md`](phase0_quorum_meta_shadow/README.md).

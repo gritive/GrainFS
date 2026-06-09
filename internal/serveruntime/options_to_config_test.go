@@ -40,10 +40,11 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		BlockCacheSize:     int64(1 << 28),
 		ShardCacheSize:     int64(1 << 27),
 
-		NFS4Port: 12049,
-		NBDPort:  10809,
-		P9Bind:   "127.0.0.99",
-		P9Port:   1564,
+		NFS4Port:      12049,
+		NBDPort:       10809,
+		P9Bind:        "127.0.0.99",
+		P9Port:        1564,
+		EnableIceberg: true,
 
 		ScrubInterval:            7 * time.Second,
 		ScrubOrphanAge:           11 * time.Minute,
@@ -172,6 +173,7 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.NBDPort, cfg.NBDPort)
 	require.Equal(t, opts.P9Bind, cfg.P9Bind)
 	require.Equal(t, opts.P9Port, cfg.P9Port)
+	require.True(t, cfg.EnableIceberg)
 
 	// Resource guards.
 	require.Equal(t, opts.FDWatchEnabled, cfg.FDWatchEnabled)

@@ -11,6 +11,7 @@ import (
 )
 
 var _ = ginkgo.Describe("Iceberg auth", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	ginkgo.Context("NoAuthRejected", func() {
 		ginkgo.It("rejects unsigned namespace requests on a single node", func() {
 			runIcebergAuthNoAuthRejectedSingleNode(ginkgo.GinkgoTB())

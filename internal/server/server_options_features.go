@@ -77,6 +77,15 @@ func WithIcebergCatalog(catalog icebergcatalog.Catalog) Option {
 	}
 }
 
+// WithIcebergDisabled prevents ensureRuntimeDefaults from creating the
+// automatic Iceberg catalog fallback. Re-enable: omit this option or pass
+// WithIcebergCatalog explicitly.
+func WithIcebergDisabled() Option {
+	return func(s *Server) {
+		s.icebergDisabled = true
+	}
+}
+
 func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
 	return WithIcebergCatalog(store)
 }

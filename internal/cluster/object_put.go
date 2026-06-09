@@ -803,7 +803,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	if plan.PreserveModTime {
 		modTime = plan.ModTime
 	}
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	metaCmd := PutObjectMetaCmd{
 		Bucket:           plan.Bucket,
 		Key:              plan.Key,
 		Size:             result.Size,
@@ -820,13 +820,15 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		ExpectedETag:     plan.ExpectedETag,
 		Parts:            result.Parts,
 		Tags:             result.Tags,
-	}); merr != nil {
+	}
+	if merr := b.propose(ctx, CmdPutObjectMeta, metaCmd); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
 	}
 	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage(metricPath, "propose_meta", stageStart)
+	b.quorumMetaShadow(ctx, metaCmd) // Phase 0 perf spike — gated OFF by default (inert)
 
 	// result.Tags aliases the caller's slice; do not introduce concurrent
 	// readers/writers on result after this point.
@@ -988,7 +990,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	}
 
 	stageStart := time.Now()
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	metaCmd := PutObjectMetaCmd{
 		Bucket:           bucket,
 		Key:              key,
 		Size:             result.Size,
@@ -1004,13 +1006,15 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		SSEAlgorithm:     sseAlgorithm,
 		Parts:            parts,
 		Tags:             tags,
-	}); merr != nil {
+	}
+	if merr := b.propose(ctx, CmdPutObjectMeta, metaCmd); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
 		return nil, merr
 	}
 	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage("ec_single", "propose_meta", stageStart)
+	b.quorumMetaShadow(ctx, metaCmd) // Phase 0 perf spike — gated OFF by default (inert)
 
 	return &storage.Object{
 		Key:              key,

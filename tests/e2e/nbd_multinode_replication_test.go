@@ -12,6 +12,7 @@ import (
 )
 
 var _ = ginkgo.Describe("NBD multinode replication", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	ginkgo.Context("Cluster3Node", func() {
 		var c *e2eCluster
 

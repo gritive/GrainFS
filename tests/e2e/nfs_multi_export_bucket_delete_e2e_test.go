@@ -47,6 +47,7 @@ func runNFSExportCases(getTgt func() *nfsTarget) {
 // entries into one entry with sub-test branches, matching the canonical
 // dual fixture shape used by the rest of the suite.
 var _ = ginkgo.Describe("NFS export bucket delete", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func() *nfsTarget

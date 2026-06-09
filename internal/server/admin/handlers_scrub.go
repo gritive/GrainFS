@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/server/execution"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -48,25 +47,6 @@ func ListScrubJobs(ctx context.Context, d *Deps) (ListScrubJobsResp, error) {
 func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error) {
 	if req.Bucket == "" {
 		return ScrubResp{}, NewInvalid("bucket required")
-	}
-	if d.Execution != nil {
-		// Scrub keeps its existing session_id contract; Operation.ID stays zero here.
-		plan, err := (execution.Planner{ClusterAvailable: true}).Plan(execution.Operation{
-			Kind: execution.OperationScrub,
-			Scrub: execution.ScrubOperation{
-				Bucket:    req.Bucket,
-				KeyPrefix: req.KeyPrefix,
-				DryRun:    req.DryRun,
-			},
-		})
-		if err != nil {
-			return ScrubResp{}, executionErrorToAdmin(err)
-		}
-		result, err := d.Execution.Execute(ctx, plan)
-		if err != nil {
-			return ScrubResp{}, executionErrorToAdmin(err)
-		}
-		return ScrubResp{SessionID: result.Scrub.SessionID, Created: result.Scrub.Created}, nil
 	}
 	if d.ScrubProposer == nil {
 		return ScrubResp{}, NewInternal("scrub proposer not configured")

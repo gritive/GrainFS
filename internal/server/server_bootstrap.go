@@ -99,7 +99,7 @@ func (s *Server) ensureRuntimeDefaults(ss ServerStorage) {
 	if s.volMgr == nil {
 		s.volMgr = volume.NewManager(ss.VolumeBackend)
 	}
-	if s.icebergCatalog == nil {
+	if s.icebergCatalog == nil && !s.icebergDisabled {
 		if dbp := ss.DBProvider; dbp != nil {
 			s.icebergCatalog = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
 		}

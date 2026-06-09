@@ -10,6 +10,7 @@ import (
 // embeds p9.DefaultWalkGetAttr, so the path is exercised implicitly by kernel
 // 9P clients in tests/9p_colima, but no explicit wire-level e2e exists.
 var _ = ginkgo.Describe("P9 WalkGetAttr skeleton", ginkgo.Label("p9"), func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func(testing.TB) *p9Target

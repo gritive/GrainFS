@@ -6,9 +6,9 @@ node or as a Raft-backed cluster.
 It exposes object, file, and block interfaces over one storage layer:
 
 - **Object storage:** S3-compatible HTTP API
-- **File storage:** NFSv4 and 9P2000.L
-- **Block storage:** NBD for Linux clients
-- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows
+- **File storage:** NFSv4 and 9P2000.L *(disabled by default in Phase 1 — pass `--nfs4-port 2049` to enable)*
+- **Block storage:** NBD for Linux clients *(disabled by default in Phase 1 — pass `--nbd-port 10809` to enable)*
+- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows *(disabled by default in Phase 1 — pass `--enable-iceberg` to enable)*
 
 ## Quick Start (2-5 minutes)
 
@@ -35,8 +35,11 @@ upload: ./file.txt to s3://default/file.txt
 ```
 
 That's it. You have a working local S3 server. To verify the same data through
-NFS on Linux, continue with [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
+NFS on Linux, start the server with `--nfs4-port 2049` and continue with
+[`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
 That guide also covers 9P mounts, authenticated Mount SAs, and read-only exports.
+
+> ℹ️ **Phase 1:** NFSv4, NBD, and Iceberg REST Catalog are disabled by default while the data-plane architecture is being rearchitected. Add `--nfs4-port 2049`, `--nbd-port 10809`, or `--enable-iceberg` to re-enable them. S3 is unaffected.
 
 > ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
@@ -92,6 +95,8 @@ For production steps, verification, cutover, and revocation, see
 <details>
 <summary>Auth + Iceberg</summary>
 
+> ℹ️ **Phase 1:** Iceberg REST Catalog is disabled by default. Start the server with `--enable-iceberg` to use it.
+
 ```bash
 DATA_DIR=./tmp
 ./bin/grainfs iam sa create admin --endpoint "$DATA_DIR/admin.sock"
@@ -120,9 +125,9 @@ See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-produc
 | Area | Summary | Details |
 | --- | --- | --- |
 | S3 API | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| File protocols | NFSv4 explicit bucket exports, 9P2000.L | [NFSv4 compatibility](docs/reference/nfs-compatibility.md), [9P compatibility](docs/reference/9p-compatibility.md) |
-| Block protocol | Linux NBD protocol surface | [NBD compatibility](docs/reference/nbd-compatibility.md) |
-| Iceberg | DuckDB-compatible REST Catalog | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
+| File protocols | NFSv4 explicit bucket exports, 9P2000.L *(pass `--nfs4-port 2049` to enable)* | [NFSv4 compatibility](docs/reference/nfs-compatibility.md), [9P compatibility](docs/reference/9p-compatibility.md) |
+| Block protocol | Linux NBD protocol surface *(pass `--nbd-port 10809` to enable)* | [NBD compatibility](docs/reference/nbd-compatibility.md) |
+| Iceberg | DuckDB-compatible REST Catalog *(pass `--enable-iceberg` to enable)* | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
 | Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
 | Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
 
@@ -159,11 +164,11 @@ required targets are writable.
 
 **Same data, multiple protocols.** S3, NFSv4, 9P, NBD, and Iceberg use the same
 storage backend contracts. Use the compatibility docs for protocol-specific
-limits.
+limits. *(Phase 1: NFSv4, 9P, NBD, and Iceberg are disabled by default; S3 is the active interface.)*
 
 **Protocol network boundary.** S3 uses IAM. NFSv4, 9P, and NBD do not use S3
 IAM; expose those listeners only on loopback, private networks, or
-firewall-restricted addresses.
+firewall-restricted addresses. *(Phase 1: these listeners are off by default — set their port flags to enable.)*
 
 ## Common Workflows
 

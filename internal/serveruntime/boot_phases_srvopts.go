@@ -168,7 +168,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		}
 		metaCatalog = cluster.NewMetaCatalogWithForwarders(metaRaft, state.backend, "s3://grainfs-tables/warehouse", metaForward, state.metaReadSender, metaReadTargets)
 	}
-	srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
+	if cfg.EnableIceberg {
+		srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
+	} else {
+		srvOpts = append(srvOpts, server.WithIcebergDisabled())
+	}
 	srvOpts = append(srvOpts, server.WithJWTKeySet(metaRaft.FSM().JWTKeySet()))
 	// §5 T45: ProxyTrust is constructed in bootMetaRaftWiring and its CIDRs are
 	// driven by the OnTrustedProxyCIDR reload hook. Pass it to the Server so

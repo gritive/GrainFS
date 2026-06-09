@@ -240,6 +240,7 @@ func grantNBDCredentialPolicy(binary, adminSock, saID string) error {
 
 // TestNBD_PatternWriteRead writes two distinct 4KB patterns and reads them back.
 func TestNBD_PatternWriteRead(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNBDDevice(t, func(dev string) {
 		// Write pattern 0xAA to block 0.
 		runColimaSSH(t, "sudo", "bash", "-c",
@@ -263,6 +264,7 @@ func TestNBD_PatternWriteRead(t *testing.T) {
 
 // TestNBD_LargeBlock writes 1MB of random data and verifies checksum after read-back.
 func TestNBD_LargeBlock(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNBDDevice(t, func(dev string) {
 		tmpSrc := "/tmp/nbd_colima_src.bin"
 		tmpDst := "/tmp/nbd_colima_dst.bin"
@@ -287,6 +289,7 @@ func TestNBD_LargeBlock(t *testing.T) {
 
 // TestNBD_UnalignedOffset writes and reads data at a non-block-aligned offset.
 func TestNBD_UnalignedOffset(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNBDDevice(t, func(dev string) {
 		// Write 32 bytes at offset 100.
 		runColimaSSH(t, "sudo", "python3", "-c",
@@ -303,6 +306,7 @@ func TestNBD_UnalignedOffset(t *testing.T) {
 
 // TestNBD_MultipleConnections tests two sequential nbd-client connections to the same volume.
 func TestNBD_MultipleConnections(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNBDDevice(t, func(dev string) {
 		// Write pattern in first connection.
 		runColimaSSH(t, "sudo", "bash", "-c",

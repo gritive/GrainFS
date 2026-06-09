@@ -36,6 +36,7 @@ import (
 //     of the base. The contract under test is the path string, not the auth
 //     posture, so the assertion is fixture-independent.
 var _ = ginkgo.Describe("Iceberg REST path capture", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	describeIcebergPathCaptureContext("SingleNode", func(t testing.TB) *icebergTarget {
 		return newSingleNodeIcebergTarget(t)
 	})

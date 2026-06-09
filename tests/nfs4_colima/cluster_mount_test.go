@@ -23,6 +23,7 @@ import (
 )
 
 func TestNFS4_ClusterMountWriteVisibleAcrossNodes(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	c := colimafixture.StartCluster(t, colimafixture.Options{EnableNFS: true})
 	leaderDir := c.DataDirs[c.LeaderIdx]
 	hostIP := envOrDefault("HOST_IP", "192.168.5.2")

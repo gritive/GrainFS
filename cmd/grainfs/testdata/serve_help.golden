@@ -36,6 +36,7 @@ Flags:
   -d, --data string                                         data directory (comma-separated for multi-root) (default "./data")
       --datagroup-refresh-interval duration                 how often to scan for new DataGroups and start reshard managers (0 = only scan at startup) (default 1m0s)
       --degraded-check-interval duration                    EC degraded-mode liveness check interval (default 30s)
+      --enable-iceberg                                      enable Iceberg REST Catalog endpoint (disabled by default in Phase 1)
       --fd-classification-cap int                           max open file descriptors to classify by category per sample (default 512)
       --fd-critical-threshold float                         FD used fraction (0-1) at which a critical incident fires (default 0.9)
       --fd-eta-window duration                              positive-trend ETA window for predictive FD warnings (default 30m0s)
@@ -63,10 +64,10 @@ Flags:
       --meta-dir string                                     dedicated fast metadata storage directory (defaults to first path in --data)
       --mux-flush duration                                  heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval) (default 2ms)
       --mux-pool int                                        stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining) (default 4)
-      --nbd-port int                                        NBD server port (0 = disabled). Client-side nbd-client still requires Linux. (default 10809)
+      --nbd-port int                                        NBD server port (0 = disabled). Client-side nbd-client still requires Linux.
       --nfs-write-buffer-dir string                         directory for NFS write coalescing buffer files (empty = derive from --data)
       --nfs-write-buffer-idle duration                      idle timeout before write buffer auto-flushes (0 = disable buffering) (default 30s)
-      --nfs4-port int                                       NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces (default 2049)
+      --nfs4-port int                                       NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces
       --node-id string                                      unique node ID (auto-generated if omitted)
       --object-index-groups int                             EXPERIMENTAL: number of sharded object-index raft groups (default 1 = single meta-FSM index; >1 is greenfield-only) (default 1)
       --otel-endpoint string                                OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)
