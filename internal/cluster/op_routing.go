@@ -124,7 +124,9 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 // Internal buckets (storage.IsInternalBucket) bypass the object index per
 // ADR 0004's pinned-bucket invariant.
 //
-// F1: nil objectIndexLookup is a configuration error, not a fallback.
+// nil objectIndexLookup: falls back to deterministic hash placement when a
+// frozen candidate list is available (index-free mode). Returns
+// ErrObjectIndexRequired only if the candidate list is also empty (bootstrap).
 func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, error) {
 	if storage.IsInternalBucket(bucket) {
 		target, err := r.RouteBucket(bucket)
