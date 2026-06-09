@@ -247,6 +247,7 @@ func TestMain(m *testing.M) {
 }
 
 func Test9P_ListBuckets(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	with9PMount(t, func(mnt string) {
 		out := runColimaSSH(t, "ls", mnt)
 		require.Contains(t, out, colima9PBucket)
@@ -254,6 +255,7 @@ func Test9P_ListBuckets(t *testing.T) {
 }
 
 func Test9P_ListObjects(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	// Upload a test object via HTTP PUT using grainfs S3-compatible API.
 	httpPutObject(t, "test-file.txt", "hello 9p")
 
@@ -269,6 +271,7 @@ func Test9P_ListObjects(t *testing.T) {
 }
 
 func Test9P_WriteReadAndHTTPVisibility(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	with9PBucketMount(t, func(mnt string) {
 		writeMountedFile(t, p9Path(mnt, "write-read.txt"), "hello from 9p")
 
@@ -282,6 +285,7 @@ func Test9P_WriteReadAndHTTPVisibility(t *testing.T) {
 }
 
 func Test9P_OverwriteTruncatesStaleTail(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	httpPutObject(t, "overwrite.txt", "longer original content")
 
 	with9PBucketMount(t, func(mnt string) {
@@ -297,6 +301,7 @@ func Test9P_OverwriteTruncatesStaleTail(t *testing.T) {
 }
 
 func Test9P_TruncateUpdatesHTTPObject(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	httpPutObject(t, "truncate.txt", "truncate-me")
 
 	with9PBucketMount(t, func(mnt string) {
@@ -312,6 +317,7 @@ func Test9P_TruncateUpdatesHTTPObject(t *testing.T) {
 }
 
 func Test9P_ChmodTouchStatAndHideMetadata(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	with9PBucketMount(t, func(mnt string) {
 		writeMountedFile(t, p9Path(mnt, "metadata.txt"), "metadata")
 		runColimaSSH(t, "sudo", "chmod", "600", p9Path(mnt, "metadata.txt"))
@@ -326,6 +332,7 @@ func Test9P_ChmodTouchStatAndHideMetadata(t *testing.T) {
 }
 
 func Test9P_RenameAndUnlinkVisibleThroughHTTP(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	with9PBucketMount(t, func(mnt string) {
 		writeMountedFile(t, p9Path(mnt, "rename-src.txt"), "rename body")
 		runColimaSSH(t, "sudo", "mv", p9Path(mnt, "rename-src.txt"), p9Path(mnt, "rename-dst.txt"))

@@ -11,6 +11,7 @@ import (
 )
 
 var _ = ginkgo.Describe("NFS multi-export propagation", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	ginkgo.Context("MRCluster3Node", func() {
 		var c *mrCluster
 

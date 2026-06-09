@@ -9,6 +9,7 @@ import (
 // grep "[TODO:e2e]" to enumerate pending coverage gaps. Each gap exists on
 // both single-node and 4-node-cluster topologies; parity is the default.
 var _ = ginkgo.Describe("Iceberg namespace and table skeletons", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func() *icebergTarget

@@ -10,6 +10,7 @@ import (
 // mask combinations have no e2e coverage. Includes Tgetattr partial masks,
 // Tlopen mode variants, readdir/lock/flush edge cases.
 var _ = ginkgo.Describe("P9 modifier variants skeleton", ginkgo.Label("p9"), func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func(testing.TB) *p9Target

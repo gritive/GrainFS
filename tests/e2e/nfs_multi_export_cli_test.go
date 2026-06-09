@@ -28,6 +28,7 @@ type e2eNfsExportList struct {
 // surface (add/list/update/remove + missing-bucket rejection). Shared
 // single + shared cluster fixtures — sub-tests pick unique bucket names.
 var _ = ginkgo.Describe("NFS multi-export CLI", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func() s3Target

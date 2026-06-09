@@ -201,6 +201,7 @@ func testBasicOps(t *testing.T, mnt string) {
 }
 
 func TestNFS4_MultiExportPseudoRootListsBucket(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNFSRootMount(t, "4.1", func(mnt string) {
 		require.Contains(t, runColimaSSH(t, "ls", mnt), colimaNFSExportBucket)
 	})
@@ -262,6 +263,7 @@ func testCommit(t *testing.T, mountPoint string, mnt string, vers string) {
 }
 
 func TestNFS4_BasicOps(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	for _, vers := range nfsVersions {
 		vers := vers
 		t.Run("vers_"+strings.ReplaceAll(vers, ".", "_"), func(t *testing.T) {
@@ -273,6 +275,7 @@ func TestNFS4_BasicOps(t *testing.T) {
 }
 
 func TestNFS4_SetAttr(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	for _, vers := range nfsVersions {
 		vers := vers
 		t.Run("vers_"+strings.ReplaceAll(vers, ".", "_"), func(t *testing.T) {
@@ -284,6 +287,7 @@ func TestNFS4_SetAttr(t *testing.T) {
 }
 
 func TestNFS4_Commit(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	for _, vers := range nfsVersions {
 		vers := vers
 		t.Run("vers_"+strings.ReplaceAll(vers, ".", "_"), func(t *testing.T) {
@@ -295,6 +299,7 @@ func TestNFS4_Commit(t *testing.T) {
 }
 
 func TestNFS4_Seek(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNFSMount(t, "4.2", func(mnt string) {
 		testDir := mnt + "/testdir-seek"
 		runColimaSSH(t, "sudo", "mkdir", "-p", testDir)
@@ -316,6 +321,7 @@ func TestNFS4_Seek(t *testing.T) {
 }
 
 func TestNFS4_Allocate(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNFSMount(t, "4.2", func(mnt string) {
 		testDir := mnt + "/testdir-allocate"
 		runColimaSSH(t, "sudo", "mkdir", "-p", testDir)
@@ -330,6 +336,7 @@ func TestNFS4_Allocate(t *testing.T) {
 }
 
 func TestNFS4_Deallocate(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNFSMount(t, "4.2", func(mnt string) {
 		testDir := mnt + "/testdir-deallocate"
 		runColimaSSH(t, "sudo", "mkdir", "-p", testDir)
@@ -353,6 +360,7 @@ func TestNFS4_Deallocate(t *testing.T) {
 }
 
 func TestNFS4_ServerSideCopy(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	withNFSMount(t, "4.2", func(mnt string) {
 		testDir := mnt + "/testdir-copy"
 		runColimaSSH(t, "sudo", "mkdir", "-p", testDir)

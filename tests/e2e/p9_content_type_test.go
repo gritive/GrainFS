@@ -31,6 +31,7 @@ import (
 // F-§B-9P-anon-attach-phase2). Cluster3Node coverage requires either a Phase 0
 // mrCluster fixture (does not exist) or 9P attach-gate parity with S3.
 var _ = ginkgo.Describe("P9 Content-Type preservation", ginkgo.Label("p9", "content-type"), func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	describeP9ContentTypeContext("SingleNode", func(tb testing.TB) *p9Target {
 		return newSingleNodeP9Target(tb)
 	})

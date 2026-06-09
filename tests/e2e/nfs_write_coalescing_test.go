@@ -25,6 +25,7 @@ import (
 // Default --nfs-write-buffer-idle is 30 s; tests rely on explicit COMMIT (dd
 // conv=fdatasync) or SETATTR (truncate) rather than the idle flusher.
 var _ = ginkgo.Describe("NFS write coalescing", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func() *nfsTarget

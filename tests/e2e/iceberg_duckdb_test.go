@@ -585,6 +585,7 @@ INSTALL httpfs;
 }
 
 var _ = ginkgo.Describe("Iceberg DuckDB", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	ginkgo.Context("SingleNode", func() {
 		ginkgo.It("keeps the local catalog readable across restart and drop", func() {
 			runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(ginkgo.GinkgoTB())

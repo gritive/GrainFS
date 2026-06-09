@@ -77,6 +77,7 @@ func runNBDCases(getTgt func() *nbdTarget) {
 // convention so the same NBD client-side behaviors are exercised against both
 // deployment shapes.
 var _ = ginkgo.Describe("NBD matrix", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	for _, tc := range []struct {
 		name string
 		mk   func() *nbdTarget

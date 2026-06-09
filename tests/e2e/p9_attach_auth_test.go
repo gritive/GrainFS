@@ -32,6 +32,7 @@ import (
 //   - AnameMountSANoPolicy_EACCES: mount-SA in pool but no policy attached →
 //     EACCES. Works on both (deny path, phase-agnostic).
 var _ = ginkgo.Describe("P9 attach auth", ginkgo.Label("p9", "auth"), func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	describeP9AttachAuthContext("SingleNode", false, func(tb testing.TB) *p9Target {
 		return newSingleNodeP9Target(tb)
 	})

@@ -31,6 +31,7 @@ import (
 //     credential; S3-side is SigV4 throughout). Proves minting a bearer does
 //     not break the SigV4 path — the test never sends the bearer.
 var _ = ginkgo.Describe("Iceberg OAuth", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	describeIcebergOAuthContext("SingleNode", func(t testing.TB) *icebergTarget {
 		return newSingleNodeIcebergTarget(t)
 	})

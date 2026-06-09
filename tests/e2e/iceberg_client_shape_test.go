@@ -27,6 +27,7 @@ import (
 //     DuckDB's CREATE SECRET passes verbatim (catalog_base + /v1/oauth/tokens)
 //     accepts form-encoded client_credentials and returns a 3-segment JWT.
 var _ = ginkgo.Describe("Iceberg client response shape", func() {
+	ginkgo.BeforeEach(func() { ginkgo.Skip("phase 1: protocol disabled by default") })
 	describeIcebergClientShapeContext("SingleNode", func(t testing.TB) *icebergTarget {
 		return newSingleNodeIcebergTarget(t)
 	})

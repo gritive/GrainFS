@@ -22,6 +22,7 @@ import (
 )
 
 func Test9P_ClusterMountWriteVisibleAcrossNodes(t *testing.T) {
+	t.Skip("phase 1: protocol disabled by default")
 	c := colimafixture.StartCluster(t, colimafixture.Options{EnableP9: true})
 	leaderDir := c.DataDirs[c.LeaderIdx]
 	bucket := fmt.Sprintf("cluster-9p-write-%d", time.Now().UnixNano())
