@@ -11,7 +11,6 @@ import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/incident"
-	"github.com/gritive/GrainFS/internal/server/execution"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -24,7 +23,6 @@ type Deps struct {
 	PeerHealth           PeerHealthAPI             // optional; nil disables cluster peer admin endpoints
 	VlogBreakdown        VlogBreakdownAPI          // optional; nil disables vlog breakdown endpoint
 	ScrubProposer        ScrubProposer             // optional; nil disables POST /v1/scrub
-	Execution            execution.Executor        // optional; nil uses existing ScrubProposer path
 	ScrubAggregator      ScrubAggregator           // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
 	VolumePlacement      VolumePlacementSource     // optional; nil disables replica/EC volume health signal
 	IAM                  IAMService                // optional; nil disables IAM admin endpoints

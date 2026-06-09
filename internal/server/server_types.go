@@ -106,13 +106,13 @@ type Server struct {
 	volMgr      *volume.Manager
 	policyStore *CompiledPolicyStore
 
-	lifecycle      *lifecycle.Service
+	lifecycle       *lifecycle.Service
 	icebergCatalog  icebergcatalog.Catalog
 	icebergDisabled bool
-	auditEmitter   *audit.Emitter
-	auditOutbox    *audit.Outbox
-	auditSearcher  auditSearcher
-	auditNodeID    string
+	auditEmitter    *audit.Emitter
+	auditOutbox     *audit.Outbox
+	auditSearcher   auditSearcher
+	auditNodeID     string
 
 	auditInternalAccessKey string
 	auditInternalSecretKey string

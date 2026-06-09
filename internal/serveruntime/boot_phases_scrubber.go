@@ -15,7 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
-	"github.com/gritive/GrainFS/internal/serveruntime/executioncluster"
 	"github.com/gritive/GrainFS/internal/startuprecovery"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -148,14 +147,6 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	if state.metaRaft != nil {
 		scrubProposer := NewScrubProposerAdapter(state.metaRaft, director, state.nodeID)
 		state.adminDeps.ScrubProposer = scrubProposer
-		exec := executioncluster.NewExecutor(
-			NewScrubExecutionBackend(scrubProposer),
-			executioncluster.WithMaxAttempts(3),
-			executioncluster.WithRetryBackoff(50*time.Millisecond),
-			executioncluster.WithMetrics(executioncluster.NewPrometheusMetrics()),
-		)
-		state.adminDeps.Execution = exec
-		state.AddCleanup(func() { _ = exec.Close(context.Background()) })
 	}
 
 	if cfg.ScrubInterval > 0 {
