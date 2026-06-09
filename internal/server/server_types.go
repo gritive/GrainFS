@@ -107,7 +107,8 @@ type Server struct {
 	policyStore *CompiledPolicyStore
 
 	lifecycle      *lifecycle.Service
-	icebergCatalog icebergcatalog.Catalog
+	icebergCatalog  icebergcatalog.Catalog
+	icebergDisabled bool
 	auditEmitter   *audit.Emitter
 	auditOutbox    *audit.Outbox
 	auditSearcher  auditSearcher
