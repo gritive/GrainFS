@@ -162,11 +162,15 @@ func TestQuorumMetaShadow_SelfLocalRemoteRemoteAndTraces(t *testing.T) {
 	s := newShadowTestShardService(t, ft)
 	b := &DistributedBackend{selfAddr: "node-a", shardSvc: s}
 
+	// K = N here so the fan-out waits for every node (incl. the slower self
+	// local fsync write) before returning — makes the self-local file check
+	// deterministic. Quorum early-return (K < N) is covered by
+	// TestFanOutQuorumMetaShadow_ReturnsAtKAcks.
 	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{Bucket: "bucket", Key: "k", Ingress: PutTraceIngressLocalLeader})
 	b.quorumMetaShadow(ctx, PutObjectMetaCmd{
 		Bucket:  "bucket",
 		Key:     "k",
-		ECData:  4,
+		ECData:  6,
 		NodeIDs: []string{"node-a", "node-b", "node-c", "node-d", "node-e", "node-f"},
 	})
 
@@ -190,7 +194,7 @@ func TestQuorumMetaShadow_SelfLocalRemoteRemoteAndTraces(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(line), &ev))
 		if ev.Stage == PutTraceStageQuorumMetaWrite {
 			found = true
-			assert.Equal(t, 4, ev.MetaProposeCount)
+			assert.Equal(t, 6, ev.MetaProposeCount)
 			assert.Empty(t, ev.Error)
 		}
 	}
