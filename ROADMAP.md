@@ -58,10 +58,11 @@
 - **검증**: S3 PUT/GET/LIST/DELETE green, 단일 경로. 토글로 프로토콜 복구 가능.
 - **결과**: NFS4/NBD port=0 기본, `--enable-iceberg` 플래그 추가, executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip 처리.
 
-### Phase 2 — 결정론 placement
+### Phase 2 — 결정론 placement ✅ DONE
 - placement 선택을 결정론으로 교체: group = `hash % numGroups` 동결, HRW static-weighted 노드 선택, Bounded Load → soft 격하.
 - **목표**: 고정 토폴로지에서 인덱스 없이 GET이 group 재계산.
 - **검증**: GET 라우팅이 인덱스 없이 동작. placement 결정성 테스트.
+- **결과**: `groupIDForObject` 순수 함수로 쓰기·읽기 경로 동일 hash 공유(equivalence by construction), `OpRouter.placementGroupIDs` 동결 리스트로 라우팅 일관성 보장, BoundedLoads hot-demotion 쓰기 경로에서 제거(WRH capacity-weighted만 유지). v0.0.527.0.
 
 ### Phase 3 — quorum 메타 (data_raft 제거, A의 본체)
 - data_raft ObjectMeta 커밋 → per-node quorum 메타 write(shard에 동봉) + GET quorum read + version-LWW. **옛 data_raft 경로 eager 삭제.**
