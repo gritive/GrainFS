@@ -31,19 +31,6 @@ var (
 		Help: "Number of nodes currently in hot state.",
 	})
 
-	// ClusterBLSpilledWrites counts writes that spilled to a non-hot node due to BoundedLoads.
-	// node label: node ID.
-	ClusterBLSpilledWrites = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_cluster_bl_spilled_writes_total",
-		Help: "Writes that spilled to a non-hot node due to BoundedLoads.",
-	}, []string{"node"})
-
-	// ClusterBLBypassedWrites counts writes where BL was bypassed because <k+m active nodes remained.
-	ClusterBLBypassedWrites = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "grainfs_cluster_bl_bypassed_writes_total",
-		Help: "Writes where BL was bypassed because <k+m active nodes remained.",
-	})
-
 	// ClusterBLRerankedReads counts reads that swapped out a hot data shard to parity due to BoundedLoads.
 	// node label: node ID.
 	ClusterBLRerankedReads = promauto.NewCounterVec(prometheus.CounterOpts{
