@@ -722,6 +722,8 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 		return s.handleReadRange(sr)
 	case "DeleteShards":
 		return s.handleDelete(sr)
+	case "WriteShadowMeta":
+		return s.handleShadowMeta(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
@@ -797,6 +799,15 @@ func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
 		ForwardMode: PutTraceForwardNone,
 	})
 	if err := s.writeLocalShard(ctx, sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// handleShadowMeta receives a Phase 0 shadow object-meta blob and durably
+// writes it locally (write + fsync). Measurement only — not load-bearing.
+func (s *ShardService) handleShadowMeta(sr *shardRequest) *transport.Message {
+	if err := s.writeShadowMetaLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)

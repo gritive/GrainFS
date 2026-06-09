@@ -49,6 +49,7 @@ const (
 	PutTraceStageMetaIndexWaitLocal       PutTraceStage = "meta_index_wait_local"
 	PutTraceStageMetaIndexLocalPropose    PutTraceStage = "meta_index_local_propose"
 	PutTraceStageMetaIndexLocalApply      PutTraceStage = "meta_index_local_apply"
+	PutTraceStageQuorumMetaWrite          PutTraceStage = "quorum_meta_write"
 )
 
 type PutTraceIngress string
