@@ -22,7 +22,7 @@ func TestSelectECPlacement_WeightedFromDiskAvail(t *testing.T) {
 	count := make(map[string]int)
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("obj-%d", i)
-		nodes := selectECPlacementFromNodeStates(cfg, liveNodes, key, nodeStates, true, true)
+		nodes := selectECPlacementFromNodeStates(cfg, liveNodes, key, nodeStates, true)
 		for _, n := range nodes {
 			count[n]++
 		}
@@ -207,6 +207,44 @@ func TestPlacementContextCarriesShardGroup(t *testing.T) {
 func TestSelectECPlacement_AllStaleFallback(t *testing.T) {
 	// nodeStates is empty — every node is stale.
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	nodes := selectECPlacementFromNodeStates(cfg, []string{"n1", "n2", "n3", "n4"}, "key", nil, true, false)
+	nodes := selectECPlacementFromNodeStates(cfg, []string{"n1", "n2", "n3", "n4"}, "key", nil, true)
 	assert.Len(t, nodes, 3, "should fall back to unweighted placement, not empty")
+}
+
+func TestCandidateGroupsFor_SortStability(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	ordered := []ShardGroupEntry{
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	shuffled := []ShardGroupEntry{
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	c1, err := candidateGroupsFor(ordered, cfg)
+	require.NoError(t, err)
+	c2, err := candidateGroupsFor(shuffled, cfg)
+	require.NoError(t, err)
+	require.Equal(t, len(c1), len(c2))
+	for i := range c1 {
+		require.Equal(t, c1[i].ID, c2[i].ID, "sort output must be identical regardless of input order")
+	}
+}
+
+func TestObjectPlacement_Deterministic(t *testing.T) {
+	sortedIDs := []string{"group-1", "group-2", "group-3"}
+	id1 := groupIDForObject("bucket", "same-key", sortedIDs)
+	id2 := groupIDForObject("bucket", "same-key", sortedIDs)
+	require.Equal(t, id1, id2)
+	require.Contains(t, sortedIDs, id1)
+
+	// Different keys should not all map to the same group (distribution check).
+	seen := make(map[string]struct{})
+	for i := 0; i < 300; i++ {
+		key := fmt.Sprintf("obj/%d", i)
+		seen[groupIDForObject("b", key, sortedIDs)] = struct{}{}
+	}
+	require.GreaterOrEqual(t, len(seen), 2, "keys should spread across at least 2 groups")
 }

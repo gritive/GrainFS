@@ -17,6 +17,15 @@ func ValidatePlacementGroupID(groupID string) error {
 	return nil
 }
 
+// groupIDForObject returns the deterministic placement group ID for (bucket, key).
+// sortedGroupIDs must be the alphabetically-sorted candidate ID list produced by
+// candidateGroupsFor. Callers that build the list independently (e.g. a frozen
+// snapshot in OpRouter) must use the same sort order to guarantee equivalence.
+func groupIDForObject(bucket, key string, sortedGroupIDs []string) string {
+	idx := hashObjectPlacementKey(bucket, key) % uint64(len(sortedGroupIDs))
+	return sortedGroupIDs[idx]
+}
+
 // SelectObjectPlacementGroup chooses the normal data group for a new object.
 // group-0 stays reserved for legacy/system paths when normal data groups are
 // present, but remains the fallback for bootstrap clusters that only have the
@@ -26,8 +35,17 @@ func SelectObjectPlacementGroup(bucket, key string, groups []ShardGroupEntry, cf
 	if err != nil {
 		return ShardGroupEntry{}, fmt.Errorf("no EC-capable object placement group")
 	}
-	idx := hashObjectPlacementKey(bucket, key) % uint64(len(candidates))
-	return candidates[idx], nil
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.ID
+	}
+	selectedID := groupIDForObject(bucket, key, ids)
+	for _, c := range candidates {
+		if c.ID == selectedID {
+			return c, nil
+		}
+	}
+	return candidates[0], nil // unreachable: groupIDForObject always picks from ids
 }
 
 // SelectSegmentPlacementGroup picks the placement group for segment segmentIdx
