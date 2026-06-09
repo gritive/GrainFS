@@ -181,3 +181,16 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "/tmp/sentinel-data", opts.FlagsSnapshot["data"])
 	require.Equal(t, "<redacted>", opts.FlagsSnapshot["heal-receipt-psk"], "secret redaction")
 }
+
+func TestServeDefaultPortsDisabled(t *testing.T) {
+	cmd := &cobra.Command{Use: "serve"}
+	registerAllServeFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{}))
+
+	opts, err := serveOptionsFromCmd(cmd)
+	require.NoError(t, err)
+
+	require.Equal(t, 0, opts.NFS4Port, "NFS4 must be disabled by default")
+	require.Equal(t, 0, opts.NBDPort, "NBD must be disabled by default")
+	require.Equal(t, 0, opts.P9Port, "9P must be disabled by default")
+}
