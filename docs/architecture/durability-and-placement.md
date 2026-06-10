@@ -46,3 +46,32 @@ mixed layouts during scale-up, repair, and resharding:
 
 Reads and repair use the actual per-version layout, while placement policy uses
 the current topology for new work.
+
+## Metadata Durability (Phase 3)
+
+Object *data* durability is governed by the EC layout above. Object *metadata*
+durability uses a separate mechanism that was changed in Phase 3.
+
+**Pre-Phase-3:** object metadata was committed through the data Raft group
+(`data_raft`). This gave strong single-writer ordering but serialized every
+PUT through a consensus round, which was the dominant PUT latency bottleneck.
+
+**Phase-3 quorum meta store:** user-bucket object metadata is written directly
+to each placement node's local filesystem at
+`{dataDir}/.quorum_meta/{bucket}/{key}`, bypassing Raft consensus.
+
+- **K-of-N write quorum**: the write fans out to ECData placement nodes
+  (k = 4 in a 4+2 cluster). The PUT succeeds when k nodes acknowledge;
+  parity nodes are best-effort.
+- **Peer fan-out read**: a parity node that missed the K-of-N write can
+  recover metadata by fanning out `ReadQuorumMeta` RPCs to all shard-group
+  peers. The reader applies LWW by ModTime and returns the newest entry.
+- **Fallback chain**: local file → peer fan-out → BadgerDB (multipart-completed
+  objects, pre-Phase-3 objects, scrubber entries) → `ErrObjectNotFound`.
+- **Multipart boundary**: `CompleteMultipartUpload` intentionally stays on
+  data_raft. `applyCompleteMultipart` writes object meta and deletes the
+  multipart manifest key in a single BadgerDB transaction; splitting that
+  atomicity would open a window where the manifest leaks.
+
+Internal buckets (`_grainfs_*`) always use raft for metadata; only user buckets
+use the quorum meta path.
