@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -349,6 +350,22 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 // the object through the cluster-wide object index.
 func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) error {
 	ctx := context.Background()
+	// Phase 3: for objects written via quorum meta, update the quorum meta
+	// blob directly (read-modify-write) instead of proposing to data_raft.
+	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+		cmd, err := b.readQuorumMetaCmd(bucket, key)
+		if err == nil {
+			cmd.ACL = acl
+			if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
+				return fmt.Errorf("set object acl quorum: %w", werr)
+			}
+			return nil
+		}
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return fmt.Errorf("set object acl quorum read: %w", err)
+		}
+		// ErrObjectNotFound: pre-Phase-3 object; fall through to raft.
+	}
 	return b.propose(ctx, CmdSetObjectACL, SetObjectACLCmd{
 		Bucket: bucket,
 		Key:    key,
@@ -375,6 +392,22 @@ func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags [
 // the object through the cluster-wide object index.
 func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string, tags []storage.Tag) error {
 	ctx := context.Background()
+	// Phase 3: for objects written via quorum meta, update the quorum meta
+	// blob directly (read-modify-write) instead of proposing to data_raft.
+	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+		cmd, err := b.readQuorumMetaCmd(bucket, key)
+		if err == nil {
+			cmd.Tags = append([]storage.Tag(nil), tags...)
+			if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
+				return fmt.Errorf("set object tags quorum: %w", werr)
+			}
+			return nil
+		}
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return fmt.Errorf("set object tags quorum read: %w", err)
+		}
+		// ErrObjectNotFound: pre-Phase-3 object; fall through to raft.
+	}
 	return b.propose(ctx, CmdSetObjectTags, SetObjectTagsCmd{
 		Bucket:    bucket,
 		Key:       key,

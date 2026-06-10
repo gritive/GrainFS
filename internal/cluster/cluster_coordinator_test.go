@@ -512,7 +512,6 @@ func TestClusterCoordinator_PutObject_AllowsMetaAssignedBucketBeforeLocalBucketR
 }
 
 func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *testing.T) {
-	t.Skip("Phase 3: applySetObjectACL reads BadgerDB, misses quorum meta objects")
 	base := &fakeBackend{}
 	gb := newTestFollowerGroupBackend(t, "g1", "self")
 	stopApply := make(chan struct{})
