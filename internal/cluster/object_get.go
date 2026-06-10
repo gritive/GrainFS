@@ -310,8 +310,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil {
 			return obj, pm, nil
 		}
-		// Fall through to BadgerDB for repair/scrubber-written entries and
-		// objects committed before Phase 3 upgrade.
+		// Fall through to BadgerDB for: multipart-completed objects (their meta
+		// lives on raft — see commitCompleteMultipartObjectWriteResult), objects
+		// committed before Phase 3 upgrade, and repair/scrubber-written entries.
 	}
 
 	var obj storage.Object

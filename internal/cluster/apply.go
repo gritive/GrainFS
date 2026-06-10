@@ -495,6 +495,10 @@ func (f *FSM) applyCreateMultipartUpload(txn *badger.Txn, data []byte) error {
 	return f.setValue(txn, f.keys.MultipartKey(c.UploadID), meta)
 }
 
+// applyCompleteMultipart is intentionally on data_raft (Phase 3 boundary): it
+// atomically writes object meta and deletes the multipart manifest key in one
+// BadgerDB txn. Splitting the two operations would violate that atomicity.
+// Reads fall back to this BadgerDB entry when quorum meta is absent (headObjectMeta).
 func (f *FSM) applyCompleteMultipart(txn *badger.Txn, data []byte) error {
 	c, err := decodeCompleteMultipartCmd(data)
 	if err != nil {

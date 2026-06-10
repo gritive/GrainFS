@@ -88,6 +88,49 @@ var _ = Describe("Quorum meta — Phase 3 primary path", func() {
 	})
 })
 
+// TestMultipartComplete_BadgerDBFallback proves the Phase 3 raft/quorum boundary:
+// multipart-completed objects are committed via data_raft (applyCompleteMultipart),
+// so their quorum meta file is absent. headObjectMeta must still serve them by falling
+// back to BadgerDB.
+//
+// RED without the BadgerDB fallback in headObjectMeta: HeadObject returns ErrObjectNotFound.
+// GREEN with fallback: HeadObject returns the object committed by raft.
+//
+// Neuter test: if the BadgerDB fallback block is removed from headObjectMeta, this test
+// is RED (storage.ErrObjectNotFound) for multipart-completed objects.
+func TestMultipartComplete_BadgerDBFallback(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	// Create and complete a multipart upload.
+	mpu, err := b.CreateMultipartUpload(ctx, "bucket", "multi.bin", "application/octet-stream")
+	require.NoError(t, err)
+
+	payload := bytes.Repeat([]byte("mp"), 512)
+	part, err := b.UploadPart(ctx, "bucket", "multi.bin", mpu.UploadID, 1, bytes.NewReader(payload))
+	require.NoError(t, err)
+
+	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "multi.bin", mpu.UploadID, []storage.Part{{
+		PartNumber: part.PartNumber,
+		ETag:       part.ETag,
+		Size:       part.Size,
+	}})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.ETag)
+
+	// Quorum meta must NOT exist: multipart complete is raft-only (Phase 3 boundary).
+	qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "multi.bin")
+	_, statErr := os.Stat(qmetaPath)
+	require.True(t, os.IsNotExist(statErr), "quorum meta file must not exist for multipart-completed object: %s", qmetaPath)
+
+	// HeadObject must succeed via BadgerDB fallback (quorum meta is absent).
+	head, err := b.HeadObject(ctx, "bucket", "multi.bin")
+	require.NoError(t, err, "headObjectMeta must fall back to BadgerDB for multipart-completed objects")
+	require.Equal(t, obj.ETag, head.ETag)
+	require.Equal(t, int64(len(payload)), head.Size)
+}
+
 // TestReadQuorumMeta_PeerFallback_ParityNodeMiss proves the N-K node hazard fix:
 // when a parity node did not receive the K-of-N quorum meta write, it must
 // recover the metadata by fanning out ReadQuorumMeta RPCs to other placement
