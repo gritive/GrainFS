@@ -287,6 +287,10 @@ func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, Place
 		IsAppendable:     m.IsAppendable,
 		Parts:            m.Parts,
 		Tags:             append([]storage.Tag(nil), m.Tags...),
+		// S4-4c: carry the delete-marker flag so versioned reads
+		// (GetObjectVersion/HeadObjectVersion) fold a quorum-meta delete marker
+		// to 405 MethodNotAllowed instead of trying to read its (absent) body.
+		IsDeleteMarker: putCmd.IsDeleteMarker,
 	}
 	placement := PlacementMeta{
 		VersionID:        putCmd.VersionID,

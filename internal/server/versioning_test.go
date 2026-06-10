@@ -232,7 +232,6 @@ func TestDeleteObjectVersion_EC(t *testing.T) {
 // TestGetObjectVersion_DeleteMarker_EC verifies GET ?versionId=<deleteMarkerID>
 // returns 405 MethodNotAllowed with x-amz-delete-marker: true (S3 spec).
 func TestGetObjectVersion_DeleteMarker_EC(t *testing.T) {
-	t.Skip("Phase 3/S4-4c: versioned GET of a delete marker reads quorum meta, not BadgerDB (same gap as TestHeadObjectVersion_EC); returns 500 instead of 405 — fixed in the S4-4c read-path migration")
 	base, b := setupECTestServer(t)
 	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 

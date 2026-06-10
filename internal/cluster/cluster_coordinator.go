@@ -246,20 +246,21 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 	}
 }
 
+// routeReadOrBucket resolves an object read to its placement-group target via
+// deterministic hash placement (S4-4c: index-free). When the frozen placement
+// candidate list is empty (bootstrap) or the key resolves to no object, it
+// falls back to bucket routing so internal/sole-voter reads still resolve. The
+// authoritative metadata now lives in quorum meta; the GroupBackend read (local
+// via ResolveRead, or forwarded to the leader) resolves it — there is no object
+// index to consult for routing.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
-	target, _, _, err := c.routeIndexedReadOrBucket(bucket, key, versionID)
-	return target, err
-}
-
-func (c *ClusterCoordinator) routeIndexedReadOrBucket(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, bool, error) {
-	target, entry, err := c.runtimeState().opRouter.RouteObjectRead(bucket, key, versionID)
-	if errors.Is(err, storage.ErrObjectNotFound) {
-		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
-		if fallbackErr == nil {
-			return fallback, ObjectIndexEntry{}, false, nil
+	target, _, err := c.runtimeState().opRouter.RouteObjectRead(bucket, key, versionID)
+	if errors.Is(err, storage.ErrObjectNotFound) || errors.Is(err, ErrObjectIndexRequired) {
+		if fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key); fallbackErr == nil {
+			return fallback, nil
 		}
 	}
-	return target, entry, err == nil, err
+	return target, err
 }
 
 // routeWriteOrBucket falls back to RouteBucket for single-node wiring (no EC).
@@ -694,71 +695,21 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // response body bytes after the metadata reply; legacy tests can still use the
 // single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	target, entry, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return nil, nil, err
 	}
-	// F#46: unversioned GET against a delete-marker latest version must be
-	// 404 NoSuchKey, not 405 MethodNotAllowed. The object index keeps a
-	// delete-marker entry whose VersionID points at the marker; routing
-	// down to gb.GetObjectVersion(marker) returns ErrMethodNotAllowed
-	// (correct for explicit version reads, wrong for the unversioned
-	// "latest" caller). Single-node GET hits headObjectMeta which already
-	// folds delete-marker → ErrObjectNotFound, so this short-circuit
-	// restores single/cluster parity.
-	if indexed && entry.IsDeleteMarker {
-		return nil, nil, storage.ErrObjectNotFound
-	}
-	if indexed && entry.ECData > 0 {
-		if gb, err := c.runtimeState().localExec.ResolveObjectPlacementRead(ctx, target); err != nil {
-			return nil, nil, err
-		} else if gb != nil {
-			var (
-				rc       io.ReadCloser
-				obj      *storage.Object
-				localErr error
-			)
-			if entry.VersionID == "" {
-				rc, obj, localErr = gb.GetObject(ctx, bucket, key)
-			} else {
-				rc, obj, localErr = gb.GetObjectVersion(bucket, key, entry.VersionID)
-			}
-			if localErr == nil {
-				return rc, obj, nil
-			}
-			if !errors.Is(localErr, storage.ErrObjectNotFound) {
-				return nil, nil, localErr
-			}
-		}
-	}
+	// S4-4c: index-free. ResolveRead serves locally only when this node can
+	// answer authoritatively (sole voter, internal bucket, or a leader doing a
+	// linearizable ReadIndex); otherwise it returns nil and we forward to the
+	// placement-group leader. The GroupBackend resolves object metadata from
+	// quorum meta (local file → peer fan-out) and folds a delete-marker latest
+	// version to ErrObjectNotFound, so the unversioned-GET 404 semantics that the
+	// object index used to short-circuit are now served by the backend read.
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, nil, err
 	} else if gb != nil {
-		rc, obj, err := gb.GetObject(ctx, bucket, key)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !indexed || objectMatchesIndexForFollowerRead(obj, entry) {
-			return rc, obj, nil
-		}
-		_ = rc.Close()
-		log.Warn().
-			Str("event", "object_read_local_stale_against_index").
-			Str("bucket", bucket).
-			Str("key", key).
-			Str("group_id", target.GroupID).
-			Int64("local_size", obj.Size).
-			Int64("indexed_size", entry.Size).
-			Str("local_etag", obj.ETag).
-			Str("indexed_etag", entry.ETag).
-			Str("local_version", obj.VersionID).
-			Str("indexed_version", entry.VersionID).
-			Msg("local object read is behind object index; forwarding to placement group")
-	}
-	if indexed {
-		if rc, obj, ok, err := c.getObjectLocalCurrentFollower(ctx, bucket, key, target, entry); ok {
-			return rc, obj, err
-		}
+		return gb.GetObject(ctx, bucket, key)
 	}
 	args := buildGetObjectArgs(bucket, key)
 	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
@@ -768,97 +719,29 @@ func (c *ClusterCoordinator) GetObjectVersion(
 	bucket, key, versionID string,
 ) (io.ReadCloser, *storage.Object, error) {
 	ctx := context.Background()
-	target, entry, indexed, err := c.routeIndexedReadOrBucket(bucket, key, versionID)
+	target, err := c.routeReadOrBucket(bucket, key, versionID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if indexed && entry.ECData > 0 {
-		if gb, err := c.runtimeState().localExec.ResolveObjectPlacementRead(ctx, target); err != nil {
-			return nil, nil, err
-		} else if gb != nil {
-			rc, obj, localErr := gb.GetObjectVersion(bucket, key, versionID)
-			if localErr == nil {
-				return rc, obj, nil
-			}
-			if !errors.Is(localErr, storage.ErrObjectNotFound) {
-				return nil, nil, localErr
-			}
-		}
-	}
+	// S4-4c: index-free (see GetObject). Local serve only when authoritative;
+	// otherwise forward to the placement-group leader.
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, nil, err
 	} else if gb != nil {
-		rc, obj, err := gb.GetObjectVersion(bucket, key, versionID)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !indexed || objectMatchesIndexForFollowerRead(obj, entry) {
-			return rc, obj, nil
-		}
-		_ = rc.Close()
-		log.Warn().
-			Str("event", "object_version_read_local_stale_against_index").
-			Str("bucket", bucket).
-			Str("key", key).
-			Str("group_id", target.GroupID).
-			Int64("local_size", obj.Size).
-			Int64("indexed_size", entry.Size).
-			Str("local_etag", obj.ETag).
-			Str("indexed_etag", entry.ETag).
-			Str("local_version", obj.VersionID).
-			Str("indexed_version", entry.VersionID).
-			Msg("local object version read is behind object index; forwarding to placement group")
+		return gb.GetObjectVersion(bucket, key, versionID)
 	}
 	args := buildGetObjectVersionArgs(bucket, key, versionID)
 	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
 }
 
-func (c *ClusterCoordinator) getObjectLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry) (io.ReadCloser, *storage.Object, bool, error) {
-	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
-		return nil, nil, false, nil
-	}
-	dg := c.groups.Get(target.GroupID)
-	if dg == nil || dg.Backend() == nil {
-		return nil, nil, false, nil
-	}
-	gb := dg.Backend()
-	obj, _, err := gb.headObjectMeta(ctx, bucket, key)
-	if err != nil {
-		return nil, nil, false, nil
-	}
-	if !objectMatchesIndexForFollowerRead(obj, entry) {
-		return nil, nil, false, nil
-	}
-
-	var rc io.ReadCloser
-	if entry.VersionID != "" {
-		rc, obj, err = gb.GetObjectVersion(bucket, key, entry.VersionID)
-	} else {
-		rc, obj, err = gb.GetObject(ctx, bucket, key)
-	}
-	if err != nil {
-		if errors.Is(err, ErrObjectQuarantined) || ctx.Err() != nil {
-			return nil, nil, true, err
-		}
-		return nil, nil, false, nil
-	}
-	if !objectMatchesIndexForFollowerRead(obj, entry) {
-		_ = rc.Close()
-		return nil, nil, false, nil
-	}
-	return rc, obj, true, nil
-}
-
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, entry, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return nil, err
 	}
-	// F#46: unversioned HEAD against a delete-marker latest version must be
-	// 404 NoSuchKey, not 405 MethodNotAllowed. See GetObject for full context.
-	if indexed && entry.IsDeleteMarker {
-		return nil, storage.ErrObjectNotFound
-	}
+	// S4-4c: index-free (see GetObject). The GroupBackend HeadObject folds a
+	// delete-marker latest version to ErrObjectNotFound, preserving the
+	// unversioned-HEAD 404 semantics the object index used to short-circuit.
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
@@ -1175,21 +1058,15 @@ func (c *ClusterCoordinator) PutObjectWithACL(
 
 func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 	ctx := context.Background()
-	target, _, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
-		if indexed {
-			type proposer interface {
-				SetObjectACLPropose(bucket, key string, acl uint8) error
-			}
-			if p, ok := any(gb).(proposer); ok {
-				return p.SetObjectACLPropose(bucket, key, acl)
-			}
-		}
+		// S4-4c: index-free. The ACL change is a read-modify-write against the
+		// quorum-meta file (Phase 3); the old index-gated propose path is gone.
 		return gb.SetObjectACL(bucket, key, acl)
 	}
 	args := buildSetObjectACLArgs(bucket, key, acl)
@@ -1201,21 +1078,15 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 // forwards to the owning peer via ForwardOpSetObjectTags. Mirrors SetObjectACL.
 func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
 	ctx := context.Background()
-	target, _, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
-		if indexed {
-			type proposer interface {
-				SetObjectTagsPropose(bucket, key, versionID string, tags []storage.Tag) error
-			}
-			if p, ok := any(gb).(proposer); ok {
-				return p.SetObjectTagsPropose(bucket, key, versionID, tags)
-			}
-		}
+		// S4-4c: index-free. Tag write is a read-modify-write against the
+		// quorum-meta file (Phase 3); the old index-gated propose path is gone.
 		return gb.SetObjectTags(bucket, key, versionID, tags)
 	}
 	args := buildSetObjectTagsArgs(bucket, key, versionID, tags)
@@ -1315,7 +1186,7 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, entry, hasEntry, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return 0, err
 	}
@@ -1323,11 +1194,6 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return 0, err
 	} else if gb != nil {
 		return gb.ReadAt(ctx, bucket, key, offset, buf)
-	}
-	if hasEntry {
-		if n, ok, err := c.readAtLocalCurrentFollower(ctx, bucket, key, target, entry, offset, buf); ok {
-			return n, err
-		}
 	}
 
 	if c.forward == nil {
@@ -1359,7 +1225,7 @@ func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key strin
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, _, _, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, err := c.routeReadOrBucket(bucket, key, "")
 	if err != nil {
 		return 0, err
 	}
@@ -1369,53 +1235,6 @@ func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key strin
 		return gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
 	}
 	return c.ReadAt(ctx, bucket, key, offset, buf)
-}
-
-func (c *ClusterCoordinator) readAtLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry, offset int64, buf []byte) (int, bool, error) {
-	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
-		return 0, false, nil
-	}
-	dg := c.groups.Get(target.GroupID)
-	if dg == nil || dg.Backend() == nil {
-		return 0, false, nil
-	}
-	gb := dg.Backend()
-	obj, placementMeta, err := gb.headObjectMeta(ctx, bucket, key)
-	if err != nil {
-		return 0, false, nil
-	}
-	if !objectMatchesIndexForFollowerRead(obj, entry) {
-		return 0, false, nil
-	}
-	if blocked, q, qerr := gb.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
-		return 0, true, fmt.Errorf("check quarantine: %w", qerr)
-	} else if blocked {
-		return 0, true, objectQuarantinedError(bucket, key, q)
-	}
-	n, err := gb.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
-	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
-		return 0, false, nil
-	}
-	return n, true, err
-}
-
-func objectMatchesIndexForFollowerRead(obj *storage.Object, entry ObjectIndexEntry) bool {
-	if obj == nil {
-		return false
-	}
-	if obj.Size != entry.Size || obj.ETag != entry.ETag {
-		return false
-	}
-	if entry.ContentType != "" && obj.ContentType != entry.ContentType {
-		return false
-	}
-	if entry.ModTime != 0 && obj.LastModified != entry.ModTime {
-		return false
-	}
-	if entry.VersionID != "" && obj.VersionID != entry.VersionID {
-		return false
-	}
-	return true
 }
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {

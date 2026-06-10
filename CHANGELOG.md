@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.530.0] - 2026-06-10
+
+### Fixed
+
+- **Phase 4 S4-4c: index-free GET/HEAD/ReadAt read path (resolves the S4-4b
+  read-path regression).** Removing the object index (S4-4b) left the cluster
+  read path comparing the local object against a now-always-empty index entry,
+  so followers always forwarded and internal-bucket (volume/VFS/NBD) reads
+  errored with "coordinator: router not configured". The read methods now route
+  via deterministic placement (`routeReadOrBucket`) and serve through
+  `ResolveRead`: sole-voter and internal buckets read locally, a user-bucket
+  leader does a linearizable read, and a non-leader voter forwards to the leader.
+  Object metadata comes from the GroupBackend's quorum-meta read (local file →
+  peer fan-out). The index-comparison helpers (`getObjectLocalCurrentFollower`,
+  `readAtLocalCurrentFollower`, `objectMatchesIndexForFollowerRead`) are removed.
+- **Versioned delete-marker reads return 405.** `decodeQuorumMetaBlob` now carries
+  the `IsDeleteMarker` flag, so `GetObjectVersion` of a quorum-meta delete marker
+  folds to `MethodNotAllowed` instead of erroring (500).
+
+### Notes
+
+- **Behavior change — follower reads forward.** With the object index gone, a
+  voter that is not the group leader no longer serves user-bucket reads from a
+  local index-validated copy; it forwards to the leader (correct, linearizable).
+  The follower-local-read latency optimization is intentionally dropped, to be
+  re-evaluated against the Phase-5 GET/HEAD benchmark.
+- **Availability change — leader-down EC reads.** The index-gated path that let a
+  surviving voter reconstruct an EC object while the group leader was down is
+  removed (it depended on index-supplied EC metadata). This is a transient
+  election-window regression, intentionally dropped under the reduce→measure
+  discipline; revisit after the Phase-5 bench if it proves material.
+- `VolumeReplicaSummaries` still returns empty (S4-4d restores it from quorum
+  meta; it is an optional admin observability signal that degrades gracefully).
+- This branch remains WIP behind the Phase-5 GET/HEAD-regression merge gate.
+
 ## [0.0.529.0] - 2026-06-10
 
 ### Changed
