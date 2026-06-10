@@ -60,6 +60,15 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 - 인터페이스는 사용처에서 정의
 - 테이블 드리븐 테스트 사용
 
+### Clean Architecture 레이어 규칙
+레이어 의존성 방향: Frameworks → Adapters → Application → Domain (역방향 import 금지)
+- **Domain** (`internal/cluster` 핵심 타입/로직): HTTP·DB·네트워크 패키지 직접 import 금지
+- **Application** (`internal/serveruntime`, `internal/<feature>admin`): 도메인 인터페이스만 사용, 구현체 직접 참조 금지
+- **Infrastructure** (`internal/storage`, `internal/raft`, `internal/transport`): 도메인 인터페이스를 구현, 상위 레이어 import 금지
+- **Adapters** (`internal/server`): HTTP ↔ Application 변환만 담당, 비즈니스 로직 포함 금지
+- 레이어 경계의 인터페이스는 **사용처(내부 레이어)** 패키지에 정의, 구현은 외부 레이어에 위치
+- 레이어 간 데이터 전달은 도메인 객체 또는 전용 DTO 사용 (프레임워크 타입 직접 전달 금지)
+
 ### 성능 규칙
 - Erasure Coding: Reed-Solomon 4+2 기본, 가변 설정 가능
 - TCP 멀티플렉싱(mux carrier)으로 클러스터 통신
