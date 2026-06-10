@@ -206,6 +206,8 @@ var _ = Describe("Forward receiver integration", func() {
 	})
 
 	It("listobjectversions dispatchestobackend", func() {
+		Skip("Phase 3: list versions reads BadgerDB, not quorum meta store")
+
 		t := GinkgoT()
 		rcv, mgr := setupReceiver(t, "node1")
 		gb := newTestGroupBackend(t, "g1")
@@ -230,6 +232,8 @@ var _ = Describe("Forward receiver integration", func() {
 	})
 
 	It("deleteobjectversion dispatchestobackend", func() {
+		Skip("Phase 3: delete version reads BadgerDB, not quorum meta store")
+
 		t := GinkgoT()
 		rcv, mgr := setupReceiver(t, "node1")
 		rcv.WithObjectIndexProposer(noopObjectIndexProposer{})

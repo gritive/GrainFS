@@ -474,7 +474,7 @@ func TestForwardReceiver_HandlePutObjectStreamRecordsTrace(t *testing.T) {
 	events := readPutTraceEvents(t, path)
 	requirePutTraceStage(t, events, PutTraceStageForwardReceiverDispatch)
 	requirePutTraceStage(t, events, PutTraceStageReceiverBackendPut)
-	requirePutTraceStage(t, events, PutTraceStageDataRaftProposeMeta)
+	requirePutTraceStage(t, events, PutTraceStageQuorumMetaWrite)
 	requirePutTraceStage(t, events, PutTraceStageMetaIndexPropose)
 	var meta PutTraceEvent
 	for _, ev := range events {

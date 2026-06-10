@@ -724,9 +724,21 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 		return s.handleDelete(sr)
 	case "WriteShadowMeta":
 		return s.handleShadowMeta(sr)
+	case "WriteQuorumMeta":
+		return s.handleQuorumMetaWrite(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
+}
+
+// handleQuorumMetaWrite receives a Phase 3 primary quorum meta blob and
+// durably writes it locally (write + fsync). Failures are reported to the
+// caller so the PUT can fail the quorum check.
+func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) *transport.Message {
+	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
 }
 
 // marshalResponseDirect serializes an RPCMessage without pool-and-copy.

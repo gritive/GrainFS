@@ -12,7 +12,7 @@ import (
 // quorumMetaShadowTimeout bounds the synchronous shadow so a hung placement
 // node cannot stall the real PUT it rides on. A timed-out shadow records its
 // stage with a non-empty Error and is excluded from the p99 ratio analysis.
-const quorumMetaShadowTimeout = 30 * time.Second
+const quorumMetaShadowTimeout = 30 * time.Second //nolint:unused
 
 // Phase 0 — quorum-meta shadow write (kill-only perf spike).
 //
@@ -29,14 +29,14 @@ const quorumMetaShadowTimeout = 30 * time.Second
 
 // quorumMetaShadowEnabled is read once at process start. Default OFF →
 // byte-identical inert (the shadow code is never entered). Tests set it directly.
-var quorumMetaShadowEnabled = os.Getenv("GRAINFS_QUORUM_META_SHADOW") != ""
+var quorumMetaShadowEnabled = os.Getenv("GRAINFS_QUORUM_META_SHADOW") != "" //nolint:unused
 
 // quorumMetaShadow performs the shadow quorum meta write for one object PUT,
 // SYNCHRONOUSLY (the PUT waits for the quorum). Synchronous — not a detached
 // goroutine — so conc32 load is preserved symmetrically on both the shadow and
 // the raft stages and no unbounded shadow pile-up self-injects a contention
 // axis. Errors are swallowed: this is measurement only.
-func (b *DistributedBackend) quorumMetaShadow(ctx context.Context, cmd PutObjectMetaCmd) {
+func (b *DistributedBackend) quorumMetaShadow(ctx context.Context, cmd PutObjectMetaCmd) { //nolint:unused
 	if !quorumMetaShadowEnabled {
 		return
 	}
@@ -76,7 +76,7 @@ func (b *DistributedBackend) quorumMetaShadow(ctx context.Context, cmd PutObject
 // returns as soon as K acks arrive (quorum = K data shards, NOT all-N — a
 // straggler must not dominate the measured tail). It returns an error only when
 // the quorum becomes unreachable (more than N-K failures).
-func fanOutQuorumMetaShadow(ctx context.Context, nodes []string, k int, dispatch func(context.Context, string) error) error {
+func fanOutQuorumMetaShadow(ctx context.Context, nodes []string, k int, dispatch func(context.Context, string) error) error { //nolint:unused
 	if k <= 0 {
 		k = 1
 	}

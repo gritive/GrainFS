@@ -30,6 +30,12 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
+	// Phase 3: quorum meta is the primary source for non-internal user objects.
+	if !storage.IsInternalBucket(bucket) {
+		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {
+			return obj, pm, nil
+		}
+	}
 	var obj storage.Object
 	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {

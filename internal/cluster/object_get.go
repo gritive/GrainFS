@@ -304,6 +304,16 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		return nil, PlacementMeta{}, err
 	}
 
+	// Phase 3: non-internal user objects are stored in the quorum meta store.
+	// Internal buckets (bucket routing via raft) still use BadgerDB.
+	if !storage.IsInternalBucket(bucket) {
+		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil {
+			return obj, pm, nil
+		}
+		// Fall through to BadgerDB for repair/scrubber-written entries and
+		// objects committed before Phase 3 upgrade.
+	}
+
 	var obj storage.Object
 	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -415,6 +425,12 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 }
 
 func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) PlacementMeta {
+	// Phase 3: quorum meta is the primary source for non-internal user objects.
+	if !storage.IsInternalBucket(bucket) {
+		if _, pm, err := b.readQuorumMeta(bucket, key); err == nil {
+			return pm
+		}
+	}
 	meta := PlacementMeta{VersionID: versionID}
 	_ = b.db.View(func(txn *badger.Txn) error {
 		dbKey := b.ks().ObjectMetaKey(bucket, key)

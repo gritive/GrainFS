@@ -98,7 +98,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				nodeIDs[i] = selfID
 			}
 			stripeBytes := uint32(b.putPipeline.StripeBytes())
-			if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+			pipelineAllLocalMetaCmd := PutObjectMetaCmd{
 				Bucket:           bucket,
 				Key:              key,
 				Size:             obj.Size,
@@ -115,7 +115,9 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				NodeIDs:      nodeIDs,
 				UserMetadata: cloneStringMap(userMetadata),
 				SSEAlgorithm: sseAlgorithm,
-			}); merr != nil {
+			}
+			// Phase 3: quorum meta write replaces data_raft propose.
+			if merr := b.writeQuorumMeta(ctx, pipelineAllLocalMetaCmd); merr != nil {
 				go b.deleteShardsAsync(bucket, nodeIDs, shardKey)
 				return nil, merr
 			}
@@ -163,7 +165,7 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 			placementGroupID := placementPlan.PlacementGroupID
 			nodeIDs := cloneStringSlice(placementPlan.NodeIDs)
 			stripeBytes := uint32(b.putPipeline.StripeBytes())
-			if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+			pipelineMetaCmd := PutObjectMetaCmd{
 				Bucket:           bucket,
 				Key:              key,
 				Size:             obj.Size,
@@ -180,7 +182,9 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 				NodeIDs:      nodeIDs,
 				UserMetadata: cloneStringMap(userMetadata),
 				SSEAlgorithm: sseAlgorithm,
-			}); merr != nil {
+			}
+			// Phase 3: quorum meta write replaces data_raft propose.
+			if merr := b.writeQuorumMeta(ctx, pipelineMetaCmd); merr != nil {
 				go b.deleteShardsAsync(bucket, nodeIDs, shardKey)
 				return nil, merr
 			}
@@ -794,14 +798,14 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		Parts:            result.Parts,
 		Tags:             result.Tags,
 	}
-	if merr := b.propose(ctx, CmdPutObjectMeta, metaCmd); merr != nil {
-		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
+	// Phase 3: quorum meta write replaces data_raft propose.
+	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
+		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
 	}
-	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
-	observePutStage(metricPath, "propose_meta", stageStart)
-	b.quorumMetaShadow(ctx, metaCmd) // Phase 0 perf spike — gated OFF by default (inert)
+	ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{})
+	observePutStage(metricPath, "quorum_meta", stageStart)
 
 	// result.Tags aliases the caller's slice; do not introduce concurrent
 	// readers/writers on result after this point.
@@ -980,14 +984,14 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		Parts:            parts,
 		Tags:             tags,
 	}
-	if merr := b.propose(ctx, CmdPutObjectMeta, metaCmd); merr != nil {
-		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
+	// Phase 3: quorum meta write replaces data_raft propose.
+	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
+		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{Error: merr.Error()})
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
 		return nil, merr
 	}
-	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
-	observePutStage("ec_single", "propose_meta", stageStart)
-	b.quorumMetaShadow(ctx, metaCmd) // Phase 0 perf spike — gated OFF by default (inert)
+	ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{})
+	observePutStage("ec_single", "quorum_meta", stageStart)
 
 	return &storage.Object{
 		Key:              key,
