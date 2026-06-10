@@ -395,6 +395,8 @@ func runChunkedPutWithParts(
 	segments := buildSegmentMetaEntries(csb.placements, obj.Segments)
 
 	// 6. Single atomic raft commit.
+	// completeUploadID path intentionally uses data_raft (Phase 3 boundary): see
+	// commitCompleteMultipartObjectWriteResult in object_put.go for the rationale.
 	var commitErr error
 	if completeUploadID != "" {
 		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
