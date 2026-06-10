@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.532.0] - 2026-06-11
+
+### Added
+
+- **Phase 5 S5-1: cross-binary A/B benchmark harness + pre-registered decision
+  rule.** `benchmarks/cross_binary_ab.sh` is the merge go/no-go gate driver for
+  ROADMAP Phase 5 — it builds the NEW binary (`devel`: `data_raft` + meta-index
+  removed = "신규 전체") and the OLD binary (`master`: both consensus rounds
+  present = "옛 전체"), then runs them back-to-back on the same host through the
+  existing `bench_s3_compat_compare.sh` cluster machinery (4-node boot + warp +
+  optional minio anchor). Scope `PUT + GET + HEAD` (`warp put,get,stat`). It
+  computes within-run `new/old` throughput ratios, medians them across `RUNS`,
+  and applies the merge-blocker rule: **① PUT win** (`new/old` PUT ≥
+  `PUT_WIN_MIN`, default 1.05x) **AND ② GET/HEAD no-regress** (`new/old` GET &
+  HEAD ≥ `NOREG_MIN`, default 0.95x), failing the verdict on any warp error or
+  missing sample. Output: `benchmarks/profiles/cross-binary-ab-<stamp>/verdict.md`.
+  Decision rule and run procedure (multi-node GCP vs local smoke):
+  `benchmarks/cross_binary_ab/README.md`. The actual Phase 5 verdict is a
+  user-run multi-node benchmark (S5-2) — a local run is a harness smoke test, not
+  the gate (`dev bench != parity`).
+
 ## [0.0.531.0] - 2026-06-10
 
 ### Fixed

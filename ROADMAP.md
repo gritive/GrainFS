@@ -101,6 +101,12 @@
 - **목표**: 물질적 win 입증/반증. (confound 정직: 브랜치엔 strip-down·결정론 placement도 포함 → "consensus 단독"이 아니라 "신규 전체 vs 옛 전체". Phase 1/2는 PUT throughput ~중립 가정이라 confound 허용.)
 - **결정(merge-blocker, 동등)**: ① PUT win 입증 **AND** ② **GET/HEAD no-regress.** 하나라도 실패 = 브랜치 폐기(master 무손상). 둘 다 통과 시에만 Phase 6 후 merge.
 
+#### Phase 5 진행 현황
+Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 달리 후속 단계가 없다 — 이 게이트가 곧 devel→master merge 판정). 두 슬라이스로 분해:
+
+- [완료] **S5-1: cross-binary A/B 벤치 harness + 결정 규칙 문서** — devel(신규 전체) 바이너리 vs master(옛 전체) 바이너리를 같은 호스트에서 back-to-back로 돌려 PUT+GET+HEAD within-run 비율을 산출하고 merge-blocker 규칙(① PUT win AND ② GET/HEAD no-regress)을 자동 판정하는 harness. 기존 `bench_s3_compat_compare.sh`(cluster boot + warp + minio anchor)를 재사용하는 얇은 래퍼(`benchmarks/cross_binary_ab.sh`) — 두 ref를 transient worktree로 빌드, RUNS회 반복, minio 외부 앵커 옵션, `verdict.md` 산출. 결정 규칙 사전등록 문서 `benchmarks/cross_binary_ab/README.md`. 로컬 스모크로 end-to-end 실행 검증(harness smoke ≠ Phase 5 판정). 전제: Phase 4 완료.
+- [보류] **S5-2: ★결정 벤치 실행 (merge go/no-go)** — S5-1 harness를 멀티노드 환경(GCP n2-standard-4 ×4, Spot)에서 user-run으로 실행해 실제 verdict 산출. **이 환경(macOS 로컬, GCP 쿼터 없음)에서 멀티노드 cross-binary 벤치 실행 불가** — S4-0와 동일한 user-run 제약. verdict가 GO면 Phase 6 후 merge, NO-GO면 브랜치 폐기(master 무손상). 전제: S5-1.
+
 ### Phase 6 — control/data plane 경계 + gossip (벤치 후) → merge
 - raft 범위를 membership/bucket/IAM/multipart manifest로 확정, PUT 임계경로 밖 보장. gossip이 soft state(부하/용량/health) → Bounded Load/balancer 공급. (PUT-perf 무관이라 벤치 뒤.)
 - **목표**: control/data 경계 코드 확정 후 **master merge**(비가역 지점).
