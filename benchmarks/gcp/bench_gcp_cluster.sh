@@ -36,6 +36,13 @@ PREFIX="${PREFIX:-gr-p5}"
 CLIENT="$PREFIX-cli"
 GO_VERSION="${GO_VERSION:-1.26.4}"
 WARP_VERSION="${WARP_VERSION:-1.1.4}"
+# Ops Agent: stock Compute Engine metrics omit guest MEMORY and DISK-SPACE
+# utilization; the Ops Agent adds agent.googleapis.com/memory/percent_used and
+# .../disk/percent_used (visible in Cloud Monitoring / Metrics Explorer). Auto-
+# installed via startup-script at boot (needs VM internet — VMs get an external
+# IP). OPS_AGENT=0 to skip (e.g. to remove its small CPU/RSS overhead from a
+# publishable bench run).
+OPS_AGENT="${OPS_AGENT:-1}"
 
 NEW_REF="${NEW_REF:-devel}"
 OLD_REF="${OLD_REF:-master}"
@@ -82,17 +89,31 @@ cmd_up() {
   local names=("$CLIENT")
   for i in $(seq 0 $((NODE_COUNT - 1))); do names+=("$(node_name "$i")"); done
   log "provisioning ${names[*]} ($MACHINE, $ZONE)"
+  # Ops Agent install at boot for guest memory + disk-space metrics.
+  local meta=()
+  if [[ "$OPS_AGENT" == "1" ]]; then
+    local sf; sf="$(mktemp "${TMPDIR:-/tmp}/p5-opsagent.XXXXXX.sh")"
+    cat >"$sf" <<'STARTUP'
+#! /bin/bash
+curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent.sh
+bash add-google-cloud-ops-agent.sh --also-install
+STARTUP
+    meta=(--metadata-from-file "startup-script=$sf")
+    log "ops-agent: auto-install via startup-script (guest memory + disk-space metrics)"
+  fi
   # client: pd-balanced (no SSD quota); storage: pd-ssd
   gcloud compute instances create "$CLIENT" \
     --zone="$ZONE" --project="$PROJECT" --machine-type="$MACHINE" \
     --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
     --boot-disk-size=40GB --boot-disk-type=pd-balanced \
+    "${meta[@]}" \
     --provisioning-model=SPOT --quiet >&2 || return 1
   for i in $(seq 0 $((NODE_COUNT - 1))); do
     gcloud compute instances create "$(node_name "$i")" \
       --zone="$ZONE" --project="$PROJECT" --machine-type="$MACHINE" \
       --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
       --boot-disk-size="${STORAGE_DISK_GB}GB" --boot-disk-type=pd-ssd \
+      "${meta[@]}" \
       --provisioning-model=SPOT --quiet >&2 || return 1
   done
   log "waiting for SSH on all nodes"
@@ -206,7 +227,7 @@ serve_node() {
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
-    --nfs4-port 0 --nbd-port 0 --scrub-interval 0 --lifecycle-interval 0 --log-level warn \
+    --nfs4-port 0 --nbd-port 0 --scrub-interval 0 --lifecycle-interval 0 --log-level ${LOG_LEVEL:-warn} \
     && echo node-$idx-launched"
 }
 
