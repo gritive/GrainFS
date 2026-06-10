@@ -38,9 +38,11 @@ type fakeSegmentBackendDeps struct {
 
 	deleteCalls []deleteCall
 
-	proposeCalls   []proposeCall
-	proposeErr     error
-	deleteShardErr error
+	proposeCalls         []proposeCall
+	proposeErr           error
+	deleteShardErr       error
+	writeQuorumMetaCalls []PutObjectMetaCmd
+	writeQuorumMetaErr   error
 }
 
 type deleteCall struct {
@@ -92,22 +94,30 @@ func (f *fakeSegmentBackendDeps) propose(ctx context.Context, cmdType CommandTyp
 	return f.proposeErr
 }
 
+func (f *fakeSegmentBackendDeps) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writeQuorumMetaCalls = append(f.writeQuorumMetaCalls, cmd)
+	return f.writeQuorumMetaErr
+}
+
 func newFakeBackendWithGroups(groups []ShardGroupEntry) *fakeSegmentBackendDeps {
 	return &fakeSegmentBackendDeps{groups: groups, writeErrAt: map[int]error{}}
 }
 
 func newCSBWithDeps(deps *fakeSegmentBackendDeps, blobIDs []string) *clusterSegmentBackend {
 	return &clusterSegmentBackend{
-		bucket:          "test-bucket",
-		key:             "large.bin",
-		versionID:       "v1",
-		blobIDs:         blobIDs,
-		placements:      make([]segmentPlacement, len(blobIDs)),
-		writeSegmentFn:  deps.writeSegment,
-		groupSelectorFn: deps.groupSelector,
-		deleteShardsFn:  deps.deleteShards,
-		proposeFn:       deps.propose,
-		ecConfigFn:      func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
+		bucket:            "test-bucket",
+		key:               "large.bin",
+		versionID:         "v1",
+		blobIDs:           blobIDs,
+		placements:        make([]segmentPlacement, len(blobIDs)),
+		writeSegmentFn:    deps.writeSegment,
+		groupSelectorFn:   deps.groupSelector,
+		deleteShardsFn:    deps.deleteShards,
+		proposeFn:         deps.propose,
+		writeQuorumMetaFn: deps.writeQuorumMeta,
+		ecConfigFn:        func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
 	}
 }
 
@@ -230,9 +240,9 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	assert.False(t, obj.IsAppendable)
 	assert.Len(t, obj.Segments, 4)
 
-	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
-	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
+	require.Len(t, deps.writeQuorumMetaCalls, 1, "exactly one quorum meta write")
+	require.Empty(t, deps.proposeCalls, "PutObjectMeta must not go through raft propose")
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Len(t, cmd.Segments, 4)
 	for i, seg := range cmd.Segments {
 		assert.Equal(t, int32(i), seg.SegmentIdx, "Segments[%d].SegmentIdx deterministic", i)
@@ -391,7 +401,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	payload := bytes.Repeat([]byte("D"), 2*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
-	deps.proposeErr = errors.New("raft propose failed")
+	deps.writeQuorumMetaErr = errors.New("quorum meta write failed")
 
 	blobIDs := make([]string, 2)
 	for i := range blobIDs {
@@ -408,8 +418,8 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "commit meta")
 
-	// propose was attempted exactly once (and failed).
-	require.Len(t, deps.proposeCalls, 1)
+	// writeQuorumMeta was attempted exactly once (and failed).
+	require.Len(t, deps.writeQuorumMetaCalls, 1)
 
 	// Both segments' blobs cleaned up after propose failure (committed=false).
 	cleanedBlobs := map[string]struct{}{}
@@ -468,8 +478,8 @@ func TestPutObjectChunked_CommitsMultipartParts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, parts, obj.Parts)
 
-	require.Len(t, deps.proposeCalls, 1)
-	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
+	require.Len(t, deps.writeQuorumMetaCalls, 1)
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Equal(t, parts, cmd.Parts)
 }
 
@@ -514,9 +524,8 @@ func TestChunkedPut_PreservesTags(t *testing.T) {
 		nil, "", 0, false, "", nil, nil, wantTags)
 	require.NoError(t, err)
 
-	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
-	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
+	require.Len(t, deps.writeQuorumMetaCalls, 1, "exactly one quorum meta write")
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Equal(t, wantTags, cmd.Tags,
 		"chunked-PUT must thread tags into PutObjectMetaCmd; clobbering this drops tags on every large object")
 }
