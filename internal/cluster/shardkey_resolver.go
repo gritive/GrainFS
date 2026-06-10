@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/dgraph-io/badger/v4"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // startupRepairPlacementScanCap bounds how many exact-key object versions a
@@ -64,12 +66,24 @@ func (b *DistributedBackend) ResolveShardKeyPlacement(ctx context.Context, bucke
 		if err != nil {
 			return rec, "", err
 		}
+		if len(rec.Nodes) > 0 {
+			return rec, "", nil
+		}
+		// Phase 3 fallback: object may be in quorum meta (not BadgerDB). Build the
+		// PlacementRecord from the quorum meta entry when BadgerDB returns empty.
+		if obj, _, qerr := b.readQuorumMeta(bucket, objectKey); qerr == nil && obj != nil {
+			if len(obj.NodeIDs) > 0 && obj.ECData > 0 {
+				return PlacementRecord{
+					Nodes:       obj.NodeIDs,
+					K:           int(obj.ECData),
+					M:           int(obj.ECParity),
+					StripeBytes: int(obj.StripeBytes),
+				}, "", nil
+			}
+		}
 		// Label empty placements (missing / non-EC object) uniformly with the
 		// segment/coalesced miss path so callers see one "stale" reason.
-		if len(rec.Nodes) == 0 {
-			return PlacementRecord{}, "stale", nil
-		}
-		return rec, "", nil
+		return PlacementRecord{}, "stale", nil
 	}
 
 	// Empty objectKey (shard key like "/segments/x") is structurally invalid;
@@ -125,11 +139,50 @@ func (b *DistributedBackend) shardKeyScanResult(ctx context.Context, bucket, obj
 	if err != nil {
 		return nil, err
 	}
+	// Phase 3 objects are stored in quorum meta files (filesystem), not BadgerDB.
+	// Fall back to the local quorum meta store when the BadgerDB scan found nothing.
+	if len(res.blob) == 0 && len(res.coalesced) == 0 && !res.capped {
+		if obj, _, qerr := b.readQuorumMeta(bucket, objectKey); qerr == nil {
+			res = quorumMetaToScanResult(obj)
+		}
+	}
 	if scan != nil {
 		scan.scans++
 		scan.entries[bucket+"\x00"+objectKey] = res
 	}
 	return res, nil
+}
+
+// quorumMetaToScanResult builds a shardKeyScanResult from a quorum meta object
+// decoded by readQuorumMeta. Used when BadgerDB has no entry for Phase 3 objects.
+func quorumMetaToScanResult(obj *storage.Object) *shardKeyScanResult {
+	res := &shardKeyScanResult{
+		blob:      make(map[string]PlacementRecord),
+		coalesced: make(map[string]PlacementRecord),
+	}
+	for _, ref := range obj.Segments {
+		if ref.ECData == 0 || len(ref.NodeIDs) == 0 {
+			continue
+		}
+		res.blob[ref.BlobID] = PlacementRecord{
+			Nodes:       ref.NodeIDs,
+			K:           int(ref.ECData),
+			M:           int(ref.ECParity),
+			StripeBytes: int(ref.StripeBytes),
+		}
+	}
+	for _, ref := range obj.Coalesced {
+		if ref.ECData == 0 || len(ref.NodeIDs) == 0 {
+			continue
+		}
+		res.coalesced[ref.ShardKey] = PlacementRecord{
+			Nodes:       ref.NodeIDs,
+			K:           int(ref.ECData),
+			M:           int(ref.ECParity),
+			StripeBytes: int(ref.StripeBytes),
+		}
+	}
+	return res
 }
 
 // scanShardKeyPlacement iterates obj:bucket/objectKey/ and builds the segment
