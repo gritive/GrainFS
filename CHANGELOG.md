@@ -42,7 +42,7 @@
 - `ShardService.ReadQuorumMetaRaw(ctx, addr, bucket, key)` — new shard RPC for peer fallback.
 - `ShardService.decodeQuorumMetaBlob` / `decodeQuorumMetaCmdBlob` — shared decode helpers.
 - `DistributedBackend.fetchQuorumMetaFromPeers(bucket, key)` — fans out to all shard-group
-  peers concurrently; first success wins (short timeout via `quorumMetaWriteTimeout`).
+  peers concurrently; LWW-best blob wins within `quorumMetaReadTimeout` (5 s).
 
 ## [0.0.527.0] - 2026-06-09
 
