@@ -85,8 +85,6 @@ var _ = Describe("Backend object API integration", func() {
 	})
 
 	It("deletes objects", func() {
-		Skip("Phase 3: delete does not yet remove quorum meta file")
-
 		_, err := b.PutObject(ctx, "bucket", "del.txt", strings.NewReader("data"), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
