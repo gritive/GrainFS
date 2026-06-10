@@ -286,8 +286,20 @@ func (rcv *PutObjectMetaCmd) MutateStripeBytes(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(42, n)
 }
 
+func (rcv *PutObjectMetaCmd) Acl() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(44))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateAcl(n byte) bool {
+	return rcv._tab.MutateByteSlot(44, n)
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(20)
+	builder.StartObject(21)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -363,6 +375,9 @@ func PutObjectMetaCmdStartTagsVector(builder *flatbuffers.Builder, numElems int)
 }
 func PutObjectMetaCmdAddStripeBytes(builder *flatbuffers.Builder, stripeBytes uint32) {
 	builder.PrependUint32Slot(19, stripeBytes, 0)
+}
+func PutObjectMetaCmdAddAcl(builder *flatbuffers.Builder, acl byte) {
+	builder.PrependByteSlot(20, acl, 0)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

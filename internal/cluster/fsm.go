@@ -116,6 +116,9 @@ type PutObjectMetaCmd struct {
 	// (carried from clusterMultipartMeta.Tags) so cluster reaches single-node
 	// parity for CreateMultipartUploadWithTags.
 	Tags []storage.Tag
+	// ACL is the s3auth.ACLGrant bitmask. 0 = private (backward-compatible
+	// default; old encoded blobs decode to 0).
+	ACL uint8
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The
