@@ -118,6 +118,79 @@ func TestDeleteObject_QuorumMetaTombstone(t *testing.T) {
 	require.True(t, cmd.IsDeleteMarker, "quorum meta after DELETE must have IsDeleteMarker=true")
 }
 
+// TestScatterGatherList_LWWAndTombstone proves S4-3:
+// scatterGatherList fans out ScanQuorumMeta RPCs to all shard group peers,
+// applies per-key LWW (max ModTime wins), and filters IsDeleteMarker tombstones.
+//
+// RED without scatterGatherList (or ScanQuorumMeta RPC): compile error.
+// GREEN: stale alpha.bin on node B loses to fresh alpha.bin on node A (LWW);
+// beta.bin tombstone is excluded; gamma.bin from node B is included.
+//
+// Neuter test: removing LWW in scatterGatherList or removing tombstone filtering
+// causes key assertions to fail.
+func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewTCPTransport("test-cluster-psk")
+	trB := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+	require.NoError(t, trA.Connect(ctx, trB.LocalAddr()))
+	require.NoError(t, trB.Connect(ctx, trA.LocalAddr()))
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	trA.SetStreamHandler(svcA.HandleRPC())
+	trB.SetStreamHandler(svcB.HandleRPC())
+
+	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
+		t.Helper()
+		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	baseCmd := func(key string, modTime int64, isDel bool) PutObjectMetaCmd {
+		return PutObjectMetaCmd{Bucket: "bkt", Key: key, ETag: "e", ECData: 1,
+			NodeIDs: []string{"n1"}, ModTime: modTime, IsDeleteMarker: isDel}
+	}
+
+	// Node A: alpha.bin (ModTime=10, fresh) + beta.bin (tombstone, ModTime=5).
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 10, false))))
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "beta.bin", encodeBlob(baseCmd("beta.bin", 5, true))))
+	// Node B: alpha.bin (ModTime=5, stale) + gamma.bin (ModTime=10, normal).
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 5, false))))
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(baseCmd("gamma.bin", 10, false))))
+
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr(), trB.LocalAddr()}},
+		}},
+	}
+
+	entries, err := backendA.scatterGatherList(ctx, "bkt", "")
+	require.NoError(t, err)
+
+	// beta.bin is a tombstone → filtered.
+	// alpha.bin: node A (ModTime=10) beats node B (ModTime=5).
+	// gamma.bin: only on node B.
+	require.Len(t, entries, 2, "tombstone filtered; alpha.bin + gamma.bin survive")
+	keySet := map[string]int64{}
+	for _, e := range entries {
+		keySet[e.Key] = e.ModTime
+	}
+	require.Contains(t, keySet, "alpha.bin")
+	require.Contains(t, keySet, "gamma.bin")
+	require.NotContains(t, keySet, "beta.bin", "tombstone must not appear")
+	require.Equal(t, int64(10), keySet["alpha.bin"], "LWW: fresh entry (ModTime=10) must win")
+}
+
 // TestScanQuorumMetaBucket proves S4-2: ScanQuorumMetaBucket returns all entries
 // (including tombstones) for a bucket, with optional prefix filtering.
 //
