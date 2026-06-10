@@ -270,6 +270,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if tagsVec != 0 {
 		clusterpb.PutObjectMetaCmdAddTags(b, tagsVec)
 	}
+	if c.ACL != 0 {
+		clusterpb.PutObjectMetaCmdAddAcl(b, c.ACL)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -356,6 +359,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
+		ACL:              t.Acl(),
 	}, nil
 }
 

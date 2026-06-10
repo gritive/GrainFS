@@ -359,9 +359,10 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		return err
 	}
 
-	// Commit updated EC placement via ObjectMeta. CmdPutShardPlacement is
-	// retained only for legacy decode compatibility and no longer stores rows.
-	if perr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	// Commit updated EC placement via quorum meta (Phase 3: bypasses data_raft
+	// for user buckets). CmdPutShardPlacement is retained only for legacy
+	// decode compatibility and no longer stores rows.
+	if perr := b.writeQuorumMeta(ctx, PutObjectMetaCmd{
 		Bucket:           bucket,
 		Key:              key,
 		Size:             obj.Size,
@@ -373,9 +374,9 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		ECData:           uint8(newCfg.DataShards),
 		ECParity:         uint8(newCfg.ParityShards),
 		NodeIDs:          newPlacement,
+		ACL:              obj.ACL,
 		UserMetadata:     cloneStringMap(obj.UserMetadata),
-		// applyPutObjectMeta writes Tags unconditionally; forward the existing
-		// tags so an EC config upgrade doesn't clobber them to nil.
+		// Forward existing tags so an EC config upgrade doesn't clobber them.
 		Tags: obj.Tags,
 	}); perr != nil {
 		cleanup()

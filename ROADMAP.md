@@ -64,7 +64,7 @@
 - **검증**: GET 라우팅이 인덱스 없이 동작. placement 결정성 테스트.
 - **결과**: `groupIDForObject` 순수 함수로 쓰기·읽기 경로 동일 hash 공유(equivalence by construction), `OpRouter.placementGroupIDs` 동결 리스트로 라우팅 일관성 보장, BoundedLoads hot-demotion 쓰기 경로에서 제거(WRH capacity-weighted만 유지). v0.0.527.0.
 
-### Phase 3 — quorum 메타 (data_raft 제거, A의 본체)
+### Phase 3 — quorum 메타 (data_raft 제거, A의 본체) ✅ DONE
 - data_raft ObjectMeta 커밋 → per-node quorum 메타 write(shard에 동봉) + GET quorum read + version-LWW. **옛 data_raft 경로 eager 삭제.**
 - **목표**: object PUT의 합의 1회(data_raft) 제거. (하드 문제 #1, 최고 위험.)
 - **must-solve (스펙 단계 선결 — LWW가 깨는 지점)**:

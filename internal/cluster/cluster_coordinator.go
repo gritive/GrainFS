@@ -947,17 +947,15 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 			return rc, obj, err
 		}
 	}
-	// FU#4 missing-object-500: if we got here on a non-indexed routing
-	// fallback for a user-facing bucket, no authoritative source claims the
-	// key exists. Forwarding to the routeWriteOrBucket-selected placement
-	// group can surface ErrNoReachablePeer (no leader/quorum) and bubble
-	// out as S3 500. The S3 contract says never-existed key must be 404
-	// NoSuchKey — treat absence-of-index-entry-and-no-local-evidence as
-	// NotFound. Local-current-follower / local-stale-against-index paths
-	// above already covered the legitimate read-after-write race window.
-	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
-		return nil, nil, storage.ErrObjectNotFound
-	}
+	// Phase 3: FU#4 short-circuit disabled — object metadata is stored in the
+	// per-node quorum meta store, not in the object index. Non-indexed user
+	// objects must be forwarded to the placement-group leader, which will
+	// resolve the quorum meta read via headObjectMeta. Restore FU#4 when
+	// Phase 3 writes to the object index.
+	//
+	// if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+	//     return nil, nil, storage.ErrObjectNotFound
+	// }
 	args := buildGetObjectArgs(bucket, key)
 	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
 }

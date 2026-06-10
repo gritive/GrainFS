@@ -26,9 +26,11 @@ func (f *FSM) resolveObjectMetaForAppendUpdate(txn *badger.Txn, bucket, key, blo
 	if err != nil {
 		return objectMetaForAppendUpdate{}, err
 	}
+
 	if existing == nil {
 		return objectMetaForAppendUpdate{}, nil
 	}
+
 	if appendObjectCommandAlreadyApplied(existing, blobID) {
 		return objectMetaForAppendUpdate{
 			Found:          true,

@@ -134,6 +134,10 @@ table PutObjectMetaCmd {
   segments:[SegmentMetaEntry];
   tags:[Tag];
   stripe_bytes:uint32 = 0;
+  // Phase 3: ACL bitmask (s3auth.ACLGrant). Default 0 = private.
+  // Appended last for backward-compatible reading of old blobs (old decoder
+  // returns acl=0 which is the correct private default).
+  acl:uint8 = 0;
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked

@@ -54,6 +54,11 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	}); err != nil {
 		return "", err
 	}
+	// Remove the local quorum meta file so subsequent reads fall through to
+	// BadgerDB and find the delete marker.  Best-effort: raft is authoritative.
+	if b.shardSvc != nil {
+		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+	}
 	return markerID, nil
 }
 

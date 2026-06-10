@@ -40,14 +40,15 @@ type clusterSegmentBackend struct {
 
 	// Test seams. Production constructor leaves these nil; defaults route
 	// through b.shardGroup / newECObjectWriter / b.shardSvc.DeleteShards /
-	// b.propose. Tests inject all four to exercise putObjectChunked without
-	// a full RaftNode + ShardService.
-	writeSegmentFn  func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
-	groupSelectorFn func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
-	deleteShardsFn  func(ctx context.Context, peer, bucket, shardKey string) error
-	proposeFn       func(ctx context.Context, cmdType CommandType, payload any) error
-	ecConfigFn      func() ECConfig
-	chunkSize       int
+	// b.writeQuorumMeta / b.propose. Tests inject all five to exercise
+	// putObjectChunked without a full RaftNode + ShardService.
+	writeSegmentFn    func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
+	groupSelectorFn   func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
+	deleteShardsFn    func(ctx context.Context, peer, bucket, shardKey string) error
+	proposeFn         func(ctx context.Context, cmdType CommandType, payload any) error
+	writeQuorumMetaFn func(ctx context.Context, cmd PutObjectMetaCmd) error
+	ecConfigFn        func() ECConfig
+	chunkSize         int
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -394,6 +395,8 @@ func runChunkedPutWithParts(
 	segments := buildSegmentMetaEntries(csb.placements, obj.Segments)
 
 	// 6. Single atomic raft commit.
+	// completeUploadID path intentionally uses data_raft (Phase 3 boundary): see
+	// commitCompleteMultipartObjectWriteResult in object_put.go for the rationale.
 	var commitErr error
 	if completeUploadID != "" {
 		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
@@ -414,7 +417,8 @@ func runChunkedPutWithParts(
 			Tags:             tags,
 		})
 	} else {
-		commitErr = csb.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		// Phase 3: commit via per-node quorum meta write (bypasses data_raft).
+		commitErr = csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
 			Bucket:           bucket,
 			Key:              key,
 			Size:             obj.Size,
@@ -453,6 +457,13 @@ func (c *clusterSegmentBackend) propose(ctx context.Context, cmdType CommandType
 		return c.proposeFn(ctx, cmdType, payload)
 	}
 	return c.b.propose(ctx, cmdType, payload)
+}
+
+func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
+	if c.writeQuorumMetaFn != nil {
+		return c.writeQuorumMetaFn(ctx, cmd)
+	}
+	return c.b.writeQuorumMeta(ctx, cmd)
 }
 
 // chunkedChooseModTime returns ModTime according to the preserveModTime
