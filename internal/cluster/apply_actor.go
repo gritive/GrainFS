@@ -131,7 +131,14 @@ func (a *applyActor) collect(b *DistributedBackend, first raft.LogEntry, applyCh
 		return true
 	}
 	if first.Type != raft.LogEntryCommand {
-		return true // LogEntryNoOp / conf-change: nothing for the FSM
+		// LogEntryNoOp / conf-change: nothing for the FSM, but advance the applied
+		// cursor to the commit frontier so the linearizable read fence
+		// (WaitApplied) is satisfied even when the committed log tail is a
+		// non-command entry (e.g. a fresh group's leader-election NoOp). Entries
+		// arrive in log order, so storing first.Index keeps lastApplied contiguous.
+		b.lastApplied.Store(first.Index)
+		b.lastAppliedTerm.Store(first.Term)
+		return true
 	}
 
 	a.batch = a.batch[:0]
@@ -167,7 +174,14 @@ func (a *applyActor) collect(b *DistributedBackend, first raft.LogEntry, applyCh
 func (a *applyActor) collectNonCommand(b *DistributedBackend, e raft.LogEntry) {
 	if e.Type == raft.LogEntrySnapshot {
 		a.restore(b, e)
+		return
 	}
+	// NoOp / conf-change after a committed batch: no FSM work, but advance the
+	// applied cursor to this entry's index (commitBatch already advanced it to the
+	// batch's last command; e.Index is higher) so lastApplied reaches the commit
+	// frontier. Keeps the forward read fence (WaitApplied) unblocked.
+	b.lastApplied.Store(e.Index)
+	b.lastAppliedTerm.Store(e.Term)
 }
 
 // commitBatch applies a.batch, records results, runs notifications, and advances
