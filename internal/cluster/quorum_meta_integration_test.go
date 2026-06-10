@@ -88,6 +88,36 @@ var _ = Describe("Quorum meta — Phase 3 primary path", func() {
 	})
 })
 
+// TestDeleteObject_QuorumMetaTombstone proves S4-1: DELETE writes an IsDeleteMarker=true
+// tombstone to quorum meta instead of removing the file.
+//
+// RED without the tombstone write in deleteObjectWithMarker: readQuorumMetaRawCmd
+// returns storage.ErrObjectNotFound after DELETE (file was removed instead of marked).
+// GREEN with the tombstone write: readQuorumMetaRawCmd returns a cmd with IsDeleteMarker=true.
+//
+// Neuter test: if the writeQuorumMeta call is removed from deleteObjectWithMarker
+// (reverting to deleteQuorumMetaLocal), this test is RED.
+func TestDeleteObject_QuorumMetaTombstone(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	// PUT — writes quorum meta locally.
+	payload := bytes.Repeat([]byte("d"), 512)
+	_, err := b.PutObject(ctx, "bucket", "del.bin",
+		bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+
+	// DELETE — must write tombstone to quorum meta.
+	err = b.DeleteObject(ctx, "bucket", "del.bin")
+	require.NoError(t, err)
+
+	// The quorum meta file must still exist as a tombstone.
+	cmd, err := b.shardSvc.readQuorumMetaRawCmd("bucket", "del.bin")
+	require.NoError(t, err, "quorum meta tombstone must be present after DELETE")
+	require.True(t, cmd.IsDeleteMarker, "quorum meta after DELETE must have IsDeleteMarker=true")
+}
+
 // TestMultipartComplete_BadgerDBFallback proves the Phase 3 raft/quorum boundary:
 // multipart-completed objects are committed via data_raft (applyCompleteMultipart),
 // so their quorum meta file is absent. headObjectMeta must still serve them by falling

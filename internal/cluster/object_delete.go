@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"os"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -54,10 +56,23 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	}); err != nil {
 		return "", err
 	}
-	// Remove the local quorum meta file so subsequent reads fall through to
-	// BadgerDB and find the delete marker.  Best-effort: raft is authoritative.
+	// Write a tombstone to quorum meta so scatter-gather LIST sees the delete.
+	// Read the existing placement to determine which nodes to write to.
+	// Best-effort: if the object has no quorum meta (pre-Phase-3), skip.
 	if b.shardSvc != nil {
-		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+		if existing, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil && len(existing.NodeIDs) > 0 {
+			_ = b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+				Bucket:         bucket,
+				Key:            key,
+				VersionID:      markerID,
+				ModTime:        time.Now().Unix(),
+				IsDeleteMarker: true,
+				ECData:         existing.ECData,
+				NodeIDs:        existing.NodeIDs,
+			})
+		} else if !errors.Is(qerr, storage.ErrObjectNotFound) && qerr != nil {
+			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key) // fallback: remove stale file
+		}
 	}
 	return markerID, nil
 }
