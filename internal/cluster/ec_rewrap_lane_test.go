@@ -101,7 +101,6 @@ func TestRewrapShardIfStale(t *testing.T) {
 // upgradeObjectEC works in the singleton fixture (k=1 -> k=2) and that the new
 // acquireShardWriteLock wrap does not self-deadlock.
 func TestECRewrap_UpgradeReSplitSerial(t *testing.T) {
-	t.Skip("Phase 3: upgradeObjectEC commits to BadgerDB; headObjectMeta reads stale quorum meta after upgrade")
 	backend, _ := setupECRewrapBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "b"))
@@ -138,7 +137,6 @@ func TestECRewrap_UpgradeReSplitSerial(t *testing.T) {
 // necessary lives in TestECRewrap_ConfigUpgradeLockSerializesWrite, which
 // asserts at the on-disk shard layer (where the clobber is observable).
 func TestECRewrap_ConfigUpgradeRace(t *testing.T) {
-	t.Skip("Phase 3: upgradeObjectEC commits to BadgerDB; headObjectMeta reads stale quorum meta after upgrade")
 	backend, keeper := setupECRewrapBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "b"))

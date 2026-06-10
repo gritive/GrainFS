@@ -131,6 +131,16 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	}); err != nil {
 		return 0, fmt.Errorf("scan ec shard targets: %w", err)
 	}
+	// Phase 3: also scan objects stored in quorum meta (filesystem), which bypass
+	// BadgerDB and are not covered by IterECShardScanTargets above.
+	if m.shardSvc != nil {
+		if err := m.shardSvc.IterQuorumMetaECShardTargets(func(t ECShardScanTarget) error {
+			targets = append(targets, t)
+			return nil
+		}); err != nil {
+			return 0, fmt.Errorf("scan quorum meta ec shard targets: %w", err)
+		}
+	}
 
 	for _, t := range targets {
 		if ctx.Err() != nil {
