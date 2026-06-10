@@ -24,6 +24,10 @@ const quorumMetaSubDir = ".quorum_meta"
 // long as a quorum (K data shards) of nodes acked.
 const quorumMetaWriteTimeout = 30 * time.Second
 
+// quorumMetaReadTimeout bounds the peer fan-out read in fetchQuorumMetaFromPeers.
+// Shorter than the write timeout: reads are latency-sensitive (GET path).
+const quorumMetaReadTimeout = 5 * time.Second
+
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	// Internal buckets stay on raft (control-plane; headObjectMeta reads BadgerDB
 	// for them). Non-internal user buckets use per-node quorum (data_raft bypass).
@@ -83,8 +87,10 @@ func (b *DistributedBackend) readQuorumMeta(bucket, key string) (*storage.Object
 }
 
 // fetchQuorumMetaFromPeers fans out ReadQuorumMeta RPCs to all shard group
-// peers concurrently and returns the first successful response. Returns
-// (nil, false) when no peer has the file or b.shardGroup is nil.
+// peers concurrently and returns the blob with the highest ModTime (LWW).
+// Waits for all peers within quorumMetaReadTimeout so that a concurrent PUT
+// race resolves to the latest write rather than the fastest responder.
+// Returns (nil, false) when no peer has the file or b.shardGroup is nil.
 func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byte, bool) {
 	if b.shardSvc == nil || b.shardGroup == nil {
 		return nil, false
@@ -105,14 +111,14 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 		return nil, false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaWriteTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
 	defer cancel()
 
-	type result struct {
-		data []byte
-		ok   bool
+	type peerResult struct {
+		data    []byte
+		modTime int64
 	}
-	ch := make(chan result, len(peers))
+	ch := make(chan peerResult, len(peers))
 	var wg sync.WaitGroup
 	for _, p := range peers {
 		p := p
@@ -121,26 +127,34 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 			defer wg.Done()
 			addr, err := b.shardSvc.resolvePeerAddress(p)
 			if err != nil {
-				ch <- result{}
 				return
 			}
 			data, err := b.shardSvc.ReadQuorumMetaRaw(ctx, addr, bucket, key)
 			if err != nil || len(data) == 0 {
-				ch <- result{}
 				return
 			}
-			ch <- result{data: data, ok: true}
+			// Decode ModTime for LWW: pick the blob written latest.
+			var modTime int64
+			if cmd, decErr := b.shardSvc.decodeQuorumMetaCmdBlob(data); decErr == nil {
+				modTime = cmd.ModTime
+			}
+			ch <- peerResult{data: data, modTime: modTime}
 		}()
 	}
 	go func() { wg.Wait(); close(ch) }()
 
+	// Collect all peer responses; return the one with the highest ModTime (LWW).
+	// hasBest guards the zero-ModTime case: two blobs with ModTime=0 must still
+	// result in the first hit being returned.
+	var best peerResult
+	hasBest := false
 	for r := range ch {
-		if r.ok {
-			cancel() // stop remaining in-flight RPCs
-			return r.data, true
+		if !hasBest || r.modTime > best.modTime {
+			best = r
+			hasBest = true
 		}
 	}
-	return nil, false
+	return best.data, hasBest
 }
 
 // fanOutQuorumMeta dispatches to every placement node concurrently and returns
