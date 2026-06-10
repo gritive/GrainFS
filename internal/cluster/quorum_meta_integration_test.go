@@ -191,6 +191,60 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 	require.Equal(t, int64(10), keySet["alpha.bin"], "LWW: fresh entry (ModTime=10) must win")
 }
 
+// TestScanObjectMetaEntries_CarriesPlacementFields proves S4-4d: the scan
+// returns each live block as an ObjectIndexEntry carrying the EC placement
+// fields (PlacementGroupID, NodeIDs, ECData, ECParity) that ClassifyObjectLayout
+// needs to rebuild admin volume replica facts. Tombstones are filtered.
+//
+// RED without ScanObjectMetaEntries: compile error.
+// Neuter: if the conversion drops NodeIDs/ECData/PlacementGroupID, the field
+// assertions fail; if it stops filtering tombstones, the length assertion fails.
+func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
+	defer tr.Close()
+	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	tr.SetStreamHandler(svc.HandleRPC())
+
+	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
+		t.Helper()
+		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	// vol1/blk: 4+2 EC across 6 nodes. vol2/blk: tombstone (must be filtered).
+	require.NoError(t, svc.writeQuorumMetaLocal("vols", "vol1/blk", encodeBlob(PutObjectMetaCmd{
+		Bucket: "vols", Key: "vol1/blk", ETag: "e", ModTime: 10,
+		ECData: 4, ECParity: 2, PlacementGroupID: "g1",
+		NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+	})))
+	require.NoError(t, svc.writeQuorumMetaLocal("vols", "vol2/blk", encodeBlob(PutObjectMetaCmd{
+		Bucket: "vols", Key: "vol2/blk", ETag: "e", ModTime: 5, IsDeleteMarker: true,
+		ECData: 4, ECParity: 2, PlacementGroupID: "g1", NodeIDs: []string{"n1"},
+	})))
+
+	backend := &DistributedBackend{
+		selfAddr: tr.LocalAddr(),
+		shardSvc: svc,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{tr.LocalAddr()}},
+		}},
+	}
+
+	entries, err := backend.ScanObjectMetaEntries(ctx, "vols", "")
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "tombstone vol2/blk must be filtered; only vol1/blk survives")
+	e := entries[0]
+	require.Equal(t, "vol1/blk", e.Key)
+	require.Equal(t, "g1", e.PlacementGroupID)
+	require.Equal(t, uint8(4), e.ECData)
+	require.Equal(t, uint8(2), e.ECParity)
+	require.Equal(t, []string{"n1", "n2", "n3", "n4", "n5", "n6"}, e.NodeIDs)
+}
+
 // TestScanQuorumMetaBucket proves S4-2: ScanQuorumMetaBucket returns all entries
 // (including tombstones) for a bucket, with optional prefix filtering.
 //

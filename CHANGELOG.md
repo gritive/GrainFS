@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.531.0] - 2026-06-10
+
+### Fixed
+
+- **Phase 4 S4-4d: admin volume replica summaries restored from quorum meta.**
+  S4-4b removed the object index that fed per-volume EC replica layout facts, so
+  the admin volume-health endpoint had lost its replica signal. New
+  `DistributedBackend.ScanObjectMetaEntries` scatter-gathers a bucket's live
+  (tombstone-filtered) quorum meta and returns each block as an entry carrying
+  its EC placement fields; `VolumeReplicaSummaries` scans `__grainfs_volumes` and
+  classifies each block against its placement group (`ClassifyObjectLayout`),
+  aggregated per volume. A nil backend or scan error degrades gracefully to the
+  incident-only signal as before.
+
 ## [0.0.530.0] - 2026-06-10
 
 ### Fixed

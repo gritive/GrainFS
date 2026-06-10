@@ -641,6 +641,36 @@ func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix 
 // scatterGatherList fans out ScanQuorumMeta calls to all shard group peers
 // (including self), applies per-key LWW (max ModTime wins), filters
 // IsDeleteMarker tombstones, and returns the surviving entries sorted by key.
+// ScanObjectMetaEntries scatter-gathers the live (tombstone-filtered) object
+// metadata for bucket under prefix and returns each as an ObjectIndexEntry
+// carrying the EC placement fields (PlacementGroupID, NodeIDs, ECData, ECParity)
+// that ClassifyObjectLayout needs. S4-4d uses it to rebuild admin volume replica
+// facts from quorum meta now that the object index is gone.
+func (b *DistributedBackend) ScanObjectMetaEntries(ctx context.Context, bucket, prefix string) ([]ObjectIndexEntry, error) {
+	cmds, err := b.scatterGatherList(ctx, bucket, prefix)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]ObjectIndexEntry, 0, len(cmds))
+	for _, cmd := range cmds {
+		entries = append(entries, ObjectIndexEntry{
+			Bucket:           cmd.Bucket,
+			Key:              cmd.Key,
+			VersionID:        cmd.VersionID,
+			PlacementGroupID: cmd.PlacementGroupID,
+			Size:             cmd.Size,
+			ContentType:      cmd.ContentType,
+			ETag:             cmd.ETag,
+			ModTime:          cmd.ModTime,
+			ECData:           cmd.ECData,
+			ECParity:         cmd.ECParity,
+			NodeIDs:          cmd.NodeIDs,
+			IsDeleteMarker:   cmd.IsDeleteMarker,
+		})
+	}
+	return entries, nil
+}
+
 func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, nil
