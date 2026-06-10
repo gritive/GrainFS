@@ -399,69 +399,6 @@ func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID 
 	return m.waitAppliedResult(ctx, idx)
 }
 
-// ProposeObjectIndex encodes a PutObjectIndex command and proposes it to the
-// meta-Raft group, blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error {
-	encodeStart := time.Now()
-	payload, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
-			MetaProposeSite: "local",
-			Error:           err.Error(),
-		})
-		return fmt.Errorf("meta_raft: encode PutObjectIndex: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, payload)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
-			MetaProposeSite: "local",
-			Error:           err.Error(),
-		})
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
-		MetaProposeSite: "local",
-	})
-	proposeStart := time.Now()
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageMetaIndexLocalPropose, proposeStart, PutTraceStageFields{
-			MetaProposeSite: "local",
-			Error:           err.Error(),
-		})
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexLocalPropose, proposeStart, PutTraceStageFields{
-		MetaProposeSite: "local",
-	})
-	applyStart := time.Now()
-	err = m.waitAppliedResult(ctx, idx)
-	fields := PutTraceStageFields{MetaProposeSite: "local"}
-	if err != nil {
-		fields.Error = err.Error()
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexLocalApply, applyStart, fields)
-	return err
-}
-
-// ProposeDeleteObjectIndex removes one object-index version row and updates
-// the key's latest pointer in the meta-Raft FSM.
-func (m *MetaRaft) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error {
-	payload, err := encodeMetaDeleteObjectIndexCmd(bucket, key, versionID)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode DeleteObjectIndex: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypeDeleteObjectIndex, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
 // it is applied to the local FSM.
 func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
@@ -475,21 +412,6 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	data, err := encodeMetaCmd(MetaCmdTypePutShardGroup, payload)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
-// ProposeIndexGroup proposes a PutIndexGroup command to the cluster and blocks
-// until it is applied to the local FSM. Index groups are a registry separate
-// from data shard groups.
-func (m *MetaRaft) ProposeIndexGroup(ctx context.Context, ig IndexGroupEntry) error {
-	data, err := encodeMetaIndexGroupCmd(ig)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode PutIndexGroup: %w", err)
 	}
 	idx, err := m.node.ProposeWait(ctx, data)
 	if err != nil {

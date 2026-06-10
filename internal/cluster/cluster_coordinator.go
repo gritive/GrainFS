@@ -83,17 +83,6 @@ func (a dataGroupManagerLocalBackend) Backend(groupID string) *GroupBackend {
 	return dg.Backend()
 }
 
-// metaObjectIndexAdapter is a helper that extracts the narrow
-// objectIndexLookup interface from a ShardGroupSource via type assertion.
-// Returns nil if meta does not implement the index methods (test wiring;
-// production meta-FSM always does).
-func metaObjectIndexAdapter(meta ShardGroupSource) objectIndexLookup {
-	if src, ok := meta.(objectIndexLookup); ok {
-		return src
-	}
-	return nil
-}
-
 // ErrForwardBodySizeMismatch is returned when a forwarded data-plane reply
 // reports success but the returned metadata size does not match the body bytes
 // that crossed the wire. Treating this as success can commit an empty object
@@ -122,8 +111,6 @@ type ClusterCoordinator struct {
 	addr        NodeAddressBook
 	ecConfig    ECConfig
 	runtime     atomic.Pointer[clusterCoordinatorRuntime]
-	indexWriter objectIndexProposer
-	indexReader objectIndexLookup // overrides metaObjectIndexAdapter(meta) when set (sharded index façade)
 	capGate     *CapabilityGate
 
 	opRouter  *OpRouter
@@ -137,17 +124,6 @@ type clusterCoordinatorRuntime struct {
 	opRouter  *OpRouter
 	localExec *LocalExecution
 	ecConfig  ECConfig
-}
-
-type objectIndexListSource interface {
-	ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
-	ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) (entries []ObjectIndexEntry, truncated bool)
-	ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
-}
-
-type objectIndexProposer interface {
-	ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error
-	ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error
 }
 
 // NewClusterCoordinator constructs a coordinator with the legacy 5 MiB
@@ -216,23 +192,6 @@ func (c *ClusterCoordinator) SetAppendForwardBufferConfig(cfg AppendForwardBuffe
 	c.appendForwardBuffer = newAppendForwardBuffer(cfg.TotalBytes)
 }
 
-func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *ClusterCoordinator {
-	c.indexWriter = p
-	c.rebuild()
-	return c
-}
-
-// WithObjectIndexReader injects the point-read index source used by the
-// embedded OpRouter. When set (production: the ObjectIndexShardSet façade), it
-// overrides metaObjectIndexAdapter(c.meta). When nil, rebuild() falls back to
-// the meta adapter — preserving the pre-façade path for tests and the
-// single-node/no-index wiring.
-func (c *ClusterCoordinator) WithObjectIndexReader(r objectIndexLookup) *ClusterCoordinator {
-	c.indexReader = r
-	c.rebuild()
-	return c
-}
-
 func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCoordinator {
 	c.capGate = gate
 	return c
@@ -243,14 +202,9 @@ func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCo
 // NewClusterCoordinator. Keeping the modules embedded rather than passed
 // per-call avoids per-request allocations on the hot path.
 func (c *ClusterCoordinator) rebuild() {
-	indexReader := c.indexReader
-	if indexReader == nil {
-		indexReader = metaObjectIndexAdapter(c.meta)
-	}
 	opRouter := NewOpRouter(
 		c.router,
 		c.meta,
-		indexReader,
 		c.addr,
 		dataGroupManagerLeaderProbe{m: c.groups},
 		c.ecConfig,
@@ -292,22 +246,13 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 	}
 }
 
-// routeReadOrBucket picks RouteObjectRead when an object index is configured
-// (production wiring), and falls back to RouteBucket when not (test wiring
-// without an objectIndexProposer / objectIndexLookup). Preserves the legacy
-// routeObjectLatest/Version dispatch behavior that callers depended on.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
 	target, _, _, err := c.routeIndexedReadOrBucket(bucket, key, versionID)
 	return target, err
 }
 
 func (c *ClusterCoordinator) routeIndexedReadOrBucket(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, bool, error) {
-	state := c.runtimeState()
-	if c.indexWriter == nil {
-		target, err := state.opRouter.RouteBucket(bucket)
-		return target, ObjectIndexEntry{}, false, err
-	}
-	target, entry, err := state.opRouter.RouteObjectRead(bucket, key, versionID)
+	target, entry, err := c.runtimeState().opRouter.RouteObjectRead(bucket, key, versionID)
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
 		if fallbackErr == nil {
@@ -317,15 +262,10 @@ func (c *ClusterCoordinator) routeIndexedReadOrBucket(bucket, key, versionID str
 	return target, entry, err == nil, err
 }
 
-// routeWriteOrBucket picks RouteObjectWrite (EC-aware placement) when an
-// object index proposer or EC config is configured (production wiring), and
-// falls back to a bucket-only route when neither is set. Preserves the legacy
-// routeObjectWrite short-circuit:
-//
-//	indexWriter == nil && ecConfig.NumShards() == 0 → routeBucket
+// routeWriteOrBucket falls back to RouteBucket for single-node wiring (no EC).
 func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
 	state := c.runtimeState()
-	if c.indexWriter == nil && state.ecConfig.NumShards() == 0 {
+	if state.ecConfig.NumShards() == 0 {
 		target, err := state.opRouter.RouteBucket(bucket)
 		return target, ShardGroupEntry{ID: target.GroupID}, err
 	}
@@ -333,39 +273,6 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 }
 
 func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOffset int64) (RouteTarget, ShardGroupEntry, error) {
-	state := c.runtimeState()
-	if c.indexWriter != nil && c.objectIndexReadSource() != nil && !storage.IsInternalBucket(bucket) {
-		target, entry, err := state.opRouter.RouteObjectRead(bucket, key, "")
-		if err == nil {
-			if entry.Size > expectedOffset {
-				log.Debug().
-					Str("bucket", bucket).
-					Str("key", key).
-					Int64("indexed_size", entry.Size).
-					Int64("offset", expectedOffset).
-					Msg("append stale offset rejected from object index before body read")
-				return RouteTarget{}, ShardGroupEntry{}, storage.ErrAppendOffsetMismatch
-			}
-			if entry.Size < expectedOffset {
-				log.Warn().
-					Str("event", "append_route_index_behind_expected_offset").
-					Str("bucket", bucket).
-					Str("key", key).
-					Str("group_id", entry.PlacementGroupID).
-					Int64("indexed_size", entry.Size).
-					Int64("expected_offset", expectedOffset).
-					Msg("append route used object index entry behind caller offset")
-			}
-			group, ok := c.meta.ShardGroup(entry.PlacementGroupID)
-			if !ok {
-				return RouteTarget{}, ShardGroupEntry{}, ErrNoGroup
-			}
-			return target, group, nil
-		}
-		if !errors.Is(err, storage.ErrObjectNotFound) {
-			return RouteTarget{}, ShardGroupEntry{}, err
-		}
-	}
 	return c.routeWriteOrBucket(bucket, key)
 }
 
@@ -721,46 +628,6 @@ func (c *ClusterCoordinator) RestoreBuckets(buckets []storage.SnapshotBucket) er
 	return snap.RestoreBuckets(buckets)
 }
 
-func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key string, obj *storage.Object, group ShardGroupEntry, isDeleteMarker bool) error {
-	if c.indexWriter == nil {
-		return nil
-	}
-	if storage.IsInternalBucket(bucket) {
-		return nil
-	}
-	if _, ok := PutTraceRequestFromContext(ctx); !ok {
-		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
-			Bucket:      bucket,
-			Key:         key,
-			GroupID:     group.ID,
-			Ingress:     PutTraceIngressLocalLeader,
-			SizeClass:   PutTraceSizeUnknown,
-			ForwardMode: PutTraceForwardNone,
-		})
-	}
-	entry := buildObjectIndexEntry(group, bucket, key, obj, isDeleteMarker)
-	stageStart := time.Now()
-	err := c.indexWriter.ProposeObjectIndex(ctx, entry, false)
-	fields := PutTraceStageFields{MetaProposeSite: "coordinator", MetaProposeCount: 1}
-	if err != nil {
-		fields.Error = err.Error()
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
-	return err
-}
-
-func objectIndexECConfigForGroup(group ShardGroupEntry) ECConfig {
-	return AutoECConfigForClusterSize(len(group.PeerIDs))
-}
-
-func objectIndexNodeIDsForGroup(group ShardGroupEntry, cfg ECConfig) []string {
-	n := cfg.NumShards()
-	if n > 0 && len(group.PeerIDs) >= n {
-		return cloneStringSlice(group.PeerIDs[:n])
-	}
-	return cloneStringSlice(group.PeerIDs)
-}
-
 func contextWithObjectWritePlacement(ctx context.Context, group ShardGroupEntry) context.Context {
 	if len(group.PeerIDs) == 0 {
 		return ContextWithPlacementGroup(ctx, group.ID)
@@ -797,60 +664,6 @@ func logForwardReplyDecodeError(err error, bucket, key, groupID string, op raftp
 		Bool("has_object", forwardReplyHasObject(reply)).
 		Int("reply_bytes", len(reply)).
 		Msg("forward: decode reply failed")
-}
-
-func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
-	obj := &storage.Object{
-		Key:          entry.Key,
-		Size:         entry.Size,
-		ContentType:  entry.ContentType,
-		ETag:         entry.ETag,
-		LastModified: entry.ModTime,
-		VersionID:    entry.VersionID,
-	}
-	if len(entry.Parts) > 0 {
-		parts := make([]storage.MultipartPartEntry, len(entry.Parts))
-		copy(parts, entry.Parts)
-		obj.Parts = parts
-	}
-	return obj
-}
-
-// TODO(post-launch): widen ObjectIndexEntry with Tags if List-via-coordinator
-// must surface tags. Today clients call GetObjectTagging separately.
-func objectIndexEntryToVersion(entry ObjectIndexEntry, isLatest bool) *storage.ObjectVersion {
-	return &storage.ObjectVersion{
-		Key:            entry.Key,
-		VersionID:      entry.VersionID,
-		IsLatest:       isLatest,
-		IsDeleteMarker: entry.IsDeleteMarker,
-		LastModified:   entry.ModTime,
-		ETag:           entry.ETag,
-		Size:           entry.Size,
-	}
-}
-
-// objectIndexReadSource returns the point-read index source: the injected
-// façade (c.indexReader) when set, else the meta adapter (byte-identical
-// fallback for tests / single-node).
-func (c *ClusterCoordinator) objectIndexReadSource() objectIndexLookup {
-	if c.indexReader != nil {
-		return c.indexReader
-	}
-	return metaObjectIndexAdapter(c.meta)
-}
-
-func (c *ClusterCoordinator) objectIndexListSource() (objectIndexListSource, bool) {
-	if c.indexWriter == nil {
-		return nil, false
-	}
-	if c.indexReader != nil {
-		if ls, ok := c.indexReader.(objectIndexListSource); ok {
-			return ls, true
-		}
-	}
-	src, ok := c.meta.(objectIndexListSource)
-	return src, ok
 }
 
 // localBackend returns the GroupBackend embedded in the named group. Caller
@@ -947,15 +760,6 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 			return rc, obj, err
 		}
 	}
-	// Phase 3: FU#4 short-circuit disabled — object metadata is stored in the
-	// per-node quorum meta store, not in the object index. Non-indexed user
-	// objects must be forwarded to the placement-group leader, which will
-	// resolve the quorum meta read via headObjectMeta. Restore FU#4 when
-	// Phase 3 writes to the object index.
-	//
-	// if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
-	//     return nil, nil, storage.ErrObjectNotFound
-	// }
 	args := buildGetObjectArgs(bucket, key)
 	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
 }
@@ -1060,12 +864,6 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	} else if gb != nil {
 		return gb.HeadObject(ctx, bucket, key)
 	}
-	// FU#4 missing-object-500: see GetObject — fall back to NotFound when no
-	// authoritative source has the key and we'd otherwise forward to a
-	// placement group with no quorum yet.
-	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
-		return nil, storage.ErrObjectNotFound
-	}
 	args := buildHeadObjectArgs(bucket, key)
 	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
 }
@@ -1095,38 +893,14 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return "", err
 	}
-	var (
-		target RouteTarget
-		group  ShardGroupEntry
-		err    error
-	)
-	if c.indexWriter == nil {
-		target, err = c.runtimeState().opRouter.RouteBucket(bucket)
-		group = ShardGroupEntry{ID: target.GroupID}
-	} else {
-		var entry ObjectIndexEntry
-		target, entry, err = c.runtimeState().opRouter.RouteObjectRead(bucket, key, "")
-		if errors.Is(err, storage.ErrObjectNotFound) {
-			target, group, err = c.routeWriteOrBucket(bucket, key)
-		} else {
-			group = ShardGroupEntry{ID: entry.PlacementGroupID, PeerIDs: entry.NodeIDs}
-		}
-	}
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return "", err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return "", err
 	} else if gb != nil {
-		markerID, err := gb.DeleteObjectReturningMarker(bucket, key)
-		if err != nil {
-			return "", err
-		}
-		marker := &storage.Object{Key: key, VersionID: markerID, LastModified: time.Now().Unix()}
-		if err := c.commitObjectIndex(ctx, bucket, key, marker, group, true); err != nil {
-			return "", err
-		}
-		return markerID, nil
+		return gb.DeleteObjectReturningMarker(bucket, key)
 	}
 	args := buildDeleteObjectArgs(bucket, key)
 	return c.forwardRuntime().deleteObject(ctx, target, args)
@@ -1141,13 +915,7 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
-		if err := gb.DeleteObjectVersion(bucket, key, versionID); err != nil {
-			return err
-		}
-		if c.indexWriter != nil {
-			return c.indexWriter.ProposeDeleteObjectIndex(ctx, bucket, key, versionID)
-		}
-		return nil
+		return gb.DeleteObjectVersion(bucket, key, versionID)
 	}
 	args := buildDeleteObjectVersionArgs(bucket, key, versionID)
 	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpDeleteObjectVersion, args)
@@ -1163,19 +931,6 @@ func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix str
 // beyond the returned slice — the S3 handler maps this to IsTruncated and
 // NextMarker.
 func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) (objects []*storage.Object, truncated bool, err error) {
-	if !storage.IsInternalBucket(bucket) {
-		if src, ok := c.objectIndexListSource(); ok {
-			if err := c.HeadBucket(ctx, bucket); err != nil {
-				return nil, false, err
-			}
-			entries, more := src.ObjectIndexLatestEntriesPage(bucket, prefix, marker, maxKeys)
-			objects = make([]*storage.Object, 0, len(entries))
-			for _, entry := range entries {
-				objects = append(objects, objectIndexEntryToObject(entry))
-			}
-			return objects, more, nil
-		}
-	}
 	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, false, err
@@ -1192,23 +947,6 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	bucket, prefix string, maxKeys int,
 ) ([]*storage.ObjectVersion, error) {
 	ctx := context.Background()
-	if src, ok := c.objectIndexListSource(); ok {
-		if err := c.HeadBucket(ctx, bucket); err != nil {
-			return nil, err
-		}
-		latestSrc := c.objectIndexReadSource()
-		entries := src.ObjectIndexVersionEntries(bucket, prefix, maxKeys)
-		versions := make([]*storage.ObjectVersion, 0, len(entries))
-		for _, entry := range entries {
-			isLatest := false
-			if latestSrc != nil {
-				latest, ok := latestSrc.ObjectIndexLatest(entry.Bucket, entry.Key)
-				isLatest = ok && latest.VersionID == entry.VersionID
-			}
-			versions = append(versions, objectIndexEntryToVersion(entry, isLatest))
-		}
-		return versions, nil
-	}
 	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
@@ -1225,18 +963,6 @@ func (c *ClusterCoordinator) ListObjectVersions(
 // one reply. Callers expecting large keysets should use ListObjects with
 // maxKeys pagination instead.
 func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
-	if src, ok := c.objectIndexListSource(); ok {
-		if err := c.HeadBucket(ctx, bucket); err != nil {
-			return err
-		}
-		entries := src.ObjectIndexLatestEntries(bucket, prefix, 0)
-		for _, entry := range entries {
-			if err := fn(objectIndexEntryToObject(entry)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return err
@@ -1300,9 +1026,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 	if s, ok := r.(interface{ Len() int }); ok {
 		sizeClass = putTraceSizeClass(int64(s.Len()), c.maxBody)
 	}
-	if c.indexWriter != nil {
-		ctx = contextWithObjectWritePlacement(ctx, group)
-	}
+	ctx = contextWithObjectWritePlacement(ctx, group)
 	if gb, err := c.runtimeState().localExec.ResolveObjectWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
@@ -1324,7 +1048,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 		if err != nil {
 			return nil, err
 		}
-		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+		return obj, nil
 	}
 	if len(userMetadata) > 0 || req.ACL != nil {
 		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
@@ -1377,20 +1101,6 @@ func (c *ClusterCoordinator) PutObjectWithRequestResult(ctx context.Context, req
 }
 
 func (c *ClusterCoordinator) previousObjectForMutation(ctx context.Context, bucket, key string) (storage.PreviousObject, error) {
-	if !storage.IsInternalBucket(bucket) && c.indexWriter != nil {
-		if src := c.objectIndexReadSource(); src != nil {
-			entry, ok := src.ObjectIndexLatest(bucket, key)
-			if !ok || entry.IsDeleteMarker {
-				return storage.PreviousObject{}, nil
-			}
-			return storage.PreviousObject{
-				Exists:    true,
-				Size:      entry.Size,
-				ETag:      entry.ETag,
-				VersionID: entry.VersionID,
-			}, nil
-		}
-	}
 	obj, err := c.HeadObject(ctx, bucket, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotFound) {
@@ -1778,9 +1488,7 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	if err != nil {
 		return nil, err
 	}
-	if c.indexWriter != nil {
-		ctx = contextWithObjectWritePlacement(ctx, group)
-	}
+	ctx = contextWithObjectWritePlacement(ctx, group)
 
 	// Local-exec branch — DistributedBackend.AppendObject already performs the
 	// cluster-aware pre-check (offset/cap/non-appendable). We add a bounded
@@ -1789,24 +1497,11 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		obj, err := c.appendObjectLocalWithRetry(ctx, gb, bucket, key, expectedOffset, r)
-		if err != nil {
-			return nil, err
-		}
-		if err := c.commitObjectIndex(ctx, bucket, key, obj, group, false); err != nil {
-			return nil, err
-		}
-		return obj, nil
+		return c.appendObjectLocalWithRetry(ctx, gb, bucket, key, expectedOffset, r)
 	}
 
 	obj, err := c.forwardRuntime().appendObject(ctx, target, group, bucket, key, expectedOffset, r)
 	if err != nil {
-		return nil, err
-	}
-	// The receiver commits the object index first. Re-proposing the same entry
-	// on the ingress node closes the read-your-writes gap where this node's
-	// local meta-FSM has not applied the receiver's commit yet.
-	if err := c.commitObjectIndex(ctx, bucket, key, obj, group, false); err != nil {
 		return nil, err
 	}
 	c.waitLocalAppendVisible(ctx, target, bucket, key, obj)

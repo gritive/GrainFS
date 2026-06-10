@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.529.0] - 2026-06-10
+
+### Changed
+
+- **Phase 4: index-free LIST + meta-index removal (S4-4a, S4-4b).** The cluster
+  object listing path no longer depends on the meta-raft object index. `ListObjects`/
+  `ListObjectsPage`/`WalkObjects` now resolve entries via per-group quorum-meta
+  scatter-gather with last-writer-wins merge and tombstone filtering (S4-4a), and the
+  entire object-index write path is removed (S4-4b): `ProposeObjectIndex`/
+  `ProposeDeleteObjectIndex`, the `MetaFSM` `objectIndex`/`objectLatest` maps and their
+  apply/encode functions, the `index_group` machinery, `ObjectIndexShardSet`, and the
+  serveruntime index-group boot/seed wiring. This removes the second consensus round
+  from the object write path. Old snapshots containing object-index entries are decoded
+  and discarded (forward-compatible).
+
+### Removed
+
+- **`--object-index-groups` flag (EXPERIMENTAL, breaking).** The sharded object-index
+  raft-group feature is removed along with the object index itself. The flag had no
+  effect at its default (`1`) and was greenfield-only; no alias is provided.
+
+### Notes
+
+- DEK reference counting lost its driver (the object-index apply path); DEK version
+  pruning already refuses unconditionally until S7's full prune-safety predicate, so
+  zero refcounts are harmless. The refcount machinery stays wired for S7.
+- Admin volume replica summaries (`VolumeReplicaSummaries`) return empty pending the
+  S4-4c read-path migration to quorum meta.
+- **⚠️ Known read-path regression — do NOT merge/deploy this branch as-is; fixed in
+  S4-4c.** Removing the object index left the GET/HEAD/ReadAt/Truncate routing
+  (`routeIndexedReadOrBucket` + `objectMatchesIndexForFollowerRead`, 5 call sites) still
+  comparing the local object against a now-always-empty index entry. Observed impact:
+  (1) a follower that holds the object always concludes "local is stale" and forwards to
+  the group leader instead of serving locally — functional when a leader is reachable but
+  a latency regression and a hard failure where no leader resolves; (2) **internal-bucket
+  reads (volume/VFS/NBD via `Truncate`/`WriteAt`/`GetObject`) currently error with
+  "coordinator: router not configured"** — a functional outage for those paths. 11 unit
+  tests + 1 ginkgo table are gated behind `t.Skip("Phase 4 S4-4c: ...")` rather than
+  deleted. S4-4c migrates these reads to quorum-meta lookups and updates the tests to the
+  new contract; this branch is WIP behind the Phase-5 benchmark merge gate until then.
+
 ## [0.0.528.0] - 2026-06-10
 
 ### Changed

@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // PeerHealthAdapter implements admin.PeerHealthAPI on top of
@@ -64,10 +63,11 @@ func (f ReplicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key stri
 }
 
 // VolumePlacementAdapter implements admin.VolumePlacementSource over the
-// cluster meta-Raft FSM. One full pass over the volume bucket builds a
-// per-volume admin.ReplicaLayoutFact via aggregateVolumeReplicaLayout. nil
-// metaRaft (or nil FSM) returns nil with no error so standalone runtimes
-// fall back to incident-only volume health composition.
+// cluster meta-Raft FSM. Phase 4 S4-4b removed the object index that fed
+// per-volume replica layout facts, so VolumeReplicaSummaries now returns nil
+// (no replica signal); standalone runtimes already fall back to incident-only
+// volume health composition. Reinstating replica summaries from quorum meta is
+// tracked under S4-4c (read-path migration).
 type VolumePlacementAdapter struct {
 	metaRaft *cluster.MetaRaft
 }
@@ -79,24 +79,9 @@ func NewVolumePlacementAdapter(metaRaft *cluster.MetaRaft) VolumePlacementAdapte
 	return VolumePlacementAdapter{metaRaft: metaRaft}
 }
 
-func (a VolumePlacementAdapter) VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]admin.ReplicaLayoutFact, error) {
-	if a.metaRaft == nil {
-		return nil, nil
-	}
-	fsm := a.metaRaft.FSM()
-	if fsm == nil {
-		return nil, nil
-	}
-	entries := fsm.ObjectIndexLatestEntries(volume.VolumeBucketName, "", 0)
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	groupList := fsm.ShardGroups()
-	groups := make(map[string]cluster.ShardGroupEntry, len(groupList))
-	for _, g := range groupList {
-		groups[g.ID] = g
-	}
-	return aggregateVolumeReplicaLayout(entries, groups, names), nil
+func (a VolumePlacementAdapter) VolumeReplicaSummaries(_ context.Context, _ []string) (map[string]admin.ReplicaLayoutFact, error) {
+	// Object index removed in Phase 4; replica summaries via index lookup are no longer available.
+	return nil, nil
 }
 
 // ScrubProposerAdapter implements admin.ScrubProposer over MetaRaft. The

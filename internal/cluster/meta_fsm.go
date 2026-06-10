@@ -42,7 +42,6 @@ const (
 	MetaCmdTypeAddNode                      = clusterpb.MetaCmdTypeAddNode
 	MetaCmdTypeRemoveNode                   = clusterpb.MetaCmdTypeRemoveNode
 	MetaCmdTypePutShardGroup                = clusterpb.MetaCmdTypePutShardGroup        // PR-C
-	MetaCmdTypePutIndexGroup                = clusterpb.MetaCmdTypePutIndexGroup        // sharded object index registry
 	MetaCmdTypePutBucketAssignment          = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
 	MetaCmdTypeSetLoadSnapshot              = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
 	MetaCmdTypeProposeRebalancePlan         = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
@@ -57,8 +56,6 @@ const (
 	MetaCmdTypeRotateKeyDrop                = clusterpb.MetaCmdTypeRotateKeyDrop
 	MetaCmdTypeRotateKeyAbort               = clusterpb.MetaCmdTypeRotateKeyAbort
 	MetaCmdTypeScrubTrigger                 = clusterpb.MetaCmdTypeScrubTrigger // PR4
-	MetaCmdTypePutObjectIndex               = clusterpb.MetaCmdTypePutObjectIndex
-	MetaCmdTypeDeleteObjectIndex            = clusterpb.MetaCmdTypeDeleteObjectIndex
 	MetaCmdTypeIAMSACreate                  = clusterpb.MetaCmdTypeIAMSACreate
 	MetaCmdTypeIAMSADelete                  = clusterpb.MetaCmdTypeIAMSADelete
 	MetaCmdTypeIAMKeyCreate                 = clusterpb.MetaCmdTypeIAMKeyCreate
@@ -261,11 +258,8 @@ type IcebergDeleteTableCmd struct {
 type MetaFSM struct {
 	mu                sync.RWMutex
 	nodes             map[string]MetaNodeEntry
-	shardGroups       map[string]ShardGroupEntry // key = group ID
-	indexGroups       map[string]IndexGroupEntry // key = index group ID; separate from shardGroups
-	bucketAssignments map[string]string          // bucket → group_id (PR-D)
-	objectIndex       map[string]ObjectIndexEntry
-	objectLatest      map[string]string
+	shardGroups       map[string]ShardGroupEntry                  // key = group ID
+	bucketAssignments map[string]string                           // bucket → group_id (PR-D)
 	loadSnapshot      map[string]LoadStatEntry                    // node_id → stats (PR-D)
 	activePlan        *RebalancePlan                              // nil = no active plan (PR-D)
 	icebergNamespaces map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
@@ -273,7 +267,6 @@ type MetaFSM struct {
 	onBucketAssigned  func(string, string)                        // protected by mu; set before Start() (PR-D)
 	onRebalancePlan   func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
 	onShardGroupAdded func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onIndexGroupAdded func(IndexGroupEntry)                       // fired after PutIndexGroup applies; protected by mu (Slice 4b)
 	onIcebergResult   func(string, error)                         // requestID, typed catalog result; must not block
 	onScrubTrigger    func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
 	onNfsExportChange func()                                      // fired after NFS export registry apply; must not block
@@ -387,9 +380,8 @@ type MetaFSM struct {
 	dekKeeper *encrypt.DEKKeeper
 
 	// dekRefCounts holds the per-generation reference count: how many
-	// ObjectIndexEntry records reference each DEK generation. Incremented on
-	// applyPutObjectIndex, decremented on applyDeleteObjectIndex. Persisted
-	// in the DKVS snapshot trailer alongside DEK versions (Task 12).
+	// quorum-meta records reference each DEK generation. Persisted in the
+	// DKVS snapshot trailer alongside DEK versions (Task 12).
 	dekRefCounts map[uint32]uint64
 
 	// dekRewrapDone tracks per-generation rewrap completion: gen → (nodeID →
@@ -675,10 +667,7 @@ func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
 		nodes:                      make(map[string]MetaNodeEntry),
 		shardGroups:                make(map[string]ShardGroupEntry),
-		indexGroups:                make(map[string]IndexGroupEntry),
 		bucketAssignments:          make(map[string]string),
-		objectIndex:                make(map[string]ObjectIndexEntry),
-		objectLatest:               make(map[string]string),
 		loadSnapshot:               make(map[string]LoadStatEntry),
 		icebergNamespaces:          make(map[string]map[string]IcebergNamespaceEntry),
 		icebergTables:              make(map[string]map[string]IcebergTableEntry),
@@ -791,14 +780,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyRemoveNode(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutShardGroup:
 		return f.applyPutShardGroup(cmd.DataBytes())
-	case clusterpb.MetaCmdTypePutIndexGroup:
-		return f.applyPutIndexGroup(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
-	case clusterpb.MetaCmdTypePutObjectIndex:
-		return f.applyPutObjectIndex(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeDeleteObjectIndex:
-		return f.applyDeleteObjectIndex(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:
 		return f.applySetLoadSnapshot(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeProposeRebalancePlan:
@@ -1042,18 +1025,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-func cloneObjectIndexEntry(in ObjectIndexEntry) ObjectIndexEntry {
-	in.NodeIDs = cloneStringSlice(in.NodeIDs)
-	if len(in.Parts) > 0 {
-		cp := make([]storage.MultipartPartEntry, len(in.Parts))
-		copy(cp, in.Parts)
-		in.Parts = cp
-	} else {
-		in.Parts = nil
-	}
-	return in
 }
 
 func readStringVector(n int, at func(int) []byte) []string {

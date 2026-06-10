@@ -236,7 +236,6 @@ var _ = Describe("Forward receiver integration", func() {
 
 		t := GinkgoT()
 		rcv, mgr := setupReceiver(t, "node1")
-		rcv.WithObjectIndexProposer(noopObjectIndexProposer{})
 		gb := newTestGroupBackend(t, "g1")
 		mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 

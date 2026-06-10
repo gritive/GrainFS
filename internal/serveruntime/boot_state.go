@@ -256,10 +256,6 @@ type bootState struct {
 	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
-	// indexGroupMgr owns the local object-index raft groups when IndexGroupCount>1
-	// (Slice 4b). nil at the default N=1 (the single meta-FSM shard path), so the
-	// post-seed phase + shutdown are no-ops there. Set by bootIndexGroupsPostSeed.
-	indexGroupMgr *cluster.IndexGroupManager
 	// seedMu (Option B) serializes the leader-side deferred seed-on-quorum across
 	// overlapping post-join hooks within one process. The "should I seed" decision
 	// itself is derived (handleDeferredSeed), not stored, so it survives a leader

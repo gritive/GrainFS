@@ -41,23 +41,10 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for _, sg := range f.shardGroups {
 		shardGroups = append(shardGroups, sg)
 	}
-	indexGroups := make([]IndexGroupEntry, 0, len(f.indexGroups))
-	for _, ig := range f.indexGroups {
-		indexGroups = append(indexGroups, ig)
-	}
 	type bucketKV struct{ bucket, groupID string }
 	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
 	for bucket, groupID := range f.bucketAssignments {
 		buckets = append(buckets, bucketKV{bucket, groupID})
-	}
-	objectEntries := make([]objectIndexSnapshotEntry, 0, len(f.objectIndex))
-	for versionKey, entry := range f.objectIndex {
-		latestVersionID := f.objectLatest[objectIndexLatestKey(entry.Bucket, entry.Key)]
-		objectEntries = append(objectEntries, objectIndexSnapshotEntry{
-			ObjectIndexEntry: cloneObjectIndexEntry(entry),
-			IsLatest:         latestVersionID == entry.VersionID,
-			sortKey:          versionKey,
-		})
 	}
 	lsEntries := make([]LoadStatEntry, 0, len(f.loadSnapshot))
 	for _, v := range f.loadSnapshot {
@@ -190,30 +177,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	sgVec := b.EndVector(len(sgOffs))
 
-	// Build IndexGroupEntry offsets (separate registry from shard groups).
-	igOffs := make([]flatbuffers.UOffsetT, len(indexGroups))
-	for i := len(indexGroups) - 1; i >= 0; i-- {
-		ig := indexGroups[i]
-		idOff := b.CreateString(ig.ID)
-		peerOffs := make([]flatbuffers.UOffsetT, len(ig.PeerIDs))
-		for j := len(ig.PeerIDs) - 1; j >= 0; j-- {
-			peerOffs[j] = b.CreateString(ig.PeerIDs[j])
-		}
-		clusterpb.IndexGroupEntryStartPeerIdsVector(b, len(peerOffs))
-		for j := len(peerOffs) - 1; j >= 0; j-- {
-			b.PrependUOffsetT(peerOffs[j])
-		}
-		peerVec := b.EndVector(len(peerOffs))
-		clusterpb.IndexGroupEntryStart(b)
-		clusterpb.IndexGroupEntryAddId(b, idOff)
-		clusterpb.IndexGroupEntryAddPeerIds(b, peerVec)
-		igOffs[i] = clusterpb.IndexGroupEntryEnd(b)
-	}
-	clusterpb.MetaStateSnapshotStartIndexGroupsVector(b, len(igOffs))
-	for i := len(igOffs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(igOffs[i])
-	}
-	igVec := b.EndVector(len(igOffs))
+	// Index groups removed in Phase 4; encode empty vector for wire compatibility.
+	clusterpb.MetaStateSnapshotStartIndexGroupsVector(b, 0)
+	igVec := b.EndVector(0)
 
 	// Build MetaNodeEntry offsets
 	nodeOffs := make([]flatbuffers.UOffsetT, len(nodes))
@@ -287,7 +253,9 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 
 	icebergNamespaceVec := buildIcebergNamespaceEntriesVector(b, icebergNamespaces)
 	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
-	objectIndexVec := buildMetaObjectIndexEntriesVector(b, objectEntries)
+	// Object index removed in Phase 4; encode empty vector for wire compatibility.
+	clusterpb.MetaStateSnapshotStartObjectIndexVector(b, 0)
+	objectIndexVec := b.EndVector(0)
 	nfsExportVec := buildNfsExportEntriesVector(b, nfsExports)
 
 	// ClusterConfig: serialize the wrapper's current snap into a stand-alone
@@ -485,28 +453,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newShardGroups[e.ID] = e
 	}
 
-	// Index groups: separate registry. Mirror applyPutIndexGroup (no ValidateGroupID,
-	// skip empty IDs) so log-replay and snapshot-restore land on identical state.
-	newIndexGroups := make(map[string]IndexGroupEntry, snap.IndexGroupsLength())
-	var igEntry clusterpb.IndexGroupEntry
-	for i := 0; i < snap.IndexGroupsLength(); i++ {
-		if !snap.IndexGroups(&igEntry, i) {
-			return fmt.Errorf("meta_fsm: Restore: index group %d decode failed", i)
-		}
-		peers := make([]string, igEntry.PeerIdsLength())
-		for j := 0; j < igEntry.PeerIdsLength(); j++ {
-			peers[j] = string(igEntry.PeerIds(j))
-		}
-		e := IndexGroupEntry{
-			ID:      string(igEntry.Id()),
-			PeerIDs: peers,
-		}
-		if e.ID == "" {
-			continue
-		}
-		newIndexGroups[e.ID] = e
-	}
-
 	newBucketAssignments := make(map[string]string, snap.BucketAssignmentsLength())
 	var baEntry clusterpb.BucketAssignmentEntry
 	for i := 0; i < snap.BucketAssignmentsLength(); i++ {
@@ -614,21 +560,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newIcebergTables[wh][icebergTableKey(ident)] = entry
 	}
 
-	newObjectIndex := make(map[string]ObjectIndexEntry, snap.ObjectIndexLength())
-	newObjectLatest := make(map[string]string)
-	var objFB clusterpb.MetaObjectIndexEntry
-	for i := 0; i < snap.ObjectIndexLength(); i++ {
-		if !snap.ObjectIndex(&objFB, i) {
-			return fmt.Errorf("meta_fsm: Restore: object index %d decode failed", i)
-		}
-		entry := readMetaObjectIndexEntry(&objFB)
-		vkey := objectIndexVersionKey(entry.Bucket, entry.Key, entry.VersionID)
-		newObjectIndex[vkey] = entry
-		if objFB.IsLatest() {
-			newObjectLatest[objectIndexLatestKey(entry.Bucket, entry.Key)] = entry.VersionID
-		}
-	}
-
+	// Object index removed in Phase 4; discard any entries for backward compatibility.
 	hasNfsExports := snap.NfsExportsPresent()
 	newNfsExports := make(map[string]nfsexport.Config, snap.NfsExportsLength())
 	var exportFB clusterpb.NfsExportUpsertCmd
@@ -723,7 +655,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// VALIDATE + BUILD the peer indexes HERE, in the decode phase, so a corrupt
 	// peer vector (duplicate node ID / duplicate SPKI / bad state) fails BEFORE
 	// any core FSM state is committed below. Previously peer import ran AFTER
-	// the f.nodes/shardGroups/objectIndex commit, leaving a FAILED Restore with
+	// the f.nodes/shardGroups commit, leaving a FAILED Restore with
 	// partially-mutated core state (violating the meta-raft invariant that a
 	// failed Restore leaves the FSM un-restored). The commit phase swaps these
 	// pre-validated maps in via commitPeerIndexes, which cannot fail.
@@ -928,10 +860,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
-	f.indexGroups = newIndexGroups
 	f.bucketAssignments = newBucketAssignments
-	f.objectIndex = newObjectIndex
-	f.objectLatest = newObjectLatest
 	f.loadSnapshot = newLoadSnapshot
 	f.activePlan = newActivePlan
 	f.icebergNamespaces = newIcebergNamespaces
@@ -952,13 +881,9 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		if newDEKRefs != nil {
 			f.dekRefCounts = newDEKRefs
 		} else {
-			// Pre-Task-12 snapshot: no ref_counts trailer field. Rebuild from the
-			// just-restored objectIndex so DEK prune-safety sees accurate counts.
-			// All legacy entries decode dek_gen=0 via FlatBuffer default.
-			f.dekRefCounts = make(map[uint32]uint64, len(f.objectIndex))
-			for _, e := range f.objectIndex {
-				f.dekRefCounts[e.DekGen]++
-			}
+			// Pre-Task-12 snapshot: no ref_counts trailer field. Object index was
+			// removed in Phase 4; start with empty ref counts.
+			f.dekRefCounts = make(map[uint32]uint64)
 		}
 		// Restore rewrap done set. Pre-S6d snapshots decode nil → empty map.
 		if newDEKRewrapDone != nil {

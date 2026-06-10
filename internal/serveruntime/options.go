@@ -33,7 +33,6 @@ type ServeOptions struct {
 	// --- Cluster bootstrap (Option B: uniform genesis seeding) ---
 	BootstrapExpectNodes   int           // --bootstrap-expect-nodes (0/unset = seed-immediately)
 	BootstrapExpectTimeout time.Duration // --bootstrap-expect-timeout
-	IndexGroupCount        int           // --object-index-groups (0/unset normalized to 1)
 
 	// --- Cluster transport tuning ---
 	AppendForwardBufferTotalBytes    int64         // --cluster-append-forward-buffer-total-bytes
