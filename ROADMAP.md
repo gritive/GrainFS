@@ -84,6 +84,15 @@
   - fan-out 비용 ∝ numGroups×nodes → metacache/병렬도 설계.
 - **검증**: group 횡단 LIST 정확성·delete 전파.
 
+#### Phase 4 진행 현황
+
+- [대기] **S4-0: ★ early-kill 벤치** — Phase 3 완료 브랜치 vs master 부분 벤치. 4-node GCP back-to-back PUT 측정. data_raft 제거 단독 효과 확인. **통과 기준**: PUT latency/throughput 가시적 개선 OR 사용자 명시적 계속 결정. → S4-1 게이트.
+- [대기] **S4-1: DELETE tombstone (quorum meta write)** — `deleteObjectWithMarker`: `deleteQuorumMetaLocal` 대신 `PutObjectMetaCmd{IsDeleteMarker: true}` K-of-N quorum meta write. `PutObjectMetaCmd.IsDeleteMarker` 필드 이미 존재 → 인코딩/팬아웃만 추가. 테스트: DELETE → `readQuorumMetaLocalDecoded` → IsDeleteMarker=true. 전제: S4-0 통과.
+- [대기] **S4-2: 로컬 quorum meta 버킷 스캔** — `ShardService.ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error)`: `IterQuorumMetaECShardTargets` 동일 WalkDir 패턴, prefix 필터, `decodeQuorumMetaCmdBlob` 디코딩. 반환: tombstone 포함 전체 (호출처가 필터). 테스트: PUT 2개 + DELETE 1개 populate → ScanQuorumMetaBucket → tombstone 포함 3개 반환 검증. 전제: S4-1.
+- [대기] **S4-3: scatter-gather LIST RPC + LWW merge** — ①`ScanQuorumMeta` shard RPC(handler in `shard_service.go`, `ShardService.ScanQuorumMetaBucket` 위임) ②`DistributedBackend.scatterGatherList(ctx, bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, error)`: shardGroup 피어 병렬 fan-out(quorumMetaReadTimeout), (bucket,key) 별 LWW(max ModTime), 정렬, truncate, tombstone(IsDeleteMarker) 필터링. 테스트: in-process 3-node scatter — stale vs fresh conflict → LWW 채택; tombstone → 결과에서 제외. 전제: S4-2.
+- [대기] **S4-4a: LIST flip** — `object_list.go`: `ListObjects`/`ListObjectsPage`/`WalkObjects`의 BadgerDB `lat:`+`obj:` 스캔을 `scatterGatherList` 로 교체. pagination: marker 기반(기존 ObjectIndexShardSet 정렬 패턴 재사용). 통합 테스트: 3-node in-process cross-group LIST + pagination(marker 경계) + tombstone 필터 정확성. 전제: S4-3.
+- [대기] **S4-4b: meta-index eager delete** — 즉시 제거(dual-path 미유지): ①`forward_receiver.go` ProposeObjectIndex 5개 + ProposeDeleteObjectIndex 1개 ②`cluster_coordinator.go` `indexWriter.ProposeObjectIndex` ③`MetaFSM.objectIndex`/`objectLatest` 맵 + `applyPutObjectIndex`/`applyDeleteObjectIndex`/인코딩 함수들 ④`index_group.go` 전체 ⑤`ObjectIndexShardSet` Writer 측(`ProposeObjectIndex`/`ProposeDeleteObjectIndex`) ⑥boot wiring(`cluster_coordinator.go` indexGrouper 필드, `SetOnIndexGroupAdded`). 테스트: `ProposeObjectIndex` grep 0. 전제: S4-4a.
+
 ### Phase 5 — ★결정 벤치 (cross-binary, merge go/no-go)
 - 합의 2회가 제거된 브랜치 vs master 바이너리. **엄격성 필수**(원칙): 외부 S3 앵커 · 같은 VM back-to-back · within-run 비율 · 다회. Phase 0이 거른 뒤 여기서 end-to-end를 실측.
 - **스코프 = PUT + GET + HEAD.** GET/HEAD 메타 read가 단일 raft-read→다중 quorum-read로 바뀌므로(이미 0.64–0.72x) **퇴행 위험 실측 필수.**
