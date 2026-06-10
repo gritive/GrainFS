@@ -107,14 +107,14 @@ STARTUP
     --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
     --boot-disk-size=40GB --boot-disk-type=pd-balanced \
     "${meta[@]}" \
-    --provisioning-model=SPOT --quiet >&2 || return 1
+    --min-cpu-platform="Intel Cascade Lake" --provisioning-model=SPOT --quiet >&2 || return 1
   for i in $(seq 0 $((NODE_COUNT - 1))); do
     gcloud compute instances create "$(node_name "$i")" \
       --zone="$ZONE" --project="$PROJECT" --machine-type="$MACHINE" \
       --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
       --boot-disk-size="${STORAGE_DISK_GB}GB" --boot-disk-type=pd-ssd \
       "${meta[@]}" \
-      --provisioning-model=SPOT --quiet >&2 || return 1
+      --min-cpu-platform="Intel Cascade Lake" --provisioning-model=SPOT --quiet >&2 || return 1
   done
   log "waiting for SSH on all nodes"
   for n in "${names[@]}"; do
