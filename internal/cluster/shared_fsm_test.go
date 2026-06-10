@@ -52,9 +52,9 @@ func newTestNodeForSharedDB(t *testing.T, nodeID string) (node RaftNode, closeFn
 
 // TestSharedFSM_BackendListObjects_ScopedToGroup verifies that two
 // DistributedBackends sharing one BadgerDB but using distinct stateKeyspaces
-// never see each other's objects. It drives writes via FSM.Apply (no Raft
-// round-trip needed) and reads via the real ListObjects + HeadObject iterator
-// paths.
+// never see each other's objects. Writes via FSM.Apply land in BadgerDB only;
+// Phase 4 LIST uses quorum meta (shardSvc), so group isolation is verified
+// via HeadObject point reads (BadgerDB path) rather than ListObjects.
 func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	// Shared in-memory BadgerDB.
 	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
@@ -114,25 +114,8 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 
 	ctx := context.Background()
 
-	// --- backendA: must see obj1 + obj2-only-in-A ---
-	objsA, err := backendA.ListObjects(ctx, bucket, "", 100)
-	require.NoError(t, err)
-	keysA := make([]string, 0, len(objsA))
-	for _, o := range objsA {
-		keysA = append(keysA, o.Key)
-	}
-	assert.ElementsMatch(t, []string{"obj1", "obj2-only-in-A"}, keysA,
-		"group-A ListObjects should return exactly obj1 and obj2-only-in-A")
-
-	// --- backendB: must see only obj1 ---
-	objsB, err := backendB.ListObjects(ctx, bucket, "", 100)
-	require.NoError(t, err)
-	keysB := make([]string, 0, len(objsB))
-	for _, o := range objsB {
-		keysB = append(keysB, o.Key)
-	}
-	assert.ElementsMatch(t, []string{"obj1"}, keysB,
-		"group-B ListObjects should return exactly obj1")
+	// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM backends
+	// have no shardSvc, so HeadObject point reads prove isolation instead.
 
 	// --- Point read: group-A's obj1 has A-payload, NOT B-payload ---
 	objA, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")

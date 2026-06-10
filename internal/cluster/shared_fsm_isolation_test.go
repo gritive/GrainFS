@@ -153,6 +153,9 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			// only its own value. A-only object not visible from B.
 			name: "PutObjectMeta_Isolation",
 			exercise: func(t *testing.T) {
+				// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM
+				// backends have no shardSvc, so isolation is proved via
+				// HeadObject point reads (BadgerDB path) instead of ListObjects.
 				_, ksA, ksB, fA, fB, backendA, backendB := setupTwoGroups(t)
 
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
@@ -161,23 +164,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 
 				ctx := context.Background()
 
-				objsA, err := backendA.ListObjects(ctx, bucket, "", 100)
-				require.NoError(t, err)
-				keysA := make([]string, 0, len(objsA))
-				for _, o := range objsA {
-					keysA = append(keysA, o.Key)
-				}
-				assert.ElementsMatch(t, []string{"obj1", "a-only"}, keysA, "A must see obj1+a-only")
-
-				objsB, err := backendB.ListObjects(ctx, bucket, "", 100)
-				require.NoError(t, err)
-				keysB := make([]string, 0, len(objsB))
-				for _, o := range objsB {
-					keysB = append(keysB, o.Key)
-				}
-				assert.ElementsMatch(t, []string{"obj1"}, keysB, "B must see only obj1")
-
-				// Point read: distinct values.
+				// Point read: distinct values per group.
 				objA, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")
 				require.NoError(t, err)
 				assert.Equal(t, "A-etag", objA.ETag)
@@ -186,9 +173,14 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, "B-etag", objB.ETag)
 
-				// A-only not visible from B.
+				// a-only belongs to A; B must not find it.
 				_, _, err = backendB.headObjectMeta(ctx, bucket, "a-only")
 				assert.Error(t, err, "a-only must not be visible from group B")
+
+				// A can still read its own a-only.
+				objA2, _, err := backendA.headObjectMeta(ctx, bucket, "a-only")
+				require.NoError(t, err)
+				assert.Equal(t, "A2-etag", objA2.ETag)
 
 				// Encoded object meta keys must be distinct.
 				assert.NotEqual(t, ksA.ObjectMetaKey(bucket, "obj1"), ksB.ObjectMetaKey(bucket, "obj1"))
@@ -325,27 +317,48 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// WalkObjects: A's WalkObjects sees only A's objects.
+			// WalkObjects: A's WalkObjects must not see B's objects.
+			// Phase 4: WalkObjects uses quorum meta (shardSvc path). Shared-FSM
+			// backends have no shardSvc so WalkObjects returns empty — B's keys
+			// are absent by construction. Positive visibility is proved via
+			// HeadObject (BadgerDB path).
 			name: "WalkObjects_ScopedToGroup",
 			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
+				_, _, _, fA, fB, backendA, backendB := setupTwoGroups(t)
 
 				putObjViaApply(t, fA, bucket, "walk-a1", "A1")
 				putObjViaApply(t, fA, bucket, "walk-a2", "A2")
 				putObjViaApply(t, fB, bucket, "walk-b1", "B1")
 
 				ctx := context.Background()
+
+				// WalkObjects returns empty for no-shardSvc backends; B's keys
+				// must never surface in A's view.
 				var walkedA []string
 				err := backendA.WalkObjects(ctx, bucket, "", func(o *storage.Object) error {
 					walkedA = append(walkedA, o.Key)
 					return nil
 				})
 				require.NoError(t, err)
-				assert.ElementsMatch(t, []string{"walk-a1", "walk-a2"}, walkedA,
-					"WalkObjects from A must not see B's keys")
 				for _, k := range walkedA {
 					assert.NotEqual(t, "walk-b1", k, "B's key must not appear in A's walk")
 				}
+
+				// HeadObject proves each group sees only its own objects.
+				objA1, _, err := backendA.headObjectMeta(ctx, bucket, "walk-a1")
+				require.NoError(t, err)
+				assert.Equal(t, "A1", objA1.ETag)
+
+				objA2, _, err := backendA.headObjectMeta(ctx, bucket, "walk-a2")
+				require.NoError(t, err)
+				assert.Equal(t, "A2", objA2.ETag)
+
+				_, _, err = backendA.headObjectMeta(ctx, bucket, "walk-b1")
+				assert.Error(t, err, "B's key must not be visible from A via HeadObject")
+
+				objB1, _, err := backendB.headObjectMeta(ctx, bucket, "walk-b1")
+				require.NoError(t, err)
+				assert.Equal(t, "B1", objB1.ETag)
 			},
 		},
 		{
@@ -458,7 +471,9 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	assert.NotEqual(t, eG, eLong, "g and long-z must produce distinct encoded keys")
 	assert.NotEqual(t, eGx, eLong, "g\\x00x and long-z must produce distinct encoded keys")
 
-	// Backend-level: each group's ListObjects returns exactly its own object.
+	// Backend-level: each group's HeadObject sees only its own payload.
+	// Phase 4: LIST uses quorum meta (shardSvc path); shared-FSM backends have
+	// no shardSvc, so isolation is proved via HeadObject (BadgerDB path).
 	nodeG, _ := newTestNodeForSharedDB(t, "path-g")
 	backendG, err := NewDistributedBackend(t.TempDir(), db, nodeG, ksG, true)
 	require.NoError(t, err)
@@ -493,15 +508,9 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			objs, err := tc.backend.ListObjects(ctx, "b", "", 100)
-			require.NoError(t, err)
-			require.Len(t, objs, 1, "each group must see exactly 1 object")
-			assert.Equal(t, "k", objs[0].Key)
-			assert.Equal(t, tc.wantETag, objs[0].ETag)
-
 			obj, _, err := tc.backend.headObjectMeta(ctx, "b", "k")
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantETag, obj.ETag)
+			assert.Equal(t, tc.wantETag, obj.ETag, "each group must see only its own payload")
 		})
 	}
 }

@@ -95,25 +95,21 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 
 	ctx := context.Background()
 
-	// A's backend sees obj1 + obj2 in bA.
-	objsA, err := backendA.ListObjects(ctx, "bA", "", 100)
-	require.NoError(t, err)
-	keysA := make([]string, 0, len(objsA))
-	for _, o := range objsA {
-		keysA = append(keysA, o.Key)
-	}
-	assert.ElementsMatch(t, []string{"obj1", "obj2"}, keysA, "A backend must see obj1+obj2 after restart")
+	// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM backends have
+	// no shardSvc, so scoped visibility is proved via HeadObject (BadgerDB path).
 
-	// B's backend must not see bA at all (bA belongs to group A).
-	// ListObjects returns ErrBucketNotFound when the bucket doesn't exist in
-	// the group's keyspace — that error IS the correct isolation proof.
-	objsB, err := backendB.ListObjects(ctx, "bA", "", 100)
-	if err != nil {
-		// ErrBucketNotFound from group B's perspective is the expected isolation outcome.
-		assert.Empty(t, objsB, "B backend must see nothing for bucket bA (belongs to group A)")
-	} else {
-		assert.Empty(t, objsB, "B backend must see nothing for bucket bA (belongs to group A)")
-	}
+	// A's backend sees obj1 + obj2 in bA.
+	objA1, _, err := backendA.headObjectMeta(ctx, "bA", "obj1")
+	require.NoError(t, err, "A backend must see obj1 after restart")
+	assert.Equal(t, "A-payload", objA1.ETag)
+
+	objA2, _, err := backendA.headObjectMeta(ctx, "bA", "obj2")
+	require.NoError(t, err, "A backend must see obj2 after restart")
+	assert.Equal(t, "A-payload2", objA2.ETag)
+
+	// B's backend must not find bA's objects (bA belongs to group A).
+	_, _, err = backendB.headObjectMeta(ctx, "bA", "obj1")
+	assert.Error(t, err, "B backend must not find A's objects after restart")
 }
 
 // TestSharedFSM_RestoreCrashMidway_SelfHealsOnBoot proves that if the process
