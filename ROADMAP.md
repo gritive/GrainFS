@@ -98,6 +98,26 @@
 ### Phase 7 — numGroups 증설 / 토폴로지 migration
 - 하드 문제 #3: group 수 증가를 remap 없이(새 pool) 또는 migration으로. **그 전까지 클러스터는 group 추가 불가**(노드-in-group EC heal만) — Phase 7이 이 운영 제약 해제.
 
+### Phase 6.5 — MetadataStore 추상화 (Clean Architecture)
+- `internal/cluster`가 `*badger.Txn`을 직접 사용하는 30개 파일을 `MetadataTxn` / `MetadataStore` 인터페이스로 추상화. BadgerDB 구현체를 `internal/badgermeta`(또는 `internal/raft` 내부)로 이동하고 composition root에서 주입.
+- **전제**: Phase 4 완료 후 시작 — meta-index 제거로 cluster 내 BadgerDB 사용처가 제어 플레인(멀티파트 manifest, IAM, bucket 설정, Raft state)으로 축소된 뒤 진행해야 리팩터링 범위가 최소화됨.
+- **목표**: cluster Domain 레이어가 DB 구현체에 직접 의존하지 않음(CLAUDE.md Clean Architecture 규칙 완전 준수). 단위 테스트에서 in-memory `MetadataStore` 주입 가능 → BadgerDB 없는 격리 테스트.
+- **인터페이스 초안**:
+  ```go
+  // internal/cluster 에 정의 (사용처 패키지)
+  type MetadataTxn interface {
+      Get(key []byte) ([]byte, error)
+      Set(key, value []byte) error
+      Delete(key []byte) error
+      Scan(prefix []byte) Iterator
+  }
+  type MetadataStore interface {
+      View(fn func(MetadataTxn) error) error
+      Update(fn func(MetadataTxn) error) error
+  }
+  ```
+- **검증**: BadgerDB import가 cluster 패키지에서 0. 기존 integration 테스트 green.
+
 ## 분리된 베팅 (성능 비요구, data plane 안정 후)
 
 ### Phase 8 — data-plane transport HTTP화
