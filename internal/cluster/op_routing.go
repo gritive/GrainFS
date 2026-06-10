@@ -33,14 +33,15 @@ type dataGroupLeaderProbe interface {
 // OpRouter resolves S3-level operations to placement-group targets via
 // bucket, object-index, or EC-placement lookups. Ctx-free; performs no I/O.
 type OpRouter struct {
-	router      *Router
-	groups      ShardGroupSource
-	index       objectIndexLookup
-	addr        NodeAddressBook
-	leaderProbe dataGroupLeaderProbe
-	ec          ECConfig
-	selfID      string
-	selfAliases []string
+	router            *Router
+	groups            ShardGroupSource
+	index             objectIndexLookup
+	addr              NodeAddressBook
+	leaderProbe       dataGroupLeaderProbe
+	ec                ECConfig
+	selfID            string
+	selfAliases       []string
+	placementGroupIDs []string // frozen sorted candidate IDs; nil on bootstrap
 }
 
 func NewOpRouter(
@@ -53,15 +54,26 @@ func NewOpRouter(
 	selfID string,
 	selfAliases []string,
 ) *OpRouter {
+	var placementGroupIDs []string
+	if groups != nil {
+		if candidates, err := candidateGroupsFor(groups.ShardGroups(), ec); err == nil {
+			ids := make([]string, len(candidates))
+			for i, c := range candidates {
+				ids[i] = c.ID
+			}
+			placementGroupIDs = ids
+		}
+	}
 	return &OpRouter{
-		router:      router,
-		groups:      groups,
-		index:       index,
-		addr:        addr,
-		leaderProbe: leaderProbe,
-		ec:          ec,
-		selfID:      selfID,
-		selfAliases: selfAliases,
+		router:            router,
+		groups:            groups,
+		index:             index,
+		addr:              addr,
+		leaderProbe:       leaderProbe,
+		ec:                ec,
+		selfID:            selfID,
+		selfAliases:       selfAliases,
+		placementGroupIDs: placementGroupIDs,
 	}
 }
 
@@ -112,7 +124,9 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 // Internal buckets (storage.IsInternalBucket) bypass the object index per
 // ADR 0004's pinned-bucket invariant.
 //
-// F1: nil objectIndexLookup is a configuration error, not a fallback.
+// nil objectIndexLookup: falls back to deterministic hash placement when a
+// frozen candidate list is available (index-free mode). Returns
+// ErrObjectIndexRequired only if the candidate list is also empty (bootstrap).
 func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, error) {
 	if storage.IsInternalBucket(bucket) {
 		target, err := r.RouteBucket(bucket)
@@ -120,7 +134,13 @@ func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, 
 		return target, entry, err
 	}
 	if r.index == nil {
-		return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
+		if len(r.placementGroupIDs) == 0 {
+			return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
+		}
+		groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+		target, err := r.routeGroup(groupID)
+		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: groupID}
+		return target, entry, err
 	}
 	var (
 		entry ObjectIndexEntry
@@ -160,17 +180,29 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 		}
 		return target, group, nil
 	}
-	group, err := SelectObjectPlacementGroup(bucket, key, r.groups.ShardGroups(), r.ec)
-	if err != nil {
-		target, routeErr := r.RouteBucket(bucket)
-		if routeErr != nil {
-			return RouteTarget{}, ShardGroupEntry{}, err
+	var (
+		group ShardGroupEntry
+		err   error
+	)
+	if len(r.placementGroupIDs) > 0 {
+		groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+		if g, ok := r.groups.ShardGroup(groupID); ok {
+			group = g
 		}
-		groupSnapshot, ok := r.groups.ShardGroup(target.GroupID)
-		if !ok {
-			return RouteTarget{}, ShardGroupEntry{}, err
+	}
+	if group.ID == "" {
+		group, err = SelectObjectPlacementGroup(bucket, key, r.groups.ShardGroups(), r.ec)
+		if err != nil {
+			target, routeErr := r.RouteBucket(bucket)
+			if routeErr != nil {
+				return RouteTarget{}, ShardGroupEntry{}, err
+			}
+			groupSnapshot, ok := r.groups.ShardGroup(target.GroupID)
+			if !ok {
+				return RouteTarget{}, ShardGroupEntry{}, err
+			}
+			return target, groupSnapshot, nil
 		}
-		return target, groupSnapshot, nil
 	}
 	target, err := r.routeGroup(group.ID)
 	if err != nil {

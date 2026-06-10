@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.527.0] - 2026-06-09
+
+### Changed
+
+- **Deterministic object placement: group = `hash(bucket+key) % numGroups`.** Object placement
+  now maps every `(bucket, key)` pair to a placement group via a stable FNV-64a hash mod the
+  sorted candidate count. The group assignment is frozen at write time and can be recomputed
+  identically on reads — enabling index-free GET routing on fixed topologies without consulting
+  the object index. `OpRouter` captures a sorted candidate snapshot at construction time so all
+  routing decisions in a single coordinator view are consistent. `SelectObjectPlacementGroup` and
+  the index-free read path in `RouteObjectRead` share the same `groupIDForObject` function,
+  making write/read equivalence structural rather than asserted.
+
+- **BoundedLoads hot-demotion removed from write placement.** Dynamic RPS-based node demotion
+  on writes was a non-deterministic perturbation that made GET re-derivation impossible without
+  the object index (a hot node at write time might not be hot at read time, causing `GET` to
+  pick a different node set). The `Hot` field and `BoundedLoadsEnabled` parameter are removed
+  from `ObjectWritePlacementInput`; the write placement path is now purely capacity-weighted
+  (WRH). BoundedLoads is retained for reads (shard re-ranking during EC decode) and monitoring.
+  The two write-specific Prometheus metrics (`grainfs_cluster_bl_spilled_writes_total`,
+  `grainfs_cluster_bl_bypassed_writes_total`) are retired.
+
+### For contributors
+
+- `selectECPlacementFromNodeStates` lost its `blEnabled bool` sixth parameter (removed).
+  Update call sites to the 5-argument form.
+- `ObjectWritePlacementInput.BoundedLoadsEnabled` and `ObjectWritePlacementNodeState.Hot` are
+  removed. Any test fixtures constructing these structs must drop those fields.
+
 ## [0.0.526.0] - 2026-06-09
 
 ### Fixed
