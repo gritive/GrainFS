@@ -92,7 +92,7 @@ cmd_up() {
   # Ops Agent install at boot for guest memory + disk-space metrics.
   local meta=()
   if [[ "$OPS_AGENT" == "1" ]]; then
-    local sf; sf="$(mktemp "${TMPDIR:-/tmp}/p5-opsagent.XXXXXX.sh")"
+    local sf; sf="$(mktemp "${TMPDIR:-/tmp}/p5-opsagent.XXXXXX")" # no suffix: BSD/macOS mktemp needs trailing X's
     cat >"$sf" <<'STARTUP'
 #! /bin/bash
 curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent.sh
