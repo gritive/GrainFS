@@ -2,10 +2,13 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -35,6 +38,8 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 		return fmt.Errorf("quorum meta write encode: %w", err)
 	}
 	self := b.currentSelfAddr()
+	// K-of-N write quorum: ECData nodes must ack. Parity nodes are best-effort.
+	// Any node that misses the write can still read via fetchQuorumMetaFromPeers.
 	k := int(cmd.ECData)
 	if k <= 0 {
 		k = 1
@@ -53,15 +58,89 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	})
 }
 
-// readQuorumMeta reads object metadata from the local quorum store.
-// Returns (nil, PlacementMeta{}, storage.ErrObjectNotFound) when the object is
-// not in the local store. Callers may fall back to BadgerDB for objects written
-// before Phase 3 or by repair/scrubber paths.
+// readQuorumMeta reads object metadata from the local quorum store, falling
+// back to a peer fan-out when the local file is absent (e.g. parity node that
+// missed the K-of-N write). Returns ErrObjectNotFound only when no peer has
+// the file; callers then fall through to BadgerDB for pre-Phase-3 objects.
 func (b *DistributedBackend) readQuorumMeta(bucket, key string) (*storage.Object, PlacementMeta, error) {
 	if b.shardSvc == nil {
 		return nil, PlacementMeta{}, storage.ErrObjectNotFound
 	}
-	return b.shardSvc.readQuorumMetaLocalDecoded(bucket, key)
+	obj, pm, err := b.shardSvc.readQuorumMetaLocalDecoded(bucket, key)
+	if err == nil {
+		return obj, pm, nil
+	}
+	if !errors.Is(err, storage.ErrObjectNotFound) {
+		return nil, PlacementMeta{}, err
+	}
+	// Local miss: fan out to peers. First success wins (K-of-N write quorum
+	// guarantees at least K peers have the file).
+	raw, ok := b.fetchQuorumMetaFromPeers(bucket, key)
+	if !ok {
+		return nil, PlacementMeta{}, storage.ErrObjectNotFound
+	}
+	return b.shardSvc.decodeQuorumMetaBlob(raw)
+}
+
+// fetchQuorumMetaFromPeers fans out ReadQuorumMeta RPCs to all shard group
+// peers concurrently and returns the first successful response. Returns
+// (nil, false) when no peer has the file or b.shardGroup is nil.
+func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byte, bool) {
+	if b.shardSvc == nil || b.shardGroup == nil {
+		return nil, false
+	}
+	// Collect unique peer addresses from all shard groups, excluding self.
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	var peers []string
+	for _, g := range b.shardGroup.ShardGroups() {
+		for _, p := range g.PeerIDs {
+			if !seen[p] {
+				seen[p] = true
+				peers = append(peers, p)
+			}
+		}
+	}
+	if len(peers) == 0 {
+		return nil, false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaWriteTimeout)
+	defer cancel()
+
+	type result struct {
+		data []byte
+		ok   bool
+	}
+	ch := make(chan result, len(peers))
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addr, err := b.shardSvc.resolvePeerAddress(p)
+			if err != nil {
+				ch <- result{}
+				return
+			}
+			data, err := b.shardSvc.ReadQuorumMetaRaw(ctx, addr, bucket, key)
+			if err != nil || len(data) == 0 {
+				ch <- result{}
+				return
+			}
+			ch <- result{data: data, ok: true}
+		}()
+	}
+	go func() { wg.Wait(); close(ch) }()
+
+	for r := range ch {
+		if r.ok {
+			cancel() // stop remaining in-flight RPCs
+			return r.data, true
+		}
+	}
+	return nil, false
 }
 
 // fanOutQuorumMeta dispatches to every placement node concurrently and returns
@@ -135,27 +214,31 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	return f.Close()
 }
 
-// readQuorumMetaLocalDecoded reads and decodes the quorum meta blob for
-// (bucket, key) from the local store. Returns storage.ErrObjectNotFound if the
-// file does not exist (object not yet written via Phase 3 PUT, or on a node
-// that was not part of the write quorum).
-func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.Object, PlacementMeta, error) {
+// readQuorumMetaRaw reads the raw quorum meta blob for (bucket, key) from the
+// local filesystem. Returns (nil, ErrObjectNotFound) when the file is absent.
+func (s *ShardService) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
 	if len(s.dataDirs) == 0 {
-		return nil, PlacementMeta{}, storage.ErrObjectNotFound
+		return nil, storage.ErrObjectNotFound
 	}
 	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
 	target := filepath.Join(root, bucket, key)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, PlacementMeta{}, fmt.Errorf("quorum meta read: key %q escapes root", key)
+		return nil, fmt.Errorf("quorum meta read raw: key %q escapes root", key)
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, PlacementMeta{}, storage.ErrObjectNotFound
+			return nil, storage.ErrObjectNotFound
 		}
-		return nil, PlacementMeta{}, fmt.Errorf("quorum meta read: %w", err)
+		return nil, fmt.Errorf("quorum meta read raw: %w", err)
 	}
+	return data, nil
+}
+
+// decodeQuorumMetaBlob decodes a raw quorum meta blob into storage.Object and
+// PlacementMeta. Used by both the local-read and peer-fallback paths.
+func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, PlacementMeta, error) {
 	cmd, err := DecodeCommand(data)
 	if err != nil {
 		return nil, PlacementMeta{}, fmt.Errorf("quorum meta decode command: %w", err)
@@ -175,6 +258,7 @@ func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.
 		ETag:             m.ETag,
 		LastModified:     m.LastModified,
 		VersionID:        putCmd.VersionID,
+		ACL:              m.ACL,
 		UserMetadata:     cloneStringMap(m.UserMetadata),
 		SSEAlgorithm:     m.SSEAlgorithm,
 		PlacementGroupID: m.PlacementGroupID,
@@ -182,6 +266,9 @@ func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.
 		ECParity:         m.ECParity,
 		StripeBytes:      m.StripeBytes,
 		NodeIDs:          cloneStringSlice(m.NodeIDs),
+		Segments:         append([]storage.SegmentRef(nil), m.Segments...),
+		Coalesced:        coalescedRefsToStorage(m.Coalesced),
+		IsAppendable:     m.IsAppendable,
 		Parts:            m.Parts,
 		Tags:             append([]storage.Tag(nil), m.Tags...),
 	}
@@ -194,6 +281,106 @@ func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.
 		PlacementGroupID: m.PlacementGroupID,
 	}
 	return obj, placement, nil
+}
+
+// readQuorumMetaLocalDecoded reads and decodes the quorum meta blob for
+// (bucket, key) from the local store. Returns storage.ErrObjectNotFound if the
+// file does not exist.
+func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.Object, PlacementMeta, error) {
+	data, err := s.readQuorumMetaRaw(bucket, key)
+	if err != nil {
+		return nil, PlacementMeta{}, err
+	}
+	return s.decodeQuorumMetaBlob(data)
+}
+
+// deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
+// Called by deleteObjectWithMarker after the raft CmdDeleteObject commit so
+// subsequent reads fall through to BadgerDB and find the delete marker.
+// Errors are silently ignored: the raft marker is the source of truth; a
+// stale quorum meta file is handled on the next read.
+func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
+	if len(s.dataDirs) == 0 {
+		return nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	target := filepath.Join(root, bucket, key)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta delete: key %q escapes root", key)
+	}
+	err = os.Remove(target)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("quorum meta delete: %w", err)
+	}
+	return nil
+}
+
+// decodeQuorumMetaCmdBlob decodes a raw quorum meta blob to a PutObjectMetaCmd.
+func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error) {
+	cmd, err := DecodeCommand(data)
+	if err != nil {
+		return PutObjectMetaCmd{}, fmt.Errorf("quorum meta decode raw: %w", err)
+	}
+	if cmd.Type != CmdPutObjectMeta {
+		return PutObjectMetaCmd{}, fmt.Errorf("quorum meta read raw: unexpected command type %d", cmd.Type)
+	}
+	return decodePutObjectMetaCmd(cmd.Data)
+}
+
+// readQuorumMetaRawCmd reads and decodes the PutObjectMetaCmd from the local
+// quorum meta store. Returns storage.ErrObjectNotFound if the file is absent.
+// Use DistributedBackend.readQuorumMetaCmd when peer fallback is needed.
+func (s *ShardService) readQuorumMetaRawCmd(bucket, key string) (PutObjectMetaCmd, error) {
+	data, err := s.readQuorumMetaRaw(bucket, key)
+	if err != nil {
+		return PutObjectMetaCmd{}, err
+	}
+	return s.decodeQuorumMetaCmdBlob(data)
+}
+
+// ReadQuorumMetaRaw fetches the raw quorum meta blob from a remote peer via
+// the shard transport. Returns (nil, nil) when the peer has no file for the
+// object (not-found is not an error — caller treats nil data as a miss).
+func (s *ShardService) ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key string) ([]byte, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("quorum meta read: no transport")
+	}
+	fw := buildShardEnvelope("ReadQuorumMeta", bucket, key, 0, nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	resp, err := s.transport.CallFlatBuffer(ctx, addr, fw)
+	if err != nil {
+		return nil, fmt.Errorf("read quorum meta from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal quorum meta read response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote quorum meta read error from %s", addr)
+	}
+	return data, nil
+}
+
+// readQuorumMetaCmd is the DistributedBackend-level read for PutObjectMetaCmd,
+// with peer fan-out fallback when the local quorum meta file is absent.
+// Used by SetObjectACLPropose, SetObjectTagsPropose, and AppendObject migration.
+func (b *DistributedBackend) readQuorumMetaCmd(bucket, key string) (PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return PutObjectMetaCmd{}, storage.ErrObjectNotFound
+	}
+	cmd, err := b.shardSvc.readQuorumMetaRawCmd(bucket, key)
+	if err == nil {
+		return cmd, nil
+	}
+	if !errors.Is(err, storage.ErrObjectNotFound) {
+		return PutObjectMetaCmd{}, err
+	}
+	raw, ok := b.fetchQuorumMetaFromPeers(bucket, key)
+	if !ok {
+		return PutObjectMetaCmd{}, storage.ErrObjectNotFound
+	}
+	return b.shardSvc.decodeQuorumMetaCmdBlob(raw)
 }
 
 // WriteQuorumMeta sends the quorum meta blob to a remote placement node via the
@@ -216,4 +403,108 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 		return fmt.Errorf("remote quorum meta error from %s", addr)
 	}
 	return nil
+}
+
+// IterQuorumMetaECShardTargets walks all quorum meta files under
+// {dataDirs[0]}/.quorum_meta/ and emits ECShardScanTarget entries for every
+// object whose segments or coalesced refs carry EC placement. Used by
+// ShardPlacementMonitor.Scan to cover Phase 3 objects that bypass BadgerDB.
+//
+// fn returning a non-nil error stops iteration.
+func (s *ShardService) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) error) error {
+	if len(s.dataDirs) == 0 {
+		return nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return nil
+	}
+	// Walk: root/{bucket}/{key} — exactly two levels deep.
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		parts := strings.SplitN(rel, string(filepath.Separator), 2)
+		if len(parts) != 2 {
+			return nil // not bucket/key shape
+		}
+		bucket, key := parts[0], parts[1]
+		obj, _, qerr := s.readQuorumMetaLocalDecoded(bucket, key)
+		if qerr != nil {
+			return nil // corrupt or not found; skip
+		}
+		// Build ECShardScanTarget entries mirroring buildECShardTargets in
+		// shard_placement.go, but sourced from the quorum meta store.
+		for i := range obj.Segments {
+			seg := obj.Segments[i]
+			if seg.ECData == 0 || len(seg.NodeIDs) == 0 {
+				continue
+			}
+			if !validateECRefPlacement(seg.ECData, seg.ECParity, seg.NodeIDs) {
+				continue
+			}
+			if ferr := fn(ECShardScanTarget{
+				Kind:      ECShardSegment,
+				Bucket:    bucket,
+				ObjectKey: key,
+				VersionID: obj.VersionID,
+				ShardKey:  key + "/segments/" + seg.BlobID,
+				Placement: PlacementRecord{
+					Nodes:       seg.NodeIDs,
+					K:           int(seg.ECData),
+					M:           int(seg.ECParity),
+					StripeBytes: int(seg.StripeBytes),
+				},
+			}); ferr != nil {
+				return ferr
+			}
+		}
+		for i := range obj.Coalesced {
+			cs := obj.Coalesced[i]
+			if cs.ECData == 0 || len(cs.NodeIDs) == 0 {
+				continue
+			}
+			if !validateECRefPlacement(cs.ECData, cs.ECParity, cs.NodeIDs) {
+				continue
+			}
+			if ferr := fn(ECShardScanTarget{
+				Kind:      ECShardCoalesced,
+				Bucket:    bucket,
+				ObjectKey: key,
+				VersionID: obj.VersionID,
+				ShardKey:  cs.ShardKey,
+				Placement: PlacementRecord{
+					Nodes:       cs.NodeIDs,
+					K:           int(cs.ECData),
+					M:           int(cs.ECParity),
+					StripeBytes: int(cs.StripeBytes),
+				},
+			}); ferr != nil {
+				return ferr
+			}
+		}
+		// Non-segmented / non-coalesced EC objects (single-blob phase-3 objects).
+		if len(obj.Segments) == 0 && len(obj.Coalesced) == 0 && obj.ECData > 0 && len(obj.NodeIDs) > 0 {
+			if ferr := fn(ECShardScanTarget{
+				Kind:             ECShardObjectVersion,
+				Bucket:           bucket,
+				ObjectKey:        key,
+				VersionID:        obj.VersionID,
+				ECData:           obj.ECData,
+				ECParity:         obj.ECParity,
+				NodeIDs:          obj.NodeIDs,
+				PlacementGroupID: obj.PlacementGroupID,
+			}); ferr != nil {
+				return ferr
+			}
+		}
+		return nil
+	})
 }

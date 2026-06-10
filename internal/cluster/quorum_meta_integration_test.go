@@ -6,11 +6,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4"
+
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 var _ = Describe("Quorum meta — Phase 3 primary path", func() {
@@ -82,3 +87,85 @@ var _ = Describe("Quorum meta — Phase 3 primary path", func() {
 		Expect(buf[:n]).To(Equal(payload))
 	})
 })
+
+// TestReadQuorumMeta_PeerFallback_ParityNodeMiss proves the N-K node hazard fix:
+// when a parity node did not receive the K-of-N quorum meta write, it must
+// recover the metadata by fanning out ReadQuorumMeta RPCs to other placement
+// nodes.
+//
+// RED without fetchQuorumMetaFromPeers: readQuorumMeta returns ErrObjectNotFound.
+// GREEN with fan-out: readQuorumMeta returns the correct metadata.
+//
+// Neuter test: if the fetchQuorumMetaFromPeers fallback is removed from
+// readQuorumMeta, this test is RED (storage.ErrObjectNotFound).
+func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	// Two real TCP transport nodes: node-data (has the quorum meta file) and
+	// node-parity (missed the K-of-N write — file absent locally).
+	trData := transport.MustNewTCPTransport("test-cluster-psk")
+	trParity := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, trData.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trParity.Listen(ctx, "127.0.0.1:0"))
+	defer trData.Close()
+	defer trParity.Close()
+	// trParity dials trData so it can send ReadQuorumMeta RPCs.
+	require.NoError(t, trParity.Connect(ctx, trData.LocalAddr()))
+
+	dirData := t.TempDir()
+	dirParity := t.TempDir()
+	svcData := NewShardService(dirData, trData,
+		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcParity := NewShardService(dirParity, trParity,
+		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+
+	// trData serves incoming shard RPCs (including ReadQuorumMeta).
+	trData.SetStreamHandler(svcData.HandleRPC())
+
+	// Write quorum meta ONLY to the data node, simulating K-of-N write where
+	// the parity node was not in the write quorum.
+	blob := func() []byte {
+		cmd := PutObjectMetaCmd{
+			Bucket:      "bkt",
+			Key:         "obj",
+			ECData:      4,
+			ECParity:    2,
+			Size:        1024,
+			ContentType: "application/octet-stream",
+			ETag:        "abc123",
+			NodeIDs:     []string{trData.LocalAddr(), trParity.LocalAddr()},
+		}
+		b, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		require.NoError(t, err)
+		return b
+	}()
+	require.NoError(t, svcData.writeQuorumMetaLocal("bkt", "obj", blob))
+
+	// The parity node has no local file for this object.
+	_, err := os.Stat(filepath.Join(dirParity, "shards", quorumMetaSubDir, "bkt", "obj"))
+	require.True(t, os.IsNotExist(err), "parity node must not have the quorum meta file")
+
+	// Set up a DistributedBackend representing the parity node.
+	// shardGroup advertises trData as a peer so fetchQuorumMetaFromPeers dials it.
+	backendParity := &DistributedBackend{
+		selfAddr: trParity.LocalAddr(),
+		shardSvc: svcParity,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trData.LocalAddr(), trParity.LocalAddr()}},
+		}},
+	}
+
+	// readQuorumMeta on the parity node — local miss → peer fan-out → data node hit.
+	obj, pm, err := backendParity.readQuorumMeta("bkt", "obj")
+	require.NoError(t, err, "peer fan-out must return the quorum meta from the data node")
+	require.NotNil(t, obj)
+	require.Equal(t, "obj", obj.Key)
+	require.Equal(t, int64(1024), obj.Size)
+	require.Equal(t, "abc123", obj.ETag)
+	require.Equal(t, 2, len(pm.NodeIDs), "placement must include both nodes")
+
+	// Sanity: a truly absent object must still return ErrObjectNotFound.
+	_, _, err = backendParity.readQuorumMeta("bkt", "nonexistent")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}

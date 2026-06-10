@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -726,6 +727,8 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 		return s.handleShadowMeta(sr)
 	case "WriteQuorumMeta":
 		return s.handleQuorumMetaWrite(sr)
+	case "ReadQuorumMeta":
+		return s.handleQuorumMetaRead(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
@@ -739,6 +742,19 @@ func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) *transport.Messag
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
+}
+
+// handleQuorumMetaRead serves a ReadQuorumMeta RPC: reads the local quorum
+// meta file and returns its raw bytes, or OK with empty payload when absent.
+func (s *ShardService) handleQuorumMetaRead(sr *shardRequest) *transport.Message {
+	data, err := s.readQuorumMetaRaw(sr.Bucket, sr.Key)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return s.okResponse(nil) // empty payload = not found on this node
+		}
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(data)
 }
 
 // marshalResponseDirect serializes an RPCMessage without pool-and-copy.
