@@ -308,6 +308,44 @@ func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.
 	return s.decodeQuorumMetaBlob(data)
 }
 
+// ScanQuorumMetaBucket returns all PutObjectMetaCmd entries (including
+// IsDeleteMarker tombstones) stored locally for bucket. prefix is an
+// optional key-prefix filter (empty string = return all). Unreadable entries
+// are silently skipped. Callers decide whether to filter tombstones.
+func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	bucketRoot := filepath.Join(root, bucket)
+	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
+		return nil, nil
+	}
+	var results []PutObjectMetaCmd
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		key, rerr := filepath.Rel(bucketRoot, path)
+		if rerr != nil {
+			return nil
+		}
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
+		if qerr != nil {
+			return nil
+		}
+		results = append(results, cmd)
+		return nil
+	})
+	return results, err
+}
+
 // deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
 // Called by deleteObjectWithMarker after the raft CmdDeleteObject commit so
 // subsequent reads fall through to BadgerDB and find the delete marker.

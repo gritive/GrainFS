@@ -118,6 +118,48 @@ func TestDeleteObject_QuorumMetaTombstone(t *testing.T) {
 	require.True(t, cmd.IsDeleteMarker, "quorum meta after DELETE must have IsDeleteMarker=true")
 }
 
+// TestScanQuorumMetaBucket proves S4-2: ScanQuorumMetaBucket returns all entries
+// (including tombstones) for a bucket, with optional prefix filtering.
+//
+// RED without ScanQuorumMetaBucket: compile error (function not found).
+// GREEN: PUT 2 objects + DELETE 1 → scan returns all 3 entries; tombstone has IsDeleteMarker=true;
+// prefix filter reduces results to the matching subset.
+//
+// Neuter test: if ScanQuorumMetaBucket omits tombstones, the tombstone assertion fails.
+func TestScanQuorumMetaBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+
+	payload := bytes.Repeat([]byte("x"), 128)
+	_, err := b.PutObject(ctx, "bkt", "keep.bin", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "bkt", "del.bin", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.NoError(t, b.DeleteObject(ctx, "bkt", "del.bin"))
+
+	entries, err := b.shardSvc.ScanQuorumMetaBucket("bkt", "")
+	require.NoError(t, err)
+	// DELETE overwrites the existing quorum meta with a tombstone (same path).
+	// So 2 PUTs → 2 files; 1 DELETE → 1 file replaced with tombstone → still 2 files.
+	require.Len(t, entries, 2, "scan must return 2 entries: 1 normal PUT + 1 tombstone")
+
+	// Tombstone must have IsDeleteMarker=true.
+	var sawTombstone bool
+	for _, e := range entries {
+		if e.Key == "del.bin" {
+			sawTombstone = e.IsDeleteMarker
+		}
+	}
+	require.True(t, sawTombstone, "del.bin entry must be IsDeleteMarker=true")
+
+	// Prefix filter.
+	keep, err := b.shardSvc.ScanQuorumMetaBucket("bkt", "keep")
+	require.NoError(t, err)
+	require.Len(t, keep, 1)
+	require.Equal(t, "keep.bin", keep[0].Key)
+}
+
 // TestMultipartComplete_BadgerDBFallback proves the Phase 3 raft/quorum boundary:
 // multipart-completed objects are committed via data_raft (applyCompleteMultipart),
 // so their quorum meta file is absent. headObjectMeta must still serve them by falling
