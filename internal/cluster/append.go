@@ -100,6 +100,24 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// FSM can reject if it has moved since — see apply.go ErrStalePlacement).
 	pgID := b.lookupPlacementGroupForAppend(ctx, existing)
 
+	// Phase 3 migration: if the object lives in the quorum meta store (not in
+	// BadgerDB), migrate it to BadgerDB first. The FSM apply of CmdAppendObject
+	// reads BadgerDB for the existing state — if the record is absent there the
+	// FSM calculates offset 0 instead of the real size, which diverges from the
+	// coordinator's view and causes "write offset does not match object size".
+	// Proposing CmdPutObjectMeta is deterministic on all FSM nodes (no per-node
+	// filesystem read inside FSM apply) and brings the record into BadgerDB on
+	// all nodes before the append is committed.
+	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+		if rawCmd, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil {
+			if err := b.propose(ctx, CmdPutObjectMeta, rawCmd); err != nil {
+				_ = os.Remove(b.segmentBlobPath(bucket, key, seg.BlobID))
+				return nil, fmt.Errorf("migrate quorum meta before append: %w", err)
+			}
+			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+		}
+	}
+
 	// Step 4: propose via data-Raft. b.propose returns FSM apply error
 	// transparently (Phase A). AppendObject is rejected for versioning-enabled
 	// buckets, so subsequent appends mutate the same latest version instead of
@@ -126,6 +144,13 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		// (full sweep deferred — see TODOS.md "Scrubber orphan sweep production wiring [P1]").
 		_ = os.Remove(b.segmentBlobPath(bucket, key, seg.BlobID))
 		return nil, err
+	}
+
+	// Phase 3: remove any stale quorum meta entry so subsequent HeadObject calls
+	// read from BadgerDB (which the FSM just updated) rather than the now-outdated
+	// quorum meta file. Best-effort — the raft state is authoritative.
+	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
 	}
 
 	obj := appendObjectResult(existing, key, versionID, pgID, seg, modifiedUnixSec)
