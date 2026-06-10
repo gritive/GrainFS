@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.0.528.0] - 2026-06-10
+
+### Changed
+
+- **Phase 3: object metadata bypasses data_raft (quorum write + peer-fallback read).**
+  User-bucket object PUT now writes metadata directly to each placement node's local
+  filesystem (`{dataDir}/.quorum_meta/{bucket}/{key}`) via K-of-N fan-out (k = ECData),
+  removing the per-PUT data_raft consensus round that was the dominant PUT latency bottleneck.
+
+  - **K-of-N write quorum**: ECData (= 4 in the default 4+2 configuration) placement nodes
+    must acknowledge the write. Parity nodes are best-effort. Any single unreachable parity
+    node no longer fails the PUT.
+
+  - **Peer fan-out read (N-K hazard fix)**: when a parity node that missed the K-of-N write
+    becomes the shard-group leader and serves a GET/HEAD, `readQuorumMeta` fans out
+    `ReadQuorumMeta` RPCs to all shard-group peers and returns the first hit. Fallback chain:
+    local file → peer fan-out → `ErrObjectNotFound` → BadgerDB (pre-Phase-3 objects).
+
+  - **AppendObject migration-first**: before proposing `CmdAppendObject`, if a quorum meta
+    file exists, it is migrated to BadgerDB via a raft commit then deleted locally. Prevents
+    offset-0 corruption on the AppendObject raft path which reads BadgerDB.
+
+  - **ACL round-trip in quorum meta**: `PutObjectMetaCmd` gains an `acl:uint8` FlatBuffers
+    field (backward-compatible, default 0 = private). `SetObjectACL` / `SetObjectTags` now
+    read-modify-write the quorum meta file directly for Phase-3 objects.
+
+  - **Delete cleanup**: `DeleteObject` removes the local quorum meta file after the raft
+    delete-marker commit.
+
+  - **EC maintenance coverage**: `ShardPlacementMonitor` and `ec_maintenance` now walk
+    `.quorum_meta/` to include Phase-3 objects in repair and EC shard-placement scans.
+
+  Internal buckets (`_grainfs_*`) still use raft (control-plane); only user buckets use the
+  quorum meta path.
+
+### For contributors
+
+- `DistributedBackend.readQuorumMetaCmd(bucket, key)` replaces direct
+  `b.shardSvc.readQuorumMetaRawCmd` calls; use the backend method so peer fan-out is applied.
+- `ShardService.ReadQuorumMetaRaw(ctx, addr, bucket, key)` — new shard RPC for peer fallback.
+- `ShardService.decodeQuorumMetaBlob` / `decodeQuorumMetaCmdBlob` — shared decode helpers.
+- `DistributedBackend.fetchQuorumMetaFromPeers(bucket, key)` — fans out to all shard-group
+  peers concurrently; first success wins (short timeout via `quorumMetaWriteTimeout`).
+
 ## [0.0.527.0] - 2026-06-09
 
 ### Changed
