@@ -491,6 +491,31 @@ for the concrete per-group reason, such as `leaderless`, `unwired`, or
 
 ---
 
+## Growing the Cluster (Adding Placement Groups)
+
+`GrainFS` (v0.0.543.0+, Phase 7) can add raft placement groups to a running cluster without remapping existing objects. The object→group placement is pinned per topology *generation*; new groups become a new generation, and reads probe newest-generation-first (existing objects stay served from the prior generation).
+
+Two steps:
+
+1. **Form the new groups.** Add nodes to the cluster (zero-CA join). New shard groups are formed automatically as nodes join (`expandShardGroupsForJoinedNode`). At this point the groups exist but are not yet used for object placement.
+
+2. **Activate them.** Run the operator command to record the current shard groups as a new placement generation:
+
+```bash
+grainfs cluster expand-placement --endpoint <data>/admin.sock
+```
+
+The command reports `previous groups`, `new groups`, and the `active set`. It is a no-op when no new groups are present. If a newly-joined group is *wider* (more peers) than the existing groups, narrower groups drop out of the active set (the command prints a `WARNING` with the dropped groups — they stop receiving new writes but their existing objects stay readable).
+
+Notes:
+
+- **Irreversible:** a placement generation, once recorded, is never removed. There is no group-*removal* path.
+- **Run on the leader.** The command proposes through the meta-raft; on a follower it returns an error — target the current leader (`grainfs cluster status`).
+- **Reads stay correct** during and after growth: existing objects are found via the older generation; the cross-generation last-writer-wins fence resolves the brief add-window.
+- **Not yet validated:** multi-node concurrent growth under heavy load and throughput parity were not benchmarked (the fence arms per-node on the generation-count transition). Grow during a maintenance window for the first time.
+
+---
+
 ## Rollback Procedure
 
 If ANY verification step fails, execute rollback immediately.
