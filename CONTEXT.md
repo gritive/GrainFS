@@ -458,6 +458,32 @@ between the storage write and the quorum-meta write leaves an orphan that the
 background scrubber resolves; the local execution path (originating node is
 leader) accepts the same best-effort semantics.
 
+### Control/Data Plane Boundary
+
+The cluster runs two distinct consensus planes. The **control plane** is the
+meta-raft (`MetaRaft`, reached through the coordinator's `base`
+`DistributedBackend`): it owns cluster membership, bucket creation/assignment,
+IAM, KEK rotation, rebalance/migration plans, and lifecycle policies — cluster-wide
+linearizable state. The **data plane** is per-group raft (each `GroupBackend` owns
+its own raft node, distinct from meta-raft) plus per-node quorum-meta (K-of-N
+fan-out); it owns object metadata and bytes.
+
+Invariant (Phase 6 S6-1, audited + regression-guarded): the object **PUT/GET/HEAD
+critical path never touches the control plane**. PUT/GET/HEAD route via
+deterministic placement to a `GroupBackend` and use group-raft / quorum-meta only.
+The single hot-path touch of `base` is `requireObjectBucket` → `HeadBucket`, a
+*local* BadgerDB read (not a raft propose/ReadIndex), and `bucketAssigned()`
+(in-memory router/meta map) short-circuits even that in steady state.
+`TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft` guards this
+dynamically on a non-collapsed topology.
+
+Two boundary nuances: (1) multipart completion proposes on **group-raft (data
+plane)**, not meta-raft — the manifest lives on group-raft (not quorum-meta) only
+for single-txn atomicity, and it is off the hot path; (2) legacy single-backend
+deployments intentionally collapse both planes onto one raft node
+(`WrapDistributedBackend`), so the boundary is meaningful for multi-group
+topologies with a dedicated meta-raft.
+
 ### Local Execution Decision
 
 The local execution decision is the ctx-aware sibling of storage op routing.

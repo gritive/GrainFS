@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.534.0] - 2026-06-11
+
+### Added
+
+- **Phase 6 S6-1: control/data plane boundary audit + dynamic regression guard.**
+  Audited (static) that the object PUT/GET/HEAD critical path routes only through
+  the data plane (per-group raft + per-node quorum-meta) and never touches the
+  control plane (meta-raft: bucket membership / IAM / multipart manifest). Verdict:
+  **clean** — the sole hot-path touch of the control-plane backend is a local
+  BadgerDB `HeadBucket` read on a bucket-assignment cache miss (not a raft
+  propose/ReadIndex), and `bucketAssigned()` short-circuits it in steady state.
+  Added `TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft`, a
+  regression guard that runs PUT+GET+HEAD on a *non-collapsed* topology (a real
+  group-raft `GroupBackend` distinct from the control-plane backend) and asserts
+  the control plane sees zero calls; a positive-control `CreateBucket` proves the
+  spy is non-vacuous (and the guard RED-able by mutation).
+
+### Notes
+
+- Boundary-labeling reconciliation: multipart completion proposes on the **group
+  raft** (data plane), not the meta-raft control plane — the manifest lives on
+  group-raft (not quorum-meta) only for single-txn atomicity, and it is off the
+  PUT/GET/HEAD hot path. ROADMAP's "multipart manifest" under the meta-raft scope
+  was the loose label; clarified the `commitCompleteMultipartObjectWriteResult`
+  comment accordingly.
+- Legacy single-backend deployments intentionally collapse the two planes
+  (`WrapDistributedBackend` shares one raft node); the boundary holds for
+  multi-group topologies with a dedicated meta-raft.
+
 ## [0.0.533.0] - 2026-06-11
 
 ### Fixed
