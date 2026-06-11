@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.533.0] - 2026-06-11
+
+### Fixed
+
+- **Multi-host cluster forward read fence deadlock — PUT/GET/HEAD failed on every
+  non-leader node.** On a fresh data group the first committed raft entry is a
+  NoOp (leader election) or ConfChange; the `ApplyCh` bridge filtered those out
+  and the apply loop never advanced `DistributedBackend.lastApplied`, leaving it
+  at 0 while `commitIndex` was 1. The forwarded read fence
+  (`waitForwardReadFence` → `ReadIndex` barrier → `WaitApplied`) polls
+  `lastApplied >= barrier`, which could never hold when the committed log tail
+  was a non-command entry, so every forwarded `HeadObject`/`GetObject` (including
+  the PUT previous-object-lookup) timed out at 5s. Because a PUT runs its
+  previous-lookup as a fenced read, the group deadlocked: reads waited for an
+  apply that no write could land. Localhost (RTT≈0, direct-to-leader PUTs) masked
+  it; real multi-host did not. The bridge now forwards all committed entries and
+  the apply loop advances `lastApplied` past non-command entries (NoOp/ConfChange
+  are trivially applied). Verified on a real 4-node GCP cluster: warp PUT
+  343 MiB/s, GET 676 MiB/s, HEAD 2080 obj/s, 0 errors (was total failure).
+
 ## [0.0.532.0] - 2026-06-11
 
 ### Added
