@@ -256,6 +256,32 @@ func TestHTTPDataPlane_LargeBufferedResponse(t *testing.T) {
 	}
 }
 
+// TestHTTPDataPlane_LargeCallPayload is the S8-3 firing test: entries-bearing
+// AppendEntries (~16 MiB of raft log) and InstallSnapshot travel over plain Call
+// with a large Message.Payload. The payload must ride the request BODY, not the
+// X-Gfs-Payload header — an 8 MiB base64 header would blow Hertz's header limit.
+// RED against the S8-2 header-based code.
+func TestHTTPDataPlane_LargeCallPayload(t *testing.T) {
+	srv, cli, addr := httpPair(t)
+	const payloadLen = 8 << 20 // 8 MiB (entries-AE-sized)
+	want := make([]byte, payloadLen)
+	for i := range want {
+		want[i] = byte(i*31 + 7)
+	}
+	srv.Handle(testStreamType, func(req *Message) *Message {
+		return NewResponse(req, req.Payload) // echo so we verify the payload arrived intact
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := cli.Call(ctx, addr, &Message{Type: testStreamType, ID: 11, Payload: want})
+	if err != nil {
+		t.Fatalf("large Call (payload must ride the body): %v", err)
+	}
+	if len(resp.Payload) != payloadLen || !bytes.Equal(resp.Payload, want) {
+		t.Fatalf("large Call payload corrupted in round-trip: got %d bytes", len(resp.Payload))
+	}
+}
+
 // TestHTTPDataPlane_DefaultRetryIf_RefusesBodyStream pins the Hertz contract that
 // makes CallWithBody's one-shot streamed body safe: a streamed-body request is never
 // retried. RED if a Hertz upgrade changes DefaultRetryIf (then a streamed shard write

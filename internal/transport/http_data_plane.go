@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -41,28 +42,41 @@ func (t *HTTPTransport) SetStreamHandler(h StreamHandler) {
 	t.mu.Unlock()
 }
 
-// parseReqFrame reconstructs the request Message from the X-Gfs-* headers. The
-// request payload is always the small FB envelope, so it rides a header.
-func parseReqFrame(ctx *app.RequestContext) (*Message, error) {
+// parseReqMeta reads the request frame metadata (Type, ID) from the X-Gfs-*
+// headers. The payload is NOT read here — its location depends on the call shape
+// (see handleRPC): a CallWithBody envelope rides the X-Gfs-Payload header while the
+// raw body streams; a Call/CallRead payload (possibly large, e.g. entries-AE or an
+// InstallSnapshot) is the request BODY.
+func parseReqMeta(ctx *app.RequestContext) (StreamType, uint64, error) {
 	typeStr := string(ctx.GetHeader(hdrGfsType))
 	if typeStr == "" {
-		return nil, errors.New("missing X-Gfs-Type")
+		return 0, 0, errors.New("missing X-Gfs-Type")
 	}
 	typ, err := strconv.ParseUint(typeStr, 10, 8)
 	if err != nil {
-		return nil, fmt.Errorf("bad X-Gfs-Type: %w", err)
+		return 0, 0, fmt.Errorf("bad X-Gfs-Type: %w", err)
 	}
 	var id uint64
 	if s := string(ctx.GetHeader(hdrGfsID)); s != "" {
 		if id, err = strconv.ParseUint(s, 10, 64); err != nil {
-			return nil, fmt.Errorf("bad X-Gfs-Id: %w", err)
+			return 0, 0, fmt.Errorf("bad X-Gfs-Id: %w", err)
 		}
 	}
-	payload, err := decodePayloadHeader(string(ctx.GetHeader(hdrGfsPayload)))
+	return StreamType(typ), id, nil
+}
+
+// readReqBodyPayload reads a Call/CallRead request payload from the request BODY,
+// capped at maxPayloadSize (the codec's allocation guard). This keeps large raft
+// payloads (entries-AE, InstallSnapshot) off the header.
+func readReqBodyPayload(ctx *app.RequestContext) ([]byte, error) {
+	p, err := io.ReadAll(io.LimitReader(ctx.RequestBodyStream(), maxPayloadSize+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read request body: %w", err)
 	}
-	return &Message{Type: StreamType(typ), ID: id, Payload: payload}, nil
+	if len(p) > maxPayloadSize {
+		return nil, fmt.Errorf("request payload exceeds max %d", maxPayloadSize)
+	}
+	return p, nil
 }
 
 func decodePayloadHeader(s string) ([]byte, error) {
@@ -92,13 +106,36 @@ func writeRespMeta(ctx *app.RequestContext, msg *Message) {
 // and streams the body; for all others it writes metadata to headers and the
 // (possibly large) payload to the response BODY.
 func (t *HTTPTransport) handleRPC(_ context.Context, ctx *app.RequestContext) {
-	req, err := parseReqFrame(ctx)
+	typ, id, err := parseReqMeta(ctx)
 	if err != nil {
 		ctx.SetStatusCode(consts.StatusBadRequest)
 		return
 	}
-	if h, ok := t.router.LookupRead(req.Type); ok {
-		resp, body := h(req)
+
+	// HandleBody (CallWithBody): the small FB envelope rides the X-Gfs-Payload
+	// header and the request body is the raw stream handed to the handler.
+	if h, ok := t.router.LookupBody(typ); ok {
+		payload, perr := decodePayloadHeader(string(ctx.GetHeader(hdrGfsPayload)))
+		if perr != nil {
+			ctx.SetStatusCode(consts.StatusBadRequest)
+			return
+		}
+		req := &Message{Type: typ, ID: id, Payload: payload}
+		writeBufferedResp(ctx, req, h(req, ctx.RequestBodyStream()))
+		return
+	}
+
+	// Call / CallRead / catch-all: the payload (possibly large — entries-AE,
+	// InstallSnapshot) is the request BODY.
+	payload, perr := readReqBodyPayload(ctx)
+	if perr != nil {
+		ctx.SetStatusCode(consts.StatusBadRequest)
+		return
+	}
+	req := &Message{Type: typ, ID: id, Payload: payload}
+
+	if h, ok := t.router.LookupRead(typ); ok {
+		resp, rbody := h(req)
 		if resp == nil {
 			resp = NewErrorResponse(req, StatusError, errors.New("nil read response"))
 		}
@@ -108,16 +145,12 @@ func (t *HTTPTransport) handleRPC(_ context.Context, ctx *app.RequestContext) {
 		if len(resp.Payload) > 0 {
 			ctx.Header(hdrGfsPayload, base64.StdEncoding.EncodeToString(resp.Payload))
 		}
-		if body != nil {
-			ctx.SetBodyStream(body, -1) // Hertz closes the io.Closer after writing
+		if rbody != nil {
+			ctx.SetBodyStream(rbody, -1) // Hertz closes the io.Closer after writing
 		}
 		return
 	}
-	if h, ok := t.router.LookupBody(req.Type); ok {
-		writeBufferedResp(ctx, req, h(req, ctx.RequestBodyStream()))
-		return
-	}
-	if h, ok := t.router.Lookup(req.Type); ok {
+	if h, ok := t.router.Lookup(typ); ok {
 		writeBufferedResp(ctx, req, h(req))
 		return
 	}
@@ -145,7 +178,14 @@ func writeBufferedResp(ctx *app.RequestContext, req *Message, resp *Message) {
 
 // --- client ---
 
-// doRPC performs one HTTP RPC. body, if non-nil, is streamed as the request body.
+// doRPC performs one HTTP RPC.
+//
+// Payload placement (large-safe): when body == nil (Call/CallFlatBuffer/CallRead) the
+// request Message.Payload — which may be LARGE (entries-bearing AppendEntries,
+// InstallSnapshot) — is sent as the request BODY. When body != nil (CallWithBody) the
+// small FB envelope rides the X-Gfs-Payload header and `body` is the raw stream. A
+// payload in a header would blow Hertz's header-size limit for big raft payloads.
+//
 // When stream is true the response body is returned as a ReadCloser the caller must
 // Close (which releases the pooled Hertz response); otherwise the full response body
 // is read into the reply Message.Payload and the response is released here.
@@ -160,11 +200,15 @@ func (t *HTTPTransport) doRPC(ctx context.Context, addr string, req *Message, bo
 	hreq.SetRequestURI("https://" + addr + httpRPCPath)
 	hreq.Header.Set(hdrGfsType, strconv.FormatUint(uint64(req.Type), 10))
 	hreq.Header.Set(hdrGfsID, strconv.FormatUint(req.ID, 10))
-	if len(req.Payload) > 0 {
-		hreq.Header.Set(hdrGfsPayload, base64.StdEncoding.EncodeToString(req.Payload))
-	}
 	if body != nil {
+		// CallWithBody: small envelope in the header, raw stream as the body.
+		if len(req.Payload) > 0 {
+			hreq.Header.Set(hdrGfsPayload, base64.StdEncoding.EncodeToString(req.Payload))
+		}
 		hreq.SetBodyStream(body, -1)
+	} else if len(req.Payload) > 0 {
+		// Call/CallFlatBuffer/CallRead: payload (possibly large) is the request body.
+		hreq.SetBodyStream(bytes.NewReader(req.Payload), len(req.Payload))
 	}
 
 	if err := c.Do(ctx, hreq, hresp); err != nil {
