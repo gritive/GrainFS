@@ -1,5 +1,210 @@
 # Changelog
 
+## [0.0.536.0] - 2026-06-11
+
+### Fixed
+
+- **Quorum-meta torn read: a concurrent write could make an object briefly read as
+  "not found".** `writeQuorumMetaLocal` published the per-node quorum metadata with
+  an in-place `O_WRONLY|O_TRUNC` write, which leaves a window where the file is 0
+  bytes (truncated, data not yet written). A reader hitting that window
+  (`readQuorumMetaRaw` → `os.ReadFile`) decoded an empty blob, and `headObjectMeta`
+  then fell through to BadgerDB — which has no row for a quorum-meta object — and
+  returned `ErrObjectNotFound`. The quorum-meta path is keyed by `bucket/key` (not
+  versioned), so this surfaces whenever a write overlaps a read of the same key: a
+  same-key overwrite PUT racing a GET/HEAD, or a lingering best-effort quorum write
+  still in flight after `fanOutQuorumMeta` returned on the k-th ack. The write is
+  now atomic (temp file in the same directory, fsync, then rename), so a reader sees
+  either the previous complete blob or the new one, never a torn one. This was the
+  root cause of the flaky `TestECRewrap_ConfigUpgradeRace` ("upgrade head object:
+  object not found"); added `TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn`
+  as a deterministic regression guard (RED on the in-place write, GREEN on rename).
+
+## [0.0.535.0] - 2026-06-11
+
+### Added
+
+- **Phase 6 S6-2: gossip load-signal supply chain completed (RequestsPerSec
+  producer) + leader-transfer gated off.** The gossip → BoundedLoads/balancer chain
+  was fully wired but had no production producer for `RequestsPerSec`: it was always
+  0, so BoundedLoads' hot-set was always empty and hot-node read reranking was
+  inert. Added a `RequestRateCollector` that samples the existing, label-sharded
+  `ServiceRequestsTotal` counter off the hot path (once per gossip interval) and
+  writes the derived rate via `NodeStatsStore.UpdateRequestStats`, mirroring the
+  disk collector. Gossip then propagates it cluster-wide. New gauge
+  `grainfs_node_requests_per_sec`. Adds zero per-request cost (the counter is
+  already incremented per request; only the periodic sample is new).
+
+### Changed
+
+- **Load-based meta-Raft leader transfer is now gated off by default.** Producing
+  `RequestsPerSec` would otherwise activate `selectPeerByLoad → TransferLeadership`
+  — a never-validated path that transfers control-plane (meta-Raft) leadership in
+  response to a data-plane S3 load signal, risking election churn. It is gated off
+  (`BalancerProposer.SetLeaderLoadTransferEnabled`, default false) and never fires
+  until validated and enabled in code. Disk-skew migration and hot-node read
+  reranking are unaffected. See `docs/operators/balancer.md`.
+
+## [0.0.534.0] - 2026-06-11
+
+### Added
+
+- **Phase 6 S6-1: control/data plane boundary audit + dynamic regression guard.**
+  Audited (static) that the object PUT/GET/HEAD critical path routes only through
+  the data plane (per-group raft + per-node quorum-meta) and never touches the
+  control plane (meta-raft: bucket membership / IAM / multipart manifest). Verdict:
+  **clean** — the sole hot-path touch of the control-plane backend is a local
+  BadgerDB `HeadBucket` read on a bucket-assignment cache miss (not a raft
+  propose/ReadIndex), and `bucketAssigned()` short-circuits it in steady state.
+  Added `TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft`, a
+  regression guard that runs PUT+GET+HEAD on a *non-collapsed* topology (a real
+  group-raft `GroupBackend` distinct from the control-plane backend) and asserts
+  the control plane sees zero calls; a positive-control `CreateBucket` proves the
+  spy is non-vacuous (and the guard RED-able by mutation).
+
+### Notes
+
+- Boundary-labeling reconciliation: multipart completion proposes on the **group
+  raft** (data plane), not the meta-raft control plane — the manifest lives on
+  group-raft (not quorum-meta) only for single-txn atomicity, and it is off the
+  PUT/GET/HEAD hot path. ROADMAP's "multipart manifest" under the meta-raft scope
+  was the loose label; clarified the `commitCompleteMultipartObjectWriteResult`
+  comment accordingly.
+- Legacy single-backend deployments intentionally collapse the two planes
+  (`WrapDistributedBackend` shares one raft node); the boundary holds for
+  multi-group topologies with a dedicated meta-raft.
+
+## [0.0.533.0] - 2026-06-11
+
+### Fixed
+
+- **Multi-host cluster forward read fence deadlock — PUT/GET/HEAD failed on every
+  non-leader node.** On a fresh data group the first committed raft entry is a
+  NoOp (leader election) or ConfChange; the `ApplyCh` bridge filtered those out
+  and the apply loop never advanced `DistributedBackend.lastApplied`, leaving it
+  at 0 while `commitIndex` was 1. The forwarded read fence
+  (`waitForwardReadFence` → `ReadIndex` barrier → `WaitApplied`) polls
+  `lastApplied >= barrier`, which could never hold when the committed log tail
+  was a non-command entry, so every forwarded `HeadObject`/`GetObject` (including
+  the PUT previous-object-lookup) timed out at 5s. Because a PUT runs its
+  previous-lookup as a fenced read, the group deadlocked: reads waited for an
+  apply that no write could land. Localhost (RTT≈0, direct-to-leader PUTs) masked
+  it; real multi-host did not. The bridge now forwards all committed entries and
+  the apply loop advances `lastApplied` past non-command entries (NoOp/ConfChange
+  are trivially applied). Verified on a real 4-node GCP cluster: warp PUT
+  343 MiB/s, GET 676 MiB/s, HEAD 2080 obj/s, 0 errors (was total failure).
+
+## [0.0.532.0] - 2026-06-11
+
+### Added
+
+- **Phase 5 S5-1: cross-binary A/B benchmark harness + pre-registered decision
+  rule.** `benchmarks/cross_binary_ab.sh` is the merge go/no-go gate driver for
+  ROADMAP Phase 5 — it builds the NEW binary (`devel`: `data_raft` + meta-index
+  removed = "신규 전체") and the OLD binary (`master`: both consensus rounds
+  present = "옛 전체"), then runs them back-to-back on the same host through the
+  existing `bench_s3_compat_compare.sh` cluster machinery (4-node boot + warp +
+  optional minio anchor). Scope `PUT + GET + HEAD` (`warp put,get,stat`). It
+  computes within-run `new/old` throughput ratios, medians them across `RUNS`,
+  and applies the merge-blocker rule: **① PUT win** (`new/old` PUT ≥
+  `PUT_WIN_MIN`, default 1.05x) **AND ② GET/HEAD no-regress** (`new/old` GET &
+  HEAD ≥ `NOREG_MIN`, default 0.95x), failing the verdict on any warp error or
+  missing sample. Output: `benchmarks/profiles/cross-binary-ab-<stamp>/verdict.md`.
+  Decision rule and run procedure (multi-node GCP vs local smoke):
+  `benchmarks/cross_binary_ab/README.md`. The actual Phase 5 verdict is a
+  user-run multi-node benchmark (S5-2) — a local run is a harness smoke test, not
+  the gate (`dev bench != parity`).
+
+## [0.0.531.0] - 2026-06-10
+
+### Fixed
+
+- **Phase 4 S4-4d: admin volume replica summaries restored from quorum meta.**
+  S4-4b removed the object index that fed per-volume EC replica layout facts, so
+  the admin volume-health endpoint had lost its replica signal. New
+  `DistributedBackend.ScanObjectMetaEntries` scatter-gathers a bucket's live
+  (tombstone-filtered) quorum meta and returns each block as an entry carrying
+  its EC placement fields; `VolumeReplicaSummaries` scans `__grainfs_volumes` and
+  classifies each block against its placement group (`ClassifyObjectLayout`),
+  aggregated per volume. A nil backend or scan error degrades gracefully to the
+  incident-only signal as before.
+
+## [0.0.530.0] - 2026-06-10
+
+### Fixed
+
+- **Phase 4 S4-4c: index-free GET/HEAD/ReadAt read path (resolves the S4-4b
+  read-path regression).** Removing the object index (S4-4b) left the cluster
+  read path comparing the local object against a now-always-empty index entry,
+  so followers always forwarded and internal-bucket (volume/VFS/NBD) reads
+  errored with "coordinator: router not configured". The read methods now route
+  via deterministic placement (`routeReadOrBucket`) and serve through
+  `ResolveRead`: sole-voter and internal buckets read locally, a user-bucket
+  leader does a linearizable read, and a non-leader voter forwards to the leader.
+  Object metadata comes from the GroupBackend's quorum-meta read (local file →
+  peer fan-out). The index-comparison helpers (`getObjectLocalCurrentFollower`,
+  `readAtLocalCurrentFollower`, `objectMatchesIndexForFollowerRead`) are removed.
+- **Versioned delete-marker reads return 405.** `decodeQuorumMetaBlob` now carries
+  the `IsDeleteMarker` flag, so `GetObjectVersion` of a quorum-meta delete marker
+  folds to `MethodNotAllowed` instead of erroring (500).
+
+### Notes
+
+- **Behavior change — follower reads forward.** With the object index gone, a
+  voter that is not the group leader no longer serves user-bucket reads from a
+  local index-validated copy; it forwards to the leader (correct, linearizable).
+  The follower-local-read latency optimization is intentionally dropped, to be
+  re-evaluated against the Phase-5 GET/HEAD benchmark.
+- **Availability change — leader-down EC reads.** The index-gated path that let a
+  surviving voter reconstruct an EC object while the group leader was down is
+  removed (it depended on index-supplied EC metadata). This is a transient
+  election-window regression, intentionally dropped under the reduce→measure
+  discipline; revisit after the Phase-5 bench if it proves material.
+- `VolumeReplicaSummaries` still returns empty (S4-4d restores it from quorum
+  meta; it is an optional admin observability signal that degrades gracefully).
+- This branch remains WIP behind the Phase-5 GET/HEAD-regression merge gate.
+
+## [0.0.529.0] - 2026-06-10
+
+### Changed
+
+- **Phase 4: index-free LIST + meta-index removal (S4-4a, S4-4b).** The cluster
+  object listing path no longer depends on the meta-raft object index. `ListObjects`/
+  `ListObjectsPage`/`WalkObjects` now resolve entries via per-group quorum-meta
+  scatter-gather with last-writer-wins merge and tombstone filtering (S4-4a), and the
+  entire object-index write path is removed (S4-4b): `ProposeObjectIndex`/
+  `ProposeDeleteObjectIndex`, the `MetaFSM` `objectIndex`/`objectLatest` maps and their
+  apply/encode functions, the `index_group` machinery, `ObjectIndexShardSet`, and the
+  serveruntime index-group boot/seed wiring. This removes the second consensus round
+  from the object write path. Old snapshots containing object-index entries are decoded
+  and discarded (forward-compatible).
+
+### Removed
+
+- **`--object-index-groups` flag (EXPERIMENTAL, breaking).** The sharded object-index
+  raft-group feature is removed along with the object index itself. The flag had no
+  effect at its default (`1`) and was greenfield-only; no alias is provided.
+
+### Notes
+
+- DEK reference counting lost its driver (the object-index apply path); DEK version
+  pruning already refuses unconditionally until S7's full prune-safety predicate, so
+  zero refcounts are harmless. The refcount machinery stays wired for S7.
+- Admin volume replica summaries (`VolumeReplicaSummaries`) return empty pending the
+  S4-4c read-path migration to quorum meta.
+- **⚠️ Known read-path regression — do NOT merge/deploy this branch as-is; fixed in
+  S4-4c.** Removing the object index left the GET/HEAD/ReadAt/Truncate routing
+  (`routeIndexedReadOrBucket` + `objectMatchesIndexForFollowerRead`, 5 call sites) still
+  comparing the local object against a now-always-empty index entry. Observed impact:
+  (1) a follower that holds the object always concludes "local is stale" and forwards to
+  the group leader instead of serving locally — functional when a leader is reachable but
+  a latency regression and a hard failure where no leader resolves; (2) **internal-bucket
+  reads (volume/VFS/NBD via `Truncate`/`WriteAt`/`GetObject`) currently error with
+  "coordinator: router not configured"** — a functional outage for those paths. 11 unit
+  tests + 1 ginkgo table are gated behind `t.Skip("Phase 4 S4-4c: ...")` rather than
+  deleted. S4-4c migrates these reads to quorum-meta lookups and updates the tests to the
+  new contract; this branch is WIP behind the Phase-5 benchmark merge gate until then.
+
 ## [0.0.528.0] - 2026-06-10
 
 ### Changed

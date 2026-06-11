@@ -189,8 +189,14 @@ done:
 
 // --- Apply channel ---
 
-// The bridge filters out Raft protocol log entries (ConfChange,
-// JointConfChange, NoOp) that cluster FSMs do not consume directly.
+// The bridge forwards ALL committed entries. Cluster FSMs do not consume Raft
+// protocol entries (ConfChange, JointConfChange, NoOp), but the apply loop must
+// still SEE them to advance its applied cursor (DistributedBackend.lastApplied)
+// to the commit frontier. Filtering them out left lastApplied stuck below
+// commitIndex whenever the committed log tail was a non-command entry (e.g. a
+// fresh data group whose only committed entry is the leader's election NoOp),
+// which deadlocked the forward read fence (WaitApplied(commitIndex) could never
+// be satisfied). apply_actor treats non-command entries as trivially applied.
 func (a *raftNodeAdapter) ApplyCh() <-chan raft.LogEntry {
 	a.applyOnce.Do(func() {
 		ch := make(chan raft.LogEntry, 64)
@@ -198,9 +204,6 @@ func (a *raftNodeAdapter) ApplyCh() <-chan raft.LogEntry {
 		src := a.n.ApplyCh()
 		go func() {
 			for entry := range src {
-				if entry.Type != raft.LogEntryCommand && entry.Type != raft.LogEntrySnapshot {
-					continue
-				}
 				ch <- raft.LogEntry{
 					Term:    entry.Term,
 					Index:   entry.Index,

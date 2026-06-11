@@ -827,12 +827,14 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	}, nil
 }
 
-// commitCompleteMultipartObjectWriteResult intentionally uses data_raft (not quorum meta).
-// Multipart completion is a control-plane operation: applyCompleteMultipart atomically
-// writes object meta AND deletes the multipart manifest key in a single BadgerDB txn.
-// Splitting that atomicity (quorum write + separate raft manifest delete) would open a
-// window where the manifest leaks or the object disappears. Phase 3 경계: the manifest
-// lives on raft; headObjectMeta falls back to BadgerDB when quorum meta is absent.
+// commitCompleteMultipartObjectWriteResult intentionally proposes on the *group*
+// raft (b.node — data plane), not on quorum meta and not on the meta-raft control
+// plane: applyCompleteMultipart atomically writes object meta AND deletes the
+// multipart manifest key in a single BadgerDB txn. Splitting that atomicity (quorum
+// write + separate manifest delete) would open a window where the manifest leaks or
+// the object disappears, so the manifest lives on group-raft rather than quorum
+// meta. This is off the PUT/GET/HEAD hot path (CompleteMultipartUpload is its own S3
+// API); headObjectMeta falls back to BadgerDB when quorum meta is absent. Phase 3 경계.
 func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	ctx context.Context,
 	uploadID string,

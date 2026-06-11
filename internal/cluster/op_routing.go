@@ -21,11 +21,6 @@ func (t RouteTarget) CanReadLocal() bool {
 	return t.SelfIsLeader || t.SelfIsOnlyVoter
 }
 
-type objectIndexLookup interface {
-	ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool)
-	ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool)
-}
-
 type dataGroupLeaderProbe interface {
 	GroupLeaderIsSelf(groupID string) bool
 }
@@ -35,7 +30,6 @@ type dataGroupLeaderProbe interface {
 type OpRouter struct {
 	router            *Router
 	groups            ShardGroupSource
-	index             objectIndexLookup
 	addr              NodeAddressBook
 	leaderProbe       dataGroupLeaderProbe
 	ec                ECConfig
@@ -47,7 +41,6 @@ type OpRouter struct {
 func NewOpRouter(
 	router *Router,
 	groups ShardGroupSource,
-	index objectIndexLookup,
 	addr NodeAddressBook,
 	leaderProbe dataGroupLeaderProbe,
 	ec ECConfig,
@@ -67,7 +60,6 @@ func NewOpRouter(
 	return &OpRouter{
 		router:            router,
 		groups:            groups,
-		index:             index,
 		addr:              addr,
 		leaderProbe:       leaderProbe,
 		ec:                ec,
@@ -120,41 +112,21 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 }
 
 // RouteObjectRead resolves an object read to its placement-group target via
-// the meta-FSM object index. Empty versionID means the latest version.
-// Internal buckets (storage.IsInternalBucket) bypass the object index per
-// ADR 0004's pinned-bucket invariant.
-//
-// nil objectIndexLookup: falls back to deterministic hash placement when a
-// frozen candidate list is available (index-free mode). Returns
-// ErrObjectIndexRequired only if the candidate list is also empty (bootstrap).
+// deterministic hash placement. Empty versionID means the latest version.
+// Internal buckets bypass placement selection per ADR 0004.
+// Returns ErrObjectIndexRequired when the frozen candidate list is empty (bootstrap).
 func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, error) {
 	if storage.IsInternalBucket(bucket) {
 		target, err := r.RouteBucket(bucket)
 		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: target.GroupID}
 		return target, entry, err
 	}
-	if r.index == nil {
-		if len(r.placementGroupIDs) == 0 {
-			return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
-		}
-		groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
-		target, err := r.routeGroup(groupID)
-		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: groupID}
-		return target, entry, err
+	if len(r.placementGroupIDs) == 0 {
+		return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
 	}
-	var (
-		entry ObjectIndexEntry
-		ok    bool
-	)
-	if versionID == "" {
-		entry, ok = r.index.ObjectIndexLatest(bucket, key)
-	} else {
-		entry, ok = r.index.ObjectIndexVersion(bucket, key, versionID)
-	}
-	if !ok {
-		return RouteTarget{}, ObjectIndexEntry{}, storage.ErrObjectNotFound
-	}
-	target, err := r.routeGroup(entry.PlacementGroupID)
+	groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+	target, err := r.routeGroup(groupID)
+	entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: groupID}
 	return target, entry, err
 }
 

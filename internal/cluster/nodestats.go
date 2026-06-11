@@ -114,6 +114,33 @@ func (s *NodeStatsStore) UpdateDiskStats(nodeID string, usedPct float64, availBy
 	s.snap.Store(&next)
 }
 
+// UpdateRequestStats atomically updates only the RequestsPerSec field for nodeID,
+// preserving all other fields. No-op if nodeID is not in the store. Clamps rps to
+// [0, ∞). Mirrors UpdateDiskStats: the local request-rate collector calls this
+// every interval so the node's own load is observable to BoundedLoads/balancer
+// via gossip (the disk collector owns the disk fields, this owns the load field).
+func (s *NodeStatsStore) UpdateRequestStats(nodeID string, rps float64) {
+	if rps < 0 {
+		rps = 0
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cur := *s.snap.Load()
+	ns, ok := cur[nodeID]
+	if !ok {
+		return
+	}
+	ns.RequestsPerSec = rps
+	ns.UpdatedAt = time.Now()
+
+	next := make(map[string]NodeStats, len(cur))
+	maps.Copy(next, cur)
+	next[nodeID] = ns
+	s.snap.Store(&next)
+}
+
 // Len returns the count of non-expired entries.
 func (s *NodeStatsStore) Len() int {
 	snap := *s.snap.Load()

@@ -312,11 +312,31 @@ func TestLeaderBalance_TransfersWhenOverloaded(t *testing.T) {
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig() // LeaderLoadThreshold: 1.3, LeaderTenureMin: 0
 	p := NewBalancerProposer("leader", store, node, cfg)
+	p.SetLeaderLoadTransferEnabled(true)                           // mechanism test: opt in past the default-off gate
 	p.startedAt = time.Now().Add(-cfg.warmupTimeout - time.Second) // warmup done
 
 	p.tickOnce()
 
 	assert.True(t, node.transferred, "leader overloaded: expected TransferLeadership")
+}
+
+func TestLeaderBalance_NoTransferWhenGateDisabled(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "leader", RequestsPerSec: 300.0})
+	store.Set(NodeStats{NodeID: "peer-a", RequestsPerSec: 50.0})
+	store.Set(NodeStats{NodeID: "peer-b", RequestsPerSec: 80.0})
+
+	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
+	cfg := testBalancerConfig()
+	p := NewBalancerProposer("leader", store, node, cfg)
+	// Default: leaderLoadTransferEnabled is false — even a wildly overloaded
+	// leader must NOT transfer. Guards against shipping never-validated
+	// load-driven meta-Raft leadership churn as a default (Phase 6 S6-2).
+	p.startedAt = time.Now().Add(-cfg.warmupTimeout - time.Second)
+
+	p.tickOnce()
+
+	assert.False(t, node.transferred, "gate off by default: overloaded leader must not transfer")
 }
 
 func TestLeaderBalance_NoTransferWhenBalanced(t *testing.T) {
@@ -328,6 +348,7 @@ func TestLeaderBalance_NoTransferWhenBalanced(t *testing.T) {
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig()
 	p := NewBalancerProposer("leader", store, node, cfg)
+	p.SetLeaderLoadTransferEnabled(true) // isolate the threshold logic from the gate
 	p.startedAt = time.Now().Add(-cfg.warmupTimeout - time.Second)
 
 	p.tickOnce()

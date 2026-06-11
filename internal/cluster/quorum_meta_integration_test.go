@@ -88,6 +88,205 @@ var _ = Describe("Quorum meta — Phase 3 primary path", func() {
 	})
 })
 
+// TestDeleteObject_QuorumMetaTombstone proves S4-1: DELETE writes an IsDeleteMarker=true
+// tombstone to quorum meta instead of removing the file.
+//
+// RED without the tombstone write in deleteObjectWithMarker: readQuorumMetaRawCmd
+// returns storage.ErrObjectNotFound after DELETE (file was removed instead of marked).
+// GREEN with the tombstone write: readQuorumMetaRawCmd returns a cmd with IsDeleteMarker=true.
+//
+// Neuter test: if the writeQuorumMeta call is removed from deleteObjectWithMarker
+// (reverting to deleteQuorumMetaLocal), this test is RED.
+func TestDeleteObject_QuorumMetaTombstone(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	// PUT — writes quorum meta locally.
+	payload := bytes.Repeat([]byte("d"), 512)
+	_, err := b.PutObject(ctx, "bucket", "del.bin",
+		bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+
+	// DELETE — must write tombstone to quorum meta.
+	err = b.DeleteObject(ctx, "bucket", "del.bin")
+	require.NoError(t, err)
+
+	// The quorum meta file must still exist as a tombstone.
+	cmd, err := b.shardSvc.readQuorumMetaRawCmd("bucket", "del.bin")
+	require.NoError(t, err, "quorum meta tombstone must be present after DELETE")
+	require.True(t, cmd.IsDeleteMarker, "quorum meta after DELETE must have IsDeleteMarker=true")
+}
+
+// TestScatterGatherList_LWWAndTombstone proves S4-3:
+// scatterGatherList fans out ScanQuorumMeta RPCs to all shard group peers,
+// applies per-key LWW (max ModTime wins), and filters IsDeleteMarker tombstones.
+//
+// RED without scatterGatherList (or ScanQuorumMeta RPC): compile error.
+// GREEN: stale alpha.bin on node B loses to fresh alpha.bin on node A (LWW);
+// beta.bin tombstone is excluded; gamma.bin from node B is included.
+//
+// Neuter test: removing LWW in scatterGatherList or removing tombstone filtering
+// causes key assertions to fail.
+func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewTCPTransport("test-cluster-psk")
+	trB := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+	require.NoError(t, trA.Connect(ctx, trB.LocalAddr()))
+	require.NoError(t, trB.Connect(ctx, trA.LocalAddr()))
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	trA.SetStreamHandler(svcA.HandleRPC())
+	trB.SetStreamHandler(svcB.HandleRPC())
+
+	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
+		t.Helper()
+		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	baseCmd := func(key string, modTime int64, isDel bool) PutObjectMetaCmd {
+		return PutObjectMetaCmd{Bucket: "bkt", Key: key, ETag: "e", ECData: 1,
+			NodeIDs: []string{"n1"}, ModTime: modTime, IsDeleteMarker: isDel}
+	}
+
+	// Node A: alpha.bin (ModTime=10, fresh) + beta.bin (tombstone, ModTime=5).
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 10, false))))
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "beta.bin", encodeBlob(baseCmd("beta.bin", 5, true))))
+	// Node B: alpha.bin (ModTime=5, stale) + gamma.bin (ModTime=10, normal).
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 5, false))))
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(baseCmd("gamma.bin", 10, false))))
+
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr(), trB.LocalAddr()}},
+		}},
+	}
+
+	entries, err := backendA.scatterGatherList(ctx, "bkt", "")
+	require.NoError(t, err)
+
+	// beta.bin is a tombstone → filtered.
+	// alpha.bin: node A (ModTime=10) beats node B (ModTime=5).
+	// gamma.bin: only on node B.
+	require.Len(t, entries, 2, "tombstone filtered; alpha.bin + gamma.bin survive")
+	keySet := map[string]int64{}
+	for _, e := range entries {
+		keySet[e.Key] = e.ModTime
+	}
+	require.Contains(t, keySet, "alpha.bin")
+	require.Contains(t, keySet, "gamma.bin")
+	require.NotContains(t, keySet, "beta.bin", "tombstone must not appear")
+	require.Equal(t, int64(10), keySet["alpha.bin"], "LWW: fresh entry (ModTime=10) must win")
+}
+
+// TestScanObjectMetaEntries_CarriesPlacementFields proves S4-4d: the scan
+// returns each live block as an ObjectIndexEntry carrying the EC placement
+// fields (PlacementGroupID, NodeIDs, ECData, ECParity) that ClassifyObjectLayout
+// needs to rebuild admin volume replica facts. Tombstones are filtered.
+//
+// RED without ScanObjectMetaEntries: compile error.
+// Neuter: if the conversion drops NodeIDs/ECData/PlacementGroupID, the field
+// assertions fail; if it stops filtering tombstones, the length assertion fails.
+func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
+	defer tr.Close()
+	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	tr.SetStreamHandler(svc.HandleRPC())
+
+	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
+		t.Helper()
+		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	// vol1/blk: 4+2 EC across 6 nodes. vol2/blk: tombstone (must be filtered).
+	require.NoError(t, svc.writeQuorumMetaLocal("vols", "vol1/blk", encodeBlob(PutObjectMetaCmd{
+		Bucket: "vols", Key: "vol1/blk", ETag: "e", ModTime: 10,
+		ECData: 4, ECParity: 2, PlacementGroupID: "g1",
+		NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+	})))
+	require.NoError(t, svc.writeQuorumMetaLocal("vols", "vol2/blk", encodeBlob(PutObjectMetaCmd{
+		Bucket: "vols", Key: "vol2/blk", ETag: "e", ModTime: 5, IsDeleteMarker: true,
+		ECData: 4, ECParity: 2, PlacementGroupID: "g1", NodeIDs: []string{"n1"},
+	})))
+
+	backend := &DistributedBackend{
+		selfAddr: tr.LocalAddr(),
+		shardSvc: svc,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{tr.LocalAddr()}},
+		}},
+	}
+
+	entries, err := backend.ScanObjectMetaEntries(ctx, "vols", "")
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "tombstone vol2/blk must be filtered; only vol1/blk survives")
+	e := entries[0]
+	require.Equal(t, "vol1/blk", e.Key)
+	require.Equal(t, "g1", e.PlacementGroupID)
+	require.Equal(t, uint8(4), e.ECData)
+	require.Equal(t, uint8(2), e.ECParity)
+	require.Equal(t, []string{"n1", "n2", "n3", "n4", "n5", "n6"}, e.NodeIDs)
+}
+
+// TestScanQuorumMetaBucket proves S4-2: ScanQuorumMetaBucket returns all entries
+// (including tombstones) for a bucket, with optional prefix filtering.
+//
+// RED without ScanQuorumMetaBucket: compile error (function not found).
+// GREEN: PUT 2 objects + DELETE 1 → scan returns all 3 entries; tombstone has IsDeleteMarker=true;
+// prefix filter reduces results to the matching subset.
+//
+// Neuter test: if ScanQuorumMetaBucket omits tombstones, the tombstone assertion fails.
+func TestScanQuorumMetaBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+
+	payload := bytes.Repeat([]byte("x"), 128)
+	_, err := b.PutObject(ctx, "bkt", "keep.bin", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "bkt", "del.bin", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.NoError(t, b.DeleteObject(ctx, "bkt", "del.bin"))
+
+	entries, err := b.shardSvc.ScanQuorumMetaBucket("bkt", "")
+	require.NoError(t, err)
+	// DELETE overwrites the existing quorum meta with a tombstone (same path).
+	// So 2 PUTs → 2 files; 1 DELETE → 1 file replaced with tombstone → still 2 files.
+	require.Len(t, entries, 2, "scan must return 2 entries: 1 normal PUT + 1 tombstone")
+
+	// Tombstone must have IsDeleteMarker=true.
+	var sawTombstone bool
+	for _, e := range entries {
+		if e.Key == "del.bin" {
+			sawTombstone = e.IsDeleteMarker
+		}
+	}
+	require.True(t, sawTombstone, "del.bin entry must be IsDeleteMarker=true")
+
+	// Prefix filter.
+	keep, err := b.shardSvc.ScanQuorumMetaBucket("bkt", "keep")
+	require.NoError(t, err)
+	require.Len(t, keep, 1)
+	require.Equal(t, "keep.bin", keep[0].Key)
+}
+
 // TestMultipartComplete_BadgerDBFallback proves the Phase 3 raft/quorum boundary:
 // multipart-completed objects are committed via data_raft (applyCompleteMultipart),
 // so their quorum meta file is absent. headObjectMeta must still serve them by falling

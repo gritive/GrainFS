@@ -51,23 +51,13 @@ func (r multipartRuntime) completeMultipartUpload(ctx context.Context, bucket, k
 	if err != nil {
 		return nil, err
 	}
-	if r.c.indexWriter != nil {
-		ctx = contextWithObjectWritePlacement(ctx, group)
-	}
+	ctx = contextWithObjectWritePlacement(ctx, group)
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		obj, err := gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
-		if err != nil {
-			return nil, err
-		}
-		return obj, r.c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+		return gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	}
-	obj, err := r.c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, uploadID, parts)
-	if err != nil {
-		return nil, err
-	}
-	return obj, r.c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+	return r.c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, uploadID, parts)
 }
 
 func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (*storage.Part, error) {
@@ -75,9 +65,7 @@ func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID 
 	if err != nil {
 		return nil, err
 	}
-	if r.c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
-	}
+	ctx = ContextWithPlacementGroup(ctx, target.GroupID)
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
@@ -91,9 +79,7 @@ func (r multipartRuntime) abortMultipartUpload(ctx context.Context, bucket, key,
 	if err != nil {
 		return err
 	}
-	if r.c.indexWriter != nil {
-		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
-	}
+	ctx = ContextWithPlacementGroup(ctx, target.GroupID)
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {

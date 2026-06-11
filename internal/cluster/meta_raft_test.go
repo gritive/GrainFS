@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -437,50 +436,6 @@ func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
 		return cbBucket == "videos"
 	}, 2*time.Second, 10*time.Millisecond, "callback must fire after propose")
 	assert.Equal(t, "group-1", cbGroup)
-}
-
-func TestMetaRaft_ProposeObjectIndex_CommitToFSM(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-	tracePath := filepath.Join(t.TempDir(), "put-trace.jsonl")
-	t.Setenv("GRAINFS_PUT_TRACE_FILE", tracePath)
-	reloadPutTraceSinkForTest()
-	t.Cleanup(reloadPutTraceSinkForTest)
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	entry := ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v1",
-		PlacementGroupID: "group-2",
-		Size:             7,
-		ETag:             "etag",
-		ECData:           2,
-		ECParity:         1,
-		NodeIDs:          []string{"n1", "n2", "n3"},
-	}
-	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
-		Bucket:      "b",
-		Key:         "k",
-		GroupID:     "group-2",
-		Ingress:     PutTraceIngressLocalLeader,
-		SizeClass:   PutTraceSizeSmall,
-		ForwardMode: PutTraceForwardNone,
-	})
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	require.NoError(t, m.ProposeObjectIndex(ctx, entry, false))
-
-	got, ok := m.FSM().ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.Equal(t, entry, got)
-	events := readPutTraceEvents(t, tracePath)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexEncode)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexLocalPropose)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexLocalApply)
 }
 
 func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {

@@ -254,6 +254,13 @@ var (
 		Help: "Local disk usage percentage (0–100) as seen by each node.",
 	}, []string{"node_id"})
 
+	// NodeRequestsPerSec tracks the locally-measured request rate per node, the
+	// load signal gossiped to BoundedLoads and the balancer.
+	NodeRequestsPerSec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_node_requests_per_sec",
+		Help: "Locally-measured request rate (RPS) as seen by each node.",
+	}, []string{"node_id"})
+
 	// FDOpen tracks current open file descriptors per node.
 	FDOpen = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_fd_open",

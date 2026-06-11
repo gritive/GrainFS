@@ -207,6 +207,14 @@ type BalancerProposer struct {
 	migrationProposalRate float64
 	stickyDonorHoldTime   time.Duration
 
+	// leaderLoadTransferEnabled gates the load-driven meta-Raft leadership
+	// transfer (selectPeerByLoad → TransferLeadership). Default false: this
+	// behavior has never run in production (RequestsPerSec was always 0 until the
+	// request-rate collector landed), and transferring control-plane leadership in
+	// response to a data-plane S3 load signal is unvalidated and risks election
+	// churn. Enabled in code (SetLeaderLoadTransferEnabled) once validated.
+	leaderLoadTransferEnabled bool
+
 	active      atomic.Bool // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt   time.Time
 	picker      ObjectPicker               // nil = no proposals until SetObjectPicker is called
@@ -332,6 +340,13 @@ func (p *BalancerProposer) SetObjectPicker(picker ObjectPicker) {
 	p.picker = picker
 }
 
+// SetLeaderLoadTransferEnabled toggles the load-driven leadership transfer (off by
+// default). Must be called before Run() starts; the field is read only from the
+// actor goroutine. Intended for validation/tests until the behavior is vetted.
+func (p *BalancerProposer) SetLeaderLoadTransferEnabled(enabled bool) {
+	p.leaderLoadTransferEnabled = enabled
+}
+
 // Run starts the balancer actor loop. Blocks until ctx is cancelled or Stop() is called.
 // The gossip-interval ticker is hot-reloaded: each tick re-reads
 // BalancerGossipInterval() and calls ticker.Reset if it changed. Honors
@@ -409,8 +424,9 @@ func (p *BalancerProposer) tickOnce() {
 	triggerPct := p.clusterCfg.BalancerImbalanceTriggerPct()
 	stopPct := p.clusterCfg.BalancerImbalanceStopPct()
 
-	// Leader load check: transfer leadership if this leader is significantly overloaded.
-	if time.Since(p.startedAt) >= p.clusterCfg.BalancerLeaderTenureMin() {
+	// Leader load check: transfer leadership if this leader is significantly
+	// overloaded. Gated off by default — see leaderLoadTransferEnabled.
+	if p.leaderLoadTransferEnabled && time.Since(p.startedAt) >= p.clusterCfg.BalancerLeaderTenureMin() {
 		if _, overloaded := selectPeerByLoad(p.store, p.nodeID, p.leaderLoadThreshold); overloaded {
 			if err := p.node.TransferLeadership(); err != nil {
 				p.logger.Warn().Err(err).Msg("balancer: TransferLeadership failed")

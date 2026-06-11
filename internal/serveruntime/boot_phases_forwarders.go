@@ -108,21 +108,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 			}
 			return hint
 		})
-	indexProposer := cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
-		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
-		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-	})
-	indexShardSlice, err := buildObjectIndexShards(state, indexProposer)
-	if err != nil {
-		return err
-	}
-	indexShards, err := cluster.NewObjectIndexShardSet(indexShardSlice)
-	if err != nil {
-		return fmt.Errorf("boot: object index shard set: %w", err)
-	}
-	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr).
-		WithObjectIndexProposer(indexShards)
+	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr)
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
@@ -243,20 +229,6 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	}))
 
-	indexProposer := cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
-		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
-		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-	})
-	indexShardSlice, err := buildObjectIndexShards(state, indexProposer)
-	if err != nil {
-		return err
-	}
-	indexShards, err := cluster.NewObjectIndexShardSet(indexShardSlice)
-	if err != nil {
-		return fmt.Errorf("boot: object index shard set: %w", err)
-	}
-
 	state.clusterCoord = cluster.NewClusterCoordinator(
 		state.distBackend, // base for cluster-wide ops (CreateBucket, etc.)
 		state.dgMgr,       // local owned groups (self-leader shortcut)
@@ -267,8 +239,6 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 		WithNodeAddressResolver(metaRaft.FSM()).
 		WithSelfPeerAlias(state.raftAddr).
 		WithECConfig(state.effectiveEC).
-		WithObjectIndexProposer(indexShards).
-		WithObjectIndexReader(indexShards).
 		WithCapabilityGate(state.capabilityGate)
 	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
 		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
@@ -429,24 +399,6 @@ func handleDeferredSeed(ctx context.Context, state *bootState, liveNodes []clust
 	}
 	targetGroups := seedGroupCountForClusterSize(expectN)
 	voters := cluster.AutoECConfigForClusterSize(expectN).NumShards()
-
-	// Slice 4b-2: seed the N object-index groups BEFORE the shard groups. The
-	// deferred-seed verdict (decideDeferredSeed) keys on ShardGroups() count, so
-	// seeding shard groups LAST keeps the verdict at seedNow until BOTH batches
-	// land — a re-entry after an index-seed failure re-fires seedNow instead of
-	// passing through with index groups missing. Derive index voters from the
-	// JOINED liveNodes (NOT state.peers, which is empty in deferred mode →
-	// SeedInitialIndexGroups would yield a self-only RF=1 group). count<=1 is a
-	// no-op so the default N=1 meta-FSM single-shard path is byte-identical.
-	// (SeedInitialIndexGroups re-proposes all N on a re-entry — NOT propose-only-
-	// missing like the shard path; safe here because the deferred bootstrap window
-	// sees no membership churn.)
-	if idxCount := normalizeIndexGroupCount(state.cfg.IndexGroupCount); idxCount > 1 {
-		indexPeers := seedShardGroupPeerAddrsFromNodes(state.nodeID, state.raftAddr, liveNodes)
-		if err := SeedInitialIndexGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, indexPeers, idxCount, voters); err != nil {
-			return false, fmt.Errorf("option-B seed-on-quorum index groups: %w", err)
-		}
-	}
 
 	missing := MissingSeedShardGroups(state.nodeID, state.raftAddr, liveNodes, state.metaRaft.FSM().ShardGroups(), voters)
 	for _, group := range missing {

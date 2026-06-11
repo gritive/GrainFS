@@ -7,22 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeObjectIndex satisfies objectIndexLookup for OpRouter tests.
-type fakeObjectIndex struct {
-	latest  map[string]ObjectIndexEntry // key = bucket+"/"+key
-	version map[string]ObjectIndexEntry // key = bucket+"/"+key+"#"+versionID
-}
-
-func (f *fakeObjectIndex) ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool) {
-	e, ok := f.latest[bucket+"/"+key]
-	return e, ok
-}
-
-func (f *fakeObjectIndex) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool) {
-	e, ok := f.version[bucket+"/"+key+"#"+versionID]
-	return e, ok
-}
-
 // fakeLeaderProbe satisfies dataGroupLeaderProbe for OpRouter tests.
 type fakeLeaderProbe struct {
 	leaderGroups map[string]bool
@@ -67,8 +51,7 @@ func routerForTestWithBucket(t *testing.T, leaderProbe *fakeLeaderProbe) *OpRout
 		{ID: "node-2", Address: "10.0.0.2:7000"},
 		{ID: "node-3", Address: "10.0.0.3:7000"},
 	}}
-	idx := &fakeObjectIndex{latest: map[string]ObjectIndexEntry{}, version: map[string]ObjectIndexEntry{}}
-	return NewOpRouter(r, groups, idx, addr, leaderProbe, ECConfig{}, "node-2", nil)
+	return NewOpRouter(r, groups, addr, leaderProbe, ECConfig{}, "node-2", nil)
 }
 
 func TestOpRouter_RouteBucket_HappyNonLeader(t *testing.T) {
@@ -114,45 +97,11 @@ func TestOpRouter_RouteBucket_DuplicateSelfIsOnlyVoter(t *testing.T) {
 			"g1": {ID: "g1", PeerIDs: []string{"node-1", "node-1", "node-1"}},
 		},
 	}
-	idx := &fakeObjectIndex{latest: map[string]ObjectIndexEntry{}, version: map[string]ObjectIndexEntry{}}
-	router := NewOpRouter(r, groups, idx, nil, &fakeLeaderProbe{}, ECConfig{}, "node-1", nil)
+	router := NewOpRouter(r, groups, nil, &fakeLeaderProbe{}, ECConfig{}, "node-1", nil)
 
 	got, err := router.RouteBucket("b1")
 	require.NoError(t, err)
 	require.True(t, got.SelfIsOnlyVoter)
-}
-
-func TestOpRouter_RouteObjectRead_LatestFromIndex(t *testing.T) {
-	probe := &fakeLeaderProbe{}
-	r := routerForTestWithBucket(t, probe)
-	r.index.(*fakeObjectIndex).latest["b1/k1"] = ObjectIndexEntry{
-		Bucket: "b1", Key: "k1", VersionID: "v-A", PlacementGroupID: "g1",
-		Size: 100, ETag: "etag-A",
-	}
-	got, entry, err := r.RouteObjectRead("b1", "k1", "")
-	require.NoError(t, err)
-	require.Equal(t, "g1", got.GroupID)
-	require.Equal(t, "v-A", entry.VersionID)
-	require.Equal(t, "etag-A", entry.ETag)
-}
-
-func TestOpRouter_RouteObjectRead_VersionFromIndex(t *testing.T) {
-	probe := &fakeLeaderProbe{}
-	r := routerForTestWithBucket(t, probe)
-	r.index.(*fakeObjectIndex).version["b1/k1#v-B"] = ObjectIndexEntry{
-		Bucket: "b1", Key: "k1", VersionID: "v-B", PlacementGroupID: "g1", Size: 200,
-	}
-	got, entry, err := r.RouteObjectRead("b1", "k1", "v-B")
-	require.NoError(t, err)
-	require.Equal(t, "g1", got.GroupID)
-	require.Equal(t, int64(200), entry.Size)
-}
-
-func TestOpRouter_RouteObjectRead_MissingLatest(t *testing.T) {
-	probe := &fakeLeaderProbe{}
-	r := routerForTestWithBucket(t, probe)
-	_, _, err := r.RouteObjectRead("b1", "missing", "")
-	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
 func TestOpRouter_RouteObjectRead_InternalBucketBypassesIndex(t *testing.T) {
@@ -183,11 +132,10 @@ func TestOpRouter_RouteObjectWrite_InternalBucketPreservesGroupPeers(t *testing.
 	require.Equal(t, []string{"node-1", "node-2", "node-3"}, group.PeerIDs)
 }
 
-func TestOpRouter_RouteObjectRead_NilIndexDeterministicWhenGroupsExist(t *testing.T) {
-	// Phase 2: nil index + EC-capable groups → deterministic route (no error).
+func TestOpRouter_RouteObjectRead_DeterministicWhenGroupsExist(t *testing.T) {
+	// Deterministic hash placement: EC-capable groups → route succeeds without index.
 	probe := &fakeLeaderProbe{}
 	r := routerForTestWithBucket(t, probe)
-	r.index = nil
 	_, entry, err := r.RouteObjectRead("b1", "k1", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, entry.PlacementGroupID)
@@ -196,7 +144,7 @@ func TestOpRouter_RouteObjectRead_NilIndexDeterministicWhenGroupsExist(t *testin
 func TestOpRouter_RouteObjectRead_NilIndexNoCandidatesReturnsError(t *testing.T) {
 	// nil index + no EC-capable groups (bootstrap) → ErrObjectIndexRequired.
 	groups := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{}}
-	r := NewOpRouter(nil, groups, nil, nil, nil, ECConfig{DataShards: 2, ParityShards: 1}, "n1", nil)
+	r := NewOpRouter(nil, groups, nil, nil, ECConfig{DataShards: 2, ParityShards: 1}, "n1", nil)
 	_, _, err := r.RouteObjectRead("b1", "k1", "")
 	require.ErrorIs(t, err, ErrObjectIndexRequired)
 }
@@ -218,9 +166,8 @@ func routerForTestWithECGroups(t *testing.T, ec ECConfig) *OpRouter {
 		{ID: "node-3", Address: "10.0.0.3:7000"}, {ID: "node-4", Address: "10.0.0.4:7000"},
 		{ID: "node-5", Address: "10.0.0.5:7000"}, {ID: "node-6", Address: "10.0.0.6:7000"},
 	}}
-	idx := &fakeObjectIndex{latest: map[string]ObjectIndexEntry{}, version: map[string]ObjectIndexEntry{}}
 	probe := &fakeLeaderProbe{}
-	return NewOpRouter(rt, groups, idx, addr, probe, ec, "node-2", nil)
+	return NewOpRouter(rt, groups, addr, probe, ec, "node-2", nil)
 }
 
 func TestOpRouter_RouteObjectWrite_PicksECCapableGroup(t *testing.T) {
@@ -265,14 +212,14 @@ func TestRouteObjectRead_IndexFree(t *testing.T) {
 	}
 	ec := ECConfig{DataShards: 2, ParityShards: 1}
 
-	// nil index + frozen list → deterministic route succeeds
-	r := NewOpRouter(nil, groups, nil, nil, nil, ec, "n1", nil)
+	// EC-capable groups → deterministic route succeeds
+	r := NewOpRouter(nil, groups, nil, nil, ec, "n1", nil)
 	_, entry, err := r.RouteObjectRead("b", "k", "")
 	require.NoError(t, err)
 	require.Contains(t, []string{"g1", "g2"}, entry.PlacementGroupID)
 
-	// nil index + empty group source (no EC candidates) → ErrObjectIndexRequired
-	r2 := NewOpRouter(nil, &fakeShardGroupSource{groups: map[string]ShardGroupEntry{}}, nil, nil, nil, ec, "n1", nil)
+	// empty group source (no EC candidates) → ErrObjectIndexRequired
+	r2 := NewOpRouter(nil, &fakeShardGroupSource{groups: map[string]ShardGroupEntry{}}, nil, nil, ec, "n1", nil)
 	_, _, err2 := r2.RouteObjectRead("b", "k", "")
 	require.ErrorIs(t, err2, ErrObjectIndexRequired)
 }
@@ -285,8 +232,7 @@ func TestPlacementEquivalence(t *testing.T) {
 		},
 	}
 	ec := ECConfig{DataShards: 2, ParityShards: 1}
-	// nil index forces RouteObjectRead onto the deterministic (index-free) path.
-	r := NewOpRouter(nil, groups, nil, nil, nil, ec, "n1", nil)
+	r := NewOpRouter(nil, groups, nil, nil, ec, "n1", nil)
 
 	for _, key := range []string{"obj/a", "obj/b", "obj/c", "obj/123"} {
 		_, writeGroup, err := r.RouteObjectWrite("b", key)
@@ -314,8 +260,7 @@ func TestOpRouter_RouteObjectWrite_NoECCapableFallsBackToBucketRoute(t *testing.
 		{ID: "node-1", Address: "10.0.0.1:7000"}, {ID: "node-2", Address: "10.0.0.2:7000"},
 		{ID: "node-3", Address: "10.0.0.3:7000"},
 	}}
-	idx := &fakeObjectIndex{}
-	r := NewOpRouter(rt, groups, idx, addr, &fakeLeaderProbe{}, ECConfig{DataShards: 4, ParityShards: 2}, "node-2", nil)
+	r := NewOpRouter(rt, groups, addr, &fakeLeaderProbe{}, ECConfig{DataShards: 4, ParityShards: 2}, "node-2", nil)
 	target, group, err := r.RouteObjectWrite("b-fallback", "k")
 	require.NoError(t, err)
 	require.Equal(t, "g-small", target.GroupID)

@@ -729,6 +729,8 @@ func (s *ShardService) handleRPC(req *transport.Message) *transport.Message {
 		return s.handleQuorumMetaWrite(sr)
 	case "ReadQuorumMeta":
 		return s.handleQuorumMetaRead(sr)
+	case "ScanQuorumMeta":
+		return s.handleScanQuorumMeta(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
@@ -755,6 +757,24 @@ func (s *ShardService) handleQuorumMetaRead(sr *shardRequest) *transport.Message
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(data)
+}
+
+// handleScanQuorumMeta serves a ScanQuorumMeta RPC: scans the local quorum meta
+// store for all entries in the given bucket (sr.Key = prefix) and returns them
+// as a packBlobList-encoded payload.
+func (s *ShardService) handleScanQuorumMeta(sr *shardRequest) *transport.Message {
+	entries, err := s.ScanQuorumMetaBucket(sr.Bucket, sr.Key) // Key field = prefix
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	blobs := make([][]byte, 0, len(entries))
+	for i := range entries {
+		blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i])
+		if eerr == nil {
+			blobs = append(blobs, blob)
+		}
+	}
+	return s.okResponse(packBlobList(blobs))
 }
 
 // marshalResponseDirect serializes an RPCMessage without pool-and-copy.

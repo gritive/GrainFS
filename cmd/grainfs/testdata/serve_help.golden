@@ -69,7 +69,6 @@ Flags:
       --nfs-write-buffer-idle duration                      idle timeout before write buffer auto-flushes (0 = disable buffering) (default 30s)
       --nfs4-port int                                       NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces
       --node-id string                                      unique node ID (auto-generated if omitted)
-      --object-index-groups int                             EXPERIMENTAL: number of sharded object-index raft groups (default 1 = single meta-FSM index; >1 is greenfield-only) (default 1)
       --otel-endpoint string                                OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)
       --otel-sample-rate float                              head-based OTel trace sample rate [0.0, 1.0] (default 1%) (default 0.01)
       --pack-threshold int                                  pack objects below this size into blob files (0 = disabled, e.g. 65537) (default 65537)

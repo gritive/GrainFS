@@ -2,11 +2,13 @@ package cluster
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -210,22 +212,39 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta: key %q escapes root", key)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("quorum meta mkdir: %w", err)
 	}
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Atomic publish: write to a unique temp file in the same directory, fsync,
+	// then rename over the target. An in-place O_TRUNC write exposes a window where
+	// the file is 0 bytes (truncated, data not yet written); a concurrent reader of
+	// the same key — a same-key overwrite racing a GET/HEAD, or a lingering
+	// best-effort quorum write still in flight after fanOutQuorumMeta returned on
+	// the k-th ack — would read that empty file and report the object as missing.
+	// rename is atomic on a POSIX filesystem, so a reader sees either the previous
+	// complete blob or the new one, never a torn one.
+	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
 	if err != nil {
-		return fmt.Errorf("quorum meta create: %w", err)
+		return fmt.Errorf("quorum meta tmp create: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("quorum meta write: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("quorum meta fsync: %w", err)
 	}
-	return f.Close()
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("quorum meta tmp close: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("quorum meta rename: %w", err)
+	}
+	return nil
 }
 
 // readQuorumMetaRaw reads the raw quorum meta blob for (bucket, key) from the
@@ -285,6 +304,10 @@ func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, Place
 		IsAppendable:     m.IsAppendable,
 		Parts:            m.Parts,
 		Tags:             append([]storage.Tag(nil), m.Tags...),
+		// S4-4c: carry the delete-marker flag so versioned reads
+		// (GetObjectVersion/HeadObjectVersion) fold a quorum-meta delete marker
+		// to 405 MethodNotAllowed instead of trying to read its (absent) body.
+		IsDeleteMarker: putCmd.IsDeleteMarker,
 	}
 	placement := PlacementMeta{
 		VersionID:        putCmd.VersionID,
@@ -306,6 +329,44 @@ func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.
 		return nil, PlacementMeta{}, err
 	}
 	return s.decodeQuorumMetaBlob(data)
+}
+
+// ScanQuorumMetaBucket returns all PutObjectMetaCmd entries (including
+// IsDeleteMarker tombstones) stored locally for bucket. prefix is an
+// optional key-prefix filter (empty string = return all). Unreadable entries
+// are silently skipped. Callers decide whether to filter tombstones.
+func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	bucketRoot := filepath.Join(root, bucket)
+	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
+		return nil, nil
+	}
+	var results []PutObjectMetaCmd
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		key, rerr := filepath.Rel(bucketRoot, path)
+		if rerr != nil {
+			return nil
+		}
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
+		if qerr != nil {
+			return nil
+		}
+		results = append(results, cmd)
+		return nil
+	})
+	return results, err
 }
 
 // deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
@@ -521,4 +582,189 @@ func (s *ShardService) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) e
 		}
 		return nil
 	})
+}
+
+// packBlobList encodes a slice of blobs as a concatenated length-prefixed stream.
+// Each blob is preceded by a 4-byte big-endian length. Used for ScanQuorumMeta RPC.
+func packBlobList(blobs [][]byte) []byte {
+	var total int
+	for _, b := range blobs {
+		total += 4 + len(b)
+	}
+	out := make([]byte, 0, total)
+	for _, b := range blobs {
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], uint32(len(b)))
+		out = append(out, hdr[:]...)
+		out = append(out, b...)
+	}
+	return out
+}
+
+// unpackBlobList decodes a packBlobList-encoded byte slice.
+func unpackBlobList(data []byte) ([][]byte, error) {
+	var out [][]byte
+	for len(data) > 0 {
+		if len(data) < 4 {
+			return nil, fmt.Errorf("unpack blob list: truncated length prefix")
+		}
+		n := binary.BigEndian.Uint32(data[:4])
+		data = data[4:]
+		if uint32(len(data)) < n {
+			return nil, fmt.Errorf("unpack blob list: truncated blob (%d bytes, want %d)", len(data), n)
+		}
+		out = append(out, data[:n])
+		data = data[n:]
+	}
+	return out, nil
+}
+
+// ScanQuorumMeta fans out a ScanQuorumMeta RPC to a remote node and returns
+// all PutObjectMetaCmds (including tombstones) for the given bucket and prefix.
+func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("scan quorum meta: no transport")
+	}
+	fw := buildShardEnvelope("ScanQuorumMeta", bucket, prefix, 0, nil)
+	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	resp, err := s.transport.CallFlatBuffer(ctx, addr, fw)
+	if err != nil {
+		return nil, fmt.Errorf("scan quorum meta from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal scan quorum meta response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote scan quorum meta error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	blobs, err := unpackBlobList(data)
+	if err != nil {
+		return nil, fmt.Errorf("unpack scan quorum meta response: %w", err)
+	}
+	var cmds []PutObjectMetaCmd
+	for _, blob := range blobs {
+		cmd, qerr := s.decodeQuorumMetaCmdBlob(blob)
+		if qerr == nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return cmds, nil
+}
+
+// scatterGatherList fans out ScanQuorumMeta calls to all shard group peers
+// (including self), applies per-key LWW (max ModTime wins), filters
+// IsDeleteMarker tombstones, and returns the surviving entries sorted by key.
+// ScanObjectMetaEntries scatter-gathers the live (tombstone-filtered) object
+// metadata for bucket under prefix and returns each as an ObjectIndexEntry
+// carrying the EC placement fields (PlacementGroupID, NodeIDs, ECData, ECParity)
+// that ClassifyObjectLayout needs. S4-4d uses it to rebuild admin volume replica
+// facts from quorum meta now that the object index is gone.
+func (b *DistributedBackend) ScanObjectMetaEntries(ctx context.Context, bucket, prefix string) ([]ObjectIndexEntry, error) {
+	cmds, err := b.scatterGatherList(ctx, bucket, prefix)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]ObjectIndexEntry, 0, len(cmds))
+	for _, cmd := range cmds {
+		entries = append(entries, ObjectIndexEntry{
+			Bucket:           cmd.Bucket,
+			Key:              cmd.Key,
+			VersionID:        cmd.VersionID,
+			PlacementGroupID: cmd.PlacementGroupID,
+			Size:             cmd.Size,
+			ContentType:      cmd.ContentType,
+			ETag:             cmd.ETag,
+			ModTime:          cmd.ModTime,
+			ECData:           cmd.ECData,
+			ECParity:         cmd.ECParity,
+			NodeIDs:          cmd.NodeIDs,
+			IsDeleteMarker:   cmd.IsDeleteMarker,
+		})
+	}
+	return entries, nil
+}
+
+func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{}
+	var peerIDs []string
+	if b.shardGroup != nil {
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if !seen[p] {
+					seen[p] = true
+					peerIDs = append(peerIDs, p)
+				}
+			}
+		}
+	}
+	if !seen[self] {
+		peerIDs = append(peerIDs, self)
+	}
+	if len(peerIDs) == 0 {
+		entries, err := b.shardSvc.ScanQuorumMetaBucket(bucket, prefix)
+		if err != nil {
+			return nil, err
+		}
+		return filterAndSortEntries(entries), nil
+	}
+
+	type nodeResult struct {
+		entries []PutObjectMetaCmd
+	}
+	rctx, cancel := context.WithTimeout(ctx, quorumMetaReadTimeout)
+	defer cancel()
+	ch := make(chan nodeResult, len(peerIDs))
+	for _, p := range peerIDs {
+		p := p
+		go func() {
+			if p == self {
+				entries, _ := b.shardSvc.ScanQuorumMetaBucket(bucket, prefix)
+				ch <- nodeResult{entries: entries}
+				return
+			}
+			addr, aerr := b.shardSvc.resolvePeerAddress(p)
+			if aerr != nil {
+				ch <- nodeResult{}
+				return
+			}
+			entries, _ := b.shardSvc.ScanQuorumMeta(rctx, addr, bucket, prefix)
+			ch <- nodeResult{entries: entries}
+		}()
+	}
+
+	lww := map[string]PutObjectMetaCmd{}
+	for range peerIDs {
+		r := <-ch
+		for _, e := range r.entries {
+			if cur, ok := lww[e.Key]; !ok || e.ModTime > cur.ModTime {
+				lww[e.Key] = e
+			}
+		}
+	}
+
+	all := make([]PutObjectMetaCmd, 0, len(lww))
+	for _, e := range lww {
+		all = append(all, e)
+	}
+	return filterAndSortEntries(all), nil
+}
+
+// filterAndSortEntries removes tombstones and sorts by key.
+func filterAndSortEntries(entries []PutObjectMetaCmd) []PutObjectMetaCmd {
+	out := entries[:0]
+	for _, e := range entries {
+		if !e.IsDeleteMarker {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
 }

@@ -88,6 +88,22 @@ benchmark server starts:
 BENCH_STRICT_HOST=1 WARP_OPS=put,get make bench-s3-compat-compare
 ```
 
+## Phase 5 — Cross-Binary A/B (merge go/no-go)
+
+`cross_binary_ab.sh` is the ROADMAP Phase 5 decision gate: it builds the new
+(`devel`, consensus-removed) and old (`master`) GrainFS binaries and runs them
+back-to-back on the same host through the comparison machinery above, computing
+within-run `new/old` PUT/GET/HEAD ratios and applying the merge-blocker rule
+(① PUT win **AND** ② GET/HEAD no-regress). The decision rule, rigor, and how to
+run the multi-node (GCP) verdict vs a local smoke test:
+[`cross_binary_ab/README.md`](cross_binary_ab/README.md).
+
+```bash
+# local harness smoke (NOT the verdict):
+RUNS=1 WARP_DURATION=10s ANCHOR=0 ./benchmarks/cross_binary_ab.sh
+# results: benchmarks/profiles/cross-binary-ab-<timestamp>/verdict.md
+```
+
 ## Iceberg Table API
 
 `make bench-iceberg-table` and `make bench-iceberg-table-cluster` run MinIO

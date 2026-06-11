@@ -308,6 +308,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 	// Internal buckets (bucket routing via raft) still use BadgerDB.
 	if !storage.IsInternalBucket(bucket) {
 		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil {
+			if obj.ETag == deleteMarkerETag {
+				return nil, PlacementMeta{}, storage.ErrObjectNotFound
+			}
 			return obj, pm, nil
 		}
 		// Fall through to BadgerDB for: multipart-completed objects (their meta

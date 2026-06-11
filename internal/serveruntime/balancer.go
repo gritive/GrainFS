@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -132,6 +133,12 @@ func StartBalancer(
 		collector.SetStatFunc(func(string) (float64, uint64) { return testPct, 0 })
 	}
 	go collector.Run(ctx)
+
+	// Request-rate collector: samples the local service-request counter off the
+	// hot path and writes RequestsPerSec into the stats store, completing the
+	// gossip → BoundedLoads/balancer load-signal supply chain (Phase 6 S6-2).
+	rpsCollector := cluster.NewRequestRateCollector(nodeID, statsStore, gossipInterval, metrics.ServiceRequestCount)
+	go rpsCollector.Run(ctx)
 
 	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
 		log.Warn().Err(err).Msg("balancer: recover pending failed")
