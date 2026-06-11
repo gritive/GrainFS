@@ -41,6 +41,12 @@ func WithJoinCluster(fn JoinClusterFunc) Option {
 	}
 }
 
+func WithExpandPlacement(fn ExpandPlacementFunc) Option {
+	return func(s *Server) {
+		s.expandPlacement = fn
+	}
+}
+
 func WithReadIndexer(ri ReadIndexer) Option {
 	return func(s *Server) {
 		s.readIndexer = ri

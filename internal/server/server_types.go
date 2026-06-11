@@ -58,6 +58,22 @@ type ClusterMembership interface {
 
 type JoinClusterFunc func(nodeID, raftAddr, peers, clusterKey string) error
 
+// ExpandPlacementResult reports the outcome of a topology-generation growth
+// (S7-7). NoOp is true when no new candidate groups were present, so no
+// generation was recorded.
+type ExpandPlacementResult struct {
+	Base     []string `json:"base"`
+	Expanded []string `json:"expanded"`
+	Added    []string `json:"added"`
+	Removed  []string `json:"removed,omitempty"`
+	NoOp     bool     `json:"no_op"`
+}
+
+// ExpandPlacementFunc records the current shard groups as a new placement
+// generation so object placement starts using the groups formed since boot
+// (S7-7). Injected by serveruntime, which holds the coordinator + meta-raft.
+type ExpandPlacementFunc func(ctx context.Context) (ExpandPlacementResult, error)
+
 type ReadIndexer interface {
 	ReadIndex(ctx context.Context) (uint64, error)
 	WaitApplied(ctx context.Context, index uint64) error
@@ -118,24 +134,25 @@ type Server struct {
 	auditInternalSecretKey string
 	auditInternalVerifier  *s3auth.CachingVerifier
 
-	cluster       ClusterInfo
-	membership    ClusterMembership
-	joinCluster   JoinClusterFunc
-	balancer      BalancerInfo
-	evStore       *eventstore.Store
-	alerts        *alertssvc.State
-	receiptAPI    *receipt.API
-	incidentStore incident.StateStore
-	mutationGate  *MutationGate
-	degradedFlag  atomic.Bool
-	blockCache    *blockcache.Cache
-	shardCache    *shardcache.Cache
-	jwtKeys       *iamjwt.KeySet
-	iceberg       *iceberg.Handler
-	receipt       *receiptsvc.Handler
-	incidentH     *incidentsvc.Handler
-	snapshotH     *snapshotsvc.Handler
-	proxyTrust    *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
+	cluster         ClusterInfo
+	membership      ClusterMembership
+	joinCluster     JoinClusterFunc
+	expandPlacement ExpandPlacementFunc
+	balancer        BalancerInfo
+	evStore         *eventstore.Store
+	alerts          *alertssvc.State
+	receiptAPI      *receipt.API
+	incidentStore   incident.StateStore
+	mutationGate    *MutationGate
+	degradedFlag    atomic.Bool
+	blockCache      *blockcache.Cache
+	shardCache      *shardcache.Cache
+	jwtKeys         *iamjwt.KeySet
+	iceberg         *iceberg.Handler
+	receipt         *receiptsvc.Handler
+	incidentH       *incidentsvc.Handler
+	snapshotH       *snapshotsvc.Handler
+	proxyTrust      *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration

@@ -420,6 +420,64 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeAddPlacementGeneration encodes an AddPlacementGeneration command and
+// proposes it to the cluster, blocking until applied to the local FSM (S7-6).
+// groupIDs is the pinned candidate group-ID set for the new topology generation;
+// the FSM assigns the epoch monotonically (len of the existing registry) and
+// rejects an empty set. This is the irreversible flip primitive — once a
+// generation is appended, the registry never shrinks.
+func (m *MetaRaft) ProposeAddPlacementGeneration(ctx context.Context, groupIDs []string) error {
+	if len(groupIDs) == 0 {
+		return fmt.Errorf("meta_raft: ProposeAddPlacementGeneration: empty group set")
+	}
+	payload := encodeMetaAddPlacementGenerationCmd(groupIDs)
+	data, err := encodeMetaCmd(MetaCmdTypeAddPlacementGeneration, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitAppliedResult(ctx, idx)
+}
+
+// AddTopologyGeneration records a new topology generation that grows the object→
+// group placement set from baseGroupIDs to expandedGroupIDs (S7-6 add-protocol,
+// must-solve ②). The new groups must already be formed and registered
+// (PutShardGroup) via existing group-add machinery — this records the placement
+// generation on top.
+//
+// Crash-safe ordering: when the registry is empty (first-ever growth) it first
+// records gen-0 = baseGroupIDs, so existing objects placed by the original
+// modulo stay readable, THEN records the expanded generation. gen-0 is recorded
+// before the expanded gen, so every intermediate crash state is a valid
+// single-generation (original modulo, byte-identical) or fully multi-generation
+// view — never a state that loses existing objects. A second growth (registry
+// already non-empty) skips the gen-0 capture and appends only the expanded set.
+//
+// Concurrency: this reads PlacementGenerations() then issues two non-atomic
+// proposals, so it is NOT safe against concurrent callers — two simultaneous
+// first-growth calls on an empty registry could both capture gen-0 and interleave
+// into a malformed [base, expanded1, base, expanded2] history. Callers MUST
+// serialize topology growth through a single control-plane orchestrator (one
+// outstanding AddTopologyGeneration at a time). No production entry point wires
+// this yet (S7-6 builds the machinery; operator triggering is a follow-on).
+func (m *MetaRaft) AddTopologyGeneration(ctx context.Context, baseGroupIDs, expandedGroupIDs []string) error {
+	if len(expandedGroupIDs) == 0 {
+		return fmt.Errorf("meta_raft: AddTopologyGeneration: empty expanded group set")
+	}
+	if len(m.fsm.PlacementGenerations()) == 0 {
+		if len(baseGroupIDs) == 0 {
+			return fmt.Errorf("meta_raft: AddTopologyGeneration: empty base group set for gen-0 capture")
+		}
+		if err := m.ProposeAddPlacementGeneration(ctx, baseGroupIDs); err != nil {
+			return fmt.Errorf("meta_raft: capture gen-0: %w", err)
+		}
+	}
+	return m.ProposeAddPlacementGeneration(ctx, expandedGroupIDs)
+}
+
 // ProposeShardGroupForwarding is ProposeShardGroup that forwards to the meta
 // leader when this node is a follower (P1-1 convergence). proposeOrForward waits
 // for apply equivalently (leader applies locally; follower forwards), so a

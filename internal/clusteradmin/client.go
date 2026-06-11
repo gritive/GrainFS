@@ -122,6 +122,55 @@ func (c *Client) TransferLeader(ctx context.Context) (*TransferLeaderResult, err
 	return &out, nil
 }
 
+// ExpandPlacementResult is returned by POST /v1/cluster/expand-placement.
+type ExpandPlacementResult struct {
+	Base     []string `json:"base"`
+	Expanded []string `json:"expanded"`
+	Added    []string `json:"added"`
+	Removed  []string `json:"removed,omitempty"`
+	NoOp     bool     `json:"no_op"`
+}
+
+// ExpandPlacement issues POST /v1/cluster/expand-placement: records the
+// cluster's currently-formed shard groups as a new topology placement
+// generation so object placement starts using groups added since boot (S7-7).
+func (c *Client) ExpandPlacement(ctx context.Context) (*ExpandPlacementResult, error) {
+	var out ExpandPlacementResult
+	if err := c.Post(ctx, "/v1/cluster/expand-placement", struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ExpandPlacementOptions configures RunExpandPlacement.
+type ExpandPlacementOptions struct {
+	Endpoint string
+	Out      io.Writer
+}
+
+// RunExpandPlacement records the cluster's currently-formed shard groups as a
+// new placement generation and renders the result (S7-7).
+func RunExpandPlacement(ctx context.Context, opts ExpandPlacementOptions) error {
+	res, err := NewClient(opts.Endpoint).ExpandPlacement(ctx)
+	if err != nil {
+		return err
+	}
+	if res.NoOp {
+		fmt.Fprintf(opts.Out, "no new placement groups present — no generation recorded (current groups: %v)\n", res.Base)
+		return nil
+	}
+	fmt.Fprintf(opts.Out, "placement generation recorded:\n")
+	fmt.Fprintf(opts.Out, "  previous groups: %v\n", res.Base)
+	fmt.Fprintf(opts.Out, "  new groups:      %v\n", res.Added)
+	fmt.Fprintf(opts.Out, "  active set:      %v\n", res.Expanded)
+	if len(res.Removed) > 0 {
+		fmt.Fprintf(opts.Out, "  WARNING: groups dropped from the active set (wider groups joined): %v\n", res.Removed)
+		fmt.Fprintln(opts.Out, "  these groups stop receiving new writes; their existing objects stay readable.")
+	}
+	fmt.Fprintln(opts.Out, "existing objects stay readable via the generation-probe read path.")
+	return nil
+}
+
 // CompleteCutoverResponse is returned by POST /v1/cluster/complete-cutover.
 type CompleteCutoverResponse struct {
 	Status  string `json:"status"`

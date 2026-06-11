@@ -97,6 +97,7 @@ const (
 	MetaCmdTypeDropClusterKeyAccept         MetaCmdType = 87
 	MetaCmdTypeDEKRewrapProgress            MetaCmdType = 88
 	MetaCmdTypePutIndexGroup                MetaCmdType = 89
+	MetaCmdTypeAddPlacementGeneration       MetaCmdType = 90
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -190,6 +191,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeDropClusterKeyAccept:         "DropClusterKeyAccept",
 	MetaCmdTypeDEKRewrapProgress:            "DEKRewrapProgress",
 	MetaCmdTypePutIndexGroup:                "PutIndexGroup",
+	MetaCmdTypeAddPlacementGeneration:       "AddPlacementGeneration",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -283,6 +285,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"DropClusterKeyAccept":         MetaCmdTypeDropClusterKeyAccept,
 	"DEKRewrapProgress":            MetaCmdTypeDEKRewrapProgress,
 	"PutIndexGroup":                MetaCmdTypePutIndexGroup,
+	"AddPlacementGeneration":       MetaCmdTypeAddPlacementGeneration,
 }
 
 func (v MetaCmdType) String() string {

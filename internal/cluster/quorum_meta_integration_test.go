@@ -191,6 +191,72 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 	require.Equal(t, int64(10), keySet["alpha.bin"], "LWW: fresh entry (ModTime=10) must win")
 }
 
+// TestScatterGatherList_SpansAllShardGroups proves the Phase 7 S7-5 invariant:
+// scatterGatherList fans out to EVERY shard group's peers, not a generation- or
+// candidate-scoped subset. Because a new topology generation's groups are seeded
+// as ordinary shard groups (PutShardGroup), they appear in ShardGroups() and are
+// therefore scanned — so LIST covers objects across all generations by
+// construction, with no generation-specific code on the LIST path. Here two
+// distinct groups live on two nodes; the list returns objects from BOTH.
+//
+// RED-on-revert: if scatterGatherList scanned only the bucket-routed group (or a
+// single generation's candidate set), gamma.bin (on the second group's node)
+// would be missing.
+func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewTCPTransport("test-cluster-psk")
+	trB := transport.MustNewTCPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+	require.NoError(t, trA.Connect(ctx, trB.LocalAddr()))
+	require.NoError(t, trB.Connect(ctx, trA.LocalAddr()))
+
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	trA.SetStreamHandler(svcA.HandleRPC())
+	trB.SetStreamHandler(svcB.HandleRPC())
+
+	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
+		t.Helper()
+		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	cmd := func(key string) PutObjectMetaCmd {
+		return PutObjectMetaCmd{Bucket: "bkt", Key: key, ETag: "e", ECData: 1, NodeIDs: []string{"n1"}, ModTime: 10}
+	}
+	// alpha.bin lives on node A (generation-0 group), gamma.bin on node B
+	// (a second/"newer-generation" group). Each node only has its own object.
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(cmd("alpha.bin"))))
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(cmd("gamma.bin"))))
+
+	// Two SEPARATE groups, one peer each — the generation-agnostic fan-out must
+	// iterate both groups, not just the bucket-routed one.
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr()}},
+			"g2": {ID: "g2", PeerIDs: []string{trB.LocalAddr()}},
+		}},
+	}
+
+	entries, err := backendA.scatterGatherList(ctx, "bkt", "")
+	require.NoError(t, err)
+	keySet := map[string]bool{}
+	for _, e := range entries {
+		keySet[e.Key] = true
+	}
+	require.True(t, keySet["alpha.bin"], "object in the first group must appear")
+	require.True(t, keySet["gamma.bin"], "object in the second (newer-generation) group must appear")
+}
+
 // TestScanObjectMetaEntries_CarriesPlacementFields proves S4-4d: the scan
 // returns each live block as an ObjectIndexEntry carrying the EC placement
 // fields (PlacementGroupID, NodeIDs, ECData, ECParity) that ClassifyObjectLayout

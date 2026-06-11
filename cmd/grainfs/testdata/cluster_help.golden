@@ -9,6 +9,7 @@ Available Commands:
   config           Inspect or change cluster-wide policy
   drain            Remove a voter via graceful transfer-leader + remove-peer composite
   events           Show recent cluster audit events
+  expand-placement Activate newly-formed shard groups for object placement (grow the cluster)
   health           Show aggregated cluster health (quorum, peers, issues)
   invite           Zero-CA invite tooling (mint one-time join invites)
   peers            List cluster voters with leader and liveness state

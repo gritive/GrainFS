@@ -28,14 +28,17 @@ type dataGroupLeaderProbe interface {
 // OpRouter resolves S3-level operations to placement-group targets via
 // bucket, object-index, or EC-placement lookups. Ctx-free; performs no I/O.
 type OpRouter struct {
-	router            *Router
-	groups            ShardGroupSource
-	addr              NodeAddressBook
-	leaderProbe       dataGroupLeaderProbe
-	ec                ECConfig
-	selfID            string
-	selfAliases       []string
-	placementGroupIDs []string // frozen sorted candidate IDs; nil on bootstrap
+	router      *Router
+	groups      ShardGroupSource
+	addr        NodeAddressBook
+	leaderProbe dataGroupLeaderProbe
+	ec          ECConfig
+	selfID      string
+	selfAliases []string
+	// placement owns the topology generation list for object→group metadata
+	// placement. At a single generation its currentGroupIDs() is byte-identical
+	// to the legacy frozen sorted candidate IDs (nil on bootstrap).
+	placement *GenerationPlacement
 }
 
 func NewOpRouter(
@@ -58,15 +61,85 @@ func NewOpRouter(
 		}
 	}
 	return &OpRouter{
-		router:            router,
-		groups:            groups,
-		addr:              addr,
-		leaderProbe:       leaderProbe,
-		ec:                ec,
-		selfID:            selfID,
-		selfAliases:       selfAliases,
-		placementGroupIDs: placementGroupIDs,
+		router:      router,
+		groups:      groups,
+		addr:        addr,
+		leaderProbe: leaderProbe,
+		ec:          ec,
+		selfID:      selfID,
+		selfAliases: selfAliases,
+		placement:   newGenerationPlacement(placementGroupIDs),
 	}
+}
+
+// applyGenerations replaces the placement with one built from the FSM topology
+// generation list when non-empty. An empty list (the default, single-generation
+// case) leaves the live-candidate-set placement built at construction untouched
+// — byte-identical to legacy routing. Called by the coordinator's rebuild after
+// NewOpRouter so the generation source stays out of the constructor signature.
+func (r *OpRouter) applyGenerations(gens []placementGeneration) {
+	if len(gens) > 0 {
+		r.placement = newGenerationPlacementFromList(gens)
+	}
+}
+
+// currentPlacementGroupIDs returns the latest generation's pinned candidate
+// group-ID set — the set objects are currently routed under (S7-7 base for
+// topology growth). Boot-frozen until a generation is recorded; the live shard
+// groups cannot reconstruct it once new groups have joined.
+func (r *OpRouter) currentPlacementGroupIDs() []string {
+	return r.placement.currentGroupIDs()
+}
+
+// generationCount reports the number of recorded topology generations (S7-6).
+// A value > 1 means an operator has added a generation; the coordinator uses
+// this to arm the cross-generation LWW read merge on the backends. The default
+// single-generation cluster returns 1 (or 0 before the candidate set is frozen).
+func (r *OpRouter) generationCount() int {
+	return r.placement.generationCount()
+}
+
+// RouteObjectReadGenerations resolves an object read to one placement-group
+// target per topology generation, newest-first (S7-4 generation probe). At a
+// single generation it returns exactly one target equal to RouteObjectRead's,
+// so the read path is byte-identical. Internal buckets and the empty-candidate
+// bootstrap case mirror RouteObjectRead. Targets whose group cannot be resolved
+// are skipped; an all-unresolved result returns the first such error.
+func (r *OpRouter) RouteObjectReadGenerations(bucket, key, versionID string) ([]RouteTarget, error) {
+	if storage.IsInternalBucket(bucket) {
+		target, err := r.RouteBucket(bucket)
+		if err != nil {
+			return nil, err
+		}
+		return []RouteTarget{target}, nil
+	}
+	genGroupIDs := r.placement.readGenerationGroupIDs()
+	if len(genGroupIDs) == 0 {
+		return nil, ErrObjectIndexRequired
+	}
+	targets := make([]RouteTarget, 0, len(genGroupIDs))
+	var firstErr error
+	for _, ids := range genGroupIDs {
+		if len(ids) == 0 {
+			continue
+		}
+		groupID := groupIDForObject(bucket, key, ids)
+		target, err := r.routeGroup(groupID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, ErrObjectIndexRequired
+	}
+	return targets, nil
 }
 
 func (r *OpRouter) RouteBucket(bucket string) (RouteTarget, error) {
@@ -121,10 +194,11 @@ func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, 
 		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: target.GroupID}
 		return target, entry, err
 	}
-	if len(r.placementGroupIDs) == 0 {
+	placementIDs := r.placement.currentGroupIDs()
+	if len(placementIDs) == 0 {
 		return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
 	}
-	groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+	groupID := groupIDForObject(bucket, key, placementIDs)
 	target, err := r.routeGroup(groupID)
 	entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: groupID}
 	return target, entry, err
@@ -156,8 +230,8 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 		group ShardGroupEntry
 		err   error
 	)
-	if len(r.placementGroupIDs) > 0 {
-		groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+	if placementIDs := r.placement.currentGroupIDs(); len(placementIDs) > 0 {
+		groupID := groupIDForObject(bucket, key, placementIDs)
 		if g, ok := r.groups.ShardGroup(groupID); ok {
 			group = g
 		}

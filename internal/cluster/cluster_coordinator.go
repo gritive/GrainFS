@@ -14,6 +14,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -147,8 +148,39 @@ func NewClusterCoordinator(
 		maxBody:             DefaultMaxForwardBodyBytes,
 		appendForwardBuffer: newAppendForwardBuffer(DefaultAppendForwardBufferConfig().TotalBytes),
 	}
+	// Order matters: rebuild() first (single-threaded here) does the one-time
+	// plain-field opRouter/localExec init and publishes a non-nil c.runtime; ONLY
+	// then register the post-commit hook. A hook-fired rebuild (from the meta-raft
+	// apply goroutine) then always sees a non-nil c.runtime and takes the
+	// atomic-Store-only path — never racing the constructor's first rebuild on the
+	// plain-field writes. Generations already in the FSM (snapshot restore) are
+	// reflected by this rebuild; generations applied after registration are caught
+	// by the hook (and the builder-method rebuilds that follow re-read regardless).
 	c.rebuild()
+	c.registerTopologyRebuildHook()
 	return c
+}
+
+// registerTopologyRebuildHook wires a meta-FSM post-commit hook that re-runs
+// rebuild() whenever an AddPlacementGeneration command is applied on this node
+// (S7-6). Without it, an applied generation add would stay inert until an
+// unrelated rebuild or a restart — rebuild() is otherwise only called from
+// boot/builder wiring. The hook re-reads PlacementGenerations() into the
+// OpRouter and re-propagates the multi-generation flag to backends. No-op when
+// c.meta does not support post-commit registration (test stubs).
+func (c *ClusterCoordinator) registerTopologyRebuildHook() {
+	type postCommitRegistrar interface {
+		RegisterPostCommit(PostCommitHook)
+	}
+	reg, ok := c.meta.(postCommitRegistrar)
+	if !ok {
+		return
+	}
+	reg.RegisterPostCommit(func(cmdType clusterpb.MetaCmdType, _ []byte) {
+		if cmdType == clusterpb.MetaCmdTypeAddPlacementGeneration {
+			c.rebuild()
+		}
+	})
 }
 
 // WithForwardSender attaches the transport dialer used to send 0x08 forward calls
@@ -211,6 +243,13 @@ func (c *ClusterCoordinator) rebuild() {
 		c.selfID,
 		c.selfAliases,
 	)
+	// S7-4: consume the FSM topology-generation registry when present. Empty
+	// (the default) leaves the live-candidate-set placement untouched →
+	// byte-identical. The MetaFSM implements placementGenerationSource; test
+	// stubs typically do not, so they stay on the single-generation path.
+	if src, ok := c.meta.(placementGenerationSource); ok {
+		opRouter.applyGenerations(src.PlacementGenerations())
+	}
 	localExec := NewLocalExecution(dataGroupManagerLocalBackend{m: c.groups})
 	if c.runtime.Load() == nil {
 		c.opRouter = opRouter
@@ -221,6 +260,28 @@ func (c *ClusterCoordinator) rebuild() {
 		localExec: localExec,
 		ecConfig:  c.ecConfig,
 	})
+	// S7-6: arm the cross-generation LWW read merge on every backend once the
+	// topology has more than one placement generation. At a single generation
+	// (the default) this propagates false → byte-identical local-first reads.
+	c.propagateMultiGeneration(opRouter.generationCount() > 1)
+}
+
+// propagateMultiGeneration sets the multi-generation read-merge flag on every
+// data-group backend (and the meta backend) so cross-generation LWW reads arm
+// consistently on this node. Derived from the meta-raft-replicated generation
+// registry, so every node converges on the same value. Called from rebuild(),
+// including the rebuild fired by the AddPlacementGeneration post-commit hook.
+func (c *ClusterCoordinator) propagateMultiGeneration(multiGen bool) {
+	if c.groups != nil {
+		for _, g := range c.groups.All() {
+			if b := g.Backend(); b != nil {
+				b.SetMultiGeneration(multiGen)
+			}
+		}
+	}
+	if b, ok := c.base.(*DistributedBackend); ok && b != nil {
+		b.SetMultiGeneration(multiGen)
+	}
 }
 
 func (c *ClusterCoordinator) runtimeState() clusterCoordinatorRuntime {
@@ -246,6 +307,89 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 	}
 }
 
+// PlacementExpansionPlan describes a proposed topology-generation growth (S7-7):
+// Base is the placement group set objects are currently routed under (the
+// OpRouter's boot-frozen / latest-generation set); Expanded is the candidate set
+// derived from the live shard groups (which includes any groups formed by node
+// joins since boot). Added is Expanded minus Base; Removed is Base minus
+// Expanded. Removed is normally empty, but can be non-empty when a newly-joined
+// group is WIDER than the Base groups: candidateGroupsFor keeps only the
+// widest-peer-count groups, so narrower Base groups drop out of the active
+// placement set. Their existing objects stay readable via the prior generation
+// (gen-0 probe) but stop receiving new writes — the operator must be shown this,
+// not just the additions. NoOp is true when Expanded equals Base.
+type PlacementExpansionPlan struct {
+	Base     []string
+	Expanded []string
+	Added    []string
+	Removed  []string
+	NoOp     bool
+}
+
+// PlanPlacementExpansion computes the topology-generation growth that would
+// activate the currently-formed-but-unused shard groups for object placement
+// (S7-7). It does NOT mutate anything — the caller (serveruntime) proposes the
+// generation via MetaRaft.AddTopologyGeneration(plan.Base, plan.Expanded). Base
+// comes from the OpRouter (boot-frozen original / latest generation), which is
+// the only authoritative source of the set existing objects were placed under;
+// the live shard groups alone cannot reconstruct it once new groups have joined.
+func (c *ClusterCoordinator) PlanPlacementExpansion() (PlacementExpansionPlan, error) {
+	base := append([]string(nil), c.runtimeState().opRouter.currentPlacementGroupIDs()...)
+	if len(base) == 0 {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: no current placement groups (bootstrap or no EC-active groups)")
+	}
+	if c.meta == nil {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: no shard-group source")
+	}
+	candidates, err := candidateGroupsFor(c.meta.ShardGroups(), c.ecConfig)
+	if err != nil {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: candidate groups: %w", err)
+	}
+	expanded := make([]string, len(candidates))
+	for i, cand := range candidates {
+		expanded[i] = cand.ID
+	}
+	if stringSlicesEqual(base, expanded) {
+		return PlacementExpansionPlan{Base: base, Expanded: expanded, NoOp: true}, nil
+	}
+	baseSet := make(map[string]struct{}, len(base))
+	for _, id := range base {
+		baseSet[id] = struct{}{}
+	}
+	expandedSet := make(map[string]struct{}, len(expanded))
+	for _, id := range expanded {
+		expandedSet[id] = struct{}{}
+	}
+	var added []string
+	for _, id := range expanded {
+		if _, ok := baseSet[id]; !ok {
+			added = append(added, id)
+		}
+	}
+	var removed []string
+	for _, id := range base {
+		if _, ok := expandedSet[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	return PlacementExpansionPlan{Base: base, Expanded: expanded, Added: added, Removed: removed}, nil
+}
+
+// stringSlicesEqual reports whether two already-sorted string slices are
+// element-wise equal. Both base (currentGroupIDs) and expanded (candidateGroupsFor)
+// are sorted candidate-ID lists, so this is a sound set-equality test.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // routeReadOrBucket resolves an object read to its placement-group target via
 // deterministic hash placement (S4-4c: index-free). When the frozen placement
 // candidate list is empty (bootstrap) or the key resolves to no object, it
@@ -261,6 +405,52 @@ func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (R
 		}
 	}
 	return target, err
+}
+
+// placementGenerationSource is the optional MetaFSM capability that exposes the
+// topology-generation registry. OpRouter consumes it via the coordinator
+// (rebuild) rather than widening ShardGroupSource.
+type placementGenerationSource interface {
+	PlacementGenerations() []placementGeneration
+}
+
+// routeReadGenerations resolves an object read to one target per topology
+// generation, newest-first (S7-4 probe order). At a single generation it returns
+// the same single target routeReadOrBucket would, preserving the bootstrap
+// bucket-route fallback. The returned slice is non-empty on success.
+func (c *ClusterCoordinator) routeReadGenerations(bucket, key, versionID string) ([]RouteTarget, error) {
+	targets, err := c.runtimeState().opRouter.RouteObjectReadGenerations(bucket, key, versionID)
+	if errors.Is(err, storage.ErrObjectNotFound) || errors.Is(err, ErrObjectIndexRequired) {
+		if fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key); fallbackErr == nil {
+			return []RouteTarget{fallback}, nil
+		}
+	}
+	return targets, err
+}
+
+// probeRead runs do against each topology-generation target newest-first,
+// advancing to the next (older) generation ONLY on a definitive
+// ErrObjectNotFound. Any other error (group unavailable, transport failure) is
+// returned immediately (fail-closed) so a transiently-down older-generation
+// group never masquerades as a 404 for an object that exists. At a single
+// generation this is exactly one attempt — byte-identical to legacy routing.
+func (c *ClusterCoordinator) probeRead(bucket, key, versionID string, do func(target RouteTarget) error) error {
+	targets, err := c.routeReadGenerations(bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, target := range targets {
+		err := do(target)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return err
+		}
+		lastErr = err
+	}
+	return lastErr
 }
 
 // routeWriteOrBucket falls back to RouteBucket for single-node wiring (no EC).
@@ -695,10 +885,6 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // response body bytes after the metadata reply; legacy tests can still use the
 // single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return nil, nil, err
-	}
 	// S4-4c: index-free. ResolveRead serves locally only when this node can
 	// answer authoritatively (sole voter, internal bucket, or a leader doing a
 	// linearizable ReadIndex); otherwise it returns nil and we forward to the
@@ -706,64 +892,123 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	// quorum meta (local file → peer fan-out) and folds a delete-marker latest
 	// version to ErrObjectNotFound, so the unversioned-GET 404 semantics that the
 	// object index used to short-circuit are now served by the backend read.
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, nil, err
-	} else if gb != nil {
-		return gb.GetObject(ctx, bucket, key)
-	}
-	args := buildGetObjectArgs(bucket, key)
-	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
+	// S7-4: probeRead tries each topology generation newest-first; at a single
+	// generation (the default) it is one attempt against the same target.
+	var (
+		rc  io.ReadCloser
+		obj *storage.Object
+	)
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			r, o, e := gb.GetObject(ctx, bucket, key)
+			if e != nil {
+				return e
+			}
+			rc, obj = r, o
+			return nil
+		}
+		args := buildGetObjectArgs(bucket, key)
+		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
+		if e != nil {
+			return e
+		}
+		rc, obj = r, o
+		return nil
+	})
+	return rc, obj, err
 }
 
 func (c *ClusterCoordinator) GetObjectVersion(
 	bucket, key, versionID string,
 ) (io.ReadCloser, *storage.Object, error) {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, versionID)
-	if err != nil {
-		return nil, nil, err
-	}
 	// S4-4c: index-free (see GetObject). Local serve only when authoritative;
 	// otherwise forward to the placement-group leader.
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, nil, err
-	} else if gb != nil {
-		return gb.GetObjectVersion(bucket, key, versionID)
-	}
-	args := buildGetObjectVersionArgs(bucket, key, versionID)
-	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
+	// S7-4c: a specific versionID lives in exactly one generation; probeRead
+	// walks generations newest-first until the version is found (advancing only
+	// on not-found, fail-closed otherwise). Single generation → one attempt.
+	var (
+		rc  io.ReadCloser
+		obj *storage.Object
+	)
+	err := c.probeRead(bucket, key, versionID, func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			r, o, e := gb.GetObjectVersion(bucket, key, versionID)
+			if e != nil {
+				return e
+			}
+			rc, obj = r, o
+			return nil
+		}
+		args := buildGetObjectVersionArgs(bucket, key, versionID)
+		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
+		if e != nil {
+			return e
+		}
+		rc, obj = r, o
+		return nil
+	})
+	return rc, obj, err
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return nil, err
-	}
 	// S4-4c: index-free (see GetObject). The GroupBackend HeadObject folds a
 	// delete-marker latest version to ErrObjectNotFound, preserving the
 	// unversioned-HEAD 404 semantics the object index used to short-circuit.
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.HeadObject(ctx, bucket, key)
-	}
-	args := buildHeadObjectArgs(bucket, key)
-	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
+	// S7-4: probeRead tries each topology generation newest-first; one attempt
+	// at a single generation (the default).
+	var obj *storage.Object
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			o, e := gb.HeadObject(ctx, bucket, key)
+			if e != nil {
+				return e
+			}
+			obj = o
+			return nil
+		}
+		args := buildHeadObjectArgs(bucket, key)
+		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
+		if e != nil {
+			return e
+		}
+		obj = o
+		return nil
+	})
+	return obj, err
 }
 
 func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, versionID)
-	if err != nil {
-		return nil, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.HeadObjectVersion(bucket, key, versionID)
-	}
-	args := buildHeadObjectVersionArgs(bucket, key, versionID)
-	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
+	// S7-4c: probe generations newest-first for the specific version (one
+	// attempt at a single generation).
+	var obj *storage.Object
+	err := c.probeRead(bucket, key, versionID, func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			o, e := gb.HeadObjectVersion(bucket, key, versionID)
+			if e != nil {
+				return e
+			}
+			obj = o
+			return nil
+		}
+		args := buildHeadObjectVersionArgs(bucket, key, versionID)
+		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
+		if e != nil {
+			return e
+		}
+		obj = o
+		return nil
+	})
+	return obj, err
 }
 
 func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key string) error {
@@ -1186,33 +1431,39 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return 0, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return 0, err
-	} else if gb != nil {
-		return gb.ReadAt(ctx, bucket, key, offset, buf)
-	}
-
-	if c.forward == nil {
-		return 0, ErrCoordinatorNoRouter
-	}
-	if c.forward.readDialer == nil {
-		rc, _, err := c.GetObject(ctx, bucket, key)
-		if err != nil {
-			return 0, err
+	// S7-4c: probe generations newest-first (one attempt at a single
+	// generation). The no-readDialer fallback delegates to GetObject, which
+	// probes on its own; the local and forward-readAt paths route per target.
+	var n int
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			var e error
+			n, e = gb.ReadAt(ctx, bucket, key, offset, buf)
+			return e
 		}
-		defer rc.Close()
-		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
-			return 0, err
+		if c.forward == nil {
+			return ErrCoordinatorNoRouter
 		}
-		return io.ReadFull(rc, buf)
-	}
-
-	args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
-	return c.forwardRuntime().readAt(ctx, target, args, buf)
+		if c.forward.readDialer == nil {
+			rc, _, e := c.GetObject(ctx, bucket, key)
+			if e != nil {
+				return e
+			}
+			defer rc.Close()
+			if _, e := io.CopyN(io.Discard, rc, offset); e != nil {
+				return e
+			}
+			n, e = io.ReadFull(rc, buf)
+			return e
+		}
+		args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
+		var e error
+		n, e = c.forwardRuntime().readAt(ctx, target, args, buf)
+		return e
+	})
+	return n, err
 }
 
 func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
@@ -1225,16 +1476,24 @@ func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key strin
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return 0, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return 0, err
-	} else if gb != nil {
-		return gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
-	}
-	return c.ReadAt(ctx, bucket, key, offset, buf)
+	// S7-4c: probe generations newest-first; non-authoritative falls back to
+	// ReadAt (which probes too). One attempt at a single generation.
+	var n int
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		gb, rerr := c.runtimeState().localExec.ResolveRead(ctx, target)
+		if rerr != nil {
+			return rerr
+		}
+		if gb == nil {
+			var e error
+			n, e = c.ReadAt(ctx, bucket, key, offset, buf)
+			return e
+		}
+		var e error
+		n, e = gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+		return e
+	})
+	return n, err
 }
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {

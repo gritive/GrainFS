@@ -1,5 +1,214 @@
 # Changelog
 
+## [0.0.543.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-7: operator trigger to grow placement groups on a running
+  cluster (`grainfs cluster expand-placement`).** This makes the S7-6 machinery
+  reachable — S7-6 was production-inert (no entry point), so this is what actually
+  lifts Phase 7's "cannot add groups to a running cluster" operational constraint.
+  - **Flow:** after scaling out (adding nodes, which forms new shard groups via the
+    existing join machinery — `expandShardGroupsForJoinedNode`), the operator runs
+    `grainfs cluster expand-placement`. The server records the current shard groups
+    as a new topology placement generation. Existing objects are NOT remapped — the
+    generation-probe read path (S7-4) serves them from the prior generation, and the
+    cross-generation LWW fence (S7-6) keeps add-window reads correct.
+  - **Why the base must come from the OpRouter (correctness).** `rebuild()` does not
+    fire on `PutShardGroup`/group-join, so the OpRouter keeps its boot-frozen
+    placement set — that frozen set is the only authoritative source of what existing
+    objects were placed under. `ClusterCoordinator.PlanPlacementExpansion` reads Base
+    from the OpRouter and Expanded from the live candidate groups
+    (`candidateGroupsFor(ShardGroups())`); sourcing Base from the live groups instead
+    would freeze the wrong (already-grown) set as gen-0 and lose existing objects.
+  - **No-op guard:** when no new candidate groups are present (Base == Expanded), no
+    generation is recorded (returns `no_op`).
+  - **Narrowing transparency:** `candidateGroupsFor` keeps only the widest-peer-count
+    groups, so if a newly-joined group is wider than the Base groups, the narrower Base
+    groups drop out of the active set. The plan/result surface these as `removed` and the
+    CLI prints a warning (those groups stop receiving new writes; their existing objects
+    stay readable) — the operator is not misled by an additions-only report.
+  - **Wiring:** CLI (`cmd/grainfs`, thin-runner → `clusteradmin.RunExpandPlacement`)
+    → admin UDS `POST /v1/cluster/expand-placement` (JSON, the established
+    operator-plane convention; node-to-node stays FlatBuffers) → serveruntime closure
+    holding the coordinator (Base) + meta-raft (`AddTopologyGeneration`, gen-0 capture
+    before expanded). Mirrors the existing transfer-leader command end-to-end.
+  - **Tests (RED on revert of the mechanism):** `PlanPlacementExpansion` frozen-Base
+    vs live-Base, no-op guard; handler 503-when-unwired / 200-JSON / no-op. Builds the
+    full project; `make test-unit` + `make lint` green.
+  - This is the activation slice the S7-6 entry flagged as deferred; with it, Phase 7
+    growth is operator-reachable. Group **formation** (forming the new raft groups) is
+    still the existing node-join machinery — `expand-placement` records the generation
+    on top.
+
+## [0.0.542.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-6 (the topology flip — irreversible): cross-generation
+  last-writer-wins read fence + add-protocol that activate running-cluster group
+  growth.** This is the flip gate of the Phase 7 epic. The user chose GO (build the
+  irreversible add-protocol + flip, eyes-open, without a GCP throughput bench — like
+  the QUIC→TCP flip). It builds the machinery that lets an operator add a topology
+  generation (grow the object→group placement set) on a running cluster while reads
+  stay correct.
+  - **⚠️ This slice is production-inert as merged.** No CLI/adminapi entry point wires
+    `ProposeAddPlacementGeneration` / `AddTopologyGeneration`, so in production
+    `generationCount()` stays 1, `multiGeneration` stays false, and the fence/merge are
+    unreachable. Unlike the QUIC→TCP flip (which flipped a default), merging S7-6 has no
+    production effect on its own. Lifting the can't-grow-groups operational constraint
+    requires wiring an operator trigger (a follow-on mechanical slice). The add-protocol
+    machinery and the GO decision are complete and verified; operator-facing activation
+    is deferred.
+  - **Cross-generation LWW read fence (must-solve ①).** When a cluster has more than
+    one placement generation, an add-window split-brain write can land a fresher copy
+    of a key in an OLDER generation than the routed (newest-generation) leader holds.
+    `readQuorumMeta`/`readQuorumMetaCmd` now share a `readQuorumMetaWinningRaw` funnel:
+    at a single generation it is the byte-identical local-first fast path; at >1
+    generation it merges the local blob with the cross-generation peer fan-out
+    (`fetchQuorumMetaFromPeers` already spans every `ShardGroups()` peer) and returns
+    the last-writer-wins blob. Because the EC data fetch is record-driven off the
+    winning blob's `NodeIDs` (`ResolvePlacement`), the winner's data is read
+    cross-group with no coordinator re-route. Tombstones participate: a higher-ModTime
+    delete marker wins the LWW and folds to not-found. The merge arms per-node via an
+    `atomic.Bool` the coordinator propagates from `rebuild()`.
+  - **On-add → rebuild trigger (must-solve, wiring).** The coordinator registers a
+    meta-FSM post-commit hook that re-runs `rebuild()` when an `AddPlacementGeneration`
+    command is applied, so an added generation takes effect immediately on every node
+    (re-reading the registry into the OpRouter and re-arming the backend merge) rather
+    than staying inert until a restart.
+  - **Add-protocol orchestration (must-solve ②).** `MetaRaft.ProposeAddPlacementGeneration`
+    (the irreversible flip primitive) and `MetaRaft.AddTopologyGeneration`, which —
+    on the first growth — records gen-0 (the base group set) BEFORE the expanded
+    generation so existing objects placed by the original modulo stay readable. The
+    ordering makes every intermediate crash state a valid single-generation
+    (byte-identical) or fully multi-generation view; a second growth appends only the
+    expanded set. The new groups must already be formed/registered via existing
+    group-add machinery — this records the placement generation on top.
+  - **Deterministic same-second tiebreak (advisor D).** ModTime is second-granularity,
+    so cross-generation same-key same-second ties were resolved nondeterministically and
+    point-GET vs LIST could disagree. A single `quorumMetaBlobWins` comparison (higher
+    ModTime, then lexicographically higher VersionID) is now used by the merge, the peer
+    fan-out, AND `scatterGatherList`, so they agree. This is deterministic agreement,
+    NOT a recency guarantee at second granularity (pre-existing LWW property; only
+    already-nondeterministic outcomes change). The `scatterGatherList` tiebreak applies
+    unconditionally (all generations) — it is a generation-independent determinism
+    improvement, so the "single-generation byte-identical" statement below scopes to the
+    point-read funnel, not to the LIST tiebreak.
+  - **In-place mutations (advisor B) are already correct cross-generation.** `SetObjectACL`,
+    `SetObjectTags`, and `DeleteObject` RMW the FULL `PutObjectMetaCmd` via
+    `readQuorumMetaCmd` (now merge-aware) and write it back whole, so there is no
+    partial-write that would win the LWW with missing NodeIDs. The merge symmetry on
+    `readQuorumMetaCmd` additionally prevents a silent lost mutation in the add window.
+  - **Default single-generation path is byte-identical** (merge disarmed, fast path
+    untouched) — no throughput regression on the default. Tests: cross-generation LWW
+    merge for both read consumers, cross-generation tombstone, VersionID tiebreak (unit +
+    merge), the post-commit-hook arming, and the gen-0-capture ordering — each RED on
+    revert of its mechanism. `make test-unit` + `make lint` green.
+  - **Decision rendered (honest scope):** machinery built and in-proc LWW correctness
+    validated. NOT validated: multi-node concurrent topology growth under live load, and
+    throughput parity (no GCP bench was run, per the GO choice). The fence arms
+    **per-node** on the generation-count transition — during the brief multi-node raft
+    apply-skew window a lagging node serves reads on its unarmed fast path and can return
+    stale; this is inherent to async raft apply and is the "multi-node growth NOT
+    validated" caveat. The flip is irreversible: a placement generation, once appended,
+    is never removed.
+
+## [0.0.541.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-5 (internal, verification): cross-generation LIST coverage is
+  guaranteed by construction.** `scatterGatherList` (the fan-out behind
+  `ListObjects`/`ListObjectsPage`/`WalkObjects`) enumerates the peers of EVERY shard
+  group in `ShardGroups()`, not a generation- or candidate-scoped subset. Because a
+  new topology generation's groups are seeded as ordinary shard groups, they appear
+  in `ShardGroups()` and are scanned, so object listings span all generations with no
+  generation-specific code on the LIST path. Added `TestScatterGatherList_SpansAllShardGroups`
+  (two groups on two nodes; the listing returns objects from both — RED if the fan-out
+  scanned only the bucket-routed group). No production code change.
+  - **Pre-existing limitation noted (orthogonal to generations):** `ListObjectVersions`
+    reads only the local BadgerDB versioned store via the bucket-routed group, so it
+    does not scatter-gather across groups and is incomplete in multi-group clusters
+    regardless of topology generations. Versioned GET/HEAD route correctly (S7-4c probe);
+    only the versioned LIST enumeration has this gap, which predates Phase 7 and is left
+    for a separate scatter-gather-versioned-list fix.
+
+## [0.0.540.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-4c (internal, dormant): version-aware generation probe for
+  versioned and range reads.** `GetObjectVersion`, `HeadObjectVersion`, `ReadAt`, and
+  `ReadAtObject` now route through the S7-4b `probeRead` helper, so a specific
+  version or a range read of an object placed in an older topology generation is
+  found by walking generations newest-first (advancing only on a definitive
+  not-found, fail-closed on any other error). With no generations recorded (the
+  default) each makes exactly one attempt against the same target as before —
+  byte-identical. `ListObjectVersions` cross-generation union is the scatter-gather
+  concern handled in S7-5; conditional PUT (If-Match/If-None-Match) is already
+  covered because its server-side current-version check reads through the now
+  generation-aware `HeadObject`/`GetObject`. In-place metadata writes
+  (SetObjectACL/SetObjectTags/DeleteObjectVersion) stay single-target — also
+  byte-identical at a single generation; their write-to-the-owning-generation
+  behavior is deferred to the S7-6 add protocol.
+
+## [0.0.539.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-4a+4b (internal, dormant): generation-aware read routing + probe.**
+  `OpRouter` now consumes the FSM topology-generation registry (via the coordinator's
+  `rebuild`): when generations are recorded, write/read placement uses the latest
+  generation's pinned group set, and `RouteObjectReadGenerations` yields one target per
+  generation newest-first. The coordinator's `GetObject`/`HeadObject` route through a new
+  `probeRead` helper that tries each generation newest-first, advancing to an older
+  generation ONLY on a definitive `ErrObjectNotFound` and returning any other error
+  immediately (fail-closed — a transiently-unavailable older-generation group never
+  masquerades as a 404). With no generations recorded (the default) every path makes
+  exactly one attempt against the same target as before, so this is byte-identical and
+  behavior-neutral. No production code records a generation yet (the first append is the
+  S7-6 flip). Versioned reads, `ListObjectVersions`, and conditional PUT get
+  generation-aware semantics in S7-4c; cross-group `LIST` fan-out is S7-5. RED-on-revert
+  tests cover single-generation byte-identity, newest-first ordering, probe fallthrough,
+  and fail-closed.
+
+## [0.0.538.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-3 (internal, dormant): `AddPlacementGeneration` control-plane command
+  family.** The MetaFSM now carries an ordered, snapshotted placement-generation
+  registry (`placementGenerations`, ascending epoch) plus a new `AddPlacementGeneration`
+  meta-raft command (FlatBuffers `MetaAddPlacementGenerationCmd`, enum 90) that appends
+  a generation. Epochs are assigned monotonically by `apply` from the list length (not
+  carried on the wire) so replay/re-encode are deterministic; empty `group_ids` is
+  rejected. Snapshot/restore round-trips the registry; a snapshot lacking the new slot
+  (legacy binaries, fresh clusters) restores to an empty registry. This is a pure
+  data-model slice — the registry is empty by default and no production path proposes
+  the command yet (OpRouter consumes generations from S7-4; the first append is the
+  S7-6 irreversible flip), so it is behavior-neutral. Dispatch wiring, monotonic
+  append, snapshot round-trip, and legacy-snapshot compatibility are each covered by
+  RED-on-revert tests.
+
+## [0.0.537.0] - 2026-06-11
+
+### Changed
+
+- **Phase 7 S7-2 (internal, dormant): object→group placement now flows through a
+  `GenerationPlacement` seam.** `OpRouter` previously held a frozen sorted candidate
+  ID list (`placementGroupIDs`) and hashed objects into it directly. That list is now
+  wrapped in a single-generation `GenerationPlacement` whose `currentGroupIDs()`
+  returns the identical set, so object read/write placement is byte-identical — this
+  is a pure representational refactor with no behavior change. The seam is the dormant
+  foundation for Phase 7 topology-generation growth (S7-3 appends generations on group
+  addition; S7-4 adds newest-first read probe). Segment/EC placement is deliberately
+  out of scope: it is recorded in the object metadata (`storage.SegmentRef`
+  self-describes `PlacementGroupID` + `NodeIDs`) and read record-driven, so a
+  generation change never reroutes an existing object's shards — only object→group
+  metadata placement is recomputed on read (Phase 4 index-free) and thus needs the
+  seam.
+
 ## [0.0.536.0] - 2026-06-11
 
 ### Fixed

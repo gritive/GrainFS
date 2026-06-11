@@ -27,6 +27,7 @@ func (s *Server) RegisterClusterAdminUDS(h *server.Hertz) {
 	g.POST(routePathAdminUDSRemovePeer, s.removePeerHandler)
 	g.GET(routePathAdminUDSEventLog, s.queryEventLog)
 	g.POST(routePathAdminUDSTransferLeader, s.transferLeaderHandler)
+	g.POST(routePathAdminUDSExpandPlacement, s.expandPlacementHandler)
 	g.GET(routePathAdminUDSHealth, s.clusterHealth)
 	g.GET(routePathAdminUDSBalancerStatus, s.balancerStatusHandler)
 	g.GET(routePathAdminUDSCapabilities, s.capabilitiesStatus)
