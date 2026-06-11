@@ -180,6 +180,20 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
   - **성능**: Hertz netpoll 기본 처리, transport는 PUT 천장 아님(에픽 확인) → throughput 중립. *단순화·유지보수* 목적(perf 레버 아님)이라 perf 수술과 분리.
 - **검증**: shard round-trip이 HTTP 스트리밍으로(대용량서 메모리 flat).
 
+#### Phase 8 진행 현황 (2026-06-11 부트스트랩, advisor plan-gate 통과)
+
+> **범위 갈림길 (S8-4 착수 전 사용자 확정 필요)**: 검증 bullet(line 181)은 **데이터 플레인만**(shard round-trip 스트리밍) 요구하나, 설명 bullet(line 177)은 raft/meta까지 + 자작 mux carrier·lane·pool·desync **전부 삭제**까지 요구. 두 읽기가 endpoint를 바꿈 — 좁은 읽기=S8-3 완료, 전체 읽기=S8-5까지. S8-1~S8-3은 양쪽 공통이라 무블록 진행, S8-4 착수 직전에만 확정 필요.
+>
+> **완료 의미론 (advisor 보정)**: Phase 8은 "분리된 베팅 = 단순화 목적"이라 Phase 7의 "dormant land + flip DECLINE = 완료"가 **전이 안 됨**. HTTP transport를 dormant로만 올리고 flip 안 하면 transport 2개로 *더 복잡*해짐 = 베팅 목적의 정반대 최악 종착. 가치는 **flip + 구 machinery 삭제**에서만 실현 → 완료 기준 = flip + 삭제. flip은 검증 인프라 요구(QUIC→TCP §6 선례: macOS-functional-only + 사용자 eyes-open override) → flip 슬라이스서 사용자 sign-off.
+>
+> **재사용 강제**: `transport_shared.go`(DeriveClusterIdentity/pinAcceptedSPKI/checkResponseStatus/IdentitySnapshot)·`join_wire.go` 재사용, 재발명 금지. identity rotation은 S5a code-gate가 실제 보안버그(drop된 identity로 핸드셰이크된 in-flight conn re-pool) 잡은 자리 → HTTP tls.Config도 `GetConfigForClient` fresh-read-per-handshake 필수. **컨트롤 플레인이 진짜 lift**(데이터 플레인 성공이 전이 안 됨 — raft GroupRaftMux는 persistent bidir stream + corrID mux 가정, HTTP req/resp면 driver 재작성).
+
+- [완료] **S8-1: HTTP transport scaffold** (v0.0.544.0) — `internal/transport/HTTPTransport`: Hertz server + **Hertz client**(net/http 이탈 폐기 — advisor plan-gate가 "Hertz client는 정적 TLS라 fresh-read 불가"를 미검증 추론으로 적발, v0.10.4 소스 확인 결과 `client.WithDialer(network.Dialer)` 커스텀 dialer가 per-dial fresh `tls.Config` 주입 가능=net/http `DialTLSContext`와 동일 seam → ROADMAP "Hertz client 풀" + Phase 8 단순화[HTTP 스택 1개] 양쪽 충족) over SPKI-pinned mTLS. identity rotation(SwapIdentity/UpdateRegistryAccept/SeedInitialPeerSPKIs/ApplyRotation/FlipPresent/SetDropped) **전부 shared `identityComposer`에 위임**(tcp_identity.go와 동일 shape), DeriveClusterIdentity/NewIdentitySnapshot/pinAcceptedSPKI 재사용. server `GetConfigForClient` + 커스텀 `httpFreshDialer` 양쪽 fresh-read(`identity.Load()` per handshake/dial). `WithStreamBody(true)`+`WithResponseBodyStream` 활성(S8-2 대비). **dormant**: HTTPTransport 참조가 internal/transport/ 밖에 0(grep 증명). 검증: handshake round-trip + SPKI reject(서버↔클라 양방향) + **rotation fresh-read mutation-verified**(static config 캡처시 RED, GetConfigForClient fresh-read면 GREEN) + build/lint/full test-unit green. ✓
+- [대기] **S8-2: 데이터 플레인 HTTP** [S8-1] — CallWithBody/CallRead → HTTP PUT/GET /shard/{...}, body=raw 바이트. Hertz `WithStreamRequestBody` + response stream **명시 활성화**(기본 버퍼링→대용량 메모리 적재 회피, 전 구간 io.Reader/io.Copy). selectable, default 구 transport. 검증(헤드라인): shard round-trip 스트리밍 + 대용량 메모리 flat.
+- [대기] **S8-3: 데이터 플레인 flip + 삭제** [S8-2] — default를 HTTP로 flip, data-plane 전용 자작 machinery(chunk framing 등) 삭제. 검증: 멀티노드 round-trip + PUT/GET throughput 무회귀. ← 1차 단순화 실현. flip 슬라이스(사용자 sign-off). **대응 flip 전 삭제 금지**(QUIC→TCP S6 indivisible-merge 교훈).
+- [대기] **S8-4: 컨트롤 플레인 HTTP** [S8-1, **전체 읽기 선택 시에만**] — raft/meta/forward RPC를 HTTP로. internal/raft GroupRaftMux(persistent bidir stream + corrID mux) → HTTP req/resp driver 재작성. control/bulk lane → pool 분할. selectable, default 구. ← **진짜 lift**.
+- [대기] **S8-5: 컨트롤 플레인 flip + 삭제** [S8-3, S8-4] — default flip, mux carrier·lane·pool·desync 전부 삭제. raft transport_iface(GetOrConnectMux/EvictMux/MuxConnHandler) 제거. ← 전체 단순화 실현. flip 슬라이스(사용자 sign-off).
+
 ### Phase 9 — primitive 라이브러리 추출
 - raft/HRW/bounded/gossip 분리. 두 번째 소비자 생길 때. **선행 검토**: hashicorp/raft·memberlist 등 Layer-1 채택 vs 자체 유지.
 

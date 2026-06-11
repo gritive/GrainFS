@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.544.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-1: dormant HTTP transport scaffold** (`internal/transport/HTTPTransport`).
+  A Hertz HTTP server + Hertz HTTP client over the SAME zero-CA SPKI-pinned mTLS and
+  live identity rotation the TCP transport uses — the secure substrate for the Phase 8
+  data-plane move (shard PUT/GET over streaming HTTP, S8-2).
+  - **Reuses, does not reinvent**, the shared identity machinery: `DeriveClusterIdentity`,
+    `NewIdentitySnapshot`, `pinAcceptedSPKI`, and `identityComposer`. The rotation surface
+    (`SwapIdentity`/`UpdateRegistryAccept`/`SeedInitialPeerSPKIs`/`ApplyRotation`/
+    `FlipPresent`/`SetDropped`) delegates to the composer exactly as the TCP transport does.
+  - **Fresh-read per handshake/dial:** the server's `GetConfigForClient` and a custom Hertz
+    client `network.Dialer` both rebuild their `tls.Config` from the live `IdentitySnapshot`,
+    so a post-Listen rotation/flip takes effect on new connections without a restart
+    (mirrors the TCP transport; mutation-verified).
+  - **Streaming enabled now:** `WithStreamBody(true)` on the server + `WithResponseBodyStream`
+    on the client, so S8-2 can stream large shard bodies without buffering.
+  - **Dormant:** not wired into boot — the production default transport is unchanged
+    (`HTTPTransport` is referenced only inside `internal/transport/`).
+
 ## [0.0.543.0] - 2026-06-11
 
 ### Added
