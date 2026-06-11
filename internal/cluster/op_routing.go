@@ -83,6 +83,14 @@ func (r *OpRouter) applyGenerations(gens []placementGeneration) {
 	}
 }
 
+// currentPlacementGroupIDs returns the latest generation's pinned candidate
+// group-ID set — the set objects are currently routed under (S7-7 base for
+// topology growth). Boot-frozen until a generation is recorded; the live shard
+// groups cannot reconstruct it once new groups have joined.
+func (r *OpRouter) currentPlacementGroupIDs() []string {
+	return r.placement.currentGroupIDs()
+}
+
 // generationCount reports the number of recorded topology generations (S7-6).
 // A value > 1 means an operator has added a generation; the coordinator uses
 // this to arm the cross-generation LWW read merge on the backends. The default

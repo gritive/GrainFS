@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.543.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-7: operator trigger to grow placement groups on a running
+  cluster (`grainfs cluster expand-placement`).** This makes the S7-6 machinery
+  reachable — S7-6 was production-inert (no entry point), so this is what actually
+  lifts Phase 7's "cannot add groups to a running cluster" operational constraint.
+  - **Flow:** after scaling out (adding nodes, which forms new shard groups via the
+    existing join machinery — `expandShardGroupsForJoinedNode`), the operator runs
+    `grainfs cluster expand-placement`. The server records the current shard groups
+    as a new topology placement generation. Existing objects are NOT remapped — the
+    generation-probe read path (S7-4) serves them from the prior generation, and the
+    cross-generation LWW fence (S7-6) keeps add-window reads correct.
+  - **Why the base must come from the OpRouter (correctness).** `rebuild()` does not
+    fire on `PutShardGroup`/group-join, so the OpRouter keeps its boot-frozen
+    placement set — that frozen set is the only authoritative source of what existing
+    objects were placed under. `ClusterCoordinator.PlanPlacementExpansion` reads Base
+    from the OpRouter and Expanded from the live candidate groups
+    (`candidateGroupsFor(ShardGroups())`); sourcing Base from the live groups instead
+    would freeze the wrong (already-grown) set as gen-0 and lose existing objects.
+  - **No-op guard:** when no new candidate groups are present (Base == Expanded), no
+    generation is recorded (returns `no_op`).
+  - **Wiring:** CLI (`cmd/grainfs`, thin-runner → `clusteradmin.RunExpandPlacement`)
+    → admin UDS `POST /v1/cluster/expand-placement` (JSON, the established
+    operator-plane convention; node-to-node stays FlatBuffers) → serveruntime closure
+    holding the coordinator (Base) + meta-raft (`AddTopologyGeneration`, gen-0 capture
+    before expanded). Mirrors the existing transfer-leader command end-to-end.
+  - **Tests (RED on revert of the mechanism):** `PlanPlacementExpansion` frozen-Base
+    vs live-Base, no-op guard; handler 503-when-unwired / 200-JSON / no-op. Builds the
+    full project; `make test-unit` + `make lint` green.
+  - This is the activation slice the S7-6 entry flagged as deferred; with it, Phase 7
+    growth is operator-reachable. Group **formation** (forming the new raft groups) is
+    still the existing node-join machinery — `expand-placement` records the generation
+    on top.
+
 ## [0.0.542.0] - 2026-06-11
 
 ### Added
@@ -11,6 +47,14 @@
   the QUIC→TCP flip). It builds the machinery that lets an operator add a topology
   generation (grow the object→group placement set) on a running cluster while reads
   stay correct.
+  - **⚠️ This slice is production-inert as merged.** No CLI/adminapi entry point wires
+    `ProposeAddPlacementGeneration` / `AddTopologyGeneration`, so in production
+    `generationCount()` stays 1, `multiGeneration` stays false, and the fence/merge are
+    unreachable. Unlike the QUIC→TCP flip (which flipped a default), merging S7-6 has no
+    production effect on its own. Lifting the can't-grow-groups operational constraint
+    requires wiring an operator trigger (a follow-on mechanical slice). The add-protocol
+    machinery and the GO decision are complete and verified; operator-facing activation
+    is deferred.
   - **Cross-generation LWW read fence (must-solve ①).** When a cluster has more than
     one placement generation, an add-window split-brain write can land a fresher copy
     of a key in an OLDER generation than the routed (newest-generation) leader holds.

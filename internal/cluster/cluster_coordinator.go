@@ -307,6 +307,74 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 	}
 }
 
+// PlacementExpansionPlan describes a proposed topology-generation growth (S7-7):
+// Base is the placement group set objects are currently routed under (the
+// OpRouter's boot-frozen / latest-generation set); Expanded is the candidate set
+// derived from the live shard groups (which includes any groups formed by node
+// joins since boot). Added is Expanded minus Base. NoOp is true when Expanded
+// equals Base — no new candidate groups are present, so recording a generation
+// would be a useless no-op.
+type PlacementExpansionPlan struct {
+	Base     []string
+	Expanded []string
+	Added    []string
+	NoOp     bool
+}
+
+// PlanPlacementExpansion computes the topology-generation growth that would
+// activate the currently-formed-but-unused shard groups for object placement
+// (S7-7). It does NOT mutate anything — the caller (serveruntime) proposes the
+// generation via MetaRaft.AddTopologyGeneration(plan.Base, plan.Expanded). Base
+// comes from the OpRouter (boot-frozen original / latest generation), which is
+// the only authoritative source of the set existing objects were placed under;
+// the live shard groups alone cannot reconstruct it once new groups have joined.
+func (c *ClusterCoordinator) PlanPlacementExpansion() (PlacementExpansionPlan, error) {
+	base := append([]string(nil), c.runtimeState().opRouter.currentPlacementGroupIDs()...)
+	if len(base) == 0 {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: no current placement groups (bootstrap or no EC-active groups)")
+	}
+	if c.meta == nil {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: no shard-group source")
+	}
+	candidates, err := candidateGroupsFor(c.meta.ShardGroups(), c.ecConfig)
+	if err != nil {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: candidate groups: %w", err)
+	}
+	expanded := make([]string, len(candidates))
+	for i, cand := range candidates {
+		expanded[i] = cand.ID
+	}
+	if stringSlicesEqual(base, expanded) {
+		return PlacementExpansionPlan{Base: base, Expanded: expanded, NoOp: true}, nil
+	}
+	baseSet := make(map[string]struct{}, len(base))
+	for _, id := range base {
+		baseSet[id] = struct{}{}
+	}
+	var added []string
+	for _, id := range expanded {
+		if _, ok := baseSet[id]; !ok {
+			added = append(added, id)
+		}
+	}
+	return PlacementExpansionPlan{Base: base, Expanded: expanded, Added: added}, nil
+}
+
+// stringSlicesEqual reports whether two already-sorted string slices are
+// element-wise equal. Both base (currentGroupIDs) and expanded (candidateGroupsFor)
+// are sorted candidate-ID lists, so this is a sound set-equality test.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // routeReadOrBucket resolves an object read to its placement-group target via
 // deterministic hash placement (S4-4c: index-free). When the frozen placement
 // candidate list is empty (bootstrap) or the key resolves to no object, it
