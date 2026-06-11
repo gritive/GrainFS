@@ -217,6 +217,39 @@ the EC write and what exact node IDs the write will use. Callers should consume
 the plan instead of re-reading placement group context and recomputing EC target
 rules in each write fast path.
 
+### Quorum Meta Store
+
+The quorum meta store is the per-node filesystem location that holds object
+metadata for user-bucket objects placed in Phase 3 and later. Each node writes
+metadata to its local `{dataDir}/.quorum_meta/{bucket}/{key}` file as part of
+a K-of-N fan-out rather than through a Raft consensus round.
+
+**Write path**: `writeQuorumMeta` fans out to ECData placement nodes
+(k = 4 in the default 4+2 profile). The write succeeds when k nodes
+acknowledge; parity nodes are best-effort. A 30-second bounded timeout
+(`quorumMetaWriteTimeout`) prevents unbounded hangs.
+
+**Read path**: `readQuorumMeta` checks the local file first. On a miss, it
+fans out `ReadQuorumMeta` RPCs to all shard-group peers and applies
+Last-Write-Wins (LWW) by `ModTime`. The fan-out waits for all peers within
+`quorumMetaReadTimeout` (5 s) so a concurrent PUT racing the read can be
+observed. If all peers miss, the read falls back to BadgerDB.
+
+**BadgerDB fallback**: the BadgerDB fallback covers three cases:
+1. Multipart-completed objects — `applyCompleteMultipart` writes object meta
+   and deletes the multipart manifest key atomically in a single BadgerDB
+   transaction (raft). Splitting that atomicity would open a window where the
+   manifest leaks or the object disappears.
+2. Objects committed before Phase 3 upgrade (pre-existing BadgerDB entries).
+3. Repair/scrubber-written entries injected via the raft control plane.
+
+**Internal buckets** (`_grainfs_*`) always use raft and never touch the quorum
+meta store.
+
+**Conflict resolution**: concurrent PUTs to the same key race on ModTime (LWW).
+UUIDv7 version IDs provide natural monotone ordering per-node, mitigating
+clock-skew risk.
+
 ### Shard Group Peer Identity
 
 Shard group peer identity is the node identifier stored in
