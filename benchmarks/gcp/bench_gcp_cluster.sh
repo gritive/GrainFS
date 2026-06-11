@@ -175,16 +175,43 @@ cmd_build() {
     local n; n="$(node_name "$i")"
     ssh_node "$n" "sudo mkdir -p $BIN_DIR && sudo chown $REMOTE_USER $BIN_DIR"
   done
-  # pull binaries to local, push to each storage node (scp is VM<->local only)
-  gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
-    "$CLIENT:/tmp/grainfs-new" "$CLIENT:/tmp/grainfs-old" /tmp/ >/dev/null 2>&1
+  # pull binaries to local, push to each storage node (scp is VM<->local only).
+  # The IAP-tunnelled scp intermittently corrupts the ~122MB binary (silent
+  # "fatal error: invalid runtime symbol table" at boot), so every hop is md5-
+  # verified and retried — a corrupt binary otherwise wastes a full boot cycle.
+  local arm md5 nm
+  for arm in new old; do
+    md5="$(ssh_node "$CLIENT" "md5sum /tmp/grainfs-$arm | cut -d' ' -f1")"
+    push_verified "$CLIENT:/tmp/grainfs-$arm" "/tmp/grainfs-$arm" "$md5" || { log "ERROR: client->local grainfs-$arm corrupt"; return 1; }
+    for i in $(seq 0 $((NODE_COUNT - 1))); do
+      nm="$(node_name "$i")"
+      push_verified "/tmp/grainfs-$arm" "$nm:$BIN_DIR/grainfs-$arm" "$md5" "$nm" || { log "ERROR: ->$nm grainfs-$arm corrupt"; return 1; }
+    done
+  done
   for i in $(seq 0 $((NODE_COUNT - 1))); do
-    local n; n="$(node_name "$i")"
-    scp_to /tmp/grainfs-new "$n:$BIN_DIR/grainfs-new"
-    scp_to /tmp/grainfs-old "$n:$BIN_DIR/grainfs-old"
-    ssh_node "$n" "chmod +x $BIN_DIR/grainfs-new $BIN_DIR/grainfs-old"
+    ssh_node "$(node_name "$i")" "chmod +x $BIN_DIR/grainfs-new $BIN_DIR/grainfs-old"
   done
   log "build done"
+}
+
+# push_verified <src> <dst> <expected-md5> [remote-node-for-dst]
+# scp src->dst, verify dst md5 == expected, retry up to 4x. dst is "node:path"
+# (verify over ssh on that node) or a local path (verify locally).
+push_verified() {
+  local src="$1" dst="$2" want="$3" rnode="${4:-}"
+  local got
+  for _ in 1 2 3 4; do
+    if [[ "$dst" == *:* ]]; then scp_to "$src" "$dst"; else
+      gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap "$src" "$dst" >/dev/null 2>&1
+    fi
+    if [[ -n "$rnode" ]]; then
+      got="$(ssh_node "$rnode" "md5sum '${dst#*:}' 2>/dev/null | cut -d' ' -f1")"
+    else
+      got="$(md5 -q "$dst" 2>/dev/null || md5sum "$dst" 2>/dev/null | cut -d' ' -f1)"
+    fi
+    [[ "$got" == "$want" ]] && return 0
+  done
+  return 1
 }
 
 # --------------------------------------------------------- boot cluster --------
