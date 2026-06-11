@@ -23,6 +23,11 @@
     would freeze the wrong (already-grown) set as gen-0 and lose existing objects.
   - **No-op guard:** when no new candidate groups are present (Base == Expanded), no
     generation is recorded (returns `no_op`).
+  - **Narrowing transparency:** `candidateGroupsFor` keeps only the widest-peer-count
+    groups, so if a newly-joined group is wider than the Base groups, the narrower Base
+    groups drop out of the active set. The plan/result surface these as `removed` and the
+    CLI prints a warning (those groups stop receiving new writes; their existing objects
+    stay readable) — the operator is not misled by an additions-only report.
   - **Wiring:** CLI (`cmd/grainfs`, thin-runner → `clusteradmin.RunExpandPlacement`)
     → admin UDS `POST /v1/cluster/expand-placement` (JSON, the established
     operator-plane convention; node-to-node stays FlatBuffers) → serveruntime closure

@@ -311,13 +311,18 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 // Base is the placement group set objects are currently routed under (the
 // OpRouter's boot-frozen / latest-generation set); Expanded is the candidate set
 // derived from the live shard groups (which includes any groups formed by node
-// joins since boot). Added is Expanded minus Base. NoOp is true when Expanded
-// equals Base — no new candidate groups are present, so recording a generation
-// would be a useless no-op.
+// joins since boot). Added is Expanded minus Base; Removed is Base minus
+// Expanded. Removed is normally empty, but can be non-empty when a newly-joined
+// group is WIDER than the Base groups: candidateGroupsFor keeps only the
+// widest-peer-count groups, so narrower Base groups drop out of the active
+// placement set. Their existing objects stay readable via the prior generation
+// (gen-0 probe) but stop receiving new writes — the operator must be shown this,
+// not just the additions. NoOp is true when Expanded equals Base.
 type PlacementExpansionPlan struct {
 	Base     []string
 	Expanded []string
 	Added    []string
+	Removed  []string
 	NoOp     bool
 }
 
@@ -351,13 +356,23 @@ func (c *ClusterCoordinator) PlanPlacementExpansion() (PlacementExpansionPlan, e
 	for _, id := range base {
 		baseSet[id] = struct{}{}
 	}
+	expandedSet := make(map[string]struct{}, len(expanded))
+	for _, id := range expanded {
+		expandedSet[id] = struct{}{}
+	}
 	var added []string
 	for _, id := range expanded {
 		if _, ok := baseSet[id]; !ok {
 			added = append(added, id)
 		}
 	}
-	return PlacementExpansionPlan{Base: base, Expanded: expanded, Added: added}, nil
+	var removed []string
+	for _, id := range base {
+		if _, ok := expandedSet[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	return PlacementExpansionPlan{Base: base, Expanded: expanded, Added: added, Removed: removed}, nil
 }
 
 // stringSlicesEqual reports whether two already-sorted string slices are

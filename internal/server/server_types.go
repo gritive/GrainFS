@@ -65,6 +65,7 @@ type ExpandPlacementResult struct {
 	Base     []string `json:"base"`
 	Expanded []string `json:"expanded"`
 	Added    []string `json:"added"`
+	Removed  []string `json:"removed,omitempty"`
 	NoOp     bool     `json:"no_op"`
 }
 

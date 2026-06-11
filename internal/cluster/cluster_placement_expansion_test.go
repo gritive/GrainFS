@@ -35,6 +35,30 @@ func TestPlanPlacementExpansion(t *testing.T) {
 	require.Equal(t, []string{"group-3", "group-4"}, plan.Added)
 }
 
+// TestPlanPlacementExpansion_WiderGroupNarrows proves the Removed reporting:
+// candidateGroupsFor keeps only the widest-peer-count groups, so when a
+// newly-joined group is wider than the Base groups, the narrower Base groups
+// drop out of the active set. The plan must surface them in Removed so the
+// operator is not misled by an Added-only report.
+func TestPlanPlacementExpansion_WiderGroupNarrows(t *testing.T) {
+	ec := ECConfig{DataShards: 2, ParityShards: 1}
+	meta := newFakeShardGroupSourceN(t, 2) // group-1, group-2 @ 3 peers
+	c := NewClusterCoordinator(&fakeBackend{}, NewDataGroupManager(), nil, meta, "node-1").
+		WithECConfig(ec)
+
+	// A wider group joins (5 peers). candidateGroupsFor keeps only the widest,
+	// so group-1/group-2 (3 peers) drop out of the active placement set.
+	meta.groups["group-5"] = ShardGroupEntry{ID: "group-5", PeerIDs: []string{"n1", "n2", "n3", "n4", "n5"}}
+
+	plan, err := c.PlanPlacementExpansion()
+	require.NoError(t, err)
+	require.False(t, plan.NoOp)
+	require.Equal(t, []string{"group-1", "group-2"}, plan.Base)
+	require.Equal(t, []string{"group-5"}, plan.Expanded, "widest-only candidate set")
+	require.Equal(t, []string{"group-5"}, plan.Added)
+	require.Equal(t, []string{"group-1", "group-2"}, plan.Removed, "narrower Base groups must be surfaced as Removed")
+}
+
 // TestPlanPlacementExpansion_NoOp proves the degenerate guard: when no new
 // candidate groups have appeared (live candidate set equals the frozen base),
 // the plan is a no-op so the caller records no useless generation.

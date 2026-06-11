@@ -127,6 +127,7 @@ type ExpandPlacementResult struct {
 	Base     []string `json:"base"`
 	Expanded []string `json:"expanded"`
 	Added    []string `json:"added"`
+	Removed  []string `json:"removed,omitempty"`
 	NoOp     bool     `json:"no_op"`
 }
 
@@ -162,6 +163,10 @@ func RunExpandPlacement(ctx context.Context, opts ExpandPlacementOptions) error 
 	fmt.Fprintf(opts.Out, "  previous groups: %v\n", res.Base)
 	fmt.Fprintf(opts.Out, "  new groups:      %v\n", res.Added)
 	fmt.Fprintf(opts.Out, "  active set:      %v\n", res.Expanded)
+	if len(res.Removed) > 0 {
+		fmt.Fprintf(opts.Out, "  WARNING: groups dropped from the active set (wider groups joined): %v\n", res.Removed)
+		fmt.Fprintln(opts.Out, "  these groups stop receiving new writes; their existing objects stay readable.")
+	}
 	fmt.Fprintln(opts.Out, "existing objects stay readable via the generation-probe read path.")
 	return nil
 }
