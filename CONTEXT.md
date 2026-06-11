@@ -427,23 +427,22 @@ to a placement-group target. Input is `(bucket, key, version)` plus intent
 (bucket-only, object-read, object-write); output is a route target — group
 ID, dial-ready peer list, and self-leader/voter facts.
 
-The module owns object-index lookup, internal-bucket bypass, deterministic
-hash placement (write and index-free read), and peer address resolution through
-the address book. Object placement group selection uses `groupIDForObject`
-(FNV-64a hash mod sorted candidate count); `OpRouter` freezes a sorted
-candidate list at construction so write and index-free read paths share
-identical hash logic. When the object index is unavailable, the read path
-derives the group deterministically from this frozen list rather than returning
-an error — enabling index-free GET routing on fixed topologies. It is ctx-free
-and performs no I/O; address book lookup is an in-memory snapshot read, not
-network probing.
+The module owns deterministic hash placement, internal-bucket bypass, and peer
+address resolution through the address book. Object placement group selection
+uses `groupIDForObject` (FNV-64a hash mod sorted candidate count); `OpRouter`
+freezes a sorted candidate list at construction so write and read paths share
+identical hash logic — a read re-derives the same group the write chose, with
+no index to consult (Phase 4 / S4-4b removed the meta-raft object index
+entirely). It is ctx-free and performs no I/O; address book lookup is an
+in-memory snapshot read, not network probing.
 
 The interface has three methods, one per intent. `RouteBucket(bucket)`
 returns a target alone. `RouteObjectRead(bucket, key, versionID)` returns a
-target plus the resolved object-index entry, where empty `versionID` means
-latest. `RouteObjectWrite(bucket, key)` returns a target plus the chosen
-shard group entry so callers can commit the object-index record after the
-write succeeds.
+target plus a placement entry synthesized from the hash (PlacementGroupID only;
+there is no index lookup), where empty `versionID` means latest.
+`RouteObjectWrite(bucket, key)` returns a target plus the chosen shard group
+entry; the object's authoritative metadata is then written to per-node quorum
+meta (K-of-N fan-out), not a meta-raft index.
 
 Transport-shape selection, ctx-blocking local-vs-forward decisions, and
 forwarded reply parsing remain in their owning modules. Unresolved legacy
@@ -452,14 +451,12 @@ consistent with ADR 0003.
 
 **Forward operation atomicity invariant**: for any mutating forward operation
 (PutObject, CompleteMultipartUpload, DeleteObject, DeleteObjectVersion), the
-storage write and the corresponding object-index commit must both complete on
-the leader side before the response is returned to the originating node. The
-originating node does not perform a post-forward index commit. Violations
-produce orphan storage objects (put/delete-marker) or stale index entries
-(delete-version) that are detectable only by the background scrubber. The
-local execution path (originating node is leader) has no remote hand-off and
-accepts the same best-effort semantics: a node crash between storage write
-and ProposeObjectIndex leaves an orphan that the scrubber resolves.
+storage write and the corresponding quorum-meta write must both complete on the
+leader side before the response is returned to the originating node. The
+originating node does not perform a post-forward metadata write. A node crash
+between the storage write and the quorum-meta write leaves an orphan that the
+background scrubber resolves; the local execution path (originating node is
+leader) accepts the same best-effort semantics.
 
 ### Local Execution Decision
 
