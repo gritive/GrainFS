@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.550.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 S8-5: flip the default cluster transport TCP → HTTP.** The node-to-node
+  cluster transport now defaults to the Phase 8 Hertz `HTTPTransport` (streaming HTTP over
+  the same zero-CA SPKI-pinned mTLS + live identity rotation the TCP transport used).
+  `--transport` now defaults to `http`; `optionsToConfig` maps any value other than `tcp`
+  to the HTTP transport (empty → HTTP, matching the cobra default). **Reversible:** the
+  `--transport tcp` opt-out remains, so operators can pin the legacy TCP transport (unlike
+  the QUIC removal, this flip removes nothing). The dormant runway that made this safe
+  shipped across S8-1..S8-5 (scaffold → data-plane → control-plane → selectable →
+  idle-deadline + multi-node e2e). **Validation: macOS functional-only** — full unit suite
+  + representative multi-node e2e green; **Linux throughput parity NOT measured** (eyes-open,
+  the same posture as the QUIC→TCP flip; the HTTP transport runs raft over per-message
+  `Call` with mux disabled, so heartbeat fan-out under sustained cluster load is unmeasured
+  on macOS where the perf signal does not surface).
+
+### Fixed
+
+- **HTTP transport: retry once on a stale keep-alive pooled connection (`ErrBadPoolConn`).**
+  HTTP keep-alive pools connections, and a peer routinely reaps an idle pooled conn ("Apache
+  and nginx usually do this", per Hertz); the TCP→HTTP default flip makes this production-
+  relevant (TCP's connection-per-RPC `Call` never pooled, so it never hit a reaped conn). The
+  Hertz client now retries once (`httpRetryIf`) on `ErrBadPoolConn` only. That error is raised
+  when the pooled conn was found closed BEFORE the request was delivered, so the retry is a
+  first delivery on a fresh conn — **provably replay-safe for every Call-path RPC type**,
+  including the non-idempotent proposal forwards `CallPooled` carries
+  (`ShardService.SendRequest`). It deliberately does NOT retry Hertz's ambiguous
+  "server closed connection before returning the first response byte" (which fires after the
+  request was written, where the server may have processed it — replaying a proposal forward
+  could double-propose); that case stays a transient error absorbed by raft/S3-client retries.
+  Retry also refuses `IsBodyStream` requests (the S3b "retry-after-body" landmine). This retry
+  is unrelated to the pre-existing `node-id == raft-addr` join deadlock (TODOS.md). Pinned by
+  `TestHTTPDataPlane_RetryIf_RefusesBodyStream`.
+
 ## [0.0.549.0] - 2026-06-12
 
 ### Added
