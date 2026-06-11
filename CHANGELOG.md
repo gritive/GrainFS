@@ -16,9 +16,11 @@
     256 MiB round-trip whose `TotalAlloc` delta stays under body/4 — mutation-verified
     (disabling streaming or buffering the body turns it RED).
   - **TCP parity:** RPC-level `StatusError`/`StatusOverloaded` map to a Go error
-    (`checkResponseStatus`); `CallRead` bodies have a reset-per-Read idle deadline; the
-    buffered response read is capped at 64 MiB. No client retry of streamed bodies
-    (Hertz `DefaultRetryIf` refuses body streams + POST; pinned by test).
+    (`checkResponseStatus`); the buffered response read is capped at 64 MiB. No client
+    retry of streamed bodies (Hertz `DefaultRetryIf` refuses body streams + POST; pinned
+    by test). The `CallRead` body idle-read deadline (TCP's S3b-cbd hardening) is deferred
+    to S8-3 wiring — Hertz forbids a cross-goroutine close-vs-read watchdog and hides the
+    conn behind its buffered reader, so the in-goroutine bound is designed at wiring.
   - **Dormant:** not wired into boot; the production default transport is unchanged.
 
 ## [0.0.544.0] - 2026-06-11

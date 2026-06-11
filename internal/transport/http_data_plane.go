@@ -8,7 +8,6 @@ import (
 	"io"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
@@ -28,11 +27,6 @@ const (
 	hdrGfsID      = "X-Gfs-Id"      // request ID, uint64 decimal
 	hdrGfsStatus  = "X-Gfs-Status"  // MessageStatus, decimal (responses)
 	hdrGfsPayload = "X-Gfs-Payload" // base64 of Message.Payload (request frame; streaming-response metadata)
-
-	// httpClientBodyTimeout is the reset-per-Read idle bound on a CallRead response
-	// body (mirrors transport.defaultClientBodyTimeout for the TCP path) so a stalled
-	// mid-body server cannot pin a client goroutine + pooled conn forever.
-	httpClientBodyTimeout = 5 * time.Minute
 )
 
 // --- server registration (mirror TCPTransport; reuse the shared StreamRouter) ---
@@ -259,44 +253,34 @@ func respMeta(resp *protocol.Response) (*Message, error) {
 
 // httpRespBody adapts a streaming Hertz response body to io.ReadCloser. Close
 // releases the response (returning the conn to the pool) exactly once.
+//
+// NOTE — deferred parity gap (idle read deadline): tcpReadCloser arms a
+// reset-per-Read conn deadline so a server that stalls mid-body cannot pin this
+// goroutine + pooled conn forever (the S3b-cbd hardening). There is no safe
+// equivalent here yet: Hertz forbids calling CloseBodyStream() and
+// BodyStream().Read() concurrently (response.go), so a watchdog that Closes from a
+// second goroutine is a data race + use-after-pool; and a conn-level read deadline
+// can't be plumbed cleanly because Hertz reads the body through its own buffered
+// Reader (Peek/fill), not net.Conn.Read, and SetReadTimeout is a one-shot deadline
+// (not reset-per-Read). The correct in-Read-goroutine idle bound is designed in S8-3
+// when this transport is wired and the consumers' read patterns are concrete
+// (tracked in TODOS.md). Until then a CallRead body read can block on a stalled peer
+// for as long as the caller's ctx/socket allows — acceptable while dormant.
 type httpRespBody struct {
-	resp  *protocol.Response
-	r     io.Reader
-	once  sync.Once
-	timer *time.Timer
+	resp *protocol.Response
+	r    io.Reader
+	once sync.Once
 }
 
 func newHTTPRespBody(resp *protocol.Response) *httpRespBody {
 	return &httpRespBody{resp: resp, r: resp.BodyStream()}
 }
 
-func (b *httpRespBody) Read(p []byte) (int, error) {
-	// Reset-per-Read idle deadline (mirrors tcpReadCloser.Read at tcp_call.go:240): a
-	// server that stalls mid-body without closing must not pin this goroutine + pooled
-	// conn forever. TCP arms a conn read deadline; Hertz hides the conn, so a watchdog
-	// timer fires Close (closing the body stream) on inactivity, unblocking the read
-	// with an error. A progressing transfer keeps resetting the window — only a genuine
-	// stall trips it.
-	if httpClientBodyTimeout > 0 {
-		if b.timer == nil {
-			b.timer = time.AfterFunc(httpClientBodyTimeout, func() { _ = b.Close() })
-		} else {
-			b.timer.Reset(httpClientBodyTimeout)
-		}
-	}
-	n, err := b.r.Read(p)
-	if b.timer != nil {
-		b.timer.Stop()
-	}
-	return n, err
-}
+func (b *httpRespBody) Read(p []byte) (int, error) { return b.r.Read(p) }
 
 func (b *httpRespBody) Close() error {
 	var err error
 	b.once.Do(func() {
-		if b.timer != nil {
-			b.timer.Stop()
-		}
 		err = b.resp.CloseBodyStream()
 		protocol.ReleaseResponse(b.resp)
 	})
