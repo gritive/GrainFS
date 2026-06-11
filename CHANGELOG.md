@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.549.0] - 2026-06-12
+
+### Added
+
+- **Phase 8 S8-5 (Phase A, Task 2): multi-node HTTP data-plane e2e** (dormant; TCP is
+  still the default). The existing in-process multi-node streaming-EC PUT/GET harness is
+  now transport-parameterized, and a new HTTP variant brings up a 5-node cluster on the
+  Phase 8 `HTTPTransport`: a 3+2 object's shards spread across distinct nodes, so the PUT
+  streams sealed shards to remote peers over HTTP `CallWithBody` and the GET reconstructs
+  by fetching remote shards over HTTP `CallRead` — the first real data-plane-over-HTTP
+  exercise (S8-2 was method-isolated, S8-3 was raft). A parity-shard-failure variant
+  proves best-effort commit holds over HTTP too. macOS functional-only (no throughput
+  bench; eyes-open, the QUIC→TCP flip posture).
+
+### Fixed
+
+- **HTTP transport: tolerate `(0, nil)` request-body reads** (dormant path). The PUT
+  pipeline streams a sealed shard through an `io.Pipe`, and a zero-length pipe write
+  surfaces to the reader as `(0, nil)` — legal per the `io.Reader` contract (callers must
+  treat it as "nothing happened") and tolerated by the TCP transport's chunked writer, but
+  Hertz's `WriteBodyChunked` panics on it. `doRPC` now wraps the request body so empty
+  non-EOF reads are skipped, restoring TCP parity. Surfaced by the new HTTP data-plane e2e.
+- **HTTP transport: immediate `Close`** (dormant path). `Close` closed the Hertz server via
+  a 5s graceful `Shutdown`, which blocks the full window waiting for idle keep-alive
+  connections held open by remote clients to drain (the standard transport waits for
+  active==0 and never force-closes them) — adding ~5s per server at teardown with no
+  benefit. `Close` now closes the listener immediately (TCP-parity: the TCP transport
+  closes its conns at once and the cluster tolerates abrupt peer loss) and drops idle
+  client conns.
+
 ## [0.0.548.0] - 2026-06-11
 
 ### Added

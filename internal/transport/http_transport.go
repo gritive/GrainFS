@@ -376,8 +376,17 @@ func (t *HTTPTransport) Ping(ctx context.Context, addr string) error {
 	return nil
 }
 
-// Close shuts the transport down: cancels the context, shuts the Hertz server, and
-// closes idle client conns. Idempotent.
+// Close shuts the transport down: cancels the context, closes the Hertz server
+// listener, and closes idle client conns. Idempotent.
+//
+// Close is IMMEDIATE (TCP-parity), not a graceful drain. The TCP transport closes
+// its listener and conns at once, and the cluster tolerates abrupt peer loss, so
+// Close must not block node shutdown. A graceful srv.Shutdown would wait up to
+// ExitWaitTimeout for idle keep-alive conns held open by REMOTE clients to drain
+// (the standard transport waits for active==0 and never force-closes them), so it
+// just adds shutdown latency without benefit. srv.Close() closes the listener now;
+// client.CloseIdleConnections() drops the conns THIS node holds to peers, which
+// unblocks their servers' read loops in turn.
 func (t *HTTPTransport) Close() error {
 	t.cancel()
 	t.mu.Lock()
@@ -385,9 +394,7 @@ func (t *HTTPTransport) Close() error {
 	client := t.client
 	t.mu.Unlock()
 	if srv != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutCtx)
+		_ = srv.Close()
 	}
 	if client != nil {
 		client.CloseIdleConnections()

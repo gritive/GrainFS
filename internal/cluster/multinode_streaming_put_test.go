@@ -55,7 +55,7 @@ type inProcessCluster struct {
 // injected write failure — which is exactly what the parity-best-effort test
 // needs (the parity write fails, the surviving data shards still serve GET).
 type failingShardTransport struct {
-	inner     *transport.TCPTransport
+	inner     transport.ClusterTransport
 	failWrite map[string]bool
 }
 
@@ -69,11 +69,28 @@ func (f *failingShardTransport) CallWithBody(ctx context.Context, addr string, r
 	return f.inner.CallWithBody(ctx, addr, req, body)
 }
 
-// newInProcessCluster stands up `nodes` distinct nodes (coord + nodes-1 peers)
-// wired for streaming-EC PUT and GET at ec. The shared keeper + clusterID
-// threads through the coord pipeline, the coord ShardService, and every peer
-// ShardService so PUT-seal and GET-open agree on one DEK.
+// mkTransport builds a cluster transport for one node from the shared cluster
+// PSK. Both the TCP transport and the Phase 8 HTTP transport satisfy
+// transport.ClusterTransport, so the same multi-node data-plane harness runs
+// over either — this is what lets the HTTP data-plane e2e (S8-5 Phase A) reuse
+// the exact PUT-fanout/GET-read path the production flip activates.
+type mkTransport func(psk string) transport.ClusterTransport
+
+func tcpTransport(psk string) transport.ClusterTransport  { return transport.MustNewTCPTransport(psk) }
+func httpTransport(psk string) transport.ClusterTransport { return transport.MustNewHTTPTransport(psk) }
+
+// newInProcessCluster stands up `nodes` distinct nodes over loopback TCP (the
+// default transport). HTTP-transport callers use newInProcessClusterT.
 func newInProcessCluster(t *testing.T, nodes int, ec cluster.ECConfig) *inProcessCluster {
+	return newInProcessClusterT(t, nodes, ec, tcpTransport)
+}
+
+// newInProcessClusterT stands up `nodes` distinct nodes (coord + nodes-1 peers)
+// wired for streaming-EC PUT and GET at ec, each on a transport built by mk. The
+// shared keeper + clusterID threads through the coord pipeline, the coord
+// ShardService, and every peer ShardService so PUT-seal and GET-open agree on one
+// DEK.
+func newInProcessClusterT(t *testing.T, nodes int, ec cluster.ECConfig, mk mkTransport) *inProcessCluster {
 	t.Helper()
 	require.GreaterOrEqual(t, nodes, ec.NumShards(), "need one node per shard for a clean multi-node placement")
 
@@ -87,7 +104,7 @@ func newInProcessCluster(t *testing.T, nodes int, ec cluster.ECConfig) *inProces
 	// Coord transport + ShardService. The coord pipeline writes coord-local
 	// shards to DataDirs (multi-root, one per shard like the all-local helper),
 	// so the coord-local shard read aligns with where the pipeline wrote it.
-	coordTr := transport.MustNewTCPTransport("test-cluster-psk")
+	coordTr := mk("test-cluster-psk")
 	require.NoError(t, coordTr.Listen(context.Background(), "127.0.0.1:0"))
 	t.Cleanup(func() { _ = coordTr.Close() })
 
@@ -110,7 +127,7 @@ func newInProcessCluster(t *testing.T, nodes int, ec cluster.ECConfig) *inProces
 	// GET, so all three are required.
 	cl := &inProcessCluster{t: t, coordAddr: coordTr.LocalAddr(), failWrite: map[string]bool{}}
 	for i := 0; i < nodes-1; i++ {
-		peerTr := transport.MustNewTCPTransport("test-cluster-psk")
+		peerTr := mk("test-cluster-psk")
 		require.NoError(t, peerTr.Listen(context.Background(), "127.0.0.1:0"))
 		t.Cleanup(func() { _ = peerTr.Close() })
 
@@ -259,6 +276,62 @@ func TestMultiNodeStreamingPUT_K3_RoundTrip(t *testing.T) {
 
 	got := getAll(t, coord, "bucket", "multi.bin")
 	require.True(t, bytes.Equal(payload, got), "GET must reconstruct the streamed multi-node object")
+}
+
+// TestMultiNodeStreamingPUT_HTTP_K3_RoundTrip is the S8-5 Phase A data-plane
+// proof: the SAME multi-node streaming-EC PUT/GET round-trip, but every node runs
+// the Phase 8 HTTPTransport instead of TCP. A 3+2 object's five shards spread
+// across five distinct nodes (requireSpansNodes guards against an all-local
+// collapse), so the PUT streams ≥K-1 sealed shards to remote peers over HTTP
+// CallWithBody and the GET reconstructs by fetching remote shards over HTTP
+// CallRead/ReadShard. This is the first REAL data-plane-over-HTTP exercise (S8-2
+// was method-isolated, S8-3 was raft) — the path the production flip activates.
+// macOS functional-only (no throughput bench; eyes-open, like the QUIC→TCP flip).
+func TestMultiNodeStreamingPUT_HTTP_K3_RoundTrip(t *testing.T) {
+	ec := cluster.ECConfig{DataShards: 3, ParityShards: 2}
+	cl := newInProcessClusterT(t, 5, ec, httpTransport)
+	coord := cl.coord
+	coord.SetPutPipelineMultiNode(true)
+	require.NoError(t, coord.CreateBucket(ctxBg(), "bucket"))
+
+	nodeIDs, cfg, err := coord.PlanPlacementForTest(ctxBg(), "http.bin")
+	require.NoError(t, err)
+	require.Equal(t, ec, cfg, "EC config must not be clamped on a 5-node cluster")
+	requireSpansNodes(t, cl, nodeIDs)
+
+	payload := randBytes(t, 3<<20+123) // multi-stripe, not a clean multiple
+	obj, err := coord.PutObjectWithRequest(ctxBg(), putReq("bucket", "http.bin", bytes.NewReader(payload), int64(len(payload))))
+	require.NoError(t, err, "multi-node streaming PUT over HTTP must succeed")
+	require.Greater(t, obj.StripeBytes, uint32(0), "streaming PUT must stamp StripeBytes (the de-interleave key)")
+
+	got := getAll(t, coord, "bucket", "http.bin")
+	require.True(t, bytes.Equal(payload, got), "GET must reconstruct the streamed multi-node object over HTTP")
+}
+
+// TestMultiNodeStreamingPUT_HTTP_ParityShardFailure_CommitsAndReads runs the
+// parity-best-effort path over HTTP: a failed REMOTE parity-shard write (injected
+// via the failingShardTransport wrapping the HTTP CallWithBody) must NOT fail the
+// PUT, and GET must still reconstruct from the K data shards over HTTP — proving
+// the fault/commit semantics hold on the HTTP data plane, not just TCP.
+func TestMultiNodeStreamingPUT_HTTP_ParityShardFailure_CommitsAndReads(t *testing.T) {
+	ec := cluster.ECConfig{DataShards: 3, ParityShards: 2}
+	cl := newInProcessClusterT(t, 5, ec, httpTransport)
+	coord := cl.coord
+	coord.SetPutPipelineMultiNode(true)
+	require.NoError(t, coord.CreateBucket(ctxBg(), "bucket"))
+
+	nodeIDs, _, err := coord.PlanPlacementForTest(ctxBg(), "httpparity.bin")
+	require.NoError(t, err)
+	idx, addr, ok := cl.remoteShardIdx(nodeIDs, ec, true /*parity*/)
+	require.True(t, ok, "need a remote PARITY shard to inject into; placement=%v coord=%s", nodeIDs, cl.coordAddr)
+	t.Logf("failing remote parity shard idx=%d on %s (placement=%v)", idx, addr, nodeIDs)
+	cl.failSealedShardWritesOn(addr)
+
+	payload := randBytes(t, 3<<20+123)
+	_, err = coord.PutObjectWithRequest(ctxBg(), putReq("bucket", "httpparity.bin", bytes.NewReader(payload), int64(len(payload))))
+	require.NoError(t, err, "parity-shard failure must NOT fail the PUT (parity best-effort) over HTTP")
+	require.True(t, bytes.Equal(payload, getAll(t, coord, "bucket", "httpparity.bin")),
+		"GET de-interleaves from the K data shards alone over HTTP")
 }
 
 // TestMultiNodeStreamingPUT_ParityShardFailure_CommitsAndReads: failing a

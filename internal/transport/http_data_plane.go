@@ -227,7 +227,7 @@ func (t *HTTPTransport) doRPC(ctx context.Context, addr string, req *Message, bo
 		if len(req.Payload) > 0 {
 			hreq.Header.Set(hdrGfsPayload, base64.StdEncoding.EncodeToString(req.Payload))
 		}
-		hreq.SetBodyStream(body, -1)
+		hreq.SetBodyStream(hertzBodyReader{r: body}, -1)
 	} else if len(req.Payload) > 0 {
 		// Call/CallFlatBuffer/CallRead: payload (possibly large) is the request body.
 		hreq.SetBodyStream(bytes.NewReader(req.Payload), len(req.Payload))
@@ -290,6 +290,30 @@ func (t *HTTPTransport) doRPC(ctx context.Context, addr string, req *Message, bo
 		return nil, nil, serr
 	}
 	return msg, nil, nil
+}
+
+// hertzBodyReader adapts an arbitrary request-body io.Reader for the Hertz
+// chunked body writer, which PANICS on a (0, nil) read ("BUG: io.Reader returned
+// 0, nil", ext/common.go WriteBodyChunked). The cluster PUT pipeline streams a
+// sealed shard through an io.Pipe, and a zero-length pipe Write surfaces to the
+// reader as (0, nil) — legal per the io.Reader contract ("callers should treat a
+// return of 0 and nil as indicating that nothing happened"; callers MUST tolerate
+// it) but fatal to Hertz. The TCP transport's chunked writer tolerated it; this
+// restores parity by looping past empty non-EOF reads (the io.Pipe only yields
+// (0,nil) per zero-length Write, then blocks for the next Write — no busy spin).
+type hertzBodyReader struct{ r io.Reader }
+
+func (b hertzBodyReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for {
+		n, err := b.r.Read(p)
+		if n > 0 || err != nil {
+			return n, err
+		}
+		// n == 0 && err == nil: "nothing happened" — read again, don't hand Hertz a (0,nil).
+	}
 }
 
 // respMeta reads the response frame metadata (Type/ID/Status) from headers.
