@@ -558,6 +558,7 @@ enum MetaCmdType : uint8 {
   DropClusterKeyAccept         = 87, // zero-CA cutover: irreversibly drops cluster-key from accept-set (PR-2b §8 H2)
   DEKRewrapProgress            = 88, // S6a: per-node DEK-generation rewrap completion ledger
   PutIndexGroup                = 89, // sharded object index → Raft 그룹 매핑 (data-group과 별개 레지스트리)
+  AddPlacementGeneration       = 90, // Phase 7: placement generation append (topology 증설 epoch 레지스트리)
 }
 
 table MetaNodeEntry {
@@ -688,6 +689,20 @@ table IndexGroupEntry {
 // MetaPutIndexGroup 커맨드 — index group 매핑을 기록·갱신한다.
 table MetaPutIndexGroupCmd {
   group:IndexGroupEntry;
+}
+
+// Phase 7: PlacementGenerationEntry — 한 topology generation의 pinned
+// object→group placement set. epoch는 단조(0=base), group_ids는 이 generation에
+// pinned된 candidate group ID 정렬 리스트. data plane 무관 control-plane 레지스트리.
+table PlacementGenerationEntry {
+  epoch:ulong;
+  group_ids:[string];
+}
+
+// Phase 7: MetaAddPlacementGeneration 커맨드 — placement generation 1건을 리스트
+// 끝에 append한다. epoch는 wire에 없음 — apply가 현재 길이로 단조 할당(결정론).
+table MetaAddPlacementGenerationCmd {
+  group_ids:[string];
 }
 
 // PR-D: bucket→group 매핑 엔트리 1건
@@ -971,6 +986,7 @@ table MetaStateSnapshot {
   present_flip_begun:bool = false;                         // zero-CA cutover: slot 16 (PR-2a §8c); set by BeginPresentFlip(86) Apply
   revoked_node_ids:[string];                               // zero-CA revoked-node set: slot 17 (data-group evacuation)
   index_groups:[IndexGroupEntry];                          // sharded object index registry: slot 18 (separate from shard_groups)
+  placement_generations:[PlacementGenerationEntry];        // Phase 7: topology generation registry: slot 19 (dormant; empty = single-generation legacy)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

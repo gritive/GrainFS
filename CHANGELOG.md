@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.538.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-3 (internal, dormant): `AddPlacementGeneration` control-plane command
+  family.** The MetaFSM now carries an ordered, snapshotted placement-generation
+  registry (`placementGenerations`, ascending epoch) plus a new `AddPlacementGeneration`
+  meta-raft command (FlatBuffers `MetaAddPlacementGenerationCmd`, enum 90) that appends
+  a generation. Epochs are assigned monotonically by `apply` from the list length (not
+  carried on the wire) so replay/re-encode are deterministic; empty `group_ids` is
+  rejected. Snapshot/restore round-trips the registry; a snapshot lacking the new slot
+  (legacy binaries, fresh clusters) restores to an empty registry. This is a pure
+  data-model slice — the registry is empty by default and no production path proposes
+  the command yet (OpRouter consumes generations from S7-4; the first append is the
+  S7-6 irreversible flip), so it is behavior-neutral. Dispatch wiring, monotonic
+  append, snapshot round-trip, and legacy-snapshot compatibility are each covered by
+  RED-on-revert tests.
+
 ## [0.0.537.0] - 2026-06-11
 
 ### Changed

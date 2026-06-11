@@ -41,6 +41,13 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for _, sg := range f.shardGroups {
 		shardGroups = append(shardGroups, sg)
 	}
+	// Phase 7 topology-generation registry (ordered, deep-copied under RLock).
+	placementGenerations := make([]placementGeneration, len(f.placementGenerations))
+	for i, g := range f.placementGenerations {
+		ids := make([]string, len(g.groupIDs))
+		copy(ids, g.groupIDs)
+		placementGenerations[i] = placementGeneration{epoch: g.epoch, groupIDs: ids}
+	}
 	type bucketKV struct{ bucket, groupID string }
 	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
 	for bucket, groupID := range f.bucketAssignments {
@@ -180,6 +187,31 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// Index groups removed in Phase 4; encode empty vector for wire compatibility.
 	clusterpb.MetaStateSnapshotStartIndexGroupsVector(b, 0)
 	igVec := b.EndVector(0)
+
+	// Build PlacementGenerationEntry offsets (Phase 7). Empty for single-generation
+	// legacy clusters → zero-length vector (restore reads it back as nil).
+	pgOffs := make([]flatbuffers.UOffsetT, len(placementGenerations))
+	for i := len(placementGenerations) - 1; i >= 0; i-- {
+		pg := placementGenerations[i]
+		gidOffs := make([]flatbuffers.UOffsetT, len(pg.groupIDs))
+		for j := len(pg.groupIDs) - 1; j >= 0; j-- {
+			gidOffs[j] = b.CreateString(pg.groupIDs[j])
+		}
+		clusterpb.PlacementGenerationEntryStartGroupIdsVector(b, len(gidOffs))
+		for j := len(gidOffs) - 1; j >= 0; j-- {
+			b.PrependUOffsetT(gidOffs[j])
+		}
+		gidVec := b.EndVector(len(gidOffs))
+		clusterpb.PlacementGenerationEntryStart(b)
+		clusterpb.PlacementGenerationEntryAddEpoch(b, pg.epoch)
+		clusterpb.PlacementGenerationEntryAddGroupIds(b, gidVec)
+		pgOffs[i] = clusterpb.PlacementGenerationEntryEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartPlacementGenerationsVector(b, len(pgOffs))
+	for i := len(pgOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(pgOffs[i])
+	}
+	pgVec := b.EndVector(len(pgOffs))
 
 	// Build MetaNodeEntry offsets
 	nodeOffs := make([]flatbuffers.UOffsetT, len(nodes))
@@ -351,6 +383,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
 	clusterpb.MetaStateSnapshotAddIndexGroups(b, igVec)
+	clusterpb.MetaStateSnapshotAddPlacementGenerations(b, pgVec)
 	clusterpb.MetaStateSnapshotAddBucketAssignments(b, baVec)
 	clusterpb.MetaStateSnapshotAddLoadSnapshot(b, lsVec)
 	if activePlanCopy != nil {
@@ -451,6 +484,24 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			continue
 		}
 		newShardGroups[e.ID] = e
+	}
+
+	// Phase 7 placement-generation registry. Missing slot (legacy snapshots) →
+	// PlacementGenerationsLength()==0 → nil, preserving single-generation behavior.
+	var newPlacementGenerations []placementGeneration
+	if n := snap.PlacementGenerationsLength(); n > 0 {
+		newPlacementGenerations = make([]placementGeneration, 0, n)
+		var pgEntry clusterpb.PlacementGenerationEntry
+		for i := 0; i < n; i++ {
+			if !snap.PlacementGenerations(&pgEntry, i) {
+				return fmt.Errorf("meta_fsm: Restore: placement generation %d decode failed", i)
+			}
+			ids := make([]string, pgEntry.GroupIdsLength())
+			for j := 0; j < pgEntry.GroupIdsLength(); j++ {
+				ids[j] = string(pgEntry.GroupIds(j))
+			}
+			newPlacementGenerations = append(newPlacementGenerations, placementGeneration{epoch: pgEntry.Epoch(), groupIDs: ids})
+		}
 	}
 
 	newBucketAssignments := make(map[string]string, snap.BucketAssignmentsLength())
@@ -860,6 +911,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
+	f.placementGenerations = newPlacementGenerations
 	f.bucketAssignments = newBucketAssignments
 	f.loadSnapshot = newLoadSnapshot
 	f.activePlan = newActivePlan

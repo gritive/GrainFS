@@ -41,11 +41,12 @@ const (
 	MetaCmdTypeNoOp                         = clusterpb.MetaCmdTypeNoOp
 	MetaCmdTypeAddNode                      = clusterpb.MetaCmdTypeAddNode
 	MetaCmdTypeRemoveNode                   = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup                = clusterpb.MetaCmdTypePutShardGroup        // PR-C
-	MetaCmdTypePutBucketAssignment          = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
-	MetaCmdTypeSetLoadSnapshot              = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
-	MetaCmdTypeProposeRebalancePlan         = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
-	MetaCmdTypeAbortPlan                    = clusterpb.MetaCmdTypeAbortPlan            // PR-D
+	MetaCmdTypePutShardGroup                = clusterpb.MetaCmdTypePutShardGroup          // PR-C
+	MetaCmdTypeAddPlacementGeneration       = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
+	MetaCmdTypePutBucketAssignment          = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
+	MetaCmdTypeSetLoadSnapshot              = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
+	MetaCmdTypeProposeRebalancePlan         = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
+	MetaCmdTypeAbortPlan                    = clusterpb.MetaCmdTypeAbortPlan              // PR-D
 	MetaCmdTypeIcebergCreateNamespace       = clusterpb.MetaCmdTypeIcebergCreateNamespace
 	MetaCmdTypeIcebergDeleteNamespace       = clusterpb.MetaCmdTypeIcebergDeleteNamespace
 	MetaCmdTypeIcebergCreateTable           = clusterpb.MetaCmdTypeIcebergCreateTable
@@ -256,20 +257,24 @@ type IcebergDeleteTableCmd struct {
 // that call InstallKEKRotation() hold f.mu and then acquire keeper.mu inside
 // InstallKEKRotation. Never acquire keeper.mu before f.mu.
 type MetaFSM struct {
-	mu                sync.RWMutex
-	nodes             map[string]MetaNodeEntry
-	shardGroups       map[string]ShardGroupEntry                  // key = group ID
-	bucketAssignments map[string]string                           // bucket → group_id (PR-D)
-	loadSnapshot      map[string]LoadStatEntry                    // node_id → stats (PR-D)
-	activePlan        *RebalancePlan                              // nil = no active plan (PR-D)
-	icebergNamespaces map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
-	icebergTables     map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
-	onBucketAssigned  func(string, string)                        // protected by mu; set before Start() (PR-D)
-	onRebalancePlan   func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
-	onShardGroupAdded func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onIcebergResult   func(string, error)                         // requestID, typed catalog result; must not block
-	onScrubTrigger    func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
-	onNfsExportChange func()                                      // fired after NFS export registry apply; must not block
+	mu          sync.RWMutex
+	nodes       map[string]MetaNodeEntry
+	shardGroups map[string]ShardGroupEntry // key = group ID
+	// placementGenerations is the Phase 7 topology-generation registry (ordered,
+	// ascending epoch). Empty for single-generation legacy clusters; appended by
+	// AddPlacementGeneration. Consumed by OpRouter from S7-4 onward.
+	placementGenerations []placementGeneration
+	bucketAssignments    map[string]string                           // bucket → group_id (PR-D)
+	loadSnapshot         map[string]LoadStatEntry                    // node_id → stats (PR-D)
+	activePlan           *RebalancePlan                              // nil = no active plan (PR-D)
+	icebergNamespaces    map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
+	icebergTables        map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
+	onBucketAssigned     func(string, string)                        // protected by mu; set before Start() (PR-D)
+	onRebalancePlan      func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
+	onShardGroupAdded    func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onIcebergResult      func(string, error)                         // requestID, typed catalog result; must not block
+	onScrubTrigger       func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
+	onNfsExportChange    func()                                      // fired after NFS export registry apply; must not block
 
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
@@ -780,6 +785,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyRemoveNode(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutShardGroup:
 		return f.applyPutShardGroup(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeAddPlacementGeneration:
+		return f.applyAddPlacementGeneration(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:
