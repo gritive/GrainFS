@@ -181,6 +181,7 @@ firewall-restricted addresses. *(Phase 1: these listeners are off by default —
 | Drop the shared cluster-key accept path | `grainfs cluster --endpoint <data>/admin.sock complete-cutover` |
 | Revoke a zero-CA node identity | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>` |
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
+| Grow placement groups on a running cluster | `grainfs cluster expand-placement --endpoint <data>/admin.sock` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
 | Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |
 | Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock` |

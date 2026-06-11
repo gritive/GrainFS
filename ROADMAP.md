@@ -19,7 +19,7 @@
 - **Greenfield, 하위호환성 없음.** 데이터 모델 변경은 비가역(QUIC→TCP flip과 동일 성격).
 - **Git-gated greenfield (eager-delete)**: 신규 data plane은 브랜치에서 옛 경로를 **즉시 삭제하며** 만든다(런타임 flag 없음 — flag-threading은 코드만 더럽힘). 가역성=git(옛 시스템=master, **벤치 통과 전 merge 안 함**), baseline=master 바이너리. **비가역 지점은 flip이 아니라 merge.** (노이즈가 크면 대안: 두 구현을 단일 `DataPlane` 인터페이스 뒤 boot서 1회 선택 → 깨끗한 공존+within-run A/B, 기본은 plain eager.)
 - **결정 벤치는 cross-binary라 엄격성 non-negotiable**(flag 없으니 within-run A/B 불가): 외부 S3 앵커 필수 · master↔브랜치 같은 VM back-to-back · within-run 비율만 · 다회 실행. (4b-2를 inconclusive하게 만든 across-boot 노이즈 회피.)
-- **group 수는 Phase 7까지 고정**: 노드-in-group은 EC heal로 변동하나 group 추가/감소 불가(운영 제약, Phase 7에서 해제).
+- **group 추가는 Phase 7에서 해제됨(v0.0.543.0)**: running cluster에 placement group 증설 가능(`grainfs cluster expand-placement`, generation-probe로 기존 객체 remap 없음). group **감소**는 여전히 미지원. 노드-in-group은 EC heal로 변동.
 - **유지**: Erasure Coding, At-rest Encryption(XAES-256-GCM), zero-CA, putpipeline streaming 산개(꼬리만 quorum-write로 교체).
 - **별개 베팅(성능 비요구, data plane 안정 후): 라이브러리 분리(raft/HRW/bounded/gossip) · 비-S3 프로토콜 재연결 · data-plane HTTP transport.**
 - **dead code 삭제** 아키텍처 변경으로 생기는 dead code는 과감히 삭제, 단, 향후 다시 연결할 nfs, 9p, nbd 등 프로토콜은 예외
