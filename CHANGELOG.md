@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.548.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-5 (Phase A, Task 1): HTTP CallRead idle-read deadline** (dormant; TCP is
+  still the default transport). The Hertz HTTP client sets no read deadline of its own
+  (it computes 0/unbounded when neither `WithClientReadTimeout` nor a per-request
+  `RequestTimeout` is set — both unset here), so an HTTP `CallRead` whose peer stalls
+  mid-body would pin the client goroutine and its pooled connection forever. A new
+  `idleReadConn` wraps the client dialer's connection and arms a reset-per-Read idle
+  deadline (`SetReadTimeout(clientBodyTimeout)`, default 5m — mirrors the TCP transport's
+  `tcpReadCloser`/`ClientBodyTimeout`) before every blocking network read, so a stall
+  surfaces as a timeout **in the same goroutine** rather than the cross-goroutine
+  `CloseBodyStream` watchdog Hertz forbids (the reverted S8-2 attempt). Because the client
+  never sets a shorter deadline, this clobbers nothing — it only replaces "unbounded" with
+  the idle bound. `ConnTLSer`/`ErrorNormalization` are delegated explicitly (embedding the
+  `network.Conn` interface would hide the optional interfaces the Hertz client asserts).
+  This is the mandatory availability gate for the S8-5 data-plane flip. Verified by a
+  FIRING test (stalled peer → next `Read` errors within the idle window; mutation-verified
+  RED when the bound is disabled) plus a reuse test (a poisoned connection is not silently
+  reused) under `-race`.
+
 ## [0.0.547.0] - 2026-06-11
 
 ### Added

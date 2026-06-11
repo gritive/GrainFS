@@ -320,18 +320,12 @@ func respMeta(resp *protocol.Response) (*Message, error) {
 // httpRespBody adapts a streaming Hertz response body to io.ReadCloser. Close
 // releases the response (returning the conn to the pool) exactly once.
 //
-// NOTE — deferred parity gap (idle read deadline): tcpReadCloser arms a
-// reset-per-Read conn deadline so a server that stalls mid-body cannot pin this
-// goroutine + pooled conn forever (the S3b-cbd hardening). There is no safe
-// equivalent here yet: Hertz forbids calling CloseBodyStream() and
-// BodyStream().Read() concurrently (response.go), so a watchdog that Closes from a
-// second goroutine is a data race + use-after-pool; and a conn-level read deadline
-// can't be plumbed cleanly because Hertz reads the body through its own buffered
-// Reader (Peek/fill), not net.Conn.Read, and SetReadTimeout is a one-shot deadline
-// (not reset-per-Read). The correct in-Read-goroutine idle bound is designed in S8-3
-// when this transport is wired and the consumers' read patterns are concrete
-// (tracked in TODOS.md). Until then a CallRead body read can block on a stalled peer
-// for as long as the caller's ctx/socket allows — acceptable while dormant.
+// The reset-per-Read IDLE bound (tcpReadCloser parity, S3b-cbd) is armed one layer
+// down by idleReadConn (http_transport.go): Hertz reads the body through the dialed
+// conn's Peek/Read, and idleReadConn re-arms SetReadTimeout(clientBodyTimeout)
+// before each, so a server that stalls mid-body surfaces as a timeout error here
+// (in this goroutine) rather than pinning it forever. This avoids the cross-
+// goroutine CloseBodyStream-vs-Read watchdog Hertz forbids (the S8-2 BLOCKER).
 type httpRespBody struct {
 	resp *protocol.Response
 	r    io.Reader

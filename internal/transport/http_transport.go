@@ -67,6 +67,15 @@ type HTTPTransport struct {
 
 	srv    *hzserver.Hertz
 	client *hzclient.Client
+
+	// clientBodyTimeout is the reset-per-Read IDLE bound armed on the client
+	// response-body read (mirrors tcp_config.go ClientBodyTimeout). The Hertz
+	// client sets NO read deadline of its own here (calcTimeout returns 0 with
+	// neither WithClientReadTimeout nor a per-request RequestTimeout set), so
+	// without this an HTTP CallRead body read on a stalled peer would pin the
+	// client goroutine + pooled conn forever. Set before the first call (the
+	// client builds lazily); 0 disables the bound. See idleReadConn.
+	clientBodyTimeout time.Duration
 }
 
 // NewHTTPTransport derives the cluster identity from psk and builds a transport
@@ -94,6 +103,7 @@ func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 	t.identity.Store(snap)
 	t.composer = newIdentityComposer(spki, func(s *IdentitySnapshot) { t.identity.Store(s) })
 	t.composer.setPresent(cert, spki)
+	t.clientBodyTimeout = defaultClientBodyTimeout
 	return t, nil
 }
 
@@ -229,10 +239,15 @@ func (t *HTTPTransport) LocalAddr() string {
 type httpFreshDialer struct {
 	inner network.Dialer
 	build func() *tls.Config
+	idle  time.Duration // per-Read idle bound armed on the dialed conn (0 = none)
 }
 
 func (d *httpFreshDialer) DialConnection(n, address string, timeout time.Duration, _ *tls.Config) (network.Conn, error) {
-	return d.inner.DialConnection(n, address, timeout, d.build())
+	conn, err := d.inner.DialConnection(n, address, timeout, d.build())
+	if err != nil {
+		return nil, err
+	}
+	return wrapIdleReadConn(conn, d.idle), nil
 }
 
 func (d *httpFreshDialer) DialTimeout(n, address string, timeout time.Duration, _ *tls.Config) (net.Conn, error) {
@@ -240,7 +255,79 @@ func (d *httpFreshDialer) DialTimeout(n, address string, timeout time.Duration, 
 }
 
 func (d *httpFreshDialer) AddTLS(conn network.Conn, _ *tls.Config) (network.Conn, error) {
-	return d.inner.AddTLS(conn, d.build())
+	c, err := d.inner.AddTLS(conn, d.build())
+	if err != nil {
+		return nil, err
+	}
+	return wrapIdleReadConn(c, d.idle), nil
+}
+
+// wrapIdleReadConn wraps conn in an idleReadConn when idle > 0, else returns it
+// unchanged (no behavior change when the bound is disabled).
+func wrapIdleReadConn(conn network.Conn, idle time.Duration) network.Conn {
+	if idle <= 0 {
+		return conn
+	}
+	return &idleReadConn{Conn: conn, idle: idle}
+}
+
+// idleReadConn arms a reset-per-Read IDLE read deadline before every blocking
+// network read on the Hertz client's dialed connection — the HTTP analogue of the
+// TCP transport's tcpReadCloser (S3b-cbd). Post-flip every production shard read is
+// an HTTP CallRead whose response body streams through this conn, and the Hertz
+// client sets NO read deadline of its own (calcTimeout returns 0 when neither
+// WithClientReadTimeout nor a per-request RequestTimeout is set — both unset here),
+// so a peer that stalls mid-body would otherwise pin this client goroutine + the
+// pooled conn forever. SetReadTimeout(idle) before each read makes a stall surface
+// as a timeout IN THE SAME GOROUTINE — not the cross-goroutine CloseBodyStream
+// watchdog that was the S8-2 BLOCKER (Hertz forbids Close concurrent with Read). A
+// read that makes progress returns and the next read re-arms, so a slow-but-
+// progressing transfer is never aborted (idle, not total). Because the client never
+// sets a shorter deadline, the arm clobbers nothing — it only replaces "unbounded"
+// with the idle bound.
+//
+// All four network-blocking read entry points are overridden: Go embedding has no
+// virtual dispatch, so standard.Conn.ReadByte/ReadBinary call the EMBEDDED conn's
+// Peek (not ours) — overriding only Peek would miss reads entering via those. One
+// arm per entry point is sufficient (it bounds the blocking syscall the read drives;
+// stream.go reads fixed-length bodies via Read and chunked via Peek).
+//
+// ConnTLSer and ErrorNormalization are delegated explicitly because embedding the
+// network.Conn INTERFACE hides the optional interfaces the Hertz client asserts on
+// the conn (client.go:564 Handshake, :625/:696 ToHertzError for ErrConnectionClosed
+// detection on pooled-conn reuse). These two are the complete client-side optional
+// set in Hertz v0.10.4 (StatefulConn is server-only); a Hertz bump must re-check.
+type idleReadConn struct {
+	network.Conn
+	idle time.Duration
+}
+
+func (c *idleReadConn) arm() { _ = c.Conn.SetReadTimeout(c.idle) }
+
+func (c *idleReadConn) Read(b []byte) (int, error)       { c.arm(); return c.Conn.Read(b) }
+func (c *idleReadConn) Peek(n int) ([]byte, error)       { c.arm(); return c.Conn.Peek(n) }
+func (c *idleReadConn) ReadByte() (byte, error)          { c.arm(); return c.Conn.ReadByte() }
+func (c *idleReadConn) ReadBinary(n int) ([]byte, error) { c.arm(); return c.Conn.ReadBinary(n) }
+
+func (c *idleReadConn) Handshake() error {
+	if tc, ok := c.Conn.(network.ConnTLSer); ok {
+		return tc.Handshake()
+	}
+	return nil
+}
+
+func (c *idleReadConn) ConnectionState() tls.ConnectionState {
+	if tc, ok := c.Conn.(network.ConnTLSer); ok {
+		return tc.ConnectionState()
+	}
+	return tls.ConnectionState{}
+}
+
+func (c *idleReadConn) ToHertzError(err error) error {
+	if e, ok := c.Conn.(network.ErrorNormalization); ok {
+		return e.ToHertzError(err)
+	}
+	return err
 }
 
 // httpClient lazily builds the Hertz client. The custom dialer supplies a fresh
@@ -261,7 +348,7 @@ func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 		return t.client, nil
 	}
 	c, err := hzclient.NewClient(
-		hzclient.WithDialer(&httpFreshDialer{inner: standard.NewDialer(), build: t.buildClientTLS}),
+		hzclient.WithDialer(&httpFreshDialer{inner: standard.NewDialer(), build: t.buildClientTLS, idle: t.clientBodyTimeout}),
 		hzclient.WithResponseBodyStream(true),
 	)
 	if err != nil {
