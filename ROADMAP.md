@@ -118,6 +118,12 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
 - **목표**: control/data 경계 코드 확정 후 **master merge**(비가역 지점).
 - **검증**: bucket/IAM/multipart 강일관 유지, object PUT/GET는 data-plane raft 미접촉. 전체 e2e green → merge.
 
+#### Phase 6 진행 현황 (Phase 5 GO 후 진입, 2026-06-11 부트스트랩)
+기존 인프라 상당: `internal/cluster/gossip.go` + `internal/metrics/bounded_loads.go` 존재, object PUT은 Phase 4 index-free로 meta-raft 직접 미접촉. Phase 6는 대형 빌드가 아니라 **경계 확정·감사 + gossip 공급 확정 + merge-readiness 검증**. 슬라이스:
+- [대기] **S6-1: control/data plane 경계 감사 + 갭 수정** — object PUT/GET/HEAD 임계경로가 control-plane raft(meta membership/bucket/IAM/multipart manifest)를 안 타고 data-plane(group raft + per-node quorum-meta)만 타는지 정적 grep + 동적(멀티노드 trace) 검증. 위반 발견 시 수정. Phase 4 index-free로 상당 달성됐을 것 — 잔여 갭(예: bucket assignment·multipart manifest read가 hot path에 섞임) 확인·격리. 전제: Phase 5 GO.
+- [대기] **S6-2: gossip soft-state → Bounded Load/balancer 공급 확정** — 기존 gossip.go/BoundedLoads가 부하(RPS)·용량·health를 balancer에 실제 공급하는지 확인, 미비분 보완. PUT-perf 무관(control plane). 전제: S6-1.
+- [대기] **S6-3: merge-readiness 검증 → master merge 준비** — ① bucket/IAM/multipart 강일관 유지(e2e) ② object PUT/GET data-plane raft 미접촉(S6-1 검증) ③ **게이트 ② GET/HEAD no-regress 멀티호스트 실측**(Phase 5서 미측정한 잔여 리스크 — 안정 인프라 A/B 또는 read-path 분석) ④ 전체 e2e green. 통과 시 devel→master merge(forward fix 동반, 비가역). 전제: S6-2.
+
 ### Phase 7 — numGroups 증설 / 토폴로지 migration
 - 하드 문제 #3: group 수 증가를 remap 없이(새 pool) 또는 migration으로. **그 전까지 클러스터는 group 추가 불가**(노드-in-group EC heal만) — Phase 7이 이 운영 제약 해제.
 
