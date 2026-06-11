@@ -73,9 +73,7 @@ func (f *MetaFSM) PlacementGenerations() []placementGeneration {
 
 // encodeMetaAddPlacementGenerationCmd builds the inner MetaAddPlacementGenerationCmd
 // payload (wrap in a MetaCmd envelope via encodeMetaCmd before proposing/applying).
-// Forward-scaffolding for the S7-6 proposer; exercised now only by tests.
-//
-//nolint:unused // referenced by meta_fsm_generation_test.go; production proposer lands in S7-6.
+// Consumed by MetaRaft.ProposeAddPlacementGeneration (S7-6 production proposer).
 func encodeMetaAddPlacementGenerationCmd(groupIDs []string) []byte {
 	b := clusterBuilderPool.Get()
 	idOffs := make([]flatbuffers.UOffsetT, len(groupIDs))

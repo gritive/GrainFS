@@ -83,6 +83,14 @@ func (r *OpRouter) applyGenerations(gens []placementGeneration) {
 	}
 }
 
+// generationCount reports the number of recorded topology generations (S7-6).
+// A value > 1 means an operator has added a generation; the coordinator uses
+// this to arm the cross-generation LWW read merge on the backends. The default
+// single-generation cluster returns 1 (or 0 before the candidate set is frozen).
+func (r *OpRouter) generationCount() int {
+	return r.placement.generationCount()
+}
+
 // RouteObjectReadGenerations resolves an object read to one placement-group
 // target per topology generation, newest-first (S7-4 generation probe). At a
 // single generation it returns exactly one target equal to RouteObjectRead's,

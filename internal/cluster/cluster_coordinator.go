@@ -14,6 +14,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -147,8 +148,39 @@ func NewClusterCoordinator(
 		maxBody:             DefaultMaxForwardBodyBytes,
 		appendForwardBuffer: newAppendForwardBuffer(DefaultAppendForwardBufferConfig().TotalBytes),
 	}
+	// Order matters: rebuild() first (single-threaded here) does the one-time
+	// plain-field opRouter/localExec init and publishes a non-nil c.runtime; ONLY
+	// then register the post-commit hook. A hook-fired rebuild (from the meta-raft
+	// apply goroutine) then always sees a non-nil c.runtime and takes the
+	// atomic-Store-only path — never racing the constructor's first rebuild on the
+	// plain-field writes. Generations already in the FSM (snapshot restore) are
+	// reflected by this rebuild; generations applied after registration are caught
+	// by the hook (and the builder-method rebuilds that follow re-read regardless).
 	c.rebuild()
+	c.registerTopologyRebuildHook()
 	return c
+}
+
+// registerTopologyRebuildHook wires a meta-FSM post-commit hook that re-runs
+// rebuild() whenever an AddPlacementGeneration command is applied on this node
+// (S7-6). Without it, an applied generation add would stay inert until an
+// unrelated rebuild or a restart — rebuild() is otherwise only called from
+// boot/builder wiring. The hook re-reads PlacementGenerations() into the
+// OpRouter and re-propagates the multi-generation flag to backends. No-op when
+// c.meta does not support post-commit registration (test stubs).
+func (c *ClusterCoordinator) registerTopologyRebuildHook() {
+	type postCommitRegistrar interface {
+		RegisterPostCommit(PostCommitHook)
+	}
+	reg, ok := c.meta.(postCommitRegistrar)
+	if !ok {
+		return
+	}
+	reg.RegisterPostCommit(func(cmdType clusterpb.MetaCmdType, _ []byte) {
+		if cmdType == clusterpb.MetaCmdTypeAddPlacementGeneration {
+			c.rebuild()
+		}
+	})
 }
 
 // WithForwardSender attaches the transport dialer used to send 0x08 forward calls
@@ -228,6 +260,28 @@ func (c *ClusterCoordinator) rebuild() {
 		localExec: localExec,
 		ecConfig:  c.ecConfig,
 	})
+	// S7-6: arm the cross-generation LWW read merge on every backend once the
+	// topology has more than one placement generation. At a single generation
+	// (the default) this propagates false → byte-identical local-first reads.
+	c.propagateMultiGeneration(opRouter.generationCount() > 1)
+}
+
+// propagateMultiGeneration sets the multi-generation read-merge flag on every
+// data-group backend (and the meta backend) so cross-generation LWW reads arm
+// consistently on this node. Derived from the meta-raft-replicated generation
+// registry, so every node converges on the same value. Called from rebuild(),
+// including the rebuild fired by the AddPlacementGeneration post-commit hook.
+func (c *ClusterCoordinator) propagateMultiGeneration(multiGen bool) {
+	if c.groups != nil {
+		for _, g := range c.groups.All() {
+			if b := g.Backend(); b != nil {
+				b.SetMultiGeneration(multiGen)
+			}
+		}
+	}
+	if b, ok := c.base.(*DistributedBackend); ok && b != nil {
+		b.SetMultiGeneration(multiGen)
+	}
 }
 
 func (c *ClusterCoordinator) runtimeState() clusterCoordinatorRuntime {

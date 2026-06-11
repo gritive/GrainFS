@@ -72,20 +72,94 @@ func (b *DistributedBackend) readQuorumMeta(bucket, key string) (*storage.Object
 	if b.shardSvc == nil {
 		return nil, PlacementMeta{}, storage.ErrObjectNotFound
 	}
-	obj, pm, err := b.shardSvc.readQuorumMetaLocalDecoded(bucket, key)
-	if err == nil {
-		return obj, pm, nil
-	}
-	if !errors.Is(err, storage.ErrObjectNotFound) {
+	raw, err := b.readQuorumMetaWinningRaw(bucket, key)
+	if err != nil {
 		return nil, PlacementMeta{}, err
 	}
-	// Local miss: fan out to peers. First success wins (K-of-N write quorum
-	// guarantees at least K peers have the file).
-	raw, ok := b.fetchQuorumMetaFromPeers(bucket, key)
-	if !ok {
-		return nil, PlacementMeta{}, storage.ErrObjectNotFound
-	}
 	return b.shardSvc.decodeQuorumMetaBlob(raw)
+}
+
+// quorumMetaBlobWins reports whether candidate (modA, verA) beats (modB, verB)
+// in the quorum-meta last-writer-wins comparison: higher ModTime wins; on an
+// equal ModTime (second granularity — see time.Now().Unix() writers) the
+// lexicographically greater VersionID wins. The VersionID tiebreak gives the
+// point-GET merge, the peer fan-out, and scatter-gather LIST a single
+// deterministic ordering so they agree on the winner of a same-second tie. It is
+// NOT a recency guarantee at second granularity — only deterministic agreement.
+func quorumMetaBlobWins(modA int64, verA string, modB int64, verB string) bool {
+	if modA != modB {
+		return modA > modB
+	}
+	return verA > verB
+}
+
+// readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
+// comparison for (bucket, key). It is the shared read funnel for both
+// readQuorumMeta (decodes to storage.Object) and readQuorumMetaCmd (decodes to
+// PutObjectMetaCmd).
+//
+// Single-generation default (multiGeneration false): local-first fast path —
+// return the local blob on hit, fan out to peers only on a local miss. This is
+// byte-identical to the legacy readQuorumMeta/readQuorumMetaCmd behavior.
+//
+// Multi-generation (S7-6): a routed (newest-generation) leader holding a stale
+// local copy must not shadow a fresher copy that an add-window split-brain write
+// landed in an older generation. So merge the local blob AND the cross-generation
+// peer fan-out (fetchQuorumMetaFromPeers already spans every ShardGroups() peer),
+// returning the LWW winner. fetchQuorumMetaFromPeers excludes self, so the local
+// blob is merged in separately here rather than dropped.
+func (b *DistributedBackend) readQuorumMetaWinningRaw(bucket, key string) ([]byte, error) {
+	localRaw, localErr := b.shardSvc.readQuorumMetaRaw(bucket, key)
+	if localErr != nil && !errors.Is(localErr, storage.ErrObjectNotFound) {
+		return nil, localErr
+	}
+
+	if !b.multiGeneration.Load() {
+		// Local-first fast path (byte-identical to legacy).
+		if localErr == nil {
+			return localRaw, nil
+		}
+		raw, ok := b.fetchQuorumMetaFromPeers(bucket, key)
+		if !ok {
+			return nil, storage.ErrObjectNotFound
+		}
+		return raw, nil
+	}
+
+	// Multi-generation cross-generation LWW merge: combine the local blob with
+	// the peer-best blob and pick the winner.
+	peerRaw, peerOK := b.fetchQuorumMetaFromPeers(bucket, key)
+	switch {
+	case localErr == nil && peerOK:
+		return b.pickQuorumMetaWinner(localRaw, peerRaw), nil
+	case localErr == nil:
+		return localRaw, nil
+	case peerOK:
+		return peerRaw, nil
+	default:
+		return nil, storage.ErrObjectNotFound
+	}
+}
+
+// pickQuorumMetaWinner returns whichever of two raw quorum-meta blobs wins the
+// LWW comparison (quorumMetaBlobWins). A blob that fails to decode loses to a
+// decodable one; if both fail it returns a (the caller already holds both as
+// candidate winners, so returning either preserves liveness).
+func (b *DistributedBackend) pickQuorumMetaWinner(a, bRaw []byte) []byte {
+	cmdA, errA := b.shardSvc.decodeQuorumMetaCmdBlob(a)
+	cmdB, errB := b.shardSvc.decodeQuorumMetaCmdBlob(bRaw)
+	switch {
+	case errA != nil && errB != nil:
+		return a
+	case errA != nil:
+		return bRaw
+	case errB != nil:
+		return a
+	}
+	if quorumMetaBlobWins(cmdB.ModTime, cmdB.VersionID, cmdA.ModTime, cmdA.VersionID) {
+		return bRaw
+	}
+	return a
 }
 
 // fetchQuorumMetaFromPeers fans out ReadQuorumMeta RPCs to all shard group
@@ -117,8 +191,9 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 	defer cancel()
 
 	type peerResult struct {
-		data    []byte
-		modTime int64
+		data      []byte
+		modTime   int64
+		versionID string
 	}
 	ch := make(chan peerResult, len(peers))
 	var wg sync.WaitGroup
@@ -135,23 +210,28 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 			if err != nil || len(data) == 0 {
 				return
 			}
-			// Decode ModTime for LWW: pick the blob written latest.
-			var modTime int64
+			// Decode ModTime+VersionID for LWW: pick the blob written latest,
+			// breaking same-second ties deterministically by VersionID.
+			var (
+				modTime   int64
+				versionID string
+			)
 			if cmd, decErr := b.shardSvc.decodeQuorumMetaCmdBlob(data); decErr == nil {
 				modTime = cmd.ModTime
+				versionID = cmd.VersionID
 			}
-			ch <- peerResult{data: data, modTime: modTime}
+			ch <- peerResult{data: data, modTime: modTime, versionID: versionID}
 		}()
 	}
 	go func() { wg.Wait(); close(ch) }()
 
-	// Collect all peer responses; return the one with the highest ModTime (LWW).
-	// hasBest guards the zero-ModTime case: two blobs with ModTime=0 must still
-	// result in the first hit being returned.
+	// Collect all peer responses; return the LWW winner (highest ModTime, then
+	// highest VersionID on a tie). hasBest guards the zero-ModTime case: two
+	// blobs with ModTime=0 must still resolve to a deterministic winner.
 	var best peerResult
 	hasBest := false
 	for r := range ch {
-		if !hasBest || r.modTime > best.modTime {
+		if !hasBest || quorumMetaBlobWins(r.modTime, r.versionID, best.modTime, best.versionID) {
 			best = r
 			hasBest = true
 		}
@@ -444,16 +524,9 @@ func (b *DistributedBackend) readQuorumMetaCmd(bucket, key string) (PutObjectMet
 	if b.shardSvc == nil {
 		return PutObjectMetaCmd{}, storage.ErrObjectNotFound
 	}
-	cmd, err := b.shardSvc.readQuorumMetaRawCmd(bucket, key)
-	if err == nil {
-		return cmd, nil
-	}
-	if !errors.Is(err, storage.ErrObjectNotFound) {
+	raw, err := b.readQuorumMetaWinningRaw(bucket, key)
+	if err != nil {
 		return PutObjectMetaCmd{}, err
-	}
-	raw, ok := b.fetchQuorumMetaFromPeers(bucket, key)
-	if !ok {
-		return PutObjectMetaCmd{}, storage.ErrObjectNotFound
 	}
 	return b.shardSvc.decodeQuorumMetaCmdBlob(raw)
 }
@@ -744,7 +817,7 @@ func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, pref
 	for range peerIDs {
 		r := <-ch
 		for _, e := range r.entries {
-			if cur, ok := lww[e.Key]; !ok || e.ModTime > cur.ModTime {
+			if cur, ok := lww[e.Key]; !ok || quorumMetaBlobWins(e.ModTime, e.VersionID, cur.ModTime, cur.VersionID) {
 				lww[e.Key] = e
 			}
 		}

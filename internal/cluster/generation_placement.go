@@ -60,6 +60,19 @@ func (g *GenerationPlacement) currentGroupIDs() []string {
 	return g.generations[len(g.generations)-1].groupIDs
 }
 
+// generationCount returns the number of recorded topology generations. The
+// default (bootstrap or single-generation) returns 0 or 1; a value > 1 means an
+// operator has added at least one new generation, which arms the cross-generation
+// LWW read merge (S7-6). Used by the coordinator to propagate the multi-generation
+// flag to backends so reads fan out for last-writer-wins across generations
+// instead of taking the local-first fast path.
+func (g *GenerationPlacement) generationCount() int {
+	if g == nil {
+		return 0
+	}
+	return len(g.generations)
+}
+
 // readGenerationGroupIDs returns each generation's pinned group-ID set in
 // newest-first probe order (latest generation first, base generation last). At
 // a single generation this is one element equal to currentGroupIDs(), so the

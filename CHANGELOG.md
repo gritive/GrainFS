@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.0.542.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-6 (the topology flip — irreversible): cross-generation
+  last-writer-wins read fence + add-protocol that activate running-cluster group
+  growth.** This is the flip gate of the Phase 7 epic. The user chose GO (build the
+  irreversible add-protocol + flip, eyes-open, without a GCP throughput bench — like
+  the QUIC→TCP flip). It builds the machinery that lets an operator add a topology
+  generation (grow the object→group placement set) on a running cluster while reads
+  stay correct.
+  - **Cross-generation LWW read fence (must-solve ①).** When a cluster has more than
+    one placement generation, an add-window split-brain write can land a fresher copy
+    of a key in an OLDER generation than the routed (newest-generation) leader holds.
+    `readQuorumMeta`/`readQuorumMetaCmd` now share a `readQuorumMetaWinningRaw` funnel:
+    at a single generation it is the byte-identical local-first fast path; at >1
+    generation it merges the local blob with the cross-generation peer fan-out
+    (`fetchQuorumMetaFromPeers` already spans every `ShardGroups()` peer) and returns
+    the last-writer-wins blob. Because the EC data fetch is record-driven off the
+    winning blob's `NodeIDs` (`ResolvePlacement`), the winner's data is read
+    cross-group with no coordinator re-route. Tombstones participate: a higher-ModTime
+    delete marker wins the LWW and folds to not-found. The merge arms per-node via an
+    `atomic.Bool` the coordinator propagates from `rebuild()`.
+  - **On-add → rebuild trigger (must-solve, wiring).** The coordinator registers a
+    meta-FSM post-commit hook that re-runs `rebuild()` when an `AddPlacementGeneration`
+    command is applied, so an added generation takes effect immediately on every node
+    (re-reading the registry into the OpRouter and re-arming the backend merge) rather
+    than staying inert until a restart.
+  - **Add-protocol orchestration (must-solve ②).** `MetaRaft.ProposeAddPlacementGeneration`
+    (the irreversible flip primitive) and `MetaRaft.AddTopologyGeneration`, which —
+    on the first growth — records gen-0 (the base group set) BEFORE the expanded
+    generation so existing objects placed by the original modulo stay readable. The
+    ordering makes every intermediate crash state a valid single-generation
+    (byte-identical) or fully multi-generation view; a second growth appends only the
+    expanded set. The new groups must already be formed/registered via existing
+    group-add machinery — this records the placement generation on top.
+  - **Deterministic same-second tiebreak (advisor D).** ModTime is second-granularity,
+    so cross-generation same-key same-second ties were resolved nondeterministically and
+    point-GET vs LIST could disagree. A single `quorumMetaBlobWins` comparison (higher
+    ModTime, then lexicographically higher VersionID) is now used by the merge, the peer
+    fan-out, AND `scatterGatherList`, so they agree. This is deterministic agreement,
+    NOT a recency guarantee at second granularity (pre-existing LWW property; only
+    already-nondeterministic outcomes change). The `scatterGatherList` tiebreak applies
+    unconditionally (all generations) — it is a generation-independent determinism
+    improvement, so the "single-generation byte-identical" statement below scopes to the
+    point-read funnel, not to the LIST tiebreak.
+  - **In-place mutations (advisor B) are already correct cross-generation.** `SetObjectACL`,
+    `SetObjectTags`, and `DeleteObject` RMW the FULL `PutObjectMetaCmd` via
+    `readQuorumMetaCmd` (now merge-aware) and write it back whole, so there is no
+    partial-write that would win the LWW with missing NodeIDs. The merge symmetry on
+    `readQuorumMetaCmd` additionally prevents a silent lost mutation in the add window.
+  - **Default single-generation path is byte-identical** (merge disarmed, fast path
+    untouched) — no throughput regression on the default. Tests: cross-generation LWW
+    merge for both read consumers, cross-generation tombstone, VersionID tiebreak (unit +
+    merge), the post-commit-hook arming, and the gen-0-capture ordering — each RED on
+    revert of its mechanism. `make test-unit` + `make lint` green.
+  - **Decision rendered (honest scope):** machinery built and in-proc LWW correctness
+    validated. NOT validated: multi-node concurrent topology growth under live load, and
+    throughput parity (no GCP bench was run, per the GO choice). The fence arms
+    **per-node** on the generation-count transition — during the brief multi-node raft
+    apply-skew window a lagging node serves reads on its unarmed fast path and can return
+    stale; this is inherent to async raft apply and is the "multi-node growth NOT
+    validated" caveat. The flip is irreversible: a placement generation, once appended,
+    is never removed.
+
 ## [0.0.541.0] - 2026-06-11
 
 ### Added

@@ -201,6 +201,15 @@ type DistributedBackend struct {
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
+
+	// multiGeneration arms the cross-generation LWW read merge (S7-6). False (the
+	// default) keeps readQuorumMeta/readQuorumMetaCmd on the local-first fast path
+	// — byte-identical to legacy. The coordinator sets it true on every node once
+	// the topology has >1 placement generation, so quorum-meta reads fan out and
+	// pick the last-writer-wins copy across generations rather than returning a
+	// stale same-generation local copy.
+	multiGeneration atomic.Bool
+
 	// chunkedPutChunkSize is a test seam; zero keeps the production default.
 	chunkedPutChunkSize int
 
@@ -797,6 +806,16 @@ func (b *DistributedBackend) UnregisterCacheInvalidator(id string) {
 // Must be called before RunApplyLoop.
 func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
 	b.onApply = fn
+}
+
+// SetMultiGeneration arms (true) or disarms (false) the cross-generation LWW
+// read merge for quorum-meta reads (S7-6). The coordinator calls it from
+// rebuild() with generationCount() > 1 so that, once a topology generation has
+// been added, reads pick the last-writer-wins copy across all generations
+// instead of returning a stale local copy. The default (false) is the
+// byte-identical single-generation fast path.
+func (b *DistributedBackend) SetMultiGeneration(v bool) {
+	b.multiGeneration.Store(v)
 }
 
 // SetOnFSMValueResealDone registers a callback that fires once per applied
