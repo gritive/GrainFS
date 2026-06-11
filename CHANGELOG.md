@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.547.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-4: selectable cluster transport** (EXPERIMENTAL, dormant). A new
+  `--transport tcp|http` flag chooses the cluster transport at boot; **the default is
+  `tcp`, so production behavior is unchanged**. With `--transport http`,
+  `bootClusterTransport` constructs the Phase 8 `HTTPTransport` (everything downstream is
+  transport-agnostic via the `ClusterTransport` interface) and the raft mux is forced off
+  (raft rides HTTP Call; the HTTP transport has no mux carrier). The Zero-CA join listener
+  is orthogonal and stays on its existing path. Verified by a boot-selection test
+  (`--transport http` → `*HTTPTransport`); the default-TCP branch is the existing test, so
+  the two discriminate the selection.
+
 ## [0.0.546.0] - 2026-06-11
 
 ### Added

@@ -46,15 +46,24 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 		state.transportPSK = ephemeral
 	}
 
-	// TCP is the sole cluster transport (S6 removed the legacy QUIC stack). All
+	// Transport selection (Phase 8 S8-4, EXPERIMENTAL): TCP (default) or HTTP. All
 	// post-construction setup below is transport-agnostic (ClusterTransport interface
 	// methods); state.clusterTransport is the interface-typed field (legacy name).
 	var clusterTransport transport.ClusterTransport
-	tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
-	if terr != nil {
-		return fmt.Errorf("init cluster transport: %w", terr)
+	if state.cfg.UseHTTPTransport {
+		httpTransport, herr := transport.NewHTTPTransport(state.transportPSK)
+		if herr != nil {
+			return fmt.Errorf("init HTTP cluster transport: %w", herr)
+		}
+		clusterTransport = httpTransport
+		log.Info().Msg("cluster transport: HTTP (Phase 8, EXPERIMENTAL) — raft mux disabled")
+	} else {
+		tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
+		if terr != nil {
+			return fmt.Errorf("init cluster transport: %w", terr)
+		}
+		clusterTransport = tcpTransport
 	}
-	clusterTransport = tcpTransport
 	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.
@@ -146,7 +155,9 @@ func bootPeerConnections(ctx context.Context, state *bootState) error {
 // election (codex P1 #3).
 func bootGroupRaftMux(state *bootState) error {
 	state.groupRaftMux = raft.NewGroupRaftMux(state.clusterTransport)
-	if state.cfg.MuxEnabled {
+	// The HTTP transport has no mux carrier (raft rides HTTP Call); never EnableMux
+	// for it, regardless of MuxEnabled (GetOrConnectMux would error and fall back).
+	if state.cfg.MuxEnabled && !state.cfg.UseHTTPTransport {
 		state.groupRaftMux.EnableMux(state.cfg.MuxPoolSize, state.cfg.MuxFlushWindow)
 		log.Info().
 			Int("pool", state.cfg.MuxPoolSize).

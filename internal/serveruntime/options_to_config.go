@@ -47,6 +47,9 @@ func optionsToConfig(
 	cfg.MuxEnabled = true // mux is always on; the --mux flag was removed
 	cfg.MuxPoolSize = opts.MuxPoolSize
 	cfg.MuxFlushWindow = opts.MuxFlushWindow
+	// Phase 8 (EXPERIMENTAL, dormant): --transport http selects the HTTP cluster
+	// transport; anything else (incl. empty/default) keeps the TCP transport.
+	cfg.UseHTTPTransport = opts.Transport == "http"
 
 	cfg.AppendForwardBufferTotalBytes = opts.AppendForwardBufferTotalBytes
 	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest
