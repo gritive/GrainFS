@@ -28,14 +28,17 @@ type dataGroupLeaderProbe interface {
 // OpRouter resolves S3-level operations to placement-group targets via
 // bucket, object-index, or EC-placement lookups. Ctx-free; performs no I/O.
 type OpRouter struct {
-	router            *Router
-	groups            ShardGroupSource
-	addr              NodeAddressBook
-	leaderProbe       dataGroupLeaderProbe
-	ec                ECConfig
-	selfID            string
-	selfAliases       []string
-	placementGroupIDs []string // frozen sorted candidate IDs; nil on bootstrap
+	router      *Router
+	groups      ShardGroupSource
+	addr        NodeAddressBook
+	leaderProbe dataGroupLeaderProbe
+	ec          ECConfig
+	selfID      string
+	selfAliases []string
+	// placement owns the topology generation list for object→group metadata
+	// placement. At a single generation its currentGroupIDs() is byte-identical
+	// to the legacy frozen sorted candidate IDs (nil on bootstrap).
+	placement *GenerationPlacement
 }
 
 func NewOpRouter(
@@ -58,14 +61,14 @@ func NewOpRouter(
 		}
 	}
 	return &OpRouter{
-		router:            router,
-		groups:            groups,
-		addr:              addr,
-		leaderProbe:       leaderProbe,
-		ec:                ec,
-		selfID:            selfID,
-		selfAliases:       selfAliases,
-		placementGroupIDs: placementGroupIDs,
+		router:      router,
+		groups:      groups,
+		addr:        addr,
+		leaderProbe: leaderProbe,
+		ec:          ec,
+		selfID:      selfID,
+		selfAliases: selfAliases,
+		placement:   newGenerationPlacement(placementGroupIDs),
 	}
 }
 
@@ -121,10 +124,11 @@ func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, 
 		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: target.GroupID}
 		return target, entry, err
 	}
-	if len(r.placementGroupIDs) == 0 {
+	placementIDs := r.placement.currentGroupIDs()
+	if len(placementIDs) == 0 {
 		return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
 	}
-	groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+	groupID := groupIDForObject(bucket, key, placementIDs)
 	target, err := r.routeGroup(groupID)
 	entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: groupID}
 	return target, entry, err
@@ -156,8 +160,8 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 		group ShardGroupEntry
 		err   error
 	)
-	if len(r.placementGroupIDs) > 0 {
-		groupID := groupIDForObject(bucket, key, r.placementGroupIDs)
+	if placementIDs := r.placement.currentGroupIDs(); len(placementIDs) > 0 {
+		groupID := groupIDForObject(bucket, key, placementIDs)
 		if g, ok := r.groups.ShardGroup(groupID); ok {
 			group = g
 		}

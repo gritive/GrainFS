@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.537.0] - 2026-06-11
+
+### Changed
+
+- **Phase 7 S7-2 (internal, dormant): object→group placement now flows through a
+  `GenerationPlacement` seam.** `OpRouter` previously held a frozen sorted candidate
+  ID list (`placementGroupIDs`) and hashed objects into it directly. That list is now
+  wrapped in a single-generation `GenerationPlacement` whose `currentGroupIDs()`
+  returns the identical set, so object read/write placement is byte-identical — this
+  is a pure representational refactor with no behavior change. The seam is the dormant
+  foundation for Phase 7 topology-generation growth (S7-3 appends generations on group
+  addition; S7-4 adds newest-first read probe). Segment/EC placement is deliberately
+  out of scope: it is recorded in the object metadata (`storage.SegmentRef`
+  self-describes `PlacementGroupID` + `NodeIDs`) and read record-driven, so a
+  generation change never reroutes an existing object's shards — only object→group
+  metadata placement is recomputed on read (Phase 4 index-free) and thus needs the
+  seam.
+
 ## [0.0.536.0] - 2026-06-11
 
 ### Fixed
