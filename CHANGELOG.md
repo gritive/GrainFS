@@ -1,5 +1,175 @@
 # Changelog
 
+## [0.0.550.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 S8-5: flip the default cluster transport TCP → HTTP.** The node-to-node
+  cluster transport now defaults to the Phase 8 Hertz `HTTPTransport` (streaming HTTP over
+  the same zero-CA SPKI-pinned mTLS + live identity rotation the TCP transport used).
+  `--transport` now defaults to `http`; `optionsToConfig` maps any value other than `tcp`
+  to the HTTP transport (empty → HTTP, matching the cobra default). **Reversible:** the
+  `--transport tcp` opt-out remains, so operators can pin the legacy TCP transport (unlike
+  the QUIC removal, this flip removes nothing). The dormant runway that made this safe
+  shipped across S8-1..S8-5 (scaffold → data-plane → control-plane → selectable →
+  idle-deadline + multi-node e2e). **Validation: macOS functional-only** — full unit suite
+  + representative multi-node e2e green; **Linux throughput parity NOT measured** (eyes-open,
+  the same posture as the QUIC→TCP flip; the HTTP transport runs raft over per-message
+  `Call` with mux disabled, so heartbeat fan-out under sustained cluster load is unmeasured
+  on macOS where the perf signal does not surface).
+
+### Fixed
+
+- **HTTP transport: retry once on a stale keep-alive pooled connection (`ErrBadPoolConn`).**
+  HTTP keep-alive pools connections, and a peer routinely reaps an idle pooled conn ("Apache
+  and nginx usually do this", per Hertz); the TCP→HTTP default flip makes this production-
+  relevant (TCP's connection-per-RPC `Call` never pooled, so it never hit a reaped conn). The
+  Hertz client now retries once (`httpRetryIf`) on `ErrBadPoolConn` only. That error is raised
+  when the pooled conn was found closed BEFORE the request was delivered, so the retry is a
+  first delivery on a fresh conn — **provably replay-safe for every Call-path RPC type**,
+  including the non-idempotent proposal forwards `CallPooled` carries
+  (`ShardService.SendRequest`). It deliberately does NOT retry Hertz's ambiguous
+  "server closed connection before returning the first response byte" (which fires after the
+  request was written, where the server may have processed it — replaying a proposal forward
+  could double-propose); that case stays a transient error absorbed by raft/S3-client retries.
+  Retry also refuses `IsBodyStream` requests (the S3b "retry-after-body" landmine). This retry
+  is unrelated to the pre-existing `node-id == raft-addr` join deadlock (TODOS.md). Pinned by
+  `TestHTTPDataPlane_RetryIf_RefusesBodyStream`.
+
+## [0.0.549.0] - 2026-06-12
+
+### Added
+
+- **Phase 8 S8-5 (Phase A, Task 2): multi-node HTTP data-plane e2e** (dormant; TCP is
+  still the default). The existing in-process multi-node streaming-EC PUT/GET harness is
+  now transport-parameterized, and a new HTTP variant brings up a 5-node cluster on the
+  Phase 8 `HTTPTransport`: a 3+2 object's shards spread across distinct nodes, so the PUT
+  streams sealed shards to remote peers over HTTP `CallWithBody` and the GET reconstructs
+  by fetching remote shards over HTTP `CallRead` — the first real data-plane-over-HTTP
+  exercise (S8-2 was method-isolated, S8-3 was raft). A parity-shard-failure variant
+  proves best-effort commit holds over HTTP too. macOS functional-only (no throughput
+  bench; eyes-open, the QUIC→TCP flip posture).
+
+### Fixed
+
+- **HTTP transport: tolerate `(0, nil)` request-body reads** (dormant path). The PUT
+  pipeline streams a sealed shard through an `io.Pipe`, and a zero-length pipe write
+  surfaces to the reader as `(0, nil)` — legal per the `io.Reader` contract (callers must
+  treat it as "nothing happened") and tolerated by the TCP transport's chunked writer, but
+  Hertz's `WriteBodyChunked` panics on it. `doRPC` now wraps the request body so empty
+  non-EOF reads are skipped, restoring TCP parity. Surfaced by the new HTTP data-plane e2e.
+- **HTTP transport: immediate `Close`** (dormant path). `Close` closed the Hertz server via
+  a 5s graceful `Shutdown`, which blocks the full window waiting for idle keep-alive
+  connections held open by remote clients to drain (the standard transport waits for
+  active==0 and never force-closes them) — adding ~5s per server at teardown with no
+  benefit. `Close` now closes the listener immediately (TCP-parity: the TCP transport
+  closes its conns at once and the cluster tolerates abrupt peer loss) and drops idle
+  client conns.
+
+## [0.0.548.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-5 (Phase A, Task 1): HTTP CallRead idle-read deadline** (dormant; TCP is
+  still the default transport). The Hertz HTTP client sets no read deadline of its own
+  (it computes 0/unbounded when neither `WithClientReadTimeout` nor a per-request
+  `RequestTimeout` is set — both unset here), so an HTTP `CallRead` whose peer stalls
+  mid-body would pin the client goroutine and its pooled connection forever. A new
+  `idleReadConn` wraps the client dialer's connection and arms a reset-per-Read idle
+  deadline (`SetReadTimeout(clientBodyTimeout)`, default 5m — mirrors the TCP transport's
+  `tcpReadCloser`/`ClientBodyTimeout`) before every blocking network read, so a stall
+  surfaces as a timeout **in the same goroutine** rather than the cross-goroutine
+  `CloseBodyStream` watchdog Hertz forbids (the reverted S8-2 attempt). Because the client
+  never sets a shorter deadline, this clobbers nothing — it only replaces "unbounded" with
+  the idle bound. `ConnTLSer`/`ErrorNormalization` are delegated explicitly (embedding the
+  `network.Conn` interface would hide the optional interfaces the Hertz client asserts).
+  This is the mandatory availability gate for the S8-5 data-plane flip. Verified by a
+  FIRING test (stalled peer → next `Read` errors within the idle window; mutation-verified
+  RED when the bound is disabled) plus a reuse test (a poisoned connection is not silently
+  reused) under `-race`.
+
+## [0.0.547.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-4: selectable cluster transport** (EXPERIMENTAL, dormant). A new
+  `--transport tcp|http` flag chooses the cluster transport at boot; **the default is
+  `tcp`, so production behavior is unchanged**. With `--transport http`,
+  `bootClusterTransport` constructs the Phase 8 `HTTPTransport` (everything downstream is
+  transport-agnostic via the `ClusterTransport` interface) and the raft mux is forced off
+  (raft rides HTTP Call; the HTTP transport has no mux carrier). The Zero-CA join listener
+  is orthogonal and stays on its existing path. Verified by a boot-selection test
+  (`--transport http` → `*HTTPTransport`); the default-TCP branch is the existing test, so
+  the two discriminate the selection.
+
+## [0.0.546.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-3: control plane over HTTP** (still dormant). `HTTPTransport` now
+  satisfies the full `transport.ClusterTransport` interface (enforced by a compile-time
+  assertion), so the cluster control plane — per-group raft, meta-raft, InstallSnapshot,
+  forward/probe RPCs, and gossip — runs over it. Raft RPCs are request/response, so with
+  the raft mux **disabled** they ride `tr.Call` (an HTTP POST round-trip); Hertz's
+  keep-alive connection pool subsumes what the hand-rolled mux/corrID/lanes provided. The
+  mux-carrier methods are stubs (never invoked when mux is off).
+  - **Large control-plane payloads**: `Call`/`CallFlatBuffer`/`CallRead` send the request
+    payload in the request BODY (entries-bearing AppendEntries ~16 MiB, InstallSnapshot),
+    not a header — fixing a latent S8-2 flaw that only surfaced on the control plane.
+  - **Gossip**: `Send` (fire-and-forget) + `Receive` (inbox); `RecycleConns`/`ClosePeer`
+    recycle the client pool on rotation; `SetTrafficLimits` installs inbound admission.
+  - **Verified**: a 3-node group-raft cluster over HTTP (mux off) elects + replicates, with
+    a positive carrier signal (`InboundRPCCount(StreamGroupRaft) > 0`) and neuter-verified
+    (no HTTP serving → no election). **Performance is unverified** (no multi-node bench;
+    HTTP/1.1 is one-in-flight-per-conn vs the mux's corrID multiplexing, so it needs more
+    pooled connections under concurrency) — the same eyes-open bet as the flip. Legacy mode
+    also sends heartbeats individually (no coalescing).
+  - **Dormant**: not wired into boot (the production default transport is unchanged).
+
+## [0.0.545.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-2: data-plane RPC over streaming HTTP** (still dormant). `HTTPTransport`
+  now carries the shard data-plane RPC surface — `Call`, `CallFlatBuffer`, `CallWithBody`
+  (streaming request body), `CallRead` (streaming response body), plus the
+  `Handle`/`HandleBody`/`HandleRead`/`SetStreamHandler` server side — mirroring the TCP
+  transport. The `transport.Message` frame travels in `X-Gfs-*` headers; bodies are raw
+  byte streams. A generic `POST /_grainfs/rpc` endpoint routes by `StreamType` via the
+  shared `StreamRouter` (the transport never parses the shard envelope).
+  - **Streaming, not buffering:** large shard bodies stream both ways
+    (`WithStreamBody`/`req.SetBodyStream` + `WithResponseBodyStream`). Verified by a
+    256 MiB round-trip whose `TotalAlloc` delta stays under body/4 — mutation-verified
+    (disabling streaming or buffering the body turns it RED).
+  - **TCP parity:** RPC-level `StatusError`/`StatusOverloaded` map to a Go error
+    (`checkResponseStatus`); the buffered response read is capped at 64 MiB. No client
+    retry of streamed bodies (Hertz `DefaultRetryIf` refuses body streams + POST; pinned
+    by test). The `CallRead` body idle-read deadline (TCP's S3b-cbd hardening) is deferred
+    to S8-3 wiring — Hertz forbids a cross-goroutine close-vs-read watchdog and hides the
+    conn behind its buffered reader, so the in-goroutine bound is designed at wiring.
+  - **Dormant:** not wired into boot; the production default transport is unchanged.
+
+## [0.0.544.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-1: dormant HTTP transport scaffold** (`internal/transport/HTTPTransport`).
+  A Hertz HTTP server + Hertz HTTP client over the SAME zero-CA SPKI-pinned mTLS and
+  live identity rotation the TCP transport uses — the secure substrate for the Phase 8
+  data-plane move (shard PUT/GET over streaming HTTP, S8-2).
+  - **Reuses, does not reinvent**, the shared identity machinery: `DeriveClusterIdentity`,
+    `NewIdentitySnapshot`, `pinAcceptedSPKI`, and `identityComposer`. The rotation surface
+    (`SwapIdentity`/`UpdateRegistryAccept`/`SeedInitialPeerSPKIs`/`ApplyRotation`/
+    `FlipPresent`/`SetDropped`) delegates to the composer exactly as the TCP transport does.
+  - **Fresh-read per handshake/dial:** the server's `GetConfigForClient` and a custom Hertz
+    client `network.Dialer` both rebuild their `tls.Config` from the live `IdentitySnapshot`,
+    so a post-Listen rotation/flip takes effect on new connections without a restart
+    (mirrors the TCP transport; mutation-verified).
+  - **Streaming enabled now:** `WithStreamBody(true)` on the server + `WithResponseBodyStream`
+    on the client, so S8-2 can stream large shard bodies without buffering.
+  - **Dormant:** not wired into boot — the production default transport is unchanged
+    (`HTTPTransport` is referenced only inside `internal/transport/`).
+
 ## [0.0.543.0] - 2026-06-11
 
 ### Added

@@ -51,6 +51,7 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.AppendSizeCapBytes, _ = cmd.Flags().GetInt64("append-size-cap-bytes")
 	opts.MuxPoolSize, _ = cmd.Flags().GetInt("mux-pool")
 	opts.MuxFlushWindow, _ = cmd.Flags().GetDuration("mux-flush")
+	opts.Transport, _ = cmd.Flags().GetString("transport")
 
 	// Storage knobs.
 	opts.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")

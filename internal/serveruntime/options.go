@@ -40,6 +40,7 @@ type ServeOptions struct {
 	AppendSizeCapBytes               int64         // --append-size-cap-bytes
 	MuxPoolSize                      int           // --mux-pool
 	MuxFlushWindow                   time.Duration // --mux-flush
+	Transport                        string        // --transport (tcp|http, EXPERIMENTAL; default tcp)
 
 	// --- Storage knobs ---
 	PackThreshold      int   // --pack-threshold

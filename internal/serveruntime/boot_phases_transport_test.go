@@ -35,6 +35,25 @@ func TestBootClusterTransport_TCPBindsLoopbackPort0(t *testing.T) {
 	assert.Equal(t, state.clusterTransport.LocalAddr(), resolved, "state.raftAddr matches LocalAddr")
 }
 
+// TestBootClusterTransport_HTTPSelected — Phase 8 S8-4: with UseHTTPTransport set,
+// bootClusterTransport must construct the *HTTPTransport stack (EXPERIMENTAL, dormant
+// — default is still TCP, proven by TestBootClusterTransport_TCPBindsLoopbackPort0).
+// Together the two tests discriminate the transport-selection branch.
+func TestBootClusterTransport_HTTPSelected(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899", UseHTTPTransport: true})
+	require.NoError(t, bootValidateConfig(state))
+	t.Cleanup(state.Cleanup)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, bootClusterTransport(ctx, state))
+	require.NotNil(t, state.clusterTransport)
+	_, isHTTP := state.clusterTransport.(*transport.HTTPTransport)
+	assert.True(t, isHTTP, "UseHTTPTransport must construct a *HTTPTransport")
+	assert.Equal(t, state.clusterTransport.LocalAddr(), state.raftAddr, "state.raftAddr matches LocalAddr")
+}
+
 // TestBootClusterTransport_BindsLoopbackPort0 — happy path: solo-mode bootstrap
 // (no peers) uses 127.0.0.1:0; bootClusterTransport must Listen, then resolve
 // state.raftAddr to the kernel-picked port so peers see a dialable self.

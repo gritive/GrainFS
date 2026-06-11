@@ -47,6 +47,11 @@ func optionsToConfig(
 	cfg.MuxEnabled = true // mux is always on; the --mux flag was removed
 	cfg.MuxPoolSize = opts.MuxPoolSize
 	cfg.MuxFlushWindow = opts.MuxFlushWindow
+	// Phase 8 (S8-5 flip): the HTTP cluster transport is the DEFAULT; only an
+	// explicit --transport tcp opts back into the legacy TCP transport. Empty/default
+	// → HTTP (matches the cobra flag default), so an unset value never silently
+	// reverts the flip. The TCP path and this flag are removed once the flip settles.
+	cfg.UseHTTPTransport = opts.Transport != "tcp"
 
 	cfg.AppendForwardBufferTotalBytes = opts.AppendForwardBufferTotalBytes
 	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest
