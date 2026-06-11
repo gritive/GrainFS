@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.541.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-5 (internal, verification): cross-generation LIST coverage is
+  guaranteed by construction.** `scatterGatherList` (the fan-out behind
+  `ListObjects`/`ListObjectsPage`/`WalkObjects`) enumerates the peers of EVERY shard
+  group in `ShardGroups()`, not a generation- or candidate-scoped subset. Because a
+  new topology generation's groups are seeded as ordinary shard groups, they appear
+  in `ShardGroups()` and are scanned, so object listings span all generations with no
+  generation-specific code on the LIST path. Added `TestScatterGatherList_SpansAllShardGroups`
+  (two groups on two nodes; the listing returns objects from both — RED if the fan-out
+  scanned only the bucket-routed group). No production code change.
+  - **Pre-existing limitation noted (orthogonal to generations):** `ListObjectVersions`
+    reads only the local BadgerDB versioned store via the bucket-routed group, so it
+    does not scatter-gather across groups and is incomplete in multi-group clusters
+    regardless of topology generations. Versioned GET/HEAD route correctly (S7-4c probe);
+    only the versioned LIST enumeration has this gap, which predates Phase 7 and is left
+    for a separate scatter-gather-versioned-list fix.
+
 ## [0.0.540.0] - 2026-06-11
 
 ### Added
