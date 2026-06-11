@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.536.0] - 2026-06-11
+
+### Fixed
+
+- **Quorum-meta torn read: a concurrent write could make an object briefly read as
+  "not found".** `writeQuorumMetaLocal` published the per-node quorum metadata with
+  an in-place `O_WRONLY|O_TRUNC` write, which leaves a window where the file is 0
+  bytes (truncated, data not yet written). A reader hitting that window
+  (`readQuorumMetaRaw` → `os.ReadFile`) decoded an empty blob, and `headObjectMeta`
+  then fell through to BadgerDB — which has no row for a quorum-meta object — and
+  returned `ErrObjectNotFound`. The quorum-meta path is keyed by `bucket/key` (not
+  versioned), so this surfaces whenever a write overlaps a read of the same key: a
+  same-key overwrite PUT racing a GET/HEAD, or a lingering best-effort quorum write
+  still in flight after `fanOutQuorumMeta` returned on the k-th ack. The write is
+  now atomic (temp file in the same directory, fsync, then rename), so a reader sees
+  either the previous complete blob or the new one, never a torn one. This was the
+  root cause of the flaky `TestECRewrap_ConfigUpgradeRace` ("upgrade head object:
+  object not found"); added `TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn`
+  as a deterministic regression guard (RED on the in-place write, GREEN on rename).
+
 ## [0.0.535.0] - 2026-06-11
 
 ### Added

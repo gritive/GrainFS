@@ -212,22 +212,39 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta: key %q escapes root", key)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("quorum meta mkdir: %w", err)
 	}
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Atomic publish: write to a unique temp file in the same directory, fsync,
+	// then rename over the target. An in-place O_TRUNC write exposes a window where
+	// the file is 0 bytes (truncated, data not yet written); a concurrent reader of
+	// the same key — a same-key overwrite racing a GET/HEAD, or a lingering
+	// best-effort quorum write still in flight after fanOutQuorumMeta returned on
+	// the k-th ack — would read that empty file and report the object as missing.
+	// rename is atomic on a POSIX filesystem, so a reader sees either the previous
+	// complete blob or the new one, never a torn one.
+	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
 	if err != nil {
-		return fmt.Errorf("quorum meta create: %w", err)
+		return fmt.Errorf("quorum meta tmp create: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("quorum meta write: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("quorum meta fsync: %w", err)
 	}
-	return f.Close()
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("quorum meta tmp close: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("quorum meta rename: %w", err)
+	}
+	return nil
 }
 
 // readQuorumMetaRaw reads the raw quorum meta blob for (bucket, key) from the
