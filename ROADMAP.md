@@ -127,6 +127,24 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
 ### Phase 7 — numGroups 증설 / 토폴로지 migration
 - 하드 문제 #3: group 수 증가를 remap 없이(새 pool) 또는 migration으로. **그 전까지 클러스터는 group 추가 불가**(노드-in-group EC heal만) — Phase 7이 이 운영 제약 해제.
 
+#### Phase 7 진행 현황 (2026-06-11 부트스트랩, Phase 6 merged 후 진입)
+
+**구조적 pin (primary-source 확정)**: object→group 라우팅이 `groupIDForObject = hashObjectPlacementKey(bucket,key) % len(placementGroupIDs)` 순수 modulo이며 **read·write 양쪽이 동일 함수 사용**(op_routing.go:124-127 RouteObjectRead / :159-166 RouteObjectWrite). `placementGroupIDs`는 boot snapshot 동결(op_routing.go:38, 갱신 안 됨). Phase 4가 object-index를 eager-delete해 **저장된 per-object placement가 0** → GET은 순수 modulo 재계산. 따라서 numGroups N→N+k면 분모가 바뀌어 ~전체 키 remap → 기존 read 전멸. 이것이 Phase 7이 해제할 운영 제약(group 추가 불가)의 코드 근원. AddGroup/RemoveGroup command는 MetaFSM apply에 부재(toplogy=control-plane이어야 Phase 6 경계 정합).
+
+**read-time 전략 3택 (S7-1이 결정)**: ⒜ **generation-probe(새 pool, "remap 없이")** — group 추가 = 새 generation epoch, 새 객체만 새 group-set 사용; read는 현재 gen modulo 시도→miss시 직전 gen fallback probe. **데이터 이동 0**, index-free 유지, 비용=miss시 fan-out ∝ #generations. ⒝ **migration** — 새 placement에 맞게 객체 물리 이동 + dual-read window(훨씬 크고 위험, 후속 consolidation phase 후보). ⒞ per-object placement record 재도입 = index 부활, Phase 4 index-free 결정과 정면 충돌 → **배제(확인만)**. **직교 레버**: object→group을 modulo→HRW로 바꾸면 group 추가시 영향 키 ~전체→k/(N+k)로 한정(gen-0=modulo=오늘 byte-identical 보존). 1차 베팅=⒜ + gen-gated HRW(additive·dormant-land 가능·비가역 지점은 "2nd gen 활성화 flip" 하나).
+
+**불변식 (전 dormant 슬라이스 RED 기준)**: generation이 1개일 때 read는 probe 분기 자체를 안 탐 → 오늘과 byte-identical(default 무회귀 보장). 비가역 greenfield flip은 **마지막 1개로 격리**, 결정 게이트 뒤.
+
+**완료 의미 (advisor 보정)**: hard-problem gated epic에서 "Phase 7 완전 구현" = dormant runway land + **flip 결정 게이트 도달**. trigger(운영상 group 증설 필요) 없으면 flip 미실행(DECLINE)이 정당한 종착(sharded-index 4b-3 선례: 구조적 확정·no-prod서 flip DECLINE이 완료였음). S7-flip 슬라이스 완료 기준 = "결정 rendered"(GO/DECLINE 둘 다 완료).
+
+슬라이스(S7-2+는 S7-1 design gate가 비준/수정하는 **잠정** 분해, 1차 베팅 ⒜+gen-gated HRW 기준):
+- [대기] **S7-1: 토폴로지 변경 전략 결정 게이트 (design slice + plan-eng-review)** — read-time 전략 ⒜/⒝/⒞ 결정 + HRW 도입 여부 + generation-probe read fan-out이 GET no-regress 게이트 통과하는지 논증. 산출=결정 문서(root worktree git-untracked) + S7-2+ 슬라이스 확정. 완료 기준 = 결정 rendered. 전제: Phase 6 완료(merged).
+- [대기] **S7-2: generation-aware placement seam (dormant, behavior-neutral)** — frozen `placementGroupIDs`(op_routing.go:38)를 generation-aware/refreshable 구조로. recompute 사이트 전수(RouteObjectRead/RouteObjectWrite/SelectObjectPlacementGroup/**SelectSegmentPlacementGroup** multipart) 단일 seam 경유. 검증: gen=1일 때 byte-identical(RED-on-revert), 모든 placement 호출처 seam 경유 grep. 전제: S7-1.
+- [대기] **S7-3: AddGroup control-plane command family (dormant)** — MetaFSM에 토폴로지 변경(group 추가) command 추가, control-plane linearizable(Phase 6 경계), group 추가 시 generation epoch 단조 기록. 검증: AddGroup propose→FSM 반영, epoch 단조 증가, gen=1 변화 없음. 전제: S7-2.
+- [대기] **S7-4: generation-probe read path (dormant)** — read-miss 시 직전 generation fallback probe(bounded fan-out). single-generation일 때 probe 분기 미진입(byte-identical). 검증: 2-generation in-proc 옛-gen 객체 read 성공, gen=1 byte-identical RED-on-revert. 전제: S7-2 + S7-3.
+- [대기] **S7-5: scatter-gather LIST generation union (dormant)** — Phase 4 scatter-gather LIST가 새 group까지 fan-out + generation union 정확. 검증: 2-generation cross-group LIST 정확성·pagination·tombstone, gen=1 byte-identical. 전제: S7-3 + S7-4.
+- [대기] **S7-6: ★토폴로지 flip 결정 게이트 (GCP/결정, 비가역)** — 실제 group 증설 활성화(2nd generation). read fan-out no-regress 측정/논증. **완료 기준 = 결정 rendered**(trigger 없으면 DECLINE도 완료; dormant runway는 master에 잔존, flip만 보류). 전제: S7-2..S7-5 전부 완료.
+
 ### Phase 6.5 — MetadataStore 추상화 (Clean Architecture)
 - `internal/cluster`가 `*badger.Txn`을 직접 사용하는 30개 파일을 `MetadataTxn` / `MetadataStore` 인터페이스로 추상화. BadgerDB 구현체를 `internal/badgermeta`(또는 `internal/raft` 내부)로 이동하고 composition root에서 주입.
 - **전제**: Phase 4 완료 후 시작 — meta-index 제거로 cluster 내 BadgerDB 사용처가 제어 플레인(멀티파트 manifest, IAM, bucket 설정, Raft state)으로 축소된 뒤 진행해야 리팩터링 범위가 최소화됨.
