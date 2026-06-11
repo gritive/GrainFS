@@ -84,8 +84,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--pprof-port", "6060",
 		"--raft-heartbeat-interval", "37ms",
 		"--raft-election-timeout", "41ms",
-		"--mux-pool", "17",
-		"--mux-flush", "3ms",
 		"--audit-iceberg=false",
 		"--audit-commit-interval", "67s",
 		"--enable-iceberg=true",
@@ -110,8 +108,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, int64(16777216), opts.AppendForwardBufferTotalBytes)
 	require.Equal(t, int64(1048576), opts.AppendForwardBufferMaxPerRequest)
 	require.Equal(t, int64(67108864), opts.AppendSizeCapBytes)
-	require.Equal(t, 17, opts.MuxPoolSize)
-	require.Equal(t, 3*1000*1000, int(opts.MuxFlushWindow.Nanoseconds()))
 
 	// Storage knobs.
 	require.Equal(t, 31, opts.PackThreshold)

@@ -44,9 +44,6 @@ func optionsToConfig(
 	cfg.RaftLogGCInterval = opts.RaftLogGCInterval
 	cfg.RaftHeartbeatInterval = opts.RaftHeartbeatInterval
 	cfg.RaftElectionTimeout = opts.RaftElectionTimeout
-	cfg.MuxEnabled = true // mux is always on; the --mux flag was removed
-	cfg.MuxPoolSize = opts.MuxPoolSize
-	cfg.MuxFlushWindow = opts.MuxFlushWindow
 	// Phase 8 (S8-5 flip): the HTTP cluster transport is the DEFAULT; only an
 	// explicit --transport tcp opts back into the legacy TCP transport. Empty/default
 	// → HTTP (matches the cobra flag default), so an unset value never silently

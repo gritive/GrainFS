@@ -37,34 +37,6 @@ func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	return out
 }
 
-type borrowedRPCPayload struct {
-	data []byte
-	b    *flatbuffers.Builder
-}
-
-func (p borrowedRPCPayload) release() {
-	if p.b == nil {
-		return
-	}
-	p.b.Reset()
-	raftBuilderPool.Put(p.b)
-}
-
-func releaseBorrowedRPCPayloads(payloads []borrowedRPCPayload) {
-	for i := range payloads {
-		payloads[i].release()
-		payloads[i] = borrowedRPCPayload{}
-	}
-}
-
-func borrowAppendEntriesArgsPayload(args *AppendEntriesArgs) borrowedRPCPayload {
-	b := raftBuilderPool.Get()
-	root := buildAppendEntriesArgsFlatBuffer(b, args)
-	b.Finish(root)
-
-	return borrowedRPCPayload{data: b.FinishedBytes(), b: b}
-}
-
 func buildAppendEntriesArgsFlatBuffer(b *flatbuffers.Builder, args *AppendEntriesArgs) flatbuffers.UOffsetT {
 	entryOffs := make([]flatbuffers.UOffsetT, len(args.Entries))
 	for i := len(args.Entries) - 1; i >= 0; i-- {
@@ -100,12 +72,6 @@ func buildAppendEntriesArgsFlatBuffer(b *flatbuffers.Builder, args *AppendEntrie
 	pb.AppendEntriesArgsAddEntries(b, entriesVec)
 	pb.AppendEntriesArgsAddLeaderCommit(b, args.LeaderCommit)
 	return pb.AppendEntriesArgsEnd(b)
-}
-
-// encodeAppendEntriesReply serializes just the AppendEntriesReply FlatBuffer
-// (no RPCMessage envelope) for batch reply payloads.
-func encodeAppendEntriesReply(reply *AppendEntriesReply) ([]byte, error) {
-	return encodeRPCPayload(rpcTypeAppendEntriesReply, reply)
 }
 
 // encodeRPC serializes an RPC message (type + payload) using FlatBuffers.

@@ -106,9 +106,8 @@ func TestBootPeerConnections_EmptyPeersIsNoOp(t *testing.T) {
 	require.NoError(t, bootPeerConnections(ctx, state), "empty peer list is a clean no-op")
 }
 
-// TestBootGroupRaftMux_CreatesMux — phase constructs the mux from
-// state.clusterTransport. With MuxEnabled=false, EnableMux must NOT fire
-// (default mux mode).
+// TestBootGroupRaftMux_CreatesMux — phase constructs the group-raft dispatcher
+// from state.clusterTransport.
 func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
@@ -122,32 +121,9 @@ func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
 	require.NotNil(t, state.groupRaftMux, "state.groupRaftMux populated")
 }
 
-// TestBootGroupRaftMux_EnabledHonorsConfig — with MuxEnabled=true the
-// phase must wire EnableMux with the operator-supplied pool size + flush
-// window (the R+H Phase 2 prototype mode).
-func TestBootGroupRaftMux_EnabledHonorsConfig(t *testing.T) {
-	state := newBootState(Config{
-		DataDir:        t.TempDir(),
-		NodeID:         "n1",
-		ClusterKey:     "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		MuxEnabled:     true,
-		MuxPoolSize:    8,
-		MuxFlushWindow: 2 * time.Millisecond,
-	})
-	require.NoError(t, bootValidateConfig(state))
-	t.Cleanup(state.Cleanup)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NoError(t, bootGroupRaftMux(state))
-	require.NotNil(t, state.groupRaftMux)
-}
-
 // TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant —
 // the central invariant: groupRaftMux must be constructed BEFORE any code
-// that builds NewMetaTransportMux. After PR 3 the phase ordering makes
+// that builds NewMetaTransport. After PR 3 the phase ordering makes
 // this explicit (mux phase runs before any raft-meta phase). This test
 // asserts the bootState surface witnesses that ordering: after running the
 // transport phase trio, state.groupRaftMux is non-nil and observable to a
@@ -176,21 +152,16 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 }
 
 // TestBootGroupRaftMux_TCPAssemblesOverTCPTransport proves the serveruntime boot
-// PHASES assemble the raft mux over a TCP-constructed transport: bootClusterTransport
-// (TCP) → bootGroupRaftMux constructs the GroupRaftMux on the *TCPTransport and
-// runs EnableMux against it cleanly (i.e. *TCPTransport satisfies the muxDriverTransport
-// surface EnableMux→SetMuxConnHandler lands on). NOTE: MuxEnabled() here is a config
-// echo — the test injects MuxEnabled:true, which also drives the mux — so the
-// TCP-SPECIFIC signal is the *TCPTransport assertion + the clean assembly, NOT
-// mux-over-TCP behavior (that is the raft-layer carrier test raftv2_group_mux_tcp_test.go).
-// This is the in-process boot-assembly half; the full multi-node serveruntime TCP
-// cluster formation (invite-join + replicate + S3) rides the S5c-2 parity bench, which
-// stands up a real multi-node TCP cluster.
+// PHASES assemble the group-raft dispatcher over a TCP-constructed transport when
+// --transport tcp is selected: bootClusterTransport (TCP) → bootGroupRaftMux
+// constructs the GroupRaftMux on the *TCPTransport cleanly. (The raft mux subsystem
+// is gone; raft rides transport.Call over either transport. TCP remains selectable
+// until it is removed in a later slice.)
 func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
 	state := newBootState(Config{
 		DataDir: t.TempDir(), NodeID: "n1",
-		ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		MuxEnabled: true, MuxPoolSize: 4, MuxFlushWindow: 2 * time.Millisecond,
+		ClusterKey:       "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		UseHTTPTransport: false,
 	})
 	require.NoError(t, bootValidateConfig(state))
 	t.Cleanup(state.Cleanup)
@@ -203,6 +174,5 @@ func TestBootGroupRaftMux_TCPAssemblesOverTCPTransport(t *testing.T) {
 	require.True(t, isTCP, "transport phase must construct a *TCPTransport")
 
 	require.NoError(t, bootGroupRaftMux(state))
-	require.NotNil(t, state.groupRaftMux, "mux phase must construct the group raft mux over the TCP transport")
-	require.True(t, state.groupRaftMux.MuxEnabled(), "TCP raft must ride the mux carrier (mux enabled in boot)")
+	require.NotNil(t, state.groupRaftMux, "mux phase must construct the group raft dispatcher over the TCP transport")
 }

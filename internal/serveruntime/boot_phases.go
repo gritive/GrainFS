@@ -179,16 +179,6 @@ func bootValidateTimings(state *bootState) error {
 	if cfg.RaftElectionTimeout > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.RaftElectionTimeout < 3*cfg.RaftHeartbeatInterval {
 		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", cfg.RaftElectionTimeout, cfg.RaftHeartbeatInterval)
 	}
-	if cfg.MuxEnabled && cfg.MuxFlushWindow > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.MuxFlushWindow >= cfg.RaftHeartbeatInterval {
-		return fmt.Errorf("--mux-flush (%s) must be << --raft-heartbeat-interval (%s)", cfg.MuxFlushWindow, cfg.RaftHeartbeatInterval)
-	}
-	// Meta-raft heartbeat is fixed (not user-configurable) and shares the
-	// same coalescer flush window. If the flush window were larger than
-	// the meta heartbeat, meta hb dispatch could be delayed past the meta
-	// election deadline. Cap conservatively at < half of the meta heartbeat.
-	if cfg.MuxEnabled && cfg.MuxFlushWindow > 0 && cfg.MuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
-		return fmt.Errorf("--mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", cfg.MuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
-	}
 	return nil
 }
 

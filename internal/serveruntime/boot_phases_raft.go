@@ -67,10 +67,10 @@ func bootMetaRaftWiring(state *bootState) error {
 	state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))
 	state.metaRaft.SetCapabilityGate(state.capabilityGate)
 
-	// Mux-aware constructor: auto-registers metaRaft.Node() on groupRaftMux
-	// under the magic groupID "__meta__" so receiver-side mux dispatch is
-	// wired before any meta heartbeat hits the wire.
-	state.metaTransport = cluster.NewMetaTransportMux(state.clusterTransport, metaRaft.Node(), state.groupRaftMux)
+	// Meta-raft RPCs go over transport.Call (StreamMetaRaft); inbound dispatch is
+	// registered by the constructor. Receiver-side group dispatch stays on
+	// groupRaftMux (StreamGroupRaft) independently.
+	state.metaTransport = cluster.NewMetaTransport(state.clusterTransport, metaRaft.Node())
 	metaRaft.SetTransport(state.metaTransport)
 
 	exportStore, err := nfsexport.OpenStore(state.db)
