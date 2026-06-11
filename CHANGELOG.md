@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.551.0] - 2026-06-12
+
+### Removed
+
+- **Phase 8 N1: remove the raft mux subsystem; raft RPCs ride `transport.Call` only.**
+  The QUIC-era per-group/meta raft multiplexing layer — persistent `RaftConn` streams,
+  `HeartbeatCoalescer`, the `MuxCarrier` driver, the sender mux primary path, and the
+  `IsMuxFallbackErr` fallback — existed only to serve a mux that the HTTP transport (the
+  default since 0.0.550.0) never used: with HTTP active, boot already skipped `EnableMux`,
+  so every group/meta raft RPC already went through `transport.Call`. This deletes that
+  dormant machinery (~2,900 LOC net): `internal/raft/group_transport_mux.go`,
+  `heartbeat_coalescer.go`, `raft_conn.go`, `meta_mux_send.go`, the mux fields on
+  `GroupRaftMux`, the unused zero-copy codec helpers, and the now-orphaned mux/lane/carrier
+  tests. `GroupRaftSender` and `RaftV2MetaTransport` now have a single `Call` path; the
+  inbound dispatch (`handleRPC`, meta `StreamMetaRaft` handler) is unchanged.
+  **Behavior-neutral** on the HTTP default (the deleted path was already dormant at runtime);
+  the group-raft-over-HTTP integration test (`raftv2_group_http_test.go`) is the unchanged
+  safety net. The TCP transport remains selectable via `--transport tcp`, but for it this is a
+  steady-state change, NOT neutral: TCP raft now rides connection-per-RPC `Call` (a fresh TLS
+  handshake per RPC) as its only path instead of the persistent mux — correctness is preserved
+  (raft RPCs are independent request/response), but under real inter-node latency a cold
+  handshake could approach the 80ms `groupRaftRPCTimeout` and risk a spurious election. TCP is
+  EXPERIMENTAL and is removed in a later slice; HTTP (the default) reuses pooled keep-alive
+  conns, so its RPCs stay warm.
+- **BREAKING (operator flags): `--mux-pool` and `--mux-flush` are removed.** They tuned the
+  deleted mux carrier's stream pool and heartbeat-coalescing window. No replacement — raft no
+  longer multiplexes. (Already renamed from `--quic-mux-*` in S6; now gone entirely.) The
+  `MuxEnabled`/`MuxPoolSize`/`MuxFlushWindow` config fields and the `--mux-flush` timing
+  validation are removed with them.
+
 ## [0.0.550.0] - 2026-06-12
 
 ### Changed
