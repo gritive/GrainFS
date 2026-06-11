@@ -111,6 +111,7 @@ func (t *HTTPTransport) handleRPC(c context.Context, ctx *app.RequestContext) {
 		ctx.SetStatusCode(consts.StatusBadRequest)
 		return
 	}
+	t.inboundRPC[byte(typ)].Add(1)
 
 	// Inbound admission (nil-safe; mirrors TCP). Acquire blocks until a slot frees
 	// or the request context ends; an exhausted class surfaces as StatusOverloaded.

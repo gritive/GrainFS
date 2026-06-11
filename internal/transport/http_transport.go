@@ -59,6 +59,12 @@ type HTTPTransport struct {
 	inbox   chan *ReceivedMessage
 	traffic *TrafficLimiter
 
+	// inboundRPC counts handled inbound RPCs per StreamType (lock-free; StreamType
+	// is a byte). Observability + the positive carrier signal for the raft-over-HTTP
+	// integration test (proves raft RPCs actually traversed HTTP Call, not a vacuous
+	// "election succeeded"). Mirrors TCPTransport.InboundMuxSessionCount's intent.
+	inboundRPC [256]atomic.Uint64
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 }
@@ -199,6 +205,13 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 
 	go func() { _ = srv.Run() }()
 	return nil
+}
+
+// InboundRPCCount returns the number of inbound RPCs of the given StreamType the
+// server has handled. Test/observability accessor (the raft-over-HTTP integration
+// test asserts StreamGroupRaft > 0 as a positive carrier signal).
+func (t *HTTPTransport) InboundRPCCount(st StreamType) uint64 {
+	return t.inboundRPC[byte(st)].Load()
 }
 
 // LocalAddr returns the bound listen address.

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.546.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-3: control plane over HTTP** (still dormant). `HTTPTransport` now
+  satisfies the full `transport.ClusterTransport` interface (enforced by a compile-time
+  assertion), so the cluster control plane — per-group raft, meta-raft, InstallSnapshot,
+  forward/probe RPCs, and gossip — runs over it. Raft RPCs are request/response, so with
+  the raft mux **disabled** they ride `tr.Call` (an HTTP POST round-trip); Hertz's
+  keep-alive connection pool subsumes what the hand-rolled mux/corrID/lanes provided. The
+  mux-carrier methods are stubs (never invoked when mux is off).
+  - **Large control-plane payloads**: `Call`/`CallFlatBuffer`/`CallRead` send the request
+    payload in the request BODY (entries-bearing AppendEntries ~16 MiB, InstallSnapshot),
+    not a header — fixing a latent S8-2 flaw that only surfaced on the control plane.
+  - **Gossip**: `Send` (fire-and-forget) + `Receive` (inbox); `RecycleConns`/`ClosePeer`
+    recycle the client pool on rotation; `SetTrafficLimits` installs inbound admission.
+  - **Verified**: a 3-node group-raft cluster over HTTP (mux off) elects + replicates, with
+    a positive carrier signal (`InboundRPCCount(StreamGroupRaft) > 0`) and neuter-verified
+    (no HTTP serving → no election). **Performance is unverified** (no multi-node bench;
+    HTTP/1.1 is one-in-flight-per-conn vs the mux's corrID multiplexing, so it needs more
+    pooled connections under concurrency) — the same eyes-open bet as the flip. Legacy mode
+    also sends heartbeats individually (no coalescing).
+  - **Dormant**: not wired into boot (the production default transport is unchanged).
+
 ## [0.0.545.0] - 2026-06-11
 
 ### Added
