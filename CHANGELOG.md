@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.535.0] - 2026-06-11
+
+### Added
+
+- **Phase 6 S6-2: gossip load-signal supply chain completed (RequestsPerSec
+  producer) + leader-transfer gated off.** The gossip → BoundedLoads/balancer chain
+  was fully wired but had no production producer for `RequestsPerSec`: it was always
+  0, so BoundedLoads' hot-set was always empty and hot-node read reranking was
+  inert. Added a `RequestRateCollector` that samples the existing, label-sharded
+  `ServiceRequestsTotal` counter off the hot path (once per gossip interval) and
+  writes the derived rate via `NodeStatsStore.UpdateRequestStats`, mirroring the
+  disk collector. Gossip then propagates it cluster-wide. New gauge
+  `grainfs_node_requests_per_sec`. Adds zero per-request cost (the counter is
+  already incremented per request; only the periodic sample is new).
+
+### Changed
+
+- **Load-based meta-Raft leader transfer is now gated off by default.** Producing
+  `RequestsPerSec` would otherwise activate `selectPeerByLoad → TransferLeadership`
+  — a never-validated path that transfers control-plane (meta-Raft) leadership in
+  response to a data-plane S3 load signal, risking election churn. It is gated off
+  (`BalancerProposer.SetLeaderLoadTransferEnabled`, default false) and never fires
+  until validated and enabled in code. Disk-skew migration and hot-node read
+  reranking are unaffected. See `docs/operators/balancer.md`.
+
 ## [0.0.534.0] - 2026-06-11
 
 ### Added

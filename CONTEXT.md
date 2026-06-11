@@ -484,6 +484,17 @@ deployments intentionally collapse both planes onto one raft node
 (`WrapDistributedBackend`), so the boundary is meaningful for multi-group
 topologies with a dedicated meta-raft.
 
+Gossip carries soft state — per-node disk used/available and `RequestsPerSec` — off
+the critical path. `DiskCollector` and `RequestRateCollector` each own their field
+on the local node and write it to `NodeStatsStore`; gossip propagates it; consumers
+are write placement (capacity-weighted HRW), the balancer (disk-skew migration),
+and BoundedLoads (hot-node read reranking). The request-rate signal is sampled from
+the already-incremented service-request counter once per gossip interval, so it adds
+no per-request cost. Load-based **leader transfer** (`selectPeerByLoad →
+TransferLeadership`) is the one consumer gated off by default: moving control-plane
+meta-Raft leadership in response to a data-plane load signal is unvalidated and risks
+election churn (Phase 6 S6-2).
+
 ### Local Execution Decision
 
 The local execution decision is the ctx-aware sibling of storage op routing.

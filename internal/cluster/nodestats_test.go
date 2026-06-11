@@ -46,6 +46,29 @@ func TestNodeStatsStore_SetAndGet(t *testing.T) {
 	assert.Equal(t, 50.0, stats.RequestsPerSec)
 }
 
+func TestNodeStatsStore_UpdateRequestStats(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+
+	// No-op when the node is absent (mirrors UpdateDiskStats).
+	store.UpdateRequestStats("ghost", 42.0)
+	_, ok := store.Get("ghost")
+	assert.False(t, ok, "UpdateRequestStats must not create entries")
+
+	// Updates only RequestsPerSec, preserving disk fields.
+	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 60.0, DiskAvailBytes: 1024})
+	store.UpdateRequestStats("n1", 123.5)
+	got, ok := store.Get("n1")
+	require.True(t, ok)
+	assert.Equal(t, 123.5, got.RequestsPerSec)
+	assert.Equal(t, 60.0, got.DiskUsedPct, "disk fields must be preserved")
+	assert.Equal(t, uint64(1024), got.DiskAvailBytes)
+
+	// Negative rps is clamped to 0.
+	store.UpdateRequestStats("n1", -5.0)
+	got, _ = store.Get("n1")
+	assert.Equal(t, 0.0, got.RequestsPerSec)
+}
+
 func TestNodeStatsStore_GetMissing(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 

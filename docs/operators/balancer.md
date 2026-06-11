@@ -35,6 +35,21 @@ FSM.applyMigrateShard -> MigrationExecutor.Execute()
 If the migration channel is full, `GrainFS` persists the task under the BadgerDB
 `pending-migration:` keyspace and recovers it after restart.
 
+### Load signal (RequestsPerSec) and leader transfer
+
+Besides disk usage, each node measures its own request rate off the hot path (a
+30s rollup of the service-request counter) and writes it to the stats store, which
+gossip propagates cluster-wide. This `RequestsPerSec` signal feeds BoundedLoads
+hot-node read reranking and is exported as `grainfs_node_requests_per_sec`.
+
+**Load-based leader transfer is disabled by default.** Transferring the (control-
+plane) meta-Raft leadership in response to a (data-plane) S3 request-load signal is
+unvalidated and risks election churn, so the `selectPeerByLoad → TransferLeadership`
+path is gated off and never fires regardless of load. Disk-skew migration and
+hot-node read reranking are unaffected. The `--balancer-leader-tenure-min` flag and
+`grainfs_balancer_leader_transfers_total` metric below describe that gated path; it
+is inert until the behavior is validated and the gate is enabled in code.
+
 ## Configuration Flags
 
 | Flag | Default | Description |
@@ -101,7 +116,8 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
 | `grainfs_balancer_migrations_failed_total` | Failed migration count. | Investigate if nonzero and sustained. |
 | `grainfs_balancer_imbalance_pct` | Current `max-min` disk skew percentage. | Sustained value above trigger percentage. |
 | `grainfs_balancer_pending_tasks` | Number of `pending-migration:` keys. | Investigate if sustained above 10. |
-| `grainfs_balancer_leader_transfers_total` | Load-based leader transfer count. | Frequent increases indicate cluster instability or load concentration. |
+| `grainfs_balancer_leader_transfers_total` | Load-based leader transfer count. Stays `0` while the gate is off (default). | Frequent increases indicate cluster instability or load concentration (only possible once the gate is enabled). |
+| `grainfs_node_requests_per_sec` | Locally-measured request rate per node, gossiped as the load signal. | Large per-node skew indicates load concentration. |
 
 ## Alert Response
 
@@ -146,12 +162,15 @@ systemctl restart grainfs
 
 ### Alert: Leader Transfers Are Frequent
 
-If `grainfs_balancer_leader_transfers_total` grows frequently, one node is
-likely receiving too much request load.
+Load-based leader transfer is gated off by default, so
+`grainfs_balancer_leader_transfers_total` stays `0` and this alert cannot fire in a
+default deployment. If the gate has been enabled in code and the counter grows
+frequently, one node is likely receiving too much request load.
 
-1. Check each node's `requests_per_sec` through gossip logs or Prometheus.
+1. Check each node's `grainfs_node_requests_per_sec` in Prometheus or gossip logs.
 2. Look for hot bucket or key patterns in Prometheus metrics or gossip logs.
 3. Review client load-balancing configuration.
+4. Consider disabling the leader-transfer gate again until load is rebalanced.
 
 ## Tuning Guide
 
