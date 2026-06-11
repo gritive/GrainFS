@@ -105,12 +105,24 @@ func writeRespMeta(ctx *app.RequestContext, msg *Message) {
 // For a streaming (HandleRead) response it writes metadata + a small payload header
 // and streams the body; for all others it writes metadata to headers and the
 // (possibly large) payload to the response BODY.
-func (t *HTTPTransport) handleRPC(_ context.Context, ctx *app.RequestContext) {
+func (t *HTTPTransport) handleRPC(c context.Context, ctx *app.RequestContext) {
 	typ, id, err := parseReqMeta(ctx)
 	if err != nil {
 		ctx.SetStatusCode(consts.StatusBadRequest)
 		return
 	}
+
+	// Inbound admission (nil-safe; mirrors TCP). Acquire blocks until a slot frees
+	// or the request context ends; an exhausted class surfaces as StatusOverloaded.
+	t.mu.RLock()
+	limiter := t.traffic
+	t.mu.RUnlock()
+	release, aerr := limiter.Acquire(c, typ)
+	if aerr != nil {
+		writeRespMeta(ctx, NewErrorResponse(&Message{Type: typ, ID: id}, StatusOverloaded, aerr))
+		return
+	}
+	defer release()
 
 	// HandleBody (CallWithBody): the small FB envelope rides the X-Gfs-Payload
 	// header and the request body is the raw stream handed to the handler.
@@ -158,10 +170,19 @@ func (t *HTTPTransport) handleRPC(_ context.Context, ctx *app.RequestContext) {
 	sh := t.streamHandler
 	t.mu.RUnlock()
 	if sh != nil {
-		writeBufferedResp(ctx, req, sh(req))
-		return
+		if resp := sh(req); resp != nil {
+			writeBufferedResp(ctx, req, resp)
+			return
+		}
 	}
-	writeBufferedResp(ctx, req, NewErrorResponse(req, StatusError, errors.New("no handler for stream type")))
+	// No per-type handler and the catch-all (if any) returned nil → fire-and-forget
+	// gossip: deliver to the inbox (Receive) and reply with an empty OK frame so the
+	// sender's Send/doRPC sees a clean StatusOK. Mirrors TCPTransport's inbox path.
+	select {
+	case t.inbox <- &ReceivedMessage{From: ctx.RemoteAddr().String(), Message: req}:
+	case <-t.ctx.Done():
+	}
+	writeBufferedResp(ctx, req, NewResponse(req, nil))
 }
 
 // writeBufferedResp writes a non-streaming response: metadata to headers, the

@@ -54,6 +54,11 @@ type HTTPTransport struct {
 	router        *StreamRouter
 	streamHandler StreamHandler
 
+	// Control-plane surface (S8-3): inbox delivers fire-and-forget gossip
+	// (Send/Receive); traffic is the nil-safe inbound admission limiter.
+	inbox   chan *ReceivedMessage
+	traffic *TrafficLimiter
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 }
@@ -71,7 +76,12 @@ func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 	snap := NewIdentitySnapshot([][32]byte{spki}, cert, spki)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &HTTPTransport{ctx: ctx, cancel: cancel, router: NewStreamRouter()}
+	t := &HTTPTransport{
+		ctx:    ctx,
+		cancel: cancel,
+		router: NewStreamRouter(),
+		inbox:  make(chan *ReceivedMessage, 256),
+	}
 	// Seed the live identity (base PSK accepted, present = PSK cert), then hand
 	// ownership to the composer whose swap closure atomically restores it — exactly
 	// as NewTCPTransport does — so rotation/flip mutations recompute the snapshot.

@@ -300,6 +300,26 @@ func TestHTTPDataPlane_DefaultRetryIf_RefusesBodyStream(t *testing.T) {
 	}
 }
 
+// TestHTTPDataPlane_SendReceiveGossip: a fire-and-forget Send (no handler for the
+// type) is delivered to the peer's inbox (Receive), and Send sees a clean reply.
+func TestHTTPDataPlane_SendReceiveGossip(t *testing.T) {
+	srv, cli, addr := httpPair(t)
+	const gossipType = StreamReceipt // no handler registered → inbox path
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := cli.Send(ctx, addr, &Message{Type: gossipType, Payload: []byte("gossip")}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case rm := <-srv.Receive():
+		if rm.Message.Type != gossipType || string(rm.Message.Payload) != "gossip" {
+			t.Fatalf("inbox message mismatch: %+v", rm.Message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gossip Send did not reach the peer inbox (Receive)")
+	}
+}
+
 func TestHTTPDataPlane_RespMetaMissingFrame(t *testing.T) {
 	// A response with no X-Gfs-* headers must surface a clean error, not a panic.
 	resp := protocol.AcquireResponse()
