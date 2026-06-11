@@ -118,12 +118,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	cmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with transport stream-open cost.")
 	cmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
-	// Multiplexed raft RPCs are always on (idle-N8 measurement: 78pct drop
-	// in CPU samples, 17x drop in recvmsg syscalls vs the legacy per-message
-	// path; per-peer ALPN fallback to the legacy path is retained for older
-	// binaries). These two knobs tune the always-on mux path.
-	cmd.Flags().Int("mux-pool", 4, "stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining)")
-	cmd.Flags().Duration("mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval)")
 	cmd.Flags().String("transport", "http", "EXPERIMENTAL cluster transport: http (default; Phase 8 streaming HTTP over SPKI-pinned mTLS) or tcp (legacy)")
 	cmd.Flags().Bool("audit-iceberg", true, "enable audit log lake: S3 ops → Iceberg table on grainfs-audit bucket")
 	cmd.Flags().Duration("audit-commit-interval", 60*time.Second, "how often the audit committer flushes the ring buffer to Iceberg")

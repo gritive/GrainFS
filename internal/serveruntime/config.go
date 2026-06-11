@@ -64,12 +64,9 @@ type Config struct {
 	RaftLogGCInterval     time.Duration
 	RaftHeartbeatInterval time.Duration
 	RaftElectionTimeout   time.Duration
-	MuxEnabled            bool
-	MuxPoolSize           int
-	MuxFlushWindow        time.Duration
 	// UseHTTPTransport selects the Phase 8 HTTP cluster transport instead of the TCP
-	// transport (EXPERIMENTAL, dormant — default false = TCP). When true the raft mux
-	// is forced off (raft rides HTTP Call; the HTTP transport has no mux carrier).
+	// transport (EXPERIMENTAL — default false = TCP). Raft RPCs ride transport.Call
+	// over either transport.
 	UseHTTPTransport bool
 
 	// Storage / EC

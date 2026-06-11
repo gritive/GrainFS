@@ -140,25 +140,10 @@ func TestBootValidateTimings_RejectsTooFastElection(t *testing.T) {
 	assert.Contains(t, err.Error(), "must be >= 3")
 }
 
-// TestBootValidateTimings_RejectsFlushNotMuchSmallerThanHeartbeat — quic mux
-// flush window must be << raft heartbeat for hb to dispatch on time.
-func TestBootValidateTimings_RejectsFlushNotMuchSmallerThanHeartbeat(t *testing.T) {
-	state := newBootState(Config{
-		MuxEnabled:            true,
-		MuxFlushWindow:        100 * time.Millisecond,
-		RaftHeartbeatInterval: 100 * time.Millisecond, // not <<
-	})
-	err := bootValidateTimings(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be <<")
-}
-
 // TestBootValidateTimings_AcceptsValidConfig — happy path: 200ms hb +
-// 1s election + 2ms flush satisfies all three bounds.
+// 1s election satisfies the election/heartbeat bound.
 func TestBootValidateTimings_AcceptsValidConfig(t *testing.T) {
 	state := newBootState(Config{
-		MuxEnabled:            true,
-		MuxFlushWindow:        2 * time.Millisecond,
 		RaftHeartbeatInterval: 200 * time.Millisecond,
 		RaftElectionTimeout:   1 * time.Second,
 	})

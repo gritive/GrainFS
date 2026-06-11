@@ -147,22 +147,10 @@ func bootPeerConnections(ctx context.Context, state *bootState) error {
 	return nil
 }
 
-// bootGroupRaftMux constructs the GroupRaftMux that multiplexes per-group
-// raft RPCs over StreamGroupRaft. Must run BEFORE NewMetaTransportMux so
-// the meta-raft transport can auto-register its node on the mux at
-// construction time. If the mux were created later, a startup race would let
-// inbound meta calls hit "mux: unknown group __meta__" and stall meta
-// election (codex P1 #3).
+// bootGroupRaftMux constructs the GroupRaftMux that dispatches per-group raft
+// RPCs over StreamGroupRaft (one transport.Call per RPC). Must run before the
+// meta-raft transport so the group-raft inbound handler is registered.
 func bootGroupRaftMux(state *bootState) error {
 	state.groupRaftMux = raft.NewGroupRaftMux(state.clusterTransport)
-	// The HTTP transport has no mux carrier (raft rides HTTP Call); never EnableMux
-	// for it, regardless of MuxEnabled (GetOrConnectMux would error and fall back).
-	if state.cfg.MuxEnabled && !state.cfg.UseHTTPTransport {
-		state.groupRaftMux.EnableMux(state.cfg.MuxPoolSize, state.cfg.MuxFlushWindow)
-		log.Info().
-			Int("pool", state.cfg.MuxPoolSize).
-			Dur("flush", state.cfg.MuxFlushWindow).
-			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
-	}
 	return nil
 }

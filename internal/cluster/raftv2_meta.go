@@ -36,31 +36,14 @@ const (
 	// v2MetaSnapshotTimeout mirrors v1's metaRaftSnapshotTimeout — 60s
 	// budget for large InstallSnapshot payloads.
 	v2MetaSnapshotTimeout = 60 * time.Second
-	// v2MetaMuxAttemptTimeout caps the mux-path attempt so a half-open mux call
-	// cannot consume the whole legacy budget. Mirrors v1's metaMuxAttemptTimeout:
-	// 200ms leaves the 500ms v2MetaRPCTimeout intact for the Call fallback.
-	v2MetaMuxAttemptTimeout = 200 * time.Millisecond
 )
-
-// metaMuxSender is the subset of *raft.GroupRaftMux the meta transport uses to
-// ride the shared persistent carrier instead of connection-per-RPC Call. nil
-// disables the mux fast path (Call-only, the pre-fix behavior).
-type metaMuxSender interface {
-	MuxEnabled() bool
-	SendMetaAppendEntries(ctx context.Context, peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)
-	SendMetaRequestVote(ctx context.Context, peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
-}
 
 // RaftV2MetaTransport bridges meta-Raft RPCs over the cluster transport for raft v2. It
 // registers an inbound handler on transport.StreamMetaRaft and exposes the
-// three outbound Send* methods that satisfy cluster.MetaTransport.
+// outbound Send* methods (one transport.Call per RPC) that satisfy cluster.MetaTransport.
 type RaftV2MetaTransport struct {
 	transport clusterRPCTransport
 	node      RaftNode
-	// mux, when non-nil and enabled, carries AppendEntries/RequestVote over the
-	// shared persistent mux carrier (one TLS handshake per peer, reused) instead
-	// of transport.Call (a fresh handshake per RPC). nil = Call-only.
-	mux metaMuxSender
 }
 
 // compile-time check: RaftV2MetaTransport must satisfy MetaTransport.
@@ -76,19 +59,6 @@ func NewRaftV2MetaTransport(tr clusterRPCTransport, node RaftNode) *RaftV2MetaTr
 // SendRequestVote mirrors v1's MetaRaftTransport.SendRequestVote — the
 // wire envelope uses the shared v2 codec.
 func (m *RaftV2MetaTransport) SendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-	if m.mux != nil && m.mux.MuxEnabled() {
-		muxCtx, cancel := context.WithTimeout(context.Background(), v2MetaMuxAttemptTimeout)
-		reply, err := m.mux.SendMetaRequestVote(muxCtx, peer, args)
-		cancel()
-		if err == nil {
-			return reply, nil
-		}
-		if !raft.IsMuxFallbackErr(err) {
-			return nil, fmt.Errorf("meta RequestVote to %s: %w", peer, err)
-		}
-		// fall through to legacy Call with a fresh ctx
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), v2MetaRPCTimeout)
 	defer cancel()
 
@@ -112,19 +82,6 @@ func (m *RaftV2MetaTransport) SendRequestVote(peer string, args *raft.RequestVot
 
 // SendAppendEntries mirrors v1's MetaRaftTransport.SendAppendEntries.
 func (m *RaftV2MetaTransport) SendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-	if m.mux != nil && m.mux.MuxEnabled() {
-		muxCtx, cancel := context.WithTimeout(context.Background(), v2MetaMuxAttemptTimeout)
-		reply, err := m.mux.SendMetaAppendEntries(muxCtx, peer, args)
-		cancel()
-		if err == nil {
-			return reply, nil
-		}
-		if !raft.IsMuxFallbackErr(err) {
-			return nil, fmt.Errorf("meta AppendEntries to %s: %w", peer, err)
-		}
-		// fall through to legacy Call with a fresh ctx
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), v2MetaRPCTimeout)
 	defer cancel()
 
