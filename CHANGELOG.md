@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.540.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-4c (internal, dormant): version-aware generation probe for
+  versioned and range reads.** `GetObjectVersion`, `HeadObjectVersion`, `ReadAt`, and
+  `ReadAtObject` now route through the S7-4b `probeRead` helper, so a specific
+  version or a range read of an object placed in an older topology generation is
+  found by walking generations newest-first (advancing only on a definitive
+  not-found, fail-closed on any other error). With no generations recorded (the
+  default) each makes exactly one attempt against the same target as before —
+  byte-identical. `ListObjectVersions` cross-generation union is the scatter-gather
+  concern handled in S7-5; conditional PUT (If-Match/If-None-Match) is already
+  covered because its server-side current-version check reads through the now
+  generation-aware `HeadObject`/`GetObject`. In-place metadata writes
+  (SetObjectACL/SetObjectTags/DeleteObjectVersion) stay single-target — also
+  byte-identical at a single generation; their write-to-the-owning-generation
+  behavior is deferred to the S7-6 add protocol.
+
 ## [0.0.539.0] - 2026-06-11
 
 ### Added

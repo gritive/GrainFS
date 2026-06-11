@@ -787,19 +787,35 @@ func (c *ClusterCoordinator) GetObjectVersion(
 	bucket, key, versionID string,
 ) (io.ReadCloser, *storage.Object, error) {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, versionID)
-	if err != nil {
-		return nil, nil, err
-	}
 	// S4-4c: index-free (see GetObject). Local serve only when authoritative;
 	// otherwise forward to the placement-group leader.
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, nil, err
-	} else if gb != nil {
-		return gb.GetObjectVersion(bucket, key, versionID)
-	}
-	args := buildGetObjectVersionArgs(bucket, key, versionID)
-	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
+	// S7-4c: a specific versionID lives in exactly one generation; probeRead
+	// walks generations newest-first until the version is found (advancing only
+	// on not-found, fail-closed otherwise). Single generation → one attempt.
+	var (
+		rc  io.ReadCloser
+		obj *storage.Object
+	)
+	err := c.probeRead(bucket, key, versionID, func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			r, o, e := gb.GetObjectVersion(bucket, key, versionID)
+			if e != nil {
+				return e
+			}
+			rc, obj = r, o
+			return nil
+		}
+		args := buildGetObjectVersionArgs(bucket, key, versionID)
+		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
+		if e != nil {
+			return e
+		}
+		rc, obj = r, o
+		return nil
+	})
+	return rc, obj, err
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
@@ -833,17 +849,29 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 
 func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, versionID)
-	if err != nil {
-		return nil, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.HeadObjectVersion(bucket, key, versionID)
-	}
-	args := buildHeadObjectVersionArgs(bucket, key, versionID)
-	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
+	// S7-4c: probe generations newest-first for the specific version (one
+	// attempt at a single generation).
+	var obj *storage.Object
+	err := c.probeRead(bucket, key, versionID, func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			o, e := gb.HeadObjectVersion(bucket, key, versionID)
+			if e != nil {
+				return e
+			}
+			obj = o
+			return nil
+		}
+		args := buildHeadObjectVersionArgs(bucket, key, versionID)
+		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
+		if e != nil {
+			return e
+		}
+		obj = o
+		return nil
+	})
+	return obj, err
 }
 
 func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key string) error {
@@ -1266,33 +1294,39 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return 0, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return 0, err
-	} else if gb != nil {
-		return gb.ReadAt(ctx, bucket, key, offset, buf)
-	}
-
-	if c.forward == nil {
-		return 0, ErrCoordinatorNoRouter
-	}
-	if c.forward.readDialer == nil {
-		rc, _, err := c.GetObject(ctx, bucket, key)
-		if err != nil {
-			return 0, err
+	// S7-4c: probe generations newest-first (one attempt at a single
+	// generation). The no-readDialer fallback delegates to GetObject, which
+	// probes on its own; the local and forward-readAt paths route per target.
+	var n int
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			var e error
+			n, e = gb.ReadAt(ctx, bucket, key, offset, buf)
+			return e
 		}
-		defer rc.Close()
-		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
-			return 0, err
+		if c.forward == nil {
+			return ErrCoordinatorNoRouter
 		}
-		return io.ReadFull(rc, buf)
-	}
-
-	args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
-	return c.forwardRuntime().readAt(ctx, target, args, buf)
+		if c.forward.readDialer == nil {
+			rc, _, e := c.GetObject(ctx, bucket, key)
+			if e != nil {
+				return e
+			}
+			defer rc.Close()
+			if _, e := io.CopyN(io.Discard, rc, offset); e != nil {
+				return e
+			}
+			n, e = io.ReadFull(rc, buf)
+			return e
+		}
+		args := buildReadAtArgs(bucket, key, offset, int64(len(buf)))
+		var e error
+		n, e = c.forwardRuntime().readAt(ctx, target, args, buf)
+		return e
+	})
+	return n, err
 }
 
 func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
@@ -1305,16 +1339,24 @@ func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key strin
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return 0, err
-	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return 0, err
-	} else if gb != nil {
-		return gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
-	}
-	return c.ReadAt(ctx, bucket, key, offset, buf)
+	// S7-4c: probe generations newest-first; non-authoritative falls back to
+	// ReadAt (which probes too). One attempt at a single generation.
+	var n int
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		gb, rerr := c.runtimeState().localExec.ResolveRead(ctx, target)
+		if rerr != nil {
+			return rerr
+		}
+		if gb == nil {
+			var e error
+			n, e = c.ReadAt(ctx, bucket, key, offset, buf)
+			return e
+		}
+		var e error
+		n, e = gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+		return e
+	})
+	return n, err
 }
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
