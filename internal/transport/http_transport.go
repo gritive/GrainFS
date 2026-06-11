@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -11,9 +12,12 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	hzclient "github.com/cloudwego/hertz/pkg/app/client"
+	"github.com/cloudwego/hertz/pkg/app/client/retry"
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
+	errs "github.com/cloudwego/hertz/pkg/common/errors"
 	"github.com/cloudwego/hertz/pkg/network"
 	"github.com/cloudwego/hertz/pkg/network/standard"
+	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
@@ -333,14 +337,19 @@ func (c *idleReadConn) ToHertzError(err error) error {
 // httpClient lazily builds the Hertz client. The custom dialer supplies a fresh
 // SPKI-pinned tls.Config per dial; WithResponseBodyStream(true) is set for S8-2.
 //
-// No client retry is configured, deliberately: CallWithBody streams a ONE-SHOT
-// request body (the put pipeline's pipe reader) that cannot be re-sent. Re-sending
-// an exhausted stream is the S3b "retry-after-body" landmine. Three independent
-// Hertz v0.10.4 layers make this safe: (1) default MaxAttemptTimes is 1 — no retry
-// loop without an explicit RetryConfig; (2) the RPC is POST, which DefaultRetryIf
-// treats as non-idempotent; (3) DefaultRetryIf returns false outright for any
-// IsBodyStream() request. A future RetryConfig MUST preserve (3) — pinned by
-// TestHTTPDataPlane_DefaultRetryIf_RefusesBodyStream.
+// Retry policy (httpRetryIf): the client retries ONCE on ErrBadPoolConn. HTTP keep-alive
+// pools connections, and a peer routinely reaps an idle pooled conn ("Apache and nginx
+// usually do this", per Hertz); the TCP→HTTP default flip makes this production-relevant
+// (TCP's connection-per-RPC Call never pooled, so it never hit a reaped conn). ErrBadPoolConn
+// is raised when the pooled conn was found closed BEFORE delivery, so the retry is a first
+// delivery on a fresh conn — provably replay-safe for every Call-path RPC type (raft RPCs,
+// reads, AND the non-idempotent proposal forwards CallPooled carries). Retry refuses
+// IsBodyStream requests, so a CallWithBody one-shot pipe body is never re-sent (the S3b
+// "retry-after-body" landmine); buffered Call/CallRead payloads use SetBody (rewindable). The
+// retry delay is 0 (no DelayPolicy) so both attempts fit the caller's RPC ctx. This retry does
+// NOT fix the pre-existing node-id==raft-addr join deadlock (TODOS.md §6) — that is a
+// transport-independent boot-ordering bug, unrelated to keep-alive. httpRetryIf's body-stream
+// refusal is pinned by TestHTTPDataPlane_RetryIf_RefusesBodyStream.
 func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -350,12 +359,38 @@ func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 	c, err := hzclient.NewClient(
 		hzclient.WithDialer(&httpFreshDialer{inner: standard.NewDialer(), build: t.buildClientTLS, idle: t.clientBodyTimeout}),
 		hzclient.WithResponseBodyStream(true),
+		hzclient.WithRetryConfig(retry.WithMaxAttemptTimes(2)), // 1 retry; delay 0 (no DelayPolicy)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("http client: %w", err)
 	}
+	c.SetRetryIfFunc(httpRetryIf)
 	t.client = c
 	return c, nil
+}
+
+// httpRetryIf decides whether to retry a failed request. It retries idempotent
+// raft/control RPCs when a POOLED keep-alive connection was closed by the peer
+// before the request was delivered, but NEVER retries a streamed request body
+// (CallWithBody) — re-sending an exhausted one-shot stream is the S3b
+// "retry-after-body" landmine.
+func httpRetryIf(req *protocol.Request, _ *protocol.Response, err error) bool {
+	if req.IsBodyStream() {
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	// ONLY ErrBadPoolConn: Hertz raises it when a pooled keep-alive conn was found closed
+	// BEFORE the request was delivered, so the retry is a first delivery on a fresh conn —
+	// provably replay-safe for ALL Call-path RPC types, including the non-idempotent proposal
+	// forwards CallPooled carries (ShardService.SendRequest forwards every PUT's index/group
+	// proposal). We deliberately do NOT match Hertz's errConnectionClosed ("server closed
+	// connection before returning the first response byte"): that fires AFTER the request was
+	// written, so the server may have processed it before closing, and replaying a proposal
+	// forward there could double-propose. That ambiguous case stays a transient RPC error
+	// (raft retries next tick; the S3 client retries the PUT/GET) — the safe behavior.
+	return errors.Is(err, errs.ErrBadPoolConn)
 }
 
 // Ping does one liveness round-trip over the SPKI-pinned mTLS HTTP channel

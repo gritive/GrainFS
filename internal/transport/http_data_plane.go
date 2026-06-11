@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -229,8 +228,12 @@ func (t *HTTPTransport) doRPC(ctx context.Context, addr string, req *Message, bo
 		}
 		hreq.SetBodyStream(hertzBodyReader{r: body}, -1)
 	} else if len(req.Payload) > 0 {
-		// Call/CallFlatBuffer/CallRead: payload (possibly large) is the request body.
-		hreq.SetBodyStream(bytes.NewReader(req.Payload), len(req.Payload))
+		// Call/CallFlatBuffer/CallRead: payload (possibly large — entries-AE,
+		// InstallSnapshot) is the request body. SetBody (NOT SetBodyStream) keeps it
+		// REWINDABLE so the client can re-send it on a stale-keep-alive-conn retry
+		// (httpRetryIf): the payload is already a []byte in memory, so this buffers
+		// nothing extra, and a streamed body would set IsBodyStream → un-retryable.
+		hreq.SetBody(req.Payload)
 	}
 
 	if err := c.Do(ctx, hreq, hresp); err != nil {

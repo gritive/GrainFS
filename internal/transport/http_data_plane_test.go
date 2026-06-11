@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	errs "github.com/cloudwego/hertz/pkg/common/errors"
 	"github.com/cloudwego/hertz/pkg/protocol"
-	protoclient "github.com/cloudwego/hertz/pkg/protocol/client"
 )
 
 const testStreamType = StreamShardWriteBody
@@ -286,17 +286,35 @@ func TestHTTPDataPlane_LargeCallPayload(t *testing.T) {
 // makes CallWithBody's one-shot streamed body safe: a streamed-body request is never
 // retried. RED if a Hertz upgrade changes DefaultRetryIf (then a streamed shard write
 // could be re-sent after the body was already consumed — the S3b landmine).
-func TestHTTPDataPlane_DefaultRetryIf_RefusesBodyStream(t *testing.T) {
-	req := protocol.AcquireRequest()
-	defer protocol.ReleaseRequest(req)
-	req.SetMethod("POST")
-	req.SetRequestURI("https://peer/_grainfs/rpc")
-	req.SetBodyStream(&limitedZeroReader{remaining: 1 << 20}, -1)
-	if !req.IsBodyStream() {
+// TestHTTPDataPlane_RetryIf_RefusesBodyStream pins the load-bearing safety of the
+// custom retry policy: httpRetryIf must NEVER retry a streamed-body request
+// (CallWithBody's one-shot pipe body — the S3b "retry-after-body" landmine), even
+// on a stale-pooled-conn error it would otherwise retry. A buffered (SetBody)
+// request on the same error IS retried.
+func TestHTTPDataPlane_RetryIf_RefusesBodyStream(t *testing.T) {
+	stream := protocol.AcquireRequest()
+	defer protocol.ReleaseRequest(stream)
+	stream.SetMethod("POST")
+	stream.SetRequestURI("https://peer/_grainfs/rpc")
+	stream.SetBodyStream(&limitedZeroReader{remaining: 1 << 20}, -1)
+	if !stream.IsBodyStream() {
 		t.Fatal("precondition: request must be a body stream")
 	}
-	if protoclient.DefaultRetryIf(req, protocol.AcquireResponse(), nil) {
-		t.Fatal("DefaultRetryIf must refuse to retry a streamed-body request (S3b safety)")
+	if httpRetryIf(stream, protocol.AcquireResponse(), errs.ErrBadPoolConn) {
+		t.Fatal("httpRetryIf must refuse to retry a streamed-body request even on ErrBadPoolConn (S3b safety)")
+	}
+
+	// A buffered (rewindable) request on the same stale-conn error must retry.
+	buffered := protocol.AcquireRequest()
+	defer protocol.ReleaseRequest(buffered)
+	buffered.SetMethod("POST")
+	buffered.SetRequestURI("https://peer/_grainfs/rpc")
+	buffered.SetBody([]byte("raft-rpc-envelope"))
+	if !httpRetryIf(buffered, protocol.AcquireResponse(), errs.ErrBadPoolConn) {
+		t.Fatal("httpRetryIf must retry a buffered request on ErrBadPoolConn (the stale-keep-alive fix)")
+	}
+	if httpRetryIf(buffered, protocol.AcquireResponse(), nil) {
+		t.Fatal("httpRetryIf must NOT retry on a nil error")
 	}
 }
 
