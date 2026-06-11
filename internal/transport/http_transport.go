@@ -22,8 +22,9 @@ import (
 // transport and vice-versa.
 const httpALPN = "grainfs-http-v1"
 
-// httpPingPath is the scaffold-only liveness route that proves the secure HTTP
-// channel end-to-end (S8-1). S8-2 replaces it with the /shard data-plane routes.
+// httpPingPath is the liveness route that proves the secure HTTP channel
+// end-to-end (S8-1). S8-2 added the generic /_grainfs/rpc data-plane endpoint
+// alongside it; the ping route remains a cheap reachability probe.
 const httpPingPath = "/_grainfs/ping"
 
 // HTTPTransport is the dormant Phase 8 node-to-node transport: a Hertz HTTP server
@@ -47,6 +48,12 @@ type HTTPTransport struct {
 	identity atomic.Pointer[IdentitySnapshot]
 	composer *identityComposer
 
+	// Data-plane RPC routing (S8-2): reuses the shared StreamRouter, dispatching
+	// by StreamType exactly as the TCP transport does. streamHandler is the
+	// catch-all for types with no per-type handler.
+	router        *StreamRouter
+	streamHandler StreamHandler
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 }
@@ -64,7 +71,7 @@ func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 	snap := NewIdentitySnapshot([][32]byte{spki}, cert, spki)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &HTTPTransport{ctx: ctx, cancel: cancel}
+	t := &HTTPTransport{ctx: ctx, cancel: cancel, router: NewStreamRouter()}
 	// Seed the live identity (base PSK accepted, present = PSK cert), then hand
 	// ownership to the composer whose swap closure atomically restores it — exactly
 	// as NewTCPTransport does — so rotation/flip mutations recompute the snapshot.
@@ -173,6 +180,7 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.GET(httpPingPath, func(c context.Context, rc *app.RequestContext) {
 		rc.SetStatusCode(consts.StatusOK)
 	})
+	srv.POST(httpRPCPath, t.handleRPC)
 
 	t.mu.Lock()
 	t.srv = srv
@@ -214,6 +222,15 @@ func (d *httpFreshDialer) AddTLS(conn network.Conn, _ *tls.Config) (network.Conn
 
 // httpClient lazily builds the Hertz client. The custom dialer supplies a fresh
 // SPKI-pinned tls.Config per dial; WithResponseBodyStream(true) is set for S8-2.
+//
+// No client retry is configured, deliberately: CallWithBody streams a ONE-SHOT
+// request body (the put pipeline's pipe reader) that cannot be re-sent. Re-sending
+// an exhausted stream is the S3b "retry-after-body" landmine. Three independent
+// Hertz v0.10.4 layers make this safe: (1) default MaxAttemptTimes is 1 — no retry
+// loop without an explicit RetryConfig; (2) the RPC is POST, which DefaultRetryIf
+// treats as non-idempotent; (3) DefaultRetryIf returns false outright for any
+// IsBodyStream() request. A future RetryConfig MUST preserve (3) — pinned by
+// TestHTTPDataPlane_DefaultRetryIf_RefusesBodyStream.
 func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

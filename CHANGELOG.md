@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.545.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-2: data-plane RPC over streaming HTTP** (still dormant). `HTTPTransport`
+  now carries the shard data-plane RPC surface — `Call`, `CallFlatBuffer`, `CallWithBody`
+  (streaming request body), `CallRead` (streaming response body), plus the
+  `Handle`/`HandleBody`/`HandleRead`/`SetStreamHandler` server side — mirroring the TCP
+  transport. The `transport.Message` frame travels in `X-Gfs-*` headers; bodies are raw
+  byte streams. A generic `POST /_grainfs/rpc` endpoint routes by `StreamType` via the
+  shared `StreamRouter` (the transport never parses the shard envelope).
+  - **Streaming, not buffering:** large shard bodies stream both ways
+    (`WithStreamBody`/`req.SetBodyStream` + `WithResponseBodyStream`). Verified by a
+    256 MiB round-trip whose `TotalAlloc` delta stays under body/4 — mutation-verified
+    (disabling streaming or buffering the body turns it RED).
+  - **TCP parity:** RPC-level `StatusError`/`StatusOverloaded` map to a Go error
+    (`checkResponseStatus`); `CallRead` bodies have a reset-per-Read idle deadline; the
+    buffered response read is capped at 64 MiB. No client retry of streamed bodies
+    (Hertz `DefaultRetryIf` refuses body streams + POST; pinned by test).
+  - **Dormant:** not wired into boot; the production default transport is unchanged.
+
 ## [0.0.544.0] - 2026-06-11
 
 ### Added
