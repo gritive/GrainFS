@@ -72,6 +72,60 @@ func NewOpRouter(
 	}
 }
 
+// applyGenerations replaces the placement with one built from the FSM topology
+// generation list when non-empty. An empty list (the default, single-generation
+// case) leaves the live-candidate-set placement built at construction untouched
+// — byte-identical to legacy routing. Called by the coordinator's rebuild after
+// NewOpRouter so the generation source stays out of the constructor signature.
+func (r *OpRouter) applyGenerations(gens []placementGeneration) {
+	if len(gens) > 0 {
+		r.placement = newGenerationPlacementFromList(gens)
+	}
+}
+
+// RouteObjectReadGenerations resolves an object read to one placement-group
+// target per topology generation, newest-first (S7-4 generation probe). At a
+// single generation it returns exactly one target equal to RouteObjectRead's,
+// so the read path is byte-identical. Internal buckets and the empty-candidate
+// bootstrap case mirror RouteObjectRead. Targets whose group cannot be resolved
+// are skipped; an all-unresolved result returns the first such error.
+func (r *OpRouter) RouteObjectReadGenerations(bucket, key, versionID string) ([]RouteTarget, error) {
+	if storage.IsInternalBucket(bucket) {
+		target, err := r.RouteBucket(bucket)
+		if err != nil {
+			return nil, err
+		}
+		return []RouteTarget{target}, nil
+	}
+	genGroupIDs := r.placement.readGenerationGroupIDs()
+	if len(genGroupIDs) == 0 {
+		return nil, ErrObjectIndexRequired
+	}
+	targets := make([]RouteTarget, 0, len(genGroupIDs))
+	var firstErr error
+	for _, ids := range genGroupIDs {
+		if len(ids) == 0 {
+			continue
+		}
+		groupID := groupIDForObject(bucket, key, ids)
+		target, err := r.routeGroup(groupID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, ErrObjectIndexRequired
+	}
+	return targets, nil
+}
+
 func (r *OpRouter) RouteBucket(bucket string) (RouteTarget, error) {
 	if r.router == nil {
 		return RouteTarget{}, ErrCoordinatorNoRouter

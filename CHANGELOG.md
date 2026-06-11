@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.539.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-4a+4b (internal, dormant): generation-aware read routing + probe.**
+  `OpRouter` now consumes the FSM topology-generation registry (via the coordinator's
+  `rebuild`): when generations are recorded, write/read placement uses the latest
+  generation's pinned group set, and `RouteObjectReadGenerations` yields one target per
+  generation newest-first. The coordinator's `GetObject`/`HeadObject` route through a new
+  `probeRead` helper that tries each generation newest-first, advancing to an older
+  generation ONLY on a definitive `ErrObjectNotFound` and returning any other error
+  immediately (fail-closed — a transiently-unavailable older-generation group never
+  masquerades as a 404). With no generations recorded (the default) every path makes
+  exactly one attempt against the same target as before, so this is byte-identical and
+  behavior-neutral. No production code records a generation yet (the first append is the
+  S7-6 flip). Versioned reads, `ListObjectVersions`, and conditional PUT get
+  generation-aware semantics in S7-4c; cross-group `LIST` fan-out is S7-5. RED-on-revert
+  tests cover single-generation byte-identity, newest-first ordering, probe fallthrough,
+  and fail-closed.
+
 ## [0.0.538.0] - 2026-06-11
 
 ### Added

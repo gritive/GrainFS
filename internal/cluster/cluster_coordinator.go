@@ -211,6 +211,13 @@ func (c *ClusterCoordinator) rebuild() {
 		c.selfID,
 		c.selfAliases,
 	)
+	// S7-4: consume the FSM topology-generation registry when present. Empty
+	// (the default) leaves the live-candidate-set placement untouched →
+	// byte-identical. The MetaFSM implements placementGenerationSource; test
+	// stubs typically do not, so they stay on the single-generation path.
+	if src, ok := c.meta.(placementGenerationSource); ok {
+		opRouter.applyGenerations(src.PlacementGenerations())
+	}
 	localExec := NewLocalExecution(dataGroupManagerLocalBackend{m: c.groups})
 	if c.runtime.Load() == nil {
 		c.opRouter = opRouter
@@ -261,6 +268,52 @@ func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (R
 		}
 	}
 	return target, err
+}
+
+// placementGenerationSource is the optional MetaFSM capability that exposes the
+// topology-generation registry. OpRouter consumes it via the coordinator
+// (rebuild) rather than widening ShardGroupSource.
+type placementGenerationSource interface {
+	PlacementGenerations() []placementGeneration
+}
+
+// routeReadGenerations resolves an object read to one target per topology
+// generation, newest-first (S7-4 probe order). At a single generation it returns
+// the same single target routeReadOrBucket would, preserving the bootstrap
+// bucket-route fallback. The returned slice is non-empty on success.
+func (c *ClusterCoordinator) routeReadGenerations(bucket, key, versionID string) ([]RouteTarget, error) {
+	targets, err := c.runtimeState().opRouter.RouteObjectReadGenerations(bucket, key, versionID)
+	if errors.Is(err, storage.ErrObjectNotFound) || errors.Is(err, ErrObjectIndexRequired) {
+		if fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key); fallbackErr == nil {
+			return []RouteTarget{fallback}, nil
+		}
+	}
+	return targets, err
+}
+
+// probeRead runs do against each topology-generation target newest-first,
+// advancing to the next (older) generation ONLY on a definitive
+// ErrObjectNotFound. Any other error (group unavailable, transport failure) is
+// returned immediately (fail-closed) so a transiently-down older-generation
+// group never masquerades as a 404 for an object that exists. At a single
+// generation this is exactly one attempt — byte-identical to legacy routing.
+func (c *ClusterCoordinator) probeRead(bucket, key, versionID string, do func(target RouteTarget) error) error {
+	targets, err := c.routeReadGenerations(bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, target := range targets {
+		err := do(target)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return err
+		}
+		lastErr = err
+	}
+	return lastErr
 }
 
 // routeWriteOrBucket falls back to RouteBucket for single-node wiring (no EC).
@@ -695,10 +748,6 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // response body bytes after the metadata reply; legacy tests can still use the
 // single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return nil, nil, err
-	}
 	// S4-4c: index-free. ResolveRead serves locally only when this node can
 	// answer authoritatively (sole voter, internal bucket, or a leader doing a
 	// linearizable ReadIndex); otherwise it returns nil and we forward to the
@@ -706,13 +755,32 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	// quorum meta (local file → peer fan-out) and folds a delete-marker latest
 	// version to ErrObjectNotFound, so the unversioned-GET 404 semantics that the
 	// object index used to short-circuit are now served by the backend read.
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, nil, err
-	} else if gb != nil {
-		return gb.GetObject(ctx, bucket, key)
-	}
-	args := buildGetObjectArgs(bucket, key)
-	return c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
+	// S7-4: probeRead tries each topology generation newest-first; at a single
+	// generation (the default) it is one attempt against the same target.
+	var (
+		rc  io.ReadCloser
+		obj *storage.Object
+	)
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			r, o, e := gb.GetObject(ctx, bucket, key)
+			if e != nil {
+				return e
+			}
+			rc, obj = r, o
+			return nil
+		}
+		args := buildGetObjectArgs(bucket, key)
+		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
+		if e != nil {
+			return e
+		}
+		rc, obj = r, o
+		return nil
+	})
+	return rc, obj, err
 }
 
 func (c *ClusterCoordinator) GetObjectVersion(
@@ -735,20 +803,32 @@ func (c *ClusterCoordinator) GetObjectVersion(
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
-	if err != nil {
-		return nil, err
-	}
 	// S4-4c: index-free (see GetObject). The GroupBackend HeadObject folds a
 	// delete-marker latest version to ErrObjectNotFound, preserving the
 	// unversioned-HEAD 404 semantics the object index used to short-circuit.
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.HeadObject(ctx, bucket, key)
-	}
-	args := buildHeadObjectArgs(bucket, key)
-	return c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
+	// S7-4: probeRead tries each topology generation newest-first; one attempt
+	// at a single generation (the default).
+	var obj *storage.Object
+	err := c.probeRead(bucket, key, "", func(target RouteTarget) error {
+		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			o, e := gb.HeadObject(ctx, bucket, key)
+			if e != nil {
+				return e
+			}
+			obj = o
+			return nil
+		}
+		args := buildHeadObjectArgs(bucket, key)
+		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
+		if e != nil {
+			return e
+		}
+		obj = o
+		return nil
+	})
+	return obj, err
 }
 
 func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {

@@ -38,6 +38,18 @@ func newGenerationPlacement(baseGroupIDs []string) *GenerationPlacement {
 	}
 }
 
+// newGenerationPlacementFromList builds a placement from the FSM topology
+// generation list (ascending epoch, as PlacementGenerations() returns it). Used
+// by OpRouter when the cluster has recorded explicit generations; an empty list
+// leaves the caller on the legacy single-generation path. The slice is taken
+// as-is (PlacementGenerations() already returns a deep copy).
+func newGenerationPlacementFromList(gens []placementGeneration) *GenerationPlacement {
+	if len(gens) == 0 {
+		return &GenerationPlacement{}
+	}
+	return &GenerationPlacement{generations: gens}
+}
+
 // currentGroupIDs returns the latest generation's pinned candidate group-ID set
 // used for object→group write/read placement. Returns nil when no generation is
 // configured (bootstrap), matching the legacy nil placementGroupIDs guard.
@@ -46,4 +58,19 @@ func (g *GenerationPlacement) currentGroupIDs() []string {
 		return nil
 	}
 	return g.generations[len(g.generations)-1].groupIDs
+}
+
+// readGenerationGroupIDs returns each generation's pinned group-ID set in
+// newest-first probe order (latest generation first, base generation last). At
+// a single generation this is one element equal to currentGroupIDs(), so the
+// read path takes exactly one attempt — byte-identical to legacy routing.
+func (g *GenerationPlacement) readGenerationGroupIDs() [][]string {
+	if g == nil || len(g.generations) == 0 {
+		return nil
+	}
+	out := make([][]string, 0, len(g.generations))
+	for i := len(g.generations) - 1; i >= 0; i-- {
+		out = append(out, g.generations[i].groupIDs)
+	}
+	return out
 }
