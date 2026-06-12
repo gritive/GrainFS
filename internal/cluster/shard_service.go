@@ -327,9 +327,9 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	if err != nil {
 		return nil, err
 	}
-	// Phase 8 N7-3: migrated families ride their native buffered routes; the
-	// rest stay on the tunnel CallPooled until their own family migrations
-	// register native server adapters (each row adds its case here).
+	// Phase 8 N7-3: every SendRequest family rides its native buffered route
+	// (pooled HTTP conns keep the bounded-backpressure property the tunnel's
+	// CallPooled provided on this PUT-hot forward path).
 	var route string
 	switch msg.Type {
 	case transport.StreamData:
@@ -338,18 +338,16 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 		route = transport.RouteForwardProposeLegacy
 	case transport.StreamDataGroupProposeForward:
 		route = transport.RouteForwardProposeDataGroup
+	case transport.StreamReadIndex:
+		route = transport.RouteForwardReadIndex
+	default:
+		return nil, fmt.Errorf("shard service: no native route for stream type 0x%02x", byte(msg.Type))
 	}
-	if route != "" {
-		reply, err := s.transport.CallBuffered(ctx, peerAddr, route, msg.Payload)
-		if err != nil {
-			return nil, err
-		}
-		return &transport.Message{Type: msg.Type, Status: transport.StatusOK, Payload: reply}, nil
+	reply, err := s.transport.CallBuffered(ctx, peerAddr, route, msg.Payload)
+	if err != nil {
+		return nil, err
 	}
-	// CallPooled (reused conn) not Call (connection-per-RPC): SendRequest forwards
-	// every PUT's index/group proposal to the leader, so a fresh TLS handshake per
-	// forward was a PUT-hot-path cost (alongside meta-raft + shard writes).
-	return s.transport.CallPooled(ctx, peerAddr, msg)
+	return &transport.Message{Type: msg.Type, Status: transport.StatusOK, Payload: reply}, nil
 }
 
 // Ping verifies that the peer's transport shard service can accept a bidirectional

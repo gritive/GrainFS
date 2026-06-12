@@ -1011,7 +1011,7 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 	if b.shardSvc == nil {
 		return
 	}
-	b.shardSvc.RegisterHandler(transport.StreamReadIndex, func(req *transport.Message) *transport.Message {
+	h := func(req *transport.Message) *transport.Message {
 		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		resp := make([]byte, 12)
@@ -1026,7 +1026,14 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 			binary.BigEndian.PutUint32(resp[8:12], 0)
 		}
 		return &transport.Message{Type: transport.StreamReadIndex, Payload: resp}
-	})
+	}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
+	b.shardSvc.RegisterHandler(transport.StreamReadIndex, h)
+	// Phase 8 N7-3: native /forward/read-index buffered route. The handler
+	// ignores the (empty) request payload; the leader outcome (commitIndex or
+	// error text) is in-band in the reply payload.
+	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardReadIndex,
+		transport.BufferedRouteFromMessageHandler("read-index forward", h))
 }
 
 // ReadIndex returns a linearizable read fence index.
