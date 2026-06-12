@@ -30,6 +30,7 @@ type shardTransport interface {
 	CallWithBody(ctx context.Context, addr string, req *transport.Message, body io.Reader) (*transport.Message, error)
 	CallRead(ctx context.Context, addr string, req *transport.Message) (*transport.Message, io.ReadCloser, error)
 	CallFlatBuffer(ctx context.Context, addr string, fw *transport.FlatBuffersWriter) (*transport.Message, error)
+	ShardWrite(ctx context.Context, addr string, req transport.ShardWriteRequest, body io.Reader) error
 	Handle(st transport.StreamType, h transport.StreamHandler)
 	HandleBody(st transport.StreamType, h transport.StreamBodyHandler)
 	HandleRead(st transport.StreamType, h transport.StreamReadHandler)

@@ -42,14 +42,19 @@ type inProcessCluster struct {
 	// peerAddr[i] is the loopback address of peer i (i in [0, nPeers)); peer
 	// transports are indexed by address, not shard index.
 	peerAddrs []string
+	// nodeTransports holds every node's transport (coord first, then peers) so
+	// tests can read the per-node native-dispatch counter
+	// (InboundNativeShardWrites — a concrete *transport.HTTPTransport accessor,
+	// deliberately NOT part of ClusterTransport).
+	nodeTransports []transport.ClusterTransport
 	// callWithBodyFails, when an address is present (value true), makes the
 	// coord pipeline's remote sealed-shard write RPC to that peer fail. Read by
 	// the fault-injecting transport wrapping pipeline.Config.Transport.
 	failWrite map[string]bool
 }
 
-// failingShardTransport wraps the coord's TCP transport for the put pipeline
-// only: CallWithBody (the verbatim WriteSealedShard body RPC) errors for any
+// failingShardTransport wraps the coord's transport for the put pipeline
+// only: ShardWrite (the native sealed-shard write route) errors for any
 // peer address in failWrite, and delegates everything else. The coord
 // ShardService keeps the raw transport, so GET reads are never disturbed by the
 // injected write failure — which is exactly what the parity-best-effort test
@@ -59,14 +64,14 @@ type failingShardTransport struct {
 	failWrite map[string]bool
 }
 
-func (f *failingShardTransport) CallWithBody(ctx context.Context, addr string, req *transport.Message, body io.Reader) (*transport.Message, error) {
+func (f *failingShardTransport) ShardWrite(ctx context.Context, addr string, req transport.ShardWriteRequest, body io.Reader) error {
 	if f.failWrite[addr] {
 		// Drain the body so the pipeline's pipe writer unblocks, then reject,
 		// mirroring a peer that accepts the stream but rejects the shard.
 		_, _ = io.Copy(io.Discard, body)
-		return nil, context.Canceled
+		return context.Canceled
 	}
-	return f.inner.CallWithBody(ctx, addr, req, body)
+	return f.inner.ShardWrite(ctx, addr, req, body)
 }
 
 // mkTransport builds a cluster transport for one node from the shared cluster
@@ -123,6 +128,7 @@ func newInProcessClusterT(t *testing.T, nodes int, ec cluster.ECConfig, mk mkTra
 	// ReadShardStream). Registering only the write handler passes PUT and fails
 	// GET, so all three are required.
 	cl := &inProcessCluster{t: t, coordAddr: coordTr.LocalAddr(), failWrite: map[string]bool{}}
+	cl.nodeTransports = append(cl.nodeTransports, coordTr)
 	for i := 0; i < nodes-1; i++ {
 		peerTr := mk("test-cluster-psk")
 		require.NoError(t, peerTr.Listen(context.Background(), "127.0.0.1:0"))
@@ -137,11 +143,13 @@ func newInProcessClusterT(t *testing.T, nodes int, ec cluster.ECConfig, mk mkTra
 		peerSvc := cluster.NewShardService(peerDir, peerTr,
 			cluster.WithShardDEKKeeper(keeper, clusterID), cluster.WithDataWAL(peerDWAL))
 		peerTr.SetStreamHandler(peerSvc.HandleRPC())
+		peerTr.RegisterShardWriteHandler(peerSvc.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 		peerTr.HandleBody(transport.StreamShardWriteBody, peerSvc.HandleWriteBody())
 		peerTr.HandleRead(transport.StreamShardReadBody, peerSvc.HandleReadBody())
 		t.Cleanup(func() { _ = peerSvc.Close() })
 
 		cl.peerAddrs = append(cl.peerAddrs, peerTr.LocalAddr())
+		cl.nodeTransports = append(cl.nodeTransports, peerTr)
 	}
 
 	// allNodes = [coord, peer0, peer1, ...]; coord = allNodes[0] = selfAddr.
@@ -228,6 +236,21 @@ func (cl *inProcessCluster) remoteShardIdx(nodeIDs []string, ec cluster.ECConfig
 
 func ctxBg() context.Context { return context.Background() }
 
+// requireNativeShardWriteDispatch sums InboundNativeShardWrites across every
+// node transport and asserts the PUT's remote shard writes traveled the native
+// /shard/write route, not the tunnel (Phase 8 N6 positive dispatch proof —
+// S5b lesson: prove dispatch, don't infer it from a green round-trip).
+func requireNativeShardWriteDispatch(t *testing.T, cl *inProcessCluster) {
+	t.Helper()
+	var nativeWrites uint64
+	for _, tr := range cl.nodeTransports {
+		ht, ok := tr.(*transport.HTTPTransport)
+		require.True(t, ok, "node transport must be the concrete *transport.HTTPTransport to expose the native counter")
+		nativeWrites += ht.InboundNativeShardWrites()
+	}
+	require.Positive(t, nativeWrites, "multi-node PUT must dispatch shard writes through the native route")
+}
+
 // requireSpansNodes asserts the resolved placement genuinely spans nodes (at
 // least K-1 remote entries on a 5-node 3+2 layout), so a green round-trip
 // cannot be a false all-local collapse (task Step 3).
@@ -273,6 +296,7 @@ func TestMultiNodeStreamingPUT_K3_RoundTrip(t *testing.T) {
 
 	got := getAll(t, coord, "bucket", "multi.bin")
 	require.True(t, bytes.Equal(payload, got), "GET must reconstruct the streamed multi-node object")
+	requireNativeShardWriteDispatch(t, cl)
 }
 
 // TestMultiNodeStreamingPUT_HTTP_K3_RoundTrip is the S8-5 Phase A data-plane
@@ -303,6 +327,7 @@ func TestMultiNodeStreamingPUT_HTTP_K3_RoundTrip(t *testing.T) {
 
 	got := getAll(t, coord, "bucket", "http.bin")
 	require.True(t, bytes.Equal(payload, got), "GET must reconstruct the streamed multi-node object over HTTP")
+	requireNativeShardWriteDispatch(t, cl)
 }
 
 // TestMultiNodeStreamingPUT_HTTP_ParityShardFailure_CommitsAndReads runs the

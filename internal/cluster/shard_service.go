@@ -434,7 +434,7 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 }
 
 // WriteShardStream sends shard bytes to a remote node without buffering the
-// shard into the request envelope.
+// shard into the request envelope. Native /shard/write route (Phase 8 N6).
 func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error {
 	peerAddr, err := s.resolvePeerAddress(peer)
 	if err != nil {
@@ -443,34 +443,11 @@ func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key s
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), nil)
-	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
-	resp, err := s.transport.CallWithBody(ctx, peerAddr, req, body)
-	if err != nil {
+	req := transport.ShardWriteRequest{Bucket: bucket, Key: key, ShardIdx: shardIdx, Sealed: false}
+	if err := s.transport.ShardWrite(ctx, peerAddr, req, body); err != nil {
 		return fmt.Errorf("stream shard to %s: %w", peerAddr, err)
 	}
-
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
-	if err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
-	}
-	if rpcType == "Error" {
-		return fmt.Errorf("remote error from %s", peer)
-	}
 	return nil
-}
-
-// BuildSealedShardWriteRequest builds the StreamShardWriteBody request frame for
-// the verbatim sealed-shard write RPC ("WriteSealedShard"). The body — the
-// already-GFSENC3-sealed shard bytes — is streamed separately via
-// transport.CallWithBody. Exported so the put pipeline's remote shard sink (which
-// lives in a package that imports cluster, not vice-versa) can drive the RPC
-// without re-implementing the FlatBuffers envelope.
-func BuildSealedShardWriteRequest(bucket, shardKey string, shardIdx int) *transport.Message {
-	fw := buildShardEnvelope("WriteSealedShard", bucket, shardKey, int32(shardIdx), nil)
-	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	return &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
 }
 
 // SealedShardTrailerLen is the length of the completeness trailer appended to a
@@ -505,23 +482,6 @@ func SplitSealedShardTrailer(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("sealed shard truncated: received %d payload bytes, sender declared %d", len(payload), declared)
 	}
 	return payload, nil
-}
-
-// CheckShardWriteResponse interprets a shard-write RPC response: nil on success,
-// or the remote-reported error. Pairs with BuildSealedShardWriteRequest for
-// out-of-package callers (unmarshalEnvelope is unexported).
-func CheckShardWriteResponse(resp *transport.Message) error {
-	if resp == nil {
-		return fmt.Errorf("nil shard write response")
-	}
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
-	if err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
-	}
-	if rpcType == "Error" {
-		return fmt.Errorf("remote shard write rejected: %s", string(data))
-	}
-	return nil
 }
 
 // ReadShard fetches a shard from a remote node.
@@ -967,6 +927,41 @@ func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *tr
 		}
 		observePutStage("shard_stream_server", "write_local", stageStart)
 		return s.okResponse(nil)
+	}
+}
+
+// NativeWriteHandler returns the native-route shard write handler
+// (transport.RegisterShardWriteHandler). Same storage semantics as
+// HandleWriteBody minus the FlatBuffers RPC envelope: the metadata arrives
+// already-parsed and the result is a plain error (the transport maps it to the
+// HTTP status). Sealed=true is WriteSealedShard (verbatim GFSENC3 body +
+// completeness trailer); Sealed=false is WriteShard (plaintext stream,
+// destination seals).
+func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
+	return func(req transport.ShardWriteRequest, body io.Reader) error {
+		stageStart := time.Now()
+		if req.Sealed {
+			// Bounded by the data WAL's MaxPayloadBytes plus the 8-byte
+			// completeness trailer (mirrors HandleWriteBody's sealed branch).
+			raw, rerr := readShardPayload(body, datawal.MaxPayloadBytes+SealedShardTrailerLen, -1, false)
+			if rerr != nil {
+				return rerr
+			}
+			sealed, terr := SplitSealedShardTrailer(raw)
+			if terr != nil {
+				return terr
+			}
+			if werr := s.writeLocalSealedShard(context.Background(), req.Bucket, req.Key, req.ShardIdx, sealed); werr != nil {
+				return werr
+			}
+			observePutStage("shard_stream_server", "write_local_sealed", stageStart)
+			return nil
+		}
+		if err := s.WriteLocalShardStream(req.Bucket, req.Key, req.ShardIdx, body); err != nil {
+			return err
+		}
+		observePutStage("shard_stream_server", "write_local", stageStart)
+		return nil
 	}
 }
 

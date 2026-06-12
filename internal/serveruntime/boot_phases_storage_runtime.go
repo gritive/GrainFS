@@ -251,6 +251,10 @@ func bootStreamRouter(state *bootState) error {
 	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
 	state.clusterTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
 	state.clusterTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
+	// Phase 8 N6: native /shard/write route. The tunnel HandleBody registration
+	// above stays until N8 deletes the tunnel; all in-tree clients now dial the
+	// native route.
+	state.clusterTransport.RegisterShardWriteHandler(state.shardSvc.NativeWriteHandler())
 	// Phase B1: node-level append-segment peer-fetch handler. Each node
 	// hosts multiple group backends — the request payload carries groupID
 	// so the handler resolves the right per-group root via DataGroupManager.

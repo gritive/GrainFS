@@ -41,16 +41,16 @@ func (w *recordingWAL) recorded() []int {
 	return out
 }
 
-// blockingTransport is a shardTransport whose CallWithBody never reads the body
+// blockingTransport is a shardTransport whose ShardWrite never reads the body
 // and blocks until its ctx is cancelled/expired, then returns ctx.Err() — it
 // models a dead peer. The remote sink's Write parks on this; without a per-shard
 // RPC deadline the PUT would deadlock (the pump cancel only fires after Put
 // returns, which never happens while a remote shard write is blocked).
 type blockingTransport struct{}
 
-func (blockingTransport) CallWithBody(ctx context.Context, _ string, _ *transport.Message, _ io.Reader) (*transport.Message, error) {
+func (blockingTransport) ShardWrite(ctx context.Context, _ string, _ transport.ShardWriteRequest, _ io.Reader) error {
 	<-ctx.Done()
-	return nil, ctx.Err()
+	return ctx.Err()
 }
 
 // TestMixedPlacement_DeadPeerDoesNotHangPastDeadline proves the streaming remote
@@ -137,6 +137,7 @@ func TestPipeline_MixedPlacementRoundTrip(t *testing.T) {
 		cluster.WithShardDEKKeeper(keeper, clusterID),
 		cluster.WithDataWAL(fakeShardWAL{}))
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
 
 	p := New(Config{
@@ -273,6 +274,7 @@ func TestPipeline_SlowProgressingClientDoesNotAbort(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
 
 	p := New(Config{
@@ -338,6 +340,7 @@ func TestPipeline_MixedPlacementWALSkipsRemote(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
 
 	wal := &recordingWAL{}
@@ -461,6 +464,7 @@ func TestPipeline_PlacedEC_OverridesStalePipelineEC(t *testing.T) {
 		cluster.WithShardDEKKeeper(keeper, clusterID),
 		cluster.WithDataWAL(fakeShardWAL{}))
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
 
 	// Pipeline frozen at the STALE solo width — the bug condition on a joiner.
