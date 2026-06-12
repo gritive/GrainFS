@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.562.0] - 2026-06-13
+
+### Fixed
+- Quorum-meta store walkers (`IterQuorumMetaECShardTargets`, `ScanQuorumMetaBucket`) no
+  longer treat in-flight `.qmeta-*.tmp` atomic-publish temp files as stored objects. A
+  scan racing an in-flight quorum-meta write fabricated a phantom object keyed by the
+  temp name: the shard placement monitor reported phantom missing shards (shard key
+  `.qmeta-<ts>.tmp/segments/<id>`) and triggered repairs that cannot succeed, and bucket
+  LIST scans could return a duplicate entry. Captured under full-suite load as the
+  long-standing `TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd` flake
+  ("repair: only 0/1 other shards readable").
+- Two load flakes in the test suite are root-caused and fixed: the multi-node streaming
+  PUT harness now wires a `ShardGroupSource` (production boot always does) so the
+  quorum-meta GET peer-fallback — the designed read-your-writes path when the
+  coordinator's own K-of-N meta write loses the K-th-ack race — is reachable, with a
+  deterministic regression test; and the IAM PDP flip-invariant test pre-consults the
+  PDP so its sanity check no longer depends on goroutine scheduling.
+
 ## [0.0.561.0] - 2026-06-12
 
 ### Changed

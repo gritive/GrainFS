@@ -327,6 +327,18 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	return nil
 }
 
+// isQuorumMetaTempName reports whether a directory entry is an in-flight
+// atomic-publish temp file (os.CreateTemp(dir, ".qmeta-*.tmp") above). Store
+// walkers MUST skip these: the temp lives in the same directory as its rename
+// target and contains a complete, decodable meta blob, so a walker that treats
+// every file as {bucket}/{key} would fabricate an object keyed by the temp
+// name (e.g. ".qmeta-123.tmp" with shard key ".qmeta-123.tmp/segments/<id>")
+// whenever a scan races an in-flight write — phantom "missing local shard"
+// reports and doomed repairs.
+func isQuorumMetaTempName(name string) bool {
+	return strings.HasPrefix(name, ".qmeta-") && strings.HasSuffix(name, ".tmp")
+}
+
 // readQuorumMetaRaw reads the raw quorum meta blob for (bucket, key) from the
 // local filesystem. Returns (nil, ErrObjectNotFound) when the file is absent.
 func (s *ShardService) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
@@ -431,6 +443,9 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 		}
 		if d.IsDir() {
 			return nil
+		}
+		if isQuorumMetaTempName(d.Name()) {
+			return nil // in-flight atomic-publish temp, not a stored key
 		}
 		key, rerr := filepath.Rel(bucketRoot, path)
 		if rerr != nil {
@@ -574,6 +589,9 @@ func (s *ShardService) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) e
 		}
 		if d.IsDir() {
 			return nil
+		}
+		if isQuorumMetaTempName(d.Name()) {
+			return nil // in-flight atomic-publish temp, not a stored key
 		}
 		rel, rerr := filepath.Rel(root, path)
 		if rerr != nil {

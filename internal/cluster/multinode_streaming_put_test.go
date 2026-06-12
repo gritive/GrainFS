@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,11 +35,33 @@ import (
 // table-free top-level funcs; the existing all-local pipeline_integration_test.go
 // covers the Ginkgo round-trip suite.
 
+// staticShardGroups is the harness ShardGroupSource: one group spanning every
+// node. Production boot always wires SetShardGroupSource (meta FSM); without it
+// the coord's quorum-meta GET fallback (fetchQuorumMetaFromPeers) is amputated,
+// and the K-of-N PUT (which returns on the K-th ack without requiring the
+// coord's own local meta write to be among them) leaves a window where an
+// immediate GET misses locally and reports "object not found" — the flake this
+// harness previously exhibited under -count load.
+type staticShardGroups struct{ groups []cluster.ShardGroupEntry }
+
+func (s staticShardGroups) ShardGroup(id string) (cluster.ShardGroupEntry, bool) {
+	for _, g := range s.groups {
+		if g.ID == id {
+			return g, true
+		}
+	}
+	return cluster.ShardGroupEntry{}, false
+}
+func (s staticShardGroups) ShardGroups() []cluster.ShardGroupEntry { return s.groups }
+
 // inProcessCluster is a coord backend + N peer Shardservices over loopback TCP.
 type inProcessCluster struct {
 	t         *testing.T
 	coord     *cluster.DistributedBackend
 	coordAddr string
+	// coordDataRoots are the coord pipeline's DataDirs; coordDataRoots[0] hosts
+	// the coord's local .quorum_meta store (see writeQuorumMetaLocal).
+	coordDataRoots []string
 	// peerAddr[i] is the loopback address of peer i (i in [0, nPeers)); peer
 	// transports are indexed by address, not shard index.
 	peerAddrs []string
@@ -157,6 +180,14 @@ func newInProcessClusterT(t *testing.T, nodes int, ec cluster.ECConfig, mk mkTra
 	// allNodes = [coord, peer0, peer1, ...]; coord = allNodes[0] = selfAddr.
 	allNodes := append([]string{coordTr.LocalAddr()}, cl.peerAddrs...)
 	coord.SetShardService(coordSvc, allNodes)
+	// Mirror production boot (boot_phases_storage_runtime.go wires the meta FSM):
+	// quorum-meta GET needs a ShardGroupSource for the peer fan-out fallback.
+	// The K-of-N quorum PUT returns on the K-th ack, so the coord's OWN local
+	// meta write may still be in flight when PUT returns; without this source an
+	// immediate GET that misses locally cannot reach the peers that did ack and
+	// flakes with "object not found" under CPU load.
+	coord.SetShardGroupSource(staticShardGroups{groups: []cluster.ShardGroupEntry{{ID: "group-1", PeerIDs: allNodes}}})
+	cl.coordDataRoots = coordDataRoots
 
 	// Coord pipeline. Config.Transport is the fault-injecting wrapper (write-path
 	// only); DataDirs == coordSvc.DataDirs() so coord-local shards land where the
@@ -317,6 +348,43 @@ func TestMultiNodeStreamingPUT_K3_RoundTrip(t *testing.T) {
 	got := getAll(t, coord, "bucket", "multi.bin")
 	require.True(t, bytes.Equal(payload, got), "GET must reconstruct the streamed multi-node object")
 	requireNativeShardWriteDispatch(t, cl)
+}
+
+// TestMultiNodeStreamingPUT_LocalMetaMiss_ReadsViaPeerQuorum is the
+// deterministic regression test for the "object not found" flake: the K-of-N
+// quorum-meta PUT returns on the K-th ack, and under CPU load the coord's own
+// local meta write can lose that race — so a GET immediately after PUT misses
+// the local .quorum_meta file and MUST fall back to the peer fan-out
+// (fetchQuorumMetaFromPeers), which requires the ShardGroupSource wiring this
+// harness previously lacked. Simulate the lost race deterministically: wait for
+// the local meta file to land, remove it, then GET. RED without the
+// SetShardGroupSource wiring in newInProcessClusterT (peer fallback amputated →
+// storage.ErrObjectNotFound, the flake's exact signature); GREEN with it.
+func TestMultiNodeStreamingPUT_LocalMetaMiss_ReadsViaPeerQuorum(t *testing.T) {
+	ec := cluster.ECConfig{DataShards: 3, ParityShards: 2}
+	cl := newInProcessCluster(t, 5, ec)
+	coord := cl.coord
+	coord.SetPutPipelineMultiNode(true)
+	require.NoError(t, coord.CreateBucket(ctxBg(), "bucket"))
+
+	payload := randBytes(t, 3<<20+123)
+	_, err := coord.PutObjectWithRequest(ctxBg(), putReq("bucket", "metamiss.bin", bytes.NewReader(payload), int64(len(payload))))
+	require.NoError(t, err)
+
+	// The local write is one of N concurrent quorum dispatches and may still be
+	// in flight when PUT returns; wait for it to land before removing it so the
+	// removal below cannot race a late re-create.
+	// ShardService roots its dataDirs at {root}/shards (see NewMultiRootShardService).
+	localMeta := filepath.Join(cl.coordDataRoots[0], "shards", ".quorum_meta", "bucket", "metamiss.bin")
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(localMeta)
+		return statErr == nil
+	}, 10*time.Second, 5*time.Millisecond, "coord-local quorum meta write must land at %s", localMeta)
+	require.NoError(t, os.Remove(localMeta))
+
+	got := getAll(t, coord, "bucket", "metamiss.bin")
+	require.True(t, bytes.Equal(payload, got),
+		"GET with a missing local quorum-meta file must read the meta from peer quorum (read-your-writes)")
 }
 
 // TestMultiNodeStreamingPUT_HTTP_K3_RoundTrip is the S8-5 Phase A data-plane

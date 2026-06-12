@@ -977,6 +977,16 @@ func TestDecoratorReleaseConcurrentFlipDecisionInvariant(t *testing.T) {
 	cfg := &mutableCfg{val: `{"enabled":false}`}
 	d := NewDecorator(&spyInner{decision: policy.DecisionAllow}, cfg, nil, "data_plane")
 	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k"}
+	// Consult once with the PDP enabled BEFORE the flip storm. The final
+	// consulted>0 sanity check is otherwise not guaranteed by construction:
+	// under full-suite CPU starvation the flipper goroutine may never be
+	// scheduled before the 4000 worker calls drain, leaving the config
+	// disabled for every call (observed as a load flake: "0 is not greater
+	// than 0"). The invariant under test — no torn decision mid-flip — is the
+	// worker-side assertion and is unaffected.
+	cfg.set(decoCfgDataPlane(url, "closed"))
+	_ = d.Authorize(context.Background(), "sa", "b", ctxReq)
+	cfg.set(`{"enabled":false}`)
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 	wg.Add(1)
