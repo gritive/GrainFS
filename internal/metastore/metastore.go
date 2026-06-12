@@ -47,8 +47,10 @@ type Store interface {
 // other transactions are never visible mid-transaction. Get returns
 // ErrKeyNotFound for missing keys. Delete of a missing key succeeds.
 // Set/Delete on a read-only transaction return a non-nil error.
-// Commit/Discard are for manual transactions (NewTransaction); Discard
-// after Commit is a no-op. Any other use of a finished transaction is a
+// Commit/Discard are for manual transactions (NewTransaction). Discard is
+// idempotent: calling it on an already-discarded or already-committed
+// transaction is a no-op (cluster's apply actor and its tests rely on
+// double-Discard being safe). Any other use of a finished transaction is a
 // programming error: Get/Set/Delete return ErrDiscardedTxn, Commit returns
 // an error, NewIterator panics (badger behavior, mirrored by MemStore).
 //

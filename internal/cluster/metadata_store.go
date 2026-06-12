@@ -11,10 +11,11 @@ import "github.com/gritive/GrainFS/internal/metastore"
 // Dormant in S6.5-1: declared but not yet consumed. S6.5-2+ migrate
 // *badger.Txn signatures to these types.
 type (
-	MetadataStore = metastore.Store
-	MetadataTxn   = metastore.Txn
-	MetaItem      = metastore.Item
-	MetaIterator  = metastore.Iterator
+	MetadataStore       = metastore.Store
+	MetadataTxn         = metastore.Txn
+	MetaItem            = metastore.Item
+	MetaIterator        = metastore.Iterator
+	MetaIteratorOptions = metastore.IteratorOptions
 )
 
 var (
