@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	hzclient "github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/app/client/retry"
+	"github.com/cloudwego/hertz/pkg/app/middlewares/server/recovery"
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	errs "github.com/cloudwego/hertz/pkg/common/errors"
 	"github.com/cloudwego/hertz/pkg/network"
@@ -220,6 +221,13 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 		hzserver.WithHostPorts(""),
 		hzserver.WithStreamBody(true),
 	)
+	// Panic containment: hzserver.New (unlike server.Default) ships NO recovery
+	// middleware, so a panic in any route handler — e.g. a lazy FlatBuffers
+	// accessor indexing a corrupt payload from an authenticated peer — would
+	// kill the whole process. Recovery converts it to a 500 on that request;
+	// the native-route clients already map non-200 to a Go error, so consumers
+	// degrade to a per-RPC failure instead of a node crash.
+	srv.Use(recovery.Recovery())
 	srv.GET(httpPingPath, func(c context.Context, rc *app.RequestContext) {
 		rc.SetStatusCode(consts.StatusOK)
 	})

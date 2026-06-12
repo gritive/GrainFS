@@ -270,40 +270,38 @@ func (r *GossipReceiver) RegisterNativeGossipRoutes() {
 }
 
 func (r *GossipReceiver) handleNodeStats(from string, payload []byte) {
-	pb, err := decodeNodeStatsMsg(payload)
+	msg, err := decodeNodeStatsMsg(payload)
 	if err != nil {
 		r.logger.Warn().Err(err).Msg("gossip: invalid payload")
 		return
 	}
-	nodeID := string(pb.NodeId())
-	if nodeID == "" {
+	if msg.nodeID == "" {
 		return
 	}
-	evidenceNodeID, matches := r.resolveGossipNodeID(nodeID, from)
+	evidenceNodeID, matches := r.resolveGossipNodeID(msg.nodeID, from)
 	// Verify the claimed NodeId matches the actual sender address to prevent spoofing.
 	if !matches {
-		r.logger.Warn().Str("claimed", nodeID).Str("from", from).Msg("gossip: NodeId mismatch, dropping")
+		r.logger.Warn().Str("claimed", msg.nodeID).Str("from", from).Msg("gossip: NodeId mismatch, dropping")
 		return
 	}
 	var joinedAt time.Time
-	if pb.JoinedAt() != 0 {
-		joinedAt = time.Unix(pb.JoinedAt(), 0)
+	if msg.joinedAt != 0 {
+		joinedAt = time.Unix(msg.joinedAt, 0)
 	}
 	r.store.Set(NodeStats{
-		NodeID:         nodeID,
-		DiskUsedPct:    pb.DiskUsedPct(),
-		DiskAvailBytes: pb.DiskAvailBytes(),
-		RequestsPerSec: pb.RequestsPerSec(),
+		NodeID:         msg.nodeID,
+		DiskUsedPct:    msg.diskUsedPct,
+		DiskAvailBytes: msg.diskAvailBytes,
+		RequestsPerSec: msg.requestsPerSec,
 		JoinedAt:       joinedAt,
 	})
 	// Gossip capabilities are diagnostic-only — capability gates use direct
 	// RPC via CapabilityGate.Allow (Task 1b). ReportEvidence here feeds
 	// EvidenceSnapshot (admin /v1/cluster/capabilities) and the bench warmup
 	// probe, not production gate enforcement.
-	if gate := r.capabilityGate.Load(); gate != nil && pb.CapabilitiesLength() > 0 {
-		capabilities := make(map[string]bool, pb.CapabilitiesLength())
-		for i := 0; i < pb.CapabilitiesLength(); i++ {
-			capability := string(pb.Capabilities(i))
+	if gate := r.capabilityGate.Load(); gate != nil && len(msg.capabilities) > 0 {
+		capabilities := make(map[string]bool, len(msg.capabilities))
+		for _, capability := range msg.capabilities {
 			if capability != "" {
 				capabilities[capability] = true
 			}
@@ -322,12 +320,11 @@ func (r *GossipReceiver) handleReceiptGossip(from string, payload []byte) {
 	if cachePtr == nil {
 		return // receipt gossip disabled on this node
 	}
-	pb, err := decodeReceiptGossipMsg(payload)
+	nodeID, ids, err := decodeReceiptGossipMsg(payload)
 	if err != nil {
 		r.logger.Warn().Err(err).Msg("receipt-gossip: invalid payload")
 		return
 	}
-	nodeID := string(pb.NodeId())
 	if nodeID == "" {
 		return
 	}
@@ -335,21 +332,43 @@ func (r *GossipReceiver) handleReceiptGossip(from string, payload []byte) {
 		r.logger.Warn().Str("claimed", nodeID).Str("from", from).Msg("receipt-gossip: NodeId mismatch, dropping")
 		return
 	}
-	n := pb.ReceiptIdsLength()
-	ids := make([]string, n)
-	for i := 0; i < n; i++ {
-		ids[i] = string(pb.ReceiptIds(i))
-	}
 	(*cachePtr).Update(nodeID, ids)
 }
 
-func decodeNodeStatsMsg(data []byte) (msg *clusterpb.NodeStatsMsg, err error) {
+// nodeStatsGossip is decodeNodeStatsMsg's plain-value result. FlatBuffers
+// accessors are LAZY — they index the raw buffer at call time — so every field
+// must be read INSIDE the decode's recover scope. Returning the FB table object
+// and accessing it in the handler would move the panic surface (corrupt vtable
+// from an authenticated peer) outside the recover and crash the gossip drain
+// goroutine.
+type nodeStatsGossip struct {
+	nodeID         string
+	diskUsedPct    float64
+	diskAvailBytes uint64
+	requestsPerSec float64
+	joinedAt       int64
+	capabilities   []string
+}
+
+func decodeNodeStatsMsg(data []byte) (msg nodeStatsGossip, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode node stats: invalid flatbuffer: %v", r)
 		}
 	}()
-	return clusterpb.GetRootAsNodeStatsMsg(data, 0), nil
+	pb := clusterpb.GetRootAsNodeStatsMsg(data, 0)
+	msg.nodeID = string(pb.NodeId())
+	msg.diskUsedPct = pb.DiskUsedPct()
+	msg.diskAvailBytes = pb.DiskAvailBytes()
+	msg.requestsPerSec = pb.RequestsPerSec()
+	msg.joinedAt = pb.JoinedAt()
+	if n := pb.CapabilitiesLength(); n > 0 {
+		msg.capabilities = make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			msg.capabilities = append(msg.capabilities, string(pb.Capabilities(i)))
+		}
+	}
+	return msg, nil
 }
 
 func (r *GossipReceiver) resolveGossipNodeID(nodeID, from string) (compat.NodeID, bool) {

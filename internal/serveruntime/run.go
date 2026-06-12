@@ -119,6 +119,19 @@ func Run(ctx context.Context, cfg Config) error {
 	v2RPCTransport.SetTransport()
 	v2RPCTransport.SetTimeoutNowTransport()
 	log.Info().Msg("raft v2: Raft RPC transport wired (TimeoutNow enabled)")
+	// Start the data-raft actor IMMEDIATELY after the RPC bridge is wired —
+	// BEFORE invite-join Phase-2 (inside bootWALAndForwardersPart1). During
+	// Phase-2 the leader's post-join hook calls AddVoterCtx and replicates
+	// AppendEntries to this joiner; if the actor isn't draining cmdCh yet,
+	// HandleAppendEntries blocks forever and the leader's AddVoter times out —
+	// the join deadlocks (the long-standing 5-node EC e2e failure, TODOS §6).
+	// Early start is safe: the applyLoop buffers applied entries UNBOUNDED
+	// until distBackend.RunApplyLoop (bootOwnedGroupsAndEC) drains them, and
+	// JoinMode (set above for invite-joiners) suppresses both the solo-voter
+	// auto-promote and election-timer campaigns until the leader's AE installs
+	// the real multi-voter config (actor.go JoinMode guards).
+	state.node.Start()
+	state.AddCleanup(func() { state.node.Close() })
 
 	// PR 4: meta-raft callback registration BEFORE Start.
 	if err := bootMetaRaftWiring(state); err != nil {

@@ -152,3 +152,34 @@ func TestBufferedRoute_RequestCapEnforced(t *testing.T) {
 		t.Fatalf("err = %v, want status 400 request-cap error", err)
 	}
 }
+
+// TestBufferedRoute_HandlerPanicContained: a panicking handler (the corrupt-
+// FlatBuffer lazy-accessor class) must surface as a per-request error — NOT
+// kill the server process. hzserver.New ships no recovery middleware; Listen
+// installs recovery.Recovery() explicitly, and this test is its FIRING proof:
+// without the middleware the panic crashes the test process here.
+func TestBufferedRoute_HandlerPanicContained(t *testing.T) {
+	srv, cli, addr := httpPair(t)
+	srv.RegisterBufferedRoute(RouteProbeCapability, func(payload []byte) ([]byte, error) {
+		panic("corrupt flatbuffer: slice bounds out of range")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := cli.CallBuffered(ctx, addr, RouteProbeCapability, []byte("x"))
+	if err == nil {
+		t.Fatal("want error from panicking handler, got nil")
+	}
+
+	// The server must still serve subsequent requests on other routes.
+	srv.RegisterBufferedRoute(RouteProbeKEKDisk, func(payload []byte) ([]byte, error) {
+		return []byte("alive"), nil
+	})
+	reply, err := cli.CallBuffered(ctx, addr, RouteProbeKEKDisk, nil)
+	if err != nil {
+		t.Fatalf("server did not survive the panic: %v", err)
+	}
+	if string(reply) != "alive" {
+		t.Fatalf("reply = %q, want alive", reply)
+	}
+}

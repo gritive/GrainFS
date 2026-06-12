@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.559.0] - 2026-06-12
+
+### Fixed
+- Gossip receivers no longer crash the process on a malformed gossip payload from an
+  authenticated peer: `decodeNodeStatsMsg`/`decodeReceiptGossipMsg` now read every
+  FlatBuffers field inside their panic-recovery scope (FB accessors are lazy — a corrupt
+  vtable previously panicked the gossip drain goroutine at the accessor, outside the
+  recover). Malformed payloads are dropped with a warning; valid gossip continues.
+- The cluster HTTP server now installs Hertz recovery middleware: a panic in any native
+  route handler (the same corrupt-FlatBuffer class) surfaces as a 500 on that request
+  instead of killing the node. Native-route clients already map non-200 to a per-RPC
+  error, so consumers degrade gracefully.
+- Dynamic invite-join no longer deadlocks when `--node-id` equals `--raft-addr`: the
+  joiner's data-plane raft actor now starts immediately after the raft RPC bridge is
+  wired (before invite-join Phase-2) instead of in the storage-runtime boot phase.
+  Previously the cluster leader's post-join `AddVoter` replicated AppendEntries to a
+  joiner whose actor was not yet draining its command channel, blocking the join until
+  the leader's 60s timeout (the long-standing 5-node EC e2e failure). Early start is
+  safe: the apply loop buffers entries unbounded until the storage runtime drains them,
+  and join-mode guards already prevent the joiner from campaigning before the leader
+  installs the real cluster configuration.
+
 ## [0.0.558.0] - 2026-06-12
 
 ### Changed
