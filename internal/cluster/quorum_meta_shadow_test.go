@@ -134,8 +134,8 @@ func TestWriteShadowMeta_RealTransportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	keeper, clusterID := testDEKKeeper(t)
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()

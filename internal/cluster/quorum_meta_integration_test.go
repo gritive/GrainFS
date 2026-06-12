@@ -132,8 +132,8 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 	ctx := context.Background()
 	keeper, clusterID := testDEKKeeper(t)
 
-	trA := transport.MustNewTCPTransport("test-cluster-psk")
-	trB := transport.MustNewTCPTransport("test-cluster-psk")
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
 	defer trA.Close()
@@ -206,8 +206,8 @@ func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
 	ctx := context.Background()
 	keeper, clusterID := testDEKKeeper(t)
 
-	trA := transport.MustNewTCPTransport("test-cluster-psk")
-	trB := transport.MustNewTCPTransport("test-cluster-psk")
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
 	defer trA.Close()
@@ -269,7 +269,7 @@ func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
 	ctx := context.Background()
 	keeper, clusterID := testDEKKeeper(t)
 
-	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
 	defer tr.Close()
 	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
@@ -412,8 +412,8 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 
 	// Two real TCP transport nodes: node-data (has the quorum meta file) and
 	// node-parity (missed the K-of-N write — file absent locally).
-	trData := transport.MustNewTCPTransport("test-cluster-psk")
-	trParity := transport.MustNewTCPTransport("test-cluster-psk")
+	trData := transport.MustNewHTTPTransport("test-cluster-psk")
+	trParity := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, trData.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, trParity.Listen(ctx, "127.0.0.1:0"))
 	defer trData.Close()

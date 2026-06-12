@@ -70,19 +70,16 @@ func (f *failingShardTransport) CallWithBody(ctx context.Context, addr string, r
 }
 
 // mkTransport builds a cluster transport for one node from the shared cluster
-// PSK. Both the TCP transport and the Phase 8 HTTP transport satisfy
-// transport.ClusterTransport, so the same multi-node data-plane harness runs
-// over either — this is what lets the HTTP data-plane e2e (S8-5 Phase A) reuse
-// the exact PUT-fanout/GET-read path the production flip activates.
+// PSK. The Phase 8 HTTP transport is the only cluster transport; the factory
+// indirection is retained so the harness stays transport-agnostic.
 type mkTransport func(psk string) transport.ClusterTransport
 
-func tcpTransport(psk string) transport.ClusterTransport  { return transport.MustNewTCPTransport(psk) }
 func httpTransport(psk string) transport.ClusterTransport { return transport.MustNewHTTPTransport(psk) }
 
-// newInProcessCluster stands up `nodes` distinct nodes over loopback TCP (the
-// default transport). HTTP-transport callers use newInProcessClusterT.
+// newInProcessCluster stands up `nodes` distinct nodes over the loopback HTTP
+// cluster transport.
 func newInProcessCluster(t *testing.T, nodes int, ec cluster.ECConfig) *inProcessCluster {
-	return newInProcessClusterT(t, nodes, ec, tcpTransport)
+	return newInProcessClusterT(t, nodes, ec, httpTransport)
 }
 
 // newInProcessClusterT stands up `nodes` distinct nodes (coord + nodes-1 peers)

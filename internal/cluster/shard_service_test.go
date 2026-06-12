@@ -26,7 +26,7 @@ import (
 
 func TestShardService_LocalWriteAndRead(t *testing.T) {
 	dir := t.TempDir()
-	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(dir, tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
@@ -99,7 +99,7 @@ func TestShardService_Encryption(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	svc := NewShardService(dir, tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	plaintext := []byte("secret shard data")
@@ -121,7 +121,7 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("secret shard data"), 8192)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -144,7 +144,7 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 func TestShardService_WriteLocalSealedShardVerbatim(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"),
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("sealed-at-source shard "), 8192)
@@ -175,7 +175,7 @@ func TestShardService_WriteLocalSealedShardVerbatim(t *testing.T) {
 func TestShardService_HandleWriteBody_SealedShardRoundTrip(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"),
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("rpc sealed shard "), 8192)
@@ -202,7 +202,7 @@ func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -242,7 +242,7 @@ func TestShardService_SharedPackWriteLocalShardStream(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -265,7 +265,7 @@ func TestShardService_WriteLocalShardStreamSizedContextBypassesPackForLargeShard
 	dir := t.TempDir()
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -290,7 +290,7 @@ func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -304,7 +304,7 @@ func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -323,7 +323,7 @@ func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -341,7 +341,7 @@ func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
 
 	restarted := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithShardPackThreshold(1024),
 		withTestWALDEK(t, keeper, clusterID),
@@ -382,7 +382,7 @@ func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 192*1024)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -417,7 +417,7 @@ func TestIsUnsupportedDirectIO(t *testing.T) {
 func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	_, err := svc.ReadLocalShard("bkt", "no-such-obj", 0)
 	require.Error(t, err)
@@ -428,7 +428,7 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	// Write garbage bytes that look like valid data but aren't valid ciphertext
 	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
@@ -449,7 +449,7 @@ func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) 
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	const bucket = "bkt"
 
@@ -490,7 +490,7 @@ func TestShardService_ResolvePeerAddress(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithNodeAddressBook(f), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithNodeAddressBook(f), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	addr, err := svc.resolvePeerAddress("node-a")
 	require.NoError(t, err)
@@ -512,8 +512,8 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 
 	keeper, clusterID := testDEKKeeper(t)
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -554,8 +554,8 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 
 	keeper, clusterID := testDEKKeeper(t)
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -589,8 +589,8 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
 	ctx := context.Background()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -616,8 +616,8 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up two QUIC transports to simulate two nodes
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -698,7 +698,7 @@ func requireShardServiceTraceStage(t *testing.T, events []PutTraceEvent, stage P
 func TestWriteLocalShard_Atomic(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	data := []byte("atomic-shard-payload")
 	require.NoError(t, svc.WriteLocalShard("bkt", "key/v1", 0, data))
@@ -727,7 +727,7 @@ func TestWriteLocalShard_OverwritePreservesOriginalOnError(t *testing.T) {
 	}
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	original := []byte("original-safe-content")
 	require.NoError(t, svc.WriteLocalShard("bkt", "key", 0, original))
@@ -753,7 +753,7 @@ func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	data := []byte("secret shard payload")
 	require.NoError(t, svc.WriteLocalShard("mybucket", "obj/v1", 2, data))
@@ -774,7 +774,7 @@ func TestWriteLocalShardStream_EncryptedUsesChunkedEnvelope(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	data := bytes.Repeat([]byte("stream-secret-"), 8192)
 	require.NoError(t, svc.WriteLocalShardStream("b", "k", 1, bytes.NewReader(data)))
@@ -793,7 +793,7 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	data := []byte("payload")
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, data))
@@ -814,7 +814,7 @@ func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 	require.NoError(t, err)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
 	require.NoError(t, dwal.Flush())
 	shardPath := mustShardPath(svc, "b", "k", 0)
@@ -830,7 +830,7 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
 	require.NoError(t, err)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
 	require.NoError(t, dwal.Flush())
 	shardPath := mustShardPath(svc, "b", "streamed", 1)
@@ -848,7 +848,7 @@ func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
 	require.NoError(t, err)
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithDataWAL(dwal),
 		WithShardPackThreshold(1024),
@@ -878,7 +878,7 @@ func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
 	require.NoError(t, err)
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithDataWAL(dwal),
 		WithShardPackThreshold(1024),
@@ -916,7 +916,7 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	require.NoError(t, err)
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithDataWAL(dwal),
 	)
@@ -1007,7 +1007,7 @@ func TestShardService_DataWALMetadataOnlyMissingQueuesStartupRepair(t *testing.T
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithDataWAL(dwal),
 		WithDataWALRepairSink(collector),
@@ -1042,7 +1042,7 @@ func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *test
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithDataWAL(dwal),
 		WithDataWALRepairSink(collector),
@@ -1106,7 +1106,7 @@ func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T)
 	collector := NewDataWALRepairCollector()
 	svc := NewShardService(
 		dir,
-		transport.MustNewTCPTransport("test-cluster-psk"),
+		transport.MustNewHTTPTransport("test-cluster-psk"),
 		WithShardDEKKeeper(keeper, clusterID),
 		WithDataWAL(dwal),
 		WithDataWALRepairSink(collector),

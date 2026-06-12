@@ -64,10 +64,6 @@ type Config struct {
 	RaftLogGCInterval     time.Duration
 	RaftHeartbeatInterval time.Duration
 	RaftElectionTimeout   time.Duration
-	// UseHTTPTransport selects the Phase 8 HTTP cluster transport instead of the TCP
-	// transport (EXPERIMENTAL — default false = TCP). Raft RPCs ride transport.Call
-	// over either transport.
-	UseHTTPTransport bool
 
 	// Storage / EC
 	DirectIO           bool

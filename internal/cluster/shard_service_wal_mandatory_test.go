@@ -25,7 +25,7 @@ func TestAppendShardDataWAL_RequiresWAL(t *testing.T) {
 func TestAppendShardDataWAL_ReplayRequiresFsync(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewTCPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(mustTestDataWALDEK(t, dir, keeper, clusterID)))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(mustTestDataWALDEK(t, dir, keeper, clusterID)))
 	svc.replayingDataWAL.Store(true)
 
 	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, []byte("d"))

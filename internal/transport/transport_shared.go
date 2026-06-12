@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -19,15 +18,6 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 )
-
-// recycleJitter returns 0..250ms to de-synchronize cluster-wide reconnects.
-func recycleJitter() time.Duration {
-	var b [2]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0
-	}
-	return time.Duration(binary.BigEndian.Uint16(b[:])%251) * time.Millisecond
-}
 
 // pinAcceptedSPKI returns a VerifyPeerCertificate callback that accepts any
 // peer cert whose SPKI hash is in snap's accept set (O(1) map lookup).

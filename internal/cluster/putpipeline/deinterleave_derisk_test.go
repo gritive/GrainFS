@@ -35,7 +35,7 @@ func TestDeinterleaveDerisk(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
 	defer tr.Close()
 	ss := cluster.NewMultiRootShardService(

@@ -121,8 +121,8 @@ func TestPipeline_MixedPlacementRoundTrip(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -264,8 +264,8 @@ func TestPipeline_SlowProgressingClientDoesNotAbort(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -329,8 +329,8 @@ func TestPipeline_MixedPlacementWALSkipsRemote(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -385,7 +385,7 @@ func TestPipeline_MixedPlacementDenseLocalDrives(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
 	defer tr.Close()
 	ss := cluster.NewMultiRootShardService(
@@ -448,8 +448,8 @@ func TestPipeline_PlacedEC_OverridesStalePipelineEC(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -527,7 +527,7 @@ func TestPipeline_PutShard_AllLocalUsesPerPutEC(t *testing.T) {
 	ctx := context.Background()
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
-	tr := transport.MustNewTCPTransport("test-cluster-psk")
+	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
 	defer tr.Close()
 
