@@ -32,6 +32,8 @@ type ClusterTransport interface {
 	// Native route surfaces (Phase 8 N6+; the envelope-free per-family wire).
 	RegisterShardWriteHandler(h ShardWriteHandler)
 	ShardWrite(ctx context.Context, addr string, req ShardWriteRequest, body io.Reader) error
+	RegisterShardReadHandler(h ShardReadHandler)
+	ShardRead(ctx context.Context, addr string, req ShardReadRequest) (io.ReadCloser, error)
 
 	RecycleConns()
 	ClosePeer(addr string)

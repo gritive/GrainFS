@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.556.0] - 2026-06-12
+
+### Changed
+
+- Phase 8 N7-1: the shard-read streaming family (whole-shard and bounded-range shard
+  streams) now travels the native `GET /shard/read` route — URL-encoded query metadata,
+  a raw streaming response body, HTTP status codes — instead of the `/_grainfs/rpc`
+  StreamType envelope tunnel. Second family on the envelope-free wire (after `/shard/write`
+  in v0.0.555.0); pins the streaming-response conventions for the remaining read-shaped
+  RPC families. The tunnel remains for all other families until N8. Internal cluster wire
+  only — no operator-visible API change; mixed-version clusters across this boundary are
+  unsupported (existing flag-day stance).
+
 ## [0.0.555.0] - 2026-06-12
 
 ### Changed
