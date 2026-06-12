@@ -210,7 +210,13 @@ func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error 
 		state.kekStore,
 		state.metaRaft.FSM(),
 	)
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
 	state.clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+	// Phase 8 N7-3: native /probe/capability buffered route. Handle reads only
+	// req.Payload; its StatusError replies (decode/identity/seal failure) map
+	// to a 500 → client error, exactly as the tunnel surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability,
+		transport.BufferedRouteFromMessageHandler("capability probe", handler.Handle))
 
 	dialer := cluster.NewCapabilityProbeDialer(state.clusterTransport)
 	state.capabilityGate.WithDirectProbe(clusterID, state.kekStore, dialer)

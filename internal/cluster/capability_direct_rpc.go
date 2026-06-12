@@ -1,6 +1,7 @@
 // Package cluster: direct capability probe RPC (Task 1b, Option A).
 //
-// RPC mechanism: the cluster transport.Call / Handle with StreamCapabilityProbe (0x17).
+// RPC mechanism: the native /probe/capability buffered route (Phase 8 N7-3;
+// the tunnel StreamCapabilityProbe 0x17 registration stays server-side until N8).
 // Production wires with an injected capabilityProbeDialer (same pattern as
 // forwardDialer in forward_sender.go). Tests pass a fake function — no transport
 // needed in unit tests.
@@ -30,24 +31,21 @@ var capProbeRequestMagic = []byte("CAPREQ\x01")
 // capProbeReplyMagic guards against misrouted payloads.
 var capProbeReplyMagic = []byte("CAPREP\x01")
 
-// capabilityProbeDialer abstracts the transport Call for testability.
-// Production wires it to: func(ctx, peer, payload) { return clusterTransport.Call(ctx, peer, &transport.Message{Type: transport.StreamCapabilityProbe, Payload: payload}) }
+// capabilityProbeDialer abstracts the transport call for testability.
+// Production wires it to: func(ctx, peer, payload) { return clusterTransport.CallBuffered(ctx, peer, transport.RouteProbeCapability, payload) }
 type capabilityProbeDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 // NewCapabilityProbeDialer builds the production capabilityProbeDialer that
-// dispatches a StreamCapabilityProbe request over the shared cluster transport and
-// returns the raw response payload. Used by serve-runtime boot to wire the
-// CapabilityGate's direct signed-assertion path.
+// dispatches a capability probe over the native /probe/capability buffered
+// route (Phase 8 N7-3) and returns the raw response payload. Used by
+// serve-runtime boot to wire the CapabilityGate's direct signed-assertion path.
 func NewCapabilityProbeDialer(t callerTransport) capabilityProbeDialer {
 	return func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-		resp, err := t.Call(ctx, peer, &transport.Message{
-			Type:    transport.StreamCapabilityProbe,
-			Payload: payload,
-		})
+		reply, err := t.CallBuffered(ctx, peer, transport.RouteProbeCapability, payload)
 		if err != nil {
 			return nil, fmt.Errorf("capability_probe: call %s: %w", peer, err)
 		}
-		return resp.Payload, nil
+		return reply, nil
 	}
 }
 
@@ -355,7 +353,7 @@ func GetCapabilities(
 // capability gate path. Stored in CapabilityGate and populated via WithDirectProbe.
 type CapabilityGateDirectConfig struct {
 	// dialer dials a peer and returns the raw response payload.
-	// Production: func(ctx, peerAddr, payload) { resp, _ := clusterTransport.Call(ctx, peerAddr, &transport.Message{Type: transport.StreamCapabilityProbe, Payload: payload}); return resp.Payload, nil }
+	// Production: func(ctx, peerAddr, payload) { return clusterTransport.CallBuffered(ctx, peerAddr, transport.RouteProbeCapability, payload) }
 	dialer    capabilityProbeDialer
 	clusterID []byte
 	kekStore  *encrypt.KEKStore

@@ -23,9 +23,11 @@ type clusterRPCTransport interface {
 	RegisterBufferedRoute(path string, h transport.BufferedRouteHandler)
 }
 
-// callerTransport: outbound Call only.
+// callerTransport: outbound buffered RPC only (Call until Phase 8 N8 — kept
+// while unmigrated consumers remain).
 type callerTransport interface {
 	Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
+	CallBuffered(ctx context.Context, addr, path string, payload []byte) ([]byte, error)
 }
 
 // shardTransport: the rich surface ShardService uses (bulk body + flatbuffer + handlers).
