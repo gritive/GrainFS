@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 func writeTestShard(t *testing.T, root, bucket, key string) {
@@ -61,9 +63,9 @@ func TestLocalObjectPicker_NodeArgIgnored(t *testing.T) {
 
 func TestBalancerProposer_OkFalse_SkipsMigrationProposal(t *testing.T) {
 	// When ObjectPicker returns ok=false, proposeMigration should not send a proposal.
-	store := NewNodeStatsStore(0) // no TTL
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
+	store := gossip.NewNodeStatsStore(0) // no TTL
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()

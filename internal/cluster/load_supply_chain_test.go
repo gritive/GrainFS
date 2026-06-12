@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // TestLoadSupplyChain_CollectorFeedsBoundedLoads is the Phase 6 S6-2 dynamic
@@ -13,16 +15,16 @@ import (
 //
 // Before S6-2 RequestsPerSec had no production producer, so AvgRPS was always 0
 // and BoundedLoads.HotSet was always empty — hot-node read reranking was inert.
-// This drives the real RequestRateCollector against a NodeStatsStore, then a real
+// This drives the real RequestRateCollector against a gossip.NodeStatsStore, then a real
 // BoundedLoads reading that same store, and asserts a genuinely overloaded node is
 // detected as hot. Were the collector→store→BoundedLoads chain broken, HotSet would
 // stay empty and IsHot would return false (the pre-S6-2 behavior).
 func TestLoadSupplyChain_CollectorFeedsBoundedLoads(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	// Three nodes present in the store (gossip would populate peers in production;
 	// here we seed them directly, then let the collector own each node's RPS field).
 	for _, id := range []string{"hot", "cool-a", "cool-b"} {
-		store.Set(NodeStats{NodeID: id, DiskAvailBytes: 1 << 30})
+		store.Set(gossip.NodeStats{NodeID: id, DiskAvailBytes: 1 << 30})
 	}
 
 	// Per-node request-rate collectors, each sampling that node's own counter.

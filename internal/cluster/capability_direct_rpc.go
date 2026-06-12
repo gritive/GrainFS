@@ -22,6 +22,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -224,7 +225,7 @@ type CapabilityProbeHandler struct {
 	binaryVersion  string
 	clusterID      []byte // 16 bytes, from HandshakeVerifier.ClusterID()
 	kekStore       *encrypt.KEKStore
-	evidenceSource CapabilityEvidenceSource
+	evidenceSource gossip.CapabilityEvidenceSource
 }
 
 // NewCapabilityProbeHandler constructs a server-side handler.
@@ -234,7 +235,7 @@ func NewCapabilityProbeHandler(
 	binaryVersion string,
 	clusterID []byte,
 	kekStore *encrypt.KEKStore,
-	evidenceSource CapabilityEvidenceSource,
+	evidenceSource gossip.CapabilityEvidenceSource,
 ) *CapabilityProbeHandler {
 	if len(clusterID) != 16 {
 		panic(fmt.Sprintf("NewCapabilityProbeHandler: clusterID must be 16 bytes, got %d", len(clusterID)))

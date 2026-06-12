@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -189,9 +190,9 @@ type DistributedBackend struct {
 	// lock-free counters, why we do not use an actor pattern here).
 	shardCache *shardcache.Cache
 
-	nodeStatsStore *NodeStatsStore // gossip-fed disk/RPS stats; wired by StartPlacementRuntime
-	bl             *BoundedLoads   // hot-node detection; wired by StartPlacementRuntime
-	clusterCfg     *ClusterConfig  // live policy view; wired by StartPlacementRuntime (defaults until then)
+	nodeStatsStore *gossip.NodeStatsStore // gossip-fed disk/RPS stats; wired by StartPlacementRuntime
+	bl             *BoundedLoads          // hot-node detection; wired by StartPlacementRuntime
+	clusterCfg     *ClusterConfig         // live policy view; wired by StartPlacementRuntime (defaults until then)
 
 	// frozenSegSrc yields snapshot-frozen segment paths (bucket -> paths) for the
 	// orphan-segment known-set. nil until SetFrozenSegmentPathSource wires the
@@ -495,13 +496,13 @@ func (b *DistributedBackend) SetClusterNodes(allNodes []string) {
 }
 
 // StartPlacementRuntime wires the live ClusterConfig and gossip-fed
-// NodeStatsStore into the backend, constructs BoundedLoads from them, and
+// gossip.NodeStatsStore into the backend, constructs BoundedLoads from them, and
 // starts the periodic BoundedLoads refresh goroutine. Must be called after
 // gossip infrastructure is up (store is being populated). Weighted placement
 // and BoundedLoads skip are inactive until this is called.
 //
 // ctx governs the refresh goroutine lifetime — cancel it to stop.
-func (b *DistributedBackend) StartPlacementRuntime(ctx context.Context, cfg *ClusterConfig, store *NodeStatsStore) {
+func (b *DistributedBackend) StartPlacementRuntime(ctx context.Context, cfg *ClusterConfig, store *gossip.NodeStatsStore) {
 	b.clusterCfg = cfg
 	b.nodeStatsStore = store
 	// Pass cfg directly so BoundedLoads reads C/CLow/MaxStale live on every

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/hrw"
 )
 
 func TestObjectWritePlacementTargetsForGroup_UsesFullGroup(t *testing.T) {
@@ -45,7 +47,7 @@ func TestPlanObjectWritePlacement_UsesFallbackPlacementWithoutFullGroup(t *testi
 	require.False(t, plan.TopologyWrite)
 	require.Equal(t, "group-1", plan.PlacementGroupID)
 	require.Equal(t, ECConfig{DataShards: 2, ParityShards: 1}, plan.Config)
-	require.Equal(t, PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
+	require.Equal(t, hrw.PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
 }
 
 func TestPlanObjectWritePlacement_UsesNodeStateSnapshotForWeightedFallback(t *testing.T) {

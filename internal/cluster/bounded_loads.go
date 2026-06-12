@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -44,12 +45,12 @@ type BoundedLoadsSnapshot struct {
 	LowThreshold  float64
 	HotSet        map[string]struct{} // read-only; see godoc above
 	ComputedAt    time.Time
-	DataVersion   time.Time // max NodeStats.UpdatedAt seen at compute time
+	DataVersion   time.Time // max gossip.NodeStats.UpdatedAt seen at compute time
 }
 
 // BoundedLoads computes hot-node classification with hysteresis.
 type BoundedLoads struct {
-	store *NodeStatsStore
+	store *gossip.NodeStatsStore
 	cfg   ParamsSource // live config — read on every Refresh, not snapshotted
 	snap  atomic.Pointer[BoundedLoadsSnapshot]
 	sf    singleflight.Group
@@ -57,7 +58,7 @@ type BoundedLoads struct {
 
 // NewBoundedLoads constructs a BoundedLoads bound to store. cfg is read on every
 // Refresh so cluster_config patches propagate without restart.
-func NewBoundedLoads(store *NodeStatsStore, cfg ParamsSource) *BoundedLoads {
+func NewBoundedLoads(store *gossip.NodeStatsStore, cfg ParamsSource) *BoundedLoads {
 	bl := &BoundedLoads{store: store, cfg: cfg}
 	empty := &BoundedLoadsSnapshot{HotSet: map[string]struct{}{}}
 	bl.snap.Store(empty)
@@ -76,7 +77,7 @@ func (bl *BoundedLoads) IsHot(nodeID string) bool {
 	return ok
 }
 
-// Refresh recomputes the snapshot from current NodeStatsStore state.
+// Refresh recomputes the snapshot from current gossip.NodeStatsStore state.
 // Single-writer assumption: callers serialise (e.g. via singleflight in Task 4).
 func (bl *BoundedLoads) Refresh() {
 	stats := bl.store.GetAll()
@@ -140,7 +141,7 @@ func (bl *BoundedLoads) Refresh() {
 	bl.snap.Store(next)
 }
 
-// RefreshIfStale recomputes the snapshot only if the underlying NodeStatsStore
+// RefreshIfStale recomputes the snapshot only if the underlying gossip.NodeStatsStore
 // has advanced (max UpdatedAt > snapshot.DataVersion) or the snapshot has aged
 // past params.MaxStale. Concurrent callers coalesce via singleflight.
 func (bl *BoundedLoads) RefreshIfStale() {
@@ -187,7 +188,7 @@ func (bl *BoundedLoads) shouldRefresh(cur *BoundedLoadsSnapshot) bool {
 //
 // prev is non-nil — NewBoundedLoads stores an initial empty snapshot, and
 // Refresh always reads bl.snap.Load() before publishing.
-func computeHotSet(stats []NodeStats, prev *BoundedLoadsSnapshot, high, low float64) map[string]struct{} {
+func computeHotSet(stats []gossip.NodeStats, prev *BoundedLoadsSnapshot, high, low float64) map[string]struct{} {
 	out := make(map[string]struct{}, len(stats))
 	prevHot := map[string]struct{}{}
 	if prev != nil {

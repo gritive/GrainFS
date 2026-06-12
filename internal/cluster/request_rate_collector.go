@@ -6,11 +6,12 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // RequestRateCollector periodically derives this node's request rate (RPS) from a
-// monotonic request counter and writes it into the NodeStatsStore, mirroring how
+// monotonic request counter and writes it into the gossip.NodeStatsStore, mirroring how
 // DiskCollector owns the disk fields. Gossip then propagates the value cluster-wide
 // so BoundedLoads (hot-node read reranking) and the balancer can consume it.
 //
@@ -20,7 +21,7 @@ import (
 // time between successive samples.
 type RequestRateCollector struct {
 	nodeID    string
-	store     *NodeStatsStore
+	store     *gossip.NodeStatsStore
 	interval  time.Duration
 	countFunc func() float64
 
@@ -30,7 +31,7 @@ type RequestRateCollector struct {
 
 // NewRequestRateCollector creates a collector that samples countFunc every interval.
 // countFunc must return a monotonically non-decreasing cumulative request count.
-func NewRequestRateCollector(nodeID string, store *NodeStatsStore, interval time.Duration, countFunc func() float64) *RequestRateCollector {
+func NewRequestRateCollector(nodeID string, store *gossip.NodeStatsStore, interval time.Duration, countFunc func() float64) *RequestRateCollector {
 	return &RequestRateCollector{
 		nodeID:    nodeID,
 		store:     store,

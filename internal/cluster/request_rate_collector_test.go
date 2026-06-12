@@ -6,11 +6,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 func TestRequestRateCollector_ComputesDeltaRate(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 40.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", DiskUsedPct: 40.0})
 
 	var count float64
 	c := NewRequestRateCollector("n1", store, time.Second, func() float64 { return count })
@@ -30,7 +32,7 @@ func TestRequestRateCollector_ComputesDeltaRate(t *testing.T) {
 }
 
 func TestRequestRateCollector_NoOpWhenNodeAbsent(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	var count float64
 	c := NewRequestRateCollector("ghost", store, time.Second, func() float64 { return count })
 	c.seed(time.Now())
@@ -41,8 +43,8 @@ func TestRequestRateCollector_NoOpWhenNodeAbsent(t *testing.T) {
 }
 
 func TestRequestRateCollector_CounterResetClampsToZero(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 	var count float64
 	c := NewRequestRateCollector("n1", store, time.Second, func() float64 { return count })
 

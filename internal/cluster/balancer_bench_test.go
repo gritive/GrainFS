@@ -5,11 +5,13 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 func newTestBalancer(b *testing.B) *BalancerProposer {
 	b.Helper()
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{}}
 	return NewBalancerProposer("self", store, node, defaultFakeBalancerCfg())
 }

@@ -1,4 +1,4 @@
-package cluster
+package gossip
 
 import (
 	"context"

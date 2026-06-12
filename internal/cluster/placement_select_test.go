@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/hrw"
 )
 
 func TestSelectECPlacement_AllLive(t *testing.T) {
@@ -20,7 +22,7 @@ func TestSelectECPlacement_AllLive(t *testing.T) {
 	placement := selectECPlacementFromNodeStates(cfg, liveNodes, "obj/v1", nil, false)
 
 	assert.Len(t, placement, cfg.NumShards())
-	expected := PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
+	expected := hrw.PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
 	assert.Equal(t, expected, placement)
 }
 
@@ -31,7 +33,7 @@ func TestSelectECPlacement_DeadNode(t *testing.T) {
 	placement := selectECPlacementFromNodeStates(cfg, liveNodes, "obj/v1", nil, false)
 
 	assert.Len(t, placement, cfg.NumShards())
-	expected := PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
+	expected := hrw.PlaceShards("obj/v1", liveNodes, nil, cfg.NumShards())
 	assert.Equal(t, expected, placement)
 }
 
@@ -44,7 +46,7 @@ func TestSelectECPlacement_PartialDead(t *testing.T) {
 	var triggerKey string
 	for i := 0; i < 10_000; i++ {
 		k := "obj/" + strconv.Itoa(i)
-		cand := PlaceShards(k, allNodes, nil, cfg.NumShards())
+		cand := hrw.PlaceShards(k, allNodes, nil, cfg.NumShards())
 		hasDead := false
 		for _, n := range cand {
 			if n == "n4" || n == "n5" {
@@ -60,6 +62,6 @@ func TestSelectECPlacement_PartialDead(t *testing.T) {
 	require.NotEmpty(t, triggerKey, "HRW never selected a dead node candidate")
 
 	placement := selectECPlacementFromNodeStates(cfg, liveNodes, triggerKey, nil, false)
-	expected := PlaceShards(triggerKey, liveNodes, nil, cfg.NumShards())
+	expected := hrw.PlaceShards(triggerKey, liveNodes, nil, cfg.NumShards())
 	assert.Equal(t, expected, placement)
 }

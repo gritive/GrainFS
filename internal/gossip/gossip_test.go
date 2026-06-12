@@ -1,4 +1,4 @@
-package cluster
+package gossip
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -122,7 +121,7 @@ func TestGossipSender_BroadcastsToPeers(t *testing.T) {
 	sender := NewGossipSender("node-a", peers, tr, store, 30*time.Second)
 
 	// Broadcast once synchronously
-	sender.broadcastOnce(context.Background())
+	sender.BroadcastOnce(context.Background())
 
 	for _, peer := range peers {
 		msgs := tr.SentTo(peer)
@@ -138,7 +137,7 @@ func TestGossipSender_PayloadDecodable(t *testing.T) {
 	peers := []string{"node-b:9000"}
 
 	sender := NewGossipSender("node-a", peers, tr, store, 30*time.Second)
-	sender.broadcastOnce(context.Background())
+	sender.BroadcastOnce(context.Background())
 
 	msgs := tr.SentTo("node-b:9000")
 	require.Len(t, msgs, 1)
@@ -162,14 +161,6 @@ func (s staticCapabilityEvidence) CapabilityEvidence(nodeID string, now time.Tim
 	}
 }
 
-type fakeGossipAddressBook struct {
-	nodes []MetaNodeEntry
-}
-
-func (f fakeGossipAddressBook) Nodes() []MetaNodeEntry {
-	return f.nodes
-}
-
 func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
@@ -179,7 +170,7 @@ func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
 			compat.CapabilityNfsExportCreateV1: true,
 		}})
-	sender.broadcastOnce(context.Background())
+	sender.BroadcastOnce(context.Background())
 
 	msgs := tr.SentTo("node-b:9000")
 	require.Len(t, msgs, 1)
@@ -187,130 +178,6 @@ func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].payload, 0)
 	require.Equal(t, 1, pb.CapabilitiesLength())
 	assert.Equal(t, compat.CapabilityNfsExportCreateV1, string(pb.Capabilities(0)))
-}
-
-func TestGossipSenderIncludesMultipartListingCapabilityEvidence(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
-
-	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
-		WithCapabilityEvidenceSource(NewMetaFSM())
-	sender.broadcastOnce(context.Background())
-
-	msgs := tr.SentTo("node-b:9000")
-	require.Len(t, msgs, 1)
-
-	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].payload, 0)
-	var caps []string
-	for i := 0; i < pb.CapabilitiesLength(); i++ {
-		caps = append(caps, string(pb.Capabilities(i)))
-	}
-	assert.Contains(t, caps, compat.CapabilityMultipartListingV1)
-}
-
-func TestGossipSenderRefreshesLocalCapabilityEvidence(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-
-	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
-		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
-			compat.CapabilityMultipartListingV1: true,
-		}}).
-		WithCapabilityGate(gate)
-	sender.broadcastOnce(context.Background())
-
-	_, err := gate.RequirePeerTransportCapability(
-		compat.CapabilityMultipartListingV1,
-		compat.OperationCreateMultipartUpload,
-		[]string{"node-a"},
-		time.Now(),
-	)
-	require.NoError(t, err)
-}
-
-func TestGossipSenderRefreshesLocalCapabilityEvidenceAliases(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-
-	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
-		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
-			compat.CapabilityMultipartListingV1: true,
-		}}).
-		WithCapabilityGate(gate).
-		WithCapabilityEvidenceAliases("127.0.0.1:9001")
-	sender.broadcastOnce(context.Background())
-
-	_, err := gate.RequirePeerTransportCapability(
-		compat.CapabilityMultipartListingV1,
-		compat.OperationCreateMultipartUpload,
-		[]string{"127.0.0.1:9001"},
-		time.Now(),
-	)
-	require.NoError(t, err)
-}
-
-func TestGossipSenderRefreshesLocalCapabilityEvidenceDynamicAliases(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-	aliases := []string{}
-
-	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
-		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
-			compat.CapabilityMultipartListingV1: true,
-		}}).
-		WithCapabilityGate(gate).
-		WithCapabilityEvidenceAliasProvider(func() []string {
-			return append([]string(nil), aliases...)
-		})
-
-	sender.broadcastOnce(context.Background())
-	_, err := gate.RequirePeerTransportCapability(
-		compat.CapabilityMultipartListingV1,
-		compat.OperationCreateMultipartUpload,
-		[]string{"127.0.0.1:9001"},
-		time.Now(),
-	)
-	require.Error(t, err)
-
-	aliases = []string{"127.0.0.1:9001"}
-	sender.broadcastOnce(context.Background())
-	_, err = gate.RequirePeerTransportCapability(
-		compat.CapabilityMultipartListingV1,
-		compat.OperationCreateMultipartUpload,
-		[]string{"127.0.0.1:9001"},
-		time.Now(),
-	)
-	require.NoError(t, err)
-}
-
-func TestGossipSenderBroadcastsCapabilityEvidenceWithoutStats(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-
-	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
-		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
-			compat.CapabilityMultipartListingV1: true,
-		}}).
-		WithCapabilityGate(gate).
-		WithCapabilityEvidenceAliases("127.0.0.1:9001")
-	sender.broadcastOnce(context.Background())
-
-	require.Len(t, tr.SentTo("node-b:9000"), 1)
-	_, err := gate.RequirePeerTransportCapability(
-		compat.CapabilityMultipartListingV1,
-		compat.OperationCreateMultipartUpload,
-		[]string{"127.0.0.1:9001"},
-		time.Now(),
-	)
-	require.NoError(t, err)
 }
 
 func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
@@ -325,7 +192,7 @@ func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
 		})
 	peers = []string{"node-c:9000"}
 
-	sender.broadcastOnce(context.Background())
+	sender.BroadcastOnce(context.Background())
 
 	require.Empty(t, tr.SentTo("node-b:9000"))
 	require.Len(t, tr.SentTo("node-c:9000"), 1)
@@ -339,7 +206,7 @@ func TestGossipSenderSendsToDynamicPeer(t *testing.T) {
 	sender := NewGossipSender("node-a", nil, tr, store, 30*time.Second).
 		WithPeerProvider(func() []string { return []string{"node-c:9000"} })
 
-	sender.broadcastOnce(context.Background())
+	sender.BroadcastOnce(context.Background())
 
 	require.Len(t, tr.SentTo("node-c:9000"), 1)
 }
@@ -350,7 +217,7 @@ func TestGossipSender_SkipsBroadcastWhenNoLocalStats(t *testing.T) {
 	// Do NOT set any stats for "node-a" → cold-start scenario
 
 	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second)
-	sender.broadcastOnce(context.Background())
+	sender.BroadcastOnce(context.Background())
 
 	assert.Empty(t, tr.AllSent(), "should not broadcast DiskUsedPct=0 before local stats are ready")
 }
@@ -360,7 +227,7 @@ func TestGossipSender_NoPeers(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 
 	sender := NewGossipSender("node-a", nil, tr, store, 30*time.Second)
-	sender.broadcastOnce(context.Background()) // should not panic
+	sender.BroadcastOnce(context.Background()) // should not panic
 
 	assert.Empty(t, tr.AllSent())
 }
@@ -438,104 +305,6 @@ func TestGossipReceiver_AcceptsMatchingNodeId(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, ok := store.Get("node-b")
 		return ok
-	}, 500*time.Millisecond, 10*time.Millisecond)
-}
-
-func TestGossipReceiverReportsCapabilityEvidenceToGate(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-	gate.SetMetaRaftSnapshot(7, raft.Configuration{Servers: []raft.Server{
-		{ID: "node-a", Suffrage: raft.Voter},
-		{ID: "node-b", Suffrage: raft.Voter},
-	}})
-	now := time.Now()
-	gate.ReportEvidence(compat.Evidence{
-		NodeID: compat.NodeID("node-a"),
-		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
-		},
-		LastSeen: now,
-		Ready:    true,
-	})
-
-	recv := NewGossipReceiver(tr, store).WithCapabilityGate(gate)
-	recv.RegisterNativeGossipRoutes()
-
-	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
-	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, msg)
-
-	require.Eventually(t, func() bool {
-		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
-		return err == nil
-	}, 500*time.Millisecond, 10*time.Millisecond)
-}
-
-func TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-	gate.SetMetaRaftSnapshot(7, raft.Configuration{Servers: []raft.Server{
-		{ID: "10.0.0.1:7001", Suffrage: raft.Voter},
-		{ID: "10.0.0.2:7001", Suffrage: raft.Voter},
-	}})
-	now := time.Now()
-	gate.ReportEvidence(compat.Evidence{
-		NodeID: compat.NodeID("10.0.0.1:7001"),
-		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
-		},
-		LastSeen: now,
-		Ready:    true,
-	})
-
-	recv := NewGossipReceiver(tr, store).
-		WithCapabilityGate(gate).
-		WithNodeAddressBook(fakeGossipAddressBook{nodes: []MetaNodeEntry{
-			{ID: "node-b", Address: "10.0.0.2:7001"},
-		}})
-	recv.RegisterNativeGossipRoutes()
-
-	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
-	tr.deliver(t, "10.0.0.2:54321", transport.RouteGossipAdmin, msg)
-
-	require.Eventually(t, func() bool {
-		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
-		return err == nil
-	}, 500*time.Millisecond, 10*time.Millisecond)
-}
-
-func TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-	gate.SetMetaRaftSnapshot(7, raft.Configuration{Servers: []raft.Server{
-		{ID: "node-a:7001", Suffrage: raft.Voter},
-		{ID: "node-b:7001", Suffrage: raft.Voter},
-	}})
-	now := time.Now()
-	gate.ReportEvidence(compat.Evidence{
-		NodeID: compat.NodeID("node-a:7001"),
-		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
-		},
-		LastSeen: now,
-		Ready:    true,
-	})
-
-	recv := NewGossipReceiver(tr, store).
-		WithCapabilityGate(gate).
-		WithNodeAddressBook(fakeGossipAddressBook{nodes: []MetaNodeEntry{
-			{ID: "node-b", Address: "node-b:7001"},
-		}})
-	recv.RegisterNativeGossipRoutes()
-
-	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
-	tr.deliver(t, "node-b:54321", transport.RouteGossipAdmin, msg)
-
-	require.Eventually(t, func() bool {
-		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
-		return err == nil
 	}, 500*time.Millisecond, 10*time.Millisecond)
 }
 
