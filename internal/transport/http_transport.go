@@ -78,6 +78,8 @@ type HTTPTransport struct {
 	// handlers; atomic so registration may follow Listen (boot ordering).
 	shardWriteHandler atomic.Pointer[ShardWriteHandler]
 	nativeShardWrites atomic.Uint64
+	shardReadHandler  atomic.Pointer[ShardReadHandler]
+	nativeShardReads  atomic.Uint64
 
 	srv    *hzserver.Hertz
 	client *hzclient.Client
@@ -222,6 +224,7 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	})
 	srv.POST(httpRPCPath, t.handleRPC)
 	srv.POST(httpShardWritePath, t.handleShardWrite)
+	srv.GET(httpShardReadPath, t.handleShardRead)
 
 	t.mu.Lock()
 	t.srv = srv
