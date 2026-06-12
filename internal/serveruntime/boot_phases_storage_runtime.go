@@ -225,12 +225,10 @@ func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
 }
 
 // bootShardRoutes registers the shard data-plane handlers on the cluster
-// transport's native routes, then fires raft.Node.Start to begin the apply
-// loop on the data-plane raft.
-//
-// node.Start fires the data-plane raft apply loop. After this returns,
-// distBackend.RunApplyLoop (started in bootOwnedGroupsAndEC) will see
-// applied entries flow.
+// transport's native routes. (raft.Node.Start moved to run.go, immediately
+// after the Raft RPC bridge wiring: it must precede invite-join Phase-2 or the
+// joiner deadlocks on the leader's AddVoter AppendEntries — see the comment at
+// the Start site.)
 func bootShardRoutes(state *bootState) error {
 	// Native /shard/rpc buffered route — carries every buffered shard op
 	// (Write/Read/ReadRange/Delete/quorum-meta/shadow-meta/Ping).
@@ -246,9 +244,6 @@ func bootShardRoutes(state *bootState) error {
 	// to the manager AFTER this registration (bootOwnedGroupsAndEC).
 	cluster.RegisterAppendSegmentHandler(state.clusterTransport, dataGroupAppendSegmentLookup{m: state.dgMgr})
 
-	state.node.Start()
-	// state.node.Close() goes through the cluster.RaftNode interface.
-	state.AddCleanup(func() { state.node.Close() })
 	return nil
 }
 

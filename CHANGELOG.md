@@ -12,6 +12,15 @@
   route handler (the same corrupt-FlatBuffer class) surfaces as a 500 on that request
   instead of killing the node. Native-route clients already map non-200 to a per-RPC
   error, so consumers degrade gracefully.
+- Dynamic invite-join no longer deadlocks when `--node-id` equals `--raft-addr`: the
+  joiner's data-plane raft actor now starts immediately after the raft RPC bridge is
+  wired (before invite-join Phase-2) instead of in the storage-runtime boot phase.
+  Previously the cluster leader's post-join `AddVoter` replicated AppendEntries to a
+  joiner whose actor was not yet draining its command channel, blocking the join until
+  the leader's 60s timeout (the long-standing 5-node EC e2e failure). Early start is
+  safe: the apply loop buffers entries unbounded until the storage runtime drains them,
+  and join-mode guards already prevent the joiner from campaigning before the leader
+  installs the real cluster configuration.
 
 ## [0.0.558.0] - 2026-06-12
 

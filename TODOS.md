@@ -50,35 +50,6 @@
   assertion, and root-cause from there. Tracked as a known flake, not an active
   blocker for the Phase 8 feature work.
 
-- [pre-existing deadlock — root cause captured, transport-independent, RUN-verified on clean master]
-  **Joiner's legacy data-raft `node.Start()` is wired AFTER invite-join Phase-2, so a
-  voter-add during Phase-2 deadlocks the join.** Only triggered when `--node-id ==
-  --raft-addr` (the config the 5-node EC e2e uses, `tests/e2e/cluster_ec_test.go:80`).
-  **Root cause (captured, not guessed):** during invite-join Phase-2 the leader runs
-  `addJoinedNodeToLegacyDataRaft` (`internal/serveruntime/boot_phases_forwarders.go:295`),
-  which calls `node.AddVoterCtx(ctx, nodeID, addr)` — but ONLY when `nodeID == addr`
-  (line 287 guard). `AddVoterCtx` makes the leader replicate AppendEntries to the
-  joiner's data-raft. The joiner's data-raft actor loop (`internal/raft/node.go` `run()`,
-  started by `node.Start()`) is not started until `bootStorageRuntime`
-  (`boot_phases_storage_runtime.go:261`), which runs AFTER `bootWALAndForwardersPart1`
-  (the phase containing invite-join Phase-2). So the joiner receives AppendEntries before
-  its actor drains `cmdCh` → `HandleAppendEntries` (node.go:438) blocks forever on the
-  reply channel → leader's AddVoter times out (60s) → join fails → `waitForPortsParallel`
-  fails (`cluster_ec_test.go:127`).
-  **VERIFIED PRE-EXISTING:** built + ran the EC reconstruct test on clean pre-Phase-8
-  master (commit 8c768d92, the canonical Phase-7 tip) — it FAILS identically at
-  `cluster_ec_test.go:127`. Confirmed transport-independent: fails the same way on
-  `--transport tcp` and `--transport http`. This was long mis-filed in memory as a
-  "macOS resource flake" (S5c-3 entry); it is in fact a boot-ordering deadlock with a
-  timing-sensitive trigger under the `node-id == raft-addr` config (reproduced on clean
-  master + both transports; not claimed 100%-deterministic, but root-caused, not random).
-  **Fix direction (separate work from the transport rebuild):** start the joiner's
-  legacy data-raft actor BEFORE invite-join Phase-2, or add the joiner as a learner
-  (not a direct voter) and promote only after its actor is running — matching the
-  documented JoinMode learner path (`types.go:286`) instead of the
-  `addJoinedNodeToLegacyDataRaft` direct `AddVoterCtx`. NOT fixed by any transport change.
-
-
 - [pre-existing e2e failures — cluster join Iceberg 501 + multipart list fanout timeout; Phase 8-independent, A/B-verified]
   4 cluster e2e specs fail identically on the post-Phase-8 tree (664bd79d), the pre-N7-3
   baseline (a716f0f7), AND the pre-Phase-II baseline (a63d6983) — verified by building each

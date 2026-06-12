@@ -197,10 +197,16 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 
 	// 2. ShardRoutes — registers the native shard routes; distBackend still nil.
+	// node.Start (and its Stop cleanup) moved to run.go, BEFORE invite-join
+	// Phase-2 (the §6 join-deadlock fix) — bootShardRoutes pushes no cleanup.
 	cleanupsBefore := len(state.cleanups)
 	require.NoError(t, bootShardRoutes(state))
-	assert.Equal(t, cleanupsBefore+1, len(state.cleanups), "node.Stop cleanup pushed")
+	assert.Equal(t, cleanupsBefore, len(state.cleanups), "bootShardRoutes pushes no cleanup (node.Start lives in run.go)")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
+	// Mirror run.go's early Start so the later phases see a running actor,
+	// exactly as production boot does.
+	state.node.Start()
+	state.AddCleanup(func() { state.node.Close() })
 
 	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + rebalancer +
 	//    loadReporter; shutdown hook registered.
