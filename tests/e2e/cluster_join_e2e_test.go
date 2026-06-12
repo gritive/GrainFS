@@ -109,6 +109,10 @@ func runClusterJoinAllServicesAvailable(t testing.TB) {
 		AccessKey:  "join-ak",
 		SecretKey:  "join-sk",
 		LogPrefix:  "grainfs-dynamic-join",
+		// Iceberg is opt-in since the Phase-1 core rewrite (f9283f12 disabled
+		// non-S3 protocols by default); this spec asserts the Iceberg REST
+		// catalog over a joined cluster, so it must enable the flag it tests.
+		ExtraArgs: []string{"--enable-iceberg"},
 	})
 	waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
 	waitForPortsParallel(t, c.nbdPorts, 30*time.Second)
@@ -146,6 +150,9 @@ func runClusterJoinDynamicJoinServicesNodeCount(t testing.TB, nodes int) {
 		AccessKey:  "join-ak",
 		SecretKey:  "join-sk",
 		LogPrefix:  fmt.Sprintf("grainfs-dynamic-join-%d", nodes),
+		// Iceberg is opt-in since the Phase-1 core rewrite — enable the flag
+		// this spec asserts (see runClusterJoinAllServicesAvailable).
+		ExtraArgs: []string{"--enable-iceberg"},
 	})
 
 	waitForPortsParallel(t, c.httpPorts, 30*time.Second)

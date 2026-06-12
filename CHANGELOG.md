@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.560.0] - 2026-06-12
+
+### Fixed
+- Multipart sessions no longer misroute across nodes whose boot-frozen placement
+  candidate sets diverge (dynamically grown clusters: join-time group expansion records
+  no FSM placement generation, so older nodes keep a smaller candidate set and hash the
+  same object onto a different group). `CreateMultipartUpload` now returns an uploadID
+  that encodes the owning shard group (`mpg:<groupID>:<raw>`); UploadPart / ListParts /
+  Complete / Abort parse it and route directly to that group instead of re-hashing
+  against the local candidate set. S3 uploadIDs are opaque to clients; un-prefixed IDs
+  keep the legacy hash routing. `ListMultipartUploads` and the lifecycle MPU scan
+  re-encode collected IDs with their source group, so listing-then-abort (including
+  lifecycle expiry of incomplete uploads) routes correctly from any node.
+- Cluster-join e2e specs that assert Iceberg availability now start nodes with
+  `--enable-iceberg` (the flag defaults to off since non-S3 protocols became opt-in),
+  and the multipart fanout e2e gates on every node's `multipart_listing_v1` capability
+  evidence (gossip-fed, first round ~30s) before creating fixtures — both were test
+  bugs, not product regressions.
+
 ## [0.0.559.0] - 2026-06-12
 
 ### Fixed

@@ -16,17 +16,30 @@ func (c *ClusterCoordinator) multipartRuntime() multipartRuntime {
 	return multipartRuntime{c: c}
 }
 
+// createMultipartUpload group-encodes the returned uploadID with the routed
+// placement group (see multipart_upload_id.go) so session ops issued on OTHER
+// nodes — whose boot-frozen hash candidate sets may diverge — route back to
+// the owning group. Backends only ever see the raw ID.
 func (r multipartRuntime) createMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
 	ctx, target, _, err := r.prepareCreate(ctx, bucket, key)
 	if err != nil {
 		return nil, err
 	}
+	var upload *storage.MultipartUpload
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		return gb.CreateMultipartUpload(ctx, bucket, key, contentType)
+		upload, err = gb.CreateMultipartUpload(ctx, bucket, key, contentType)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		upload, err = r.c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return r.c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, nil)
+	return r.c.wrapMultipartUpload(upload, target.GroupID), nil
 }
 
 func (r multipartRuntime) createMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
@@ -37,17 +50,21 @@ func (r multipartRuntime) createMultipartUploadWithTags(ctx context.Context, buc
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return "", err
 	} else if gb != nil {
-		return gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+		uploadID, err := gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+		if err != nil {
+			return "", err
+		}
+		return r.c.wrapMultipartUploadID(uploadID, target.GroupID), nil
 	}
 	upload, err := r.c.forwardRuntime().createMultipartUpload(ctx, target, bucket, key, contentType, tags)
 	if err != nil {
 		return "", err
 	}
-	return upload.UploadID, nil
+	return r.c.wrapMultipartUploadID(upload.UploadID, target.GroupID), nil
 }
 
 func (r multipartRuntime) completeMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
-	ctx, target, group, err := r.prepareMutation(ctx, bucket, key)
+	ctx, target, group, rawID, err := r.prepareSession(ctx, bucket, key, uploadID)
 	if err != nil {
 		return nil, err
 	}
@@ -55,13 +72,13 @@ func (r multipartRuntime) completeMultipartUpload(ctx context.Context, bucket, k
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		return gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
+		return gb.CompleteMultipartUpload(ctx, bucket, key, rawID, parts)
 	}
-	return r.c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, uploadID, parts)
+	return r.c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, rawID, parts)
 }
 
 func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (*storage.Part, error) {
-	ctx, target, _, err := r.prepareMutation(ctx, bucket, key)
+	ctx, target, _, rawID, err := r.prepareSession(ctx, bucket, key, uploadID)
 	if err != nil {
 		return nil, err
 	}
@@ -69,13 +86,13 @@ func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID 
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
+		return gb.UploadPart(ctx, bucket, key, rawID, partNumber, body)
 	}
-	return r.c.forwardRuntime().uploadPart(ctx, target, bucket, key, uploadID, partNumber, body)
+	return r.c.forwardRuntime().uploadPart(ctx, target, bucket, key, rawID, partNumber, body)
 }
 
 func (r multipartRuntime) abortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
-	ctx, target, _, err := r.prepareMutation(ctx, bucket, key)
+	ctx, target, _, rawID, err := r.prepareSession(ctx, bucket, key, uploadID)
 	if err != nil {
 		return err
 	}
@@ -83,9 +100,9 @@ func (r multipartRuntime) abortMultipartUpload(ctx context.Context, bucket, key,
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
-		return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
+		return gb.AbortMultipartUpload(ctx, bucket, key, rawID)
 	}
-	return r.c.forwardRuntime().abortMultipartUpload(ctx, target, bucket, key, uploadID)
+	return r.c.forwardRuntime().abortMultipartUpload(ctx, target, bucket, key, rawID)
 }
 
 func (r multipartRuntime) prepareCreate(ctx context.Context, bucket, key string) (context.Context, RouteTarget, ShardGroupEntry, error) {
@@ -109,4 +126,18 @@ func (r multipartRuntime) prepareMutation(ctx context.Context, bucket, key strin
 		return ctx, RouteTarget{}, ShardGroupEntry{}, err
 	}
 	return ctx, target, group, nil
+}
+
+// prepareSession resolves routing for an op on an EXISTING multipart session
+// (routeMultipartSession: group-encoded uploadID → direct group route,
+// un-prefixed → legacy hash route) and returns the raw backend uploadID.
+func (r multipartRuntime) prepareSession(ctx context.Context, bucket, key, uploadID string) (context.Context, RouteTarget, ShardGroupEntry, string, error) {
+	if err := r.c.requireObjectBucket(ctx, bucket); err != nil {
+		return ctx, RouteTarget{}, ShardGroupEntry{}, "", err
+	}
+	target, group, rawID, err := r.c.routeMultipartSession(bucket, key, uploadID)
+	if err != nil {
+		return ctx, RouteTarget{}, ShardGroupEntry{}, "", err
+	}
+	return ctx, target, group, rawID, nil
 }
