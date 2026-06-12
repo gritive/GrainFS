@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.552.0] - 2026-06-12
+
+### Removed
+
+- **Phase 8 N2+N3: delete the TCP cluster transport — HTTP is now the only cluster
+  transport.** Removes `tcp_transport.go`, `tcp_call.go`, `tcp_identity.go`, `tcp_mux.go`,
+  `tcp_chunk.go`, `tcp_pool.go`, `tcp_config.go`, and `mux_carrier.go` (~1,900 LOC + their
+  tests), the `MuxCarrier`/`GetOrConnectMux`/`SetMuxConnHandler`/`EvictMux` methods from the
+  `ClusterTransport` interface (nothing referenced them after the raft mux subsystem went in
+  N1), the HTTP transport's mux stubs, and the boot transport-selection branch. The Zero-CA
+  join listener (`tcp_join.go`, always its own TLS handshake) is independent of the cluster
+  transport and is untouched.
+- **BREAKING (operator flag): `--transport` is removed.** There is no longer a transport to
+  select — the cluster always uses the Phase 8 Hertz HTTP transport over SPKI-pinned mTLS.
+  **This removes the `--transport tcp` escape hatch: the TCP→HTTP migration is now
+  irreversible** (like the QUIC removal). `UseHTTPTransport`/`Transport` config + options are
+  removed with the flag.
+
+### Notes
+
+- **Eyes-open, no throughput proof.** Like the original flip (0.0.550.0), this ships
+  macOS-functional-only: full unit suite green; **Linux multi-node throughput parity was NOT
+  measured** (macOS cannot surface the signal). The user accepted removing the escape hatch
+  without a load proof.
+- **Surfaced (not caused) a pre-existing HTTP gap.** Renaming the TCP-only
+  `TestRemoteSealedShardSink_AbortDoesNotCommit` to the HTTP transport revealed that a shard
+  write aborted mid-stream leaves a *truncated* shard file at the final path over HTTP (the
+  Hertz server reads a client mid-body abort as a clean EOF, so `HandleWriteBody` reaches its
+  tmp→final rename). Verified: the final shard file exists after abort, which over the removed
+  TCP transport it did not. NOT verified for this failure path (inferred, not asserted as
+  fact): that the receiver returns StatusOK to the coordinator, and that the resulting
+  truncated shard is EC-masked on read (a truncated AES-GCM shard *should* fail its tag → be
+  reconstructed). Live since the 0.0.550.0 flip. Captured in TODOS.md with a fix direction
+  (carry the expected sealed length in the request envelope; reject a short body); the test is
+  `t.Skip`-ped until then.
+
 ## [0.0.551.0] - 2026-06-12
 
 ### Removed
