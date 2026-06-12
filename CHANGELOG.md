@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Phase 8 N7-2: the S3 forward streaming family (streamed-body write forwards and
+  streamed-response read forwards between group leaders) now travels native routes —
+  `POST /forward/write` and `GET /forward/read`, with the FlatBuffers forward frame in a
+  typed family header and raw bytes streamed — instead of the `/_grainfs/rpc` StreamType
+  envelope tunnel. Application-level forward status (leader hints, bucket errors) stays
+  in-band in the FlatBuffers reply, preserving the sender's redirect protocol unchanged.
+  Third and fourth ops on the envelope-free wire. The tunnel remains for the remaining
+  RPC families until N8. Internal cluster wire only; mixed-version clusters across this
+  boundary are unsupported (existing flag-day stance).
+
 ## [0.0.556.0] - 2026-06-12
 
 ### Changed
