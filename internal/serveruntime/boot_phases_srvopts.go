@@ -403,10 +403,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			if len(targets) == 0 {
 				return fmt.Errorf("audit ship: no leader elected")
 			}
-			return state.clusterTransport.Send(ctx, targets[0], &transport.Message{
-				Type:    transport.StreamAuditShip,
-				Payload: payload,
-			})
+			// Native /audit/ship buffered route (Phase 8 N7-3). This family is
+			// BUFFERED, not gossip: the tunnel Send rode doRPC and surfaced the
+			// handler's StatusError (decode/append failure) as an error — a
+			// fire-and-forget route would silently drop audit failures. The
+			// success reply is empty; only the error matters.
+			_, err = state.clusterTransport.CallBuffered(ctx, targets[0], transport.RouteAuditShip, payload)
+			return err
 		}
 		committer := audit.NewCommitter(audit.CommitterConfig{
 			Outbox:       auditOutbox,
@@ -417,7 +420,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			NodeID:       nodeID,
 			Interval:     interval,
 		})
-		state.streamRouter.Handle(transport.StreamAuditShip, func(req *transport.Message) *transport.Message {
+		auditShipHandler := func(req *transport.Message) *transport.Message {
 			events, err := audit.DecodeS3Batch(req.Payload)
 			if err != nil {
 				return transport.NewErrorResponse(req, transport.StatusError, err)
@@ -426,7 +429,14 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 				return transport.NewErrorResponse(req, transport.StatusError, err)
 			}
 			return transport.NewResponse(req, nil)
-		})
+		}
+		// Tunnel registration — kept alongside the native route until Phase 8 N8.
+		state.streamRouter.Handle(transport.StreamAuditShip, auditShipHandler)
+		// Phase 8 N7-3: native /audit/ship buffered route. The handler reads
+		// only req.Payload; decode/append failures map to a 500 → sender error,
+		// preserving the tunnel's StatusError surfacing.
+		state.clusterTransport.RegisterBufferedRoute(transport.RouteAuditShip,
+			transport.BufferedRouteFromMessageHandler("audit ship", auditShipHandler))
 		commitCtx, commitCancel := context.WithCancel(ctx)
 		state.AddCleanup(commitCancel)
 		go committer.Run(commitCtx)
