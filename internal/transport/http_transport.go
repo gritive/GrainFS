@@ -86,6 +86,12 @@ type HTTPTransport struct {
 	nativeForwardWrites atomic.Uint64
 	nativeForwardReads  atomic.Uint64
 
+	// Generic native primitives (Phase 8 N7-3): buffered-Call routes and
+	// gossip routes, keyed by path. The maps are built at construction and
+	// immutable afterwards; per-route handler/counter fields are atomic.
+	bufferedByPath map[string]*bufferedRouteState
+	gossipByPath   map[string]*gossipRouteState
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 
@@ -113,10 +119,12 @@ func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &HTTPTransport{
-		ctx:    ctx,
-		cancel: cancel,
-		router: NewStreamRouter(),
-		inbox:  make(chan *ReceivedMessage, 256),
+		ctx:            ctx,
+		cancel:         cancel,
+		router:         NewStreamRouter(),
+		inbox:          make(chan *ReceivedMessage, 256),
+		bufferedByPath: newBufferedRouteStates(),
+		gossipByPath:   newGossipRouteStates(),
 	}
 	// Seed the live identity (base PSK accepted, present = PSK cert), then hand
 	// ownership to the composer whose swap closure atomically restores it — exactly
@@ -232,6 +240,14 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.GET(httpShardReadPath, t.handleShardRead)
 	srv.POST(httpForwardWritePath, t.handleForwardWrite)
 	srv.GET(httpForwardReadPath, t.handleForwardRead)
+	// Generic native primitives (N7-3): EVERY declared buffered/gossip route is
+	// live from Listen; a family whose handler has not registered answers 503.
+	for path, rs := range t.bufferedByPath {
+		srv.POST(path, t.handleBufferedRoute(rs))
+	}
+	for path, rs := range t.gossipByPath {
+		srv.POST(path, t.handleGossipRoute(rs))
+	}
 
 	t.mu.Lock()
 	t.srv = srv

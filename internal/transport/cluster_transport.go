@@ -39,6 +39,13 @@ type ClusterTransport interface {
 	ForwardWrite(ctx context.Context, addr string, frame []byte, body io.Reader) ([]byte, error)
 	ForwardRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
 
+	// Generic native primitives (Phase 8 N7-3): buffered-Call and gossip
+	// routes for the long-tail families (route table in http_buffered_route.go).
+	RegisterBufferedRoute(path string, h BufferedRouteHandler)
+	CallBuffered(ctx context.Context, addr, path string, payload []byte) ([]byte, error)
+	RegisterGossipRoute(path string, h GossipHandler)
+	GossipSend(ctx context.Context, addr, path string, payload []byte) error
+
 	RecycleConns()
 	ClosePeer(addr string)
 	LocalAddr() string
