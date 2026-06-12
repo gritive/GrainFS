@@ -35,10 +35,9 @@ type ServeOptions struct {
 	BootstrapExpectTimeout time.Duration // --bootstrap-expect-timeout
 
 	// --- Cluster transport tuning ---
-	AppendForwardBufferTotalBytes    int64  // --cluster-append-forward-buffer-total-bytes
-	AppendForwardBufferMaxPerRequest int64  // --cluster-append-forward-buffer-max-per-request
-	AppendSizeCapBytes               int64  // --append-size-cap-bytes
-	Transport                        string // --transport (tcp|http, EXPERIMENTAL; default http)
+	AppendForwardBufferTotalBytes    int64 // --cluster-append-forward-buffer-total-bytes
+	AppendForwardBufferMaxPerRequest int64 // --cluster-append-forward-buffer-max-per-request
+	AppendSizeCapBytes               int64 // --append-size-cap-bytes
 
 	// --- Storage knobs ---
 	PackThreshold      int   // --pack-threshold

@@ -189,21 +189,3 @@ func TestOptionsToConfigRaftAddrExplicitFalse(t *testing.T) {
 	require.False(t, cfg.RaftAddrExplicit, "empty RaftAddr implies explicit=false")
 	require.Equal(t, "", cfg.RaftAddr)
 }
-
-// TestOptionsToConfigTransportDefaultHTTP locks the S8-5 flip semantics: HTTP is
-// the default cluster transport, and only an explicit --transport tcp opts back
-// into the legacy TCP transport. An empty/unset value must NOT silently revert the
-// flip — it maps to HTTP, matching the cobra flag default.
-func TestOptionsToConfigTransportDefaultHTTP(t *testing.T) {
-	for _, tc := range []struct {
-		transport string
-		wantHTTP  bool
-	}{
-		{"", true},     // unset → HTTP (must not revert the flip)
-		{"http", true}, // explicit HTTP
-		{"tcp", false}, // explicit legacy opt-out
-	} {
-		cfg := optionsToConfig(ServeOptions{Transport: tc.transport}, ":0", nil, nil, nil)
-		require.Equal(t, tc.wantHTTP, cfg.UseHTTPTransport, "transport=%q", tc.transport)
-	}
-}

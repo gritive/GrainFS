@@ -11,9 +11,9 @@ import (
 // interface in cluster/raft, so the boot-held value can be passed to those
 // narrower constructors (Go interface-to-interface assignment).
 //
-// The mux-connection methods speak MuxCarrier (S2b-1), so this interface is no
-// longer QUIC-shaped: a TCP mux carrier (S2b-2) can satisfy it. *TCPTransport
-// satisfies it today via muxCarrier.
+// Raft and shard RPCs are request/response over Call*/Handle*; there is no
+// stream-multiplexing surface (the raft mux subsystem and the TCP transport that
+// carried it were removed in Phase 8). HTTPTransport is the only implementation.
 type ClusterTransport interface {
 	// Transport covers Listen/Connect/Send/Receive/Close.
 	Transport
@@ -29,10 +29,6 @@ type ClusterTransport interface {
 	HandleRead(st StreamType, h StreamReadHandler)
 	SetStreamHandler(h StreamHandler)
 
-	SetMuxConnHandler(h MuxConnHandler)
-	GetOrConnectMux(ctx context.Context, addr string) (MuxCarrier, error)
-	EvictMux(addr string, carrier MuxCarrier)
-
 	RecycleConns()
 	ClosePeer(addr string)
 	LocalAddr() string
@@ -46,5 +42,5 @@ type ClusterTransport interface {
 	SetDropped()
 }
 
-// TCPTransport is the sole cluster transport (S6 removed the QUIC stack).
-var _ ClusterTransport = (*TCPTransport)(nil)
+// HTTPTransport is the sole cluster transport.
+var _ ClusterTransport = (*HTTPTransport)(nil)

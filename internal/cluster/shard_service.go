@@ -473,6 +473,40 @@ func BuildSealedShardWriteRequest(bucket, shardKey string, shardIdx int) *transp
 	return &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
 }
 
+// SealedShardTrailerLen is the length of the completeness trailer appended to a
+// streamed sealed-shard body: an 8-byte big-endian count of the payload bytes
+// that precede it. The receiver requires it to reject a TRUNCATED body. Without
+// it, a mid-stream abort is indistinguishable from a clean finish over the HTTP
+// transport: when the sink's pipe reader errors, Hertz logs the body-reader
+// error as a warning and ends the chunked request cleanly, so the server reads
+// a short body as a normal EOF and would commit a truncated shard.
+const SealedShardTrailerLen = 8
+
+// AppendSealedShardTrailer appends the 8-byte big-endian completeness trailer
+// encoding payloadLen to buf. The streaming sink writes it after the last shard
+// chunk on a clean Finalize (never on Abort).
+func AppendSealedShardTrailer(buf []byte, payloadLen int64) []byte {
+	var t [SealedShardTrailerLen]byte
+	binary.BigEndian.PutUint64(t[:], uint64(payloadLen))
+	return append(buf, t[:]...)
+}
+
+// SplitSealedShardTrailer verifies and strips the completeness trailer from a
+// received sealed-shard body, returning the payload. It errors if the body is
+// shorter than the trailer or if the declared payload length does not match the
+// bytes received (the signature of a mid-stream truncation).
+func SplitSealedShardTrailer(body []byte) ([]byte, error) {
+	if len(body) < SealedShardTrailerLen {
+		return nil, fmt.Errorf("sealed shard body %d bytes shorter than completeness trailer: truncated", len(body))
+	}
+	payload := body[:len(body)-SealedShardTrailerLen]
+	declared := binary.BigEndian.Uint64(body[len(body)-SealedShardTrailerLen:])
+	if uint64(len(payload)) != declared {
+		return nil, fmt.Errorf("sealed shard truncated: received %d payload bytes, sender declared %d", len(payload), declared)
+	}
+	return payload, nil
+}
+
 // CheckShardWriteResponse interprets a shard-write RPC response: nil on success,
 // or the remote-reported error. Pairs with BuildSealedShardWriteRequest for
 // out-of-package callers (unmarshalEnvelope is unexported).
@@ -906,13 +940,21 @@ func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *tr
 		observePutStage("shard_stream_server", "parse_request", stageStart)
 		stageStart = time.Now()
 		if rpcType == "WriteSealedShard" {
-			// The body is the final encoded payload, so it is bounded directly by
-			// the data WAL's MaxPayloadBytes (no further encode grows it). Buffer
-			// is per-shard, not whole-object; streaming the sealed body to disk
-			// without buffering is a later refinement.
-			sealed, rerr := readShardPayload(body, datawal.MaxPayloadBytes, -1, false)
+			// The body is the final encoded payload plus an 8-byte completeness
+			// trailer, so the payload is bounded directly by the data WAL's
+			// MaxPayloadBytes (no further encode grows it); read with room for the
+			// trailer. Buffer is per-shard, not whole-object; streaming the sealed
+			// body to disk without buffering is a later refinement.
+			raw, rerr := readShardPayload(body, datawal.MaxPayloadBytes+SealedShardTrailerLen, -1, false)
 			if rerr != nil {
 				return s.errorResponse(rerr.Error())
+			}
+			// Reject a truncated body: a mid-stream abort surfaces over HTTP as a
+			// clean EOF, so the trailer's declared length is the only signal that
+			// distinguishes a complete shard from a partial one.
+			sealed, terr := SplitSealedShardTrailer(raw)
+			if terr != nil {
+				return s.errorResponse(terr.Error())
 			}
 			if werr := s.writeLocalSealedShard(context.Background(), sr.Bucket, sr.Key, int(sr.ShardIdx), sealed); werr != nil {
 				return s.errorResponse(werr.Error())

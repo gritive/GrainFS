@@ -22,7 +22,7 @@ func buildCapGateWiringState(t *testing.T) *bootState {
 	require.NoError(t, err)
 	t.Cleanup(func() { meta.Close() })
 
-	tr, err := transport.NewTCPTransport("test-psk")
+	tr, err := transport.NewHTTPTransport("test-psk")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tr.Close() })
 

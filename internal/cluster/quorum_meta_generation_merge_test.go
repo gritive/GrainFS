@@ -19,8 +19,8 @@ func twoGenerationBackend(t *testing.T, selfIsB bool) (*DistributedBackend, *Sha
 	ctx := context.Background()
 	keeper, clusterID := testDEKKeeper(t)
 
-	trA := transport.MustNewTCPTransport("test-cluster-psk")
-	trB := transport.MustNewTCPTransport("test-cluster-psk")
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
 	t.Cleanup(func() { trA.Close() })

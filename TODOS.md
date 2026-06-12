@@ -1,6 +1,17 @@
 # TODO
 
 - [known flake — diagnosed, NOT bounded-reproducible; Phase 8-independent, pre-existing]
+  `internal/cluster` package: rare intermittent `object not found` on GET under repeated/concurrent
+  load. Observed on `TestMultiNodeStreamingPUT_HTTP_ParityShardFailure_CommitsAndReads` and
+  `TestMultiNodeStreamingPUT_K3_RoundTrip` (the multi-node in-process GET reconstruction path) when
+  run under `-count` repeat or full-package parallel load. **Confirmed pre-existing and unrelated to
+  the abort-truncation trailer fix:** symmetric measurement — base (no fix) and fix both pass 0/10 at
+  isolated `-count=1` and both FAIL at `-count=20`; the fix does not change the rate. Likely the same
+  resource-contention class as the placement-monitor flake below (CPU/FD starvation tripping a
+  deadline/probe or a cross-test shared-resource window). CI runs `-count=1` per package, where it is
+  reliably green.
+
+- [known flake — diagnosed, NOT bounded-reproducible; Phase 8-independent, pre-existing]
   `internal/cluster` package: a rare intermittent failure under heavy concurrent
   load (observed once during a full `make test-unit` as
   `TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd`, fast-fail ~0.14s).

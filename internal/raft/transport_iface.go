@@ -14,5 +14,5 @@ type raftRPCTransport interface {
 	Handle(st transport.StreamType, h transport.StreamHandler)
 }
 
-// TCPTransport satisfies the RPC surface.
-var _ raftRPCTransport = (*transport.TCPTransport)(nil)
+// HTTPTransport satisfies the RPC surface.
+var _ raftRPCTransport = (*transport.HTTPTransport)(nil)

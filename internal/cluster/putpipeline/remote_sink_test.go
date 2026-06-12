@@ -27,7 +27,7 @@ func (fakeShardWAL) AppendReader(context.Context, datawal.Record, io.Reader) (ui
 }
 func (fakeShardWAL) Flush() error { return nil }
 
-func newSinkTestShardService(t *testing.T, tr *transport.TCPTransport, keeper *encrypt.DEKKeeper, clusterID []byte) *cluster.ShardService {
+func newSinkTestShardService(t *testing.T, tr *transport.HTTPTransport, keeper *encrypt.DEKKeeper, clusterID []byte) *cluster.ShardService {
 	t.Helper()
 	return cluster.NewShardService(t.TempDir(), tr,
 		cluster.WithShardDEKKeeper(keeper, clusterID),
@@ -43,8 +43,8 @@ func TestRemoteSealedShardSink_RoundTrip(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -76,15 +76,18 @@ func TestRemoteSealedShardSink_RoundTrip(t *testing.T) {
 
 // TestRemoteSealedShardSink_AbortDoesNotCommit is the critical failure-semantics
 // test: a sink Abort (after a partial Write) must leave NO shard committed on the
-// peer — the receiver's body Read errors and the write is rejected. This is the
-// shardSink self-clean contract verified over the real transport.
+// peer. Over HTTP a mid-stream abort surfaces to the server as a clean EOF, so
+// the receiver cannot rely on a body-read error; instead Abort omits the
+// completeness trailer that Finalize would write, so the receiver's declared-vs-
+// received length check rejects the partial. This is the shardSink self-clean
+// contract verified over the real transport.
 func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
 	ctx := context.Background()
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
@@ -125,8 +128,8 @@ func TestDriveActor_RemoteDestination(t *testing.T) {
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()
 
-	tr1 := transport.MustNewTCPTransport("test-cluster-psk")
-	tr2 := transport.MustNewTCPTransport("test-cluster-psk")
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()

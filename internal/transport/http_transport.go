@@ -31,6 +31,11 @@ const httpALPN = "grainfs-http-v1"
 // alongside it; the ping route remains a cheap reachability probe.
 const httpPingPath = "/_grainfs/ping"
 
+// defaultClientBodyTimeout is the idle bound (reset per Read) armed on the client
+// response-body read so a stalled mid-body server cannot pin a client goroutine +
+// pooled conn forever. Generous for 16MiB+ shard bodies over LAN. See idleReadConn.
+const defaultClientBodyTimeout = 5 * time.Minute
+
 // HTTPTransport is the dormant Phase 8 node-to-node transport: a Hertz HTTP server
 // and Hertz HTTP client over the SAME zero-CA SPKI-pinned mTLS + live identity
 // rotation the TCP transport uses (transport_shared.go). S8-1 carries only the

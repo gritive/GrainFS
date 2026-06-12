@@ -46,24 +46,15 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 		state.transportPSK = ephemeral
 	}
 
-	// Transport selection (Phase 8 S8-4, EXPERIMENTAL): TCP (default) or HTTP. All
-	// post-construction setup below is transport-agnostic (ClusterTransport interface
-	// methods); state.clusterTransport is the interface-typed field (legacy name).
-	var clusterTransport transport.ClusterTransport
-	if state.cfg.UseHTTPTransport {
-		httpTransport, herr := transport.NewHTTPTransport(state.transportPSK)
-		if herr != nil {
-			return fmt.Errorf("init HTTP cluster transport: %w", herr)
-		}
-		clusterTransport = httpTransport
-		log.Info().Msg("cluster transport: HTTP (Phase 8, EXPERIMENTAL) — raft mux disabled")
-	} else {
-		tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
-		if terr != nil {
-			return fmt.Errorf("init cluster transport: %w", terr)
-		}
-		clusterTransport = tcpTransport
+	// The cluster transport is the Phase 8 Hertz HTTP transport (the TCP transport
+	// and the --transport selector were removed in Phase 8). All post-construction
+	// setup below is transport-agnostic (ClusterTransport interface methods);
+	// state.clusterTransport is the interface-typed field.
+	httpTransport, herr := transport.NewHTTPTransport(state.transportPSK)
+	if herr != nil {
+		return fmt.Errorf("init HTTP cluster transport: %w", herr)
 	}
+	var clusterTransport transport.ClusterTransport = httpTransport
 	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.
