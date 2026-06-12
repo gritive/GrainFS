@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -378,8 +377,8 @@ func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
 		return
 	}
 	rawPrefix := []byte("obj:")
-	_ = b.db.View(func(txn *badger.Txn) error {
-		return b.ks().scanGroupPrefix(txn, rawPrefix, func(rawKey []byte, item *badger.Item) error {
+	_ = b.store.View(func(txn MetadataTxn) error {
+		return b.ks().scanGroupPrefix(txn, rawPrefix, func(rawKey []byte, item MetaItem) error {
 			select {
 			case <-ctx.Done():
 				return errStopScan

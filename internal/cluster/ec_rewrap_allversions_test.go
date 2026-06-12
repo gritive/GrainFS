@@ -5,7 +5,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -49,7 +48,7 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 		m.Key = key
 		val, err := marshalObjectMeta(m)
 		require.NoError(t, err)
-		require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 			return f.setValue(txn, metaKey, val)
 		}))
 	}
@@ -65,7 +64,7 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	seedMeta(t, f.keys.ObjectMetaKeyV("b1", "obj1", "v1"), "obj1", objectMeta{
 		ECData: ecData, ECParity: ecParity, NodeIDs: selfNodes,
 	})
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		return txn.Set(f.keys.LatestKey("b1", "obj1"), []byte("v1"))
 	}))
 
@@ -89,7 +88,7 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	// map for b2. With m.Key derivation, m.Key="seg" gives the exact key and
 	// "vtag" becomes the version ID — correctly emitting the segment target.
 	const decoyKey = "seg/vtag" // slash-containing key — collides with b2's tail
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		return txn.Set(f.keys.LatestKey("b1", decoyKey), []byte("somevid"))
 	}))
 	// No b1 obj: entry for decoyKey needed; the lat: alone populated latestMap.
@@ -119,7 +118,7 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	// We reuse the same versioned segment object already seeded above and add
 	// a same-bucket decoy lat: pointer. No second obj: record needed (two metas
 	// for obj:b2/seg/vtag would overwrite each other — they share the same key).
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		return txn.Set(f.keys.LatestKey("b2", decoyKey), []byte("somevid2"))
 	}))
 	// segShardKey is already seeded above; the same-bucket decoy lat: just adds

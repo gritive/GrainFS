@@ -7,8 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -37,10 +35,10 @@ func (b *DistributedBackend) listAllObjects(strict bool) ([]storage.SnapshotObje
 	}
 	var result []storage.SnapshotObject
 	for _, bucket := range buckets {
-		if err := b.db.View(func(txn *badger.Txn) error {
+		if err := b.store.View(func(txn MetadataTxn) error {
 			latest := make(map[string]string)
 			rawLatPrefix := []byte("lat:" + bucket + "/")
-			if err := b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+			if err := b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
 				key := string(raw[len(rawLatPrefix):])
 				_ = item.Value(func(v []byte) error {
 					latest[key] = string(v)
@@ -52,7 +50,7 @@ func (b *DistributedBackend) listAllObjects(strict bool) ([]storage.SnapshotObje
 			}
 
 			rawObjPrefix := []byte("obj:" + bucket + "/")
-			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item *badger.Item) error {
+			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
 				rest := string(raw[len(rawObjPrefix):])
 				slash := strings.LastIndex(rest, "/")
 				if slash < 0 {
@@ -177,9 +175,9 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 		return 0, nil, err
 	}
 	for _, bucket := range buckets {
-		if err := b.db.View(func(txn *badger.Txn) error {
+		if err := b.store.View(func(txn MetadataTxn) error {
 			rawObjPrefix := []byte("obj:" + bucket + "/")
-			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, _ *badger.Item) error {
+			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, _ MetaItem) error {
 				rest := string(raw[len(rawObjPrefix):])
 				slash := strings.LastIndex(rest, "/")
 				if slash < 0 {
@@ -287,7 +285,7 @@ func (b *DistributedBackend) restorePlacementMeta(snap storage.SnapshotObject) P
 
 func (b *DistributedBackend) latestMatchingObjectVersionID(obj storage.SnapshotObject) string {
 	versionID := ""
-	_ = b.db.View(func(txn *badger.Txn) error {
+	_ = b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().LatestKey(obj.Bucket, obj.Key))
 		if err != nil {
 			return nil
@@ -355,7 +353,7 @@ func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 	if versionID == "" {
 		// Resolve versionID from the lat: pointer so WAL-replayed objects
 		// (which carry no versionID) can still be located on disk.
-		_ = b.db.View(func(txn *badger.Txn) error {
+		_ = b.store.View(func(txn MetadataTxn) error {
 			item, err := txn.Get(b.ks().LatestKey(bucket, key))
 			if err != nil {
 				return err

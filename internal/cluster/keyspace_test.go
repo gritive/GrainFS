@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
@@ -140,10 +141,12 @@ func TestStateKeyspace_ScanGroupPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	store := badgermeta.Wrap(db)
+
 	// Scoped scan: group A's obj: prefix returns exactly k1,k2 with stripped keys.
 	got := map[string]string{}
-	if err := db.View(func(txn *badger.Txn) error {
-		return ksA.scanGroupPrefix(txn, []byte("obj:"), func(raw []byte, item *badger.Item) error {
+	if err := store.View(func(txn MetadataTxn) error {
+		return ksA.scanGroupPrefix(txn, []byte("obj:"), func(raw []byte, item MetaItem) error {
 			v, err := item.ValueCopy(nil)
 			if err != nil {
 				return err
@@ -161,8 +164,8 @@ func TestStateKeyspace_ScanGroupPrefix(t *testing.T) {
 
 	// errStopScan halts cleanly (returns nil), having seen >= 1 item.
 	n := 0
-	if err := db.View(func(txn *badger.Txn) error {
-		return ksA.scanGroupPrefix(txn, []byte("obj:"), func(raw []byte, item *badger.Item) error {
+	if err := store.View(func(txn MetadataTxn) error {
+		return ksA.scanGroupPrefix(txn, []byte("obj:"), func(raw []byte, item MetaItem) error {
 			n++
 			return errStopScan
 		})
@@ -179,8 +182,8 @@ func TestStateKeyspace_ScanGroupPrefix(t *testing.T) {
 	// "no group prefix => whole DB" behavior).
 	ksEmpty := newStateKeyspaceEmpty()
 	cnt := 0
-	if err := db.View(func(txn *badger.Txn) error {
-		return ksEmpty.scanGroupPrefix(txn, []byte("obj:"), func(raw []byte, item *badger.Item) error {
+	if err := store.View(func(txn MetadataTxn) error {
+		return ksEmpty.scanGroupPrefix(txn, []byte("obj:"), func(raw []byte, item MetaItem) error {
 			cnt++
 			return nil
 		})

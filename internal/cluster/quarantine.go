@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/incident"
@@ -99,9 +98,9 @@ func (b *DistributedBackend) QuarantineCorruptShardLocalAtShardKey(t ECShardScan
 func (b *DistributedBackend) ShardTargetStillReferenced(ctx context.Context, t ECShardScanTarget) bool {
 	var m objectMeta
 	found := false
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().ObjectMetaKeyV(t.Bucket, t.ObjectKey, t.VersionID))
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -158,10 +157,10 @@ func (b *DistributedBackend) ShardTargetStillReferenced(ctx context.Context, t E
 
 func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, PutObjectQuarantineCmd, error) {
 	var out PutObjectQuarantineCmd
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		for _, candidate := range []string{versionID, ""} {
 			item, err := txn.Get(b.ks().QuarantineKey(bucket, key, candidate))
-			if err == badger.ErrKeyNotFound {
+			if err == ErrMetaKeyNotFound {
 				continue
 			}
 			if err != nil {

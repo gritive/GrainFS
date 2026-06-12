@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -35,8 +36,8 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 	ksA := mustNewKS(t, "group-A")
 	ksB := mustNewKS(t, "group-B")
 
-	fA := NewFSM(db, ksA)
-	fB := NewFSM(db, ksB)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
+	fB := NewFSM(badgermeta.Wrap(db), ksB)
 
 	// Write objects and buckets into each group.
 	putObjViaApply(t, fA, "bA", "obj1", "A-payload")
@@ -51,11 +52,11 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 	defer db2.Close()
 
 	// All keys must still exist after reopen.
-	assert.True(t, dbHasKey(t, db2, ksA.ObjectMetaKey("bA", "obj1")), "A obj1 must survive restart")
-	assert.True(t, dbHasKey(t, db2, ksA.ObjectMetaKey("bA", "obj2")), "A obj2 must survive restart")
-	assert.True(t, dbHasKey(t, db2, ksA.BucketKey("bA")), "A bucket must survive restart")
-	assert.True(t, dbHasKey(t, db2, ksB.ObjectMetaKey("bB", "obj1")), "B obj1 must survive restart")
-	assert.True(t, dbHasKey(t, db2, ksB.BucketKey("bB")), "B bucket must survive restart")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.ObjectMetaKey("bA", "obj1")), "A obj1 must survive restart")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.ObjectMetaKey("bA", "obj2")), "A obj2 must survive restart")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.BucketKey("bA")), "A bucket must survive restart")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksB.ObjectMetaKey("bB", "obj1")), "B obj1 must survive restart")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksB.BucketKey("bB")), "B bucket must survive restart")
 
 	// Values must be distinct — A and B had different payloads for obj1.
 	var valA, valB []byte
@@ -130,8 +131,8 @@ func TestSharedFSM_RestoreCrashMidway_SelfHealsOnBoot(t *testing.T) {
 
 	ksA := mustNewKS(t, "group-A")
 	ksB := mustNewKS(t, "group-B")
-	fA := NewFSM(db, ksA)
-	fB := NewFSM(db, ksB)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
+	fB := NewFSM(badgermeta.Wrap(db), ksB)
 
 	// Step 2: write group A's initial state and group B's state.
 	putObjViaApply(t, fA, "bA", "old-obj", "OLD")
@@ -162,13 +163,13 @@ func TestSharedFSM_RestoreCrashMidway_SelfHealsOnBoot(t *testing.T) {
 	restoreCrashAfterDrop = nil
 
 	// After the crash: group A's old-obj was DropPrefix'd; new-obj was never written.
-	assert.False(t, dbHasKey(t, db, ksA.ObjectMetaKey("bA", "old-obj")),
+	assert.False(t, dbHasKey(t, badgermeta.Wrap(db), ksA.ObjectMetaKey("bA", "old-obj")),
 		"old-obj must be gone: DropPrefix ran before the crash")
-	assert.False(t, dbHasKey(t, db, ksA.ObjectMetaKey("bA", "new-obj")),
+	assert.False(t, dbHasKey(t, badgermeta.Wrap(db), ksA.ObjectMetaKey("bA", "new-obj")),
 		"new-obj must not exist: re-write never ran (crash interrupted it)")
 
 	// Sibling group B is intact through the crash.
-	assert.True(t, dbHasKey(t, db, ksB.ObjectMetaKey("bB", "keep-obj")),
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), ksB.ObjectMetaKey("bB", "keep-obj")),
 		"B's keep-obj must survive group-A's crash")
 
 	// Step 5: simulate the reboot — close DB and reopen.
@@ -178,8 +179,8 @@ func TestSharedFSM_RestoreCrashMidway_SelfHealsOnBoot(t *testing.T) {
 	require.NoError(t, err)
 	defer db2.Close()
 
-	fA2 := NewFSM(db2, ksA)
-	fB2 := NewFSM(db2, ksB)
+	fA2 := NewFSM(badgermeta.Wrap(db2), ksA)
+	fB2 := NewFSM(badgermeta.Wrap(db2), ksB)
 	_ = fB2 // created to mirror boot: both groups' FSMs are instantiated on startup
 
 	// Re-run Restore from the durable snapshot (the boot path).
@@ -188,11 +189,11 @@ func TestSharedFSM_RestoreCrashMidway_SelfHealsOnBoot(t *testing.T) {
 		"reboot Restore must succeed")
 
 	// Group A self-healed: new-obj is now present.
-	assert.True(t, dbHasKey(t, db2, ksA.ObjectMetaKey("bA", "new-obj")),
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.ObjectMetaKey("bA", "new-obj")),
 		"new-obj must be restored after reboot Restore")
 
 	// Group B still intact: keep-obj survived both the crash and the reboot.
-	assert.True(t, dbHasKey(t, db2, ksB.ObjectMetaKey("bB", "keep-obj")),
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksB.ObjectMetaKey("bB", "keep-obj")),
 		"B's keep-obj must be intact after crash + reboot")
 }
 
@@ -211,7 +212,7 @@ func TestSharedFSM_RestoreRejectsCorruptBytesBeforeDrop(t *testing.T) {
 	defer db.Close()
 
 	ksA := mustNewKS(t, "group-A")
-	fA := NewFSM(db, ksA)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
 
 	putObjViaApply(t, fA, "bA", "x", "X")
 
@@ -221,6 +222,6 @@ func TestSharedFSM_RestoreRejectsCorruptBytesBeforeDrop(t *testing.T) {
 	require.Error(t, err, "corrupt snapshot bytes must be rejected")
 
 	// Pre-existing state must be intact — decode failed before DropPrefix.
-	assert.True(t, dbHasKey(t, db, ksA.ObjectMetaKey("bA", "x")),
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), ksA.ObjectMetaKey("bA", "x")),
 		"pre-existing key must survive a corrupt-snapshot rejection (decode-before-drop)")
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -32,6 +33,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 		return fmt.Errorf("open metadata db: %w", err)
 	}
 	defer db.Close()
+	store := badgermeta.Wrap(db)
 
 	// Collect all existing metadata entries
 	var buckets []string
@@ -43,8 +45,8 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 	var objects []objEntry
 	var multiparts [][]byte
 
-	err = db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+	err = store.View(func(txn MetadataTxn) error {
+		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
@@ -124,7 +126,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 	}
 
 	// Start FSM apply loop to keep metadata in sync
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(store, newStateKeyspaceEmpty())
 	stopApply := make(chan struct{})
 	go func() {
 		for {

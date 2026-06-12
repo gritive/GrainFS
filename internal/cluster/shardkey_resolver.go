@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -203,10 +201,8 @@ func (b *DistributedBackend) scanShardKeyPlacement(ctx context.Context, bucket, 
 	rawObjPfx := []byte("obj:" + bucket + "/" + objectKey + "/")
 	objPrefix := b.ks().Prefix(rawObjPfx)
 
-	err := b.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = objPrefix
-		it := txn.NewIterator(opts)
+	err := b.store.View(func(txn MetadataTxn) error {
+		it := txn.NewIterator(MetaIteratorOptions{Prefix: objPrefix, PrefetchValues: true})
 		defer it.Close()
 		exact := 0
 		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {

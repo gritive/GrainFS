@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -66,8 +68,8 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	ksB, err := newStateKeyspace("group-B")
 	require.NoError(t, err)
 
-	fA := NewFSM(db, ksA)
-	fB := NewFSM(db, ksB)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
+	fB := NewFSM(badgermeta.Wrap(db), ksB)
 
 	// Helper: write a bucket + object into a group's FSM (same bucket name,
 	// same object key — to prove there is no cross-group collision).
@@ -149,9 +151,9 @@ func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
 func fsmHasKey(t *testing.T, f *FSM, rawKey string) bool {
 	t.Helper()
 	found := false
-	require.NoError(t, f.db.View(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(f.keys.Key([]byte(rawKey)))
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -174,8 +176,8 @@ func TestSharedFSM_SnapshotContainsOnlyOwnGroup(t *testing.T) {
 	require.NoError(t, err)
 	ksB, err := newStateKeyspace("group-B")
 	require.NoError(t, err)
-	fA := NewFSM(db, ksA)
-	fB := NewFSM(db, ksB)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
+	fB := NewFSM(badgermeta.Wrap(db), ksB)
 
 	putObjViaApply(t, fA, "bucket", "objA", "A-pay")
 	putObjViaApply(t, fB, "bucket", "objB", "B-pay")
@@ -202,8 +204,8 @@ func TestSharedFSM_RestoreReplacesOnlyOwnGroup(t *testing.T) {
 	require.NoError(t, err)
 	ksB, err := newStateKeyspace("group-B")
 	require.NoError(t, err)
-	fA := NewFSM(db, ksA)
-	fB := NewFSM(db, ksB)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
+	fB := NewFSM(badgermeta.Wrap(db), ksB)
 
 	putObjViaApply(t, fA, "bucket", "old-A", "old")
 	putObjViaApply(t, fB, "bucket", "keep-B", "keep")
@@ -226,7 +228,7 @@ func TestSharedFSM_RestoreRejectsWrongFormatVersion(t *testing.T) {
 
 	ksA, err := newStateKeyspace("group-A")
 	require.NoError(t, err)
-	fA := NewFSM(db, ksA)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
 	putObjViaApply(t, fA, "bucket", "objA", "pay")
 
 	blob, err := fA.Snapshot()
@@ -244,7 +246,7 @@ func TestSharedFSM_RestoreRejectsAlreadyPrefixedKeys(t *testing.T) {
 
 	ksA, err := newStateKeyspace("group-A")
 	require.NoError(t, err)
-	fA := NewFSM(db, ksA)
+	fA := NewFSM(badgermeta.Wrap(db), ksA)
 	putObjViaApply(t, fA, "bucket", "objA", "pay")
 
 	blob, err := marshalSnapshotState(map[string][]byte{
@@ -261,7 +263,7 @@ func TestFSM_Restore_EmptyKeyspace_WholeDBReplace(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	f := NewFSM(db, newStateKeyspaceEmpty())
+	f := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	putObjViaApply(t, f, "bucket", "old", "old")
 	require.True(t, fsmHasKey(t, f, "obj:bucket/old"))
 

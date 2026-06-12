@@ -37,8 +37,8 @@ func applyBatched(t *testing.T, fsm *FSM, cmds [][]byte, batchSizes []int) []str
 func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	err := fsm.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+	err := fsm.db.View(func(txn MetadataTxn) error {
+		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
@@ -100,7 +100,7 @@ func TestApplyTxnBatchDeterminism(t *testing.T) {
 				g[i] = 1
 			}
 		}
-		fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+		fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 		results := applyBatched(t, fsm, cmds, g)
 		state := dumpFSMState(t, fsm)
 		if gi == 0 {
@@ -122,7 +122,7 @@ func TestApplyBatch_CommitFailureFallback(t *testing.T) {
 	}
 
 	// Reference: unbatched apply on a separate FSM.
-	refFSM := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	refFSM := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	for _, c := range cmds {
 		_ = refFSM.Apply(c)
 	}
@@ -131,7 +131,7 @@ func TestApplyBatch_CommitFailureFallback(t *testing.T) {
 	// Force the batch commit to fail once; subsequent commits go through.
 	orig := commitApplyTxn
 	failed := false
-	commitApplyTxn = func(txn *badger.Txn) error {
+	commitApplyTxn = func(txn MetadataTxn) error {
 		if !failed {
 			failed = true
 			txn.Discard()
@@ -141,7 +141,7 @@ func TestApplyBatch_CommitFailureFallback(t *testing.T) {
 	}
 	defer func() { commitApplyTxn = orig }()
 
-	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	a := &applyActor{db: fsm.db, fsm: fsm}
 	results := a.applyBatch(batch)
 
@@ -169,7 +169,7 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 1, Type: raft.LogEntryCommand, Command: c}
 	}
 
-	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	a := &applyActor{db: fsm.db, fsm: fsm}
 	results := a.applyBatch(batch)
 
@@ -179,7 +179,7 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 	require.NoError(t, results[3])
 
 	// Entry 3 (k3) committed despite entry 2's error.
-	err := fsm.db.View(func(txn *badger.Txn) error {
+	err := fsm.db.View(func(txn MetadataTxn) error {
 		_, e := txn.Get(fsm.keys.ObjectMetaKey("b1", "k3"))
 		return e
 	})
@@ -205,12 +205,12 @@ func TestApplyBatch_ErrTxnTooBigFallback(t *testing.T) {
 		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 1, Type: raft.LogEntryCommand, Command: c}
 	}
 
-	refFSM := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	refFSM := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	for _, c := range cmds {
 		require.NoError(t, refFSM.Apply(c))
 	}
 
-	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	a := &applyActor{db: fsm.db, fsm: fsm}
 	results := a.applyBatch(batch)
 
@@ -246,14 +246,14 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	}
 
 	// Source FSM with one bucket -> snapshot bytes.
-	src := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	src := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	require.NoError(t, src.Apply(enc(CmdCreateBucket, CreateBucketCmd{Bucket: "from-snap"})))
 	snapBytes, err := src.Snapshot()
 	require.NoError(t, err)
 
 	// Target FSM + backend. Feed: command, command, snapshot, command.
-	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
-	b := &DistributedBackend{db: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}, registry: NewRegistry()}
+	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
+	b := &DistributedBackend{store: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}, registry: NewRegistry()}
 	a := &applyActor{db: fsm.db, fsm: fsm}
 
 	c1 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "pre1"})

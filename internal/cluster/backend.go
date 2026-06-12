@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/pool"
@@ -155,8 +156,14 @@ type PutPipelineRunner interface {
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
 type DistributedBackend struct {
-	root                             string
-	db                               *badger.DB
+	root string
+	// db is the raw BadgerDB handle, kept only for FSMDB()/Close/constructor
+	// pass-through (removed in S6.5-3).
+	db *badger.DB
+	// store carries ALL internal transactions. Never call store.Close():
+	// the raw db owns the lifecycle (until S6.5-3) — closing both would
+	// double-close the underlying BadgerDB.
+	store                            MetadataStore
 	node                             RaftNode
 	fsm                              *FSM
 	keys                             *stateKeyspace
@@ -306,7 +313,8 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 		keys = newStateKeyspaceEmpty()
 	}
 
-	fsm := NewFSM(db, keys)
+	store := badgermeta.Wrap(db)
+	fsm := NewFSM(store, keys)
 
 	if noOp, err := EncodeNoOpCommand(); err == nil {
 		node.SetNoOpCommand(noOp)
@@ -315,6 +323,7 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 	b := &DistributedBackend{
 		root:         root,
 		db:           db,
+		store:        store,
 		node:         node,
 		fsm:          fsm,
 		keys:         keys,
@@ -841,7 +850,7 @@ func (b *DistributedBackend) ProposeFSMValueResealDone(ctx context.Context, gen 
 // This must run in a goroutine. Delegates to applyActor, which opportunistically
 // batches command entries into a single BadgerDB transaction per commit.
 func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
-	a := &applyActor{db: b.db, fsm: b.fsm}
+	a := &applyActor{db: b.store, fsm: b.fsm}
 	a.run(b, stop)
 }
 

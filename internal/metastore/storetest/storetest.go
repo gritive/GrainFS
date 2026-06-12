@@ -336,6 +336,20 @@ func Run(t *testing.T, opener func(t *testing.T) metastore.Store) {
 		}))
 	})
 
+	t.Run("DiscardIdempotent", func(t *testing.T) {
+		// apply_actor's ErrTxnTooBig fallback discards, and tests discard
+		// inside the commit seam — double Discard must be a no-op (badger is
+		// idempotent; the contract now promises it). (S6.5-2 plan-gate C6.)
+		s := opener(t)
+		txn := s.NewTransaction(true)
+		require.NoError(t, txn.Set([]byte("k"), []byte("v")))
+		txn.Discard()
+		txn.Discard() // second discard: no panic
+		ro := s.NewTransaction(false)
+		ro.Discard()
+		ro.Discard()
+	})
+
 	t.Run("ReadOnlyTxnRejectsWrites", func(t *testing.T) {
 		s := opener(t)
 		require.NoError(t, s.View(func(txn metastore.Txn) error {

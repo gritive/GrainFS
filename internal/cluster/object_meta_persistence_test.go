@@ -3,15 +3,13 @@ package cluster
 import (
 	"errors"
 	"testing"
-
-	"github.com/dgraph-io/badger/v4"
 )
 
 func TestPersistObjectMetaUpdatePublishesLatestVersion(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 	meta := objectMeta{Key: "k", Size: 12}
 
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
 			Bucket:    "b",
 			Key:       "k",
@@ -38,7 +36,7 @@ func TestPersistObjectMetaUpdateMirrorsExistingVersionWithoutPublishingLatest(t 
 	f := newCoalesceTestFSM(t)
 	meta := objectMeta{Key: "k", Size: 12}
 
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
 			Bucket:    "b",
 			Key:       "k",
@@ -65,7 +63,7 @@ func TestPersistObjectMetaUpdateLegacyOnly(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 	meta := objectMeta{Key: "k", Size: 12}
 
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
 			Bucket: "b",
 			Key:    "k",
@@ -81,7 +79,7 @@ func TestPersistObjectMetaUpdateLegacyOnly(t *testing.T) {
 	if legacy.Size != 12 {
 		t.Fatalf("legacy=%+v", legacy)
 	}
-	if _, err := readObjectMetaMaybeForPersistenceTest(t, f, f.keys.ObjectMetaKeyV("b", "k", "v1")); !errors.Is(err, badger.ErrKeyNotFound) {
+	if _, err := readObjectMetaMaybeForPersistenceTest(t, f, f.keys.ObjectMetaKeyV("b", "k", "v1")); !errors.Is(err, ErrMetaKeyNotFound) {
 		t.Fatalf("versioned err=%v want ErrKeyNotFound", err)
 	}
 }
@@ -90,7 +88,7 @@ func TestPersistPutObjectMetaUpdatePublishesVersionedObject(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 	meta := objectMeta{Key: "k", Size: 12}
 
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return f.persistPutObjectMetaUpdate(txn, PutObjectMetaCmd{
 			Bucket:    "b",
 			Key:       "k",
@@ -117,7 +115,7 @@ func TestPersistPutObjectMetaUpdatePreserveLatestWritesOnlyVersion(t *testing.T)
 	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), previous)
 	requireSetLatestForResolveTest(t, f, "b", "k", "v-current")
 
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return f.persistPutObjectMetaUpdate(txn, PutObjectMetaCmd{
 			Bucket:         "b",
 			Key:            "k",
@@ -143,7 +141,7 @@ func TestPersistPutObjectMetaUpdateDeleteMarkerPublishesLatestAndDeletesLegacy(t
 	f := newCoalesceTestFSM(t)
 	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), objectMeta{Key: "k", Size: 12})
 
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return f.persistPutObjectMetaUpdate(txn, PutObjectMetaCmd{
 			Bucket:         "b",
 			Key:            "k",
@@ -162,7 +160,7 @@ func TestPersistPutObjectMetaUpdateDeleteMarkerPublishesLatestAndDeletesLegacy(t
 	if got := readLatestForPersistenceTest(t, f, "b", "k"); got != "del-v1" {
 		t.Fatalf("latest=%q want del-v1", got)
 	}
-	if _, err := readObjectMetaMaybeForPersistenceTest(t, f, f.keys.ObjectMetaKey("b", "k")); !errors.Is(err, badger.ErrKeyNotFound) {
+	if _, err := readObjectMetaMaybeForPersistenceTest(t, f, f.keys.ObjectMetaKey("b", "k")); !errors.Is(err, ErrMetaKeyNotFound) {
 		t.Fatalf("legacy err=%v want ErrKeyNotFound", err)
 	}
 }
@@ -179,7 +177,7 @@ func readObjectMetaForPersistenceTest(t *testing.T, f *FSM, key []byte) objectMe
 func readObjectMetaMaybeForPersistenceTest(t *testing.T, f *FSM, key []byte) (objectMeta, error) {
 	t.Helper()
 	var meta objectMeta
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(key)
 		if err != nil {
 			return err
@@ -203,9 +201,9 @@ func readObjectMetaMaybeForPersistenceTest(t *testing.T, f *FSM, key []byte) (ob
 func readLatestForPersistenceTest(t *testing.T, f *FSM, bucket, key string) string {
 	t.Helper()
 	var latest string
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(f.keys.LatestKey(bucket, key))
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil
 		}
 		if err != nil {

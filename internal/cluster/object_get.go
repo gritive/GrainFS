@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -320,8 +319,8 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 
 	var obj storage.Object
 	var placement PlacementMeta
-	err := b.db.View(func(txn *badger.Txn) error {
-		decodeMeta := func(item *badger.Item, versionID string) error {
+	err := b.store.View(func(txn MetadataTxn) error {
+		decodeMeta := func(item MetaItem, versionID string) error {
 			val, err := b.itemValueCopy(item)
 			if err != nil {
 				return err
@@ -383,11 +382,11 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				if versionID != "" {
 					metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
 				}
-			} else if lerr != badger.ErrKeyNotFound {
+			} else if lerr != ErrMetaKeyNotFound {
 				return lerr
 			}
 			item, err := txn.Get(metaKeyBytes)
-			if err == badger.ErrKeyNotFound {
+			if err == ErrMetaKeyNotFound {
 				return storage.ErrObjectNotFound
 			}
 			if err != nil {
@@ -409,12 +408,12 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			if versionID != "" {
 				metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
 			}
-		} else if lerr != badger.ErrKeyNotFound {
+		} else if lerr != ErrMetaKeyNotFound {
 			return lerr
 		}
 
 		item, err := txn.Get(metaKeyBytes)
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrObjectNotFound
 		}
 		if err != nil {
@@ -436,7 +435,7 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 		}
 	}
 	meta := PlacementMeta{VersionID: versionID}
-	_ = b.db.View(func(txn *badger.Txn) error {
+	_ = b.store.View(func(txn MetadataTxn) error {
 		dbKey := b.ks().ObjectMetaKey(bucket, key)
 		if versionID != "" {
 			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)

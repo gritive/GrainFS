@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -25,14 +24,14 @@ func (b *DistributedBackend) CreateBucketBypassReserved(ctx context.Context, buc
 
 func (b *DistributedBackend) createBucketInternal(ctx context.Context, bucket string, bypassReserved bool) error {
 	// Check if already exists (read local)
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().BucketKey(bucket))
 		return err
 	})
 	if err == nil {
 		return storage.ErrBucketAlreadyExists
 	}
-	if err != badger.ErrKeyNotFound {
+	if err != ErrMetaKeyNotFound {
 		return err
 	}
 
@@ -90,9 +89,9 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 	if b.bypassBucketCheck {
 		return nil
 	}
-	return b.db.View(func(txn *badger.Txn) error {
+	return b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().BucketKey(bucket))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrBucketNotFound
 		}
 		return err
@@ -101,9 +100,9 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 
 func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	// Check existence and emptiness
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().BucketKey(bucket))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrBucketNotFound
 		}
 		if err != nil {
@@ -111,7 +110,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		}
 
 		prefix := b.ks().Prefix([]byte("obj:" + bucket + "/"))
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		it.Seek(prefix)
 		if it.ValidForPrefix(prefix) {
@@ -149,7 +148,7 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 		versionID string // empty for legacy unversioned keys
 	}
 	var refs []objRef
-	if err := b.db.View(func(txn *badger.Txn) error {
+	if err := b.store.View(func(txn MetadataTxn) error {
 		// Build latMap so we can distinguish versioned sub-keys from unversioned
 		// legacy keys. A key of the form obj:<bucket>/<base>/<vid> is a versioned
 		// object iff <base> appears in latMap (i.e. lat:<bucket>/<base> exists)
@@ -159,7 +158,7 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 		latMap := make(map[string]struct{})
 		rawLatPfx := []byte("lat:" + bucket + "/")
 		latPfx := b.ks().Prefix(rawLatPfx)
-		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		itLat := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		for itLat.Seek(latPfx); itLat.ValidForPrefix(latPfx); itLat.Next() {
 			rawK := b.ks().MustStrip(itLat.Item().Key())
 			latMap[string(rawK[len(rawLatPfx):])] = struct{}{}
@@ -168,7 +167,7 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 
 		rawBucketPfx := []byte("obj:" + bucket + "/")
 		pfx := b.ks().Prefix(rawBucketPfx)
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
 			rawK := b.ks().MustStrip(it.Item().Key())
@@ -305,9 +304,9 @@ func (b *DistributedBackend) SetBucketPolicyPropose(bucket string, policyJSON []
 // FSM-consistent view; writes flow through Raft.
 func (b *DistributedBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 	var data []byte
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().BucketPolicyKey(bucket))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrBucketNotFound
 		}
 		if err != nil {
@@ -421,13 +420,13 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 // node, so the local view is always current modulo replication lag.
 func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
 	var result []storage.Tag
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		dbKey := b.ks().ObjectMetaKey(bucket, key)
 		if versionID != "" {
 			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)
 		}
 		item, err := txn.Get(dbKey)
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrObjectNotFound
 		}
 		if err != nil {
@@ -453,9 +452,9 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 // when no state has been set so the S3 semantic matches ECBackend's default.
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
 	var state string
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().BucketVerKey(bucket))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			state = "Unversioned"
 			return nil
 		}
@@ -472,8 +471,8 @@ func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) 
 
 func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	var buckets []string
-	err := b.db.View(func(txn *badger.Txn) error {
-		return b.ks().scanGroupPrefix(txn, []byte("bucket:"), func(rawKey []byte, item *badger.Item) error {
+	err := b.store.View(func(txn MetadataTxn) error {
+		return b.ks().scanGroupPrefix(txn, []byte("bucket:"), func(rawKey []byte, item MetaItem) error {
 			name := strings.TrimPrefix(string(rawKey), "bucket:")
 			buckets = append(buckets, name)
 			return nil

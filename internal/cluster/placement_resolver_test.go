@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -12,8 +13,8 @@ import (
 func newResolverTestBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	return &DistributedBackend{db: db, fsm: fsm, ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	return &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm, ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
 }
 
 func TestResolvePlacement_UsesMetadataNodeIDs(t *testing.T) {
@@ -54,7 +55,7 @@ func TestResolvePlacement_ReturnsErrPlacementCorruptForBadMetadata(t *testing.T)
 
 func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "bkt",
 		Key:         "obj/with/slash",
@@ -85,8 +86,8 @@ func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 
 func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	b := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	b := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
 
 	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "bkt"})
 	require.NoError(t, err)

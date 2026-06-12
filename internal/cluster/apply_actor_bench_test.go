@@ -7,6 +7,8 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
+
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -26,7 +28,7 @@ func benchmarkApplyBatched(b *testing.B, batchSize int) {
 	}
 	b.Cleanup(func() { db.Close() })
 
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	a := &applyActor{db: fsm.db, fsm: fsm}
 
 	cmds := make([][]byte, b.N)

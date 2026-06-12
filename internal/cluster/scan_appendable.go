@@ -3,8 +3,6 @@ package cluster
 import (
 	"context"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -21,8 +19,8 @@ func (b *DistributedBackend) ScanAppendableObjects(bucket string) (<-chan scrubb
 		defer close(ch)
 		rawLatPrefix := []byte("lat:" + bucket + "/")
 
-		_ = b.db.View(func(txn *badger.Txn) error {
-			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+		_ = b.store.View(func(txn MetadataTxn) error {
+			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
 				key := string(raw[len(rawLatPrefix):])
 
 				var versionID string

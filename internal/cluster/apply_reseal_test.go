@@ -7,6 +7,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -23,7 +24,7 @@ func newFSMWithDEKAtGen(t *testing.T, activeGen uint32) (*FSM, *encrypt.DEKKeepe
 	for i := uint32(0); i < activeGen; i++ {
 		require.NoError(t, keeper.Rotate())
 	}
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	fsm.SetDEKKeeper(keeper, clusterID)
 	return fsm, keeper
 }
@@ -32,7 +33,7 @@ func newFSMWithDEKAtGen(t *testing.T, activeGen uint32) (*FSM, *encrypt.DEKKeepe
 func frameGenOf(t *testing.T, f *FSM, key []byte) uint32 {
 	t.Helper()
 	var gen uint32
-	require.NoError(t, f.db.View(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(key)
 		if err != nil {
 			return err
@@ -58,7 +59,7 @@ func frameGenOf(t *testing.T, f *FSM, key []byte) uint32 {
 func mustOpenValue(t *testing.T, f *FSM, key []byte) []byte {
 	t.Helper()
 	var plain []byte
-	require.NoError(t, f.db.View(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(key)
 		if err != nil {
 			return err
@@ -90,7 +91,7 @@ func TestApplyResealFSMValues_ResealsStaleSkipsActive(t *testing.T) {
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x91}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
 
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Step 2: wire keeper at gen 0, write the object meta key value (will be sealed at gen 0).
 	// Then rotate so keeper becomes gen 1.

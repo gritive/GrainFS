@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
@@ -22,7 +21,7 @@ func seedLatestObjectMetaVersion(t *testing.T, b *DistributedBackend, bucket, ke
 	f := b.FSMRef()
 	val, err := marshalObjectMeta(m)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(bucket, key, versionID), val); err != nil {
 			return err
 		}
@@ -211,7 +210,7 @@ func TestIterECShardScanTargetsAllVersions(t *testing.T) {
 		m := objectMeta{ECData: 2, ECParity: 1, NodeIDs: legacyNodes, Key: "legacy"}
 		val, err := marshalObjectMeta(m)
 		require.NoError(t, err)
-		require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 			return f.setValue(txn, f.keys.ObjectMetaKey("b", "legacy"), val)
 		}))
 	}
@@ -342,7 +341,7 @@ func seedModernDualWriteObject(t *testing.T, b *DistributedBackend, bucket, key,
 	f := b.FSMRef()
 	val, err := marshalObjectMeta(m)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(bucket, key, versionID), val); err != nil {
 			return err
 		}
@@ -386,7 +385,7 @@ func TestIterECShardScanTargetsAllVersions_SkipsModernDualWriteAlias(t *testing.
 		m := objectMeta{ECData: 2, ECParity: 1, NodeIDs: legacyNodes, Key: "legacy"}
 		val, err := marshalObjectMeta(m)
 		require.NoError(t, err)
-		require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 			return f.setValue(txn, f.keys.ObjectMetaKey("b", "legacy"), val)
 		}))
 	}
