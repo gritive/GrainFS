@@ -12,7 +12,7 @@
 //  4. Version mismatches (v1 snapshot probed at v2) correctly return 0.
 //
 // No real QUIC transport is needed: the test directly invokes h.Handle with a
-// *transport.Message carrying the wire-encoded payload, then decodes the
+// wire-encoded request payload, then decodes the
 // response. This is the same path a remote caller traverses; the only skipped
 // layer is the TCP/QUIC framing, which is codec-independent.
 package cluster
@@ -24,7 +24,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/snapshot"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // makeTestSnapshotFile writes a snapshot envelope file sealed under the given
@@ -90,15 +89,11 @@ func TestKEKLeaseSnapshotHandler_WireWithRealScan(t *testing.T) {
 	)
 
 	// --- v1 probe: expect SnapshotRefCount == 1 ---
-	reqV1 := &transport.Message{
-		Type:    transport.StreamKEKLeaseSnapshotProbe,
-		Payload: encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 1}),
+	respV1, herr := h.Handle(encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 1}))
+	if herr != nil {
+		t.Fatalf("v1 probe: handler error: %v", herr)
 	}
-	respV1 := h.Handle(reqV1)
-	if respV1.Status != transport.StatusOK {
-		t.Fatalf("v1 probe: handler status=%v payload=%q", respV1.Status, string(respV1.Payload))
-	}
-	gotV1, err := decodeKEKLeaseSnapshotResp(respV1.Payload)
+	gotV1, err := decodeKEKLeaseSnapshotResp(respV1)
 	if err != nil {
 		t.Fatalf("v1 probe: decode response: %v", err)
 	}
@@ -113,15 +108,11 @@ func TestKEKLeaseSnapshotHandler_WireWithRealScan(t *testing.T) {
 	}
 
 	// --- v2 probe: snapshot is sealed under v1, so count must be 0 ---
-	reqV2 := &transport.Message{
-		Type:    transport.StreamKEKLeaseSnapshotProbe,
-		Payload: encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 2}),
+	respV2, herr := h.Handle(encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 2}))
+	if herr != nil {
+		t.Fatalf("v2 probe: handler error: %v", herr)
 	}
-	respV2 := h.Handle(reqV2)
-	if respV2.Status != transport.StatusOK {
-		t.Fatalf("v2 probe: handler status=%v payload=%q", respV2.Status, string(respV2.Payload))
-	}
-	gotV2, err := decodeKEKLeaseSnapshotResp(respV2.Payload)
+	gotV2, err := decodeKEKLeaseSnapshotResp(respV2)
 	if err != nil {
 		t.Fatalf("v2 probe: decode response: %v", err)
 	}

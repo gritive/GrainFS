@@ -221,11 +221,9 @@ func setupClusterReceipt(
 	if gossipReceiver != nil {
 		gossipReceiver.SetReceiptCache(routingCache)
 	}
-	// Native /receipt/query buffered route. The handler reads
-	// only req.Payload; found/not-found is in-band in the FB response (invalid
-	// requests answer found=false, never an error).
-	clusterTransport.RegisterBufferedRoute(transport.RouteReceiptQuery,
-		transport.BufferedRouteFromMessageHandler("receipt query", cluster.NewReceiptQueryHandler(store)))
+	// Native /receipt/query buffered route. found/not-found is in-band in the
+	// FB response (invalid requests answer found=false, never an error).
+	clusterTransport.RegisterBufferedRoute(transport.RouteReceiptQuery, cluster.NewReceiptQueryHandler(store))
 
 	go gossipSender.Run(ctx)
 

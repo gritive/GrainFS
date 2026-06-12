@@ -183,27 +183,6 @@ func (t *HTTPTransport) handleBufferedRoute(rs *bufferedRouteState) app.HandlerF
 	}
 }
 
-// BufferedRouteFromMessageHandler adapts a tunnel Message handler to a native
-// buffered-route handler (transitional N7-3 shim — deleted with the tunnel in
-// N8). The Message envelope stays process-internal: payload in, reply payload
-// out. The wrapped handlers read only req.Payload (verified per family); their
-// Type/ID echo into the reply is discarded (the native wire has no envelope).
-// A nil reply or non-OK status maps to an error (→ 500 + text) — the exact
-// consumer-visible semantic the tunnel's StatusError → checkResponseStatus
-// path provided.
-func BufferedRouteFromMessageHandler(name string, h StreamHandler) BufferedRouteHandler {
-	return func(payload []byte) ([]byte, error) {
-		resp := h(&Message{Payload: payload})
-		if resp == nil {
-			return nil, fmt.Errorf("%s: bad request", name)
-		}
-		if resp.Status != StatusOK {
-			return nil, fmt.Errorf("%s: %s", name, resp.Payload)
-		}
-		return resp.Payload, nil
-	}
-}
-
 // CallBuffered POSTs payload to path on addr and returns the reply body.
 // payload is a rewindable []byte body (SetBody, not SetBodyStream) →
 // retryable on stale pooled conns (httpRetryIf), same as tunnel Call/

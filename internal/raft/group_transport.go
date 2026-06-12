@@ -44,21 +44,11 @@ type GroupRaftMux struct {
 // on the cluster transport. It must outlive all registered nodes.
 func NewGroupRaftMux(tr raftRPCTransport) *GroupRaftMux {
 	m := &GroupRaftMux{tr: tr}
-	// Native /raft/group/rpc buffered route. The payload keeps
-	// the [4B groupIDLen][groupID][raftRPC] prefix; handleRPC only reads
-	// req.Payload, and its Type echo into the reply is dropped here. A nil
-	// reply (short header / unknown group / decode failure) maps to a 500
-	// exactly as the tunnel's nil-response StatusError did.
-	tr.RegisterBufferedRoute(transport.RouteRaftGroupRPC, func(payload []byte) ([]byte, error) {
-		resp := m.handleRPC(&transport.Message{Type: transport.StreamGroupRaft, Payload: payload})
-		if resp == nil {
-			return nil, fmt.Errorf("group raft RPC: bad request")
-		}
-		if resp.Status != transport.StatusOK {
-			return nil, fmt.Errorf("group raft RPC: %s", resp.Payload)
-		}
-		return resp.Payload, nil
-	})
+	// Native /raft/group/rpc buffered route. The payload keeps the
+	// [4B groupIDLen][groupID][raftRPC] prefix; a short header / unknown group
+	// / decode failure maps to a 500 exactly as the tunnel's nil-response
+	// StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftGroupRPC, m.handleRPC)
 	return m
 }
 
@@ -109,41 +99,41 @@ func extractGroupID(buf []byte) (groupID string, payload []byte, err error) {
 	return string(buf[4 : 4+gidLen]), buf[4+gidLen:], nil
 }
 
-func (m *GroupRaftMux) handleRPC(req *transport.Message) *transport.Message {
-	groupID, payload, err := extractGroupID(req.Payload)
+func (m *GroupRaftMux) handleRPC(reqPayload []byte) ([]byte, error) {
+	groupID, payload, err := extractGroupID(reqPayload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
 	v, ok := m.nodes.Load(groupID)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: unknown group")
 	}
 	node := v.(RaftV2Handler)
 
 	rpcType, data, err := decodeRPC(payload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
 	var replyEnv []byte
 	switch rpcType {
 	case rpcTypeRequestVote:
 		args, err := decodeRequestVoteArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("group raft RPC: bad request")
 		}
 		reply := node.HandleRequestVote(args)
 		replyEnv, _ = encodeRPC(rpcTypeRequestVoteReply, reply)
 	case rpcTypeAppendEntries:
 		args, err := decodeAppendEntriesArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("group raft RPC: bad request")
 		}
 		reply := node.HandleAppendEntries(args)
 		replyEnv, _ = encodeRPC(rpcTypeAppendEntriesReply, reply)
 	default:
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
-	return &transport.Message{Type: transport.StreamGroupRaft, Payload: replyEnv}
+	return replyEnv, nil
 }
 
 // GroupRaftSender is the per-group sender returned by GroupRaftMux.ForGroup.

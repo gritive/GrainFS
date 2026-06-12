@@ -68,11 +68,11 @@ func TestWriteShadowMetaLocal_RejectsTraversal(t *testing.T) {
 func TestHandleShadowMeta_RoutesThroughRPCAndWrites(t *testing.T) {
 	s := newShadowTestShardService(t, &fakeShadowTransport{})
 
-	fw := buildShardEnvelope("WriteShadowMeta", "bucket", "k1", 0, []byte("blob"))
-	payload := fw.Builder.FinishedBytes()
-	resp := s.handleRPC(&transport.Message{Type: transport.StreamData, Payload: payload})
+	envb := buildShardEnvelope("WriteShadowMeta", "bucket", "k1", 0, []byte("blob"))
+	payload := envb.FinishedBytes()
+	resp := s.handleRPC(payload)
 
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	rpcType, _, err := unmarshalEnvelope(resp)
 	require.NoError(t, err)
 	require.Equal(t, "OK", rpcType)
 

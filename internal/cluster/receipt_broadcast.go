@@ -240,31 +240,32 @@ func encodeReceiptQuery(receiptID string) []byte {
 	return out
 }
 
-// NewReceiptQueryHandler returns a StreamHandler that answers incoming
-// ReceiptQueryMsg requests by consulting the local receipt store (lookup).
-// Used by cluster peers to serve the broadcaster's fan-out.
+// NewReceiptQueryHandler returns the native /receipt/query buffered-route
+// handler answering incoming ReceiptQueryMsg requests by consulting the local
+// receipt store (lookup). Used by cluster peers to serve the broadcaster's
+// fan-out.
 //
 // Invalid requests return found=false rather than panicking — the
 // transport layer's trust boundary assumes peer auth, but malformed
 // payloads should still fail gracefully.
-func NewReceiptQueryHandler(lookup ReceiptLookup) func(req *transport.Message) *transport.Message {
+func NewReceiptQueryHandler(lookup ReceiptLookup) transport.BufferedRouteHandler {
 	logger := log.With().Str("component", "receipt-query-handler").Logger()
-	return func(req *transport.Message) *transport.Message {
-		id, err := decodeReceiptQueryID(req.Payload)
+	return func(payload []byte) ([]byte, error) {
+		id, err := decodeReceiptQueryID(payload)
 		if err != nil || id == "" {
 			logger.Warn().Err(err).Msg("receipt-query: invalid payload")
-			return buildQueryResponseMsg(false, nil)
+			return buildQueryResponseMsg(false, nil), nil
 		}
 		r, found := lookup.LookupReceipt(id)
 		if !found {
-			return buildQueryResponseMsg(false, nil)
+			return buildQueryResponseMsg(false, nil), nil
 		}
 		data, err := receipt.EncodeReceipt(r)
 		if err != nil {
 			logger.Warn().Err(err).Msg("receipt-query: encode failed")
-			return buildQueryResponseMsg(false, nil)
+			return buildQueryResponseMsg(false, nil), nil
 		}
-		return buildQueryResponseMsg(true, data)
+		return buildQueryResponseMsg(true, data), nil
 	}
 }
 
@@ -278,7 +279,7 @@ func decodeReceiptQueryID(data []byte) (id string, err error) {
 	return string(msg.ReceiptId()), nil
 }
 
-func buildQueryResponseMsg(found bool, receiptBytes []byte) *transport.Message {
+func buildQueryResponseMsg(found bool, receiptBytes []byte) []byte {
 	b := flatbuffers.NewBuilder(128)
 	var receiptOff flatbuffers.UOffsetT
 	if len(receiptBytes) > 0 {
@@ -293,5 +294,5 @@ func buildQueryResponseMsg(found bool, receiptBytes []byte) *transport.Message {
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
-	return &transport.Message{Type: transport.StreamReceiptQuery, Payload: out}
+	return out
 }

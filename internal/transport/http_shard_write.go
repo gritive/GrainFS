@@ -22,7 +22,7 @@ import (
 //   - reply = the HTTP status: 200 empty = OK; 400 malformed params;
 //     503 overloaded / handler not ready; 500 handler error (text in the body)
 //
-// No transport.Message, no X-Gfs-* headers, no FlatBuffers RPC envelope, no
+// No envelope frame, no X-Gfs-* headers, no FlatBuffers RPC envelope, no
 // StreamRouter. This is the N7 template: URL = operation, query = metadata,
 // body = bytes, status = result, handler registered by the consumer.
 const httpShardWritePath = "/shard/write"

@@ -20,7 +20,6 @@ import (
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 func TestMetaCatalogLoadTableReadsMetadataFromWarehouseObject(t *testing.T) {
@@ -233,7 +232,7 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	t.Cleanup(func() { _ = follower.Close() })
 	receiver := NewMetaProposeForwardReceiver(leader)
 	sender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
-		return receiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return receiver.Handle(payload)
 	})
 	catalog := NewMetaCatalogWithForwarder(follower, nil, "s3://grainfs-tables/warehouse", func(ctx context.Context, command []byte) error {
 		return sender.Send(ctx, []string{"leader"}, command)
@@ -271,11 +270,11 @@ func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) 
 	leaderCatalog := NewMetaCatalog(leader, backend, "s3://grainfs-tables/warehouse")
 	leaderReceiver := NewMetaProposeForwardReceiver(leader)
 	forwardSender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
-		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return leaderReceiver.Handle(payload)
 	})
 	readReceiver := NewMetaCatalogReadReceiver(leaderCatalog)
 	readSender := NewMetaCatalogReadSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
-		return readReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return readReceiver.Handle(payload)
 	})
 	followerCatalog := NewMetaCatalogWithForwarders(
 		follower,
@@ -319,11 +318,11 @@ func TestMetaCatalogFollowerCreateTableReturnsProvidedMetadataWithoutLeaderObjec
 	leaderCatalog := NewMetaCatalog(leader, leaderBackend, "s3://grainfs-tables/warehouse")
 	leaderReceiver := NewMetaProposeForwardReceiver(leader)
 	forwardSender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
-		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return leaderReceiver.Handle(payload)
 	})
 	readReceiver := NewMetaCatalogReadReceiver(leaderCatalog)
 	readSender := NewMetaCatalogReadSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
-		return readReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return readReceiver.Handle(payload)
 	})
 	followerCatalog := NewMetaCatalogWithForwarders(
 		follower,
@@ -371,7 +370,7 @@ func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 		if peer == "follower" {
 			return encodeMetaForwardReply(raft.ErrNotLeader), nil
 		}
-		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return leaderReceiver.Handle(payload)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -394,8 +393,8 @@ func TestMetaForwardReceiverRejectsRawGatedCommand(t *testing.T) {
 	command, err := encodeMetaCmd(MetaCmdTypeNfsExportCreate, payload)
 	require.NoError(t, err)
 
-	reply := NewMetaProposeForwardReceiver(leader).Handle(&transport.Message{Payload: command})
-	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	reply, _ := NewMetaProposeForwardReceiver(leader).Handle(command)
+	_, err = decodeMetaForwardReplyWithIndex(reply)
 	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
 }
 
@@ -412,8 +411,8 @@ func TestMetaForwardReceiverAllowsLegacyRawMigrationCutover(t *testing.T) {
 	command, err := encodeMetaCmd(MetaCmdTypeMigrationCutover, payload)
 	require.NoError(t, err)
 
-	reply := NewMetaProposeForwardReceiver(leader).Handle(&transport.Message{Payload: command})
-	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	reply, _ := NewMetaProposeForwardReceiver(leader).Handle(command)
+	_, err = decodeMetaForwardReplyWithIndex(reply)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, compat.ErrCapabilityRejected)
 }
@@ -455,10 +454,8 @@ func TestMetaForwardReceiverRevalidatesGateOnLeader(t *testing.T) {
 		ConfigID:   raftConfigurationID(cfg),
 	}
 
-	reply := NewMetaProposeForwardReceiver(leader).Handle(&transport.Message{
-		Payload: encodeMetaForwardRequest(command, &plan),
-	})
-	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	reply, _ := NewMetaProposeForwardReceiver(leader).Handle(encodeMetaForwardRequest(command, &plan))
+	_, err = decodeMetaForwardReplyWithIndex(reply)
 	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
 }
 
@@ -494,12 +491,12 @@ func TestMetaForwardReceiverRefreshesGateBeforeGatedProposal(t *testing.T) {
 		ConfigID:   raftConfigurationID(cfg),
 	}
 
-	reply := NewMetaProposeForwardReceiver(leader).
+	reply, _ := NewMetaProposeForwardReceiver(leader).
 		WithGateRefresh(func() {
 			gate.SetMetaRaftSnapshot(2, cfg)
 		}).
-		Handle(&transport.Message{Payload: encodeMetaForwardRequest(command, &plan)})
-	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+		Handle(encodeMetaForwardRequest(command, &plan))
+	_, err = decodeMetaForwardReplyWithIndex(reply)
 	require.NoError(t, err)
 }
 

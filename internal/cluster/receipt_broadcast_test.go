@@ -14,7 +14,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/receipt"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // mockCaller lets tests pin each peer's RPC response. The peerResp map is
@@ -249,13 +248,11 @@ func TestReceiptQueryHandler_ReturnsReceiptWhenFound(t *testing.T) {
 	clusterpb.ReceiptQueryMsgStart(b)
 	clusterpb.ReceiptQueryMsgAddReceiptId(b, idOff)
 	b.Finish(clusterpb.ReceiptQueryMsgEnd(b))
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: b.FinishedBytes()}
-
-	resp := handler(req)
+	resp, herr := handler(b.FinishedBytes())
+	require.NoError(t, herr)
 	require.NotNil(t, resp)
-	require.Equal(t, transport.StreamReceiptQuery, resp.Type)
 
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp, 0)
 	assert.True(t, parsed.Found())
 	gotReceipt, err := receipt.DecodeReceiptStorage(parsed.ReceiptBytes())
 	require.NoError(t, err)
@@ -271,11 +268,10 @@ func TestReceiptQueryHandler_ReturnsNotFound(t *testing.T) {
 	clusterpb.ReceiptQueryMsgStart(b)
 	clusterpb.ReceiptQueryMsgAddReceiptId(b, idOff)
 	b.Finish(clusterpb.ReceiptQueryMsgEnd(b))
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: b.FinishedBytes()}
-
-	resp := handler(req)
+	resp, herr := handler(b.FinishedBytes())
+	require.NoError(t, herr)
 	require.NotNil(t, resp)
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp, 0)
 	assert.False(t, parsed.Found())
 	assert.Empty(t, parsed.ReceiptBytes())
 }
@@ -284,10 +280,10 @@ func TestReceiptQueryHandler_RejectsInvalidPayload(t *testing.T) {
 	lookup := &fakeReceiptLookup{}
 	handler := NewReceiptQueryHandler(lookup)
 
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: []byte{0xff, 0xff, 0xff, 0xff}}
-	resp := handler(req)
+	resp, herr := handler([]byte{0xff, 0xff, 0xff, 0xff})
 	// Invalid request → respond with found=false rather than panic/crash.
+	require.NoError(t, herr)
 	require.NotNil(t, resp)
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp, 0)
 	assert.False(t, parsed.Found())
 }

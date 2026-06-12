@@ -423,10 +423,10 @@ func TestShardPackScanSkipsOversizedRecord(t *testing.T) {
 func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 
-	req := buildShardEnvelope("WriteShard", "bkt", "obj/v1", 1, payload)
-	defer func() { req.Builder.Reset(); shardBuilderPool.Put(req.Builder) }()
+	envb := buildShardEnvelope("WriteShard", "bkt", "obj/v1", 1, payload)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 
-	require.LessOrEqual(t, cap(req.Builder.Bytes), 80<<10)
+	require.LessOrEqual(t, cap(envb.Bytes), 80<<10)
 }
 
 func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {

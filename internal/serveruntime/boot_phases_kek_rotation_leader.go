@@ -106,14 +106,11 @@ func bootKEKRotationLeader(state *bootState) error {
 	leaseHandler := cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
 		return state.metaRaft.LastApplied()
 	}, snapRefCount)
-	// Native /probe/kek-disk + /probe/kek-lease buffered routes.
-	// Both handlers read only req.Payload; their StatusError replies
-	// (decode/statfs/snapshot-count failure) map to a 500 → client error,
-	// exactly as the tunnel surfaced them.
-	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKDisk,
-		transport.BufferedRouteFromMessageHandler("kek disk-space probe", diskHandler.Handle))
-	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKLease,
-		transport.BufferedRouteFromMessageHandler("kek lease-snapshot probe", leaseHandler.Handle))
+	// Native /probe/kek-disk + /probe/kek-lease buffered routes. Handler
+	// errors (decode/statfs/snapshot-count failure) map to a 500 → client
+	// error, exactly as the tunnel surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKDisk, diskHandler.Handle)
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKLease, leaseHandler.Handle)
 
 	// 3. Production PeerKEKProbe with self-shortcut. Self-call computes the
 	//    disk-space + lease values directly (no wire codec roundtrip) so the
@@ -216,11 +213,10 @@ func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error 
 		state.kekStore,
 		state.metaRaft.FSM(),
 	)
-	// Native /probe/capability buffered route. Handle reads only
-	// req.Payload; its StatusError replies (decode/identity/seal failure) map
-	// to a 500 → client error, exactly as the tunnel surfaced them.
-	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability,
-		transport.BufferedRouteFromMessageHandler("capability probe", handler.Handle))
+	// Native /probe/capability buffered route. Handler errors (decode/identity/
+	// seal failure) map to a 500 → client error, exactly as the tunnel
+	// surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability, handler.Handle)
 
 	dialer := cluster.NewCapabilityProbeDialer(state.clusterTransport)
 	state.capabilityGate.WithDirectProbe(clusterID, state.kekStore, dialer)

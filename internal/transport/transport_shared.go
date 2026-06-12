@@ -37,12 +37,6 @@ func pinAcceptedSPKI(snap *IdentitySnapshot) func([][]byte, [][]*x509.Certificat
 	}
 }
 
-// StreamHandler processes an incoming request message and returns a response.
-// Transitional (Phase 8 N8): survives only as the input shape of
-// BufferedRouteFromMessageHandler until the consumer handlers are re-signatured
-// to payload-in/payload-out.
-type StreamHandler func(req *Message) *Message
-
 type TrafficLimits struct {
 	Control int
 	Meta    int

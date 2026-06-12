@@ -16,12 +16,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ForwardSender encodes a single transport.Message frame for the 0x08 stream
-// type and delivers it via the supplied dialer. PutObject/UploadPart can use
-// StreamGroupForwardBody when a stream dialer is configured; the legacy
-// single-message path keeps body bytes inside the FBS args.
+// ForwardSender encodes a single forward frame for the /forward/propose/group
+// route and delivers it via the supplied dialer. PutObject/UploadPart can use
+// the streamed /forward/write route when a stream dialer is configured; the
+// legacy buffered path keeps body bytes inside the FBS args.
 //
-// Wire payload layout (single transport.Message of type=0x08):
+// Wire payload layout (one /forward/propose/group request body):
 //
 //	[4B BE groupIDLen][groupID bytes][1B opcode][4B BE argsLen][FBS args]
 //
@@ -36,8 +36,8 @@ var (
 const defaultMaxForwardStreams = 64
 
 // forwardDialer abstracts the request-response cluster transport for testability.
-// Production wires it to clusterTransport.Call; tests pass a fake that returns
-// canned replies.
+// Production wires it to clusterTransport.CallBuffered; tests pass a fake that
+// returns canned replies.
 type forwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 type forwardStreamDialer func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error)
 type forwardReadStreamDialer func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error)

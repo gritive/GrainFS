@@ -1,6 +1,6 @@
 // Package cluster: KEK in-flight lease snapshot probe RPC (Task 8).
 //
-// RPC mechanism: the cluster transport.Call / Handle with StreamKEKLeaseSnapshotProbe (0x19).
+// RPC mechanism: the native /probe/kek-lease buffered route (CallBuffered / RegisterBufferedRoute).
 // The leader uses this to collect per-voter lease counts before proposing a
 // MetaKEKPruneCmd. A version can only be pruned when every voter attests
 // lease_count == 0 (no in-flight consumers hold a reference to K_old).
@@ -22,7 +22,6 @@ import (
 	"math"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // kekLeaseSnapshotReqMagic guards against misrouted payloads on StreamKEKLeaseSnapshotProbe.
@@ -48,14 +47,9 @@ type KEKLeaseSnapshotResp struct {
 	SnapshotRefCount          uint64
 }
 
-// kekLeaseSnapshotDialer abstracts the outbound transport.Call so tests can
-// inject a fake without a real transport link. Production wires:
-//
-//	func(ctx, peer, payload) ([]byte, error) {
-//	    resp, err := quic.Call(ctx, peer, &transport.Message{
-//	        Type: transport.StreamKEKLeaseSnapshotProbe, Payload: payload})
-//	    return resp.Payload, err
-//	}
+// kekLeaseSnapshotDialer abstracts the outbound RPC so tests can inject a
+// fake without a real transport link. Production wires
+// ClusterPeerProbeDialer.CallKEKLeaseSnapshot (CallBuffered on /probe/kek-lease).
 type kekLeaseSnapshotDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 // encodeKEKLeaseSnapshotReq serialises a request.
@@ -140,8 +134,8 @@ func decodeKEKLeaseSnapshotResp(data []byte) (KEKLeaseSnapshotResp, error) {
 	}, nil
 }
 
-// KEKLeaseSnapshotHandler is the server-side handler for StreamKEKLeaseSnapshotProbe.
-// Register it with: clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe, h.Handle)
+// KEKLeaseSnapshotHandler is the server-side handler for /probe/kek-lease.
+// Register it with: clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKLease, h.Handle)
 type KEKLeaseSnapshotHandler struct {
 	nodeID             string
 	tracker            *encrypt.KEKLeaseTracker
@@ -163,17 +157,16 @@ func NewKEKLeaseSnapshotHandler(nodeID string, tracker *encrypt.KEKLeaseTracker,
 	}
 }
 
-// Handle processes a StreamKEKLeaseSnapshotProbe request and returns a response.
-func (h *KEKLeaseSnapshotHandler) Handle(req *transport.Message) *transport.Message {
-	decoded, err := decodeKEKLeaseSnapshotReq(req.Payload)
+// Handle processes a /probe/kek-lease request and returns a response payload.
+// Errors map to a 500 → client-side error, exactly as the tunnel's StatusError.
+func (h *KEKLeaseSnapshotHandler) Handle(reqPayload []byte) ([]byte, error) {
+	decoded, err := decodeKEKLeaseSnapshotReq(reqPayload)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("kek_lease_snapshot_probe: decode request: %w", err))
+		return nil, fmt.Errorf("kek_lease_snapshot_probe: decode request: %w", err)
 	}
 	cnt, err := h.snapshotRefCountFn(decoded.Version)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("kek_lease_snapshot_probe: snapshot ref scan: %w", err))
+		return nil, fmt.Errorf("kek_lease_snapshot_probe: snapshot ref scan: %w", err)
 	}
 	resp := KEKLeaseSnapshotResp{
 		LeaseCount:                h.tracker.Count(decoded.Version),
@@ -183,10 +176,9 @@ func (h *KEKLeaseSnapshotHandler) Handle(req *transport.Message) *transport.Mess
 	}
 	payload, err := encodeKEKLeaseSnapshotResp(resp)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("kek_lease_snapshot_probe: encode response: %w", err))
+		return nil, fmt.Errorf("kek_lease_snapshot_probe: encode response: %w", err)
 	}
-	return transport.NewResponse(req, payload)
+	return payload, nil
 }
 
 // GetKEKLeaseSnapshot sends a probe to a peer and returns its response.

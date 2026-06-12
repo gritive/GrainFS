@@ -218,7 +218,7 @@ func decodeCapProbeResponse(data []byte) (capabilityProbeResponse, error) {
 }
 
 // CapabilityProbeHandler is the server-side handler for StreamCapabilityProbe.
-// Register it with: clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+// Register it with: clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability, handler.Handle)
 type CapabilityProbeHandler struct {
 	serverID       string
 	binaryVersion  string
@@ -248,18 +248,17 @@ func NewCapabilityProbeHandler(
 	}
 }
 
-// Handle processes a StreamCapabilityProbe request message and returns a response.
-func (h *CapabilityProbeHandler) Handle(req *transport.Message) *transport.Message {
-	probeReq, err := decodeCapProbeRequest(req.Payload)
+// Handle processes a /probe/capability request and returns a response payload.
+// Errors map to a 500 → client-side error, exactly as the tunnel's StatusError.
+func (h *CapabilityProbeHandler) Handle(payload []byte) ([]byte, error) {
+	probeReq, err := decodeCapProbeRequest(payload)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("capability_probe: decode request: %w", err))
+		return nil, fmt.Errorf("capability_probe: decode request: %w", err)
 	}
 	// Identity guard: refuse requests targeting a different server.
 	if probeReq.ExpectedServerID != h.serverID {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("capability_probe: identity mismatch: expected %q, this server is %q",
-				probeReq.ExpectedServerID, h.serverID))
+		return nil, fmt.Errorf("capability_probe: identity mismatch: expected %q, this server is %q",
+			probeReq.ExpectedServerID, h.serverID)
 	}
 
 	// Collect local capabilities.
@@ -278,8 +277,7 @@ func (h *CapabilityProbeHandler) Handle(req *transport.Message) *transport.Messa
 	canonical := canonicalEncodeCapAssertion(h.serverID, caps, probeReq.Nonce[:])
 	signed, err := h.kekStore.SealWithActiveKEK(canonical, aad)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("capability_probe: seal assertion: %w", err))
+		return nil, fmt.Errorf("capability_probe: seal assertion: %w", err)
 	}
 
 	resp := capabilityProbeResponse{
@@ -288,7 +286,7 @@ func (h *CapabilityProbeHandler) Handle(req *transport.Message) *transport.Messa
 		BinaryVersion:   h.binaryVersion,
 		SignedAssertion: signed,
 	}
-	return transport.NewResponse(req, encodeCapProbeResponse(resp))
+	return encodeCapProbeResponse(resp), nil
 }
 
 // GetCapabilities sends a capability probe to a peer and verifies the signed assertion.

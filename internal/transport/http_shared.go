@@ -11,6 +11,11 @@ import (
 // (http_shard_write.go, http_shard_read.go, http_forward.go,
 // http_append_segment.go).
 
+// maxPayloadSize bounds buffered request/reply payloads (allocation guard;
+// WithResponseBodyStream bypasses Hertz's MaxResponseBodySize, so the native
+// routes enforce this cap on every buffered io.ReadAll).
+const maxPayloadSize = 64 * 1024 * 1024 // 64MB
+
 // hertzBodyReader adapts an arbitrary request-body io.Reader for the Hertz
 // chunked body writer, which PANICS on a (0, nil) read ("BUG: io.Reader returned
 // 0, nil", ext/common.go WriteBodyChunked). The cluster PUT pipeline streams a

@@ -1,10 +1,10 @@
 package transport
 
-import (
-	"errors"
-)
-
-// StreamType distinguishes the purpose of a transport stream.
+// StreamType is an INTERNAL admission/metrics key only (TrafficLimiter
+// classes via ClassOf). It never travels on the wire: every RPC family rides
+// its own native HTTP route, and the route tables in http_buffered_route.go /
+// http_gossip_route.go map each route to its StreamType purely for inbound
+// admission classing.
 type StreamType byte
 
 const (
@@ -57,41 +57,4 @@ func ClassOf(st StreamType) StreamClass {
 	default:
 		return StreamClassControl
 	}
-}
-
-type MessageStatus byte
-
-const (
-	StatusOK MessageStatus = iota
-	StatusOverloaded
-	StatusError
-)
-
-// Message is a framed message sent over a transport stream.
-// Wire format: [1 byte StreamType][8 bytes request ID][1 byte status][4 bytes big-endian length][payload]
-type Message struct {
-	Type    StreamType
-	ID      uint64
-	Status  MessageStatus
-	Payload []byte
-}
-
-func NewResponse(req *Message, payload []byte) *Message {
-	if req == nil {
-		return &Message{Status: StatusOK, Payload: payload}
-	}
-	return &Message{Type: req.Type, ID: req.ID, Status: StatusOK, Payload: payload}
-}
-
-func NewErrorResponse(req *Message, status MessageStatus, err error) *Message {
-	if status == StatusOK {
-		status = StatusError
-	}
-	if err == nil {
-		err = errors.New("transport error")
-	}
-	if req == nil {
-		return &Message{Status: status, Payload: []byte(err.Error())}
-	}
-	return &Message{Type: req.Type, ID: req.ID, Status: status, Payload: []byte(err.Error())}
 }

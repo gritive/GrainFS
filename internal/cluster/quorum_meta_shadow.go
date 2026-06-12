@@ -119,9 +119,9 @@ func (s *ShardService) WriteShadowMeta(ctx context.Context, addr, bucket, key st
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	fw := buildShardEnvelope("WriteShadowMeta", bucket, key, 0, data)
-	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	respEnvelope, err := s.callShardRPC(ctx, addr, fw)
+	envb := buildShardEnvelope("WriteShadowMeta", bucket, key, 0, data)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
 		return fmt.Errorf("write shadow meta to %s: %w", addr, err)
 	}

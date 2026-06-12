@@ -420,21 +420,19 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			NodeID:       nodeID,
 			Interval:     interval,
 		})
-		auditShipHandler := func(req *transport.Message) *transport.Message {
-			events, err := audit.DecodeS3Batch(req.Payload)
+		// Native /audit/ship buffered route. Decode/append failures map to a
+		// 500 → sender error, preserving the tunnel's StatusError surfacing.
+		auditShipHandler := func(payload []byte) ([]byte, error) {
+			events, err := audit.DecodeS3Batch(payload)
 			if err != nil {
-				return transport.NewErrorResponse(req, transport.StatusError, err)
+				return nil, err
 			}
 			if err := committer.AppendFromFollower(context.Background(), events); err != nil {
-				return transport.NewErrorResponse(req, transport.StatusError, err)
+				return nil, err
 			}
-			return transport.NewResponse(req, nil)
+			return nil, nil
 		}
-		// Native /audit/ship buffered route. The handler reads
-		// only req.Payload; decode/append failures map to a 500 → sender error,
-		// preserving the tunnel's StatusError surfacing.
-		state.clusterTransport.RegisterBufferedRoute(transport.RouteAuditShip,
-			transport.BufferedRouteFromMessageHandler("audit ship", auditShipHandler))
+		state.clusterTransport.RegisterBufferedRoute(transport.RouteAuditShip, auditShipHandler)
 		commitCtx, commitCancel := context.WithCancel(ctx)
 		state.AddCleanup(commitCancel)
 		go committer.Run(commitCtx)

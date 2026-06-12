@@ -900,20 +900,17 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	if b.shardSvc == nil {
 		return 0, fmt.Errorf("forwardPropose: no transport available")
 	}
-	streamType := transport.StreamProposeForward
+	route := transport.RouteForwardProposeLegacy
 	payload := data
 	if groupID, ok := PlacementGroupFromContext(ctx); ok {
-		streamType = transport.StreamDataGroupProposeForward
+		route = transport.RouteForwardProposeDataGroup
 		payload = encodeGroupForwardPayload(groupID, data)
 	}
-	resp, err := b.shardSvc.SendRequest(ctx, leaderAddr, &transport.Message{
-		Type:    streamType,
-		Payload: payload,
-	})
+	reply, err := b.shardSvc.SendRequest(ctx, leaderAddr, route, payload)
 	if err != nil {
 		return 0, fmt.Errorf("forwardPropose: send: %w", err)
 	}
-	index, applyErr, transportErr := decodeProposeForwardReply(resp.Payload)
+	index, applyErr, transportErr := decodeProposeForwardReply(reply)
 	if transportErr != nil {
 		return 0, fmt.Errorf("forwardPropose: %w", transportErr)
 	}
@@ -939,10 +936,10 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 	if b.shardSvc == nil {
 		return
 	}
-	h := func(req *transport.Message) *transport.Message {
+	h := func(payload []byte) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
-		idx, err := b.node.ProposeWait(ctx, req.Payload)
+		idx, err := b.node.ProposeWait(ctx, payload)
 		if err == nil {
 			// Wait for apply, then surface FSM apply error (if any).
 			for b.lastApplied.Load() < idx {
@@ -962,16 +959,12 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 				}
 			}
 		}
-		return &transport.Message{
-			Type:    transport.StreamProposeForward,
-			Payload: encodeProposeForwardReply(idx, err),
-		}
+		return encodeProposeForwardReply(idx, err), nil
 	}
-	// Native /forward/propose/legacy buffered route. The handler
-	// reads only req.Payload and every propose outcome (index + apply error) is
-	// in-band in the reply payload, exactly as the tunnel delivered it.
-	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeLegacy,
-		transport.BufferedRouteFromMessageHandler("propose forward", h))
+	// Native /forward/propose/legacy buffered route. Every propose outcome
+	// (index + apply error) is in-band in the reply payload, exactly as the
+	// tunnel delivered it.
+	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeLegacy, h)
 }
 
 // forwardReadIndex sends a StreamReadIndex RPC to leaderAddr and returns the leader's commitIndex.
@@ -980,20 +973,17 @@ func (b *DistributedBackend) forwardReadIndex(ctx context.Context, leaderAddr st
 	if b.shardSvc == nil {
 		return 0, fmt.Errorf("forwardReadIndex: no transport available")
 	}
-	resp, err := b.shardSvc.SendRequest(ctx, leaderAddr, &transport.Message{
-		Type:    transport.StreamReadIndex,
-		Payload: []byte{},
-	})
+	reply, err := b.shardSvc.SendRequest(ctx, leaderAddr, transport.RouteForwardReadIndex, nil)
 	if err != nil {
 		return 0, fmt.Errorf("forwardReadIndex: %w", err)
 	}
-	if len(resp.Payload) < 12 {
-		return 0, fmt.Errorf("forwardReadIndex: short response: %d bytes", len(resp.Payload))
+	if len(reply) < 12 {
+		return 0, fmt.Errorf("forwardReadIndex: short response: %d bytes", len(reply))
 	}
-	idx := binary.BigEndian.Uint64(resp.Payload[0:8])
-	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
-	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
-		msg := string(resp.Payload[12 : 12+int(errLen)])
+	idx := binary.BigEndian.Uint64(reply[0:8])
+	errLen := binary.BigEndian.Uint32(reply[8:12])
+	if errLen > 0 && len(reply) >= 12+int(errLen) {
+		msg := string(reply[12 : 12+int(errLen)])
 		if msg == raft.ErrNotLeader.Error() {
 			return 0, raft.ErrNotLeader
 		}
@@ -1008,7 +998,7 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 	if b.shardSvc == nil {
 		return
 	}
-	h := func(req *transport.Message) *transport.Message {
+	h := func(_ []byte) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		resp := make([]byte, 12)
@@ -1022,13 +1012,12 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 			binary.BigEndian.PutUint64(resp[0:8], idx)
 			binary.BigEndian.PutUint32(resp[8:12], 0)
 		}
-		return &transport.Message{Type: transport.StreamReadIndex, Payload: resp}
+		return resp, nil
 	}
-	// Native /forward/read-index buffered route. The handler
-	// ignores the (empty) request payload; the leader outcome (commitIndex or
-	// error text) is in-band in the reply payload.
-	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardReadIndex,
-		transport.BufferedRouteFromMessageHandler("read-index forward", h))
+	// Native /forward/read-index buffered route. The handler ignores the
+	// (empty) request payload; the leader outcome (commitIndex or error text)
+	// is in-band in the reply payload.
+	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardReadIndex, h)
 }
 
 // ReadIndex returns a linearizable read fence index.

@@ -15,7 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/rs/zerolog/log"
 )
 
@@ -495,12 +494,15 @@ func (r *MetaProposeForwardReceiver) WithGateRefresh(fn func()) *MetaProposeForw
 	return r
 }
 
-func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.Message {
+// Handle serves one buffered /raft/meta/propose request. The propose outcome
+// (index + error) is in-band via encodeMetaForwardReplyWithIndex; the returned
+// error is always nil.
+func (r *MetaProposeForwardReceiver) Handle(payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var err error
 	var idx uint64
-	command, plan, framed, decodeErr := decodeMetaForwardRequest(req.Payload)
+	command, plan, framed, decodeErr := decodeMetaForwardRequest(payload)
 	if decodeErr != nil {
 		err = decodeErr
 	} else if framed && plan == nil {
@@ -525,7 +527,7 @@ func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.M
 	} else {
 		idx, err = r.meta.ProposeMetaCommandWithIndex(ctx, command)
 	}
-	return &transport.Message{Type: transport.StreamMetaProposeForward, Payload: encodeMetaForwardReplyWithIndex(idx, err)}
+	return encodeMetaForwardReplyWithIndex(idx, err), nil
 }
 
 func encodeMetaForwardRequest(command []byte, plan *compat.GatePlan) []byte {
@@ -850,14 +852,14 @@ func NewMetaCatalogReadReceiver(catalog *MetaCatalog) *MetaCatalogReadReceiver {
 	return &MetaCatalogReadReceiver{catalog: catalog}
 }
 
-func (r *MetaCatalogReadReceiver) Handle(req *transport.Message) *transport.Message {
+// Handle serves one buffered /raft/meta/catalog-read request. The read outcome
+// (reply or error type/message) is in-band via encodeMetaLoadTableReply; the
+// returned error is always nil.
+func (r *MetaCatalogReadReceiver) Handle(payload []byte) ([]byte, error) {
 	reply := &metaLoadTableReply{}
-	request, decodeErr := decodeMetaCatalogReadRequest(req.Payload)
+	request, decodeErr := decodeMetaCatalogReadRequest(payload)
 	if decodeErr != nil {
-		return &transport.Message{
-			Type:    transport.StreamMetaCatalogRead,
-			Payload: encodeMetaLoadTableReply(reply, decodeErr),
-		}
+		return encodeMetaLoadTableReply(reply, decodeErr), nil
 	}
 	var err error
 	if !r.catalog.meta.IsLeader() {
@@ -877,7 +879,7 @@ func (r *MetaCatalogReadReceiver) Handle(req *transport.Message) *transport.Mess
 			err = icebergcatalog.ErrServiceUnavailable
 		}
 	}
-	return &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: encodeMetaLoadTableReply(reply, err)}
+	return encodeMetaLoadTableReply(reply, err), nil
 }
 
 type metaCatalogReadRequest struct {

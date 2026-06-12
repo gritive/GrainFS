@@ -123,11 +123,9 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
 		WithGateRefresh(func() { refreshCapabilityGate(state) })
-	// Native /raft/meta/propose buffered route. Handle reads only
-	// req.Payload; the propose outcome (index + error) is in-band via
-	// encodeMetaForwardReplyWithIndex.
-	clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaPropose,
-		transport.BufferedRouteFromMessageHandler("meta propose forward", metaForwardReceiver.Handle))
+	// Native /raft/meta/propose buffered route. The propose outcome (index +
+	// error) is in-band via encodeMetaForwardReplyWithIndex.
+	clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaPropose, metaForwardReceiver.Handle)
 	// Zero-CA invite-join receiver. It serves the two-phase invite flow over the
 	// dedicated join listener (HandleJoinStream); state.handshakeVerifier (set by
 	// wireDEKKeeper) supplies the 16-byte cluster id bound into the invite
@@ -242,11 +240,9 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	}
 
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
-	// Native /raft/meta/catalog-read buffered route. Handle reads
-	// only req.Payload; the read outcome (reply or error type/message) is
-	// in-band via encodeMetaLoadTableReply.
-	state.clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaCatalogRead,
-		transport.BufferedRouteFromMessageHandler("meta catalog read", metaReadReceiver.Handle))
+	// Native /raft/meta/catalog-read buffered route. The read outcome (reply or
+	// error type/message) is in-band via encodeMetaLoadTableReply.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaCatalogRead, metaReadReceiver.Handle)
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	return nil
 }
@@ -430,7 +426,7 @@ func bootRegisterForwardHandlers(state *bootState) error {
 	state.forwardReceiver.Register(state.shardSvc)
 	// Phase 8 N7-2: native forward routes. The tunnel registrations above stay
 	// until N8; all in-tree streaming-forward clients now dial the native routes.
-	state.clusterTransport.RegisterForwardWriteHandler(state.forwardReceiver.NativeWriteHandler())
-	state.clusterTransport.RegisterForwardReadHandler(state.forwardReceiver.NativeReadHandler())
+	state.clusterTransport.RegisterForwardWriteHandler(state.forwardReceiver.HandleBody)
+	state.clusterTransport.RegisterForwardReadHandler(state.forwardReceiver.HandleRead)
 	return nil
 }
