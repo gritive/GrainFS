@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.561.0] - 2026-06-12
+
+### Changed
+- M5 raft v1→v2 migration tail: the stale `v2*` raft naming in `internal/cluster` is gone
+  (v1 was deleted long ago, so the prefix carried no information). `v2EncodeRPC`/`v2DecodeRPC`/
+  `v2RPCType*`/`v2RaftBuilderPool` → unprefixed, `v2RaftRPCTimeout`/`v2MetaRPCTimeout` →
+  `raftRPCTimeout`/`metaRaftRPCTimeout`, `raftv2_*.go` files renamed, and the
+  `MetaTransportMux = RaftV2MetaTransport` type alias collapsed into a concrete
+  `MetaRaftTransport` (constructor stays `NewMetaTransport`). Behavior-neutral: wire
+  literals (RPC type strings, route paths) are byte-identical; internal naming only.
+
 ## [0.0.560.0] - 2026-06-12
 
 ### Fixed

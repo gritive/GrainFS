@@ -1,22 +1,12 @@
 # TODO
 
 - [Phase 8 N4 follow-up — load-gated retune, deferred]
-  `v2RaftRPCTimeout` (80ms, `internal/cluster/raft_rpc.go`) and `v2MetaRPCTimeout` (500ms,
-  `raftv2_meta.go`) are kept at their proven values. N4's spec said "retune for warm pooled HTTP POST
+  `raftRPCTimeout` (80ms, `internal/cluster/raft_rpc.go`) and `metaRaftRPCTimeout` (500ms,
+  `meta_raft_rpc.go`) are kept at their proven values. N4's spec said "retune for warm pooled HTTP POST
   + one retry", but the right value is an R1 throughput question that is **not measurable on macOS**
   (the QUIC→TCP epic established Linux is where the perf signal lives). The election-timeout invariant
   already holds (`TestRaftRPCTimeout_BelowElectionTimeout`: 80ms < 150ms; meta 500ms < 750ms). Retune
   only with a Linux load measurement; retuning on a guess is what N4 deliberately avoided.
-
-- [M5 raft v1→v2 migration tail — separate behavior-neutral cleanup slice, NOT Phase 8]
-  The `v2`-prefixed raft naming (`v2EncodeRPC`/`v2DecodeRPC`/`v2RPCType*` in `raftv2_codec.go`,
-  `v2RaftRPCTimeout`/`v2RaftSnapshotTimeout` in `raft_rpc.go`, `v2Meta*` in `raftv2_meta.go`, the
-  `raftv2_*.go` filenames, and the `PR 30b drops the type alias and renames the v2 file` /
-  `PR 30b deletes v1 and renames this file` notes in `meta_transport.go`/`raftv2_meta.go`) is
-  leftover from the M5 raft v1→v2 migration, whose v1 package (`internal/raft/quic_rpc.go`) is already
-  deleted. Phase 8 N4 cleaned the *transport* freeze comments (byte-identical-to-v1, frozen-until-PR-30)
-  but intentionally left the `v2*` symbol/file rename alone (M5 scope, not Phase 8; a whole-family
-  rename is its own behavior-neutral slice). Do the `v2* → *` rename as a dedicated M5-completion PR.
 
 - [known flake — diagnosed, NOT bounded-reproducible; Phase 8-independent, pre-existing]
   `internal/cluster` package: rare intermittent `object not found` on GET under repeated/concurrent
