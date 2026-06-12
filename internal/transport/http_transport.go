@@ -74,6 +74,11 @@ type HTTPTransport struct {
 	// "election succeeded"). Mirrors TCPTransport.InboundMuxSessionCount's intent.
 	inboundRPC [256]atomic.Uint64
 
+	// Native route surfaces (Phase 8 N6+). Consumer-registered per-family
+	// handlers; atomic so registration may follow Listen (boot ordering).
+	shardWriteHandler atomic.Pointer[ShardWriteHandler]
+	nativeShardWrites atomic.Uint64
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 
@@ -216,6 +221,7 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 		rc.SetStatusCode(consts.StatusOK)
 	})
 	srv.POST(httpRPCPath, t.handleRPC)
+	srv.POST(httpShardWritePath, t.handleShardWrite)
 
 	t.mu.Lock()
 	t.srv = srv
