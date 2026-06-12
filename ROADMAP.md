@@ -197,5 +197,13 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
 ### Phase 9 — primitive 라이브러리 추출
 - raft/HRW/bounded/gossip 분리. 두 번째 소비자 생길 때. **선행 검토**: hashicorp/raft·memberlist 등 Layer-1 채택 vs 자체 유지.
 
+**진행 현황 (2026-06-13)**
+- [완료] **선행 검토: Layer-1 채택 vs 자체 유지** — 결론: **4개 primitive 전부 자체 유지.**
+  - raft(internal/raft, ~12.8K LOC): hashicorp/raft 채택 시 GrainFS-특화 기능 상실(Path B 단일-단계 멤버십, learner catch-up 승격 게이트, election priority, actor-pattern 무락 핫패스, meta+per-group 2-계층 토폴로지 — hashicorp는 단일-인스턴스 모델 가정) + wire/스토리지 포맷 전면 마이그레이션 + Phase 8 native HTTP 라우트 재작성 비용. 회귀 위험만 크고 기능 이득 없음. etcd-raft는 프레임워크 성격이라 절감 폭이 더 작음.
+  - HRW(~110 LOC, 의존성 0 순수 함수): 추출 난이도 최저이나 지금 추출하면 소비자 없는 리포만 늘어남. 소비자 발생 시 1일 작업.
+  - bounded: 단일 primitive가 아님 — pool.Pool[T](20 LOC, 라이브러리화 가치 없음) / putpipeline(EC 인코딩 도메인 로직, 추출 대상 아님) / resourceguard(제네릭하나 소비자 없음)의 3개 이질 항목.
+  - gossip(~593 LOC, full-mesh unicast 상태 전파): memberlist는 SWIM 장애감지+자체 UDP/TCP 전송 — 장애 감지는 raft 선거+peer-health가 담당하고, Phase 8에서 단일 HTTP 전송으로 수렴시킨 방향과 정면 충돌. 수백 노드 규모가 실측 요구로 오면 재검토.
+- [보류: 트리거 미충족] **추출 4건(raft/HRW/bounded/gossip 분리)** — 전제 "두 번째 소비자"가 미충족(리포 진입점은 `cmd/grainfs/main.go` 단일, 4개 primitive의 외부 소비자 0 확인). 소비자 발생 시 추출 난이도 순서: HRW(트리비얼) → gossip(중간, FlatBuffers/transport 인터페이스화 필요) → resourceguard. raft는 소비자가 생겨도 추출보다 in-house 강화(property/chaos test)가 우선.
+
 ### Phase 10 — 비-S3 프로토콜 재연결
 - 비활성 프로토콜(NFS/NBD/Iceberg/9p)을 신규 코어의 보존된 seam에 재활성화. Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합).
