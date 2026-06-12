@@ -13,9 +13,14 @@ import (
 // satisfies all of them today (compile-time assertions below).
 
 // clusterRPCTransport: small request/response RPC + inbound handler registration.
+// Carries BOTH the tunnel surface (Call/Handle — deleted in Phase 8 N8) and the
+// native buffered-route surface (CallBuffered/RegisterBufferedRoute) while the
+// per-family migrations are staged.
 type clusterRPCTransport interface {
 	Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
 	Handle(st transport.StreamType, h transport.StreamHandler)
+	CallBuffered(ctx context.Context, addr, path string, payload []byte) ([]byte, error)
+	RegisterBufferedRoute(path string, h transport.BufferedRouteHandler)
 }
 
 // callerTransport: outbound Call only.

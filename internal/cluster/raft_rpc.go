@@ -47,7 +47,24 @@ type RaftRPCTransport struct {
 // RaftNode.SetTransport.
 func NewRaftRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftRPCTransport {
 	rpc := &RaftRPCTransport{transport: tr, node: node}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8
+	// deletes the envelope tunnel wholesale.
 	tr.Handle(transport.StreamControl, rpc.handleRPC)
+	// Phase 8 N7-3: native /raft/data/rpc buffered route. The wire payload is
+	// the same v2 FB RPC envelope; handleRPC only reads req.Payload, and its
+	// Type echo into the reply is dropped here (the native wire has no
+	// Message/ID/Type). A nil reply (decode failure / unknown RPC) maps to a
+	// 500 exactly as the tunnel's nil-response StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftDataRPC, func(payload []byte) ([]byte, error) {
+		resp := rpc.handleRPC(&transport.Message{Type: transport.StreamControl, Payload: payload})
+		if resp == nil {
+			return nil, fmt.Errorf("raft data RPC: bad request")
+		}
+		if resp.Status != transport.StatusOK {
+			return nil, fmt.Errorf("raft data RPC: %s", resp.Payload)
+		}
+		return resp.Payload, nil
+	})
 	return rpc
 }
 
@@ -81,12 +98,11 @@ func (r *RaftRPCTransport) sendRequestVote(peer string, args *raft.RequestVoteAr
 	if err != nil {
 		return nil, err
 	}
-	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(ctx, peer, msg)
+	reply, err := r.transport.CallBuffered(ctx, peer, transport.RouteRaftDataRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("RequestVote to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
@@ -104,12 +120,11 @@ func (r *RaftRPCTransport) sendAppendEntries(peer string, args *raft.AppendEntri
 	if err != nil {
 		return nil, err
 	}
-	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(ctx, peer, msg)
+	reply, err := r.transport.CallBuffered(ctx, peer, transport.RouteRaftDataRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("AppendEntries to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
@@ -127,12 +142,11 @@ func (r *RaftRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNowArgs
 	if err != nil {
 		return nil, err
 	}
-	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(ctx, peer, msg)
+	reply, err := r.transport.CallBuffered(ctx, peer, transport.RouteRaftDataRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("TimeoutNow to %s: %w", peer, err)
 	}
-	rpcType, _, err := v2DecodeRPC(resp.Payload)
+	rpcType, _, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
