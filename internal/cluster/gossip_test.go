@@ -588,3 +588,56 @@ func TestGossipReceiver_UnknownFieldTolerance(t *testing.T) {
 	stats, _ := store.Get("node-b")
 	assert.Equal(t, 42.0, stats.DiskUsedPct, "known fields intact despite unknown field")
 }
+
+// --- malformed-payload robustness (panic containment) ---
+
+// malformedFlatBuffer returns bytes whose root uoffset is in-bounds for
+// GetRootAs* (so the recovered decode call itself survives) but whose table
+// position sits at the very end of the buffer, so any LAZY field accessor
+// (vtable read) indexes past the end and panics. This is the adversarial shape
+// an authenticated-but-buggy/malicious peer can send to /gossip/admin or
+// /gossip/receipt.
+func malformedFlatBuffer() []byte {
+	// uoffset32 little-endian = 8 → table pos 8 == len(buf): accessors panic.
+	return []byte{8, 0, 0, 0, 0, 0, 0, 0}
+}
+
+// TestGossipReceiver_MalformedAdminPayloadDoesNotPanic: a corrupt NodeStatsMsg
+// must be dropped, not panic the gossip drain goroutine (process crash).
+func TestGossipReceiver_MalformedAdminPayloadDoesNotPanic(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	recv := NewGossipReceiver(tr, store)
+	recv.RegisterNativeGossipRoutes()
+
+	require.NotPanics(t, func() {
+		tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, malformedFlatBuffer())
+	})
+	assert.Equal(t, 0, store.Len(), "malformed payload must not populate the store")
+
+	// The receiver must still process valid gossip afterwards.
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 12.0}))
+	require.Eventually(t, func() bool {
+		_, ok := store.Get("node-b")
+		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond)
+}
+
+// TestGossipReceiver_MalformedReceiptPayloadDoesNotPanic: same containment for
+// the receipt gossip family (decodeReceiptGossipMsg has the identical lazy-
+// accessor exposure).
+func TestGossipReceiver_MalformedReceiptPayloadDoesNotPanic(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	recv := NewGossipReceiver(tr, store)
+	recv.SetReceiptCache(mockReceiptCache{})
+	recv.RegisterNativeGossipRoutes()
+
+	require.NotPanics(t, func() {
+		tr.deliver(t, "node-b:9000", transport.RouteGossipReceipt, malformedFlatBuffer())
+	})
+}
+
+type mockReceiptCache struct{}
+
+func (mockReceiptCache) Update(nodeID string, receiptIDs []string) {}

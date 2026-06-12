@@ -145,11 +145,23 @@ func encodeReceiptGossip(nodeID string, ids []string) []byte {
 	return out
 }
 
-func decodeReceiptGossipMsg(data []byte) (msg *clusterpb.ReceiptGossipMsg, err error) {
+// decodeReceiptGossipMsg decodes a ReceiptGossipMsg into plain values. Every
+// FlatBuffers accessor runs INSIDE the recover scope — FB accessors are lazy
+// (they index the raw buffer at call time), so reading fields after returning
+// the table object would move the corrupt-buffer panic outside the recover and
+// crash the gossip drain goroutine (see nodeStatsGossip in gossip.go).
+func decodeReceiptGossipMsg(data []byte) (nodeID string, receiptIDs []string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode receipt gossip: invalid flatbuffer: %v", r)
 		}
 	}()
-	return clusterpb.GetRootAsReceiptGossipMsg(data, 0), nil
+	pb := clusterpb.GetRootAsReceiptGossipMsg(data, 0)
+	nodeID = string(pb.NodeId())
+	n := pb.ReceiptIdsLength()
+	receiptIDs = make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		receiptIDs = append(receiptIDs, string(pb.ReceiptIds(i)))
+	}
+	return nodeID, receiptIDs, nil
 }

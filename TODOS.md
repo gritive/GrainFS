@@ -78,16 +78,6 @@
   documented JoinMode learner path (`types.go:286`) instead of the
   `addJoinedNodeToLegacyDataRaft` direct `AddVoterCtx`. NOT fixed by any transport change.
 
-- [pre-existing latent panic — gossip admin payload FB decode, surfaced during Phase 8 N8]
-  `GossipReceiver.handleNodeStats` (internal/cluster/gossip.go) recovers FlatBuffers panics
-  only inside `decodeNodeStatsMsg`, but FB accessors (`pb.NodeId()` etc.) evaluate lazily
-  AFTER the recover — a malformed `/gossip/admin` payload from an authenticated peer panics
-  the gossip drain goroutine and crashes the process. Pre-existing (the tunnel-era Receive
-  loop had identical exposure); discovered during N8 when a repurposed test fed garbage to
-  the admin route. Fix direction: widen the recover to cover the accessor reads (decode into
-  plain values inside the recovered scope), plus a malformed-payload unit test. Blast radius:
-  requires an authenticated cluster peer (SPKI-pinned mTLS) sending garbage — low likelihood,
-  high impact (process crash).
 
 - [pre-existing e2e failures — cluster join Iceberg 501 + multipart list fanout timeout; Phase 8-independent, A/B-verified]
   4 cluster e2e specs fail identically on the post-Phase-8 tree (664bd79d), the pre-N7-3
