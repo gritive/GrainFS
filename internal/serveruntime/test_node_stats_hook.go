@@ -4,9 +4,8 @@ package serveruntime
 
 import (
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
-
-	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // registerTestEndpoints is a no-op in production builds.
-func registerTestEndpoints(h *hzserver.Hertz, store *cluster.NodeStatsStore) {}
+func registerTestEndpoints(h *hzserver.Hertz, store *gossip.NodeStatsStore) {}

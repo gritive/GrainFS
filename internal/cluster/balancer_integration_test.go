@@ -6,6 +6,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // notifyMover is a ShardMover that reads from a fixed in-memory shard slice
@@ -51,9 +53,9 @@ func (r *notifyLoopRaft) NodeID() string { return "test-node" }
 
 var _ = Describe("Balancer integration", func() {
 	It("proposes migration on imbalance", func() {
-		store := NewNodeStatsStore(1 * time.Minute)
-		store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
-		store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30})
+		store := gossip.NewNodeStatsStore(1 * time.Minute)
+		store.Set(gossip.NodeStats{NodeID: "leader", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
+		store.Set(gossip.NodeStats{NodeID: "peer-a", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30})
 
 		node := &mockRaftNode{
 			state:   2,
@@ -122,10 +124,10 @@ var _ = Describe("Balancer integration", func() {
 	})
 
 	It("triggers migration from disk collector stats", func() {
-		store := NewNodeStatsStore(1 * time.Minute)
+		store := gossip.NewNodeStatsStore(1 * time.Minute)
 
-		store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 0.0})
-		store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 20.0, DiskAvailBytes: 200 << 30})
+		store.Set(gossip.NodeStats{NodeID: "leader", DiskUsedPct: 0.0})
+		store.Set(gossip.NodeStats{NodeID: "peer-a", DiskUsedPct: 20.0, DiskAvailBytes: 200 << 30})
 
 		node := &mockRaftNode{
 			state:   2,

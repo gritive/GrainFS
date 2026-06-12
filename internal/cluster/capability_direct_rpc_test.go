@@ -10,10 +10,11 @@ import (
 
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// fakeEvidenceSource is a test CapabilityEvidenceSource.
+// fakeEvidenceSource is a test gossip.CapabilityEvidenceSource.
 type fakeEvidenceSource struct {
 	caps map[string]bool
 }
@@ -28,7 +29,7 @@ func (f *fakeEvidenceSource) CapabilityEvidence(nodeID string, now time.Time) co
 }
 
 // Ensure fakeEvidenceSource satisfies the interface.
-var _ CapabilityEvidenceSource = (*fakeEvidenceSource)(nil)
+var _ gossip.CapabilityEvidenceSource = (*fakeEvidenceSource)(nil)
 
 // newCapProbeKEKStore returns a KEKStore loaded with a single test KEK at version 0.
 // The key is filled with keyByte repeated KEKSize times.

@@ -10,6 +10,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 var _ = Describe("Backend control integration", func() {
@@ -97,7 +99,7 @@ var _ = Describe("Backend control integration", func() {
 		var fakeBL *BoundedLoads
 
 		BeforeEach(func() {
-			store := NewNodeStatsStore(time.Minute)
+			store := gossip.NewNodeStatsStore(time.Minute)
 			params := BoundedLoadsParams{C: 1.25, CLow: 1.0}
 			fakeBL = NewBoundedLoads(store, params)
 		})

@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/incident"
@@ -214,7 +215,7 @@ type bootState struct {
 	rebalancer       *cluster.Rebalancer
 	evacuator        *cluster.DataGroupEvacuator
 	loadReporter     *cluster.LoadReporter
-	loadReporterStor *cluster.NodeStatsStore
+	loadReporterStor *gossip.NodeStatsStore
 
 	// Services + shutdown (populated by services phases — PR 6 onwards).
 	// bootSnapshotAndApplyLoop owns: fsm (the distBackend's FSM —
@@ -233,8 +234,8 @@ type bootState struct {
 
 	// bootBalancerAndGossip
 	balancerProposer    *cluster.BalancerProposer
-	gossipReceiver      *cluster.GossipReceiver
-	placementStatsStore *cluster.NodeStatsStore // nil when balancer disabled
+	gossipReceiver      *gossip.GossipReceiver
+	placementStatsStore *gossip.NodeStatsStore // nil when balancer disabled
 
 	// bootShardService (data WAL — opened before the cluster shard service so
 	// shard writes can be logged and replayed before any transport stream handler

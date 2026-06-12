@@ -1,4 +1,4 @@
-package cluster
+package gossip
 
 import (
 	"maps"
@@ -152,4 +152,27 @@ func (s *NodeStatsStore) Len() int {
 		}
 	}
 	return count
+}
+
+// BackdateUpdatedAt rewinds nodeID's UpdatedAt by age, preserving CoW snapshot
+// semantics. Returns false when the entry does not exist. Test support: lets
+// TTL-expiry tests age an entry without sleeping; not for production use.
+func (s *NodeStatsStore) BackdateUpdatedAt(nodeID string, age time.Duration) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cur := *s.snap.Load()
+	ns, ok := cur[nodeID]
+	if !ok {
+		return false
+	}
+	ns.UpdatedAt = time.Now().Add(-age)
+
+	next := make(map[string]NodeStats, len(cur))
+	for id, existing := range cur {
+		next[id] = existing
+	}
+	next[nodeID] = ns
+	s.snap.Store(&next)
+	return true
 }

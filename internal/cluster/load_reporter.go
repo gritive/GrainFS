@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // LoadProposer is the subset of MetaRaft used by LoadReporter.
@@ -17,13 +19,13 @@ type LeaderChecker interface {
 	IsLeader() bool
 }
 
-// LoadReporter periodically commits local NodeStatsStore contents to the
+// LoadReporter periodically commits local gossip.NodeStatsStore contents to the
 // meta-Raft log. Only fires when this node is the meta-Raft leader.
 //
 // Default interval is 30s (P1: ~44 MB/day at 3-node cluster).
 type LoadReporter struct {
 	nodeID   string
-	store    *NodeStatsStore
+	store    *gossip.NodeStatsStore
 	proposer LoadProposer
 	leader   LeaderChecker
 	interval time.Duration
@@ -32,7 +34,7 @@ type LoadReporter struct {
 const DefaultLoadReportInterval = 30 * time.Second
 
 // NewLoadReporter creates a reporter where proposer also implements LeaderChecker.
-func NewLoadReporter(nodeID string, store *NodeStatsStore, proposer interface {
+func NewLoadReporter(nodeID string, store *gossip.NodeStatsStore, proposer interface {
 	LoadProposer
 	LeaderChecker
 }, interval time.Duration) *LoadReporter {
@@ -40,7 +42,7 @@ func NewLoadReporter(nodeID string, store *NodeStatsStore, proposer interface {
 }
 
 // NewLoadReporterWithLeaderCheck creates a reporter with separate proposer and leader checker.
-func NewLoadReporterWithLeaderCheck(nodeID string, store *NodeStatsStore, proposer LoadProposer, leader LeaderChecker, interval time.Duration) *LoadReporter {
+func NewLoadReporterWithLeaderCheck(nodeID string, store *gossip.NodeStatsStore, proposer LoadProposer, leader LeaderChecker, interval time.Duration) *LoadReporter {
 	return &LoadReporter{
 		nodeID:   nodeID,
 		store:    store,

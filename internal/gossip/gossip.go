@@ -1,4 +1,4 @@
-package cluster
+package gossip
 
 import (
 	"context"
@@ -29,6 +29,25 @@ type CapabilityEvidenceSource interface {
 	CapabilityEvidence(nodeID string, now time.Time) compat.Evidence
 }
 
+// EvidenceReporter is the capability-gate surface gossip needs: peer/self
+// capability evidence sink. Declared here so the gossip package does not
+// import cluster (satisfied by *cluster.CapabilityGate). Callers must pass a
+// non-nil implementation or skip the With/Set call entirely — a typed-nil
+// concrete pointer wrapped in the interface would defeat the nil checks.
+type EvidenceReporter interface {
+	ReportEvidence(ev compat.Evidence)
+}
+
+// evidenceReporterBox wraps EvidenceReporter for atomic.Pointer (which needs a
+// concrete element type).
+type evidenceReporterBox struct{ r EvidenceReporter }
+
+// AddressResolver resolves a gossiped node ID (or an already-dialable address)
+// to the transport address capability evidence is keyed by. Declared as a func
+// type so the gossip package does not import cluster's NodeAddressBook;
+// cluster.NodeAddressBookResolver adapts one.
+type AddressResolver func(idOrAddr string) (string, bool)
+
 // GossipTransport is the transport surface the gossip senders/receiver use:
 // the native gossip routes (Phase 8 N7-3).
 type GossipTransport interface {
@@ -47,7 +66,7 @@ type GossipSender struct {
 	interval        time.Duration
 	logger          zerolog.Logger
 	evidenceSource  CapabilityEvidenceSource
-	capabilityGate  *CapabilityGate
+	capabilityGate  EvidenceReporter
 	evidenceAliases []string
 	aliasProvider   func() []string
 }
@@ -69,7 +88,7 @@ func (s *GossipSender) WithCapabilityEvidenceSource(source CapabilityEvidenceSou
 	return s
 }
 
-func (s *GossipSender) WithCapabilityGate(gate *CapabilityGate) *GossipSender {
+func (s *GossipSender) WithCapabilityGate(gate EvidenceReporter) *GossipSender {
 	s.capabilityGate = gate
 	return s
 }
@@ -100,19 +119,20 @@ func (s *GossipSender) snapshotPeers() []string {
 func (s *GossipSender) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
-	s.broadcastOnce(ctx)
+	s.BroadcastOnce(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.broadcastOnce(ctx)
+			s.BroadcastOnce(ctx)
 		}
 	}
 }
 
-// broadcastOnce sends the current node stats to all peers.
-func (s *GossipSender) broadcastOnce(ctx context.Context) {
+// BroadcastOnce sends the current node stats to all peers immediately — the
+// body of one Run tick, exported so callers and tests can flush synchronously.
+func (s *GossipSender) BroadcastOnce(ctx context.Context) {
 	stats, ok := s.store.Get(s.nodeID)
 	if !ok {
 		if s.evidenceSource == nil {
@@ -209,8 +229,8 @@ type GossipReceiver struct {
 	// receiptCache is set via SetReceiptCache. Stored as atomic.Pointer so
 	// Run can read it without a lock and callers can wire it post-construction.
 	receiptCache   atomic.Pointer[ReceiptRoutingCache]
-	capabilityGate atomic.Pointer[CapabilityGate]
-	addrBook       atomic.Pointer[NodeAddressBook]
+	capabilityGate atomic.Pointer[evidenceReporterBox]
+	addrBook       atomic.Pointer[AddressResolver]
 }
 
 // NewGossipReceiver creates a receiver backed by the given transport.
@@ -222,26 +242,29 @@ func NewGossipReceiver(tr GossipTransport, store *NodeStatsStore) *GossipReceive
 	}
 }
 
-func (r *GossipReceiver) WithCapabilityGate(gate *CapabilityGate) *GossipReceiver {
+func (r *GossipReceiver) WithCapabilityGate(gate EvidenceReporter) *GossipReceiver {
 	r.SetCapabilityGate(gate)
 	return r
 }
 
-func (r *GossipReceiver) SetCapabilityGate(gate *CapabilityGate) {
-	r.capabilityGate.Store(gate)
+func (r *GossipReceiver) SetCapabilityGate(gate EvidenceReporter) {
+	r.capabilityGate.Store(&evidenceReporterBox{r: gate})
 }
 
-func (r *GossipReceiver) WithNodeAddressBook(book NodeAddressBook) *GossipReceiver {
-	r.SetNodeAddressBook(book)
+func (r *GossipReceiver) WithAddressResolver(resolve AddressResolver) *GossipReceiver {
+	r.SetAddressResolver(resolve)
 	return r
 }
 
-func (r *GossipReceiver) SetNodeAddressBook(book NodeAddressBook) {
-	if book == nil {
+// SetAddressResolver wires the nodeID→address resolution used to key
+// capability evidence (cluster.NodeAddressBookResolver adapts a
+// NodeAddressBook). nil disables resolution (gossiped IDs used as-is).
+func (r *GossipReceiver) SetAddressResolver(resolve AddressResolver) {
+	if resolve == nil {
 		r.addrBook.Store(nil)
 		return
 	}
-	r.addrBook.Store(&book)
+	r.addrBook.Store(&resolve)
 }
 
 // SetReceiptCache wires the receipt routing cache. When set, StreamReceipt
@@ -299,7 +322,8 @@ func (r *GossipReceiver) handleNodeStats(from string, payload []byte) {
 	// RPC via CapabilityGate.Allow (Task 1b). ReportEvidence here feeds
 	// EvidenceSnapshot (admin /v1/cluster/capabilities) and the bench warmup
 	// probe, not production gate enforcement.
-	if gate := r.capabilityGate.Load(); gate != nil && len(msg.capabilities) > 0 {
+	if box := r.capabilityGate.Load(); box != nil && box.r != nil && len(msg.capabilities) > 0 {
+		gate := box.r
 		capabilities := make(map[string]bool, len(msg.capabilities))
 		for _, capability := range msg.capabilities {
 			if capability != "" {
@@ -372,9 +396,9 @@ func decodeNodeStatsMsg(data []byte) (msg nodeStatsGossip, err error) {
 }
 
 func (r *GossipReceiver) resolveGossipNodeID(nodeID, from string) (compat.NodeID, bool) {
-	bookPtr := r.addrBook.Load()
-	if bookPtr != nil {
-		if addr, ok := ResolveNodeAddress(*bookPtr, nodeID); ok {
+	resolvePtr := r.addrBook.Load()
+	if resolvePtr != nil {
+		if addr, ok := (*resolvePtr)(nodeID); ok {
 			return compat.NodeID(addr), nodeIDMatchesFrom(addr, from)
 		}
 	}

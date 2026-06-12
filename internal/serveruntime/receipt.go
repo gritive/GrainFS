@@ -11,6 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
@@ -69,7 +70,7 @@ type HealReceiptWiring struct {
 	api          *receipt.API
 	routingCache *receipt.RoutingCache
 	broadcaster  *cluster.ReceiptBroadcaster
-	gossipSender *cluster.ReceiptGossipSender
+	gossipSender *gossip.ReceiptGossipSender
 }
 
 // Store exposes the receipt store for callers that need to record entries
@@ -131,7 +132,7 @@ func SetupClusterReceipt(
 	dataDir, nodeID string,
 	peers []string,
 	clusterTransport transport.ClusterTransport,
-	gossipReceiver *cluster.GossipReceiver,
+	gossipReceiver *gossip.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
 	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, clusterTransport, gossipReceiver, srvOpts)
@@ -143,7 +144,7 @@ func SetupClusterReceiptWithPeerProvider(
 	dataDir, nodeID string,
 	peerProvider func() []string,
 	clusterTransport transport.ClusterTransport,
-	gossipReceiver *cluster.GossipReceiver,
+	gossipReceiver *gossip.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
 	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, clusterTransport, gossipReceiver, srvOpts)
@@ -156,7 +157,7 @@ func setupClusterReceipt(
 	peers []string,
 	peerProvider func() []string,
 	clusterTransport transport.ClusterTransport,
-	gossipReceiver *cluster.GossipReceiver,
+	gossipReceiver *gossip.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
 	if !opts.Enabled {
@@ -204,15 +205,15 @@ func setupClusterReceipt(
 
 	routingCache := receipt.NewRoutingCache()
 	var broadcaster *cluster.ReceiptBroadcaster
-	var gossipSender *cluster.ReceiptGossipSender
+	var gossipSender *gossip.ReceiptGossipSender
 	if peerProvider != nil {
 		broadcaster = cluster.NewReceiptBroadcasterWithPeerProvider(clusterTransport, peerProvider, 3*time.Second)
-		gossipSender = cluster.NewReceiptGossipSenderWithPeerProvider(
+		gossipSender = gossip.NewReceiptGossipSenderWithPeerProvider(
 			nodeID, peerProvider, clusterTransport, store, opts.GossipInterval, opts.WindowSize,
 		)
 	} else {
 		broadcaster = cluster.NewReceiptBroadcaster(clusterTransport, peers, 3*time.Second)
-		gossipSender = cluster.NewReceiptGossipSender(
+		gossipSender = gossip.NewReceiptGossipSender(
 			nodeID, peers, clusterTransport, store, opts.GossipInterval, opts.WindowSize,
 		)
 	}

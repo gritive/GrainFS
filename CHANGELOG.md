@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.565.0] - 2026-06-13
+
+### Changed
+- Phase 9 primitive separation, executed in-repo: the HRW placement algorithm moved to
+  `internal/hrw` (pure function, stdlib+xxh3 only) and the gossip primitive (sender,
+  receiver, receipt gossip, NodeStatsStore) moved to `internal/gossip`. The gossip
+  package no longer references cluster types: the capability gate is consumed through a
+  new `EvidenceReporter` interface (satisfied by `cluster.CapabilityGate`) and node-ID
+  resolution through an `AddressResolver` func adapted by `cluster.NodeAddressBookResolver`,
+  so `internal/gossip` imports no cluster code (the generated `clusterpb` schemas only).
+  `GossipSender.BroadcastOnce` is now exported (synchronous flush — the body of one Run
+  tick). Wire behavior is byte-identical: routes, FlatBuffers encoding, TTL semantics,
+  and the panic-containment decode paths are untouched. raft was already a separate
+  package (`internal/raft`, no cluster imports) and the bounded family is already split
+  (pool / resourceguard / domain-specific putpipeline), so no further extraction applies.
+
 ## [0.0.564.0] - 2026-06-13
 
 ### Changed

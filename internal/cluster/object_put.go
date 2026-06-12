@@ -8,6 +8,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/gossip"
+	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -470,7 +472,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	return obj, func() error { return nil }, err
 }
 
-func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *NodeStatsStore) []ObjectWritePlacementNodeState {
+func objectWritePlacementNodeStatesFromRuntime(liveNodes []string, store *gossip.NodeStatsStore) []ObjectWritePlacementNodeState {
 	if store == nil {
 		return nil
 	}
@@ -493,7 +495,7 @@ func selectECPlacementFromNodeStates(
 	weightedEnabled bool,
 ) []string {
 	if !weightedEnabled || len(nodeStates) == 0 {
-		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+		return hrw.PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
 	}
 	stateByNode := make(map[string]ObjectWritePlacementNodeState, len(nodeStates))
 	for _, state := range nodeStates {
@@ -517,7 +519,7 @@ func selectECPlacementFromNodeStates(
 	// fall back to legacy unweighted placement so writes don't fail.
 	if active == 0 && countSkippedFor(skipReason, "stale") == len(liveNodes) {
 		metrics.ClusterPlacementSkipped.WithLabelValues("*", "all_stale_fallback").Inc()
-		return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+		return hrw.PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
 	}
 
 	// Emit per-reason skip metrics.
@@ -527,7 +529,7 @@ func selectECPlacementFromNodeStates(
 		}
 	}
 
-	return PlaceShards(shardKey, liveNodes, weights, cfg.NumShards())
+	return hrw.PlaceShards(shardKey, liveNodes, weights, cfg.NumShards())
 }
 
 // countSkippedFor returns the number of entries in reasons matching target.

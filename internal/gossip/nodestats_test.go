@@ -1,4 +1,4 @@
-package cluster
+package gossip
 
 import (
 	"sync"
@@ -11,21 +11,7 @@ import (
 
 func ageNodeStatsForTest(t *testing.T, store *NodeStatsStore, nodeID string, age time.Duration) {
 	t.Helper()
-
-	store.writeMu.Lock()
-	defer store.writeMu.Unlock()
-
-	cur := *store.snap.Load()
-	ns, ok := cur[nodeID]
-	require.True(t, ok, "node stats entry must exist before aging")
-	ns.UpdatedAt = time.Now().Add(-age)
-
-	next := make(map[string]NodeStats, len(cur))
-	for id, existing := range cur {
-		next[id] = existing
-	}
-	next[nodeID] = ns
-	store.snap.Store(&next)
+	require.True(t, store.BackdateUpdatedAt(nodeID, age), "node stats entry must exist before aging")
 }
 
 func TestNodeStatsStore_SetAndGet(t *testing.T) {

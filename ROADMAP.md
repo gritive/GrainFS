@@ -203,7 +203,11 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
   - HRW(~110 LOC, 의존성 0 순수 함수): 추출 난이도 최저이나 지금 추출하면 소비자 없는 리포만 늘어남. 소비자 발생 시 1일 작업.
   - bounded: 단일 primitive가 아님 — pool.Pool[T](20 LOC, 라이브러리화 가치 없음) / putpipeline(EC 인코딩 도메인 로직, 추출 대상 아님) / resourceguard(제네릭하나 소비자 없음)의 3개 이질 항목.
   - gossip(~593 LOC, full-mesh unicast 상태 전파): memberlist는 SWIM 장애감지+자체 UDP/TCP 전송 — 장애 감지는 raft 선거+peer-health가 담당하고, Phase 8에서 단일 HTTP 전송으로 수렴시킨 방향과 정면 충돌. 수백 노드 규모가 실측 요구로 오면 재검토.
-- [보류: 트리거 미충족] **추출 4건(raft/HRW/bounded/gossip 분리)** — 전제 "두 번째 소비자"가 미충족(리포 진입점은 `cmd/grainfs/main.go` 단일, 4개 primitive의 외부 소비자 0 확인). 소비자 발생 시 추출 난이도 순서: HRW(트리비얼) → gossip(중간, FlatBuffers/transport 인터페이스화 필요) → resourceguard. raft는 소비자가 생겨도 추출보다 in-house 강화(property/chaos test)가 우선.
+- [완료] **패키지-경계 분리(in-repo)** — 사용자 지시("그냥 진행")로 트리거 대기 없이 분리 실행 (2026-06-13). 별도 리포 추출이 아니라 in-repo 패키지 경계 분리: 외부 소비자가 생기면 리포 추출은 기계적.
+  - **raft**: 이미 `internal/raft` 독립 패키지(cluster 미import) — 분리 완료 상태 확인.
+  - **HRW**: `internal/cluster/hrw.go` → `internal/hrw` (stdlib+xxh3만 의존, 순수 함수; 소비자는 `hrw.PlaceShards`).
+  - **gossip**: gossip.go/receipt_gossip.go/nodestats.go → `internal/gossip`. cluster 결합은 인터페이스 역전으로 절단: `EvidenceReporter`(CapabilityGate가 만족, ReportEvidence만), `AddressResolver` func 타입(`cluster.NodeAddressBookResolver` 어댑터). gossip은 cluster를 import하지 않음(clusterpb 생성 패키지만). `BroadcastOnce` 공개(동기 flush). gate 통합 테스트는 `internal/cluster/gossip_capability_test.go`로 분리 유지.
+  - **bounded**: 단일 primitive 아님 — pool/resourceguard는 이미 독립 패키지, putpipeline은 EC 도메인 로직(분리 대상 아님). 추가 작업 없음 확인.
 
 ### Phase 10 — 비-S3 프로토콜 재연결
 - 비활성 프로토콜(NFS/NBD/Iceberg/9p)을 신규 코어의 보존된 seam에 재활성화. Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합).

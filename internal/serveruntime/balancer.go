@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -50,20 +51,20 @@ func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.Transfe
 func StartBalancer(
 	ctx context.Context,
 	nodeID, dataDir string,
-	statsStore *cluster.NodeStatsStore,
+	statsStore *gossip.NodeStatsStore,
 	node cluster.RaftNode,
 	peers []string,
 	fsm *cluster.FSM,
-	clusterTransport cluster.GossipTransport,
+	clusterTransport gossip.GossipTransport,
 	shardSvc *cluster.ShardService,
 	numShards int,
 	clusterCfg cluster.BalancerClusterCfg,
 	diskCfg cluster.DiskCfgReader,
 	capabilityGate *cluster.CapabilityGate,
-	capabilityEvidence cluster.CapabilityEvidenceSource,
+	capabilityEvidence gossip.CapabilityEvidenceSource,
 	addrBook cluster.NodeAddressBook,
 	gossipPeerProvider func() []string,
-) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
+) (*cluster.BalancerProposer, *gossip.GossipReceiver, error) {
 	gossipInterval := clusterCfg.BalancerGossipInterval()
 	migrationPendingTTL := clusterCfg.BalancerMigrationPendingTTL()
 	migrationMaxRetries := int(clusterCfg.BalancerMigrationMaxRetries())
@@ -94,14 +95,14 @@ func StartBalancer(
 		}
 		return []string{addr}
 	}
-	sender := cluster.NewGossipSender(nodeID, peers, clusterTransport, statsStore, gossipInterval).
+	sender := gossip.NewGossipSender(nodeID, peers, clusterTransport, statsStore, gossipInterval).
 		WithPeerProvider(gossipPeerProvider).
 		WithCapabilityEvidenceSource(capabilityEvidence).
 		WithCapabilityGate(capabilityGate).
 		WithCapabilityEvidenceAliasProvider(capabilityEvidenceAliasProvider)
-	receiver := cluster.NewGossipReceiver(clusterTransport, statsStore).
+	receiver := gossip.NewGossipReceiver(clusterTransport, statsStore).
 		WithCapabilityGate(capabilityGate).
-		WithNodeAddressBook(addrBook)
+		WithAddressResolver(cluster.NodeAddressBookResolver(addrBook))
 
 	go sender.Run(ctx)
 	// Phase 8 N7-3: the receiver consumes the native /gossip/admin +
@@ -111,7 +112,7 @@ func StartBalancer(
 	go exec.Run(ctx, taskCh)
 	go balancer.Run(ctx)
 
-	statsStore.Set(cluster.NodeStats{
+	statsStore.Set(gossip.NodeStats{
 		NodeID:   nodeID,
 		JoinedAt: time.Now(),
 	})

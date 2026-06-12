@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -152,10 +153,10 @@ func TestDistributedBackend_Close(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_ReturnsLightestWhenOverloaded(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 300.0}) // overloaded
-	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
-	store.Set(NodeStats{NodeID: "node-c", RequestsPerSec: 80.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 300.0}) // overloaded
+	store.Set(gossip.NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
+	store.Set(gossip.NodeStats{NodeID: "node-c", RequestsPerSec: 80.0})
 
 	peer, ok := selectPeerByLoad(store, "node-a", 1.3)
 	require.True(t, ok)
@@ -163,10 +164,10 @@ func TestSelectPeerByLoad_ReturnsLightestWhenOverloaded(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_NoRedirectWhenBalanced(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 100.0})
-	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 90.0})
-	store.Set(NodeStats{NodeID: "node-c", RequestsPerSec: 110.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 100.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", RequestsPerSec: 90.0})
+	store.Set(gossip.NodeStats{NodeID: "node-c", RequestsPerSec: 110.0})
 
 	// median ~100, node-a = 100, threshold 1.3 → 100 <= 100*1.3 → no redirect
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
@@ -174,8 +175,8 @@ func TestSelectPeerByLoad_NoRedirectWhenBalanced(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_SingleNode(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 1000.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 1000.0})
 
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
 	require.False(t, ok, "single node: no peers to redirect to")

@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
@@ -660,7 +661,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		wg.Wait()
 	})
 
-	state.loadReporterStor = cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
+	state.loadReporterStor = gossip.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
 	state.loadReporter = cluster.NewLoadReporter(state.nodeID, state.loadReporterStor, state.metaRaft, cluster.DefaultLoadReportInterval)
 	go state.loadReporter.Run(ctx)
 

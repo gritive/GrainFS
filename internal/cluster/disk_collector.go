@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -29,11 +30,11 @@ type DiskCfgReader interface {
 	DiskCriticalFrac() float64
 }
 
-// DiskCollector periodically reads local disk stats and updates the NodeStatsStore.
+// DiskCollector periodically reads local disk stats and updates the gossip.NodeStatsStore.
 type DiskCollector struct {
 	nodeID   string
 	dataDirs []string
-	store    *NodeStatsStore
+	store    *gossip.NodeStatsStore
 	interval time.Duration
 	mu       sync.RWMutex
 	statFunc func(dir string) (usedPct float64, availBytes uint64)
@@ -58,11 +59,11 @@ type DiskCollector struct {
 // NewDiskCollector creates a collector for nodeID reading disk stats from dataDir.
 // cfg provides live warn/critical thresholds; pass nil to disable threshold
 // callbacks (e.g. when the collector is used only for stats gossip).
-func NewDiskCollector(nodeID, dataDir string, store *NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
+func NewDiskCollector(nodeID, dataDir string, store *gossip.NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
 	return NewMultiRootDiskCollector(nodeID, []string{dataDir}, store, interval, cfg)
 }
 
-func NewMultiRootDiskCollector(nodeID string, dataDirs []string, store *NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
+func NewMultiRootDiskCollector(nodeID string, dataDirs []string, store *gossip.NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
 	return &DiskCollector{
 		nodeID:   nodeID,
 		dataDirs: dataDirs,

@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -191,13 +192,13 @@ type balancerMsg struct {
 	replyCh chan BalancerStatus
 }
 
-// BalancerProposer monitors NodeStatsStore and proposes CmdMigrateShard when
+// BalancerProposer monitors gossip.NodeStatsStore and proposes CmdMigrateShard when
 // disk usage is imbalanced across nodes. Only the Raft leader runs proposals.
 // All mutable state (active, inflight, cbs) is owned exclusively by the Run()
 // goroutine — no mutex needed.
 type BalancerProposer struct {
 	nodeID     string
-	store      *NodeStatsStore
+	store      *gossip.NodeStatsStore
 	node       RaftBalancerNode
 	clusterCfg BalancerClusterCfg
 	// Non-cluster (still hardcoded) defaults — read once at construction.
@@ -238,7 +239,7 @@ type BalancerProposer struct {
 // (LeaderLoadThreshold / GracePeriod / PeerSeenWindow / MigrationProposalRate /
 // StickyDonorHoldTime) come from DefaultBalancerConfig() and are fixed for the
 // lifetime of the proposer.
-func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancerNode, clusterCfg BalancerClusterCfg) *BalancerProposer {
+func NewBalancerProposer(nodeID string, store *gossip.NodeStatsStore, node RaftBalancerNode, clusterCfg BalancerClusterCfg) *BalancerProposer {
 	def := DefaultBalancerConfig()
 	return &BalancerProposer{
 		nodeID:                nodeID,
@@ -262,7 +263,7 @@ func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancer
 
 // syncCB updates (or creates) per-peer circuit breakers from the latest gossip stats.
 // Must be called from the actor goroutine only.
-func (p *BalancerProposer) syncCB(peers []NodeStats) {
+func (p *BalancerProposer) syncCB(peers []gossip.NodeStats) {
 	thresholdPct := p.clusterCfg.BalancerCBThreshold() * 100
 	for _, ns := range peers {
 		if ns.NodeID == p.nodeID {
@@ -496,9 +497,9 @@ func (p *BalancerProposer) tickOnce() {
 
 // BalancerStatus is a point-in-time snapshot of the balancer's state.
 type BalancerStatus struct {
-	Active       bool        // true when imbalance trigger has fired
-	ImbalancePct float64     // current max-min disk usage %
-	Nodes        []NodeStats // all non-expired node stats
+	Active       bool               // true when imbalance trigger has fired
+	ImbalancePct float64            // current max-min disk usage %
+	Nodes        []gossip.NodeStats // all non-expired node stats
 }
 
 // Status returns a snapshot of the balancer's current state.
@@ -601,7 +602,7 @@ func (p *BalancerProposer) proposeMigration(src, dst string) {
 // selectLightestPeer returns the nodeID with the lowest DiskUsedPct, excluding self.
 //
 //nolint:unused // package tests pin peer-selection behaviour.
-func selectLightestPeer(store *NodeStatsStore, selfID string) (string, bool) {
+func selectLightestPeer(store *gossip.NodeStatsStore, selfID string) (string, bool) {
 	all := store.GetAll()
 	var best string
 	bestPct := math.MaxFloat64
@@ -618,7 +619,7 @@ func selectLightestPeer(store *NodeStatsStore, selfID string) (string, bool) {
 }
 
 // imbalancePct returns max(DiskUsedPct) - min(DiskUsedPct) across all nodes.
-func imbalancePct(store *NodeStatsStore) float64 {
+func imbalancePct(store *gossip.NodeStatsStore) float64 {
 	all := store.GetAll()
 	if len(all) < 2 {
 		return 0
@@ -637,7 +638,7 @@ func imbalancePct(store *NodeStatsStore) float64 {
 
 // selectPeerByLoad returns the peer with the lowest RequestsPerSec when selfID's
 // load exceeds median*threshold. Returns ("", false) if no redirect is needed.
-func selectPeerByLoad(store *NodeStatsStore, selfID string, threshold float64) (string, bool) {
+func selectPeerByLoad(store *gossip.NodeStatsStore, selfID string, threshold float64) (string, bool) {
 	all := store.GetAll()
 	if len(all) <= 1 {
 		return "", false

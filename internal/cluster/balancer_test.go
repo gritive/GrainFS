@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // mockRaftNode captures Propose calls for balancer testing.
@@ -130,9 +132,9 @@ func testBalancerConfig() *fakeBalancerCfg { return defaultFakeBalancerCfg() }
 // --- BalancerProposer tests ---
 
 func TestBalancerProposer_NoActionWhenBalanced(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 50.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}) // 5% diff — below 20% trigger
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 50.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}) // 5% diff — below 20% trigger
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
@@ -145,9 +147,9 @@ func TestBalancerProposer_NoActionWhenBalanced(t *testing.T) {
 }
 
 func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0, DiskAvailBytes: 100 << 30}) // 40% diff
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 40.0, DiskAvailBytes: 100 << 30}) // 40% diff
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
@@ -164,9 +166,9 @@ func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
 }
 
 func TestBalancerProposer_OnlyLeaderProposes(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
 
 	// follower node
 	node := &mockRaftNode{state: 0, nodeID: "node-a", peerIDs: []string{"node-b"}}
@@ -179,9 +181,9 @@ func TestBalancerProposer_OnlyLeaderProposes(t *testing.T) {
 }
 
 func TestBalancerProposer_WarmupGate(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	// only 1 of 2 peers seen — warm-up not complete
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b", "node-c"}}
 	cfg := testBalancerConfig()
@@ -193,10 +195,10 @@ func TestBalancerProposer_WarmupGate(t *testing.T) {
 }
 
 func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	// only 1 of 2 peers seen — warm-up not complete, but timeout expired
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0}) // node-c missing
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 40.0}) // node-c missing
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b", "node-c"}}
 	cfg := testBalancerConfig()
@@ -213,9 +215,9 @@ func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
 }
 
 func TestBalancerProposer_HysteresisStopsAtLowThreshold(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 53.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0}) // 3% diff — below stop threshold
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 53.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0}) // 3% diff — below stop threshold
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
@@ -231,10 +233,10 @@ func TestBalancerProposer_HysteresisStopsAtLowThreshold(t *testing.T) {
 }
 
 func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 60.0, DiskAvailBytes: 50 << 30})
-	store.Set(NodeStats{NodeID: "node-c", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30}) // lightest
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 60.0, DiskAvailBytes: 50 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-c", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30}) // lightest
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b", "node-c"}}
 	cfg := testBalancerConfig()
@@ -254,10 +256,10 @@ func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
 // --- selectLightestPeer tests ---
 
 func TestSelectLightestPeer_ReturnsLowestDisk(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
-	store.Set(NodeStats{NodeID: "node-c", DiskUsedPct: 60.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
+	store.Set(gossip.NodeStats{NodeID: "node-c", DiskUsedPct: 60.0})
 
 	peer, ok := selectLightestPeer(store, "node-a")
 	require.True(t, ok)
@@ -265,9 +267,9 @@ func TestSelectLightestPeer_ReturnsLowestDisk(t *testing.T) {
 }
 
 func TestSelectLightestPeer_ExcludesSelf(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 10.0}) // would be lightest, but is self
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 10.0}) // would be lightest, but is self
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0})
 
 	peer, ok := selectLightestPeer(store, "node-a")
 	require.True(t, ok)
@@ -275,8 +277,8 @@ func TestSelectLightestPeer_ExcludesSelf(t *testing.T) {
 }
 
 func TestSelectLightestPeer_ReturnsFalseWhenNoPeers(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
 
 	_, ok := selectLightestPeer(store, "node-a")
 	assert.False(t, ok)
@@ -285,17 +287,17 @@ func TestSelectLightestPeer_ReturnsFalseWhenNoPeers(t *testing.T) {
 // --- imbalancePct tests ---
 
 func TestImbalancePct_Correct(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0})
 
 	pct := imbalancePct(store)
 	assert.InDelta(t, 30.0, pct, 0.001)
 }
 
 func TestImbalancePct_SingleNode(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0})
 
 	pct := imbalancePct(store)
 	assert.Equal(t, 0.0, pct, "single node has no imbalance")
@@ -304,10 +306,10 @@ func TestImbalancePct_SingleNode(t *testing.T) {
 // --- Leader load balancing tests ---
 
 func TestLeaderBalance_TransfersWhenOverloaded(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "leader", RequestsPerSec: 300.0})
-	store.Set(NodeStats{NodeID: "peer-a", RequestsPerSec: 50.0})
-	store.Set(NodeStats{NodeID: "peer-b", RequestsPerSec: 80.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "leader", RequestsPerSec: 300.0})
+	store.Set(gossip.NodeStats{NodeID: "peer-a", RequestsPerSec: 50.0})
+	store.Set(gossip.NodeStats{NodeID: "peer-b", RequestsPerSec: 80.0})
 
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig() // LeaderLoadThreshold: 1.3, LeaderTenureMin: 0
@@ -321,10 +323,10 @@ func TestLeaderBalance_TransfersWhenOverloaded(t *testing.T) {
 }
 
 func TestLeaderBalance_NoTransferWhenGateDisabled(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "leader", RequestsPerSec: 300.0})
-	store.Set(NodeStats{NodeID: "peer-a", RequestsPerSec: 50.0})
-	store.Set(NodeStats{NodeID: "peer-b", RequestsPerSec: 80.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "leader", RequestsPerSec: 300.0})
+	store.Set(gossip.NodeStats{NodeID: "peer-a", RequestsPerSec: 50.0})
+	store.Set(gossip.NodeStats{NodeID: "peer-b", RequestsPerSec: 80.0})
 
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig()
@@ -340,10 +342,10 @@ func TestLeaderBalance_NoTransferWhenGateDisabled(t *testing.T) {
 }
 
 func TestLeaderBalance_NoTransferWhenBalanced(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "leader", RequestsPerSec: 100.0})
-	store.Set(NodeStats{NodeID: "peer-a", RequestsPerSec: 90.0})
-	store.Set(NodeStats{NodeID: "peer-b", RequestsPerSec: 110.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "leader", RequestsPerSec: 100.0})
+	store.Set(gossip.NodeStats{NodeID: "peer-a", RequestsPerSec: 90.0})
+	store.Set(gossip.NodeStats{NodeID: "peer-b", RequestsPerSec: 110.0})
 
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig()
@@ -360,11 +362,11 @@ func TestSelectPeerByLoad_EvenCountMedian(t *testing.T) {
 	// With 4 nodes (even count), loads[len/2] = loads[2] which is the upper-middle.
 	// The median of [50, 100, 150, 200] should be 125 (average of middle two).
 	// Current implementation uses loads[2]=150 as median — this test documents the behavior.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 50.0})
-	store.Set(NodeStats{NodeID: "n2", RequestsPerSec: 100.0})
-	store.Set(NodeStats{NodeID: "n3", RequestsPerSec: 150.0})
-	store.Set(NodeStats{NodeID: "n4", RequestsPerSec: 200.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 50.0})
+	store.Set(gossip.NodeStats{NodeID: "n2", RequestsPerSec: 100.0})
+	store.Set(gossip.NodeStats{NodeID: "n3", RequestsPerSec: 150.0})
+	store.Set(gossip.NodeStats{NodeID: "n4", RequestsPerSec: 200.0})
 
 	// self=n4 with 200 rps. threshold=1.3. loads sorted: [50,100,150,200], loads[2]=150 (upper-middle).
 	// 200 > 150*1.3=195 → overloaded → should redirect
@@ -374,17 +376,17 @@ func TestSelectPeerByLoad_EvenCountMedian(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_SingleNodeBalancer(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 999.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 999.0})
 
 	_, ok := selectPeerByLoad(store, "n1", 1.3)
 	assert.False(t, ok, "single node cannot redirect")
 }
 
 func TestLeaderBalance_NoTransferWhenFollower(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 300.0})
-	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 300.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
 
 	node := &mockRaftNode{state: 0, nodeID: "node-a", peerIDs: []string{"node-b"}} // follower
 	cfg := testBalancerConfig()
@@ -403,9 +405,9 @@ func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
 	// Normal trigger=20%; with any node in grace period the effective trigger is
 	// ImbalanceTriggerPct * 1.5 = 30%.
 	// Imbalance is 25% (between 20% and 30%), so proposal should be skipped.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
 		JoinedAt: time.Now().Add(-1 * time.Minute)}) // recently joined
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
@@ -420,9 +422,9 @@ func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
 
 func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
 	// node-b joined recently; imbalance is 40% which exceeds the relaxed 30% trigger.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 90.0, DiskAvailBytes: 5 << 30})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 90.0, DiskAvailBytes: 5 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
 		JoinedAt: time.Now().Add(-1 * time.Minute)})
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
@@ -438,9 +440,9 @@ func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
 func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) {
 	// node-b joined 15 min ago — past the 10 min grace period.
 	// Imbalance is 25%, which is above the normal 20% trigger, so proposal expected.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 75.0, DiskAvailBytes: 20 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30,
 		JoinedAt: time.Now().Add(-15 * time.Minute)}) // past grace period
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
@@ -456,9 +458,9 @@ func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) 
 // TestBalancerProposer_InflightDedup verifies that the same object is not
 // proposed again on the next tick while a migration is already in flight.
 func TestBalancerProposer_InflightDedup(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 10})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 10})
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
@@ -479,7 +481,7 @@ func TestBalancerProposer_InflightDedup(t *testing.T) {
 func TestBalancerProposer_ConcurrentStatusAndNotify(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	p := NewBalancerProposer("node-a", store, node, testBalancerConfig())
 	go p.Run(ctx)
@@ -506,7 +508,7 @@ func TestBalancerProposer_ConcurrentStatusAndNotify(t *testing.T) {
 func TestBalancerProposer_StopIdempotent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{}}
 	p := NewBalancerProposer("node-a", store, node, testBalancerConfig())
 	go p.Run(ctx)
@@ -543,10 +545,10 @@ func TestLocalObjectPicker_NestedKey(t *testing.T) {
 // Start with a very high trigger (no migration), then lower it — the balancer
 // should activate.
 func TestBalancer_HotReload_TriggerPct(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	// 30% imbalance — between the initial 50% trigger and the lowered 1% trigger.
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30})
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
@@ -577,8 +579,8 @@ func TestBalancer_HotReload_TriggerPct(t *testing.T) {
 // BalancerGossipInterval mid-run causes the ticker to reset. Start slow,
 // speed up, observe more ticks per unit time.
 func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "self", DiskUsedPct: 10})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "self", DiskUsedPct: 10})
 	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{}}
 	cfg := testBalancerConfig()
 	cfg.gossipInterval.Store(20 * time.Millisecond)
