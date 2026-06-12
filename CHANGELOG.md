@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.557.0] - 2026-06-12
 
 ### Changed
 - Phase 8 N7-2: the S3 forward streaming family (streamed-body write forwards and
