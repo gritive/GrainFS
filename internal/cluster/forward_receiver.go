@@ -300,6 +300,31 @@ func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message
 	return spec.handleRead(r, dg, fbsArgs)
 }
 
+// NativeWriteHandler adapts HandleBody to the native /forward/write route
+// (transport.RegisterForwardWriteHandler). The transport.Message wrapper here is
+// internal plumbing only — it leaves with the tunnel in N8, when HandleBody's
+// signature drops Message.
+func (r *ForwardReceiver) NativeWriteHandler() transport.ForwardWriteHandler {
+	return func(frame []byte, body io.Reader) ([]byte, error) {
+		resp := r.HandleBody(&transport.Message{Payload: frame}, body)
+		if resp == nil {
+			return nil, errors.New("forward write: nil reply")
+		}
+		return resp.Payload, nil
+	}
+}
+
+// NativeReadHandler adapts HandleRead to the native /forward/read route.
+func (r *ForwardReceiver) NativeReadHandler() transport.ForwardReadHandler {
+	return func(frame []byte) ([]byte, io.ReadCloser, error) {
+		resp, rbody := r.HandleRead(&transport.Message{Payload: frame})
+		if resp == nil {
+			return nil, nil, errors.New("forward read: nil reply")
+		}
+		return resp.Payload, rbody, nil
+	}
+}
+
 func drainForwardBody(body io.Reader) {
 	if body != nil {
 		_, _ = io.Copy(io.Discard, body)
