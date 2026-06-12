@@ -103,17 +103,20 @@ func bootKEKRotationLeader(state *bootState) error {
 	//    leader's GetKEKDiskSpace / GetKEKLeaseSnapshot reaches this node as a
 	//    voter.
 	diskHandler := cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */)
+	leaseHandler := cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
+		return state.metaRaft.LastApplied()
+	}, snapRefCount)
 	// Tunnel registrations — kept alongside the native routes until Phase 8 N8.
 	state.clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe, diskHandler.Handle)
-	state.clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
-		cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
-			return state.metaRaft.LastApplied()
-		}, snapRefCount).Handle)
-	// Phase 8 N7-3: native /probe/kek-disk buffered route. Handle reads only
-	// req.Payload; its StatusError replies (decode/statfs failure) map to a
-	// 500 → client error, exactly as the tunnel surfaced them.
+	state.clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe, leaseHandler.Handle)
+	// Phase 8 N7-3: native /probe/kek-disk + /probe/kek-lease buffered routes.
+	// Both handlers read only req.Payload; their StatusError replies
+	// (decode/statfs/snapshot-count failure) map to a 500 → client error,
+	// exactly as the tunnel surfaced them.
 	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKDisk,
 		transport.BufferedRouteFromMessageHandler("kek disk-space probe", diskHandler.Handle))
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKLease,
+		transport.BufferedRouteFromMessageHandler("kek lease-snapshot probe", leaseHandler.Handle))
 
 	// 3. Production PeerKEKProbe with self-shortcut. Self-call computes the
 	//    disk-space + lease values directly (no wire codec roundtrip) so the

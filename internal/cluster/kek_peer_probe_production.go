@@ -40,16 +40,10 @@ func (d *ClusterPeerProbeDialer) CallKEKDiskSpace(ctx context.Context, peer stri
 	return d.T.CallBuffered(ctx, peer, transport.RouteProbeKEKDisk, payload)
 }
 
-// CallKEKLeaseSnapshot dispatches a StreamKEKLeaseSnapshotProbe request.
+// CallKEKLeaseSnapshot dispatches a KEK lease-snapshot probe over the native
+// /probe/kek-lease buffered route (Phase 8 N7-3).
 func (d *ClusterPeerProbeDialer) CallKEKLeaseSnapshot(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-	resp, err := d.T.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamKEKLeaseSnapshotProbe,
-		Payload: payload,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Payload, nil
+	return d.T.CallBuffered(ctx, peer, transport.RouteProbeKEKLease, payload)
 }
 
 // peerKEKProbeImpl is the production PeerKEKProbe. It fans out
