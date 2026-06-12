@@ -19,7 +19,7 @@ import (
 // uses. Declared as an interface so tests inject a mock without spinning up
 // a real transport listener.
 type Caller interface {
-	Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error)
+	CallBuffered(ctx context.Context, addr, path string, payload []byte) ([]byte, error)
 }
 
 // ReceiptLookup is the server-side dependency of the query handler — the
@@ -124,7 +124,6 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 	defer cancel()
 
 	payload := encodeReceiptQuery(receiptID)
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: payload}
 
 	type result struct {
 		bytes []byte
@@ -138,22 +137,22 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 		wg.Add(1)
 		go func(peer string) {
 			defer wg.Done()
-			resp, err := b.caller.Call(qCtx, peer, req)
+			reply, err := b.caller.CallBuffered(qCtx, peer, transport.RouteReceiptQuery, payload)
 			if err != nil {
 				results <- result{err: err}
 				return
 			}
-			if resp == nil {
+			if len(reply) == 0 {
 				results <- result{}
 				return
 			}
-			parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+			parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(reply, 0)
 			if !parsed.Found() {
 				results <- result{}
 				return
 			}
 			// Fresh copy of the FB payload — FlatBuffers byte views
-			// alias into `resp.Payload`, which would get reused.
+			// alias into `reply`, which would get reused.
 			fbBytes := parsed.ReceiptBytes()
 			cp := make([]byte, len(fbBytes))
 			copy(cp, fbBytes)
@@ -210,16 +209,15 @@ func (b *ReceiptBroadcaster) QuerySingle(ctx context.Context, peer, receiptID st
 	defer cancel()
 
 	payload := encodeReceiptQuery(receiptID)
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: payload}
 
-	resp, err := b.caller.Call(qCtx, peer, req)
+	reply, err := b.caller.CallBuffered(qCtx, peer, transport.RouteReceiptQuery, payload)
 	if err != nil {
 		return nil, false, err
 	}
-	if resp == nil {
+	if len(reply) == 0 {
 		return nil, false, nil
 	}
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(reply, 0)
 	if !parsed.Found() {
 		return nil, false, nil
 	}

@@ -224,7 +224,13 @@ func setupClusterReceipt(
 	if gossipReceiver != nil {
 		gossipReceiver.SetReceiptCache(routingCache)
 	}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
 	router.Handle(transport.StreamReceiptQuery, cluster.NewReceiptQueryHandler(store))
+	// Phase 8 N7-3: native /receipt/query buffered route. The handler reads
+	// only req.Payload; found/not-found is in-band in the FB response (invalid
+	// requests answer found=false, never an error).
+	clusterTransport.RegisterBufferedRoute(transport.RouteReceiptQuery,
+		transport.BufferedRouteFromMessageHandler("receipt query", cluster.NewReceiptQueryHandler(store)))
 
 	go gossipSender.Run(ctx)
 
