@@ -137,7 +137,7 @@ func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGro
 	if tr == nil || lookup == nil {
 		return
 	}
-	tr.HandleRead(transport.StreamReadAppendSegment, func(req *transport.Message) (*transport.Message, io.ReadCloser) {
+	h := func(req *transport.Message) (*transport.Message, io.ReadCloser) {
 		groupID, bucket, key, blobID, kind, err := decodeAppendSegmentRequest(req.Payload)
 		if err != nil {
 			return errorAppendSegmentMeta(req, err.Error()), nil
@@ -162,6 +162,28 @@ func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGro
 			return errorAppendSegmentMeta(req, err.Error()), nil
 		}
 		return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: []byte{appendSegStatusOK}}, f
+	}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
+	tr.HandleRead(transport.StreamReadAppendSegment, h)
+	// Phase 8 N7-3: native GET /append-segment/read. The handler reads only
+	// req.Payload and always answers StatusOK with the outcome (OK/ENOENT/
+	// ERROR + text) in-band in the status frame — its Type/ID echo into the
+	// reply is discarded (the native wire has no envelope).
+	tr.RegisterAppendSegmentReadHandler(func(frame []byte) ([]byte, io.ReadCloser, error) {
+		resp, rc := h(&transport.Message{Type: transport.StreamReadAppendSegment, Payload: frame})
+		if resp == nil {
+			if rc != nil {
+				_ = rc.Close()
+			}
+			return nil, nil, fmt.Errorf("append segment read: nil reply")
+		}
+		if resp.Status != transport.StatusOK {
+			if rc != nil {
+				_ = rc.Close()
+			}
+			return nil, nil, fmt.Errorf("append segment read: %s", resp.Payload)
+		}
+		return resp.Payload, rc, nil
 	})
 }
 
@@ -188,18 +210,19 @@ func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	req := &transport.Message{Type: transport.StreamReadAppendSegment, Payload: payload}
-	resp, body, err := b.shardSvc.transport.CallRead(ctx, addr, req)
+	// Native GET /append-segment/read (Phase 8 N7-3): frame in the family
+	// header, status frame in the reply header, segment bytes streamed.
+	reply, body, err := b.shardSvc.transport.AppendSegmentRead(ctx, addr, payload)
 	if err != nil {
 		return nil, fmt.Errorf("call peer %s: %w", peer, err)
 	}
-	if len(resp.Payload) == 0 {
+	if len(reply) == 0 {
 		if body != nil {
 			_ = body.Close()
 		}
 		return nil, fmt.Errorf("empty append-segment response from %s", peer)
 	}
-	switch resp.Payload[0] {
+	switch reply[0] {
 	case appendSegStatusOK:
 		if body == nil {
 			return nil, fmt.Errorf("peer %s ok but no body", peer)
@@ -214,12 +237,12 @@ func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, 
 		if body != nil {
 			_ = body.Close()
 		}
-		return nil, fmt.Errorf("peer %s error: %s", peer, string(resp.Payload[1:]))
+		return nil, fmt.Errorf("peer %s error: %s", peer, string(reply[1:]))
 	default:
 		if body != nil {
 			_ = body.Close()
 		}
-		return nil, fmt.Errorf("peer %s: unknown status byte %d", peer, resp.Payload[0])
+		return nil, fmt.Errorf("peer %s: unknown status byte %d", peer, reply[0])
 	}
 }
 

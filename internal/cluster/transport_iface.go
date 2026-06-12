@@ -41,15 +41,18 @@ type shardTransport interface {
 	RegisterBufferedRoute(path string, h transport.BufferedRouteHandler)
 	ShardWrite(ctx context.Context, addr string, req transport.ShardWriteRequest, body io.Reader) error
 	ShardRead(ctx context.Context, addr string, req transport.ShardReadRequest) (io.ReadCloser, error)
+	AppendSegmentRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
 	Handle(st transport.StreamType, h transport.StreamHandler)
 	HandleBody(st transport.StreamType, h transport.StreamBodyHandler)
 	HandleRead(st transport.StreamType, h transport.StreamReadHandler)
 	Close() error
 }
 
-// appendSegRegistrar: append-segment read handler registration only.
+// appendSegRegistrar: append-segment read handler registration only (tunnel
+// HandleRead until Phase 8 N8 + the native route registration).
 type appendSegRegistrar interface {
 	HandleRead(st transport.StreamType, h transport.StreamReadHandler)
+	RegisterAppendSegmentReadHandler(h transport.AppendSegmentReadHandler)
 }
 
 // Compile-time conformance: the HTTP transport (the sole cluster transport)

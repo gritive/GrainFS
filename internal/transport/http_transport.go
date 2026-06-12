@@ -86,6 +86,9 @@ type HTTPTransport struct {
 	nativeForwardWrites atomic.Uint64
 	nativeForwardReads  atomic.Uint64
 
+	appendSegReadHandler atomic.Pointer[AppendSegmentReadHandler]
+	nativeAppendSegReads atomic.Uint64
+
 	// Generic native primitives (Phase 8 N7-3): buffered-Call routes and
 	// gossip routes, keyed by path. The maps are built at construction and
 	// immutable afterwards; per-route handler/counter fields are atomic.
@@ -240,6 +243,7 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.GET(httpShardReadPath, t.handleShardRead)
 	srv.POST(httpForwardWritePath, t.handleForwardWrite)
 	srv.GET(httpForwardReadPath, t.handleForwardRead)
+	srv.GET(httpAppendSegmentReadPath, t.handleAppendSegmentRead)
 	// Generic native primitives (N7-3): EVERY declared buffered/gossip route is
 	// live from Listen; a family whose handler has not registered answers 503.
 	for path, rs := range t.bufferedByPath {

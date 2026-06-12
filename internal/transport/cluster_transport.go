@@ -38,6 +38,8 @@ type ClusterTransport interface {
 	RegisterForwardReadHandler(h ForwardReadHandler)
 	ForwardWrite(ctx context.Context, addr string, frame []byte, body io.Reader) ([]byte, error)
 	ForwardRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
+	RegisterAppendSegmentReadHandler(h AppendSegmentReadHandler)
+	AppendSegmentRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
 
 	// Generic native primitives (Phase 8 N7-3): buffered-Call and gossip
 	// routes for the long-tail families (route table in http_buffered_route.go).
