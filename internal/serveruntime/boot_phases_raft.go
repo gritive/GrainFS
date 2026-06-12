@@ -371,15 +371,21 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		})
 	}
 	// PR-2a §8b: applied-index probe handler for the leader's barrier fan-out.
-	state.clusterTransport.Handle(transport.StreamAppliedIndexProbe,
-		func(req *transport.Message) *transport.Message {
-			respPayload, err := cluster.HandleAppliedIndexProbe(req.Payload, state.nodeID, state.metaRaft.LastApplied)
-			if err != nil {
-				log.Warn().Err(err).Msg("applied-index probe: bad request")
-				return nil
-			}
-			return &transport.Message{Type: transport.StreamAppliedIndexProbe, Payload: respPayload}
-		})
+	appliedIndexHandler := func(req *transport.Message) *transport.Message {
+		respPayload, err := cluster.HandleAppliedIndexProbe(req.Payload, state.nodeID, state.metaRaft.LastApplied)
+		if err != nil {
+			log.Warn().Err(err).Msg("applied-index probe: bad request")
+			return nil
+		}
+		return &transport.Message{Type: transport.StreamAppliedIndexProbe, Payload: respPayload}
+	}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
+	state.clusterTransport.Handle(transport.StreamAppliedIndexProbe, appliedIndexHandler)
+	// Phase 8 N7-3: native /probe/applied-index buffered route. The handler
+	// reads only req.Payload; its nil reply (bad request) maps to a 500 →
+	// client error, matching the tunnel's nil-response StatusError.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeAppliedIndex,
+		transport.BufferedRouteFromMessageHandler("applied-index probe", appliedIndexHandler))
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).
 	if _, activeSPKI, err := transport.DeriveClusterIdentity(state.transportPSK); err == nil {
