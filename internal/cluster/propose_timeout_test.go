@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,17 +23,17 @@ func (n *proposeTimeoutNode) IsLeader() bool   { return n.leader }
 func (n *proposeTimeoutNode) LeaderID() string { return n.leaderID }
 func (n *proposeTimeoutNode) Peers() []string  { return nil }
 
-// blockingShardTransport.CallPooled blocks until the forward context expires,
+// blockingShardTransport.CallBuffered blocks until the forward context expires,
 // then returns the bare context error — modelling a forward SendRequest whose
 // proposeCtx fired mid-flight. The embedded shardTransport is nil; SendRequest
-// only reaches CallPooled. The wrapped error is non-ErrNotLeader, so it drives
-// propose()'s `!allNotLeader` early-return — the path the Done() branch test
-// can't reach.
+// only reaches CallBuffered (propose-forward rides the native route, Phase 8
+// N7-3). The wrapped error is non-ErrNotLeader, so it drives propose()'s
+// `!allNotLeader` early-return — the path the Done() branch test can't reach.
 type blockingShardTransport struct {
 	shardTransport
 }
 
-func (b *blockingShardTransport) CallPooled(ctx context.Context, _ string, _ *transport.Message) (*transport.Message, error) {
+func (b *blockingShardTransport) CallBuffered(ctx context.Context, _, _ string, _ []byte) ([]byte, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }

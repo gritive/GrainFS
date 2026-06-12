@@ -939,7 +939,7 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 	if b.shardSvc == nil {
 		return
 	}
-	b.shardSvc.RegisterHandler(transport.StreamProposeForward, func(req *transport.Message) *transport.Message {
+	h := func(req *transport.Message) *transport.Message {
 		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
 		defer cancel()
 		idx, err := b.node.ProposeWait(ctx, req.Payload)
@@ -966,7 +966,15 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 			Type:    transport.StreamProposeForward,
 			Payload: encodeProposeForwardReply(idx, err),
 		}
-	})
+	}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8
+	// deletes the envelope tunnel wholesale.
+	b.shardSvc.RegisterHandler(transport.StreamProposeForward, h)
+	// Phase 8 N7-3: native /forward/propose/legacy buffered route. The handler
+	// reads only req.Payload and every propose outcome (index + apply error) is
+	// in-band in the reply payload, exactly as the tunnel delivered it.
+	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeLegacy,
+		transport.BufferedRouteFromMessageHandler("propose forward", h))
 }
 
 // forwardReadIndex sends a StreamReadIndex RPC to leaderAddr and returns the leader's commitIndex.

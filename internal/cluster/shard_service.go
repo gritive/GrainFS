@@ -327,17 +327,22 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	if err != nil {
 		return nil, err
 	}
-	// Phase 8 N7-3: the shard family (StreamData) rides the native /shard/rpc
-	// buffered route. The other SendRequest stream types — propose-forward
-	// (0x06/0x14) and read-index (0x0A) — stay on the tunnel until their own
-	// family migrations (plan rows 5/7/8) register native server adapters; each
-	// of those rows adds its case here (or retires this method).
-	if msg.Type == transport.StreamData {
-		reply, err := s.transport.CallBuffered(ctx, peerAddr, transport.RouteShardRPC, msg.Payload)
+	// Phase 8 N7-3: migrated families ride their native buffered routes; the
+	// rest stay on the tunnel CallPooled until their own family migrations
+	// register native server adapters (each row adds its case here).
+	var route string
+	switch msg.Type {
+	case transport.StreamData:
+		route = transport.RouteShardRPC
+	case transport.StreamProposeForward:
+		route = transport.RouteForwardProposeLegacy
+	}
+	if route != "" {
+		reply, err := s.transport.CallBuffered(ctx, peerAddr, route, msg.Payload)
 		if err != nil {
 			return nil, err
 		}
-		return &transport.Message{Type: transport.StreamData, Status: transport.StatusOK, Payload: reply}, nil
+		return &transport.Message{Type: msg.Type, Status: transport.StatusOK, Payload: reply}, nil
 	}
 	// CallPooled (reused conn) not Call (connection-per-RPC): SendRequest forwards
 	// every PUT's index/group proposal to the leader, so a fresh TLS handshake per
@@ -379,6 +384,15 @@ func (s *ShardService) RegisterHandler(st transport.StreamType, h func(*transpor
 		return
 	}
 	s.transport.Handle(st, h)
+}
+
+// RegisterBufferedRoute registers a native buffered-route handler on the
+// transport (Phase 8 N7-3).
+func (s *ShardService) RegisterBufferedRoute(path string, h transport.BufferedRouteHandler) {
+	if s.transport == nil {
+		return
+	}
+	s.transport.RegisterBufferedRoute(path, h)
 }
 
 // RegisterBodyHandler registers a per-type handler whose framed request is
