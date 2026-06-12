@@ -34,6 +34,10 @@ type ClusterTransport interface {
 	ShardWrite(ctx context.Context, addr string, req ShardWriteRequest, body io.Reader) error
 	RegisterShardReadHandler(h ShardReadHandler)
 	ShardRead(ctx context.Context, addr string, req ShardReadRequest) (io.ReadCloser, error)
+	RegisterForwardWriteHandler(h ForwardWriteHandler)
+	RegisterForwardReadHandler(h ForwardReadHandler)
+	ForwardWrite(ctx context.Context, addr string, frame []byte, body io.Reader) ([]byte, error)
+	ForwardRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
 
 	RecycleConns()
 	ClosePeer(addr string)
