@@ -66,12 +66,9 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// turning the storm into bounded backpressure. (This mirrors 730222ee, which
 	// only covered shardSvc; these boot dialers were the remaining conn-per-RPC path.)
 	forwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
+		// Native /forward/propose/group buffered route (Phase 8 N7-3); pooled
+		// HTTP conns give the same bounded-backpressure property.
+		return clusterTransport.CallBuffered(callCtx, peer, transport.RouteForwardProposeGroup, payload)
 	}
 	forwardStreamDialer := func(callCtx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
 		// Native /forward/write route (Phase 8 N7-2): frame in the family header,
