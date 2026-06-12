@@ -24,37 +24,34 @@ func TestNoBadgerImportsInProductionFiles(t *testing.T) {
 		"GrainFS/internal/badgermeta",
 		"GrainFS/internal/badgerutil",
 	}
-	// Both directories listed explicitly — filepath.WalkDir from "." would
-	// also work today, but an explicit list keeps the guard honest if the
-	// package ever gains nested dirs that should be scoped differently.
-	dirs := []string{".", "putpipeline"}
-
+	// Recursive walk so every current and future subpackage (putpipeline,
+	// clusterpb, ecspike, ...) is covered — an explicit dir list would
+	// silently exempt new subdirectories.
 	fset := token.NewFileSet()
 	var violations []string
-	for _, dir := range dirs {
-		entries, err := os.ReadDir(dir)
+	walkErr := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			t.Fatalf("read dir %s: %v", dir, err)
+			return err
 		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			path := filepath.Join(dir, name)
-			f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-			if err != nil {
-				t.Fatalf("parse %s: %v", path, err)
-			}
-			for _, imp := range f.Imports {
-				p := strings.Trim(imp.Path.Value, `"`)
-				for _, bad := range forbidden {
-					if strings.Contains(p, bad) {
-						violations = append(violations, path+" imports "+p)
-					}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, perr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if perr != nil {
+			return perr
+		}
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			for _, bad := range forbidden {
+				if strings.Contains(p, bad) {
+					violations = append(violations, path+" imports "+p)
 				}
 			}
 		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk: %v", walkErr)
 	}
 	if len(violations) > 0 {
 		t.Fatalf("Phase 6.5 guard: production files in internal/cluster must not "+

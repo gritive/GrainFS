@@ -427,6 +427,12 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
 	state.distBackend = distBackend
+	// Close stops the coalesce worker + backstop scanner goroutines; in
+	// shared mode it never touches the store. Registered AFTER the shared
+	// FSM DB's cleanup, so LIFO order stops these goroutines BEFORE the DB
+	// they read closes (otherwise they outlive shutdown and can panic on a
+	// closed BadgerDB — pre-existing gap surfaced by the Phase 6.5 S3 review).
+	state.AddCleanup(func() { _ = distBackend.Close() })
 
 	allNodes := runtimeTopologyNodes(state.nodeID, state.raftAddr, state.peers, state.metaRaft.FSM().Nodes())
 	distBackend.SetShardService(state.shardSvc, allNodes)
