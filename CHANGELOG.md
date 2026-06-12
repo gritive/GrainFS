@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.564.0] - 2026-06-13
+
+### Changed
+- The Phase 8 N4 raft RPC timeout question is settled with data: a gated measurement
+  tool (`TestMeasureRaftRPCLatency`, `GRAINFS_MEASURE_RAFT_RPC=1`) measures the exact
+  span `raftRPCTimeout`/`metaRaftRPCTimeout` bound — FB encode → warm pooled HTTP POST →
+  decode against real inbound codec work. Local run (macOS 8-core, 9,000+ samples):
+  zero 80ms breaches in every condition, including 2×-core CPU saturation plus 8×
+  concurrent bulk RPC load (p99.9 11.5ms, max 32.2ms). The proven values stay: 80ms is
+  not too tight, and must not be lowered (the saturated tail reaches within 2.5× of it);
+  500ms meta keeps 15× headroom. The tool is reusable for a Linux re-run if R1
+  throughput work reopens the question.
+
 ## [0.0.563.0] - 2026-06-13
 
 ### Changed
