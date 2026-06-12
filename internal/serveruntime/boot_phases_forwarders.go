@@ -157,12 +157,8 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		}
 	}
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
-		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
+		// Native /raft/meta/catalog-read buffered route (Phase 8 N7-3).
+		return clusterTransport.CallBuffered(callCtx, peer, transport.RouteRaftMetaCatalogRead, payload)
 	}
 	state.metaReadSender = cluster.NewMetaCatalogReadSender(metaReadDialer)
 
@@ -248,7 +244,13 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	}
 
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
+	// Phase 8 N7-3: native /raft/meta/catalog-read buffered route. Handle reads
+	// only req.Payload; the read outcome (reply or error type/message) is
+	// in-band via encodeMetaLoadTableReply.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaCatalogRead,
+		transport.BufferedRouteFromMessageHandler("meta catalog read", metaReadReceiver.Handle))
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	return nil
 }
