@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Phase 8 N6: the shard-write family (plaintext-stream and sealed-stream shard writes)
+  now travels a genuinely native HTTP route — `POST /shard/write` with URL-encoded query
+  metadata, a raw streamed body, and HTTP status codes — instead of the `/_grainfs/rpc`
+  StreamType envelope tunnel. No FlatBuffers RPC envelope, no `X-Gfs-*` frame headers,
+  no `Message.ID` on this family's wire. The sealed path keeps the 8-byte completeness
+  trailer (mid-stream abort rejection). The tunnel remains in place for all other RPC
+  families; it is removed in N8 after the remaining families migrate (N7). Internal
+  cluster wire only — no operator-visible API change. Flag-day note: mixed-version
+  clusters across this boundary are unsupported (existing project stance).
+
 ## [0.0.554.0] - 2026-06-12
 
 ### Changed
