@@ -254,18 +254,45 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 	if err != nil {
 		return RouteTarget{}, ShardGroupEntry{}, err
 	}
-	// When self is the leader, routeGroup skips peer resolution (short-circuit
-	// for RouteBucket). For object writes we still need forward candidates so
-	// the write can be forwarded to the rest of the group if leadership changes
-	// between routing and execution (route-to-execute race).
-	if target.SelfIsLeader && len(target.Peers) == 0 {
-		peers := NewShardGroupPeerSet(group).ForwardOrder(r.selfID, r.selfAliases...)
-		if r.addr != nil {
-			if resolved, resolveErr := ResolveNodeAddresses(r.addr, peers); resolveErr == nil {
-				peers = resolved
-			}
-		}
-		target.Peers = peers
-	}
+	r.fillWriteForwardPeers(&target, group)
 	return target, group, nil
+}
+
+// RouteObjectWriteGroup resolves a write-shaped RouteTarget for an explicitly
+// known placement group, bypassing hash placement. Used by multipart session
+// ops whose owning group is encoded in the uploadID: the per-node boot-frozen
+// hash candidate sets can diverge in dynamically-grown clusters, so the
+// create-time hash route is not reproducible on other nodes.
+func (r *OpRouter) RouteObjectWriteGroup(groupID string) (RouteTarget, ShardGroupEntry, error) {
+	if r.groups == nil {
+		return RouteTarget{}, ShardGroupEntry{}, ErrCoordinatorNoRouter
+	}
+	group, ok := r.groups.ShardGroup(groupID)
+	if !ok {
+		return RouteTarget{}, ShardGroupEntry{}, ErrUnknownGroup
+	}
+	target, err := r.routeGroup(group.ID)
+	if err != nil {
+		return RouteTarget{}, ShardGroupEntry{}, err
+	}
+	r.fillWriteForwardPeers(&target, group)
+	return target, group, nil
+}
+
+// fillWriteForwardPeers backfills forward candidates on a self-leader target.
+// When self is the leader, routeGroup skips peer resolution (short-circuit
+// for RouteBucket). For object writes we still need forward candidates so
+// the write can be forwarded to the rest of the group if leadership changes
+// between routing and execution (route-to-execute race).
+func (r *OpRouter) fillWriteForwardPeers(target *RouteTarget, group ShardGroupEntry) {
+	if !target.SelfIsLeader || len(target.Peers) != 0 {
+		return
+	}
+	peers := NewShardGroupPeerSet(group).ForwardOrder(r.selfID, r.selfAliases...)
+	if r.addr != nil {
+		if resolved, resolveErr := ResolveNodeAddresses(r.addr, peers); resolveErr == nil {
+			peers = resolved
+		}
+	}
+	target.Peers = peers
 }

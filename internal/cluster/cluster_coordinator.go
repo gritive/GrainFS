@@ -1725,14 +1725,16 @@ func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, p
 			if err != nil {
 				return nil, err
 			}
-			uploads = append(uploads, groupUploads...)
+			// Group-encode listed IDs with the group they came from so clients
+			// get the same uploadID Create returned (session ops route by it).
+			uploads = append(uploads, c.wrapMultipartUploads(groupUploads, dg.ID())...)
 			continue
 		}
 		groupUploads, err := gb.ListMultipartUploads(ctx, bucket, prefix, 0)
 		if err != nil {
 			return nil, err
 		}
-		uploads = append(uploads, groupUploads...)
+		uploads = append(uploads, c.wrapMultipartUploads(groupUploads, dg.ID())...)
 	}
 	if len(groups) == 0 && c.base != nil {
 		return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
@@ -1769,18 +1771,19 @@ func (c *ClusterCoordinator) forwardListMultipartUploads(ctx context.Context, gr
 	return c.forwardRuntime().listMultipartUploads(ctx, target, bucket, prefix, 0)
 }
 
-// ListParts routes by (bucket, key): local group backend first; otherwise the
-// peer-transport capability gate must pass before forwarding to the remote
-// data-group leader.
+// ListParts routes by the group encoded in the uploadID (falling back to the
+// legacy (bucket, key) hash for un-prefixed IDs): local group backend first;
+// otherwise the peer-transport capability gate must pass before forwarding to
+// the remote data-group leader.
 func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
-	target, _, err := c.routeWriteOrBucket(bucket, key)
+	target, _, rawID, err := c.routeMultipartSession(bucket, key, uploadID)
 	if err != nil {
 		return nil, err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		return gb.ListParts(ctx, bucket, key, uploadID, maxParts)
+		return gb.ListParts(ctx, bucket, key, rawID, maxParts)
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -1788,7 +1791,7 @@ func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadI
 	if err := c.requireMultipartListingPeerCapability(compat.OperationListParts, target.Peers); err != nil {
 		return nil, err
 	}
-	return c.forwardRuntime().listParts(ctx, target, bucket, key, uploadID, maxParts)
+	return c.forwardRuntime().listParts(ctx, target, bucket, key, rawID, maxParts)
 }
 
 func (c *ClusterCoordinator) requireMultipartListingPeerCapability(op compat.Operation, peers []string) error {
