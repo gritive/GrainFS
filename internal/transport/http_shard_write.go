@@ -22,8 +22,8 @@ import (
 //   - reply = the HTTP status: 200 empty = OK; 400 malformed params;
 //     503 overloaded / handler not ready; 500 handler error (text in the body)
 //
-// No transport.Message, no X-Gfs-* headers, no FlatBuffers RPC envelope, no
-// StreamRouter. This is the N7 template: URL = operation, query = metadata,
+// No envelope frame, no generic frame headers, no FlatBuffers RPC envelope.
+// This is the N7 template: URL = operation, query = metadata,
 // body = bytes, status = result, handler registered by the consumer.
 const httpShardWritePath = "/shard/write"
 
@@ -49,7 +49,7 @@ type ShardWriteHandler func(req ShardWriteRequest, body io.Reader) error
 // RegisterShardWriteHandler installs the native shard-write handler. Called by
 // the composition root (serveruntime boot) — mirrors HandleBody registration,
 // but for the native route. Listen runs before registration (bootClusterTransport
-// precedes bootStreamRouter), so the route 503s until this is called. A nil h
+// precedes bootShardRoutes), so the route 503s until this is called. A nil h
 // unregisters (the route reverts to 503) — never stored as a non-nil pointer to
 // a nil func, which would dodge the not-ready check and panic at call time.
 func (t *HTTPTransport) RegisterShardWriteHandler(h ShardWriteHandler) {

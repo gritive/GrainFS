@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 func setupReadAtBenchReceiver() (*ForwardReceiver, *DataGroupManager) {
@@ -73,19 +72,18 @@ func BenchmarkForwardReceiverHandleReadAtSmall_4KiB(b *testing.B) {
 		b.Fatal(err)
 	}
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "small", 128, 4*1024))
-	req := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
 
 	b.SetBytes(4 * 1024)
 	b.ResetTimer()
 	for b.Loop() {
-		reply := rcv.Handle(req)
+		reply, _ := rcv.Handle(payload)
 		if reply == nil {
 			b.Fatal("nil reply")
 		}
-		if err := parseReplyStatus(reply.Payload); err != nil {
+		if err := parseReplyStatus(reply); err != nil {
 			b.Fatal(err)
 		}
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		if fr.ReadBodyLength() != 4*1024 {
 			b.Fatalf("read body length %d, want %d", fr.ReadBodyLength(), 4*1024)
 		}

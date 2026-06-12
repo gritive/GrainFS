@@ -12,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // RaftBalancerAdapter wraps cluster.RaftNode to implement
@@ -55,7 +54,7 @@ func StartBalancer(
 	node cluster.RaftNode,
 	peers []string,
 	fsm *cluster.FSM,
-	clusterTransport transport.Transport,
+	clusterTransport cluster.GossipTransport,
 	shardSvc *cluster.ShardService,
 	numShards int,
 	clusterCfg cluster.BalancerClusterCfg,
@@ -105,7 +104,10 @@ func StartBalancer(
 		WithNodeAddressBook(addrBook)
 
 	go sender.Run(ctx)
-	go receiver.Run(ctx)
+	// Phase 8 N7-3: the receiver consumes the native /gossip/admin +
+	// /gossip/receipt routes (the transport's per-route drain goroutines
+	// replace the Receive()-loop goroutine).
+	receiver.RegisterNativeGossipRoutes()
 	go exec.Run(ctx, taskCh)
 	go balancer.Run(ctx)
 

@@ -9,7 +9,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,9 +46,9 @@ func TestContextForForwardedGroupCarriesPlacementEntry(t *testing.T) {
 func TestForwardReceiver_UnknownGroup_NotVoter(t *testing.T) {
 	rcv, _ := setupReceiver(t, "self")
 	payload := encodeForwardPayload("g99", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k"))
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusNotVoter, fr.Status())
 }
 
@@ -58,9 +57,9 @@ func TestForwardReceiver_HandleBody_EarlyRejectDrainsBody(t *testing.T) {
 	payload := encodeForwardPayload("g99", raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil))
 	body := bytes.NewBuffer(bytes.Repeat([]byte("x"), 64*1024))
 
-	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, body)
+	reply, _ := rcv.HandleBody(payload, body)
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusNotVoter, fr.Status())
 	require.Zero(t, body.Len(), "early streamed-forward rejects must drain body so the sender can finish")
 }
@@ -77,9 +76,9 @@ func TestForwardReceiver_NonLeaderVoter_ReturnsHint(t *testing.T) {
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k"))
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	// Without a real RaftNode, we expect either NotVoter (nil node) or OK (if mock reports leader)
 	status := fr.Status()
 	require.True(t, status == raftpb.ForwardStatusOK || status == raftpb.ForwardStatusNotVoter || status == raftpb.ForwardStatusNotLeader,
@@ -94,17 +93,14 @@ func TestForwardReceiver_HandleGroupPropose_DispatchesToGroupBackend(t *testing.
 	cmd, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "forward-propose"})
 	require.NoError(t, err)
 
-	reply := rcv.HandleGroupPropose(&transport.Message{
-		Type:    transport.StreamDataGroupProposeForward,
-		Payload: encodeGroupForwardPayload("group-1", cmd),
-	})
+	reply, _ := rcv.HandleGroupPropose(encodeGroupForwardPayload("group-1", cmd))
 
 	require.NotNil(t, reply)
 	// Phase A (Task 16): success wire is [8B idx][4B errLen=0][1B applyErrCode=0].
-	require.Len(t, reply.Payload, 13)
-	require.Greater(t, binary.BigEndian.Uint64(reply.Payload[0:8]), uint64(0))
-	require.Zero(t, binary.BigEndian.Uint32(reply.Payload[8:12]))
-	require.Equal(t, byte(applyErrCodeNone), reply.Payload[12])
+	require.Len(t, reply, 13)
+	require.Greater(t, binary.BigEndian.Uint64(reply[0:8]), uint64(0))
+	require.Zero(t, binary.BigEndian.Uint32(reply[8:12]))
+	require.Equal(t, byte(applyErrCodeNone), reply[12])
 }
 
 func TestForwardReceiver_HandlePutObject_ReturnsOK(t *testing.T) {
@@ -116,10 +112,10 @@ func TestForwardReceiver_HandlePutObject_ReturnsOK(t *testing.T) {
 
 	args := buildPutObjectArgs("bucket", "mykey", "text/plain", []byte("hello"))
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
 	head, err := gb.HeadObject(context.Background(), "bucket", "mykey")
 	require.NoError(t, err)
@@ -135,10 +131,10 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 
 	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256")
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 
 	require.NotNil(t, reply)
-	obj, err := objectFromReply(reply.Payload)
+	obj, err := objectFromReply(reply)
 	require.NoError(t, err)
 	require.Equal(t, "AES256", obj.SSEAlgorithm)
 
@@ -158,10 +154,10 @@ func TestForwardReceiver_HandlePutObjectStream_ReturnsOK(t *testing.T) {
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	body := bytes.NewReader([]byte("streamed body"))
 
-	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, body)
+	reply, _ := rcv.HandleBody(payload, body)
 
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
 	_, err := gb.HeadObject(context.Background(), "bucket", "streamkey")
 	require.NoError(t, err)
@@ -185,9 +181,9 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ReturnsOK(t *testing.T) {
 	args := buildCompleteMultipartUploadArgs("bucket", "mpu-key", up.UploadID, []storage.Part{*part})
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCompleteMultipartUpload, args)
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
 	head, err := gb.HeadObject(context.Background(), "bucket", "mpu-key")
 	require.NoError(t, err)
@@ -207,10 +203,10 @@ func TestForwardReceiver_HandleListParts_CallsBackend(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListParts, buildListPartsArgs("bucket", "mpu-key", up.UploadID, 100))
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 
 	require.NotNil(t, reply)
-	parts, err := partsFromReply(reply.Payload)
+	parts, err := partsFromReply(reply)
 	require.NoError(t, err)
 	require.Equal(t, []storage.Part{*part}, parts)
 }
@@ -224,10 +220,10 @@ func TestForwardReceiver_HandleListParts_MissingUploadReturnsNoSuchUpload(t *tes
 	rcv := NewForwardReceiver(mgr)
 
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListParts, buildListPartsArgs("bucket", "mpu-key", "missing", 100))
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusNoSuchUpload, fr.Status())
 }
 
@@ -242,10 +238,10 @@ func TestForwardReceiver_HandleListMultipartUploads_CallsBackend(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListMultipartUploads, buildListMultipartUploadsArgs("bucket", "listed/", 100))
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 
 	require.NotNil(t, reply)
-	uploads, err := multipartUploadsFromReply(reply.Payload)
+	uploads, err := multipartUploadsFromReply(reply)
 	require.NoError(t, err)
 	require.Equal(t, []*storage.MultipartUpload{up}, uploads)
 }
@@ -264,9 +260,9 @@ func TestForwardReceiver_HandleDeleteObject_ReturnsOK(t *testing.T) {
 	args := buildDeleteObjectArgs("bucket", "del-key")
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpDeleteObject, args)
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
 }
 
@@ -284,9 +280,9 @@ func TestForwardReceiver_HandleDeleteObjectVersion_ReturnsOK(t *testing.T) {
 	args := buildDeleteObjectVersionArgs("bucket", "ver-key", obj.VersionID)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpDeleteObjectVersion, args)
 
-	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
-	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
 }
 
@@ -303,7 +299,7 @@ func TestForwardReceiver_HandlePutObjectStreamRecordsTrace(t *testing.T) {
 
 	args := buildPutObjectArgs("bucket", "stream-trace-key", "text/plain", nil)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
-	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, bytes.NewReader([]byte("streamed body")))
+	reply, _ := rcv.HandleBody(payload, bytes.NewReader([]byte("streamed body")))
 	require.NotNil(t, reply)
 
 	events := readPutTraceEvents(t, path)

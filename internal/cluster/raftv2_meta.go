@@ -52,7 +52,10 @@ var _ MetaTransport = (*RaftV2MetaTransport)(nil)
 // NewRaftV2MetaTransport wires the inbound StreamMetaRaft handler.
 func NewRaftV2MetaTransport(tr clusterRPCTransport, node RaftNode) *RaftV2MetaTransport {
 	mt := &RaftV2MetaTransport{transport: tr, node: node}
-	tr.Handle(transport.StreamMetaRaft, mt.handleRPC)
+	// Native /raft/meta/rpc buffered route. The wire payload is the shared v2
+	// FB RPC envelope; a decode failure / unknown RPC maps to a 500 exactly as
+	// the tunnel's nil-response StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftMetaRPC, mt.handleRPC)
 	return mt
 }
 
@@ -66,11 +69,11 @@ func (m *RaftV2MetaTransport) SendRequestVote(peer string, args *raft.RequestVot
 	if err != nil {
 		return nil, err
 	}
-	resp, err := m.transport.Call(ctx, peer, &transport.Message{Type: transport.StreamMetaRaft, Payload: envelope})
+	reply, err := m.transport.CallBuffered(ctx, peer, transport.RouteRaftMetaRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("meta RequestVote to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
@@ -89,11 +92,11 @@ func (m *RaftV2MetaTransport) SendAppendEntries(peer string, args *raft.AppendEn
 	if err != nil {
 		return nil, err
 	}
-	resp, err := m.transport.Call(ctx, peer, &transport.Message{Type: transport.StreamMetaRaft, Payload: envelope})
+	reply, err := m.transport.CallBuffered(ctx, peer, transport.RouteRaftMetaRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("meta AppendEntries to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
@@ -113,11 +116,11 @@ func (m *RaftV2MetaTransport) SendTimeoutNow(peer string, args *raft.TimeoutNowA
 	if err != nil {
 		return nil, err
 	}
-	resp, err := m.transport.Call(ctx, peer, &transport.Message{Type: transport.StreamMetaRaft, Payload: envelope})
+	reply, err := m.transport.CallBuffered(ctx, peer, transport.RouteRaftMetaRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("meta TimeoutNow to %s: %w", peer, err)
 	}
-	rpcType, _, err := v2DecodeRPC(resp.Payload)
+	rpcType, _, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
@@ -137,11 +140,11 @@ func (m *RaftV2MetaTransport) SendInstallSnapshot(peer string, args *raft.Instal
 	if err != nil {
 		return nil, err
 	}
-	resp, err := m.transport.Call(ctx, peer, &transport.Message{Type: transport.StreamMetaRaft, Payload: envelope})
+	reply, err := m.transport.CallBuffered(ctx, peer, transport.RouteRaftMetaRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("meta InstallSnapshot to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := v2DecodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
@@ -151,13 +154,13 @@ func (m *RaftV2MetaTransport) SendInstallSnapshot(peer string, args *raft.Instal
 	return v2DecodeInstallSnapshotReply(data)
 }
 
-// handleRPC decodes an inbound StreamMetaRaft message and dispatches via the
+// handleRPC decodes an inbound meta-raft RPC envelope and dispatches via the
 // RaftNode interface (the v2 adapter translates v1 wire types ↔ v2 native).
-// Mirrors raft_quic_rpc.go::handleRPC for the per-group bridge.
-func (m *RaftV2MetaTransport) handleRPC(req *transport.Message) *transport.Message {
-	rpcType, data, err := v2DecodeRPC(req.Payload)
+// Mirrors raft_rpc.go::handleRPC for the per-group bridge.
+func (m *RaftV2MetaTransport) handleRPC(payload []byte) ([]byte, error) {
+	rpcType, data, err := v2DecodeRPC(payload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("meta raft RPC: bad request")
 	}
 
 	var replyEnvelope []byte
@@ -166,7 +169,7 @@ func (m *RaftV2MetaTransport) handleRPC(req *transport.Message) *transport.Messa
 	case v2RPCTypeRequestVote:
 		args, err := v2DecodeRequestVoteArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("meta raft RPC: bad request")
 		}
 		reply := m.node.HandleRequestVote(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeRequestVoteReply, reply)
@@ -174,7 +177,7 @@ func (m *RaftV2MetaTransport) handleRPC(req *transport.Message) *transport.Messa
 	case v2RPCTypeAppendEntries:
 		args, err := v2DecodeAppendEntriesArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("meta raft RPC: bad request")
 		}
 		reply := m.node.HandleAppendEntries(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeAppendEntriesReply, reply)
@@ -182,7 +185,7 @@ func (m *RaftV2MetaTransport) handleRPC(req *transport.Message) *transport.Messa
 	case v2RPCTypeInstallSnapshot:
 		args, err := v2DecodeInstallSnapshotArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("meta raft RPC: bad request")
 		}
 		reply := m.node.HandleInstallSnapshot(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeInstallSnapshotReply, reply)
@@ -192,8 +195,8 @@ func (m *RaftV2MetaTransport) handleRPC(req *transport.Message) *transport.Messa
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeTimeoutNowReply, nil)
 
 	default:
-		return nil
+		return nil, fmt.Errorf("meta raft RPC: bad request")
 	}
 
-	return &transport.Message{Type: transport.StreamMetaRaft, Payload: replyEnvelope}
+	return replyEnvelope, nil
 }

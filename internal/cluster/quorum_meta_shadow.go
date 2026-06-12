@@ -113,19 +113,19 @@ func fanOutQuorumMetaShadow(ctx context.Context, nodes []string, k int, dispatch
 }
 
 // WriteShadowMeta sends the shadow object-meta blob to a remote placement node.
-// Thin mirror of WriteShard: build the envelope, CallFlatBuffer, check for a
-// remote Error reply.
+// Thin mirror of WriteShard: build the envelope, send it over the native
+// /shard/rpc route, check for a remote Error reply.
 func (s *ShardService) WriteShadowMeta(ctx context.Context, addr, bucket, key string, data []byte) error {
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	fw := buildShardEnvelope("WriteShadowMeta", bucket, key, 0, data)
-	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, addr, fw)
+	envb := buildShardEnvelope("WriteShadowMeta", bucket, key, 0, data)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
 		return fmt.Errorf("write shadow meta to %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("unmarshal shadow meta response: %w", err)
 	}

@@ -102,12 +102,15 @@ func bootKEKRotationLeader(state *bootState) error {
 	// 2. Peer probe RPC handlers. Register on the shared cluster transport so a
 	//    leader's GetKEKDiskSpace / GetKEKLeaseSnapshot reaches this node as a
 	//    voter.
-	state.clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe,
-		cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */).Handle)
-	state.clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
-		cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
-			return state.metaRaft.LastApplied()
-		}, snapRefCount).Handle)
+	diskHandler := cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */)
+	leaseHandler := cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
+		return state.metaRaft.LastApplied()
+	}, snapRefCount)
+	// Native /probe/kek-disk + /probe/kek-lease buffered routes. Handler
+	// errors (decode/statfs/snapshot-count failure) map to a 500 → client
+	// error, exactly as the tunnel surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKDisk, diskHandler.Handle)
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKLease, leaseHandler.Handle)
 
 	// 3. Production PeerKEKProbe with self-shortcut. Self-call computes the
 	//    disk-space + lease values directly (no wire codec roundtrip) so the
@@ -210,7 +213,10 @@ func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error 
 		state.kekStore,
 		state.metaRaft.FSM(),
 	)
-	state.clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+	// Native /probe/capability buffered route. Handler errors (decode/identity/
+	// seal failure) map to a 500 → client error, exactly as the tunnel
+	// surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability, handler.Handle)
 
 	dialer := cluster.NewCapabilityProbeDialer(state.clusterTransport)
 	state.capabilityGate.WithDirectProbe(clusterID, state.kekStore, dialer)

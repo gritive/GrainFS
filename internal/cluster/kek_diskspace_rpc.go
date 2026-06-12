@@ -1,6 +1,6 @@
 // Package cluster: KEK keystore-directory disk-space probe RPC (Task 5).
 //
-// RPC mechanism: the cluster transport.Call / Handle with StreamKEKDiskSpaceProbe (0x18).
+// RPC mechanism: the native /probe/kek-disk buffered route (CallBuffered / RegisterBufferedRoute).
 // The leader uses this to verify every voter has at least MinKeystoreFreeBytes
 // free in its keystore directory before proposing a MetaKEKRotateCmd. A node
 // that runs out of disk between persist of K_new and the snapshot-atomic
@@ -17,8 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"syscall"
-
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // kekDiskSpaceReqMagic guards against misrouted payloads on StreamKEKDiskSpaceProbe.
@@ -40,14 +38,9 @@ type KEKDiskSpaceResp struct {
 	NodeID       string
 }
 
-// kekDiskSpaceProbeDialer abstracts the outbound transport.Call so tests can
-// inject a fake without a real transport link. Production wires:
-//
-//	func(ctx, peer, payload) ([]byte, error) {
-//	    resp, err := quic.Call(ctx, peer, &transport.Message{
-//	        Type: transport.StreamKEKDiskSpaceProbe, Payload: payload})
-//	    return resp.Payload, err
-//	}
+// kekDiskSpaceProbeDialer abstracts the outbound RPC so tests can inject a
+// fake without a real transport link. Production wires
+// ClusterPeerProbeDialer.CallKEKDiskSpace (CallBuffered on /probe/kek-disk).
 type kekDiskSpaceProbeDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 // encodeKEKDiskSpaceReq serialises an empty request.
@@ -134,8 +127,8 @@ func statfsDiskSpace(dir string) (uint64, error) {
 	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
 }
 
-// KEKDiskSpaceHandler is the server-side handler for StreamKEKDiskSpaceProbe.
-// Register it with: clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe, h.Handle)
+// KEKDiskSpaceHandler is the server-side handler for /probe/kek-disk.
+// Register it with: clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKDisk, h.Handle)
 type KEKDiskSpaceHandler struct {
 	nodeID      string
 	keystoreDir string
@@ -153,11 +146,11 @@ func NewKEKDiskSpaceHandler(nodeID, keystoreDir string, diskSpaceFn diskSpaceFun
 	}
 }
 
-// Handle processes a StreamKEKDiskSpaceProbe request and returns a response.
-func (h *KEKDiskSpaceHandler) Handle(req *transport.Message) *transport.Message {
-	if _, err := decodeKEKDiskSpaceReq(req.Payload); err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("kek_diskspace_probe: decode request: %w", err))
+// Handle processes a /probe/kek-disk request and returns a response payload.
+// Errors map to a 500 → client-side error, exactly as the tunnel's StatusError.
+func (h *KEKDiskSpaceHandler) Handle(payload []byte) ([]byte, error) {
+	if _, err := decodeKEKDiskSpaceReq(payload); err != nil {
+		return nil, fmt.Errorf("kek_diskspace_probe: decode request: %w", err)
 	}
 	fn := h.diskSpaceFn
 	if fn == nil {
@@ -165,15 +158,14 @@ func (h *KEKDiskSpaceHandler) Handle(req *transport.Message) *transport.Message 
 	}
 	free, err := fn(h.keystoreDir)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("kek_diskspace_probe: %w", err))
+		return nil, fmt.Errorf("kek_diskspace_probe: %w", err)
 	}
 	resp := KEKDiskSpaceResp{
 		FreeBytes:    free,
 		KeystorePath: h.keystoreDir,
 		NodeID:       h.nodeID,
 	}
-	return transport.NewResponse(req, encodeKEKDiskSpaceResp(resp))
+	return encodeKEKDiskSpaceResp(resp), nil
 }
 
 // GetKEKDiskSpace sends a probe to a peer and returns its response. Verifies

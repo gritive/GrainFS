@@ -49,11 +49,10 @@ func TestRemoteSealedShardSink_RoundTrip(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	recv := newSinkTestShardService(t, tr2, keeper, clusterID)
 	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler())
 
 	// Source seals with the cluster DEK (seal-at-source); sealer uses the same
 	// keeper/clusterID so the receiver can decrypt on read.
@@ -93,7 +92,6 @@ func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	// Explicit recv dir so we can assert FILE ABSENCE, not just a read error: a
 	// committed-but-corrupt partial shard would also make ReadLocalShard error
@@ -106,7 +104,7 @@ func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
 		cluster.WithShardDEKKeeper(keeper, clusterID),
 		cluster.WithDataWAL(fakeShardWAL{}))
 	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler())
 
 	sealer := newSinkTestShardService(t, tr1, keeper, clusterID)
 	plaintext := bytes.Repeat([]byte("aborted shard "), 4096)
@@ -136,11 +134,10 @@ func TestDriveActor_RemoteDestination(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	recv := newSinkTestShardService(t, tr2, keeper, clusterID)
 	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler())
 
 	sealer := newSinkTestShardService(t, tr1, keeper, clusterID)
 	plaintext := bytes.Repeat([]byte("drive remote shard "), 4096)

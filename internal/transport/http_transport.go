@@ -27,8 +27,8 @@ import (
 const httpALPN = "grainfs-http-v1"
 
 // httpPingPath is the liveness route that proves the secure HTTP channel
-// end-to-end (S8-1). S8-2 added the generic /_grainfs/rpc data-plane endpoint
-// alongside it; the ping route remains a cheap reachability probe.
+// end-to-end (S8-1). It remains a cheap reachability probe alongside the
+// native per-family data-plane routes.
 const httpPingPath = "/_grainfs/ping"
 
 // defaultClientBodyTimeout is the idle bound (reset per Read) armed on the client
@@ -36,12 +36,12 @@ const httpPingPath = "/_grainfs/ping"
 // pooled conn forever. Generous for 16MiB+ shard bodies over LAN. See idleReadConn.
 const defaultClientBodyTimeout = 5 * time.Minute
 
-// HTTPTransport is the dormant Phase 8 node-to-node transport: a Hertz HTTP server
-// and Hertz HTTP client over the SAME zero-CA SPKI-pinned mTLS + live identity
-// rotation the TCP transport uses (transport_shared.go). S8-1 carries only the
-// secure substrate — handshake, SPKI pin, identity rotation, and one liveness
-// round-trip; data-plane shard PUT/GET stream over HTTP in S8-2. It is NOT wired
-// into boot, so the production default transport is unchanged.
+// HTTPTransport is the sole node-to-node cluster transport (Phase 8): a Hertz
+// HTTP server and Hertz HTTP client over zero-CA SPKI-pinned mTLS + live
+// identity rotation (transport_shared.go). Every cluster RPC family rides a
+// native per-family route (typed shard/forward/append-segment surfaces plus the
+// generic buffered-Call and gossip primitives); there is no generic envelope
+// tunnel on the wire.
 type HTTPTransport struct {
 	mu        sync.RWMutex
 	ctx       context.Context
@@ -57,22 +57,9 @@ type HTTPTransport struct {
 	identity atomic.Pointer[IdentitySnapshot]
 	composer *identityComposer
 
-	// Data-plane RPC routing (S8-2): reuses the shared StreamRouter, dispatching
-	// by StreamType exactly as the TCP transport does. streamHandler is the
-	// catch-all for types with no per-type handler.
-	router        *StreamRouter
-	streamHandler StreamHandler
-
-	// Control-plane surface (S8-3): inbox delivers fire-and-forget gossip
-	// (Send/Receive); traffic is the nil-safe inbound admission limiter.
-	inbox   chan *ReceivedMessage
+	// traffic is the nil-safe inbound admission limiter, applied per native
+	// route by the family's internal StreamType class.
 	traffic *TrafficLimiter
-
-	// inboundRPC counts handled inbound RPCs per StreamType (lock-free; StreamType
-	// is a byte). Observability + the positive carrier signal for the raft-over-HTTP
-	// integration test (proves raft RPCs actually traversed HTTP Call, not a vacuous
-	// "election succeeded"). Mirrors TCPTransport.InboundMuxSessionCount's intent.
-	inboundRPC [256]atomic.Uint64
 
 	// Native route surfaces (Phase 8 N6+). Consumer-registered per-family
 	// handlers; atomic so registration may follow Listen (boot ordering).
@@ -86,6 +73,15 @@ type HTTPTransport struct {
 	nativeForwardWrites atomic.Uint64
 	nativeForwardReads  atomic.Uint64
 
+	appendSegReadHandler atomic.Pointer[AppendSegmentReadHandler]
+	nativeAppendSegReads atomic.Uint64
+
+	// Generic native primitives (Phase 8 N7-3): buffered-Call routes and
+	// gossip routes, keyed by path. The maps are built at construction and
+	// immutable afterwards; per-route handler/counter fields are atomic.
+	bufferedByPath map[string]*bufferedRouteState
+	gossipByPath   map[string]*gossipRouteState
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 
@@ -93,7 +89,7 @@ type HTTPTransport struct {
 	// response-body read (mirrors tcp_config.go ClientBodyTimeout). The Hertz
 	// client sets NO read deadline of its own here (calcTimeout returns 0 with
 	// neither WithClientReadTimeout nor a per-request RequestTimeout set), so
-	// without this an HTTP CallRead body read on a stalled peer would pin the
+	// without this a streaming-read body read on a stalled peer would pin the
 	// client goroutine + pooled conn forever. Set before the first call (the
 	// client builds lazily); 0 disables the bound. See idleReadConn.
 	clientBodyTimeout time.Duration
@@ -113,10 +109,10 @@ func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &HTTPTransport{
-		ctx:    ctx,
-		cancel: cancel,
-		router: NewStreamRouter(),
-		inbox:  make(chan *ReceivedMessage, 256),
+		ctx:            ctx,
+		cancel:         cancel,
+		bufferedByPath: newBufferedRouteStates(),
+		gossipByPath:   newGossipRouteStates(),
 	}
 	// Seed the live identity (base PSK accepted, present = PSK cert), then hand
 	// ownership to the composer whose swap closure atomically restores it — exactly
@@ -227,11 +223,19 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.GET(httpPingPath, func(c context.Context, rc *app.RequestContext) {
 		rc.SetStatusCode(consts.StatusOK)
 	})
-	srv.POST(httpRPCPath, t.handleRPC)
 	srv.POST(httpShardWritePath, t.handleShardWrite)
 	srv.GET(httpShardReadPath, t.handleShardRead)
 	srv.POST(httpForwardWritePath, t.handleForwardWrite)
 	srv.GET(httpForwardReadPath, t.handleForwardRead)
+	srv.GET(httpAppendSegmentReadPath, t.handleAppendSegmentRead)
+	// Generic native primitives (N7-3): EVERY declared buffered/gossip route is
+	// live from Listen; a family whose handler has not registered answers 503.
+	for path, rs := range t.bufferedByPath {
+		srv.POST(path, t.handleBufferedRoute(rs))
+	}
+	for path, rs := range t.gossipByPath {
+		srv.POST(path, t.handleGossipRoute(rs))
+	}
 
 	t.mu.Lock()
 	t.srv = srv
@@ -240,13 +244,6 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 
 	go func() { _ = srv.Run() }()
 	return nil
-}
-
-// InboundRPCCount returns the number of inbound RPCs of the given StreamType the
-// server has handled. Test/observability accessor (the raft-over-HTTP integration
-// test asserts StreamGroupRaft > 0 as a positive carrier signal).
-func (t *HTTPTransport) InboundRPCCount(st StreamType) uint64 {
-	return t.inboundRPC[byte(st)].Load()
 }
 
 // LocalAddr returns the bound listen address.
@@ -299,7 +296,7 @@ func wrapIdleReadConn(conn network.Conn, idle time.Duration) network.Conn {
 // idleReadConn arms a reset-per-Read IDLE read deadline before every blocking
 // network read on the Hertz client's dialed connection — the HTTP analogue of the
 // TCP transport's tcpReadCloser (S3b-cbd). Post-flip every production shard read is
-// an HTTP CallRead whose response body streams through this conn, and the Hertz
+// a native streaming route (ShardRead/ForwardRead/AppendSegmentRead) whose response body streams through this conn, and the Hertz
 // client sets NO read deadline of its own (calcTimeout returns 0 when neither
 // WithClientReadTimeout nor a per-request RequestTimeout is set — both unset here),
 // so a peer that stalls mid-body would otherwise pin this client goroutine + the
@@ -356,21 +353,22 @@ func (c *idleReadConn) ToHertzError(err error) error {
 }
 
 // httpClient lazily builds the Hertz client. The custom dialer supplies a fresh
-// SPKI-pinned tls.Config per dial; WithResponseBodyStream(true) is set for S8-2.
+// SPKI-pinned tls.Config per dial; WithResponseBodyStream(true) keeps large
+// shard/forward bodies streaming.
 //
 // Retry policy (httpRetryIf): the client retries ONCE on ErrBadPoolConn. HTTP keep-alive
 // pools connections, and a peer routinely reaps an idle pooled conn ("Apache and nginx
 // usually do this", per Hertz); the TCP→HTTP default flip makes this production-relevant
 // (TCP's connection-per-RPC Call never pooled, so it never hit a reaped conn). ErrBadPoolConn
 // is raised when the pooled conn was found closed BEFORE delivery, so the retry is a first
-// delivery on a fresh conn — provably replay-safe for every Call-path RPC type (raft RPCs,
-// reads, AND the non-idempotent proposal forwards CallPooled carries). Retry refuses
-// IsBodyStream requests, so a CallWithBody one-shot pipe body is never re-sent (the S3b
-// "retry-after-body" landmine); buffered Call/CallRead payloads use SetBody (rewindable). The
-// retry delay is 0 (no DelayPolicy) so both attempts fit the caller's RPC ctx. This retry does
-// NOT fix the pre-existing node-id==raft-addr join deadlock (TODOS.md §6) — that is a
-// transport-independent boot-ordering bug, unrelated to keep-alive. httpRetryIf's body-stream
-// refusal is pinned by TestHTTPDataPlane_RetryIf_RefusesBodyStream.
+// delivery on a fresh conn — provably replay-safe for every buffered RPC family (raft RPCs,
+// reads, AND the non-idempotent proposal forwards CallBuffered carries). Retry refuses
+// IsBodyStream requests, so a streamed-body request (ShardWrite/ForwardWrite) one-shot pipe
+// body is never re-sent (the S3b "retry-after-body" landmine); buffered payloads use SetBody
+// (rewindable). The retry delay is 0 (no DelayPolicy) so both attempts fit the caller's RPC
+// ctx. This retry does NOT fix the pre-existing node-id==raft-addr join deadlock (TODOS.md §6)
+// — that is a transport-independent boot-ordering bug, unrelated to keep-alive. httpRetryIf's
+// body-stream refusal is pinned by TestHTTPDataPlane_RetryIf_RefusesBodyStream.
 func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -205,20 +205,10 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				completeCutoverH := &CompleteCutoverHandler{
 					RunDrop: func(ctx context.Context) error {
 						dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-							resp, err := state.clusterTransport.Call(ctx, peer, &transport.Message{
-								Type:    transport.StreamAppliedIndexProbe,
-								Payload: payload,
-							})
-							if err != nil {
-								return nil, err
-							}
-							if resp == nil {
-								return nil, fmt.Errorf("applied-index probe: nil response from %s", peer)
-							}
-							if resp.Status != transport.StatusOK {
-								return nil, fmt.Errorf("applied-index probe from %s failed: %s", peer, string(resp.Payload))
-							}
-							return resp.Payload, nil
+							// Native /probe/applied-index buffered route (Phase 8
+							// N7-3): a handler failure (the tunnel's nil-response
+							// StatusError) surfaces as the call error.
+							return state.clusterTransport.CallBuffered(ctx, peer, transport.RouteProbeAppliedIndex, payload)
 						}
 						return state.metaRaft.CompleteCutover(ctx, dialer, 60*time.Second)
 					},

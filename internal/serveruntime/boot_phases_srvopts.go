@@ -218,7 +218,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	newSrvOpts, receiptWiring, err := SetupClusterReceiptWithPeerProvider(
 		ctx, rcptOpts, dataDir, nodeID, receiptPeerProvider,
-		state.clusterTransport, state.streamRouter, state.gossipReceiver, srvOpts,
+		state.clusterTransport, state.gossipReceiver, srvOpts,
 	)
 	if err != nil {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
@@ -403,10 +403,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			if len(targets) == 0 {
 				return fmt.Errorf("audit ship: no leader elected")
 			}
-			return state.clusterTransport.Send(ctx, targets[0], &transport.Message{
-				Type:    transport.StreamAuditShip,
-				Payload: payload,
-			})
+			// Native /audit/ship buffered route (Phase 8 N7-3). This family is
+			// BUFFERED, not gossip: the tunnel Send rode doRPC and surfaced the
+			// handler's StatusError (decode/append failure) as an error — a
+			// fire-and-forget route would silently drop audit failures. The
+			// success reply is empty; only the error matters.
+			_, err = state.clusterTransport.CallBuffered(ctx, targets[0], transport.RouteAuditShip, payload)
+			return err
 		}
 		committer := audit.NewCommitter(audit.CommitterConfig{
 			Outbox:       auditOutbox,
@@ -417,16 +420,19 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			NodeID:       nodeID,
 			Interval:     interval,
 		})
-		state.streamRouter.Handle(transport.StreamAuditShip, func(req *transport.Message) *transport.Message {
-			events, err := audit.DecodeS3Batch(req.Payload)
+		// Native /audit/ship buffered route. Decode/append failures map to a
+		// 500 → sender error, preserving the tunnel's StatusError surfacing.
+		auditShipHandler := func(payload []byte) ([]byte, error) {
+			events, err := audit.DecodeS3Batch(payload)
 			if err != nil {
-				return transport.NewErrorResponse(req, transport.StatusError, err)
+				return nil, err
 			}
 			if err := committer.AppendFromFollower(context.Background(), events); err != nil {
-				return transport.NewErrorResponse(req, transport.StatusError, err)
+				return nil, err
 			}
-			return transport.NewResponse(req, nil)
-		})
+			return nil, nil
+		}
+		state.clusterTransport.RegisterBufferedRoute(transport.RouteAuditShip, auditShipHandler)
 		commitCtx, commitCancel := context.WithCancel(ctx)
 		state.AddCleanup(commitCancel)
 		go committer.Run(commitCtx)

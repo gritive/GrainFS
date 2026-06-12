@@ -46,8 +46,8 @@ func TestForwardNativeWire(t *testing.T) {
 	require.NoError(t, recvTr.Listen(context.Background(), "127.0.0.1:0"))
 	addr := recvTr.LocalAddr()
 
-	recvTr.RegisterForwardWriteHandler(rcv.NativeWriteHandler())
-	recvTr.RegisterForwardReadHandler(rcv.NativeReadHandler())
+	recvTr.RegisterForwardWriteHandler(rcv.HandleBody)
+	recvTr.RegisterForwardReadHandler(rcv.HandleRead)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

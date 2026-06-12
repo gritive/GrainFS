@@ -71,7 +71,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	warnIfReducedDataFsync()
 	// Open the data WAL before any cluster shard service is constructed so that
 	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
-	// before bootStreamRouter registers transport handlers that would otherwise
+	// before bootShardRoutes registers transport handlers that would otherwise
 	// surface partially-recovered state to peers.
 	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
 	sealer, err := dataWALSealerForState(state)
@@ -201,7 +201,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	// has already been closed.
 	state.AddCleanup(func() { _ = state.shardSvc.Close() })
 
-	// Replay the data WAL into the shard service before bootStreamRouter
+	// Replay the data WAL into the shard service before bootShardRoutes
 	// registers transport handlers; this keeps peers from observing partially-
 	// recovered local shard state.
 	if state.shardSvc != nil {
@@ -224,39 +224,20 @@ func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
 	}
 }
 
-// bootStreamRouter sets up the transport stream multiplexer (Raft RPCs on the
-// Control stream, Shard RPCs on the Data stream) and registers the body
-// handlers that consume body streams directly off the cluster transport. Then
-// fires raft.Node.Start to begin the apply loop on the data-plane raft.
-//
-// The body handler registration is critical: without it, every
-// StreamShardWriteBody falls through the catch-all router (router.Dispatch
-// only sees per-message handlers, not body streams), the stream closes
-// without a response, and the caller sees "decode response: read header:
-// EOF". The pre-2024-fix bug here meant N×replication produced only the
-// leader's local copy.
+// bootShardRoutes registers the shard data-plane handlers on the cluster
+// transport's native routes, then fires raft.Node.Start to begin the apply
+// loop on the data-plane raft.
 //
 // node.Start fires the data-plane raft apply loop. After this returns,
 // distBackend.RunApplyLoop (started in bootOwnedGroupsAndEC) will see
 // applied entries flow.
-func bootStreamRouterShell(state *bootState) {
-	if state.streamRouter == nil {
-		state.streamRouter = transport.NewStreamRouter()
-		state.clusterTransport.SetStreamHandler(state.streamRouter.Dispatch)
-	}
-}
-
-func bootStreamRouter(state *bootState) error {
-	bootStreamRouterShell(state)
-	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
-	state.clusterTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
-	state.clusterTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
-	// Phase 8 N6: native /shard/write route. The tunnel HandleBody registration
-	// above stays until N8 deletes the tunnel; all in-tree clients now dial the
-	// native route.
+func bootShardRoutes(state *bootState) error {
+	// Native /shard/rpc buffered route — carries every buffered shard op
+	// (Write/Read/ReadRange/Delete/quorum-meta/shadow-meta/Ping).
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteShardRPC, state.shardSvc.NativeRPCHandler())
+	// Native /shard/write route (Phase 8 N6).
 	state.clusterTransport.RegisterShardWriteHandler(state.shardSvc.NativeWriteHandler())
-	// Phase 8 N7-1: native /shard/read route — same staging as the write route
-	// above (tunnel HandleRead registration stays until N8).
+	// Native /shard/read route (Phase 8 N7-1).
 	state.clusterTransport.RegisterShardReadHandler(state.shardSvc.NativeReadHandler())
 	// Phase B1: node-level append-segment peer-fetch handler. Each node
 	// hosts multiple group backends — the request payload carries groupID

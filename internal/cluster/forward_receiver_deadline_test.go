@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,10 +39,7 @@ func TestHandleGroupPropose_DeadlineHonorsForwardTimeout(t *testing.T) {
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-A"}, gb))
 
 	payload := encodeGroupForwardPayload("g1", []byte("dummy-raft-cmd"))
-	reply := rcv.HandleGroupPropose(&transport.Message{
-		Type:    transport.StreamDataGroupProposeForward,
-		Payload: payload,
-	})
+	reply, _ := rcv.HandleGroupPropose(payload)
 	require.NotNil(t, reply)
 
 	// RED on the unfixed code: captured ≈ 5s. GREEN after the fix: ≈ 30s.

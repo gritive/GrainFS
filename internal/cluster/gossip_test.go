@@ -16,47 +16,45 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// mockTransport implements transport.Transport for gossip tests.
+// mockTransport implements cluster.GossipTransport for gossip tests.
 type mockTransport struct {
-	mu        sync.Mutex
-	sent      []sentMsg
-	connected []string
-	recv      chan *transport.ReceivedMessage
+	mu           sync.Mutex
+	sent         []sentMsg
+	gossipRoutes map[string]transport.GossipHandler
 }
 
 type sentMsg struct {
-	to  string
-	msg *transport.Message
+	to      string
+	path    string
+	payload []byte
 }
 
 func newMockTransport() *mockTransport {
-	return &mockTransport{recv: make(chan *transport.ReceivedMessage, 64)}
+	return &mockTransport{
+		gossipRoutes: make(map[string]transport.GossipHandler),
+	}
 }
 
-func (m *mockTransport) Listen(_ context.Context, _ string) error { return nil }
-func (m *mockTransport) Connect(_ context.Context, addr string) error {
+func (m *mockTransport) RegisterGossipRoute(path string, h transport.GossipHandler) {
 	m.mu.Lock()
-	m.connected = append(m.connected, addr)
+	m.gossipRoutes[path] = h
+	m.mu.Unlock()
+}
+
+func (m *mockTransport) GossipSend(_ context.Context, addr, path string, payload []byte) error {
+	m.mu.Lock()
+	m.sent = append(m.sent, sentMsg{to: addr, path: path, payload: payload})
 	m.mu.Unlock()
 	return nil
 }
-func (m *mockTransport) Close() error                               { return nil }
-func (m *mockTransport) Receive() <-chan *transport.ReceivedMessage { return m.recv }
 
-func (m *mockTransport) Send(_ context.Context, addr string, msg *transport.Message) error {
-	m.mu.Lock()
-	m.sent = append(m.sent, sentMsg{to: addr, msg: msg})
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *mockTransport) SentTo(addr string) []*transport.Message {
+func (m *mockTransport) SentTo(addr string) []sentMsg {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []*transport.Message
+	var out []sentMsg
 	for _, s := range m.sent {
 		if s.to == addr {
-			out = append(out, s.msg)
+			out = append(out, s)
 		}
 	}
 	return out
@@ -70,24 +68,19 @@ func (m *mockTransport) AllSent() []sentMsg {
 	return out
 }
 
-func (m *mockTransport) ConnectedTo(addr string) bool {
+// deliver simulates an inbound gossip POST from a remote node by invoking the
+// handler the receiver registered for path (RegisterNativeGossipRoutes).
+func (m *mockTransport) deliver(t *testing.T, from, path string, payload []byte) {
+	t.Helper()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, got := range m.connected {
-		if got == addr {
-			return true
-		}
-	}
-	return false
+	h, ok := m.gossipRoutes[path]
+	m.mu.Unlock()
+	require.True(t, ok, "no gossip handler registered for %s", path)
+	h(from, payload)
 }
 
-// inject simulates an incoming message from a remote node.
-func (m *mockTransport) inject(from string, msg *transport.Message) {
-	m.recv <- &transport.ReceivedMessage{From: from, Message: msg}
-}
-
-// statsGossipMsg encodes a NodeStatsMsg as a StreamAdmin transport.Message.
-func statsGossipMsg(ns NodeStats, capabilities ...string) *transport.Message {
+// statsGossipMsg encodes a NodeStatsMsg payload for the /gossip/admin route.
+func statsGossipMsg(ns NodeStats, capabilities ...string) []byte {
 	b := flatbuffers.NewBuilder(64)
 	nodeIDOff := b.CreateString(ns.NodeID)
 	var capabilitiesVec flatbuffers.UOffsetT
@@ -115,7 +108,7 @@ func statsGossipMsg(ns NodeStats, capabilities ...string) *transport.Message {
 	raw := b.FinishedBytes()
 	payload := make([]byte, len(raw))
 	copy(payload, raw)
-	return &transport.Message{Type: transport.StreamAdmin, Payload: payload}
+	return payload
 }
 
 // --- GossipSender tests ---
@@ -134,7 +127,7 @@ func TestGossipSender_BroadcastsToPeers(t *testing.T) {
 	for _, peer := range peers {
 		msgs := tr.SentTo(peer)
 		require.Len(t, msgs, 1, "expected exactly 1 message to %s", peer)
-		assert.Equal(t, transport.StreamAdmin, msgs[0].Type)
+		assert.Equal(t, transport.RouteGossipAdmin, msgs[0].path)
 	}
 }
 
@@ -150,7 +143,7 @@ func TestGossipSender_PayloadDecodable(t *testing.T) {
 	msgs := tr.SentTo("node-b:9000")
 	require.Len(t, msgs, 1)
 
-	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].Payload, 0)
+	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].payload, 0)
 	assert.Equal(t, "node-a", string(pb.NodeId()))
 	assert.Equal(t, 70.0, pb.DiskUsedPct())
 	assert.Equal(t, 120.0, pb.RequestsPerSec())
@@ -191,7 +184,7 @@ func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 	msgs := tr.SentTo("node-b:9000")
 	require.Len(t, msgs, 1)
 
-	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].Payload, 0)
+	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].payload, 0)
 	require.Equal(t, 1, pb.CapabilitiesLength())
 	assert.Equal(t, compat.CapabilityNfsExportCreateV1, string(pb.Capabilities(0)))
 }
@@ -208,7 +201,7 @@ func TestGossipSenderIncludesMultipartListingCapabilityEvidence(t *testing.T) {
 	msgs := tr.SentTo("node-b:9000")
 	require.Len(t, msgs, 1)
 
-	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].Payload, 0)
+	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].payload, 0)
 	var caps []string
 	for i := 0; i < pb.CapabilitiesLength(); i++ {
 		caps = append(caps, string(pb.Capabilities(i)))
@@ -338,7 +331,7 @@ func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
 	require.Len(t, tr.SentTo("node-c:9000"), 1)
 }
 
-func TestGossipSenderConnectsDynamicPeerBeforeSend(t *testing.T) {
+func TestGossipSenderSendsToDynamicPeer(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
@@ -348,7 +341,6 @@ func TestGossipSenderConnectsDynamicPeerBeforeSend(t *testing.T) {
 
 	sender.broadcastOnce(context.Background())
 
-	require.True(t, tr.ConnectedTo("node-c:9000"))
 	require.Len(t, tr.SentTo("node-c:9000"), 1)
 }
 
@@ -379,13 +371,10 @@ func TestGossipReceiver_UpdatesStore(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store)
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
-	tr.inject("node-b:9000", statsGossipMsg(NodeStats{
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, statsGossipMsg(NodeStats{
 		NodeID:         "node-b",
 		DiskUsedPct:    55.0,
 		RequestsPerSec: 80.0,
@@ -401,38 +390,15 @@ func TestGossipReceiver_UpdatesStore(t *testing.T) {
 	assert.Equal(t, 80.0, stats.RequestsPerSec)
 }
 
-func TestGossipReceiver_IgnoresNonAdminMessages(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	recv := NewGossipReceiver(tr, store)
-	go recv.Run(ctx)
-
-	// inject a non-admin message (StreamData)
-	tr.recv <- &transport.ReceivedMessage{
-		From:    "node-b:9000",
-		Message: &transport.Message{Type: transport.StreamData, Payload: []byte("not-stats")},
-	}
-
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 0, store.Len(), "non-admin message should not update store")
-}
-
 func TestGossipReceiver_MultipleNodes(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store)
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
-	tr.inject("node-b:9000", statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0}))
-	tr.inject("node-c:9000", statsGossipMsg(NodeStats{NodeID: "node-c", DiskUsedPct: 60.0}))
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0}))
+	tr.deliver(t, "node-c:9000", transport.RouteGossipAdmin, statsGossipMsg(NodeStats{NodeID: "node-c", DiskUsedPct: 60.0}))
 
 	require.Eventually(t, func() bool {
 		return store.Len() == 2
@@ -448,17 +414,13 @@ func TestGossipReceiver_DropsNodeIdSpoofing(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store)
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
-	// Inject a message claiming to be "node-a" but arriving from "node-b:9000"
+	// Deliver a message claiming to be "node-a" but arriving from "node-b:9000"
 	spoofed := statsGossipMsg(NodeStats{NodeID: "node-a", DiskUsedPct: 99.0})
-	tr.recv <- &transport.ReceivedMessage{From: "node-b:9000", Message: spoofed}
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, spoofed)
 
-	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, 0, store.Len(), "spoofed NodeId should be dropped")
 }
 
@@ -466,15 +428,12 @@ func TestGossipReceiver_AcceptsMatchingNodeId(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store)
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
 	// NodeId matches the host part of From address
 	valid := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0})
-	tr.recv <- &transport.ReceivedMessage{From: "node-b:9000", Message: valid}
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, valid)
 
 	require.Eventually(t, func() bool {
 		_, ok := store.Get("node-b")
@@ -500,14 +459,11 @@ func TestGossipReceiverReportsCapabilityEvidenceToGate(t *testing.T) {
 		Ready:    true,
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store).WithCapabilityGate(gate)
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
 	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
-	tr.recv <- &transport.ReceivedMessage{From: "node-b:9000", Message: msg}
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, msg)
 
 	require.Eventually(t, func() bool {
 		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
@@ -533,18 +489,15 @@ func TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID(t *testing.T) 
 		Ready:    true,
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store).
 		WithCapabilityGate(gate).
 		WithNodeAddressBook(fakeGossipAddressBook{nodes: []MetaNodeEntry{
 			{ID: "node-b", Address: "10.0.0.2:7001"},
 		}})
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
 	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
-	tr.recv <- &transport.ReceivedMessage{From: "10.0.0.2:54321", Message: msg}
+	tr.deliver(t, "10.0.0.2:54321", transport.RouteGossipAdmin, msg)
 
 	require.Eventually(t, func() bool {
 		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
@@ -570,18 +523,15 @@ func TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch(t *testing.T) {
 		Ready:    true,
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store).
 		WithCapabilityGate(gate).
 		WithNodeAddressBook(fakeGossipAddressBook{nodes: []MetaNodeEntry{
 			{ID: "node-b", Address: "node-b:7001"},
 		}})
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
 	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
-	tr.recv <- &transport.ReceivedMessage{From: "node-b:54321", Message: msg}
+	tr.deliver(t, "node-b:54321", transport.RouteGossipAdmin, msg)
 
 	require.Eventually(t, func() bool {
 		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
@@ -624,14 +574,11 @@ func TestGossipReceiver_UnknownFieldTolerance(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	recv := NewGossipReceiver(tr, store)
-	go recv.Run(ctx)
+	recv.RegisterNativeGossipRoutes()
 
 	// FlatBuffers natively ignores unknown fields; just send a valid message.
-	tr.inject("node-b:9000", statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 42.0}))
+	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 42.0}))
 
 	require.Eventually(t, func() bool {
 		_, ok := store.Get("node-b")
@@ -640,26 +587,4 @@ func TestGossipReceiver_UnknownFieldTolerance(t *testing.T) {
 
 	stats, _ := store.Get("node-b")
 	assert.Equal(t, 42.0, stats.DiskUsedPct, "known fields intact despite unknown field")
-}
-
-func TestGossipReceiver_StopsOnContextCancel(t *testing.T) {
-	tr := newMockTransport()
-	store := NewNodeStatsStore(1 * time.Minute)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	recv := NewGossipReceiver(tr, store)
-
-	done := make(chan struct{})
-	go func() {
-		recv.Run(ctx)
-		close(done)
-	}()
-
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("GossipReceiver did not stop after context cancel")
-	}
 }

@@ -6,8 +6,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 func TestKEKDiskSpaceHandler_RoundTrip(t *testing.T) {
@@ -18,15 +16,11 @@ func TestKEKDiskSpaceHandler_RoundTrip(t *testing.T) {
 		}
 		return 1 << 30, nil
 	})
-	req := &transport.Message{
-		Type:    transport.StreamKEKDiskSpaceProbe,
-		Payload: encodeKEKDiskSpaceReq(KEKDiskSpaceReq{}),
+	resp, herr := h.Handle(encodeKEKDiskSpaceReq(KEKDiskSpaceReq{}))
+	if herr != nil {
+		t.Fatalf("handler returned error: %v", herr)
 	}
-	resp := h.Handle(req)
-	if resp.Status != transport.StatusOK {
-		t.Fatalf("handler returned status=%v payload=%q", resp.Status, string(resp.Payload))
-	}
-	decoded, err := decodeKEKDiskSpaceResp(resp.Payload)
+	decoded, err := decodeKEKDiskSpaceResp(resp)
 	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -44,15 +38,11 @@ func TestKEKDiskSpaceHandler_RoundTrip(t *testing.T) {
 func TestKEKDiskSpaceHandler_DefaultUsesStatfs(t *testing.T) {
 	dir := t.TempDir()
 	h := NewKEKDiskSpaceHandler("node-default", dir, nil)
-	req := &transport.Message{
-		Type:    transport.StreamKEKDiskSpaceProbe,
-		Payload: encodeKEKDiskSpaceReq(KEKDiskSpaceReq{}),
+	resp, herr := h.Handle(encodeKEKDiskSpaceReq(KEKDiskSpaceReq{}))
+	if herr != nil {
+		t.Fatalf("handler returned error: %v", herr)
 	}
-	resp := h.Handle(req)
-	if resp.Status != transport.StatusOK {
-		t.Fatalf("handler returned status=%v payload=%q", resp.Status, string(resp.Payload))
-	}
-	decoded, err := decodeKEKDiskSpaceResp(resp.Payload)
+	decoded, err := decodeKEKDiskSpaceResp(resp)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -71,15 +61,12 @@ func TestKEKDiskSpaceHandler_RejectsBadMagic(t *testing.T) {
 	h := NewKEKDiskSpaceHandler("node-X", t.TempDir(), func(string) (uint64, error) {
 		return 1, nil
 	})
-	resp := h.Handle(&transport.Message{
-		Type:    transport.StreamKEKDiskSpaceProbe,
-		Payload: []byte("not the right magic"),
-	})
-	if resp.Status != transport.StatusError {
-		t.Fatalf("expected StatusError on bad magic, got %v", resp.Status)
+	_, herr := h.Handle([]byte("not the right magic"))
+	if herr == nil {
+		t.Fatal("expected error on bad magic, got nil")
 	}
-	if !strings.Contains(string(resp.Payload), "bad request magic") {
-		t.Errorf("error payload missing magic marker: %q", string(resp.Payload))
+	if !strings.Contains(herr.Error(), "bad request magic") {
+		t.Errorf("error missing magic marker: %q", herr.Error())
 	}
 }
 
@@ -87,15 +74,12 @@ func TestKEKDiskSpaceHandler_PropagatesProbeError(t *testing.T) {
 	h := NewKEKDiskSpaceHandler("node-err", t.TempDir(), func(string) (uint64, error) {
 		return 0, errors.New("synthetic statfs failure")
 	})
-	resp := h.Handle(&transport.Message{
-		Type:    transport.StreamKEKDiskSpaceProbe,
-		Payload: encodeKEKDiskSpaceReq(KEKDiskSpaceReq{}),
-	})
-	if resp.Status != transport.StatusError {
-		t.Fatalf("expected StatusError on probe failure, got %v", resp.Status)
+	_, herr := h.Handle(encodeKEKDiskSpaceReq(KEKDiskSpaceReq{}))
+	if herr == nil {
+		t.Fatal("expected error on probe failure, got nil")
 	}
-	if !strings.Contains(string(resp.Payload), "synthetic statfs failure") {
-		t.Errorf("error payload missing underlying cause: %q", string(resp.Payload))
+	if !strings.Contains(herr.Error(), "synthetic statfs failure") {
+		t.Errorf("error missing underlying cause: %q", herr.Error())
 	}
 }
 

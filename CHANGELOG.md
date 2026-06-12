@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.558.0] - 2026-06-12
+
+### Changed
+- Phase 8 N7-3: every remaining RPC family now travels its own native route — the
+  generic buffered-Call primitive (`POST <path>`, raw request/reply bodies, handler
+  error → 500 + text) carries the raft bridges (`/raft/data/rpc`, `/raft/meta/rpc`,
+  `/raft/group/rpc`), the shard RPC family (`/shard/rpc`), the proposal/read-index
+  forwards (`/forward/propose/{legacy,group,data-group}`, `/forward/read-index`),
+  the meta forwards (`/raft/meta/propose`, `/raft/meta/catalog-read`), the receipt
+  query (`/receipt/query`), the capability/KEK/applied-index probes
+  (`/probe/{capability,kek-disk,kek-lease,applied-index}`), and the audit ship
+  (`/audit/ship`); the gossip primitive (`POST <path>`, enqueue-then-200, consumer
+  callback on a per-route drain goroutine) carries `/gossip/admin` and
+  `/gossip/receipt`; and `GET /append-segment/read` carries the append-segment
+  peer fetch as a bespoke streaming-read route.
+- Phase 8 N8: the envelope tunnel is deleted. `POST /_grainfs/rpc`, the `X-Gfs-*`
+  frame headers, the `transport.Message` envelope, the `StreamRouter`/`Handle*`
+  registration surface, the `Call*`/`Send`/`Receive`/`Connect` client surface, and
+  the binary wire codec are all gone — the internal cluster wire is fully
+  envelope-free (per-family HTTP routes over SPKI-pinned mTLS, ALPN
+  `grainfs-http-v1`). `StreamType` survives internally as an admission/metrics key
+  only. Internal cluster wire only; mixed-version clusters across this boundary
+  are unsupported (existing flag-day stance).
+
+### Removed
+- Operator note: the `grainfs_transport_ce_total` Prometheus metric
+  (`TransportCECounter`, mux capability-exchange outcomes) is removed. It has had
+  no writer since the mux subsystem was deleted in v0.0.551.0 (Phase 8 N1) and
+  always reported 0; dashboards referencing it should drop the panel. The orphaned
+  `ProtocolVersionMux` constant is gone with it.
+
 ## [0.0.557.0] - 2026-06-12
 
 ### Changed

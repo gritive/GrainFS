@@ -90,7 +90,7 @@ func decodeAppliedIndexResp(data []byte) (AppliedIndexResp, error) {
 }
 
 // AppliedIndexDialer is the production-injected outbound. In production this
-// wraps the cluster transport.Call with StreamAppliedIndexProbe; tests inject a fake.
+// wraps CallBuffered on /probe/applied-index; tests inject a fake.
 type AppliedIndexDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 // WaitVotersApplied blocks until every voter's LastApplied >= target, or the
@@ -173,15 +173,8 @@ func WaitVotersApplied(
 }
 
 // HandleAppliedIndexProbe is the server-side handler. Returns the response
-// payload (or an error) for a StreamAppliedIndexProbe inbound request.
-//
-// Wire it on the cluster transport at boot:
-//
-//	t.Handle(transport.StreamAppliedIndexProbe, func(req *Message) *Message {
-//	    respPayload, err := HandleAppliedIndexProbe(req.Payload, selfID, mr.LastApplied)
-//	    if err != nil { return nil }
-//	    return &transport.Message{Type: transport.StreamAppliedIndexProbe, Payload: respPayload}
-//	})
+// payload (or an error) for an inbound /probe/applied-index request; boot
+// wraps it as the route's BufferedRouteHandler (boot_phases_raft.go).
 func HandleAppliedIndexProbe(reqPayload []byte, selfID string, localLastApplied func() uint64) ([]byte, error) {
 	if _, err := decodeAppliedIndexReq(reqPayload); err != nil {
 		return nil, err

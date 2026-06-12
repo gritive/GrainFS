@@ -127,7 +127,6 @@ func TestPipeline_MixedPlacementRoundTrip(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	// node1 owns shards 0,1 locally; node2 receives shards 2,3 verbatim.
 	// The pipeline keys its registry by PutID, so each local shard needs its
@@ -138,7 +137,7 @@ func TestPipeline_MixedPlacementRoundTrip(t *testing.T) {
 		cluster.WithDataWAL(fakeShardWAL{}))
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
 	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler())
 
 	p := New(Config{
 		DataDirs:    ss1.DataDirs(), // local shards land where ss1 reads them
@@ -271,11 +270,10 @@ func TestPipeline_SlowProgressingClientDoesNotAbort(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
 	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler())
 
 	p := New(Config{
 		DataDirs:    []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()},
@@ -337,11 +335,10 @@ func TestPipeline_MixedPlacementWALSkipsRemote(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
 	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler())
 
 	wal := &recordingWAL{}
 	p := New(Config{
@@ -457,7 +454,6 @@ func TestPipeline_PlacedEC_OverridesStalePipelineEC(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	ss1 := cluster.NewMultiRootShardService(
 		[]string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()}, tr1,
@@ -465,7 +461,7 @@ func TestPipeline_PlacedEC_OverridesStalePipelineEC(t *testing.T) {
 		cluster.WithDataWAL(fakeShardWAL{}))
 	ss2 := newSinkTestShardService(t, tr2, keeper, clusterID)
 	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
-	tr2.HandleBody(transport.StreamShardWriteBody, ss2.HandleWriteBody())
+	tr2.RegisterShardWriteHandler(ss2.NativeWriteHandler())
 
 	// Pipeline frozen at the STALE solo width — the bug condition on a joiner.
 	p := New(Config{

@@ -14,14 +14,13 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/receipt"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // mockCaller lets tests pin each peer's RPC response. The peerResp map is
 // consulted first; if no explicit response is set, peerErr fires instead.
 type mockCaller struct {
 	mu        sync.Mutex
-	peerResp  map[string]*transport.Message
+	peerResp  map[string][]byte
 	peerErr   map[string]error
 	peerDelay map[string]time.Duration
 	callCount atomic.Int32
@@ -29,13 +28,13 @@ type mockCaller struct {
 
 func newMockCaller() *mockCaller {
 	return &mockCaller{
-		peerResp:  make(map[string]*transport.Message),
+		peerResp:  make(map[string][]byte),
 		peerErr:   make(map[string]error),
 		peerDelay: make(map[string]time.Duration),
 	}
 }
 
-func (m *mockCaller) setResp(peer string, resp *transport.Message) {
+func (m *mockCaller) setResp(peer string, resp []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.peerResp[peer] = resp
@@ -53,7 +52,7 @@ func (m *mockCaller) setDelay(peer string, d time.Duration) {
 	m.peerDelay[peer] = d
 }
 
-func (m *mockCaller) Call(ctx context.Context, addr string, req *transport.Message) (*transport.Message, error) {
+func (m *mockCaller) CallBuffered(ctx context.Context, addr, _ string, _ []byte) ([]byte, error) {
 	m.callCount.Add(1)
 	m.mu.Lock()
 	delay := m.peerDelay[addr]
@@ -75,7 +74,7 @@ func (m *mockCaller) Call(ctx context.Context, addr string, req *transport.Messa
 }
 
 // buildQueryResponse constructs a FB-encoded ReceiptQueryResponseMsg for tests.
-func buildQueryResponse(t *testing.T, found bool, receiptBytes []byte) *transport.Message {
+func buildQueryResponse(t *testing.T, found bool, receiptBytes []byte) []byte {
 	t.Helper()
 	b := flatbuffers.NewBuilder(128)
 	var receiptOff flatbuffers.UOffsetT
@@ -91,7 +90,7 @@ func buildQueryResponse(t *testing.T, found bool, receiptBytes []byte) *transpor
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
-	return &transport.Message{Type: transport.StreamReceiptQuery, Payload: out}
+	return out
 }
 
 func TestReceiptBroadcaster_Query_FirstSuccessReturns(t *testing.T) {
@@ -249,13 +248,11 @@ func TestReceiptQueryHandler_ReturnsReceiptWhenFound(t *testing.T) {
 	clusterpb.ReceiptQueryMsgStart(b)
 	clusterpb.ReceiptQueryMsgAddReceiptId(b, idOff)
 	b.Finish(clusterpb.ReceiptQueryMsgEnd(b))
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: b.FinishedBytes()}
-
-	resp := handler(req)
+	resp, herr := handler(b.FinishedBytes())
+	require.NoError(t, herr)
 	require.NotNil(t, resp)
-	require.Equal(t, transport.StreamReceiptQuery, resp.Type)
 
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp, 0)
 	assert.True(t, parsed.Found())
 	gotReceipt, err := receipt.DecodeReceiptStorage(parsed.ReceiptBytes())
 	require.NoError(t, err)
@@ -271,11 +268,10 @@ func TestReceiptQueryHandler_ReturnsNotFound(t *testing.T) {
 	clusterpb.ReceiptQueryMsgStart(b)
 	clusterpb.ReceiptQueryMsgAddReceiptId(b, idOff)
 	b.Finish(clusterpb.ReceiptQueryMsgEnd(b))
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: b.FinishedBytes()}
-
-	resp := handler(req)
+	resp, herr := handler(b.FinishedBytes())
+	require.NoError(t, herr)
 	require.NotNil(t, resp)
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp, 0)
 	assert.False(t, parsed.Found())
 	assert.Empty(t, parsed.ReceiptBytes())
 }
@@ -284,10 +280,10 @@ func TestReceiptQueryHandler_RejectsInvalidPayload(t *testing.T) {
 	lookup := &fakeReceiptLookup{}
 	handler := NewReceiptQueryHandler(lookup)
 
-	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: []byte{0xff, 0xff, 0xff, 0xff}}
-	resp := handler(req)
+	resp, herr := handler([]byte{0xff, 0xff, 0xff, 0xff})
 	// Invalid request → respond with found=false rather than panic/crash.
+	require.NoError(t, herr)
 	require.NotNil(t, resp)
-	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
+	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp, 0)
 	assert.False(t, parsed.Found())
 }

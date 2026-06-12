@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // TestClusterConfig_FollowerForward_E2E verifies that a ClusterConfigPatch
@@ -70,7 +69,7 @@ func TestClusterConfig_FollowerForward_E2E(t *testing.T) {
 		if peer != "node-0" {
 			return encodeMetaForwardReply(raft.ErrNotLeader), nil
 		}
-		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+		return leaderReceiver.Handle(payload)
 	}
 	sender := NewMetaProposeForwardSender(dialer)
 

@@ -4,7 +4,6 @@ import (
 	"io"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 type forwardTransportKind uint8
@@ -20,9 +19,9 @@ type bucketForwardOpSpec struct {
 	name        string
 	transport   forwardTransportKind
 	mutates     bool
-	handleFrame func(*ForwardReceiver, *DataGroup, []byte) *transport.Message
-	handleBody  func(*ForwardReceiver, *DataGroup, []byte, io.Reader) *transport.Message
-	handleRead  func(*ForwardReceiver, *DataGroup, []byte) (*transport.Message, io.ReadCloser)
+	handleFrame func(*ForwardReceiver, *DataGroup, []byte) []byte
+	handleBody  func(*ForwardReceiver, *DataGroup, []byte, io.Reader) []byte
+	handleRead  func(*ForwardReceiver, *DataGroup, []byte) ([]byte, io.ReadCloser)
 }
 
 func (s bucketForwardOpSpec) allowedOn(kind forwardTransportKind) bool {

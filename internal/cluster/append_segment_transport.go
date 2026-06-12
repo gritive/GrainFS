@@ -9,7 +9,6 @@ import (
 	"os"
 
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // Phase B1: forward-on-read for append-segment blobs.
@@ -137,15 +136,18 @@ func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGro
 	if tr == nil || lookup == nil {
 		return
 	}
-	tr.HandleRead(transport.StreamReadAppendSegment, func(req *transport.Message) (*transport.Message, io.ReadCloser) {
-		groupID, bucket, key, blobID, kind, err := decodeAppendSegmentRequest(req.Payload)
+	// Native GET /append-segment/read. The handler always answers the outcome
+	// (OK/ENOENT/ERROR + text) in-band in the status frame; the returned error
+	// is always nil.
+	tr.RegisterAppendSegmentReadHandler(func(frame []byte) ([]byte, io.ReadCloser, error) {
+		groupID, bucket, key, blobID, kind, err := decodeAppendSegmentRequest(frame)
 		if err != nil {
-			return errorAppendSegmentMeta(req, err.Error()), nil
+			return errorAppendSegmentMeta(err.Error()), nil, nil
 		}
 		b := lookup.Backend(groupID)
 		if b == nil {
 			// Peer doesn't host this group, so it never has the segment.
-			return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: []byte{appendSegStatusNoEnt}}, nil
+			return []byte{appendSegStatusNoEnt}, nil, nil
 		}
 		var path string
 		switch kind {
@@ -157,19 +159,19 @@ func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGro
 		f, err := os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: []byte{appendSegStatusNoEnt}}, nil
+				return []byte{appendSegStatusNoEnt}, nil, nil
 			}
-			return errorAppendSegmentMeta(req, err.Error()), nil
+			return errorAppendSegmentMeta(err.Error()), nil, nil
 		}
-		return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: []byte{appendSegStatusOK}}, f
+		return []byte{appendSegStatusOK}, f, nil
 	})
 }
 
-func errorAppendSegmentMeta(req *transport.Message, msg string) *transport.Message {
+func errorAppendSegmentMeta(msg string) []byte {
 	payload := make([]byte, 1+len(msg))
 	payload[0] = appendSegStatusError
 	copy(payload[1:], msg)
-	return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: payload}
+	return payload
 }
 
 // readAppendSegmentFromPeerKind issues a single-peer fetch for either a raw
@@ -188,18 +190,19 @@ func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	req := &transport.Message{Type: transport.StreamReadAppendSegment, Payload: payload}
-	resp, body, err := b.shardSvc.transport.CallRead(ctx, addr, req)
+	// Native GET /append-segment/read (Phase 8 N7-3): frame in the family
+	// header, status frame in the reply header, segment bytes streamed.
+	reply, body, err := b.shardSvc.transport.AppendSegmentRead(ctx, addr, payload)
 	if err != nil {
 		return nil, fmt.Errorf("call peer %s: %w", peer, err)
 	}
-	if len(resp.Payload) == 0 {
+	if len(reply) == 0 {
 		if body != nil {
 			_ = body.Close()
 		}
 		return nil, fmt.Errorf("empty append-segment response from %s", peer)
 	}
-	switch resp.Payload[0] {
+	switch reply[0] {
 	case appendSegStatusOK:
 		if body == nil {
 			return nil, fmt.Errorf("peer %s ok but no body", peer)
@@ -214,12 +217,12 @@ func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, 
 		if body != nil {
 			_ = body.Close()
 		}
-		return nil, fmt.Errorf("peer %s error: %s", peer, string(resp.Payload[1:]))
+		return nil, fmt.Errorf("peer %s error: %s", peer, string(reply[1:]))
 	default:
 		if body != nil {
 			_ = body.Close()
 		}
-		return nil, fmt.Errorf("peer %s: unknown status byte %d", peer, resp.Payload[0])
+		return nil, fmt.Errorf("peer %s: unknown status byte %d", peer, reply[0])
 	}
 }
 

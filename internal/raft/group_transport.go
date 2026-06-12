@@ -44,7 +44,11 @@ type GroupRaftMux struct {
 // on the cluster transport. It must outlive all registered nodes.
 func NewGroupRaftMux(tr raftRPCTransport) *GroupRaftMux {
 	m := &GroupRaftMux{tr: tr}
-	tr.Handle(transport.StreamGroupRaft, m.handleRPC)
+	// Native /raft/group/rpc buffered route. The payload keeps the
+	// [4B groupIDLen][groupID][raftRPC] prefix; a short header / unknown group
+	// / decode failure maps to a 500 exactly as the tunnel's nil-response
+	// StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftGroupRPC, m.handleRPC)
 	return m
 }
 
@@ -95,41 +99,41 @@ func extractGroupID(buf []byte) (groupID string, payload []byte, err error) {
 	return string(buf[4 : 4+gidLen]), buf[4+gidLen:], nil
 }
 
-func (m *GroupRaftMux) handleRPC(req *transport.Message) *transport.Message {
-	groupID, payload, err := extractGroupID(req.Payload)
+func (m *GroupRaftMux) handleRPC(reqPayload []byte) ([]byte, error) {
+	groupID, payload, err := extractGroupID(reqPayload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
 	v, ok := m.nodes.Load(groupID)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: unknown group")
 	}
 	node := v.(RaftV2Handler)
 
 	rpcType, data, err := decodeRPC(payload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
 	var replyEnv []byte
 	switch rpcType {
 	case rpcTypeRequestVote:
 		args, err := decodeRequestVoteArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("group raft RPC: bad request")
 		}
 		reply := node.HandleRequestVote(args)
 		replyEnv, _ = encodeRPC(rpcTypeRequestVoteReply, reply)
 	case rpcTypeAppendEntries:
 		args, err := decodeAppendEntriesArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("group raft RPC: bad request")
 		}
 		reply := node.HandleAppendEntries(args)
 		replyEnv, _ = encodeRPC(rpcTypeAppendEntriesReply, reply)
 	default:
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
-	return &transport.Message{Type: transport.StreamGroupRaft, Payload: replyEnv}
+	return replyEnv, nil
 }
 
 // GroupRaftSender is the per-group sender returned by GroupRaftMux.ForGroup.
@@ -148,14 +152,11 @@ func (s *GroupRaftSender) RequestVote(peer string, args *RequestVoteArgs) (*Requ
 	}
 	payload := prefixGroupID(s.groupID, env)
 
-	resp, err := s.mux.tr.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamGroupRaft,
-		Payload: payload,
-	})
+	reply, err := s.mux.tr.CallBuffered(ctx, peer, transport.RouteRaftGroupRPC, payload)
 	if err != nil {
 		return nil, fmt.Errorf("group %s RequestVote to %s: %w", s.groupID, peer, err)
 	}
-	_, data, err := decodeRPC(resp.Payload)
+	_, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, fmt.Errorf("group %s RequestVote reply: %w", s.groupID, err)
 	}
@@ -170,14 +171,11 @@ func (s *GroupRaftSender) AppendEntries(peer string, args *AppendEntriesArgs) (*
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.mux.tr.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamGroupRaft,
-		Payload: prefixGroupID(s.groupID, env),
-	})
+	reply, err := s.mux.tr.CallBuffered(ctx, peer, transport.RouteRaftGroupRPC, prefixGroupID(s.groupID, env))
 	if err != nil {
 		return nil, fmt.Errorf("group %s AppendEntries to %s: %w", s.groupID, peer, err)
 	}
-	_, data, err := decodeRPC(resp.Payload)
+	_, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, fmt.Errorf("group %s AppendEntries reply: %w", s.groupID, err)
 	}

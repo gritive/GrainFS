@@ -1,12 +1,10 @@
 package transport
 
-import (
-	"context"
-	"errors"
-	"io"
-)
-
-// StreamType distinguishes the purpose of a transport stream.
+// StreamType is an INTERNAL admission/metrics key only (TrafficLimiter
+// classes via ClassOf). It never travels on the wire: every RPC family rides
+// its own native HTTP route, and the route tables in http_buffered_route.go /
+// http_gossip_route.go map each route to its StreamType purely for inbound
+// admission classing.
 type StreamType byte
 
 const (
@@ -24,19 +22,19 @@ const (
 	StreamMetaCatalogRead     StreamType = 0x0C // Follower → meta-Raft leader Iceberg catalog linearized reads
 	StreamGroupForwardBody    StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
 	// 0x0E retired: was StreamMetaJoin (legacy KEK-challenge cluster-join admin RPC).
-	StreamGroupForwardRead        StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
-	StreamShardWriteBody          StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
-	StreamShardReadBody           StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
-	StreamCapabilityExchange      StreamType = 0x12 // protocol version handshake; first stream on every mux conn
+	StreamGroupForwardRead StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
+	StreamShardWriteBody   StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
+	StreamShardReadBody    StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
+	// 0x12 retired: was StreamCapabilityExchange (mux-era protocol version handshake).
 	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 	// 0x16 retired: was StreamMetaJoinChallenge (legacy KEK-challenge nonce request).
-	StreamCapabilityProbe          StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
-	StreamKEKDiskSpaceProbe        StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
-	StreamKEKLeaseSnapshotProbe    StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
-	StreamAppliedIndexProbe        StreamType = 0x1A // Leader → voter applied-index barrier probe (PR-2a §8b); req/resp magic-tagged binary
-	StreamIndexGroupProposeForward StreamType = 0x1B // Follower → index-group leader object-index proposal forwarding (sharded object index)
+	StreamCapabilityProbe       StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
+	StreamKEKDiskSpaceProbe     StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
+	StreamKEKLeaseSnapshotProbe StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
+	StreamAppliedIndexProbe     StreamType = 0x1A // Leader → voter applied-index barrier probe (PR-2a §8b); req/resp magic-tagged binary
+	// 0x1B retired: was StreamIndexGroupProposeForward (zero non-test uses).
 )
 
 type StreamClass byte
@@ -52,78 +50,11 @@ func ClassOf(st StreamType) StreamClass {
 	switch st {
 	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamReadIndex:
 		return StreamClassMeta
-	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward, StreamIndexGroupProposeForward:
+	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
 		return StreamClassData
 	case StreamGroupForwardBody, StreamGroupForwardRead, StreamShardWriteBody, StreamShardReadBody, StreamReadAppendSegment:
 		return StreamClassBulk
 	default:
 		return StreamClassControl
 	}
-}
-
-type MessageStatus byte
-
-const (
-	StatusOK MessageStatus = iota
-	StatusOverloaded
-	StatusError
-)
-
-// Message is a framed message sent over a transport stream.
-// Wire format: [1 byte StreamType][8 bytes request ID][1 byte status][4 bytes big-endian length][payload]
-type Message struct {
-	Type    StreamType
-	ID      uint64
-	Status  MessageStatus
-	Payload []byte
-}
-
-func NewResponse(req *Message, payload []byte) *Message {
-	if req == nil {
-		return &Message{Status: StatusOK, Payload: payload}
-	}
-	return &Message{Type: req.Type, ID: req.ID, Status: StatusOK, Payload: payload}
-}
-
-func NewErrorResponse(req *Message, status MessageStatus, err error) *Message {
-	if status == StatusOK {
-		status = StatusError
-	}
-	if err == nil {
-		err = errors.New("transport error")
-	}
-	if req == nil {
-		return &Message{Status: status, Payload: []byte(err.Error())}
-	}
-	return &Message{Type: req.Type, ID: req.ID, Status: status, Payload: []byte(err.Error())}
-}
-
-// ReceivedMessage wraps a Message with sender information.
-type ReceivedMessage struct {
-	From    string
-	Message *Message
-}
-
-// Transport provides node-to-node communication over the cluster transport.
-type Transport interface {
-	// Listen starts accepting incoming connections on the given address.
-	Listen(ctx context.Context, addr string) error
-
-	// Connect opens a connection to a remote peer.
-	Connect(ctx context.Context, addr string) error
-
-	// Send sends a message to a peer identified by address.
-	Send(ctx context.Context, addr string, msg *Message) error
-
-	// Receive returns a channel that delivers incoming messages.
-	Receive() <-chan *ReceivedMessage
-
-	// Close shuts down the transport and all connections.
-	Close() error
-}
-
-// Codec handles message framing: encoding and decoding on the wire.
-type Codec interface {
-	Encode(w io.Writer, msg *Message) error
-	Decode(r io.Reader) (*Message, error)
 }

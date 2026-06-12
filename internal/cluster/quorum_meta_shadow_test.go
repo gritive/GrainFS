@@ -16,8 +16,9 @@ import (
 )
 
 // fakeShadowTransport embeds the shardTransport interface (nil) and overrides
-// only CallFlatBuffer — the sole method the quorum-meta-shadow remote path uses.
-// Any other method call panics, which keeps the fake honest about its surface.
+// only CallBuffered — the sole method the quorum-meta-shadow remote path uses
+// (the native /shard/rpc route, Phase 8 N7-3). Any other method call panics,
+// which keeps the fake honest about its surface.
 type fakeShadowTransport struct {
 	shardTransport
 	mu       sync.Mutex
@@ -25,15 +26,15 @@ type fakeShadowTransport struct {
 	failAddr map[string]bool
 }
 
-func (f *fakeShadowTransport) CallFlatBuffer(_ context.Context, addr string, _ *transport.FlatBuffersWriter) (*transport.Message, error) {
+func (f *fakeShadowTransport) CallBuffered(_ context.Context, addr, _ string, _ []byte) ([]byte, error) {
 	f.mu.Lock()
 	f.addrs = append(f.addrs, addr)
 	fail := f.failAddr[addr]
 	f.mu.Unlock()
 	if fail {
-		return &transport.Message{Type: transport.StreamData, Payload: marshalResponseDirect("Error", []byte("forced"))}, nil
+		return marshalResponseDirect("Error", []byte("forced")), nil
 	}
-	return &transport.Message{Type: transport.StreamData, Payload: marshalResponseDirect("OK", nil)}, nil
+	return marshalResponseDirect("OK", nil), nil
 }
 
 func (f *fakeShadowTransport) calledAddrs() []string {
@@ -67,11 +68,11 @@ func TestWriteShadowMetaLocal_RejectsTraversal(t *testing.T) {
 func TestHandleShadowMeta_RoutesThroughRPCAndWrites(t *testing.T) {
 	s := newShadowTestShardService(t, &fakeShadowTransport{})
 
-	fw := buildShardEnvelope("WriteShadowMeta", "bucket", "k1", 0, []byte("blob"))
-	payload := fw.Builder.FinishedBytes()
-	resp := s.handleRPC(&transport.Message{Type: transport.StreamData, Payload: payload})
+	envb := buildShardEnvelope("WriteShadowMeta", "bucket", "k1", 0, []byte("blob"))
+	payload := envb.FinishedBytes()
+	resp := s.handleRPC(payload)
 
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	rpcType, _, err := unmarshalEnvelope(resp)
 	require.NoError(t, err)
 	require.Equal(t, "OK", rpcType)
 
@@ -140,12 +141,12 @@ func TestWriteShadowMeta_RealTransportRoundTrip(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	blob := []byte("shadow-meta-over-the-wire")
 	require.NoError(t, svc1.WriteShadowMeta(ctx, tr2.LocalAddr(), "bkt", "key", blob))

@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,7 +11,6 @@ import (
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // fakeEvidenceSource is a test CapabilityEvidenceSource.
@@ -47,18 +45,10 @@ func newCapProbeKEKStore(t *testing.T, keyByte byte) *encrypt.KEKStore {
 var testClusterID = bytes.Repeat([]byte{0xAB}, 16)
 
 // makeTestDialer wires a CapabilityProbeHandler as a capabilityProbeDialer.
-// No QUIC is needed — the handler is called in-process.
+// No transport is needed — the handler is called in-process.
 func makeTestDialer(handler *CapabilityProbeHandler) capabilityProbeDialer {
 	return func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{
-			Type:    transport.StreamCapabilityProbe,
-			Payload: payload,
-		}
-		resp := handler.Handle(msg)
-		if resp.Status != transport.StatusOK {
-			return nil, errors.New(string(resp.Payload))
-		}
-		return resp.Payload, nil
+		return handler.Handle(payload)
 	}
 }
 
@@ -120,15 +110,11 @@ func TestCapabilityDirectRPC_AssertionForWrongServer_Rejects(t *testing.T) {
 			ExpectedServerID: "node-B",
 			Nonce:            nodeBNonce,
 		})
-		msg := &transport.Message{
-			Type:    transport.StreamCapabilityProbe,
-			Payload: internalReq,
+		nodeBResp, err := handlerB.Handle(internalReq)
+		if err != nil {
+			return nil, err
 		}
-		nodeBRespMsg := handlerB.Handle(msg)
-		if nodeBRespMsg.Status != transport.StatusOK {
-			return nil, errors.New(string(nodeBRespMsg.Payload))
-		}
-		decoded, err := decodeCapProbeResponse(nodeBRespMsg.Payload)
+		decoded, err := decodeCapProbeResponse(nodeBResp)
 		if err != nil {
 			return nil, err
 		}

@@ -138,19 +138,20 @@ func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *For
 	return r
 }
 
-// Register installs this ForwardReceiver as the handler for StreamProposeGroupForward (0x08) on shardSvc.
-// The 0x08 stream type is used for intra-cluster forwarding of bucket-scoped operations.
+// Register installs this ForwardReceiver's buffered-route handlers on shardSvc's
+// transport: /forward/propose/group (bucket-scoped operation forwarding) and
+// /forward/propose/data-group (metadata proposal forwarding). Every forward
+// outcome (NotVoter/NotLeader+hint/OK/...) is in-band in the FB reply.
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
-	shardSvc.RegisterHandler(transport.StreamProposeGroupForward, r.Handle)
-	shardSvc.RegisterHandler(transport.StreamDataGroupProposeForward, r.HandleGroupPropose)
-	shardSvc.RegisterBodyHandler(transport.StreamGroupForwardBody, r.HandleBody)
-	shardSvc.RegisterReadHandler(transport.StreamGroupForwardRead, r.HandleRead)
+	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeGroup, r.Handle)
+	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeDataGroup, r.HandleGroupPropose)
 }
 
 // HandleGroupPropose forwards a raw DistributedBackend metadata command to the
-// matching local data-group raft node.
-func (r *ForwardReceiver) HandleGroupPropose(req *transport.Message) *transport.Message {
-	groupID, data, err := decodeGroupForwardPayload(req.Payload)
+// matching local data-group raft node. The propose outcome (index + apply
+// error) is in-band via encodeProposeForwardReply.
+func (r *ForwardReceiver) HandleGroupPropose(payload []byte) ([]byte, error) {
+	groupID, data, err := decodeGroupForwardPayload(payload)
 	if err != nil {
 		return groupProposeReply(0, err)
 	}
@@ -171,21 +172,19 @@ func (r *ForwardReceiver) HandleGroupPropose(req *transport.Message) *transport.
 	return groupProposeReply(idx, err)
 }
 
-func groupProposeReply(index uint64, err error) *transport.Message {
+func groupProposeReply(index uint64, err error) ([]byte, error) {
 	// Phase A (Task 16): wire-compatible with decodeProposeForwardReply.
 	// GroupBackend.ApplyError harvesting will land alongside AppendObject (Task 18+).
-	return &transport.Message{
-		Type:    transport.StreamDataGroupProposeForward,
-		Payload: encodeProposeForwardReply(index, err),
-	}
+	return encodeProposeForwardReply(index, err), nil
 }
 
-// Handle implements transport.Handler for 0x08 stream.
-func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
-	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
+// Handle serves one buffered /forward/propose/group request. Every outcome is
+// in-band in the FB ForwardReply (the returned error is always nil).
+func (r *ForwardReceiver) Handle(payload []byte) ([]byte, error) {
+	groupID, op, fbsArgs, err := decodeForwardPayload(payload)
 	if err != nil {
 		log.Debug().Err(err).Msg("forward: decode payload failed")
-		return errReply(raftpb.ForwardStatusInternal, "")
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
 	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: receive")
 
@@ -193,17 +192,17 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	// It bypasses the DataGroup lookup + leader gate that the rest of the
 	// forwarding ops require.
 	if op == raftpb.ForwardOpScrubSessionStat {
-		return r.handleScrubSessionStat(fbsArgs)
+		return r.handleScrubSessionStat(fbsArgs), nil
 	}
 	spec, ok := lookupBucketForwardOpSpec(op)
 	if !ok {
-		return errReply(raftpb.ForwardStatusInternal, "")
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
 		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: not voter")
-		return errReply(raftpb.ForwardStatusNotVoter, "")
+		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
 	}
 
 	node := dg.Backend().Node()
@@ -213,39 +212,41 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 			hint = node.LeaderID()
 		}
 		log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward: not leader")
-		return errReply(raftpb.ForwardStatusNotLeader, hint)
+		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
 	}
 	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: dispatch leader")
 
 	if spec.handleFrame == nil {
-		return errReply(raftpb.ForwardStatusInternal, "")
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
-	return spec.handleFrame(r, dg, fbsArgs)
+	return spec.handleFrame(r, dg, fbsArgs), nil
 }
 
-// HandleBody implements streamed-body forwarding for PutObject and UploadPart.
-// The request payload carries group/op/metadata; body bytes follow the frame on
-// the same transport stream and are passed directly into the local GroupBackend.
-func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *transport.Message {
-	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
+// HandleBody implements streamed-body forwarding for PutObject and UploadPart
+// (the native /forward/write route, transport.RegisterForwardWriteHandler).
+// The frame carries group/op/metadata; body is the raw request stream, passed
+// directly into the local GroupBackend. Every outcome is in-band in the FB
+// ForwardReply (the returned error is always nil).
+func (r *ForwardReceiver) HandleBody(frame []byte, body io.Reader) ([]byte, error) {
+	groupID, op, fbsArgs, err := decodeForwardPayload(frame)
 	if err != nil {
 		log.Debug().Err(err).Msg("forward body: decode payload failed")
 		drainForwardBody(body)
-		return errReply(raftpb.ForwardStatusInternal, "")
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
 	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: receive")
 	spec, ok := lookupBucketForwardOpSpec(op)
 	if !ok || !spec.allowedOn(forwardBodyStream) {
 		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: unsupported op")
 		drainForwardBody(body)
-		return errReply(raftpb.ForwardStatusInternal, "")
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
 		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: not voter")
 		drainForwardBody(body)
-		return errReply(raftpb.ForwardStatusNotVoter, "")
+		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
 	}
 
 	node := dg.Backend().Node()
@@ -256,33 +257,34 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 			hint = node.LeaderID()
 		}
 		log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward body: not leader")
-		return errReply(raftpb.ForwardStatusNotLeader, hint)
+		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
 	}
 	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: dispatch leader")
 
 	if spec.handleBody == nil {
 		drainForwardBody(body)
-		return errReply(raftpb.ForwardStatusInternal, "")
+		return errReply(raftpb.ForwardStatusInternal, ""), nil
 	}
-	return spec.handleBody(r, dg, fbsArgs, body)
+	return spec.handleBody(r, dg, fbsArgs, body), nil
 }
 
 // HandleRead implements streamed-response forwarding for GetObject and
-// GetObjectVersion. The returned ForwardReply carries metadata only; object
-// bytes follow as the raw response body on the same transport stream.
-func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message, io.ReadCloser) {
-	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
+// GetObjectVersion (the native /forward/read route,
+// transport.RegisterForwardReadHandler). The returned ForwardReply carries
+// metadata only; object bytes follow as the streamed response body.
+func (r *ForwardReceiver) HandleRead(frame []byte) ([]byte, io.ReadCloser, error) {
+	groupID, op, fbsArgs, err := decodeForwardPayload(frame)
 	if err != nil {
-		return errReply(raftpb.ForwardStatusInternal, ""), nil
+		return errReply(raftpb.ForwardStatusInternal, ""), nil, nil
 	}
 	spec, ok := lookupBucketForwardOpSpec(op)
 	if !ok || !spec.allowedOn(forwardReadStream) {
-		return errReply(raftpb.ForwardStatusInternal, ""), nil
+		return errReply(raftpb.ForwardStatusInternal, ""), nil, nil
 	}
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
-		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
+		return errReply(raftpb.ForwardStatusNotVoter, ""), nil, nil
 	}
 
 	node := dg.Backend().Node()
@@ -291,38 +293,14 @@ func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message
 		if node != nil {
 			hint = node.LeaderID()
 		}
-		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
+		return errReply(raftpb.ForwardStatusNotLeader, hint), nil, nil
 	}
 
 	if spec.handleRead == nil {
-		return errReply(raftpb.ForwardStatusInternal, ""), nil
+		return errReply(raftpb.ForwardStatusInternal, ""), nil, nil
 	}
-	return spec.handleRead(r, dg, fbsArgs)
-}
-
-// NativeWriteHandler adapts HandleBody to the native /forward/write route
-// (transport.RegisterForwardWriteHandler). The transport.Message wrapper here is
-// internal plumbing only — it leaves with the tunnel in N8, when HandleBody's
-// signature drops Message.
-func (r *ForwardReceiver) NativeWriteHandler() transport.ForwardWriteHandler {
-	return func(frame []byte, body io.Reader) ([]byte, error) {
-		resp := r.HandleBody(&transport.Message{Payload: frame}, body)
-		if resp == nil {
-			return nil, errors.New("forward write: nil reply")
-		}
-		return resp.Payload, nil
-	}
-}
-
-// NativeReadHandler adapts HandleRead to the native /forward/read route.
-func (r *ForwardReceiver) NativeReadHandler() transport.ForwardReadHandler {
-	return func(frame []byte) ([]byte, io.ReadCloser, error) {
-		resp, rbody := r.HandleRead(&transport.Message{Payload: frame})
-		if resp == nil {
-			return nil, nil, errors.New("forward read: nil reply")
-		}
-		return resp.Payload, rbody, nil
-	}
+	reply, rbody := spec.handleRead(r, dg, fbsArgs)
+	return reply, rbody, nil
 }
 
 func drainForwardBody(body io.Reader) {
@@ -341,7 +319,7 @@ func contextForForwardedGroup(ctx context.Context, dg *DataGroup) context.Contex
 	})
 }
 
-func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
 	key := string(pa.Key())
@@ -369,10 +347,10 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 		return statusReply(mapErrorToStatus(err))
 	}
 	ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
-	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
+	return buildObjectReply(obj, bucket)
 }
 
-func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) []byte {
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
 	key := string(pa.Key())
@@ -400,10 +378,10 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 		return statusReply(mapErrorToStatus(err))
 	}
 	ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
-	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
+	return buildObjectReply(obj, bucket)
 }
 
-func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) ([]byte, io.ReadCloser) {
 	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
@@ -413,10 +391,10 @@ func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*tran
 	if err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
 	}
-	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), nil)}, rc
+	return buildGetObjectReply(obj, string(ga.Bucket()), nil), rc
 }
 
-func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) ([]byte, io.ReadCloser) {
 	ra := raftpb.GetRootAsReadAtArgs(args, 0)
 	length := ra.Length()
 	if ra.Offset() < 0 || length < 0 {
@@ -430,10 +408,10 @@ func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) (*transpo
 		offset:  ra.Offset(),
 		length:  length,
 	}
-	return &transport.Message{Payload: buildOKReply()}, body
+	return buildOKReply(), body
 }
 
-func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) []byte {
 	ra := raftpb.GetRootAsReadAtArgs(args, 0)
 	length := ra.Length()
 	if ra.Offset() < 0 || length < 0 || length > DefaultMaxForwardReplyBytes {
@@ -448,7 +426,7 @@ func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) *transport.Me
 	if n < 0 || n > len(buf) {
 		return statusReply(raftpb.ForwardStatusInternal)
 	}
-	return &transport.Message{Payload: buildReadAtReply(buf[:n])}
+	return buildReadAtReply(buf[:n])
 }
 
 type backendReadAtStream struct {
@@ -476,7 +454,7 @@ func (r *backendReadAtStream) Read(p []byte) (int, error) {
 
 func (r *backendReadAtStream) Close() error { return nil }
 
-func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
@@ -498,19 +476,19 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 	if obj.Size != int64(len(body)) {
 		return statusReply(raftpb.ForwardStatusInternal)
 	}
-	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
+	return buildGetObjectReply(obj, string(ga.Bucket()), body)
 }
 
-func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
+func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte) ([]byte, io.ReadCloser) {
 	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
 	rc, obj, err := dg.Backend().GetObjectVersion(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
 	}
-	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), nil)}, rc
+	return buildGetObjectReply(obj, string(ga.Bucket()), nil), rc
 }
 
-func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) []byte {
 	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
 	rc, obj, err := dg.Backend().GetObjectVersion(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
@@ -528,10 +506,10 @@ func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *tr
 	if obj.Size != int64(len(body)) {
 		return statusReply(raftpb.ForwardStatusInternal)
 	}
-	return &transport.Message{Payload: buildGetObjectReply(obj, string(ga.Bucket()), body)}
+	return buildGetObjectReply(obj, string(ga.Bucket()), body)
 }
 
-func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	ha := raftpb.GetRootAsHeadObjectArgs(args, 0)
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
@@ -541,7 +519,7 @@ func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transpor
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(ha.Bucket()))}
+	return buildObjectReply(obj, string(ha.Bucket()))
 }
 
 func waitForwardReadFence(ctx context.Context, gb *GroupBackend) error {
@@ -557,17 +535,17 @@ func waitForwardReadFence(ctx context.Context, gb *GroupBackend) error {
 	return gb.WaitApplied(readCtx, idx)
 }
 
-func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) []byte {
 	ha := raftpb.GetRootAsHeadObjectVersionArgs(args, 0)
 	bucket := string(ha.Bucket())
 	obj, err := dg.Backend().HeadObjectVersion(bucket, string(ha.Key()), string(ha.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
+	return buildObjectReply(obj, bucket)
 }
 
-func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) []byte {
 	da := raftpb.GetRootAsDeleteObjectArgs(args, 0)
 	bucket := string(da.Bucket())
 	key := string(da.Key())
@@ -575,21 +553,21 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(&storage.Object{
+	return buildObjectReply(&storage.Object{
 		Key:       key,
 		VersionID: markerID,
-	}, bucket)}
+	}, bucket)
 }
 
-func (r *ForwardReceiver) handleSetObjectACL(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleSetObjectACL(dg *DataGroup, args []byte) []byte {
 	sa := raftpb.GetRootAsSetObjectACLArgs(args, 0)
 	if err := dg.Backend().SetObjectACL(string(sa.Bucket()), string(sa.Key()), sa.Acl()); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildOKReply()}
+	return buildOKReply()
 }
 
-func (r *ForwardReceiver) handleSetObjectTags(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleSetObjectTags(dg *DataGroup, args []byte) []byte {
 	sa := raftpb.GetRootAsSetObjectTagsArgs(args, 0)
 
 	tags := make([]storage.Tag, 0, sa.TagsLength())
@@ -606,19 +584,19 @@ func (r *ForwardReceiver) handleSetObjectTags(dg *DataGroup, args []byte) *trans
 	if err := dg.Backend().SetObjectTags(string(sa.Bucket()), string(sa.Key()), string(sa.VersionId()), tags); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildOKReply()}
+	return buildOKReply()
 }
 
-func (r *ForwardReceiver) handleGetObjectTags(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleGetObjectTags(dg *DataGroup, args []byte) []byte {
 	ga := raftpb.GetRootAsGetObjectTagsArgs(args, 0)
 	tags, err := dg.Backend().GetObjectTags(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildGetObjectTagsReply(tags)}
+	return buildGetObjectTagsReply(tags)
 }
 
-func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) []byte {
 	da := raftpb.GetRootAsDeleteObjectVersionArgs(args, 0)
 	bucket := string(da.Bucket())
 	key := string(da.Key())
@@ -626,10 +604,10 @@ func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) 
 	if err := dg.Backend().DeleteObjectVersion(bucket, key, versionID); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildOKReply()}
+	return buildOKReply()
 }
 
-func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	la := raftpb.GetRootAsListObjectsArgs(args, 0)
 	bucket := string(la.Bucket())
@@ -654,19 +632,19 @@ func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transpo
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectsReply(bucket, objs)}
+	return buildObjectsReply(bucket, objs)
 }
 
-func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) []byte {
 	la := raftpb.GetRootAsListObjectVersionsArgs(args, 0)
 	versions, err := dg.Backend().ListObjectVersions(string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectVersionsReply(versions)}
+	return buildObjectVersionsReply(versions)
 }
 
-func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	wa := raftpb.GetRootAsWalkObjectsArgs(args, 0)
 	var objs []*storage.Object
@@ -677,10 +655,10 @@ func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) *transpo
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectsReply(string(wa.Bucket()), objs)}
+	return buildObjectsReply(string(wa.Bucket()), objs)
 }
 
-func (r *ForwardReceiver) handleCreateMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleCreateMultipartUpload(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	ca := raftpb.GetRootAsCreateMultipartUploadArgs(args, 0)
 	bucket := string(ca.Bucket())
@@ -706,17 +684,17 @@ func (r *ForwardReceiver) handleCreateMultipartUpload(dg *DataGroup, args []byte
 		if err != nil {
 			return statusReply(mapErrorToStatus(err))
 		}
-		return &transport.Message{Payload: buildUploadReply(bucket, key, uploadID)}
+		return buildUploadReply(bucket, key, uploadID)
 	}
 
 	upload, err := dg.Backend().CreateMultipartUpload(ctx, bucket, key, contentType)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildUploadReply(upload.Bucket, upload.Key, upload.UploadID)}
+	return buildUploadReply(upload.Bucket, upload.Key, upload.UploadID)
 }
 
-func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	ua := raftpb.GetRootAsUploadPartArgs(args, 0)
 	body := ua.BodyBytes()
@@ -731,10 +709,10 @@ func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) *transpor
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildPartReply(part)}
+	return buildPartReply(part)
 }
 
-func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, body io.Reader) []byte {
 	ctx := context.Background()
 	ua := raftpb.GetRootAsUploadPartArgs(args, 0)
 	part, err := dg.Backend().UploadPart(
@@ -748,11 +726,11 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildPartReply(part)}
+	return buildPartReply(part)
 }
 
 // handleAppendObjectStream dispatches a forwarded AppendObject. Body bytes are
-func (r *ForwardReceiver) handleAppendObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+func (r *ForwardReceiver) handleAppendObjectStream(dg *DataGroup, args []byte, body io.Reader) []byte {
 	aa := raftpb.GetRootAsAppendObjectForwardArgs(args, 0)
 	bucket := string(aa.Bucket())
 	key := string(aa.Key())
@@ -761,10 +739,10 @@ func (r *ForwardReceiver) handleAppendObjectStream(dg *DataGroup, args []byte, b
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
+	return buildObjectReply(obj, bucket)
 }
 
-func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) []byte {
 	ctx := contextForForwardedGroup(context.Background(), dg)
 	ca := raftpb.GetRootAsCompleteMultipartUploadArgs(args, 0)
 	bucket := string(ca.Bucket())
@@ -784,10 +762,10 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
+	return buildObjectReply(obj, bucket)
 }
 
-func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	aa := raftpb.GetRootAsAbortMultipartUploadArgs(args, 0)
 	err := dg.Backend().AbortMultipartUpload(
@@ -799,10 +777,10 @@ func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildOKReply()}
+	return buildOKReply()
 }
 
-func (r *ForwardReceiver) handleListMultipartUploads(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleListMultipartUploads(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	la := raftpb.GetRootAsListMultipartUploadsArgs(args, 0)
 	uploads, err := dg.Backend().ListMultipartUploads(
@@ -814,10 +792,10 @@ func (r *ForwardReceiver) handleListMultipartUploads(dg *DataGroup, args []byte)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildMultipartUploadsReply(uploads)}
+	return buildMultipartUploadsReply(uploads)
 }
 
-func (r *ForwardReceiver) handleListParts(dg *DataGroup, args []byte) *transport.Message {
+func (r *ForwardReceiver) handleListParts(dg *DataGroup, args []byte) []byte {
 	ctx := context.Background()
 	la := raftpb.GetRootAsListPartsArgs(args, 0)
 	parts, err := dg.Backend().ListParts(
@@ -830,14 +808,14 @@ func (r *ForwardReceiver) handleListParts(dg *DataGroup, args []byte) *transport
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildPartsReply(parts)}
+	return buildPartsReply(parts)
 }
 
-func errReply(status raftpb.ForwardStatus, hint string) *transport.Message {
-	return &transport.Message{Payload: buildSimpleReply(status, hint)}
+func errReply(status raftpb.ForwardStatus, hint string) []byte {
+	return buildSimpleReply(status, hint)
 }
 
-func statusReply(status raftpb.ForwardStatus) *transport.Message {
+func statusReply(status raftpb.ForwardStatus) []byte {
 	return errReply(status, "")
 }
 
@@ -879,7 +857,7 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	return raftpb.ForwardStatusInternal
 }
 
-func (r *ForwardReceiver) handleScrubSessionStat(fbsArgs []byte) *transport.Message {
+func (r *ForwardReceiver) handleScrubSessionStat(fbsArgs []byte) []byte {
 	if len(fbsArgs) == 0 {
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
@@ -893,7 +871,7 @@ func (r *ForwardReceiver) handleScrubSessionStat(fbsArgs []byte) *transport.Mess
 	return buildScrubSessionStatReply(found, sess)
 }
 
-func buildScrubSessionStatReply(found bool, sess scrubber.Session) *transport.Message {
+func buildScrubSessionStatReply(found bool, sess scrubber.Session) []byte {
 	b := flatbuffers.NewBuilder(256)
 	bktOff := b.CreateString(sess.Bucket)
 	pfxOff := b.CreateString(sess.KeyPrefix)
@@ -922,5 +900,5 @@ func buildScrubSessionStatReply(found bool, sess scrubber.Session) *transport.Me
 	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
 	raftpb.ForwardReplyAddScrubSession(b, scrubReplyOff)
 	b.Finish(raftpb.ForwardReplyEnd(b))
-	return &transport.Message{Type: transport.StreamProposeGroupForward, Payload: b.FinishedBytes()}
+	return b.FinishedBytes()
 }

@@ -6,6 +6,12 @@
 > `grainfs-http-v1` ALPN and does NOT perform a capability-exchange handshake (version skew is a
 > greenfield/flag-day concern — there is no rolling-upgrade compat with an older transport). Kept
 > for the design rationale of the retired mux protocol.
+>
+> As of Phase 8 N8 every identifier this document names is deleted from the code:
+> `ProtocolVersionMux`, the `StreamCapabilityExchange` (0x12) stream type, the `BinaryCodec`
+> frame, and the `grainfs_transport_ce_total` metric (`TransportCECounter`). The internal wire
+> is fully envelope-free — each RPC family rides its own native HTTP route; `StreamType` survives
+> only as an internal admission/metrics key.
 
 ## ALPN
 

@@ -11,23 +11,15 @@ import (
 // interface in cluster/raft, so the boot-held value can be passed to those
 // narrower constructors (Go interface-to-interface assignment).
 //
-// Raft and shard RPCs are request/response over Call*/Handle*; there is no
-// stream-multiplexing surface (the raft mux subsystem and the TCP transport that
-// carried it were removed in Phase 8). HTTPTransport is the only implementation.
+// Every RPC family rides a native per-family route: the typed surfaces below
+// plus the generic buffered-Call and gossip primitives. There is no envelope
+// tunnel and no stream-multiplexing surface (both removed in Phase 8).
+// HTTPTransport is the only implementation.
 type ClusterTransport interface {
-	// Transport covers Listen/Connect/Send/Receive/Close.
-	Transport
-
-	Call(ctx context.Context, addr string, req *Message) (*Message, error)
-	CallPooled(ctx context.Context, addr string, req *Message) (*Message, error)
-	CallWithBody(ctx context.Context, addr string, req *Message, body io.Reader) (*Message, error)
-	CallRead(ctx context.Context, addr string, req *Message) (*Message, io.ReadCloser, error)
-	CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error)
-
-	Handle(st StreamType, h StreamHandler)
-	HandleBody(st StreamType, h StreamBodyHandler)
-	HandleRead(st StreamType, h StreamReadHandler)
-	SetStreamHandler(h StreamHandler)
+	// Lifecycle + liveness.
+	Listen(ctx context.Context, addr string) error
+	Close() error
+	Ping(ctx context.Context, addr string) error
 
 	// Native route surfaces (Phase 8 N6+; the envelope-free per-family wire).
 	RegisterShardWriteHandler(h ShardWriteHandler)
@@ -38,6 +30,15 @@ type ClusterTransport interface {
 	RegisterForwardReadHandler(h ForwardReadHandler)
 	ForwardWrite(ctx context.Context, addr string, frame []byte, body io.Reader) ([]byte, error)
 	ForwardRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
+	RegisterAppendSegmentReadHandler(h AppendSegmentReadHandler)
+	AppendSegmentRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
+
+	// Generic native primitives (Phase 8 N7-3): buffered-Call and gossip
+	// routes for the long-tail families (route table in http_buffered_route.go).
+	RegisterBufferedRoute(path string, h BufferedRouteHandler)
+	CallBuffered(ctx context.Context, addr, path string, payload []byte) ([]byte, error)
+	RegisterGossipRoute(path string, h GossipHandler)
+	GossipSend(ctx context.Context, addr, path string, payload []byte) error
 
 	RecycleConns()
 	ClosePeer(addr string)

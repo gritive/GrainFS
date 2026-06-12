@@ -1,14 +1,5 @@
 # TODO
 
-- [Phase 8 N1-N3 follow-up — orphaned mux-versioning dead code, separate small slice]
-  The mux subsystem removal (v0.0.551.0) left two orphans, used nowhere live: `ProtocolVersionMux
-  = "grainfs-mux-v1"` (the whole `internal/transport/version.go`) and `metrics.TransportCECounter`
-  (`internal/metrics/transport.go`, "mux capability exchange outcomes" — now never incremented). Not
-  folded into N5 (the docs slice) because removing `TransportCECounter` is **operator-visible** (a
-  Prometheus metric disappearing from dashboards) and deserves its own CHANGELOG operator note +
-  decision on whether to keep a now-always-absent metric for dashboard stability. Remove both (and the
-  now-empty version.go) in a dedicated code-cleanup slice.
-
 - [Phase 8 N4 follow-up — load-gated retune, deferred]
   `v2RaftRPCTimeout` (80ms, `internal/cluster/raft_rpc.go`) and `v2MetaRPCTimeout` (500ms,
   `raftv2_meta.go`) are kept at their proven values. N4's spec said "retune for warm pooled HTTP POST
@@ -86,3 +77,14 @@
   (not a direct voter) and promote only after its actor is running — matching the
   documented JoinMode learner path (`types.go:286`) instead of the
   `addJoinedNodeToLegacyDataRaft` direct `AddVoterCtx`. NOT fixed by any transport change.
+
+- [pre-existing latent panic — gossip admin payload FB decode, surfaced during Phase 8 N8]
+  `GossipReceiver.handleNodeStats` (internal/cluster/gossip.go) recovers FlatBuffers panics
+  only inside `decodeNodeStatsMsg`, but FB accessors (`pb.NodeId()` etc.) evaluate lazily
+  AFTER the recover — a malformed `/gossip/admin` payload from an authenticated peer panics
+  the gossip drain goroutine and crashes the process. Pre-existing (the tunnel-era Receive
+  loop had identical exposure); discovered during N8 when a repurposed test fed garbage to
+  the admin route. Fix direction: widen the recover to cover the accessor reads (decode into
+  plain values inside the recovered scope), plus a malformed-payload unit test. Blast radius:
+  requires an authenticated cluster peer (SPKI-pinned mTLS) sending garbage — low likelihood,
+  high impact (process crash).
