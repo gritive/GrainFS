@@ -164,6 +164,46 @@ func TestMultipartAbort_SurvivesDivergentPlacement(t *testing.T) {
 	require.Empty(t, listed)
 }
 
+// TestMultipartScan_RecordsCarryOwningGroup covers the lifecycle abort leg:
+// ScanLocalMultipartUploads fans out over locally-owned groups, and the
+// lifecycle MPU worker feeds each record's UploadID straight back into
+// AbortMultipartUpload. The scan must therefore re-encode the per-group raw ID
+// with its owning group — otherwise expired MPUs abort via the legacy hash
+// fallback and leak on nodes with divergent boot-frozen placement.
+func TestMultipartScan_RecordsCarryOwningGroup(t *testing.T) {
+	cl := newDivergentMultipartCluster(t)
+	ctx := context.Background()
+	key := cl.divergentKey(t)
+
+	up, err := cl.coordB.CreateMultipartUpload(ctx, "bk", key, "application/octet-stream")
+	require.NoError(t, err)
+	owningGroup, _, ok := parseMultipartUploadID(up.UploadID)
+	require.True(t, ok)
+
+	ch, err := cl.coordA.ScanLocalMultipartUploads("bk")
+	require.NoError(t, err)
+	var recs []storage.MultipartUploadRecord
+	for rec := range ch {
+		recs = append(recs, rec)
+	}
+	require.Len(t, recs, 1)
+	require.Equal(t, up.UploadID, recs[0].UploadID,
+		"scan must return the same group-encoded uploadID Create returned")
+	groupID, _, ok := parseMultipartUploadID(recs[0].UploadID)
+	require.True(t, ok, "scanned uploadID must be group-encoded")
+	require.Equal(t, owningGroup, groupID)
+
+	// The lifecycle worker aborts with the scanned ID verbatim — must route to
+	// the owning group even on the divergent coordinator.
+	require.NoError(t, cl.coordA.AbortMultipartUpload(ctx, "bk", key, recs[0].UploadID))
+
+	ch, err = cl.coordA.ScanLocalMultipartUploads("bk")
+	require.NoError(t, err)
+	for range ch {
+		t.Fatal("scan must be empty after abort")
+	}
+}
+
 // TestMultipartCreateWithTags_EncodesGroup covers the tags-create overload:
 // the returned ID must be group-encoded the same way so all session ops route
 // consistently.

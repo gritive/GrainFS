@@ -1928,7 +1928,15 @@ func (c *ClusterCoordinator) ScanLocalMultipartUploads(bucket string) (<-chan st
 	}
 
 	// Collect per-group channels; only locally-owned groups (Backend() != nil) participate.
-	var srcs []<-chan storage.MultipartUploadRecord
+	// Keep the source group ID alongside each channel: lifecycle abort feeds these
+	// records back into AbortMultipartUpload, which routes by the group encoded in
+	// the upload ID. Without re-encoding here, expired MPUs created under group-ID
+	// routing would fall back to legacy hash routing and leak on divergent nodes.
+	type groupScan struct {
+		groupID string
+		ch      <-chan storage.MultipartUploadRecord
+	}
+	var srcs []groupScan
 	for _, dg := range groups {
 		gb := dg.Backend()
 		if gb == nil {
@@ -1938,7 +1946,7 @@ func (c *ClusterCoordinator) ScanLocalMultipartUploads(bucket string) (<-chan st
 		if err != nil {
 			return nil, fmt.Errorf("ScanLocalMultipartUploads group %s: %w", dg.ID(), err)
 		}
-		srcs = append(srcs, ch)
+		srcs = append(srcs, groupScan{groupID: dg.ID(), ch: ch})
 	}
 	if len(srcs) == 0 {
 		out := make(chan storage.MultipartUploadRecord)
@@ -1946,11 +1954,15 @@ func (c *ClusterCoordinator) ScanLocalMultipartUploads(bucket string) (<-chan st
 		return out, nil
 	}
 
+	wrap := c.multipartGroupIDRouting()
 	out := make(chan storage.MultipartUploadRecord, 16)
 	go func() {
 		defer close(out)
 		for _, src := range srcs {
-			for rec := range src {
+			for rec := range src.ch {
+				if wrap {
+					rec.UploadID = encodeMultipartUploadID(src.groupID, rec.UploadID)
+				}
 				out <- rec
 			}
 		}
