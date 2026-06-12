@@ -22,19 +22,19 @@ const (
 	StreamMetaCatalogRead     StreamType = 0x0C // Follower → meta-Raft leader Iceberg catalog linearized reads
 	StreamGroupForwardBody    StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
 	// 0x0E retired: was StreamMetaJoin (legacy KEK-challenge cluster-join admin RPC).
-	StreamGroupForwardRead        StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
-	StreamShardWriteBody          StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
-	StreamShardReadBody           StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
-	StreamCapabilityExchange      StreamType = 0x12 // protocol version handshake; first stream on every mux conn
+	StreamGroupForwardRead StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
+	StreamShardWriteBody   StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
+	StreamShardReadBody    StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
+	// 0x12 retired: was StreamCapabilityExchange (mux-era protocol version handshake).
 	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 	// 0x16 retired: was StreamMetaJoinChallenge (legacy KEK-challenge nonce request).
-	StreamCapabilityProbe          StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
-	StreamKEKDiskSpaceProbe        StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
-	StreamKEKLeaseSnapshotProbe    StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
-	StreamAppliedIndexProbe        StreamType = 0x1A // Leader → voter applied-index barrier probe (PR-2a §8b); req/resp magic-tagged binary
-	StreamIndexGroupProposeForward StreamType = 0x1B // Follower → index-group leader object-index proposal forwarding (sharded object index)
+	StreamCapabilityProbe       StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
+	StreamKEKDiskSpaceProbe     StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
+	StreamKEKLeaseSnapshotProbe StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
+	StreamAppliedIndexProbe     StreamType = 0x1A // Leader → voter applied-index barrier probe (PR-2a §8b); req/resp magic-tagged binary
+	// 0x1B retired: was StreamIndexGroupProposeForward (zero non-test uses).
 )
 
 type StreamClass byte
@@ -50,7 +50,7 @@ func ClassOf(st StreamType) StreamClass {
 	switch st {
 	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamReadIndex:
 		return StreamClassMeta
-	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward, StreamIndexGroupProposeForward:
+	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
 		return StreamClassData
 	case StreamGroupForwardBody, StreamGroupForwardRead, StreamShardWriteBody, StreamShardReadBody, StreamReadAppendSegment:
 		return StreamClassBulk
