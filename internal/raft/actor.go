@@ -1632,7 +1632,7 @@ func (n *Node) maybeAdvanceCommitIndex() {
 func (n *Node) resetElectionTimer() {
 	base := n.cfg.ElectionTimeout
 	if base <= 0 {
-		base = defaultElectionTimeout
+		base = DefaultElectionTimeout
 	}
 	jitter := time.Duration(n.rng.Int63n(int64(base)))
 	timeout := base + jitter

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.553.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 N4: unfreeze the raft RPC wire codec/timeout (comment + test cleanup; no behavior
+  change).** The cluster raft RPC codec (`raftv2_codec.go`) and the per-RPC timeout
+  (`v2RaftRPCTimeout`, `raft_rpc.go`) carried a "byte-identical to v1 / frozen until PR 30 deletes the
+  v1 package" constraint. That v1 package (`internal/raft/quic_rpc.go`) was already deleted in the
+  QUIC→TCP migration, so the freeze no longer binds: dropped the stale "mirrors v1 / frozen / PR 30"
+  comments and reframed the golden-hex test `TestV2EncodeRPC_ByteIdenticalToV1` →
+  `TestV2EncodeRPC_WireGolden` (the goldens are now the canonical wire-format regression guard, not a
+  v1-conformance gate). Added `raft.DefaultElectionTimeout` (exported) and
+  `TestRaftRPCTimeout_BelowElectionTimeout`, a compile-time guard that the per-RPC timeout (80ms) stays
+  below the minimum election timeout (150ms) so an in-flight heartbeat completes before a spurious
+  election. The `v2RaftRPCTimeout` value and the `v2*` raft naming are intentionally unchanged — the
+  value is an unmeasurable-on-macOS throughput question (deferred to a Linux load gate), and `v2*` is
+  separate M5-migration naming whose family rename is its own slice (both captured in TODOS).
+
 ## [0.0.552.0] - 2026-06-12
 
 ### Removed

@@ -9,11 +9,14 @@ import (
 	"time"
 )
 
+// DefaultElectionTimeout is the base election timeout applied to a Node whose
+// Config leaves ElectionTimeout zero (the timer randomizes up from this base at
+// runtime). Exported so the cluster raft RPC bridge can assert its per-RPC
+// timeout stays safely below it (see internal/cluster/raft_rpc.go).
+const DefaultElectionTimeout = 150 * time.Millisecond
+
 // Timer defaults applied when Config leaves the corresponding field zero.
-// Mirrors v1's defaults (internal/raft/raft.go) closely enough that tests
-// using zero-config Nodes inherit familiar election cadence.
 const (
-	defaultElectionTimeout  = 150 * time.Millisecond
 	defaultHeartbeatTimeout = 50 * time.Millisecond
 	// idleElectionTimeout parks the timer for single-voter Nodes (no election
 	// is needed; the bootstrap path makes us Leader). One hour is "effectively

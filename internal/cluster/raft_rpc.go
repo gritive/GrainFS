@@ -1,14 +1,12 @@
-// raft_rpc.go — Raft RPC bridge for raft v2 (renamed from
-// raftv2_quic_rpc.go in M5 PR 29 now that v2 is the only path).
+// raft_rpc.go — Raft RPC bridge for the cluster data raft.
 //
-// Mirrors internal/raft.RPCTransport: it registers a transport.StreamControl
-// handler that decodes inbound Raft RPCs via the v2 wire codec
-// (raftv2_codec.go) and dispatches them through cluster.RaftNode.Handle*
-// (the v2 adapter forwards to raftv2.Node). Outbound RPCs go through the
-// v1-style callback pair the cluster layer already wires into the v2 adapter.
+// It registers a transport.StreamControl handler that decodes inbound Raft RPCs
+// via the wire codec (raftv2_codec.go) and dispatches them through
+// cluster.RaftNode.Handle* (the adapter forwards to the raft Node). Outbound
+// RPCs go through the callback pair the cluster layer wires into the adapter.
 //
-// Wire format is byte-identical to v1's raft_rpc.go (frozen until PR 30
-// deletes the v1 package).
+// The wire format is the FlatBuffers RPC envelope in raftv2_codec.go; it is the
+// sole raft RPC codec (the QUIC-era v1 it once mirrored is deleted).
 
 package cluster
 
@@ -23,9 +21,12 @@ import (
 )
 
 const (
-	// v2RaftRPCTimeout mirrors v1's raftRPCTimeout (internal/raft/quic_rpc.go).
-	// Must stay shorter than the minimum election timeout so heartbeats can
-	// reconnect before a follower starts a spurious election.
+	// v2RaftRPCTimeout bounds one raft RPC (RequestVote/AppendEntries/TimeoutNow)
+	// over the HTTP cluster transport: a warm pooled POST plus the one stale-conn
+	// retry (httpRetryIf). It MUST stay shorter than the minimum election timeout
+	// (raft.DefaultElectionTimeout) so an in-flight heartbeat completes before a
+	// follower starts a spurious election — guarded by
+	// TestRaftRPCTimeout_BelowElectionTimeout.
 	v2RaftRPCTimeout      = 80 * time.Millisecond
 	v2RaftSnapshotTimeout = 60 * time.Second
 )
