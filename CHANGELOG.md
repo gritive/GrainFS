@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.559.0] - 2026-06-12
 
 ### Fixed
 - Gossip receivers no longer crash the process on a malformed gossip payload from an
