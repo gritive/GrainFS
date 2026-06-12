@@ -74,20 +74,14 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 		return reply.Payload, nil
 	}
 	forwardStreamDialer := func(callCtx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}
-		reply, err := clusterTransport.CallWithBody(callCtx, peer, msg, body)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
+		// Native /forward/write route (Phase 8 N7-2): frame in the family header,
+		// raw body streamed, FB ForwardReply as the response body.
+		return clusterTransport.ForwardWrite(callCtx, peer, payload, body)
 	}
 	forwardReadStreamDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
-		msg := &transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload}
-		reply, body, err := clusterTransport.CallRead(callCtx, peer, msg)
-		if err != nil {
-			return nil, nil, err
-		}
-		return reply.Payload, body, nil
+		// Native /forward/read route: reply metadata in the family response
+		// header, object bytes streamed.
+		return clusterTransport.ForwardRead(callCtx, peer, payload)
 	}
 
 	state.forwardSender = cluster.NewForwardSender(forwardDialer).
@@ -436,5 +430,9 @@ func bootRegisterForwardHandlers(state *bootState) error {
 		return fmt.Errorf("bootRegisterForwardHandlers: shardSvc is nil — bootShardService must run first")
 	}
 	state.forwardReceiver.Register(state.shardSvc)
+	// Phase 8 N7-2: native forward routes. The tunnel registrations above stay
+	// until N8; all in-tree streaming-forward clients now dial the native routes.
+	state.clusterTransport.RegisterForwardWriteHandler(state.forwardReceiver.NativeWriteHandler())
+	state.clusterTransport.RegisterForwardReadHandler(state.forwardReceiver.NativeReadHandler())
 	return nil
 }

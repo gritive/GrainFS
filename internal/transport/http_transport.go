@@ -81,6 +81,11 @@ type HTTPTransport struct {
 	shardReadHandler  atomic.Pointer[ShardReadHandler]
 	nativeShardReads  atomic.Uint64
 
+	forwardWriteHandler atomic.Pointer[ForwardWriteHandler]
+	forwardReadHandler  atomic.Pointer[ForwardReadHandler]
+	nativeForwardWrites atomic.Uint64
+	nativeForwardReads  atomic.Uint64
+
 	srv    *hzserver.Hertz
 	client *hzclient.Client
 
@@ -225,6 +230,8 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.POST(httpRPCPath, t.handleRPC)
 	srv.POST(httpShardWritePath, t.handleShardWrite)
 	srv.GET(httpShardReadPath, t.handleShardRead)
+	srv.POST(httpForwardWritePath, t.handleForwardWrite)
+	srv.GET(httpForwardReadPath, t.handleForwardRead)
 
 	t.mu.Lock()
 	t.srv = srv
