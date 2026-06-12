@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.567.0] - 2026-06-13
+
+### Changed
+- Phase 6.5 S2 — `internal/cluster`'s entire badger transaction closure now runs
+  through the metastore contract: 81 `*badger.Txn` signatures and 48 View/Update
+  closures across 26 production files (plus 27 test files) converted to
+  `MetadataTxn`/`MetaItem`/`MetaIterator`, badger sentinels replaced by
+  `ErrMetaKeyNotFound`/`ErrMetaTxnTooBig`. Transaction-opening holders (FSM,
+  apply actor, segment orphan log, putpipeline metadata sink) take a
+  `MetadataStore`; `DistributedBackend` keeps the raw `*badger.DB` handle
+  (FSMDB/Close/constructors) alongside the wrapped store until the final
+  Phase 6.5 slice. Behavior-neutral: the adapter forwards 1:1, iterator
+  prefetch defaults are preserved explicitly, and the apply actor's
+  ErrTxnTooBig split-and-retry flow is untouched. The metastore contract now
+  also guarantees Discard idempotence (pinned by the conformance suite).
+  Direct badger imports in cluster are down to six handle/lifecycle files.
+
 ## [0.0.566.0] - 2026-06-13
 
 ### Added
