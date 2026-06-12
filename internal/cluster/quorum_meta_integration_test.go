@@ -147,6 +147,8 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	trA.SetStreamHandler(svcA.HandleRPC())
 	trB.SetStreamHandler(svcB.HandleRPC())
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
 		t.Helper()
@@ -221,6 +223,8 @@ func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
 	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	trA.SetStreamHandler(svcA.HandleRPC())
 	trB.SetStreamHandler(svcB.HandleRPC())
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
 		t.Helper()
@@ -274,6 +278,7 @@ func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
 	defer tr.Close()
 	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	tr.SetStreamHandler(svc.HandleRPC())
+	tr.RegisterBufferedRoute(transport.RouteShardRPC, svc.NativeRPCHandler())
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
 		t.Helper()
@@ -430,6 +435,7 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 
 	// trData serves incoming shard RPCs (including ReadQuorumMeta).
 	trData.SetStreamHandler(svcData.HandleRPC())
+	trData.RegisterBufferedRoute(transport.RouteShardRPC, svcData.NativeRPCHandler())
 
 	// Write quorum meta ONLY to the data node, simulating K-of-N write where
 	// the parity node was not in the write quorum.

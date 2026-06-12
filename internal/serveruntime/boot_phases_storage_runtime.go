@@ -249,6 +249,10 @@ func bootStreamRouterShell(state *bootState) {
 func bootStreamRouter(state *bootState) error {
 	bootStreamRouterShell(state)
 	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
+	// Phase 8 N7-3: native /shard/rpc buffered route — carries every buffered
+	// shard op (Write/Read/ReadRange/Delete/quorum-meta/shadow-meta/Ping). The
+	// tunnel StreamData registration above stays until N8 deletes the tunnel.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteShardRPC, state.shardSvc.NativeRPCHandler())
 	state.clusterTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
 	state.clusterTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
 	// Phase 8 N6: native /shard/write route. The tunnel HandleBody registration

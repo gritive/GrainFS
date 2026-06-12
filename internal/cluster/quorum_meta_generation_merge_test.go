@@ -32,6 +32,8 @@ func twoGenerationBackend(t *testing.T, selfIsB bool) (*DistributedBackend, *Sha
 	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	trA.SetStreamHandler(svcA.HandleRPC())
 	trB.SetStreamHandler(svcB.HandleRPC())
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	selfAddr := trA.LocalAddr()
 	selfSvc := svcA

@@ -291,6 +291,32 @@ func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Messa
 	return s.handleRPC
 }
 
+// NativeRPCHandler returns the native /shard/rpc buffered-route handler
+// (transport.RegisterBufferedRoute, Phase 8 N7-3). Same dispatch as HandleRPC
+// minus the transport Message envelope: the payload is the family's own FB RPC
+// envelope, and every outcome — including "Error" replies — is in-band in the
+// reply envelope (handleRPC never returns nil or a non-OK status), exactly as
+// the tunnel delivered it.
+func (s *ShardService) NativeRPCHandler() transport.BufferedRouteHandler {
+	return func(payload []byte) ([]byte, error) {
+		resp := s.handleRPC(&transport.Message{Type: transport.StreamData, Payload: payload})
+		if resp == nil {
+			return nil, fmt.Errorf("shard RPC: nil reply")
+		}
+		if resp.Status != transport.StatusOK {
+			return nil, fmt.Errorf("shard RPC: %s", resp.Payload)
+		}
+		return resp.Payload, nil
+	}
+}
+
+// callShardRPC sends one buffered shard-family RPC over the native /shard/rpc
+// route and returns the raw reply envelope (application status in-band, parsed
+// by the caller via unmarshalEnvelope).
+func (s *ShardService) callShardRPC(ctx context.Context, addr string, fw *transport.FlatBuffersWriter) ([]byte, error) {
+	return s.transport.CallBuffered(ctx, addr, transport.RouteShardRPC, fw.Builder.FinishedBytes())
+}
+
 // SendRequest sends a request to a peer and returns the response (bidirectional RPC).
 func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *transport.Message) (*transport.Message, error) {
 	if s.transport == nil {
@@ -300,6 +326,18 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 	peerAddr, err = s.resolvePeerAddress(peerAddr)
 	if err != nil {
 		return nil, err
+	}
+	// Phase 8 N7-3: the shard family (StreamData) rides the native /shard/rpc
+	// buffered route. The other SendRequest stream types — propose-forward
+	// (0x06/0x14) and read-index (0x0A) — stay on the tunnel until their own
+	// family migrations (plan rows 5/7/8) register native server adapters; each
+	// of those rows adds its case here (or retires this method).
+	if msg.Type == transport.StreamData {
+		reply, err := s.transport.CallBuffered(ctx, peerAddr, transport.RouteShardRPC, msg.Payload)
+		if err != nil {
+			return nil, err
+		}
+		return &transport.Message{Type: transport.StreamData, Status: transport.StatusOK, Payload: reply}, nil
 	}
 	// CallPooled (reused conn) not Call (connection-per-RPC): SendRequest forwards
 	// every PUT's index/group proposal to the leader, so a fresh TLS handshake per
@@ -320,7 +358,7 @@ func (s *ShardService) Ping(ctx context.Context, peer string) error {
 	}
 	fw := buildShardEnvelope("Ping", "_grainfs_health", "_ping", 0, nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	_, err = s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	_, err = s.callShardRPC(ctx, peerAddr, fw)
 	return err
 }
 
@@ -384,7 +422,7 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 		ShardTargetClass: "remote",
 	})
 	callStart := time.Now()
-	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, fw)
 	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteCall, callStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
@@ -403,7 +441,7 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 	})
 
 	decodeStart := time.Now()
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteDecode, decodeStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
@@ -495,12 +533,12 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	}
 	fw := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, fw)
 	if err != nil {
 		return nil, fmt.Errorf("read shard from %s: %w", peerAddr, err)
 	}
 
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
@@ -533,12 +571,12 @@ func (s *ShardService) ReadShardRange(ctx context.Context, peer, bucket, key str
 	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
 	fw := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, fw)
 	if err != nil {
 		return nil, fmt.Errorf("read shard range from %s: %w", peerAddr, err)
 	}
 
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
@@ -606,7 +644,7 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	}
 	fw := buildShardEnvelope("DeleteShards", bucket, key, 0, nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	_, err = s.transport.CallFlatBuffer(ctx, peerAddr, fw)
+	_, err = s.callShardRPC(ctx, peerAddr, fw)
 	return err
 }
 

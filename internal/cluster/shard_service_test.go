@@ -589,6 +589,7 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	plaintext := []byte("encrypted rpc shard")
 	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
@@ -669,6 +670,7 @@ func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 4096)
 	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
@@ -701,6 +703,7 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 
 	// Set tr2's stream handler to svc2's handler (simulating node2's shard server)
 	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	// Node1 writes a shard to Node2
 	err := svc1.WriteShard(ctx, tr2.LocalAddr(), "mybucket", "mykey", 0, []byte("shard-data-0"))

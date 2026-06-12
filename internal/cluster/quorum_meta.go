@@ -503,11 +503,11 @@ func (s *ShardService) ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key 
 	}
 	fw := buildShardEnvelope("ReadQuorumMeta", bucket, key, 0, nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, addr, fw)
+	respEnvelope, err := s.callShardRPC(ctx, addr, fw)
 	if err != nil {
 		return nil, fmt.Errorf("read quorum meta from %s: %w", addr, err)
 	}
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal quorum meta read response: %w", err)
 	}
@@ -539,11 +539,11 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	}
 	fw := buildShardEnvelope("WriteQuorumMeta", bucket, key, 0, data)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, addr, fw)
+	respEnvelope, err := s.callShardRPC(ctx, addr, fw)
 	if err != nil {
 		return fmt.Errorf("write quorum meta to %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("unmarshal quorum meta response: %w", err)
 	}
@@ -700,11 +700,11 @@ func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix 
 	}
 	fw := buildShardEnvelope("ScanQuorumMeta", bucket, prefix, 0, nil)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
-	resp, err := s.transport.CallFlatBuffer(ctx, addr, fw)
+	respEnvelope, err := s.callShardRPC(ctx, addr, fw)
 	if err != nil {
 		return nil, fmt.Errorf("scan quorum meta from %s: %w", addr, err)
 	}
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal scan quorum meta response: %w", err)
 	}
