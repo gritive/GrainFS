@@ -8,17 +8,17 @@ import (
 	"sync"
 )
 
-// MemStore is an in-memory Store for unit tests. Locks are held per
-// operation, never for a transaction's lifetime, so nested transactions
-// (View inside Update etc.) cannot deadlock. Write transactions buffer into
-// a pending overlay and apply on Commit under a short write lock — other
-// transactions never observe uncommitted writes (matching badger). The one
-// semantic this gives up is cross-operation snapshot isolation inside a
-// read transaction, which the conformance suite does not require and the
-// single-writer FSM apply actor cannot observe.
+// MemStore is an in-memory Store for unit tests, built on copy-on-write
+// snapshots: every transaction captures an immutable map reference at
+// creation (snapshot isolation, matching badger), and Commit publishes a
+// fresh copy under a short lock. No lock is ever held for a transaction's
+// lifetime, so nested transactions (View inside Update etc.) cannot
+// deadlock. Unlike badger there is no conflict detection: concurrent write
+// transactions are last-writer-wins per key — unobservable under the
+// single-writer FSM apply actor the cluster uses.
 type MemStore struct {
 	mu   sync.RWMutex
-	data map[string][]byte
+	data map[string][]byte // immutable once published; replaced wholesale on commit
 }
 
 // NewMemStore returns an empty in-memory store.
@@ -54,21 +54,41 @@ func (s *MemStore) Update(fn func(Txn) error) error {
 }
 
 func (s *MemStore) NewTransaction(update bool) Txn {
-	t := &memTxn{store: s, update: update}
+	t := &memTxn{store: s, update: update, snap: s.snapshot()}
 	if update {
 		t.pending = make(map[string]memPending)
 	}
 	return t
 }
 
-func (s *MemStore) DropPrefix(prefix []byte) error {
+// snapshot returns the current committed map. Published maps are never
+// mutated in place, so holding the reference is a stable point-in-time view.
+func (s *MemStore) snapshot() map[string][]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data
+}
+
+// publish replaces the committed map with a copy transformed by apply.
+func (s *MemStore) publish(apply func(next map[string][]byte)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k := range s.data {
-		if strings.HasPrefix(k, string(prefix)) {
-			delete(s.data, k)
-		}
+	next := make(map[string][]byte, len(s.data))
+	for k, v := range s.data {
+		next[k] = v
 	}
+	apply(next)
+	s.data = next
+}
+
+func (s *MemStore) DropPrefix(prefix []byte) error {
+	s.publish(func(next map[string][]byte) {
+		for k := range next {
+			if strings.HasPrefix(k, string(prefix)) {
+				delete(next, k)
+			}
+		}
+	})
 	return nil
 }
 
@@ -80,14 +100,26 @@ type memPending struct {
 	deleted bool
 }
 
+type txnState uint8
+
+const (
+	txnActive txnState = iota
+	txnCommitted
+	txnDiscarded
+)
+
 type memTxn struct {
 	store   *MemStore
 	update  bool
+	snap    map[string][]byte // immutable snapshot captured at creation
 	pending map[string]memPending
-	done    bool
+	state   txnState
 }
 
 func (t *memTxn) Get(key []byte) (Item, error) {
+	if t.state != txnActive {
+		return nil, ErrDiscardedTxn
+	}
 	k := string(key)
 	if t.update {
 		if p, ok := t.pending[k]; ok {
@@ -97,42 +129,45 @@ func (t *memTxn) Get(key []byte) (Item, error) {
 			return &memItem{key: append([]byte(nil), key...), val: p.value}, nil
 		}
 	}
-	t.store.mu.RLock()
-	v, ok := t.store.data[k]
-	t.store.mu.RUnlock()
+	v, ok := t.snap[k]
 	if !ok {
 		return nil, ErrKeyNotFound
 	}
-	// v is safe to hold after RUnlock: committed value slices are never
-	// mutated in place (Set stores a copy, Commit swaps map entries).
 	return &memItem{key: append([]byte(nil), key...), val: v}, nil
 }
 
 func (t *memTxn) Set(key, val []byte) error {
-	if !t.update {
-		return errMemReadOnlyTxn
+	switch {
+	case !t.update:
+		return errMemReadOnlyTxn // badger checks read-only before discarded
+	case t.state != txnActive:
+		return ErrDiscardedTxn
 	}
 	t.pending[string(key)] = memPending{value: append([]byte(nil), val...)}
 	return nil
 }
 
 func (t *memTxn) Delete(key []byte) error {
-	if !t.update {
+	switch {
+	case !t.update:
 		return errMemReadOnlyTxn
+	case t.state != txnActive:
+		return ErrDiscardedTxn
 	}
 	t.pending[string(key)] = memPending{deleted: true}
 	return nil
 }
 
 func (t *memTxn) NewIterator(opts IteratorOptions) Iterator {
-	// Snapshot the merged (committed ∪ pending) view at iterator creation,
-	// under a short read lock.
-	t.store.mu.RLock()
-	merged := make(map[string][]byte, len(t.store.data))
-	for k, v := range t.store.data {
+	if t.state != txnActive {
+		panic(ErrDiscardedTxn) // badger panics here, not an error return
+	}
+	// Merge the immutable snapshot with this txn's pending overlay; no store
+	// lock needed (the snapshot is never mutated after publication).
+	merged := make(map[string][]byte, len(t.snap))
+	for k, v := range t.snap {
 		merged[k] = v
 	}
-	t.store.mu.RUnlock()
 	if t.update {
 		for k, p := range t.pending {
 			if p.deleted {
@@ -154,26 +189,36 @@ func (t *memTxn) NewIterator(opts IteratorOptions) Iterator {
 }
 
 func (t *memTxn) Commit() error {
-	if t.done {
+	// badger: an empty commit short-circuits to Discard()+nil BEFORE the
+	// discarded check; only a commit with pending writes on a finished txn
+	// errors.
+	if len(t.pending) == 0 {
+		t.Discard()
 		return nil
 	}
-	t.done = true
-	if !t.update {
-		return nil
+	if t.state != txnActive {
+		return errors.New("metastore: trying to commit a discarded txn")
 	}
-	t.store.mu.Lock()
-	for k, p := range t.pending {
-		if p.deleted {
-			delete(t.store.data, k)
-		} else {
-			t.store.data[k] = p.value
+	t.state = txnCommitted
+	// Applied against the LIVE map (not the snapshot): concurrent committers
+	// are last-writer-wins per key — no conflict detection by contract.
+	t.store.publish(func(next map[string][]byte) {
+		for k, p := range t.pending {
+			if p.deleted {
+				delete(next, k)
+			} else {
+				next[k] = p.value
+			}
 		}
-	}
-	t.store.mu.Unlock()
+	})
 	return nil
 }
 
-func (t *memTxn) Discard() { t.done = true }
+func (t *memTxn) Discard() {
+	if t.state == txnActive {
+		t.state = txnDiscarded
+	}
+}
 
 type memItem struct {
 	key []byte

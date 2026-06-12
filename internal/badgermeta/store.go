@@ -54,6 +54,8 @@ func mapErr(err error) error {
 		return metastore.ErrKeyNotFound
 	case errors.Is(err, badger.ErrTxnTooBig):
 		return metastore.ErrTxnTooBig
+	case errors.Is(err, badger.ErrDiscardedTxn):
+		return metastore.ErrDiscardedTxn
 	default:
 		return err
 	}

@@ -274,6 +274,68 @@ func Run(t *testing.T, opener func(t *testing.T) metastore.Store) {
 		}))
 	})
 
+	t.Run("SnapshotIsolationAcrossCommit", func(t *testing.T) {
+		// badger transactions read from a snapshot taken at creation —
+		// commits that land after the txn started must not become visible
+		// mid-transaction. Cluster read paths (latest-pointer then object
+		// meta) depend on this coherence. (code-gate finding 2.)
+		s := opener(t)
+		require.NoError(t, s.Update(func(txn metastore.Txn) error {
+			return txn.Set([]byte("stable"), []byte("old"))
+		}))
+		ro := s.NewTransaction(false)
+		defer ro.Discard()
+		require.NoError(t, s.Update(func(txn metastore.Txn) error {
+			if err := txn.Set([]byte("fresh"), []byte("new")); err != nil {
+				return err
+			}
+			return txn.Set([]byte("stable"), []byte("mutated"))
+		}))
+		// The pre-existing txn still sees the world as of its creation.
+		_, err := ro.Get([]byte("fresh"))
+		require.ErrorIs(t, err, metastore.ErrKeyNotFound, "commit after txn start must be invisible")
+		item, err := ro.Get([]byte("stable"))
+		require.NoError(t, err)
+		v, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		require.Equal(t, []byte("old"), v, "txn must read its snapshot, not the live state")
+		it := ro.NewIterator(metastore.IteratorOptions{Prefix: []byte("fresh")})
+		defer it.Close()
+		it.Rewind()
+		require.False(t, it.Valid(), "iterator must also be snapshot-scoped")
+		// A transaction created after the commit sees the new state.
+		require.NoError(t, s.View(func(txn metastore.Txn) error {
+			_, err := txn.Get([]byte("fresh"))
+			return err
+		}))
+	})
+
+	t.Run("FinishedTxnRejected", func(t *testing.T) {
+		// badger semantics (verified against txn.go/iterator.go): a finished
+		// txn returns ErrDiscardedTxn from Get/Set/Delete, a plain error from
+		// Commit, and panics from NewIterator. MemStore must fail identically
+		// so migrated tests cannot hide lifecycle bugs. (code-gate finding 3.)
+		s := opener(t)
+		txn := s.NewTransaction(true)
+		// A pending write BEFORE Discard: badger's Commit short-circuits to
+		// nil on an empty write set even when discarded, so only a non-empty
+		// finished txn exercises the rejection path.
+		require.NoError(t, txn.Set([]byte("pre"), []byte("v")))
+		txn.Discard()
+		_, err := txn.Get([]byte("k"))
+		require.ErrorIs(t, err, metastore.ErrDiscardedTxn)
+		require.ErrorIs(t, txn.Set([]byte("k"), []byte("v")), metastore.ErrDiscardedTxn)
+		require.ErrorIs(t, txn.Delete([]byte("k")), metastore.ErrDiscardedTxn)
+		require.Error(t, txn.Commit())
+		require.Panics(t, func() { txn.NewIterator(metastore.IteratorOptions{}) })
+		// The discarded write must never become visible.
+		require.NoError(t, s.View(func(v metastore.Txn) error {
+			_, gerr := v.Get([]byte("pre"))
+			require.ErrorIs(t, gerr, metastore.ErrKeyNotFound)
+			return nil
+		}))
+	})
+
 	t.Run("ReadOnlyTxnRejectsWrites", func(t *testing.T) {
 		s := opener(t)
 		require.NoError(t, s.View(func(txn metastore.Txn) error {
