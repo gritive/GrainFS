@@ -1,14 +1,5 @@
 # TODO
 
-- [Phase 8 N1-N3 follow-up — orphaned mux-versioning dead code, separate small slice]
-  The mux subsystem removal (v0.0.551.0) left two orphans, used nowhere live: `ProtocolVersionMux
-  = "grainfs-mux-v1"` (the whole `internal/transport/version.go`) and `metrics.TransportCECounter`
-  (`internal/metrics/transport.go`, "mux capability exchange outcomes" — now never incremented). Not
-  folded into N5 (the docs slice) because removing `TransportCECounter` is **operator-visible** (a
-  Prometheus metric disappearing from dashboards) and deserves its own CHANGELOG operator note +
-  decision on whether to keep a now-always-absent metric for dashboard stability. Remove both (and the
-  now-empty version.go) in a dedicated code-cleanup slice.
-
 - [Phase 8 N4 follow-up — load-gated retune, deferred]
   `v2RaftRPCTimeout` (80ms, `internal/cluster/raft_rpc.go`) and `v2MetaRPCTimeout` (500ms,
   `raftv2_meta.go`) are kept at their proven values. N4's spec said "retune for warm pooled HTTP POST
