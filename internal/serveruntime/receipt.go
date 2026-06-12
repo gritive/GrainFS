@@ -122,20 +122,19 @@ func receiptDBOptions(dir string) badger.Options {
 
 // SetupClusterReceipt wires the full Slice 2 stack in cluster mode.
 // PSK comes from opts.PSK if set; callers usually pass --heal-receipt-psk
-// when set, otherwise the resolved cluster transport key. Registers the StreamReceiptQuery
-// handler on the router and wires the routing cache into the gossip
-// receiver. Starts the gossip broadcast goroutine bound to ctx.
+// when set, otherwise the resolved cluster transport key. Registers the
+// /receipt/query handler on the cluster transport and wires the routing cache
+// into the gossip receiver. Starts the gossip broadcast goroutine bound to ctx.
 func SetupClusterReceipt(
 	ctx context.Context,
 	opts ReceiptOptions,
 	dataDir, nodeID string,
 	peers []string,
 	clusterTransport transport.ClusterTransport,
-	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
-	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, clusterTransport, router, gossipReceiver, srvOpts)
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, clusterTransport, gossipReceiver, srvOpts)
 }
 
 func SetupClusterReceiptWithPeerProvider(
@@ -144,11 +143,10 @@ func SetupClusterReceiptWithPeerProvider(
 	dataDir, nodeID string,
 	peerProvider func() []string,
 	clusterTransport transport.ClusterTransport,
-	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
-	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, clusterTransport, router, gossipReceiver, srvOpts)
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, clusterTransport, gossipReceiver, srvOpts)
 }
 
 func setupClusterReceipt(
@@ -158,7 +156,6 @@ func setupClusterReceipt(
 	peers []string,
 	peerProvider func() []string,
 	clusterTransport transport.ClusterTransport,
-	router *transport.StreamRouter,
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
@@ -224,9 +221,7 @@ func setupClusterReceipt(
 	if gossipReceiver != nil {
 		gossipReceiver.SetReceiptCache(routingCache)
 	}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	router.Handle(transport.StreamReceiptQuery, cluster.NewReceiptQueryHandler(store))
-	// Phase 8 N7-3: native /receipt/query buffered route. The handler reads
+	// Native /receipt/query buffered route. The handler reads
 	// only req.Payload; found/not-found is in-band in the FB response (invalid
 	// requests answer found=false, never an error).
 	clusterTransport.RegisterBufferedRoute(transport.RouteReceiptQuery,

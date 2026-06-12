@@ -72,20 +72,6 @@ func TestBootClusterTransport_GeneratesEphemeralKeyInSoloMode(t *testing.T) {
 }
 
 // TestBootPeerConnections_EmptyPeersIsNoOp — solo bootstrap has no peers.
-// bootPeerConnections must return cleanly without panicking on a nil/empty
-// peer list.
-func TestBootPeerConnections_EmptyPeersIsNoOp(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
-	require.NoError(t, bootValidateConfig(state))
-	t.Cleanup(state.Cleanup)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NoError(t, bootPeerConnections(ctx, state), "empty peer list is a clean no-op")
-}
-
 // TestBootGroupRaftMux_CreatesMux — phase constructs the group-raft dispatcher
 // from state.clusterTransport.
 func TestBootGroupRaftMux_CreatesMux(t *testing.T) {
@@ -123,9 +109,6 @@ func TestBootTransportPhases_OrderingPreservesMuxBeforeMetaTransportInvariant(t 
 	require.NoError(t, bootClusterTransport(ctx, state))
 	require.NotNil(t, state.clusterTransport, "transport up first")
 	assert.Nil(t, state.groupRaftMux, "mux not yet constructed")
-
-	require.NoError(t, bootPeerConnections(ctx, state))
-	assert.Nil(t, state.groupRaftMux, "peer connections do not touch mux")
 
 	require.NoError(t, bootGroupRaftMux(state))
 	require.NotNil(t, state.groupRaftMux, "mux ready for downstream metaTransport")

@@ -30,11 +30,8 @@ type CapabilityEvidenceSource interface {
 }
 
 // GossipTransport is the transport surface the gossip senders/receiver use:
-// the native gossip routes (Phase 8 N7-3) plus the tunnel Transport surface
-// (Connect/Send/Receive — deleted in N8, after which only the native methods
-// remain).
+// the native gossip routes (Phase 8 N7-3).
 type GossipTransport interface {
-	transport.Transport
 	RegisterGossipRoute(path string, h transport.GossipHandler)
 	GossipSend(ctx context.Context, addr, path string, payload []byte) error
 }
@@ -202,12 +199,8 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 //   - /gossip/admin   → NodeStatsMsg → NodeStatsStore
 //   - /gossip/receipt → ReceiptGossipMsg → ReceiptRoutingCache (if configured)
 //
-// Production wires it via RegisterNativeGossipRoutes (Phase 8 N7-3): each
-// family's callback runs on the route's transport-owned drain goroutine. The
-// legacy Run loop (the tunnel Receive() inbox type-switch) remains until N8
-// for the same dispatch — multi-stream dispatch lives in one receiver because
-// transport.Receive() is a single channel; two competing goroutine consumers
-// would race for each message and deliver to at most one.
+// Wired via RegisterNativeGossipRoutes (Phase 8 N7-3): each family's callback
+// runs on the route's transport-owned drain goroutine.
 type GossipReceiver struct {
 	tr     GossipTransport
 	store  *NodeStatsStore
@@ -259,10 +252,8 @@ func (r *GossipReceiver) SetReceiptCache(c ReceiptRoutingCache) {
 }
 
 // RegisterNativeGossipRoutes installs the receiver's two per-family handlers
-// on the native gossip routes (Phase 8 N7-3) — the native replacement for the
-// Run inbox loop. The callbacks run on the transport's per-route drain
-// goroutine, exactly where the Receive() loop ran them; empty payloads are
-// skipped as Run skipped them.
+// on the native gossip routes (Phase 8 N7-3). The callbacks run on the
+// transport's per-route drain goroutine; empty payloads are skipped.
 func (r *GossipReceiver) RegisterNativeGossipRoutes() {
 	r.tr.RegisterGossipRoute(transport.RouteGossipAdmin, func(from string, payload []byte) {
 		if len(payload) == 0 {
@@ -276,34 +267,6 @@ func (r *GossipReceiver) RegisterNativeGossipRoutes() {
 		}
 		r.handleReceiptGossip(from, payload)
 	})
-}
-
-// Run processes incoming tunnel-inbox messages until ctx is cancelled.
-// Production uses RegisterNativeGossipRoutes instead; Run remains until Phase
-// 8 N8 deletes the Receive() surface (tests still drive dispatch through it).
-func (r *GossipReceiver) Run(ctx context.Context) {
-	ch := r.tr.Receive()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case rm, ok := <-ch:
-			if !ok {
-				return
-			}
-			if len(rm.Message.Payload) == 0 {
-				continue
-			}
-			switch rm.Message.Type {
-			case transport.StreamAdmin:
-				r.handleNodeStats(rm.From, rm.Message.Payload)
-			case transport.StreamReceipt:
-				r.handleReceiptGossip(rm.From, rm.Message.Payload)
-			default:
-				// Other stream types are not gossip concerns.
-			}
-		}
-	}
 }
 
 func (r *GossipReceiver) handleNodeStats(from string, payload []byte) {

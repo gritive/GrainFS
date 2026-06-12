@@ -967,10 +967,7 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 			Payload: encodeProposeForwardReply(idx, err),
 		}
 	}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8
-	// deletes the envelope tunnel wholesale.
-	b.shardSvc.RegisterHandler(transport.StreamProposeForward, h)
-	// Phase 8 N7-3: native /forward/propose/legacy buffered route. The handler
+	// Native /forward/propose/legacy buffered route. The handler
 	// reads only req.Payload and every propose outcome (index + apply error) is
 	// in-band in the reply payload, exactly as the tunnel delivered it.
 	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeLegacy,
@@ -1027,9 +1024,7 @@ func (b *DistributedBackend) RegisterReadIndexHandler() {
 		}
 		return &transport.Message{Type: transport.StreamReadIndex, Payload: resp}
 	}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	b.shardSvc.RegisterHandler(transport.StreamReadIndex, h)
-	// Phase 8 N7-3: native /forward/read-index buffered route. The handler
+	// Native /forward/read-index buffered route. The handler
 	// ignores the (empty) request payload; the leader outcome (commitIndex or
 	// error text) is in-band in the reply payload.
 	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardReadIndex,

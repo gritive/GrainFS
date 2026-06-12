@@ -163,9 +163,7 @@ func RegisterAppendSegmentHandler(tr appendSegRegistrar, lookup appendSegmentGro
 		}
 		return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: []byte{appendSegStatusOK}}, f
 	}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	tr.HandleRead(transport.StreamReadAppendSegment, h)
-	// Phase 8 N7-3: native GET /append-segment/read. The handler reads only
+	// Native GET /append-segment/read. The handler reads only
 	// req.Payload and always answers StatusOK with the outcome (OK/ENOENT/
 	// ERROR + text) in-band in the status frame — its Type/ID echo into the
 	// reply is discarded (the native wire has no envelope).

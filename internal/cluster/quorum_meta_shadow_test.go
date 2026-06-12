@@ -141,12 +141,11 @@ func TestWriteShadowMeta_RealTransportRoundTrip(t *testing.T) {
 	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
 	defer tr1.Close()
 	defer tr2.Close()
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	blob := []byte("shadow-meta-over-the-wire")

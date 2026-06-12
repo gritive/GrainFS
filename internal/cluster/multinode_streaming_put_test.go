@@ -142,12 +142,12 @@ func newInProcessClusterT(t *testing.T, nodes int, ec cluster.ECConfig, mk mkTra
 
 		peerSvc := cluster.NewShardService(peerDir, peerTr,
 			cluster.WithShardDEKKeeper(keeper, clusterID), cluster.WithDataWAL(peerDWAL))
-		peerTr.SetStreamHandler(peerSvc.HandleRPC())
+		peerTr.RegisterBufferedRoute(transport.RouteShardRPC, peerSvc.NativeRPCHandler())
 		peerTr.RegisterBufferedRoute(transport.RouteShardRPC, peerSvc.NativeRPCHandler())
 		peerTr.RegisterShardWriteHandler(peerSvc.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 		peerTr.RegisterShardReadHandler(peerSvc.NativeReadHandler())   // native /shard/read route (Phase 8 N7-1)
-		peerTr.HandleBody(transport.StreamShardWriteBody, peerSvc.HandleWriteBody())
-		peerTr.HandleRead(transport.StreamShardReadBody, peerSvc.HandleReadBody())
+		peerTr.RegisterShardWriteHandler(peerSvc.NativeWriteHandler())
+		peerTr.RegisterShardReadHandler(peerSvc.NativeReadHandler())
 		t.Cleanup(func() { _ = peerSvc.Close() })
 
 		cl.peerAddrs = append(cl.peerAddrs, peerTr.LocalAddr())

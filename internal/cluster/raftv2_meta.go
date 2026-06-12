@@ -52,10 +52,7 @@ var _ MetaTransport = (*RaftV2MetaTransport)(nil)
 // NewRaftV2MetaTransport wires the inbound StreamMetaRaft handler.
 func NewRaftV2MetaTransport(tr clusterRPCTransport, node RaftNode) *RaftV2MetaTransport {
 	mt := &RaftV2MetaTransport{transport: tr, node: node}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8
-	// deletes the envelope tunnel wholesale.
-	tr.Handle(transport.StreamMetaRaft, mt.handleRPC)
-	// Phase 8 N7-3: native /raft/meta/rpc buffered route. handleRPC only reads
+	// Native /raft/meta/rpc buffered route. handleRPC only reads
 	// req.Payload; its Type echo into the reply (a Message field, not part of
 	// the FB envelope) is dropped here. nil reply (decode failure / unknown
 	// RPC) maps to a 500 exactly as the tunnel's nil-response StatusError did.

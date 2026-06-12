@@ -106,10 +106,7 @@ func bootKEKRotationLeader(state *bootState) error {
 	leaseHandler := cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
 		return state.metaRaft.LastApplied()
 	}, snapRefCount)
-	// Tunnel registrations — kept alongside the native routes until Phase 8 N8.
-	state.clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe, diskHandler.Handle)
-	state.clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe, leaseHandler.Handle)
-	// Phase 8 N7-3: native /probe/kek-disk + /probe/kek-lease buffered routes.
+	// Native /probe/kek-disk + /probe/kek-lease buffered routes.
 	// Both handlers read only req.Payload; their StatusError replies
 	// (decode/statfs/snapshot-count failure) map to a 500 → client error,
 	// exactly as the tunnel surfaced them.
@@ -219,9 +216,7 @@ func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error 
 		state.kekStore,
 		state.metaRaft.FSM(),
 	)
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	state.clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
-	// Phase 8 N7-3: native /probe/capability buffered route. Handle reads only
+	// Native /probe/capability buffered route. Handle reads only
 	// req.Payload; its StatusError replies (decode/identity/seal failure) map
 	// to a 500 → client error, exactly as the tunnel surfaced them.
 	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability,

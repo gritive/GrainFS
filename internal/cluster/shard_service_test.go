@@ -34,8 +34,8 @@ func TestShardService_LocalWriteAndRead(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, "shards"))
 	require.NoError(t, err)
 
-	// Write a shard locally via handleRPC
-	handler := svc.HandleRPC()
+	// The shard RPC handler exists (native /shard/rpc route)
+	handler := svc.NativeRPCHandler()
 	require.NotNil(t, handler)
 
 	// Direct local write
@@ -168,11 +168,10 @@ func TestShardService_WriteLocalSealedShardVerbatim(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
-// TestShardService_HandleWriteBody_SealedShardRoundTrip drives the receiver RPC
-// branch end-to-end: a "WriteSealedShard" envelope + already-sealed body is
-// stored verbatim by the handler and reads back to the original plaintext. This
-// is the dormant S2 receiver entry point (no sender ships WriteSealedShard yet).
-func TestShardService_HandleWriteBody_SealedShardRoundTrip(t *testing.T) {
+// TestShardService_NativeWriteHandler_SealedShardRoundTrip drives the receiver
+// branch end-to-end: a Sealed=true request + already-sealed body is stored
+// verbatim by the handler and reads back to the original plaintext.
+func TestShardService_NativeWriteHandler_SealedShardRoundTrip(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
@@ -182,18 +181,12 @@ func TestShardService_HandleWriteBody_SealedShardRoundTrip(t *testing.T) {
 	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 3, plaintext)
 	require.NoError(t, err)
 
-	fw := buildShardEnvelope("WriteSealedShard", "bkt", "obj", 3, nil)
-	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
-	fw.Builder.Reset()
-
 	// The receiver requires the completeness trailer the streaming sink appends
 	// on a clean Finalize; hand-build it here since this test drives the handler
 	// directly without the sink.
 	body := AppendSealedShardTrailer(sealed, int64(len(sealed)))
-	resp := svc.HandleWriteBody()(req, bytes.NewReader(body))
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
-	require.NoError(t, err)
-	require.NotEqual(t, "Error", rpcType, "sealed-shard write must not error")
+	werr := svc.NativeWriteHandler()(transport.ShardWriteRequest{Bucket: "bkt", Key: "obj", ShardIdx: 3, Sealed: true}, bytes.NewReader(body))
+	require.NoError(t, werr, "sealed-shard write must not error")
 
 	got, err := svc.ReadLocalShard("bkt", "obj", 3)
 	require.NoError(t, err)
@@ -227,12 +220,12 @@ func TestSplitSealedShardTrailer(t *testing.T) {
 	})
 }
 
-// TestShardService_HandleWriteBody_RejectsTruncatedSealedShard proves the handler
-// path: a "WriteSealedShard" body whose trailer declares MORE payload than was
-// received (a truncated stream) is rejected with an Error response and commits NO
-// shard file. This is the direct-handler counterpart to the over-transport
+// TestShardService_NativeWriteHandler_RejectsTruncatedSealedShard proves the
+// handler path: a Sealed=true body whose trailer declares MORE payload than was
+// received (a truncated stream) is rejected with an error and commits NO shard
+// file. This is the direct-handler counterpart to the over-transport
 // TestRemoteSealedShardSink_AbortDoesNotCommit.
-func TestShardService_HandleWriteBody_RejectsTruncatedSealedShard(t *testing.T) {
+func TestShardService_NativeWriteHandler_RejectsTruncatedSealedShard(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
@@ -242,19 +235,13 @@ func TestShardService_HandleWriteBody_RejectsTruncatedSealedShard(t *testing.T) 
 	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 5, plaintext)
 	require.NoError(t, err)
 
-	fw := buildShardEnvelope("WriteSealedShard", "bkt", "obj", 5, nil)
-	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
-	fw.Builder.Reset()
-
 	// Trailer declares the FULL length, but the body carries only half the sealed
 	// bytes — exactly what a mid-stream abort leaves on the wire.
 	full := AppendSealedShardTrailer(sealed, int64(len(sealed)))
 	truncated := append(full[:len(sealed)/2], full[len(sealed):]...)
 
-	resp := svc.HandleWriteBody()(req, bytes.NewReader(truncated))
-	rpcType, _, err := unmarshalEnvelope(resp.Payload)
-	require.NoError(t, err)
-	require.Equal(t, "Error", rpcType, "truncated sealed-shard write must be rejected")
+	werr := svc.NativeWriteHandler()(transport.ShardWriteRequest{Bucket: "bkt", Key: "obj", ShardIdx: 5, Sealed: true}, bytes.NewReader(truncated))
+	require.Error(t, werr, "truncated sealed-shard write must be rejected")
 
 	_, statErr := os.Stat(filepath.Join(dir, "shards", "bkt", "obj", "shard_5"))
 	require.True(t, os.IsNotExist(statErr), "rejected sealed-shard write must commit NO shard file")
@@ -583,12 +570,10 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	defer tr1.Close()
 	defer tr2.Close()
 
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
-
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	plaintext := []byte("encrypted rpc shard")
@@ -626,15 +611,13 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	defer tr1.Close()
 	defer tr2.Close()
 
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
-
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler()) // WriteShardStream dials the native route (Phase 8 N6)
 	tr2.RegisterShardReadHandler(svc2.NativeReadHandler())   // ReadShardStream dials the native route (Phase 8 N7-1)
-	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
-	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
+	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler())
+	tr2.RegisterShardReadHandler(svc2.NativeReadHandler())
 
 	plaintext := bytes.Repeat([]byte("encrypted rpc shard"), 128*1024)
 	require.NoError(t, svc1.WriteShardStream(ctx, tr2.LocalAddr(), "bkt", "key", 0, bytes.NewReader(plaintext)))
@@ -663,13 +646,11 @@ func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
 	defer tr1.Close()
 	defer tr2.Close()
 
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
-
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 4096)
@@ -692,7 +673,6 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	defer tr2.Close()
 
 	// Connect them
-	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
@@ -702,7 +682,7 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	// Set tr2's stream handler to svc2's handler (simulating node2's shard server)
-	tr2.SetStreamHandler(svc2.HandleRPC())
+	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
 	// Node1 writes a shard to Node2
@@ -1241,8 +1221,8 @@ func TestShardService_NativeWriteHandler_PlainAndSealed(t *testing.T) {
 	// which is exactly what the InboundNativeShardWrites assertion below
 	// discriminates). Read-back uses the streaming read (HandleRead), the same
 	// shape TestShardService_ReadShardStream_EncryptedStreamsPlaintext uses.
-	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
-	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
+	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler())
+	tr2.RegisterShardReadHandler(svc2.NativeReadHandler())
 
 	// Plain path (WriteShard semantics): destination seals; read-back decrypts.
 	plaintext := bytes.Repeat([]byte("native shard write"), 64*1024)

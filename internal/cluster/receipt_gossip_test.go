@@ -45,11 +45,11 @@ func TestReceiptGossipSender_BroadcastsToAllPeers(t *testing.T) {
 	defer cancel()
 	sender.Run(ctx)
 
-	// Each peer received at least one StreamReceipt message.
+	// Each peer received at least one /gossip/receipt message.
 	for _, p := range peers {
 		sent := tr.SentTo(p)
 		require.NotEmpty(t, sent, "peer %s should receive gossip", p)
-		assert.Equal(t, transport.StreamReceipt, sent[0].Type, "messages must use StreamReceipt")
+		assert.Equal(t, transport.RouteGossipReceipt, sent[0].path, "messages must use the receipt gossip route")
 	}
 }
 
@@ -94,7 +94,7 @@ func TestReceiptGossipSender_PayloadDecodesToExpectedIDs(t *testing.T) {
 	sent := tr.SentTo("peer:1")
 	require.NotEmpty(t, sent)
 
-	msg := clusterpb.GetRootAsReceiptGossipMsg(sent[0].Payload, 0)
+	msg := clusterpb.GetRootAsReceiptGossipMsg(sent[0].payload, 0)
 	assert.Equal(t, "node-x", string(msg.NodeId()))
 	n := msg.ReceiptIdsLength()
 	got := make([]string, n)
@@ -120,7 +120,7 @@ func TestReceiptGossipSender_RespectsMaxIDs(t *testing.T) {
 
 	sent := tr.SentTo("peer:1")
 	require.NotEmpty(t, sent)
-	msg := clusterpb.GetRootAsReceiptGossipMsg(sent[0].Payload, 0)
+	msg := clusterpb.GetRootAsReceiptGossipMsg(sent[0].payload, 0)
 	assert.Equal(t, 50, msg.ReceiptIdsLength(), "sender must cap at maxIDs")
 }
 
@@ -146,23 +146,15 @@ func TestGossipReceiver_DispatchesReceiptGossipToCache(t *testing.T) {
 	r := NewGossipReceiver(tr, statsStore)
 	r.SetReceiptCache(cache)
 
-	// Craft a ReceiptGossipMsg from "peer-a" and inject via mock.
+	r.RegisterNativeGossipRoutes()
+
+	// Craft a ReceiptGossipMsg from "peer-a" and deliver via the native route.
 	payload := encodeReceiptGossipMsg(t, "peer-a:9000", []string{"rcpt-1", "rcpt-2"})
-	tr.recv <- &transport.ReceivedMessage{
-		From:    "peer-a:9000",
-		Message: &transport.Message{Type: transport.StreamReceipt, Payload: payload},
-	}
+	tr.deliver(t, "peer-a:9000", transport.RouteGossipReceipt, payload)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go r.Run(ctx)
-
-	// Poll until cache has the IDs.
-	require.Eventually(t, func() bool {
-		node, ok := cache.Lookup("rcpt-1")
-		return ok && node == "peer-a:9000"
-	}, 500*time.Millisecond, 5*time.Millisecond)
-
-	cancel()
+	node, ok := cache.Lookup("rcpt-1")
+	require.True(t, ok)
+	require.Equal(t, "peer-a:9000", node)
 }
 
 func TestGossipReceiver_DropsReceiptGossipWithMismatchedNodeID(t *testing.T) {
@@ -173,22 +165,14 @@ func TestGossipReceiver_DropsReceiptGossipWithMismatchedNodeID(t *testing.T) {
 	r := NewGossipReceiver(tr, statsStore)
 	r.SetReceiptCache(cache)
 
+	r.RegisterNativeGossipRoutes()
+
 	// NodeId in payload says "peer-a" but connection is from "peer-evil".
 	payload := encodeReceiptGossipMsg(t, "peer-a:9000", []string{"rcpt-1"})
-	tr.recv <- &transport.ReceivedMessage{
-		From:    "peer-evil:9000",
-		Message: &transport.Message{Type: transport.StreamReceipt, Payload: payload},
-	}
+	tr.deliver(t, "peer-evil:9000", transport.RouteGossipReceipt, payload)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go r.Run(ctx)
-
-	// Give the receiver a chance to process. Then assert cache is still empty.
-	time.Sleep(50 * time.Millisecond)
 	_, ok := cache.Lookup("rcpt-1")
 	assert.False(t, ok, "spoofed gossip must be dropped")
-
-	cancel()
 }
 
 func TestGossipReceiver_RollingWindowReplacesPriorIDs(t *testing.T) {
@@ -199,28 +183,17 @@ func TestGossipReceiver_RollingWindowReplacesPriorIDs(t *testing.T) {
 	r := NewGossipReceiver(tr, statsStore)
 	r.SetReceiptCache(cache)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go r.Run(ctx)
-	t.Cleanup(cancel)
+	r.RegisterNativeGossipRoutes()
 
 	// First tick: old IDs
-	tr.recv <- &transport.ReceivedMessage{
-		From:    "peer-a:9000",
-		Message: &transport.Message{Type: transport.StreamReceipt, Payload: encodeReceiptGossipMsg(t, "peer-a:9000", []string{"old-1"})},
-	}
-	require.Eventually(t, func() bool {
-		_, ok := cache.Lookup("old-1")
-		return ok
-	}, 500*time.Millisecond, 5*time.Millisecond)
+	tr.deliver(t, "peer-a:9000", transport.RouteGossipReceipt, encodeReceiptGossipMsg(t, "peer-a:9000", []string{"old-1"}))
+	_, ok := cache.Lookup("old-1")
+	require.True(t, ok)
 
 	// Second tick: replacement IDs
-	tr.recv <- &transport.ReceivedMessage{
-		From:    "peer-a:9000",
-		Message: &transport.Message{Type: transport.StreamReceipt, Payload: encodeReceiptGossipMsg(t, "peer-a:9000", []string{"new-1"})},
-	}
-	require.Eventually(t, func() bool {
-		_, okOld := cache.Lookup("old-1")
-		_, okNew := cache.Lookup("new-1")
-		return !okOld && okNew
-	}, 500*time.Millisecond, 5*time.Millisecond, "rolling window should evict old IDs on next gossip")
+	tr.deliver(t, "peer-a:9000", transport.RouteGossipReceipt, encodeReceiptGossipMsg(t, "peer-a:9000", []string{"new-1"}))
+	_, okOld := cache.Lookup("old-1")
+	_, okNew := cache.Lookup("new-1")
+	require.False(t, okOld, "rolling window should evict old IDs on next gossip")
+	require.True(t, okNew)
 }

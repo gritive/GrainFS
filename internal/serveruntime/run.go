@@ -56,9 +56,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootClusterTransport(ctx, state); err != nil {
 		return err
 	}
-	if err := bootPeerConnections(ctx, state); err != nil {
-		return err
-	}
 	// groupRaftMux must exist BEFORE NewMetaTransportMux so the meta-raft
 	// transport auto-registers on construction.
 	if err := bootGroupRaftMux(state); err != nil {
@@ -70,7 +67,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// runtime). Bootstrap runs in non-join mode.
 	//
 	// In join mode, state.peers carries the join target transport address
-	// (used by PerformMetaJoin / bootPeerConnections); it is NOT a node-ID
+	// (used by PerformMetaJoin); it is NOT a node-ID
 	// list and must NOT be fed to raft as cfg.Peers — doing so makes v2's
 	// reconstructConfig seed the initial voter set with a transport address
 	// as a voter ID, triggering a term storm that step-downs n1 mid-promote.
@@ -151,8 +148,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootGenesisDEKBootstrap(ctx, state); err != nil {
 		return err
 	}
-	bootStreamRouterShell(state)
-
 	recordStartupDecision := func(decision badgerrole.Decision) {
 		recordBadgerStartupDecision(state, decision)
 	}
@@ -224,9 +219,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// R-FSM-α: register data-shard RPC handlers now that shardSvc exists. Until
-	// this point, StreamRouter.Dispatch returns nil for the forwarder RPC types
-	// (graceful no-handler path), so any racing forwarded RPC sees a clean
-	// no-handler reply rather than a panic.
+	// this point, the forwarder routes answer 503 not-ready, so any racing
+	// forwarded RPC sees a clean not-ready error rather than a panic.
 	if err := bootRegisterForwardHandlers(state); err != nil {
 		return err
 	}

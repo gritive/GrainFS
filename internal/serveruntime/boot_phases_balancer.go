@@ -10,9 +10,8 @@ import (
 )
 
 // bootBalancerAndGossip starts the balancer (cluster mode only) and ensures a
-// single GossipReceiver drains transport.Receive() whenever a feature needs
-// StreamReceipt gossip. Only one consumer is allowed because Receive() is a
-// single channel — competing readers would deliver each message to only one.
+// single GossipReceiver consumes the native gossip routes whenever a feature
+// needs receipt gossip.
 //
 // Inputs:  state.cfg (HealReceiptEnabled), state.metaRaft.FSM().ClusterConfig()
 //

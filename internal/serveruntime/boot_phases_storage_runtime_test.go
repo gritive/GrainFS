@@ -46,7 +46,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Cleanup(cancel)
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NoError(t, bootPeerConnections(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 
 	// Mirror the run.go raft-node construction: needed by the storage phases.
@@ -178,7 +177,6 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 
 	// Before any storage phase: nothing wired.
 	assert.Nil(t, state.shardSvc)
-	assert.Nil(t, state.streamRouter)
 	assert.Nil(t, state.distBackend)
 	assert.Nil(t, state.shardCache)
 	assert.Nil(t, state.rebalancer)
@@ -196,13 +194,11 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	// Single-node cluster -> 1+0 auto profile.
 	assert.Equal(t, 1, state.effectiveEC.DataShards)
 	assert.Equal(t, 0, state.effectiveEC.ParityShards)
-	assert.Nil(t, state.streamRouter, "streamRouter not yet constructed")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 
-	// 2. StreamRouter — populates streamRouter; distBackend still nil.
+	// 2. StreamRouter — registers the native shard routes; distBackend still nil.
 	cleanupsBefore := len(state.cleanups)
 	require.NoError(t, bootStreamRouter(state))
-	require.NotNil(t, state.streamRouter, "streamRouter after bootStreamRouter")
 	assert.Equal(t, cleanupsBefore+1, len(state.cleanups), "node.Stop cleanup pushed")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 

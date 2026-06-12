@@ -1,9 +1,7 @@
 package transport
 
 import (
-	"context"
 	"errors"
-	"io"
 )
 
 // StreamType distinguishes the purpose of a transport stream.
@@ -96,34 +94,4 @@ func NewErrorResponse(req *Message, status MessageStatus, err error) *Message {
 		return &Message{Status: status, Payload: []byte(err.Error())}
 	}
 	return &Message{Type: req.Type, ID: req.ID, Status: status, Payload: []byte(err.Error())}
-}
-
-// ReceivedMessage wraps a Message with sender information.
-type ReceivedMessage struct {
-	From    string
-	Message *Message
-}
-
-// Transport provides node-to-node communication over the cluster transport.
-type Transport interface {
-	// Listen starts accepting incoming connections on the given address.
-	Listen(ctx context.Context, addr string) error
-
-	// Connect opens a connection to a remote peer.
-	Connect(ctx context.Context, addr string) error
-
-	// Send sends a message to a peer identified by address.
-	Send(ctx context.Context, addr string, msg *Message) error
-
-	// Receive returns a channel that delivers incoming messages.
-	Receive() <-chan *ReceivedMessage
-
-	// Close shuts down the transport and all connections.
-	Close() error
-}
-
-// Codec handles message framing: encoding and decoding on the wire.
-type Codec interface {
-	Encode(w io.Writer, msg *Message) error
-	Decode(r io.Reader) (*Message, error)
 }

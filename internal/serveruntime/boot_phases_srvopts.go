@@ -218,7 +218,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	newSrvOpts, receiptWiring, err := SetupClusterReceiptWithPeerProvider(
 		ctx, rcptOpts, dataDir, nodeID, receiptPeerProvider,
-		state.clusterTransport, state.streamRouter, state.gossipReceiver, srvOpts,
+		state.clusterTransport, state.gossipReceiver, srvOpts,
 	)
 	if err != nil {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
@@ -430,9 +430,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			}
 			return transport.NewResponse(req, nil)
 		}
-		// Tunnel registration — kept alongside the native route until Phase 8 N8.
-		state.streamRouter.Handle(transport.StreamAuditShip, auditShipHandler)
-		// Phase 8 N7-3: native /audit/ship buffered route. The handler reads
+		// Native /audit/ship buffered route. The handler reads
 		// only req.Payload; decode/append failures map to a 500 → sender error,
 		// preserving the tunnel's StatusError surfacing.
 		state.clusterTransport.RegisterBufferedRoute(transport.RouteAuditShip,

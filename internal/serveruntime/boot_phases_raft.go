@@ -379,9 +379,7 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		}
 		return &transport.Message{Type: transport.StreamAppliedIndexProbe, Payload: respPayload}
 	}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	state.clusterTransport.Handle(transport.StreamAppliedIndexProbe, appliedIndexHandler)
-	// Phase 8 N7-3: native /probe/applied-index buffered route. The handler
+	// Native /probe/applied-index buffered route. The handler
 	// reads only req.Payload; its nil reply (bad request) maps to a 500 →
 	// client error, matching the tunnel's nil-response StatusError.
 	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeAppliedIndex,

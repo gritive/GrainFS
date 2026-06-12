@@ -47,10 +47,7 @@ type RaftRPCTransport struct {
 // RaftNode.SetTransport.
 func NewRaftRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftRPCTransport {
 	rpc := &RaftRPCTransport{transport: tr, node: node}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8
-	// deletes the envelope tunnel wholesale.
-	tr.Handle(transport.StreamControl, rpc.handleRPC)
-	// Phase 8 N7-3: native /raft/data/rpc buffered route. The wire payload is
+	// Native /raft/data/rpc buffered route. The wire payload is
 	// the same v2 FB RPC envelope; handleRPC only reads req.Payload, and its
 	// Type echo into the reply is dropped here (the native wire has no
 	// Message/ID/Type). A nil reply (decode failure / unknown RPC) maps to a

@@ -123,9 +123,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
 		WithGateRefresh(func() { refreshCapabilityGate(state) })
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
-	// Phase 8 N7-3: native /raft/meta/propose buffered route. Handle reads only
+	// Native /raft/meta/propose buffered route. Handle reads only
 	// req.Payload; the propose outcome (index + error) is in-band via
 	// encodeMetaForwardReplyWithIndex.
 	clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaPropose,
@@ -244,9 +242,7 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	}
 
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
-	// Tunnel registration — kept alongside the native route until Phase 8 N8.
-	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
-	// Phase 8 N7-3: native /raft/meta/catalog-read buffered route. Handle reads
+	// Native /raft/meta/catalog-read buffered route. Handle reads
 	// only req.Payload; the read outcome (reply or error type/message) is
 	// in-band via encodeMetaLoadTableReply.
 	state.clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaCatalogRead,

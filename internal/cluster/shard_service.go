@@ -286,17 +286,11 @@ func isSafePathSegment(name string) bool {
 	return !strings.ContainsRune(name, '/') && !strings.ContainsRune(name, filepath.Separator)
 }
 
-// HandleRPC returns the stream handler function for use with a StreamRouter.
-func (s *ShardService) HandleRPC() func(req *transport.Message) *transport.Message {
-	return s.handleRPC
-}
-
 // NativeRPCHandler returns the native /shard/rpc buffered-route handler
-// (transport.RegisterBufferedRoute, Phase 8 N7-3). Same dispatch as HandleRPC
-// minus the transport Message envelope: the payload is the family's own FB RPC
-// envelope, and every outcome — including "Error" replies — is in-band in the
-// reply envelope (handleRPC never returns nil or a non-OK status), exactly as
-// the tunnel delivered it.
+// (transport.RegisterBufferedRoute, Phase 8 N7-3). The payload is the family's
+// own FB RPC envelope, and every outcome — including "Error" replies — is
+// in-band in the reply envelope (handleRPC never returns nil or a non-OK
+// status), exactly as the tunnel delivered it.
 func (s *ShardService) NativeRPCHandler() transport.BufferedRouteHandler {
 	return func(payload []byte) ([]byte, error) {
 		resp := s.handleRPC(&transport.Message{Type: transport.StreamData, Payload: payload})
@@ -378,14 +372,6 @@ func (s *ShardService) resolvePeerAddress(peer string) (string, error) {
 	return addr, nil
 }
 
-// RegisterHandler registers a per-type stream handler on the transport.
-func (s *ShardService) RegisterHandler(st transport.StreamType, h func(*transport.Message) *transport.Message) {
-	if s.transport == nil {
-		return
-	}
-	s.transport.Handle(st, h)
-}
-
 // RegisterBufferedRoute registers a native buffered-route handler on the
 // transport (Phase 8 N7-3).
 func (s *ShardService) RegisterBufferedRoute(path string, h transport.BufferedRouteHandler) {
@@ -393,24 +379,6 @@ func (s *ShardService) RegisterBufferedRoute(path string, h transport.BufferedRo
 		return
 	}
 	s.transport.RegisterBufferedRoute(path, h)
-}
-
-// RegisterBodyHandler registers a per-type handler whose framed request is
-// followed by raw bytes on the same bidirectional stream.
-func (s *ShardService) RegisterBodyHandler(st transport.StreamType, h func(*transport.Message, io.Reader) *transport.Message) {
-	if s.transport == nil {
-		return
-	}
-	s.transport.HandleBody(st, h)
-}
-
-// RegisterReadHandler registers a per-type handler whose framed response is
-// followed by raw bytes on the same bidirectional stream.
-func (s *ShardService) RegisterReadHandler(st transport.StreamType, h func(*transport.Message) (*transport.Message, io.ReadCloser)) {
-	if s.transport == nil {
-		return
-	}
-	s.transport.HandleRead(st, h)
 }
 
 // WriteShard sends a shard to a remote node for storage.
@@ -882,71 +850,24 @@ func (s *ShardService) handleReadRange(sr *shardRequest) *transport.Message {
 	return s.okResponse(buf)
 }
 
-// HandleWriteBody returns the streamed shard write handler for StreamRouter.
-func (s *ShardService) HandleWriteBody() func(*transport.Message, io.Reader) *transport.Message {
-	return func(req *transport.Message, body io.Reader) *transport.Message {
-		stageStart := time.Now()
-		rpcType, srData, err := unmarshalEnvelope(req.Payload)
-		if err != nil {
-			return s.errorResponse("unmarshal request: " + err.Error())
-		}
-		// "WriteShard" carries a PLAINTEXT shard body that the destination seals
-		// (seal-at-dest). "WriteSealedShard" carries an ALREADY-SEALED GFSENC3
-		// body that the S2 streaming sender produced at the source (seal-at-
-		// source); it is stored verbatim, never re-encrypted.
-		if rpcType != "WriteShard" && rpcType != "WriteSealedShard" {
-			return s.errorResponse("unexpected shard body RPC: " + rpcType)
-		}
-		sr, err := unmarshalShardRequest(srData)
-		if err != nil {
-			return s.errorResponse("decode request: " + err.Error())
-		}
-		observePutStage("shard_stream_server", "parse_request", stageStart)
-		stageStart = time.Now()
-		if rpcType == "WriteSealedShard" {
-			// The body is the final encoded payload plus an 8-byte completeness
-			// trailer, so the payload is bounded directly by the data WAL's
-			// MaxPayloadBytes (no further encode grows it); read with room for the
-			// trailer. Buffer is per-shard, not whole-object; streaming the sealed
-			// body to disk without buffering is a later refinement.
-			raw, rerr := readShardPayload(body, datawal.MaxPayloadBytes+SealedShardTrailerLen, -1, false)
-			if rerr != nil {
-				return s.errorResponse(rerr.Error())
-			}
-			// Reject a truncated body: a mid-stream abort surfaces over HTTP as a
-			// clean EOF, so the trailer's declared length is the only signal that
-			// distinguishes a complete shard from a partial one.
-			sealed, terr := SplitSealedShardTrailer(raw)
-			if terr != nil {
-				return s.errorResponse(terr.Error())
-			}
-			if werr := s.writeLocalSealedShard(context.Background(), sr.Bucket, sr.Key, int(sr.ShardIdx), sealed); werr != nil {
-				return s.errorResponse(werr.Error())
-			}
-			observePutStage("shard_stream_server", "write_local_sealed", stageStart)
-			return s.okResponse(nil)
-		}
-		if err := s.WriteLocalShardStream(sr.Bucket, sr.Key, int(sr.ShardIdx), body); err != nil {
-			return s.errorResponse(err.Error())
-		}
-		observePutStage("shard_stream_server", "write_local", stageStart)
-		return s.okResponse(nil)
-	}
-}
-
 // NativeWriteHandler returns the native-route shard write handler
-// (transport.RegisterShardWriteHandler). Same storage semantics as
-// HandleWriteBody minus the FlatBuffers RPC envelope: the metadata arrives
-// already-parsed and the result is a plain error (the transport maps it to the
-// HTTP status). Sealed=true is WriteSealedShard (verbatim GFSENC3 body +
-// completeness trailer); Sealed=false is WriteShard (plaintext stream,
+// (transport.RegisterShardWriteHandler). The metadata arrives already-parsed
+// and the result is a plain error (the transport maps it to the HTTP status).
+// Sealed=true is WriteSealedShard (verbatim GFSENC3 body + completeness
+// trailer, the S2 streaming sender seals at the source — stored verbatim,
+// never re-encrypted); Sealed=false is WriteShard (plaintext stream,
 // destination seals).
 func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 	return func(req transport.ShardWriteRequest, body io.Reader) error {
 		stageStart := time.Now()
 		if req.Sealed {
-			// Bounded by the data WAL's MaxPayloadBytes plus the 8-byte
-			// completeness trailer (mirrors HandleWriteBody's sealed branch).
+			// The body is the final encoded payload plus an 8-byte completeness
+			// trailer, so the payload is bounded directly by the data WAL's
+			// MaxPayloadBytes (no further encode grows it); read with room for the
+			// trailer. Buffer is per-shard, not whole-object. A truncated body is
+			// rejected: a mid-stream abort surfaces over HTTP as a clean EOF, so
+			// the trailer's declared length is the only signal that distinguishes
+			// a complete shard from a partial one.
 			raw, rerr := readShardPayload(body, datawal.MaxPayloadBytes+SealedShardTrailerLen, -1, false)
 			if rerr != nil {
 				return rerr
@@ -969,42 +890,9 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 	}
 }
 
-// HandleReadBody returns the streamed shard read handler for StreamRouter.
-func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Message, io.ReadCloser) {
-	return func(req *transport.Message) (*transport.Message, io.ReadCloser) {
-		rpcType, srData, err := unmarshalEnvelope(req.Payload)
-		if err != nil {
-			return s.errorResponse("unmarshal request: " + err.Error()), nil
-		}
-		if rpcType != "ReadShard" && rpcType != "ReadShardRange" {
-			return s.errorResponse("unexpected shard read RPC: " + rpcType), nil
-		}
-		sr, err := unmarshalShardRequest(srData)
-		if err != nil {
-			return s.errorResponse("decode request: " + err.Error()), nil
-		}
-		var r io.ReadCloser
-		if rpcType == "ReadShardRange" {
-			if len(sr.Data) != 16 {
-				return s.errorResponse("invalid shard range payload"), nil
-			}
-			offset := int64(binary.BigEndian.Uint64(sr.Data[0:8]))
-			length := int64(binary.BigEndian.Uint64(sr.Data[8:16]))
-			r, err = s.OpenLocalShardRange(sr.Bucket, sr.Key, int(sr.ShardIdx), offset, length)
-		} else {
-			r, err = s.OpenLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx))
-		}
-		if err != nil {
-			return s.errorResponse(err.Error()), nil
-		}
-		return s.okResponse(nil), r
-	}
-}
-
 // NativeReadHandler returns the native-route shard read handler
-// (transport.RegisterShardReadHandler). Same storage semantics as
-// HandleReadBody minus the FlatBuffers RPC envelope: metadata arrives parsed,
-// errors surface as plain errors (the transport maps them to HTTP 500 + text).
+// (transport.RegisterShardReadHandler). Metadata arrives parsed, errors
+// surface as plain errors (the transport maps them to HTTP 500 + text).
 func (s *ShardService) NativeReadHandler() transport.ShardReadHandler {
 	return func(req transport.ShardReadRequest) (io.ReadCloser, error) {
 		if req.Range {

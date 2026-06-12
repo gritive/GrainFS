@@ -44,10 +44,7 @@ type GroupRaftMux struct {
 // on the cluster transport. It must outlive all registered nodes.
 func NewGroupRaftMux(tr raftRPCTransport) *GroupRaftMux {
 	m := &GroupRaftMux{tr: tr}
-	// Tunnel registration — kept alongside the native route until Phase 8 N8
-	// deletes the envelope tunnel wholesale.
-	tr.Handle(transport.StreamGroupRaft, m.handleRPC)
-	// Phase 8 N7-3: native /raft/group/rpc buffered route. The payload keeps
+	// Native /raft/group/rpc buffered route. The payload keeps
 	// the [4B groupIDLen][groupID][raftRPC] prefix; handleRPC only reads
 	// req.Payload, and its Type echo into the reply is dropped here. A nil
 	// reply (short header / unknown group / decode failure) maps to a 500

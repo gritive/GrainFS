@@ -141,18 +141,12 @@ func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *For
 // Register installs this ForwardReceiver as the handler for StreamProposeGroupForward (0x08) on shardSvc.
 // The 0x08 stream type is used for intra-cluster forwarding of bucket-scoped operations.
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
-	// Tunnel registrations — kept alongside the native routes until Phase 8 N8
-	// deletes the envelope tunnel wholesale.
-	shardSvc.RegisterHandler(transport.StreamProposeGroupForward, r.Handle)
-	shardSvc.RegisterHandler(transport.StreamDataGroupProposeForward, r.HandleGroupPropose)
-	shardSvc.RegisterBodyHandler(transport.StreamGroupForwardBody, r.HandleBody)
-	shardSvc.RegisterReadHandler(transport.StreamGroupForwardRead, r.HandleRead)
-	// Phase 8 N7-3: native /forward/propose/group buffered route. Handle reads
+	// Native /forward/propose/group buffered route. Handle reads
 	// only req.Payload; every forward outcome (NotVoter/NotLeader+hint/OK/...)
 	// is in-band in the FB ForwardReply, exactly as the tunnel delivered it.
 	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeGroup,
 		transport.BufferedRouteFromMessageHandler("group forward", r.Handle))
-	// Phase 8 N7-3: native /forward/propose/data-group buffered route.
+	// Native /forward/propose/data-group buffered route.
 	// HandleGroupPropose reads only req.Payload; the propose outcome (index +
 	// apply error) is in-band via encodeProposeForwardReply.
 	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeDataGroup,

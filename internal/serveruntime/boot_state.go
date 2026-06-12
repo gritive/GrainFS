@@ -95,7 +95,7 @@ type bootState struct {
 	sharedFSMDB *badger.DB // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
 
 	// Transport (populated by transport phases — bootClusterTransport,
-	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
+	// bootGroupRaftMux). transportPSK records the
 	// resolved cluster key (disk > flag > ephemeral). raftAddr is updated
 	// in-place by bootClusterTransport once Listen resolves a kernel-picked
 	// port (operator passed 127.0.0.1:0).
@@ -195,7 +195,7 @@ type bootState struct {
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
-	// service, stream multiplexing on the cluster transport, distributed backend, per-group
+	// service, native shard routes on the cluster transport, distributed backend, per-group
 	// raft instantiation, and EC config. effectiveEC is captured here so
 	// downstream phases (PR 6: balancer, healreceipt) can re-read the
 	// resolved EC profile without re-deriving from cluster size.
@@ -204,7 +204,6 @@ type bootState struct {
 	node cluster.RaftNode
 	//nolint:unused // assigned by boot_phases_storage_runtime_test.go to seed the RPC transport for tests.
 	rpcTransport     *cluster.RaftRPCTransport
-	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
 	packedBackend    *packblob.PackedBackend // single-node packed-blob fast path; nil in cluster / when packing off (DEK rewrap lane source)

@@ -25,13 +25,11 @@ func twoGenerationBackend(t *testing.T, selfIsB bool) (*DistributedBackend, *Sha
 	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
 	t.Cleanup(func() { trA.Close() })
 	t.Cleanup(func() { trB.Close() })
-	require.NoError(t, trA.Connect(ctx, trB.LocalAddr()))
-	require.NoError(t, trB.Connect(ctx, trA.LocalAddr()))
 
 	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	trA.SetStreamHandler(svcA.HandleRPC())
-	trB.SetStreamHandler(svcB.HandleRPC())
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 

@@ -126,18 +126,6 @@ func loadInviteNodeKeyKEKFromDisk(dataDir string, gen uint32) ([]byte, error) {
 	return kek, nil
 }
 
-// bootPeerConnections opens a cluster-transport connection to each peer.
-// Connection failures are logged but non-fatal — the transport retries lazily on
-// the first send. Empty peer list (solo mode) is a clean no-op.
-func bootPeerConnections(ctx context.Context, state *bootState) error {
-	for _, peer := range state.peers {
-		if err := state.clusterTransport.Connect(ctx, peer); err != nil {
-			log.Warn().Str("peer", peer).Err(err).Msg("failed to connect to peer (will retry lazily)")
-		}
-	}
-	return nil
-}
-
 // bootGroupRaftMux constructs the GroupRaftMux that dispatches per-group raft
 // RPCs over StreamGroupRaft (one transport.Call per RPC). Must run before the
 // meta-raft transport so the group-raft inbound handler is registered.

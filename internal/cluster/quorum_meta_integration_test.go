@@ -138,15 +138,13 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
 	defer trA.Close()
 	defer trB.Close()
-	require.NoError(t, trA.Connect(ctx, trB.LocalAddr()))
-	require.NoError(t, trB.Connect(ctx, trA.LocalAddr()))
 
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	trA.SetStreamHandler(svcA.HandleRPC())
-	trB.SetStreamHandler(svcB.HandleRPC())
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
@@ -214,15 +212,13 @@ func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
 	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
 	defer trA.Close()
 	defer trB.Close()
-	require.NoError(t, trA.Connect(ctx, trB.LocalAddr()))
-	require.NoError(t, trB.Connect(ctx, trA.LocalAddr()))
 
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	trA.SetStreamHandler(svcA.HandleRPC())
-	trB.SetStreamHandler(svcB.HandleRPC())
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
@@ -277,7 +273,7 @@ func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
 	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
 	defer tr.Close()
 	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	tr.SetStreamHandler(svc.HandleRPC())
+	tr.RegisterBufferedRoute(transport.RouteShardRPC, svc.NativeRPCHandler())
 	tr.RegisterBufferedRoute(transport.RouteShardRPC, svc.NativeRPCHandler())
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
@@ -424,7 +420,6 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 	defer trData.Close()
 	defer trParity.Close()
 	// trParity dials trData so it can send ReadQuorumMeta RPCs.
-	require.NoError(t, trParity.Connect(ctx, trData.LocalAddr()))
 
 	dirData := t.TempDir()
 	dirParity := t.TempDir()
@@ -434,7 +429,7 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
 	// trData serves incoming shard RPCs (including ReadQuorumMeta).
-	trData.SetStreamHandler(svcData.HandleRPC())
+	trData.RegisterBufferedRoute(transport.RouteShardRPC, svcData.NativeRPCHandler())
 	trData.RegisterBufferedRoute(transport.RouteShardRPC, svcData.NativeRPCHandler())
 
 	// Write quorum meta ONLY to the data node, simulating K-of-N write where
