@@ -1,19 +1,16 @@
-// raftv2_codec.go — wire codec for the v2 Raft RPC bridge.
+// raftv2_codec.go — wire codec for the cluster Raft RPC bridge.
 //
-// This file duplicates internal/raft/rpc_codec.go's encode/decode logic
-// byte-identically. The duplication is intentional: v1's encodeRPC/decodeRPC
-// are unexported and v1 is frozen for M5; once v1 is deleted (PR 30) this
-// becomes the sole implementation and can absorb the meta-raft variants.
+// It encodes/decodes Raft RPCs as FlatBuffers RPC envelopes, sharing the schema
+// package (internal/raft/raftpb) with internal/raft's own codec. This is the
+// sole cluster-side raft RPC codec; the QUIC-era v1 it once mirrored is deleted,
+// so it is free to evolve (greenfield/flag-day — no rolling-upgrade compat with
+// a v1 peer).
 //
-// Byte-identicalness is achieved by:
-//   1. Sharing the FlatBuffers schema package (internal/raft/raftpb).
-//   2. Issuing the same builder calls in the same order as v1. FlatBuffers'
-//      vtable layout is deterministic given the call sequence; any deviation
-//      changes wire bytes.
-//
-// The byte-equal guarantee is verified in raftv2_quic_codec_test.go via
-// golden hex captured from v1's encodeRPC. PR 30 (v1 deletion) removes the
-// duplication.
+// The current wire bytes are pinned as a regression guard by the golden-hex
+// cases in raftv2_codec_test.go (TestV2EncodeRPC_WireGolden): the FlatBuffers
+// vtable layout is deterministic given the builder call sequence, so changing
+// that sequence shifts the bytes and an intentional wire change must regenerate
+// the goldens.
 
 package cluster
 

@@ -9,20 +9,16 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// TestV2EncodeRPC_ByteIdenticalToV1 verifies the v2 cluster-side wire codec
-// produces byte-identical output to v1's internal/raft.encodeRPC. Golden hex
-// was captured from v1 via a one-shot test (internal/raft/quic_rpc_wiredump_test.go)
-// at PR 27 implementation time and deleted after capture. v1 is frozen for M5;
-// these constants will become canonical when v1 is removed in PR 30.
+// TestV2EncodeRPC_WireGolden pins the cluster-side raft RPC wire format to its
+// canonical bytes. The goldens were originally captured to prove byte-equality
+// with the QUIC-era v1 codec; v1 is now deleted, so they stand on their own as
+// the canonical wire format and a regression guard against accidental drift.
 //
-// If this test ever fails after touching internal/raft/quic_rpc_codec.go OR
-// internal/cluster/raftv2_quic_codec.go, you have a wire-format divergence
-// between v1 and v2 — mixed-mode clusters will misbehave. Either:
-//
-//	(a) update both codecs together and regenerate the golden hex via the
-//	    wiredump helper, or
-//	(b) revert.
-func TestV2EncodeRPC_ByteIdenticalToV1(t *testing.T) {
+// If this test fails after touching raftv2_codec.go, you have changed the wire
+// format. Since this is the sole codec (greenfield/flag-day, no v1 peer to stay
+// compatible with), an intentional change is fine — regenerate the goldens from
+// the new encoder output. An unintentional change is a bug — revert.
+func TestV2EncodeRPC_WireGolden(t *testing.T) {
 	cases := []struct {
 		name    string
 		rpcType string
@@ -113,13 +109,13 @@ func TestV2EncodeRPC_ByteIdenticalToV1(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := v2EncodeRPC(tc.rpcType, tc.msg)
 			require.NoError(t, err)
-			require.Equal(t, tc.golden, hex.EncodeToString(got), "v2 wire bytes diverged from v1 golden")
+			require.Equal(t, tc.golden, hex.EncodeToString(got), "raft RPC wire bytes diverged from the canonical golden")
 		})
 	}
 }
 
 // TestV2EncodeDecode_RoundTrip exercises encode→decode for each RPC type so
-// the decode path is also covered (the byte-identical test above only covers
+// the decode path is also covered (the wire-golden test above only covers
 // encode).
 func TestV2EncodeDecode_RoundTrip(t *testing.T) {
 	t.Run("RequestVote", func(t *testing.T) {
