@@ -255,6 +255,9 @@ func bootStreamRouter(state *bootState) error {
 	// above stays until N8 deletes the tunnel; all in-tree clients now dial the
 	// native route.
 	state.clusterTransport.RegisterShardWriteHandler(state.shardSvc.NativeWriteHandler())
+	// Phase 8 N7-1: native /shard/read route — same staging as the write route
+	// above (tunnel HandleRead registration stays until N8).
+	state.clusterTransport.RegisterShardReadHandler(state.shardSvc.NativeReadHandler())
 	// Phase B1: node-level append-segment peer-fetch handler. Each node
 	// hosts multiple group backends — the request payload carries groupID
 	// so the handler resolves the right per-group root via DataGroupManager.

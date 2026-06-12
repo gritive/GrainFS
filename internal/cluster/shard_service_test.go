@@ -631,6 +631,7 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler()) // WriteShardStream dials the native route (Phase 8 N6)
+	tr2.RegisterShardReadHandler(svc2.NativeReadHandler())   // ReadShardStream dials the native route (Phase 8 N7-1)
 	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
 	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
 
@@ -1231,6 +1232,7 @@ func TestShardService_NativeWriteHandler_PlainAndSealed(t *testing.T) {
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler())
+	tr2.RegisterShardReadHandler(svc2.NativeReadHandler()) // ReadShardStream dials the native route (Phase 8 N7-1)
 	// Tunnel registrations mirror boot wiring: the write tunnel handler stays
 	// registered until N8 (and, pre-Task-3, WriteShardStream still dials it —
 	// which is exactly what the InboundNativeShardWrites assertion below

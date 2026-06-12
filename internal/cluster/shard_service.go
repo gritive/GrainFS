@@ -557,7 +557,8 @@ func (s *ShardService) ReadShardRange(ctx context.Context, peer, bucket, key str
 	return data, nil
 }
 
-// ReadShardStream fetches a remote shard as a plaintext stream.
+// ReadShardStream fetches a remote shard as a plaintext stream. Native
+// /shard/read route (Phase 8 N7-1).
 func (s *ShardService) ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error) {
 	peerAddr, err := s.resolvePeerAddress(peer)
 	if err != nil {
@@ -566,32 +567,9 @@ func (s *ShardService) ReadShardStream(ctx context.Context, peer, bucket, key st
 	if s.transport == nil {
 		return nil, fmt.Errorf("shard service: no transport")
 	}
-	fw := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
-	payload := append([]byte(nil), fw.Builder.FinishedBytes()...)
-	fw.Builder.Reset()
-	shardBuilderPool.Put(fw.Builder)
-
-	req := &transport.Message{Type: transport.StreamShardReadBody, Payload: payload}
-	resp, body, err := s.transport.CallRead(ctx, peerAddr, req)
+	body, err := s.transport.ShardRead(ctx, peerAddr, transport.ShardReadRequest{Bucket: bucket, Key: key, ShardIdx: shardIdx})
 	if err != nil {
 		return nil, fmt.Errorf("stream shard from %s: %w", peerAddr, err)
-	}
-
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
-	if err != nil {
-		_ = body.Close()
-		return nil, fmt.Errorf("unmarshal response: %w", err)
-	}
-	if rpcType == "Error" {
-		_ = body.Close()
-		if len(data) > 0 {
-			return nil, fmt.Errorf("remote error from %s: %s", peer, string(data))
-		}
-		return nil, fmt.Errorf("remote error from %s", peer)
-	}
-	if rpcType != "OK" {
-		_ = body.Close()
-		return nil, fmt.Errorf("unexpected shard stream response from %s: %s", peer, rpcType)
 	}
 	return body, nil
 }
@@ -610,35 +588,9 @@ func (s *ShardService) ReadShardRangeStream(ctx context.Context, peer, bucket, k
 	if s.transport == nil {
 		return nil, fmt.Errorf("shard service: no transport")
 	}
-	var rangePayload [16]byte
-	binary.BigEndian.PutUint64(rangePayload[0:8], uint64(offset))
-	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
-	fw := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
-	payload := append([]byte(nil), fw.Builder.FinishedBytes()...)
-	fw.Builder.Reset()
-	shardBuilderPool.Put(fw.Builder)
-
-	req := &transport.Message{Type: transport.StreamShardReadBody, Payload: payload}
-	resp, body, err := s.transport.CallRead(ctx, peerAddr, req)
+	body, err := s.transport.ShardRead(ctx, peerAddr, transport.ShardReadRequest{Bucket: bucket, Key: key, ShardIdx: shardIdx, Range: true, Offset: offset, Length: length})
 	if err != nil {
 		return nil, fmt.Errorf("stream shard range from %s: %w", peerAddr, err)
-	}
-
-	rpcType, data, err := unmarshalEnvelope(resp.Payload)
-	if err != nil {
-		_ = body.Close()
-		return nil, fmt.Errorf("unmarshal response: %w", err)
-	}
-	if rpcType == "Error" {
-		_ = body.Close()
-		if len(data) > 0 {
-			return nil, fmt.Errorf("remote error from %s: %s", peer, string(data))
-		}
-		return nil, fmt.Errorf("remote error from %s", peer)
-	}
-	if rpcType != "OK" {
-		_ = body.Close()
-		return nil, fmt.Errorf("unexpected shard range stream response from %s: %s", peer, rpcType)
 	}
 	return body, nil
 }
@@ -994,6 +946,19 @@ func (s *ShardService) HandleReadBody() func(*transport.Message) (*transport.Mes
 			return s.errorResponse(err.Error()), nil
 		}
 		return s.okResponse(nil), r
+	}
+}
+
+// NativeReadHandler returns the native-route shard read handler
+// (transport.RegisterShardReadHandler). Same storage semantics as
+// HandleReadBody minus the FlatBuffers RPC envelope: metadata arrives parsed,
+// errors surface as plain errors (the transport maps them to HTTP 500 + text).
+func (s *ShardService) NativeReadHandler() transport.ShardReadHandler {
+	return func(req transport.ShardReadRequest) (io.ReadCloser, error) {
+		if req.Range {
+			return s.OpenLocalShardRange(req.Bucket, req.Key, req.ShardIdx, req.Offset, req.Length)
+		}
+		return s.OpenLocalShard(req.Bucket, req.Key, req.ShardIdx)
 	}
 }
 

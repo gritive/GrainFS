@@ -144,6 +144,7 @@ func newInProcessClusterT(t *testing.T, nodes int, ec cluster.ECConfig, mk mkTra
 			cluster.WithShardDEKKeeper(keeper, clusterID), cluster.WithDataWAL(peerDWAL))
 		peerTr.SetStreamHandler(peerSvc.HandleRPC())
 		peerTr.RegisterShardWriteHandler(peerSvc.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
+		peerTr.RegisterShardReadHandler(peerSvc.NativeReadHandler())   // native /shard/read route (Phase 8 N7-1)
 		peerTr.HandleBody(transport.StreamShardWriteBody, peerSvc.HandleWriteBody())
 		peerTr.HandleRead(transport.StreamShardReadBody, peerSvc.HandleReadBody())
 		t.Cleanup(func() { _ = peerSvc.Close() })
@@ -251,6 +252,24 @@ func requireNativeShardWriteDispatch(t *testing.T, cl *inProcessCluster) {
 	require.Positive(t, nativeWrites, "multi-node PUT must dispatch shard writes through the native route")
 }
 
+// requireNativeShardReadDispatch sums InboundNativeShardReads across every node
+// transport and asserts the GET's remote shard reads traveled the native
+// /shard/read route, not the tunnel (Phase 8 N7-1 positive dispatch proof).
+// Only meaningful after a GET of a >4MiB object: smaller objects take the
+// BUFFERED ReadShard path (bufferedShardReaders, ec_object_reader.go) — a
+// different family that never touches the native route — so the counter would
+// legitimately read 0 for them.
+func requireNativeShardReadDispatch(t *testing.T, cl *inProcessCluster) {
+	t.Helper()
+	var nativeReads uint64
+	for _, tr := range cl.nodeTransports {
+		ht, ok := tr.(*transport.HTTPTransport)
+		require.True(t, ok, "node transport must be the concrete *transport.HTTPTransport to expose the native counter")
+		nativeReads += ht.InboundNativeShardReads()
+	}
+	require.Positive(t, nativeReads, "multi-node GET of a >4MiB object must stream shard reads through the native route")
+}
+
 // requireSpansNodes asserts the resolved placement genuinely spans nodes (at
 // least K-1 remote entries on a 5-node 3+2 layout), so a green round-trip
 // cannot be a false all-local collapse (task Step 3).
@@ -328,6 +347,21 @@ func TestMultiNodeStreamingPUT_HTTP_K3_RoundTrip(t *testing.T) {
 	got := getAll(t, coord, "bucket", "http.bin")
 	require.True(t, bytes.Equal(payload, got), "GET must reconstruct the streamed multi-node object over HTTP")
 	requireNativeShardWriteDispatch(t, cl)
+
+	// Second object, >4MiB: openShardReaders buffers objects <=
+	// maxECPooledReadObjectSize (4<<20) through the BUFFERED ReadShard tunnel op,
+	// so the 3MiB object above cannot exercise the native read route. A 5MiB+77
+	// payload forces the STREAMING reconstruction branch (ReadShardStream →
+	// native GET /shard/read) — the byte-identical GET plus the positive counter
+	// below is the behavior-neutral proof for the streaming read path under real
+	// EC reconstruction (Phase 8 N7-1; RED if the consumer switch is reverted).
+	bigPayload := randBytes(t, 5<<20+77)
+	bigObj, err := coord.PutObjectWithRequest(ctxBg(), putReq("bucket", "http-big.bin", bytes.NewReader(bigPayload), int64(len(bigPayload))))
+	require.NoError(t, err, "multi-node streaming PUT of a >4MiB object over HTTP must succeed")
+	require.Greater(t, bigObj.StripeBytes, uint32(0), "streaming PUT must stamp StripeBytes (the de-interleave key)")
+	bigGot := getAll(t, coord, "bucket", "http-big.bin")
+	require.True(t, bytes.Equal(bigPayload, bigGot), "GET must reconstruct the >4MiB streamed multi-node object over HTTP")
+	requireNativeShardReadDispatch(t, cl)
 }
 
 // TestMultiNodeStreamingPUT_HTTP_ParityShardFailure_CommitsAndReads runs the
