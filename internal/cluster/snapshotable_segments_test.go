@@ -17,6 +17,7 @@ import (
 func seedObjectWithSegments(
 	t *testing.T,
 	b *DistributedBackend,
+	db *badger.DB,
 	bucket, key, versionID string,
 	segs []storage.SegmentRef,
 	coalesced []CoalescedShardRef,
@@ -30,7 +31,7 @@ func seedObjectWithSegments(
 		Coalesced: coalesced,
 	})
 	require.NoError(t, err)
-	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(b.ks().ObjectMetaKeyV(bucket, key, versionID), raw); err != nil {
 			return err
 		}
@@ -39,7 +40,7 @@ func seedObjectWithSegments(
 }
 
 func TestListAllObjectsPropagatesSegments(t *testing.T) {
-	b := newTestDistributedBackend(t)
+	b, db := newTestDistributedBackendWithDB(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
 
@@ -47,7 +48,7 @@ func TestListAllObjectsPropagatesSegments(t *testing.T) {
 		{BlobID: "chunk-A", Size: 10},
 		{BlobID: "chunk-B", Size: 20},
 	}
-	seedObjectWithSegments(t, b, "bkt", "k", "v1", segs, nil)
+	seedObjectWithSegments(t, b, db, "bkt", "k", "v1", segs, nil)
 
 	objs, err := b.ListAllObjects()
 	require.NoError(t, err)
@@ -66,7 +67,7 @@ func TestListAllObjectsPropagatesSegments(t *testing.T) {
 }
 
 func TestListAllObjectsPropagatesCoalesced(t *testing.T) {
-	b := newTestDistributedBackend(t)
+	b, db := newTestDistributedBackendWithDB(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt2"))
 
@@ -77,7 +78,7 @@ func TestListAllObjectsPropagatesCoalesced(t *testing.T) {
 	coal := []CoalescedShardRef{
 		{CoalescedID: "coalesced-blob-1"},
 	}
-	seedObjectWithSegments(t, b, "bkt2", "obj", "v1", segs, coal)
+	seedObjectWithSegments(t, b, db, "bkt2", "obj", "v1", segs, coal)
 
 	objs, err := b.ListAllObjects()
 	require.NoError(t, err)
@@ -101,16 +102,16 @@ func TestListAllObjectsPropagatesCoalesced(t *testing.T) {
 // ListAllObjectsStrict fails closed (returns an error) so the scrubber skips its
 // sweep rather than treating the corrupt object's segments as orphaned.
 func TestListAllObjectsStrictFailsClosedOnCorruptMeta(t *testing.T) {
-	b := newTestDistributedBackend(t)
+	b, db := newTestDistributedBackendWithDB(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
 
 	// One valid object so the tolerant path returns 1 (not 0) — a stronger assertion.
-	seedObjectWithSegments(t, b, "bkt", "good", "v1",
+	seedObjectWithSegments(t, b, db, "bkt", "good", "v1",
 		[]storage.SegmentRef{{BlobID: "chunk-A", Size: 10}}, nil)
 
 	// Inject a properly-keyed obj: record with an undecodable value.
-	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
 		return txn.Set(b.ks().ObjectMetaKeyV("bkt", "corrupt", "v1"), []byte{0xff, 0xff, 0xff})
 	}))
 

@@ -422,7 +422,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	// DB under the "group-0" keyspace prefix (C2 P3). The shared DB is owned
 	// by bootOpenSharedFSMDB; this backend opens in shared mode (Close no-ops
 	// the DB close).
-	distBackend, err := cluster.NewDistributedBackendForGroup(state.cfg.DataDir, state.sharedFSMDB, state.node, "group-0")
+	distBackend, err := cluster.NewDistributedBackendForGroup(state.cfg.DataDir, state.sharedFSMStore, state.node, "group-0")
 	if err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
@@ -583,7 +583,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			EC:               ecConfigForShardGroup(entry, state.effectiveEC),
 			ElectionTimeout:  state.cfg.RaftElectionTimeout,
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
-			FSMStore:         state.sharedFSMDB,
+			FSMStore:         state.sharedFSMStore,
 		}
 		gb, err := state.instantiateGroupWithConfig(glc, entry)
 		if err != nil {

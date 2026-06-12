@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"time"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -24,7 +22,7 @@ type GroupLifecycleConfig struct {
 	DataDir   string
 	ShardSvc  *ShardService // may be nil for in-process / single-node tests
 	EC        ECConfig
-	FSMStore  *badger.DB // required — the per-node shared FSM-state DB; each group gets a prefixed view (C2 P3)
+	FSMStore  MetadataStore // required — the per-node shared FSM-state store; each group gets a prefixed view (C2 P3)
 	Transport groupTransport
 	AddrBook  NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
@@ -157,7 +155,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:           entry.ID,
 		Root:         groupDir,
-		DB:           cfg.FSMStore,
+		Store:        cfg.FSMStore,
 		Node:         node,
 		ShardSvc:     cfg.ShardSvc,
 		PeerIDs:      peerIDsSelfFirst,

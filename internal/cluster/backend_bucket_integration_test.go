@@ -19,11 +19,12 @@ import (
 var _ = Describe("Backend bucket integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 	})
 
@@ -60,7 +61,7 @@ var _ = Describe("Backend bucket integration", func() {
 		Expect(b.CreateBucket(ctx, "policy-bucket")).To(Succeed())
 		Expect(b.SetBucketPolicy("policy-bucket", policy)).To(Succeed())
 
-		Expect(b.db.View(func(txn *badger.Txn) error {
+		Expect(db.View(func(txn *badger.Txn) error {
 			item, err := txn.Get(b.ks().BucketPolicyKey("policy-bucket"))
 			if err != nil {
 				return err

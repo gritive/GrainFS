@@ -14,7 +14,7 @@ func newResolverTestBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	return &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm, ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
+	return &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm, ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
 }
 
 func TestResolvePlacement_UsesMetadataNodeIDs(t *testing.T) {
@@ -87,7 +87,7 @@ func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	b := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
 	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "bkt"})
 	require.NoError(t, err)

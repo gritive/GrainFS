@@ -22,9 +22,9 @@ var _ scrubber.ShardOwner = (*DistributedBackend)(nil)
 // bypassing the Raft proposal path. Matches the byte layout that
 // applyPutShardPlacement writes. Used by tests that call LookupShardPlacement
 // directly (not ResolvePlacement).
-func writePlacement(t clusterTestTB, b *DistributedBackend, bucket, key string, nodes []string) {
+func writePlacement(t clusterTestTB, b *DistributedBackend, db *badger.DB, bucket, key string, nodes []string) {
 	t.Helper()
-	if err := b.db.Update(func(txn *badger.Txn) error {
+	if err := db.Update(func(txn *badger.Txn) error {
 		rec := PlacementRecord{Nodes: nodes, K: 4, M: 2}
 		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(rec))
 	}); err != nil {
@@ -59,14 +59,14 @@ func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, vers
 func TestRaftNodeID_NilNode(t *testing.T) {
 	// DistributedBackend with node == nil must return "" (no panic).
 	db := newTestDB(t)
-	b := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())}
+	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())}
 	assert.Equal(t, "", b.RaftNodeID())
 }
 
 func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	b := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "b",

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -319,7 +320,7 @@ func TestClusterCoordinator_DeleteBucket_ChecksRoutedDataGroupBeforeBaseDelete(t
 
 func TestClusterCoordinator_DeleteBucket_UsesLocalSingletonGroupBeforeForward(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
 	router := NewRouter(mgr)
@@ -338,7 +339,7 @@ func TestClusterCoordinator_DeleteBucket_UsesLocalSingletonGroupBeforeForward(t 
 
 func TestClusterCoordinator_PutObject_WaitsForLocalSingletonLeaderBeforeForward(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
 	t.Cleanup(func() { close(stopApply) })
@@ -367,7 +368,7 @@ func TestClusterCoordinator_PutObject_WaitsForLocalSingletonLeaderBeforeForward(
 
 func TestClusterCoordinator_PutObject_RejectsMissingBucketBeforeGroupWrite(t *testing.T) {
 	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
@@ -391,7 +392,7 @@ func TestClusterCoordinator_PutObject_RejectsMissingBucketBeforeGroupWrite(t *te
 
 func TestClusterCoordinator_PutObject_AllowsMetaAssignedBucketBeforeLocalBucketRow(t *testing.T) {
 	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
@@ -419,7 +420,7 @@ func TestClusterCoordinator_PutObject_AllowsMetaAssignedBucketBeforeLocalBucketR
 
 func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
 	t.Cleanup(func() { close(stopApply) })
@@ -467,7 +468,7 @@ func (m *objectIndexMeta) ObjectIndexVersion(bucket, key, versionID string) (Obj
 
 func TestClusterCoordinator_DeleteObject_MissingObjectIsIdempotentWhenBucketExists(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
@@ -491,7 +492,7 @@ func TestClusterCoordinator_DeleteObject_MissingObjectIsIdempotentWhenBucketExis
 
 func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, gbDB := newTestFollowerGroupBackend(t, "g1", "self")
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "key",
 		Size:         4,
@@ -500,7 +501,7 @@ func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(
 		LastModified: time.Now().Unix(),
 	})
 	require.NoError(t, err)
-	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, gbDB.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(bucketKey("read-bucket"), []byte{1}); err != nil {
 			return err
 		}
@@ -523,7 +524,10 @@ func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(
 	require.Empty(t, d.calls)
 }
 
-func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBackend {
+// newTestFollowerGroupBackend returns the backend plus the raw BadgerDB the
+// test opened, for raw verification / injection (the backend no longer
+// exposes its store as *badger.DB).
+func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) (*GroupBackend, *badger.DB) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := badger.Open(badgerutil.SmallOptions(dir + "/meta"))
@@ -543,7 +547,7 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBac
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,
-		DB:       db,
+		Store:    badgermeta.Wrap(db),
 		Node:     node,
 		PeerIDs:  []string{nodeID},
 		ShardSvc: svc,
@@ -556,7 +560,7 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBac
 			require.NoError(t, closeRaft())
 		}
 	})
-	return gb
+	return gb, db
 }
 
 func TestClusterCoordinator_ListBuckets_DelegatesToBase(t *testing.T) {
@@ -648,7 +652,7 @@ func TestClusterCoordinator_RequireObjectBucket_SkipsBaseWhenBucketAssigned(t *t
 
 func TestClusterCoordinator_PutObjectWithResultUsesObjectIndexForMissingPrevious(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
@@ -1424,7 +1428,7 @@ func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
 
 func TestClusterCoordinator_GetObject_FollowerVoterForwardsWhenLocalObjectIndexStale(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, gbDB := newTestFollowerGroupBackend(t, "g1", "self")
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "k",
 		Size:         5,
@@ -1435,7 +1439,7 @@ func TestClusterCoordinator_GetObject_FollowerVoterForwardsWhenLocalObjectIndexS
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
 	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("stale"), 0o644))
-	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, gbDB.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
 			return err
 		}
@@ -1529,7 +1533,7 @@ func TestClusterCoordinator_ReadAt_ForwardSmallRangeUsesSingleFrame(t *testing.T
 
 func TestClusterCoordinator_HeadObject_FollowerVoterForwardsToLeader(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, gbDB := newTestFollowerGroupBackend(t, "g1", "self")
 	modTime := time.Now().Unix()
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "k",
@@ -1541,7 +1545,7 @@ func TestClusterCoordinator_HeadObject_FollowerVoterForwardsToLeader(t *testing.
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
 	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
-	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, gbDB.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
 			return err
 		}
@@ -1584,7 +1588,7 @@ func TestClusterCoordinator_HeadObject_FollowerVoterForwardsToLeader(t *testing.
 
 func TestClusterCoordinator_HeadObject_FollowerVoterForwardsInsteadOfServingStaleIndexMatch(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, gbDB := newTestFollowerGroupBackend(t, "g1", "self")
 	staleModTime := time.Now().Unix()
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "k",
@@ -1596,7 +1600,7 @@ func TestClusterCoordinator_HeadObject_FollowerVoterForwardsInsteadOfServingStal
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
 	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
-	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, gbDB.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
 			return err
 		}
@@ -1662,7 +1666,7 @@ func TestClusterCoordinator_ReadAt_FollowerVoterForwardsWhenLocalObjectIndexStal
 
 func TestClusterCoordinator_ReadAt_FollowerVoterForwardsWhenLocalCurrentReadFails(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, gbDB := newTestFollowerGroupBackend(t, "g1", "self")
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key:          "k",
 		Size:         5,
@@ -1671,7 +1675,7 @@ func TestClusterCoordinator_ReadAt_FollowerVoterForwardsWhenLocalCurrentReadFail
 		LastModified: time.Now().Unix(),
 	})
 	require.NoError(t, err)
-	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, gbDB.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
 			return err
 		}

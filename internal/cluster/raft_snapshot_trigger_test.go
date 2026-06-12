@@ -8,6 +8,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -42,7 +43,7 @@ func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 	require.NoError(t, node.Bootstrap())
 	require.Eventually(t, node.IsLeader, 3*time.Second, 20*time.Millisecond, "v2 node must elect itself")
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 
 	// Deliberately do NOT call SetSnapshotManager — that's the v2 path:

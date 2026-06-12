@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-
-	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metastore"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
@@ -36,16 +34,14 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
 
-	metaDir := dir + "/meta"
-	db, err := badger.Open(badgerutil.SmallOptions(metaDir))
-	if err != nil {
-		t.Fatalf("open badger: %v", err)
-	}
+	// Phase 6.5: metadata goes to an in-memory MetadataStore — the contract's
+	// conformance suite pins it to badger semantics, so package tests get the
+	// same behavior without cluster touching badger.
+	store := metastore.NewMemStore()
 
 	cfg := raft.DefaultConfig("test-node", nil)
 	node, closeFn, err := newRaftNode(cfg, dir)
 	if err != nil {
-		db.Close()
 		t.Fatalf("newRaftNode: %v", err)
 	}
 	node.SetTransport(
@@ -71,7 +67,7 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 		t.Fatalf("no-peers node must become leader")
 	}
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, store, node, nil, false)
 	if err != nil {
 		t.Fatalf("NewDistributedBackend: %v", err)
 	}
@@ -109,7 +105,6 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 		if closeFn != nil {
 			_ = closeFn()
 		}
-		db.Close()
 	})
 
 	return backend

@@ -21,11 +21,12 @@ import (
 var _ = Describe("Quorum meta — Phase 3 primary path", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 	})
@@ -50,7 +51,7 @@ var _ = Describe("Quorum meta — Phase 3 primary path", func() {
 
 		// Object meta key must NOT exist in BadgerDB.
 		var found bool
-		_ = b.db.View(func(txn *badger.Txn) error {
+		_ = db.View(func(txn *badger.Txn) error {
 			k := b.ks().ObjectMetaKey("bucket", "bypassed.bin")
 			_, dbErr := txn.Get(k)
 			found = dbErr == nil

@@ -81,14 +81,14 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 	// Backend-level scoping: A's backend sees only A's objects; B's backend
 	// knows nothing about A's bucket.
 	nodeA, _ := newTestNodeForSharedDB(t, "restart-nodeA")
-	backendA, err := NewDistributedBackend(t.TempDir(), db2, nodeA, ksA, true)
+	backendA, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db2), nodeA, ksA, true)
 	require.NoError(t, err)
 	stopA := make(chan struct{})
 	go backendA.RunApplyLoop(stopA)
 	t.Cleanup(func() { close(stopA) })
 
 	nodeB, _ := newTestNodeForSharedDB(t, "restart-nodeB")
-	backendB, err := NewDistributedBackend(t.TempDir(), db2, nodeB, ksB, true)
+	backendB, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db2), nodeB, ksB, true)
 	require.NoError(t, err)
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)

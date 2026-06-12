@@ -18,7 +18,7 @@ func TestFSMValueCheckLane_ImplementsRewrapLane(t *testing.T) {
 //   - lane.RewrapByGen errors when this node has a stale FSM-value below keeper-current;
 //   - lane.RewrapByGen returns nil once the store is drained (all at keeper-current).
 func TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained(t *testing.T) {
-	gb := newTestGroupBackend(t, "check-lane-group")
+	gb, gbDB := newTestGroupBackendWithDB(t, "check-lane-group")
 	keeper := gb.shardSvc.dekKeeper
 	ks := gb.ks()
 
@@ -26,7 +26,7 @@ func TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained(t *testing.T) {
 	polKey := ks.BucketPolicyKey("b1")
 	polRaw, err := gb.fsm.sealValue(polKey, []byte(`{}`))
 	require.NoError(t, err)
-	dbSet(t, gb.db, polKey, polRaw)
+	dbSet(t, gbDB, polKey, polRaw)
 
 	// Rotate keeper to gen 1 — the sealed value is now stale.
 	require.NoError(t, keeper.Rotate())

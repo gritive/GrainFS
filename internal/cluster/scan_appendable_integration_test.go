@@ -19,11 +19,12 @@ var _ scrubber.AppendableScannable = (*DistributedBackend)(nil)
 var _ = Describe("Appendable object scan integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 	})
 
@@ -38,7 +39,7 @@ var _ = Describe("Appendable object scan integration", func() {
 			Segments:     segs,
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(b.db.Update(func(txn *badger.Txn) error {
+		Expect(db.Update(func(txn *badger.Txn) error {
 			if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
 				return err
 			}
@@ -59,7 +60,7 @@ var _ = Describe("Appendable object scan integration", func() {
 			LastModified: time.Now().Unix(),
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(b.db.Update(func(txn *badger.Txn) error {
+		Expect(db.Update(func(txn *badger.Txn) error {
 			if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
 				return err
 			}

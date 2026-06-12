@@ -19,10 +19,13 @@ var _ = Describe("Snapshot integration", func() {
 	BeforeEach(func() {
 		Skip("Phase 3: snapshot/restore not yet adapted to quorum meta store")
 	})
-	var b *DistributedBackend
+	var (
+		b  *DistributedBackend
+		db *badger.DB
+	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 	})
 
 	It("lists no objects for an empty bucket", func() {
@@ -116,7 +119,7 @@ var _ = Describe("Snapshot integration", func() {
 		obj, err := b.PutObject(context.Background(), "wal-replay", "inc.txt", strings.NewReader("included"), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.VersionID).NotTo(BeEmpty())
-		Expect(b.db.Update(func(txn *badger.Txn) error {
+		Expect(db.Update(func(txn *badger.Txn) error {
 			return txn.Delete(b.ks().BucketKey("wal-replay"))
 		})).To(Succeed())
 
@@ -327,7 +330,7 @@ func readLatestObjectMeta(b *DistributedBackend, bucket, key string) (string, ob
 	GinkgoHelper()
 	var latestVersionID string
 	var meta objectMeta
-	Expect(b.db.View(func(txn *badger.Txn) error {
+	Expect(b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().LatestKey(bucket, key))
 		if err != nil {
 			return err
@@ -356,7 +359,7 @@ func readLatestObjectMeta(b *DistributedBackend, bucket, key string) (string, ob
 func readObjectMetaVersion(b *DistributedBackend, bucket, key, versionID string) objectMeta {
 	GinkgoHelper()
 	var meta objectMeta
-	Expect(b.db.View(func(txn *badger.Txn) error {
+	Expect(b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
 		if err != nil {
 			return err

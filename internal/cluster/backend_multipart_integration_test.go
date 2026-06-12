@@ -44,11 +44,12 @@ func (n *recordingMultipartRaftNode) commandTypes() []CommandType {
 var _ = Describe("Backend multipart integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 	})
@@ -260,22 +261,22 @@ var _ = Describe("Backend multipart integration", func() {
 	It("filters, skips legacy rows, limits, and sorts multipart upload listings", func() {
 		Expect(b.CreateBucket(ctx, "other")).To(Succeed())
 
-		writeMultipartMetaSpec(b, "upload-late", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-late", clusterMultipartMeta{
 			Bucket: "bucket", Key: "prefix/z.bin", CreatedAt: 300, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-early-b", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-early-b", clusterMultipartMeta{
 			Bucket: "bucket", Key: "prefix/b.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-early-a", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-early-a", clusterMultipartMeta{
 			Bucket: "bucket", Key: "prefix/a.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-other-prefix", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-other-prefix", clusterMultipartMeta{
 			Bucket: "bucket", Key: "else/a.bin", CreatedAt: 50, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-other-bucket", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-other-bucket", clusterMultipartMeta{
 			Bucket: "other", Key: "prefix/a.bin", CreatedAt: 25, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-legacy", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-legacy", clusterMultipartMeta{
 			ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
 
@@ -308,11 +309,11 @@ func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 
 const testChunkedMultipartChunkSize = 5 << 20
 
-func writeMultipartMetaSpec(b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMetaSpec(b *DistributedBackend, db *badger.DB, uploadID string, meta clusterMultipartMeta) {
 	GinkgoHelper()
 	raw, err := marshalClusterMultipartMeta(meta)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
+	Expect(db.Update(func(txn *badger.Txn) error {
 		return txn.Set(b.ks().MultipartKey(uploadID), raw)
 	})).To(Succeed())
 }

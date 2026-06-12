@@ -198,7 +198,7 @@ func TestScatterGatherList_SameModTimeTiebreak(t *testing.T) {
 // the backend's multiGeneration flag never flips and the assertion fails.
 func TestAddPlacementGeneration_FiresCoordinatorRebuild(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
 	router := NewRouter(mgr)

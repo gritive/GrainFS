@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -121,8 +122,20 @@ func bootAutoMigrate(state *bootState) error {
 		return nil
 	}
 	log.Info().Str("component", "migrate").Msg("auto-migrating local metadata to cluster format")
-	if err := cluster.MigrateLegacyMetaToCluster(state.cfg.DataDir, state.nodeID); err != nil {
-		return fmt.Errorf("auto-migrate: %w", err)
+	// Phase 6.5 S3: the composition root opens the legacy meta DB and injects
+	// the wrapped store; cluster.MigrateLegacyMetaToCluster no longer touches
+	// badger. The layout checks above preserve the old metaDir-existence
+	// semantics (we only get here with a populated legacy meta dir).
+	legacyDB, err := badger.Open(badger.DefaultOptions(state.metaDir).WithLogger(nil))
+	if err != nil {
+		return fmt.Errorf("auto-migrate: open legacy meta db: %w", err)
+	}
+	migErr := cluster.MigrateLegacyMetaToCluster(badgermeta.Wrap(legacyDB), state.cfg.DataDir, state.nodeID)
+	if cerr := legacyDB.Close(); cerr != nil && migErr == nil {
+		migErr = fmt.Errorf("auto-migrate: close legacy meta db: %w", cerr)
+	}
+	if migErr != nil {
+		return fmt.Errorf("auto-migrate: %w", migErr)
 	}
 	log.Info().Str("component", "migrate").Msg("auto-migration complete")
 	return nil
@@ -215,6 +228,7 @@ func bootOpenSharedFSMDB(state *bootState) error {
 		return fmt.Errorf("open shared FSM-state badger at %s: %w", sharedDir, err)
 	}
 	state.sharedFSMDB = sharedDB
+	state.sharedFSMStore = badgermeta.Wrap(sharedDB)
 	state.AddCleanup(func() { sharedDB.Close() })
 	sharedVlog := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedFSM, sharedDB)
 	state.AddCleanup(func() { resourcewatch.DeregisterDB(sharedVlog) })

@@ -3,37 +3,27 @@ package cluster
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// MigrateLegacyMetaToCluster converts a legacy data directory to cluster format.
-// It reads existing metadata from BadgerDB and re-proposes it through Raft
-// as a single-node cluster, establishing a clean Raft log baseline.
-func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
+// MigrateLegacyMetaToCluster converts a legacy data directory to cluster
+// format. It reads existing metadata from legacyStore (the caller opens the
+// legacy DB under dataDir/meta and owns its lifecycle — Phase 6.5 S3 moved
+// the badger.Open to the composition root, see serveruntime bootAutoMigrate)
+// and re-proposes it through Raft as a single-node cluster, establishing a
+// clean Raft log baseline.
+func MigrateLegacyMetaToCluster(legacyStore MetadataStore, dataDir, nodeID string) error {
+	if legacyStore == nil {
+		return fmt.Errorf("migrate: nil legacy metadata store")
+	}
 	logger := log.With().Str("component", "migrate").Logger()
-
-	metaDir := filepath.Join(dataDir, "meta")
-	if _, err := os.Stat(metaDir); os.IsNotExist(err) {
-		return fmt.Errorf("metadata directory not found: %s", metaDir)
-	}
-
-	// Open the existing metadata DB
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
-	db, err := badger.Open(dbOpts)
-	if err != nil {
-		return fmt.Errorf("open metadata db: %w", err)
-	}
-	defer db.Close()
-	store := badgermeta.Wrap(db)
+	store := legacyStore
 
 	// Collect all existing metadata entries
 	var buckets []string
@@ -45,7 +35,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 	var objects []objEntry
 	var multiparts [][]byte
 
-	err = store.View(func(txn MetadataTxn) error {
+	err := store.View(func(txn MetadataTxn) error {
 		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {

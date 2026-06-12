@@ -31,7 +31,7 @@ func gbFrameGenOf(t *testing.T, gb *GroupBackend, key []byte) uint32 {
 // are EXCLUDED regardless of gen.
 func TestCollectStaleFSMValueKeys_PolicyAndObjOnly(t *testing.T) {
 	// Use newTestGroupBackend (keeper starts at gen 0).
-	gb := newTestGroupBackend(t, "group-1")
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
 	keeper := gb.shardSvc.dekKeeper
 	require.NotNil(t, keeper)
@@ -40,14 +40,14 @@ func TestCollectStaleFSMValueKeys_PolicyAndObjOnly(t *testing.T) {
 	polKey := ks.BucketPolicyKey("b1")
 	polRaw, err := gb.fsm.sealValue(polKey, []byte(`{}`))
 	require.NoError(t, err)
-	dbSet(t, gb.db, polKey, polRaw)
+	dbSet(t, gbDB, polKey, polRaw)
 	require.Equal(t, uint32(0), gbFrameGenOf(t, gb, polKey), "policy should be at gen 0 (stale)")
 
 	// At gen 0: also seal mpu: key (should be excluded by prefix scan).
 	mpuKey := ks.MultipartKey("up-1")
 	mpuRaw, err := gb.fsm.sealValue(mpuKey, []byte(`{}`))
 	require.NoError(t, err)
-	dbSet(t, gb.db, mpuKey, mpuRaw)
+	dbSet(t, gbDB, mpuKey, mpuRaw)
 
 	// Rotate keeper to gen 1 (now active == 1).
 	require.NoError(t, keeper.Rotate())
@@ -58,7 +58,7 @@ func TestCollectStaleFSMValueKeys_PolicyAndObjOnly(t *testing.T) {
 	objKey := ks.ObjectMetaKey("b1", "k")
 	objRaw, err := gb.fsm.sealValue(objKey, []byte(`{}`))
 	require.NoError(t, err)
-	dbSet(t, gb.db, objKey, objRaw)
+	dbSet(t, gbDB, objKey, objRaw)
 	require.Equal(t, uint32(1), gbFrameGenOf(t, gb, objKey), "obj should be at gen 1 (active)")
 
 	// CollectStaleFSMValueKeys with activeGen=1: only policy: should appear.
@@ -69,7 +69,7 @@ func TestCollectStaleFSMValueKeys_PolicyAndObjOnly(t *testing.T) {
 
 // TestCollectStaleFSMValueKeys_RespectsMaxBatch verifies that the count cap is respected.
 func TestCollectStaleFSMValueKeys_RespectsMaxBatch(t *testing.T) {
-	gb := newTestGroupBackend(t, "group-1")
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
 
 	// Seed 5 stale policy: keys at gen 0.
@@ -77,7 +77,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBatch(t *testing.T) {
 		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
 		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 		require.NoError(t, err)
-		dbSet(t, gb.db, key, raw)
+		dbSet(t, gbDB, key, raw)
 	}
 
 	// Rotate to gen 1 so all 5 are stale.
@@ -90,7 +90,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBatch(t *testing.T) {
 
 // TestCollectStaleFSMValueKeys_RespectsMaxBytes verifies the byte-budget cap.
 func TestCollectStaleFSMValueKeys_RespectsMaxBytes(t *testing.T) {
-	gb := newTestGroupBackend(t, "group-1")
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
 
 	// Seed 5 policy: keys with ~200-byte values.
@@ -99,7 +99,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBytes(t *testing.T) {
 		key := ks.BucketPolicyKey(fmt.Sprintf("big%d", i))
 		raw, err := gb.fsm.sealValue(key, largeVal)
 		require.NoError(t, err)
-		dbSet(t, gb.db, key, raw)
+		dbSet(t, gbDB, key, raw)
 	}
 
 	// Rotate to gen 1 so all 5 are stale.
@@ -114,7 +114,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBytes(t *testing.T) {
 
 // TestDrainFSMValueRewrap_DrainsGroupToActive verifies full drain.
 func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
-	gb := newTestGroupBackend(t, "group-1")
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
 	keeper := gb.shardSvc.dekKeeper
 
@@ -123,7 +123,7 @@ func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
 		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
 		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 		require.NoError(t, err)
-		dbSet(t, gb.db, key, raw)
+		dbSet(t, gbDB, key, raw)
 	}
 
 	// Rotate to gen 1 (active = 1).
@@ -140,7 +140,7 @@ func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
 
 // TestDrainFSMValueRewrap_IdempotentWhenClean verifies drain on already-active data is safe.
 func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
-	gb := newTestGroupBackend(t, "group-1")
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
 	keeper := gb.shardSvc.dekKeeper
 
@@ -151,7 +151,7 @@ func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 	key := ks.BucketPolicyKey("b1")
 	raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 	require.NoError(t, err)
-	dbSet(t, gb.db, key, raw)
+	dbSet(t, gbDB, key, raw)
 
 	// Drain when keeper-current == 1 and value already at 1 — nothing to do.
 	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 100))
@@ -181,7 +181,7 @@ func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 // cleanly (the drain always returns → the single-flight guard's defer releases,
 // so the group is never permanently skipped).
 func TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges(t *testing.T) {
-	gb := newTestGroupBackend(t, "group-1")
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
 	keeper := gb.shardSvc.dekKeeper
 
@@ -191,7 +191,7 @@ func TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges(t *testing.T
 		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
 		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 		require.NoError(t, err)
-		dbSet(t, gb.db, key, raw)
+		dbSet(t, gbDB, key, raw)
 	}
 	require.NoError(t, keeper.Rotate()) // gen 1 active; values at gen 0 → stale
 

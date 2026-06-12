@@ -33,7 +33,7 @@ import (
 // base.calls would be non-empty and this test would fail.
 func TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft(t *testing.T) {
 	base := &fakeBackend{}
-	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
 	gb.Node().Start()
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)

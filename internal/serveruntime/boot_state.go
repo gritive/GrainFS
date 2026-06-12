@@ -94,6 +94,10 @@ type bootState struct {
 	// registers the matching teardown via AddCleanup.
 	db          *badger.DB // bootOpenMetaDB
 	sharedFSMDB *badger.DB // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
+	// sharedFSMStore wraps sharedFSMDB once as the cluster MetadataStore
+	// (Phase 6.5 S3: composition root injects; backends are shared-mode and
+	// never close it — serveruntime owns the raw DB lifecycle).
+	sharedFSMStore cluster.MetadataStore
 
 	// Transport (populated by transport phases — bootClusterTransport,
 	// bootGroupRaftMux). transportPSK records the

@@ -100,7 +100,7 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	// Each backend gets its own raft node so it can process proposals.
 	rootA := t.TempDir()
 	nodeA, _ := newTestNodeForSharedDB(t, "node-A")
-	backendA, err := NewDistributedBackend(rootA, db, nodeA, ksA, true)
+	backendA, err := NewDistributedBackend(rootA, badgermeta.Wrap(db), nodeA, ksA, true)
 	require.NoError(t, err)
 	stopA := make(chan struct{})
 	go backendA.RunApplyLoop(stopA)
@@ -108,7 +108,7 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 
 	rootB := t.TempDir()
 	nodeB, _ := newTestNodeForSharedDB(t, "node-B")
-	backendB, err := NewDistributedBackend(rootB, db, nodeB, ksB, true)
+	backendB, err := NewDistributedBackend(rootB, badgermeta.Wrap(db), nodeB, ksB, true)
 	require.NoError(t, err)
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)
