@@ -1,4 +1,4 @@
-// raftv2_group_http_test.go — per-group raft over the Phase 8 HTTP transport.
+// raft_rpc_http_test.go — per-group raft over the Phase 8 HTTP transport.
 // GroupRaftSender routes RequestVote/AppendEntries over the native
 // /raft/group/rpc buffered route (Phase 8 N7-3) — an HTTP POST round-trip per
 // RPC. This is the multi-node proof that the control plane works over the HTTP

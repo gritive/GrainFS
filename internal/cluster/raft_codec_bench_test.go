@@ -27,7 +27,7 @@ func BenchmarkV2EncodeRPCAppendEntries(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		raw, err := v2EncodeRPC(v2RPCTypeAppendEntries, args)
+		raw, err := encodeRPC(rpcTypeAppendEntries, args)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -38,22 +38,22 @@ func BenchmarkV2EncodeRPCAppendEntries(b *testing.B) {
 }
 
 func BenchmarkV2DecodeRPCAppendEntries(b *testing.B) {
-	raw, err := v2EncodeRPC(v2RPCTypeAppendEntries, benchmarkAppendEntriesArgs())
+	raw, err := encodeRPC(rpcTypeAppendEntries, benchmarkAppendEntriesArgs())
 	if err != nil {
 		b.Fatal(err)
 	}
-	rpcType, data, err := v2DecodeRPC(raw)
+	rpcType, data, err := decodeRPC(raw)
 	if err != nil {
 		b.Fatal(err)
 	}
-	if rpcType != v2RPCTypeAppendEntries {
-		b.Fatalf("rpc type = %s, want %s", rpcType, v2RPCTypeAppendEntries)
+	if rpcType != rpcTypeAppendEntries {
+		b.Fatalf("rpc type = %s, want %s", rpcType, rpcTypeAppendEntries)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		args, err := v2DecodeAppendEntriesArgs(data)
+		args, err := decodeAppendEntriesArgs(data)
 		if err != nil {
 			b.Fatal(err)
 		}

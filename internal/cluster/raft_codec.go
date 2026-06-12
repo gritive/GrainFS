@@ -1,4 +1,4 @@
-// raftv2_codec.go — wire codec for the cluster Raft RPC bridge.
+// raft_codec.go — wire codec for the cluster Raft RPC bridge.
 //
 // It encodes/decodes Raft RPCs as FlatBuffers RPC envelopes, sharing the schema
 // package (internal/raft/raftpb) with internal/raft's own codec. This is the
@@ -7,7 +7,7 @@
 // a v1 peer).
 //
 // The current wire bytes are pinned as a regression guard by the golden-hex
-// cases in raftv2_codec_test.go (TestV2EncodeRPC_WireGolden): the FlatBuffers
+// cases in raft_codec_test.go (TestV2EncodeRPC_WireGolden): the FlatBuffers
 // vtable layout is deterministic given the builder call sequence, so changing
 // that sequence shifts the bytes and an intentional wire change must regenerate
 // the goldens.
@@ -24,41 +24,43 @@ import (
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
-// RPC type strings — must match v1's quic_rpc.go::rpcType* constants verbatim.
+// RPC type strings — wire literals, pinned by the golden tests (historically
+// matched the deleted v1 codec's constants verbatim).
 const (
-	v2RPCTypeRequestVote          = "RequestVote"
-	v2RPCTypeRequestVoteReply     = "RequestVoteReply"
-	v2RPCTypeAppendEntries        = "AppendEntries"
-	v2RPCTypeAppendEntriesReply   = "AppendEntriesReply"
-	v2RPCTypeInstallSnapshot      = "InstallSnapshot"
-	v2RPCTypeInstallSnapshotReply = "InstallSnapshotReply"
-	v2RPCTypeTimeoutNow           = "TimeoutNow"
-	v2RPCTypeTimeoutNowReply      = "TimeoutNowReply"
+	rpcTypeRequestVote          = "RequestVote"
+	rpcTypeRequestVoteReply     = "RequestVoteReply"
+	rpcTypeAppendEntries        = "AppendEntries"
+	rpcTypeAppendEntriesReply   = "AppendEntriesReply"
+	rpcTypeInstallSnapshot      = "InstallSnapshot"
+	rpcTypeInstallSnapshotReply = "InstallSnapshotReply"
+	rpcTypeTimeoutNow           = "TimeoutNow"
+	rpcTypeTimeoutNowReply      = "TimeoutNowReply"
 )
 
-// v2RaftBuilderPool is a sibling of v1's raftBuilderPool (intentionally separate
-// so v1/v2 builders never share state during the M5 dual-import window).
-var v2RaftBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
+// raftBuilderPool is a sibling of internal/raft's raftBuilderPool
+// (package-separate pools, intentionally separate so the two packages'
+// builders never share state).
+var raftBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
 
-func v2FbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
+func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	b.Finish(root)
 	raw := b.FinishedBytes()
 	out := make([]byte, len(raw))
 	copy(out, raw)
 	b.Reset()
-	v2RaftBuilderPool.Put(b)
+	raftBuilderPool.Put(b)
 	return out
 }
 
-// v2EncodeRPC serializes an RPC message (type + payload) using FlatBuffers.
+// encodeRPC serializes an RPC message (type + payload) using FlatBuffers.
 // Byte-identical to internal/raft.encodeRPC.
-func v2EncodeRPC(rpcType string, msg any) ([]byte, error) {
-	data, err := v2EncodeRPCPayload(rpcType, msg)
+func encodeRPC(rpcType string, msg any) ([]byte, error) {
+	data, err := encodeRPCPayload(rpcType, msg)
 	if err != nil {
 		return nil, err
 	}
 
-	b := v2RaftBuilderPool.Get()
+	b := raftBuilderPool.Get()
 	typeOff := b.CreateString(rpcType)
 	var dataOff flatbuffers.UOffsetT
 	if len(data) > 0 {
@@ -70,14 +72,14 @@ func v2EncodeRPC(rpcType string, msg any) ([]byte, error) {
 		pb.RPCMessageAddData(b, dataOff)
 	}
 	root := pb.RPCMessageEnd(b)
-	return v2FbFinishRPC(b, root), nil
+	return fbFinishRPC(b, root), nil
 }
 
-func v2EncodeRPCPayload(rpcType string, msg any) ([]byte, error) {
+func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	switch rpcType {
-	case v2RPCTypeRequestVote:
+	case rpcTypeRequestVote:
 		args := msg.(*raft.RequestVoteArgs)
-		b := v2RaftBuilderPool.Get()
+		b := raftBuilderPool.Get()
 		cidOff := b.CreateString(args.CandidateID)
 		pb.RequestVoteArgsStart(b)
 		pb.RequestVoteArgsAddTerm(b, args.Term)
@@ -87,20 +89,20 @@ func v2EncodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		pb.RequestVoteArgsAddPreVote(b, args.PreVote)
 		pb.RequestVoteArgsAddLeaderTransfer(b, args.LeaderTransfer)
 		root := pb.RequestVoteArgsEnd(b)
-		return v2FbFinishRPC(b, root), nil
+		return fbFinishRPC(b, root), nil
 
-	case v2RPCTypeRequestVoteReply:
+	case rpcTypeRequestVoteReply:
 		reply := msg.(*raft.RequestVoteReply)
-		b := v2RaftBuilderPool.Get()
+		b := raftBuilderPool.Get()
 		pb.RequestVoteReplyStart(b)
 		pb.RequestVoteReplyAddTerm(b, reply.Term)
 		pb.RequestVoteReplyAddVoteGranted(b, reply.VoteGranted)
 		root := pb.RequestVoteReplyEnd(b)
-		return v2FbFinishRPC(b, root), nil
+		return fbFinishRPC(b, root), nil
 
-	case v2RPCTypeAppendEntries:
+	case rpcTypeAppendEntries:
 		args := msg.(*raft.AppendEntriesArgs)
-		b := v2RaftBuilderPool.Get()
+		b := raftBuilderPool.Get()
 
 		entryOffs := make([]flatbuffers.UOffsetT, len(args.Entries))
 		for i := len(args.Entries) - 1; i >= 0; i-- {
@@ -136,22 +138,22 @@ func v2EncodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		pb.AppendEntriesArgsAddEntries(b, entriesVec)
 		pb.AppendEntriesArgsAddLeaderCommit(b, args.LeaderCommit)
 		root := pb.AppendEntriesArgsEnd(b)
-		return v2FbFinishRPC(b, root), nil
+		return fbFinishRPC(b, root), nil
 
-	case v2RPCTypeAppendEntriesReply:
+	case rpcTypeAppendEntriesReply:
 		reply := msg.(*raft.AppendEntriesReply)
-		b := v2RaftBuilderPool.Get()
+		b := raftBuilderPool.Get()
 		pb.AppendEntriesReplyStart(b)
 		pb.AppendEntriesReplyAddTerm(b, reply.Term)
 		pb.AppendEntriesReplyAddSuccess(b, reply.Success)
 		pb.AppendEntriesReplyAddConflictTerm(b, reply.ConflictTerm)
 		pb.AppendEntriesReplyAddConflictIndex(b, reply.ConflictIndex)
 		root := pb.AppendEntriesReplyEnd(b)
-		return v2FbFinishRPC(b, root), nil
+		return fbFinishRPC(b, root), nil
 
-	case v2RPCTypeInstallSnapshot:
+	case rpcTypeInstallSnapshot:
 		args := msg.(*raft.InstallSnapshotArgs)
-		b := v2RaftBuilderPool.Get()
+		b := raftBuilderPool.Get()
 
 		serverOffs := make([]flatbuffers.UOffsetT, len(args.Servers))
 		for i := len(args.Servers) - 1; i >= 0; i-- {
@@ -188,17 +190,17 @@ func v2EncodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 			pb.InstallSnapshotArgsAddServers(b, serversVec)
 		}
 		root := pb.InstallSnapshotArgsEnd(b)
-		return v2FbFinishRPC(b, root), nil
+		return fbFinishRPC(b, root), nil
 
-	case v2RPCTypeInstallSnapshotReply:
+	case rpcTypeInstallSnapshotReply:
 		reply := msg.(*raft.InstallSnapshotReply)
-		b := v2RaftBuilderPool.Get()
+		b := raftBuilderPool.Get()
 		pb.InstallSnapshotReplyStart(b)
 		pb.InstallSnapshotReplyAddTerm(b, reply.Term)
 		root := pb.InstallSnapshotReplyEnd(b)
-		return v2FbFinishRPC(b, root), nil
+		return fbFinishRPC(b, root), nil
 
-	case v2RPCTypeTimeoutNow, v2RPCTypeTimeoutNowReply:
+	case rpcTypeTimeoutNow, rpcTypeTimeoutNowReply:
 		return []byte{}, nil
 
 	default:
@@ -206,8 +208,8 @@ func v2EncodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	}
 }
 
-// v2DecodeRPC deserializes the outer RPCMessage envelope.
-func v2DecodeRPC(raw []byte) (rpcType string, data []byte, err error) {
+// decodeRPC deserializes the outer RPCMessage envelope.
+func decodeRPC(raw []byte) (rpcType string, data []byte, err error) {
 	if len(raw) == 0 {
 		return "", nil, fmt.Errorf("unmarshal RPC envelope: empty data")
 	}
@@ -220,7 +222,7 @@ func v2DecodeRPC(raw []byte) (rpcType string, data []byte, err error) {
 	return string(msg.Type()), msg.DataBytes(), nil
 }
 
-func v2DecodeRequestVoteArgs(data []byte) (args *raft.RequestVoteArgs, err error) {
+func decodeRequestVoteArgs(data []byte) (args *raft.RequestVoteArgs, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode RequestVoteArgs: invalid flatbuffer: %v", r)
@@ -237,7 +239,7 @@ func v2DecodeRequestVoteArgs(data []byte) (args *raft.RequestVoteArgs, err error
 	}, nil
 }
 
-func v2DecodeRequestVoteReply(data []byte) (reply *raft.RequestVoteReply, err error) {
+func decodeRequestVoteReply(data []byte) (reply *raft.RequestVoteReply, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode RequestVoteReply: invalid flatbuffer: %v", r)
@@ -250,7 +252,7 @@ func v2DecodeRequestVoteReply(data []byte) (reply *raft.RequestVoteReply, err er
 	}, nil
 }
 
-func v2DecodeAppendEntriesArgs(data []byte) (args *raft.AppendEntriesArgs, err error) {
+func decodeAppendEntriesArgs(data []byte) (args *raft.AppendEntriesArgs, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode AppendEntriesArgs: invalid flatbuffer: %v", r)
@@ -275,7 +277,7 @@ func v2DecodeAppendEntriesArgs(data []byte) (args *raft.AppendEntriesArgs, err e
 	}, nil
 }
 
-func v2DecodeAppendEntriesReply(data []byte) (reply *raft.AppendEntriesReply, err error) {
+func decodeAppendEntriesReply(data []byte) (reply *raft.AppendEntriesReply, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode AppendEntriesReply: invalid flatbuffer: %v", r)
@@ -290,7 +292,7 @@ func v2DecodeAppendEntriesReply(data []byte) (reply *raft.AppendEntriesReply, er
 	}, nil
 }
 
-func v2DecodeInstallSnapshotArgs(data []byte) (args *raft.InstallSnapshotArgs, err error) {
+func decodeInstallSnapshotArgs(data []byte) (args *raft.InstallSnapshotArgs, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode InstallSnapshotArgs: invalid flatbuffer: %v", r)
@@ -314,7 +316,7 @@ func v2DecodeInstallSnapshotArgs(data []byte) (args *raft.InstallSnapshotArgs, e
 	}, nil
 }
 
-func v2DecodeInstallSnapshotReply(data []byte) (reply *raft.InstallSnapshotReply, err error) {
+func decodeInstallSnapshotReply(data []byte) (reply *raft.InstallSnapshotReply, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode InstallSnapshotReply: invalid flatbuffer: %v", r)
