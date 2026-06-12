@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.558.0] - 2026-06-12
 
 ### Changed
 - Phase 8 N7-3: every remaining RPC family now travels its own native route — the
