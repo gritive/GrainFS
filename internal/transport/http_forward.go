@@ -22,7 +22,7 @@ import (
 // cluster/forward_codec.go) — not flat scalars — so it rides a NAMED family
 // header (base64, capped), exactly where the tunnel carried it. This is the
 // convention for FB-framed families: a family-specific header carrying the
-// family's own application payload, NOT a revival of the generic X-Gfs-*
+// family's own application payload, NOT a revival of the retired generic
 // envelope (no StreamType, no Message.ID, no transport-status header).
 //
 // HTTP status is TRANSPORT-ONLY on these routes: 400 bad/missing frame, 503

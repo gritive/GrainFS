@@ -183,7 +183,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootShardService(ctx, state); err != nil {
 		return err
 	}
-	if err := bootStreamRouter(state); err != nil {
+	if err := bootShardRoutes(state); err != nil {
 		return err
 	}
 	if err := bootOwnedGroupsAndEC(ctx, state, recordStartupDecision); err != nil {

@@ -16,7 +16,7 @@ func servicesPhasePrereqs(t *testing.T) *bootState {
 	t.Helper()
 	ctx, state := storagePhasePrereqs(t)
 	require.NoError(t, bootShardService(ctx, state))
-	require.NoError(t, bootStreamRouter(state))
+	require.NoError(t, bootShardRoutes(state))
 	require.NoError(t, bootOwnedGroupsAndEC(ctx, state, func(badgerrole.Decision) {}))
 	return state
 }

@@ -25,7 +25,7 @@ import (
 // cluster-key is required in all modes; a fixed test key is supplied.
 // In solo mode bootShardService still runs the !JoinMode branch — meta-raft
 // has a single voter so the leader wait completes near-instantly.
-// The data-plane raft node is constructed but not Bootstrap'd — bootStreamRouter
+// The data-plane raft node is constructed but not Bootstrap'd — bootShardRoutes
 // fires node.Start() in production; tests rely on the cleanup stack to Stop it.
 func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
@@ -196,9 +196,9 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	assert.Equal(t, 0, state.effectiveEC.ParityShards)
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 
-	// 2. StreamRouter — registers the native shard routes; distBackend still nil.
+	// 2. ShardRoutes — registers the native shard routes; distBackend still nil.
 	cleanupsBefore := len(state.cleanups)
-	require.NoError(t, bootStreamRouter(state))
+	require.NoError(t, bootShardRoutes(state))
 	assert.Equal(t, cleanupsBefore+1, len(state.cleanups), "node.Stop cleanup pushed")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 

@@ -71,7 +71,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	warnIfReducedDataFsync()
 	// Open the data WAL before any cluster shard service is constructed so that
 	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
-	// before bootStreamRouter registers transport handlers that would otherwise
+	// before bootShardRoutes registers transport handlers that would otherwise
 	// surface partially-recovered state to peers.
 	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
 	sealer, err := dataWALSealerForState(state)
@@ -201,7 +201,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	// has already been closed.
 	state.AddCleanup(func() { _ = state.shardSvc.Close() })
 
-	// Replay the data WAL into the shard service before bootStreamRouter
+	// Replay the data WAL into the shard service before bootShardRoutes
 	// registers transport handlers; this keeps peers from observing partially-
 	// recovered local shard state.
 	if state.shardSvc != nil {
@@ -224,14 +224,14 @@ func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
 	}
 }
 
-// bootStreamRouter registers the shard data-plane handlers on the cluster
+// bootShardRoutes registers the shard data-plane handlers on the cluster
 // transport's native routes, then fires raft.Node.Start to begin the apply
 // loop on the data-plane raft.
 //
 // node.Start fires the data-plane raft apply loop. After this returns,
 // distBackend.RunApplyLoop (started in bootOwnedGroupsAndEC) will see
 // applied entries flow.
-func bootStreamRouter(state *bootState) error {
+func bootShardRoutes(state *bootState) error {
 	// Native /shard/rpc buffered route — carries every buffered shard op
 	// (Write/Read/ReadRange/Delete/quorum-meta/shadow-meta/Ping).
 	state.clusterTransport.RegisterBufferedRoute(transport.RouteShardRPC, state.shardSvc.NativeRPCHandler())

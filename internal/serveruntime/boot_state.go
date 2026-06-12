@@ -194,7 +194,7 @@ type bootState struct {
 	bannerWriter io.Writer
 
 	// Storage runtime (populated by storage phases — bootShardService,
-	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
+	// bootShardRoutes, bootOwnedGroupsAndEC). The data plane: shard
 	// service, native shard routes on the cluster transport, distributed backend, per-group
 	// raft instantiation, and EC config. effectiveEC is captured here so
 	// downstream phases (PR 6: balancer, healreceipt) can re-read the
@@ -238,7 +238,7 @@ type bootState struct {
 
 	// bootShardService (data WAL — opened before the cluster shard service so
 	// shard writes can be logged and replayed before any transport stream handler
-	// is registered downstream by bootStreamRouter).
+	// is registered downstream by bootShardRoutes).
 	dataWAL    *datawal.WAL
 	dataWALDir string
 	// dataWALRepairCollector receives metadata-only WAL replay candidates during
