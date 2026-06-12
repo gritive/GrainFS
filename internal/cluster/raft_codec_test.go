@@ -14,7 +14,7 @@ import (
 // with the QUIC-era v1 codec; v1 is now deleted, so they stand on their own as
 // the canonical wire format and a regression guard against accidental drift.
 //
-// If this test fails after touching raftv2_codec.go, you have changed the wire
+// If this test fails after touching raft_codec.go, you have changed the wire
 // format. Since this is the sole codec (greenfield/flag-day, no v1 peer to stay
 // compatible with), an intentional change is fine — regenerate the goldens from
 // the new encoder output. An unintentional change is a bug — revert.
@@ -27,7 +27,7 @@ func TestV2EncodeRPC_WireGolden(t *testing.T) {
 	}{
 		{
 			name:    "RequestVote",
-			rpcType: v2RPCTypeRequestVote,
+			rpcType: rpcTypeRequestVote,
 			msg: &raft.RequestVoteArgs{
 				Term:         7,
 				CandidateID:  "node-A",
@@ -38,13 +38,13 @@ func TestV2EncodeRPC_WireGolden(t *testing.T) {
 		},
 		{
 			name:    "RequestVoteReply",
-			rpcType: v2RPCTypeRequestVoteReply,
+			rpcType: rpcTypeRequestVoteReply,
 			msg:     &raft.RequestVoteReply{Term: 7, VoteGranted: true},
 			golden:  "0c00000008000c00080004000800000008000000280000002000000010000000000000000800100008000700080000000000000107000000000000001000000052657175657374566f74655265706c7900000000",
 		},
 		{
 			name:    "AppendEntries_empty",
-			rpcType: v2RPCTypeAppendEntries,
+			rpcType: rpcTypeAppendEntries,
 			msg: &raft.AppendEntriesArgs{
 				Term:         7,
 				LeaderID:     "node-A",
@@ -56,7 +56,7 @@ func TestV2EncodeRPC_WireGolden(t *testing.T) {
 		},
 		{
 			name:    "AppendEntries_one",
-			rpcType: v2RPCTypeAppendEntries,
+			rpcType: rpcTypeAppendEntries,
 			msg: &raft.AppendEntriesArgs{
 				Term:         7,
 				LeaderID:     "node-A",
@@ -69,13 +69,13 @@ func TestV2EncodeRPC_WireGolden(t *testing.T) {
 		},
 		{
 			name:    "AppendEntriesReply",
-			rpcType: v2RPCTypeAppendEntriesReply,
+			rpcType: rpcTypeAppendEntriesReply,
 			msg:     &raft.AppendEntriesReply{Term: 7, Success: true},
 			golden:  "0c00000008000c000800040008000000080000002800000020000000100000000000000008001000080007000800000000000001070000000000000012000000417070656e64456e74726965735265706c790000",
 		},
 		{
 			name:    "InstallSnapshot",
-			rpcType: v2RPCTypeInstallSnapshot,
+			rpcType: rpcTypeInstallSnapshot,
 			msg: &raft.InstallSnapshotArgs{
 				Term:              7,
 				LeaderID:          "node-A",
@@ -88,26 +88,26 @@ func TestV2EncodeRPC_WireGolden(t *testing.T) {
 		},
 		{
 			name:    "InstallSnapshotReply",
-			rpcType: v2RPCTypeInstallSnapshotReply,
+			rpcType: rpcTypeInstallSnapshotReply,
 			msg:     &raft.InstallSnapshotReply{Term: 7},
 			golden:  "0c00000008000c0008000400080000000800000020000000180000000c000000000006000c00040006000000070000000000000014000000496e7374616c6c536e617073686f745265706c7900000000",
 		},
 		{
 			name:    "TimeoutNow",
-			rpcType: v2RPCTypeTimeoutNow,
+			rpcType: rpcTypeTimeoutNow,
 			msg:     nil,
 			golden:  "0c000000000006000800040006000000040000000a00000054696d656f75744e6f770000",
 		},
 		{
 			name:    "TimeoutNowReply",
-			rpcType: v2RPCTypeTimeoutNowReply,
+			rpcType: rpcTypeTimeoutNowReply,
 			msg:     nil,
 			golden:  "0c000000000006000800040006000000040000000f00000054696d656f75744e6f775265706c7900",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := v2EncodeRPC(tc.rpcType, tc.msg)
+			got, err := encodeRPC(tc.rpcType, tc.msg)
 			require.NoError(t, err)
 			require.Equal(t, tc.golden, hex.EncodeToString(got), "raft RPC wire bytes diverged from the canonical golden")
 		})
@@ -123,12 +123,12 @@ func TestV2EncodeDecode_RoundTrip(t *testing.T) {
 			Term: 7, CandidateID: "node-A", LastLogIndex: 42, LastLogTerm: 6,
 			PreVote: true, LeaderTransfer: true,
 		}
-		raw, err := v2EncodeRPC(v2RPCTypeRequestVote, args)
+		raw, err := encodeRPC(rpcTypeRequestVote, args)
 		require.NoError(t, err)
-		rpcType, data, err := v2DecodeRPC(raw)
+		rpcType, data, err := decodeRPC(raw)
 		require.NoError(t, err)
-		require.Equal(t, v2RPCTypeRequestVote, rpcType)
-		out, err := v2DecodeRequestVoteArgs(data)
+		require.Equal(t, rpcTypeRequestVote, rpcType)
+		out, err := decodeRequestVoteArgs(data)
 		require.NoError(t, err)
 		require.Equal(t, args, out)
 	})
@@ -141,12 +141,12 @@ func TestV2EncodeDecode_RoundTrip(t *testing.T) {
 			},
 			LeaderCommit: 41,
 		}
-		raw, err := v2EncodeRPC(v2RPCTypeAppendEntries, args)
+		raw, err := encodeRPC(rpcTypeAppendEntries, args)
 		require.NoError(t, err)
-		rpcType, data, err := v2DecodeRPC(raw)
+		rpcType, data, err := decodeRPC(raw)
 		require.NoError(t, err)
-		require.Equal(t, v2RPCTypeAppendEntries, rpcType)
-		out, err := v2DecodeAppendEntriesArgs(data)
+		require.Equal(t, rpcTypeAppendEntries, rpcType)
+		out, err := decodeAppendEntriesArgs(data)
 		require.NoError(t, err)
 		require.Equal(t, args.Term, out.Term)
 		require.Equal(t, args.LeaderID, out.LeaderID)
@@ -160,12 +160,12 @@ func TestV2EncodeDecode_RoundTrip(t *testing.T) {
 			Data:    []byte("snapshot-data"),
 			Servers: []raft.Server{{ID: "node-A", Suffrage: raft.Voter}},
 		}
-		raw, err := v2EncodeRPC(v2RPCTypeInstallSnapshot, args)
+		raw, err := encodeRPC(rpcTypeInstallSnapshot, args)
 		require.NoError(t, err)
-		rpcType, data, err := v2DecodeRPC(raw)
+		rpcType, data, err := decodeRPC(raw)
 		require.NoError(t, err)
-		require.Equal(t, v2RPCTypeInstallSnapshot, rpcType)
-		out, err := v2DecodeInstallSnapshotArgs(data)
+		require.Equal(t, rpcTypeInstallSnapshot, rpcType)
+		out, err := decodeInstallSnapshotArgs(data)
 		require.NoError(t, err)
 		require.Equal(t, args.Term, out.Term)
 		require.Equal(t, args.LeaderID, out.LeaderID)

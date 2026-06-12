@@ -56,7 +56,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootClusterTransport(ctx, state); err != nil {
 		return err
 	}
-	// groupRaftMux must exist BEFORE NewMetaTransportMux so the meta-raft
+	// groupRaftMux must exist BEFORE NewMetaTransport so the meta-raft
 	// transport auto-registers on construction.
 	if err := bootGroupRaftMux(state); err != nil {
 		return err

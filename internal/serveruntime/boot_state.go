@@ -111,7 +111,7 @@ type bootState struct {
 	// against state.metaRaft.FSM(); bootMetaRaftStart then calls Start.
 	metaRaft         *cluster.MetaRaft
 	capabilityGate   *cluster.CapabilityGate
-	metaTransport    *cluster.MetaTransportMux
+	metaTransport    *cluster.MetaRaftTransport
 	dgMgr            *cluster.DataGroupManager
 	clusterRouter    *cluster.Router
 	rotationKeystore *transport.Keystore
