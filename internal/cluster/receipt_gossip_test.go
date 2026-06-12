@@ -68,7 +68,7 @@ func TestReceiptGossipSender_UsesLatestPeerProvider(t *testing.T) {
 	require.NotEmpty(t, tr.SentTo("peer-c:9000"))
 }
 
-func TestReceiptGossipSender_ConnectsDynamicPeerBeforeSend(t *testing.T) {
+func TestReceiptGossipSender_SendsToDynamicPeer(t *testing.T) {
 	tr := newMockTransport()
 	provider := &fakeReceiptProvider{ids: []string{"rcpt-1"}}
 	sender := NewReceiptGossipSenderWithPeerProvider("node-self:9000", func() []string {
@@ -79,7 +79,7 @@ func TestReceiptGossipSender_ConnectsDynamicPeerBeforeSend(t *testing.T) {
 	defer cancel()
 	sender.Run(ctx)
 
-	require.True(t, tr.ConnectedTo("peer-c:9000"))
+	require.NotEmpty(t, tr.SentTo("peer-c:9000"))
 }
 
 func TestReceiptGossipSender_PayloadDecodesToExpectedIDs(t *testing.T) {

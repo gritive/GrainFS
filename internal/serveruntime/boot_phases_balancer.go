@@ -57,7 +57,8 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 		state.gossipReceiver = cluster.NewGossipReceiver(state.clusterTransport, standaloneStats).
 			WithCapabilityGate(state.capabilityGate).
 			WithNodeAddressBook(state.metaRaft.FSM())
-		go state.gossipReceiver.Run(ctx)
+		// Phase 8 N7-3: native gossip routes replace the Receive()-loop goroutine.
+		state.gossipReceiver.RegisterNativeGossipRoutes()
 		log.Info().Str("component", "gossip").Msg("gossip receiver started")
 	}
 	if state.gossipReceiver != nil {

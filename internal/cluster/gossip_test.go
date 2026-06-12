@@ -16,12 +16,12 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
-// mockTransport implements transport.Transport for gossip tests.
+// mockTransport implements cluster.GossipTransport for gossip tests.
 type mockTransport struct {
-	mu        sync.Mutex
-	sent      []sentMsg
-	connected []string
-	recv      chan *transport.ReceivedMessage
+	mu           sync.Mutex
+	sent         []sentMsg
+	gossipRoutes map[string]transport.GossipHandler
+	recv         chan *transport.ReceivedMessage
 }
 
 type sentMsg struct {
@@ -30,22 +30,40 @@ type sentMsg struct {
 }
 
 func newMockTransport() *mockTransport {
-	return &mockTransport{recv: make(chan *transport.ReceivedMessage, 64)}
+	return &mockTransport{
+		recv:         make(chan *transport.ReceivedMessage, 64),
+		gossipRoutes: make(map[string]transport.GossipHandler),
+	}
 }
 
-func (m *mockTransport) Listen(_ context.Context, _ string) error { return nil }
-func (m *mockTransport) Connect(_ context.Context, addr string) error {
-	m.mu.Lock()
-	m.connected = append(m.connected, addr)
-	m.mu.Unlock()
-	return nil
-}
+func (m *mockTransport) Listen(_ context.Context, _ string) error   { return nil }
+func (m *mockTransport) Connect(_ context.Context, _ string) error  { return nil }
 func (m *mockTransport) Close() error                               { return nil }
 func (m *mockTransport) Receive() <-chan *transport.ReceivedMessage { return m.recv }
 
 func (m *mockTransport) Send(_ context.Context, addr string, msg *transport.Message) error {
 	m.mu.Lock()
 	m.sent = append(m.sent, sentMsg{to: addr, msg: msg})
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *mockTransport) RegisterGossipRoute(path string, h transport.GossipHandler) {
+	m.mu.Lock()
+	m.gossipRoutes[path] = h
+	m.mu.Unlock()
+}
+
+// GossipSend records the native gossip send as a sentMsg (synthesizing the
+// family's legacy StreamType from the path) so per-peer assertions keep
+// reading Type+Payload.
+func (m *mockTransport) GossipSend(_ context.Context, addr, path string, payload []byte) error {
+	st := transport.StreamAdmin
+	if path == transport.RouteGossipReceipt {
+		st = transport.StreamReceipt
+	}
+	m.mu.Lock()
+	m.sent = append(m.sent, sentMsg{to: addr, msg: &transport.Message{Type: st, Payload: payload}})
 	m.mu.Unlock()
 	return nil
 }
@@ -68,17 +86,6 @@ func (m *mockTransport) AllSent() []sentMsg {
 	out := make([]sentMsg, len(m.sent))
 	copy(out, m.sent)
 	return out
-}
-
-func (m *mockTransport) ConnectedTo(addr string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, got := range m.connected {
-		if got == addr {
-			return true
-		}
-	}
-	return false
 }
 
 // inject simulates an incoming message from a remote node.
@@ -338,7 +345,7 @@ func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
 	require.Len(t, tr.SentTo("node-c:9000"), 1)
 }
 
-func TestGossipSenderConnectsDynamicPeerBeforeSend(t *testing.T) {
+func TestGossipSenderSendsToDynamicPeer(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
 	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
@@ -348,7 +355,6 @@ func TestGossipSenderConnectsDynamicPeerBeforeSend(t *testing.T) {
 
 	sender.broadcastOnce(context.Background())
 
-	require.True(t, tr.ConnectedTo("node-c:9000"))
 	require.Len(t, tr.SentTo("node-c:9000"), 1)
 }
 

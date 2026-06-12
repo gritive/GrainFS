@@ -29,12 +29,23 @@ type CapabilityEvidenceSource interface {
 	CapabilityEvidence(nodeID string, now time.Time) compat.Evidence
 }
 
-// GossipSender broadcasts local node stats to all peers at a configurable interval via StreamAdmin.
+// GossipTransport is the transport surface the gossip senders/receiver use:
+// the native gossip routes (Phase 8 N7-3) plus the tunnel Transport surface
+// (Connect/Send/Receive — deleted in N8, after which only the native methods
+// remain).
+type GossipTransport interface {
+	transport.Transport
+	RegisterGossipRoute(path string, h transport.GossipHandler)
+	GossipSend(ctx context.Context, addr, path string, payload []byte) error
+}
+
+// GossipSender broadcasts local node stats to all peers at a configurable
+// interval via the native /gossip/admin route.
 type GossipSender struct {
 	nodeID          string
 	peers           []string
 	peerProvider    func() []string
-	tr              transport.Transport
+	tr              GossipTransport
 	store           *NodeStatsStore
 	interval        time.Duration
 	logger          zerolog.Logger
@@ -45,7 +56,7 @@ type GossipSender struct {
 }
 
 // NewGossipSender creates a sender that broadcasts nodeID's stats at the given interval.
-func NewGossipSender(nodeID string, peers []string, tr transport.Transport, store *NodeStatsStore, interval time.Duration) *GossipSender {
+func NewGossipSender(nodeID string, peers []string, tr GossipTransport, store *NodeStatsStore, interval time.Duration) *GossipSender {
 	return &GossipSender{
 		nodeID:   nodeID,
 		peers:    peers,
@@ -175,14 +186,10 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	raw := b.FinishedBytes()
 	payload := make([]byte, len(raw))
 	copy(payload, raw)
-	msg := &transport.Message{Type: transport.StreamAdmin, Payload: payload}
+	// Native /gossip/admin route (Phase 8 N7-3); errors are logged and skipped
+	// exactly as the tunnel Connect/Send errors were.
 	for _, peer := range s.snapshotPeers() {
-		if err := s.tr.Connect(ctx, peer); err != nil {
-			s.logger.Warn().Str("peer", peer).Err(err).Msg("gossip: connect failed")
-			metrics.BalancerGossipErrorsTotal.Inc()
-			continue
-		}
-		if err := s.tr.Send(ctx, peer, msg); err != nil {
+		if err := s.tr.GossipSend(ctx, peer, transport.RouteGossipAdmin, payload); err != nil {
 			s.logger.Warn().Str("peer", peer).Err(err).Msg("gossip: send failed")
 			metrics.BalancerGossipErrorsTotal.Inc()
 		} else {
@@ -191,16 +198,18 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	}
 }
 
-// GossipReceiver listens on the transport's Receive channel and dispatches
-// by StreamType:
-//   - StreamAdmin   → NodeStatsMsg → NodeStatsStore
-//   - StreamReceipt → ReceiptGossipMsg → ReceiptRoutingCache (if configured)
+// GossipReceiver consumes both gossip families:
+//   - /gossip/admin   → NodeStatsMsg → NodeStatsStore
+//   - /gossip/receipt → ReceiptGossipMsg → ReceiptRoutingCache (if configured)
 //
-// Multi-stream dispatch lives in one receiver because transport.Receive()
-// is a single channel; two competing goroutine consumers would race for
-// each message and deliver to at most one.
+// Production wires it via RegisterNativeGossipRoutes (Phase 8 N7-3): each
+// family's callback runs on the route's transport-owned drain goroutine. The
+// legacy Run loop (the tunnel Receive() inbox type-switch) remains until N8
+// for the same dispatch — multi-stream dispatch lives in one receiver because
+// transport.Receive() is a single channel; two competing goroutine consumers
+// would race for each message and deliver to at most one.
 type GossipReceiver struct {
-	tr     transport.Transport
+	tr     GossipTransport
 	store  *NodeStatsStore
 	logger zerolog.Logger
 
@@ -212,7 +221,7 @@ type GossipReceiver struct {
 }
 
 // NewGossipReceiver creates a receiver backed by the given transport.
-func NewGossipReceiver(tr transport.Transport, store *NodeStatsStore) *GossipReceiver {
+func NewGossipReceiver(tr GossipTransport, store *NodeStatsStore) *GossipReceiver {
 	return &GossipReceiver{
 		tr:     tr,
 		store:  store,
@@ -249,7 +258,29 @@ func (r *GossipReceiver) SetReceiptCache(c ReceiptRoutingCache) {
 	r.receiptCache.Store(&c)
 }
 
-// Run processes incoming messages until ctx is cancelled.
+// RegisterNativeGossipRoutes installs the receiver's two per-family handlers
+// on the native gossip routes (Phase 8 N7-3) — the native replacement for the
+// Run inbox loop. The callbacks run on the transport's per-route drain
+// goroutine, exactly where the Receive() loop ran them; empty payloads are
+// skipped as Run skipped them.
+func (r *GossipReceiver) RegisterNativeGossipRoutes() {
+	r.tr.RegisterGossipRoute(transport.RouteGossipAdmin, func(from string, payload []byte) {
+		if len(payload) == 0 {
+			return
+		}
+		r.handleNodeStats(from, payload)
+	})
+	r.tr.RegisterGossipRoute(transport.RouteGossipReceipt, func(from string, payload []byte) {
+		if len(payload) == 0 {
+			return
+		}
+		r.handleReceiptGossip(from, payload)
+	})
+}
+
+// Run processes incoming tunnel-inbox messages until ctx is cancelled.
+// Production uses RegisterNativeGossipRoutes instead; Run remains until Phase
+// 8 N8 deletes the Receive() surface (tests still drive dispatch through it).
 func (r *GossipReceiver) Run(ctx context.Context) {
 	ch := r.tr.Receive()
 	for {
@@ -265,9 +296,9 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 			}
 			switch rm.Message.Type {
 			case transport.StreamAdmin:
-				r.handleNodeStats(rm)
+				r.handleNodeStats(rm.From, rm.Message.Payload)
 			case transport.StreamReceipt:
-				r.handleReceiptGossip(rm)
+				r.handleReceiptGossip(rm.From, rm.Message.Payload)
 			default:
 				// Other stream types are not gossip concerns.
 			}
@@ -275,8 +306,8 @@ func (r *GossipReceiver) Run(ctx context.Context) {
 	}
 }
 
-func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
-	pb, err := decodeNodeStatsMsg(rm.Message.Payload)
+func (r *GossipReceiver) handleNodeStats(from string, payload []byte) {
+	pb, err := decodeNodeStatsMsg(payload)
 	if err != nil {
 		r.logger.Warn().Err(err).Msg("gossip: invalid payload")
 		return
@@ -285,10 +316,10 @@ func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 	if nodeID == "" {
 		return
 	}
-	evidenceNodeID, matches := r.resolveGossipNodeID(nodeID, rm.From)
+	evidenceNodeID, matches := r.resolveGossipNodeID(nodeID, from)
 	// Verify the claimed NodeId matches the actual sender address to prevent spoofing.
 	if !matches {
-		r.logger.Warn().Str("claimed", nodeID).Str("from", rm.From).Msg("gossip: NodeId mismatch, dropping")
+		r.logger.Warn().Str("claimed", nodeID).Str("from", from).Msg("gossip: NodeId mismatch, dropping")
 		return
 	}
 	var joinedAt time.Time
@@ -323,12 +354,12 @@ func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 	}
 }
 
-func (r *GossipReceiver) handleReceiptGossip(rm *transport.ReceivedMessage) {
+func (r *GossipReceiver) handleReceiptGossip(from string, payload []byte) {
 	cachePtr := r.receiptCache.Load()
 	if cachePtr == nil {
 		return // receipt gossip disabled on this node
 	}
-	pb, err := decodeReceiptGossipMsg(rm.Message.Payload)
+	pb, err := decodeReceiptGossipMsg(payload)
 	if err != nil {
 		r.logger.Warn().Err(err).Msg("receipt-gossip: invalid payload")
 		return
@@ -337,8 +368,8 @@ func (r *GossipReceiver) handleReceiptGossip(rm *transport.ReceivedMessage) {
 	if nodeID == "" {
 		return
 	}
-	if !nodeIDMatchesFrom(nodeID, rm.From) {
-		r.logger.Warn().Str("claimed", nodeID).Str("from", rm.From).Msg("receipt-gossip: NodeId mismatch, dropping")
+	if !nodeIDMatchesFrom(nodeID, from) {
+		r.logger.Warn().Str("claimed", nodeID).Str("from", from).Msg("receipt-gossip: NodeId mismatch, dropping")
 		return
 	}
 	n := pb.ReceiptIdsLength()

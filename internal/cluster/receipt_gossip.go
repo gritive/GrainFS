@@ -23,14 +23,15 @@ type ReceiptProvider interface {
 }
 
 // ReceiptGossipSender broadcasts the local node's rolling window of receipt
-// IDs to every peer at a configurable interval via transport.StreamReceipt.
+// IDs to every peer at a configurable interval via the native /gossip/receipt
+// route.
 // Other nodes route `/api/receipts/:id` queries using these windows; IDs
 // older than the window fall through to a cluster broadcast fallback.
 type ReceiptGossipSender struct {
 	nodeID       string
 	peers        []string
 	peerProvider func() []string
-	tr           transport.Transport
+	tr           GossipTransport
 	provider     ReceiptProvider
 	interval     time.Duration
 	maxIDs       int
@@ -42,7 +43,7 @@ type ReceiptGossipSender struct {
 func NewReceiptGossipSender(
 	nodeID string,
 	peers []string,
-	tr transport.Transport,
+	tr GossipTransport,
 	provider ReceiptProvider,
 	interval time.Duration,
 	maxIDs int,
@@ -61,7 +62,7 @@ func NewReceiptGossipSender(
 func NewReceiptGossipSenderWithPeerProvider(
 	nodeID string,
 	peerProvider func() []string,
-	tr transport.Transport,
+	tr GossipTransport,
 	provider ReceiptProvider,
 	interval time.Duration,
 	maxIDs int,
@@ -108,13 +109,10 @@ func (s *ReceiptGossipSender) broadcastOnce(ctx context.Context) {
 	}
 
 	payload := encodeReceiptGossip(s.nodeID, ids)
-	msg := &transport.Message{Type: transport.StreamReceipt, Payload: payload}
+	// Native /gossip/receipt route (Phase 8 N7-3); errors are logged and
+	// skipped exactly as the tunnel Connect/Send errors were.
 	for _, peer := range s.snapshotPeers() {
-		if err := s.tr.Connect(ctx, peer); err != nil {
-			s.logger.Warn().Str("peer", peer).Err(err).Msg("receipt-gossip: connect failed")
-			continue
-		}
-		if err := s.tr.Send(ctx, peer, msg); err != nil {
+		if err := s.tr.GossipSend(ctx, peer, transport.RouteGossipReceipt, payload); err != nil {
 			s.logger.Warn().Str("peer", peer).Err(err).Msg("receipt-gossip: send failed")
 		}
 	}
