@@ -102,12 +102,9 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr)
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
-		reply, err := clusterTransport.CallPooled(callCtx, peer, msg)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
+		// Native /raft/meta/propose buffered route (Phase 8 N7-3); pooled HTTP
+		// conns give the same bounded-backpressure property.
+		return clusterTransport.CallBuffered(callCtx, peer, transport.RouteRaftMetaPropose, payload)
 	}
 	state.metaForwardSender = cluster.NewMetaProposeForwardSender(metaForwardDialer)
 
@@ -126,7 +123,13 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
 		WithGateRefresh(func() { refreshCapabilityGate(state) })
+	// Tunnel registration — kept alongside the native route until Phase 8 N8.
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
+	// Phase 8 N7-3: native /raft/meta/propose buffered route. Handle reads only
+	// req.Payload; the propose outcome (index + error) is in-band via
+	// encodeMetaForwardReplyWithIndex.
+	clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaPropose,
+		transport.BufferedRouteFromMessageHandler("meta propose forward", metaForwardReceiver.Handle))
 	// Zero-CA invite-join receiver. It serves the two-phase invite flow over the
 	// dedicated join listener (HandleJoinStream); state.handshakeVerifier (set by
 	// wireDEKKeeper) supplies the 16-byte cluster id bound into the invite
