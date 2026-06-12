@@ -171,6 +171,23 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
   ```
 - **검증**: BadgerDB import가 cluster 패키지에서 0. 기존 integration 테스트 green.
 
+#### Phase 6.5 진행 현황 (2026-06-13 부트스트랩)
+
+**현황 측정 (부트스트랩 시점)**: cluster 내 badger import = non-test 29 파일(+test 44), `badger.Txn` non-test 참조 81(apply.go 최대 52), `badger.Item` 21, `ErrKeyNotFound` 49. DB 보유 지점 = FSM(apply.go)/DistributedBackend(backend.go, `FSMDB()` accessor를 serveruntime lifecycle/migration store가 소비)/applyActor/SegmentOrphanLog/putpipeline(meta_batcher·pipeline)/GroupLifecycle.FSMStore/GroupBackendHandle.DB. `badger.Open` in-cluster 3곳 = raftfactory(raft log/stable/snapshot store용 — 메타데이터와 별개 관심사)/migrate.go/testbackend.go.
+
+**설계 가드레일 (전 슬라이스 공통)**:
+- 인터페이스는 사용처(`internal/cluster`)에 정의, badger 구현체는 `internal/badgermeta`. badgermeta는 cluster를 import하지 않음(구조적 타이핑) — 의존 방향: cluster(Domain)←composition root→badgermeta(Infrastructure).
+- **핫패스 무회귀**: MetadataTxn/Item이 badger zero-copy 패턴을 미러(`Value(fn []byte) error`/`ValueCopy(dst)`, prefix iterator + PrefetchValues 제어). 추가되는 것은 인터페이스 디스패치뿐, per-op alloc 추가 금지(quorum-meta read/FSM apply가 PUT/GET 임계경로).
+- **마이그레이션 escape hatch**: 전환 중 경계에서만 `badgermeta.Txn.Unwrap() *badger.Txn` 허용, 최종 슬라이스에서 제거(잔존=미완).
+- sentinel: badger.ErrKeyNotFound 직접 비교 제거 → cluster측 sentinel(`ErrMetaKeyNotFound` 등) + errors.Is 매핑.
+- 각 슬라이스 = 해당 파일군의 테스트도 함께 전환(코드만큼 churn 큼).
+
+- [완료] **S6.5-1: 인터페이스 + badgermeta 어댑터 + in-memory 구현 (dormant)** — **계약은 leaf 패키지 `internal/metastore`로** (ROADMAP 초안 "cluster에 정의"에서 수정: 어댑터가 sentinel 에러 식별(errors.Is)을 위해 계약 패키지를 import해야 하고 cluster의 testbackend.go(non-test)가 어댑터를 import하면 cycle → io/fs 패턴; cluster에는 type alias `MetadataStore`/`MetadataTxn`/`MetaItem`/`MetaIterator`+`ErrMetaKeyNotFound`/`ErrMetaTxnTooBig`로 사용처-정의 의도 보존, ADR 기록). 표면=실사용 전수 미러: zero-copy Item(Value(fn)/ValueCopy/Key/KeyCopy), 수동 txn(NewTransaction/Commit/Discard, ErrTxnTooBig 배치분할), DropPrefix(FSM.Restore), iterator(Rewind/Seek/Valid/ValidForPrefix, Prefix+PrefetchValues). `internal/badgermeta`=badger 어댑터(**Get은 per-call 할당** — badger Get-Item은 txn 종료까지 독립 유효라 wrapper 재사용=aliasing 버그; zero-alloc은 rebind 계약인 iterator만, AllocsPerRun 핀; *badger.DB escape hatch 없음), `MemStore`=COW 스냅샷(txn 생성 시 불변 map 캡처=**스냅샷 격리**, 락 txn-수명 보유 없음=중첩 데드락 불가, conflict 미검출=last-writer-wins[single-writer FSM라 무관]). 공유 conformance suite(storetest) 19 케이스가 양 구현 핀: not-found/discard-on-error/RYOW/스캔 순서/**스냅샷 격리**/**finished-txn 의미론(ErrDiscardedTxn/빈-commit nil short-circuit/NewIterator panic — badger v4 소스 검증)**. 검증: 양 구현 conformance green + full test-unit + lint green + **dormant grep 증명**(production 소비처=cluster alias 파일 1개). plan-gate(4건)+codex outside-voice(9건 중 6 수용·2 반박·1 기커버)+code-gate(3건 수정 후 codex 재검증 CLEAN). 전제: Phase 4 완료(충족). ✓
+- [대기] **S6.5-2: FSM apply 코어 전환** — apply.go/apply_actor.go/fsm_values.go/fsm_value_rewrap.go/coalesce.go/snapshotable.go/keyspace.go의 `*badger.Txn`→MetadataTxn, `FSM.db`/`NewFSM`→MetadataStore. 경계는 Unwrap 허용. 전제: S6.5-1.
+- [대기] **S6.5-3: object 경로 전환** — object_get/object_delete/object_version/object_meta_resolve/object_meta_persistence/put_object_meta/scan_appendable/scrubbable/shardkey_resolver/quarantine. 전제: S6.5-2.
+- [대기] **S6.5-4: bucket/multipart/placement/배관 전환** — bucket/multipart/shard_placement/segment_orphan_log/group_backend/group_lifecycle/backend(DistributedBackend.db→MetadataStore; `FSMDB()` 소비처인 serveruntime lifecycle/migration store는 composition root가 raw DB를 직접 보유·주입하도록 재배선)/putpipeline(meta_batcher·pipeline). 전제: S6.5-3.
+- [대기] **S6.5-5: DB lifecycle 주입 + badger 잔재 제거 + guard** — `badger.Open` 이동(raftfactory raft-store open은 `internal/raft`로, migrate/testbackend는 badgermeta/composition root로), Unwrap escape hatch 제거, 잔여 테스트 badger 직접 사용 전환, **guard 테스트**(cluster 패키지 badger import 0 강제, cmd_loc_guard 패턴). 검증: grep 0 + make test-unit + lint + 기존 integration green. 전제: S6.5-4.
+
 ## 분리된 베팅 (성능 비요구, data plane 안정 후)
 
 ### Phase 8 — data-plane transport HTTP화

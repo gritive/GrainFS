@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.566.0] - 2026-06-13
+
+### Added
+- Phase 6.5 S1 — metadata-store contract package, groundwork for removing direct
+  BadgerDB imports from `internal/cluster`. New leaf package `internal/metastore`
+  defines the Store/Txn/Item/Iterator interfaces (mirroring the badger API subset
+  cluster actually uses, zero-copy access shapes included), the sentinel errors
+  (`ErrKeyNotFound`, `ErrTxnTooBig`, `ErrDiscardedTxn`), and an in-memory `MemStore`
+  built on copy-on-write snapshots (snapshot isolation, no lock held across a
+  transaction, badger-exact finished-transaction semantics). New `internal/badgermeta`
+  adapts `*badger.DB` to the contract with per-Get item allocation (badger Get-items
+  stay independently valid until txn end) and a zero-allocation iterator item pinned
+  by an AllocsPerRun test. A shared conformance suite (`internal/metastore/storetest`,
+  19 cases) pins both implementations to identical semantics, including snapshot
+  isolation across commits and discarded-transaction behavior verified against badger
+  v4 source. Dormant: no production consumer yet — `internal/cluster` gains type
+  aliases (`MetadataStore`, `MetadataTxn`, `MetaItem`, `MetaIterator`) and sentinels
+  only; behavior is byte-identical.
+
 ## [0.0.565.0] - 2026-06-13
 
 ### Changed
