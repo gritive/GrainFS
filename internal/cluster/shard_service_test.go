@@ -630,6 +630,7 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler()) // WriteShardStream dials the native route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
 	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
 
@@ -1213,4 +1214,60 @@ func TestWithShardDEKKeeper_NilOrBadClusterIDIsNoOp(t *testing.T) {
 	if s.segEnc == nil {
 		t.Fatal("nil keeper must leave the valid DEK-keeper segEnc intact")
 	}
+}
+
+func TestShardService_NativeWriteHandler_PlainAndSealed(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
+	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler())
+	// Tunnel registrations mirror boot wiring: the write tunnel handler stays
+	// registered until N8 (and, pre-Task-3, WriteShardStream still dials it —
+	// which is exactly what the InboundNativeShardWrites assertion below
+	// discriminates). Read-back uses the streaming read (HandleRead), the same
+	// shape TestShardService_ReadShardStream_EncryptedStreamsPlaintext uses.
+	tr2.HandleBody(transport.StreamShardWriteBody, svc2.HandleWriteBody())
+	tr2.HandleRead(transport.StreamShardReadBody, svc2.HandleReadBody())
+
+	// Plain path (WriteShard semantics): destination seals; read-back decrypts.
+	plaintext := bytes.Repeat([]byte("native shard write"), 64*1024)
+	require.NoError(t, svc1.WriteShardStream(ctx, tr2.LocalAddr(), "bkt", "key", 0, bytes.NewReader(plaintext)))
+	r, err := svc1.ReadShardStream(ctx, tr2.LocalAddr(), "bkt", "key", 0)
+	require.NoError(t, err)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, plaintext, got)
+	require.Positive(t, tr2.InboundNativeShardWrites(), "write must dispatch through the native route, not the tunnel")
+
+	// Sealed path: a truncated body (trailer mismatch) must be rejected.
+	bodyNoTrailer := []byte("sealed-bytes-without-trailer")
+	err = tr1.ShardWrite(ctx, tr2.LocalAddr(),
+		transport.ShardWriteRequest{Bucket: "bkt", Key: "key2", ShardIdx: 0, Sealed: true},
+		bytes.NewReader(bodyNoTrailer))
+	require.Error(t, err, "missing completeness trailer must be rejected")
+	require.Contains(t, err.Error(), "truncated")
+
+	// Sealed path, complete: payload + correct trailer commits. The body must be
+	// produced by the same sealer (EncodeEncryptedShardBuffer) with the SAME
+	// identity the write targets — the AAD binds bucket/shardKey/shardIdx.
+	sealed, err := svc2.EncodeEncryptedShardBuffer("bkt", "key3", 0, []byte("sealed shard plaintext"))
+	require.NoError(t, err)
+	withTrailer := AppendSealedShardTrailer(append([]byte(nil), sealed...), int64(len(sealed)))
+	require.NoError(t, tr1.ShardWrite(ctx, tr2.LocalAddr(),
+		transport.ShardWriteRequest{Bucket: "bkt", Key: "key3", ShardIdx: 0, Sealed: true},
+		bytes.NewReader(withTrailer)))
+	gotSealed, err := svc2.ReadLocalShard("bkt", "key3", 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("sealed shard plaintext"), gotSealed)
 }

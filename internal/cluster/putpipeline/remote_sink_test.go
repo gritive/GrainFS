@@ -52,6 +52,7 @@ func TestRemoteSealedShardSink_RoundTrip(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	recv := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
 
 	// Source seals with the cluster DEK (seal-at-source); sealer uses the same
@@ -104,6 +105,7 @@ func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
 	recv := cluster.NewShardService(recvDir, tr2,
 		cluster.WithShardDEKKeeper(keeper, clusterID),
 		cluster.WithDataWAL(fakeShardWAL{}))
+	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
 
 	sealer := newSinkTestShardService(t, tr1, keeper, clusterID)
@@ -137,6 +139,7 @@ func TestDriveActor_RemoteDestination(t *testing.T) {
 	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
 
 	recv := newSinkTestShardService(t, tr2, keeper, clusterID)
+	tr2.RegisterShardWriteHandler(recv.NativeWriteHandler()) // native /shard/write route (Phase 8 N6)
 	tr2.HandleBody(transport.StreamShardWriteBody, recv.HandleWriteBody())
 
 	sealer := newSinkTestShardService(t, tr1, keeper, clusterID)

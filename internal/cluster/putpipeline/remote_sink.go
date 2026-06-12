@@ -10,9 +10,9 @@ import (
 )
 
 // shardTransport is the subset of the cluster transport the remote shard sink
-// needs: stream a request + body to a peer and return the response.
+// needs: stream a sealed shard write to a peer over the native route.
 type shardTransport interface {
-	CallWithBody(ctx context.Context, addr string, req *transport.Message, body io.Reader) (*transport.Message, error)
+	ShardWrite(ctx context.Context, addr string, req transport.ShardWriteRequest, body io.Reader) error
 }
 
 var errShardSinkAborted = errors.New("remote shard sink: aborted")
@@ -22,10 +22,11 @@ var errShardSinkAborted = errors.New("remote shard sink: aborted")
 var _ shardSink = (*remoteSealedShardSink)(nil)
 
 // remoteSealedShardSink streams one shard's already-sealed (GFSENC3) bytes to a
-// peer's verbatim "WriteSealedShard" RPC. It satisfies shardSink: the DriveActor
-// PUSHes ciphertext via Write while transport.CallWithBody PULLs from the paired
-// io.Pipe in a background goroutine (Write blocks until the RPC reader consumes,
-// which is the natural backpressure — at most one stripe is in flight).
+// peer's verbatim sealed write over the native /shard/write route (sealed=1,
+// Phase 8 N6). It satisfies shardSink: the DriveActor PUSHes ciphertext via
+// Write while transport.ShardWrite PULLs from the paired io.Pipe in a
+// background goroutine (Write blocks until the RPC reader consumes, which is
+// the natural backpressure — at most one stripe is in flight).
 //
 // Sealing is done once at the source (CPUPool); the receiver stores the shard
 // ciphertext verbatim, never re-encrypting. The wire body is that ciphertext
@@ -44,7 +45,7 @@ var _ shardSink = (*remoteSealedShardSink)(nil)
 //
 // The caller MUST pass a ctx that cancels on a stall (e.g. an idle-deadline ctx;
 // see idleTimeoutContext): a dead peer that never reads would otherwise block
-// Write forever; ctx cancellation makes CallWithBody return, which unblocks Write
+// Write forever; ctx cancellation makes ShardWrite return, which unblocks Write
 // via the pipe-reader CloseWithError. The sink reports downstream progress by
 // calling reset() after each successful Write (the peer consumed that chunk), so
 // the idle deadline only fires when the peer stops making progress, not on a
@@ -68,9 +69,9 @@ type remoteSealedShardSink struct {
 func newRemoteSealedShardSink(ctx context.Context, reset func(), tr shardTransport, peerAddr, bucket, shardKey string, shardIdx int) *remoteSealedShardSink {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
-	req := cluster.BuildSealedShardWriteRequest(bucket, shardKey, shardIdx)
+	req := transport.ShardWriteRequest{Bucket: bucket, Key: shardKey, ShardIdx: shardIdx, Sealed: true}
 	go func() {
-		resp, err := tr.CallWithBody(ctx, peerAddr, req, pr)
+		err := tr.ShardWrite(ctx, peerAddr, req, pr)
 		if err != nil {
 			// Unblock any Write still parked on the pipe: the reader is gone.
 			_ = pr.CloseWithError(err)
@@ -78,7 +79,7 @@ func newRemoteSealedShardSink(ctx context.Context, reset func(), tr shardTranspo
 			return
 		}
 		_ = pr.Close()
-		done <- cluster.CheckShardWriteResponse(resp)
+		done <- nil
 	}()
 	return &remoteSealedShardSink{pw: pw, done: done, reset: reset}
 }
