@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.563.0] - 2026-06-13
+
+### Changed
+- ROADMAP Phase 9 (primitive library extraction) now carries a progress ledger. The
+  prerequisite review — adopt Layer-1 OSS (hashicorp/raft, memberlist) vs keep the
+  in-house implementations — is complete: all four primitives (raft, HRW placement,
+  bounded, gossip) stay in-house. Switching raft would forfeit GrainFS-specific
+  features (Path B single-phase membership, learner catch-up promotion gates, election
+  priority, the lock-free actor hot path, the meta+per-group two-tier topology) for no
+  functional gain; memberlist's SWIM failure detection and dedicated transport run
+  against the Phase 8 single-HTTP-transport convergence. The extraction slices remain
+  on hold: their stated trigger ("a second consumer") is unmet — the repository has a
+  single binary entry point and zero external consumers of these packages.
+
 ## [0.0.562.0] - 2026-06-13
 
 ### Fixed
