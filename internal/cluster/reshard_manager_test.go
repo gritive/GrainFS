@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,7 +59,7 @@ func (c *fakeConverter) upgradeObjectEC(_ context.Context, bucket, key string, _
 	return nil
 }
 func (c *fakeConverter) ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error) {
-	return (&DistributedBackend{db: c.fsm.db, fsm: c.fsm}).ResolvePlacement(ctx, bucket, key, meta)
+	return (&DistributedBackend{store: c.fsm.db, fsm: c.fsm}).ResolvePlacement(ctx, bucket, key, meta)
 }
 func (c *fakeConverter) ShardGroup(id string) (ShardGroupEntry, bool) {
 	g, ok := c.shardGroups[id]
@@ -102,7 +103,7 @@ func seedObjectMetaECInGroup(t *testing.T, fsm *FSM, bucket, key, etag string, s
 
 func TestReshardManager_Run_ConvertsObjectsWithoutPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Seed three objects, all N× (no placement).
 	seedObjectMeta(t, fsm, "bkt", "obj1", "e1", 10)
@@ -122,7 +123,7 @@ func TestReshardManager_Run_ConvertsObjectsWithoutPlacement(t *testing.T) {
 // CmdPutShardPlacement is a no-op; both objects are converted (no skip).
 func TestReshardManager_Run_SkipsObjectsWithPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	seedObjectMeta(t, fsm, "bkt", "new", "e1", 10)
 	seedObjectMeta(t, fsm, "bkt", "existing", "e2", 20)
@@ -145,7 +146,7 @@ func TestReshardManager_Run_SkipsObjectsWithPlacement(t *testing.T) {
 
 func TestReshardManager_Run_SkipsWhenNotLeader(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	seedObjectMeta(t, fsm, "bkt", "obj", "e1", 10)
 
 	conv := &fakeConverter{fsm: fsm, active: true}
@@ -160,7 +161,7 @@ func TestReshardManager_Run_SkipsWhenNotLeader(t *testing.T) {
 
 func TestReshardManager_Run_SkipsWhenECInactive(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	seedObjectMeta(t, fsm, "bkt", "obj", "e1", 10)
 
 	conv := &fakeConverter{fsm: fsm, active: false} // EC not active
@@ -174,7 +175,7 @@ func TestReshardManager_Run_SkipsWhenECInactive(t *testing.T) {
 
 func TestReshardManager_Run_ContinuesOnConvertError(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	seedObjectMeta(t, fsm, "bkt", "good1", "e1", 10)
 	seedObjectMeta(t, fsm, "bkt", "bad", "e2", 20)
@@ -201,7 +202,7 @@ func TestReshardManager_Run_ContinuesOnConvertError(t *testing.T) {
 
 func TestReshardManager_Run_ContextCancel(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	for i := 0; i < 50; i++ {
 		seedObjectMeta(t, fsm, "b", fmt.Sprintf("obj-%d", i), fmt.Sprintf("e-%d", i), 1)
 	}
@@ -216,7 +217,7 @@ func TestReshardManager_Run_ContextCancel(t *testing.T) {
 
 func TestReshardManager_Stats_InitialState(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	conv := &fakeConverter{fsm: fsm, active: true}
 	mgr := NewReshardManager(conv, &fakeLeader{leader: true}, time.Minute)
 	s := mgr.Stats()
@@ -229,7 +230,7 @@ func TestReshardManager_Stats_InitialState(t *testing.T) {
 // CmdPutShardPlacement is a no-op; ec-obj has no placement → treated as N× → both convert.
 func TestReshardManager_Run_UpgradesECObjects_OnKMismatch(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	seedObjectMeta(t, fsm, "bkt", "nx-obj", "e1", 10)
 	seedObjectMeta(t, fsm, "bkt", "ec-obj", "e2", 20)
@@ -257,7 +258,7 @@ func TestReshardManager_Run_UpgradesECObjects_OnKMismatch(t *testing.T) {
 
 func TestReshardManager_Run_UsesObjectPlacementGroupDesiredProfile(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	seedObjectMetaECInGroup(t, fsm, "bkt", "obj", "e1", 10, "group-1", 2, 1, []string{"n1", "n2", "n3"})
 
 	conv := &fakeConverter{
@@ -279,7 +280,7 @@ func TestReshardManager_Run_UsesObjectPlacementGroupDesiredProfile(t *testing.T)
 
 func TestReshardManager_Run_HonorsMaxObjects(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	for i := 0; i < 3; i++ {
 		seedObjectMeta(t, fsm, "bkt", fmt.Sprintf("obj-%d", i), "e", 10)
 	}
@@ -295,7 +296,7 @@ func TestReshardManager_Run_HonorsMaxObjects(t *testing.T) {
 // CmdPutShardPlacement is a no-op; ec-obj has no placement → treated as N× → converted.
 func TestReshardManager_Run_SkipsECObjects_OnKMatch(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	seedObjectMeta(t, fsm, "bkt", "ec-obj", "e1", 10)
 
@@ -321,7 +322,7 @@ func TestReshardManager_Run_SkipsECObjects_OnKMatch(t *testing.T) {
 
 func TestReshardManager_Run_SkipsMetadataOnlyECObjects_OnKMatch(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	seedObjectMetaEC(t, fsm, "bkt", "ec-obj", "e1", 10, 4, 2, []string{"n0", "n1", "n2", "n3", "n4", "n5"})
 
@@ -338,7 +339,7 @@ func TestReshardManager_Run_SkipsMetadataOnlyECObjects_OnKMatch(t *testing.T) {
 
 func TestReshardManager_Run_DoesNotConvertCorruptPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	seedObjectMetaEC(t, fsm, "bkt", "bad-ec", "e1", 10, 4, 2, []string{"n0"})
 

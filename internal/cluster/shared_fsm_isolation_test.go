@@ -16,6 +16,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -55,8 +57,8 @@ func setupTwoFSMs(t *testing.T) (
 	ksA = mustNewKS(t, "iso-A")
 	ksB = mustNewKS(t, "iso-B")
 
-	fA = NewFSM(db, ksA)
-	fB = NewFSM(db, ksB)
+	fA = NewFSM(badgermeta.Wrap(db), ksA)
+	fB = NewFSM(badgermeta.Wrap(db), ksB)
 	return db, ksA, ksB, fA, fB
 }
 
@@ -97,12 +99,12 @@ func applyCmd(t *testing.T, f *FSM, cmdType CommandType, payload any) {
 }
 
 // dbHasKey reports whether fullKey (already encoded — no extra prefix added) exists.
-func dbHasKey(t *testing.T, db *badger.DB, fullKey []byte) bool {
+func dbHasKey(t *testing.T, db MetadataStore, fullKey []byte) bool {
 	t.Helper()
 	found := false
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
+	require.NoError(t, db.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(fullKey)
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -450,9 +452,9 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	ksGx := mustNewKS(t, "g\x00x") // looks like a byte-prefix of "g" without the len-header
 	ksLong := mustNewKS(t, strings.Repeat("z", 300))
 
-	fG := NewFSM(db, ksG)
-	fGx := NewFSM(db, ksGx)
-	fLong := NewFSM(db, ksLong)
+	fG := NewFSM(badgermeta.Wrap(db), ksG)
+	fGx := NewFSM(badgermeta.Wrap(db), ksGx)
+	fLong := NewFSM(badgermeta.Wrap(db), ksLong)
 
 	putObjViaApply(t, fG, "b", "k", "G-payload")
 	putObjViaApply(t, fGx, "b", "k", "Gx-payload")
@@ -463,9 +465,9 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	eGx := ksGx.ObjectMetaKey("b", "k")
 	eLong := ksLong.ObjectMetaKey("b", "k")
 
-	assert.True(t, dbHasKey(t, db, eG), "ksG's key must exist in DB")
-	assert.True(t, dbHasKey(t, db, eGx), "ksGx's key must exist in DB")
-	assert.True(t, dbHasKey(t, db, eLong), "ksLong's key must exist in DB")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), eG), "ksG's key must exist in DB")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), eGx), "ksGx's key must exist in DB")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), eLong), "ksLong's key must exist in DB")
 
 	assert.NotEqual(t, eG, eGx, "g and g\\x00x must produce distinct encoded keys")
 	assert.NotEqual(t, eG, eLong, "g and long-z must produce distinct encoded keys")

@@ -9,6 +9,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -89,7 +90,7 @@ func TestSegmentGCActivation_PreservesAndReclaims(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
 	require.NoError(t, err)
 	defer db.Close()
-	orphanLog := cluster.NewSegmentOrphanLog(db, "group-0")
+	orphanLog := cluster.NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
 
 	// ── Phase A: generous window (1h) ──────────────────────────────────────────
 	// Two RunOnce calls:
@@ -152,7 +153,7 @@ func TestSegmentGCFailsClosedOnKnownSetError(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
 	require.NoError(t, err)
 	defer db.Close()
-	orphanLog := cluster.NewSegmentOrphanLog(db, "group-0")
+	orphanLog := cluster.NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
 
 	sc := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, 0))
 	sc.RunOnce(context.Background())
@@ -183,7 +184,7 @@ func TestSegmentGCActivation_NotCaughtUpSkipsSweep(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
 	require.NoError(t, err)
 	defer db.Close()
-	orphanLog := cluster.NewSegmentOrphanLog(db, "group-0")
+	orphanLog := cluster.NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
 
 	sc := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, 0))
 	sc.RunOnce(context.Background())

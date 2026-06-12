@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/chunkref"
 )
 
@@ -19,7 +20,7 @@ func newTestBadger(t *testing.T) *badger.DB {
 }
 
 func TestSegmentOrphanLog_ObserveFirstWins(t *testing.T) {
-	log := NewSegmentOrphanLog(newTestBadger(t), "group-0")
+	log := NewSegmentOrphanLog(badgermeta.Wrap(newTestBadger(t)), "group-0")
 	c := chunkref.ChunkID("blob-1")
 	t0 := time.Unix(1000, 0)
 	if err := log.Observe(c, t0); err != nil {
@@ -35,7 +36,7 @@ func TestSegmentOrphanLog_ObserveFirstWins(t *testing.T) {
 }
 
 func TestSegmentOrphanLog_Forget(t *testing.T) {
-	log := NewSegmentOrphanLog(newTestBadger(t), "group-0")
+	log := NewSegmentOrphanLog(badgermeta.Wrap(newTestBadger(t)), "group-0")
 	c := chunkref.ChunkID("blob-2")
 	_ = log.Observe(c, time.Unix(1000, 0))
 	if err := log.Forget(c); err != nil {
@@ -50,7 +51,7 @@ func TestSegmentOrphanLog_Forget(t *testing.T) {
 }
 
 func TestSegmentOrphanLog_Reconcile(t *testing.T) {
-	log := NewSegmentOrphanLog(newTestBadger(t), "group-0")
+	log := NewSegmentOrphanLog(badgermeta.Wrap(newTestBadger(t)), "group-0")
 	kept := chunkref.ChunkID("blob-keep")
 	forgotten := chunkref.ChunkID("blob-ref")
 	if err := log.Observe(kept, time.Unix(1000, 0)); err != nil {
@@ -72,7 +73,7 @@ func TestSegmentOrphanLog_Reconcile(t *testing.T) {
 }
 
 func TestSegmentOrphanLog_AbsentIsNotTombstoned(t *testing.T) {
-	log := NewSegmentOrphanLog(newTestBadger(t), "group-0")
+	log := NewSegmentOrphanLog(badgermeta.Wrap(newTestBadger(t)), "group-0")
 	if _, ok, err := log.TombstoneTime(chunkref.ChunkID("never")); err != nil || ok {
 		t.Fatalf("ok=%v err=%v want ok=false err=nil", ok, err)
 	}
@@ -83,7 +84,7 @@ func TestSegmentOrphanLog_AbsentIsNotTombstoned(t *testing.T) {
 // the fail-closed guard the scrubber relies on to KEEP segments on bad data.
 func TestSegmentOrphanLog_CorruptValueErrors(t *testing.T) {
 	db := newTestBadger(t)
-	l := NewSegmentOrphanLog(db, "group-0")
+	l := NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
 	c := chunkref.ChunkID("blob-corrupt")
 	// Write a 3-byte value directly via the unexported key() method so TombstoneTime
 	// encounters a corrupt (len≠8) record.
@@ -120,7 +121,7 @@ func TestSegmentOrphanLog_SurvivesFSMRestore(t *testing.T) {
 	}
 
 	// Write one sgc: orphan-log entry.
-	orphanLog := NewSegmentOrphanLog(db, "group-0")
+	orphanLog := NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
 	c := chunkref.ChunkID("seg-survive-test")
 	t0 := time.Unix(9999, 0)
 	if err := orphanLog.Observe(c, t0); err != nil {

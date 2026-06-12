@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -83,7 +81,7 @@ func TestCheckPutObjectExpectedETag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := f.db.View(func(txn *badger.Txn) error {
+			err := f.db.View(func(txn MetadataTxn) error {
 				return f.checkPutObjectExpectedETag(txn, "b", "k", tt.expected)
 			})
 			if tt.wantErrSub == "" {
@@ -102,7 +100,7 @@ func TestCheckPutObjectExpectedETag(t *testing.T) {
 func TestCheckPutObjectExpectedETagMissingCurrentFails(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		return f.checkPutObjectExpectedETag(txn, "b", "missing", "etag")
 	})
 	if err == nil || !strings.Contains(err.Error(), "read current meta") {

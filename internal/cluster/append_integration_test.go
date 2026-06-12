@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -45,7 +43,7 @@ var _ = Describe("Append object integration", func() {
 		data, err := encodeAppendObjectCmd(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(b.fsm.db.Update(func(txn *badger.Txn) error {
+		Expect(b.fsm.db.Update(func(txn MetadataTxn) error {
 			return b.fsm.applyAppendObjectFromCmd(txn, data)
 		})).To(Succeed())
 
@@ -56,7 +54,7 @@ var _ = Describe("Append object integration", func() {
 		Expect(obj1.Size).To(Equal(seg.Size))
 		Expect(obj1.IsAppendable).To(BeTrue())
 
-		Expect(b.fsm.db.Update(func(txn *badger.Txn) error {
+		Expect(b.fsm.db.Update(func(txn MetadataTxn) error {
 			return b.fsm.applyAppendObjectFromCmd(txn, data)
 		})).To(Succeed())
 
@@ -161,7 +159,7 @@ var _ = Describe("Append object integration", func() {
 		data, err := encodeAppendObjectCmd(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(b.fsm.db.Update(func(txn *badger.Txn) error {
+		Expect(b.fsm.db.Update(func(txn MetadataTxn) error {
 			return b.fsm.applyAppendObjectFromCmd(txn, data)
 		})).To(Succeed())
 

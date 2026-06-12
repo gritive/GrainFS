@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +17,7 @@ import (
 func TestLookupObjectECShards_NxMode(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	k, m, err := fsm.LookupObjectECShards("bkt", "key", "v1")
 	require.NoError(t, err)
@@ -29,7 +30,7 @@ func TestLookupObjectECShards_NxMode(t *testing.T) {
 func TestLookupObjectECShards_ECMode(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:    "bkt",

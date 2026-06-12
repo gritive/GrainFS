@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -20,7 +19,7 @@ func seedObjectMetaVersion(t *testing.T, b *DistributedBackend, bucket, key, ver
 	f := b.FSMRef()
 	val, err := marshalObjectMeta(m)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		return f.setValue(txn, f.keys.ObjectMetaKeyV(bucket, key, versionID), val)
 	}))
 }

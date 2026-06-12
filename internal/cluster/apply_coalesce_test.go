@@ -3,9 +3,9 @@ package cluster
 import (
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -13,7 +13,7 @@ import (
 func newCoalesceTestFSM(t *testing.T) *FSM {
 	t.Helper()
 	db := newTestDB(t)
-	return NewFSM(db, newStateKeyspaceEmpty())
+	return NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 }
 
 // coalesceWriteMeta marshals + persists an objectMeta directly via the FSM
@@ -22,7 +22,7 @@ func coalesceWriteMeta(t *testing.T, f *FSM, bucket, key string, m objectMeta) {
 	t.Helper()
 	raw, err := marshalObjectMeta(m)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		return f.setValue(txn, f.keys.ObjectMetaKey(bucket, key), raw)
 	}))
 }
@@ -32,7 +32,7 @@ func coalesceWriteMeta(t *testing.T, f *FSM, bucket, key string, m objectMeta) {
 func coalesceReadMeta(t *testing.T, f *FSM, bucket, key string) objectMeta {
 	t.Helper()
 	var got objectMeta
-	require.NoError(t, f.db.View(func(txn *badger.Txn) error {
+	require.NoError(t, f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(f.keys.ObjectMetaKey(bucket, key))
 		if err != nil {
 			return err
@@ -73,7 +73,7 @@ func TestApplyCoalesceSegmentsHappyPath(t *testing.T) {
 	}
 	raw, err := encodeCoalesceSegmentsCmd(cmd)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
 
 	got := coalesceReadMeta(t, f, "b", "k")
 	if len(got.Coalesced) != 1 || got.Coalesced[0].CoalescedID != "c1" {
@@ -103,7 +103,7 @@ func TestApplyCoalesceSegmentsIdempotentReplay(t *testing.T) {
 	}
 	raw, err := encodeCoalesceSegmentsCmd(cmd)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
 
 	got := coalesceReadMeta(t, f, "b", "k")
 	if len(got.Coalesced) != 1 {
@@ -131,7 +131,7 @@ func TestApplyCoalesceSegmentsRaceAppendPreserved(t *testing.T) {
 	}
 	raw, err := encodeCoalesceSegmentsCmd(cmd)
 	require.NoError(t, err)
-	require.NoError(t, f.db.Update(func(txn *badger.Txn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error { return f.applyCoalesceSegmentsFromCmd(txn, raw) }))
 
 	got := coalesceReadMeta(t, f, "b", "k")
 	if len(got.Segments) != 1 || got.Segments[0].BlobID != "s3" {

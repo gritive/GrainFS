@@ -3,8 +3,6 @@ package cluster
 import (
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -14,7 +12,7 @@ func TestResolveObjectMetaForCoalesceUsesLegacyWhenNoLatestPointer(t *testing.T)
 	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), seed)
 
 	var resolved objectMetaForCoalesceUpdate
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForCoalesceUpdate(txn, "b", "k")
 		return err
@@ -39,7 +37,7 @@ func TestResolveObjectMetaForCoalesceUsesLatestVersion(t *testing.T) {
 	requireSetLatestForResolveTest(t, f, "b", "k", "v1")
 
 	var resolved objectMetaForCoalesceUpdate
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForCoalesceUpdate(txn, "b", "k")
 		return err
@@ -59,7 +57,7 @@ func TestResolveObjectMetaForCoalesceMissingReturnsNotFound(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 
 	var resolved objectMetaForCoalesceUpdate
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForCoalesceUpdate(txn, "b", "missing")
 		return err
@@ -76,7 +74,7 @@ func TestResolveObjectMetaForAppendMissingReturnsEmpty(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 
 	var resolved objectMetaForAppendUpdate
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "missing", "blob-1")
 		return err
@@ -99,7 +97,7 @@ func TestResolveObjectMetaForAppendDetectsAlreadyApplied(t *testing.T) {
 	requirePersistObjectMetaForResolveTest(t, f, f.keys.ObjectMetaKey("b", "k"), seed)
 
 	var resolved objectMetaForAppendUpdate
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "k", "blob-1")
 		return err
@@ -119,7 +117,7 @@ func TestResolveObjectMetaForAppendReadsLatestVersionUnlessTombstone(t *testing.
 	requireSetLatestForResolveTest(t, f, "b", "k", "v1")
 
 	var resolved objectMetaForAppendUpdate
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "k", "blob-2")
 		return err
@@ -132,7 +130,7 @@ func TestResolveObjectMetaForAppendReadsLatestVersionUnlessTombstone(t *testing.
 	}
 
 	requireSetLatestForResolveTest(t, f, "b", "k", deleteMarkerETag)
-	err = f.db.View(func(txn *badger.Txn) error {
+	err = f.db.View(func(txn MetadataTxn) error {
 		var err error
 		resolved, err = f.resolveObjectMetaForAppendUpdate(txn, "b", "k", "blob-2")
 		return err
@@ -151,7 +149,7 @@ func requirePersistObjectMetaForResolveTest(t *testing.T, f *FSM, key []byte, me
 	if err != nil {
 		t.Fatalf("marshalObjectMeta: %v", err)
 	}
-	err = f.db.Update(func(txn *badger.Txn) error {
+	err = f.db.Update(func(txn MetadataTxn) error {
 		return f.setValue(txn, key, raw)
 	})
 	if err != nil {
@@ -161,7 +159,7 @@ func requirePersistObjectMetaForResolveTest(t *testing.T, f *FSM, key []byte, me
 
 func requireSetLatestForResolveTest(t *testing.T, f *FSM, bucket, key, versionID string) {
 	t.Helper()
-	err := f.db.Update(func(txn *badger.Txn) error {
+	err := f.db.Update(func(txn MetadataTxn) error {
 		return txn.Set(f.keys.LatestKey(bucket, key), []byte(versionID))
 	})
 	if err != nil {

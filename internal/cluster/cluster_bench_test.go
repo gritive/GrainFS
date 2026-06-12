@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -29,7 +30,7 @@ func benchmarkIterObjectMetas(b *testing.B, count int) {
 	}
 	defer db.Close()
 
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	for i := 0; i < count; i++ {
 		raw, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 			Bucket:      "bench",
@@ -83,7 +84,7 @@ func benchmarkReshardManagerRun(b *testing.B, count int) {
 	}
 	defer db.Close()
 
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	for i := 0; i < count; i++ {
 		raw, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 			Bucket:      "bench",
@@ -128,7 +129,7 @@ func BenchmarkFSM_Apply_PutObjectMeta(b *testing.B) {
 	}
 	defer db.Close()
 
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

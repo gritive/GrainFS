@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -58,14 +59,14 @@ func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, vers
 func TestRaftNodeID_NilNode(t *testing.T) {
 	// DistributedBackend with node == nil must return "" (no panic).
 	db := newTestDB(t)
-	b := &DistributedBackend{db: db, fsm: NewFSM(db, newStateKeyspaceEmpty())}
+	b := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())}
 	assert.Equal(t, "", b.RaftNodeID())
 }
 
 func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	b := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	b := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
 
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "b",

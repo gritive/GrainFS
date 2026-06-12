@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -29,9 +30,16 @@ func newTestDB(t *testing.T) *badger.DB {
 	return db
 }
 
+// newTestStore wraps a fresh test BadgerDB as a MetadataStore for tests that
+// construct an FSM directly (S6.5-2: NewFSM takes the contract type).
+func newTestStore(t *testing.T) MetadataStore {
+	t.Helper()
+	return badgermeta.Wrap(newTestDB(t))
+}
+
 func TestFSM_CreateBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "test-bucket"})
 	require.NoError(t, err)
@@ -47,7 +55,7 @@ func TestFSM_CreateBucket(t *testing.T) {
 
 func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	clusterID := bytes.Repeat([]byte{0x46}, 16)
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x46}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
@@ -108,7 +116,7 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 
 func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	clusterID := bytes.Repeat([]byte{0x47}, 16)
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x47}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
@@ -151,7 +159,7 @@ func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
 
 func TestFSM_DeleteBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Create then delete
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "to-delete"})
@@ -169,7 +177,7 @@ func TestFSM_DeleteBucket(t *testing.T) {
 
 func TestFSM_PutObjectMeta(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:      "b",
@@ -204,7 +212,7 @@ func TestFSM_PutObjectMeta(t *testing.T) {
 
 func TestFSM_DeleteObject(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Put then delete
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
@@ -224,7 +232,7 @@ func TestFSM_DeleteObject(t *testing.T) {
 
 func TestFSM_SnapshotRestore(t *testing.T) {
 	db1 := newTestDB(t)
-	fsm1 := NewFSM(db1, newStateKeyspaceEmpty())
+	fsm1 := NewFSM(badgermeta.Wrap(db1), newStateKeyspaceEmpty())
 
 	// Apply some commands
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "snap-bucket"})
@@ -240,7 +248,7 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 
 	// Restore to a new DB
 	db2 := newTestDB(t)
-	fsm2 := NewFSM(db2, newStateKeyspaceEmpty())
+	fsm2 := NewFSM(badgermeta.Wrap(db2), newStateKeyspaceEmpty())
 	require.NoError(t, fsm2.Restore(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
 	// Verify state
@@ -257,7 +265,7 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 
 func TestFSM_MultipartCycle(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Create multipart
 	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
@@ -296,7 +304,7 @@ func TestFSM_MultipartCycle(t *testing.T) {
 
 func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID: "upload-layout", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
@@ -374,7 +382,7 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 
 func TestFSM_CompleteMultipartRejectsDuplicateApply(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID: "upload-once", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
@@ -419,7 +427,7 @@ func TestFSM_CompleteMultipartRejectsDuplicateApply(t *testing.T) {
 
 func TestFSM_CompleteMultipartRejectsUploadMismatch(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID: "upload-other", Bucket: "b", Key: "expected.bin", ContentType: "application/octet-stream", CreatedAt: 100,
@@ -445,7 +453,7 @@ func TestFSM_CompleteMultipartRejectsUploadMismatch(t *testing.T) {
 
 func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID:         "upload-listing",
@@ -477,7 +485,7 @@ func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
 
 func TestFSM_AbortMultipart(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID: "upload-abort", Bucket: "b", Key: "abort.bin", ContentType: "binary", CreatedAt: 100,
@@ -498,7 +506,7 @@ func TestFSM_AbortMultipart(t *testing.T) {
 
 func TestFSM_SetBucketPolicy(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[]}`)
 
@@ -525,7 +533,7 @@ func TestFSM_SetBucketPolicy(t *testing.T) {
 
 func TestFSM_DeleteBucketPolicy(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Set a policy first
 	policyJSON := []byte(`{"Version":"2012-10-17"}`)
@@ -548,7 +556,7 @@ func TestFSM_DeleteBucketPolicy(t *testing.T) {
 
 func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Deleting a non-existent policy should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "no-policy"})
@@ -558,7 +566,7 @@ func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 
 func TestFSM_AbortMultipart_NotExist(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Aborting a non-existent multipart should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdAbortMultipart, AbortMultipartCmd{
@@ -570,7 +578,7 @@ func TestFSM_AbortMultipart_NotExist(t *testing.T) {
 
 func TestFSM_DeleteObject_NotExist(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Deleting a non-existent object should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "nope.txt"})
@@ -580,7 +588,7 @@ func TestFSM_DeleteObject_NotExist(t *testing.T) {
 
 func TestFSM_Apply_CorruptData(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	err := fsm.Apply([]byte("definitely not protobuf"))
 	assert.Error(t, err, "Apply should fail on corrupt data")
@@ -588,7 +596,7 @@ func TestFSM_Apply_CorruptData(t *testing.T) {
 
 func TestFSM_Restore_CorruptData(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	err := fsm.Restore(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, []byte("not valid protobuf snapshot"))
 	assert.Error(t, err, "Restore should fail on corrupt snapshot data")
@@ -597,7 +605,7 @@ func TestFSM_Restore_CorruptData(t *testing.T) {
 func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 	// Test Restore overwrites existing data in the target DB
 	db1 := newTestDB(t)
-	fsm1 := NewFSM(db1, newStateKeyspaceEmpty())
+	fsm1 := NewFSM(badgermeta.Wrap(db1), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "src-bucket"})
 	require.NoError(t, fsm1.Apply(data))
@@ -607,7 +615,7 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 
 	// Create a second DB with different data
 	db2 := newTestDB(t)
-	fsm2 := NewFSM(db2, newStateKeyspaceEmpty())
+	fsm2 := NewFSM(badgermeta.Wrap(db2), newStateKeyspaceEmpty())
 	data, _ = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "old-bucket"})
 	require.NoError(t, fsm2.Apply(data))
 
@@ -630,7 +638,7 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 
 func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	ch := make(chan MigrationTask, 1)
 	fsm.SetMigrationHooks(ch, nil, nil)
@@ -657,7 +665,7 @@ func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
 
 func TestFSM_MigrationDone_NotifiesCommit(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	notified := make(chan struct{}, 1)
 	fsm.SetMigrationHooks(nil, &migrationDoneNotifier{fn: func(bucket, key, versionID string) {
@@ -696,7 +704,7 @@ func TestFSM_MigrateShard_ChannelFull_PersistsToDB(t *testing.T) {
 	// When migration channel is full, applyMigrateShard should persist the task
 	// to BadgerDB under "pending-migration:" key.
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Zero-capacity channel — always full
 	ch := make(chan MigrationTask, 0)
@@ -719,11 +727,11 @@ func TestFSM_MigrateShard_ChannelFull_PersistsToDB(t *testing.T) {
 func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
 	// RecoverPending reads all pending-migration keys and sends them to the channel.
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Manually write a pending-migration key to simulate a crash after persistence
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
-	require.NoError(t, fsm.db.Update(func(txn *badger.Txn) error { return fsm.persistPendingMigration(txn, task) }))
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error { return fsm.persistPendingMigration(txn, task) }))
 
 	ch := make(chan MigrationTask, 10)
 	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
@@ -742,11 +750,11 @@ func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
 func TestFSM_MigrationDone_DeletesPendingKey(t *testing.T) {
 	// applyMigrationDone should delete the pending-migration key from BadgerDB.
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Pre-write a pending-migration entry
 	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
-	require.NoError(t, fsm.db.Update(func(txn *badger.Txn) error { return fsm.persistPendingMigration(txn, task) }))
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error { return fsm.persistPendingMigration(txn, task) }))
 
 	// Apply CmdMigrationDone — should clean up the key
 	data, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
@@ -765,7 +773,7 @@ func TestFSM_MigrationDone_DeletesPendingKey(t *testing.T) {
 
 func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	ch := make(chan MigrationTask, 10)
 	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
 	assert.Empty(t, ch)
@@ -773,7 +781,7 @@ func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 
 func TestFSM_SetBucketVersioning(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Bucket must exist first.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "vbucket"})
@@ -796,7 +804,7 @@ func TestFSM_SetBucketVersioning(t *testing.T) {
 
 func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "ghost", State: "Enabled"})
 	err := fsm.Apply(data)
@@ -805,7 +813,7 @@ func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
 
 func TestFSM_SetObjectACL(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Write object meta first.
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
@@ -834,7 +842,7 @@ func TestFSM_SetObjectACL(t *testing.T) {
 
 func TestFSM_SetObjectACL_NotFound(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "ghost.txt", ACL: 2})
 	err := fsm.Apply(data)
@@ -843,7 +851,7 @@ func TestFSM_SetObjectACL_NotFound(t *testing.T) {
 
 func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Create bucket first.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
@@ -903,7 +911,7 @@ func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
 
 func TestFSM_SetObjectTags(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Seed an object.
 	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
@@ -934,7 +942,7 @@ func TestFSM_SetObjectTags(t *testing.T) {
 
 func TestFSM_SetObjectTags_NotFound(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "ghost.txt", Tags: nil})
 	err := fsm.Apply(data)
@@ -943,7 +951,7 @@ func TestFSM_SetObjectTags_NotFound(t *testing.T) {
 
 func TestFSM_SetObjectTags_VersionedBucket(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Create bucket and enable versioning.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
@@ -998,7 +1006,7 @@ func TestFSM_SetObjectTags_VersionedBucket(t *testing.T) {
 
 func TestFSM_SetObjectTags_SpecificVersion(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Create bucket and enable versioning.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
@@ -1039,7 +1047,7 @@ func TestFSM_SetObjectTags_SpecificVersion(t *testing.T) {
 
 func TestFSM_SetObjectTags_SpecificLatestVersionMirrorsLegacyCurrent(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
 	require.NoError(t, fsm.Apply(data))
@@ -1077,7 +1085,7 @@ func TestFSM_SetObjectTags_SpecificLatestVersionMirrorsLegacyCurrent(t *testing.
 
 func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 	db := newTestDB(t)
-	f := NewFSM(db, newStateKeyspaceEmpty())
+	f := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"})
 	require.NoError(t, err)
 	require.NoError(t, f.Apply(data))
@@ -1091,7 +1099,7 @@ func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 
 func TestFSM_CreateMultipartUpload_PersistsTags(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
 		UploadID:    "upload-tags-1",
@@ -1123,7 +1131,7 @@ func TestFSM_CreateMultipartUpload_PersistsTags(t *testing.T) {
 // the legacy CmdCompleteMultipart, so this is where parity must hold.
 func TestFSM_CompleteMultipartUpload_MaterialisesTags(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// 1) create multipart with tags
 	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{

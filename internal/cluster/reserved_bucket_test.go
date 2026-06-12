@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 )
 
@@ -20,7 +21,7 @@ func TestApplyCreateBucket_RefusesReserved(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			db := newTestDB(t)
-			fsm := NewFSM(db, newStateKeyspaceEmpty())
+			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 			data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: c.name})
 			if err != nil {
@@ -47,7 +48,7 @@ func TestApplyCreateBucket_BypassReserved_AllowsReserved(t *testing.T) {
 	for _, name := range []string{"_grainfs", "default", "_grainfs-audit"} {
 		t.Run(name, func(t *testing.T) {
 			db := newTestDB(t)
-			fsm := NewFSM(db, newStateKeyspaceEmpty())
+			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 			data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: name, BypassReserved: true})
 			if err != nil {
@@ -72,7 +73,7 @@ func TestApplyDeleteBucket_RefusesReserved(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			db := newTestDB(t)
-			fsm := NewFSM(db, newStateKeyspaceEmpty())
+			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 			data, err := EncodeCommand(CmdDeleteBucket, DeleteBucketCmd{Bucket: c.name})
 			if err != nil {
