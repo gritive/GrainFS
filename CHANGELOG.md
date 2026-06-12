@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.554.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 N5: docs reflect the HTTP-only cluster transport (docs + one stale comment; no code
+  behavior change).** After the QUIC→TCP→HTTP migration and the mux/TCP teardown (N1–N3), several
+  docs still described the node-to-node transport as QUIC / TCP-mux / `--transport` / `--quic-mux-*`.
+  Updated: `docs/architecture/quic-stream-multiplex.md` (R+H mux design — re-banner as HISTORICAL;
+  the whole mux subsystem and its `--mux-pool`/`--mux-flush` flags were removed in v0.0.551.0, raft
+  RPCs now ride plain HTTP `transport.Call`), `docs/architecture/lock-free-audit.md` (drop deleted
+  mux/QUIC files from the lock inventory; the HTTP transport's locks are in `http_transport.go`),
+  `docs/reference/transport-mux-versioning.md` (HISTORICAL banner — `grainfs-mux-v1` ALPN +
+  capability-exchange handshake are gone; the HTTP transport uses `grainfs-http-v1` with no
+  handshake), and the "via QUIC" phrasing in `docs/operators/balancer.md`,
+  `docs/operators/sli-slo.md`, `docs/reference/s3-compatibility.md`. Also fixed a stale
+  `tcpALPN/tcpMuxALPN` reference in the `httpALPN` comment (`internal/transport/http_transport.go`).
+  README/CONTEXT.md had no stale transport vocabulary; there is no `docs/adr/` to update.
+
 ## [0.0.553.0] - 2026-06-12
 
 ### Changed

@@ -20,7 +20,7 @@ The balancer runs only on the Raft leader.
 Flow:
 
 ```text
-GossipSender  -> broadcasts each node's DiskUsedPct over QUIC
+GossipSender  -> broadcasts each node's DiskUsedPct over the cluster transport
 GossipReceiver -> updates NodeStatsStore
 BalancerProposer -> evaluates disk skew every 30 seconds
   imbalance > 20% -> proposes CmdMigrateShard through Raft
@@ -129,7 +129,7 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
    journalctl -u grainfs | grep 'migration.*failed\|migration.*error' | tail -20
    ```
 
-2. Check source-node QUIC connectivity:
+2. Check source-node cluster transport connectivity:
 
    ```bash
    grainfs cluster --endpoint <data>/admin.sock peers

@@ -127,13 +127,12 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
 
 ### Protocol Or Stream Ordering
 
-- `internal/raft/raft_conn.go` - serializes frame writes on one QUIC stream.
-- `internal/raft/heartbeat_coalescer.go` - serializes pending heartbeat batch
-  assembly and per-batch reply fan-out.
-- `internal/raft/group_transport_quic.go` - protects mux connection registry.
 - `internal/raft/rpc.go` - protects in-process test RPC registry.
-- `internal/transport/quic.go` - protects QUIC connection maps and handler
-  registration; identity reloads use atomic snapshots.
+- `internal/transport/http_transport.go` - protects the HTTP cluster
+  transport's client/handler maps; identity reloads use an atomic snapshot
+  (`atomic.Pointer[IdentitySnapshot]`). (The QUIC/TCP mux locks that used to live
+  here — `raft_conn.go`, `heartbeat_coalescer.go`, `group_transport_quic.go`,
+  `quic.go` — were removed with the mux subsystem in v0.0.551.0.)
 - `internal/nfs4server/state.go`, `lookup_hint.go`, `lookup_ring.go`,
   `server.go` - protect NFS filehandle/session/replay/server connection state.
 - `internal/p9server/locks.go`, `server.go` - per-object RMW locks and server

@@ -21,9 +21,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
-// httpALPN is the ALPN protocol for the Phase 8 HTTP cluster transport, distinct
-// from tcpALPN/tcpMuxALPN so an HTTP dial can never negotiate the legacy TCP
-// transport and vice-versa.
+// httpALPN is the ALPN protocol for the HTTP cluster transport. It was kept
+// distinct from the legacy QUIC/TCP-mux ALPNs (now deleted) so a dial could
+// never cross-negotiate transports; it is the only cluster-transport ALPN today.
 const httpALPN = "grainfs-http-v1"
 
 // httpPingPath is the liveness route that proves the secure HTTP channel
