@@ -1,25 +1,15 @@
 # TODO
 
-- [pre-existing HTTP data-plane gap — surfaced by the TCP-transport removal, live since the flip]
-  **A shard write aborted mid-stream commits a TRUNCATED shard on the peer over the HTTP
-  transport.** The HTTP/1.1 chunked client abort (`remoteSealedShardSink.Abort()` →
-  `pw.CloseWithError`) surfaces to the Hertz SERVER's `RequestBodyStream()` as a clean EOF, not a
-  read error — so `ShardService.HandleWriteBody` (`internal/cluster/shard_service.go:888`) renames
-  its tmp file to the final `shard_N` path and ACKs success, committing the partial bytes. Over the
-  (now removed) TCP transport the abort RST-truncated the conn → the server read errored → the tmp
-  was cleaned up (`cleanup()` at shard_service.go:1166) → no shard file. **Pre-existing since the
-  TCP→HTTP default flip (#735)** — `TestRemoteSealedShardSink_AbortDoesNotCommit` was TCP-only and
-  never exercised the HTTP path; the N2/N3 teardown (renaming it to the HTTP transport) revealed it,
-  did not cause it. **EC-masked, not silent corruption:** a truncated shard fails AEAD on read and
-  is reconstructed from the other shards, and the orphan tmp/shard is scrubber-GC'd; the
-  object-level commit safety still holds (`TestMultiNodeStreamingPUT_DataShardFailure_NoCommit`
-  passes over HTTP, because a transport-ERROR failure is a different path from a mid-stream abort).
-  **Fix direction (separate increment):** the sealed shard is a finite buffer, so the sender knows
-  its length — carry the expected sealed length in the shard-write request envelope
-  (`BuildSealedShardWriteRequest`) and have `HandleWriteBody` reject (cleanup, error response) a body
-  shorter than that before the tmp→final rename. `TestRemoteSealedShardSink_AbortDoesNotCommit` is
-  `t.Skip`-ped with this reference until then.
-
+- [known flake — diagnosed, NOT bounded-reproducible; Phase 8-independent, pre-existing]
+  `internal/cluster` package: rare intermittent `object not found` on GET under repeated/concurrent
+  load. Observed on `TestMultiNodeStreamingPUT_HTTP_ParityShardFailure_CommitsAndReads` and
+  `TestMultiNodeStreamingPUT_K3_RoundTrip` (the multi-node in-process GET reconstruction path) when
+  run under `-count` repeat or full-package parallel load. **Confirmed pre-existing and unrelated to
+  the abort-truncation trailer fix:** symmetric measurement — base (no fix) and fix both pass 0/10 at
+  isolated `-count=1` and both FAIL at `-count=20`; the fix does not change the rate. Likely the same
+  resource-contention class as the placement-monitor flake below (CPU/FD starvation tripping a
+  deadline/probe or a cross-test shared-resource window). CI runs `-count=1` per package, where it is
+  reliably green.
 
 - [known flake — diagnosed, NOT bounded-reproducible; Phase 8-independent, pre-existing]
   `internal/cluster` package: a rare intermittent failure under heavy concurrent

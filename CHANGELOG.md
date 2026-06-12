@@ -18,23 +18,28 @@
   irreversible** (like the QUIC removal). `UseHTTPTransport`/`Transport` config + options are
   removed with the flag.
 
+### Fixed
+
+- **HTTP abort-truncation: a mid-stream-aborted shard write no longer commits a truncated
+  shard.** Removing the TCP transport surfaced a pre-existing HTTP gap (live since the
+  0.0.550.0 flip): when the streaming sink aborts mid-body, Hertz logs the body-reader error
+  as a warning and ends the chunked request cleanly, so the receiver reads a *short* body as a
+  normal EOF and `HandleWriteBody` committed the truncated shard. The streaming path does not
+  know the sealed length up front (shards are produced incrementally with `LastInPut`), so the
+  fix is an explicit completeness trailer: `remoteSealedShardSink.Finalize` appends an 8-byte
+  big-endian payload length after the last chunk (never on `Abort`), and the receiver
+  (`SplitSealedShardTrailer`) rejects the write when the declared length does not match the
+  bytes received. `TestRemoteSealedShardSink_AbortDoesNotCommit` is un-skipped and now passes
+  (the partial commits no shard); `TestRemoteSealedShardSink_RoundTrip` confirms the trailer
+  round-trips. Wire body is now `ciphertext + 8-byte trailer`; the receiver stores the
+  ciphertext verbatim as before.
+
 ### Notes
 
 - **Eyes-open, no throughput proof.** Like the original flip (0.0.550.0), this ships
   macOS-functional-only: full unit suite green; **Linux multi-node throughput parity was NOT
   measured** (macOS cannot surface the signal). The user accepted removing the escape hatch
   without a load proof.
-- **Surfaced (not caused) a pre-existing HTTP gap.** Renaming the TCP-only
-  `TestRemoteSealedShardSink_AbortDoesNotCommit` to the HTTP transport revealed that a shard
-  write aborted mid-stream leaves a *truncated* shard file at the final path over HTTP (the
-  Hertz server reads a client mid-body abort as a clean EOF, so `HandleWriteBody` reaches its
-  tmp→final rename). Verified: the final shard file exists after abort, which over the removed
-  TCP transport it did not. NOT verified for this failure path (inferred, not asserted as
-  fact): that the receiver returns StatusOK to the coordinator, and that the resulting
-  truncated shard is EC-masked on read (a truncated AES-GCM shard *should* fail its tag → be
-  reconstructed). Live since the 0.0.550.0 flip. Captured in TODOS.md with a fix direction
-  (carry the expected sealed length in the request envelope; reject a short body); the test is
-  `t.Skip`-ped until then.
 
 ## [0.0.551.0] - 2026-06-12
 

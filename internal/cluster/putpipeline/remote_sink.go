@@ -27,15 +27,20 @@ var _ shardSink = (*remoteSealedShardSink)(nil)
 // io.Pipe in a background goroutine (Write blocks until the RPC reader consumes,
 // which is the natural backpressure — at most one stripe is in flight).
 //
-// Sealing is done once at the source (CPUPool), so the bytes on the wire and on
-// the peer's disk are identical ciphertext (the receiver stores them verbatim,
-// never re-encrypting). Failure semantics honor the shardSink contract:
-//   - Finalize closes the pipe cleanly (EOF), so the receiver reads the full
-//     body and commits; it returns the RPC result. On RPC error the sink has
-//     already closed the pipe and the goroutine has returned, so it is
-//     self-cleaned — DriveActor will NOT call Abort after a Finalize error.
-//   - Abort closes the pipe with an error, so the receiver's body Read returns a
-//     NON-EOF error and rejects the write: no partial shard is committed.
+// Sealing is done once at the source (CPUPool); the receiver stores the shard
+// ciphertext verbatim, never re-encrypting. The wire body is that ciphertext
+// followed by an 8-byte completeness trailer (the payload length) that Finalize
+// appends and the receiver strips before storing — so wire = disk + trailer.
+// Failure semantics honor the shardSink contract:
+//   - Finalize writes the trailer then closes the pipe cleanly (EOF), so the
+//     receiver reads the full body, verifies the declared length, and commits;
+//     it returns the RPC result. On RPC error the sink has already closed the
+//     pipe and the goroutine has returned, so it is self-cleaned — DriveActor
+//     will NOT call Abort after a Finalize error.
+//   - Abort closes the pipe with an error WITHOUT the trailer. Over HTTP the
+//     receiver sees a clean (truncated) EOF, but the missing/short trailer makes
+//     the declared length mismatch the bytes received, so it rejects the write:
+//     no partial shard is committed.
 //
 // The caller MUST pass a ctx that cancels on a stall (e.g. an idle-deadline ctx;
 // see idleTimeoutContext): a dead peer that never reads would otherwise block
@@ -51,9 +56,10 @@ var _ shardSink = (*remoteSealedShardSink)(nil)
 // they drift the shard stores fine but is silently unreadable until GET. Derive
 // both from one source.
 type remoteSealedShardSink struct {
-	pw    *io.PipeWriter
-	done  chan error
-	reset func() // progress signal for the idle deadline; nil if no deadline
+	pw      *io.PipeWriter
+	done    chan error
+	reset   func() // progress signal for the idle deadline; nil if no deadline
+	written int64  // payload bytes streamed so far, encoded into the Finalize trailer
 }
 
 // newRemoteSealedShardSink streams a sealed shard to peerAddr. reset (may be nil)
@@ -79,6 +85,7 @@ func newRemoteSealedShardSink(ctx context.Context, reset func(), tr shardTranspo
 
 func (s *remoteSealedShardSink) Write(p []byte) (int, error) {
 	n, err := s.pw.Write(p)
+	s.written += int64(n)
 	// A successful pipe write means the peer's CallWithBody reader consumed the
 	// chunk — real downstream progress, so refresh the idle deadline.
 	if err == nil && s.reset != nil {
@@ -88,6 +95,16 @@ func (s *remoteSealedShardSink) Write(p []byte) (int, error) {
 }
 
 func (s *remoteSealedShardSink) Finalize() error {
+	// Write the completeness trailer (8-byte BE payload length) BEFORE the clean
+	// EOF: a mid-stream abort surfaces to the receiver as a clean EOF over HTTP,
+	// so the trailer is the only signal that distinguishes a complete shard from
+	// a truncated one. Abort never writes it, so the receiver rejects the partial.
+	trailer := cluster.AppendSealedShardTrailer(nil, s.written)
+	if _, err := s.pw.Write(trailer); err != nil {
+		_ = s.pw.CloseWithError(err) // reader gone; unblock the goroutine
+		<-s.done
+		return err
+	}
 	_ = s.pw.Close() // clean EOF: the receiver reads the full body and commits
 	return <-s.done
 }

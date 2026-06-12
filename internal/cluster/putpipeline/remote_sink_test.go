@@ -76,17 +76,12 @@ func TestRemoteSealedShardSink_RoundTrip(t *testing.T) {
 
 // TestRemoteSealedShardSink_AbortDoesNotCommit is the critical failure-semantics
 // test: a sink Abort (after a partial Write) must leave NO shard committed on the
-// peer — the receiver's body Read errors and the write is rejected. This is the
-// shardSink self-clean contract verified over the real transport.
+// peer. Over HTTP a mid-stream abort surfaces to the server as a clean EOF, so
+// the receiver cannot rely on a body-read error; instead Abort omits the
+// completeness trailer that Finalize would write, so the receiver's declared-vs-
+// received length check rejects the partial. This is the shardSink self-clean
+// contract verified over the real transport.
 func TestRemoteSealedShardSink_AbortDoesNotCommit(t *testing.T) {
-	// SKIP: this asserts immediate shard-file absence on abort, which held over the
-	// (now removed) TCP transport but NOT over the HTTP transport: a Hertz client
-	// mid-body abort surfaces to the server as a clean EOF, so HandleWriteBody commits
-	// the truncated shard. Pre-existing HTTP gap, live since the TCP→HTTP flip (#735),
-	// EC-masked (truncated shard fails AEAD on read → reconstructed). Un-skip once the
-	// shard-write envelope carries the expected sealed length and HandleWriteBody
-	// rejects a short body. See TODOS.md.
-	t.Skip("HTTP transport commits truncated shard on mid-stream abort (pre-existing; see TODOS.md)")
 	ctx := context.Background()
 	keeper := testDEKKeeper(t)
 	clusterID := testClusterID()

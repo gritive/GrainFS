@@ -186,7 +186,11 @@ func TestShardService_HandleWriteBody_SealedShardRoundTrip(t *testing.T) {
 	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
 	fw.Builder.Reset()
 
-	resp := svc.HandleWriteBody()(req, bytes.NewReader(sealed))
+	// The receiver requires the completeness trailer the streaming sink appends
+	// on a clean Finalize; hand-build it here since this test drives the handler
+	// directly without the sink.
+	body := AppendSealedShardTrailer(sealed, int64(len(sealed)))
+	resp := svc.HandleWriteBody()(req, bytes.NewReader(body))
 	rpcType, _, err := unmarshalEnvelope(resp.Payload)
 	require.NoError(t, err)
 	require.NotEqual(t, "Error", rpcType, "sealed-shard write must not error")
@@ -194,6 +198,66 @@ func TestShardService_HandleWriteBody_SealedShardRoundTrip(t *testing.T) {
 	got, err := svc.ReadLocalShard("bkt", "obj", 3)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
+}
+
+// TestSplitSealedShardTrailer covers the receiver's completeness-check helper in
+// isolation: a body shorter than the trailer, a declared-length mismatch (the
+// signature of a mid-stream truncation), and the exact-match happy path.
+func TestSplitSealedShardTrailer(t *testing.T) {
+	payload := bytes.Repeat([]byte("sealed shard bytes "), 100)
+	good := AppendSealedShardTrailer(payload, int64(len(payload)))
+
+	t.Run("exact match strips and returns payload", func(t *testing.T) {
+		got, err := SplitSealedShardTrailer(good)
+		require.NoError(t, err)
+		require.Equal(t, payload, got)
+	})
+	t.Run("shorter than trailer is rejected", func(t *testing.T) {
+		_, err := SplitSealedShardTrailer([]byte{1, 2, 3})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "truncated")
+	})
+	t.Run("declared-length mismatch is rejected", func(t *testing.T) {
+		// Drop the last payload byte (keep the trailer) — the classic truncation:
+		// declared length now exceeds the bytes that precede the trailer.
+		truncated := append(good[:len(payload)-1], good[len(payload):]...)
+		_, err := SplitSealedShardTrailer(truncated)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "truncated")
+	})
+}
+
+// TestShardService_HandleWriteBody_RejectsTruncatedSealedShard proves the handler
+// path: a "WriteSealedShard" body whose trailer declares MORE payload than was
+// received (a truncated stream) is rejected with an Error response and commits NO
+// shard file. This is the direct-handler counterpart to the over-transport
+// TestRemoteSealedShardSink_AbortDoesNotCommit.
+func TestShardService_HandleWriteBody_RejectsTruncatedSealedShard(t *testing.T) {
+	keeper, clusterID := testDEKKeeper(t)
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
+		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+
+	plaintext := bytes.Repeat([]byte("truncated sealed shard "), 8192)
+	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 5, plaintext)
+	require.NoError(t, err)
+
+	fw := buildShardEnvelope("WriteSealedShard", "bkt", "obj", 5, nil)
+	req := &transport.Message{Type: transport.StreamShardWriteBody, Payload: append([]byte(nil), fw.Builder.FinishedBytes()...)}
+	fw.Builder.Reset()
+
+	// Trailer declares the FULL length, but the body carries only half the sealed
+	// bytes — exactly what a mid-stream abort leaves on the wire.
+	full := AppendSealedShardTrailer(sealed, int64(len(sealed)))
+	truncated := append(full[:len(sealed)/2], full[len(sealed):]...)
+
+	resp := svc.HandleWriteBody()(req, bytes.NewReader(truncated))
+	rpcType, _, err := unmarshalEnvelope(resp.Payload)
+	require.NoError(t, err)
+	require.Equal(t, "Error", rpcType, "truncated sealed-shard write must be rejected")
+
+	_, statErr := os.Stat(filepath.Join(dir, "shards", "bkt", "obj", "shard_5"))
+	require.True(t, os.IsNotExist(statErr), "rejected sealed-shard write must commit NO shard file")
 }
 
 func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
