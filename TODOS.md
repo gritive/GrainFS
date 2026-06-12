@@ -88,3 +88,20 @@
   plain values inside the recovered scope), plus a malformed-payload unit test. Blast radius:
   requires an authenticated cluster peer (SPKI-pinned mTLS) sending garbage — low likelihood,
   high impact (process crash).
+
+- [pre-existing e2e failures — cluster join Iceberg 501 + multipart list fanout timeout; Phase 8-independent, A/B-verified]
+  4 cluster e2e specs fail identically on the post-Phase-8 tree (664bd79d), the pre-N7-3
+  baseline (a716f0f7), AND the pre-Phase-II baseline (a63d6983) — verified by building each
+  binary and running the same focused specs:
+  (1-3) `Cluster join services` ×3 (`cluster_join_e2e_test.go`): POST /iceberg/v1/namespaces
+  on a dynamically JOINED node returns 501 ("Iceberg REST Catalog is not available: server
+  started without --audit-iceberg or catalog initialization failed") — the joiner's iceberg
+  catalog handler is unavailable. Investigate whether the e2e harness passes the iceberg
+  enable flag to joined nodes, or whether joiner boot disables the catalog
+  (boot_phases_srvopts.go:156-176 wiring).
+  (4) `MultipartListFanout Cluster4Node` (`cluster_test.go:51`): 30s Eventually timeout
+  listing incomplete multipart uploads from every node.
+  NOT caused by the native-route migration (identical failures on the pre-epic binary).
+  Passing context: 8/12 cluster specs green on the same runs (invite-join default bucket,
+  joined-node edge-write forwarding, S3 PUT/GET across joined nodes), and the single-node
+  e2e set (buckets/objects/S3 client smoke) is fully green on the post-Phase-8 binary.
