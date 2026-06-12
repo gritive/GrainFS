@@ -162,7 +162,7 @@ avg(grainfs_node_recovery_duration_seconds)
 ### AppendObject SLI metrics (reference)
 
 - `grainfs_cluster_append_forward_buffer_inflight_bytes` (Gauge) — bytes in flight
-  through the QUIC forward buffer pool. Saturation near
+  through the cluster append forward buffer pool. Saturation near
   `--cluster-append-forward-buffer-total-bytes` triggers SlowDown rejections.
 - `grainfs_cluster_append_forward_buffer_rejected_total` (Counter) — HTTP 503
   SlowDown count.

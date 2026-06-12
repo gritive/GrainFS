@@ -1,6 +1,6 @@
 # Raft RPC Persistent Stream + Heartbeat Coalescing (R+H)
 
-> **Status**: **DELIVERED** (2026-05-02). Design v3 shipped as v0.0.16.0 (#135), v0.0.16.1 (#136 nil panic fix), v0.0.17.0 (#137 default ON). The `--quic-mux` flag was removed in v0.0.151.0 — mux is now unconditionally on; the per-peer ALPN fallback to the legacy path (cross-version peers) is retained. `--quic-mux-pool` / `--quic-mux-flush` remain as tuning knobs (renamed to `--mux-pool` / `--mux-flush` in v0.0.502.0 when the cluster transport flipped from QUIC to TCP and the QUIC stack was removed; #702). **Historical note:** this document describes the R+H design as it shipped on the QUIC transport. The code references below (`internal/transport/quic.go`, `group_transport_quic.go`, etc.) are from that era; the carrier abstraction it introduced is exactly what made the QUIC→TCP migration (S0–S6, v0.0.502.0) behavior-neutral — the mux carrier is now TCP.
+> **Status**: **HISTORICAL — the entire mux subsystem this document describes was removed in v0.0.551.0 (Phase 8 N1).** It is kept for design rationale only. Timeline: design v3 shipped as v0.0.16.0 (#135) / v0.0.16.1 (#136) / v0.0.17.0 (#137 default ON) on the QUIC transport; the carrier abstraction made the QUIC→TCP migration (S0–S6, v0.0.502.0) behavior-neutral; then Phase 8 flipped the cluster transport to streaming **HTTP** (v0.0.550.0) and **deleted the mux subsystem entirely** (v0.0.551.0): raft RPCs now ride a plain HTTP request/response (`transport.Call`) with no persistent streams, no heartbeat coalescer, and no `--mux-pool`/`--mux-flush` flags (all removed). Every code path referenced below (`internal/transport/quic.go`, `group_transport_quic.go`, `raft_conn.go`, `heartbeat_coalescer.go`, `group_transport_mux.go`) has been deleted — read this as a record of the QUIC-era design, not the current code.
 >
 > **Validation (idle-N8, 5 nodes × 8 raft groups, shared raft-log BadgerDB):**
 >
@@ -20,7 +20,7 @@
 >
 > ---
 >
-> **Original draft below (2026-05-02 Draft v3, codex 3-pass review).** Kept for the design rationale + decision points (pool=4, ALPN versioning, snapshot bypass invariant). Implementation references match the merged code in `internal/raft/raft_conn.go`, `heartbeat_coalescer.go`, `group_transport_mux.go`.
+> **Original draft below (2026-05-02 Draft v3, codex 3-pass review).** Kept for the design rationale + decision points (pool=4, ALPN versioning, snapshot bypass invariant). Implementation references point at `internal/raft/raft_conn.go`, `heartbeat_coalescer.go`, `group_transport_mux.go` — all deleted in v0.0.551.0, so they no longer exist in the tree.
 
 > **Branch (when designed)**: `perf/quic-stream-reuse` (now merged)
 > **Supersedes**: v2. Codex reported 3 P0, 4 P1, and 2 P2 findings; v3 resolves them.
