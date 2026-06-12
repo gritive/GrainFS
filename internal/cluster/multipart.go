@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -99,9 +98,9 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	defer lifeMu.RUnlock()
 
 	// Verify upload exists (read local metadata)
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
 		return err
@@ -156,9 +155,9 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 
 	// Read upload metadata
 	var meta clusterMultipartMeta
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
 		if err != nil {
@@ -286,8 +285,8 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 	var uploads []*storage.MultipartUpload
 	bucketBytes := []byte(bucket)
 	prefixBytes := []byte(prefix)
-	err := b.db.View(func(txn *badger.Txn) error {
-		return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item *badger.Item) error {
+	err := b.store.View(func(txn MetadataTxn) error {
+		return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item MetaItem) error {
 			raw, err := b.itemValueCopy(item)
 			if err != nil {
 				return err
@@ -350,9 +349,9 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 	_ = ctx
 	_ = bucket
 	_ = key
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
 		return err
@@ -426,9 +425,9 @@ func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, k
 		b.multipartLocks.Delete(uploadID)
 	}()
 
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrUploadNotFound
 		}
 		return err

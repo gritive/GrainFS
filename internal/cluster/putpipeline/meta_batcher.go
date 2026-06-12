@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // MetadataBatcher accumulates MetadataRecord values and commits them
@@ -13,7 +13,7 @@ import (
 // One long-lived goroutine per server.
 type MetadataBatcher struct {
 	in         chan MetadataRecord
-	db         *badger.DB
+	db         cluster.MetadataStore
 	batchSize  int
 	flushAfter time.Duration
 	pending    sync.Map // pendingKey -> MetadataRecord

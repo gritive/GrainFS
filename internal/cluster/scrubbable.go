@@ -20,8 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
@@ -72,8 +70,8 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		defer close(ch)
 		rawLatPrefix := []byte("lat:" + bucket + "/")
 
-		_ = b.db.View(func(txn *badger.Txn) error {
-			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+		_ = b.store.View(func(txn MetadataTxn) error {
+			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
 				key := string(raw[len(rawLatPrefix):])
 
 				var versionID string
@@ -446,8 +444,8 @@ func (b *DistributedBackend) ScanLocalMultipartUploads(bucket string) (<-chan st
 	bucketBytes := []byte(bucket)
 	go func() {
 		defer close(out)
-		_ = b.db.View(func(txn *badger.Txn) error {
-			return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item *badger.Item) error {
+		_ = b.store.View(func(txn MetadataTxn) error {
+			return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item MetaItem) error {
 				raw, err := b.itemValueCopy(item)
 				if err != nil {
 					return err

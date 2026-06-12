@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 
-	badger "github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 )
 
@@ -37,9 +36,9 @@ var fsmValueRewrapAfterProposeHook func()
 func (b *DistributedBackend) CollectStaleFSMValueKeys(activeGen uint32, maxBatch int, maxBytes int) ([]string, error) {
 	var stale []string
 	var accBytes int
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		scan := func(prefix string) error {
-			return b.ks().scanGroupPrefix(txn, []byte(prefix), func(_ []byte, item *badger.Item) error {
+			return b.ks().scanGroupPrefix(txn, []byte(prefix), func(_ []byte, item MetaItem) error {
 				// Pre-check count cap before reading the value.
 				if len(stale) >= maxBatch {
 					return errStopScan

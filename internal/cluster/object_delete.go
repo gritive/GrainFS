@@ -6,7 +6,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -82,7 +81,7 @@ func (b *DistributedBackend) deleteInternalObject(bucket, key string) error {
 	_ = os.Remove(objPath.path)
 	b.internalPathCache.Delete(internalObjectCacheKey{bucket: bucket, key: key})
 	b.internalSizeCache.Delete(internalObjectCacheKey{bucket: bucket, key: key})
-	return b.db.Update(func(txn *badger.Txn) error {
+	return b.store.Update(func(txn MetadataTxn) error {
 		if item, err := txn.Get(b.ks().LatestKey(bucket, key)); err == nil {
 			if err := item.Value(func(v []byte) error {
 				versionID := string(v)
@@ -90,21 +89,21 @@ func (b *DistributedBackend) deleteInternalObject(bucket, key string) error {
 					return nil
 				}
 				_ = os.Remove(b.objectPathV(bucket, key, versionID))
-				if err := txn.Delete(b.ks().ObjectMetaKeyV(bucket, key, versionID)); err != nil && err != badger.ErrKeyNotFound {
+				if err := txn.Delete(b.ks().ObjectMetaKeyV(bucket, key, versionID)); err != nil && err != ErrMetaKeyNotFound {
 					return err
 				}
 				return nil
 			}); err != nil {
 				return err
 			}
-		} else if err != badger.ErrKeyNotFound {
+		} else if err != ErrMetaKeyNotFound {
 			return err
 		}
 		for _, dbKey := range [][]byte{
 			b.ks().LatestKey(bucket, key),
 			b.ks().ObjectMetaKey(bucket, key),
 		} {
-			if err := txn.Delete(dbKey); err != nil && err != badger.ErrKeyNotFound {
+			if err := txn.Delete(dbKey); err != nil && err != ErrMetaKeyNotFound {
 				return err
 			}
 		}

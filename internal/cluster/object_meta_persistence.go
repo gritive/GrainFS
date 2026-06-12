@@ -2,8 +2,6 @@ package cluster
 
 import (
 	"fmt"
-
-	"github.com/dgraph-io/badger/v4"
 )
 
 type objectMetaPersistencePolicy uint8
@@ -22,7 +20,7 @@ type objectMetaPersistenceInput struct {
 	Policy    objectMetaPersistencePolicy
 }
 
-func (f *FSM) persistObjectMetaUpdate(txn *badger.Txn, in objectMetaPersistenceInput) error {
+func (f *FSM) persistObjectMetaUpdate(txn MetadataTxn, in objectMetaPersistenceInput) error {
 	out, err := marshalObjectMeta(in.Meta)
 	if err != nil {
 		return fmt.Errorf("marshal updated objectMeta: %w", err)
@@ -54,7 +52,7 @@ func (f *FSM) persistObjectMetaUpdate(txn *badger.Txn, in objectMetaPersistenceI
 	}
 }
 
-func (f *FSM) persistPutObjectMetaUpdate(txn *badger.Txn, cmd PutObjectMetaCmd, meta objectMeta) error {
+func (f *FSM) persistPutObjectMetaUpdate(txn MetadataTxn, cmd PutObjectMetaCmd, meta objectMeta) error {
 	out, err := marshalObjectMeta(meta)
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
@@ -73,7 +71,7 @@ func (f *FSM) persistPutObjectMetaUpdate(txn *badger.Txn, cmd PutObjectMetaCmd, 
 				return err
 			}
 		}
-		if err := txn.Delete(f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)); err != nil && err != badger.ErrKeyNotFound {
+		if err := txn.Delete(f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)); err != nil && err != ErrMetaKeyNotFound {
 			return err
 		}
 		return nil

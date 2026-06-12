@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -22,11 +20,11 @@ type Config struct {
 	DEKKeeper    *encrypt.DEKKeeper // generation-aware shard sealing
 	ClusterID    []byte             // 16-byte data-plane AAD ID; MUST match ShardService's
 	ECConfig     cluster.ECConfig
-	StripeBytes  int           // k * blockSize; defaults to 1<<20 (1 MiB) if 0
-	ChannelDepth int           // per-actor channel cap; defaults to 8 if 0
-	BatchSize    int           // metadata batch size; defaults to 32 if 0
-	FlushAfter   time.Duration // metadata flush deadline; defaults to 5 ms if 0
-	BadgerDB     *badger.DB    // metadata sink; nil = no-op flush (tests)
+	StripeBytes  int                   // k * blockSize; defaults to 1<<20 (1 MiB) if 0
+	ChannelDepth int                   // per-actor channel cap; defaults to 8 if 0
+	BatchSize    int                   // metadata batch size; defaults to 32 if 0
+	FlushAfter   time.Duration         // metadata flush deadline; defaults to 5 ms if 0
+	MetaStore    cluster.MetadataStore // metadata sink; nil = no-op flush (tests)
 	WAL          ShardWALAppender
 	// Transport streams sealed shards to peers for mixed-placement PUTs
 	// (PutRequest.Placement). nil is fine for an all-local pipeline; a PUT
@@ -151,7 +149,7 @@ func New(cfg Config) *Pipeline {
 	}
 	p.metaBatcher = &MetadataBatcher{
 		in:         p.metaIn,
-		db:         cfg.BadgerDB,
+		db:         cfg.MetaStore,
 		batchSize:  cfg.BatchSize,
 		flushAfter: cfg.FlushAfter,
 	}

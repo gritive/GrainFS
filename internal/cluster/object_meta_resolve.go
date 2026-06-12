@@ -3,8 +3,6 @@ package cluster
 import (
 	"errors"
 	"fmt"
-
-	"github.com/dgraph-io/badger/v4"
 )
 
 type objectMetaForCoalesceUpdate struct {
@@ -21,7 +19,7 @@ type objectMetaForAppendUpdate struct {
 	ExistingVersionID string
 }
 
-func (f *FSM) resolveObjectMetaForAppendUpdate(txn *badger.Txn, bucket, key, blobID string) (objectMetaForAppendUpdate, error) {
+func (f *FSM) resolveObjectMetaForAppendUpdate(txn MetadataTxn, bucket, key, blobID string) (objectMetaForAppendUpdate, error) {
 	existing, err := f.readLegacyObjectMetaForUpdate(txn, bucket, key)
 	if err != nil {
 		return objectMetaForAppendUpdate{}, err
@@ -50,11 +48,11 @@ func (f *FSM) resolveObjectMetaForAppendUpdate(txn *badger.Txn, bucket, key, blo
 	}, nil
 }
 
-func (f *FSM) readLegacyObjectMetaForUpdate(txn *badger.Txn, bucket, key string) (*objectMeta, error) {
+func (f *FSM) readLegacyObjectMetaForUpdate(txn MetadataTxn, bucket, key string) (*objectMeta, error) {
 	metaKey := f.keys.ObjectMetaKey(bucket, key)
 	item, err := txn.Get(metaKey)
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get existing objectMeta: %w", err)
@@ -77,10 +75,10 @@ func (f *FSM) readLegacyObjectMetaForUpdate(txn *badger.Txn, bucket, key string)
 	return &meta, nil
 }
 
-func (f *FSM) readLatestObjectVersionForAppend(txn *badger.Txn, bucket, key string) (string, error) {
+func (f *FSM) readLatestObjectVersionForAppend(txn MetadataTxn, bucket, key string) (string, error) {
 	item, err := txn.Get(f.keys.LatestKey(bucket, key))
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return "", nil
 		}
 		return "", fmt.Errorf("get latest version: %w", err)
@@ -97,7 +95,7 @@ func (f *FSM) readLatestObjectVersionForAppend(txn *badger.Txn, bucket, key stri
 	return versionID, nil
 }
 
-func (f *FSM) resolveObjectMetaForCoalesceUpdate(txn *badger.Txn, bucket, key string) (objectMetaForCoalesceUpdate, error) {
+func (f *FSM) resolveObjectMetaForCoalesceUpdate(txn MetadataTxn, bucket, key string) (objectMetaForCoalesceUpdate, error) {
 	legacyKey := f.keys.ObjectMetaKey(bucket, key)
 	metaKey := legacyKey
 	versionID := ""
@@ -112,13 +110,13 @@ func (f *FSM) resolveObjectMetaForCoalesceUpdate(txn *badger.Txn, bucket, key st
 		if versionID != "" {
 			metaKey = f.keys.ObjectMetaKeyV(bucket, key, versionID)
 		}
-	} else if !errors.Is(err, badger.ErrKeyNotFound) {
+	} else if !errors.Is(err, ErrMetaKeyNotFound) {
 		return objectMetaForCoalesceUpdate{}, fmt.Errorf("get latest pointer: %w", err)
 	}
 
 	item, err := txn.Get(metaKey)
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return objectMetaForCoalesceUpdate{}, nil
 		}
 		return objectMetaForCoalesceUpdate{}, fmt.Errorf("get objectMeta: %w", err)

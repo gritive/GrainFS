@@ -11,7 +11,6 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -80,11 +79,11 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 // IterECShardScanTargets; behavior must stay identical to the public contract
 // documented on IterObjectMetas.
 func (f *FSM) iterLatestObjectMetas(fn func(ref ObjectMetaRef, m objectMeta) error) error {
-	return f.db.View(func(txn *badger.Txn) error {
+	return f.db.View(func(txn MetadataTxn) error {
 		seen := make(map[string]struct{}) // "bucket\x00key" → visited
 
 		rawLatPrefix := []byte("lat:")
-		if serr := f.keys.scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+		if serr := f.keys.scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
 			rest := string(raw[len(rawLatPrefix):])
 			slash := -1
 			for i, c := range rest {
@@ -147,7 +146,7 @@ func (f *FSM) iterLatestObjectMetas(fn func(ref ObjectMetaRef, m objectMeta) err
 		// lat: pointer. Split on first '/' — these predate versioning and
 		// therefore carry no embedded versionID.
 		rawObjPrefix := []byte("obj:")
-		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item *badger.Item) error {
+		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
 			trimmed := string(raw[len(rawObjPrefix):])
 			slash := -1
 			for i, c := range trimmed {
@@ -381,10 +380,10 @@ func (f *FSM) buildECShardTargets(ref ObjectMetaRef, m objectMeta, fn func(ECSha
 // which misclassified keys when a same-bucket lat: pointer had a slash-containing
 // key that collided with another object's {key}/{versionID} tail.
 func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error) error {
-	return f.db.View(func(txn *badger.Txn) error {
+	return f.db.View(func(txn MetadataTxn) error {
 		// Enumerate all obj: entries (every stored version).
 		rawObjPrefix := []byte("obj:")
-		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item *badger.Item) error {
+		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
 			rest := string(raw[len(rawObjPrefix):]) // "{bucket}/{...}"
 			bslash := -1
 			for i, c := range rest {
@@ -474,9 +473,9 @@ func lastIndexByte(s string, b byte) int {
 // returns a non-nil error, which is propagated. Used by ShardPlacementMonitor
 // to scan for missing shards.
 func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecord) error) error {
-	return f.db.View(func(txn *badger.Txn) error {
+	return f.db.View(func(txn MetadataTxn) error {
 		rawPrefix := []byte("placement:")
-		return f.keys.scanGroupPrefix(txn, rawPrefix, func(raw []byte, item *badger.Item) error {
+		return f.keys.scanGroupPrefix(txn, rawPrefix, func(raw []byte, item MetaItem) error {
 			trimmed := string(raw[len(rawPrefix):])
 			slash := -1
 			for i, c := range trimmed {
@@ -515,7 +514,7 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecor
 // legacy EC" and fall back to the bare-key layout.
 func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 	var versionID string
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(f.keys.LatestKey(bucket, key))
 		if err != nil {
 			return err
@@ -537,7 +536,7 @@ func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 // fall back to N× replication on an error, as that risks data loss.
 func (f *FSM) LookupShardPlacement(bucket, key string) (PlacementRecord, error) {
 	var rec PlacementRecord
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(f.keys.ShardPlacementKey(bucket, key))
 		if err != nil {
 			return err
@@ -552,7 +551,7 @@ func (f *FSM) LookupShardPlacement(bucket, key string) (PlacementRecord, error) 
 		})
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return PlacementRecord{}, nil
 		}
 		return PlacementRecord{}, err
@@ -625,7 +624,7 @@ func decodePlacementValue(data []byte) (PlacementRecord, error) {
 // NodeIDs) — callers treat an empty record as "no actionable placement".
 func (f *FSM) LookupObjectPlacement(bucket, key, versionID string) (PlacementRecord, error) {
 	var rec PlacementRecord
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		dbKey := f.keys.ObjectMetaKey(bucket, key)
 		if versionID != "" {
 			dbKey = f.keys.ObjectMetaKeyV(bucket, key, versionID)
@@ -653,7 +652,7 @@ func (f *FSM) LookupObjectPlacement(bucket, key, versionID string) (PlacementRec
 		}
 		return nil
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, ErrMetaKeyNotFound) {
 		return PlacementRecord{}, nil
 	}
 	return rec, err
@@ -663,7 +662,7 @@ func (f *FSM) LookupObjectPlacement(bucket, key, versionID string) (PlacementRec
 // for the given versioned object. Returns (0, 0, nil) when the object has no EC
 // metadata (N× replication mode). Returns (0, 0, err) on a real BadgerDB read error.
 func (f *FSM) LookupObjectECShards(bucket, key, versionID string) (k, m int, err error) {
-	err = f.db.View(func(txn *badger.Txn) error {
+	err = f.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(f.keys.ObjectMetaKeyV(bucket, key, versionID))
 		if err != nil {
 			return err
@@ -680,7 +679,7 @@ func (f *FSM) LookupObjectECShards(bucket, key, versionID string) (k, m int, err
 		m = int(meta.ECParity)
 		return nil
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, ErrMetaKeyNotFound) {
 		return 0, 0, nil // N× 모드: EC 메타 없음
 	}
 	return k, m, err

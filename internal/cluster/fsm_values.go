@@ -4,8 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -109,7 +107,7 @@ func decodeFSMValueFrameV2(raw []byte) (gen uint32, ct []byte, ok bool, err erro
 	return gen, append([]byte(nil), raw[fsmValueFrameHeader:]...), true, nil
 }
 
-func (f *FSM) setValue(txn *badger.Txn, key []byte, plain []byte) error {
+func (f *FSM) setValue(txn MetadataTxn, key []byte, plain []byte) error {
 	val, err := f.sealValue(key, plain)
 	if err != nil {
 		return err
@@ -117,7 +115,7 @@ func (f *FSM) setValue(txn *badger.Txn, key []byte, plain []byte) error {
 	return txn.Set(key, val)
 }
 
-func (f *FSM) itemValueCopy(item *badger.Item) ([]byte, error) {
+func (f *FSM) itemValueCopy(item MetaItem) ([]byte, error) {
 	key := item.KeyCopy(nil)
 	raw, err := item.ValueCopy(nil)
 	if err != nil {
@@ -126,7 +124,7 @@ func (f *FSM) itemValueCopy(item *badger.Item) ([]byte, error) {
 	return f.openValue(key, raw)
 }
 
-func (b *DistributedBackend) itemValueCopy(item *badger.Item) ([]byte, error) {
+func (b *DistributedBackend) itemValueCopy(item MetaItem) ([]byte, error) {
 	if b.fsm == nil {
 		return item.ValueCopy(nil)
 	}

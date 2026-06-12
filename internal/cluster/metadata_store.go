@@ -8,8 +8,8 @@ import "github.com/gritive/GrainFS/internal/metastore"
 // in internal/metastore so adapters can return its sentinel errors without
 // importing cluster — see docs/adr/2026-06-13-metastore-contract-package.md.
 //
-// Dormant in S6.5-1: declared but not yet consumed. S6.5-2+ migrate
-// *badger.Txn signatures to these types.
+// S6.5-2 migrated cluster's former raw badger txn/item/iterator signatures
+// to these types.
 type (
 	MetadataStore       = metastore.Store
 	MetadataTxn         = metastore.Txn
@@ -19,10 +19,10 @@ type (
 )
 
 var (
-	// ErrMetaKeyNotFound is the missing-key sentinel cluster code checks via
-	// errors.Is once migrated off badger.ErrKeyNotFound.
+	// ErrMetaKeyNotFound is the missing-key sentinel cluster code checks
+	// (migrated off the badger sentinel in S6.5-2).
 	ErrMetaKeyNotFound = metastore.ErrKeyNotFound
 	// ErrMetaTxnTooBig is the batch-limit sentinel for apply_actor's
-	// split-and-retry path (today badger.ErrTxnTooBig at apply_actor.go:77).
+	// split-and-retry path (commitApplyTxn fallback in apply_actor.go).
 	ErrMetaTxnTooBig = metastore.ErrTxnTooBig
 )

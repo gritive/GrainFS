@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -38,9 +37,9 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 	}
 	var obj storage.Object
 	var placement PlacementMeta
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-		if err == badger.ErrKeyNotFound {
+		if err == ErrMetaKeyNotFound {
 			return storage.ErrObjectNotFound
 		}
 		if err != nil {
@@ -176,11 +175,11 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 	}
 	var versions []*storage.ObjectVersion
 	latestMap := map[string]string{} // key → latestVID
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		// Pre-scan latest pointers for the prefix so each version can tag IsLatest.
 		rawLatSemanticPfx := []byte("lat:" + bucket + "/" + prefix)
 		latPrefix := b.ks().Prefix(rawLatSemanticPfx)
-		latIt := txn.NewIterator(badger.DefaultIteratorOptions)
+		latIt := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
 			rawKey := b.ks().MustStrip(latIt.Item().Key())
 			key := strings.TrimPrefix(string(rawKey), "lat:"+bucket+"/")
@@ -193,7 +192,7 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 		// path segment after the final `/`; everything before is the S3 key.
 		rawObjBucketPfx := []byte("obj:" + bucket + "/")
 		objPrefix := b.ks().Prefix(rawObjBucketPfx)
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
 			rawKey := b.ks().MustStrip(it.Item().Key())

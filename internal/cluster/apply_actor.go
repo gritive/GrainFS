@@ -5,8 +5,6 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -22,7 +20,7 @@ const maxApplyBatchEntries = 64
 const maxApplyBatchBytes = 64 << 10
 
 // commitApplyTxn is the batch-commit seam. Tests override it to inject failures.
-var commitApplyTxn = func(txn *badger.Txn) error { return txn.Commit() }
+var commitApplyTxn = func(txn MetadataTxn) error { return txn.Commit() }
 
 // applyBatchMax parses a GRAINFS_RAFT_APPLY_BATCH_MAX value into an entry cap
 // in [1, maxApplyBatchEntries]. Empty or invalid -> maxApplyBatchEntries.
@@ -52,7 +50,7 @@ var applyBatchEntriesCap = applyBatchMax(os.Getenv("GRAINFS_RAFT_APPLY_BATCH_MAX
 // each batch to a single BadgerDB transaction, and emits per-entry results.
 // Single-goroutine: batch/results buffers are reused without synchronization.
 type applyActor struct {
-	db      *badger.DB
+	db      MetadataStore
 	fsm     *FSM
 	batch   []raft.LogEntry // reused across iterations (batch[:0]); never re-nil'd
 	results []error         // reused across iterations
@@ -74,7 +72,7 @@ func (a *applyActor) applyBatch(batch []raft.LogEntry) []error {
 	// re-run sees the mpu key already gone -> spurious ErrUploadNotFound).
 	needFallback := false
 	for _, r := range results {
-		if errors.Is(r, badger.ErrTxnTooBig) {
+		if errors.Is(r, ErrMetaTxnTooBig) {
 			needFallback = true
 			break
 		}

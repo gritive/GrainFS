@@ -2,8 +2,6 @@ package cluster
 
 import (
 	"fmt"
-
-	"github.com/dgraph-io/badger/v4"
 )
 
 func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
@@ -31,7 +29,7 @@ func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 	}
 }
 
-func (f *FSM) checkPutObjectExpectedETag(txn *badger.Txn, bucket, key, expectedETag string) error {
+func (f *FSM) checkPutObjectExpectedETag(txn MetadataTxn, bucket, key, expectedETag string) error {
 	if expectedETag == "" {
 		return nil
 	}
