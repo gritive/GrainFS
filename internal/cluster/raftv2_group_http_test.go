@@ -1,15 +1,15 @@
-// raftv2_group_http_test.go — per-group raft over the Phase 8 HTTP transport with
-// mux DISABLED (S8-3). With no EnableMux, GroupRaftSender routes RequestVote/
-// AppendEntries over tr.Call(StreamGroupRaft) — which on the HTTP transport is an
-// HTTP POST round-trip. This is the multi-node proof that the control plane works
-// over HTTP Call (the Phase 8 simplification thesis: HTTP's keep-alive pool + req/
-// resp subsumes the hand-rolled mux).
+// raftv2_group_http_test.go — per-group raft over the Phase 8 HTTP transport.
+// GroupRaftSender routes RequestVote/AppendEntries over the native
+// /raft/group/rpc buffered route (Phase 8 N7-3) — an HTTP POST round-trip per
+// RPC. This is the multi-node proof that the control plane works over the HTTP
+// request/response path (the Phase 8 simplification thesis: HTTP's keep-alive
+// pool + req/resp subsumes the hand-rolled mux).
 //
-// Discriminating-by-construction: unlike the TCP mux test (where a Call fallback can
-// mask a broken carrier), here Call IS the carrier — there is no mux and no fallback,
-// so election + replication is IMPOSSIBLE unless the HTTP Call path carried the raft
-// RPCs. The InboundRPCCount(StreamGroupRaft) > 0 assertion is a positive confirmation
-// on top of that.
+// Discriminating-by-construction: the buffered route IS the carrier — there is
+// no mux and no fallback, so election + replication is IMPOSSIBLE unless the
+// native route carried the raft RPCs. The
+// InboundNativeBuffered(RouteRaftGroupRPC) > 0 assertion is a positive
+// confirmation on top of that.
 package cluster
 
 import (
@@ -24,8 +24,8 @@ import (
 )
 
 // buildHTTPGroupNodes wires N per-group v2 raft nodes over real HTTP transports,
-// each registered on its own GroupRaftMux under groupID. EnableMux is NOT called, so
-// raft RPCs ride tr.Call(StreamGroupRaft) = an HTTP POST.
+// each registered on its own GroupRaftMux under groupID. Raft RPCs ride the
+// native /raft/group/rpc buffered route = an HTTP POST per RPC.
 func buildHTTPGroupNodes(t *testing.T, n int, groupID string) ([]RaftNode, []*transport.HTTPTransport, []*raft.GroupRaftMux) {
 	t.Helper()
 	ctx := context.Background()
@@ -85,15 +85,16 @@ func TestHTTPGroupCluster_ThreeNode_NoMux_Propose_Replicate(t *testing.T) {
 
 	verifyClusterReplicates(t, &v2GroupMuxCluster{nodes: nodes}, "http-group-replicate")
 
-	// Positive carrier proof: with mux disabled there is no fallback, so the raft
-	// RPCs can only have traveled over tr.Call(StreamGroupRaft) = HTTP POST, handled
-	// by the peers' HTTP servers. Assert they were actually served (not vacuous).
+	// Positive carrier proof (Phase 8 N7-3): GroupRaftSender dials the native
+	// /raft/group/rpc buffered route with no fallback, so election + replication
+	// is impossible unless the native route actually served the raft RPCs.
+	// Assert per-route dispatches were counted (not vacuous).
 	total := uint64(0)
 	counts := make([]uint64, len(transports))
 	for i, tr := range transports {
-		counts[i] = tr.InboundRPCCount(transport.StreamGroupRaft)
+		counts[i] = tr.InboundNativeBuffered(transport.RouteRaftGroupRPC)
 		total += counts[i]
 	}
 	require.Greaterf(t, total, uint64(0),
-		"group raft must traverse the HTTP Call path (StreamGroupRaft served); per-node=%v", counts)
+		"group raft must traverse the native /raft/group/rpc route; per-node=%v", counts)
 }

@@ -44,7 +44,24 @@ type GroupRaftMux struct {
 // on the cluster transport. It must outlive all registered nodes.
 func NewGroupRaftMux(tr raftRPCTransport) *GroupRaftMux {
 	m := &GroupRaftMux{tr: tr}
+	// Tunnel registration — kept alongside the native route until Phase 8 N8
+	// deletes the envelope tunnel wholesale.
 	tr.Handle(transport.StreamGroupRaft, m.handleRPC)
+	// Phase 8 N7-3: native /raft/group/rpc buffered route. The payload keeps
+	// the [4B groupIDLen][groupID][raftRPC] prefix; handleRPC only reads
+	// req.Payload, and its Type echo into the reply is dropped here. A nil
+	// reply (short header / unknown group / decode failure) maps to a 500
+	// exactly as the tunnel's nil-response StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftGroupRPC, func(payload []byte) ([]byte, error) {
+		resp := m.handleRPC(&transport.Message{Type: transport.StreamGroupRaft, Payload: payload})
+		if resp == nil {
+			return nil, fmt.Errorf("group raft RPC: bad request")
+		}
+		if resp.Status != transport.StatusOK {
+			return nil, fmt.Errorf("group raft RPC: %s", resp.Payload)
+		}
+		return resp.Payload, nil
+	})
 	return m
 }
 
@@ -148,14 +165,11 @@ func (s *GroupRaftSender) RequestVote(peer string, args *RequestVoteArgs) (*Requ
 	}
 	payload := prefixGroupID(s.groupID, env)
 
-	resp, err := s.mux.tr.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamGroupRaft,
-		Payload: payload,
-	})
+	reply, err := s.mux.tr.CallBuffered(ctx, peer, transport.RouteRaftGroupRPC, payload)
 	if err != nil {
 		return nil, fmt.Errorf("group %s RequestVote to %s: %w", s.groupID, peer, err)
 	}
-	_, data, err := decodeRPC(resp.Payload)
+	_, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, fmt.Errorf("group %s RequestVote reply: %w", s.groupID, err)
 	}
@@ -170,14 +184,11 @@ func (s *GroupRaftSender) AppendEntries(peer string, args *AppendEntriesArgs) (*
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.mux.tr.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamGroupRaft,
-		Payload: prefixGroupID(s.groupID, env),
-	})
+	reply, err := s.mux.tr.CallBuffered(ctx, peer, transport.RouteRaftGroupRPC, prefixGroupID(s.groupID, env))
 	if err != nil {
 		return nil, fmt.Errorf("group %s AppendEntries to %s: %w", s.groupID, peer, err)
 	}
-	_, data, err := decodeRPC(resp.Payload)
+	_, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, fmt.Errorf("group %s AppendEntries reply: %w", s.groupID, err)
 	}
