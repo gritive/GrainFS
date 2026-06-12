@@ -32,18 +32,12 @@ type PeerProbeDialer interface {
 // transport (callerTransport; *transport.TCPTransport at runtime). Built once at boot.
 type ClusterPeerProbeDialer struct{ T callerTransport }
 
-// CallKEKDiskSpace dispatches a StreamKEKDiskSpaceProbe request to peer and
-// returns the response payload (or an error). On non-OK status the underlying
-// transport layer surfaces an error.
+// CallKEKDiskSpace dispatches a KEK disk-space probe over the native
+// /probe/kek-disk buffered route (Phase 8 N7-3) and returns the response
+// payload (or an error). A handler StatusError surfaces as a client-side
+// error, exactly as the tunnel's non-OK status did.
 func (d *ClusterPeerProbeDialer) CallKEKDiskSpace(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-	resp, err := d.T.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamKEKDiskSpaceProbe,
-		Payload: payload,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Payload, nil
+	return d.T.CallBuffered(ctx, peer, transport.RouteProbeKEKDisk, payload)
 }
 
 // CallKEKLeaseSnapshot dispatches a StreamKEKLeaseSnapshotProbe request.
