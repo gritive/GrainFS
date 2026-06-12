@@ -152,6 +152,11 @@ func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 	// is in-band in the FB ForwardReply, exactly as the tunnel delivered it.
 	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeGroup,
 		transport.BufferedRouteFromMessageHandler("group forward", r.Handle))
+	// Phase 8 N7-3: native /forward/propose/data-group buffered route.
+	// HandleGroupPropose reads only req.Payload; the propose outcome (index +
+	// apply error) is in-band via encodeProposeForwardReply.
+	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeDataGroup,
+		transport.BufferedRouteFromMessageHandler("data-group propose forward", r.HandleGroupPropose))
 }
 
 // HandleGroupPropose forwards a raw DistributedBackend metadata command to the

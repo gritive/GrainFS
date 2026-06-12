@@ -336,6 +336,8 @@ func (s *ShardService) SendRequest(ctx context.Context, peerAddr string, msg *tr
 		route = transport.RouteShardRPC
 	case transport.StreamProposeForward:
 		route = transport.RouteForwardProposeLegacy
+	case transport.StreamDataGroupProposeForward:
+		route = transport.RouteForwardProposeDataGroup
 	}
 	if route != "" {
 		reply, err := s.transport.CallBuffered(ctx, peerAddr, route, msg.Payload)
