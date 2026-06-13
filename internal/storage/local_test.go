@@ -1104,3 +1104,26 @@ func TestLocalBackend_DataWALRestoresWriteAtAndTruncate(t *testing.T) {
 	require.Equal(t, 5, n)
 	require.Equal(t, []byte("abZZe"), buf)
 }
+
+func TestLocalBackend_PutObjectWithRequest_ContentMD5Mismatch(t *testing.T) {
+	b, err := NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	_, err = b.PutObjectWithRequest(context.Background(), PutObjectRequest{
+		Bucket: "bucket", Key: "k", Body: bytes.NewReader([]byte("hello")),
+		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
+	})
+	require.ErrorIs(t, err, ErrContentMD5Mismatch)
+}
+
+func TestLocalBackend_PutObjectWithRequest_ContentMD5Match(t *testing.T) {
+	b, err := NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	obj, err := b.PutObjectWithRequest(context.Background(), PutObjectRequest{
+		Bucket: "bucket", Key: "k2", Body: bytes.NewReader([]byte("hello")),
+		ContentMD5Hex: "5d41402abc4b2a76b9719d911017c592", // md5("hello")
+	})
+	require.NoError(t, err)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", obj.ETag)
+}

@@ -108,7 +108,7 @@ func (o *Operations) putObjectWithRequest(ctx context.Context, req PutObjectRequ
 	// no-SSE branch gets the new behavior; the PutObjectWithACL path
 	// stays unchanged because ACL plumbing through PutObjectWithRequest
 	// has different semantics than the dedicated ACL setter.
-	if req.SizeHint == nil && req.ACL == nil && req.SystemMetadata.empty() {
+	if req.SizeHint == nil && req.ACL == nil && req.SystemMetadata.empty() && req.ContentMD5Hex == "" {
 		return o.PutObjectWithUserMetadata(ctx, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
 	}
 	if req.ACL != nil && req.SystemMetadata.empty() && len(req.UserMetadata) == 0 {

@@ -707,3 +707,14 @@ func TestPackedBackend_WalkObjectsEarlyStop(t *testing.T) {
 	assert.ErrorIs(t, err, sentinel)
 	assert.Equal(t, 2, count)
 }
+
+func TestPackedBackend_PutObject_Large_ContentMD5Mismatch(t *testing.T) {
+	pb := newTestPackedBackend(t) // inner = LocalBackend, threshold 64KiB
+	require.NoError(t, pb.CreateBucket(context.Background(), "bucket"))
+	big := bytes.Repeat([]byte("a"), 70*1024) // > threshold → large → inner
+	_, err := pb.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+		Bucket: "bucket", Key: "big", Body: bytes.NewReader(big),
+		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
+	})
+	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
+}

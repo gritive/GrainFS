@@ -659,7 +659,7 @@ func putInnerWithUserMetadata(ctx context.Context, inner storage.Backend, bucket
 }
 
 func putInnerWithRequest(ctx context.Context, inner storage.Backend, req storage.PutObjectRequest) (*storage.Object, error) {
-	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" && req.SizeHint == nil {
+	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" && req.SizeHint == nil && req.ContentMD5Hex == "" {
 		return putInnerWithUserMetadata(ctx, inner, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
 	}
 	putter, ok := inner.(storage.RequestPutter)

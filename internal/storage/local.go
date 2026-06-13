@@ -367,6 +367,10 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 		obj.ACL = *req.ACL
 	}
 
+	if req.ContentMD5Hex != "" && obj.ETag != "" && obj.ETag != req.ContentMD5Hex {
+		return nil, fmt.Errorf("%w: client %s, body %s", ErrContentMD5Mismatch, req.ContentMD5Hex, obj.ETag)
+	}
+
 	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
 		// Segments are now orphans; scrubber sweep reclaims them.
 		return nil, fmt.Errorf("commit object meta: %w", err)
