@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.573.0] - 2026-06-13
+
+### Fixed
+- `Content-MD5` validation now covers the remaining PUT paths. (1) A single-node
+  packblob small-object PUT whose body does not match the supplied `Content-MD5`
+  now returns 400 `BadDigest` instead of committing — the digest is checked
+  against the in-memory body before the pack/inner write. (2) A malformed
+  `Content-MD5` header (not base64, or not a 16-byte digest) now returns 400
+  `InvalidDigest` instead of being silently ignored; the header is rejected at
+  the S3 handler before the PUT runs.
+
 ## [0.0.572.0] - 2026-06-13
 
 ### Changed
