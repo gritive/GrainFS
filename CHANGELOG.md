@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.570.0] - 2026-06-13
+
+### Changed
+- Inbound traffic admission for the cluster transport's streaming routes (shard
+  read/write, forward write/read, append-segment read) is now a single Hertz
+  `admissionMiddleware` registered ahead of each route, replacing the
+  per-handler `TrafficLimiter.Acquire`/503/`defer release()` boilerplate they
+  each repeated. Those routes already acquired before reading their large
+  request body, so the move is behavior-equivalent. The buffered and gossip
+  routes keep admission in-handler (after reading their bounded payload, via a
+  shared `acquireAdmission` helper) so a slow-body peer cannot hold a traffic
+  slot during the read. Under limiter saturation a streaming route's
+  readiness/validation now yields 503-overloaded rather than 503-not-ready /
+  400 (both retryable; the routes are SPKI-pinned authenticated peers, so a
+  malformed request is a trusted-peer bug and the status change is immaterial);
+  non-saturated behavior is unchanged.
+
 ## [0.0.569.0] - 2026-06-13
 
 ### Changed
