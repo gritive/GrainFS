@@ -231,11 +231,14 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.GET(httpPingPath, func(c context.Context, rc *app.RequestContext) {
 		rc.SetStatusCode(consts.StatusOK)
 	})
-	srv.POST(httpShardWritePath, t.handleShardWrite)
-	srv.GET(httpShardReadPath, t.handleShardRead)
-	srv.POST(httpForwardWritePath, t.handleForwardWrite)
-	srv.GET(httpForwardReadPath, t.handleForwardRead)
-	srv.GET(httpAppendSegmentReadPath, t.handleAppendSegmentRead)
+	// Inbound admission (TrafficLimiter) runs as per-route middleware ahead of
+	// each handler — see admissionMiddleware. Each route's StreamType is its
+	// admission class.
+	srv.POST(httpShardWritePath, t.admissionMiddleware(StreamShardWriteBody), t.handleShardWrite)
+	srv.GET(httpShardReadPath, t.admissionMiddleware(StreamShardReadBody), t.handleShardRead)
+	srv.POST(httpForwardWritePath, t.admissionMiddleware(StreamGroupForwardBody), t.handleForwardWrite)
+	srv.GET(httpForwardReadPath, t.admissionMiddleware(StreamGroupForwardRead), t.handleForwardRead)
+	srv.GET(httpAppendSegmentReadPath, t.admissionMiddleware(StreamReadAppendSegment), t.handleAppendSegmentRead)
 	// Generic native primitives (N7-3): EVERY declared buffered/gossip route is
 	// live from Listen; a family whose handler has not registered answers 503.
 	for path, rs := range t.bufferedByPath {
@@ -252,6 +255,41 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 
 	go func() { _ = srv.Run() }()
 	return nil
+}
+
+// admissionMiddleware applies inbound traffic admission for one StreamType
+// class ahead of the route handler, replacing the per-handler
+// limiter.Acquire/503/defer-release boilerplate the STREAMING routes (shard
+// read/write, forward, append-segment) used to repeat. Those routes already
+// acquired before reading their large request body, so middleware (acquire
+// before the handler) is equivalent. release fires after ctx.Next returns — the
+// same point the handlers' defer release() did (handler-return; for streaming
+// responses that is before-flush, unchanged). t.traffic is nil-safe.
+//
+// The buffered/gossip routes do NOT use this — they acquire in-handler AFTER
+// reading their bounded payload (acquireAdmission), preserving the property
+// that a slow-body peer cannot hold a slot during the read.
+func (t *HTTPTransport) admissionMiddleware(st StreamType) app.HandlerFunc {
+	return func(c context.Context, ctx *app.RequestContext) {
+		release, aerr := t.acquireAdmission(c, st)
+		if aerr != nil {
+			ctx.AbortWithMsg("overloaded: "+aerr.Error(), consts.StatusServiceUnavailable)
+			return
+		}
+		defer release()
+		ctx.Next(c)
+	}
+}
+
+// acquireAdmission acquires an inbound traffic slot for st, returning the
+// release func (always callable; t.traffic is nil-safe). Single admission entry
+// point shared by admissionMiddleware (streaming routes) and the
+// buffered/gossip handlers (which acquire after reading their bounded payload).
+func (t *HTTPTransport) acquireAdmission(c context.Context, st StreamType) (func(), error) {
+	t.mu.RLock()
+	limiter := t.traffic
+	t.mu.RUnlock()
+	return limiter.Acquire(c, st)
 }
 
 // LocalAddr returns the bound listen address.

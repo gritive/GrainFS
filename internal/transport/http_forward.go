@@ -119,16 +119,7 @@ func (t *HTTPTransport) handleForwardWrite(c context.Context, ctx *app.RequestCo
 
 	// Inbound admission: same class the tunnel used (StreamGroupForwardBody →
 	// bulk; internal admission/metrics key only — no longer on the wire).
-	t.mu.RLock()
-	limiter := t.traffic
-	t.mu.RUnlock()
-	release, aerr := limiter.Acquire(c, StreamGroupForwardBody)
-	if aerr != nil {
-		ctx.SetStatusCode(consts.StatusServiceUnavailable)
-		ctx.SetBodyString("overloaded: " + aerr.Error())
-		return
-	}
-	defer release()
+	// Inbound admission for this route runs in admissionMiddleware.
 
 	t.nativeForwardWrites.Add(1)
 	reply, herr := (*hp)(frame, ctx.RequestBodyStream())
@@ -158,16 +149,7 @@ func (t *HTTPTransport) handleForwardRead(c context.Context, ctx *app.RequestCon
 
 	// Inbound admission released when this handler returns — BEFORE Hertz
 	// streams the response body — mirroring handleShardRead.
-	t.mu.RLock()
-	limiter := t.traffic
-	t.mu.RUnlock()
-	release, aerr := limiter.Acquire(c, StreamGroupForwardRead)
-	if aerr != nil {
-		ctx.SetStatusCode(consts.StatusServiceUnavailable)
-		ctx.SetBodyString("overloaded: " + aerr.Error())
-		return
-	}
-	defer release()
+	// Inbound admission for this route runs in admissionMiddleware.
 
 	t.nativeForwardReads.Add(1)
 	reply, rbody, herr := (*hp)(frame)

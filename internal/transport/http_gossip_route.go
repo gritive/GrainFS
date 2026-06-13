@@ -121,10 +121,9 @@ func (t *HTTPTransport) handleGossipRoute(rs *gossipRouteState) app.HandlerFunc 
 			return
 		}
 
-		t.mu.RLock()
-		limiter := t.traffic
-		t.mu.RUnlock()
-		release, aerr := limiter.Acquire(c, rs.st)
+		// Inbound admission AFTER reading the bounded payload (acquireAdmission),
+		// so a slow-body peer cannot hold a traffic slot during the read.
+		release, aerr := t.acquireAdmission(c, rs.st)
 		if aerr != nil {
 			ctx.SetStatusCode(consts.StatusServiceUnavailable)
 			ctx.SetBodyString("overloaded: " + aerr.Error())

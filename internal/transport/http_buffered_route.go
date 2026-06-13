@@ -156,12 +156,11 @@ func (t *HTTPTransport) handleBufferedRoute(rs *bufferedRouteState) app.HandlerF
 			return
 		}
 
-		// Inbound admission: same class the tunnel used for this family
-		// (internal admission/metrics key only — no longer on the wire).
-		t.mu.RLock()
-		limiter := t.traffic
-		t.mu.RUnlock()
-		release, aerr := limiter.Acquire(c, rs.st)
+		// Inbound admission AFTER reading the (bounded) payload, so a slow-body
+		// peer cannot hold a traffic slot while we read its request — unlike the
+		// streaming routes (which acquire before the large body and use
+		// admissionMiddleware), buffered payloads are read up front here.
+		release, aerr := t.acquireAdmission(c, rs.st)
 		if aerr != nil {
 			ctx.SetStatusCode(consts.StatusServiceUnavailable)
 			ctx.SetBodyString("overloaded: " + aerr.Error())
