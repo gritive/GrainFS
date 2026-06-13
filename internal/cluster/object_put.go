@@ -753,7 +753,9 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		Tags:             result.Tags,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
-		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
+		if shardCleanupSafeOnProposeError(merr) {
+			go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
+		}
 		return nil, merr
 	}
 	// LIST-visibility mirror into quorum-meta (best-effort; the object is already
@@ -945,8 +947,32 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	}, nil
 }
 
+// shardCleanupSafeOnProposeError reports whether a failed CmdCompleteMultipart
+// propose may safely trigger eager shard deletion. It is false ONLY for the
+// phantom-commit window — a server-side propose timeout (ErrProposeTimeout) or
+// a client cancellation mid-commit (context.Canceled). In those cases the raft
+// entry may still commit later; applyCompleteMultipart would then write object
+// meta referencing the now-deleted shards, yielding an unreadable committed
+// object with no retry. Every other error (encode failure, FSM apply error,
+// terminal non-leader / forward failure where no entry was accepted) means the
+// entry did not and will not commit, so the shards are true orphans and eager
+// deletion reclaims them immediately.
+//
+// NOTE: there is currently no orphan-shard scrubber for EC shards in production
+// (the OrphanWalkable interface is unimplemented by DistributedBackend), so
+// shards retained here on the phantom-commit window are NOT reclaimed if the
+// entry ultimately does not commit — a bounded, rare slow-leak. The proper
+// foundation (an EC orphan-shard sweep) is tracked in TODOS.md; until then the
+// trade is: rare bounded leak on ambiguous failure vs. destroying a committed
+// object's data.
+func shardCleanupSafeOnProposeError(err error) bool {
+	return !errors.Is(err, ErrProposeTimeout) && !errors.Is(err, context.Canceled)
+}
+
 // deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.
-// best-effort: 실패는 무시하고 scrubber fallback에 위임한다.
+// best-effort: 실패는 무시한다. 현재 EC 샤드용 orphan scrubber가 없으므로
+// (OrphanWalkable 미구현) 이 호출이 유일한 회수 경로다 — 따라서 propose가
+// 확정적으로 commit되지 않은 경우(shardCleanupSafeOnProposeError)에만 호출한다.
 func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string, shardKey string) {
 	// Drop any cached entries for this shardKey before/after the disk
 	// delete. Reads after this point must miss the cache so they can
