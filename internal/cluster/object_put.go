@@ -96,24 +96,6 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm)
 }
 
-// resolveShardPlacement maps each shard's target node to the address the put
-// pipeline streams to: "" when the shard is local (node == selfID), otherwise
-// the resolved peer address. Used only on the multi-node streaming PUT path.
-func resolveShardPlacement(nodeIDs []string, selfID string, resolve func(node string) (string, error)) ([]string, error) {
-	placement := make([]string, len(nodeIDs))
-	for i, node := range nodeIDs {
-		if node == selfID {
-			continue
-		}
-		addr, err := resolve(node)
-		if err != nil {
-			return nil, fmt.Errorf("put object: resolve shard %d peer %q: %w", i, node, err)
-		}
-		placement[i] = addr
-	}
-	return placement, nil
-}
-
 func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	ctx context.Context,
 	bucket, key, versionID string,

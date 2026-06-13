@@ -185,8 +185,8 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	state.dekKeeper = keeper
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
 	// Single source for the data-plane AAD clusterID (slice C). bootShardService
-	// and bootOwnedGroupsAndEC read this so the EC-shard WRITE (putpipeline) and
-	// READ (ShardService) bind the SAME clusterID — divergence fails every GET.
+	// and bootOwnedGroupsAndEC read this so the EC-shard WRITE and READ
+	// (ShardService) bind the SAME clusterID — divergence fails every GET.
 	state.clusterID = clusterID
 	// kekLeaseTracker counts in-flight KEK consumers per version. Phase B has no
 	// runtime acquire sites — Phase D wires them (raft snapshot reader holding
