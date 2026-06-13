@@ -8,7 +8,33 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
+
+func TestPutObjectContentMD5Hex(t *testing.T) {
+	mk := func(v string) *app.RequestContext {
+		c := app.NewContext(0)
+		if v != "" {
+			c.Request.Header.Set("Content-MD5", v)
+		}
+		return c
+	}
+	// absent → "", no error
+	h, err := putObjectContentMD5Hex(mk(""))
+	require.NoError(t, err)
+	require.Equal(t, "", h)
+	// valid base64 of md5("hello") → hex, no error
+	h, err = putObjectContentMD5Hex(mk("XUFAKrxLKna5cZ2REBfFkg=="))
+	require.NoError(t, err)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", h)
+	// malformed (not base64) → ErrInvalidDigest
+	_, err = putObjectContentMD5Hex(mk("not-base64!!!"))
+	require.ErrorIs(t, err, storage.ErrInvalidDigest)
+	// valid base64 but not 16 bytes → ErrInvalidDigest
+	_, err = putObjectContentMD5Hex(mk("aGVsbG8="))
+	require.ErrorIs(t, err, storage.ErrInvalidDigest)
+}
 
 func TestPutObjectBodyReader_UsesStreamingRequestBody(t *testing.T) {
 	payload := []byte("streaming upload body")
