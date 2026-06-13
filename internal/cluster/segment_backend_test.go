@@ -490,7 +490,7 @@ func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 	b := &DistributedBackend{}
 	_, err := b.putObjectChunked(context.Background(),
 		"bucket", "k", "v", sp, "ct", nil, "",
-		0, false, "", nil, nil, nil)
+		0, 0, false, "", nil, nil, nil)
 	require.Error(t, err)
 }
 

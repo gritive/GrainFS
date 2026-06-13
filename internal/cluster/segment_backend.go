@@ -36,6 +36,7 @@ type clusterSegmentBackend struct {
 	contentType  string
 	userMetadata map[string]string
 	sseAlgorithm string
+	acl          uint8              // s3auth.ACLGrant bitmask; 0 = private (default)
 	placements   []segmentPlacement // indexed by segmentIdx; pre-allocated; mutex-free
 
 	// Test seams. Production constructor leaves these nil; defaults route
@@ -211,6 +212,7 @@ func (b *DistributedBackend) putObjectChunked(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	acl uint8,
 	modTime int64,
 	preserveModTime bool,
 	expectedETag string,
@@ -237,6 +239,7 @@ func (b *DistributedBackend) putObjectChunked(
 		contentType:  contentType,
 		userMetadata: userMetadata,
 		sseAlgorithm: sseAlgorithm,
+		acl:          acl,
 		placements:   make([]segmentPlacement, numSegments),
 		chunkSize:    int(chunkSize),
 	}
@@ -428,6 +431,7 @@ func runChunkedPutWithParts(
 			ModTime:          commitModTime,
 			UserMetadata:     userMetadata,
 			SSEAlgorithm:     sseAlgorithm,
+			ACL:              csb.acl,
 			ExpectedETag:     expectedETag,
 			IsDeleteMarker:   false,
 			Parts:            partsMeta,

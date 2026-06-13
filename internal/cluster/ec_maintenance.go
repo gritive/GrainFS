@@ -228,7 +228,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	}
 	// applyPutObjectMeta writes Tags unconditionally; forward metaBefore.Tags
 	// so a legacy N×→EC conversion doesn't clobber existing user tags.
-	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil, metaBefore.Tags, ""); err != nil {
+	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.ACL, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil, metaBefore.Tags, ""); err != nil {
 		return fmt.Errorf("convert write ec shards: %w", err)
 	}
 	_, convertedMeta, err := b.headObjectMeta(ctx, bucket, key)
