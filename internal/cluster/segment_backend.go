@@ -344,8 +344,18 @@ func runChunkedPutWithParts(
 	// SegmentWriter.Write joins all workers before returning, so by the time
 	// defer runs csb.placements is settled — no race.
 	var committed bool
+	// preserveSegmentsOnProposeError suppresses the eager cleanup below ONLY for
+	// the phantom-commit window of a multipart-complete propose (timeout /
+	// cancellation, per shardCleanupSafeOnProposeError): the raft entry may still
+	// commit and write object meta referencing these segment shards, so eager
+	// deletion would orphan a committed object. Definite-no-commit propose errors,
+	// pre-commit errors (SegmentWriter.Write, beforeCommit), and the non-multipart
+	// chunked PUT (synchronous writeQuorumMeta, no phantom window) still clean up
+	// eagerly — there is no EC orphan scrubber to reclaim them later (see
+	// shardCleanupSafeOnProposeError).
+	var preserveSegmentsOnProposeError bool
 	defer func() {
-		if committed {
+		if committed || preserveSegmentsOnProposeError {
 			return
 		}
 		for _, p := range csb.placements {
@@ -425,6 +435,12 @@ func runChunkedPutWithParts(
 			Segments:         segments,
 			Tags:             tags,
 		})
+		if commitErr != nil && !shardCleanupSafeOnProposeError(commitErr) {
+			// Phantom-commit window (timeout / cancellation): the raft entry may
+			// still commit, so do NOT eager-delete the possibly-committed
+			// object's segment shards. See preserveSegmentsOnProposeError above.
+			preserveSegmentsOnProposeError = true
+		}
 		if commitErr == nil {
 			// LIST-visibility mirror into quorum-meta (Phase 4 index-free LIST
 			// scans it). Best-effort: the object is already durably committed

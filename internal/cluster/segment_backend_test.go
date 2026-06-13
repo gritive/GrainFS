@@ -295,6 +295,92 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	require.Equal(t, wantParts, cmd.Parts)
 }
 
+// TestRunChunkedPutWithParts_ProposeError_ShardCleanup guards the
+// propose-timeout shard-cleanup fix. On a multipart-complete propose error the
+// segment shards are eager-deleted ONLY when the entry definitely did not
+// commit. For the phantom-commit window (timeout / cancellation) the raft entry
+// may still commit and write object meta referencing those shards, so deletion
+// is suppressed to avoid orphaning a committed object. There is no EC orphan
+// scrubber, so definite-no-commit errors MUST still clean up eagerly (else a
+// permanent leak).
+//
+// Contrast: TestPutObjectChunked_PartialFailRollsBackBlobs_* prove PRE-commit
+// failures (segment write, beforeCommit) clean up eagerly — nothing proposed.
+//
+// Neuter test: drop the !shardCleanupSafeOnProposeError guard (always preserve,
+// or never preserve) and the relevant sub-case is RED.
+func TestRunChunkedPutWithParts_ProposeError_ShardCleanup(t *testing.T) {
+	cases := []struct {
+		name        string
+		err         error
+		wantCleanup bool // true = shards eager-deleted (definite no-commit)
+	}{
+		{"propose_timeout_preserves", ErrProposeTimeout, false},
+		{"wrapped_timeout_preserves", fmt.Errorf("commit: %w", ErrProposeTimeout), false},
+		{"context_canceled_preserves", context.Canceled, false},
+		{"definite_error_cleans", errors.New("encode command failed"), true},
+		{"apply_error_cleans", fmt.Errorf("apply: %w", storage.ErrObjectNotFound), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chunk := storage.DefaultChunkSize
+			payload := bytes.Repeat([]byte("Q"), chunk+1)
+			sp := makeSpool(t, payload)
+			deps := newFakeBackendWithGroups(fourPGFixture())
+			deps.proposeErr = tc.err
+			blobIDs := []string{uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()}
+			csb := newCSBWithDeps(deps, blobIDs)
+			parts := []storage.MultipartPartEntry{
+				{PartNumber: 1, Size: int64(chunk), ETag: "etag-1"},
+				{PartNumber: 2, Size: 1, ETag: "etag-2"},
+			}
+
+			body, err := sp.Open()
+			require.NoError(t, err)
+			defer body.Close()
+			_, err = runChunkedPutWithParts(context.Background(), csb, body,
+				"bucket", "large-mp.bin", "v1", "application/octet-stream",
+				nil, "", 0, false, "", nil, parts, nil, "upload-1")
+			require.Error(t, err, "propose error must surface to the caller")
+			require.Len(t, deps.proposeCalls, 1)
+			require.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
+
+			if tc.wantCleanup {
+				require.NotEmpty(t, deps.deleteCalls,
+					"definite-no-commit propose error must eager-delete shards (no EC orphan scrubber)")
+			} else {
+				require.Empty(t, deps.deleteCalls,
+					"phantom-commit window must NOT eager-delete a possibly-committed object's shards")
+			}
+		})
+	}
+}
+
+// TestShardCleanupSafeOnProposeError pins the classification: only the
+// phantom-commit window (server-side timeout, client cancellation) suppresses
+// eager shard cleanup; every other error is a definite no-commit and is safe to
+// clean. Neuter: change the helper to `return true` (or `return false`) → RED.
+func TestShardCleanupSafeOnProposeError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"timeout", ErrProposeTimeout, false},
+		{"wrapped_timeout", fmt.Errorf("propose: leader commit timed out: %w", ErrProposeTimeout), false},
+		{"canceled", context.Canceled, false},
+		{"wrapped_canceled", fmt.Errorf("ctx: %w", context.Canceled), false},
+		{"deadline_exceeded_not_our_sentinel", context.DeadlineExceeded, true},
+		{"encode_error", errors.New("encode command: boom"), true},
+		{"apply_error", fmt.Errorf("apply: %w", storage.ErrObjectNotFound), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, shardCleanupSafeOnProposeError(tc.err))
+		})
+	}
+}
+
 func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
 	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("M"), 4*chunk) // exactly 4 segments

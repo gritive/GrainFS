@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.576.0] - 2026-06-14
+
+### Fixed
+- Multipart-complete propose failures no longer risk deleting a committed
+  object's shards. `CompleteMultipartUpload` commits via a raft propose; that
+  propose can fail with a server-side timeout (`ErrProposeTimeout`) or client
+  cancellation while the raft entry **still commits later** (the phantom-commit
+  window). The completion paths previously eager-deleted the object's EC /
+  segment shards on any propose error, so a phantom commit would leave object
+  metadata pointing at deleted shards — an unreadable object with no retry. Eager
+  shard deletion is now gated by `shardCleanupSafeOnProposeError`: it runs for
+  definite-no-commit errors (encode failure, FSM apply error, terminal
+  non-leader) and is suppressed only for the phantom-commit window. Covers both
+  the EC-spooled completion path and the chunked (segmented) completion path.
+  (Note: there is no EC orphan-shard scrubber yet, so a shard retained on the
+  phantom window leaks if the entry ultimately does not commit — a rare, bounded
+  trade against destroying committed data; tracked in TODOS.)
+
 ## [0.0.575.0] - 2026-06-14
 
 ### Fixed
