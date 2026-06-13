@@ -23,8 +23,8 @@ func TestStartJoinListener_TCPBranch(t *testing.T) {
 	t.Cleanup(state.Cleanup)
 
 	require.NoError(t, startJoinListener(state, nil))
-	_, isTCP := state.joinListener.(*transport.TCPJoinListener)
-	assert.True(t, isTCP, "startJoinListener must start a *TCPJoinListener")
+	_, isHTTP := state.joinListener.(*transport.HTTPJoinListener)
+	assert.True(t, isHTTP, "startJoinListener must start a *HTTPJoinListener")
 	assert.True(t, strings.HasPrefix(state.JoinListenerAddr(), "127.0.0.1:"),
 		"join listener bound on loopback, got %q", state.JoinListenerAddr())
 	assert.Equal(t, wantSPKI, state.JoinListenerSPKI(), "listener SPKI matches the persisted cert")

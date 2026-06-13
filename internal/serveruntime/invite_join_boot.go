@@ -31,7 +31,7 @@ package serveruntime
 // On restart with Phase-1 artifacts durable but not ACKed → the resume gate
 // returns Resume and the post-boot path re-sends Phase-2 (idempotent on W7).
 //
-// Wire is length-prefixed binary (transport.JoinPutField/JoinReadFields) over
+// The join wire is HTTP-framed; the on-disk resume record uses length-prefixed
 // the join ALPN — NO JSON, NO TCP. The transcript ClusterID is the raw 16-byte
 // cluster.id from the bundle (hex-decoded), matching W7's gateInvite which binds
 // r.clusterID into the transcript (closes the spike's documented nil-clusterID
@@ -49,7 +49,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -469,7 +468,7 @@ func inviteJoinPhase1(ctx context.Context, opts *ServeOptions, dataDir string, b
 
 	// 5. dial the seed join listener (Phase-1), pinning its SPKI. The transcript
 	// is signed inside buildPhase1 over the resulting channel binding.
-	reply, err := inviteJoinDialWith(ctx, transport.DialJoinTCP, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
+	reply, err := inviteJoinDialWith(ctx, transport.DialJoinHTTP, bundle.SeedAddr, bundle.SeedSPKI, cert, buildPhase1)
 	if err != nil {
 		return fmt.Errorf("phase-1 dial: %w", err)
 	}
@@ -648,7 +647,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 		SPKI:      spki[:],
 		InviteID:  st.inviteID,
 	}
-	reply, err := inviteJoinDialWith(ctx, transport.DialJoinTCP, st.seedAddr, st.seedSPKI, cert,
+	reply, err := inviteJoinDialWith(ctx, transport.DialJoinHTTP, st.seedAddr, st.seedSPKI, cert,
 		func([]byte) (cluster.JoinRequest, error) { return req, nil })
 	if err != nil {
 		return fmt.Errorf("invite-join Phase-2 dial: %w", err)
@@ -679,47 +678,35 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 // inviteJoinDial dials a JoinListener at addr (pinning serverSPKI), then invokes
 // buildReq with the live session's channel binding to obtain the JoinRequest,
 // sends it framed, and reads the framed JoinReply. One field in each direction,
-// length-prefixed binary (NO JSON) — mirrors W7 HandleJoinStream. buildReq runs
+// length-prefixed binary (NO JSON) — mirrors W7 HandleJoinRequest. buildReq runs
 // AFTER the dial so the joiner can sign over the channel binding (Bind); on a
 // resumed Phase-1 each dial yields a fresh bind, so the request is re-signed and
 // never persisted.
-// joinDialer dials a join listener and returns the half-close join stream, the
-// RFC5705 channel binding, and a full-teardown closer. transport.DialJoinTCP
-// (S4) implements it, so the dialer is the single seam that selects the join
-// transport without touching the consumer choreography below.
-type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate) (io.ReadWriteCloser, []byte, func() error, error)
+// joinDialer drives one invite round-trip over the join transport. buildReq is
+// invoked with the session's RFC5705 channel binding (it must exist before the
+// request body it is folded into) and returns the encoded JoinRequest body; the
+// dialer returns the encoded JoinReply body. transport.DialJoinHTTP implements
+// it in production; tests inject a fake. It is the single seam selecting the
+// join transport without touching the consumer choreography below.
+type joinDialer func(ctx context.Context, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) ([]byte, error)) ([]byte, error)
 
-// inviteJoinDialWith is inviteJoinDial parameterized by the join dialer (always
-// transport.DialJoinTCP in production; tests may inject a fake) so it can drive the
-// SAME consumer choreography in tests.
+// inviteJoinDialWith parameterizes the invite round-trip by the join dialer so
+// tests drive the SAME consumer choreography. HTTP framing carries the single
+// request/reply, so this is now just: dial(buildReq) → decode reply.
 func inviteJoinDialWith(ctx context.Context, dial joinDialer, addr string, serverSPKI [32]byte, clientCert tls.Certificate, buildReq func(bind []byte) (cluster.JoinRequest, error)) (cluster.JoinReply, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, inviteJoinDialTimeout)
 	defer cancel()
-	stream, bind, closeConn, err := dial(dialCtx, addr, serverSPKI, clientCert)
+	replyBlob, err := dial(dialCtx, addr, serverSPKI, clientCert, func(bind []byte) ([]byte, error) {
+		req, err := buildReq(bind)
+		if err != nil {
+			return nil, err
+		}
+		return cluster.EncodeJoinRequest(req)
+	})
 	if err != nil {
 		return cluster.JoinReply{}, err
 	}
-	defer func() { _ = closeConn() }()
-
-	req, err := buildReq(bind)
-	if err != nil {
-		return cluster.JoinReply{}, err
-	}
-	reqBlob, err := cluster.EncodeJoinRequest(req)
-	if err != nil {
-		return cluster.JoinReply{}, fmt.Errorf("encode join request: %w", err)
-	}
-	if _, err := stream.Write(transport.JoinPutField(nil, reqBlob)); err != nil {
-		return cluster.JoinReply{}, fmt.Errorf("write join request: %w", err)
-	}
-	// Close the send side so the leader reads our request to EOF.
-	_ = stream.Close()
-
-	fields, err := transport.JoinReadFields(stream, 1)
-	if err != nil {
-		return cluster.JoinReply{}, fmt.Errorf("read join reply: %w", err)
-	}
-	reply, err := cluster.DecodeJoinReply(fields[0])
+	reply, err := cluster.DecodeJoinReply(replyBlob)
 	if err != nil {
 		return cluster.JoinReply{}, fmt.Errorf("decode join reply: %w", err)
 	}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -769,12 +768,9 @@ func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
-	ln, err := transport.NewTCPJoinListener("127.0.0.1:0", srvCert,
-		func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
-			defer stream.Close()
-			_, _ = transport.JoinReadFields(stream, 1)
-			blob, _ := cluster.EncodeJoinReplyForTest(cluster.JoinReply{Accepted: true, Status: cluster.JoinStatusOK})
-			_, _ = stream.Write(transport.JoinPutField(nil, blob))
+	ln, err := transport.NewHTTPJoinListener("127.0.0.1:0", srvCert,
+		func(ctx context.Context, peerSPKI [32]byte, bind []byte, req []byte) ([]byte, error) {
+			return cluster.EncodeJoinReplyForTest(cluster.JoinReply{Accepted: true, Status: cluster.JoinStatusOK})
 		})
 	if err != nil {
 		t.Fatalf("listener: %v", err)
@@ -786,7 +782,7 @@ func TestInviteJoinDial_PassesBindToBuilder(t *testing.T) {
 		t.Fatalf("joiner identity: %v", err)
 	}
 	var gotBind []byte
-	_, err = inviteJoinDialWith(context.Background(), transport.DialJoinTCP, ln.Addr(), srvSPKI, cliCert,
+	_, err = inviteJoinDialWith(context.Background(), transport.DialJoinHTTP, ln.Addr(), srvSPKI, cliCert,
 		func(bind []byte) (cluster.JoinRequest, error) {
 			gotBind = append([]byte(nil), bind...)
 			return cluster.JoinRequest{JoinPhase: 1, NodeID: "joiner", Address: "127.0.0.1:1"}, nil

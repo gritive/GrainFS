@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.569.0] - 2026-06-13
+
+### Changed
+- Zero-CA invite-join now runs over HTTP (Hertz) instead of raw TLS-over-TCP,
+  removing the last hand-rolled `crypto/tls` listener and accept loop from
+  `internal/transport`. `NewHTTPJoinListener` serves a single `POST /_grainfs/join`
+  on the dedicated join port; it passes a plain listener with `WithTLS` so Hertz's
+  standard transport surfaces the per-request `tls.ConnectionState` the handler
+  needs to capture the peer SPKI and RFC5705 channel binding. `DialJoinHTTP` is a
+  one-shot client (dial, pin server SPKI, derive the binding, build the request
+  from it, single round-trip). Security semantics are preserved byte-for-byte:
+  permissive client-cert accept, peer-SPKI capture, channel binding, client SPKI
+  pin, and the not-leader gate; the request body is capped at 1 MiB. HTTP framing
+  replaces the manual length-prefix fields, half-close contract, and leader
+  RST-drain, which are deleted along with `tcp_join.go`. The cross-session relay
+  and forged-binding adversarial e2e tests pass over the HTTP path.
+
+  **Breaking (flag-day):** the join wire is not backward compatible — a node on
+  this version cannot complete an invite-join handshake with a peer on an older
+  (TCP-join) version. Upgrade is a coordinated cutover, consistent with the
+  greenfield transport policy.
+
 ## [0.0.568.0] - 2026-06-13
 
 ### Changed
