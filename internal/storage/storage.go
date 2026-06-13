@@ -19,6 +19,10 @@ var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend
 // the client-supplied Content-MD5 header. Maps to S3 400 BadDigest.
 var ErrContentMD5Mismatch = errors.New("storage: Content-MD5 mismatch")
 
+// ErrInvalidDigest is returned when a supplied Content-MD5 header is malformed
+// (not base64, or not a 16-byte digest). Maps to S3 400 InvalidDigest.
+var ErrInvalidDigest = errors.New("storage: invalid Content-MD5 digest")
+
 // Object represents a stored object with metadata.
 type Object struct {
 	Key              string
