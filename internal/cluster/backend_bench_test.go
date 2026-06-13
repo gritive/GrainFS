@@ -252,7 +252,7 @@ func BenchmarkDistributedBackend_CompleteSinglePartMultipart64KiB(b *testing.B) 
 		key := fmt.Sprintf("single-part-%d", i)
 		up, err := bk.CreateMultipartUpload(context.Background(), "bench", key, "application/octet-stream")
 		require.NoError(b, err)
-		part, err := bk.UploadPart(context.Background(), "bench", key, up.UploadID, 1, bytes.NewReader(data))
+		part, err := bk.UploadPart(context.Background(), "bench", key, up.UploadID, 1, bytes.NewReader(data), "")
 		require.NoError(b, err)
 		b.StartTimer()
 

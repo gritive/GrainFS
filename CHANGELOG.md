@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.574.0] - 2026-06-13
+
+### Fixed
+- `Content-MD5` is now honored on the last two PUT paths, completing the
+  cross-path validation story. (1) `UploadPart` validates a supplied
+  `Content-MD5`: the digest is threaded through the storage `UploadPart`
+  interface and checked in the impls that own the part file, which **delete the
+  staged part on mismatch** (400 `BadDigest`) so a rejected part cannot be
+  completed; a malformed `Content-MD5` header on `UploadPart` returns 400
+  `InvalidDigest`. (2) `LocalBackend.PutObjectWithRequest` now compares the
+  computed body MD5 to `req.ContentMD5Hex` before committing (400 `BadDigest`),
+  closing the single-node object-PUT gap; the packblob and generic `Operations`
+  request fast paths no longer drop `ContentMD5Hex`, so it reaches the inner
+  backend for large objects.
+
 ## [0.0.573.0] - 2026-06-13
 
 ### Fixed

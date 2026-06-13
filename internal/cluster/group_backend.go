@@ -190,8 +190,8 @@ func (g *GroupBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket
 	return g.DistributedBackend.CreateMultipartUploadWithTags(g.placementContext(ctx), bucket, key, contentType, tags)
 }
 
-func (g *GroupBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
-	return g.DistributedBackend.UploadPart(g.placementContext(ctx), bucket, key, uploadID, partNumber, r)
+func (g *GroupBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
+	return g.DistributedBackend.UploadPart(g.placementContext(ctx), bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {

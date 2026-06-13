@@ -198,12 +198,13 @@ func (r forwardRuntime) uploadPart(
 	bucket, key, uploadID string,
 	partNumber int,
 	bodyReader io.Reader,
+	contentMD5Hex string,
 ) (*storage.Part, error) {
 	if r.sender == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
 	if r.sender.streamDialer != nil && shouldStreamUploadPartForward(bodyReader, r.maxBody) {
-		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
+		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil, contentMD5Hex)
 		peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
 		reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpUploadPart, args, bodyReader)
 		if err != nil {
@@ -216,7 +217,7 @@ func (r forwardRuntime) uploadPart(
 	if err != nil {
 		return nil, err
 	}
-	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
+	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body, contentMD5Hex)
 	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
 	if err != nil {
 		return nil, err

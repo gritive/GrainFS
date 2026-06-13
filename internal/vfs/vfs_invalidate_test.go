@@ -143,7 +143,7 @@ func (m *mockBackend) CreateMultipartUpload(ctx context.Context, bucket, key, co
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (m *mockBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
 	return nil, errors.New("not implemented")
 }
 

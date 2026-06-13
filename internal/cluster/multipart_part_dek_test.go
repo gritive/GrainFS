@@ -106,7 +106,7 @@ func TestMultipartPartSurvivesRestartUnderDEK(t *testing.T) {
 	uploadID := up.UploadID
 
 	partBody := bytes.Repeat([]byte("P"), 6<<20)
-	_, err = b1.UploadPart(ctx, "bkt", "obj", uploadID, 1, bytes.NewReader(partBody))
+	_, err = b1.UploadPart(ctx, "bkt", "obj", uploadID, 1, bytes.NewReader(partBody), "")
 	require.NoError(t, err)
 
 	// On-disk part file is ciphertext.

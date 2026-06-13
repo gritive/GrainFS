@@ -1067,7 +1067,7 @@ func (b *countingWalkBackend) WalkObjects(_ context.Context, _, _ string, fn fun
 func (b *countingWalkBackend) CreateMultipartUpload(context.Context, string, string, string) (*storage.MultipartUpload, error) {
 	return nil, nil
 }
-func (b *countingWalkBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*storage.Part, error) {
+func (b *countingWalkBackend) UploadPart(context.Context, string, string, string, int, io.Reader, string) (*storage.Part, error) {
 	return nil, nil
 }
 func (b *countingWalkBackend) CompleteMultipartUpload(context.Context, string, string, string, []storage.Part) (*storage.Object, error) {

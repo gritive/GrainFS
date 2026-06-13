@@ -339,11 +339,12 @@ func buildCreateMultipartUploadArgs(bucket, key, contentType string, tags []stor
 	return b.FinishedBytes()
 }
 
-func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []byte) []byte {
+func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []byte, contentMD5Hex string) []byte {
 	b := flatbuffers.NewBuilder(uploadPartArgsBuilderSize(bucket, key, uploadID, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	u := b.CreateString(uploadID)
+	md5 := b.CreateString(contentMD5Hex)
 	bodyOff := b.CreateByteVector(body)
 	raftpb.UploadPartArgsStart(b)
 	raftpb.UploadPartArgsAddBucket(b, bk)
@@ -351,6 +352,9 @@ func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []
 	raftpb.UploadPartArgsAddUploadId(b, u)
 	raftpb.UploadPartArgsAddPartNumber(b, partNumber)
 	raftpb.UploadPartArgsAddBody(b, bodyOff)
+	if contentMD5Hex != "" {
+		raftpb.UploadPartArgsAddContentMd5Hex(b, md5)
+	}
 	b.Finish(raftpb.UploadPartArgsEnd(b))
 	return b.FinishedBytes()
 }

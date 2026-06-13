@@ -183,7 +183,7 @@ func (m *migrationNoSuchBucketBackend) WalkObjects(ctx context.Context, bucket, 
 func (m *migrationNoSuchBucketBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
 	return nil, fmt.Errorf("unused")
 }
-func (m *migrationNoSuchBucketBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (m *migrationNoSuchBucketBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
 	return nil, fmt.Errorf("unused")
 }
 func (m *migrationNoSuchBucketBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {

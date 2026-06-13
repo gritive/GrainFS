@@ -75,7 +75,7 @@ func (b *fileMetaCacheBackend) WalkObjects(context.Context, string, string, func
 func (b *fileMetaCacheBackend) CreateMultipartUpload(context.Context, string, string, string) (*storage.MultipartUpload, error) {
 	return nil, nil
 }
-func (b *fileMetaCacheBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*storage.Part, error) {
+func (b *fileMetaCacheBackend) UploadPart(context.Context, string, string, string, int, io.Reader, string) (*storage.Part, error) {
 	return nil, nil
 }
 func (b *fileMetaCacheBackend) CompleteMultipartUpload(context.Context, string, string, string, []storage.Part) (*storage.Object, error) {

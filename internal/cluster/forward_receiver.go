@@ -721,6 +721,7 @@ func (r *ForwardReceiver) handleUploadPart(dg *DataGroup, args []byte) []byte {
 		string(ua.UploadId()),
 		int(ua.PartNumber()),
 		bytes.NewReader(body),
+		string(ua.ContentMd5Hex()),
 	)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
@@ -738,6 +739,7 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 		string(ua.UploadId()),
 		int(ua.PartNumber()),
 		body,
+		string(ua.ContentMd5Hex()),
 	)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))

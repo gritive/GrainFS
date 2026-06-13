@@ -1092,7 +1092,7 @@ func (b *allocateTruncateBackend) WalkObjects(context.Context, string, string, f
 func (b *allocateTruncateBackend) CreateMultipartUpload(context.Context, string, string, string) (*storage.MultipartUpload, error) {
 	return nil, nil
 }
-func (b *allocateTruncateBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*storage.Part, error) {
+func (b *allocateTruncateBackend) UploadPart(context.Context, string, string, string, int, io.Reader, string) (*storage.Part, error) {
 	return nil, nil
 }
 func (b *allocateTruncateBackend) CompleteMultipartUpload(context.Context, string, string, string, []storage.Part) (*storage.Object, error) {

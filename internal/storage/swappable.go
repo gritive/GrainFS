@@ -173,8 +173,8 @@ func (sb *SwappableBackend) CreateMultipartUpload(ctx context.Context, bucket, k
 	return (*sb.inner.Load()).CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
-func (sb *SwappableBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
-	return (*sb.inner.Load()).UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+func (sb *SwappableBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error) {
+	return (*sb.inner.Load()).UploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (sb *SwappableBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {

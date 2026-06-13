@@ -264,7 +264,7 @@ type Backend interface {
 	WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error
 
 	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error)
-	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error)
+	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	// ListMultipartUploads returns in-progress multipart uploads in bucket whose

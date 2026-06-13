@@ -55,7 +55,7 @@ func (b *contextRecorderBackend) CreateMultipartUpload(ctx context.Context, buck
 	b.ctx = ctx
 	return &MultipartUpload{UploadID: "u", Bucket: bucket, Key: key}, nil
 }
-func (b *contextRecorderBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
+func (b *contextRecorderBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error) {
 	b.ctx = ctx
 	return &Part{PartNumber: partNumber}, nil
 }

@@ -1502,9 +1502,9 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 }
 
 func (c *ClusterCoordinator) UploadPart(
-	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader,
+	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string,
 ) (*storage.Part, error) {
-	return c.multipartRuntime().uploadPart(ctx, bucket, key, uploadID, partNumber, r)
+	return c.multipartRuntime().uploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 type forwardBodyBytesProvider interface {

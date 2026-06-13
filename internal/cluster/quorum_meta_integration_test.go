@@ -375,7 +375,7 @@ func TestMultipartComplete_BadgerDBFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	payload := bytes.Repeat([]byte("mp"), 512)
-	part, err := b.UploadPart(ctx, "bucket", "multi.bin", mpu.UploadID, 1, bytes.NewReader(payload))
+	part, err := b.UploadPart(ctx, "bucket", "multi.bin", mpu.UploadID, 1, bytes.NewReader(payload), "")
 	require.NoError(t, err)
 
 	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "multi.bin", mpu.UploadID, []storage.Part{{

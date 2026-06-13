@@ -52,7 +52,7 @@ func TestLocalBackend_ScanLocalMultipartUploads_OmitsCompleted(t *testing.T) {
 	// One completes (Complete should remove the multipart entry).
 	done, err := b.CreateMultipartUpload(ctx(), "b", "done", "text/plain")
 	require.NoError(t, err)
-	part, err := b.UploadPart(ctx(), "b", "done", done.UploadID, 1, strings.NewReader("hello"))
+	part, err := b.UploadPart(ctx(), "b", "done", done.UploadID, 1, strings.NewReader("hello"), "")
 	require.NoError(t, err)
 	_, err = b.CompleteMultipartUpload(ctx(), "b", "done", done.UploadID, []storage.Part{{PartNumber: 1, ETag: part.ETag, Size: 5}})
 	require.NoError(t, err)

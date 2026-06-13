@@ -77,7 +77,7 @@ func (r multipartRuntime) completeMultipartUpload(ctx context.Context, bucket, k
 	return r.c.forwardRuntime().completeMultipartUpload(ctx, target, bucket, key, rawID, parts)
 }
 
-func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (*storage.Part, error) {
+func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader, contentMD5Hex string) (*storage.Part, error) {
 	ctx, target, _, rawID, err := r.prepareSession(ctx, bucket, key, uploadID)
 	if err != nil {
 		return nil, err
@@ -86,9 +86,9 @@ func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID 
 	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		return gb.UploadPart(ctx, bucket, key, rawID, partNumber, body)
+		return gb.UploadPart(ctx, bucket, key, rawID, partNumber, body, contentMD5Hex)
 	}
-	return r.c.forwardRuntime().uploadPart(ctx, target, bucket, key, rawID, partNumber, body)
+	return r.c.forwardRuntime().uploadPart(ctx, target, bucket, key, rawID, partNumber, body, contentMD5Hex)
 }
 
 func (r multipartRuntime) abortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

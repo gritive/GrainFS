@@ -86,9 +86,9 @@ func TestCompleteMultipartUpload_ChunkedObjectPreservesParts(t *testing.T) {
 	upload, err := b.CreateMultipartUpload(context.Background(), bucket, key, "application/octet-stream")
 	require.NoError(t, err)
 
-	p1, err := b.UploadPart(context.Background(), bucket, key, upload.UploadID, 1, bytes.NewReader(part1))
+	p1, err := b.UploadPart(context.Background(), bucket, key, upload.UploadID, 1, bytes.NewReader(part1), "")
 	require.NoError(t, err)
-	p2, err := b.UploadPart(context.Background(), bucket, key, upload.UploadID, 2, bytes.NewReader(part2))
+	p2, err := b.UploadPart(context.Background(), bucket, key, upload.UploadID, 2, bytes.NewReader(part2), "")
 	require.NoError(t, err)
 
 	obj, err := b.CompleteMultipartUpload(context.Background(), bucket, key, upload.UploadID, []storage.Part{*p1, *p2})

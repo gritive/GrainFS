@@ -57,7 +57,7 @@ var _ = Describe("Backend multipart integration", func() {
 	It("completes multipart uploads without proposing a separate abort", func() {
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("small-final-part")))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("small-final-part")), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		rec := &recordingMultipartRaftNode{RaftNode: b.node}
@@ -73,7 +73,7 @@ var _ = Describe("Backend multipart integration", func() {
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		payload := []byte("small-final-part")
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(os.MkdirAll(filepath.Dir(b.spoolDir()), 0o700)).To(Succeed())
@@ -102,12 +102,12 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(upload.UploadID).NotTo(BeEmpty())
 
-		p1, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1))
+		p1, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(p1.PartNumber).To(Equal(1))
 		Expect(p1.Size).To(Equal(int64(5 << 20)))
 
-		p2, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2))
+		p2, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", upload.UploadID, []storage.Part{
@@ -136,11 +136,11 @@ var _ = Describe("Backend multipart integration", func() {
 		part3 := []byte("C")
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "large-mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(part1))
+		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(part1), "")
 		Expect(err).NotTo(HaveOccurred())
-		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader(part2))
+		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader(part2), "")
 		Expect(err).NotTo(HaveOccurred())
-		p3, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 3, bytes.NewReader(part3))
+		p3, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 3, bytes.NewReader(part3), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "large-mp.bin", up.UploadID, []storage.Part{*p1, *p2, *p3})
@@ -169,9 +169,9 @@ var _ = Describe("Backend multipart integration", func() {
 
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "large-mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)))
+		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)), "")
 		Expect(err).NotTo(HaveOccurred())
-		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader([]byte("B")))
+		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader([]byte("B")), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		b.testBeforeChunkedMultipartCommit = func() error { return errors.New("injected commit preflight failure") }
@@ -193,7 +193,7 @@ var _ = Describe("Backend multipart integration", func() {
 		upload, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(partBytes))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(partBytes), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(part.Size).To(Equal(int64(len(partBytes))))
 
@@ -223,7 +223,7 @@ var _ = Describe("Backend multipart integration", func() {
 		upload, err := b.CreateMultipartUpload(ctx, "bucket", "abort.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = b.UploadPart(ctx, "bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"))
+		_, err = b.UploadPart(ctx, "bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(b.AbortMultipartUpload(ctx, "bucket", "abort.bin", upload.UploadID)).To(Succeed())
@@ -237,13 +237,13 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.RemoveAll(b.partDir(upload.UploadID))).To(Succeed())
 
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, strings.NewReader("data"))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, strings.NewReader("data"), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(part.PartNumber).To(Equal(1))
 	})
 
 	It("returns upload-not-found for bad multipart upload IDs", func() {
-		_, err := b.UploadPart(ctx, "bucket", "file.bin", "bad-id", 1, strings.NewReader("data"))
+		_, err := b.UploadPart(ctx, "bucket", "file.bin", "bad-id", 1, strings.NewReader("data"), "")
 		Expect(err).To(MatchError(storage.ErrUploadNotFound))
 
 		err = b.AbortMultipartUpload(ctx, "bucket", "file.bin", "bad-id")

@@ -176,6 +176,7 @@ table UploadPartArgs {
   upload_id:string;
   part_number:int32;
   body:[ubyte];
+  content_md5_hex:string;
 }
 
 table PartRef {
