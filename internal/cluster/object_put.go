@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
@@ -13,6 +15,17 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// validateContentMD5 rejects a PUT whose computed body MD5 (hex) does not match
+// the client-supplied Content-MD5. No-op when the client sent none or the
+// digest is unavailable. Returns storage.ErrContentMD5Mismatch (mapped to 400
+// BadDigest) on mismatch.
+func validateContentMD5(computedHex, clientHex string) error {
+	if clientHex == "" || computedHex == "" || computedHex == clientHex {
+		return nil
+	}
+	return fmt.Errorf("%w: client %s, body %s", storage.ErrContentMD5Mismatch, clientHex, computedHex)
+}
 
 func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
 	return b.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, nil)
@@ -210,15 +223,15 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 
 	versionID := newVersionID()
 	if b.currentECConfig().NumShards() != 0 && b.shardSvc != nil {
-		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm)
+		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm, req.ContentMD5Hex)
 		if handled || err != nil {
 			return obj, err
 		}
-		obj, handled, err = b.tryPutObjectSingleLocalShardKnownSize(ctx, bucket, key, versionID, r, req.SizeHint, contentType, userMetadata, sseAlgorithm)
+		obj, handled, err = b.tryPutObjectSingleLocalShardKnownSize(ctx, bucket, key, versionID, r, req.SizeHint, contentType, userMetadata, sseAlgorithm, req.ContentMD5Hex)
 		if handled || err != nil {
 			return obj, err
 		}
-		obj, handled, err = b.tryPutObjectECDataInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm)
+		obj, handled, err = b.tryPutObjectECDataInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm, req.ContentMD5Hex)
 		if handled || err != nil {
 			return obj, err
 		}
@@ -231,6 +244,13 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	}
 	observePutStage("distributed", "spool_object", stageStart)
 	defer sp.Cleanup()
+	// Single write-path Content-MD5 validation: sp.ETag is the body's md5,
+	// computed during spooling before any shard/metadata is written. Covers
+	// both spool sub-cases (single-local and multi-shard EC). No-op when the
+	// client sent no Content-MD5.
+	if err := validateContentMD5(sp.ETag, req.ContentMD5Hex); err != nil {
+		return nil, err
+	}
 
 	if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
 		return nil, fmt.Errorf("put object: EC storage is required")
@@ -263,6 +283,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	contentMD5Hex string,
 ) (*storage.Object, bool, error) {
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -317,6 +338,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		nil,
 		nil,
 		"",
+		contentMD5Hex,
 	)
 	return obj, true, err
 }
@@ -329,6 +351,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	contentMD5Hex string,
 ) (*storage.Object, bool, error) {
 	if sizeHint == nil || *sizeHint < 0 {
 		return nil, false, nil
@@ -379,6 +402,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
 		nil,
 		nil,
 		"",
+		contentMD5Hex,
 	)
 	return obj, true, err
 }
@@ -409,6 +433,7 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	contentMD5Hex string,
 ) (*storage.Object, bool, error) {
 	limit, ok := b.ecMemoryShardFastPathLimit(ctx)
 	if !ok {
@@ -424,6 +449,16 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	data := make([]byte, size)
 	if _, err := io.ReadFull(body, data); err != nil {
 		return nil, true, fmt.Errorf("read small EC object: %w", err)
+	}
+
+	// Single write-path Content-MD5 validation: the full body is in memory, so
+	// validate before any shard/metadata write. No-op when no Content-MD5.
+	if contentMD5Hex != "" {
+		sum := md5.Sum(data)
+		if err := validateContentMD5(hex.EncodeToString(sum[:]), contentMD5Hex); err != nil {
+			clear(data)
+			return nil, true, err
+		}
 	}
 
 	obj, err := b.putObjectECData(ctx, bucket, key, versionID, data, contentType, userMetadata, sseAlgorithm)
@@ -925,6 +960,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 		parts,
 		tags,
 		multipartUploadID,
+		"", // Content-MD5 already validated at the spool site (sp.ETag)
 	)
 	closeErr := body.Close()
 	if writeErr != nil {
@@ -952,6 +988,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
 	multipartUploadID string,
+	contentMD5Hex string,
 ) (*storage.Object, error) {
 	plan := ecObjectWritePlan{
 		Bucket:           bucket,
@@ -968,6 +1005,13 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	result, err := writer.writeSingleLocalReader(ctx, plan, sp, body, metricPath, bodyHash)
 	if err != nil {
 		return nil, err
+	}
+	// Single write-path Content-MD5 validation: the shard is written but
+	// metadata is not yet committed; reject before commit and drop the shard.
+	// No-op when no Content-MD5 (e.g. multipart-complete, which has none).
+	if verr := validateContentMD5(result.ETag, contentMD5Hex); verr != nil {
+		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
+		return nil, verr
 	}
 	result.Parts = parts
 	result.Tags = tags
