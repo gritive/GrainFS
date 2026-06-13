@@ -127,7 +127,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// error) is in-band via encodeMetaForwardReplyWithIndex.
 	clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaPropose, metaForwardReceiver.Handle)
 	// Zero-CA invite-join receiver. It serves the two-phase invite flow over the
-	// dedicated join listener (HandleJoinStream); state.handshakeVerifier (set by
+	// dedicated join listener (HandleJoinRequest); state.handshakeVerifier (set by
 	// wireDEKKeeper) supplies the 16-byte cluster id bound into the invite
 	// transcript via WithClusterID.
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
