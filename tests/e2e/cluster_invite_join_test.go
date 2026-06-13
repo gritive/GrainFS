@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -454,54 +453,50 @@ func newPhase1Material(t testing.TB, leader *inviteJoinNode, nodeID string) (pha
 	}, clusterID
 }
 
-// sendPhase1 frames + writes req onto stream and reads/decodes the framed reply.
-// A rejected Phase-1 is written as a framed JoinReply{Accepted:false} by the
-// leader's HandleJoinStream, so the reply is always decodable. A torn-down stream
-// surfaces as a non-nil error, which callers also treat as a reject.
-func sendPhase1(stream interface {
-	io.Reader
-	Write([]byte) (int, error)
-	Close() error
-}, req cluster.JoinRequest) (cluster.JoinReply, error) {
-	blob, err := cluster.EncodeJoinRequest(req)
+// dialPhase1WithBindFn dials the HTTP join listener once and sends a Phase-1
+// request built from signBind. signBind receives the live session's RFC5705
+// channel binding (the leader reconstructs over the SAME session's server-side
+// exporter) and returns the bind value to SIGN over — so a test can sign over a
+// DIFFERENT value (a forged bind, or another session's bind) to drive the
+// rejection path. A rejected Phase-1 is a decodable JoinReply{Accepted:false};
+// a torn-down request surfaces as a non-nil error (callers treat both as reject).
+// Returns the reply, the live session binding observed, and any transport error.
+func dialPhase1WithBindFn(ctx context.Context, t testing.TB, leader *inviteJoinNode, joinerName string, signBind func(liveBind []byte) []byte) (cluster.JoinReply, []byte, error) {
+	m, clusterID := newPhase1Material(t, leader, joinerName)
+	var liveBind []byte
+	replyBlob, err := transport.DialJoinHTTP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert,
+		func(b []byte) ([]byte, error) {
+			liveBind = append([]byte(nil), b...)
+			return cluster.EncodeJoinRequest(buildSignedPhase1(m, clusterID, signBind(b)))
+		})
 	if err != nil {
-		return cluster.JoinReply{}, err
+		return cluster.JoinReply{}, liveBind, err
 	}
-	if _, err := stream.Write(transport.JoinPutField(nil, blob)); err != nil {
-		return cluster.JoinReply{}, err
-	}
-	_ = stream.Close()
-	fields, err := transport.JoinReadFields(stream, 1)
+	reply, err := cluster.DecodeJoinReply(replyBlob)
 	if err != nil {
-		return cluster.JoinReply{}, err
+		return cluster.JoinReply{}, liveBind, err
 	}
-	reply, err := cluster.DecodeJoinReply(fields[0])
-	if err != nil {
-		return cluster.JoinReply{}, err
-	}
-	return *reply, nil
+	return *reply, liveBind, nil
 }
 
 // relayPhase1AcrossSessions opens session A (capturing bindA), signs a Phase-1
-// transcript over bindA, then sends the session-A-signed request onto a SECOND
+// transcript over bindA, then sends the session-A-signed request on a SECOND
 // session B. The leader reconstructs the transcript with B's server-side exporter
-// (≠ bindA), so BOTH signatures fail → reject. This is the test that actually
-// proves channel binding rather than mere signature verification.
+// (≠ bindA), so BOTH signatures fail → reject. This proves channel binding
+// rather than mere signature verification.
 func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *inviteJoinNode) (cluster.JoinReply, []byte, []byte, error) {
-	m, clusterID := newPhase1Material(t, leader, "relay-joiner")
+	// Session A uses its OWN independent invite/identity; we sign over its own
+	// live bind (a valid Phase-1) purely to capture a real session exporter
+	// (bindA). Its reply is discarded — only bindA is reused below. Because it is
+	// a separate invite, accepting it does not touch session B's invite.
+	_, bindA, _ := dialPhase1WithBindFn(ctx, t, leader, "relay-session-a",
+		func(live []byte) []byte { return live })
+	gomega.Expect(bindA).To(gomega.HaveLen(32), "session A bind")
 
-	streamA, bindA, closeA, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session A dial")
-	defer func() { _ = closeA() }()
-	_ = streamA // session A is opened only to capture its live exporter (bindA).
-
-	reqA := buildSignedPhase1(m, clusterID, bindA)
-
-	streamB, bindB, closeB, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session B dial")
-	defer func() { _ = closeB() }()
-
-	reply, sendErr := sendPhase1(streamB, reqA)
+	// Session B: sign over bindA (session A's exporter), send on session B. The
+	// leader reconstructs over B's exporter (bindB ≠ bindA) → reject.
+	reply, bindB, sendErr := dialPhase1WithBindFn(ctx, t, leader, "relay-joiner",
+		func([]byte) []byte { return bindA })
 	return reply, bindA, bindB, sendErr
 }
 
@@ -509,14 +504,9 @@ func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *invite
 // NOT any live session exporter, dials once, and sends it on the SAME session.
 // The leader reconstructs over the real session exporter → signatures fail.
 func dialPhase1WithForgedBind(ctx context.Context, t testing.TB, leader *inviteJoinNode, forged []byte) (cluster.JoinReply, error) {
-	m, clusterID := newPhase1Material(t, leader, "forged-bind-joiner")
-
-	stream, _, closeConn, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "forged-bind dial")
-	defer func() { _ = closeConn() }()
-
-	req := buildSignedPhase1(m, clusterID, forged)
-	return sendPhase1(stream, req)
+	reply, _, err := dialPhase1WithBindFn(ctx, t, leader, "forged-bind-joiner",
+		func([]byte) []byte { return forged })
+	return reply, err
 }
 
 // isBindingReject asserts the Phase-1 request was DELIVERED and a framed reply

@@ -13,6 +13,7 @@ import (
 	"net"
 	nethttp "net/http"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
@@ -23,6 +24,12 @@ import (
 
 // joinPath is the single HTTP route for the Zero-CA invite handshake.
 const joinPath = "/_grainfs/join"
+
+// joinListenerConnTimeout bounds an idle/half-open join conn. Join is a
+// one-shot request/reply (the dialer closes after a single round-trip), so a
+// conn lingering past this is misbehaving; it also bounds how long a live
+// keep-alive conn can outlast Close() (which shuts the listener, not conns).
+const joinListenerConnTimeout = 30 * time.Second
 
 // JoinRequestHandler is the consumer surface for the HTTP join listener: given
 // the TLS-captured peer SPKI, the RFC5705 channel binding, and the request
@@ -98,6 +105,12 @@ func NewHTTPJoinListener(addr string, cert tls.Certificate, handler JoinRequestH
 		// accept is permissive to arbitrary client certs, so an unauthenticated
 		// peer must not be able to make us buffer an unbounded body (G2).
 		hzserver.WithMaxRequestBodySize(joinMaxFrame),
+		// Join conns are one-shot (the dialer closes after a single round-trip).
+		// A short idle/read timeout reaps any conn a misbehaving peer leaves
+		// half-open and bounds how long a keep-alive conn can outlive Close()
+		// (srv.Close() shuts the listener but does not force-close live conns).
+		hzserver.WithReadTimeout(joinListenerConnTimeout),
+		hzserver.WithIdleTimeout(joinListenerConnTimeout),
 	)
 	srv.POST(joinPath, l.handle)
 	l.srv = srv
