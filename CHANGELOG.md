@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.575.0] - 2026-06-14
+
+### Fixed
+- Multipart-completed objects were missing from `ListObjectsV2`. A regular PUT
+  commits object metadata to per-node quorum-meta, which the Phase 4 index-free
+  LIST scans; `CompleteMultipartUpload` committed only to the group-raft FSM, so
+  `GET`/`HEAD` worked (via the BadgerDB fallback) but LIST never enumerated the
+  object. Completion now **dual-writes**: the group-raft propose stays the
+  authoritative atomic commit (it writes the object meta and deletes the
+  multipart manifest in one transaction, which prevents manifest leak / upload-ID
+  reuse), and quorum-meta is then written as a best-effort LIST-visibility
+  mirror. If the mirror write fails the object is still durably committed and
+  served by `GET`/`HEAD`; only LIST visibility lags until a repair re-derives it.
+  Applies to both the in-memory/EC-spooled completion path and the chunked
+  (segmented) completion path.
+
 ## [0.0.574.0] - 2026-06-13
 
 ### Fixed
