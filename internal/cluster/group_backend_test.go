@@ -12,6 +12,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -19,6 +20,15 @@ import (
 // newTestGroupBackend wires a single-voter GroupBackend backed by fresh
 // BadgerDB + RaftNode. Mirrors newTestDistributedBackend (single-node leader).
 func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
+	t.Helper()
+	gb, _ := newTestGroupBackendWithDB(t, groupID)
+	return gb
+}
+
+// newTestGroupBackendWithDB is newTestGroupBackend plus the raw BadgerDB the
+// test opened, for raw verification / injection (GroupBackend no longer
+// exposes its store as *badger.DB).
+func newTestGroupBackendWithDB(t clusterTestTB, groupID string) (*GroupBackend, *badger.DB) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -54,7 +64,7 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,
-		DB:       db,
+		Store:    badgermeta.Wrap(db),
 		Node:     node,
 		PeerIDs:  []string{"test-node"},
 		ShardSvc: svc,
@@ -73,7 +83,7 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 		}
 	})
 
-	return gb
+	return gb, db
 }
 
 func TestGroupBackend_ID(t *testing.T) {
@@ -151,10 +161,10 @@ func TestGroupBackend_CloseIdempotent(t *testing.T) {
 	})
 
 	gb, err := NewGroupBackend(GroupBackendConfig{
-		ID:   "group-close",
-		Root: dir,
-		DB:   db,
-		Node: node,
+		ID:    "group-close",
+		Root:  dir,
+		Store: badgermeta.Wrap(db),
+		Node:  node,
 	})
 	require.NoError(t, err)
 

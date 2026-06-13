@@ -198,7 +198,7 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			bk := newTestDistributedBackend(b)
+			bk, db := newTestDistributedBackendWithDB(b)
 			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
 			for i := 0; i < tc.uploads; i++ {
 				bucket := "bench"
@@ -209,7 +209,7 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 				if i%7 == 0 {
 					prefix = "else/"
 				}
-				writeMultipartMeta(b, bk, fmt.Sprintf("upload-%06d", i), clusterMultipartMeta{
+				writeMultipartMeta(b, bk, db, fmt.Sprintf("upload-%06d", i), clusterMultipartMeta{
 					Bucket:           bucket,
 					Key:              fmt.Sprintf("%sobj-%06d.bin", prefix, i),
 					CreatedAt:        int64(i),
@@ -231,11 +231,11 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 	}
 }
 
-func writeMultipartMeta(b testing.TB, bk *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMeta(b testing.TB, bk *DistributedBackend, db *badger.DB, uploadID string, meta clusterMultipartMeta) {
 	b.Helper()
 	raw, err := marshalClusterMultipartMeta(meta)
 	require.NoError(b, err)
-	require.NoError(b, bk.db.Update(func(txn *badger.Txn) error {
+	require.NoError(b, db.Update(func(txn *badger.Txn) error {
 		return txn.Set(bk.ks().MultipartKey(uploadID), raw)
 	}))
 }

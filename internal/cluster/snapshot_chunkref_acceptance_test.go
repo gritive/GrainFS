@@ -16,14 +16,14 @@ import (
 // Package placement: cluster_test.go imports snapshot only in test files.
 // snapshot does not import cluster, so no import cycle.
 func TestSnapshotChunkRefsRebuildableFromManifestAlone(t *testing.T) {
-	b := newTestDistributedBackend(t)
+	b, db := newTestDistributedBackendWithDB(t)
 	ctx := context.Background()
 	if err := b.CreateBucket(ctx, "bkt"); err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
-	seedObjectWithSegments(t, b, "bkt", "k1", "v1",
+	seedObjectWithSegments(t, b, db, "bkt", "k1", "v1",
 		[]storage.SegmentRef{{BlobID: "c-A"}, {BlobID: "c-B"}}, nil)
-	seedObjectWithSegments(t, b, "bkt", "k2", "v1",
+	seedObjectWithSegments(t, b, db, "bkt", "k2", "v1",
 		[]storage.SegmentRef{{BlobID: "c-A"}}, nil)
 
 	objs, err := b.ListAllObjects()
@@ -48,12 +48,12 @@ func TestSnapshotChunkRefsRebuildableFromManifestAlone(t *testing.T) {
 // badger would still appear in ListAllObjects after a soft delete. excludeKey
 // cleanly proves the property without coupling to the apply/propose path.
 func TestSnapshotPinSurvivesLiveDelete(t *testing.T) {
-	b := newTestDistributedBackend(t)
+	b, db := newTestDistributedBackendWithDB(t)
 	ctx := context.Background()
 	if err := b.CreateBucket(ctx, "bkt"); err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
-	seedObjectWithSegments(t, b, "bkt", "k", "v1",
+	seedObjectWithSegments(t, b, db, "bkt", "k", "v1",
 		[]storage.SegmentRef{{BlobID: "c-frozen"}}, nil)
 
 	store := encrypt.NewKEKStore()

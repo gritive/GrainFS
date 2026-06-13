@@ -18,11 +18,12 @@ import (
 var _ = Describe("Backend object API integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 	})
@@ -42,7 +43,7 @@ var _ = Describe("Backend object API integration", func() {
 		Expect(obj.ECParity).To(Equal(uint8(0)))
 		Expect(obj.NodeIDs).To(Equal([]string{b.selfAddr}))
 
-		Expect(b.db.Update(func(txn *badger.Txn) error {
+		Expect(db.Update(func(txn *badger.Txn) error {
 			if err := txn.Delete(b.ks().ObjectMetaKey("bucket", "mp.bin")); err != nil && err != badger.ErrKeyNotFound {
 				return err
 			}

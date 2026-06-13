@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/incident"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -19,14 +20,17 @@ func (r *recordingIncidentRecorder) Record(_ context.Context, facts []incident.F
 }
 
 var _ = Describe("Incident repair integration", func() {
-	var b *DistributedBackend
+	var (
+		b  *DistributedBackend
+		db *badger.DB
+	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 	})
 
 	It("records failure when the shard service is missing", func() {
-		writePlacement(GinkgoT(), b, "b", "k/v1", []string{"test-node", "other-a"})
+		writePlacement(GinkgoT(), b, db, "b", "k/v1", []string{"test-node", "other-a"})
 		rec := &recordingIncidentRecorder{}
 
 		err := b.RepairShardLocalWithIncident(context.Background(), IncidentRepairRequest{

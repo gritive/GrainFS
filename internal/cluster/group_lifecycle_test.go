@@ -10,6 +10,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -18,12 +19,12 @@ import (
 // <dataDir>/shared-fsm/. Tests must supply it now that
 // GroupLifecycleConfig.FSMStore is required; in shared mode GroupBackend.Close
 // does NOT close it, so the t.Cleanup here owns the close.
-func openTestFSMStore(t *testing.T, dataDir string) *badger.DB {
+func openTestFSMStore(t *testing.T, dataDir string) MetadataStore {
 	t.Helper()
 	db, err := badger.Open(badgerutil.SmallOptions(filepath.Join(dataDir, "shared-fsm")))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return badgermeta.Wrap(db)
 }
 
 type recordingGroupTransport struct {

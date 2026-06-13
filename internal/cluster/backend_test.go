@@ -9,6 +9,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -51,6 +52,16 @@ type clusterTestTB interface {
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
 func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	t.Helper()
+	backend, _ := newTestDistributedBackendWithDB(t)
+	return backend
+}
+
+// newTestDistributedBackendWithDB is newTestDistributedBackend plus the raw
+// BadgerDB handle the test opened, for tests that need raw verification or
+// corruption injection (Phase 6.5 S6.5-3: DistributedBackend no longer
+// exposes its store as *badger.DB).
+func newTestDistributedBackendWithDB(t clusterTestTB) (*DistributedBackend, *badger.DB) {
+	t.Helper()
 	dir := t.TempDir()
 
 	metaDir := dir + "/meta"
@@ -80,7 +91,7 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
@@ -110,7 +121,7 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 		}
 	})
 
-	return backend
+	return backend, db
 }
 
 func TestProposalForwardPeersFallsBackToShardServicePeers(t *testing.T) {
@@ -145,7 +156,7 @@ func TestDistributedBackend_Close(t *testing.T) {
 		}
 	}()
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 
 	err = backend.Close()

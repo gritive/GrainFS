@@ -72,7 +72,7 @@ func TestFSMOpenValueRoundTrip(t *testing.T) {
 func TestDistributedBackendSetShardServicePropagatesDEKKeeperToFSM(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
 	kek := bytes.Repeat([]byte{0x41}, encrypt.KEKSize)
 	clusterID := bytes.Repeat([]byte{0x42}, 16)
@@ -124,7 +124,7 @@ func TestDistributedBackendDEKFramedFSMValueSurvivesDBReopen(t *testing.T) {
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
 	fsm := NewFSM(badgermeta.Wrap(db), keys)
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm, keys: keys}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm, keys: keys}
 	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 	t.Cleanup(func() { _ = svc.Close() })
 	backend.SetShardService(svc, []string{"self"})

@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/dgraph-io/badger/v4"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -57,6 +58,7 @@ var _ = Describe("ClusterCoordinator single-node encrypted Truncate", func() {
 var _ = Describe("EC compatibility integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
@@ -79,7 +81,7 @@ var _ = Describe("EC compatibility integration", func() {
 				)
 			})
 		}
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 	})
 
@@ -137,7 +139,7 @@ var _ = Describe("EC compatibility integration", func() {
 			shardKey  = key + "/" + versionID
 		)
 		nodes := []string{"addr-a", "addr-b", "addr-c"}
-		writePlacement(GinkgoT(), b, "bkt", shardKey, nodes)
+		writePlacement(GinkgoT(), b, db, "bkt", shardKey, nodes)
 
 		got, err := b.fsm.LookupShardPlacement("bkt", shardKey)
 		Expect(err).NotTo(HaveOccurred())
@@ -155,8 +157,8 @@ var _ = Describe("EC compatibility integration", func() {
 		v1Nodes := []string{"node-a", "node-b", "node-c"}
 		v2Nodes := []string{"node-x", "node-y", "node-z"}
 
-		writePlacement(GinkgoT(), b, "bkt", key+"/v1", v1Nodes)
-		writePlacement(GinkgoT(), b, "bkt", key+"/v2", v2Nodes)
+		writePlacement(GinkgoT(), b, db, "bkt", key+"/v1", v1Nodes)
+		writePlacement(GinkgoT(), b, db, "bkt", key+"/v2", v2Nodes)
 
 		got1, err := b.fsm.LookupShardPlacement("bkt", key+"/v1")
 		Expect(err).NotTo(HaveOccurred())

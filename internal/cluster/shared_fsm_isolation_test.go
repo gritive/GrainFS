@@ -74,14 +74,14 @@ func setupTwoGroups(t *testing.T) (
 
 	nodeA, _ := newTestNodeForSharedDB(t, "isoA-node")
 	var err error
-	backendA, err = NewDistributedBackend(t.TempDir(), db, nodeA, ksA, true)
+	backendA, err = NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeA, ksA, true)
 	require.NoError(t, err)
 	stopA := make(chan struct{})
 	go backendA.RunApplyLoop(stopA)
 	t.Cleanup(func() { close(stopA) })
 
 	nodeB, _ := newTestNodeForSharedDB(t, "isoB-node")
-	backendB, err = NewDistributedBackend(t.TempDir(), db, nodeB, ksB, true)
+	backendB, err = NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeB, ksB, true)
 	require.NoError(t, err)
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)
@@ -477,21 +477,21 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	// Phase 4: LIST uses quorum meta (shardSvc path); shared-FSM backends have
 	// no shardSvc, so isolation is proved via HeadObject (BadgerDB path).
 	nodeG, _ := newTestNodeForSharedDB(t, "path-g")
-	backendG, err := NewDistributedBackend(t.TempDir(), db, nodeG, ksG, true)
+	backendG, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeG, ksG, true)
 	require.NoError(t, err)
 	stopG := make(chan struct{})
 	go backendG.RunApplyLoop(stopG)
 	t.Cleanup(func() { close(stopG) })
 
 	nodeGx, _ := newTestNodeForSharedDB(t, "path-gx")
-	backendGx, err := NewDistributedBackend(t.TempDir(), db, nodeGx, ksGx, true)
+	backendGx, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeGx, ksGx, true)
 	require.NoError(t, err)
 	stopGx := make(chan struct{})
 	go backendGx.RunApplyLoop(stopGx)
 	t.Cleanup(func() { close(stopGx) })
 
 	nodeLong, _ := newTestNodeForSharedDB(t, "path-long")
-	backendLong, err := NewDistributedBackend(t.TempDir(), db, nodeLong, ksLong, true)
+	backendLong, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeLong, ksLong, true)
 	require.NoError(t, err)
 	stopLong := make(chan struct{})
 	go backendLong.RunApplyLoop(stopLong)
@@ -539,13 +539,13 @@ func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
 	ksB := mustNewKS(t, "close-B")
 
 	nodeA, _ := newTestNodeForSharedDB(t, "close-nodeA")
-	backendA, err := NewDistributedBackend(t.TempDir(), db, nodeA, ksA, true)
+	backendA, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeA, ksA, true)
 	require.NoError(t, err)
 	stopA := make(chan struct{})
 	go backendA.RunApplyLoop(stopA)
 
 	nodeB, _ := newTestNodeForSharedDB(t, "close-nodeB")
-	backendB, err := NewDistributedBackend(t.TempDir(), db, nodeB, ksB, true)
+	backendB, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeB, ksB, true)
 	require.NoError(t, err)
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)

@@ -12,6 +12,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -51,7 +52,7 @@ func newDEKBackendAt(t *testing.T, dataDir string, keeper *encrypt.DEKKeeper, cl
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	backend, err := NewDistributedBackend(dataDir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dataDir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 

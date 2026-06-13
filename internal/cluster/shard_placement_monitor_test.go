@@ -31,7 +31,7 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -90,7 +90,7 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -124,7 +124,7 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -175,7 +175,7 @@ func TestShardPlacementMonitor_Stats(t *testing.T) {
 func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -311,7 +311,7 @@ func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t)
 			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-			backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+			backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 			svc, dir := newTestShardService(t)
 			const self = "node-A"
 
@@ -360,7 +360,7 @@ func TestShardPlacementMonitor_Scan_TransientReadError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t)
 			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-			backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+			backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 			svc, dir := newTestShardService(t)
 			const self = "node-A"
 
@@ -402,7 +402,7 @@ func TestShardPlacementMonitor_Scan_TransientReadError(t *testing.T) {
 func TestShardPlacementMonitor_Scan_DetectsMissingSegmentShard(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -448,7 +448,7 @@ func TestShardPlacementMonitor_Scan_DetectsMissingSegmentShard(t *testing.T) {
 func TestShardPlacementMonitor_Scan_DetectsMissingCoalescedShard(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -510,7 +510,7 @@ func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, store: badgermeta.Wrap(db), fsm: fsm}
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"

@@ -270,7 +270,12 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// Bucket Lifecycle Policy (ADR 0011): replicate via meta-Raft FSM,
 	// executor leader-only.
 	if cfg.LifecycleInterval > 0 {
-		lstore := lifecycle.NewStore(state.distBackend.FSMDB())
+		if state.sharedFSMDB == nil {
+			return fmt.Errorf("lifecycle: shared FSM DB not opened (boot ordering)")
+		}
+		// Phase 6.5 S3: the lifecycle store shares the FSM-state DB; serveruntime
+		// owns the raw handle (the backend no longer exposes it).
+		lstore := lifecycle.NewStore(state.sharedFSMDB)
 		prop := &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
 		// Use Node() (interface) — not RaftNode() (v1 concrete) — so the
 		// v2 adapter resolves under M5 PR 28 serveruntime=v2 default.
@@ -292,7 +297,10 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
 	}
 
-	mstore := migration.NewJobStore(state.distBackend.FSMDB())
+	if state.sharedFSMDB == nil {
+		return fmt.Errorf("migration: shared FSM DB not opened (boot ordering)")
+	}
+	mstore := migration.NewJobStore(state.sharedFSMDB)
 	state.metaRaft.FSM().SetMigration(mstore)
 	if state.capabilityGate == nil {
 		state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))

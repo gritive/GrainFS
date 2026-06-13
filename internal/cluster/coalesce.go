@@ -373,7 +373,7 @@ func (b *DistributedBackend) coalesceBackstopScan(ctx context.Context) {
 // scanner is the safety-net for missed in-process triggers (process restart,
 // dropped enqueue when buffer is full) — not a strong consistency primitive.
 func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
-	if b.db == nil || b.fsm == nil {
+	if b.store == nil || b.fsm == nil {
 		return
 	}
 	rawPrefix := []byte("obj:")

@@ -21,10 +21,13 @@ var _ scrubber.Scrubbable = (*DistributedBackend)(nil)
 var _ scrubber.ShardIntegrityReader = (*DistributedBackend)(nil)
 
 var _ = Describe("Scrubbable integration", func() {
-	var b *DistributedBackend
+	var (
+		b  *DistributedBackend
+		db *badger.DB
+	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 	})
 
 	Describe("object scanning", func() {
@@ -47,7 +50,7 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("emits a single object record with EC configuration", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "hello.txt", "01HZXYZABC", "etag-hello", 11, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "hello.txt", "01HZXYZABC", "etag-hello", 11, nil)
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -64,8 +67,8 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("preserves slash-containing keys while scanning", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "folder/nested/file.bin", "01A", "etag-a", 100, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "top.txt", "01B", "etag-b", 7, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "folder/nested/file.bin", "01A", "etag-a", 100, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "top.txt", "01B", "etag-b", 7, nil)
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -82,8 +85,8 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("skips tombstones while scanning", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "alive", "01A", "etag-alive", 5, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "dead", "01D", deleteMarkerETag, 0, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "alive", "01A", "etag-alive", 5, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "dead", "01D", deleteMarkerETag, 0, nil)
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -97,8 +100,8 @@ var _ = Describe("Scrubbable integration", func() {
 	Describe("object existence", func() {
 		It("reports only live objects as existing", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "present", "01A", "etag", 10, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "tomb", "01B", deleteMarkerETag, 0, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "present", "01A", "etag", 10, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "tomb", "01B", deleteMarkerETag, 0, nil)
 
 			ok, err := b.ObjectExists("bkt", "present")
 			Expect(err).NotTo(HaveOccurred())
@@ -261,9 +264,9 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("groups versions by key in key order", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "a", "01AAAA0001", "etag-a-v1", 11, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "a", "01AAAA0002", "etag-a-v2", 22, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "b", "01BBBB0001", "etag-b-v1", 33, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "a", "01AAAA0001", "etag-a-v1", 11, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "a", "01AAAA0002", "etag-a-v2", 22, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "b", "01BBBB0001", "etag-b-v1", 33, nil)
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -286,8 +289,8 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("passes delete markers through grouped scans", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "k", "01AAAA0001", "etag-live", 10, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "k", "01AAAA0002", deleteMarkerETag, 0, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "k", "01AAAA0001", "etag-live", 10, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "k", "01AAAA0002", deleteMarkerETag, 0, nil)
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -302,7 +305,7 @@ var _ = Describe("Scrubbable integration", func() {
 		It("preserves tags in grouped scans", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
 			tags := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "team", Value: "data"}}
-			writeScrubVersionedObjectMeta(b, "bkt", "tagged", "01AAAA0001", "etag", 5, tags)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "tagged", "01AAAA0001", "etag", 5, tags)
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -316,7 +319,7 @@ var _ = Describe("Scrubbable integration", func() {
 		It("includes legacy unversioned objects", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
 			tags := []storage.Tag{{Key: "expire", Value: "yes"}}
-			writeScrubLegacyObjectMeta(b, "bkt", "folder/tagged", "etag", 42, tags)
+			writeScrubLegacyObjectMeta(b, db, "bkt", "folder/tagged", "etag", 42, tags)
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -350,13 +353,13 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
 			Expect(b.CreateBucket(context.Background(), "other")).To(Succeed())
 
-			writeScrubMultipartMeta(b, "upload-aaa", clusterMultipartMeta{
+			writeScrubMultipartMeta(b, db, "upload-aaa", clusterMultipartMeta{
 				Bucket: "bkt", Key: "a.bin", ContentType: "application/octet-stream", CreatedAt: 100,
 			})
-			writeScrubMultipartMeta(b, "upload-bbb", clusterMultipartMeta{
+			writeScrubMultipartMeta(b, db, "upload-bbb", clusterMultipartMeta{
 				Bucket: "bkt", Key: "b.bin", ContentType: "application/octet-stream", CreatedAt: 200,
 			})
-			writeScrubMultipartMeta(b, "upload-other", clusterMultipartMeta{
+			writeScrubMultipartMeta(b, db, "upload-other", clusterMultipartMeta{
 				Bucket: "other", Key: "x.bin", ContentType: "application/octet-stream", CreatedAt: 300,
 			})
 
@@ -380,7 +383,7 @@ var _ = Describe("Scrubbable integration", func() {
 	})
 })
 
-func writeScrubVersionedObjectMeta(b *DistributedBackend, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
+func writeScrubVersionedObjectMeta(b *DistributedBackend, db *badger.DB, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
 	GinkgoHelper()
 	meta, err := marshalObjectMeta(objectMeta{
 		Key:          key,
@@ -391,7 +394,7 @@ func writeScrubVersionedObjectMeta(b *DistributedBackend, bucket, key, versionID
 		Tags:         tags,
 	})
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
+	Expect(db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
 			return err
 		}
@@ -402,7 +405,7 @@ func writeScrubVersionedObjectMeta(b *DistributedBackend, bucket, key, versionID
 	})).To(Succeed())
 }
 
-func writeScrubLegacyObjectMeta(b *DistributedBackend, bucket, key, etag string, size int64, tags []storage.Tag) {
+func writeScrubLegacyObjectMeta(b *DistributedBackend, db *badger.DB, bucket, key, etag string, size int64, tags []storage.Tag) {
 	GinkgoHelper()
 	meta, err := marshalObjectMeta(objectMeta{
 		Key:          key,
@@ -413,16 +416,16 @@ func writeScrubLegacyObjectMeta(b *DistributedBackend, bucket, key, etag string,
 		Tags:         tags,
 	})
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
+	Expect(db.Update(func(txn *badger.Txn) error {
 		return txn.Set(objectMetaKey(bucket, key), meta)
 	})).To(Succeed())
 }
 
-func writeScrubMultipartMeta(b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+func writeScrubMultipartMeta(b *DistributedBackend, db *badger.DB, uploadID string, meta clusterMultipartMeta) {
 	GinkgoHelper()
 	raw, err := marshalClusterMultipartMeta(meta)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
+	Expect(db.Update(func(txn *badger.Txn) error {
 		return txn.Set(b.ks().MultipartKey(uploadID), raw)
 	})).To(Succeed())
 }

@@ -13,12 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/pool"
@@ -157,12 +155,9 @@ type PutPipelineRunner interface {
 // reads are served from the local BadgerDB (kept in sync by the FSM).
 type DistributedBackend struct {
 	root string
-	// db is the raw BadgerDB handle, kept only for FSMDB()/Close/constructor
-	// pass-through (removed in S6.5-3).
-	db *badger.DB
-	// store carries ALL internal transactions. Never call store.Close():
-	// the raw db owns the lifecycle (until S6.5-3) — closing both would
-	// double-close the underlying BadgerDB.
+	// store carries ALL metadata transactions. Ownership follows shared:
+	// shared=false → Close() closes the store (backend owns it);
+	// shared=true → the caller owns the store's lifecycle.
 	store                            MetadataStore
 	node                             RaftNode
 	fsm                              *FSM
@@ -299,11 +294,15 @@ type internalObjectPath struct {
 	metaKey []byte
 }
 
-// NewDistributedBackend creates a new distributed storage backend.
+// NewDistributedBackend creates a new distributed storage backend over an
+// injected MetadataStore (Phase 6.5 S3: the composition root opens the DB
+// and wraps it; cluster no longer touches badger). Ownership: shared=false
+// means the backend OWNS the injected store and Close() closes it (for
+// badgermeta that closes the underlying BadgerDB); shared=true means the
+// caller owns the store's lifecycle and Close() never touches it.
 // The FSM apply loop must be started separately via RunApplyLoop.
-// keys may be nil (uses an identity keyspace); shared controls whether Close
-// skips closing the BadgerDB (for shared-DB mode where the caller owns the DB lifecycle).
-func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stateKeyspace, shared bool) (*DistributedBackend, error) {
+// keys may be nil (uses an identity keyspace).
+func NewDistributedBackend(root string, store MetadataStore, node RaftNode, keys *stateKeyspace, shared bool) (*DistributedBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -313,7 +312,6 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 		keys = newStateKeyspaceEmpty()
 	}
 
-	store := badgermeta.Wrap(db)
 	fsm := NewFSM(store, keys)
 
 	if noOp, err := EncodeNoOpCommand(); err == nil {
@@ -322,7 +320,6 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 
 	b := &DistributedBackend{
 		root:         root,
-		db:           db,
 		store:        store,
 		node:         node,
 		fsm:          fsm,
@@ -349,16 +346,16 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 }
 
 // NewDistributedBackendForGroup builds a DistributedBackend whose FSM-state
-// keys carry groupID's keyspace prefix and which opens in shared-DB mode
-// (Close does NOT close db — the caller owns the shared DB's lifecycle).
-// serveruntime uses this for the group-0 main backend over the per-node
-// shared FSM-state DB (C2 P3). groupID must be non-empty.
-func NewDistributedBackendForGroup(root string, db *badger.DB, node RaftNode, groupID string) (*DistributedBackend, error) {
+// keys carry groupID's keyspace prefix and which opens in shared-store mode
+// (Close does NOT close the store — the caller owns the shared store's
+// lifecycle). serveruntime uses this for the group-0 main backend over the
+// per-node shared FSM-state store (C2 P3). groupID must be non-empty.
+func NewDistributedBackendForGroup(root string, store MetadataStore, node RaftNode, groupID string) (*DistributedBackend, error) {
 	keys, err := newStateKeyspace(groupID)
 	if err != nil {
 		return nil, fmt.Errorf("group %s: keyspace: %w", groupID, err)
 	}
-	b, err := NewDistributedBackend(root, db, node, keys, true)
+	b, err := NewDistributedBackend(root, store, node, keys, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1278,7 +1275,7 @@ func (b *DistributedBackend) Close() error {
 	if b.shared {
 		return nil
 	}
-	return b.db.Close()
+	return b.store.Close()
 }
 
 // GetRegistry returns the cache invalidator registry for registering VFS instances.
@@ -1313,12 +1310,6 @@ func (b *DistributedBackend) ProposeResealFSMValues(ctx context.Context, keys []
 // FSMRef returns the underlying FSM so reshard / monitor code can iterate
 // placements + object metas without reaching through the backend's private fields.
 func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
-
-// FSMDB returns the underlying FSM BadgerDB handle.
-// Used by lifecycle.NewStore and other components needing shared metadata storage.
-// Lifecycle keys ("lifecycle:{bucket}") share the DB with FSM keys ("obj:", "lat:",
-// "bucket:", etc.); the prefixes are disjoint so they coexist safely.
-func (b *DistributedBackend) FSMDB() *badger.DB { return b.db }
 
 func (b *DistributedBackend) SetIncidentRecorder(rec IncidentRecorder) {
 	b.incidentRecorder = rec

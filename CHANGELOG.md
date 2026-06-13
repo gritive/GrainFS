@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.568.0] - 2026-06-13
+
+### Changed
+- Phase 6.5 S3 (final slice) — `internal/cluster` no longer imports BadgerDB
+  in production code, completing the MetadataStore abstraction.
+  `NewDistributedBackend`/`ForGroup` take an injected `MetadataStore` (the
+  composition root opens and wraps the DB; ownership is explicit — non-shared
+  backends close the injected store, shared backends never touch it), the raw
+  `db` field and `FSMDB()` accessor are gone, and serveruntime wires the
+  lifecycle/migration stores from the raw shared-FSM handle it already owns.
+  The legacy-meta auto-migration opens its DB at the boot layer and passes a
+  wrapped store into `MigrateLegacyMetaToCluster`. Opening the raft store
+  BadgerDB moved to `internal/raft` (`OpenV2Stores`). The package-test
+  singleton backend now injects the in-memory `MemStore` — the Phase 6.5
+  testability goal in practice. A recursive guard test pins the invariant:
+  non-test files under `internal/cluster` must not import
+  badger/badgermeta/badgerutil (mutation-verified).
+
+### Fixed
+- serveruntime now stops the group-0 backend's coalesce worker and backstop
+  scanner via the boot cleanup stack before the shared FSM-state BadgerDB
+  closes. Previously `DistributedBackend.Close` was never called on the main
+  backend, so those goroutines could outlive shutdown or boot-error cleanup
+  and read a closed BadgerDB (pre-existing; surfaced by the Phase 6.5 S3
+  review).
+
 ## [0.0.567.0] - 2026-06-13
 
 ### Changed
