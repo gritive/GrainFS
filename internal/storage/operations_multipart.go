@@ -49,8 +49,9 @@ func (o *Operations) UploadPart(
 	bucket, key, uploadID string,
 	partNumber int,
 	r io.Reader,
+	contentMD5Hex string,
 ) (*Part, error) {
-	return o.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+	return o.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (o *Operations) CompleteMultipartUpload(

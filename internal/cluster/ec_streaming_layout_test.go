@@ -218,9 +218,9 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 	mu, err := backend.CreateMultipartUpload(ctx, "b", "k", "application/octet-stream")
 	require.NoError(t, err)
 
-	p1, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 1, bytes.NewReader(part1))
+	p1, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 1, bytes.NewReader(part1), "")
 	require.NoError(t, err)
-	p2, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 2, bytes.NewReader(part2))
+	p2, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 2, bytes.NewReader(part2), "")
 	require.NoError(t, err)
 
 	_, err = backend.CompleteMultipartUpload(ctx, "b", "k", mu.UploadID, []storage.Part{

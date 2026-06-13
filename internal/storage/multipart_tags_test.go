@@ -16,7 +16,7 @@ func TestMultipart_TagsFromCreate_MaterialiseOnComplete(t *testing.T) {
 	id, err := b.CreateMultipartUploadWithTags(ctx(), "b", "k", "text/plain", tags)
 	require.NoError(t, err)
 
-	part, err := b.UploadPart(ctx(), "b", "k", id, 1, body("hello"))
+	part, err := b.UploadPart(ctx(), "b", "k", id, 1, body("hello"), "")
 	require.NoError(t, err)
 
 	parts := []storage.Part{{PartNumber: 1, ETag: part.ETag, Size: part.Size}}

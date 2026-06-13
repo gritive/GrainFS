@@ -15,8 +15,8 @@ func (s *Server) createMultipartSessionWithTags(ctx context.Context, bucket, key
 	return s.ops.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
 }
 
-func (s *Server) uploadMultipartPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (*storage.Part, error) {
-	return s.ops.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
+func (s *Server) uploadMultipartPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader, contentMD5Hex string) (*storage.Part, error) {
+	return s.ops.UploadPart(ctx, bucket, key, uploadID, partNumber, body, contentMD5Hex)
 }
 
 func (s *Server) abortMultipartSession(ctx context.Context, bucket, key, uploadID string) error {

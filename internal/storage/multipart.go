@@ -130,7 +130,7 @@ func (b *LocalBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket
 	return uploadID, nil
 }
 
-func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
+func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error) {
 	_ = ctx
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(b.multipartKey(uploadID))
@@ -154,6 +154,10 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 		}
 		etag := etagFromHash(h)
 		release()
+		if contentMD5Hex != "" && etag != contentMD5Hex {
+			os.Remove(partFile) // delete the staged part so it cannot be completed
+			return nil, fmt.Errorf("%w: client %s, part %s", ErrContentMD5Mismatch, contentMD5Hex, etag)
+		}
 		return &Part{
 			PartNumber: partNumber,
 			ETag:       etag,
@@ -177,6 +181,10 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 	}
 	etag := etagFromHash(h)
 	release()
+	if contentMD5Hex != "" && etag != contentMD5Hex {
+		os.Remove(partFile) // delete the staged part so it cannot be completed
+		return nil, fmt.Errorf("%w: client %s, part %s", ErrContentMD5Mismatch, contentMD5Hex, etag)
+	}
 
 	return &Part{
 		PartNumber: partNumber,

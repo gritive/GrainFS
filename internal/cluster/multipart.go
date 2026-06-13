@@ -92,7 +92,7 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 	return uploadID, now, nil
 }
 
-func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
 	lifeMu := b.multipartLifecycleLock(uploadID)
 	lifeMu.RLock()
 	defer lifeMu.RUnlock()
@@ -138,9 +138,15 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 		return nil, fmt.Errorf("write part: %w", err)
 	}
 
+	etag := hex.EncodeToString(h.Sum(nil))
+	if contentMD5Hex != "" && etag != contentMD5Hex {
+		os.Remove(partFile) // delete the staged part so it cannot be completed
+		return nil, fmt.Errorf("%w: client %s, part %s", storage.ErrContentMD5Mismatch, contentMD5Hex, etag)
+	}
+
 	return &storage.Part{
 		PartNumber: partNumber,
-		ETag:       hex.EncodeToString(h.Sum(nil)),
+		ETag:       etag,
 		Size:       size,
 	}, nil
 }

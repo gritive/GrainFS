@@ -1460,8 +1460,8 @@ func (pb *PackedBackend) GetObjectTags(bucket, key, versionID string) ([]storage
 	return getter.GetObjectTags(bucket, key, versionID)
 }
 
-func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
-	return pb.inner.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
+	return pb.inner.UploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (pb *PackedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {

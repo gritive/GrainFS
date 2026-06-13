@@ -249,7 +249,7 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ReturnsOK(t *testing.T) {
 	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "mpu-key", "text/plain")
 	require.NoError(t, err)
 
-	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-body")))
+	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-body")), "")
 	require.NoError(t, err)
 
 	mgr := NewDataGroupManager()
@@ -274,7 +274,7 @@ func TestForwardReceiver_HandleListParts_CallsBackend(t *testing.T) {
 	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
 	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "mpu-key", "text/plain")
 	require.NoError(t, err)
-	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-one")))
+	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-one")), "")
 	require.NoError(t, err)
 
 	mgr := NewDataGroupManager()

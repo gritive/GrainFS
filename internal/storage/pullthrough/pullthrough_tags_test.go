@@ -39,7 +39,7 @@ func TestPullthroughBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *te
 	require.NoError(t, err)
 	require.NotEmpty(t, uploadID)
 
-	part, err := pt.UploadPart(ctx, "b", "k", uploadID, 1, strings.NewReader("hello"))
+	part, err := pt.UploadPart(ctx, "b", "k", uploadID, 1, strings.NewReader("hello"), "")
 	require.NoError(t, err)
 
 	_, err = pt.CompleteMultipartUpload(ctx, "b", "k", uploadID, []storage.Part{

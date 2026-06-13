@@ -111,8 +111,16 @@ func (rcv *UploadPartArgs) MutateBody(j int, n byte) bool {
 	return false
 }
 
+func (rcv *UploadPartArgs) ContentMd5Hex() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func UploadPartArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func UploadPartArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -131,6 +139,9 @@ func UploadPartArgsAddBody(builder *flatbuffers.Builder, body flatbuffers.UOffse
 }
 func UploadPartArgsStartBodyVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
+}
+func UploadPartArgsAddContentMd5Hex(builder *flatbuffers.Builder, contentMd5Hex flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(contentMd5Hex), 0)
 }
 func UploadPartArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

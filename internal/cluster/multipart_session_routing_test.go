@@ -125,7 +125,7 @@ func TestMultipartSessionOps_SurviveDivergentPlacement(t *testing.T) {
 	require.NoError(t, err, "ListParts on a non-creating node must find the session")
 	require.Empty(t, parts)
 
-	part, err := cl.coordA.UploadPart(ctx, "bk", key, up.UploadID, 1, strings.NewReader("cross-node-part-payload"))
+	part, err := cl.coordA.UploadPart(ctx, "bk", key, up.UploadID, 1, strings.NewReader("cross-node-part-payload"), "")
 	require.NoError(t, err, "UploadPart on a non-creating node must find the session")
 
 	parts, err = cl.coordA.ListParts(ctx, "bk", key, up.UploadID, 100)

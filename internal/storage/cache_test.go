@@ -256,7 +256,7 @@ func TestCachedBackend_InvalidateOnMultipartComplete(t *testing.T) {
 	mp, err := cb.CreateMultipartUpload(context.Background(), "test", "mp-key", "text/plain")
 	require.NoError(t, err)
 
-	part, err := cb.UploadPart(context.Background(), "test", "mp-key", mp.UploadID, 1, strings.NewReader("multipart-data"))
+	part, err := cb.UploadPart(context.Background(), "test", "mp-key", mp.UploadID, 1, strings.NewReader("multipart-data"), "")
 	require.NoError(t, err)
 
 	_, err = cb.CompleteMultipartUpload(context.Background(), "test", "mp-key", mp.UploadID, []Part{*part})

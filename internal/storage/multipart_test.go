@@ -24,12 +24,12 @@ func TestCreateAndCompleteMultipartUpload(t *testing.T) {
 	part1Data := bytes.Repeat([]byte("A"), 5*1024*1024) // 5MB
 	part2Data := bytes.Repeat([]byte("B"), 3*1024*1024) // 3MB
 
-	p1, err := b.UploadPart(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, 1, bytes.NewReader(part1Data))
+	p1, err := b.UploadPart(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, 1, bytes.NewReader(part1Data), "")
 	require.NoError(t, err, "UploadPart 1")
 	assert.Equal(t, 1, p1.PartNumber)
 	assert.NotEmpty(t, p1.ETag)
 
-	p2, err := b.UploadPart(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, 2, bytes.NewReader(part2Data))
+	p2, err := b.UploadPart(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, 2, bytes.NewReader(part2Data), "")
 	require.NoError(t, err, "UploadPart 2")
 
 	obj, err := b.CompleteMultipartUpload(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, []Part{*p1, *p2})
@@ -59,9 +59,9 @@ func TestCompleteMultipartUploadPersistsParts(t *testing.T) {
 
 	part1 := bytes.Repeat([]byte("A"), 5*1024*1024)
 	part2 := bytes.Repeat([]byte("B"), 3*1024*1024)
-	p1, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 1, bytes.NewReader(part1))
+	p1, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 1, bytes.NewReader(part1), "")
 	require.NoError(t, err)
-	p2, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 2, bytes.NewReader(part2))
+	p2, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 2, bytes.NewReader(part2), "")
 	require.NoError(t, err)
 
 	_, err = b.CompleteMultipartUpload(context.Background(), "test-bucket", "parts.bin", upload.UploadID, []Part{*p1, *p2})
@@ -84,7 +84,7 @@ func TestAbortMultipartUpload(t *testing.T) {
 	b.CreateBucket(context.Background(), "test-bucket")
 
 	upload, _ := b.CreateMultipartUpload(context.Background(), "test-bucket", "aborted.bin", "application/octet-stream")
-	b.UploadPart(context.Background(), "test-bucket", "aborted.bin", upload.UploadID, 1, bytes.NewReader([]byte("data")))
+	b.UploadPart(context.Background(), "test-bucket", "aborted.bin", upload.UploadID, 1, bytes.NewReader([]byte("data")), "")
 
 	require.NoError(t, b.AbortMultipartUpload(context.Background(), "test-bucket", "aborted.bin", upload.UploadID), "AbortMultipartUpload")
 
@@ -104,7 +104,7 @@ func TestEncryptedMultipartPartFilesHidePlaintext(t *testing.T) {
 	require.NoError(t, err)
 
 	partBytes := []byte("multipart-sensitive-payload")
-	part, err := b.UploadPart(context.Background(), "bkt", "obj", up.UploadID, 1, bytes.NewReader(partBytes))
+	part, err := b.UploadPart(context.Background(), "bkt", "obj", up.UploadID, 1, bytes.NewReader(partBytes), "")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(partBytes)), part.Size)
 
@@ -139,9 +139,9 @@ func TestEncryptedMultipartCompleteStreamsMultiplePartsOutOfOrder(t *testing.T) 
 
 	part1 := bytes.Repeat([]byte("a"), encryptedChunkSize+17)
 	part2 := bytes.Repeat([]byte("b"), encryptedChunkSize+31)
-	p1, err := b.UploadPart(ctx, "bkt", "obj", up.UploadID, 1, bytes.NewReader(part1))
+	p1, err := b.UploadPart(ctx, "bkt", "obj", up.UploadID, 1, bytes.NewReader(part1), "")
 	require.NoError(t, err)
-	p2, err := b.UploadPart(ctx, "bkt", "obj", up.UploadID, 2, bytes.NewReader(part2))
+	p2, err := b.UploadPart(ctx, "bkt", "obj", up.UploadID, 2, bytes.NewReader(part2), "")
 	require.NoError(t, err)
 
 	obj, err := b.CompleteMultipartUpload(ctx, "bkt", "obj", up.UploadID, []Part{
@@ -185,7 +185,7 @@ func TestUploadPartInvalidUploadID(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")
 
-	_, err := b.UploadPart(context.Background(), "test-bucket", "file.bin", "invalid-id", 1, bytes.NewReader([]byte("data")))
+	_, err := b.UploadPart(context.Background(), "test-bucket", "file.bin", "invalid-id", 1, bytes.NewReader([]byte("data")), "")
 	require.ErrorIs(t, err, ErrUploadNotFound)
 }
 
@@ -365,7 +365,7 @@ func TestLocalBackend_ListParts(t *testing.T) {
 	wrote := map[int]string{}
 	for _, n := range []int{2, 1, 3} {
 		data := bytes.Repeat([]byte{byte('a' + n)}, 1024)
-		p, err := b.UploadPart(ctx, "mybucket", "obj.bin", uploadID, n, bytes.NewReader(data))
+		p, err := b.UploadPart(ctx, "mybucket", "obj.bin", uploadID, n, bytes.NewReader(data), "")
 		require.NoError(t, err)
 		wrote[n] = p.ETag
 	}

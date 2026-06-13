@@ -118,7 +118,7 @@ func TestBuildUploadPartArgs_5MiBAllocationBound(t *testing.T) {
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for i := 0; i < runs; i++ {
-		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body, "")
 		require.Greater(t, len(args), len(body))
 	}
 	runtime.GC()
@@ -160,7 +160,7 @@ func BenchmarkBuildUploadPartArgs_5MiB(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body, "")
 		if len(args) <= len(body) {
 			b.Fatalf("args length %d <= body length %d", len(args), len(body))
 		}
@@ -594,7 +594,7 @@ func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *
 		i := i
 		go func() {
 			_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
-				raftpb.ForwardOpUploadPart, buildUploadPartArgs("b", "k", "upload-id", int32(i+1), nil), bytes.NewReader([]byte("part")))
+				raftpb.ForwardOpUploadPart, buildUploadPartArgs("b", "k", "upload-id", int32(i+1), nil, ""), bytes.NewReader([]byte("part")))
 			done <- err
 		}()
 	}

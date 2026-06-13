@@ -56,7 +56,7 @@ func (g *RecoveryWriteGate) CreateMultipartUpload(context.Context, string, strin
 func (g *RecoveryWriteGate) CreateMultipartUploadWithTags(context.Context, string, string, string, []Tag) (string, error) {
 	return "", g.err
 }
-func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader) (*Part, error) {
+func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader, string) (*Part, error) {
 	return nil, g.err
 }
 func (g *RecoveryWriteGate) CompleteMultipartUpload(context.Context, string, string, string, []Part) (*Object, error) {

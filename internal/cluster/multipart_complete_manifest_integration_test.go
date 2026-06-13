@@ -33,7 +33,7 @@ var _ = Describe("Multipart complete manifest integration", func() {
 	}
 
 	uploadPart := func(uploadID string, partNumber int, body []byte) storage.Part {
-		part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", uploadID, partNumber, bytes.NewReader(body))
+		part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", uploadID, partNumber, bytes.NewReader(body), "")
 		Expect(err).NotTo(HaveOccurred())
 		return *part
 	}

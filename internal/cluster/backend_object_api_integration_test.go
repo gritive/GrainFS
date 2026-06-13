@@ -32,7 +32,7 @@ var _ = Describe("Backend object API integration", func() {
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		payload := bytes.Repeat([]byte("x"), 64<<10)
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload), "")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())

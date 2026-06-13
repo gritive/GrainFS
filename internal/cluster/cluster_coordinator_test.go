@@ -249,7 +249,7 @@ func (f *fakeBackend) CreateMultipartUpload(ctx context.Context, bucket, key, co
 	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.CreateMultipartUpload not implemented")
 }
-func (f *fakeBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+func (f *fakeBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
 	_ = ctx
 	return nil, fmt.Errorf("fakeBackend.UploadPart not implemented")
 }
@@ -2163,7 +2163,7 @@ func TestClusterCoordinator_ListParts_LocalPath(t *testing.T) {
 	require.NoError(t, gb.CreateBucket(context.Background(), "bk"))
 	up, err := gb.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
 	require.NoError(t, err)
-	part, err := gb.UploadPart(context.Background(), "bk", "k", up.UploadID, 1, strings.NewReader("part"))
+	part, err := gb.UploadPart(context.Background(), "bk", "k", up.UploadID, 1, strings.NewReader("part"), "")
 	require.NoError(t, err)
 
 	mgr := NewDataGroupManager()
@@ -2423,7 +2423,7 @@ func TestClusterCoordinator_UploadPart_Forward(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: int64(len(body))},
 	)
-	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, bytes.NewReader(body))
+	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, bytes.NewReader(body), "")
 	require.NoError(t, err)
 	require.Equal(t, 7, p.PartNumber)
 	require.Equal(t, "etag-part", p.ETag)
@@ -2457,7 +2457,7 @@ func TestClusterCoordinator_UploadPart_ForwardUsesExposedBodyBytes(t *testing.T)
 		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: int64(len(body))},
 	)
 
-	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, reader)
+	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, reader, "")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), p.Size)
 	require.Zero(t, reader.readCalls, "UploadPart should reuse exposed body bytes instead of copying through io.ReadAll")
@@ -2502,7 +2502,7 @@ func benchmarkClusterCoordinatorUploadPartForward5MiB(b *testing.B, exposed bool
 		} else {
 			reader = bytes.NewReader(body)
 		}
-		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, reader)
+		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, reader, "")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -2561,7 +2561,7 @@ func BenchmarkClusterCoordinatorUploadPartForwardStream_5MiB(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body), "")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -2578,7 +2578,7 @@ func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) 
 		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: 0},
 	)
 
-	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, bytes.NewReader(body))
+	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, bytes.NewReader(body), "")
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
@@ -2587,7 +2587,7 @@ func TestClusterCoordinator_UploadPart_TooLarge_413(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.maxBody = 128 * 1024
 	body := bytes.Repeat([]byte("x"), int(c.maxBody)+1) // one byte over cap
-	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body), "")
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
 }
@@ -2643,7 +2643,7 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) 
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
 
-	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body), "")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), part.Size)
 	require.Len(t, d.calls, 1, "streamed UploadPart should only use single-message preflight")
@@ -2663,7 +2663,7 @@ func TestClusterCoordinator_UploadPart_StreamForward_AtMultipartPartFloor(t *tes
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
 
-	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body), "")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), part.Size)
 	require.Len(t, d.calls, 1, "streamed UploadPart should only use single-message preflight")
@@ -2683,7 +2683,7 @@ func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t 
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
 
-	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body), "")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), part.Size)
 	require.Empty(t, d.streamCalls)

@@ -96,6 +96,14 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 		return
 	}
 
+	// Parse the optional Content-MD5 before reading the body so a malformed
+	// header is rejected as InvalidDigest (mirrors PutObject).
+	contentMD5Hex, md5Err := putObjectContentMD5Hex(c)
+	if md5Err != nil {
+		mapError(c, md5Err)
+		return
+	}
+
 	// UploadPart bodies use the same SigV4 streaming / aws-chunked transport as
 	// PutObject. Strip the chunk framing here so the part file stores the
 	// caller's plaintext bytes — leaving the framing in place inflates Part.Size
@@ -106,7 +114,7 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
 		return
 	}
-	part, err := s.uploadMultipartPart(ctx, bucket, key, uploadID, partNumber, body)
+	part, err := s.uploadMultipartPart(ctx, bucket, key, uploadID, partNumber, body, contentMD5Hex)
 	if err != nil {
 		mapError(c, err)
 		return
