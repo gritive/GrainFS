@@ -12,6 +12,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestMapError_DEKGenUnknownIsServiceUnavailable: an error wrapping
@@ -46,6 +47,22 @@ func TestMapError_ProposeTimeoutIsRetryableSlowDown(t *testing.T) {
 	var got s3Error
 	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
 	assert.Equal(t, "SlowDown", got.Code)
+}
+
+// TestMapError_ContentMD5MismatchIsBadDigest: a body whose MD5 does not match
+// the client Content-MD5 must map to 400 BadDigest, not a 500. Identical on
+// every node (direct or forwarded — both end in storage.ErrContentMD5Mismatch).
+func TestMapError_ContentMD5MismatchIsBadDigest(t *testing.T) {
+	c := app.NewContext(0)
+
+	err := fmt.Errorf("put object: %w", storage.ErrContentMD5Mismatch)
+	mapError(c, err)
+
+	require.Equal(t, consts.StatusBadRequest, c.Response.StatusCode())
+
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "BadDigest", got.Code)
 }
 
 // TestMapError_GenericErrorIsInternalError: a plain error that matches no
