@@ -77,6 +77,10 @@ table PutObjectArgs {
   // non-voter node) has the same effect as a local one. Appended for wire
   // compatibility; old peers read it as empty.
   user_metadata:[Tag];     // reuse Tag{key,value}; empty/nil -> none
+  // S3 single write-path: client Content-MD5 (hex). The receiver validates it
+  // on the spool write path, identical to a direct-to-voter PUT. Appended for
+  // wire compatibility; old peers read it as empty.
+  content_md5_hex:string;
 }
 
 table GetObjectArgs {
@@ -225,6 +229,7 @@ enum ForwardStatus : byte {
   AppendCapExceeded = 10,
   AppendObjectTooLarge = 11,
   MethodNotAllowed = 12,
+  BadDigest = 13,
   Internal = 99
 }
 

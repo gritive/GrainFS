@@ -204,28 +204,17 @@ func ecSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, bac
 	return shards, dst, nil
 }
 
-// ECSplitRawInto is the exported wrapper over ecSplitRawInto for the
-// putpipeline actors. The returned shards alias the returned backing slice;
-// the caller pools the backing and must not recycle it until every shard has
-// been consumed. dst may be nil (a fresh backing is allocated).
+// ECSplitRawInto is the exported wrapper over ecSplitRawInto. The returned
+// shards alias the returned backing slice; the caller pools the backing and
+// must not recycle it until every shard has been consumed. dst may be nil (a
+// fresh backing is allocated).
 func ECSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, backing []byte, err error) {
 	return ecSplitRawInto(cfg, data, dst)
 }
 
-// ECSplitWithEncode is the exported wrapper for callers outside the
-// cluster package (the putpipeline actors). It returns k+m shards in
-// the same format as ECSplit: each shard is prefixed with an 8-byte
-// big-endian original-size header so the EC reader (ecReconstructStreamBodies)
-// can recover the exact byte count after decryption.
-func ECSplitWithEncode(cfg ECConfig, data []byte) ([][]byte, error) {
-	return ECSplit(cfg, data)
-}
-
 // ECSplitRaw is the header-less variant: returns k+m shard byte slices
-// WITHOUT the 8-byte size header. The actor pipeline calls this per
-// stripe because each shard file's size header is written ONCE per
-// object (at the head of each shard's chunked writer in
-// CPUPool.registerPut) using the full body size — not per-stripe.
+// WITHOUT the 8-byte size header, for callers that write the size header
+// once per shard file (not per stripe).
 func ECSplitRaw(cfg ECConfig, data []byte) ([][]byte, error) {
 	return ecSplitBodies(cfg, data)
 }

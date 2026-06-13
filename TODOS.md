@@ -2,22 +2,24 @@
 
 ## Follow-ups
 
-- **[P2] Forwarded PUTs skip `Content-MD5` (BadDigest) validation.**
-  `Content-MD5` is only validated inside the put pipeline, which the storage
-  layer enters only when `req.SizeHint != nil` (`object_put.go:49`). A
-  direct-to-voter PUT always carries `SizeHint` (set from Content-Length in
-  `object_write_api.go`), so a bad digest is rejected with `BadDigest`. The
-  forward path does **not** carry `SizeHint`, so the receiver rebuilds the
-  request without it and takes the non-pipeline fallback that never reads
-  `ContentMD5Hex` — a bad digest is silently accepted. This divergence is
-  **pre-existing** (it already applied to every forwarded PUT with a
-  `Content-MD5` header, with or without user metadata) and is independent of
-  the S3 single-path #1 change, which only extended forwarding to metadata
-  PUTs. Carrying `content_md5_hex` over the wire alone does **not** fix it —
-  the receiver's fallback path ignores it; the real fix is to forward
-  `SizeHint` so forwarded PUTs enter the validating pipeline like direct ones.
-  Add a test: a forwarded PUT with a mismatched `Content-MD5` must return
-  `BadDigest`, matching the direct-to-voter path.
+- **[P2] Single-node packblob PUT skips `Content-MD5` (BadDigest) validation.**
+  The small-object packed-blob fast path (`internal/storage/packblob/packed_backend.go`,
+  the non-versioned branch around the `blobStore.Append` + `md5.Sum(data)` →
+  `etag`) computes the body MD5 but never compares it to `req.ContentMD5Hex`, so
+  a single-node PUT with a wrong `Content-MD5` commits instead of returning 400
+  `BadDigest`. The cluster EC path now validates uniformly (this PR); packblob
+  is the remaining gap. Pre-existing and single-node-only (cluster mode keeps EC
+  shard storage). Fix: validate `hex(md5(data)) == req.ContentMD5Hex` **before**
+  `blobStore.Append` (validating after Append would orphan a blob entry); return
+  `storage.ErrContentMD5Mismatch`. Versioned-bucket PUTs already delegate to the
+  inner backend, so only the small non-versioned pack path needs the guard.
+
+- **[P3] Malformed `Content-MD5` header is silently ignored (should be `InvalidDigest`).**
+  `internal/server/object_write_request.go` (`putObjectContentMD5Hex`) returns
+  `""` on a non-base64 or non-16-byte `Content-MD5`, and every validator no-ops
+  on empty — so `Content-MD5: not-base64` commits instead of returning 400
+  `InvalidDigest` per the S3 contract. Server-wide pre-existing. Fix: distinguish
+  "absent" from "present-but-malformed"; map the latter to `InvalidDigest`.
 
 - **[P3] Cluster PUT-with-`x-amz-acl` does not persist the ACL on any node.**
   `ClusterCoordinator.PutObjectWithRequest` (and the forward path) ignore

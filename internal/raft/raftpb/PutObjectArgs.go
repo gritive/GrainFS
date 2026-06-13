@@ -127,8 +127,16 @@ func (rcv *PutObjectArgs) UserMetadataLength() int {
 	return 0
 }
 
+func (rcv *PutObjectArgs) ContentMd5Hex() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func PutObjectArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(7)
 }
 func PutObjectArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -153,6 +161,9 @@ func PutObjectArgsAddUserMetadata(builder *flatbuffers.Builder, userMetadata fla
 }
 func PutObjectArgsStartUserMetadataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func PutObjectArgsAddContentMd5Hex(builder *flatbuffers.Builder, contentMd5Hex flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(contentMd5Hex), 0)
 }
 func PutObjectArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

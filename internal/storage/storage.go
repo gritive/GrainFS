@@ -15,6 +15,10 @@ type DBProvider interface{ DB() *badger.DB }
 // ErrSnapshotNotSupported is returned when the backend does not implement Snapshotable.
 var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend")
 
+// ErrContentMD5Mismatch is returned when an object PUT's body MD5 does not match
+// the client-supplied Content-MD5 header. Maps to S3 400 BadDigest.
+var ErrContentMD5Mismatch = errors.New("storage: Content-MD5 mismatch")
+
 // Object represents a stored object with metadata.
 type Object struct {
 	Key              string

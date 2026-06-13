@@ -340,6 +340,7 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 		ContentType:    string(pa.ContentType()),
 		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
 		UserMetadata:   decodePutObjectUserMetadata(pa),
+		ContentMD5Hex:  string(pa.ContentMd5Hex()),
 	})
 	fields := PutTraceStageFields{Bytes: int64(len(pa.BodyBytes()))}
 	if err != nil {
@@ -372,6 +373,7 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 		ContentType:    string(pa.ContentType()),
 		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
 		UserMetadata:   decodePutObjectUserMetadata(pa),
+		ContentMD5Hex:  string(pa.ContentMd5Hex()),
 	})
 	fields := PutTraceStageFields{}
 	if err != nil {
@@ -854,6 +856,9 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	}
 	if errors.Is(err, ErrPlacementTargetsUnavailable) {
 		return raftpb.ForwardStatusInsufficientPlacementTargets
+	}
+	if errors.Is(err, storage.ErrContentMD5Mismatch) {
+		return raftpb.ForwardStatusBadDigest
 	}
 	log.Warn().Err(err).Msg("forward receiver mapped backend error to internal status")
 	return raftpb.ForwardStatusInternal

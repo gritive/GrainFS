@@ -129,7 +129,7 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 
 	rcv := NewForwardReceiver(mgr)
 
-	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil)
+	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil, "")
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -153,7 +153,7 @@ func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	um := map[string]string{"x-amz-meta-team": "storage", "x-amz-meta-env": "prod"}
-	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um)
+	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um, "")
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -165,6 +165,43 @@ func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "storage", head.UserMetadata["x-amz-meta-team"])
 	require.Equal(t, "prod", head.UserMetadata["x-amz-meta-env"])
+}
+
+func TestForwardReceiver_HandlePutObject_RejectsBadContentMD5(t *testing.T) {
+	// A forwarded PUT with a wrong Content-MD5 must be rejected the SAME way a
+	// direct PUT is: the reply round-trips to storage.ErrContentMD5Mismatch (the
+	// S3 layer then maps it to 400 BadDigest, not 500 InternalError).
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	// body "hello" but a deliberately wrong Content-MD5
+	args := buildPutObjectArgsWithSSE("bucket", "bad-md5", "text/plain", []byte("hello"), "", nil, "deadbeefdeadbeefdeadbeefdeadbeef")
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply, _ := rcv.Handle(payload)
+
+	require.NotNil(t, reply)
+	require.ErrorIs(t, parseReplyStatus(reply), storage.ErrContentMD5Mismatch)
+}
+
+func TestForwardReceiver_HandlePutObject_GoodContentMD5OK(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	// md5("hello") = 5d41402abc4b2a76b9719d911017c592
+	args := buildPutObjectArgsWithSSE("bucket", "good-md5", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592")
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply, _ := rcv.Handle(payload)
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
+	head, err := gb.HeadObject(context.Background(), "bucket", "good-md5")
+	require.NoError(t, err)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", head.ETag)
 }
 
 func TestForwardReceiver_HandlePutObjectStream_ReturnsOK(t *testing.T) {

@@ -3,9 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -34,23 +31,6 @@ func warnIfReducedDataFsync() {
 		log.Warn().Msg("GRAINFS_FSYNC_MODE=fast: data-plane fsync skips F_FULLFSYNC (no power-loss durability on macOS; no-op vs full on Linux)")
 	case directio.SyncOff:
 		log.Warn().Msg("GRAINFS_FSYNC_MODE=off: data-plane fsync DISABLED; durability relies on cross-node EC reconstruction — UNSAFE for single-node and correlated power loss")
-	}
-}
-
-// putMultiNodeStreamEnabled reports whether the multi-node streaming-EC PUT path
-// is active. It is now the DEFAULT (seal-at-source, no whole-object spool); set
-// GRAINFS_PUT_MULTINODE_STREAM to a falsey value to opt OUT and fall back to the
-// spool path. Read once at boot (before any PUT). The parse is a falsey-set, not
-// == "1"/!= "0": the latter would silently ENABLE on "false", a footgun now that
-// ON is the default. The set is deliberately wide (covers strconv.ParseBool's
-// false tokens 0/f/false plus the human variants no/n/off/disable/disabled) so a
-// near-miss spelling of an opt-out does not silently leave streaming ON.
-func putMultiNodeStreamEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRAINFS_PUT_MULTINODE_STREAM"))) {
-	case "0", "f", "false", "n", "no", "off", "disable", "disabled":
-		return false
-	default: // unset / empty / anything-else = ON (default)
-		return true
 	}
 }
 
@@ -396,24 +376,6 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	}
 	gb.SetCoalesceConfig(state.coalesceCfg)
 	gb.SetShardGroupSource(state.metaRaft.FSM())
-	// Inject the actor pipeline (constructed once at boot in
-	// bootOwnedGroupsAndEC) into every group's DistributedBackend so
-	// PUTs routed to non-group-0 groups also dispatch through the
-	// pipeline. The pipeline owns long-lived actor goroutines shared
-	// across groups.
-	if state.putPipeline != nil {
-		// Enabled in prod (F1 durability review closed): Put() now blocks on
-		// shard durability before returning, so the metadata propose cannot
-		// precede shard fsync, and the drive-write path rejects ".." key
-		// traversal. Dispatch is still bounded to all-local EC placements.
-		gb.SetPutPipeline(state.putPipeline, true)
-		// EXPERIMENTAL multi-node streaming-EC (opt-in via env, default OFF).
-		// Must propagate here too: candidateGroupsFor excludes group-0 from
-		// object placement, so PUTs route to these per-group backends — wiring
-		// the flag only on the group-0 distBackend (bootOwnedGroupsAndEC) left
-		// every serving group on the spool fallback (#717 regression).
-		gb.SetPutPipelineMultiNode(putMultiNodeStreamEnabled())
-	}
 	return gb, nil
 }
 
@@ -440,47 +402,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	state.shardCache = shardcache.New(state.cfg.ShardCacheSize)
 	distBackend.SetShardCache(state.shardCache)
 	log.Info().Int64("bytes", state.cfg.ShardCacheSize).Msg("ec shard cache configured")
-
-	// Wire the single-node PUT actor pipeline BEFORE the ownedGroups loop
-	// instantiates additional groups — instantiateGroupWithConfig picks
-	// state.putPipeline up from here and injects it on every group's
-	// DistributedBackend (groups are created later for non-group-0
-	// placements). The pipeline owns long-lived actor goroutines shared
-	// across all groups.
-	// R1/R3: wire the PUT pipeline only when the gen-aware DEK keeper exists.
-	if state.dekKeeper != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
-		pipeline := putpipeline.New(putpipeline.Config{
-			DataDirs:  state.shardSvc.DataDirs(),
-			DEKKeeper: state.dekKeeper,
-			ClusterID: state.clusterID,
-			ECConfig:  state.effectiveEC,
-			WAL:       shardServiceWALAdapter{s: state.shardSvc},
-			// Transport carries sealed shards to peers for the EXPERIMENTAL
-			// multi-node streaming path (gated off below); the same transport
-			// the ShardService dials peers with, so resolved addresses match.
-			Transport: state.clusterTransport,
-			// Bound each remote shard write RPC so a dead peer cannot deadlock
-			// the streaming PUT, using the same deadline value as the spool path
-			// (the streaming path arms it earlier, so it bounds a broader window;
-			// see Pipeline.Put).
-			ShardRPCTimeout: cluster.ShardRPCTimeout(),
-		})
-		state.putPipeline = pipeline
-		// Enabled in prod (F1 durability review closed): Put() blocks on shard
-		// durability before returning and the drive-write path rejects ".."
-		// key traversal. Dispatch stays bounded to all-local EC placements.
-		distBackend.SetPutPipeline(pipeline, true)
-		// EXPERIMENTAL opt-in (default OFF). Streams remote shards via
-		// WriteSealedShard instead of spooling. data-shards-required/
-		// parity-best-effort (inherited from the all-local path); forward-only
-		// (rollback corrupts reads of K>=2 multi-node streamed objects).
-		distBackend.SetPutPipelineMultiNode(putMultiNodeStreamEnabled())
-		log.Info().
-			Int("drives", len(state.shardSvc.DataDirs())).
-			Int("k", state.effectiveEC.DataShards).
-			Int("m", state.effectiveEC.ParityShards).
-			Msg("put actor pipeline wired")
-	}
 
 	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
@@ -680,24 +601,4 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
 	return nil
-}
-
-// shardServiceWALAdapter exposes ShardService.AppendShardMetadataBatch
-// as putpipeline.ShardWALAppender so the actor pipeline can pay one
-// fsync per PUT inside the WAL in place of N per-shard fsyncs.
-type shardServiceWALAdapter struct {
-	s *cluster.ShardService
-}
-
-func (a shardServiceWALAdapter) AppendBatch(ctx context.Context, records []putpipeline.ShardWALRecord) (bool, error) {
-	converted := make([]cluster.ShardMetadataWALRecord, len(records))
-	for i, r := range records {
-		converted[i] = cluster.ShardMetadataWALRecord{
-			Bucket:   r.Bucket,
-			Key:      r.Key,
-			ShardIdx: r.ShardIdx,
-			Size:     r.Size,
-		}
-	}
-	return a.s.AppendShardMetadataBatch(ctx, converted)
 }

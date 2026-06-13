@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -136,8 +135,8 @@ type bootState struct {
 	rewrapController *encrypt.RewrapController // created in wireDEKKeeper (early); lanes registered post-backend in wireRewrapLanes
 	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
 	// restore) rebuildDEKKeeperFromRestore, threaded as the single source into
-	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ
-	// (ShardService) clusterID are identical. Empty until wireDEKKeeper runs.
+	// the data-plane DEKKeeperAdapters so the WRITE and READ (ShardService)
+	// clusterID are identical. Empty until wireDEKKeeper runs.
 	clusterID []byte
 	// raftStoreKey is the node-local Badger encryption key for raft v2 log
 	// stores. It is sealed at rest in keys.d/raft-store.key.enc under kekStore
@@ -212,7 +211,6 @@ type bootState struct {
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
 	packedBackend    *packblob.PackedBackend // single-node packed-blob fast path; nil in cluster / when packing off (DEK rewrap lane source)
-	putPipeline      *putpipeline.Pipeline
 	shardCache       *shardcache.Cache
 	effectiveEC      cluster.ECConfig
 	stopApply        chan struct{}

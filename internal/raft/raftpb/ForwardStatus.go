@@ -20,6 +20,7 @@ const (
 	ForwardStatusAppendCapExceeded            ForwardStatus = 10
 	ForwardStatusAppendObjectTooLarge         ForwardStatus = 11
 	ForwardStatusMethodNotAllowed             ForwardStatus = 12
+	ForwardStatusBadDigest                    ForwardStatus = 13
 	ForwardStatusInternal                     ForwardStatus = 99
 )
 
@@ -37,6 +38,7 @@ var EnumNamesForwardStatus = map[ForwardStatus]string{
 	ForwardStatusAppendCapExceeded:            "AppendCapExceeded",
 	ForwardStatusAppendObjectTooLarge:         "AppendObjectTooLarge",
 	ForwardStatusMethodNotAllowed:             "MethodNotAllowed",
+	ForwardStatusBadDigest:                    "BadDigest",
 	ForwardStatusInternal:                     "Internal",
 }
 
@@ -54,6 +56,7 @@ var EnumValuesForwardStatus = map[string]ForwardStatus{
 	"AppendCapExceeded":            ForwardStatusAppendCapExceeded,
 	"AppendObjectTooLarge":         ForwardStatusAppendObjectTooLarge,
 	"MethodNotAllowed":             ForwardStatusMethodNotAllowed,
+	"BadDigest":                    ForwardStatusBadDigest,
 	"Internal":                     ForwardStatusInternal,
 }
 

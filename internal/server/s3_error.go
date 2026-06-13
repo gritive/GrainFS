@@ -47,6 +47,8 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusConflict, "BucketNotEmpty", "The bucket you tried to delete is not empty")
 	case errors.Is(err, storage.ErrObjectNotFound):
 		writeXMLError(c, consts.StatusNotFound, "NoSuchKey", "The specified key does not exist")
+	case errors.Is(err, storage.ErrContentMD5Mismatch):
+		writeXMLError(c, consts.StatusBadRequest, "BadDigest", "The Content-MD5 you specified did not match what we received.")
 	case errors.Is(err, storage.ErrUploadNotFound):
 		writeXMLError(c, consts.StatusNotFound, "NoSuchUpload", "The specified upload does not exist")
 	case errors.Is(err, storage.ErrEntityTooLarge):
