@@ -26,13 +26,32 @@ var errInternalReply = errors.New("forward: internal reply error")
 
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
 	sse := b.CreateString(sseAlgorithm)
 	bodyOff := b.CreateByteVector(body)
+	// user_metadata as a [Tag] vector — children created BEFORE the table start
+	// (FlatBuffers rule), same pattern as buildSetObjectTagsArgs.
+	var umVec flatbuffers.UOffsetT
+	if len(userMetadata) > 0 {
+		offs := make([]flatbuffers.UOffsetT, 0, len(userMetadata))
+		for mk, mv := range userMetadata {
+			kOff := b.CreateString(mk)
+			vOff := b.CreateString(mv)
+			raftpb.TagStart(b)
+			raftpb.TagAddKey(b, kOff)
+			raftpb.TagAddValue(b, vOff)
+			offs = append(offs, raftpb.TagEnd(b))
+		}
+		raftpb.PutObjectArgsStartUserMetadataVector(b, len(offs))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		umVec = b.EndVector(len(offs))
+	}
 	raftpb.PutObjectArgsStart(b)
 	raftpb.PutObjectArgsAddBucket(b, bk)
 	raftpb.PutObjectArgsAddKey(b, k)
@@ -41,6 +60,9 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	if sseAlgorithm != "" {
 		raftpb.PutObjectArgsAddSseAlgorithm(b, sse)
 	}
+	if umVec != 0 {
+		raftpb.PutObjectArgsAddUserMetadata(b, umVec)
+	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -48,6 +70,24 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 func putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm string, bodyLen int) int {
 	const tableOverhead = 128
 	return bodyLen + len(bucket) + len(key) + len(contentType) + len(sseAlgorithm) + tableOverhead
+}
+
+// decodePutObjectUserMetadata reconstructs the user-metadata map from a
+// forwarded PutObjectArgs' Tag vector. Returns nil when none (matching a
+// metadata-less local PUT).
+func decodePutObjectUserMetadata(pa *raftpb.PutObjectArgs) map[string]string {
+	n := pa.UserMetadataLength()
+	if n == 0 {
+		return nil
+	}
+	m := make(map[string]string, n)
+	var tag raftpb.Tag
+	for i := 0; i < n; i++ {
+		if pa.UserMetadata(&tag, i) {
+			m[string(tag.Key())] = string(tag.Value())
+		}
+	}
+	return m
 }
 
 func buildGetObjectArgs(bucket, key string) []byte {

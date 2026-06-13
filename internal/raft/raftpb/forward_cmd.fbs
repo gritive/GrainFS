@@ -73,6 +73,10 @@ table PutObjectArgs {
   // Optional S3 system metadata for forwarded PUT requests. Appended for
   // wire compatibility; old peers read it as empty.
   sse_algorithm:string;
+  // S3 single-path #1: carry user metadata so a forwarded PUT (received by a
+  // non-voter node) has the same effect as a local one. Appended for wire
+  // compatibility; old peers read it as empty.
+  user_metadata:[Tag];     // reuse Tag{key,value}; empty/nil -> none
 }
 
 table GetObjectArgs {

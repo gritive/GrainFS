@@ -129,7 +129,7 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 
 	rcv := NewForwardReceiver(mgr)
 
-	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256")
+	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -141,6 +141,30 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 	head, err := gb.HeadObject(context.Background(), "bucket", "sse-key")
 	require.NoError(t, err)
 	require.Equal(t, "AES256", head.SSEAlgorithm)
+}
+
+func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
+	// S3 single-path #1: a forwarded PUT must carry user metadata so it has the
+	// same effect as a local one. Build args WITH metadata, run the receiver,
+	// and assert the persisted object carries them.
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	um := map[string]string{"x-amz-meta-team": "storage", "x-amz-meta-env": "prod"}
+	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply, _ := rcv.Handle(payload)
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
+
+	head, err := gb.HeadObject(context.Background(), "bucket", "meta-key")
+	require.NoError(t, err)
+	require.Equal(t, "storage", head.UserMetadata["x-amz-meta-team"])
+	require.Equal(t, "prod", head.UserMetadata["x-amz-meta-env"])
 }
 
 func TestForwardReceiver_HandlePutObjectStream_ReturnsOK(t *testing.T) {
