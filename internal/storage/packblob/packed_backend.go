@@ -509,6 +509,17 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return obj, nil
 	}
 
+	// Content-MD5 validation: the full small-object body is in `data`. Reject a
+	// wrong client digest before any inner delegation or pack append (S3
+	// BadDigest). No-op when no Content-MD5. Large objects (above) validate in
+	// the inner backend.
+	if req.ContentMD5Hex != "" {
+		sum := md5.Sum(data)
+		if hex.EncodeToString(sum[:]) != req.ContentMD5Hex {
+			return nil, fmt.Errorf("%w: client %s", storage.ErrContentMD5Mismatch, req.ContentMD5Hex)
+		}
+	}
+
 	// Versioning-enabled buckets must round-trip through the inner backend so
 	// the version index is updated and the response carries x-amz-version-id.
 	// Packblob's keyspace is (bucket,key) only; without this bypass small
