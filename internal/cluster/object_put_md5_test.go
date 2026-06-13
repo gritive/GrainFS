@@ -54,6 +54,26 @@ func TestPutObject_SpoolPath_ContentMD5Mismatch(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
 }
 
+// TestPutObject_WithSizeHint_ContentMD5Mismatch: a PUT carrying SizeHint (which
+// before the pipeline removal would have entered the streaming-EC pipeline) is
+// now spooled and validated, so a wrong Content-MD5 is rejected as BadDigest.
+// Proves SizeHint no longer bypasses the single spool validation path.
+func TestPutObject_WithSizeHint_ContentMD5Mismatch(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	sz := int64(5)
+	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:        "bucket",
+		Key:           "sized",
+		Body:          bytes.NewReader([]byte("hello")),
+		SizeHint:      &sz,
+		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
+	})
+	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
+}
+
 // TestPutObject_ContentMD5Match: a correct Content-MD5 succeeds and the stored
 // ETag equals the body md5 (both fast and spool paths).
 func TestPutObject_ContentMD5Match(t *testing.T) {
