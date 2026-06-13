@@ -112,16 +112,7 @@ func (t *HTTPTransport) handleShardRead(c context.Context, ctx *app.RequestConte
 	// bulk). Released when this handler returns — BEFORE Hertz streams the
 	// response body — which mirrors the tunnel dispatch()'s defer release()
 	// (its LookupRead branch also returns before the body is written).
-	t.mu.RLock()
-	limiter := t.traffic
-	t.mu.RUnlock()
-	release, aerr := limiter.Acquire(c, StreamShardReadBody)
-	if aerr != nil {
-		ctx.SetStatusCode(consts.StatusServiceUnavailable)
-		ctx.SetBodyString("overloaded: " + aerr.Error())
-		return
-	}
-	defer release()
+	// Inbound admission for this route runs in admissionMiddleware.
 
 	t.nativeShardReads.Add(1)
 	rc, herr := (*hp)(req)

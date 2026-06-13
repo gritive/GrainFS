@@ -88,16 +88,7 @@ func (t *HTTPTransport) handleAppendSegmentRead(c context.Context, ctx *app.Requ
 
 	// Inbound admission released when this handler returns — BEFORE Hertz
 	// streams the response body — mirroring handleShardRead/handleForwardRead.
-	t.mu.RLock()
-	limiter := t.traffic
-	t.mu.RUnlock()
-	release, aerr := limiter.Acquire(c, StreamReadAppendSegment)
-	if aerr != nil {
-		ctx.SetStatusCode(consts.StatusServiceUnavailable)
-		ctx.SetBodyString("overloaded: " + aerr.Error())
-		return
-	}
-	defer release()
+	// Inbound admission for this route runs in admissionMiddleware.
 
 	t.nativeAppendSegReads.Add(1)
 	reply, rbody, herr := (*hp)(frame)

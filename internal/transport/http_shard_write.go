@@ -107,16 +107,7 @@ func (t *HTTPTransport) handleShardWrite(c context.Context, ctx *app.RequestCont
 	// Inbound admission: same traffic class the tunnel used for this family
 	// (StreamShardWriteBody → bulk). The StreamType is an internal admission/
 	// metrics key here — it is no longer on the wire; it dies with the tunnel in N8.
-	t.mu.RLock()
-	limiter := t.traffic
-	t.mu.RUnlock()
-	release, aerr := limiter.Acquire(c, StreamShardWriteBody)
-	if aerr != nil {
-		ctx.SetStatusCode(consts.StatusServiceUnavailable)
-		ctx.SetBodyString("overloaded: " + aerr.Error())
-		return
-	}
-	defer release()
+	// Inbound admission for this route runs in admissionMiddleware.
 
 	t.nativeShardWrites.Add(1)
 	if herr := (*hp)(req, ctx.RequestBodyStream()); herr != nil {
