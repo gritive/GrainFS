@@ -55,6 +55,8 @@ type ecObjectWritePlan struct {
 	ContentType      string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
+	// ACL is the s3auth.ACLGrant bitmask to persist on the object meta. 0 = private.
+	ACL uint8
 	// SegmentBlobID is empty for legacy single-blob writes; when non-empty
 	// the plan refers to a chunked-PUT segment and shardKey is scoped by
 	// SegmentBlobID via ecObjectSegmentShardKey.

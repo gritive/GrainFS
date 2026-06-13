@@ -65,6 +65,21 @@ func TestMapError_ContentMD5MismatchIsBadDigest(t *testing.T) {
 	assert.Equal(t, "BadDigest", got.Code)
 }
 
+// TestMapError_InvalidDigestIsBadRequest: a malformed Content-MD5 maps to 400
+// InvalidDigest (distinct from BadDigest, which is a valid-but-wrong digest).
+func TestMapError_InvalidDigestIsBadRequest(t *testing.T) {
+	c := app.NewContext(0)
+
+	err := fmt.Errorf("parse: %w", storage.ErrInvalidDigest)
+	mapError(c, err)
+
+	require.Equal(t, consts.StatusBadRequest, c.Response.StatusCode())
+
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "InvalidDigest", got.Code)
+}
+
 // TestMapError_GenericErrorIsInternalError: a plain error that matches no
 // sentinel must still map to 500 InternalError (no over-tagging).
 func TestMapError_GenericErrorIsInternalError(t *testing.T) {

@@ -131,7 +131,11 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		Bytes: bodyBytes,
 	})
 
-	contentMD5Hex := putObjectContentMD5Hex(c)
+	contentMD5Hex, md5Err := putObjectContentMD5Hex(c)
+	if md5Err != nil {
+		mapError(c, md5Err)
+		return
+	}
 	result, putErr := s.putObjectWithUserMetadataAndMD5(ctx, bucket, key, body, sizeHint, contentType, putObjectACL(c), userMetadata, systemMetadata, contentMD5Hex)
 	if putErr != nil {
 		mapError(c, putErr)

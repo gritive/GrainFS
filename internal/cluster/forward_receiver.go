@@ -319,6 +319,16 @@ func contextForForwardedGroup(ctx context.Context, dg *DataGroup) context.Contex
 	})
 }
 
+// aclPtr maps a wire ACL bitmask to *uint8: a 0 wire value means absent
+// (private default) → nil, matching a no-ACL local PUT; a non-zero value →
+// &v so the local PUT path persists it.
+func aclPtr(v uint8) *uint8 {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
 func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
@@ -341,6 +351,7 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
 		UserMetadata:   decodePutObjectUserMetadata(pa),
 		ContentMD5Hex:  string(pa.ContentMd5Hex()),
+		ACL:            aclPtr(pa.Acl()),
 	})
 	fields := PutTraceStageFields{Bytes: int64(len(pa.BodyBytes()))}
 	if err != nil {
@@ -374,6 +385,7 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
 		UserMetadata:   decodePutObjectUserMetadata(pa),
 		ContentMD5Hex:  string(pa.ContentMd5Hex()),
+		ACL:            aclPtr(pa.Acl()),
 	})
 	fields := PutTraceStageFields{}
 	if err != nil {

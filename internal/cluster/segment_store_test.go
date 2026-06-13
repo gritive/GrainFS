@@ -239,7 +239,7 @@ func putChunkedTestObject(t *testing.T) (*DistributedBackend, string, string, []
 	require.NoError(t, b.CreateBucket(context.Background(), bucket))
 	_, err := b.putObjectChunked(context.Background(),
 		bucket, key, "v1", sp, "application/octet-stream",
-		nil, "", 0, false, "", nil, nil, nil)
+		nil, "", 0, 0, false, "", nil, nil, nil)
 	require.NoError(t, err)
 
 	return b, bucket, key, body

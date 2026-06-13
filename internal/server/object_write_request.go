@@ -12,22 +12,24 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // putObjectContentMD5Hex decodes the client-supplied Content-MD5 header
-// (base64-encoded per RFC 1864) to hex so the actor PUT pipeline can use
-// it as the object ETag without recomputing MD5. Returns "" if the
-// header is absent or malformed; the pipeline falls back to recompute.
-func putObjectContentMD5Hex(c *app.RequestContext) string {
+// (base64-encoded per RFC 1864) to hex so the PUT path can validate it against
+// the body. Returns ("", nil) when the header is absent. Returns
+// storage.ErrInvalidDigest when the header is present but not a valid 16-byte
+// base64 digest (S3 400 InvalidDigest), so the handler rejects before the PUT.
+func putObjectContentMD5Hex(c *app.RequestContext) (string, error) {
 	raw := string(c.GetHeader("Content-MD5"))
 	if raw == "" {
-		return ""
+		return "", nil
 	}
 	decoded, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil || len(decoded) != 16 {
-		return ""
+		return "", fmt.Errorf("malformed Content-MD5 %q: %w", raw, storage.ErrInvalidDigest)
 	}
-	return hex.EncodeToString(decoded)
+	return hex.EncodeToString(decoded), nil
 }
 
 const putObjectStreamingThresholdBytes = 8 << 20

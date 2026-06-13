@@ -218,7 +218,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 			if cleanupSpool {
 				defer sp.Cleanup()
 			}
-			obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, manifest.Parts, meta.Tags, uploadID)
+			obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, 0, false, "", nil, manifest.Parts, meta.Tags, uploadID)
 		}
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")

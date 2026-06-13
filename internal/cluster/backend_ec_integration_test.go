@@ -189,6 +189,7 @@ var _ = Describe("Backend EC object integration", func() {
 				"application/octet-stream",
 				nil,
 				"",
+				0,
 				1,
 				true,
 				"",

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -129,7 +130,7 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 
 	rcv := NewForwardReceiver(mgr)
 
-	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil, "")
+	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil, "", 0)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -153,7 +154,7 @@ func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	um := map[string]string{"x-amz-meta-team": "storage", "x-amz-meta-env": "prod"}
-	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um, "")
+	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um, "", 0)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -167,6 +168,23 @@ func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
 	require.Equal(t, "prod", head.UserMetadata["x-amz-meta-env"])
 }
 
+func TestForwardReceiver_HandlePutObject_PersistsACL(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+	acl := uint8(s3auth.ACLPublicRead)
+	args := buildPutObjectArgsWithSSE("bucket", "acl-key", "text/plain", []byte("hi"), "", nil, "", acl)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply, _ := rcv.Handle(payload)
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
+	head, err := gb.HeadObject(context.Background(), "bucket", "acl-key")
+	require.NoError(t, err)
+	require.Equal(t, acl, head.ACL)
+}
+
 func TestForwardReceiver_HandlePutObject_RejectsBadContentMD5(t *testing.T) {
 	// A forwarded PUT with a wrong Content-MD5 must be rejected the SAME way a
 	// direct PUT is: the reply round-trips to storage.ErrContentMD5Mismatch (the
@@ -177,7 +195,7 @@ func TestForwardReceiver_HandlePutObject_RejectsBadContentMD5(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	// body "hello" but a deliberately wrong Content-MD5
-	args := buildPutObjectArgsWithSSE("bucket", "bad-md5", "text/plain", []byte("hello"), "", nil, "deadbeefdeadbeefdeadbeefdeadbeef")
+	args := buildPutObjectArgsWithSSE("bucket", "bad-md5", "text/plain", []byte("hello"), "", nil, "deadbeefdeadbeefdeadbeefdeadbeef", 0)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -192,7 +210,7 @@ func TestForwardReceiver_HandlePutObject_GoodContentMD5OK(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	// md5("hello") = 5d41402abc4b2a76b9719d911017c592
-	args := buildPutObjectArgsWithSSE("bucket", "good-md5", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592")
+	args := buildPutObjectArgsWithSSE("bucket", "good-md5", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
