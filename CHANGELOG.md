@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.571.0] - 2026-06-13
+
+### Fixed
+- A cluster `PutObject` carrying user metadata (`x-amz-meta-*`) now succeeds on
+  any node. Previously, when such a PUT landed on a node that had to forward it
+  to a voter, the coordinator rejected it with `UnsupportedOperationError` (501)
+  because the forward wire format did not carry user metadata — the identical
+  request succeeded on a voter but failed on a non-voter. The forward
+  `PutObjectArgs` FlatBuffers message now carries a `user_metadata:[Tag]` field
+  (wire-compatible append; old peers read it as empty), both forward receive
+  paths (buffered and streaming) restore it onto the `PutObjectRequest`, and the
+  coordinator's reject-on-metadata guard is removed. ACL is intentionally not
+  forwarded: a local cluster PUT ignores `req.ACL` today (it is only honored via
+  `SetObjectACL`), so a forwarded PUT now drops `x-amz-acl` exactly as a local
+  one does — result-identical. True ACL persistence and forwarded `Content-MD5`
+  (BadDigest) validation are tracked as separate follow-ups in `TODOS.md`.
+
+### Removed
+- Deleted the unused `LocalExecution.ResolveObjectPlacementRead` method (no
+  production caller).
+
 ## [0.0.570.0] - 2026-06-13
 
 ### Changed
