@@ -847,6 +847,8 @@ func parseReplyStatus(reply []byte) error {
 		return ErrNoReachablePeer
 	case raftpb.ForwardStatusNotVoter:
 		return ErrUnknownGroup
+	case raftpb.ForwardStatusBadDigest:
+		return storage.ErrContentMD5Mismatch
 	default:
 		return errInternalReply
 	}
