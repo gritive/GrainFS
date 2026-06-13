@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.572.0] - 2026-06-13
+
+### Changed
+- Cluster object PUTs now take a **single write path**. The streaming-EC "put
+  pipeline" (taken by direct-to-voter PUTs when a size hint was present) has
+  been removed; every PUT — direct or forwarded — now goes through the spool EC
+  writer, so a PUT has the same effect and the same commit semantics on any
+  node. Commit semantics unify to **strict all-shards-durable** (every K+M shard
+  must be written before the PUT is acknowledged): a direct PUT now matches what
+  a forwarded PUT already did, guaranteeing full redundancy at ack time. Under a
+  degraded cluster (a shard peer down) a PUT now fails until the peer recovers,
+  rather than acking with parity written best-effort. Normal-cluster throughput
+  is unaffected (streaming and spool measured equivalent in the put-streaming-EC
+  benchmarks). Objects already written with the interleaved stripe layout remain
+  fully readable — the de-interleave read path is unchanged; new objects use the
+  contiguous (non-interleaved) layout.
+
+### Fixed
+- `Content-MD5` is now validated on the single cluster PUT path on every node. A
+  PUT whose body does not match the supplied `Content-MD5` returns 400
+  `BadDigest` whether it lands on a voter or is forwarded to one (forwarded PUTs
+  carry `content_md5_hex` over the wire and a mismatch round-trips as
+  `BadDigest`, not a generic 500). Previously a forwarded PUT skipped the check
+  entirely and a direct mismatch surfaced as a 500.
+
+### Removed
+- Deleted the `internal/cluster/putpipeline` package and its boot wiring,
+  including the experimental `GRAINFS_PUT_MULTINODE_STREAM` opt-out (the
+  streaming-EC write path it gated no longer exists).
+
 ## [0.0.571.0] - 2026-06-13
 
 ### Fixed
