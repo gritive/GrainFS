@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -402,6 +403,11 @@ func runChunkedPutWithParts(
 	// commitCompleteMultipartObjectWriteResult in object_put.go for the rationale.
 	var commitErr error
 	if completeUploadID != "" {
+		// Authoritative commit: atomic {write object meta to FSM, delete the
+		// manifest} via data_raft (applyCompleteMultipart). That atomicity
+		// prevents a manifest leak / upload-ID reuse, so it stays the durable
+		// commit and drives the cleanup defer below — on failure the manifest is
+		// intact and the client can retry CompleteMultipartUpload.
 		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
 			Bucket:           bucket,
 			Key:              key,
@@ -419,6 +425,34 @@ func runChunkedPutWithParts(
 			Segments:         segments,
 			Tags:             tags,
 		})
+		if commitErr == nil {
+			// LIST-visibility mirror into quorum-meta (Phase 4 index-free LIST
+			// scans it). Best-effort: the object is already durably committed
+			// above, so a mirror failure must NOT fail the op or trip the cleanup
+			// defer — only LIST visibility lags until a repair re-derives it.
+			if perr := csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
+				Bucket:           bucket,
+				Key:              key,
+				Size:             obj.Size,
+				ETag:             obj.ETag,
+				VersionID:        versionID,
+				ContentType:      contentType,
+				ModTime:          commitModTime,
+				UserMetadata:     userMetadata,
+				SSEAlgorithm:     sseAlgorithm,
+				ACL:              csb.acl,
+				Parts:            partsMeta,
+				NodeIDs:          csb.placements[0].NodeIDs,
+				ECData:           uint8(csb.placements[0].Config.DataShards),
+				ECParity:         uint8(csb.placements[0].Config.ParityShards),
+				PlacementGroupID: csb.placements[0].PlacementGroupID,
+				Segments:         segments,
+				Tags:             tags,
+			}); perr != nil {
+				log.Warn().Err(perr).Str("bucket", bucket).Str("key", key).Str("upload_id", completeUploadID).
+					Msg("chunked multipart complete: quorum-meta mirror failed (object committed via raft; LIST visibility deferred until repair)")
+			}
+		}
 	} else {
 		// Phase 3: commit via per-node quorum meta write (bypasses data_raft).
 		commitErr = csb.writeQuorumMeta(ctx, PutObjectMetaCmd{

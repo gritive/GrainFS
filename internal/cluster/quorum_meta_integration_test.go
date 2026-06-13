@@ -355,17 +355,20 @@ func TestScanQuorumMetaBucket(t *testing.T) {
 	require.Equal(t, "keep.bin", keep[0].Key)
 }
 
-// TestMultipartComplete_BadgerDBFallback proves the Phase 3 raft/quorum boundary:
-// multipart-completed objects are committed via data_raft (applyCompleteMultipart),
-// so their quorum meta file is absent. headObjectMeta must still serve them by falling
-// back to BadgerDB.
+// TestMultipartComplete_WritesQuorumMeta proves the multipart-LIST fix: a
+// completed multipart object is committed to quorum-meta (the same commit point
+// as a regular PUT), so its quorum meta file exists and HeadObject serves it
+// from quorum-meta — matching a regular PUT. A best-effort group-raft FSM copy
+// is also written, but quorum-meta is the authoritative LIST/HEAD source.
 //
-// RED without the BadgerDB fallback in headObjectMeta: HeadObject returns ErrObjectNotFound.
-// GREEN with fallback: HeadObject returns the object committed by raft.
+// RED before the fix: multipart complete proposed to group-raft FSM only, the
+// quorum meta file was absent, and Phase 4 index-free LIST (which scans
+// quorum-meta) omitted the object.
 //
-// Neuter test: if the BadgerDB fallback block is removed from headObjectMeta, this test
-// is RED (storage.ErrObjectNotFound) for multipart-completed objects.
-func TestMultipartComplete_BadgerDBFallback(t *testing.T) {
+// Neuter test: if writeQuorumMeta is removed from
+// commitCompleteMultipartObjectWriteResult, this test is RED (quorum meta file
+// absent).
+func TestMultipartComplete_WritesQuorumMeta(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
@@ -386,14 +389,62 @@ func TestMultipartComplete_BadgerDBFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.ETag)
 
-	// Quorum meta must NOT exist: multipart complete is raft-only (Phase 3 boundary).
+	// Quorum meta MUST exist: multipart complete commits to quorum-meta like a
+	// regular PUT, so Phase 4 index-free LIST can enumerate it.
 	qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "multi.bin")
 	_, statErr := os.Stat(qmetaPath)
-	require.True(t, os.IsNotExist(statErr), "quorum meta file must not exist for multipart-completed object: %s", qmetaPath)
+	require.NoError(t, statErr, "quorum meta file must exist for multipart-completed object: %s", qmetaPath)
 
-	// HeadObject must succeed via BadgerDB fallback (quorum meta is absent).
+	// HeadObject must succeed (served from quorum-meta).
 	head, err := b.HeadObject(ctx, "bucket", "multi.bin")
-	require.NoError(t, err, "headObjectMeta must fall back to BadgerDB for multipart-completed objects")
+	require.NoError(t, err, "HeadObject must serve multipart-completed object from quorum-meta")
+	require.Equal(t, obj.ETag, head.ETag)
+	require.Equal(t, int64(len(payload)), head.Size)
+
+	// And it must be enumerable by LIST (the regression this fix targets).
+	objs, err := b.ListObjects(ctx, "bucket", "", 1000)
+	require.NoError(t, err)
+	keys := make([]string, 0, len(objs))
+	for _, o := range objs {
+		keys = append(keys, o.Key)
+	}
+	require.Contains(t, keys, "multi.bin", "completed multipart object must be enumerable by LIST")
+}
+
+// TestMultipartComplete_QuorumMirrorMissing_BadgerDBFallback guards the
+// degraded path the multipart-LIST fix relies on: the group-raft propose is the
+// authoritative commit (object meta in FSM + manifest deleted atomically), and
+// the quorum-meta write is a best-effort LIST-visibility mirror. If that mirror
+// is absent (write failed, or a repair has not yet run), HeadObject must still
+// serve the object by falling back to BadgerDB — the object is durably
+// committed and must remain retrievable.
+//
+// We simulate the missing mirror by deleting the quorum-meta file after a
+// normal complete. Neuter test: if the BadgerDB fallback is removed from
+// headObjectMeta, this test is RED (storage.ErrObjectNotFound).
+func TestMultipartComplete_QuorumMirrorMissing_BadgerDBFallback(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	mpu, err := b.CreateMultipartUpload(ctx, "bucket", "multi.bin", "application/octet-stream")
+	require.NoError(t, err)
+	payload := bytes.Repeat([]byte("mp"), 512)
+	part, err := b.UploadPart(ctx, "bucket", "multi.bin", mpu.UploadID, 1, bytes.NewReader(payload), "")
+	require.NoError(t, err)
+	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "multi.bin", mpu.UploadID, []storage.Part{{
+		PartNumber: part.PartNumber,
+		ETag:       part.ETag,
+		Size:       part.Size,
+	}})
+	require.NoError(t, err)
+
+	// Drop the quorum-meta mirror, leaving only the authoritative FSM commit.
+	qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "multi.bin")
+	require.NoError(t, os.Remove(qmetaPath))
+
+	head, err := b.HeadObject(ctx, "bucket", "multi.bin")
+	require.NoError(t, err, "HeadObject must fall back to BadgerDB when the quorum-meta mirror is absent")
 	require.Equal(t, obj.ETag, head.ETag)
 	require.Equal(t, int64(len(payload)), head.Size)
 }

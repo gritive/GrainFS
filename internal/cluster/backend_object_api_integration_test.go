@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -55,6 +57,11 @@ var _ = Describe("Backend object API integration", func() {
 			}
 			return nil
 		})).To(Succeed())
+		// The multipart fix also commits to quorum-meta; remove that file too so
+		// the "metadata is no longer stored" premise holds and HeadObject falls
+		// through to the prepared EC placement read below.
+		qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "mp.bin")
+		Expect(os.Remove(qmetaPath)).To(Succeed())
 		_, err = b.HeadObject(ctx, "bucket", "mp.bin")
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 

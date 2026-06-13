@@ -10,6 +10,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -706,14 +708,21 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	}, nil
 }
 
-// commitCompleteMultipartObjectWriteResult intentionally proposes on the *group*
-// raft (b.node — data plane), not on quorum meta and not on the meta-raft control
-// plane: applyCompleteMultipart atomically writes object meta AND deletes the
-// multipart manifest key in a single BadgerDB txn. Splitting that atomicity (quorum
-// write + separate manifest delete) would open a window where the manifest leaks or
-// the object disappears, so the manifest lives on group-raft rather than quorum
-// meta. This is off the PUT/GET/HEAD hot path (CompleteMultipartUpload is its own S3
-// API); headObjectMeta falls back to BadgerDB when quorum meta is absent. Phase 3 경계.
+// commitCompleteMultipartObjectWriteResult commits the completed object via the
+// *group* raft (b.node — data plane) FIRST: applyCompleteMultipart atomically
+// writes the object meta to the FSM AND deletes the multipart manifest key in a
+// single BadgerDB txn. That atomicity is load-bearing — it prevents a manifest
+// leak / upload-ID reuse (re-completing the same upload would mint a duplicate
+// version), so the raft propose stays the authoritative durable commit. On
+// failure nothing is committed and the manifest is intact, so clean up the
+// shards and fail; the client can safely retry CompleteMultipartUpload.
+//
+// After the durable commit, the object is mirrored into quorum-meta so Phase 4
+// index-free LIST can enumerate it (the same source as a regular PUT). A failure
+// of that mirror must NOT delete shards or fail the op — the object is already
+// committed and served by GET/HEAD via the BadgerDB FSM fallback; only LIST
+// visibility lags until a repair re-derives quorum-meta. This is off the
+// PUT/GET/HEAD hot path (CompleteMultipartUpload is its own S3 API). Phase 3/4 경계.
 func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	ctx context.Context,
 	uploadID string,
@@ -726,6 +735,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	if plan.PreserveModTime {
 		modTime = plan.ModTime
 	}
+	// Authoritative commit: atomic {write object meta to FSM, delete manifest}.
 	if merr := b.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
 		Bucket:           plan.Bucket,
 		Key:              plan.Key,
@@ -745,6 +755,29 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
+	}
+	// LIST-visibility mirror into quorum-meta (best-effort; the object is already
+	// durably committed above). Must NOT delete shards or fail the op on error.
+	if merr := b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		Bucket:           plan.Bucket,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		ModTime:          modTime,
+		VersionID:        plan.VersionID,
+		PlacementGroupID: plan.PlacementGroupID,
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          result.Placement,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
+		SSEAlgorithm:     plan.SSEAlgorithm,
+		ACL:              plan.ACL,
+		Parts:            result.Parts,
+		Tags:             result.Tags,
+	}); merr != nil {
+		log.Warn().Err(merr).Str("bucket", plan.Bucket).Str("key", plan.Key).Str("upload_id", uploadID).
+			Msg("multipart complete: quorum-meta mirror failed (object committed via raft; LIST visibility deferred until repair)")
 	}
 	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage(metricPath, "propose_meta", stageStart)
