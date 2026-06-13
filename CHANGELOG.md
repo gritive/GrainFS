@@ -10,6 +10,13 @@
   `Content-MD5` header (not base64, or not a 16-byte digest) now returns 400
   `InvalidDigest` instead of being silently ignored; the header is rejected at
   the S3 handler before the PUT runs.
+- A cluster `PutObject` carrying `x-amz-acl` now persists the ACL in the
+  object's metadata on every node (direct or forwarded), so `HeadObject` and
+  `GetObjectACL` reflect it. Previously the PUT path ignored `req.ACL` entirely
+  (only `SetObjectACL` stored an ACL), so a PUT-with-ACL silently dropped it.
+  The ACL bitmask is threaded into the `PutObjectMetaCmd` on every PUT write
+  path and carried on the forward wire, matching how SSE/user-metadata/tags are
+  already persisted atomically on PUT.
 
 ## [0.0.572.0] - 2026-06-13
 
