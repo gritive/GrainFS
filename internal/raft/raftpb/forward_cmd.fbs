@@ -81,6 +81,9 @@ table PutObjectArgs {
   // on the spool write path, identical to a direct-to-voter PUT. Appended for
   // wire compatibility; old peers read it as empty.
   content_md5_hex:string;
+  // S3 single write-path: x-amz-acl bitmask (s3auth.ACLGrant). 0 = private
+  // (default). Appended for wire compatibility; old peers read it as 0.
+  acl:ubyte;
 }
 
 table GetObjectArgs {

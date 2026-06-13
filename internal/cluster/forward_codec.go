@@ -26,7 +26,7 @@ var errInternalReply = errors.New("forward: internal reply error")
 
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -66,6 +66,9 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	}
 	if contentMD5Hex != "" {
 		raftpb.PutObjectArgsAddContentMd5Hex(b, md5)
+	}
+	if acl != 0 {
+		raftpb.PutObjectArgsAddAcl(b, acl)
 	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
