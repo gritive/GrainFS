@@ -2,24 +2,22 @@
 
 ## Follow-ups
 
-- **[P2] Single-node packblob PUT skips `Content-MD5` (BadDigest) validation.**
-  The small-object packed-blob fast path (`internal/storage/packblob/packed_backend.go`,
-  the non-versioned branch around the `blobStore.Append` + `md5.Sum(data)` →
-  `etag`) computes the body MD5 but never compares it to `req.ContentMD5Hex`, so
-  a single-node PUT with a wrong `Content-MD5` commits instead of returning 400
-  `BadDigest`. The cluster EC path now validates uniformly (this PR); packblob
-  is the remaining gap. Pre-existing and single-node-only (cluster mode keeps EC
-  shard storage). Fix: validate `hex(md5(data)) == req.ContentMD5Hex` **before**
-  `blobStore.Append` (validating after Append would orphan a blob entry); return
-  `storage.ErrContentMD5Mismatch`. Versioned-bucket PUTs already delegate to the
-  inner backend, so only the small non-versioned pack path needs the guard.
+- **[P3] `UploadPart` ignores `Content-MD5` entirely.** Multipart part PUTs route
+  through `uploadPart` → `uploadMultipartPart` before the normal PUT parsing, and
+  the multipart storage API (`operations_multipart.go`) has no per-part digest
+  parameter — so a malformed or mismatched `Content-MD5` on an `UploadPart` is
+  silently accepted. Closing this needs a digest parameter threaded through the
+  multipart upload-part storage API + handler. Pre-existing; surfaced by the
+  Content-MD5-completeness plan-gate (codex). Out of scope for object PUT.
 
-- **[P3] Malformed `Content-MD5` header is silently ignored (should be `InvalidDigest`).**
-  `internal/server/object_write_request.go` (`putObjectContentMD5Hex`) returns
-  `""` on a non-base64 or non-16-byte `Content-MD5`, and every validator no-ops
-  on empty — so `Content-MD5: not-base64` commits instead of returning 400
-  `InvalidDigest` per the S3 contract. Server-wide pre-existing. Fix: distinguish
-  "absent" from "present-but-malformed"; map the latter to `InvalidDigest`.
+- **[P3] packblob large-object PUT can drop `ContentMD5Hex` on the direct storage API.**
+  `PackedBackend.PutObjectWithRequest` passes large objects to the inner backend
+  via `putInnerWithRequest`, which falls back to `PutObjectWithUserMetadata`
+  (dropping `ContentMD5Hex`) when `ACL`/`SSE`/`SizeHint` are all empty. The S3
+  HTTP handler always sets `SizeHint`, so the real S3 path is covered; only a
+  direct `PutObjectWithRequest` large write without a `SizeHint` loses the digest.
+  Fix: include `req.ContentMD5Hex != ""` in that helper's full-request
+  preservation condition. Pre-existing; surfaced by the plan-gate.
 
 - **[P3] Cluster PUT-with-`x-amz-acl` does not persist the ACL on any node.**
   `ClusterCoordinator.PutObjectWithRequest` (and the forward path) ignore
