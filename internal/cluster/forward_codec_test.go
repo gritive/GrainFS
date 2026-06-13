@@ -207,5 +207,5 @@ func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
 // explicitly (even empty string) per the SSE preservation work in #504, so the
 // no-SSE wrapper is unused outside tests.
 func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "")
+	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil)
 }

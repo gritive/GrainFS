@@ -339,6 +339,7 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 		Body:           bytes.NewReader(pa.BodyBytes()),
 		ContentType:    string(pa.ContentType()),
 		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
+		UserMetadata:   decodePutObjectUserMetadata(pa),
 	})
 	fields := PutTraceStageFields{Bytes: int64(len(pa.BodyBytes()))}
 	if err != nil {
@@ -370,6 +371,7 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 		Body:           body,
 		ContentType:    string(pa.ContentType()),
 		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
+		UserMetadata:   decodePutObjectUserMetadata(pa),
 	})
 	fields := PutTraceStageFields{}
 	if err != nil {

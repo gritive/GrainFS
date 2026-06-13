@@ -1140,8 +1140,7 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 }
 
 func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
-	bucket, key, r, contentType := req.Bucket, req.Key, req.Body, req.ContentType
-	userMetadata := req.UserMetadata
+	bucket, key, r := req.Bucket, req.Key, req.Body
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -1167,19 +1166,15 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 			ForwardMode: PutTraceForwardNone,
 		})
 		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
-		var obj *storage.Object
-		if req.SystemMetadata.SSEAlgorithm != "" || req.ACL != nil || req.SizeHint != nil {
-			obj, err = gb.PutObjectWithRequest(ctx, req)
-		} else {
-			obj, err = gb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
-		}
+		// Single path: every local PUT goes through PutObjectWithRequest (the
+		// other PutObject* methods are thin wrappers around it), and the forward
+		// path below now carries the same user metadata, so a PUT has the same
+		// effect on a voter or a non-voter node.
+		obj, err := gb.PutObjectWithRequest(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		return obj, nil
-	}
-	if len(userMetadata) > 0 || req.ACL != nil {
-		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
 	}
 	return c.forwardRuntime().putObject(ctx, target, group, req, routeStart)
 }
