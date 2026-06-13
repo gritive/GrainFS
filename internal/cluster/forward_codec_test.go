@@ -207,5 +207,11 @@ func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
 // explicitly (even empty string) per the SSE preservation work in #504, so the
 // no-SSE wrapper is unused outside tests.
 func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil)
+	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil, "")
+}
+
+func TestBuildPutObjectArgs_RoundtripContentMD5(t *testing.T) {
+	args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592")
+	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", string(pa.ContentMd5Hex()))
 }

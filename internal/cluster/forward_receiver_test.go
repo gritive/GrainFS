@@ -129,7 +129,7 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 
 	rcv := NewForwardReceiver(mgr)
 
-	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil)
+	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil, "")
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -153,7 +153,7 @@ func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	um := map[string]string{"x-amz-meta-team": "storage", "x-amz-meta-env": "prod"}
-	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um)
+	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um, "")
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 

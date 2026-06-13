@@ -26,12 +26,13 @@ var errInternalReply = errors.New("forward: internal reply error")
 
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
 	sse := b.CreateString(sseAlgorithm)
+	md5 := b.CreateString(contentMD5Hex)
 	bodyOff := b.CreateByteVector(body)
 	// user_metadata as a [Tag] vector — children created BEFORE the table start
 	// (FlatBuffers rule), same pattern as buildSetObjectTagsArgs.
@@ -62,6 +63,9 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	}
 	if umVec != 0 {
 		raftpb.PutObjectArgsAddUserMetadata(b, umVec)
+	}
+	if contentMD5Hex != "" {
+		raftpb.PutObjectArgsAddContentMd5Hex(b, md5)
 	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
