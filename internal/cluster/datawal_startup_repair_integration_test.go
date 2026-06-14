@@ -90,10 +90,12 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 // startup data WAL repair pipeline reconstructs a SEGMENT EC shard (shardKey
 // "<key>/segments/<blobID>"), not just an object-version shard. A chunked
 // PutObject (object > chunk threshold, ShardGroupSource wired) routes through
-// putObjectChunked, which writes per-segment EC shards and emits one
-// metadata-only OpShardPut per shard (shard payload >= the 1 MiB WAL inline
-// threshold). We remove one segment shard, replay the WAL, and drive the exact
-// resolve→repair flow the serveruntime startup worker runs.
+// putObjectChunked, which writes per-segment EC shards on disk. As of S1
+// (v0.0.578.0+) redundant large shards no longer emit a metadata-only OpShardPut
+// record, so the test SEEDS the WAL repair manifest directly for the target
+// segment shard, removes it, replays the WAL, and drives the exact
+// resolve→repair flow the serveruntime startup worker runs on a seeded/legacy
+// record.
 func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.T) {
 	shardDir := t.TempDir()
 	// WAL must live where RecoverDataWAL replays from: filepath.Dir(dataDirs[0])

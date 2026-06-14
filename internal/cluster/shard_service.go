@@ -1104,10 +1104,11 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardTargetClass: "local",
 	})
 
-	// EncSync owns shard-file durability only during WAL replay (requireFsync),
-	// when the WAL cannot be re-appended. On the normal write path the WAL —
-	// inline payload for small shards, metadata-only record for large ones —
-	// already covers durability via its Flush, so we skip this fsync.
+	// EncSync fsyncs the shard file only when requireFsync is set: during WAL
+	// replay (the WAL cannot be re-appended) and for large no-redundancy shards
+	// (no parity to reconstruct from). Otherwise it is skipped: small shards have
+	// WAL-inline durability (the WAL Flush), and large redundant shards rely on EC
+	// reconstruction + the scrubber (S1 — no WAL record, no fsync).
 	encSyncStart := time.Now()
 	if requireFsync {
 		if err := directio.Sync(f); err != nil {
@@ -1222,11 +1223,13 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 
 // walPayloadInlineThreshold is the size at which the data WAL stops inlining
 // the shard payload. Below the threshold the WAL stores the full encoded
-// payload and provides durability for the subsequent shard file write (single
-// fsync amortizes well for small random writes that would otherwise dominate
-// PUT latency). At or above the threshold the WAL is bypassed entirely and the
-// shard writer self-syncs — large objects are naturally sequential, so paying
-// the 2x write tax just to fold them through the WAL is counter-productive.
+// payload and provides durability for the subsequent shard file write (a single
+// group-commit fsync amortizes well for small random writes that would
+// otherwise dominate PUT latency). At or above the threshold the payload is
+// never inlined; durability then depends on redundancy (see appendShardDataWAL):
+// a redundant shard (ParityShards>0) skips the WAL entirely and relies on EC +
+// the scrubber (S1), while a no-redundancy shard keeps a metadata-only record
+// and is fsynced directly.
 const walPayloadInlineThreshold = 1 << 20
 
 // appendShardDataWAL records shard durability metadata in the data WAL before
