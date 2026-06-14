@@ -1229,22 +1229,26 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 // the 2x write tax just to fold them through the WAL is counter-productive.
 const walPayloadInlineThreshold = 1 << 20
 
-// appendShardDataWAL logs an OpShardPut record for the encoded shard payload
-// before any file mutation. WAL is mandatory on the write path: a nil WAL is
-// rejected with an error rather than falling back to a per-shard fsync.
-// Returns requireFsync = false in all normal cases (small inline-payload
-// records, or large metadata-only records), so callers skip the per-shard
-// fsync — durability comes from the WAL's single Flush. Returns
-// requireFsync = true only during WAL replay, when the WAL cannot be
-// re-appended and the caller MUST fsync the shard file itself.
+// appendShardDataWAL records shard durability metadata in the data WAL before
+// any file mutation, by shard class:
 //
-// For small payloads (< walPayloadInlineThreshold) the WAL stores the full
-// encoded shard so RecoverDataWAL can rebuild a missing file byte-for-byte.
-// For large payloads the WAL stores ONLY the metadata (no payload) to avoid
-// 2x disk write amplification. Recovery for metadata-only records verifies
-// the final shard file exists with the expected size; if it's gone (e.g.
-// page cache loss on crash before the rename hit disk) EC reconstruction
-// rebuilds it from surviving peers at read time.
+//   - Small payload (< walPayloadInlineThreshold): an inline-payload OpShardPut
+//     record. The WAL Flush IS the durability — RecoverDataWAL rebuilds a missing
+//     file byte-for-byte. Returns requireFsync=false (the shard file is not
+//     fsynced; the WAL covers it).
+//   - Large payload WITH EC redundancy (ParityShards>0, i.e. !noRedundancy):
+//     S1 skips the WAL entirely — no record, no Flush. The record was only an
+//     eager-startup-repair manifest; EC reconstruction + the background scrubber
+//     (S0) provide durability and repair (lazily, at read time or scrub sweep).
+//     Returns requireFsync=false. nil noRedundancy counts as redundant.
+//   - Large payload with NO redundancy (ParityShards==0): a metadata-only
+//     OpShardPut record + Flush, then returns requireFsync=true so the caller
+//     fsyncs the shard file directly (there is no parity to reconstruct from).
+//     (S2 will replace this with a direct file+dir fsync and drop the record.)
+//
+// WAL is mandatory where it is used: a nil WAL is rejected with an error.
+// During WAL replay it returns requireFsync=true (the WAL cannot be re-appended,
+// so the caller MUST fsync the shard file itself).
 func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) (requireFsync bool, err error) {
 	if s.dataWAL == nil {
 		return false, fmt.Errorf("appendShardDataWAL: shard write requires a data WAL (WAL is mandatory)")
@@ -1252,6 +1256,20 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 	if s.replayingDataWAL.Load() {
 		return true, nil
 	}
+	inlined := len(payload) < walPayloadInlineThreshold
+
+	// S1: large shards WITH EC redundancy skip the WAL entirely. The metadata-only
+	// record was only an eager-startup-repair manifest; EC reconstruction plus the
+	// background scrubber (S0, which now covers regular-PUT objects) provide
+	// durability and repair. Removing the Append+Flush drops one WAL fsync per
+	// shard write on the dominant PUT path. A lost shard is rebuilt lazily at read
+	// time or by the scrubber sweep. nil noRedundancy == redundant (matches the
+	// pre-S1 requireFsync default below). The no-redundancy large case still needs
+	// the WAL record (no parity to reconstruct from) and is handled in S2.
+	if !inlined && (s.noRedundancy == nil || !s.noRedundancy()) {
+		return false, nil
+	}
+
 	rec := datawal.Record{
 		Op:     datawal.OpShardPut,
 		Bucket: bucket,
@@ -1259,22 +1277,20 @@ func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key strin
 		Target: strconv.Itoa(shardIdx),
 		Size:   int64(len(payload)),
 	}
-	inlined := len(payload) < walPayloadInlineThreshold
 	if inlined {
-		// Small payload: inline so replay can rebuild the file.
+		// Small payload: inline so replay can rebuild the file byte-for-byte.
 		rec.Payload = payload
 	}
-	// Large payload: rec.Payload stays nil — metadata-only record.
+	// Large + no-redundancy: metadata-only record (S2 replaces with direct fsync).
 	if _, err := s.dataWAL.Append(ctx, rec); err != nil {
 		return false, fmt.Errorf("data wal append shard: %w", err)
 	}
 	if err := s.dataWAL.Flush(); err != nil {
 		return false, fmt.Errorf("data wal flush shard: %w", err)
 	}
-	// A large (metadata-only) record relies on EC reconstruction to rebuild a
-	// lost shard file. With no redundancy (ParityShards==0, no peers) there is
-	// nothing to reconstruct from, so the shard file must be fsynced directly.
-	if !inlined && s.noRedundancy != nil && s.noRedundancy() {
+	// Large + no-redundancy: nothing to reconstruct from, so the shard file must
+	// be fsynced directly (this branch is only reached when noRedundancy is true).
+	if !inlined {
 		return true, nil
 	}
 	return false, nil
@@ -1291,6 +1307,14 @@ type ShardMetadataWALRecord struct {
 	Size     int64
 }
 
+// NOTE (S1, v0.0.578.0+): this function has no production callers (the put
+// pipeline that used it was removed). It is left behaviorally unchanged on
+// purpose. When revived, a redundant-EC caller must SKIP the WAL entirely
+// (see appendShardDataWAL's S1 skip) rather than rely on this batch — and the
+// `walCovered bool` return needs revisiting first, because `false` currently
+// means "caller must fsync", which is the OPPOSITE of the EC-covered/no-fsync
+// semantics a redundant caller wants.
+//
 // AppendShardMetadataBatch records N shard metadata-only entries in the
 // data WAL with exactly one Flush. The put actor pipeline calls this
 // after every shard has hit disk (rename done) and before signalling
