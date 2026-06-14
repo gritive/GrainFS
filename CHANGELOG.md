@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.578.0] - 2026-06-15
+
+### Fixed
+- The EC background scrubber now proactively repairs ordinary (single-PUT)
+  objects. Its work-list source (`DistributedBackend.ScanObjects`) previously
+  walked only the group-raft FSM `lat:` index, which holds internal-bucket and
+  multipart-complete objects — but NOT regular single-PUT objects, which are
+  recorded in per-node quorum-meta and never proposed to the FSM. As a result
+  the scrubber never saw the bulk of user data and never proactively repaired a
+  missing/corrupt shard for it (only read-time EC reconstruction and
+  process-restart recovery covered those objects). `ScanObjects` now also merges
+  quorum-meta entries, deduped by key against the `lat:` walk with the FSM
+  authoritative (so a stale-live quorum-meta file for a deleted key is
+  suppressed); tombstones and non-EC entries are skipped. This is repair-only —
+  it adds no deletion path and only enlarges the scrubber's orphan known-set
+  (protective, never deletion-expanding). It is also the prerequisite repair
+  backstop for the planned data-WAL removal.
+
 ## [0.0.577.0] - 2026-06-14
 
 ### Performance
