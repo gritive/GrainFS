@@ -43,14 +43,18 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 	shardKey := "obj/" + obj.VersionID
 	info, err := os.Stat(mustShardPath(svc, "b", shardKey, 0))
 	require.NoError(t, err)
-	// PutObject already wrote one metadata-only OpShardPut record for shard 0
-	// (>1MiB shard => not inlined). Append a second record for the same shard to
-	// also exercise the collector's dedup path, then remove the local shard so
-	// replay must classify it as a repair candidate.
-	_, err = dwal.Append(context.Background(), datawal.Record{
-		Op: datawal.OpShardPut, Bucket: "b", Key: shardKey, Target: "0", Size: info.Size(),
-	})
-	require.NoError(t, err)
+	// S1 (v0.0.578.0+): PutObject no longer logs a metadata-only OpShardPut for a
+	// redundant (1+1) large shard — EC + the scrubber (S0) cover repair. Seed the
+	// WAL repair manifest directly (twice, to exercise the collector's dedup
+	// path), then remove the local shard so replay classifies it as a repair
+	// candidate. This test now exercises the startup-repair path on
+	// externally-seeded records (e.g. a legacy WAL).
+	for i := 0; i < 2; i++ {
+		_, err = dwal.Append(context.Background(), datawal.Record{
+			Op: datawal.OpShardPut, Bucket: "b", Key: shardKey, Target: "0", Size: info.Size(),
+		})
+		require.NoError(t, err)
+	}
 	require.NoError(t, dwal.Flush())
 	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
 
@@ -86,10 +90,12 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingShard(t *testing.T) {
 // startup data WAL repair pipeline reconstructs a SEGMENT EC shard (shardKey
 // "<key>/segments/<blobID>"), not just an object-version shard. A chunked
 // PutObject (object > chunk threshold, ShardGroupSource wired) routes through
-// putObjectChunked, which writes per-segment EC shards and emits one
-// metadata-only OpShardPut per shard (shard payload >= the 1 MiB WAL inline
-// threshold). We remove one segment shard, replay the WAL, and drive the exact
-// resolve→repair flow the serveruntime startup worker runs.
+// putObjectChunked, which writes per-segment EC shards on disk. As of S1
+// (v0.0.578.0+) redundant large shards no longer emit a metadata-only OpShardPut
+// record, so the test SEEDS the WAL repair manifest directly for the target
+// segment shard, removes it, replays the WAL, and drives the exact
+// resolve→repair flow the serveruntime startup worker runs on a seeded/legacy
+// record.
 func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.T) {
 	shardDir := t.TempDir()
 	// WAL must live where RecoverDataWAL replays from: filepath.Dir(dataDirs[0])
@@ -130,12 +136,22 @@ func TestDataWALStartupRepair_DiscoversAndRepairsMissingSegmentShard(t *testing.
 
 	require.NoError(t, dwal.Flush())
 
-	// The chunked PUT EC-wrote per-segment shards on disk and logged a
-	// metadata-only OpShardPut for each. Discover a real segment shardKey from
-	// the written files, then remove its shard 0 so WAL replay classifies it as
-	// MISSING.
+	// The chunked PUT EC-wrote per-segment shards on disk. Discover a real segment
+	// shardKey from the written files.
 	segShardKey := firstSegmentShardKeyOnDisk(t, svc)
 	require.Contains(t, segShardKey, "/segments/", "must target the segment path, not object-version")
+	// S1 (v0.0.578.0+): the chunked PUT no longer logs metadata-only OpShardPut
+	// records for redundant segment shards (EC + scrubber cover repair). Seed the
+	// WAL repair manifest directly so replay classifies the removed shard as
+	// MISSING — this test exercises the startup-repair path on externally-seeded
+	// records.
+	segInfo, err := os.Stat(mustShardPath(svc, "b", segShardKey, 0))
+	require.NoError(t, err)
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op: datawal.OpShardPut, Bucket: "b", Key: segShardKey, Target: "0", Size: segInfo.Size(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
 	require.NoError(t, os.Remove(mustShardPath(svc, "b", segShardKey, 0)))
 
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
