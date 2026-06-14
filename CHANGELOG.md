@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.579.0] - 2026-06-15
+
+### Performance
+- Large EC shards with redundancy (`ParityShards>0`) no longer write a
+  metadata-only data-WAL record per shard write — one fewer WAL fsync on the
+  dominant PUT path. The record only served eager startup-repair detection; with
+  the background scrubber now covering regular-PUT objects (v0.0.578.0),
+  durability and repair for these shards come from EC reconstruction plus the
+  scrubber. On-disk shard durability is unchanged — redundant shards were never
+  fsynced before either (durability has always been EC). The only behavioral
+  change is repair detection: eager (restart WAL replay) becomes lazy (read-time
+  EC reconstruction plus the scrubber sweep). Small shards keep their
+  inline-payload WAL durability; large no-redundancy shards (`ParityShards==0`)
+  keep the metadata-only record and a direct fsync.
+
+### Operators
+- Single-node deployments that relied on a process restart to eagerly repair a
+  missing EC shard should consider a shorter `--scrub-interval` (default 24h):
+  with the large-shard WAL record gone, the background scrubber is now the
+  proactive repair trigger (a single node has no peer to reconstruct from at
+  restart).
+
 ## [0.0.578.0] - 2026-06-15
 
 ### Fixed
