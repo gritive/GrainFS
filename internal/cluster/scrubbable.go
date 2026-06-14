@@ -70,9 +70,16 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		defer close(ch)
 		rawLatPrefix := []byte("lat:" + bucket + "/")
 
+		// seen records every key the FSM lat: walk visits — INCLUDING tombstones
+		// (recorded before the tombstone skip below) — so the quorum-meta merge
+		// that follows treats the FSM as authoritative and skips any stale-live
+		// quorum-meta file for a deleted key.
+		seen := make(map[string]struct{})
+
 		_ = b.store.View(func(txn MetadataTxn) error {
 			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
 				key := string(raw[len(rawLatPrefix):])
+				seen[key] = struct{}{}
 
 				var versionID string
 				if err := item.Value(func(v []byte) error {
@@ -111,9 +118,60 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 				return nil
 			})
 		})
+
+		// S0: regular-PUT EC objects are written to quorum-meta only (never
+		// proposed to the FSM lat: index), so the lat: walk above misses them.
+		// Merge quorum-meta entries the scrubber must also repair, deduped by
+		// key against the FSM walk (FSM wins — including FSM tombstones, so a
+		// stale-live quorum-meta file for a deleted key is skipped). Repair-only:
+		// this adds no deletion path.
+		for _, rec := range b.quorumMetaScrubRecords(bucket, seen) {
+			ch <- rec
+		}
 	}()
 
 	return ch, nil
+}
+
+// quorumMetaScrubRecords returns scrubber.ObjectRecords for quorum-meta-stored
+// objects whose key is not already in seen (the FSM lat: walk, which wins).
+// Tombstones and non-EC entries are skipped — they have no EC shards to scrub.
+// Safe when the shard service is absent (returns nil). Repair-only: callers use
+// the records to verify/repair shards, never to delete.
+func (b *DistributedBackend) quorumMetaScrubRecords(bucket string, seen map[string]struct{}) []scrubber.ObjectRecord {
+	if b.shardSvc == nil {
+		return nil
+	}
+	cmds, err := b.shardSvc.ScanQuorumMetaBucket(bucket, "")
+	if err != nil {
+		return nil // best-effort: a quorum-meta read error must not abort the lat: scrub
+	}
+	var recs []scrubber.ObjectRecord
+	for _, cmd := range cmds {
+		if _, dup := seen[cmd.Key]; dup {
+			continue
+		}
+		if cmd.IsDeleteMarker || cmd.ETag == deleteMarkerETag {
+			continue // tombstone — no shards to scrub
+		}
+		if cmd.ECData == 0 {
+			continue // non-EC object — no EC shards
+		}
+		// LastModified: ObjectRecord documents this as Unix seconds for the
+		// lifecycle worker; the scrub/repair path consumes only
+		// bucket/key/version/ETag, so the unit of ModTime here cannot affect
+		// repair correctness.
+		recs = append(recs, scrubber.ObjectRecord{
+			Bucket:       cmd.Bucket,
+			Key:          cmd.Key,
+			VersionID:    cmd.VersionID,
+			DataShards:   int(cmd.ECData),
+			ParityShards: int(cmd.ECParity),
+			ETag:         cmd.ETag,
+			LastModified: cmd.ModTime,
+		})
+	}
+	return recs
 }
 
 // ObjectExists returns true if key resolves to a live (non-tombstone)
