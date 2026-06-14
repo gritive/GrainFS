@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.577.0] - 2026-06-14
+
+### Performance
+- The shard-file, quorum-meta, and shadow-meta durability fsyncs now honor the
+  `GRAINFS_FSYNC_MODE` policy instead of always calling `os.File.Sync()`. On
+  macOS `os.File.Sync()` issues `F_FULLFSYNC` (a full drive-cache→platter
+  barrier, ~10-20ms); these three sites bypassed the policy, so a PUT paid 2×
+  `F_FULLFSYNC` per object even in `fast` mode — making `GRAINFS_FSYNC_MODE=fast`
+  a no-op for the dominant fsyncs. Routing them through `directio.Sync` (the
+  same helper the data WAL already uses) makes `fast` issue a plain `fsync(2)`
+  and `off` skip the fsync, matching the documented reduced-durability contract.
+  Measured single-node macOS PUT (1MiB, conc 16, fast mode): **191 → 1017 obj/s
+  (5.3×)**; default `full` mode is unchanged (still `F_FULLFSYNC`, durability
+  preserved). On Linux this is a no-op (`fast` already equals `full` — there is
+  no `F_FULLFSYNC`). The win is a macOS-durability-matched comparison: against
+  single-node MinIO (no per-object `F_FULLFSYNC`), GrainFS single-node fast-mode
+  PUT goes from 0.14× to ~0.77×.
+
 ## [0.0.576.0] - 2026-06-14
 
 ### Fixed
