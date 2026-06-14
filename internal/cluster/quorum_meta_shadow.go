@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/storage/directio"
 )
 
 // quorumMetaShadowTimeout bounds the synchronous shadow so a hung placement
@@ -159,7 +161,7 @@ func (s *ShardService) writeShadowMetaLocal(bucket, key string, data []byte) err
 		_ = f.Close()
 		return fmt.Errorf("shadow meta write: %w", err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := directio.Sync(f); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("shadow meta fsync: %w", err)
 	}

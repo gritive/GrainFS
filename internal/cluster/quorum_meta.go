@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/directio"
 )
 
 // quorumMetaSubDir is the per-dataDir subdirectory where per-node quorum object
@@ -314,7 +315,7 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 		_ = tmp.Close()
 		return fmt.Errorf("quorum meta write: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := directio.Sync(tmp); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("quorum meta fsync: %w", err)
 	}

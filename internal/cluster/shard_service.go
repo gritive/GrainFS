@@ -1110,7 +1110,7 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 	// already covers durability via its Flush, so we skip this fsync.
 	encSyncStart := time.Now()
 	if requireFsync {
-		if err := f.Sync(); err != nil {
+		if err := directio.Sync(f); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
 				Bytes:            int64(len(payload)),
 				ShardIndex:       shardIdx,
@@ -1640,7 +1640,7 @@ func writeBuffered(tmp string, payload []byte, requireFsync bool) error {
 		return fmt.Errorf("write tmp shard: %w", err)
 	}
 	if requireFsync {
-		if err := f.Sync(); err != nil {
+		if err := directio.Sync(f); err != nil {
 			f.Close()
 			os.Remove(tmp)
 			return fmt.Errorf("fsync tmp shard: %w", err)
