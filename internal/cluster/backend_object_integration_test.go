@@ -57,29 +57,6 @@ var _ = Describe("Backend object integration", func() {
 		Expect(gotObj.Size).To(Equal(obj.Size))
 	})
 
-	It("skips body and EC shard spools for small sized-reader parity EC puts", func() {
-		configureParityEC()
-
-		payload := bytes.Repeat([]byte("a"), 64<<10)
-		obj, err := b.PutObject(ctx, "bucket", "small.bin", bytes.NewReader(payload), "application/octet-stream")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.Size).To(Equal(int64(len(payload))))
-
-		rc, gotObj, err := b.GetObject(ctx, "bucket", "small.bin")
-		Expect(err).NotTo(HaveOccurred())
-		got, readErr := io.ReadAll(rc)
-		closeErr := rc.Close()
-		Expect(readErr).NotTo(HaveOccurred())
-		Expect(closeErr).NotTo(HaveOccurred())
-		Expect(got).To(Equal(payload))
-		Expect(gotObj.ETag).To(Equal(obj.ETag))
-
-		_, err = os.Stat(b.spoolDir())
-		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
-	})
-
 	It("uses the body spool but skips EC shard spool for small streaming parity EC puts", func() {
 		configureParityEC()
 

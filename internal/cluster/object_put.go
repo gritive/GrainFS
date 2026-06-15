@@ -2,8 +2,6 @@ package cluster
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
@@ -72,21 +70,11 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	observePutStage("distributed", "quarantine_check", stageStart)
 
 	versionID := newVersionID()
-	if b.currentECConfig().NumShards() != 0 && b.shardSvc != nil {
-		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm, acl, req.ContentMD5Hex)
-		if handled || err != nil {
-			return obj, err
-		}
-		obj, handled, err = b.tryPutObjectSingleLocalShardKnownSize(ctx, bucket, key, versionID, r, req.SizeHint, contentType, userMetadata, sseAlgorithm, acl, req.ContentMD5Hex)
-		if handled || err != nil {
-			return obj, err
-		}
-		obj, handled, err = b.tryPutObjectECDataInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm, acl, req.ContentMD5Hex)
-		if handled || err != nil {
-			return obj, err
-		}
-	}
-
+	// Single write path: spool the body, then route by size/topology in
+	// putObjectECSpooled (chunked / single-local-spooled / EC-memory /
+	// EC-spooled). The pre-spool single-local / EC in-memory / known-size fast
+	// paths were removed — they duplicated placement + size routing and let a
+	// large known-size object slip through as one over-cap whole-object shard.
 	stageStart = time.Now()
 	sp, err := b.spoolPutObject(ctx, bucket, r)
 	if err != nil {
@@ -106,218 +94,6 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, acl)
-}
-
-func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
-	ctx context.Context,
-	bucket, key, versionID string,
-	r io.Reader,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	contentMD5Hex string,
-) (*storage.Object, bool, error) {
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, false, nil
-		}
-		placementGroupID = "group-0"
-	}
-	shardKey := ecObjectShardKey(key, versionID)
-	placementPlan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
-		Operation:        "put_object",
-		PlacementGroupID: placementGroupID,
-		ShardKey:         shardKey,
-	})
-	if err != nil {
-		return nil, false, nil
-	}
-	if placementPlan.Config.DataShards != 1 || placementPlan.Config.ParityShards != 0 {
-		return nil, false, nil
-	}
-	if len(placementPlan.NodeIDs) != 1 || placementPlan.NodeIDs[0] != b.currentSelfAddr() {
-		return nil, false, nil
-	}
-
-	stageStart := time.Now()
-	body, size, ok := sizedReaderAtSection(r, maxSingleLocalShardMemoryFastPathBytes)
-	if !ok {
-		return nil, false, nil
-	}
-	observePutStage("ec_single_memory", "read_body", stageStart)
-
-	sp := &spooledObject{
-		Size: size,
-	}
-	h := md5Pool.Get().(hash.Hash)
-	h.Reset()
-	defer md5Pool.Put(h)
-	obj, err := b.putObjectSingleLocalShardFromReader(
-		ctx,
-		bucket,
-		key,
-		versionID,
-		placementPlan.PlacementGroupID,
-		placementPlan.NodeIDs,
-		sp,
-		body,
-		contentType,
-		userMetadata,
-		sseAlgorithm,
-		acl,
-		"ec_single_memory",
-		h,
-		nil,
-		nil,
-		"",
-		contentMD5Hex,
-	)
-	return obj, true, err
-}
-
-func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
-	ctx context.Context,
-	bucket, key, versionID string,
-	r io.Reader,
-	sizeHint *int64,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	contentMD5Hex string,
-) (*storage.Object, bool, error) {
-	if sizeHint == nil || *sizeHint < 0 {
-		return nil, false, nil
-	}
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok {
-		if b.bypassBucketCheck {
-			return nil, false, nil
-		}
-		placementGroupID = "group-0"
-	}
-	shardKey := ecObjectShardKey(key, versionID)
-	placementPlan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
-		Operation:        "put_object",
-		PlacementGroupID: placementGroupID,
-		ShardKey:         shardKey,
-	})
-	if err != nil {
-		return nil, false, nil
-	}
-	if placementPlan.Config.DataShards != 1 || placementPlan.Config.ParityShards != 0 {
-		return nil, false, nil
-	}
-	if len(placementPlan.NodeIDs) != 1 || placementPlan.NodeIDs[0] != b.currentSelfAddr() {
-		return nil, false, nil
-	}
-
-	sp := &spooledObject{
-		Size: *sizeHint,
-	}
-	h := md5Pool.Get().(hash.Hash)
-	h.Reset()
-	defer md5Pool.Put(h)
-	obj, err := b.putObjectSingleLocalShardFromReader(
-		ctx,
-		bucket,
-		key,
-		versionID,
-		placementPlan.PlacementGroupID,
-		placementPlan.NodeIDs,
-		sp,
-		r,
-		contentType,
-		userMetadata,
-		sseAlgorithm,
-		acl,
-		"ec_single_stream",
-		h,
-		nil,
-		nil,
-		"",
-		contentMD5Hex,
-	)
-	return obj, true, err
-}
-
-type sizedReaderAt interface {
-	io.ReaderAt
-	Len() int
-	Size() int64
-}
-
-func sizedReaderAtSection(r io.Reader, maxBytes int64) (io.Reader, int64, bool) {
-	sr, ok := r.(sizedReaderAt)
-	if !ok {
-		return nil, 0, false
-	}
-	remaining := int64(sr.Len())
-	if remaining < 0 || remaining > maxBytes {
-		return nil, 0, false
-	}
-	offset := sr.Size() - remaining
-	return io.NewSectionReader(sr, offset, remaining), remaining, true
-}
-
-func (b *DistributedBackend) tryPutObjectECDataInMemory(
-	ctx context.Context,
-	bucket, key, versionID string,
-	r io.Reader,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	contentMD5Hex string,
-) (*storage.Object, bool, error) {
-	limit, ok := b.ecMemoryShardFastPathLimit(ctx)
-	if !ok {
-		return nil, false, nil
-	}
-	body, size, ok := sizedReaderAtSection(r, limit)
-	if !ok {
-		return nil, false, nil
-	}
-	// Pre-size the buffer from the known body length: avoids the geometric
-	// growth churn of io.ReadAll (top alloc_space contributor for this path
-	// in iter1 pprof) and skips zeroing the unused tail.
-	data := make([]byte, size)
-	if _, err := io.ReadFull(body, data); err != nil {
-		return nil, true, fmt.Errorf("read small EC object: %w", err)
-	}
-
-	// Single write-path Content-MD5 validation: the full body is in memory, so
-	// validate before any shard/metadata write. No-op when no Content-MD5.
-	if contentMD5Hex != "" {
-		sum := md5.Sum(data)
-		if err := validateContentMD5(hex.EncodeToString(sum[:]), contentMD5Hex); err != nil {
-			clear(data)
-			return nil, true, err
-		}
-	}
-
-	obj, err := b.putObjectECData(ctx, bucket, key, versionID, data, contentType, userMetadata, sseAlgorithm, acl)
-	clear(data)
-	return obj, true, err
-}
-
-// ecMemoryShardFastPathLimit returns the maximum body size (in bytes) for which
-// the in-memory EC fast path may be used in this request, or ok=false when the
-// fast path is disabled for this placement.
-func (b *DistributedBackend) ecMemoryShardFastPathLimit(ctx context.Context) (int64, bool) {
-	plan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
-		Operation: "put_object",
-	})
-	if err != nil {
-		return 0, false
-	}
-	cfg := plan.Config
-	if !ecMemoryShardFastPathEnabled(cfg) {
-		return 0, false
-	}
-	return maxECMemoryShardFastPathBytesForCfg(cfg), true
 }
 
 func ecMemoryShardFastPathEnabled(cfg ECConfig) bool {
@@ -420,55 +196,6 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 	return ok
 }
 
-// putObjectECData is the Phase 18 Cluster EC path: Reed-Solomon split into
-// cfg.NumShards() shards, fan-out each to its placed node (self or peer),
-// then commit metadata through Raft.
-//
-// Consistency: write-all. Any shard write failure → cleanup + error.
-// Placement is derived deterministically via PlaceShards (HRW).
-// ECData/ECParity + NodeIDs are stored in object metadata so reads can
-// reconstruct shards without a separate Raft record.
-func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, versionID string, data []byte, contentType string, userMetadata map[string]string, sseAlgorithm string, acl uint8) (*storage.Object, error) {
-	// ShardService's key parameter carries the versionID as a suffix so shards
-	// for different versions land at different paths without changing the API.
-	shardKey := ecObjectShardKey(key, versionID)
-	placementPlan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
-		Operation: "put_object",
-		ShardKey:  shardKey,
-	})
-	if err != nil {
-		return nil, err
-	}
-	placementGroupID := placementPlan.PlacementGroupID
-	effectiveCfg := placementPlan.Config
-	placement := placementPlan.NodeIDs
-
-	// Commit metadata. ECData/ECParity + NodeIDs stored so reads can
-	// reconstruct shards without a separate placement record.
-	// On failure, best-effort cleanup of orphaned shards.
-	plan := ecObjectWritePlan{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		Config:           effectiveCfg,
-		Placement:        placement,
-		ContentType:      contentType,
-		UserMetadata:     cloneStringMap(userMetadata),
-		SSEAlgorithm:     sseAlgorithm,
-		ACL:              acl,
-	}
-	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	result, err := writer.writeDataShards(ctx, plan, data)
-	if err != nil {
-		if placementPlan.TopologyWrite {
-			return nil, topologyShardWriteError(placementPlan.TopologyGroup, effectiveCfg, err)
-		}
-		return nil, err
-	}
-	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
-}
-
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, acl uint8) (*storage.Object, error) {
 	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, acl, 0, false, "", nil, nil, nil, "")
 }
@@ -487,17 +214,18 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	effectiveCfg := placementPlan.Config
 	placement := placementPlan.NodeIDs
 
-	// Phase 2 chunked PUT routing: objects larger than DefaultChunkSize
-	// (16 MiB) take the segmented path — N×16 MiB segments fanned across
-	// placement groups, single atomic metadata commit, best-effort blob
-	// fanout with defer cleanup on error. <= 16 MiB stays on the existing
-	// single-segment EC path.
-	//
-	// Chunked PUT requires a ShardGroupSource for SelectSegmentPlacementGroup;
-	// legacy single-group setups (b.shardGroup == nil) fall back to the
-	// existing single-blob EC path even for large objects. Once a cluster
-	// wires SetShardGroupSource, large objects automatically segment.
-	if b.chunkedPathThresholdMet(sp.Size) && b.shardGroup != nil {
+	// Single write path: every non-empty simple PUT (any size) takes the
+	// segmented/chunked path so the route does not branch on object size —
+	// N×16 MiB segments (1 segment for <=16 MiB), single atomic metadata commit.
+	// Requires a ShardGroupSource (always wired in production by bootOwnedGroupsAndEC).
+	// Exceptions that keep the existing paths below: empty (0-byte) objects (a
+	// 0-byte segment writes no shard, unreadable by EC); internal buckets
+	// (__grainfs_*), whose ETag is an xxhash3 corruption oracle that the chunked
+	// SegmentWriter would overwrite with MD5 and break EC-rewrap verification;
+	// multipart-complete (multipartUploadID / parts) and internal rewrap
+	// (beforeCommit), which are distinct operations; and test backends that never
+	// wire a ShardGroupSource.
+	if sp.Size > 0 && !storage.IsInternalBucket(bucket) && beforeCommit == nil && multipartUploadID == "" && len(parts) == 0 && b.shardGroup != nil {
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm, acl,
