@@ -890,8 +890,8 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 // re-encryption at the destination. Used by the S2 streaming path: the
 // coordinator's CPUPool seals the shard at the source (seal-at-source), so the
 // bytes on the wire and on disk are identical GFSENC3 ciphertext. This mirrors
-// writeLocalShard's tail (mkdir → WAL-append-before-file crash-safety →
-// tmp+rename) MINUS the encode step. Packing is intentionally bypassed: the
+// writeLocalShard's tail (mkdir → tmp+rename → fsync/EC durability) MINUS the
+// encode step. Packing is intentionally bypassed: the
 // streaming path is the large-object band (shard ≫ pack threshold), so a
 // sealed-stream shard always materializes as a shard_N file. `sealed` must be
 // EncodeEncryptedShard output for ShardAADFields(bucket,key,shardIdx) (the same
@@ -1017,10 +1017,10 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardTargetClass: "local",
 	})
 
-	// EncSync fsyncs the shard file only when requireFsync is set: during WAL
-	// replay (the WAL cannot be re-appended), for small shards, and for large
-	// no-redundancy shards (no parity to reconstruct from). It is skipped for
-	// large redundant shards, which rely on EC reconstruction + the scrubber
+	// EncSync fsyncs the shard file only when requireFsync is set: for small
+	// shards and for large no-redundancy shards (no parity to reconstruct from).
+	// It is skipped for large redundant shards, which rely on EC reconstruction
+	// + the scrubber
 	// (S1 — no WAL record, no fsync).
 	encSyncStart := time.Now()
 	if requireFsync {
@@ -1138,7 +1138,7 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 		if encrypted {
 			return fmt.Errorf("shard payload too large after encryption: %d raw bytes exceeds %d cap", n, rawCap)
 		}
-		return fmt.Errorf("data WAL shard payload too large: %d", n)
+		return fmt.Errorf("shard payload too large: %d", n)
 	}
 	if streamSize >= 0 {
 		if streamSize > rawCap {

@@ -2,7 +2,6 @@
 
 ## Follow-ups
 
-- [P3] directIO 모드(`--shard-direct-io`, default OFF)에서 shard 쓰기가 `requireFsync`를 무시. `writeShardFile`가 `s.directWriter`(writeDirect, shard_service.go:1661) 성공 시 `writeBuffered`의 requireFsync fsync 전에 early-return(shard_service.go:1572)하는데, `writeDirect`는 fsync 없이 close → directIO 모드에서 single-node/no-redundancy large-shard 쓰기가 비내구. directio doc("Direct I/O does NOT imply durability; callers must still call f.Sync()")와 모순. 제대로 고치려면 `shardFileWriter` 인터페이스에 requireFsync를 엮어 writeDirect도 `directio.Sync` 호출하게 해야 함. pre-existing(fsync-policy PR이 발견, codex code-gate 2026-06-14). directIO default-OFF라 영향 제한적.
 
 - [P3] EC 샤드용 orphan scrubber 미구현. `OrphanWalkable`(internal/scrubber/orphan.go) 인터페이스와 `BackgroundScrubber.orphanSweep`(scrubber.go:710 type-assert) 프레임워크는 있으나, `DistributedBackend`가 `WalkOrphanShards`/`DeleteOrphanDir`를 구현하지 않아 production에서 EC 샤드 orphan sweep이 **전혀 실행되지 않음**. 결과: 어떤 경로로든 누출된 EC 샤드(full-object `<key>/<versionID>` + chunked segment `<key>/segments/<blobID>`)는 영구 잔존. 구현 시 두 경로의 디스크 레이아웃을 모두 스캔하고 `ScanObjects` known-set과 대조해야 함(segment walker는 `<key>_segments/<blobID>`만 스캔하므로 별도). NOTE: `ScanObjects`는 이제 FSM `lat:` + quorum-meta 머지(2026-06-15 v0.0.578.0)라 regular-PUT 객체까지 known-set에 포함됨 → orphan sweep의 false-positive 위험이 그만큼 감소(이전엔 regular-PUT 객체가 known-set에 없어 위험). codex code-gate(2026-06-14) 발견. 이게 있으면 아래 phantom-commit 잔여 누출도 자동 회수됨.
 

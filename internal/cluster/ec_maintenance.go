@@ -52,7 +52,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 
 // RepairShardAtShardKey reconstructs the local shardIdx shard for an arbitrary
 // physical shard key (object-version, segment, or coalesced) given its already-resolved
-// EC placement. Used by startup data WAL repair for segment/coalesced shards.
+// EC placement. Used by the placement monitor / repair paths for segment/coalesced shards.
 func (b *DistributedBackend) RepairShardAtShardKey(ctx context.Context, bucket, shardKey string, rec PlacementRecord, shardIdx int) error {
 	if b.shardSvc == nil {
 		return fmt.Errorf("shard service not configured")

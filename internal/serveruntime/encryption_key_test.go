@@ -69,8 +69,9 @@ func TestBulkDataPresent(t *testing.T) {
 	})
 
 	// Each encrypted-bytes location must independently trigger detection, even
-	// with shards/ and datawal/ absent.
-	for _, sub := range []string{"shards", "data", "datawal", "blobs", "shared-fsm", "wal", "raft/raft-v2", "meta_raft/raft-v2"} {
+	// with shards/ absent. (The shard data WAL was removed in S4 — its dir is no
+	// longer created or probed.)
+	for _, sub := range []string{"shards", "data", "blobs", "shared-fsm", "wal", "raft/raft-v2", "meta_raft/raft-v2"} {
 		t.Run(sub+" non-empty returns true", func(t *testing.T) {
 			dir := t.TempDir()
 			touchEntry(t, dir, sub)
