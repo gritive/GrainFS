@@ -123,13 +123,16 @@ type segmentManifestSource interface {
 	AllFrozenSegmentPaths() (map[string][]string, error)
 }
 
-// caughtUpReporter lets a backend signal that its local metadata view is
-// up-to-date enough to safely compute the known-set. A lagging node's
-// ListAllObjects is stale and could mark a committed segment as orphaned, so
-// the sweep is skipped for the whole cycle when CaughtUp() is false. The ctx
-// bounds the underlying ReadIndex barrier so the gate never stalls the cycle.
-type caughtUpReporter interface {
-	CaughtUp(ctx context.Context) bool
+// segmentBucketLister supplies the multi-group bucket list the orphan-segment
+// sweep iterates: the union of every locally-hosted group's buckets. Segments
+// live per-group under each group's b.root, so without this the sweep would only
+// reach group-0's buckets (s.backend.ListBuckets is group-0-scoped). Per-bucket
+// caught-up is enforced inside the backend's WalkOrphanSegments dispatch (only the
+// caught-up leader of a group GCs its segments). Fail-closed: an error skips the
+// segment sweep this cycle. Backends that don't implement it fall back to
+// s.backend.ListBuckets() (single-group behavior).
+type segmentBucketLister interface {
+	SegmentSweepBuckets(ctx context.Context) ([]string, error)
 }
 
 // segmentOrphanLog persists when a raw segment blob first became unreferenced
@@ -659,10 +662,25 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	segmentScanner, hasSegScanner := s.backend.(AppendableScannable)
 	segmentWalker, hasSegWalker := s.backend.(OrphanSegmentWalkable)
 	if hasSegScanner && hasSegWalker {
-		// (E) caught-up gate: a lagging node's ListAllObjects is stale and could
-		// mark a committed segment orphan. Skip the whole segment sweep this cycle.
-		if cu, ok := s.backend.(caughtUpReporter); ok && !cu.CaughtUp(ctx) {
-			log.Warn().Msg("scrub: node not caught up, skipping orphan-segment sweep this cycle")
+		// Bucket source: the union of every locally-hosted group's buckets (segments
+		// live per-group under each group's b.root). Per-bucket caught-up is enforced
+		// inside WalkOrphanSegments (only the caught-up LEADER of a group GCs its
+		// segments — a lagging/follower FSM could mark a committed segment orphan), so
+		// there is no single node-level top gate: a node that leads group-N while
+		// following group-0 must still GC group-N's segments. Fail-closed: a bucket-list
+		// error skips the segment sweep this cycle.
+		segBuckets := buckets
+		segBucketsOK := true
+		if l, ok := s.backend.(segmentBucketLister); ok {
+			if sb, err := l.SegmentSweepBuckets(ctx); err != nil {
+				log.Warn().Err(err).Msg("scrub: segment sweep bucket list failed, skipping orphan-segment sweep this cycle")
+				segBucketsOK = false
+			} else {
+				segBuckets = sb
+			}
+		}
+		if !segBucketsOK {
+			// logged above; segment sweep skipped this cycle (fail-closed)
 		} else if segByBucket, frozenByBucket, sourcesOK := s.hoistSegmentSources(); sourcesOK {
 			// (G) reconcile: a segment in the known-set is referenced -> must not
 			// carry a t_zero. Clear stale entries (covers re-reference across
@@ -684,7 +702,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 				}
 			}
 			segCapRemaining := maxSegmentsPerCycle
-			for _, bucket := range buckets {
+			for _, bucket := range segBuckets {
 				knownSegmentsB := make(map[string]bool)
 				if appCh, appErr := segmentScanner.ScanAppendableObjects(bucket); appErr != nil {
 					log.Warn().Str("bucket", bucket).Err(appErr).Msg("scrub: scan appendable failed")

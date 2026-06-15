@@ -22,15 +22,44 @@ import (
 // it structurally so the scrubber can type-assert to it.
 type manifestSegmentBackend struct {
 	*segmentBackend
-	liveObjects []storage.SnapshotObject
-	listErr     error               // when set, ListAllObjectsStrict fails closed
-	frozen      map[string][]string // bucket -> frozen paths
-	caughtUp    bool                // reported by CaughtUp; false gates off the sweep
+	liveObjects       []storage.SnapshotObject
+	listErr           error               // when set, ListAllObjectsStrict fails closed
+	frozen            map[string][]string // bucket -> frozen paths
+	caughtUp          bool                // gates this group's WalkOrphanSegments
+	segmentBuckets    []string            // when set, drives the sweep loop (multi-group)
+	segmentBucketsErr error               // when set, SegmentSweepBuckets fails closed
 }
 
-// CaughtUp implements scrubber's caughtUpReporter. When false the scrubber skips
-// the entire orphan-segment sweep for the cycle.
+// SegmentSweepBuckets implements scrubber's segmentBucketLister: the multi-group
+// bucket list the sweep loop iterates (the union of every hosted group's buckets).
+// Defaults to this group's own ListBuckets when no explicit list is set, mirroring
+// the real backend's default-self (so tests that don't exercise multi-group keep
+// today's behavior).
+func (m *manifestSegmentBackend) SegmentSweepBuckets(ctx context.Context) ([]string, error) {
+	if m.segmentBucketsErr != nil {
+		return nil, m.segmentBucketsErr
+	}
+	if m.segmentBuckets != nil {
+		return m.segmentBuckets, nil
+	}
+	return m.ListBuckets(ctx)
+}
+
+// CaughtUp reports this group's caught-up state. WalkOrphanSegments consults it
+// (mirroring the real backend's per-bucket dispatch: a not-caught-up owning group
+// GCs nothing). The scrubber no longer applies a node-level top gate.
 func (m *manifestSegmentBackend) CaughtUp(ctx context.Context) bool { return m.caughtUp }
+
+// WalkOrphanSegments overrides the embedded segmentBackend to enforce the
+// per-bucket caught-up gate the real DistributedBackend applies in its dispatch:
+// a not-caught-up owning group yields no candidates, so a stale FSM can never
+// reclaim a still-referenced segment.
+func (m *manifestSegmentBackend) WalkOrphanSegments(bucket string, known map[string]bool, fn func(string) error) error {
+	if !m.caughtUp {
+		return nil
+	}
+	return m.segmentBackend.WalkOrphanSegments(bucket, known, fn)
+}
 
 func (m *manifestSegmentBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
 	return m.liveObjects, m.listErr
@@ -196,4 +225,62 @@ func TestSegmentGCActivation_NotCaughtUpSkipsSweep(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok,
 		"not caught up: orphan must never even be observed (no t_zero) because the sweep is gated off")
+}
+
+// TestSegmentGCActivation_RunOnceSweepsMultiGroupBucket proves the sweep LOOP is
+// driven by SegmentSweepBuckets (the union of hosted groups' buckets), not by the
+// group-0-scoped ListBuckets: the orphan lives in a bucket that ListBuckets
+// (mockBackend.records) does NOT contain, surfaced only via SegmentSweepBuckets.
+// If the scrubber drove the loop from ListBuckets (the pre-multi-group bug), this
+// orphan would never be swept and the test would fail.
+func TestSegmentGCActivation_RunOnceSweepsMultiGroupBucket(t *testing.T) {
+	b := &manifestSegmentBackend{
+		segmentBackend: newSegmentBackend(),
+		frozen:         map[string][]string{},
+		caughtUp:       true,
+		segmentBuckets: []string{"sibbkt"}, // owned by a sibling group; NOT in records/ListBuckets
+	}
+	orphanPath := storage.SegmentKnownPath("sibbkt", "orphanobj", "Oblob")
+	b.addOrphanSegment(orphanPath, 10*time.Minute)
+
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
+	require.NoError(t, err)
+	defer db.Close()
+	orphanLog := cluster.NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
+
+	sc := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, 0))
+	sc.RunOnce(context.Background()) // tombstone
+	sc.RunOnce(context.Background()) // delete (window=0)
+
+	require.Equal(t, []string{orphanPath}, b.deletedSegments,
+		"a bucket surfaced only by SegmentSweepBuckets (not ListBuckets) must be swept")
+}
+
+// TestSegmentGCActivation_BucketListErrorSkipsSweep proves a SegmentSweepBuckets
+// error fails closed: the whole segment sweep is skipped that cycle (no observe,
+// no delete) rather than silently reverting to a partial bucket list.
+func TestSegmentGCActivation_BucketListErrorSkipsSweep(t *testing.T) {
+	b := &manifestSegmentBackend{
+		segmentBackend:    newSegmentBackend(),
+		frozen:            map[string][]string{},
+		caughtUp:          true,
+		segmentBucketsErr: errors.New("badger view failed"),
+	}
+	b.records["bucket"] = nil // even with a fallback bucket present, the error must skip
+	orphanPath := storage.SegmentKnownPath("bucket", "orphanobj", "Oblob")
+	b.addOrphanSegment(orphanPath, 10*time.Minute)
+
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLoggingLevel(badger.ERROR))
+	require.NoError(t, err)
+	defer db.Close()
+	orphanLog := cluster.NewSegmentOrphanLog(badgermeta.Wrap(db), "group-0")
+
+	sc := scrubber.New(b, time.Hour, scrubber.WithNoRetry(), scrubber.WithSegmentOrphanLog(orphanLog, 0))
+	sc.RunOnce(context.Background())
+	sc.RunOnce(context.Background())
+
+	require.Empty(t, b.deletedSegments, "bucket-list error must fail closed (segment sweep skipped)")
+	_, ok, err := orphanLog.TombstoneTime(chunkref.ChunkID("Oblob"))
+	require.NoError(t, err)
+	require.False(t, ok, "fail-closed: the orphan is never even observed (no t_zero)")
 }

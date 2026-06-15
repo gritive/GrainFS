@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.591.0] - 2026-06-16
+
+### Changed
+- **Orphan-segment GC now runs across all locally-hosted groups (was group-0
+  only).** The background scrubber reclaims leaked raw append-segment blobs
+  (`{dataDir}/groups/<gid>/data/<bucket>/<key>_segments/<blobID>`) for every group
+  this node LEADS and is caught-up for — previously only group-0's buckets were
+  swept, so a node leading other groups leaked their segment blobs forever (disk
+  waste, no data loss). Unlike EC shards, segments live per-group on disk and do
+  not float by disk (the balancer touches only the shard tree), so each bucket's
+  segments belong to exactly one owning group. The fix:
+  - The scrubber's per-bucket segment loop is driven by the union of every hosted
+    group's buckets (`SegmentSweepBuckets`) instead of the group-0-scoped
+    `ListBuckets`; a bucket-list error fails closed (skips the sweep that cycle).
+  - Each per-bucket walk/scan/delete dispatches to the bucket's owning-group
+    backend (its own `b.root` subtree), gated per-bucket on that group's caught-up
+    state — only the caught-up leader of a group GCs its segments, so a lagging or
+    follower FSM can never false-orphan a committed segment. This replaces the
+    single group-0 caught-up top gate, so a node that leads group-N while
+    following group-0 now correctly GCs group-N's segments.
+  - The GC known-set (`ListAllObjectsStrict`) unions live object versions across
+    all hosted groups, so a sibling group's live segment is never false-orphaned.
+
+  Single-node serve is unchanged (one hosted group; every bucket resolves to it).
+
 ## [0.0.590.0] - 2026-06-15
 
 ### Changed

@@ -6,11 +6,23 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-// ScanAppendableObjects streams an AppendableRecord for each IsAppendable
-// object in `bucket`. Used by the scrubber to build the known-segment set
-// for orphan sweep. Mirrors ScanObjects' lat: iteration pattern but filters
-// for IsAppendable=true and emits all SegmentBlobIDs from obj.Segments.
+// ScanAppendableObjects dispatches to the backend that owns `bucket` (appendable
+// records live under that group's keyspace), so the scrubber's known-segment set
+// covers every hosted group. Owner not locally hosted => closed empty channel.
 func (b *DistributedBackend) ScanAppendableObjects(bucket string) (<-chan scrubber.AppendableRecord, error) {
+	gb := b.owningGroupBackend(bucket)
+	if gb == nil {
+		ch := make(chan scrubber.AppendableRecord)
+		close(ch)
+		return ch, nil
+	}
+	return gb.scanOwnAppendableObjects(bucket)
+}
+
+// scanOwnAppendableObjects streams an AppendableRecord for each IsAppendable
+// object in `bucket` from THIS backend's keyspace. Mirrors ScanObjects' lat:
+// iteration pattern but filters for IsAppendable=true and emits all SegmentBlobIDs.
+func (b *DistributedBackend) scanOwnAppendableObjects(bucket string) (<-chan scrubber.AppendableRecord, error) {
 	if err := b.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, err
 	}

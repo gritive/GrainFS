@@ -150,12 +150,12 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 
 	if cfg.ScrubInterval > 0 {
 		// Plan 3.5: activate orphan-SEGMENT GC. Frozen-path source + orphan-log MUST
-		// wire together (the scrubber's activation constraint). The caught-up gate is
-		// auto-applied: distBackend implements scrubber's caughtUpReporter.
-		// Scope: group-0 distBackend only (single-node complete). Per-group fan-out
-		// for multi-group clusters is a follow-up (see TODOS.md: per-group segment GC).
-		// (The orphan-SHARD sweep wired below is already multi-group; only segment
-		// GC remains group-0-scoped.)
+		// wire together (the scrubber's activation constraint). Multi-group: segments
+		// live per-group under each group's b.root, so the sweep iterates the union of
+		// every hosted group's buckets (SetOwningGroupBackendSource + the shared
+		// SetHostedGroupBackendsSource below) and dispatches each per-bucket op to its
+		// owning group's backend, gated per-bucket on that group's caught-up state
+		// (only the caught-up leader of a group GCs its segments).
 		var segGCOpts []scrubber.ScrubberOption
 		if state.objSnapMgr != nil {
 			state.distBackend.SetFrozenSegmentPathSource(state.objSnapMgr.AllFrozenSegmentPaths)
@@ -200,6 +200,20 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 			return gb != nil && gb.DistributedBackend != nil
 		})
 		state.distBackend.SetOrphanShardSweepGate(func() bool { return true })
+		// Orphan-SEGMENT sweep: resolve each bucket to its owning group's backend so
+		// the per-bucket walk/scan/delete runs on that group's b.root subtree. nil
+		// when the owner is not locally hosted (its segments aren't on this node).
+		state.distBackend.SetOwningGroupBackendSource(func(bucket string) *cluster.DistributedBackend {
+			dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+			if !ok || dg == nil {
+				return nil
+			}
+			gb := dg.Backend()
+			if gb == nil {
+				return nil
+			}
+			return gb.DistributedBackend
+		})
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
 		sc.RegisterSource("replication", replSource, replVerifier)
