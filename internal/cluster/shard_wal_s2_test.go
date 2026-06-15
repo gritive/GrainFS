@@ -3,9 +3,11 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -147,4 +149,54 @@ func TestLargeRedundant_NoFsync_NoRecord(t *testing.T) {
 		"large redundant shards write no record (S1)")
 	require.Empty(t, rec.seq(),
 		"large redundant shards must NOT be fsynced — EC owns durability")
+}
+
+// TestDBV_SingleLocalPath_DirFsyncFailureBlocksVisibility proves DBV on the
+// single-local fast path (1+0 → writeSingleLocalReader → writeQuorumMeta): a
+// dir-fsync failure fails the PUT and the object never becomes visible.
+func TestDBV_SingleLocalPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
+	backend, _, _, _ := newS1ShardSvc(t,
+		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
+		WithNoRedundancy(func() bool { return true }))
+	var dirCalls atomic.Int32
+	backend.shardSvc.syncDirHook = func(string) error {
+		dirCalls.Add(1)
+		return errors.New("injected dir fsync failure")
+	}
+
+	large := bytes.Repeat([]byte("s2-dbv-single-"), 1<<17)
+	_, err := backend.PutObject(context.Background(), "b", "obj-dbv1", bytes.NewReader(large), "application/octet-stream")
+	require.Error(t, err, "a dir-fsync failure must fail the single-local PUT (DBV)")
+	require.ErrorContains(t, err, "injected dir fsync failure",
+		"the PUT must fail FROM the durability hook, not from setup/placement")
+	require.Positive(t, dirCalls.Load(), "the injected dir-fsync hook must have actually run")
+
+	_, _, gerr := backend.GetObject(context.Background(), "b", "obj-dbv1")
+	require.Error(t, gerr, "a PUT whose durability failed must not be visible via GET")
+}
+
+// TestDBV_ECCommitPath_DirFsyncFailureBlocksVisibility proves DBV on the EC
+// commit path: 2+0 is multi-shard (writeDataShards → commitECObjectWriteResult →
+// writeQuorumMeta) AND no-redundancy (requireFsync=true). 2 data shards need TWO
+// placements — []string{"self","self"} — or planObjectWritePlacement rejects the
+// PUT BEFORE any shard write (the ErrorContains + dirCalls guards catch that).
+func TestDBV_ECCommitPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
+	backend, _, _, _ := newS1ShardSvc(t,
+		ECConfig{DataShards: 2, ParityShards: 0}, []string{"self", "self"},
+		WithNoRedundancy(func() bool { return true }))
+	var dirCalls atomic.Int32
+	backend.shardSvc.syncDirHook = func(string) error {
+		dirCalls.Add(1)
+		return errors.New("injected dir fsync failure")
+	}
+
+	large := bytes.Repeat([]byte("s2-dbv-ec-"), 1<<18) // splits across 2 data shards
+	_, err := backend.PutObject(context.Background(), "b", "obj-dbv2", bytes.NewReader(large), "application/octet-stream")
+	require.Error(t, err, "a dir-fsync failure must fail the EC-commit-path PUT (DBV)")
+	require.ErrorContains(t, err, "injected dir fsync failure",
+		"the PUT must fail FROM the durability hook on the EC commit path, not from setup/placement")
+	require.Positive(t, dirCalls.Load(), "the injected dir-fsync hook must have actually run on a data shard")
+
+	_, _, gerr := backend.GetObject(context.Background(), "b", "obj-dbv2")
+	require.Error(t, gerr, "a PUT whose durability failed must not be visible via GET")
 }
