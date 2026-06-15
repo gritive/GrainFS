@@ -1,34 +1,27 @@
 package cluster
 
 import (
-	"context"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
-// TestAppendShardDataWAL_RequiresWAL asserts WAL is mandatory: the shard write
-// path must reject a write when no WAL is wired, instead of silently signalling
-// a direct-fsync fallback (the old requireFsync=true behaviour).
-func TestAppendShardDataWAL_RequiresWAL(t *testing.T) {
-	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID)) // no WithDataWAL → dataWAL == nil
-	_, err := svc.appendShardDataWAL(context.Background(), "bucket", "key", 0, []byte("payload"))
-	require.Error(t, err, "shard write without a WAL must be rejected")
-	require.Contains(t, err.Error(), "WAL")
-}
+// S2 moved shard durability off the data WAL (write-time fsync / EC), so the
+// regular shard-write path no longer REQUIRES a wired WAL — the old
+// TestAppendShardDataWAL_RequiresWAL contract was intentionally removed. The
+// stream path still requires a WAL until S4 (see
+// shard_service_stream_wal_mandatory_test.go).
 
-// TestAppendShardDataWAL_ReplayRequiresFsync guards the surviving requireFsync
-// path: during WAL replay the WAL cannot be re-appended, so the caller must
-// fsync the shard file directly.
-func TestAppendShardDataWAL_ReplayRequiresFsync(t *testing.T) {
+// TestShardWriteRequiresFsync_ReplayRequiresFsync guards the surviving
+// requireFsync path: during WAL replay the WAL cannot be re-appended, so a
+// normal write reached mid-replay must fsync the shard file directly.
+func TestShardWriteRequiresFsync_ReplayRequiresFsync(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(mustTestDataWALDEK(t, dir, keeper, clusterID)))
 	svc.replayingDataWAL.Store(true)
 
-	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, []byte("d"))
-	require.NoError(t, err)
-	require.True(t, requireFsync, "replay must require direct shard fsync")
+	require.True(t, svc.shardWriteRequiresFsync(len([]byte("d"))),
+		"replay must require direct shard fsync")
 }

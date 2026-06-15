@@ -9,9 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestWriteLocalShardStream_RequiresWAL asserts WAL is mandatory on the stream
-// write path too: with no WAL wired the stream write must be rejected rather
-// than silently writing a shard file the WAL never observed.
+// TestWriteLocalShardStream_RequiresWAL asserts the stream write path still
+// rejects a missing WAL. NOTE (S2): the regular shard-write path no longer
+// requires a WAL (durability is write-time fsync / EC); this stream-path guard
+// now only backstops the WAL-sized buffering cap (maxRawShardPayloadForWAL), not
+// durability. The guard + this test are removed in S4 along with the WAL wiring.
 func TestWriteLocalShardStream_RequiresWAL(t *testing.T) {
 	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	t.Cleanup(func() { _ = tr.Close() })
