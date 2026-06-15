@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.580.0] - 2026-06-15
+
+### Durability
+- Small shards (< 1 MiB) and large no-redundancy shards (`ParityShards==0`) now
+  establish durability with a write-time shard-file fsync **plus a fsync of the
+  shard's directory chain** (leaf shard dir + each newly-created ancestor up to
+  the data dir; locked order `write → Sync(tmp) → rename → syncDirChain`) instead
+  of a data-WAL record. The `OpShardPut` record and WAL `Flush` are no longer
+  written for these classes. After this change the production shard PUT path
+  writes no `OpShardPut` data-WAL record for any non-packed shard class
+  (small / no-redundancy → write-time fsync; large-redundant → EC, v0.0.579.0).
+  Shard-packing remains the off-by-default `OpShardPackPut`-backed exception
+  (disabled in a later slice). The Durability-before-visibility invariant is
+  enforced: a shard-durability failure aborts the PUT before the object becomes
+  visible, on both the single-local and EC commit paths.
+
+### Performance
+- The new directory-chain fsync ADDS fsyncs to the small-object and
+  no-redundancy-large PUT path (the data WAL's N→1 group-commit fsync
+  amortization is gone — this matches minio's per-object fsync model). The
+  large-redundant PUT path (the benchmark path) is unchanged: it remains
+  fsync-free, with durability owned by EC reconstruction.
+
+### Internal
+- The data WAL wiring and boot recovery remain in place for now: pre-upgrade
+  inline `OpShardPut` records still replay on boot, so rolling upgrades keep
+  in-flight small shards durable. The regular shard-write path no longer
+  requires a wired WAL (durability is fsync/EC); the stream write path still
+  does until the WAL teardown slice.
+
 ## [0.0.579.0] - 2026-06-15
 
 ### Performance
