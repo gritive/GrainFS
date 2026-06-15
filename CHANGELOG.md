@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.588.0] - 2026-06-15
+
+### Changed
+- **Renamed two WAL-era misnomer identifiers in the shard service
+  (behavior-neutral).** After the data WAL was removed (S2–S4), the constant
+  `walPayloadInlineThreshold` and the function `maxRawShardPayloadForWAL` no
+  longer relate to any WAL — the threshold gates write-time fsync vs. EC
+  durability, and the cap is purely a buffering memory bound. They are now
+  `largeShardFsyncThreshold` and `maxRawShardPayload` respectively. Internal
+  symbols only; no behavior, value, or wire change.
+
 ## [0.0.587.0] - 2026-06-15
 
 ### Fixed
