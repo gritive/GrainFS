@@ -341,6 +341,7 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 		SizeClass:   putTraceSizeClass(int64(len(pa.BodyBytes())), DefaultMaxForwardBodyBytes),
 		ForwardMode: PutTraceForwardFrame,
 	})
+	ctx = contextWithVersioningState(ctx, pa.VersioningState())
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
 	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{
@@ -375,6 +376,7 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 		SizeClass:   PutTraceSizeLarge,
 		ForwardMode: PutTraceForwardStream,
 	})
+	ctx = contextWithVersioningState(ctx, pa.VersioningState())
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
 	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{

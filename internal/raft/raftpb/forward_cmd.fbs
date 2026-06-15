@@ -84,6 +84,13 @@ table PutObjectArgs {
   // S3 single write-path: x-amz-acl bitmask (s3auth.ACLGrant). 0 = private
   // (default). Appended for wire compatibility; old peers read it as 0.
   acl:ubyte;
+  // Versioning decision resolved at the S3 edge (which can read the bucket's
+  // replicated versioning state). The forward receiver's per-group commit
+  // backend must NOT read bucket versioning itself (control/data-plane
+  // boundary), so this carries an authoritative tri-state: 0=unknown (old peer
+  // / unresolved → receiver falls back to a local read), 1=disabled,
+  // 2=enabled. Appended for wire compatibility; old peers read it as 0.
+  versioning_state:ubyte;
 }
 
 table GetObjectArgs {

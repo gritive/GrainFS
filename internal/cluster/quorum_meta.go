@@ -31,11 +31,36 @@ const quorumMetaWriteTimeout = 30 * time.Second
 // Shorter than the write timeout: reads are latency-sensitive (GET path).
 const quorumMetaReadTimeout = 5 * time.Second
 
+// bucketVersioningEnabled reports whether the PUT targets a versioning-enabled
+// bucket. It prefers the context flag set by the coordinator (and carried over
+// the forward wire), which is authoritative because the per-group commit
+// backend cannot read the replicated bucketver state itself. When the flag is
+// absent — an in-process DistributedBackend PUT that bypasses the coordinator —
+// it falls back to a local versioning read, which is correct in that case
+// because the single backend does hold the bucketver state.
+func (b *DistributedBackend) bucketVersioningEnabled(ctx context.Context, bucket string) bool {
+	if enabled, resolved := bucketVersioningFromContext(ctx); resolved {
+		return enabled
+	}
+	state, err := b.GetBucketVersioning(bucket)
+	return err == nil && state == "Enabled"
+}
+
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	// Internal buckets stay on raft (control-plane; headObjectMeta reads BadgerDB
 	// for them). Non-internal user buckets use per-node quorum (data_raft bypass).
 	if storage.IsInternalBucket(cmd.Bucket) {
 		return b.propose(ctx, CmdPutObjectMeta, cmd)
+	}
+	// Versioning-enabled buckets need per-version retention: quorum-meta holds a
+	// single latest-only record per bucket/key, so without an FSM per-version key
+	// (obj:{bucket}/{key}/{versionID}) a GET ?versionId=<old> can never find an
+	// overwritten version (404). Persist the per-version metadata via raft first,
+	// then continue to the quorum-meta fan-out below for LIST/latest visibility.
+	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
+		if err := b.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
+			return fmt.Errorf("versioned meta persist: %w", err)
+		}
 	}
 	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
 		return fmt.Errorf("quorum meta write: no shard service or empty placement")

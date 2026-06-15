@@ -32,6 +32,14 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 	// Phase 3: quorum meta is the primary source for non-internal user objects.
 	if !storage.IsInternalBucket(bucket) {
 		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {
+			// Fold delete markers to 405, mirroring the BadgerDB fallback below
+			// (deleteMarkerETag → ErrMethodNotAllowed) and this method's contract.
+			// After a soft-delete the latest quorum-meta record IS the marker
+			// tombstone, so without this a HEAD/GET of the marker version would
+			// return 200 instead of MethodNotAllowed.
+			if obj.IsDeleteMarker {
+				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
+			}
 			return obj, pm, nil
 		}
 	}
