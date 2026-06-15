@@ -1474,20 +1474,11 @@ func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bu
 }
 
 func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
-	// WAL is mandatory on the stream write path: the WAL must observe the full
-	// payload before any file mutation so recovery can replay it. A nil WAL is
-	// rejected rather than silently writing a shard the WAL never covered.
-	// Buffer the body (bounded by datawal.MaxPayloadBytes minus the encryption
-	// envelope overhead) and route through writeLocalShard, which logs the
-	// encoded/encrypted bytes through the WAL once and then decides pack vs file
-	// by size.
-	//
-	// The 64 MiB ceiling is intentional: data WAL records are size-bounded.
-	// Lifting it requires extending datawal.AppendReader to stream payload
-	// chunks across multiple WAL segment writes.
-	if s.dataWAL == nil {
-		return fmt.Errorf("writeLocalShardStreamContext: stream shard write requires a data WAL (WAL is mandatory)")
-	}
+	// Buffer the body bounded by a 64 MiB memory cap (derived from
+	// datawal.MaxPayloadBytes; the value is retained purely as a memory bound,
+	// not a WAL record limit), then route through writeLocalShard. Durability no
+	// longer involves a WAL (S4): writeLocalShard fsyncs small / no-redundancy
+	// shards directly and relies on EC for large redundant shards.
 	rawCap := maxRawShardPayloadForWAL(false)
 	data, err := readShardPayload(body, rawCap, streamSize, false)
 	if err != nil {
