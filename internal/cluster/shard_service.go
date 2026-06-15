@@ -1242,14 +1242,8 @@ const walPayloadInlineThreshold = 1 << 20
 //     is NOT fsynced → returns false. A nil noRedundancy provider counts as
 //     redundant (matches production wiring; nil only occurs in tests).
 //
-// During WAL replay the materializer fsyncs directly (writeShardFile hardcodes
-// requireFsync=true); if a normal write is somehow reached mid-replay this still
-// returns true (fail safe). The shard-write path no longer requires a wired WAL
-// (durability is fsync/EC); a nil WAL is only consulted by boot recovery now.
+// S4 removed the data WAL entirely, so there is no replay path to special-case.
 func (s *ShardService) shardWriteRequiresFsync(payloadLen int) bool {
-	if s.replayingDataWAL.Load() {
-		return true
-	}
 	large := payloadLen >= walPayloadInlineThreshold
 	if large && (s.noRedundancy == nil || !s.noRedundancy()) {
 		return false // large + redundant: EC durability, no fsync (S1)

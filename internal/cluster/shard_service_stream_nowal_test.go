@@ -39,3 +39,21 @@ func TestWriteLocalShardStream_OverCap_Rejected(t *testing.T) {
 	err := svc.WriteLocalShardStreamSizedContext(context.Background(), "b", "k", 0, bytes.NewReader([]byte("x")), over)
 	require.Error(t, err, "over-cap stream write must be rejected by the size cap, not the WAL")
 }
+
+// TestShardWriteRequiresFsync_Classes pins the fsync decision per shard class
+// after S4 removed the replay branch: small => fsync, large+redundant => no
+// fsync (EC), large+no-redundancy => fsync, nil provider => redundant.
+func TestShardWriteRequiresFsync_Classes(t *testing.T) {
+	small := walPayloadInlineThreshold - 1
+	large := walPayloadInlineThreshold + 1
+
+	redundant := &ShardService{noRedundancy: func() bool { return false }}
+	require.True(t, redundant.shardWriteRequiresFsync(small), "small shard always fsyncs")
+	require.False(t, redundant.shardWriteRequiresFsync(large), "large redundant: EC, no fsync")
+
+	noRed := &ShardService{noRedundancy: func() bool { return true }}
+	require.True(t, noRed.shardWriteRequiresFsync(large), "large no-redundancy: fsync")
+
+	nilRed := &ShardService{} // nil provider => redundant
+	require.False(t, nilRed.shardWriteRequiresFsync(large), "nil provider counts as redundant")
+}
