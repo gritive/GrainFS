@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.589.0] - 2026-06-15
+
+### Added
+- **EC full-object orphan-shard scrubber (reclaims leaked EC shard dirs).**
+  `*DistributedBackend` now implements `scrubber.OrphanWalkable`
+  (`WalkOrphanShards`/`DeleteOrphanDir`), so the background scrubber finally
+  reclaims leaked full-object EC shard directories
+  (`<dataDir>/shards/<bucket>/<key>/<versionID>/shard_N`) — previously the
+  interface was unimplemented and these leaked forever (e.g. a multipart-complete
+  propose timeout that preserved shards for a genuinely-uncommitted entry). The
+  sweep is exhaustively fail-closed against data loss:
+  - **Single-group safety gate.** The `ShardService` dataDirs are shared across
+    every local group, but the scrubber's group-0 backend only sees group-0's
+    metadata. The sweep runs only when the node hosts exactly one data group that
+    is group-0 (== the scrubber's backend); multi-group nodes leak (never lose)
+    until the per-group fan-out follow-up. Default is fail-closed (no sweep).
+  - **All-versions liveness, cleanable-key safe.** `ScanObjects` is latest-only,
+    so live retained versions are protected by forward-mapping every FSM `obj:`
+    record to its canonical shard dir via the same `getShardDir` the writer used
+    (a reverse-parse of the on-disk path would mis-identify a cleanable logical
+    key like `a/../b` or `dir/`, whose shards land in a `filepath.Join`-cleaned
+    dir, and delete a live version). Regular-PUT objects (no `obj:` record) are
+    re-checked against the peer-fallback quorum-meta (K-of-N: a parity node holds
+    shards without a local record; quorum-meta storage is itself cleaned-keyed so
+    the lookup matches). Any read uncertainty keeps the shards.
+  - **Snapshot pins.** Snapshot-pinned full-object versions are added to the
+    known-set via the new `snapshot.Manager.AllFrozenObjectVersions` (mirrors
+    `AllFrozenSegmentPaths`, strict/fail-closed), so PITR-referenced shards are
+    never swept even after their live metadata is hard-deleted.
+  - **Caught-up gate**, **in-flight `.tmp` skip**, an age gate floored at
+    `2*proposeForwardTimeout` (so the bounded write→commit window can never reach
+    it), a two-cycle tombstone delay, segment/coalesced shard-class exclusion, and
+    a delete-time re-validation (gate + caught-up + snapshot + liveness re-checked
+    before each `DeleteOrphanDir`). Resolves the phantom-commit residual-leak
+    TODO as a side effect.
+
 ## [0.0.588.0] - 2026-06-15
 
 ### Changed
