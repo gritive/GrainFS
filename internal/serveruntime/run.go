@@ -251,7 +251,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// §5 T44: refuse to start with anon-disabled + no TLS cert + no trusted
 	// proxy. Must run AFTER bootHTTPServerAndAdmin (state.cfgStore + state.srv
-	// populated) and BEFORE bootResharderAndDegraded (which goroutines
+	// populated) and BEFORE bootDegradedAndServices (which goroutines
 	// srv.Run() — the listener actually starts there).
 	if err := bootTLSPostureGate(state); err != nil {
 		return err

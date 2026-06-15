@@ -12,8 +12,8 @@ import (
 // plugs into, and that an admin endpoint can trigger on demand.
 //
 // Preconditions: the object must already have a placement record (created by
-// putObjectEC or ConvertObjectToEC). shardIdx must be in [0, k+m). At least k
-// of the other shards must be readable or reconstruction fails.
+// the EC write path). shardIdx must be in [0, k+m). At least k of the other
+// shards must be readable or reconstruction fails.
 //
 // versionID identifies the physical shard files on disk: putObjectEC writes
 // shards under `{key}/{versionID}/shard_{N}` via ShardService, and this
