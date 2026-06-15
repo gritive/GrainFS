@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"errors"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -57,7 +55,10 @@ var _ = Describe("Backend object integration", func() {
 		Expect(gotObj.Size).To(Equal(obj.Size))
 	})
 
-	It("uses the body spool but skips EC shard spool for small streaming parity EC puts", func() {
+	It("round-trips small streaming parity EC puts via the spooled path", func() {
+		// The EC-memory fast path (which skipped the EC shard spool-to-disk for
+		// small parity puts) was removed; shardGroup==nil test backends now route
+		// through writeSpooledShards. This asserts the round-trip is preserved.
 		configureParityEC()
 
 		payload := bytes.Repeat([]byte("a"), 64<<10)
@@ -74,14 +75,9 @@ var _ = Describe("Backend object integration", func() {
 		Expect(closeErr).NotTo(HaveOccurred())
 		Expect(got).To(Equal(payload))
 		Expect(gotObj.ETag).To(Equal(obj.ETag))
-
-		_, err = os.Stat(b.spoolDir())
-		Expect(err).NotTo(HaveOccurred())
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
 	})
 
-	It("streams single-local shards with request size hints", func() {
+	It("round-trips known-size streaming puts with request size hints", func() {
 		payload := bytes.Repeat([]byte("x"), 2<<20)
 		sizeHint := int64(len(payload))
 		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{

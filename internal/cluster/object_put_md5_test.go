@@ -20,10 +20,11 @@ type readerOnly struct{ r io.Reader }
 
 func (ro readerOnly) Read(p []byte) (int, error) { return ro.r.Read(p) }
 
-// TestPutObject_FastPath_ContentMD5Mismatch: a small in-memory PUT (bytes.Reader
-// → single-local fast path) with a wrong Content-MD5 must be rejected as
-// BadDigest (storage.ErrContentMD5Mismatch) before commit.
-func TestPutObject_FastPath_ContentMD5Mismatch(t *testing.T) {
+// TestPutObject_SizedReader_ContentMD5Mismatch: a small PUT whose body is a
+// sized reader (bytes.Reader) with a wrong Content-MD5 must be rejected as
+// BadDigest (storage.ErrContentMD5Mismatch) before commit. Content-MD5 is now
+// validated pre-dispatch (object_put.go), independent of the write path.
+func TestPutObject_SizedReader_ContentMD5Mismatch(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
