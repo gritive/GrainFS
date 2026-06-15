@@ -72,23 +72,3 @@ func wrapBodyNoOut204[Req any](d *Deps, fn func(context.Context, *Deps, Req) err
 		c.SetStatusCode(consts.StatusNoContent)
 	}
 }
-
-func wrapNameBody[Req any, Resp any](d *Deps, fn func(context.Context, *Deps, string, Req) (Resp, error)) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		name := c.Param("name")
-		var req Req
-		body := c.Request.Body()
-		if len(body) > 0 {
-			if err := json.Unmarshal(body, &req); err != nil {
-				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
-				return
-			}
-		}
-		resp, err := fn(ctx, d, name, req)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		writeOK(c, consts.StatusOK, resp)
-	}
-}

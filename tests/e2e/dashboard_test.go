@@ -14,7 +14,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// dashboardFactory mirrors volumeScrubFactory. TokenURLAndRotate rotates the
+// dashboardFactory builds an s3Target per case. TokenURLAndRotate rotates the
 // dashboard token; isolating each case in its own fixture prevents one
 // rotate from invalidating another case's expectations.
 type dashboardFactory func(args ...string) s3Target
@@ -165,7 +165,7 @@ func dashboardPort(tgt s3Target, nodeIdx int) int {
 
 func callUI(t testing.TB, port int, token string) int {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ui/api/volumes", port), nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ui/api/cluster/peers", port), nil)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

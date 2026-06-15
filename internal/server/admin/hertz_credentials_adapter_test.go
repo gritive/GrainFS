@@ -139,9 +139,9 @@ func TestCredentialBearerMiddlewareDoesNotAffectOtherAdminRoutes(t *testing.T) {
 	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 	cli := startCredentialRouteTestServer(t, d)
 
-	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/volumes", "Bearer bad-token", nil, http.StatusOK)
+	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/cluster/peers", "Bearer bad-token", nil, http.StatusOK)
 
-	require.Contains(t, string(raw), `"volumes"`)
+	require.Contains(t, string(raw), `"peers"`)
 }
 
 type actorAuthStub struct {

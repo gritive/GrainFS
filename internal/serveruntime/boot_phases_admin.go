@@ -159,7 +159,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
 	admin.RegisterUI(dataHertz, state.adminDeps)
 
-	// Open the admin Unix socket. Operator commands (`grainfs volume *`, `grainfs
+	// Open the admin Unix socket. Operator commands (`grainfs iam *`, `grainfs
 	// dashboard`) reach this socket; permissions are governed by the file mode
 	// (0660) and optional --admin-group chown.
 	adminSocket := cfg.AdminSocket

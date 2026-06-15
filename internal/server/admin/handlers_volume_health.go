@@ -2,22 +2,7 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
-
-	"github.com/gritive/GrainFS/internal/incident"
 )
-
-func incidentToWireMap(st incident.IncidentState) map[string]any {
-	var out map[string]any
-	buf, err := json.Marshal(st)
-	if err != nil {
-		return map[string]any{"id": st.ID}
-	}
-	if err := json.Unmarshal(buf, &out); err != nil {
-		return map[string]any{"id": st.ID}
-	}
-	return out
-}
 
 // fetchAndAnnotateHealth fetches active incident state plus per-volume
 // replica/EC layout signals and delegates composition to the pure

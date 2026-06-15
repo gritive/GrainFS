@@ -34,37 +34,6 @@ func (m *mockDirector) CancelSession(id string) error {
 }
 func (m *mockDirector) ApplyFromFSM(_ scrubber.ScrubTriggerEntry) {}
 
-// covers the default scrub-trigger path that used to assert ScopeFull
-func TestScrubVolume_Triggers(t *testing.T) {
-	d := &mockDirector{sessionID: "sess-1", created: true}
-	deps := &Deps{Director: d}
-	resp, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "myvol"})
-	require.NoError(t, err)
-	require.Equal(t, "sess-1", resp.SessionID)
-	require.True(t, resp.Created)
-	require.Equal(t, "__grainfs_volumes", d.triggered.Bucket)
-	require.Equal(t, "__vol/myvol/blk_", d.triggered.KeyPrefix)
-}
-
-func TestScrubVolume_DryRun(t *testing.T) {
-	d := &mockDirector{sessionID: "sess-2", created: true}
-	deps := &Deps{Director: d}
-	_, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "myvol", DryRun: true})
-	require.NoError(t, err)
-	require.True(t, d.triggered.DryRun)
-}
-
-func TestScrubVolume_NoName(t *testing.T) {
-	d := &mockDirector{}
-	_, err := ScrubVolume(context.Background(), &Deps{Director: d}, ScrubVolumeReq{})
-	require.Error(t, err)
-}
-
-func TestScrubVolume_NoDirector(t *testing.T) {
-	_, err := ScrubVolume(context.Background(), &Deps{}, ScrubVolumeReq{Name: "v"})
-	require.Error(t, err)
-}
-
 func TestListScrubJobs_EmptyOK(t *testing.T) {
 	resp, err := ListScrubJobs(context.Background(), &Deps{Director: &mockDirector{}})
 	require.NoError(t, err)

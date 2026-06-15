@@ -80,7 +80,6 @@ tbody tr:last-child td{border-bottom:none}
   <nav>
     <button class="active" data-tab="browser">Object Browser</button>
     <button data-tab="storage">Storage</button>
-    <button data-tab="volumes">Volumes</button>
     <button data-tab="snapshots">Snapshots</button>
     <button data-tab="events">Events</button>
     <button data-tab="audit">Audit</button>
@@ -143,22 +142,6 @@ tbody tr:last-child td{border-bottom:none}
     <table>
       <thead><tr><th>NFS Export</th><th>Mode</th><th>FSID</th><th>Generation</th></tr></thead>
       <tbody id="storage-nfs-list"></tbody>
-    </table>
-  </div>
-</div>
-
-<!-- Volumes Tab -->
-<div class="content hidden" id="tab-volumes">
-  <div class="toolbar">
-    <div class="breadcrumb"><span>Volumes</span></div>
-    <div class="actions">
-      <button class="btn primary" id="btn-create-vol">Create Volume</button>
-    </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Name</th><th>Size</th><th>Block Size</th><th>Health</th></tr></thead>
-      <tbody id="volume-list"></tbody>
     </table>
   </div>
 </div>
@@ -455,25 +438,6 @@ tbody tr:last-child td{border-bottom:none}
   </div>
 </div>
 
-<div class="modal-overlay hidden" id="modal-volume">
-  <div class="modal">
-    <h3>Create Volume</h3>
-    <input type="text" id="vol-name-input" placeholder="Volume name">
-    <div style="display:flex;gap:0.5rem">
-      <input type="number" id="vol-size-input" placeholder="Size" value="1" style="flex:1">
-      <select id="vol-size-unit" style="padding:0.5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-card);color:var(--text);font-size:0.875rem">
-        <option value="1073741824" selected>GB</option>
-        <option value="1048576">MB</option>
-        <option value="1099511627776">TB</option>
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn" id="modal-volume-cancel">Cancel</button>
-      <button class="btn primary" id="modal-volume-ok">Create</button>
-    </div>
-  </div>
-</div>
-
 <input type="file" id="file-input" multiple style="display:none">
 
 <script>
@@ -586,7 +550,6 @@ tbody tr:last-child td{border-bottom:none}
       var tab = document.getElementById('tab-' + btn.dataset.tab);
       if (tab) tab.classList.remove('hidden');
       if (btn.dataset.tab === 'storage') loadStorage();
-      if (btn.dataset.tab === 'volumes') loadVolumes();
       if (btn.dataset.tab === 'snapshots') loadSnapshots();
       if (btn.dataset.tab === 'events') loadEvents();
       if (btn.dataset.tab === 'audit') loadAudit();
@@ -744,8 +707,6 @@ tbody tr:last-child td{border-bottom:none}
   // Modal buttons
   document.getElementById('modal-bucket-cancel').addEventListener('click', function() { closeModal('modal-bucket'); });
   document.getElementById('modal-bucket-ok').addEventListener('click', createBucket);
-  document.getElementById('modal-volume-cancel').addEventListener('click', function() { closeModal('modal-volume'); });
-  document.getElementById('modal-volume-ok').addEventListener('click', createVolume);
 
   // Storage
   function protocolLabel(p) {
@@ -825,52 +786,6 @@ tbody tr:last-child td{border-bottom:none}
   document.getElementById('btn-storage-create-bucket').addEventListener('click', function() {
     openBucketModal();
   });
-
-  // Volumes
-  function loadVolumes() {
-    fetchAuth(baseURL + '/ui/api/volumes').then(function(r) { return r.json(); }).then(function(payload) {
-      var vols = (payload && payload.volumes) ? payload.volumes : [];
-      var tbody = document.getElementById('volume-list');
-      clearChildren(tbody);
-
-      if (!vols || vols.length === 0) {
-        var emptyTr = mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No volumes.' })]);
-        tbody.appendChild(emptyTr);
-        return;
-      }
-
-      vols.forEach(function(v) {
-        var tr = mkEl('tr', null, [
-          mkTd(v.name),
-          mkTd(fmtBytes(v.size), 'size-cell'),
-          mkTd(String(v.block_size), 'size-cell'),
-          mkTd(v.health || '')
-        ]);
-        tbody.appendChild(tr);
-      });
-    }).catch(function(e) { console.error('loadVolumes', e); });
-  }
-
-  document.getElementById('btn-create-vol').addEventListener('click', function() {
-    document.getElementById('modal-volume').classList.remove('hidden');
-  });
-
-  function createVolume() {
-    var name = document.getElementById('vol-name-input').value.trim();
-    var sizeVal = parseFloat(document.getElementById('vol-size-input').value);
-    var unit = parseInt(document.getElementById('vol-size-unit').value);
-    var size = Math.round(sizeVal * unit);
-    if (!name || !size) return;
-    fetchAuth(baseURL + '/ui/api/volumes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, size: size })
-    }).then(function() {
-      closeModal('modal-volume');
-      document.getElementById('vol-name-input').value = '';
-      loadVolumes();
-    });
-  }
 
   // Dashboard
   function refreshDashboard() {
