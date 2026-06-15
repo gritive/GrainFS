@@ -149,11 +149,13 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	}
 
 	if cfg.ScrubInterval > 0 {
-		// Plan 3.5: activate orphan-segment GC. Frozen-path source + orphan-log MUST
+		// Plan 3.5: activate orphan-SEGMENT GC. Frozen-path source + orphan-log MUST
 		// wire together (the scrubber's activation constraint). The caught-up gate is
 		// auto-applied: distBackend implements scrubber's caughtUpReporter.
 		// Scope: group-0 distBackend only (single-node complete). Per-group fan-out
 		// for multi-group clusters is a follow-up (see TODOS.md: per-group segment GC).
+		// (The orphan-SHARD sweep wired below is already multi-group; only segment
+		// GC remains group-0-scoped.)
 		var segGCOpts []scrubber.ScrubberOption
 		if state.objSnapMgr != nil {
 			state.distBackend.SetFrozenSegmentPathSource(state.objSnapMgr.AllFrozenSegmentPaths)
@@ -164,22 +166,40 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 			// never runs (no reclaim, but no risk of deleting a pinned version).
 			state.distBackend.SetFrozenObjectVersionSource(state.objSnapMgr.AllFrozenObjectVersions)
 		}
-		// Orphan-shard sweep safety gate: the shared ShardService dataDirs hold
-		// every local group's shards, but this group-0 backend's FSM/quorum-meta
-		// only cover group-0. Permit the sweep ONLY when the node hosts exactly
-		// one data group and it is group-0 (== this backend) — otherwise a
-		// sibling group's live shards would look orphan. Re-evaluated each sweep
-		// (membership changes at runtime); nil/false default is fail-closed.
-		distBackend := state.distBackend
-		state.distBackend.SetOrphanShardSweepGate(func() bool {
+		// EC full-object orphan-shard sweep wiring. The shared ShardService
+		// dataDirs commingle every local group's shards (plus shards the balancer
+		// floated in from groups this node does not host — balancer.go is
+		// group-blind by design, placement metadata tracks location). The sweep
+		// judges each candidate against authoritative metadata: the union of every
+		// locally-hosted group's versioned live-set + the group-agnostic
+		// quorum-meta, and KEEPS any shard whose owning group is not locally hosted
+		// (unjudgeable locally). All sources re-evaluate each sweep (membership
+		// changes at runtime).
+		state.distBackend.SetHostedGroupBackendsSource(func() []*cluster.DistributedBackend {
 			groups := dgMgr.All()
-			if len(groups) != 1 {
+			out := make([]*cluster.DistributedBackend, 0, len(groups))
+			for _, g := range groups {
+				gb := g.Backend()
+				if gb == nil || gb.DistributedBackend == nil {
+					continue
+				}
+				out = append(out, gb.DistributedBackend)
+			}
+			return out
+		})
+		state.distBackend.SetOwningGroupHostedChecker(func(bucket string) bool {
+			dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+			if !ok || dg == nil {
+				// Unknown owner → cannot judge → keep. With requireExplicit routing
+				// an unassigned bucket lands here too, so its shards are never swept
+				// (more conservative than #774; every CreateBucket assigns a group,
+				// so steady-state reclaim is unaffected).
 				return false
 			}
-			g := groups[0]
-			gb := g.Backend()
-			return g.ID() == "group-0" && gb != nil && gb.DistributedBackend == distBackend
+			gb := dg.Backend()
+			return gb != nil && gb.DistributedBackend != nil
 		})
+		state.distBackend.SetOrphanShardSweepGate(func() bool { return true })
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
 		sc.RegisterSource("replication", replSource, replVerifier)

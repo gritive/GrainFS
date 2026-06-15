@@ -40,6 +40,42 @@ func (b *DistributedBackend) SetFrozenObjectVersionSource(fn func() ([]storage.S
 	b.frozenObjVersionSrc = fn
 }
 
+// SetHostedGroupBackendsSource wires the set of locally-hosted data-group
+// backends (including this one) so the orphan-shard sweep can union the live
+// versioned-set across all of them. Call once during boot, before the scrubber
+// starts. nil/un-wired => the sweep treats this backend as the only group.
+func (b *DistributedBackend) SetHostedGroupBackendsSource(fn func() []*DistributedBackend) {
+	b.hostedGroupBackendsSrc = fn
+}
+
+// SetOwningGroupHostedChecker wires the predicate that reports whether a bucket's
+// owning data group is locally hosted. Used to keep (never delete) shards the
+// balancer floated in from groups this node does not host. Call once during boot,
+// before the scrubber starts. nil/un-wired => every bucket is treated as locally
+// owned (single-group).
+func (b *DistributedBackend) SetOwningGroupHostedChecker(fn func(bucket string) bool) {
+	b.owningGroupHostedFn = fn
+}
+
+// hostedGroupBackends returns the locally-hosted group backends to judge
+// candidates against. Defaults to just this backend when un-wired (single-group).
+func (b *DistributedBackend) hostedGroupBackends() []*DistributedBackend {
+	if b.hostedGroupBackendsSrc == nil {
+		return []*DistributedBackend{b}
+	}
+	return b.hostedGroupBackendsSrc()
+}
+
+// owningGroupHosted reports whether the bucket's owning group is locally hosted
+// (so this node has authoritative metadata to judge its shards). Defaults to true
+// when un-wired (single-group).
+func (b *DistributedBackend) owningGroupHosted(bucket string) bool {
+	if b.owningGroupHostedFn == nil {
+		return true
+	}
+	return b.owningGroupHostedFn(bucket)
+}
+
 // allFrozenObjectVersionDirs maps every snapshot-frozen full-object version to
 // its canonical (dataDirs[0]-rooted) shard dir. Fails closed when no source is
 // wired or the source errors: the caller skips the whole sweep this cycle, so an
@@ -126,28 +162,57 @@ func (b *DistributedBackend) liveVersionedShardDirs() (map[string]bool, error) {
 	return out, nil
 }
 
-// orphanShardSweepAllowed reports whether the safety gate + caught-up gate both
-// permit the sweep right now. Both are re-evaluated on every call (membership
-// and replication lag change at runtime).
+// liveVersionedShardDirsAllHosted unions liveVersionedShardDirs across every
+// locally-hosted group backend. The shared ShardService dataDirs commingle all
+// hosted groups' shards, so a versioned object owned by ANY hosted group (its
+// obj: record lives under that group's ks prefix on the shared store) must be in
+// the known-set or the sweep would false-orphan it. Fail-closed: a nil backend or
+// any scan error returns an error so the caller skips the whole sweep.
+func (b *DistributedBackend) liveVersionedShardDirsAllHosted() (map[string]bool, error) {
+	out := make(map[string]bool)
+	for _, gb := range b.hostedGroupBackends() {
+		if gb == nil {
+			return nil, fmt.Errorf("hosted group backend is nil")
+		}
+		m, err := gb.liveVersionedShardDirs()
+		if err != nil {
+			return nil, err
+		}
+		for k := range m {
+			out[k] = true
+		}
+	}
+	return out, nil
+}
+
+// orphanShardSweepAllowed reports whether the feature gate + caught-up gate both
+// permit the sweep right now, re-evaluated on every call (membership and
+// replication lag change at runtime). The caught-up gate covers EVERY hosted
+// group: a lagging sibling group's FSM could otherwise mark its own
+// committed-but-not-yet-applied shard an orphan.
 func (b *DistributedBackend) orphanShardSweepAllowed() bool {
 	if b.shardSvc == nil {
 		return false
 	}
 	if b.orphanShardSweepGate == nil || !b.orphanShardSweepGate() {
-		return false // multi-group / un-wired: fail-closed
+		return false // disabled / un-wired: fail-closed
 	}
-	if !b.CaughtUp(context.Background()) {
-		return false // lagging FSM could mark a committed shard orphan
+	for _, gb := range b.hostedGroupBackends() {
+		if gb == nil || !gb.CaughtUp(context.Background()) {
+			return false // lagging (or missing) hosted group could mark a committed shard orphan
+		}
 	}
 	return true
 }
 
 // WalkOrphanShards yields each full-object EC shard dir on disk that is not
-// backed by live metadata, a snapshot pin, or the scrubber's latest-only
-// known-set, and is older than the (floored) age gate. It is fully self-gated:
-// it no-ops (yields nothing) unless the single-group gate, the caught-up gate,
-// and a complete snapshot known-set are all satisfied — so the shared scrubber
-// never needs to know any of this. Implements scrubber.OrphanWalkable.
+// backed by live metadata (across ALL locally-hosted groups), a snapshot pin, or
+// the scrubber's latest-only known-set, and is older than the (floored) age gate.
+// It is fully self-gated: it no-ops (yields nothing) unless the feature gate, the
+// all-hosted caught-up gate, and a complete snapshot known-set are all satisfied,
+// and it keeps any shard whose owning group is not locally hosted (balancer-
+// floated, unjudgeable) — so the shared scrubber never needs to know any of this.
+// Implements scrubber.OrphanWalkable.
 func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir string) error) error {
 	if !b.orphanShardSweepAllowed() {
 		return nil
@@ -156,7 +221,7 @@ func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir
 	if err != nil {
 		return nil // fail-closed: never sweep without the full snapshot known-set
 	}
-	live, err := b.liveVersionedShardDirs()
+	live, err := b.liveVersionedShardDirsAllHosted()
 	if err != nil {
 		return nil // fail-closed: never sweep without the full live versioned-set
 	}
@@ -235,6 +300,9 @@ func (b *DistributedBackend) walkOneShardRoot(
 		bucket, key, versionID, ok := parseFullObjectRel(rel)
 		if !ok {
 			return filepath.SkipDir // unversioned / unparseable → keep (leak, never delete)
+		}
+		if !b.owningGroupHosted(bucket) {
+			return filepath.SkipDir // balancer-floated from a non-hosted group → can't judge → keep
 		}
 		// Not a live versioned object (the forward live-set above is bijective for
 		// those). Remaining live candidate is a regular-PUT object: quorum-meta is
@@ -431,7 +499,7 @@ func (b *DistributedBackend) orphanShardSweepReconfirm(canonical string) bool {
 	if err != nil {
 		return false // fail-closed
 	}
-	live, err := b.liveVersionedShardDirs()
+	live, err := b.liveVersionedShardDirsAllHosted()
 	if err != nil {
 		return false // fail-closed
 	}
@@ -450,6 +518,9 @@ func (b *DistributedBackend) orphanShardSweepReconfirm(canonical string) bool {
 	bucket, key, versionID, ok := parseFullObjectRel(filepath.ToSlash(rel))
 	if !ok {
 		return false
+	}
+	if !b.owningGroupHosted(bucket) {
+		return false // ownership moved to a non-hosted group since the walk → can't judge → keep
 	}
 	recLive, certain := b.hasLiveShardRecord(bucket, key, versionID)
 	return !recLive && certain
