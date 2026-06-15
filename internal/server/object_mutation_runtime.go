@@ -25,6 +25,7 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 		result *storage.PutObjectResult
 		err    error
 	)
+	ctx = s.ctxWithBucketVersioning(ctx, bucket)
 	backendStart := time.Now()
 	result, err = s.ops.PutObjectWithRequestResult(ctx, storage.PutObjectRequest{
 		Bucket:         bucket,
@@ -56,12 +57,28 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 }
 
 func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.Reader, contentType string) (*storage.PutObjectResult, error) {
+	ctx = s.ctxWithBucketVersioning(ctx, bucket)
 	result, err := s.ops.PutObjectWithResult(ctx, bucket, key, body, contentType)
 	if err != nil {
 		return nil, err
 	}
 	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 	return result, nil
+}
+
+// ctxWithBucketVersioning resolves the bucket's versioning state at the S3 edge
+// (the same read AppendObject does) and stamps an AUTHORITATIVE decision
+// (enabled OR disabled) onto the context. The per-group commit backend then
+// never reads versioning itself — that read would cross the control/data-plane
+// boundary (the commit backend holds no bucketver state). The decision threads
+// down via context and onward over the forward wire. A read error (e.g. a
+// backend that doesn't track versioning) leaves the context unstamped, so the
+// commit path falls back to a local read.
+func (s *Server) ctxWithBucketVersioning(ctx context.Context, bucket string) context.Context {
+	if state, vErr := s.ops.GetBucketVersioning(bucket); vErr == nil {
+		return cluster.ContextWithBucketVersioning(ctx, state == "Enabled")
+	}
+	return ctx
 }
 
 func (s *Server) completeMultipartObject(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.PutObjectResult, error) {

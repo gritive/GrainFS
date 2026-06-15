@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -207,11 +208,45 @@ func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
 // explicitly (even empty string) per the SSE preservation work in #504, so the
 // no-SSE wrapper is unused outside tests.
 func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil, "", 0)
+	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil, "", 0, versioningStateUnknown)
 }
 
 func TestBuildPutObjectArgs_RoundtripContentMD5(t *testing.T) {
-	args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0)
+	args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0, versioningStateUnknown)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", string(pa.ContentMd5Hex()))
+}
+
+// TestBuildPutObjectArgs_RoundtripVersioningState proves the edge-resolved
+// versioning decision survives the forward wire as an authoritative tri-state.
+// The receiver maps it back to a resolved context so the commit backend never
+// reads versioning itself. An old peer omits the field → unknown (0).
+func TestBuildPutObjectArgs_RoundtripVersioningState(t *testing.T) {
+	for _, st := range []byte{versioningStateUnknown, versioningStateDisabled, versioningStateEnabled} {
+		args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("x"), "", nil, "", 0, st)
+		require.Equal(t, st, raftpb.GetRootAsPutObjectArgs(args, 0).VersioningState())
+	}
+}
+
+// TestVersioningStateContextRoundtrip proves the context↔wire mapping: an
+// authoritative enabled/disabled decision round-trips, while unknown leaves the
+// context unresolved so the commit path falls back to a local read.
+func TestVersioningStateContextRoundtrip(t *testing.T) {
+	enabledCtx := ContextWithBucketVersioning(context.Background(), true)
+	require.Equal(t, versioningStateEnabled, versioningStateFromContext(enabledCtx))
+
+	disabledCtx := ContextWithBucketVersioning(context.Background(), false)
+	require.Equal(t, versioningStateDisabled, versioningStateFromContext(disabledCtx))
+
+	require.Equal(t, versioningStateUnknown, versioningStateFromContext(context.Background()))
+
+	// Wire → context: enabled/disabled resolve; unknown stays unresolved.
+	en, ok := bucketVersioningFromContext(contextWithVersioningState(context.Background(), versioningStateEnabled))
+	require.True(t, ok)
+	require.True(t, en)
+	dis, ok := bucketVersioningFromContext(contextWithVersioningState(context.Background(), versioningStateDisabled))
+	require.True(t, ok)
+	require.False(t, dis)
+	_, ok = bucketVersioningFromContext(contextWithVersioningState(context.Background(), versioningStateUnknown))
+	require.False(t, ok, "unknown must leave the context unresolved")
 }

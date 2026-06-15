@@ -826,6 +826,29 @@ func contextWithObjectWritePlacement(ctx context.Context, group ShardGroupEntry)
 	return ContextWithPlacementGroupEntry(ctx, group)
 }
 
+type bucketVersionedCtxKey struct{}
+
+// ContextWithBucketVersioning stamps an authoritative versioning decision for
+// this PUT. The S3 handler resolves the bucket versioning state at the edge
+// (the same place AppendObject reads it) and ALWAYS stamps it — both enabled
+// and disabled — so the per-group commit backend never has to read bucket
+// versioning itself. That read would be a control/data-plane boundary
+// violation (the commit backend has no replicated bucketver state). The
+// decision also rides the forward wire (PutObjectArgs.versioning_state) so a
+// forwarded PUT received by another node carries the same authoritative value.
+func ContextWithBucketVersioning(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, bucketVersionedCtxKey{}, enabled)
+}
+
+// bucketVersioningFromContext returns the stamped versioning decision and
+// whether it was resolved. resolved is false only when no edge/forward layer
+// stamped the context (e.g. an in-process DistributedBackend test that bypasses
+// the coordinator), in which case the caller falls back to a local read.
+func bucketVersioningFromContext(ctx context.Context) (enabled bool, resolved bool) {
+	v, ok := ctx.Value(bucketVersionedCtxKey{}).(bool)
+	return v, ok
+}
+
 func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 	if err == nil || !errors.Is(err, ErrNoReachablePeer) || len(group.PeerIDs) == 0 {
 		return err

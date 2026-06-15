@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.586.0] - 2026-06-15
+
+### Fixed
+- **S3 versioning now retains old versions on a versioning-enabled bucket
+  (GET/HEAD `?versionId=<old>` no longer 404s).** A simple PUT commits via
+  per-node quorum-meta (latest-only, one record per bucket/key), so an
+  overwritten version's per-version FSM metadata was never written and a read of
+  the older version returned `ErrObjectNotFound`. The S3 edge now resolves the
+  bucket's versioning state once (the same read `AppendObject` already does) and
+  threads an **authoritative** decision down to the commit path; for a
+  versioning-enabled bucket the per-group backend also persists the per-version
+  FSM key (`obj:{bucket}/{key}/{versionID}`) for retention. The per-group commit
+  backend never reads bucket versioning itself — that would cross the
+  control/data-plane boundary, since it holds no replicated `bucketver` state.
+  The decision threads via request context locally and over the forward wire
+  (new `PutObjectArgs.versioning_state` tri-state: 0=unknown/old-peer,
+  1=disabled, 2=enabled), so forwarded PUTs on a multi-node cluster behave
+  identically. Coverage also includes form-POST and CopyObject destination
+  writes.
+- **HEAD/GET `?versionId=<deleteMarkerID>` now returns 405 MethodNotAllowed
+  instead of 200.** `headObjectMetaV`'s quorum-meta fast path returned the
+  latest record without folding a delete marker; after a soft-delete the latest
+  quorum-meta record IS the marker tombstone, so a versioned read of the marker
+  wrongly succeeded. It now folds `IsDeleteMarker` to `ErrMethodNotAllowed`,
+  matching the BadgerDB fallback (`deleteMarkerETag`) and the method contract.
+
+### Known issues
+- Versioned `ListObjectVersions` does not enumerate old versions under
+  multi-group sharding (returns latest only). `ListObjectVersions` iterates a
+  single group backend's FSM `obj:` keys, while a bucket's objects are sharded
+  across groups by key-hash and regular LIST uses cross-group quorum-meta
+  scatter-gather (which is latest-only). Pre-existing; a proper fix needs a
+  cross-group scatter-gather over per-version FSM keys — tracked as a separate
+  slice.
+
 ## [0.0.585.0] - 2026-06-15
 
 ### Changed

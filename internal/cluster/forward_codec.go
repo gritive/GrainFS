@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -24,9 +25,45 @@ var errInternalReply = errors.New("forward: internal reply error")
 // Production serve wiring streams PutObject/UploadPart bodies separately on
 // StreamGroupForwardBody.
 
+// Wire tri-state for PutObjectArgs.versioning_state. 0 (the FlatBuffers
+// default / absent on old peers) means "unknown" → the receiver falls back to
+// a local read. 1/2 are authoritative decisions resolved at the S3 edge.
+const (
+	versioningStateUnknown  byte = 0
+	versioningStateDisabled byte = 1
+	versioningStateEnabled  byte = 2
+)
+
+// versioningStateFromContext maps a stamped versioning decision to its wire
+// tri-state. Unresolved context (no edge layer stamped it) encodes as unknown.
+func versioningStateFromContext(ctx context.Context) byte {
+	enabled, resolved := bucketVersioningFromContext(ctx)
+	if !resolved {
+		return versioningStateUnknown
+	}
+	if enabled {
+		return versioningStateEnabled
+	}
+	return versioningStateDisabled
+}
+
+// contextWithVersioningState applies a received wire tri-state to the context.
+// Unknown leaves the context unresolved so the receiver's commit path falls
+// back to a local read (only reachable from an old peer that omits the field).
+func contextWithVersioningState(ctx context.Context, state byte) context.Context {
+	switch state {
+	case versioningStateEnabled:
+		return ContextWithBucketVersioning(ctx, true)
+	case versioningStateDisabled:
+		return ContextWithBucketVersioning(ctx, false)
+	default:
+		return ctx
+	}
+}
+
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -69,6 +106,9 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	}
 	if acl != 0 {
 		raftpb.PutObjectArgsAddAcl(b, acl)
+	}
+	if versioningState != versioningStateUnknown {
+		raftpb.PutObjectArgsAddVersioningState(b, versioningState)
 	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()

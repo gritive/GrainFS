@@ -134,8 +134,9 @@ func (r forwardRuntime) putObject(
 	bucket, key := req.Bucket, req.Key
 	bodyReader := req.Body
 	contentType := req.ContentType
+	versioningState := versioningStateFromContext(ctx)
 	if r.sender.streamDialer != nil && forwardBodyExceedsSingleFrameCap(bodyReader, r.maxBody) {
-		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL))
+		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 			Bucket:      bucket,
 			Key:         key,
@@ -164,7 +165,7 @@ func (r forwardRuntime) putObject(
 	if err != nil {
 		return nil, err
 	}
-	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL))
+	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
 	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 		Bucket:      bucket,
 		Key:         key,
