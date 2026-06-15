@@ -211,6 +211,16 @@ type SnapshotObject struct {
 	Tags      []Tag          `json:"tags,omitempty"`
 }
 
+// SnapshotObjectRef is the minimal (bucket, key, versionID) identity of a
+// snapshot-pinned object version. The EC orphan-shard scrubber uses it as the
+// snapshot half of its known-set: a full-object EC version pinned by a live
+// snapshot must never be swept even after its live metadata is hard-deleted.
+type SnapshotObjectRef struct {
+	Bucket    string
+	Key       string
+	VersionID string
+}
+
 // StaleBlob reports an object whose blob data was not found during restore.
 type StaleBlob struct {
 	Bucket       string `json:"bucket"`

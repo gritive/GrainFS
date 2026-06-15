@@ -158,7 +158,28 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		if state.objSnapMgr != nil {
 			state.distBackend.SetFrozenSegmentPathSource(state.objSnapMgr.AllFrozenSegmentPaths)
 			segGCOpts = append(segGCOpts, scrubber.WithSegmentOrphanLog(state.distBackend.NewSegmentOrphanLog(), cfg.SegmentGCRetention))
+			// EC full-object orphan-SHARD sweep: snapshot-pinned full-object
+			// versions must stay known. Wired only when a snapshot Manager exists;
+			// absent => allFrozenObjectVersionDirs fails closed and the sweep
+			// never runs (no reclaim, but no risk of deleting a pinned version).
+			state.distBackend.SetFrozenObjectVersionSource(state.objSnapMgr.AllFrozenObjectVersions)
 		}
+		// Orphan-shard sweep safety gate: the shared ShardService dataDirs hold
+		// every local group's shards, but this group-0 backend's FSM/quorum-meta
+		// only cover group-0. Permit the sweep ONLY when the node hosts exactly
+		// one data group and it is group-0 (== this backend) — otherwise a
+		// sibling group's live shards would look orphan. Re-evaluated each sweep
+		// (membership changes at runtime); nil/false default is fail-closed.
+		distBackend := state.distBackend
+		state.distBackend.SetOrphanShardSweepGate(func() bool {
+			groups := dgMgr.All()
+			if len(groups) != 1 {
+				return false
+			}
+			g := groups[0]
+			gb := g.Backend()
+			return g.ID() == "group-0" && gb != nil && gb.DistributedBackend == distBackend
+		})
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
 		sc.RegisterSource("replication", replSource, replVerifier)

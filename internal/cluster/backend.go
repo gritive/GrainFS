@@ -182,6 +182,21 @@ type DistributedBackend struct {
 	// snapshot Manager at boot. nil => AllFrozenSegmentPaths fails closed.
 	frozenSegSrc func() (map[string][]string, error)
 
+	// frozenObjVersionSrc yields snapshot-frozen full-object versions for the
+	// orphan-SHARD known-set (full-object analogue of frozenSegSrc). nil until
+	// SetFrozenObjectVersionSource wires the snapshot Manager at boot. nil =>
+	// allFrozenObjectVersionDirs fails closed (WalkOrphanShards no-ops).
+	frozenObjVersionSrc func() ([]storage.SnapshotObjectRef, error)
+
+	// orphanShardSweepGate, when non-nil and returning true, permits the EC
+	// full-object orphan-shard sweep. nil (default) => fail-closed: the sweep
+	// never runs. Boot sets it to "node hosts exactly one data group that is
+	// group-0 and == this backend" so the shared ShardService dataDirs contain
+	// only objects this backend's FSM/quorum-meta + the scrubber's knownDirs
+	// authoritatively cover (multi-group nodes would otherwise sweep a sibling
+	// group's live shards the group-0 backend cannot see).
+	orphanShardSweepGate func() bool
+
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
