@@ -26,8 +26,12 @@ func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.Segme
 	if !ok {
 		return nil, fmt.Errorf("segment %s not found in metadata for %s/%s", ref.BlobID, s.bucket, s.key)
 	}
-	if entry.Size <= 0 {
+	if entry.Size < 0 {
 		return nil, fmt.Errorf("segment %s has invalid size %d", entry.BlobID, entry.Size)
+	}
+	if entry.Size == 0 {
+		// Empty (0-byte) segment of an empty object: there is no shard to read.
+		return &segmentBytesReadCloser{Reader: bytes.NewReader(nil), data: nil}, nil
 	}
 
 	record, err := s.placementRecord(entry)

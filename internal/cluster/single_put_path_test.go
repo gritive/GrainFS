@@ -78,7 +78,8 @@ func TestSinglePutPath_SmallObject_AlsoChunks(t *testing.T) {
 	rc, _, gerr := b.GetObject(ctx, "b", "small")
 	require.NoError(t, gerr)
 	defer rc.Close()
-	got, _ := io.ReadAll(rc)
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
 	require.Equal(t, body, got)
 }
 
@@ -100,7 +101,8 @@ func TestSinglePutPath_EmptyObject_Chunks(t *testing.T) {
 	rc, gobj, gerr := b.GetObject(ctx, "b", "empty")
 	require.NoError(t, gerr)
 	defer rc.Close()
-	got, _ := io.ReadAll(rc)
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
 	require.Empty(t, got)
 	require.Equal(t, int64(0), gobj.Size)
 }
@@ -129,8 +131,43 @@ func TestSinglePutPath_InternalBucket_ChunksWithXXH3(t *testing.T) {
 	rc, _, gerr := b.GetObject(ctx, internalBkt, "r")
 	require.NoError(t, gerr)
 	defer rc.Close()
-	got, _ := io.ReadAll(rc)
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
 	require.Equal(t, body, got)
+}
+
+// TestSinglePutPath_VersionedRead_ChunkedAndEmpty proves the versioned read
+// path (GetObjectVersion) routes chunked objects — including empty ones — through
+// SegmentReader (the object_version.go Size>0 guard was dropped to match GET).
+func TestSinglePutPath_VersionedRead_ChunkedAndEmpty(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"nonempty", []byte("versioned-chunked-body")},
+		{"empty", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			size := int64(len(tc.body))
+			obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+				Bucket: "b", Key: "v-" + tc.name, Body: bytes.NewReader(tc.body),
+				ContentType: "application/octet-stream", SizeHint: &size,
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, obj.Segments)
+
+			rc, _, gerr := b.GetObjectVersion("b", "v-"+tc.name, obj.VersionID)
+			require.NoError(t, gerr)
+			defer rc.Close()
+			got, readErr := io.ReadAll(rc)
+			require.NoError(t, readErr)
+			require.True(t, bytes.Equal(tc.body, got), "versioned chunked read must round-trip")
+		})
+	}
 }
 
 // TestSinglePutPath_UserBucketETagIsPlaintextMD5 pins ETag parity for a normal
