@@ -190,12 +190,26 @@ type DistributedBackend struct {
 
 	// orphanShardSweepGate, when non-nil and returning true, permits the EC
 	// full-object orphan-shard sweep. nil (default) => fail-closed: the sweep
-	// never runs. Boot sets it to "node hosts exactly one data group that is
-	// group-0 and == this backend" so the shared ShardService dataDirs contain
-	// only objects this backend's FSM/quorum-meta + the scrubber's knownDirs
-	// authoritatively cover (multi-group nodes would otherwise sweep a sibling
-	// group's live shards the group-0 backend cannot see).
+	// never runs. Boot sets it to a feature-on predicate; per-candidate
+	// multi-group safety lives in hostedGroupBackendsSrc (union live-set) +
+	// owningGroupHostedFn (floated-shard gate) + the all-hosted caught-up gate.
 	orphanShardSweepGate func() bool
+
+	// hostedGroupBackendsSrc yields every locally-hosted data-group backend
+	// (including this one). Boot wires it from dgMgr.All(); the orphan sweep
+	// unions each backend's versioned live-set (each scans its own ks obj:
+	// prefix on the shared store) so a sibling group's live versioned shards are
+	// protected. nil (tests / un-wired) => []{b}: single-group, identical to the
+	// pre-multi-group behavior.
+	hostedGroupBackendsSrc func() []*DistributedBackend
+
+	// owningGroupHostedFn reports whether the bucket's router-resolved owning
+	// group is locally hosted. The shared ShardService dataDirs may hold shards
+	// the balancer floated in from groups this node does not host (balancer.go is
+	// group-blind by design; placement metadata tracks location). Such a shard
+	// cannot be judged locally, so the sweep keeps it. nil (tests / un-wired) =>
+	// true: this node judges every candidate (single-group).
+	owningGroupHostedFn func(bucket string) bool
 
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing

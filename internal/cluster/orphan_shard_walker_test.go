@@ -2,12 +2,14 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -279,6 +281,136 @@ func TestWalkOrphanShards_CleanableKeyRetainedVersionProtected(t *testing.T) {
 				"without the obj: record the cleanable-key dir is a true orphan")
 		})
 	}
+}
+
+// --- multi-group harness -----------------------------------------------
+
+// siblingGroupBackend builds a second data-group backend that shares b's store,
+// raft node, and ShardService but scans its own ks (groupID) prefix — the unit
+// analogue of a node hosting more than one data group.
+func siblingGroupBackend(t *testing.T, b *DistributedBackend, groupID string) *DistributedBackend {
+	t.Helper()
+	sib, err := NewDistributedBackendForGroup(b.root, b.store, b.node, groupID)
+	require.NoError(t, err)
+	sib.shardSvc = b.shardSvc // share the node-level ShardService (same dataDirs)
+	t.Cleanup(func() {
+		if sib.coalesceCancel != nil {
+			sib.coalesceCancel()
+		}
+	})
+	return sib
+}
+
+// laggingGroupBackend builds a hosted-group backend whose raft node can NEVER win
+// an election (a 3-voter config whose 2 peers are unreachable, so no quorum), so
+// ReadIndex — hence CaughtUp() — fails deterministically and permanently. (A
+// single unbootstrapped node self-elects within milliseconds, which is racy.)
+func laggingGroupBackend(t *testing.T, b *DistributedBackend, groupID string) *DistributedBackend {
+	t.Helper()
+	cfg := raft.DefaultConfig("lagging-node", []string{"127.0.0.1:1", "127.0.0.1:2"})
+	node, closeRaft, err := newRaftNode(cfg, t.TempDir())
+	require.NoError(t, err)
+	node.SetTransport(
+		func(string, *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+		func(string, *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+			return nil, fmt.Errorf("no peers")
+		},
+	)
+	node.Start()
+	require.NoError(t, node.Bootstrap())
+	sib, err := NewDistributedBackendForGroup(b.root, b.store, node, groupID)
+	require.NoError(t, err)
+	sib.shardSvc = b.shardSvc
+	require.False(t, sib.CaughtUp(context.Background()), "no-quorum node must never report caught-up")
+	t.Cleanup(func() {
+		if sib.coalesceCancel != nil {
+			sib.coalesceCancel()
+		}
+		node.Close()
+		if closeRaft != nil {
+			_ = closeRaft()
+		}
+	})
+	return sib
+}
+
+// TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected proves the union
+// live-set protects a versioned object owned by a SIBLING hosted group (its obj:
+// record lives under that group's ks prefix, which the group-0 walker alone would
+// not scan). Dropping the record turns the same dir into a true orphan.
+func TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	sib := siblingGroupBackend(t, b, "group-3")
+	b.SetHostedGroupBackendsSource(func() []*DistributedBackend { return []*DistributedBackend{b, sib} })
+	b.SetOwningGroupHostedChecker(func(string) bool { return true })
+
+	root := b.shardSvc.DataDirs()[0]
+	dir := writeShardLeaf(t, root, "bkt/key/v-sib", []int{0}, oldEnough)
+	putObjMeta(t, sib, "bkt", "key", "v-sib", "e1") // record under the sibling's ks prefix
+
+	require.Empty(t, collectOrphans(t, b, nil),
+		"a live versioned object owned by a sibling hosted group must be protected by the union live-set")
+
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Delete(sib.ks().ObjectMetaKeyV("bkt", "key", "v-sib"))
+	}))
+	require.Equal(t, []string{dir}, collectOrphans(t, b, nil),
+		"without the sibling's obj: record the dir is a true orphan")
+}
+
+// TestWalkOrphanShards_MultiGroup_FloatedInShardKept proves a shard whose owning
+// group is not locally hosted (balancer-floated) is kept, while a locally-owned
+// orphan is still reclaimed.
+func TestWalkOrphanShards_MultiGroup_FloatedInShardKept(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	b.SetHostedGroupBackendsSource(func() []*DistributedBackend { return []*DistributedBackend{b} })
+	b.SetOwningGroupHostedChecker(func(bucket string) bool { return bucket != "foreign" })
+
+	root := b.shardSvc.DataDirs()[0]
+	writeShardLeaf(t, root, "foreign/key/v1", []int{0}, oldEnough) // owning group not hosted
+	own := writeShardLeaf(t, root, "mine/key/v1", []int{0}, oldEnough)
+
+	require.Equal(t, []string{own}, collectOrphans(t, b, nil),
+		"floated-in shard is kept; locally-owned orphan is still reclaimed")
+}
+
+// TestDeleteOrphanDir_MultiGroup_RefusesNowFloatedIn proves the delete-time
+// reconfirm refuses a dir whose ownership moved to a non-hosted group between the
+// walk and the delete (TOCTOU close).
+func TestDeleteOrphanDir_MultiGroup_RefusesNowFloatedIn(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	hosted := true
+	b.SetOwningGroupHostedChecker(func(string) bool { return hosted })
+
+	root := b.shardSvc.DataDirs()[0]
+	dir := writeShardLeaf(t, root, "bkt/key/v1", []int{0}, oldEnough)
+	require.Equal(t, []string{dir}, collectOrphans(t, b, nil)) // owning group hosted => yielded
+
+	hosted = false // ownership moved to a non-hosted group between walk and delete
+	n, err := b.DeleteOrphanDir(dir)
+	require.NoError(t, err)
+	require.Equal(t, 0, n, "reconfirm must refuse to delete a now-floated-in dir")
+	require.DirExists(t, dir)
+}
+
+// TestOrphanShardSweepAllowed_LaggingHostedGroupBlocks proves a single not-caught-up
+// hosted group blocks the WHOLE sweep (the caught-up gate covers every hosted group,
+// not just self).
+func TestOrphanShardSweepAllowed_LaggingHostedGroupBlocks(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	lag := laggingGroupBackend(t, b, "group-lag")
+	b.SetHostedGroupBackendsSource(func() []*DistributedBackend { return []*DistributedBackend{b, lag} })
+
+	root := b.shardSvc.DataDirs()[0]
+	dir := writeShardLeaf(t, root, "bkt/key/v1", []int{0}, oldEnough)
+	require.Empty(t, collectOrphans(t, b, nil),
+		"a not-caught-up hosted group must block the whole sweep")
+
+	// Control: with only the caught-up self, the same dir is reclaimed.
+	b.SetHostedGroupBackendsSource(func() []*DistributedBackend { return []*DistributedBackend{b} })
+	require.Equal(t, []string{dir}, collectOrphans(t, b, nil))
 }
 
 // TestDeleteOrphanDir_CrossRootInflightGuard proves a striped in-flight write

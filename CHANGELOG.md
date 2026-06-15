@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.590.0] - 2026-06-15
+
+### Changed
+- **EC orphan-shard sweep now runs on multi-group nodes (single-group gate
+  removed).** The sweep added in 0.0.589.0 was gated to single-group nodes
+  because the group-0 backend could only judge group-0's metadata. The root cause
+  was not the on-disk shard path (a layout epic was investigated and rejected: the
+  balancer is group-blind *by design* — it floats shards to the lowest-disk node
+  cluster-wide, so a shard's location is intentionally decoupled from its group,
+  and placement metadata tracks where it lives). The fix makes the sweep judge
+  each candidate against **authoritative metadata**:
+  - **Union live-set across all locally-hosted groups.** A versioned object owned
+    by any hosted group (its FSM `obj:` record lives under that group's keyspace
+    prefix on the shared store) is now in the known-set, so a sibling group's live
+    shards are protected — previously only group-0's were.
+  - **Owning-group gate (keeps balancer-floated shards).** A candidate whose
+    router-resolved owning group is **not locally hosted** is kept, never deleted:
+    the node lacks the metadata to prove it dead (it was floated in by the
+    balancer from a group this node does not host). Documented residual: such a
+    shard, if genuinely dead, leaks (disk waste) rather than risking data loss —
+    identical to what the rejected layout epic would have left.
+  - **All-hosted caught-up gate.** The replication-lag gate now covers *every*
+    hosted group, not just self, so a lagging sibling group cannot false-orphan
+    its own committed-but-not-yet-applied shard.
+
+  Behavior for single-node serve is unchanged (one hosted group group-0, every
+  bucket routes to it). Segment GC remains group-0-scoped (separate follow-up).
+
 ## [0.0.589.0] - 2026-06-15
 
 ### Added
