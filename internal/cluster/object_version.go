@@ -115,7 +115,7 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil
 	}
-	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
+	if !obj.IsAppendable && len(obj.Segments) > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
 		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
 	}

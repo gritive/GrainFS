@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.584.0] - 2026-06-15
+
+### Changed
+- **Single PUT path now covers every simple PUT (no exemptions).** Building on
+  v0.0.583.0, empty (0-byte) objects and internal `__grainfs_*` buckets now take
+  the same chunked/segment path as all other simple PUTs — so object size and
+  bucket class no longer pick a path. The chunked `SegmentWriter` computes a
+  bucket-aware whole-object ETag (xxhash3 for internal buckets, MD5 for
+  S3-exposed) so EC-rewrap verification still holds; a 0-byte object writes one
+  empty segment and reads back empty (`clusterSegmentStore` returns an empty
+  reader for a 0-byte segment, and the non-appendable segmented-object read
+  routing — versioned and unversioned — no longer requires `Size > 0`). Only
+  genuinely distinct operations keep separate paths: multipart-complete and
+  internal EC-rewrap. Single-node (1+0) and multi-node (k+m) share the path; the
+  EC width is a parameter, not a branch.
+
+
 ## [0.0.583.0] - 2026-06-15
 
 ### Changed
