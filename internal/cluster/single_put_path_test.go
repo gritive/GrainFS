@@ -58,26 +58,50 @@ func TestSinglePutPath_KnownSizeLarge1Plus0_Chunks(t *testing.T) {
 	require.Equal(t, body, got, "chunked object must round-trip byte-identical")
 }
 
-// TestSinglePutPath_KnownSizeSmall_RoundTrips proves a small known-size 1+0
-// object still round-trips (now via spool → single-local-spooled, not chunked).
-func TestSinglePutPath_KnownSizeSmall_RoundTrips(t *testing.T) {
+// TestSinglePutPath_SmallObject_AlsoChunks proves the single path is
+// size-independent: a tiny simple PUT on a shardGroup-wired backend ALSO chunks
+// (obj.Segments non-empty), not just large objects, and round-trips.
+func TestSinglePutPath_SmallObject_AlsoChunks(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
 	body := []byte("tiny-known-size")
 	size := int64(len(body))
-	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
 		Bucket: "b", Key: "small", Body: bytes.NewReader(body),
 		ContentType: "application/octet-stream", SizeHint: &size,
 	})
 	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments, "small simple PUT takes the same chunked path as large (size-independent)")
 
 	rc, _, gerr := b.GetObject(ctx, "b", "small")
 	require.NoError(t, gerr)
 	defer rc.Close()
 	got, _ := io.ReadAll(rc)
 	require.Equal(t, body, got)
+}
+
+// TestSinglePutPath_EmptyObject_Chunks proves a 0-byte object survives the
+// always-chunk path (one empty segment) and round-trips empty.
+func TestSinglePutPath_EmptyObject_Chunks(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	size := int64(0)
+	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "empty", Body: bytes.NewReader(nil),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err, "empty object must survive the chunked path (1 empty segment)")
+
+	rc, gobj, gerr := b.GetObject(ctx, "b", "empty")
+	require.NoError(t, gerr)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	require.Empty(t, got)
+	require.Equal(t, int64(0), gobj.Size)
 }
 
 // TestSinglePutPath_UserBucketETagIsPlaintextMD5 pins ETag parity for a normal

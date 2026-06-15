@@ -214,17 +214,15 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	effectiveCfg := placementPlan.Config
 	placement := placementPlan.NodeIDs
 
-	// Phase 2 chunked PUT routing: objects larger than DefaultChunkSize
-	// (16 MiB) take the segmented path — N×16 MiB segments fanned across
-	// placement groups, single atomic metadata commit, best-effort blob
-	// fanout with defer cleanup on error. <= 16 MiB stays on the existing
-	// single-segment EC path.
-	//
-	// Chunked PUT requires a ShardGroupSource for SelectSegmentPlacementGroup;
-	// legacy single-group setups (b.shardGroup == nil) fall back to the
-	// existing single-blob EC path even for large objects. Once a cluster
-	// wires SetShardGroupSource, large objects automatically segment.
-	if b.chunkedPathThresholdMet(sp.Size) && b.shardGroup != nil {
+	// Single write path: every non-empty simple PUT (any size) takes the
+	// segmented/chunked path so the route does not branch on object size —
+	// N×16 MiB segments (1 segment for <=16 MiB), single atomic metadata commit.
+	// Requires a ShardGroupSource (always wired in production by bootOwnedGroupsAndEC).
+	// Exceptions that keep the existing paths below: empty (0-byte) objects (a
+	// 0-byte segment writes no shard, unreadable by EC); multipart-complete
+	// (multipartUploadID / parts) and internal rewrap (beforeCommit), which are
+	// distinct operations; and test backends that never wire a ShardGroupSource.
+	if sp.Size > 0 && beforeCommit == nil && multipartUploadID == "" && len(parts) == 0 && b.shardGroup != nil {
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm, acl,
