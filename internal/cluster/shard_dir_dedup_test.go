@@ -71,6 +71,18 @@ func TestSyncDirChain_FirstWrite_FsyncsFullChain(t *testing.T) {
 		"first write: leaf + all ancestors up to (exclusive) stop, leaf-first")
 }
 
+// TestSyncDirChain_LeafEqualsStop_NoOp pins the degenerate guard: when leaf==stop
+// the call fsyncs NOTHING and returns nil (preserving the pre-dedup `d != stop`
+// loop's behavior). Unreachable for real shards (dir is always strictly below the
+// data dir), but guards against a future refactor reintroducing a walk-above-stop.
+func TestSyncDirChain_LeafEqualsStop_NoOp(t *testing.T) {
+	rec := &dirSyncPathRec{}
+	svc := newDedupSvc(t, rec)
+
+	require.NoError(t, svc.syncDirChain("/data/shards", "/data/shards"))
+	require.Empty(t, rec.seq(), "leaf==stop must fsync nothing")
+}
+
 // TestSyncDirChain_SameLeafRepeat_FsyncsLeafOnly proves a repeat write to the
 // SAME leaf (a new shard FILE, no new dirs) fsyncs ONLY the leaf — the ancestor
 // chain was made durable by the first write.
