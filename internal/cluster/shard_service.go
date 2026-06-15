@@ -798,9 +798,10 @@ func (s *ShardService) NativeReadHandler() transport.ShardReadHandler {
 // the cluster transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
 // The shard is sealed via the DEK keeper (GFSENC3) before writing.
-// Writes are crash-safe: the encoded payload is appended to the data WAL
-// before any shard file mutation, and the on-disk write uses tmp + rename
-// for atomic visibility. Durability is owned by internal/storage/datawal.
+// Writes are crash-safe via tmp + rename for atomic visibility. Durability is
+// established at write time (no WAL since S4): small / no-redundancy shards
+// fsync the file + parent-dir chain; large redundant shards rely on EC
+// reconstruction + the background scrubber.
 // New encrypted writes use eccodec's chunked AEAD envelope. Plain writes keep
 // the CRC envelope while that compatibility path remains available.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {

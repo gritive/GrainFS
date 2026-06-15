@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.582.0] - 2026-06-15
+
+### Removed
+- **Production shard data WAL teardown (WAL-removal epic S4, final).** Boot no
+  longer opens, wires, or replays a shard data WAL: `datawal.Open`,
+  `WithDataWAL`, `WithDataWALRepairSink`, and the boot-time `RecoverDataWAL`
+  replay are gone. The `ShardService` WAL surface (`DataWALAppender`,
+  `AppendShardMetadataBatch`, `RecoverDataWAL`, the WAL-replay materializer, the
+  data-WAL startup-repair subsystem) and its 6 `grainfs_datawal_startup_repair_*`
+  metrics are deleted. Shard PUT durability is fully write-time now: small /
+  no-redundancy shards fsync the file + parent-dir chain; large redundant shards
+  rely on EC reconstruction + the background scrubber. **Migration:** the boot
+  path performs NO WAL replay — a pre-S2 node that crashed with shards covered
+  only by the WAL (not yet fsynced) loses those shards on upgrade. The
+  `{dataDir}/datawal` directory is no longer created or read; any pre-existing
+  one is ignored.
+- **`--direct-io` flag removed (breaking, hidden flag).** The direct-I/O shard
+  write path was reachable **only** through the deleted WAL-replay materializer;
+  the production write path (`writeEncryptedShardFile`) never honored it after
+  the S2 refactor, so `--direct-io` had already been a no-op for production
+  shard writes. The flag, the `WithDirectIO` option, and the buffered/direct
+  writer helpers are removed.
+
+### Internal
+- The `internal/storage/datawal` Go package and the `internal/storage` LocalBackend
+  test-fixture WAL (`NamespaceNode`) are **retained** — they are an independent
+  WAL instance, unaffected by the shard-side teardown.
+
 ## [0.0.581.0] - 2026-06-15
 
 ### Removed

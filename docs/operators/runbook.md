@@ -200,21 +200,9 @@ sum(grainfs_volumes_by_health{health!="healthy"}) by (health)
 increase(grainfs_operator_state_scrape_errors_total{source="buckets"}[10m])
 ```
 
-After a node restart, data WAL replay flags metadata-only EC shards whose local file is missing or the wrong size, and a non-blocking background worker rebuilds them from surviving peers. Watch the startup repair counters to confirm boot-time self-healing landed:
+After a node restart, committed objects are durable on disk (small / no-redundancy shards were fsynced at write time; large redundant shards are EC-reconstructable) — there is no data WAL replay since S4. Missing or corrupt EC shards are healed lazily: read-time EC reconstruction serves reads, and the periodic placement monitor + background scrubber proactively repair between boots.
 
-```bash
-curl -s http://localhost:9000/metrics | grep '^grainfs_datawal_startup_repair_'
-```
-
-`discovered`/`candidates` show what replay flagged; `successes` should converge toward `attempts`. Sustained `failures_total{reason="insufficient_survivors"}` means too few peers were readable to reconstruct — bring peers back before it becomes data loss.
-
-Skip-reason diagnosis:
-
-- `skips_total{reason="placement_scan_capped"}` — the resolver scanned more than 1000 versions looking for the owning SegmentRef/CoalescedShardRef and gave up. The shard stays covered by read-time EC reconstruction. If this counter is non-zero, investigate whether the affected object has an unusually large version history.
-- `skips_total{reason="stale"}` — the shard was already present and healthy (or the WAL record was superseded). Also absorbs the rare case where an S3 object key literally contains `/segments/` or `/coalesced/` (a marker-collision); the previous `unsupported_shardkey` label is retired and no longer emitted.
-- Other reasons (`no_group`, `no_backend`, `invalid_shard_key`, `placement_corrupt`, `not_local_owner`) — see metric labels for details.
-
-Startup repair now reconstructs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shard keys in addition to object-version shards. The periodic placement monitor now also proactively detects and repairs segment and coalesced EC shards for **latest-version** objects between boots, complementing boot-time startup repair and read-time reconstruction. Non-latest-version segment/coalesced shards are not proactively scanned by the placement monitor; they remain covered by read-time EC reconstruction. Corrupt segment or coalesced shards trigger quarantine of the parent object (object-level, using the scanned version). The new metric `grainfs_placement_monitor_invalid_ec_ref_total{kind="segment|coalesced"}` is incremented when a ref has malformed placement (`len(NodeIDs) != ECData+ECParity`); a non-zero rate indicates corrupt object metadata and warrants investigation. Repair is best-effort and not re-attempted from the WAL on the next boot (the WAL checkpoint advances after replay), so with periodic scrub and placement-monitor disabled, rely on operator-initiated repair if a startup repair is interrupted.
+The periodic placement monitor proactively detects and repairs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shards for **latest-version** objects between boots, complementing read-time reconstruction. Non-latest-version segment/coalesced shards are not proactively scanned by the placement monitor; they remain covered by read-time EC reconstruction. Corrupt segment or coalesced shards trigger quarantine of the parent object (object-level, using the scanned version). The metric `grainfs_placement_monitor_invalid_ec_ref_total{kind="segment|coalesced"}` is incremented when a ref has malformed placement (`len(NodeIDs) != ECData+ECParity`); a non-zero rate indicates corrupt object metadata and warrants investigation.
 
 The placement monitor quarantines an object **only** on confirmed shard corruption (CRC mismatch, structural decode failure, truncation, or AEAD auth failure). Every other non-ENOENT local shard read error — `EIO`, `EMFILE` ("too many open files"), `EBUSY`, permission denied, or unknown — is treated as **transient**: it is logged at Debug level, counted by `grainfs_placement_monitor_transient_read_error_total{kind="object_version|segment|coalesced|unknown"}`, and skipped (the next scan retries it), **not** quarantined. This prevents a transient or failing-disk node-day from mass-quarantining otherwise healthy objects. A sustained transient rate is a signal about the **node's** disk/FD health (failing disk, fd exhaustion), not about the objects — investigate the node (`dmesg`, SMART, open-fd count, `--max-open-files`), not the named objects.
 
