@@ -73,8 +73,6 @@ func optionsToConfig(
 	cfg.ScrubInterval = opts.ScrubInterval
 	cfg.ScrubOrphanAge = opts.ScrubOrphanAge
 	cfg.SegmentGCRetention = opts.SegmentGCRetention
-	cfg.ReshardInterval = opts.ReshardInterval
-	cfg.DataGroupRefreshInterval = opts.DataGroupRefreshInterval
 	cfg.DegradedInterval = opts.DegradedInterval
 
 	cfg.AuditIceberg = opts.AuditIceberg

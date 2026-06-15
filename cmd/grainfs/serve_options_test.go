@@ -40,8 +40,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--shard-pack-threshold", "41",
 		"--scrub-interval", "7s",
 		"--scrub-orphan-age", "11m",
-		"--reshard-interval", "13s",
-		"--datagroup-refresh-interval", "19s",
 		"--lifecycle-interval", "29s",
 		"--degraded-check-interval", "23s",
 		"--raft-log-gc-interval", "31s",
@@ -127,8 +125,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	// Intervals.
 	require.Equal(t, "7s", opts.ScrubInterval.String())
 	require.Equal(t, "11m0s", opts.ScrubOrphanAge.String())
-	require.Equal(t, "13s", opts.ReshardInterval.String())
-	require.Equal(t, "19s", opts.DataGroupRefreshInterval.String())
 	require.Equal(t, "23s", opts.DegradedInterval.String())
 	require.Equal(t, "29s", opts.LifecycleInterval.String())
 	require.Equal(t, "31s", opts.RaftLogGCInterval.String())

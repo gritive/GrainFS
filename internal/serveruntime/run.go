@@ -300,7 +300,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	if err := bootResharderAndDegraded(ctx, state); err != nil {
+	if err := bootDegradedAndServices(ctx, state); err != nil {
 		return err
 	}
 	if err := bootNodeServices(ctx, state); err != nil {

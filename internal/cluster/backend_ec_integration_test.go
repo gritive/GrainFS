@@ -96,51 +96,6 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(gotObj.UserMetadata).To(Equal(map[string]string{"x-amz-meta-owner": "me"}))
 	})
 
-	It("converts legacy objects to EC with spooled shard encoding", func() {
-		payload := bytes.Repeat([]byte("convert-spooled-"), 4096)
-		key := "legacy.bin"
-		versionID := ""
-		path := b.objectPath("bucket", key)
-		Expect(os.MkdirAll(filepath.Dir(path), 0o755)).To(Succeed())
-		Expect(os.WriteFile(path, payload, 0o600)).To(Succeed())
-
-		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      "bucket",
-			Key:         key,
-			VersionID:   versionID,
-			Size:        int64(len(payload)),
-			ContentType: "application/octet-stream",
-			ETag:        backendMD5Hex(payload),
-			ModTime:     1,
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(b.fsm.Apply(raw)).To(Succeed())
-
-		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
-
-		Expect(b.ConvertObjectToEC(ctx, "bucket", key)).To(Succeed())
-
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(err).NotTo(HaveOccurred())
-		_, err = os.Stat(path)
-		Expect(os.IsNotExist(err)).To(BeTrue())
-
-		rc, gotObj, err := b.GetObject(ctx, "bucket", key)
-		Expect(err).NotTo(HaveOccurred())
-		got, readErr := io.ReadAll(rc)
-		closeErr := rc.Close()
-		Expect(readErr).NotTo(HaveOccurred())
-		Expect(closeErr).NotTo(HaveOccurred())
-		Expect(got).To(Equal(payload))
-		Expect(gotObj.VersionID).To(Equal(versionID))
-		Expect(gotObj.LastModified).To(Equal(int64(1)))
-
-		_, placementMeta, err := b.headObjectMeta(ctx, "bucket", key)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(placementMeta.ECData).To(Equal(uint8(2)))
-		Expect(placementMeta.ECParity).To(Equal(uint8(1)))
-	})
-
 	It("rejects stale PutObjectMeta expected ETag updates", func() {
 		putMeta := func(etag string, ecData, ecParity uint8, expectedETag string) error {
 			GinkgoHelper()

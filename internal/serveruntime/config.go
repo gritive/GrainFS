@@ -99,11 +99,9 @@ type Config struct {
 	AdminSocket string
 	AdminGroup  string
 
-	// Scrub / reshard / degraded
-	ScrubInterval            time.Duration
-	ReshardInterval          time.Duration
-	DataGroupRefreshInterval time.Duration
-	DegradedInterval         time.Duration
+	// Scrub / degraded
+	ScrubInterval    time.Duration
+	DegradedInterval time.Duration
 	// ScrubOrphanAge is the minimum filesystem mtime age before an orphan raw
 	// segment is eligible for sweep. Default 5m.
 	ScrubOrphanAge time.Duration
