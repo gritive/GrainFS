@@ -621,12 +621,11 @@ func TestChunkedChooseModTime(t *testing.T) {
 	assert.Equal(t, int64(999), chunkedChooseModTime(123, false, 999), "preserve=false stamps now")
 }
 
-// TestPutObjectChunked_SizeGuard_EndToEnd locks down the outer routing
-// decision in putObjectECSpooledWithOptionalModTime (backend.go): objects at
-// or below DefaultChunkSize must NOT take the chunked path; strictly larger
-// objects must. The routing predicate is extracted as chunkedPathThresholdMet
-// so the threshold can be asserted without a full DistributedBackend fixture
-// while still being the exact predicate consulted at the call site.
+// TestPutObjectChunked_SizeGuard_EndToEnd locks down the chunkedPathThresholdMet
+// predicate (size > DefaultChunkSize). NOTE: simple PUT routing is no longer
+// governed by this threshold — every non-empty (non-internal) simple PUT chunks
+// regardless of size. This predicate now governs only the MULTIPART chunked-
+// completion threshold (multipart.go), where it remains the exact predicate.
 func TestPutObjectChunked_SizeGuard_EndToEnd(t *testing.T) {
 	chunk := int64(storage.DefaultChunkSize)
 	cases := []struct {

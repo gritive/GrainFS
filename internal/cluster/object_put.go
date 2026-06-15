@@ -219,10 +219,13 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	// N×16 MiB segments (1 segment for <=16 MiB), single atomic metadata commit.
 	// Requires a ShardGroupSource (always wired in production by bootOwnedGroupsAndEC).
 	// Exceptions that keep the existing paths below: empty (0-byte) objects (a
-	// 0-byte segment writes no shard, unreadable by EC); multipart-complete
-	// (multipartUploadID / parts) and internal rewrap (beforeCommit), which are
-	// distinct operations; and test backends that never wire a ShardGroupSource.
-	if sp.Size > 0 && beforeCommit == nil && multipartUploadID == "" && len(parts) == 0 && b.shardGroup != nil {
+	// 0-byte segment writes no shard, unreadable by EC); internal buckets
+	// (__grainfs_*), whose ETag is an xxhash3 corruption oracle that the chunked
+	// SegmentWriter would overwrite with MD5 and break EC-rewrap verification;
+	// multipart-complete (multipartUploadID / parts) and internal rewrap
+	// (beforeCommit), which are distinct operations; and test backends that never
+	// wire a ShardGroupSource.
+	if sp.Size > 0 && !storage.IsInternalBucket(bucket) && beforeCommit == nil && multipartUploadID == "" && len(parts) == 0 && b.shardGroup != nil {
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm, acl,

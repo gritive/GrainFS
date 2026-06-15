@@ -82,9 +82,10 @@ func TestSinglePutPath_SmallObject_AlsoChunks(t *testing.T) {
 	require.Equal(t, body, got)
 }
 
-// TestSinglePutPath_EmptyObject_Chunks proves a 0-byte object survives the
-// always-chunk path (one empty segment) and round-trips empty.
-func TestSinglePutPath_EmptyObject_Chunks(t *testing.T) {
+// TestSinglePutPath_EmptyObject_RoundTrips proves a 0-byte object is exempt from
+// the always-chunk route (a 0-byte segment writes no shard, which the EC reader
+// cannot satisfy) and still round-trips empty via the existing path.
+func TestSinglePutPath_EmptyObject_RoundTrips(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "b"))
@@ -102,6 +103,27 @@ func TestSinglePutPath_EmptyObject_Chunks(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	require.Empty(t, got)
 	require.Equal(t, int64(0), gobj.Size)
+}
+
+// TestSinglePutPath_InternalBucket_NotChunked proves internal buckets are exempt
+// from the always-chunk route, so their xxhash3 ETag (the EC-rewrap corruption
+// oracle) is preserved instead of being overwritten with the chunked MD5.
+func TestSinglePutPath_InternalBucket_NotChunked(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const internalBkt = "__grainfs_receipts"
+	require.NoError(t, b.CreateBucket(ctx, internalBkt))
+
+	body := []byte("internal-object-body-not-chunked")
+	size := int64(len(body))
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: internalBkt, Key: "r", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err)
+	require.Empty(t, obj.Segments, "internal bucket object must NOT chunk (preserve xxhash3 ETag for rewrap)")
+	sum := md5.Sum(body)
+	require.NotEqual(t, hex.EncodeToString(sum[:]), obj.ETag, "internal bucket ETag must NOT be the chunked MD5")
 }
 
 // TestSinglePutPath_UserBucketETagIsPlaintextMD5 pins ETag parity for a normal
