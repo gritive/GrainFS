@@ -73,8 +73,6 @@ func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
 // mismatch.
 func ProposeForwardTimeout() time.Duration { return proposeForwardTimeout }
 
-const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
-
 // EC in-memory shard fast path size caps. Replication (parity == 0) keeps the
 // original 16 MiB cap; parity EC gets a lower 1 MiB cap so concurrent small
 // PUTs cannot stack into a multi-hundred-megabyte burst (the rationale for
