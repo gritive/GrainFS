@@ -169,22 +169,6 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 	return c.b.shardSvc.DeleteShards(ctx, peer, bucket, shardKey)
 }
 
-// chunkedPathThresholdMet reports whether a spooled object with the given
-// size is large enough to justify the chunked-PUT pipeline. Objects at or
-// below the threshold stay on the legacy single-segment EC path; strictly
-// larger objects route through putObjectChunked. Extracted from the call
-// site so the outer routing decision in putObjectECSpooledWithOptionalModTime
-// is unit-testable without standing up a full DistributedBackend fixture.
-//
-//nolint:unused // exercised by segment_backend_test.go; lint config sets tests:false so test usage is invisible to the linter
-func chunkedPathThresholdMet(spSize int64) bool {
-	return spSize > int64(storage.DefaultChunkSize)
-}
-
-func (b *DistributedBackend) chunkedPathThresholdMet(size int64) bool {
-	return size > int64(b.effectiveChunkedPutChunkSize())
-}
-
 func chunkedMultipartCompleteChunkSize(defaultSize int) int {
 	if defaultSize <= 0 || defaultSize > defaultChunkedMultipartCompleteSize {
 		return defaultChunkedMultipartCompleteSize

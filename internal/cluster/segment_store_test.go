@@ -3,7 +3,10 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -110,6 +113,68 @@ func TestCompleteMultipartUpload_ChunkedObjectPreservesParts(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+}
+
+// TestCompleteMultipartUpload_SmallNowChunks proves the single multipart path:
+// a SMALL multipart completion (below the old chunk threshold) now also takes
+// the chunked path (obj.Segments non-empty), preserves Parts + whole-object MD5
+// ETag, round-trips, and removes the staged part dir.
+func TestCompleteMultipartUpload_SmallNowChunks(t *testing.T) {
+	mkBackend := func(t *testing.T) *DistributedBackend {
+		b := setupECBackend(t)
+		b.chunkedPutChunkSize = testChunkedMultipartChunkSize
+		b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
+		}})
+		return b
+	}
+
+	// NOTE: a genuinely-small MULTI-part completion is impossible — S3 requires
+	// every part except the last to be >= 5 MiB. Small single-part and zero-byte
+	// completions are the meaningful small cases; large multi-part chunking is
+	// covered by TestCompleteMultipartUpload_ChunkedObjectPreservesParts.
+	for _, tc := range []struct {
+		name  string
+		parts [][]byte
+	}{
+		{"single_small_part", [][]byte{[]byte("small-single-part-body")}},
+		{"single_zero_byte_part", [][]byte{{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := mkBackend(t)
+			ctx := context.Background()
+			bucket, key := "mp-small-"+tc.name, "obj"
+			require.NoError(t, b.CreateBucket(ctx, bucket))
+			up, err := b.CreateMultipartUpload(ctx, bucket, key, "application/octet-stream")
+			require.NoError(t, err)
+
+			var want []byte
+			var completed []storage.Part
+			for i, p := range tc.parts {
+				part, perr := b.UploadPart(ctx, bucket, key, up.UploadID, i+1, bytes.NewReader(p), "")
+				require.NoError(t, perr)
+				completed = append(completed, *part)
+				want = append(want, p...)
+			}
+
+			obj, err := b.CompleteMultipartUpload(ctx, bucket, key, up.UploadID, completed)
+			require.NoError(t, err)
+			require.NotEmpty(t, obj.Segments, "small multipart now takes the chunked path")
+			require.Len(t, obj.Parts, len(tc.parts), "Parts metadata preserved")
+			sum := md5.Sum(want)
+			require.Equal(t, hex.EncodeToString(sum[:]), obj.ETag, "multipart ETag = whole-object md5")
+
+			_, statErr := os.Stat(b.partDir(up.UploadID))
+			require.True(t, os.IsNotExist(statErr), "staged part dir removed after complete")
+
+			rc, _, gerr := b.GetObject(ctx, bucket, key)
+			require.NoError(t, gerr)
+			defer rc.Close()
+			got, rerr := io.ReadAll(rc)
+			require.NoError(t, rerr)
+			require.True(t, bytes.Equal(want, got), "multipart object round-trips")
+		})
+	}
 }
 
 func TestGetObject_AppendableNotRoutedToChunked(t *testing.T) {
