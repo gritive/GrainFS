@@ -193,22 +193,6 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(string(got.Payload)).To(Equal("payload"))
 		})
 
-		It("verifies packed shards through shared shard service", func() {
-			keeper, clusterID := testDEKKeeper(GinkgoT())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), WithShardPackThreshold(1024), withTestWALDEK(GinkgoT(), keeper, clusterID))
-			b.SetShardService(svc, []string{"test-node"})
-			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("packed-payload"))).To(Succeed())
-
-			path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
-			_, err := os.Stat(path)
-			Expect(os.IsNotExist(err)).To(BeTrue())
-
-			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
-			Expect(string(got.Payload)).To(Equal("packed-payload"))
-		})
-
 		It("rejects shards outside a data dir (non-data-dir read fail-closed)", func() {
 			// A shard reaching the non-data-dir fallback can carry no canonical key
 			// binding, so it must be rejected fail-closed rather than handed back

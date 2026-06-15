@@ -36,7 +36,6 @@ func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
 				b.TempDir(),
 				nil,
 				WithShardDEKKeeper(keeper, clusterID),
-				WithShardPackThreshold(65545),
 			)
 
 			b.SetBytes(int64(len(payload)))
@@ -62,7 +61,6 @@ func BenchmarkShardServiceOpenLocalShardStream2_5MiB(b *testing.B) {
 		b.TempDir(),
 		nil,
 		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(65545),
 	)
 	require.NoError(b, svc.WriteLocalShardStreamSizedContext(context.Background(), "bench", "obj", 0, bytes.NewReader(payload), int64(len(payload))))
 

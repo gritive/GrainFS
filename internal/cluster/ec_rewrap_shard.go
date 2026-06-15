@@ -80,13 +80,6 @@ func (b *DistributedBackend) readOwnedShardRaw(bucket, canonicalKey string, shar
 	if err != nil {
 		return nil, "", fmt.Errorf("rewrap locate shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
 	}
-	if b.shardSvc.shardPack != nil {
-		if raw, ok, err := b.shardSvc.shardPack.get(bucket, canonicalKey, shardIdx); err != nil {
-			return nil, "", fmt.Errorf("rewrap read pack shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
-		} else if ok {
-			return raw, path, nil
-		}
-	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, "", fmt.Errorf("rewrap read shard file %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)

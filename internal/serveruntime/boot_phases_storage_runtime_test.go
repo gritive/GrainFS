@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
-
 )
 
 // storagePhasePrereqs runs every prior boot phase (config, storage open,
@@ -135,15 +134,6 @@ func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 	assert.Equal(t, []string{"n1", "n2", "n3"}, group.PeerIDs)
 }
 
-// TestBootStoragePhases_OrderingInvariant — witness test. Asserts each phase
-// boundary by checking which state fields are nil before vs populated after.
-// Mirrors the PR 4 ordering test pattern: if a refactor accidentally re-orders
-// the storage phases, the test catches it. It also preserves the individual
-// phase population checks without paying for separate full boot prerequisites.
-// TestBootShardService_ClosesShardPackActorOnShutdown asserts the boot path
-// registers a cleanup that closes the shard service on shutdown. With a shard
-// pack store wired (WAL present), the shard-pack actor goroutine spawns; if no
-// cleanup closes it, it leaks past shutdown.
 // TestBootShardService_ShardPackThresholdIsHardError proves S3: requesting
 // shard-packing via the config threshold is refused at boot with a clear error
 // (packing is disabled — a durable pack index was never built).
@@ -167,6 +157,11 @@ func TestBootShardServiceWiresDataWALRepairCollector(t *testing.T) {
 		"shard service must be constructed with the repair-candidate sink")
 }
 
+// TestBootStoragePhases_OrderingInvariant — witness test. Asserts each phase
+// boundary by checking which state fields are nil before vs populated after.
+// Mirrors the PR 4 ordering test pattern: if a refactor accidentally re-orders
+// the storage phases, the test catches it. It also preserves the individual
+// phase population checks without paying for separate full boot prerequisites.
 func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
 

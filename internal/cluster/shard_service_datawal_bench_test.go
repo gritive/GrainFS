@@ -50,7 +50,6 @@ func BenchmarkShardServiceWriteLocalShardStream_DataWAL_5MiB(b *testing.B) {
 				nil,
 				WithShardDEKKeeper(keeper, clusterID),
 				WithDataWAL(dwal),
-				WithShardPackThreshold(65545),
 			)
 
 			b.SetBytes(int64(len(payload)))

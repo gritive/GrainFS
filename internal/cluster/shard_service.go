@@ -55,15 +55,13 @@ type shardFileWriter func(path string, payload []byte) error
 // ShardService handles remote shard storage via the cluster transport Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
-	dataDirs      []string
-	transport     shardTransport
-	segEnc        storage.DataEncryptor // chunked EC-shard data-at-rest seam
-	dekKeeper     *encrypt.DEKKeeper
-	clusterID     [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
-	addrBook      NodeAddressBook
-	directWriter  shardFileWriter
-	shardPack     *shardPackStore
-	packThreshold int
+	dataDirs     []string
+	transport    shardTransport
+	segEnc       storage.DataEncryptor // chunked EC-shard data-at-rest seam
+	dekKeeper    *encrypt.DEKKeeper
+	clusterID    [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
+	addrBook     NodeAddressBook
+	directWriter shardFileWriter
 	// directIO bypasses the kernel page cache for shard writes when true.
 	// Linux uses O_DIRECT, macOS uses F_NOCACHE. Default false: enable via
 	// WithDirectIO and the --direct-io flag once measurement on the target
@@ -120,13 +118,6 @@ func WithDirectIO() ShardServiceOption {
 	return func(s *ShardService) { s.directIO = true }
 }
 
-// WithShardPackThreshold stores local shards smaller than threshold bytes in
-// the node-local append-only shard pack. This keeps EC placement unchanged; it
-// only replaces the per-shard file layout on each shard owner.
-func WithShardPackThreshold(threshold int) ShardServiceOption {
-	return func(s *ShardService) { s.packThreshold = threshold }
-}
-
 // WithNodeAddressBook lets shard RPC callers keep nodeID membership lists while
 // dialing the transport address stored in MetaFSM.
 func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
@@ -171,14 +162,9 @@ func (s *ShardService) ClusterID() []byte {
 	return out
 }
 
-// Close releases resources owned by the ShardService — currently the shard-pack
-// actor goroutine, which is spawned only when a data WAL is wired. The data WAL
-// itself is owned by the caller (WithDataWAL) and is not closed here. Safe to
-// call when no shard-pack store is active.
+// Close releases resources owned by the ShardService. The data WAL itself is
+// owned by the caller (WithDataWAL) and is not closed here. Currently a no-op.
 func (s *ShardService) Close() error {
-	if s.shardPack != nil {
-		return s.shardPack.Close()
-	}
 	return nil
 }
 
@@ -204,21 +190,6 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 	}
 	for _, opt := range opts {
 		opt(s)
-	}
-	threshold := s.packThreshold
-	if threshold <= 0 {
-		if envThreshold, err := strconv.Atoi(os.Getenv("GRAINFS_SHARD_PACK_THRESHOLD")); err == nil {
-			threshold = envThreshold
-		}
-	}
-	if threshold > 0 {
-		if pack, err := newShardPackStore(filepath.Join(s.dataDirs[0], ".pack"), s.dataWAL); err == nil {
-			s.packThreshold = threshold
-			s.shardPack = pack
-			log.Info().Int("threshold", threshold).Msg("cluster shard pack enabled")
-		} else {
-			log.Warn().Err(err).Msg("cluster shard pack disabled")
-		}
 	}
 	// segEnc is the chunked-EC data-at-rest seam. Production sets it from the
 	// generation-aware DEK keeper.
@@ -915,51 +886,7 @@ func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx i
 	return buf.Bytes(), nil
 }
 
-// RepairShardInPackIfResident rewrites the shard's pack entry with the supplied
-// already-encoded bytes when the shard currently lives in the pack, so the
-// pack-first read preference (readShardIntegrity) observes the repair. The pack
-// index is last-wins, so the put supersedes the stale/corrupt entry. Returns
-// false when the shard is not pack-resident — the caller writes the standalone
-// shard_N file instead. `encoded` must be the EncodeEncryptedShardBuffer output
-// (identical format to the pack write path).
-func (s *ShardService) RepairShardInPackIfResident(bucket, key string, shardIdx int, encoded []byte) (bool, error) {
-	if s.shardPack == nil || !s.shardPack.has(bucket, key, shardIdx) {
-		return false, nil
-	}
-	if err := s.shardPack.put(bucket, key, shardIdx, encoded); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
-	if s.shardPack != nil && len(data) < s.packThreshold {
-		var buf bytes.Buffer
-		if err := eccodec.EncodeEncryptedShard(&buf, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
-			return err
-		}
-		payload := buf.Bytes()
-		// Pack-routed writes are logged inside shardPackStore.append as
-		// OpShardPackPut so a torn pack blob can be replayed. Logging
-		// OpShardPut here too would resurrect a non-existent per-shard file
-		// on replay (pack writes never produce shard_N files).
-		fileStart := time.Now()
-		if err := s.shardPack.put(bucket, key, shardIdx, payload); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-				Bytes:            int64(len(data)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return err
-		}
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-		})
-		return nil
-	}
 	dir, err := s.getShardDir(bucket, key, shardIdx)
 	if err != nil {
 		return err
@@ -1040,6 +967,18 @@ func (s *ShardService) writeLocalSealedShard(ctx context.Context, bucket, key st
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	requireFsync := s.shardWriteRequiresFsync(len(sealed))
 	return s.writeEncryptedShardFile(ctx, dir, path, sealed, shardIdx, requireFsync)
+}
+
+// syncDir fsyncs a directory so a create/rename inside it is durably linked
+// into the namespace. A general durability primitive (also used by replica
+// repair); it formerly lived in the now-removed shard_pack.go.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // fsyncFile fsyncs an open shard tmp file (or the test seam when set).
@@ -1378,19 +1317,11 @@ func (s *ShardService) AppendShardMetadataBatch(ctx context.Context, records []S
 
 // RecoverDataWAL replays missing shard files from the data WAL. Safe to call
 // when no WAL is wired (no-op). Existing shard files matching the record size
-// are skipped via HasReplacement.
-//
-// Before replaying, the in-memory shard pack (if any) is closed and dropped:
-// pack records are replayed verbatim into a freshly-opened, nil-WAL store so
-// the pre-recovery index does not shadow the WAL-driven state and so the
-// pack replay path cannot recursively append back into the WAL.
+// are skipped via HasReplacement. Legacy OpShardPack* records (shard-packing
+// was removed in S3) are skipped by the materializer's default arm.
 func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	if s.dataWAL == nil {
 		return nil
-	}
-	if s.shardPack != nil {
-		_ = s.shardPack.Close()
-		s.shardPack = nil
 	}
 	s.replayingDataWAL.Store(true)
 	defer s.replayingDataWAL.Store(false)
@@ -1400,20 +1331,6 @@ func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
 	}
 	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, datawal.NamespaceShard, shardDataWALMaterializer{s: s}); err != nil {
 		return err
-	}
-	// The materializer may have constructed a nil-WAL pack store while
-	// replaying OpShardPackPut/Delete records. Drop it and reopen against
-	// the live WAL so subsequent appends are durable.
-	if s.shardPack != nil {
-		_ = s.shardPack.Close()
-		s.shardPack = nil
-	}
-	if s.packThreshold > 0 {
-		pack, err := newShardPackStore(filepath.Join(s.dataDirs[0], ".pack"), s.dataWAL)
-		if err != nil {
-			return fmt.Errorf("reopen shard pack after recovery: %w", err)
-		}
-		s.shardPack = pack
 	}
 	return nil
 }
@@ -1455,14 +1372,9 @@ func (m shardDataWALMaterializer) addRepairCandidate(rec datawal.Record, shardId
 
 func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
 	_ = ctx
-	// Pack ops are replayed unconditionally: the pack store is rebuilt from
-	// scratch in RecoverDataWAL, so an "already there" check would skip every
-	// record. The replay loop is idempotent because OpShardPackPut /
-	// OpShardPackDelete carry the original on-disk record bytes; replaying
-	// them in WAL order reproduces the pre-crash index.
-	if rec.Op == datawal.OpShardPackPut || rec.Op == datawal.OpShardPackDelete {
-		return false, nil
-	}
+	// Only OpShardPut records materialize a shard file. Everything else
+	// (including legacy OpShardPack* records — shard-packing was removed in S3)
+	// has no replacement and is skipped by Materialize's default arm.
 	if rec.Op != datawal.OpShardPut {
 		return false, nil
 	}
@@ -1486,16 +1398,6 @@ func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawa
 
 func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
 	switch rec.Op {
-	case datawal.OpShardPackPut, datawal.OpShardPackDelete:
-		if m.s.shardPack == nil {
-			// nil WAL: replay must not recurse back into the WAL.
-			pack, err := newShardPackStore(filepath.Join(m.s.dataDirs[0], ".pack"), nil)
-			if err != nil {
-				return err
-			}
-			m.s.shardPack = pack
-		}
-		return m.s.shardPack.appendRawRecord(rec.Payload)
 	case datawal.OpShardPut:
 		idx, err := strconv.Atoi(rec.Target)
 		if err != nil {
@@ -1749,15 +1651,6 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		return nil, err
 	}
 
-	if s.shardPack != nil {
-		if raw, ok, err := s.shardPack.get(bucket, key, shardIdx); ok || err != nil {
-			if err != nil {
-				return nil, err
-			}
-			return s.decodeLocalShardBytes(raw, bucket, key, shardIdx)
-		}
-	}
-
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1818,41 +1711,6 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 	return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
 }
 
-func (s *ShardService) decodeLocalShardBytes(raw []byte, bucket, key string, shardIdx int) ([]byte, error) {
-	data := raw
-	var err error
-	if eccodec.IsEncryptedShard(raw) {
-		// GFSENC3 chunked branch: use segEnc + ShardAADFields.
-		if s.segEnc == nil {
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		var decoded bytes.Buffer
-		// Pre-size to the encrypted length (≥ decoded plaintext) so DecodeEncryptedShard's
-		// streamed writes never trigger the bytes.Buffer doubling chain. Mirrors the
-		// file-read branch in ReadLocalShard, which already pre-grows from the stat size.
-		decoded.Grow(len(raw))
-		if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.segEnc, ShardAADFields(bucket, key, shardIdx)); err != nil {
-			return nil, fmt.Errorf("decrypt shard: %w", err)
-		}
-		return decoded.Bytes(), nil
-	}
-	if eccodec.IsEncodedShard(raw) {
-		data, err = eccodec.DecodeShard(raw)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if encrypt.IsEncryptedBlob(data) {
-		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-	}
-	if encrypt.IsLegacyEncryptedBlob(data) {
-		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
-	}
-	// DEK-only service: every shard is GFSENC3-sealed (handled above). A payload
-	// that reaches here carries no envelope — reject plaintext fail-closed.
-	return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
-}
-
 // crcShardMagicLen is the length of the eccodec CRC envelope magic
 // ("GFSCRC1\x00"); the inner payload (and thus any inner blob magic) begins at
 // this byte offset within a GFSCRC1-encoded shard file.
@@ -1879,14 +1737,6 @@ func rejectLegacyEncodedShardBlob(r io.ReaderAt) error {
 // OpenLocalShard opens a local shard as plaintext. New chunked encrypted shards
 // are decrypted chunk-by-chunk; compatibility formats fall back to ReadLocalShard.
 func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error) {
-	if s.shardPack != nil {
-		if data, ok, err := s.ReadLocalShardFromPack(bucket, key, shardIdx); ok || err != nil {
-			if err != nil {
-				return nil, err
-			}
-			return io.NopCloser(bytes.NewReader(data)), nil
-		}
-	}
 	path, err := s.getShardPath(bucket, key, shardIdx)
 	if err != nil {
 		return nil, err
@@ -1945,39 +1795,12 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (s *ShardService) ReadLocalShardFromPack(bucket, key string, shardIdx int) ([]byte, bool, error) {
-	if s.shardPack == nil {
-		return nil, false, nil
-	}
-	raw, ok, err := s.shardPack.get(bucket, key, shardIdx)
-	if !ok || err != nil {
-		return nil, ok, err
-	}
-	data, err := s.decodeLocalShardBytes(raw, bucket, key, shardIdx)
-	return data, true, err
-}
-
 func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, fmt.Errorf("negative shard offset %d", offset)
 	}
 	if len(buf) == 0 {
 		return 0, nil
-	}
-	if s.shardPack != nil {
-		if data, ok, err := s.ReadLocalShardFromPack(bucket, key, shardIdx); ok || err != nil {
-			if err != nil {
-				return 0, err
-			}
-			if offset >= int64(len(data)) {
-				return 0, io.EOF
-			}
-			n := copy(buf, data[offset:])
-			if n < len(buf) {
-				return n, io.EOF
-			}
-			return n, nil
-		}
 	}
 	path, err := s.getShardPath(bucket, key, shardIdx)
 	if err != nil {
@@ -2031,21 +1854,6 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 	}
 	if length < 0 {
 		return nil, fmt.Errorf("negative shard length %d", length)
-	}
-	if s.shardPack != nil {
-		if data, ok, err := s.ReadLocalShardFromPack(bucket, key, shardIdx); ok || err != nil {
-			if err != nil {
-				return nil, err
-			}
-			if offset >= int64(len(data)) {
-				return nil, io.EOF
-			}
-			end := offset + length
-			if end > int64(len(data)) {
-				end = int64(len(data))
-			}
-			return io.NopCloser(bytes.NewReader(data[offset:end])), nil
-		}
 	}
 	path, err := s.getShardPath(bucket, key, shardIdx)
 	if err != nil {
@@ -2129,11 +1937,6 @@ func (r *skipThenLimitReader) Read(p []byte) (int, error) {
 
 // DeleteLocalShards removes every shard for key on the local node (all indices).
 func (s *ShardService) DeleteLocalShards(bucket, key string) error {
-	if s.shardPack != nil {
-		if err := s.shardPack.deleteKey(bucket, key); err != nil {
-			return err
-		}
-	}
 	for _, dataDir := range s.dataDirs {
 		dir := filepath.Join(dataDir, bucket, key)
 		if err := os.RemoveAll(dir); err != nil {

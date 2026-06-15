@@ -247,179 +247,6 @@ func TestShardService_NativeWriteHandler_RejectsTruncatedSealedShard(t *testing.
 	require.True(t, os.IsNotExist(statErr), "rejected sealed-shard write must commit NO shard file")
 }
 
-func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
-	keeper, clusterID := testDEKKeeper(t)
-
-	dir := t.TempDir()
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-
-	plaintext := []byte("secret shard data")
-	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, plaintext))
-
-	_, err := os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
-	require.ErrorIs(t, err, os.ErrNotExist)
-
-	got, err := svc.ReadLocalShard("bkt", "obj/v1", 0)
-	require.NoError(t, err)
-	assert.Equal(t, plaintext, got)
-
-	buf := make([]byte, 6)
-	n, err := svc.ReadLocalShardAt("bkt", "obj/v1", 0, 7, buf)
-	require.NoError(t, err)
-	assert.Equal(t, len(buf), n)
-	assert.Equal(t, []byte("shard "), buf)
-
-	r, err := svc.OpenLocalShardRange("bkt", "obj/v1", 0, 7, 5)
-	require.NoError(t, err)
-	defer r.Close()
-	ranged, err := io.ReadAll(r)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("shard"), ranged)
-
-	require.NoError(t, svc.DeleteLocalShards("bkt", "obj/v1"))
-	_, err = svc.ReadLocalShard("bkt", "obj/v1", 0)
-	require.Error(t, err)
-}
-
-func TestShardService_SharedPackWriteLocalShardStream(t *testing.T) {
-	keeper, clusterID := testDEKKeeper(t)
-
-	dir := t.TempDir()
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-
-	plaintext := []byte("streamed shard data")
-	require.NoError(t, svc.WriteLocalShardStreamContext(context.Background(), "bkt", "obj/v1", 0, bytes.NewReader(plaintext)))
-
-	_, err := os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
-	require.ErrorIs(t, err, os.ErrNotExist)
-
-	got, err := svc.ReadLocalShard("bkt", "obj/v1", 0)
-	require.NoError(t, err)
-	assert.Equal(t, plaintext, got)
-}
-
-func TestShardService_WriteLocalShardStreamSizedContextBypassesPackForLargeShard(t *testing.T) {
-	keeper, clusterID := testDEKKeeper(t)
-
-	dir := t.TempDir()
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-
-	// declared size must match the actual stream length; the WAL write path
-	// reads exactly streamSize bytes. Use a >= packThreshold payload so the
-	// large-shard pack bypass is still exercised.
-	plaintext := bytes.Repeat([]byte("x"), 1024)
-	require.NoError(t, svc.WriteLocalShardStreamSizedContext(context.Background(), "bkt", "obj/v1", 0, bytes.NewReader(plaintext), int64(len(plaintext))))
-
-	_, err := os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
-	require.NoError(t, err)
-
-	got, err := svc.ReadLocalShard("bkt", "obj/v1", 0)
-	require.NoError(t, err)
-	assert.Equal(t, plaintext, got)
-}
-
-func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-
-	require.NotNil(t, svc.shardPack)
-}
-
-func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-
-	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
-	require.NotNil(t, svc.shardPack)
-	require.NoError(t, svc.shardPack.active.Close())
-
-	err := svc.DeleteLocalShards("bkt", "obj/v1")
-	require.Error(t, err)
-}
-
-func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-
-	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
-	require.NotNil(t, svc.shardPack)
-	packPath := svc.shardPack.blobPath(svc.shardPack.activeID)
-	require.NoError(t, svc.shardPack.active.Close())
-
-	raw, err := os.ReadFile(packPath)
-	require.NoError(t, err)
-	raw[len(raw)-1] ^= 0xff
-	require.NoError(t, os.WriteFile(packPath, raw, 0o600))
-
-	restarted := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(1024),
-		withTestWALDEK(t, keeper, clusterID),
-	)
-	require.NotNil(t, restarted.shardPack)
-	_, ok := restarted.shardPack.index[shardPackKey("bkt", "obj/v1", 0)]
-	require.False(t, ok)
-}
-
-func TestShardPackScanSkipsOversizedRecord(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "shardpack_0000000000000000.dat")
-	key := shardPackKey("bkt", "obj/v1", 0)
-	record := appendShardPackRecord(nil, shardPackFlagPut, key, make([]byte, 65))
-	require.NoError(t, os.WriteFile(path, record, 0o600))
-
-	store := &shardPackStore{
-		dir:     dir,
-		maxSize: 64,
-		index:   make(map[string]shardPackLocation),
-	}
-	require.NoError(t, store.scanFile(0, path))
-
-	_, ok := store.index[key]
-	require.False(t, ok)
-}
-
 func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 
@@ -912,74 +739,6 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	require.Equal(t, []byte("stream-payload"), got)
 }
 
-func TestShardPack_DataWALReplaysPutAndDelete(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithDataWAL(dwal),
-		WithShardPackThreshold(1024),
-	)
-	require.NoError(t, svc.WriteLocalShard("b", "packed", 0, []byte("small")))
-	require.NoError(t, svc.DeleteLocalShards("b", "packed"))
-	require.NoError(t, dwal.Flush())
-	require.NoError(t, os.RemoveAll(filepath.Join(svc.DataDirs()[0], ".pack")))
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-	_, found, err := svc.ReadLocalShardFromPack("b", "packed", 0)
-	require.NoError(t, err)
-	require.False(t, found, "pack entry must remain absent after delete replay")
-	// And there must be no resurrected per-shard file either.
-	_, statErr := os.Stat(mustShardPath(svc, "b", "packed", 0))
-	require.True(t, os.IsNotExist(statErr), "pack-routed write must not resurrect shard file on replay")
-}
-
-// TestShardPack_DataWALWritesLoggedAfterRecovery regression-tests that the
-// pack store wired by RecoverDataWAL holds onto the live data WAL, so a
-// pack write made after recovery survives a second crash+recover cycle.
-// Pre-fix the materializer left s.shardPack pointing at a nil-WAL store and
-// subsequent pack writes were silently un-logged.
-func TestShardPack_DataWALWritesLoggedAfterRecovery(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithDataWAL(dwal),
-		WithShardPackThreshold(1024),
-	)
-	require.NoError(t, svc.WriteLocalShard("b", "k1", 0, []byte("first")))
-	require.NoError(t, dwal.Flush())
-
-	// Simulate restart-and-recover.
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-
-	// A write made AFTER recovery must produce a WAL record that can replay
-	// through a second recovery.
-	require.NoError(t, svc.WriteLocalShard("b", "k2", 0, []byte("second")))
-	require.NoError(t, dwal.Flush())
-
-	// Wipe the pack directory and recover again; the second write must
-	// reappear from the WAL.
-	require.NoError(t, os.RemoveAll(filepath.Join(svc.DataDirs()[0], ".pack")))
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-	got, ok, err := svc.ReadLocalShardFromPack("b", "k2", 0)
-	require.NoError(t, err)
-	require.True(t, ok, "post-recovery pack write must replay through a second recovery")
-	require.Equal(t, []byte("second"), got)
-}
-
-// TestShardService_DataWALRestoresEncryptedShard regression-tests the latent
-// bug surfaced by boot wiring (see commit 775286d5): RecoverDataWAL must
-// forward the configured encryptor to datawal.Recover so the WAL segments
-// can be decrypted. Pre-fix the call passed nil and recovery failed with
-// "segment mode mismatch" once an encrypted WAL was wired in production.
 func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
@@ -1277,4 +1036,28 @@ func TestShardService_NativeWriteHandler_PlainAndSealed(t *testing.T) {
 	gotSealed, err := svc2.ReadLocalShard("bkt", "key3", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte("sealed shard plaintext"), gotSealed)
+}
+
+// TestRecoverDataWAL_SkipsLegacyShardPackRecords proves rolling-upgrade safety:
+// after S3 removed the shard-pack subsystem, a WAL containing legacy
+// OpShardPackPut/OpShardPackDelete records still replays without error (the
+// records hit the materializer's default arm and are skipped; their .pack data
+// is intentionally dropped — shard-packing was off by default in practice and
+// not relied upon).
+func TestRecoverDataWAL_SkipsLegacyShardPackRecords(t *testing.T) {
+	dir := t.TempDir()
+	keeper, clusterID := testDEKKeeper(t)
+	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
+	require.NoError(t, err)
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
+
+	// Seed a legacy pack record directly (the writer is gone; the op constant stays).
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op: datawal.OpShardPackPut, Bucket: "b", Key: "legacy", Target: "0", Size: 4, Payload: []byte("legacy-pack-bytes"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
+
+	// Recovery must succeed (record skipped, no crash).
+	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 }

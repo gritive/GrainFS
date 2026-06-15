@@ -29,10 +29,8 @@ func mustShardDir(s *ShardService, bucket, key string, idx int) string {
 	return d
 }
 
-// newTraversalTestShardService builds a ShardService with shard-pack disabled
-// (default packThreshold 0 ⇒ shardPack nil), so writeLocalShard takes the
-// per-file branch that maps the object key into a filesystem path — the
-// path-traversal vector.
+// newTraversalTestShardService builds a ShardService whose writeLocalShard maps
+// the object key into a filesystem path — the path-traversal vector.
 func newTraversalTestShardService(t *testing.T) (*ShardService, string) {
 	t.Helper()
 	root := t.TempDir()
