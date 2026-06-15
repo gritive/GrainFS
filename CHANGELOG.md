@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.593.0] - 2026-06-16
+
+### Removed
+- **Production-unreachable EC write fast paths.** The single-local-shard and
+  EC-memory-shards fast branches in the EC PUT dispatcher are removed. Every
+  production simple PUT already takes the chunked path (`shardGroup` is always
+  wired by `bootOwnedGroupsAndEC`), and `ConvertObjectToEC`/coalesce use
+  `writeSpooledShards` directly — only `shardGroup==nil` test fixtures reached the
+  fast paths. They now route through the kept `writeSpooledShards`, which writes
+  the identical on-disk shard format (`[8-byte header ‖ body]`). Behavior-
+  preserving for production: no data-format change, same at-write-time durability.
+  Removed: `putObjectSingleLocalShardSpooled`, `putObjectSingleLocalShardFromReader`,
+  `tryPutObjectECMemoryShards`, `writeMemoryShards`, `writeSingleLocalReader`,
+  `ecMemoryShardFastPathEnabled`, `maxECMemoryShardFastPathBytesForCfg` + caps.
+- **Dead symbols surfaced by a test-only-dead-code sweep** (zero references
+  repo-wide, or test-only): `PlacementGroupHasFullEntry`; the unused
+  `MetaRaft.ProposeIceberg{DeleteNamespace,CreateTable,CommitTable,DeleteTable}`
+  wrapper methods (the live Iceberg catalog path goes through `iceberg_catalog.go`
+  directly; the apply/decode/snapshot path and `MetaCmdType*` constants are
+  unchanged); the orphaned `raftSnapshotTimeout` constant (duplicate of the live
+  `metaRaftSnapshotTimeout`); and the test-only `writeShardReaders` wrapper. Net
+  ~490 fewer lines; no production or wire-format change.
+
 ## [0.0.592.0] - 2026-06-16
 
 ### Performance
