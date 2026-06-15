@@ -154,6 +154,11 @@ func TestMetaCatalogLeaderListCommitAndDelete(t *testing.T) {
 	defer cancel()
 	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "eng"}))
 	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"staging"}, nil))
+	// A duplicate create surfaces the typed ErrNamespaceExists through a real raft
+	// apply on the leader (coverage relocated from the removed
+	// TestMetaRaft_ProposeIcebergCreateNamespace, which tested the now-deleted
+	// MetaRaft.ProposeIcebergCreateNamespace wrapper).
+	require.ErrorIs(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil), icebergcatalog.ErrNamespaceExists)
 
 	namespaces, err := catalog.ListNamespaces(ctx, "")
 	require.NoError(t, err)

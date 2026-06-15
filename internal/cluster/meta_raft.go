@@ -574,14 +574,6 @@ func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string, reason c
 	return m.waitAppliedResult(ctx, idx)
 }
 
-func (m *MetaRaft) ProposeIcebergCreateNamespace(ctx context.Context, cmd IcebergCreateNamespaceCmd) error {
-	payload, err := encodeMetaIcebergCreateNamespaceCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergCreateNamespace: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateNamespace, payload, cmd.RequestID)
-}
-
 // ProposeConfigPut encodes a ConfigPut command and proposes it to the cluster,
 // blocking until the entry is applied to the local FSM.
 func (m *MetaRaft) ProposeConfigPut(ctx context.Context, key, value string) error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 )
@@ -24,7 +23,6 @@ type appendForwardBuffer struct {
 	capacity int64
 	mu       sync.Mutex
 	used     int64
-	inflight atomic.Int64 // mirror of `used` for lock-free gauge reads
 }
 
 func newAppendForwardBuffer(capacity int64) *appendForwardBuffer {
@@ -47,7 +45,6 @@ func (s *appendForwardBuffer) Acquire(ctx context.Context, n int64) error {
 		return ErrForwardBufferFull
 	}
 	s.used += n
-	s.inflight.Store(s.used)
 	metrics.AppendForwardBufferInflightBytes.Set(float64(s.used))
 	s.mu.Unlock()
 	return nil
@@ -62,11 +59,6 @@ func (s *appendForwardBuffer) Release(n int64) {
 	if s.used < 0 {
 		s.used = 0
 	}
-	s.inflight.Store(s.used)
 	metrics.AppendForwardBufferInflightBytes.Set(float64(s.used))
 	s.mu.Unlock()
-}
-
-func (s *appendForwardBuffer) InflightBytes() int64 {
-	return s.inflight.Load()
 }

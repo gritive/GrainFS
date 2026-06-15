@@ -23,9 +23,6 @@ func TestAppendForwardBufferReserveRelease(t *testing.T) {
 	if err := sem.Acquire(context.Background(), 500); err != nil {
 		t.Fatalf("post-release Acquire(500): %v", err)
 	}
-	if got := sem.InflightBytes(); got != 500 {
-		t.Errorf("InflightBytes = %d; want 500", got)
-	}
 	sem.Release(500)
 }
 
