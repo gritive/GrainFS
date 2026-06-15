@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.581.0] - 2026-06-15
+
+### Removed
+- Cluster shard-packing (EC shards packed into node-local `.pack` blobs) is
+  disabled and removed. The `--shard-pack-threshold` flag now defaults to `0`
+  and any value `> 0` (or `GRAINFS_SHARD_PACK_THRESHOLD > 0`) is a hard boot
+  error: a durable pack index was never built, so per-blob fsync cannot replace
+  the WAL-replay-reconstructed index (this is why packing is removed rather than
+  re-homed onto the new fsync model). The pack store, writer actor, write/read
+  paths, and the WAL-replay materializer case are deleted. **Note:** this is the
+  `internal/cluster` shard-pack only; the `internal/storage/packblob`
+  packed-object backend is a separate subsystem and is unaffected.
+
+### Internal
+- Rolling upgrades are safe: a data WAL containing legacy `OpShardPackPut` /
+  `OpShardPackDelete` records still replays (the records are skipped by the
+  materializer's default arm; the `datawal` op constants are retained for
+  decode). Any data that lived only in a `.pack` blob is dropped — shard-packing
+  was not relied upon (GrainFS has no production deployment). The
+  `--shard-pack-threshold` flag is retained as a hard-error gate so an operator
+  with it set gets a clear message rather than an unknown-flag failure.
+
 ## [0.0.580.0] - 2026-06-15
 
 ### Durability
