@@ -247,6 +247,32 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 				if err != nil {
 					return err
 				}
+				// Split-key disambiguation: a versioned record
+				// obj:{bucket}/{key}/{vid} whose lat: pointer lives in ANOTHER
+				// group (cross-group key split, or a PreserveLatest write with
+				// no lat: at all) lands here with no local latestMap entry. The
+				// stored meta.Key holds the real S3 key (no version suffix), so
+				// meta.Key == the parsed key means this is a genuine versioned
+				// record, not a legacy slash-bearing key. Emit it as a non-latest
+				// version — the owning group flags the real latest, and the
+				// coordinator's reconcileVersionIsLatest picks the global winner.
+				if m.Key == key && vid != "" {
+					if !strings.HasPrefix(key, prefix) {
+						continue
+					}
+					v := storage.ObjectVersion{
+						Key:            key,
+						VersionID:      vid,
+						IsLatest:       false,
+						IsDeleteMarker: m.ETag == deleteMarkerETag,
+						LastModified:   m.LastModified,
+						ETag:           m.ETag,
+						Size:           m.Size,
+						Tags:           append([]storage.Tag(nil), m.Tags...),
+					}
+					versions = append(versions, &v)
+					continue
+				}
 				v := storage.ObjectVersion{
 					Key:            rest,
 					VersionID:      "",

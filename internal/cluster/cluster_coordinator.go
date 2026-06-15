@@ -1094,20 +1094,152 @@ func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix
 	return c.forwardRuntime().listObjects(ctx, target, bucket, prefix, marker, maxKeys)
 }
 
+// ListObjectVersions enumerates every version of every object in the bucket.
+// Objects are key-hash-placed across shard groups (RouteObjectWrite →
+// groupIDForObject), so a single-group read (RouteBucket) would only see the
+// versions that happen to live in the bucket's assigned group. This fans out
+// across ALL shard groups, unions each group's local FSM enumeration, and
+// reconciles a single authoritative IsLatest per key.
 func (c *ClusterCoordinator) ListObjectVersions(
 	bucket, prefix string, maxKeys int,
 ) ([]*storage.ObjectVersion, error) {
 	ctx := context.Background()
-	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
+	state := c.runtimeState()
+	groups := c.shardGroupsForVersionedList()
+	// Internal buckets are single-group and unversioned; with ≤1 group the
+	// fan-out is identical to the single-group read, so keep the simpler path
+	// (also covers legacy / minimally-wired tests with no meta source).
+	if storage.IsInternalBucket(bucket) || len(groups) <= 1 {
+		return c.listObjectVersionsSingleGroup(ctx, state, bucket, prefix, maxKeys)
+	}
+	// Validate the bucket once (the single-group path returned ErrNoSuchBucket
+	// via RouteBucket; preserve that — group leaves bypass the bucket check).
+	if _, err := state.opRouter.RouteBucket(bucket); err != nil {
+		return nil, err
+	}
+	merged, err := c.fanOutListObjectVersions(ctx, state, groups, bucket, prefix, maxKeys)
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+	reconcileVersionIsLatest(merged)
+	sortObjectVersions(merged)
+	if maxKeys > 0 && len(merged) > maxKeys {
+		merged = merged[:maxKeys]
+	}
+	return merged, nil
+}
+
+// shardGroupsForVersionedList returns the cluster-wide shard group list (NOT
+// c.groups.All(), which is local-only). Empty when no meta source is wired.
+func (c *ClusterCoordinator) shardGroupsForVersionedList() []ShardGroupEntry {
+	if c.meta == nil {
+		return nil
+	}
+	return c.meta.ShardGroups()
+}
+
+func (c *ClusterCoordinator) listObjectVersionsSingleGroup(
+	ctx context.Context, state clusterCoordinatorRuntime, bucket, prefix string, maxKeys int,
+) ([]*storage.ObjectVersion, error) {
+	target, err := state.opRouter.RouteBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	if gb, err := state.localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.ListObjectVersions(bucket, prefix, maxKeys)
 	}
 	return c.forwardRuntime().listObjectVersions(ctx, target, bucket, prefix, maxKeys)
+}
+
+// fanOutListObjectVersions queries every shard group's per-version FSM
+// concurrently (local backend or forwarded) and unions the results. Fail-closed:
+// a single group error fails the whole LIST rather than silently returning a
+// partial version set, which would look like data loss (snapshots also depend
+// on this via ListAllObjects).
+func (c *ClusterCoordinator) fanOutListObjectVersions(
+	ctx context.Context, state clusterCoordinatorRuntime, groups []ShardGroupEntry, bucket, prefix string, maxKeys int,
+) ([]*storage.ObjectVersion, error) {
+	type groupResult struct {
+		versions []*storage.ObjectVersion
+		err      error
+	}
+	ch := make(chan groupResult, len(groups))
+	for _, g := range groups {
+		g := g
+		go func() {
+			target, err := state.opRouter.routeGroup(g.ID)
+			if err != nil {
+				ch <- groupResult{err: fmt.Errorf("ListObjectVersions route group %s: %w", g.ID, err)}
+				return
+			}
+			if gb, err := state.localExec.ResolveRead(ctx, target); err != nil {
+				ch <- groupResult{err: err}
+			} else if gb != nil {
+				vs, lerr := gb.ListObjectVersions(bucket, prefix, maxKeys)
+				ch <- groupResult{versions: vs, err: lerr}
+			} else {
+				vs, ferr := c.forwardRuntime().listObjectVersions(ctx, target, bucket, prefix, maxKeys)
+				ch <- groupResult{versions: vs, err: ferr}
+			}
+		}()
+	}
+	var (
+		merged   []*storage.ObjectVersion
+		firstErr error
+	)
+	for range groups {
+		r := <-ch
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
+		}
+		merged = append(merged, r.versions...)
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return merged, nil
+}
+
+// reconcileVersionIsLatest enforces exactly one IsLatest per key after a
+// cross-group merge. Candidates are ONLY versions a group already flagged
+// IsLatest (its lat: pointer) — a non-flagged version (e.g. a PreserveLatest
+// write) is never promoted. When a key split across groups left >1 flagged
+// version (divergent lat:), the newest (max UUIDv7 VersionID) wins and the
+// others are demoted. No-op in the common single-group-per-key case.
+func reconcileVersionIsLatest(versions []*storage.ObjectVersion) {
+	latestByKey := make(map[string]*storage.ObjectVersion)
+	for _, v := range versions {
+		if !v.IsLatest {
+			continue
+		}
+		cur, ok := latestByKey[v.Key]
+		if !ok {
+			latestByKey[v.Key] = v
+			continue
+		}
+		if v.VersionID > cur.VersionID {
+			cur.IsLatest = false
+			latestByKey[v.Key] = v
+		} else {
+			v.IsLatest = false
+		}
+	}
+}
+
+// sortObjectVersions orders by (Key asc, VersionID desc) — newest version first
+// within each key (UUIDv7 is lex-ASC-by-time). Mirrors the per-group leaf sort.
+func sortObjectVersions(versions []*storage.ObjectVersion) {
+	sort.Slice(versions, func(i, j int) bool {
+		if versions[i].Key != versions[j].Key {
+			return versions[i].Key < versions[j].Key
+		}
+		return versions[i].VersionID > versions[j].VersionID
+	})
 }
 
 // WalkObjects buffers ALL matching objects on the server and returns them in
