@@ -42,8 +42,8 @@ func warnIfReducedDataFsync() {
 // assignments the FSM has so far, then flip the router into "explicit-only"
 // mode (post-seed: every bucket must have an explicit assignment).
 //
-// ShardService: applies cfg-driven options (DirectIO, MeasureReadAmp,
-// AddressBook), then constructs the service. effectiveEC is captured here
+// ShardService: applies cfg-driven options (MeasureReadAmp, AddressBook), then
+// constructs the service. effectiveEC is captured here
 // because seedGroups (cluster size * 4, min 8) is the durability headroom
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
@@ -142,10 +142,6 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		// metadata-only shard write must fsync the shard file directly — read
 		// live so a later EC reconfig is honored.
 		cluster.WithNoRedundancy(func() bool { return state.effectiveEC.ParityShards == 0 }),
-	}
-	if state.cfg.DirectIO {
-		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
-		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
 	}
 	// Shard-packing is disabled (S3): a durable pack index was never built, so
 	// per-blob fsync cannot replace the WAL-replay-reconstructed index. Refuse to

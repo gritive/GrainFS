@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,20 +14,15 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
-// withTestWALDEK wires a data WAL sealed by the same DEKKeeper-backed seam the
-// ShardService uses (production shape: no static encryptor), satisfying the
-// mandatory-WAL invariant without a nil-encryptor adapter that would panic.
-func withTestWALDEK(tb clusterTestTB, keeper *encrypt.DEKKeeper, clusterID []byte) ShardServiceOption {
+// withTestWALDEK USED to wire a data WAL (mandatory before S4). The shard data
+// WAL was removed in S4; this is retained as a no-op ShardServiceOption so the
+// ~28 call sites compile unchanged. Durability is now write-time fsync / EC.
+func withTestWALDEK(tb clusterTestTB, _ *encrypt.DEKKeeper, _ []byte) ShardServiceOption {
 	tb.Helper()
-	w, err := datawal.Open(filepath.Join(tb.TempDir(), "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = w.Close() })
-	return WithDataWAL(w)
+	return func(*ShardService) {}
 }
 
 // newTestDistributedBackendDEK mirrors newTestDistributedBackend but wires the

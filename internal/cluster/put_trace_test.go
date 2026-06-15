@@ -54,8 +54,6 @@ func TestPutTraceStageVocabularyIsStable(t *testing.T) {
 	require.Equal(t, "shard_write_local_mkdir", string(PutTraceStageShardWriteLocalMkdir))
 	require.Equal(t, "shard_write_local_encode", string(PutTraceStageShardWriteLocalEncode))
 	require.Equal(t, "shard_write_local_file", string(PutTraceStageShardWriteLocalFile))
-	require.Equal(t, "shard_write_local_direct", string(PutTraceStageShardWriteLocalDirect))
-	require.Equal(t, "shard_write_local_buffered", string(PutTraceStageShardWriteLocalBuffered))
 	require.Equal(t, "shard_write_local_enc_open", string(PutTraceStageShardWriteLocalEncOpen))
 	require.Equal(t, "shard_write_local_enc_write", string(PutTraceStageShardWriteLocalEncWrite))
 	require.Equal(t, "shard_write_local_enc_sync", string(PutTraceStageShardWriteLocalEncSync))

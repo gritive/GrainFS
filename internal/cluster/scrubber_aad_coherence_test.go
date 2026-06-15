@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
@@ -19,13 +17,7 @@ func dekShardSvc(t *testing.T, root string) (*ShardService, []byte) {
 	if err != nil {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
-	wal, err := datawal.Open(filepath.Join(root, "datawal"),
-		storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	if err != nil {
-		t.Fatalf("datawal.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = wal.Close() })
-	return NewShardService(root, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(wal)), clusterID
+	return NewShardService(root, nil, WithShardDEKKeeper(keeper, clusterID)), clusterID
 }
 
 // A cleanable object key ("a/../b") seals under the UNCLEANED ecObjectShardKey;

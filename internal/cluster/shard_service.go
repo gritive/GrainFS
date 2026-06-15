@@ -9,17 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -28,15 +25,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
-
-// DataWALAppender is the subset of *datawal.WAL that ShardService needs to log
-// shard writes before mutating local files. Defined as an interface so tests
-// and Task 6/7 wiring can swap implementations.
-type DataWALAppender interface {
-	Append(context.Context, datawal.Record) (uint64, error)
-	AppendReader(context.Context, datawal.Record, io.Reader) (uint64, error)
-	Flush() error
-}
 
 var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
 
@@ -50,39 +38,21 @@ func getShardBuilder(minSize int) *flatbuffers.Builder {
 	return flatbuffers.NewBuilder(minSize)
 }
 
-type shardFileWriter func(path string, payload []byte) error
-
 // ShardService handles remote shard storage via the cluster transport Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
-	dataDirs     []string
-	transport    shardTransport
-	segEnc       storage.DataEncryptor // chunked EC-shard data-at-rest seam
-	dekKeeper    *encrypt.DEKKeeper
-	clusterID    [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
-	addrBook     NodeAddressBook
-	directWriter shardFileWriter
-	// directIO bypasses the kernel page cache for shard writes when true.
-	// Linux uses O_DIRECT, macOS uses F_NOCACHE. Default false: enable via
-	// WithDirectIO and the --direct-io flag once measurement on the target
-	// filesystem confirms the win (see shardio_directio_bench_test.go).
-	directIO bool
-	dirCache sync.Map
+	dataDirs  []string
+	transport shardTransport
+	segEnc    storage.DataEncryptor // chunked EC-shard data-at-rest seam
+	dekKeeper *encrypt.DEKKeeper
+	clusterID [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
+	addrBook  NodeAddressBook
+	dirCache  sync.Map
 	// syncFileHook / syncDirHook are nil-default test seams. Production leaves
 	// them nil → fsyncFile/fsyncDir call directio.Sync / syncDir directly. Tests
 	// set them to assert the durability fsync call ORDER (DBV / locked-order).
 	syncFileHook func(*os.File) error
 	syncDirHook  func(string) error
-	// dataWAL, when set, receives an OpShardPut record before each local shard
-	// file mutation so that a torn / lost shard file can be replayed on boot.
-	dataWAL DataWALAppender
-	// dataWALRepairSink, when set, receives repair candidates discovered
-	// during startup scanning of metadata-only WAL records.
-	dataWALRepairSink DataWALRepairSink
-	// replayingDataWAL is true only while RecoverDataWAL is materializing
-	// records. Atomic because shard writes fan out across goroutines (e.g. EC
-	// writer) and may consult it concurrently with boot recovery in tests.
-	replayingDataWAL atomic.Bool
 	// noRedundancy, when set, reports whether the deployment has no EC parity
 	// and no peers (single-node 1+0). In that case a large metadata-only WAL
 	// record cannot be recovered via EC reconstruction, so the shard file must
@@ -110,31 +80,10 @@ func WithShardDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) ShardServic
 	}
 }
 
-// WithDirectIO enables direct I/O (page-cache bypass) on the local shard
-// write path. Beneficial for the typical EC shard size range (1-4 MB),
-// neutral for larger shards. Off by default — opt in after measuring on the
-// target filesystem (some overlayfs/tmpfs configs reject O_DIRECT).
-func WithDirectIO() ShardServiceOption {
-	return func(s *ShardService) { s.directIO = true }
-}
-
 // WithNodeAddressBook lets shard RPC callers keep nodeID membership lists while
 // dialing the transport address stored in MetaFSM.
 func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 	return func(s *ShardService) { s.addrBook = book }
-}
-
-// WithDataWAL wires a data WAL into the shard service so that every local
-// shard write is logged before the shard file is mutated. RecoverDataWAL
-// replays the log on boot to restore any missing shard files.
-func WithDataWAL(w DataWALAppender) ShardServiceOption {
-	return func(s *ShardService) { s.dataWAL = w }
-}
-
-// WithDataWALRepairSink wires a sink that receives repair candidates
-// discovered during startup scanning of metadata-only WAL records.
-func WithDataWALRepairSink(sink DataWALRepairSink) ShardServiceOption {
-	return func(s *ShardService) { s.dataWALRepairSink = sink }
 }
 
 // WithNoRedundancy wires a provider reporting whether the deployment has no EC
@@ -146,14 +95,6 @@ func WithNoRedundancy(fn func() bool) ShardServiceOption {
 	return func(s *ShardService) { s.noRedundancy = fn }
 }
 
-// HasDataWAL reports whether a data WAL is wired. Used by Task 7 boot wiring
-// (and its tests) to assert that production callers actually attached a WAL
-// after construction.
-func (s *ShardService) HasDataWAL() bool { return s.dataWAL != nil }
-
-// HasDataWALRepairSink reports whether a data WAL repair candidate sink is wired.
-func (s *ShardService) HasDataWALRepairSink() bool { return s.dataWALRepairSink != nil }
-
 func (s *ShardService) DEKKeeper() *encrypt.DEKKeeper { return s.dekKeeper }
 
 func (s *ShardService) ClusterID() []byte {
@@ -162,8 +103,7 @@ func (s *ShardService) ClusterID() []byte {
 	return out
 }
 
-// Close releases resources owned by the ShardService. The data WAL itself is
-// owned by the caller (WithDataWAL) and is not closed here. Currently a no-op.
+// Close releases resources owned by the ShardService. Currently a no-op.
 func (s *ShardService) Close() error {
 	return nil
 }
@@ -184,9 +124,8 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 	}
 
 	s := &ShardService{
-		dataDirs:     resolvedDirs,
-		transport:    tr,
-		directWriter: writeDirect,
+		dataDirs:  resolvedDirs,
+		transport: tr,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -1251,209 +1190,6 @@ func (s *ShardService) shardWriteRequiresFsync(payloadLen int) bool {
 	return true // small, or large + no-redundancy: write-time fsync
 }
 
-// ShardMetadataWALRecord describes one shard's WAL metadata-only entry
-// for AppendShardMetadataBatch. Payload is never inlined — the on-disk
-// shard file is the source of truth. EC reconstruction lazily rebuilds
-// missing files at read time via the metadata-only materializer path.
-type ShardMetadataWALRecord struct {
-	Bucket   string
-	Key      string // ecObjectShardKey(key, versionID) form
-	ShardIdx int
-	Size     int64
-}
-
-// NOTE (S1, v0.0.578.0+): this function has no production callers (the put
-// pipeline that used it was removed). It is left behaviorally unchanged on
-// purpose. When revived, a redundant-EC caller must SKIP the WAL entirely
-// (see appendShardDataWAL's S1 skip) rather than rely on this batch — and the
-// `walCovered bool` return needs revisiting first, because `false` currently
-// means "caller must fsync", which is the OPPOSITE of the EC-covered/no-fsync
-// semantics a redundant caller wants.
-//
-// AppendShardMetadataBatch records N shard metadata-only entries in the
-// data WAL with exactly one Flush. The put actor pipeline calls this
-// after every shard has hit disk (rename done) and before signalling
-// completion, so a 4-shard EC object pays 1 WAL fsync instead of N
-// per-shard fsyncs. WAL is mandatory: a nil WAL returns an error. During
-// replay it returns walCovered=false (the WAL cannot be re-appended), so the
-// caller MUST fsync the shard files themselves in that case.
-//
-// On Append failure mid-batch the partially-committed WAL is left as-is
-// — the records on disk are a superset of what we acknowledge, which is
-// safe (recovery skips records whose shard files were never written).
-func (s *ShardService) AppendShardMetadataBatch(ctx context.Context, records []ShardMetadataWALRecord) (walCovered bool, err error) {
-	if s.dataWAL == nil {
-		return false, fmt.Errorf("AppendShardMetadataBatch: shard write requires a data WAL (WAL is mandatory)")
-	}
-	if s.replayingDataWAL.Load() {
-		return false, nil
-	}
-	for _, r := range records {
-		rec := datawal.Record{
-			Op:     datawal.OpShardPut,
-			Bucket: r.Bucket,
-			Key:    r.Key,
-			Target: strconv.Itoa(r.ShardIdx),
-			Size:   r.Size,
-		}
-		// Metadata-only: rec.Payload stays nil. The pipeline's shard
-		// chunks are large by construction (chunk size >> inline
-		// threshold), so we never inline.
-		if _, err := s.dataWAL.Append(ctx, rec); err != nil {
-			return false, fmt.Errorf("data wal append shard batch: %w", err)
-		}
-	}
-	if err := s.dataWAL.Flush(); err != nil {
-		return false, fmt.Errorf("data wal flush shard batch: %w", err)
-	}
-	return true, nil
-}
-
-// RecoverDataWAL replays missing shard files from the data WAL. Safe to call
-// when no WAL is wired (no-op). Existing shard files matching the record size
-// are skipped via HasReplacement. Legacy OpShardPack* records (shard-packing
-// was removed in S3) are skipped by the materializer's default arm.
-func (s *ShardService) RecoverDataWAL(ctx context.Context) error {
-	if s.dataWAL == nil {
-		return nil
-	}
-	s.replayingDataWAL.Store(true)
-	defer s.replayingDataWAL.Store(false)
-	sealer, err := s.dataWALRecoverySealer()
-	if err != nil {
-		return err
-	}
-	if err := datawal.Recover(ctx, filepath.Join(filepath.Dir(s.dataDirs[0]), "datawal"), 0, sealer, datawal.NamespaceShard, shardDataWALMaterializer{s: s}); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *ShardService) dataWALRecoverySealer() (datawal.RecordSealer, error) {
-	switch {
-	case s.dekKeeper != nil:
-		return storage.NewDEKKeeperAdapter(s.dekKeeper, s.clusterID[:]), nil
-	default:
-		return nil, nil
-	}
-}
-
-type shardDataWALMaterializer struct {
-	s *ShardService
-}
-
-// addRepairCandidate enqueues a repair candidate and bumps the discovered
-// metric, returning true when a sink was wired (and thus the candidate was
-// queued). Returns false with no side effects when no sink is configured, so
-// callers can keep the operator log honest about whether a repair was queued.
-func (m shardDataWALMaterializer) addRepairCandidate(rec datawal.Record, shardIdx int, reason DataWALRepairReason) bool {
-	if m.s.dataWALRepairSink == nil {
-		return false
-	}
-	// Discovered is counted per record (pre-dedup); the queued-after-dedup count
-	// is emitted by the serveruntime starter. Both labels match the design's
-	// observability list.
-	metrics.DataWALStartupRepairDiscovered.WithLabelValues(string(reason)).Inc()
-	m.s.dataWALRepairSink.AddDataWALRepairCandidate(DataWALRepairCandidate{
-		Bucket:       rec.Bucket,
-		ShardKey:     rec.Key,
-		ShardIdx:     shardIdx,
-		ExpectedSize: rec.Size,
-		Reason:       reason,
-	})
-	return true
-}
-
-func (m shardDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
-	_ = ctx
-	// Only OpShardPut records materialize a shard file. Everything else
-	// (including legacy OpShardPack* records — shard-packing was removed in S3)
-	// has no replacement and is skipped by Materialize's default arm.
-	if rec.Op != datawal.OpShardPut {
-		return false, nil
-	}
-	idx, err := strconv.Atoi(rec.Target)
-	if err != nil {
-		return false, err
-	}
-	path, err := m.s.getShardPath(rec.Bucket, rec.Key, idx)
-	if err != nil {
-		return false, err
-	}
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return info.Size() == rec.Size, nil
-}
-
-func (m shardDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
-	switch rec.Op {
-	case datawal.OpShardPut:
-		idx, err := strconv.Atoi(rec.Target)
-		if err != nil {
-			return err
-		}
-		dir, err := m.s.getShardDir(rec.Bucket, rec.Key, idx)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		path, err := m.s.getShardPath(rec.Bucket, rec.Key, idx)
-		if err != nil {
-			return err
-		}
-		if len(rec.Payload) == 0 {
-			// Metadata-only record (large shard path). The on-disk file
-			// either survived the crash (rename hit fs metadata journal) or
-			// was lost from the page cache. We can't rebuild the bytes
-			// here — recovery is deferred to read time, where EC
-			// reconstruction rebuilds missing shards from surviving peers.
-			// We DO leave the WAL record in place so a scrubber pass can
-			// notice the file is gone and proactively reconstruct.
-			if info, statErr := os.Stat(path); statErr == nil {
-				if info.Size() == rec.Size {
-					return nil // already present at expected size
-				}
-				msg := "data WAL replay: shard size mismatch — will reconstruct on read"
-				if m.addRepairCandidate(rec, idx, DataWALRepairSizeMismatch) {
-					msg = "data WAL replay: shard size mismatch — queued startup repair"
-				}
-				log.Warn().
-					Str("shard", path).
-					Int64("expected", rec.Size).
-					Int64("got", info.Size()).
-					Msg(msg)
-				return nil
-			} else if os.IsNotExist(statErr) {
-				msg := "data WAL replay: shard missing — will reconstruct on read"
-				if m.addRepairCandidate(rec, idx, DataWALRepairMissing) {
-					msg = "data WAL replay: shard missing — queued startup repair"
-				}
-				log.Warn().
-					Str("shard", path).
-					Int64("expected", rec.Size).
-					Msg(msg)
-				return nil
-			} else {
-				return statErr
-			}
-		}
-		// Inline-payload record (small shard path). Rebuild the file from
-		// WAL bytes. Durability comes from the WAL having already been
-		// flushed; the file write itself must fsync so the recovered shard
-		// outlives a second crash.
-		return m.s.writeShardFile(ctx, path, rec.Payload, idx, true)
-	default:
-		return nil
-	}
-}
-
 // WriteLocalShardStream stores a shard from body without buffering plaintext.
 func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
 	return s.WriteLocalShardStreamContext(context.Background(), bucket, key, shardIdx, body)
@@ -1491,140 +1227,6 @@ func (s *ShardService) ensureShardDir(dir string) error {
 	}
 	s.dirCache.Store(dir, struct{}{})
 	return nil
-}
-
-// writeShardFile writes payload to path using the atomic
-// (tmp + sync + rename) recipe. Branches on s.directIO: when true the tmp
-// file is opened with platform-specific direct-I/O hints and the payload is
-// padded to alignment + truncated; when false the standard buffered path
-// runs unchanged. Errors at any step delete the tmp file before returning.
-func (s *ShardService) writeShardFile(ctx context.Context, path string, payload []byte, shardIdx int, requireFsync bool) error {
-	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
-	if s.directIO {
-		directStart := time.Now()
-		if err := s.directWriter(tmp, payload); err == nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirect, directStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-			})
-			if err := os.Rename(tmp, path); err != nil {
-				os.Remove(tmp)
-				return fmt.Errorf("rename shard: %w", err)
-			}
-			return nil
-		} else if isUnsupportedDirectIO(err) {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirect, directStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			// Some filesystems (overlayfs, certain tmpfs configs) reject
-			// O_DIRECT with EINVAL. Fall back to the buffered path so
-			// production stays up — log nothing here; the operator already
-			// opted in and the tests cover both branches.
-			os.Remove(tmp)
-		} else {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirect, directStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			os.Remove(tmp)
-			return err
-		}
-	}
-	bufferedStart := time.Now()
-	if err := writeBuffered(tmp, payload, requireFsync); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalBuffered, bufferedStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalBuffered, bufferedStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename shard: %w", err)
-	}
-	return nil
-}
-
-// writeBuffered is the historical write path: open + write + (optional fsync) +
-// close. fsync runs when the data WAL did not inline the payload — the WAL's
-// own Flush already covers durability for small WAL'd payloads, so the
-// redundant syscall is skipped for them.
-func writeBuffered(tmp string, payload []byte, requireFsync bool) error {
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("create tmp shard: %w", err)
-	}
-	if _, err := f.Write(payload); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("write tmp shard: %w", err)
-	}
-	if requireFsync {
-		if err := directio.Sync(f); err != nil {
-			f.Close()
-			os.Remove(tmp)
-			return fmt.Errorf("fsync tmp shard: %w", err)
-		}
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("close tmp shard: %w", err)
-	}
-	return nil
-}
-
-// writeDirect uses directio.OpenFile + AlignedCopy to bypass the page cache.
-// The payload is copied into an aligned buffer once; the file is truncated
-// back to the payload's true length so readers see exactly the bytes the
-// caller passed in. Durability is owned by internal/storage/datawal — the
-// encoded payload was appended and flushed to the WAL before this call.
-func writeDirect(tmp string, payload []byte) error {
-	f, err := directio.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("create tmp shard (direct): %w", err)
-	}
-	buf, alignedLen := directio.AlignedCopy(payload)
-	if _, err := f.Write(buf); err != nil {
-		f.Close()
-		return fmt.Errorf("write tmp shard (direct): %w", err)
-	}
-	if alignedLen != len(payload) {
-		if err := f.Truncate(int64(len(payload))); err != nil {
-			f.Close()
-			return fmt.Errorf("truncate tmp shard (direct): %w", err)
-		}
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close tmp shard (direct): %w", err)
-	}
-	return nil
-}
-
-// isUnsupportedDirectIO recognises filesystem-level rejections of O_DIRECT
-// (EINVAL or "operation not supported") so the caller can fall back to the
-// buffered path silently. Filesystems that reject direct I/O should degrade
-// gracefully instead of crashing the server.
-func isUnsupportedDirectIO(err error) bool {
-	if err == nil {
-		return false
-	}
-	es := err.Error()
-	return strings.Contains(es, "invalid argument") ||
-		strings.Contains(es, "operation not supported") ||
-		strings.Contains(es, "not implemented")
 }
 
 // ReadLocalShard fetches a shard from the local node's disk and decrypts it via

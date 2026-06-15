@@ -82,14 +82,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration("vlog-smoke-defer", 60*time.Second, "delay before vlog registry startup smoke runs")
 	cmd.Flags().Int64("badger-value-threshold", 0, "force BadgerDB ValueThreshold (bytes) so values above this size spill to vlog; 0 keeps GrainFS small-store default. Test-only.")
 	_ = cmd.Flags().MarkHidden("badger-value-threshold")
-	// Direct I/O on local shard writes bypasses the kernel page cache (Linux
-	// O_DIRECT, macOS F_NOCACHE). On by default — the bench
-	// (internal/cluster/shardio_directio_bench_test.go) showed 10x on 1MB
-	// shards, 40% on 4MB, neutral on 16MB. Filesystems that reject O_DIRECT
-	// (some overlayfs/tmpfs) fall back to the buffered path automatically;
-	// pass --direct-io=false to force buffered everywhere.
-	cmd.Flags().Bool("direct-io", true, "bypass page cache on local EC shard writes (Linux O_DIRECT / macOS F_NOCACHE)")
-	_ = cmd.Flags().MarkHidden("direct-io")
 	// When on, every volume-block and EC-shard read is fed to the
 	// read-amplification simulator at three cache sizes (16/64/256 MB
 	// equivalent) per path. Hit/miss counters appear at /metrics under

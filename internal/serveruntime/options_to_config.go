@@ -49,7 +49,6 @@ func optionsToConfig(
 	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest
 	cfg.AppendSizeCapBytes = opts.AppendSizeCapBytes
 
-	cfg.DirectIO = opts.DirectIO
 	cfg.MeasureReadAmp = opts.MeasureReadAmp
 	cfg.ShardCacheSize = opts.ShardCacheSize
 	cfg.PackThreshold = opts.PackThreshold

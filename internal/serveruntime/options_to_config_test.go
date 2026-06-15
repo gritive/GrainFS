@@ -33,7 +33,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 
 		PackThreshold:      31,
 		ShardPackThreshold: 41,
-		DirectIO:           true,
 		MeasureReadAmp:     true,
 		BlockCacheSize:     int64(1 << 28),
 		ShardCacheSize:     int64(1 << 27),
@@ -125,7 +124,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.AppendSizeCapBytes, cfg.AppendSizeCapBytes)
 
 	// Storage.
-	require.Equal(t, opts.DirectIO, cfg.DirectIO)
 	require.Equal(t, opts.MeasureReadAmp, cfg.MeasureReadAmp)
 	require.Equal(t, opts.ShardCacheSize, cfg.ShardCacheSize)
 	require.Equal(t, opts.PackThreshold, cfg.PackThreshold)
