@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.585.0] - 2026-06-15
+
+### Changed
+- **Multipart-complete now takes the single chunked path regardless of total
+  size.** `CompleteMultipartUpload` no longer branches on `manifest.TotalSize`
+  (large→chunked vs small→spool); every completion routes through
+  `putMultipartObjectChunked` when a `ShardGroupSource` is wired (always in
+  production), matching the simple-PUT single path. Small / single-part / empty
+  completions now chunk into one segment. ETag is unchanged (whole-object MD5 —
+  GrainFS does not use AWS `<hash>-N` multipart ETags); `Parts` metadata is
+  preserved. The legacy spool path remains only for backends without a
+  `ShardGroupSource`. Removed the now-dead `chunkedPathThresholdMet` predicate.
+
+
 ## [0.0.584.0] - 2026-06-15
 
 ### Changed
