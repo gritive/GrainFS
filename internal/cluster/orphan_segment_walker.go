@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -13,10 +14,68 @@ import (
 
 const segmentsDirSuffix = "_segments"
 
-// WalkOrphanSegments recursively walks <root>/data/<bucket>/<key>_segments/<blobID>
+// SetOwningGroupBackendSource wires the resolver that maps a bucket to its owning
+// data-group's backend so the orphan-SEGMENT sweep can dispatch each per-bucket op
+// to the group whose b.root subtree holds that bucket's segments. Call once during
+// boot, before the scrubber starts. nil/un-wired => every bucket resolves to this
+// backend (single-group).
+func (b *DistributedBackend) SetOwningGroupBackendSource(fn func(bucket string) *DistributedBackend) {
+	b.owningGroupBackendFn = fn
+}
+
+// owningGroupBackend resolves the backend that owns `bucket`'s segments. Defaults
+// to this backend when un-wired (single-group). nil means the owner is not locally
+// hosted (its segments are not on this node).
+func (b *DistributedBackend) owningGroupBackend(bucket string) *DistributedBackend {
+	if b.owningGroupBackendFn == nil {
+		return b
+	}
+	return b.owningGroupBackendFn(bucket)
+}
+
+// SegmentSweepBuckets returns the de-duplicated union of every locally-hosted
+// group's buckets, so the scrubber's per-bucket segment sweep covers all groups
+// this node hosts (not just group-0). Fail-closed: any group's ListBuckets error
+// returns an error so the scrubber skips the segment sweep this cycle. Default
+// (un-wired hostedGroupBackendsSrc => []{b}) == this backend's ListBuckets (self).
+func (b *DistributedBackend) SegmentSweepBuckets(ctx context.Context) ([]string, error) {
+	seen := make(map[string]bool)
+	var out []string
+	for _, gb := range b.hostedGroupBackends() {
+		if gb == nil {
+			return nil, fmt.Errorf("segment sweep buckets: hosted group backend is nil")
+		}
+		bs, err := gb.ListBuckets(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("segment sweep buckets: list group buckets: %w", err)
+		}
+		for _, bk := range bs {
+			if !seen[bk] {
+				seen[bk] = true
+				out = append(out, bk)
+			}
+		}
+	}
+	return out, nil
+}
+
+// WalkOrphanSegments dispatches the per-bucket segment walk to the backend that
+// owns `bucket` (segments live under that group's b.root), and skips the bucket
+// when its owning group is not locally hosted or not caught-up (only the caught-up
+// leader of a group GCs its segments — a lagging/follower FSM could mark a
+// committed segment orphan). Implements scrubber.OrphanSegmentWalkable.
+func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]bool, fn func(string) error) error {
+	gb := b.owningGroupBackend(bucket)
+	if gb == nil || !gb.CaughtUp(context.Background()) {
+		return nil
+	}
+	return gb.walkOwnOrphanSegments(bucket, known, fn)
+}
+
+// walkOwnOrphanSegments recursively walks <root>/data/<bucket>/<key>_segments/<blobID>
 // (key may contain `/`) returning files older than scrubOrphanAge and not in
 // `known`. Bucket ENOENT (race with bucket delete) is treated as success/empty.
-func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]bool, fn func(string) error) error {
+func (b *DistributedBackend) walkOwnOrphanSegments(bucket string, known map[string]bool, fn func(string) error) error {
 	bucketDir := filepath.Join(b.root, "data", bucket)
 	cutoff := time.Now().Add(-b.scrubOrphanAge)
 
@@ -87,9 +146,22 @@ func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]
 	return stopErr
 }
 
-// DeleteOrphanSegment removes one raw segment file. ENOENT is swallowed
-// (idempotent — already removed by another path).
+// DeleteOrphanSegment dispatches the delete to the backend that owns the segment's
+// bucket (the key is `<bucket>/<key>_segments/<blobID>`, bucket is its first path
+// component — buckets forbid '/'). Owner not locally hosted => no-op. Implements
+// scrubber.OrphanSegmentWalkable.
 func (b *DistributedBackend) DeleteOrphanSegment(key string) error {
+	bucket, _, _ := strings.Cut(key, "/")
+	gb := b.owningGroupBackend(bucket)
+	if gb == nil {
+		return nil
+	}
+	return gb.deleteOwnOrphanSegment(key)
+}
+
+// deleteOwnOrphanSegment removes one raw segment file under this backend's root.
+// ENOENT is swallowed (idempotent — already removed by another path).
+func (b *DistributedBackend) deleteOwnOrphanSegment(key string) error {
 	path := filepath.Join(b.root, "data", key)
 	err := os.Remove(path)
 	if err != nil {

@@ -23,8 +23,26 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 // scrubber skips its sweep rather than deleting a segment whose object record
 // it could not read. snapshot Create deliberately uses the tolerant
 // ListAllObjects instead.
+//
+// Multi-group: unions every locally-hosted group's live objects (each group
+// enumerates its OWN buckets via its own keyspace), so the segment-GC known-set
+// covers all hosted groups — a sibling group's live segment is never
+// false-orphaned. Fail-closed: any group's error fails the whole hoist. The sole
+// caller is the scrubber's hoistSegmentSources. Default (un-wired
+// hostedGroupBackendsSrc => []{b}) == this backend only (single-group).
 func (b *DistributedBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
-	return b.listAllObjects(true)
+	var out []storage.SnapshotObject
+	for _, gb := range b.hostedGroupBackends() {
+		if gb == nil {
+			return nil, fmt.Errorf("list all objects strict: hosted group backend is nil")
+		}
+		objs, err := gb.listAllObjects(true)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, objs...)
+	}
+	return out, nil
 }
 
 func (b *DistributedBackend) listAllObjects(strict bool) ([]storage.SnapshotObject, error) {

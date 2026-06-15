@@ -211,6 +211,14 @@ type DistributedBackend struct {
 	// true: this node judges every candidate (single-group).
 	owningGroupHostedFn func(bucket string) bool
 
+	// owningGroupBackendFn resolves a bucket to its owning data-group's backend
+	// for the orphan-SEGMENT sweep (segments live per-group under that group's
+	// b.root; each bucket has exactly one owning group). Returns nil when the
+	// owner is not locally hosted (its segments aren't on this node). Boot wires
+	// it from dgMgr.GroupForBucket. nil (tests / un-wired) => owningGroupBackend
+	// returns this backend (single-group, identical to pre-multi-group behavior).
+	owningGroupBackendFn func(bucket string) *DistributedBackend
+
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
