@@ -972,6 +972,12 @@ func (s *ShardService) fsyncDir(dir string) error {
 func (s *ShardService) syncDirChain(leaf, stop string) error {
 	stop = filepath.Clean(stop)
 	leaf = filepath.Clean(leaf)
+	if leaf == stop {
+		// Degenerate (unreachable for real shards: dir = dataDir/bucket/key is
+		// always strictly below stop = dataDir). Preserve the pre-dedup contract,
+		// whose `for d := leaf; d != stop` loop fsynced nothing here.
+		return nil
+	}
 	// The leaf always receives a fresh shard-file entry on this write → fsync its
 	// CONTENTS every time, independent of whether its own dir entry is durable.
 	if err := s.fsyncDir(leaf); err != nil {
