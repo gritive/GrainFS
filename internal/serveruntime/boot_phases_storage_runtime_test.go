@@ -1,8 +1,9 @@
 package serveruntime
 
 import (
-	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,9 +12,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // storagePhasePrereqs runs every prior boot phase (config, storage open,
@@ -69,18 +68,16 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	return ctx, state
 }
 
-func TestBootShardServiceDataWALPrefersDEKKeeper(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir()})
-	kek := bytes.Repeat([]byte{0x61}, encrypt.KEKSize)
-	clusterID := bytes.Repeat([]byte{0x62}, 16)
-	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
-	require.NoError(t, err)
-	state.dekKeeper = keeper
-	state.clusterID = clusterID
+// TestBootShardService_NoWALDirCreated proves S4: boot no longer opens a shard
+// data WAL, so no {dataDir}/datawal directory is created. Durability is
+// write-time fsync / EC; there is no WAL to replay.
+func TestBootShardService_NoWALDirCreated(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
 
-	sealer, err := dataWALSealerForState(state)
-	require.NoError(t, err)
-	require.IsType(t, &storage.DEKKeeperAdapter{}, sealer)
+	require.NoError(t, bootShardService(ctx, state))
+
+	_, err := os.Stat(filepath.Join(state.cfg.DataDir, "datawal"))
+	require.True(t, os.IsNotExist(err), "S4: boot must not create a datawal directory")
 }
 
 func TestRuntimeTopologyNodesPrefersJoinedMetaNodes(t *testing.T) {
@@ -146,17 +143,6 @@ func TestBootShardService_ShardPackThresholdIsHardError(t *testing.T) {
 	require.Contains(t, err.Error(), "shard-pack")
 }
 
-func TestBootShardServiceWiresDataWALRepairCollector(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-
-	require.NoError(t, bootShardService(ctx, state))
-
-	require.NotNil(t, state.dataWALRepairCollector)
-	require.NotNil(t, state.shardSvc)
-	require.True(t, state.shardSvc.HasDataWALRepairSink(),
-		"shard service must be constructed with the repair-candidate sink")
-}
-
 // TestBootStoragePhases_OrderingInvariant — witness test. Asserts each phase
 // boundary by checking which state fields are nil before vs populated after.
 // Mirrors the PR 4 ordering test pattern: if a refactor accidentally re-orders
@@ -170,16 +156,12 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.distBackend)
 	assert.Nil(t, state.shardCache)
 	assert.Nil(t, state.rebalancer)
-	assert.Nil(t, state.dataWAL, "data WAL not opened before shard service phase")
-	assert.Empty(t, state.dataWALDir, "dataWALDir not set before shard service phase")
 	assert.Equal(t, 0, state.effectiveEC.NumShards(), "effectiveEC zero-value before phases")
 
-	// 1. ShardService — populates shardSvc + effectiveEC + data WAL; no router yet.
+	// 1. ShardService — populates shardSvc + effectiveEC; no router yet. The shard
+	//    data WAL was removed in S4: boot wires/opens/replays no WAL.
 	require.NoError(t, bootShardService(ctx, state))
 	require.NotNil(t, state.shardSvc, "shardSvc after bootShardService")
-	require.NotNil(t, state.dataWAL, "data WAL after shard service phase")
-	assert.NotEmpty(t, state.dataWALDir, "dataWALDir set after shard service phase")
-	assert.True(t, state.shardSvc.HasDataWAL(), "shard service receives data WAL")
 	require.Greater(t, state.effectiveEC.NumShards(), 0, "effectiveEC after bootShardService")
 	// Single-node cluster -> 1+0 auto profile.
 	assert.Equal(t, 1, state.effectiveEC.DataShards)

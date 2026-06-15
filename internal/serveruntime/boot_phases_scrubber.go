@@ -73,7 +73,6 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	}
 
 	clusterIncidentRecorder, scrubberIncidentRecorder := IncidentRecorderInterfaces(state.incidentRecorder)
-	startDataWALStartupRepairWorker(ctx, state)
 
 	// All three plumbings (walk, opener, repair) route through the local
 	// data-group that owns the bucket — single-node serve still sits inside
