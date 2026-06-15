@@ -42,7 +42,7 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("9p-port", 0, "9P2000.L server port (0 = disabled); unauthenticated, use firewall")
 	cmd.Flags().Bool("enable-iceberg", false, "enable Iceberg REST Catalog endpoint (disabled by default in Phase 1)")
 	cmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
-	cmd.Flags().Int("shard-pack-threshold", 65545, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65545)")
+	cmd.Flags().Int("shard-pack-threshold", 0, "DISABLED: cluster shard-packing is no longer supported (a durable pack index was never built); any value > 0 fails to boot")
 	cmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
 	cmd.Flags().Duration("scrub-orphan-age", 5*time.Minute,
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")

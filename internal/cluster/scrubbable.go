@@ -248,12 +248,6 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		if filepath.Clean(path) != filepath.Clean(canonicalPath) {
 			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: path %q is not the canonical location %q for %s/%s/%d", path, canonicalPath, bucket, canonicalKey, shardIdx)
 		}
-		if data, found, err := b.shardSvc.ReadLocalShardFromPack(bucket, canonicalKey, shardIdx); found || err != nil {
-			if err != nil {
-				return scrubber.ShardIntegrityResult{}, err
-			}
-			return scrubber.ShardIntegrityResult{Payload: data, Status: scrubber.ShardIntegrityVerified}, nil
-		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: %w", err)
@@ -340,16 +334,6 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 // write lock. encoded is the already-sealed shard payload; path is the canonical
 // standalone on-disk location for the standalone branch.
 func (b *DistributedBackend) writeEncodedShard(bucket, canonicalKey string, shardIdx int, path string, encoded []byte) error {
-	// If the shard currently lives in the pack, repair INTO the pack: the
-	// pack-first read preference (readShardIntegrity) would otherwise shadow a
-	// standalone shard_N file with the stale/corrupt pack entry, so the repair
-	// would have no effect. The pack index is last-wins, so this supersedes the
-	// stale entry. A non-pack-resident shard falls through to the file write.
-	if repaired, err := b.shardSvc.RepairShardInPackIfResident(bucket, canonicalKey, shardIdx, encoded); err != nil {
-		return fmt.Errorf("repair shard in pack: %w", err)
-	} else if repaired {
-		return nil
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}

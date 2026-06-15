@@ -48,13 +48,9 @@ func shardGenOnDisk(t *testing.T, b *DistributedBackend, bucket, canonicalKey st
 }
 
 func readFileOrPack(b *DistributedBackend, bucket, canonicalKey string, shardIdx int, path string) ([]byte, error) {
-	if b.shardSvc.shardPack != nil {
-		if raw, ok, err := b.shardSvc.shardPack.get(bucket, canonicalKey, shardIdx); err != nil {
-			return nil, err
-		} else if ok {
-			return raw, nil
-		}
-	}
+	// Shard-packing was removed (S3); shards are always standalone files now.
+	_, _, _ = b, bucket, canonicalKey
+	_ = shardIdx
 	return os.ReadFile(path)
 }
 

@@ -3,7 +3,9 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -162,9 +164,17 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
 	}
+	// Shard-packing is disabled (S3): a durable pack index was never built, so
+	// per-blob fsync cannot replace the WAL-replay-reconstructed index. Refuse to
+	// boot when it is explicitly enabled, via the flag/config or the env var, so
+	// no operator silently relies on packing.
 	if state.cfg.ShardPackThreshold > 0 {
-		shardSvcOpts = append(shardSvcOpts, cluster.WithShardPackThreshold(state.cfg.ShardPackThreshold))
-		log.Info().Int("threshold", state.cfg.ShardPackThreshold).Msg("cluster shard pack requested")
+		return fmt.Errorf("shard-packing is disabled (--shard-pack-threshold=%d): a durable pack index is not implemented; set it to 0 to boot", state.cfg.ShardPackThreshold)
+	}
+	if env := os.Getenv("GRAINFS_SHARD_PACK_THRESHOLD"); env != "" {
+		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
+			return fmt.Errorf("shard-packing is disabled (GRAINFS_SHARD_PACK_THRESHOLD=%d): a durable pack index is not implemented; unset the env to boot", n)
+		}
 	}
 	if state.cfg.MeasureReadAmp {
 		readamp.Enable()
