@@ -205,7 +205,12 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	versionID := newVersionID()
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
-		if b.chunkedPathThresholdMet(manifest.TotalSize) && b.shardGroup != nil {
+		// Single multipart-complete path: every completion (any total size) takes
+		// the chunked/segment path so the route does not branch on size — matching
+		// the simple-PUT single path. putMultipartObjectChunked emits one segment
+		// for small/empty totals. The legacy spool path below is kept only for
+		// backends without a ShardGroupSource (never production).
+		if b.shardGroup != nil {
 			beforeCommit := b.testBeforeChunkedMultipartCommit
 			obj, err = b.putMultipartObjectChunked(ctx, bucket, key, versionID, uploadID, manifest, meta.ContentType, nil, "", 0, false, "", beforeCommit, meta.Tags)
 		} else {

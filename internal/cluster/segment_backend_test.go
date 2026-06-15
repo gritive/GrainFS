@@ -621,32 +621,6 @@ func TestChunkedChooseModTime(t *testing.T) {
 	assert.Equal(t, int64(999), chunkedChooseModTime(123, false, 999), "preserve=false stamps now")
 }
 
-// TestPutObjectChunked_SizeGuard_EndToEnd locks down the chunkedPathThresholdMet
-// predicate (size > DefaultChunkSize). NOTE: simple PUT routing is no longer
-// governed by this threshold — every non-empty (non-internal) simple PUT chunks
-// regardless of size. This predicate now governs only the MULTIPART chunked-
-// completion threshold (multipart.go), where it remains the exact predicate.
-func TestPutObjectChunked_SizeGuard_EndToEnd(t *testing.T) {
-	chunk := int64(storage.DefaultChunkSize)
-	cases := []struct {
-		name      string
-		size      int64
-		wantChunk bool
-	}{
-		{name: "below_threshold_8MiB", size: 8 << 20, wantChunk: false},
-		{name: "at_threshold_16MiB", size: chunk, wantChunk: false},
-		{name: "just_above_threshold", size: chunk + 1, wantChunk: true},
-		{name: "above_threshold_17MiB", size: 17 << 20, wantChunk: true},
-		{name: "well_above_threshold_64MiB", size: 64 << 20, wantChunk: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.wantChunk, chunkedPathThresholdMet(tc.size),
-				"size=%d (chunk=%d) routing decision", tc.size, chunk)
-		})
-	}
-}
-
 func TestAcquireChunkedMultipartCompleteSlotHonorsContext(t *testing.T) {
 	oldSlots := chunkedMultipartCompleteSlots
 	chunkedMultipartCompleteSlots = make(chan struct{}, 1)
