@@ -73,7 +73,6 @@ var _ = Describe("Backend control integration", func() {
 			for i := 0; i < 200; i++ {
 				_ = b.LiveNodes()
 				_ = b.ECActive()
-				_ = b.EffectiveECConfig()
 				_ = b.NodeID()
 				if ph := b.PeerHealth(); ph != nil {
 					_ = ph.Snapshot()

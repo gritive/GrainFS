@@ -24,7 +24,7 @@ func reloadHookPostureCheck(anon bool, proxyCIDR string) error {
 
 // bootTLSPostureGate runs enforceTLSPosture as a boot phase. Wired in Run()
 // AFTER bootHTTPServerAndAdmin (so state.cfgStore is populated and state.srv
-// is constructed) and BEFORE bootResharderAndDegraded (which goroutines
+// is constructed) and BEFORE bootDegradedAndServices (which goroutines
 // srv.Run() — the listener actually starts there). The trusted-proxy.cidr
 // atomic snapshot was already reconciled right after bootSnapshotAndApplyLoop.
 func bootTLSPostureGate(state *bootState) error {

@@ -19,51 +19,16 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// bootResharderAndDegraded starts the per-group ReshardManager loop, the
-// degraded-mode monitor, the leader-aware lifecycle worker, and the data-plane
-// HTTP server goroutine.
+// bootDegradedAndServices starts the degraded-mode monitor, the leader-aware
+// lifecycle worker, the migration service, and the data-plane HTTP server
+// goroutine.
 //
-// Inputs:  state.cfg.ReshardInterval/LifecycleInterval/DegradedInterval,
+// Inputs:  state.cfg.LifecycleInterval/MigrationInterval/DegradedInterval,
 //
-//	state.dgMgr, state.distBackend, state.clusterAlerts, state.node,
-//	state.lifecycleSvc, state.srv, state.cfg.Addr.
-func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
+//	state.distBackend, state.clusterAlerts, state.node,
+//	state.lifecycleSvc, state.migrationSvc, state.srv, state.cfg.Addr.
+func bootDegradedAndServices(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
-
-	// EC reshard is always-on (validated in optionsToConfig).
-	// Optimization-only: N×→EC conversion and EC profile upgrade.
-	{
-		dgMgr := state.dgMgr
-
-		startECManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
-			gb := dg.Backend()
-			leader := gb.Node()
-			if leader == nil {
-				log.Warn().Str("group", dg.ID()).Msg("reshard manager skipped: group has no raft node")
-				return
-			}
-			go cluster.NewReshardManager(gb, leader, cfg.ReshardInterval).Start(managerCtx)
-		}
-
-		ecManagers := NewReshardManagerRegistry()
-		ecManagers.Refresh(ctx, dgMgr.All(), startECManager)
-		log.Info().Dur("interval", cfg.ReshardInterval).Msg("EC reshard manager started")
-
-		if cfg.DataGroupRefreshInterval > 0 {
-			go func() {
-				ticker := time.NewTicker(cfg.DataGroupRefreshInterval)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						ecManagers.Refresh(ctx, dgMgr.All(), startECManager)
-					}
-				}
-			}()
-		}
-	}
 
 	// Start the leader-aware worker loop. Only the Raft leader runs the
 	// worker; followers skip the scan so we don't waste IO on proposals that

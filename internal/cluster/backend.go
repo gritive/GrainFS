@@ -1287,14 +1287,6 @@ func (b *DistributedBackend) ECActive() bool {
 	return b.currentECConfig().IsActive(len(b.effectivePlacementNodes()))
 }
 
-// EffectiveECConfig returns the ECConfig proportionally scaled to the current
-// placement-slot count (cluster nodes, or local drives for single-node
-// multi-drive). Used by ReshardManager to determine the target k,m for
-// upgrades.
-func (b *DistributedBackend) EffectiveECConfig() ECConfig {
-	return EffectiveConfig(len(b.effectivePlacementNodes()), b.currentECConfig())
-}
-
 func (b *DistributedBackend) bucketDir(bucket string) string {
 	return filepath.Join(b.root, "data", bucket)
 }

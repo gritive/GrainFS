@@ -11,8 +11,6 @@ import (
 	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
-const defaultReshardInterval = 24 * time.Hour
-
 // registerAllServeFlags registers every cobra flag the `grainfs serve` command
 // accepts. Extracted from init() so unit tests can build a fresh cobra.Command
 // and exercise serveOptionsFromCmd without touching the global serveCmd.
@@ -48,8 +46,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
 	cmd.Flags().Duration("segment-gc-retention", 24*time.Hour,
 		"grace period before unreferenced raw segment blobs are GC'd")
-	cmd.Flags().Duration("reshard-interval", defaultReshardInterval, "background EC reshard interval (always on; 0 resets to default 24h)")
-	cmd.Flags().Duration("datagroup-refresh-interval", time.Minute, "how often to scan for new DataGroups and start reshard managers (0 = only scan at startup)")
 	cmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
 	cmd.Flags().Duration("degraded-check-interval", 30*time.Second, "EC degraded-mode liveness check interval")
 	cmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs")

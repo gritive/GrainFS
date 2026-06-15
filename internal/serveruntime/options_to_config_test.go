@@ -43,16 +43,14 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		P9Port:        1564,
 		EnableIceberg: true,
 
-		ScrubInterval:            7 * time.Second,
-		ScrubOrphanAge:           11 * time.Minute,
-		SegmentGCRetention:       17 * time.Minute,
-		ReshardInterval:          13 * time.Second,
-		DataGroupRefreshInterval: 19 * time.Second,
-		DegradedInterval:         23 * time.Second,
-		LifecycleInterval:        29 * time.Second,
-		RaftLogGCInterval:        31 * time.Second,
-		RaftHeartbeatInterval:    37 * time.Millisecond,
-		RaftElectionTimeout:      41 * time.Millisecond,
+		ScrubInterval:         7 * time.Second,
+		ScrubOrphanAge:        11 * time.Minute,
+		SegmentGCRetention:    17 * time.Minute,
+		DegradedInterval:      23 * time.Second,
+		LifecycleInterval:     29 * time.Second,
+		RaftLogGCInterval:     31 * time.Second,
+		RaftHeartbeatInterval: 37 * time.Millisecond,
+		RaftElectionTimeout:   41 * time.Millisecond,
 
 		HealReceiptEnabled:        true,
 		HealReceiptPSK:            "sentinel-psk",
@@ -153,8 +151,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.ScrubInterval, cfg.ScrubInterval)
 	require.Equal(t, opts.ScrubOrphanAge, cfg.ScrubOrphanAge)
 	require.Equal(t, opts.SegmentGCRetention, cfg.SegmentGCRetention)
-	require.Equal(t, opts.ReshardInterval, cfg.ReshardInterval)
-	require.Equal(t, opts.DataGroupRefreshInterval, cfg.DataGroupRefreshInterval)
 	require.Equal(t, opts.DegradedInterval, cfg.DegradedInterval)
 
 	// Audit.
