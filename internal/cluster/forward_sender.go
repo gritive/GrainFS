@@ -103,14 +103,6 @@ func (s *ForwardSender) WithMaxForwardStreams(n int) *ForwardSender {
 	return s
 }
 
-func (s *ForwardSender) WithMaxForwardReadStreams(n int) *ForwardSender {
-	if n < 1 {
-		n = 1
-	}
-	s.readSlots = make(chan struct{}, n)
-	return s
-}
-
 func (s *ForwardSender) cachedLeader(groupID string) string {
 	if s == nil || groupID == "" {
 		return ""

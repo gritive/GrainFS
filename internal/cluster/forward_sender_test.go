@@ -658,8 +658,10 @@ func TestForwardSender_SendReadStreamUsesSeparateSlotPool(t *testing.T) {
 		return okReplyBytes(t), nil
 	}).WithStreamDialer(streamDialer).
 		WithReadStreamDialer(readDialer).
-		WithMaxForwardStreams(1).
-		WithMaxForwardReadStreams(1)
+		WithMaxForwardStreams(1)
+	// Separate read-slot pool of size 1 (was WithMaxForwardReadStreams(1), removed
+	// as a test-only builder; production uses the NewForwardSender default of 64).
+	s.readSlots = make(chan struct{}, 1)
 
 	done := make(chan error, 1)
 	go func() {

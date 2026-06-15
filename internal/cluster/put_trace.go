@@ -41,12 +41,6 @@ const (
 	PutTraceStageShardWriteLocalEncRename PutTraceStage = "shard_write_local_enc_rename"
 	PutTraceStageShardWriteLocalDirSync   PutTraceStage = "shard_write_local_dirsync"
 	PutTraceStageDataRaftProposeMeta      PutTraceStage = "data_raft_propose_meta"
-	PutTraceStageMetaIndexPropose         PutTraceStage = "meta_index_propose"
-	PutTraceStageMetaIndexEncode          PutTraceStage = "meta_index_encode"
-	PutTraceStageMetaIndexForward         PutTraceStage = "meta_index_forward"
-	PutTraceStageMetaIndexWaitLocal       PutTraceStage = "meta_index_wait_local"
-	PutTraceStageMetaIndexLocalPropose    PutTraceStage = "meta_index_local_propose"
-	PutTraceStageMetaIndexLocalApply      PutTraceStage = "meta_index_local_apply"
 	PutTraceStageQuorumMetaWrite          PutTraceStage = "quorum_meta_write"
 )
 
