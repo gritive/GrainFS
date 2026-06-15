@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.583.0] - 2026-06-15
+
+### Changed
+- **Single PUT write path (size-independent).** Removed the three pre-spool
+  fast paths (single-local in-memory, known-size single-local streaming, EC
+  in-memory) — they duplicated placement + size routing and, lacking a size cap
+  on the known-size path, wrote a large object as one over-cap whole-object
+  shard (a `>64 MiB` simple PUT with `Content-Length` 500'd with
+  `shard payload too large`). Every PUT now spools, then routes through one
+  dispatcher. **Every non-empty, non-internal simple PUT now takes the chunked/
+  segmented path regardless of size** (small objects get a single segment), so
+  the route no longer branches on object size. The 64 MiB shard memory cap is
+  never reached by a well-formed PUT. ETag/Content-MD5 semantics are unchanged
+  for user buckets (md5(plaintext)).
+  - **Exemptions (keep the existing path):** empty (0-byte) objects; internal
+    `__grainfs_*` buckets (their xxhash3 ETag is an EC-rewrap corruption oracle
+    and must not be overwritten with the chunked MD5); multipart-complete and
+    internal EC-rewrap (distinct operations); and any backend without a
+    `ShardGroupSource` (never the case in production — `bootOwnedGroupsAndEC`
+    always wires it).
+
 ## [0.0.582.0] - 2026-06-15
 
 ### Removed
