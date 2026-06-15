@@ -858,6 +858,28 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	require.Error(t, err, "shard moved to wrong position must fail decryption")
 }
 
+// seedInlineShardWALRecord mirrors the pre-S2 PUT behavior: it logs an inline
+// OpShardPut record carrying the shard's on-disk (encoded) bytes, so the WAL
+// inline-restore materializer can rebuild the file on RecoverDataWAL. S2 stopped
+// the PUT path from writing this record (small shards fsync directly), but the
+// materializer stays alive (rolling-upgrade / legacy WALs) until S4 — so these
+// tests seed the record directly to keep exercising the inline-restore path.
+func seedInlineShardWALRecord(t *testing.T, dwal *datawal.WAL, svc *ShardService, bucket, key string, shardIdx int) {
+	t.Helper()
+	encoded, err := os.ReadFile(mustShardPath(svc, bucket, key, shardIdx))
+	require.NoError(t, err)
+	_, err = dwal.Append(context.Background(), datawal.Record{
+		Op:      datawal.OpShardPut,
+		Bucket:  bucket,
+		Key:     key,
+		Target:  strconv.Itoa(shardIdx),
+		Size:    int64(len(encoded)),
+		Payload: encoded,
+	})
+	require.NoError(t, err)
+	require.NoError(t, dwal.Flush())
+}
+
 func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
@@ -865,7 +887,7 @@ func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
 	require.NoError(t, err)
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
-	require.NoError(t, dwal.Flush())
+	seedInlineShardWALRecord(t, dwal, svc, "b", "k", 0) // S2: PUT no longer logs the inline record
 	shardPath := mustShardPath(svc, "b", "k", 0)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
@@ -881,7 +903,7 @@ func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
 	require.NoError(t, err)
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
 	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
-	require.NoError(t, dwal.Flush())
+	seedInlineShardWALRecord(t, dwal, svc, "b", "streamed", 1) // S2: PUT no longer logs the inline record
 	shardPath := mustShardPath(svc, "b", "streamed", 1)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
@@ -970,7 +992,7 @@ func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
 		WithDataWAL(dwal),
 	)
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("encrypted-payload")))
-	require.NoError(t, dwal.Flush())
+	seedInlineShardWALRecord(t, dwal, svc, "b", "k", 0) // S2: PUT no longer logs the inline record
 	shardPath := mustShardPath(svc, "b", "k", 0)
 	require.NoError(t, os.Remove(shardPath))
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))
@@ -1161,7 +1183,7 @@ func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T)
 		WithDataWALRepairSink(collector),
 	)
 	require.NoError(t, svc.WriteLocalShard("b", "small", 0, []byte("payload")))
-	require.NoError(t, dwal.Flush())
+	seedInlineShardWALRecord(t, dwal, svc, "b", "small", 0) // S2: PUT no longer logs the inline record
 	require.NoError(t, os.Remove(mustShardPath(svc, "b", "small", 0)))
 
 	require.NoError(t, svc.RecoverDataWAL(context.Background()))

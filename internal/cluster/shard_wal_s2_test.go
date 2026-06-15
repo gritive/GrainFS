@@ -200,3 +200,43 @@ func TestDBV_ECCommitPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 	_, _, gerr := backend.GetObject(context.Background(), "b", "obj-dbv2")
 	require.Error(t, gerr, "a PUT whose durability failed must not be visible via GET")
 }
+
+// TestS2SliceBoundary_NoShardClassWritesWAL proves that after S2 NO non-packed
+// shard class appends an OpShardPut record: small and large-no-redundancy PUTs
+// both leave the shard WAL empty. Durability is write-time fsync; the WAL is no
+// longer the durability for any non-packed class. (Shard-PACKING is a separate,
+// off-by-default exception that still WAL-delegates via OpShardPackPut; disabled
+// in S3. This test does not enable packing.)
+func TestS2SliceBoundary_NoShardClassWritesWAL(t *testing.T) {
+	backend, shardDir, keeper, clusterID := newS1ShardSvc(t,
+		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
+		WithNoRedundancy(func() bool { return true }))
+
+	ctx := context.Background()
+	_, err := backend.PutObject(ctx, "b", "small", bytes.NewReader([]byte("tiny")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(ctx, "b", "large", bytes.NewReader(bytes.Repeat([]byte("s2-"), 1<<19)), "application/octet-stream")
+	require.NoError(t, err)
+
+	require.Equal(t, 0, countShardWALRecords(t, shardDir, keeper, clusterID),
+		"after S2 no non-packed shard class writes an OpShardPut record")
+}
+
+// TestS2Recovery_FsyncedShardReadsBackWithoutWAL proves recovery passivity for
+// the fsync classes: a small shard written with NO WAL record reads back — the
+// fsynced file is the source of truth, no WAL replay required.
+func TestS2Recovery_FsyncedShardReadsBackWithoutWAL(t *testing.T) {
+	backend, _, _, _ := newS1ShardSvc(t,
+		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
+		WithNoRedundancy(func() bool { return true }))
+	ctx := context.Background()
+	payload := []byte("s2-recovery-payload")
+	_, err := backend.PutObject(ctx, "b", "obj", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+
+	rc, _, err := backend.GetObject(ctx, "b", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	require.Equal(t, payload, got)
+}
