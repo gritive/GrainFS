@@ -40,9 +40,9 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 	}
 	sp := &spooledObject{Size: 11, ETag: "etag"}
 
-	_, err := writer.writeShardReaders(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+	_, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
-	}, "test")
+	}, nil, "test")
 	require.ErrorIs(t, err, writeErr)
 	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
 	require.Empty(t, shards.deleteRemoteCalls)
@@ -240,7 +240,6 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 type fakeECObjectWriterShards struct {
 	mu                  sync.Mutex
 	writeShardErr       map[string]error
-	localWrites         []fakeECObjectWriterLocalWrite
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
 	bufferedWrites      []fakeECObjectWriterBufferedWrite
 	streamWrites        []fakeECObjectWriterStreamWrite
@@ -271,15 +270,9 @@ type fakeECObjectWriterStreamWrite struct {
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
-	data, _ := io.ReadAll(body)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.localWrites = append(f.localWrites, fakeECObjectWriterLocalWrite{
-		bucket:   bucket,
-		key:      key,
-		shardIdx: shardIdx,
-		body:     data,
-	})
+	// Drain the body so the writer side completes; no surviving test inspects the
+	// non-buffered local writes (the readers lived in the removed fast-path tests).
+	_, _ = io.ReadAll(body)
 	return nil
 }
 

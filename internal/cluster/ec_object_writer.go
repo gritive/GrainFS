@@ -170,17 +170,6 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 	return rec, res.ETag, in.SegmentBlobID, nil
 }
 
-//nolint:unused // referenced by ec_object_writer_test.go.
-func (w ecObjectWriter) writeShardReaders(
-	ctx context.Context,
-	plan ecObjectWritePlan,
-	sp *spooledObject,
-	openShard func(idx int) (io.Reader, error),
-	metricPath string,
-) (ecObjectWriteResult, error) {
-	return w.writeShardReadersWithSize(ctx, plan, sp, openShard, nil, metricPath)
-}
-
 func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
 	shards, err := ecSplitBodies(plan.Config, data)
 	if err != nil {

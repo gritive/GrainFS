@@ -186,11 +186,6 @@ func countSkippedFor(reasons []string, target string) int {
 	return n
 }
 
-func PlacementGroupHasFullEntry(ctx context.Context) bool {
-	_, ok := PlacementGroupEntryFromContext(ctx)
-	return ok
-}
-
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, acl uint8) (*storage.Object, error) {
 	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, acl, 0, false, "", nil, nil, nil, "")
 }

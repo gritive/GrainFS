@@ -582,38 +582,6 @@ func (m *MetaRaft) ProposeIcebergCreateNamespace(ctx context.Context, cmd Iceber
 	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateNamespace, payload, cmd.RequestID)
 }
 
-func (m *MetaRaft) ProposeIcebergDeleteNamespace(ctx context.Context, cmd IcebergDeleteNamespaceCmd) error {
-	payload, err := encodeMetaIcebergDeleteNamespaceCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergDeleteNamespace: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteNamespace, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergCreateTable(ctx context.Context, cmd IcebergCreateTableCmd) error {
-	payload, err := encodeMetaIcebergCreateTableCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergCreateTable: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateTable, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergCommitTable(ctx context.Context, cmd IcebergCommitTableCmd) error {
-	payload, err := encodeMetaIcebergCommitTableCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergCommitTable: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCommitTable, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergDeleteTable(ctx context.Context, cmd IcebergDeleteTableCmd) error {
-	payload, err := encodeMetaIcebergDeleteTableCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergDeleteTable: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID)
-}
-
 // ProposeConfigPut encodes a ConfigPut command and proposes it to the cluster,
 // blocking until the entry is applied to the local FSM.
 func (m *MetaRaft) ProposeConfigPut(ctx context.Context, key, value string) error {

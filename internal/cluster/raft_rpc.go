@@ -27,8 +27,7 @@ const (
 	// (raft.DefaultElectionTimeout) so an in-flight heartbeat completes before a
 	// follower starts a spurious election — guarded by
 	// TestRaftRPCTimeout_BelowElectionTimeout.
-	raftRPCTimeout      = 80 * time.Millisecond
-	raftSnapshotTimeout = 60 * time.Second
+	raftRPCTimeout = 80 * time.Millisecond
 )
 
 // RaftRPCTransport bridges Raft RPCs over the cluster transport for raft v2. It registers
