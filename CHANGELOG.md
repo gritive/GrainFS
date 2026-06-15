@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.595.0] - 2026-06-16
+
+### Removed
+- **The unused N×-replication → EC-conversion reshard subsystem** (`ReshardManager`,
+  `ConvertObjectToEC`, `upgradeObjectEC`, `EffectiveECConfig`, the reshard boot loop
+  and registry). Every object is EC-from-PUT (segmented); the reshard manager only
+  acted on non-EC (N×-replicated) objects, which are never produced, so the whole
+  path was dead. EC peer-shard recovery (`RepairShard`) and volume-block replica
+  repair (`RepairReplica`) are unaffected; the shared EC reconstruct core stays.
+  This is Phase 1 of unifying the S3 read plane onto the SegmentReader — production
+  reads are unchanged (they already go through it).
+- **BREAKING (config):** the `--reshard-interval` and `--datagroup-refresh-interval`
+  flags are removed (they drove only the deleted reshard loop). Passing them now
+  errors. The `ValidateRequiredIntervals` always-on check now covers scrub only.
+
 ## [0.0.594.0] - 2026-06-16
 
 ### Removed
