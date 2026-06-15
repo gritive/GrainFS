@@ -7,10 +7,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// largeShardPayload returns a payload at/above walPayloadInlineThreshold so
+// largeShardPayload returns a payload at/above largeShardFsyncThreshold so
 // shardWriteRequiresFsync takes the "large" branch.
 func largeShardPayload() []byte {
-	return bytes.Repeat([]byte("x"), walPayloadInlineThreshold)
+	return bytes.Repeat([]byte("x"), largeShardFsyncThreshold)
 }
 
 // TestShardWriteRequiresFsync_NoRedundancyForcesFsyncForLargeShard asserts that

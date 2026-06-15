@@ -35,7 +35,7 @@ func TestWriteLocalShardStream_OverCap_Rejected(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID))
 
-	over := maxRawShardPayloadForWAL(false) + 1
+	over := maxRawShardPayload(false) + 1
 	err := svc.WriteLocalShardStreamSizedContext(context.Background(), "b", "k", 0, bytes.NewReader([]byte("x")), over)
 	require.Error(t, err, "over-cap stream write must be rejected by the size cap, not the WAL")
 }
@@ -44,8 +44,8 @@ func TestWriteLocalShardStream_OverCap_Rejected(t *testing.T) {
 // after S4 removed the replay branch: small => fsync, large+redundant => no
 // fsync (EC), large+no-redundancy => fsync, nil provider => redundant.
 func TestShardWriteRequiresFsync_Classes(t *testing.T) {
-	small := walPayloadInlineThreshold - 1
-	large := walPayloadInlineThreshold + 1
+	small := largeShardFsyncThreshold - 1
+	large := largeShardFsyncThreshold + 1
 
 	redundant := &ShardService{noRedundancy: func() bool { return false }}
 	require.True(t, redundant.shardWriteRequiresFsync(small), "small shard always fsyncs")

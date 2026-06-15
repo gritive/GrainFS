@@ -1111,11 +1111,11 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 // pinning to the exact eccodec internals.
 const encryptedShardEnvelopeOverhead = 64
 
-// maxRawShardPayloadForWAL returns the largest raw plaintext shard size whose
+// maxRawShardPayload returns the largest raw plaintext shard size whose
 // encoded payload is guaranteed to fit within datawal.MaxPayloadBytes. The
 // encrypted path inflates input by chunked AEAD overhead; the plain path is
 // only the small CRC envelope and is bounded by MaxPayloadBytes directly.
-func maxRawShardPayloadForWAL(encrypted bool) int64 {
+func maxRawShardPayload(encrypted bool) int64 {
 	if !encrypted {
 		return datawal.MaxPayloadBytes
 	}
@@ -1160,20 +1160,19 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 	return data, nil
 }
 
-// walPayloadInlineThreshold is the shard-payload size boundary between
+// largeShardFsyncThreshold is the shard-payload size boundary between
 // fsync-covered small shards and EC-covered large shards. Below the threshold a
 // shard is always fsynced (file + dir chain) at write time; at or above it,
 // durability comes from EC redundancy when present (ParityShards>0), else a
-// direct fsync (no-redundancy). (Name retained from the WAL era for blast-radius
-// reasons; renamed in the S4 cosmetic cleanup.)
-const walPayloadInlineThreshold = 1 << 20
+// direct fsync (no-redundancy).
+const largeShardFsyncThreshold = 1 << 20
 
 // shardWriteRequiresFsync reports whether a freshly written shard file (and its
 // parent directory chain) must be fsynced for durability, by shard class.
 // Post-S2 the data WAL is no longer written on the shard PUT path — durability
 // is established at write time:
 //
-//   - Small (< walPayloadInlineThreshold) OR large with NO EC redundancy
+//   - Small (< largeShardFsyncThreshold) OR large with NO EC redundancy
 //     (ParityShards==0, i.e. noRedundancy()): fsync the shard file + parent dir
 //     chain (there is no parity to reconstruct from, or the shard is too small
 //     to be worth an EC stripe) → returns true.
@@ -1184,7 +1183,7 @@ const walPayloadInlineThreshold = 1 << 20
 //
 // S4 removed the data WAL entirely, so there is no replay path to special-case.
 func (s *ShardService) shardWriteRequiresFsync(payloadLen int) bool {
-	large := payloadLen >= walPayloadInlineThreshold
+	large := payloadLen >= largeShardFsyncThreshold
 	if large && (s.noRedundancy == nil || !s.noRedundancy()) {
 		return false // large + redundant: EC durability, no fsync (S1)
 	}
@@ -1210,7 +1209,7 @@ func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket,
 	// not a WAL record limit), then route through writeLocalShard. Durability no
 	// longer involves a WAL (S4): writeLocalShard fsyncs small / no-redundancy
 	// shards directly and relies on EC for large redundant shards.
-	rawCap := maxRawShardPayloadForWAL(false)
+	rawCap := maxRawShardPayload(false)
 	data, err := readShardPayload(body, rawCap, streamSize, false)
 	if err != nil {
 		return err
