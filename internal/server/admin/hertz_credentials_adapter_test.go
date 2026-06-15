@@ -207,7 +207,7 @@ func doCredentialCreateHTTP(t *testing.T, cli *http.Client, bearer string) admin
 
 func doCredentialListHTTP(t *testing.T, cli *http.Client, bearer string, wantStatus int) admin.CredentialListResp {
 	t.Helper()
-	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/credentials?protocol=nbd&resource=volume/devdisk", bearer, nil, wantStatus)
+	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/credentials?protocol=nfs&resource=volume/devdisk", bearer, nil, wantStatus)
 	var resp admin.CredentialListResp
 	require.NoError(t, json.Unmarshal(raw, &resp))
 	return resp
@@ -233,5 +233,5 @@ func doCredentialHTTP(t *testing.T, cli *http.Client, method, url, bearer string
 }
 
 func credentialCreateBody() io.Reader {
-	return bytes.NewBufferString(`{"sa_id":"sa-app","protocol":"nbd","resource":"volume/devdisk","mode":"rw"}`)
+	return bytes.NewBufferString(`{"sa_id":"sa-app","protocol":"nfs","resource":"volume/devdisk","mode":"rw"}`)
 }

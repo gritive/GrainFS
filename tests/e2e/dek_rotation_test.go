@@ -45,7 +45,6 @@ var _ = ginkgo.Describe("data-DEK rotation (encryption.rotate-dek)", func() {
 			Nodes:      3,
 			Mode:       ClusterModeDynamicJoin,
 			DisableNFS: true,
-			DisableNBD: true,
 			LogPrefix:  "dek-rotate-cluster",
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

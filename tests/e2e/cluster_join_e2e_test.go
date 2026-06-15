@@ -115,7 +115,6 @@ func runClusterJoinAllServicesAvailable(t testing.TB) {
 		ExtraArgs: []string{"--enable-iceberg"},
 	})
 	waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
-	waitForPortsParallel(t, c.nbdPorts, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	ginkgo.DeferCleanup(cancel)
@@ -157,7 +156,6 @@ func runClusterJoinDynamicJoinServicesNodeCount(t testing.TB, nodes int) {
 
 	waitForPortsParallel(t, c.httpPorts, 30*time.Second)
 	waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
-	waitForPortsParallel(t, c.nbdPorts, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	ginkgo.DeferCleanup(cancel)

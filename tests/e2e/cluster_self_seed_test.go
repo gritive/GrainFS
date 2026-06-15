@@ -30,7 +30,6 @@ func selfSeedLeaderArgs(n *inviteJoinNode) []string {
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
 		"--node-id", n.nodeID,
 		"--nfs4-port", "0",
-		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

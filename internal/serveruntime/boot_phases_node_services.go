@@ -135,11 +135,11 @@ func bootNodeServicesPostureGate(state *bootState) error {
 	return nil
 }
 
-// bootNodeServices starts the universal node services (NFS/NFSv4/NBD) and
+// bootNodeServices starts the universal node services (NFS/NFSv4/9P) and
 // registers the NFS4 cache invalidator on distBackend so cross-protocol cache
 // coherency works in cluster mode.
 //
-// Inputs:  state.backend, state.volMgr, state.cfg.NFS4Port/NBDPort,
+// Inputs:  state.backend, state.cfg.NFS4Port/P9Port,
 //
 //	state.distBackend.
 //
@@ -154,7 +154,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	}
 
 	cfg := state.cfg
-	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4/NBD)
+	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4)
 	// are now wired in cluster mode too, not just local.
 	// NFS§B T8: wire mount-SA IAM gate into NFS/9P servers when IAM is available.
 	var iamCfg *NodeServicesIAMConfig
@@ -177,10 +177,9 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 		if iamCfg == nil {
 			iamCfg = &NodeServicesIAMConfig{}
 		}
-		iamCfg.NBDAuth = protocolCredentialValidator
 		iamCfg.ProtocolCredentials = protocolCredentialValidator
 	}
-	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
+	nodeSvc := StartNodeServices(ctx, state.backend, cfg.NFS4Port, cfg.P9Bind, cfg.P9Port, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
 		state.adminDeps.NFSDiag = nodeSvc.NFS4()

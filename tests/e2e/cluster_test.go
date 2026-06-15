@@ -72,7 +72,6 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
@@ -125,7 +124,6 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
@@ -193,7 +191,6 @@ func runNoPeersMultipartCases(t testing.TB) {
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

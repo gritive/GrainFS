@@ -28,7 +28,6 @@ func TestStorageBucketSummaryJSONShape(t *testing.T) {
 func TestStorageProtocolStatusJSONShape(t *testing.T) {
 	payload, err := json.Marshal(StorageProtocolStatusResp{
 		NFS4: ProtocolEndpointStatus{Enabled: true, Port: 2049},
-		NBD:  ProtocolEndpointStatus{Enabled: false},
 		P9:   ProtocolEndpointStatus{Enabled: true, Bind: "127.0.0.1", Port: 564},
 	})
 	if err != nil {
@@ -40,9 +39,6 @@ func TestStorageProtocolStatusJSONShape(t *testing.T) {
 	}
 	if !decoded.NFS4.Enabled || decoded.NFS4.Port != 2049 {
 		t.Fatalf("nfs4 decoded = %+v", decoded.NFS4)
-	}
-	if decoded.NBD.Enabled {
-		t.Fatalf("nbd decoded = %+v", decoded.NBD)
 	}
 	if decoded.P9.Bind != "127.0.0.1" || decoded.P9.Port != 564 {
 		t.Fatalf("p9 decoded = %+v", decoded.P9)

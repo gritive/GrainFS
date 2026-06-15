@@ -43,7 +43,6 @@ type mrCluster struct {
 	raftPorts     []int
 	joinPorts     []int
 	nfs4Ports     []int
-	nbdPorts      []int
 	p9Ports       []int
 	httpURLs      []string
 	stopped       bool
@@ -59,7 +58,6 @@ type mrCluster struct {
 
 type mrClusterOptions struct {
 	disableNFS4   bool
-	disableNBD    bool
 	enableP9      bool     // wire --9p-port on every node (per-node ports allocated)
 	FastBootstrap bool     // replace time.Sleep(8s) with shard-group polling
 	MaxNodes      int      // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
@@ -109,7 +107,6 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	c.raftPorts = make([]int, maxNodes)
 	c.joinPorts = make([]int, maxNodes)
 	c.nfs4Ports = make([]int, maxNodes)
-	c.nbdPorts = make([]int, maxNodes)
 	c.p9Ports = make([]int, maxNodes)
 	c.httpURLs = make([]string, maxNodes)
 	c.dataDirs = make([]string, maxNodes)
@@ -122,9 +119,8 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 		if !opts.disableNFS4 {
 			c.nfs4Ports[i] = ports[2*maxNodes+i]
 		}
-		if !opts.disableNBD {
-			c.nbdPorts[i] = ports[3*maxNodes+i]
-		}
+		// Slot ports[3*maxNodes+i] left reserved (formerly NBD) to keep p9/join
+		// port indices stable.
 		if opts.enableP9 {
 			c.p9Ports[i] = ports[4*maxNodes+i]
 		}
@@ -349,7 +345,6 @@ func (c *mrCluster) startNode(i int, extraEnv []string) *exec.Cmd {
 		"--raft-addr", raftAddr,
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", c.joinPorts[i]),
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
-		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -514,7 +509,6 @@ func waitForDataGroupHealth(t testing.TB, dataDir string, minGroups int, timeout
 func runMultiRaftShardingBoot(t testing.TB) {
 	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
 		disableNFS4: true,
-		disableNBD:  true,
 	})
 
 	groupDirs := countGroupDirsAcrossNodes(c)
@@ -540,14 +534,13 @@ func runMultiRaftShardingBoot(t testing.TB) {
 
 // ----- TestMultiRaftShardingAllNodeServicesE2E ---------------------------
 // Every cluster process must expose its node-local services. S3 writes are
-// cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
-// listeners local to each process.
+// cluster-wide and may forward to the current leader; NFSv4 is a TCP
+// listener local to each process.
 func runMultiRaftShardingAllNodeServices(t testing.TB) {
 	c := startStaticMRCluster(t, 3)
 
 	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
 	waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
-	waitForPortsParallel(t, c.nbdPorts, 45*time.Second)
 
 	for i, endpoint := range c.httpURLs {
 		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
@@ -604,7 +597,6 @@ func runMultiRaftShardingRestartRecovery(t testing.TB) {
 
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
-		disableNBD:  true,
 	}) // 3 procs, 2 groups keeps restart recovery focused and stable
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -678,7 +670,6 @@ func runMultiRaftShardingPerGroupPersistence(t testing.TB) {
 	const bucket = "persist-group-1"
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
-		disableNBD:  true,
 	})
 
 	// Create a bucket (will be assigned to some group).
@@ -948,7 +939,7 @@ func runMultiRaftShardingCrossNodeDispatch(t testing.TB) {
 
 func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 
-	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	ginkgo.DeferCleanup(cancel)
 
@@ -1239,43 +1230,12 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func runMultiRaftShardingNBDRoutesThroughCoordinator(t testing.TB) {
-
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeStaticPeers,
-		DisableNFS: true,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	ginkgo.DeferCleanup(cancel)
-	c.GrantAdminOnBuckets("__grainfs_volumes")
-	ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
-	exportName := ensureE2ENBDCredential(t, ctx, c.dataDirs[c.leaderIdx]+"/admin.sock", c.saID, "default")
-
-	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), exportName)
-	ginkgo.DeferCleanup(client.Close)
-
-	body := []byte("nbd-through-cluster-coordinator")
-	client.WriteAt(t, 0, body)
-	client.Flush(t)
-	requireNBDReadEventually(t, client, 0, body)
-
-	out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String("__grainfs_volumes"),
-		Prefix: aws.String("__vol/default/"),
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(out.Contents).NotTo(gomega.BeEmpty())
-}
-
 func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.TB) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
 		Mode:       ClusterModeStaticPeers,
 		DisableNFS: true,
-		DisableNBD: true,
 	})
 
 	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, "grainfs-tables", ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey))
@@ -1344,7 +1304,6 @@ func runTwoNodeAvailabilityTrap(t testing.TB) {
 	c := startMRCluster(t, 2, mrClusterOptions{
 		FastBootstrap: true,
 		disableNFS4:   true,
-		disableNBD:    true,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	ginkgo.DeferCleanup(cancel)
@@ -1400,7 +1359,6 @@ func runDynamicGroupSeeding1to5(t testing.TB) {
 		FastBootstrap: true,
 		MaxNodes:      5,
 		disableNFS4:   true,
-		disableNBD:    true,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	ginkgo.DeferCleanup(cancel)
@@ -1463,9 +1421,6 @@ var _ = ginkgo.Describe("Multi-Raft sharding", func() {
 	})
 	ginkgo.It("routes NFSv4 through the cluster coordinator", func() {
 		runMultiRaftShardingNFSv4Smoke(ginkgo.GinkgoTB())
-	})
-	ginkgo.It("routes NBD through the cluster coordinator", func() {
-		runMultiRaftShardingNBDRoutesThroughCoordinator(ginkgo.GinkgoTB())
 	})
 	ginkgo.It("splits Iceberg catalog pointers and metadata objects", func() {
 		runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(ginkgo.GinkgoTB())

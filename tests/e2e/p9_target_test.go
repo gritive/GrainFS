@@ -49,7 +49,6 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", httpPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--9p-bind", "127.0.0.1",
 		"--9p-port", fmt.Sprintf("%d", p9Port),
 		"--scrub-interval", "0",
@@ -96,7 +95,6 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 func newClusterP9Target(t testing.TB) *p9Target {
 	t.Helper()
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNBD:    true,
 		disableNFS4:   true,
 		enableP9:      true,
 		FastBootstrap: true,

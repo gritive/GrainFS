@@ -43,7 +43,6 @@ type Cluster struct {
 	RaftPorts []int    // QUIC raft ports
 	JoinPorts []int    // Zero-CA QUIC join-listener ports
 	NFSPorts  []int    // NFSv4 ports (bind :%d)
-	NBDPorts  []int    // NBD ports (bind :%d)
 	P9Ports   []int    // 9P2000.L ports (bind 0.0.0.0 via --9p-bind)
 	DataDirs  []string // per-node data directories (temp)
 
@@ -64,9 +63,6 @@ type Options struct {
 
 	// EnableNFS enables NFSv4 listeners (binds 0.0.0.0 by default).
 	EnableNFS bool
-
-	// EnableNBD enables NBD listeners (binds 0.0.0.0 by default).
-	EnableNBD bool
 
 	// EnableP9 enables 9P listeners with --9p-bind 0.0.0.0 so the colima VM
 	// can reach them. Off by default — only set true if the test mounts 9P.
@@ -104,7 +100,6 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		RaftPorts: make([]int, numNodes),
 		JoinPorts: make([]int, numNodes),
 		NFSPorts:  make([]int, numNodes),
-		NBDPorts:  make([]int, numNodes),
 		P9Ports:   make([]int, numNodes),
 		DataDirs:  make([]string, numNodes),
 		procs:     make([]*exec.Cmd, numNodes),
@@ -114,7 +109,7 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		t.Cleanup(c.Stop)
 	}
 
-	// Allocate up to 5 ports/node (http, raft, nfs4, nbd, 9p). Even when a
+	// Allocate up to 5 ports/node (http, raft, nfs4, 9p). Even when a
 	// protocol is disabled we still reserve the slot so port indices are
 	// stable; serve will simply not listen on a `0` port.
 	ports := uniqueFreePorts(t, numNodes*6)
@@ -124,9 +119,6 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		c.JoinPorts[i] = ports[5*numNodes+i]
 		if opts.EnableNFS {
 			c.NFSPorts[i] = ports[2*numNodes+i]
-		}
-		if opts.EnableNBD {
-			c.NBDPorts[i] = ports[3*numNodes+i]
 		}
 		if opts.EnableP9 {
 			c.P9Ports[i] = ports[4*numNodes+i]
@@ -268,7 +260,6 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (
 		"--raft-addr", raftAddr,
 		"--join-listen-addr", joinAddr,
 		"--nfs4-port", fmt.Sprintf("%d", c.NFSPorts[i]),
-		"--nbd-port", fmt.Sprintf("%d", c.NBDPorts[i]),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

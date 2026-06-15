@@ -246,7 +246,6 @@ func startSingleKEKNode(t testing.TB) (string, string) {
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--node-id", "kek-single",
 		"--nfs4-port", "0",
-		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -427,7 +426,6 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				Nodes:      3,
 				Mode:       ClusterModeDynamicJoin,
 				DisableNFS: true,
-				DisableNBD: true,
 				LogPrefix:  "kek-rotate-cluster",
 			})
 			leaderDir := c.dataDirs[c.leaderIdx]
@@ -458,7 +456,6 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				Nodes:      3,
 				Mode:       ClusterModeDynamicJoin,
 				DisableNFS: true,
-				DisableNBD: true,
 				LogPrefix:  "kek-prune-cluster",
 			})
 			leaderDir := c.dataDirs[c.leaderIdx]
@@ -519,7 +516,6 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				Nodes:      3,
 				Mode:       ClusterModeDynamicJoin,
 				DisableNFS: true,
-				DisableNBD: true,
 				LogPrefix:  "kek-restart-cluster",
 			})
 			leaderIdx := c.leaderIdx
@@ -571,7 +567,6 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				Nodes:      3,
 				Mode:       ClusterModeDynamicJoin,
 				DisableNFS: true,
-				DisableNBD: true,
 				LogPrefix:  "kek-crossread-cluster",
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -618,7 +613,6 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				Nodes:      3,
 				Mode:       ClusterModeDynamicJoin,
 				DisableNFS: true,
-				DisableNBD: true,
 				LogPrefix:  "kek-objsurvive-cluster",
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -665,7 +659,6 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 				Nodes:      3,
 				Mode:       ClusterModeDynamicJoin,
 				DisableNFS: true,
-				DisableNBD: true,
 				LogPrefix:  "kek-follower-rotate-cluster",
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

@@ -43,7 +43,6 @@ func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", httpPort),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	}
 	args = append(args, extraArgs...)
 

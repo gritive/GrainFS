@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.596.0] - 2026-06-16
+
+### Removed
+- **BREAKING: the NBD block-device frontend** (`internal/nbd`, the NBD server, the
+  `--nbd-port` flag, the `nbd` protocol-credential type, and the `nbd` entry in the
+  admin storage-protocol-status response). NBD was disabled by default
+  (`--nbd-port 0`); the flag and protocol now error/are absent. This is Phase A of
+  removing the volume block-storage feature — the goal is to collapse the S3 read
+  plane onto the SegmentReader by eventually deleting the whole-object/whole-replica
+  read fallbacks that exist only for N×-replicated volume blocks. The `volume.Manager`,
+  the `grainfs volume` CLI, the admin volume API, and N×-replica durability are
+  untouched in this phase (removed in later phases). S3/NFSv4/9P/Iceberg are unaffected.
+- Deleted the NBD test suites (`tests/nbd_colima`, `tests/nbd_interop`,
+  `tests/e2e/nbd_*`, `internal/cluster/nbd_bench_test.go`) and the NBD compatibility
+  doc; de-NBD'd README/docs and the `grainfs credential` protocol help.
+
+### Note
+- The IAM policy grammar still accepts `nbd` / `nbd/volume` tokens
+  (`internal/iam/policy/parse.go`); these are tied to the volume resource grammar and
+  are removed in the later volume-removal phase, not here.
+
 ## [0.0.595.0] - 2026-06-16
 
 ### Removed

@@ -22,7 +22,7 @@ func TestProtocolCredentialCommandCodecsRoundTrip(t *testing.T) {
 	row := protocred.Credential{
 		ID:          "pc_1",
 		SAID:        "sa_app",
-		Protocol:    protocred.ProtocolNBD,
+		Protocol:    protocred.ProtocolNFS,
 		Resource:    "volume/devdisk",
 		Mode:        protocred.ModeRW,
 		SecretHash:  hash,
@@ -173,7 +173,7 @@ func TestProtocolCredentialSnapshotRequestIndexDeterministicAndRoundTrips(t *tes
 		{
 			ID:         "pc_b",
 			SAID:       "sa_b",
-			Protocol:   protocred.ProtocolNBD,
+			Protocol:   protocred.ProtocolNFS,
 			Resource:   "volume/b",
 			Mode:       protocred.ModeRW,
 			SecretHash: sha256.Sum256([]byte("b")),
@@ -209,7 +209,7 @@ func TestProtocolCredentialSnapshotRequestIndexRejectsInvalidRows(t *testing.T) 
 	rows := []protocred.Credential{{
 		ID:         "pc_b",
 		SAID:       "sa_b",
-		Protocol:   protocred.ProtocolNBD,
+		Protocol:   protocred.ProtocolNFS,
 		Resource:   "volume/b",
 		Mode:       protocred.ModeRW,
 		SecretHash: sha256.Sum256([]byte("b")),

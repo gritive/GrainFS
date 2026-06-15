@@ -84,7 +84,6 @@ func optionsToConfig(
 	cfg.NFS4Port = opts.NFS4Port
 	cfg.NFSWriteBufferDir = opts.NFSWriteBufferDir
 	cfg.NFSWriteBufferIdle = opts.NFSWriteBufferIdle
-	cfg.NBDPort = opts.NBDPort
 	cfg.P9Bind = opts.P9Bind
 	cfg.P9Port = opts.P9Port
 	cfg.EnableIceberg = opts.EnableIceberg

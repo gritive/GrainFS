@@ -129,7 +129,7 @@ func testApplyCredential(id string) Credential {
 	return Credential{
 		ID:         id,
 		SAID:       "sa_apply",
-		Protocol:   ProtocolNBD,
+		Protocol:   ProtocolNFS,
 		Resource:   "volume/apply",
 		Mode:       ModeRW,
 		SecretHash: sha256.Sum256([]byte("secret")),
