@@ -23,7 +23,6 @@ var _ = ginkgo.Describe("Cluster config hot reload", func() {
 				Mode:       ClusterModeStaticPeers,
 				LogPrefix:  "grainfs-clusterconfig-hotreload",
 				DisableNFS: true,
-				DisableNBD: true,
 			})
 		})
 

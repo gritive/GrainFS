@@ -14,7 +14,6 @@ const (
 	ProtocolIceberg Protocol = "iceberg"
 	ProtocolNFS     Protocol = "nfs"
 	Protocol9P      Protocol = "9p"
-	ProtocolNBD     Protocol = "nbd"
 )
 
 type Mode string
@@ -95,7 +94,7 @@ func ValidateCreateRequest(req CreateRequest) error {
 
 func validProtocol(p Protocol) bool {
 	switch p {
-	case ProtocolS3, ProtocolIceberg, ProtocolNFS, Protocol9P, ProtocolNBD:
+	case ProtocolS3, ProtocolIceberg, ProtocolNFS, Protocol9P:
 		return true
 	default:
 		return false

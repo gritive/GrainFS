@@ -42,14 +42,12 @@ func TestAdminStorageProtocolsFromDeps(t *testing.T) {
 	resp, err := admin.AdminStorageProtocols(context.Background(), &admin.Deps{
 		Protocols: adminapi.StorageProtocolStatusResp{
 			NFS4: adminapi.ProtocolEndpointStatus{Enabled: true, Port: 2049},
-			NBD:  adminapi.ProtocolEndpointStatus{Enabled: false},
 			P9:   adminapi.ProtocolEndpointStatus{Enabled: true, Bind: "127.0.0.1", Port: 564},
 		},
 	})
 	require.NoError(t, err)
 	require.True(t, resp.NFS4.Enabled)
 	require.Equal(t, 2049, resp.NFS4.Port)
-	require.False(t, resp.NBD.Enabled)
 	require.True(t, resp.P9.Enabled)
 	require.Equal(t, "127.0.0.1", resp.P9.Bind)
 	require.Equal(t, 564, resp.P9.Port)

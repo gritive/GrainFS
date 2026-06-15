@@ -86,7 +86,6 @@ func newSingleNodeNFSTarget(t testing.TB) *nfsTarget {
 func newSharedClusterNFSTarget(t testing.TB) *nfsTarget {
 	t.Helper()
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNBD:    true,
 		FastBootstrap: true,
 	})
 	c.nodeCount = 3

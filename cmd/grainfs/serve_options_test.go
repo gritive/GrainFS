@@ -33,7 +33,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--nfs4-port", "12049",
 		"--nfs-write-buffer-dir", "/tmp/nfs-writebuf",
 		"--nfs-write-buffer-idle", "15s",
-		"--nbd-port", "20809",
 		"--9p-bind", "127.0.0.99",
 		"--9p-port", "1564",
 		"--pack-threshold", "31",
@@ -117,7 +116,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, 12049, opts.NFS4Port)
 	require.Equal(t, "/tmp/nfs-writebuf", opts.NFSWriteBufferDir)
 	require.Equal(t, "15s", opts.NFSWriteBufferIdle.String())
-	require.Equal(t, 20809, opts.NBDPort)
 	require.Equal(t, "127.0.0.99", opts.P9Bind)
 	require.Equal(t, 1564, opts.P9Port)
 	require.True(t, opts.EnableIceberg)
@@ -183,6 +181,5 @@ func TestServeDefaultPortsDisabled(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, 0, opts.NFS4Port, "NFS4 must be disabled by default")
-	require.Equal(t, 0, opts.NBDPort, "NBD must be disabled by default")
 	require.Equal(t, 0, opts.P9Port, "9P must be disabled by default")
 }

@@ -15,7 +15,7 @@ func TestStoreSnapshotIsDeterministicAndDetached(t *testing.T) {
 	store.put(Credential{
 		ID:         "pc_b",
 		SAID:       "sa_b",
-		Protocol:   ProtocolNBD,
+		Protocol:   ProtocolNFS,
 		Resource:   "volume/b",
 		Mode:       ModeRW,
 		SecretHash: [32]byte{2},
@@ -75,7 +75,7 @@ func TestStoreRestoreIsDetachedAndPreservesNoPlaintextSecret(t *testing.T) {
 	src := NewService(NewStore(), WithNow(func() time.Time { return now }))
 	secret, err := src.Create(CreateRequest{
 		SAID:      "sa_app",
-		Protocol:  ProtocolNBD,
+		Protocol:  ProtocolNFS,
 		Resource:  "volume/devdisk",
 		Mode:      ModeRW,
 		ExpiresAt: &exp,
@@ -102,7 +102,7 @@ func TestStoreRestoreIsDetachedAndPreservesNoPlaintextSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get restored credential: %v", err)
 	}
-	if got.ID != secret.ID || got.SAID != "sa_app" || got.Protocol != ProtocolNBD ||
+	if got.ID != secret.ID || got.SAID != "sa_app" || got.Protocol != ProtocolNFS ||
 		got.Resource != "volume/devdisk" || got.Mode != ModeRW || got.SecretHint == "" ||
 		!got.CreatedAt.Equal(now) || got.CreatedBy != "admin" {
 		t.Fatalf("restored credential mismatch: %+v", got)

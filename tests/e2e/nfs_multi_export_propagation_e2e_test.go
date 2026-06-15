@@ -18,7 +18,6 @@ var _ = ginkgo.Describe("NFS multi-export propagation", func() {
 		ginkgo.BeforeEach(func() {
 			c = startMRCluster(ginkgo.GinkgoTB(), 3, mrClusterOptions{
 				disableNFS4:   true,
-				disableNBD:    true,
 				FastBootstrap: true,
 			})
 		})

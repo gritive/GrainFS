@@ -63,7 +63,6 @@ func startSingleKEKNodeWithHTTP(t testing.TB) (dataDir, serverURL, clusterName s
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--node-id", "kek-prune-refusal",
 		"--nfs4-port", "0",
-		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

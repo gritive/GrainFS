@@ -35,7 +35,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("nfs4-port", 0, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	cmd.Flags().String("nfs-write-buffer-dir", "", "directory for NFS write coalescing buffer files (empty = derive from --data)")
 	cmd.Flags().Duration("nfs-write-buffer-idle", 30*time.Second, "idle timeout before write buffer auto-flushes (0 = disable buffering)")
-	cmd.Flags().Int("nbd-port", 0, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")
 	cmd.Flags().String("9p-bind", "127.0.0.1", "9P2000.L bind address; set 0.0.0.0 only on trusted networks")
 	cmd.Flags().Int("9p-port", 0, "9P2000.L server port (0 = disabled); unauthenticated, use firewall")
 	cmd.Flags().Bool("enable-iceberg", false, "enable Iceberg REST Catalog endpoint (disabled by default in Phase 1)")

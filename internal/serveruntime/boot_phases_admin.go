@@ -330,10 +330,6 @@ func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusR
 			Enabled: cfg.NFS4Port > 0,
 			Port:    cfg.NFS4Port,
 		},
-		NBD: adminapi.ProtocolEndpointStatus{
-			Enabled: cfg.NBDPort > 0,
-			Port:    cfg.NBDPort,
-		},
 		P9: adminapi.ProtocolEndpointStatus{
 			Enabled: cfg.P9Port > 0,
 			Bind:    cfg.P9Bind,

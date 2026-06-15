@@ -215,7 +215,6 @@ func newSingleNodeIcebergTarget(t testing.TB) *icebergTarget {
 func newSharedClusterIcebergTarget(t testing.TB) *icebergTarget {
 	t.Helper()
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNBD:    true,
 		FastBootstrap: true,
 	})
 	c.nodeCount = 3
@@ -273,7 +272,6 @@ func newSharedClusterIcebergTargetWithAudit(t testing.TB, commitInterval time.Du
 	t.Helper()
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
-		disableNBD:  true,
 		ExtraArgs: []string{
 			"--audit-iceberg=true",
 			"--audit-commit-interval", commitInterval.String(),

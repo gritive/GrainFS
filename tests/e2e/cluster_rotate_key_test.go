@@ -45,7 +45,6 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 				"--node-id", "rotate-test",
 				"--nfs4-port", "0",
-				"--nbd-port", "0",
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			}
@@ -124,7 +123,6 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 				"--node-id", "rotate-status-test",
 				"--nfs4-port", "0",
-				"--nbd-port", "0",
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			}

@@ -22,14 +22,14 @@ func TestCredentialHandlersCreateListGetRotateRevoke(t *testing.T) {
 	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "node-a", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "node-a", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, created.ID)
 	require.NotEmpty(t, created.Secret)
-	require.True(t, strings.HasPrefix(created.ConnectionHint["export_name"], "devdisk@"))
+	require.True(t, strings.HasPrefix(created.ConnectionHint["mount_path"], "devdisk/"))
 
-	listed, err := admin.ListCredentials(context.Background(), d, admin.CredentialListReq{SAID: "node-a", Protocol: "nbd"})
+	listed, err := admin.ListCredentials(context.Background(), d, admin.CredentialListReq{SAID: "node-a", Protocol: "nfs"})
 	require.NoError(t, err)
 	require.Len(t, listed.Credentials, 1)
 	require.Empty(t, listed.Credentials[0].Secret)
@@ -54,7 +54,7 @@ func TestCredentialHandlersCreateListGetRotateRevoke(t *testing.T) {
 
 func TestCredentialHandlersUnsupportedWhenServiceMissing(t *testing.T) {
 	_, err := admin.CreateCredential(context.Background(), newDeps(t), admin.CredentialCreateReq{
-		SAID: "node-a", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "node-a", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	require.Error(t, err)
 	var ae *admin.Error
@@ -67,7 +67,7 @@ func TestCredentialHandlersRejectInvalidExpiresAt(t *testing.T) {
 	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
 
 	_, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "node-a", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw", ExpiresAt: "tomorrow",
+		SAID: "node-a", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw", ExpiresAt: "tomorrow",
 	})
 	require.Error(t, err)
 	var ae *admin.Error
@@ -84,13 +84,13 @@ func TestCredentialHandlersAuthorizeCreateRotateRevoke(t *testing.T) {
 	d.ProtocolCredAuthz = authz
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
 		principal: principal.ServiceAccount("sa-app"),
 		action:    "grainfs:CredentialCreate",
-		resource:  "protocol-credential/nbd/volume/devdisk",
+		resource:  "protocol-credential/nfs/volume/devdisk",
 	}, authz.calls[0])
 
 	_, err = admin.RotateCredential(context.Background(), d, created.ID)
@@ -98,7 +98,7 @@ func TestCredentialHandlersAuthorizeCreateRotateRevoke(t *testing.T) {
 	require.Equal(t, credentialAuthCall{
 		principal: principal.ServiceAccount("sa-app"),
 		action:    "grainfs:CredentialRotate",
-		resource:  "protocol-credential/nbd/volume/devdisk",
+		resource:  "protocol-credential/nfs/volume/devdisk",
 	}, authz.calls[1])
 
 	_, err = admin.RevokeCredential(context.Background(), d, created.ID)
@@ -106,7 +106,7 @@ func TestCredentialHandlersAuthorizeCreateRotateRevoke(t *testing.T) {
 	require.Equal(t, credentialAuthCall{
 		principal: principal.ServiceAccount("sa-app"),
 		action:    "grainfs:CredentialRevoke",
-		resource:  "protocol-credential/nbd/volume/devdisk",
+		resource:  "protocol-credential/nfs/volume/devdisk",
 	}, authz.calls[2])
 }
 
@@ -119,7 +119,7 @@ func TestCredentialHandlersAuthorizeGetAndList(t *testing.T) {
 	d.ProtocolCredAuthz = authz
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	require.NoError(t, err)
 
@@ -128,15 +128,15 @@ func TestCredentialHandlersAuthorizeGetAndList(t *testing.T) {
 	require.Equal(t, credentialAuthCall{
 		principal: principal.ServiceAccount("sa-app"),
 		action:    "grainfs:CredentialRead",
-		resource:  "protocol-credential/nbd/volume/devdisk",
+		resource:  "protocol-credential/nfs/volume/devdisk",
 	}, authz.calls[1])
 
-	_, err = admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nbd", Resource: "volume/devdisk"})
+	_, err = admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nfs", Resource: "volume/devdisk"})
 	require.NoError(t, err)
 	require.Equal(t, credentialAuthCall{
 		principal: principal.ServiceAccount("sa-app"),
 		action:    "grainfs:CredentialList",
-		resource:  "protocol-credential/nbd/volume/devdisk",
+		resource:  "protocol-credential/nfs/volume/devdisk",
 	}, authz.calls[2])
 }
 
@@ -153,7 +153,7 @@ func TestCredentialHandlersAuthorizeOIDCActorInsteadOfTargetSA(t *testing.T) {
 	))
 
 	_, err := admin.CreateCredential(ctx, d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 
 	require.NoError(t, err)
@@ -162,7 +162,7 @@ func TestCredentialHandlersAuthorizeOIDCActorInsteadOfTargetSA(t *testing.T) {
 	require.Equal(t, "oidc:example:alice", authz.calls[0].principal.ID)
 	require.Equal(t, []string{"oidc:example:storage-admins"}, authz.calls[0].principal.Groups)
 	require.Equal(t, "grainfs:CredentialCreate", authz.calls[0].action)
-	require.Equal(t, "protocol-credential/nbd/volume/devdisk", authz.calls[0].resource)
+	require.Equal(t, "protocol-credential/nfs/volume/devdisk", authz.calls[0].resource)
 }
 
 func TestCredentialHandlersDenyCreateBeforeMutation(t *testing.T) {
@@ -171,7 +171,7 @@ func TestCredentialHandlersDenyCreateBeforeMutation(t *testing.T) {
 	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "implicit Deny"}
 
 	_, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	requireCredentialForbidden(t, err)
 
@@ -202,7 +202,7 @@ func TestCredentialHandlersDenyRotateAndRevokeBeforeMutation(t *testing.T) {
 	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	require.NoError(t, err)
 
@@ -231,7 +231,7 @@ func TestCredentialHandlersDenyGetAndListBeforeRead(t *testing.T) {
 	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 
 	created, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	require.NoError(t, err)
 
@@ -239,7 +239,7 @@ func TestCredentialHandlersDenyGetAndListBeforeRead(t *testing.T) {
 	_, err = admin.GetCredential(context.Background(), d, created.ID)
 	requireCredentialForbidden(t, err)
 
-	listed, err := admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nbd", Resource: "volume/devdisk"})
+	listed, err := admin.ListCredentials(context.Background(), d, admin.CredentialListReq{Protocol: "nfs", Resource: "volume/devdisk"})
 	requireCredentialForbidden(t, err)
 	require.Empty(t, listed.Credentials)
 }
@@ -256,7 +256,7 @@ func TestCredentialHandlersDenyOIDCListEvenWhenEmpty(t *testing.T) {
 		[]string{"oidc:example:storage-admins"},
 	))
 
-	listed, err := admin.ListCredentials(ctx, d, admin.CredentialListReq{Protocol: "nbd", Resource: "volume/missing"})
+	listed, err := admin.ListCredentials(ctx, d, admin.CredentialListReq{Protocol: "nfs", Resource: "volume/missing"})
 
 	requireCredentialForbidden(t, err)
 	require.Empty(t, listed.Credentials)
@@ -264,7 +264,7 @@ func TestCredentialHandlersDenyOIDCListEvenWhenEmpty(t *testing.T) {
 	require.Equal(t, credentialAuthCall{
 		principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", []string{"oidc:example:storage-admins"}),
 		action:    "grainfs:CredentialList",
-		resource:  "protocol-credential/nbd/volume/missing",
+		resource:  "protocol-credential/nfs/volume/missing",
 	}, authz.calls[0])
 }
 
@@ -280,13 +280,13 @@ func TestCredentialHandlersAuthorizeOIDCEmptyListWithPartialFilterResource(t *te
 		[]string{"oidc:example:storage-admins"},
 	))
 
-	listed, err := admin.ListCredentials(ctx, d, admin.CredentialListReq{Protocol: "nbd"})
+	listed, err := admin.ListCredentials(ctx, d, admin.CredentialListReq{Protocol: "nfs"})
 
 	require.NoError(t, err)
 	require.Empty(t, listed.Credentials)
 	require.Len(t, authz.calls, 1)
 	require.Equal(t, "grainfs:CredentialList", authz.calls[0].action)
-	require.Equal(t, "protocol-credential/nbd/*", authz.calls[0].resource)
+	require.Equal(t, "protocol-credential/nfs/*", authz.calls[0].resource)
 }
 
 func TestCredentialHandlersFailClosedWhenAuthorizerMissing(t *testing.T) {
@@ -294,7 +294,7 @@ func TestCredentialHandlersFailClosedWhenAuthorizerMissing(t *testing.T) {
 	d.ProtocolCredentials = protocred.NewService(protocred.NewStore())
 
 	_, err := admin.CreateCredential(context.Background(), d, admin.CredentialCreateReq{
-		SAID: "sa-app", Protocol: "nbd", Resource: "volume/devdisk", Mode: "rw",
+		SAID: "sa-app", Protocol: "nfs", Resource: "volume/devdisk", Mode: "rw",
 	})
 	requireCredentialForbidden(t, err)
 }

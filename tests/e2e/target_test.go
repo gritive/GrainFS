@@ -40,7 +40,6 @@ type s3Target struct {
 	saID      string
 	dataDir   string
 	nfsPort   int
-	nbdPort   int
 	createBkt func(t testing.TB, bucket string)
 	// uniqueBucket creates a bucket with a name derived from t.Name() + case,
 	// sanitized to S3 spec (lowercase/hyphen, 3-63 chars). Auto-registers
@@ -82,7 +81,6 @@ func initSharedS3Targets(t testing.TB) {
 		ClusterKey: "E2E-S3-OP-KEY",
 		LogPrefix:  "grainfs-s3op-shared",
 		DisableNFS: true,
-		DisableNBD: true,
 	})
 	for i := range c.procs {
 		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
@@ -203,7 +201,6 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		ClusterKey: "E2E-S3-OP-KEY",
 		LogPrefix:  "grainfs-s3op",
 		DisableNFS: true,
-		DisableNBD: true,
 		ExtraArgs:  extraArgs,
 	})
 
@@ -264,12 +261,10 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 
 	port := freePort()
 	nfsPort := freePort()
-	nbdPort := freePort()
 	args := []string{
 		"serve", "--data", dir,
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
-		"--nbd-port", fmt.Sprintf("%d", nbdPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -314,7 +309,6 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 		saID:      admin.SAID,
 		dataDir:   dir,
 		nfsPort:   nfsPort,
-		nbdPort:   nbdPort,
 		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, bucket, client)
 		},

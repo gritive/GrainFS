@@ -43,13 +43,12 @@ func runClusterECPutGet5Node(t testing.TB) {
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
 	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
+	// 4 ports/node; slot ports[i*4+3] (formerly NBD) is left unallocated.
 	ports := uniqueFreePorts(numNodes * 4)
 	for i := range numNodes {
 		httpPorts[i] = ports[i*4]
 		raftPorts[i] = ports[i*4+1]
 		nfs4Ports[i] = ports[i*4+2]
-		nbdPorts[i] = ports[i*4+3]
 	}
 	joinPorts := make([]int, numNodes)
 	jp := uniqueFreePorts(numNodes)
@@ -82,7 +81,6 @@ func runClusterECPutGet5Node(t testing.TB) {
 			"--join-listen-addr", joinAddr(i),
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
@@ -260,7 +258,6 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 		ClusterKey: clusterKey,
 		LogPrefix:  "cluster-ec-3node",
 		DisableNFS: true,
-		DisableNBD: true,
 	})
 	gomega.Expect(adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucketName, 60*time.Second)).To(gomega.Succeed())
 	accessKey, secretKey := c.accessKey, c.secretKey
@@ -404,13 +401,12 @@ func runClusterECTopologyChange(t testing.TB) {
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
 	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
+	// 4 ports/node; slot ports[i*4+3] (formerly NBD) is left unallocated.
 	ports := uniqueFreePorts(numNodes * 4)
 	for i := range numNodes {
 		httpPorts[i] = ports[i*4]
 		raftPorts[i] = ports[i*4+1]
 		nfs4Ports[i] = ports[i*4+2]
-		nbdPorts[i] = ports[i*4+3]
 	}
 	joinPorts := make([]int, numNodes)
 	jp := uniqueFreePorts(numNodes)
@@ -448,7 +444,6 @@ func runClusterECTopologyChange(t testing.TB) {
 			"--raft-addr", raftAddr(i),
 			"--join-listen-addr", joinAddr(i),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)

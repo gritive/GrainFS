@@ -35,7 +35,6 @@ Common serve options:
 | `--node-id` | Explicit node identity. |
 | `--raft-addr` | Raft listen address. |
 | `--nfs4-port` | NFSv4 port; use `0` to disable. |
-| `--nbd-port` | NBD port; use `0` to disable. |
 | `--9p-bind`, `--9p-port` | 9P2000.L bind address and port. |
 
 At-rest encryption is always enabled and bootstraps from the KEK/DEK metadata
@@ -131,10 +130,9 @@ one-time `secret` as the SigV4 secret key. Read-only credentials allow read
 operations only. S3 `CopyObject` is limited to same-bucket copies for protocol
 credentials.
 
-NBD, NFS, and 9P attach paths enforce protocol credentials when credential
-storage is wired. NBD uses `connection_hint.export_name` (`volume@secret`),
-NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`), and 9P
-uses `connection_hint.aname` (`credential-id:secret@bucket`). Read-only
+NFS and 9P attach paths enforce protocol credentials when credential
+storage is wired. NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`),
+and 9P uses `connection_hint.aname` (`credential-id:secret@bucket`). Read-only
 credentials mount successfully but reject mutation operations.
 
 List inventory can be narrowed to the same resource scope:
@@ -227,28 +225,6 @@ grainfs nfs debug mydata --json
 
 See `../reference/nfs-compatibility.md`, `../operators/nfs-debug.md`, and
 `../operators/nfs-export-lifecycle.md`.
-
-## NBD
-
-NBD requires a Linux client.
-
-```bash
-grainfs volume create v1 --size 10Gi
-grainfs credential create --sa <sa_id> --protocol nbd --resource volume/v1 --mode rw
-# Save the returned connection_hint.export_name, for example: v1@pcsec_...
-
-sudo modprobe nbd
-sudo nbd-client localhost 10809 /dev/nbd0 -N 'v1@<secret>'
-
-sudo mkfs.ext4 /dev/nbd0
-sudo mkdir -p /mnt/nbd-v1
-sudo mount /dev/nbd0 /mnt/nbd-v1
-
-sudo umount /mnt/nbd-v1
-sudo nbd-client -d /dev/nbd0
-```
-
-See `../reference/nbd-compatibility.md`.
 
 ## 9P
 

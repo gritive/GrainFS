@@ -119,7 +119,6 @@ type Config struct {
 	NFS4Port           int
 	NFSWriteBufferDir  string
 	NFSWriteBufferIdle time.Duration
-	NBDPort            int
 	P9Bind             string
 	P9Port             int
 	EnableIceberg      bool

@@ -162,7 +162,6 @@ func TestMain(m *testing.M) {
 		"--data", dataDir,
 		"--port", colimaHTTPPort,
 		"--nfs4-port", "0",
-		"--nbd-port", "0",
 		"--9p-bind", "0.0.0.0",
 		"--9p-port", colima9PPort,
 	}

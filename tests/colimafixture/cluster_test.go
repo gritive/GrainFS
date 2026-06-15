@@ -20,7 +20,6 @@ func TestColimaClusterFixtureBoots(t *testing.T) {
 	c := StartCluster(t, Options{
 		NumNodes:  3,
 		EnableNFS: true,
-		EnableNBD: true,
 		EnableP9:  true,
 	})
 	bootDur := time.Since(start)

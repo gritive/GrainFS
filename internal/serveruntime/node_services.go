@@ -14,14 +14,12 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
-	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/p9server"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // NodeServices tracks started services so they can be cleanly torn down
@@ -29,10 +27,8 @@ import (
 // start.
 type NodeServices struct {
 	nfs4Srv *nfs4server.Server
-	nbdSrv  *nbd.Server
 	p9Srv   *p9server.Server
 	nfs4Err error
-	nbdErr  error
 	p9Err   error
 }
 
@@ -41,11 +37,6 @@ func (n *NodeServices) Close() {
 	if n.p9Srv != nil {
 		if err := n.p9Srv.Close(); err != nil {
 			log.Warn().Err(err).Msg("9p server close error")
-		}
-	}
-	if n.nbdSrv != nil {
-		if err := n.nbdSrv.Close(); err != nil {
-			log.Warn().Err(err).Msg("nbd server close error")
 		}
 	}
 	if n.nfs4Srv != nil {
@@ -65,13 +56,9 @@ func (n *NodeServices) NFS4() *nfs4server.Server { return n.nfs4Srv }
 func (n *NodeServices) ProtocolStatus(cfg Config) adminapi.StorageProtocolStatusResp {
 	resp := storageProtocolStatusFromConfig(cfg)
 	resp.NFS4.Enabled = n.nfs4Srv != nil
-	resp.NBD.Enabled = n.nbdSrv != nil
 	resp.P9.Enabled = n.p9Srv != nil
 	if cfg.NFS4Port > 0 && n.nfs4Srv == nil && n.nfs4Err != nil {
 		resp.NFS4.Warning = "start failed: " + n.nfs4Err.Error()
-	}
-	if cfg.NBDPort > 0 && n.nbdSrv == nil && n.nbdErr != nil {
-		resp.NBD.Warning = "start failed: " + n.nbdErr.Error()
 	}
 	if cfg.P9Port > 0 && n.p9Srv == nil && n.p9Err != nil {
 		resp.P9.Warning = "start failed: " + n.p9Err.Error()
@@ -103,15 +90,13 @@ type NodeServicesIAMConfig struct {
 	Authorizer          *s3auth.Authorizer
 	CfgStore            *config.Store
 	AuditHook           func(audit.S3Event)
-	NBDAuth             nbd.CredentialAuthenticator
 	ProtocolCredentials *protocred.AttachValidator
 }
 
-// StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
-// are > 0. Returns the handle for shutdown. ri is an optional ReadIndexer
-// for linearizable NBD reads (nil = no gate). iam is optional; nil = no IAM gate.
+// StartNodeServices spawns NFSv4 and 9P servers if their respective ports
+// are > 0. Returns the handle for shutdown. iam is optional; nil = no IAM gate.
 func StartNodeServices(ctx context.Context, backend storage.Backend,
-	volMgr *volume.Manager, nfs4Port, nbdPort int, p9Bind string, p9Port int, ri nbd.ReadIndexer,
+	nfs4Port int, p9Bind string, p9Port int,
 	nfsWriteBufDir string, nfsWriteBufIdle time.Duration, dataDir string,
 	iam ...*NodeServicesIAMConfig,
 ) *NodeServices {
@@ -176,21 +161,6 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 		}
 	}
 
-	if nbdPort > 0 {
-		const defaultVolName = "default"
-		var nbdAuth nbd.CredentialAuthenticator
-		if iamCfg != nil {
-			nbdAuth = iamCfg.NBDAuth
-		}
-		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri, nbdAuth)
-		if err != nil {
-			svc.nbdErr = err
-			log.Error().Err(err).Msg("nbd server start failed")
-		} else {
-			svc.nbdSrv = nbdSrv
-		}
-	}
-
 	if p9Port > 0 {
 		if p9Bind == "" {
 			p9Bind = "127.0.0.1"
@@ -227,26 +197,4 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 	}
 
 	return svc
-}
-
-func startNBDServer(mgr *volume.Manager, volName string, port int, ri nbd.ReadIndexer, auth nbd.CredentialAuthenticator) (*nbd.Server, error) {
-	srv := nbd.NewServer(mgr, volName)
-	if ri != nil {
-		srv.SetReadIndexer(ri)
-	}
-	if auth != nil {
-		srv.SetCredentialAuthenticator(auth)
-	}
-	addr := fmt.Sprintf(":%d", port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("nbd listen: %w", err)
-	}
-	log.Info().Str("component", "nbd").Str("addr", ln.Addr().String()).Str("volume", volName).Msg("nbd server started")
-	go func() {
-		if err := srv.Serve(ln); err != nil {
-			log.Error().Err(err).Msg("nbd server error")
-		}
-	}()
-	return srv, nil
 }
