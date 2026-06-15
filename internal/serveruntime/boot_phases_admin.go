@@ -113,7 +113,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}
 	}
 	state.adminDeps = &admin.Deps{
-		Manager:    srv.VolumeManager(),
 		Token:      tokenStore,
 		PublicURL:  cfg.PublicURL,
 		NodeID:     state.nodeID,
@@ -124,7 +123,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			WarnRatio:     cfg.VlogWarnRatio,
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
-		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft, state.distBackend),
 		IAM:                  state.iamAdminAPI,
 		IcebergConfig:        newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:            iamPolicyAdminService(state),

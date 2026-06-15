@@ -43,7 +43,6 @@ type ServeOptions struct {
 	PackThreshold      int   // --pack-threshold
 	ShardPackThreshold int   // --shard-pack-threshold
 	MeasureReadAmp     bool  // --measure-read-amp
-	BlockCacheSize     int64 // --block-cache-size
 	ShardCacheSize     int64 // --shard-cache-size
 
 	// --- Protocols ---

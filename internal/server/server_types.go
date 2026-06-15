@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/gritive/GrainFS/internal/audit"
-	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
@@ -30,7 +29,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server/snapshotsvc"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // ClusterInfo provides cluster state for the monitoring dashboard. Snapshot
@@ -119,7 +117,6 @@ type Server struct {
 	hertz       *server.Hertz
 	tlsListener *HotTLSListener // §5 T43: SIGHUP-driven cert reload
 	hub         *Hub
-	volMgr      *volume.Manager
 	policyStore *CompiledPolicyStore
 
 	lifecycle       *lifecycle.Service
@@ -145,7 +142,6 @@ type Server struct {
 	incidentStore   incident.StateStore
 	mutationGate    *MutationGate
 	degradedFlag    atomic.Bool
-	blockCache      *blockcache.Cache
 	shardCache      *shardcache.Cache
 	jwtKeys         *iamjwt.KeySet
 	iceberg         *iceberg.Handler

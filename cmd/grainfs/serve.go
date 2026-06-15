@@ -83,10 +83,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	// grainfs_readamp_*. Off by default — production pays only an atomic.Bool
 	// load per read when this is unset.
 	cmd.Flags().Bool("measure-read-amp", false, "enable read-amplification simulator (informs Unified Buffer Cache decision)")
-	// In-memory block cache for volume.ReadAt. Default 64 MB matches the
-	// simulator's measured "knee" — workloads with temporal locality saturate
-	// around that budget. Set 0 to disable.
-	cmd.Flags().Int64("block-cache-size", 64*1024*1024, "volume block cache capacity in bytes (0 disables)")
 	// EC shard cache sits in front of getObjectEC's per-shard fan-out. Default
 	// 1 GiB keeps repeated multipart range reads resident in 4-node cluster
 	// runs without the RSS jump seen at 2 GiB. Set 0 to disable when running

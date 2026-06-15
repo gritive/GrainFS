@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.598.0] - 2026-06-16
+
+### Removed
+- **Volume data-plane wiring + volume-health observability** — Phase C of removing the
+  volume block-storage feature. `volume.Manager` is no longer constructed or wired into
+  the running server (`BuildVolumeManager`, `state.volMgr`, `server.WithVolumeManager`,
+  the VFS thin-provisioning hook). Also removed: the volume block cache
+  (`internal/cache/blockcache`, volume-only), the volume-health Prometheus metrics
+  (`grainfs_volume*` series + their operator-state source), the `VolumePlacementAdapter`,
+  and the admin volume-health helpers.
+- **BREAKING (config):** the `--block-cache-size` flag is removed (it sized only the
+  volume block cache). Passing it now errors.
+- **API:** `GET /api/cache/status` no longer includes the `block_cache` section
+  (`shard_cache` is unchanged).
+- NFS/VFS behavior is unchanged — the VFS volume hook was thin-provisioning accounting
+  only and was never wired in production (the nil path was already the live path). The
+  `internal/volume` package itself, the scrubber replication source, and the read-plane
+  whole-replica fallbacks remain (removed in Phase D). S3/NFSv4/9P/Iceberg unaffected.
+
 ## [0.0.597.0] - 2026-06-16
 
 ### Removed

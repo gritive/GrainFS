@@ -35,7 +35,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // bootState carries the rolling state of Run's boot sequence. Phase functions
@@ -283,7 +282,6 @@ type bootState struct {
 	lifecycleSvc      *lifecycle.Service
 	migrationSvc      *migration.Service
 	mutationGate      *server.MutationGate
-	volMgr            *volume.Manager
 	auditSearchWarmup func(context.Context) error
 	// auditSearcher is the DuckDB-backed audit searcher. Created in
 	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.

@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // PeerHealthAdapter implements admin.PeerHealthAPI on top of
@@ -61,49 +60,6 @@ type ReplicaRepairerFunc func(ctx context.Context, bucket, key string) error
 
 func (f ReplicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
 	return f(ctx, bucket, key)
-}
-
-// VolumePlacementAdapter implements admin.VolumePlacementSource over the
-// cluster meta-Raft FSM. S4-4d: the object index that fed per-volume replica
-// layout facts was removed in S4-4b, so VolumeReplicaSummaries now reconstructs
-// them by scatter-gathering the volume bucket's quorum meta (via the
-// DistributedBackend) and classifying each block against its placement group.
-// nil metaRaft / backend (standalone runtimes) returns nil with no error so the
-// caller falls back to incident-only volume health composition.
-type VolumePlacementAdapter struct {
-	metaRaft *cluster.MetaRaft
-	backend  *cluster.DistributedBackend
-}
-
-// NewVolumePlacementAdapter returns a value adapter (no pointer; the struct
-// is trivially copyable). Caller passes the freshly-constructed *MetaRaft and
-// *DistributedBackend at admin-deps build time, or nil when running outside
-// cluster mode.
-func NewVolumePlacementAdapter(metaRaft *cluster.MetaRaft, backend *cluster.DistributedBackend) VolumePlacementAdapter {
-	return VolumePlacementAdapter{metaRaft: metaRaft, backend: backend}
-}
-
-func (a VolumePlacementAdapter) VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]admin.ReplicaLayoutFact, error) {
-	if a.metaRaft == nil || a.backend == nil {
-		return nil, nil
-	}
-	fsm := a.metaRaft.FSM()
-	if fsm == nil {
-		return nil, nil
-	}
-	// Scatter-gather the volume bucket's quorum meta (S4-4d). A scan error
-	// (e.g. no shard group wired yet) degrades to the incident-only signal
-	// rather than failing the volume-health endpoint.
-	entries, err := a.backend.ScanObjectMetaEntries(ctx, volume.VolumeBucketName, "")
-	if err != nil || len(entries) == 0 {
-		return nil, nil
-	}
-	groupList := fsm.ShardGroups()
-	groups := make(map[string]cluster.ShardGroupEntry, len(groupList))
-	for _, g := range groupList {
-		groups[g.ID] = g
-	}
-	return aggregateVolumeReplicaLayout(entries, groups, names), nil
 }
 
 // ScrubProposerAdapter implements admin.ScrubProposer over MetaRaft. The

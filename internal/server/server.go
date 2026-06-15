@@ -18,7 +18,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/server/snapshotsvc"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
@@ -234,10 +233,6 @@ func (s *Server) TLSActive() bool {
 	}
 	return s.tlsListener.IsTLS()
 }
-
-// VolumeManager exposes the volume manager so callers can construct admin.Deps
-// without round-tripping through New options.
-func (s *Server) VolumeManager() *volume.Manager { return s.volMgr }
 
 // Operations exposes the storage operations facade so external workflows
 // (e.g. serveruntime startup recovery) can invoke decorator-aware capability

@@ -37,7 +37,7 @@ import (
 // bootSrvOptsAndReceipt assembles the slice of server.Option that will be
 // passed to server.New. It also wires the disk collector's threshold callback
 // (now that clusterAlerts exists), the heal-receipt stack, the incident
-// recorder + resource guards, the lifecycle manager, and the volume manager.
+// recorder + resource guards, and the lifecycle manager.
 //
 // Inputs:  state.cfg (many flags), state.metaRaft, state.peers, state.nodeID,
 //
@@ -49,8 +49,7 @@ import (
 //
 // Outputs: state.srvOpts, state.clusterAlerts, state.receiptWiring,
 //
-//	state.incidentRecorder, state.lifecycleMgr, state.volMgr,
-//	state.mutationGate.
+//	state.incidentRecorder, state.lifecycleMgr, state.mutationGate.
 //
 // Cleanup: receiptWiring.Close, incidentDB.Close + DeregisterDB are all
 // registered via state.AddCleanup so behavior matches the original `defer`
@@ -326,12 +325,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}
 
-	volMgr, blockCache, err := BuildVolumeManager(VolumeManagerOptions{BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)
-	if err != nil {
-		return fmt.Errorf("volume manager: %w", err)
-	}
-	state.volMgr = volMgr
-	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(state.shardCache))
+	srvOpts = append(srvOpts, server.WithShardCache(state.shardCache))
 	// A joiner (legacy joinMode OR zero-CA inviteJoinMode) must NOT install the
 	// group-0 DistributedBackend read-index fence: it is not the group-0 leader
 	// and has no usable legacy peers, so ReadIndex returns ErrNotLeader and GETs

@@ -62,16 +62,6 @@ type VlogBreakdownAPI interface {
 	Breakdown() (VlogBreakdownResp, error)
 }
 
-// VolumePlacementSource is the slim interface admin handlers need to obtain
-// per-volume replica/EC actual layout signals (ADR 0007) for volume health
-// composition. Implemented by an adapter over the cluster meta-Raft FSM;
-// defined here so handler tests can substitute a fake. nil VolumePlacement
-// (or a non-cluster runtime) disables the replica contribution to volume
-// health, leaving incident-only signals.
-type VolumePlacementSource interface {
-	VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]ReplicaLayoutFact, error)
-}
-
 // BucketOps is the slim interface bucket admin handlers need from storage.
 // Satisfied by *storage.Operations.
 type BucketOps interface {

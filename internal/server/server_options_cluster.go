@@ -1,15 +1,8 @@
 package server
 
 import (
-	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 )
-
-func WithBlockCache(c *blockcache.Cache) Option {
-	return func(s *Server) {
-		s.blockCache = c
-	}
-}
 
 func WithShardCache(c *shardcache.Cache) Option {
 	return func(s *Server) {

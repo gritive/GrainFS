@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/rs/zerolog/log"
@@ -79,13 +78,6 @@ type ManagerOptions struct {
 	// PoolQuota is the maximum total allocated bytes across all volumes.
 	// 0 means unlimited (default).
 	PoolQuota int64
-
-	// BlockCache, if non-nil, sits in front of backend.GetObject on
-	// the ReadAt path. Hits skip the storage backend entirely; misses
-	// populate the cache so subsequent reads of the same physical
-	// block are free. Pass `blockcache.New(0)` (or leave nil) to
-	// disable. Sizing guidance is in the blockcache package doc.
-	BlockCache *blockcache.Cache
 }
 
 // Manager manages volumes on top of a storage.Backend.
@@ -93,7 +85,6 @@ type Manager struct {
 	backend storage.Backend
 	mu      sync.Mutex         // mutation mutex: protects volume metadata cache and ReadAt/WriteAt block-object consistency. Splitting this requires per-volume/per-block immutable versions or transactions.
 	volumes map[string]*Volume // 인메모리 캐시
-	blocks  *blockcache.Cache  // nil = block cache 비활성. ReadAt이 backend 앞에 두는 LRU.
 	opts    ManagerOptions
 	blkPool *pool.Pool[[]byte] // reusable DefaultBlockSize-byte slices for ReadAt/WriteAt
 }
@@ -108,7 +99,6 @@ func NewManagerWithOptions(backend storage.Backend, opts ManagerOptions) *Manage
 	return &Manager{
 		backend: backend,
 		volumes: make(map[string]*Volume),
-		blocks:  opts.BlockCache,
 		opts:    opts,
 		blkPool: pool.New(func() []byte { return make([]byte, DefaultBlockSize) }),
 	}
@@ -132,16 +122,12 @@ func (m *Manager) putBlkBuf(b []byte) {
 }
 
 func (m *Manager) newBlockIOEngine() blockIOEngine {
-	engine := blockIOEngine{
+	return blockIOEngine{
 		objects:   backendBlockObjectStore{backend: m.backend},
 		meter:     defaultBlockReadMeter{},
 		getBlkBuf: m.getBlkBuf,
 		putBlkBuf: m.putBlkBuf,
 	}
-	if m.blocks != nil {
-		engine.cache = m.blocks
-	}
-	return engine
 }
 
 func (m *Manager) currentAllocatedBytesUnlocked() int64 {

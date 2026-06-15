@@ -61,7 +61,6 @@ func optionsToConfig(
 	cfg.HealReceiptWindow = opts.HealReceiptWindow
 
 	cfg.LifecycleInterval = opts.LifecycleInterval
-	cfg.BlockCacheSize = opts.BlockCacheSize
 
 	cfg.PublicURL = opts.PublicURL
 	cfg.VlogWarnRatio = opts.VlogOpts.WarnRatio

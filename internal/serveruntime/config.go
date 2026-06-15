@@ -88,7 +88,6 @@ type Config struct {
 	// Lifecycle / cache
 	LifecycleInterval time.Duration
 	MigrationInterval time.Duration
-	BlockCacheSize    int64
 
 	// Dashboard / vlog
 	PublicURL         string
