@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.594.0] - 2026-06-16
+
+### Removed
+- **Final sweep of test-only dead production symbols in `internal/cluster`.** Each
+  was referenced only by tests; removals reroute the test to a live equivalent or
+  relocate the helper, with no production behavior change and no coverage loss:
+  - `newECReconstructStreamReader` (thin wrapper) — tests rerouted to the live
+    `newECReconstructStreamReaderWithPrefetch(.., true)`.
+  - `MetaRaft.ProposeIcebergCreateNamespace` (dead wrapper; the live path is
+    `MetaCatalog.CreateNamespace`) — its redundant raft-integration test removed
+    and its end-to-end `ErrNamespaceExists` coverage relocated to the real-raft
+    `TestMetaCatalogLeaderListCommitAndDelete`.
+  - `appendForwardBuffer.InflightBytes` plus the write-only `inflight` mirror
+    field and its two stores (the Prometheus gauge remains the accounting sink).
+  - `ForwardSender.WithMaxForwardReadStreams` (test-only builder) — the one test
+    sets the read-slot pool directly; production keeps the default of 64.
+  - 6 never-emitted `PutTraceStageMetaIndex*` trace-stage constants.
+  - The unprefixed `apply.go` Badger key helpers (`bucketKey`, `multipartKey`,
+    `bucketPolicyKey`, `bucketVerKey`, `objectMetaKey`, `objectMetaKeyV`,
+    `latestKey`, `shardPlacementKey`) moved out of the production file into a
+    `_test.go` helper (they only ever built keys for tests; production apply uses
+    the prefixed `f.keys.*`). No call-site changes.
+
 ## [0.0.593.0] - 2026-06-16
 
 ### Removed
