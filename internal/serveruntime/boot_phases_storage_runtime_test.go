@@ -15,7 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 
-	"go.uber.org/goleak"
 )
 
 // storagePhasePrereqs runs every prior boot phase (config, storage open,
@@ -145,20 +144,16 @@ func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 // registers a cleanup that closes the shard service on shutdown. With a shard
 // pack store wired (WAL present), the shard-pack actor goroutine spawns; if no
 // cleanup closes it, it leaks past shutdown.
-func TestBootShardService_ClosesShardPackActorOnShutdown(t *testing.T) {
+// TestBootShardService_ShardPackThresholdIsHardError proves S3: requesting
+// shard-packing via the config threshold is refused at boot with a clear error
+// (packing is disabled — a durable pack index was never built).
+func TestBootShardService_ShardPackThresholdIsHardError(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
-	// Enable the shard-pack store so the WAL-wired shard-pack actor goroutine spawns.
 	state.cfg.ShardPackThreshold = 1024
-	baseline := goleak.IgnoreCurrent()
 
-	require.NoError(t, bootShardService(ctx, state))
-	require.NotNil(t, state.shardSvc)
-
-	// Production shutdown runs the cleanup stack — it must close the shard
-	// service so the shard-pack actor goroutine is stopped.
-	state.Cleanup()
-
-	goleak.VerifyNone(t, baseline)
+	err := bootShardService(ctx, state)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "shard-pack")
 }
 
 func TestBootShardServiceWiresDataWALRepairCollector(t *testing.T) {
