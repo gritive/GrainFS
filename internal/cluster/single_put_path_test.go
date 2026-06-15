@@ -34,8 +34,10 @@ func newSingleNode1Plus0ChunkCapable(t *testing.T) *DistributedBackend {
 // TestSinglePutPath_KnownSizeLarge1Plus0_Chunks proves the fix: a known-size
 // (SizeHint) object larger than the chunk threshold on single-node 1+0 routes
 // through the chunked path (obj.Segments non-empty) instead of being written as
-// one whole-object shard. RED before the fix: the known-size single-local fast
-// path intercepts it, writes a single shard, and obj.Segments is empty.
+// one whole-object shard. (Historical: before the chunking fix, a known-size
+// single-local fast path intercepted this and wrote a single shard with no
+// segments; that fast path has since been removed, so the chunked gate is the
+// only route once a ShardGroupSource is wired.)
 func TestSinglePutPath_KnownSizeLarge1Plus0_Chunks(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()

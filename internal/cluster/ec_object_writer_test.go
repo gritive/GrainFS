@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/md5"
 	"encoding/json"
 	"errors"
 	"io"
@@ -41,46 +40,12 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 	}
 	sp := &spooledObject{Size: 11, ETag: "etag"}
 
-	_, err := writer.writeShardReaders(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+	_, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
-	}, "test")
+	}, nil, "test")
 	require.ErrorIs(t, err, writeErr)
 	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
 	require.Empty(t, shards.deleteRemoteCalls)
-}
-
-func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
-	shards := &fakeECObjectWriterShards{}
-	writer := ecObjectWriter{
-		selfID: "node-a",
-		shards: shards,
-	}
-	plan := ecObjectWritePlan{
-		Bucket:           "bucket",
-		Key:              "object",
-		VersionID:        "v1",
-		PlacementGroupID: "group-1",
-		Config:           ECConfig{DataShards: 1, ParityShards: 0},
-		Placement:        []string{"node-a"},
-		ContentType:      "text/plain",
-	}
-	sp := &spooledObject{Size: 5}
-
-	result, err := writer.writeSingleLocalReader(context.Background(), plan, sp, strings.NewReader("hello"), "test", md5.New())
-	require.NoError(t, err)
-
-	require.Len(t, shards.localWrites, 1)
-	gotBody := shards.localWrites[0].body
-	require.Len(t, gotBody, shardHeaderSize+len("hello"))
-	gotSize, _, err := decodeShardHeader(gotBody[:shardHeaderSize])
-	require.NoError(t, err)
-	require.Equal(t, int64(5), gotSize)
-	require.Equal(t, "hello", string(gotBody[shardHeaderSize:]))
-	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", result.ETag)
-	require.Equal(t, result.ETag, sp.ETag)
-	require.Equal(t, "object/v1", result.ShardKey)
-	require.Equal(t, uint8(1), result.ECData)
-	require.Equal(t, uint8(0), result.ECParity)
 }
 
 func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
@@ -113,69 +78,6 @@ func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t 
 	require.Equal(t, int64(5), result.Size)
 	require.Equal(t, "etag", result.ETag)
 	require.Equal(t, uint8(1), result.ECData)
-}
-
-func TestECObjectWriter_WriteMemoryShardsUsesBufferedRemoteShardWrites(t *testing.T) {
-	shards := &fakeECObjectWriterShards{}
-	writer := ecObjectWriter{
-		selfID: "node-a",
-		shards: shards,
-	}
-	dir := t.TempDir()
-	spoolPath := filepath.Join(dir, "object")
-	require.NoError(t, os.WriteFile(spoolPath, []byte("hello"), 0o600))
-	sp := &spooledObject{Path: spoolPath, Size: 5, ETag: "etag"}
-	plan := ecObjectWritePlan{
-		Bucket:           "bucket",
-		Key:              "object",
-		VersionID:        "v1",
-		PlacementGroupID: "group-1",
-		Config:           ECConfig{DataShards: 1, ParityShards: 0},
-		Placement:        []string{"node-b"},
-		ContentType:      "text/plain",
-	}
-
-	result, err := writer.writeMemoryShards(context.Background(), plan, sp)
-	require.NoError(t, err)
-
-	require.Len(t, shards.bufferedWrites, 1)
-	require.Empty(t, shards.streamWrites)
-	require.Equal(t, "node-b", shards.bufferedWrites[0].peer)
-	require.Equal(t, int64(5), result.Size)
-}
-
-func TestECObjectWriter_WriteMemoryShardsUsesBufferedLocalShardWrites(t *testing.T) {
-	shards := &fakeECObjectWriterShards{}
-	writer := ecObjectWriter{
-		selfID: "node-a",
-		shards: shards,
-	}
-	dir := t.TempDir()
-	spoolPath := filepath.Join(dir, "object")
-	require.NoError(t, os.WriteFile(spoolPath, []byte("hello"), 0o600))
-	sp := &spooledObject{Path: spoolPath, Size: 5, ETag: "etag"}
-	plan := ecObjectWritePlan{
-		Bucket:           "bucket",
-		Key:              "object",
-		VersionID:        "v1",
-		PlacementGroupID: "group-1",
-		Config:           ECConfig{DataShards: 1, ParityShards: 0},
-		Placement:        []string{"node-a"},
-		ContentType:      "text/plain",
-	}
-
-	result, err := writer.writeMemoryShards(context.Background(), plan, sp)
-	require.NoError(t, err)
-
-	require.Len(t, shards.bufferedLocalWrites, 1)
-	require.Empty(t, shards.localWrites)
-	require.Equal(t, "object/v1", shards.bufferedLocalWrites[0].key)
-	require.Len(t, shards.bufferedLocalWrites[0].body, shardHeaderSize+len("hello"))
-	gotSize, _, err := decodeShardHeader(shards.bufferedLocalWrites[0].body[:shardHeaderSize])
-	require.NoError(t, err)
-	require.Equal(t, int64(5), gotSize)
-	require.Equal(t, []byte("hello"), shards.bufferedLocalWrites[0].body[shardHeaderSize:])
-	require.Equal(t, int64(5), result.Size)
 }
 
 func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
@@ -338,7 +240,6 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 type fakeECObjectWriterShards struct {
 	mu                  sync.Mutex
 	writeShardErr       map[string]error
-	localWrites         []fakeECObjectWriterLocalWrite
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
 	bufferedWrites      []fakeECObjectWriterBufferedWrite
 	streamWrites        []fakeECObjectWriterStreamWrite
@@ -369,15 +270,9 @@ type fakeECObjectWriterStreamWrite struct {
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
-	data, _ := io.ReadAll(body)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.localWrites = append(f.localWrites, fakeECObjectWriterLocalWrite{
-		bucket:   bucket,
-		key:      key,
-		shardIdx: shardIdx,
-		body:     data,
-	})
+	// Drain the body so the writer side completes; no surviving test inspects the
+	// non-buffered local writes (the readers lived in the removed fast-path tests).
+	_, _ = io.ReadAll(body)
 	return nil
 }
 

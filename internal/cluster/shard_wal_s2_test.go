@@ -144,10 +144,11 @@ func TestLargeRedundant_NoFsync(t *testing.T) {
 		"large redundant shards must NOT be fsynced — EC owns durability")
 }
 
-// TestDBV_SingleLocalPath_DirFsyncFailureBlocksVisibility proves DBV on the
-// single-local fast path (1+0 → writeSingleLocalReader → writeQuorumMeta): a
+// TestDBV_NoRedundancyPath_DirFsyncFailureBlocksVisibility proves DBV on the
+// no-redundancy path (1+0 → writeSpooledShards → writeQuorumMeta; the single-local
+// fast path was removed, so 1+0 now routes through the spooled writer): a
 // dir-fsync failure fails the PUT and the object never becomes visible.
-func TestDBV_SingleLocalPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
+func TestDBV_NoRedundancyPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
@@ -159,7 +160,7 @@ func TestDBV_SingleLocalPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 
 	large := bytes.Repeat([]byte("s2-dbv-single-"), 1<<17)
 	_, err := backend.PutObject(context.Background(), "b", "obj-dbv1", bytes.NewReader(large), "application/octet-stream")
-	require.Error(t, err, "a dir-fsync failure must fail the single-local PUT (DBV)")
+	require.Error(t, err, "a dir-fsync failure must fail the no-redundancy PUT (DBV)")
 	require.ErrorContains(t, err, "injected dir fsync failure",
 		"the PUT must fail FROM the durability hook, not from setup/placement")
 	require.Positive(t, dirCalls.Load(), "the injected dir-fsync hook must have actually run")

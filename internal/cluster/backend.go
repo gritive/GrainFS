@@ -73,24 +73,6 @@ func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
 // mismatch.
 func ProposeForwardTimeout() time.Duration { return proposeForwardTimeout }
 
-// EC in-memory shard fast path size caps. Replication (parity == 0) keeps the
-// original 16 MiB cap; parity EC gets a lower 1 MiB cap so concurrent small
-// PUTs cannot stack into a multi-hundred-megabyte burst (the rationale for
-// commit 8d0ecccd #411). Within the cap, parity EC bypasses both the body
-// spool-to-disk and the EC shard spool-to-disk, dropping ~30% CPU on small
-// PUTs that dominate the warp s3 workload.
-const (
-	maxECMemoryShardFastPathBytesReplicated = 16 << 20
-	maxECMemoryShardFastPathBytesParity     = 1 << 20
-)
-
-func maxECMemoryShardFastPathBytesForCfg(cfg ECConfig) int64 {
-	if cfg.ParityShards == 0 {
-		return maxECMemoryShardFastPathBytesReplicated
-	}
-	return maxECMemoryShardFastPathBytesParity
-}
-
 const (
 	ecShardBufferedLimit = 256 * 1024
 	ecShardWriteAttempts = 3

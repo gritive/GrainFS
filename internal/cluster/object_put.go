@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"time"
 
@@ -94,10 +93,6 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, acl)
-}
-
-func ecMemoryShardFastPathEnabled(cfg ECConfig) bool {
-	return cfg.NumShards() != 0
 }
 
 // PutObjectAsync is the write-back variant of PutObject.
@@ -191,11 +186,6 @@ func countSkippedFor(reasons []string, target string) int {
 	return n
 }
 
-func PlacementGroupHasFullEntry(ctx context.Context) bool {
-	_, ok := PlacementGroupEntryFromContext(ctx)
-	return ok
-}
-
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, acl uint8) (*storage.Object, error) {
 	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, acl, 0, false, "", nil, nil, nil, "")
 }
@@ -232,21 +222,6 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	observePutStage("ec", "placement", stageStart)
-
-	selfID := b.currentSelfAddr()
-	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, placement, sp, contentType, userMetadata, sseAlgorithm, acl, parts, tags, multipartUploadID)
-	}
-
-	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, acl, parts, tags, multipartUploadID)
-		if err != nil && placementPlan.TopologyWrite {
-			return nil, topologyShardWriteError(placementPlan.TopologyGroup, effectiveCfg, err)
-		}
-		if handled || err != nil {
-			return obj, err
-		}
-	}
 
 	plan := ecObjectWritePlan{
 		Bucket:           bucket,
@@ -299,80 +274,6 @@ func topologyShardWriteError(group ShardGroupEntry, cfg ECConfig, err error) err
 		Unavailable:   []string{shardErr.node},
 		FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
 	}
-}
-
-func (b *DistributedBackend) tryPutObjectECMemoryShards(
-	ctx context.Context,
-	bucket, key, versionID, placementGroupID string,
-	placement []string,
-	cfg ECConfig,
-	sp *spooledObject,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	parts []storage.MultipartPartEntry,
-	tags []storage.Tag,
-	multipartUploadID string,
-) (*storage.Object, bool, error) {
-	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		Config:           cfg,
-		Placement:        placement,
-		ContentType:      contentType,
-		UserMetadata:     cloneStringMap(userMetadata),
-		SSEAlgorithm:     sseAlgorithm,
-		ACL:              acl,
-	}, sp)
-	if err != nil {
-		return nil, true, err
-	}
-
-	result.Parts = parts
-	result.Tags = tags
-	if multipartUploadID != "" {
-		obj, err := b.commitCompleteMultipartObjectWriteResult(
-			ctx,
-			multipartUploadID,
-			ecObjectWritePlan{
-				Bucket:           bucket,
-				Key:              key,
-				VersionID:        versionID,
-				PlacementGroupID: placementGroupID,
-				Config:           cfg,
-				Placement:        placement,
-				ContentType:      contentType,
-				UserMetadata:     cloneStringMap(userMetadata),
-				SSEAlgorithm:     sseAlgorithm,
-				ACL:              acl,
-			},
-			result,
-			"ec_memory",
-		)
-		return obj, true, err
-	}
-	obj, err := b.commitECObjectWriteResult(
-		ctx,
-		ecObjectWritePlan{
-			Bucket:           bucket,
-			Key:              key,
-			VersionID:        versionID,
-			PlacementGroupID: placementGroupID,
-			Config:           cfg,
-			Placement:        placement,
-			ContentType:      contentType,
-			UserMetadata:     cloneStringMap(userMetadata),
-			SSEAlgorithm:     sseAlgorithm,
-			ACL:              acl,
-		},
-		result,
-		"ec_memory",
-	)
-	return obj, true, err
 }
 
 func (b *DistributedBackend) commitECObjectWriteResult(
@@ -525,151 +426,6 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		NodeIDs:          cloneStringSlice(result.Placement),
 		Parts:            result.Parts,
 		Tags:             result.Tags,
-	}, nil
-}
-
-func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
-	ctx context.Context,
-	bucket, key, versionID, placementGroupID string,
-	placement []string,
-	sp *spooledObject,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	parts []storage.MultipartPartEntry,
-	tags []storage.Tag,
-	multipartUploadID string,
-) (*storage.Object, error) {
-	shardKey := ecObjectShardKey(key, versionID)
-	stageStart := time.Now()
-	body, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open single shard body: %w", err)
-	}
-	obj, writeErr := b.putObjectSingleLocalShardFromReader(
-		ctx,
-		bucket,
-		key,
-		versionID,
-		placementGroupID,
-		placement,
-		sp,
-		body,
-		contentType,
-		userMetadata,
-		sseAlgorithm,
-		acl,
-		"ec_single",
-		nil,
-		parts,
-		tags,
-		multipartUploadID,
-		"", // Content-MD5 already validated at the spool site (sp.ETag)
-	)
-	closeErr := body.Close()
-	if writeErr != nil {
-		return nil, writeErr
-	}
-	if closeErr != nil {
-		_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
-		return nil, fmt.Errorf("close single shard body: %w", closeErr)
-	}
-	observePutStage("ec_single", "total_with_open_close", stageStart)
-	return obj, nil
-}
-
-func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
-	ctx context.Context,
-	bucket, key, versionID, placementGroupID string,
-	placement []string,
-	sp *spooledObject,
-	body io.Reader,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	metricPath string,
-	bodyHash hash.Hash,
-	parts []storage.MultipartPartEntry,
-	tags []storage.Tag,
-	multipartUploadID string,
-	contentMD5Hex string,
-) (*storage.Object, error) {
-	plan := ecObjectWritePlan{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		Config:           ECConfig{DataShards: 1, ParityShards: 0},
-		Placement:        placement,
-		ContentType:      contentType,
-		UserMetadata:     cloneStringMap(userMetadata),
-		SSEAlgorithm:     sseAlgorithm,
-		ACL:              acl,
-	}
-	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	result, err := writer.writeSingleLocalReader(ctx, plan, sp, body, metricPath, bodyHash)
-	if err != nil {
-		return nil, err
-	}
-	// Single write-path Content-MD5 validation: the shard is written but
-	// metadata is not yet committed; reject before commit and drop the shard.
-	// No-op when no Content-MD5 (e.g. multipart-complete, which has none).
-	if verr := validateContentMD5(result.ETag, contentMD5Hex); verr != nil {
-		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
-		return nil, verr
-	}
-	result.Parts = parts
-	result.Tags = tags
-
-	if multipartUploadID != "" {
-		return b.commitCompleteMultipartObjectWriteResult(ctx, multipartUploadID, plan, result, "ec_single")
-	}
-
-	stageStart := time.Now()
-	metaCmd := PutObjectMetaCmd{
-		Bucket:           bucket,
-		Key:              key,
-		Size:             result.Size,
-		ContentType:      contentType,
-		ETag:             result.ETag,
-		ModTime:          result.ModTime,
-		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		ECData:           result.ECData,
-		ECParity:         result.ECParity,
-		NodeIDs:          result.Placement,
-		UserMetadata:     cloneStringMap(userMetadata),
-		SSEAlgorithm:     sseAlgorithm,
-		ACL:              acl,
-		Parts:            parts,
-		Tags:             tags,
-	}
-	// Phase 3: quorum meta write replaces data_raft propose.
-	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
-		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{Error: merr.Error()})
-		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
-		return nil, merr
-	}
-	ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{})
-	observePutStage("ec_single", "quorum_meta", stageStart)
-
-	return &storage.Object{
-		Key:              key,
-		Size:             result.Size,
-		ContentType:      contentType,
-		ETag:             result.ETag,
-		LastModified:     result.ModTime,
-		VersionID:        versionID,
-		UserMetadata:     cloneStringMap(userMetadata),
-		SSEAlgorithm:     sseAlgorithm,
-		PlacementGroupID: placementGroupID,
-		ECData:           result.ECData,
-		ECParity:         result.ECParity,
-		NodeIDs:          cloneStringSlice(result.Placement),
-		Parts:            parts,
-		Tags:             tags,
 	}, nil
 }
 
