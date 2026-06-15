@@ -255,50 +255,6 @@ func (f *FSM) applyResealFSMValues(txn MetadataTxn, data []byte) error {
 	return nil
 }
 
-// Badger key builders. Production code uses the FSM's KeySpace; these
-// package-level helpers exist so unit tests can build the same keys without
-// instantiating a full FSM. golangci-lint's unused analyzer doesn't traverse
-// _test.go callers (run.tests=false), hence the nolint directives.
-
-//nolint:unused // referenced by apply_test.go.
-func bucketKey(bucket string) []byte { return []byte("bucket:" + bucket) }
-
-//nolint:unused // referenced by apply_test.go.
-func bucketPolicyKey(bucket string) []byte { return []byte("policy:" + bucket) }
-
-//nolint:unused // referenced by apply_test.go.
-func bucketVerKey(bucket string) []byte { return []byte("bucketver:" + bucket) }
-
-//nolint:unused // referenced by apply_test.go.
-func objectMetaKey(bucket, key string) []byte { return []byte("obj:" + bucket + "/" + key) }
-
-// objectMetaKeyV returns the per-version metadata key:
-//
-//	obj:{bucket}/{key}/{versionID}
-//
-// Coexists with the legacy latest-only objectMetaKey during the transition.
-//
-//nolint:unused // referenced by apply_test.go and scrubbable_test.go.
-func objectMetaKeyV(bucket, key, versionID string) []byte {
-	return []byte("obj:" + bucket + "/" + key + "/" + versionID)
-}
-
-// latestKey points to the current latest version id for an object, or the
-// literal "DEL" marker when the object has been tombstoned (soft-deleted).
-//
-//nolint:unused // referenced by scrubbable_test.go.
-func latestKey(bucket, key string) []byte {
-	return []byte("lat:" + bucket + "/" + key)
-}
-
-//nolint:unused // referenced by apply_test.go.
-func multipartKey(uploadID string) []byte { return []byte("mpu:" + uploadID) }
-
-//nolint:unused // referenced by ec_metadata_test.go, scrubber_wiring_test.go, shard_placement_test.go.
-func shardPlacementKey(bucket, key string) []byte {
-	return []byte("placement:" + bucket + "/" + key)
-}
-
 // deleteMarkerETag is the sentinel ETag we store on a tombstone (soft-delete).
 // Used by callers to distinguish a real object version from a delete marker.
 const deleteMarkerETag = "DEL"
