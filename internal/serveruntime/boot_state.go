@@ -32,7 +32,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -238,16 +237,6 @@ type bootState struct {
 	balancerProposer    *cluster.BalancerProposer
 	gossipReceiver      *gossip.GossipReceiver
 	placementStatsStore *gossip.NodeStatsStore // nil when balancer disabled
-
-	// bootShardService (data WAL — opened before the cluster shard service so
-	// shard writes can be logged and replayed before any transport stream handler
-	// is registered downstream by bootShardRoutes).
-	dataWAL    *datawal.WAL
-	dataWALDir string
-	// dataWALRepairCollector receives metadata-only WAL replay candidates during
-	// bootShardService; the background repair worker drains them after data
-	// groups, incident recording, and receipts are available.
-	dataWALRepairCollector *cluster.DataWALRepairCollector
 
 	// bootWALAndForwardersPart1
 	wal               *wal.WAL

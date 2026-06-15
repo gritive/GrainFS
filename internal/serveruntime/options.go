@@ -42,7 +42,6 @@ type ServeOptions struct {
 	// --- Storage knobs ---
 	PackThreshold      int   // --pack-threshold
 	ShardPackThreshold int   // --shard-pack-threshold
-	DirectIO           bool  // --direct-io
 	MeasureReadAmp     bool  // --measure-read-amp
 	BlockCacheSize     int64 // --block-cache-size
 	ShardCacheSize     int64 // --shard-cache-size

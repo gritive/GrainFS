@@ -83,11 +83,10 @@ func TestWriteEncryptedShardFile_LockedFsyncOrder(t *testing.T) {
 	}
 }
 
-// TestSmallShard_NoWALRecord_Fsynced proves S2: a small shard (< 1 MiB) now
-// writes NO OpShardPut WAL record and is fsynced (file + dir chain) at write
-// time — the inline-WAL durability is replaced by direct fsync.
-func TestSmallShard_NoWALRecord_Fsynced(t *testing.T) {
-	backend, shardDir, keeper, clusterID := newS1ShardSvc(t,
+// TestSmallShard_Fsynced proves S2: a small shard (< 1 MiB) is fsynced (file +
+// dir chain) at write time — durability is direct fsync (no WAL).
+func TestSmallShard_Fsynced(t *testing.T) {
+	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
 	rec := &syncRecorder{}
@@ -98,8 +97,6 @@ func TestSmallShard_NoWALRecord_Fsynced(t *testing.T) {
 	_, err := backend.PutObject(context.Background(), "b", "obj-small", bytes.NewReader(small), "application/octet-stream")
 	require.NoError(t, err)
 
-	require.Equal(t, 0, countShardWALRecords(t, shardDir, keeper, clusterID),
-		"small shards must write NO WAL record after S2")
 	require.NotEmpty(t, rec.seq())
 	require.Equal(t, "file", rec.seq()[0], "small shard: file fsync first")
 	require.GreaterOrEqual(t, rec.dirCount(), 1, "small shard: dir chain fsynced after the file")
@@ -111,10 +108,10 @@ func TestSmallShard_NoWALRecord_Fsynced(t *testing.T) {
 	require.Equal(t, small, got)
 }
 
-// TestLargeNoRedundancy_NoWALRecord_Fsynced proves the no-redundancy large path
-// drops its metadata-only WAL record and is fsynced (file + dir chain) directly.
-func TestLargeNoRedundancy_NoWALRecord_Fsynced(t *testing.T) {
-	backend, shardDir, keeper, clusterID := newS1ShardSvc(t,
+// TestLargeNoRedundancy_Fsynced proves the no-redundancy large path is fsynced
+// (file + dir chain) directly (no WAL, no EC parity to reconstruct from).
+func TestLargeNoRedundancy_Fsynced(t *testing.T) {
+	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
 	rec := &syncRecorder{}
@@ -125,17 +122,15 @@ func TestLargeNoRedundancy_NoWALRecord_Fsynced(t *testing.T) {
 	_, err := backend.PutObject(context.Background(), "b", "obj-nr", bytes.NewReader(large), "application/octet-stream")
 	require.NoError(t, err)
 
-	require.Equal(t, 0, countShardWALRecords(t, shardDir, keeper, clusterID),
-		"large no-redundancy shards must write NO WAL record after S2")
 	require.NotEmpty(t, rec.seq())
 	require.Equal(t, "file", rec.seq()[0], "no-redundancy large: file fsync first")
 	require.GreaterOrEqual(t, rec.dirCount(), 1, "no-redundancy large: dir chain fsynced after the file")
 }
 
-// TestLargeRedundant_NoFsync_NoRecord proves the S1 class is untouched: large +
-// EC redundancy writes no record AND is not fsynced (EC owns durability).
-func TestLargeRedundant_NoFsync_NoRecord(t *testing.T) {
-	backend, shardDir, keeper, clusterID := newS1ShardSvc(t,
+// TestLargeRedundant_NoFsync proves the S1 class is untouched: large + EC
+// redundancy is NOT fsynced (EC owns durability).
+func TestLargeRedundant_NoFsync(t *testing.T) {
+	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 2, ParityShards: 1}, []string{"self", "self", "self"})
 	rec := &syncRecorder{}
 	backend.shardSvc.syncFileHook = rec.file
@@ -145,8 +140,6 @@ func TestLargeRedundant_NoFsync_NoRecord(t *testing.T) {
 	_, err := backend.PutObject(context.Background(), "b", "obj-r", bytes.NewReader(large), "application/octet-stream")
 	require.NoError(t, err)
 
-	require.Equal(t, 0, countShardWALRecords(t, shardDir, keeper, clusterID),
-		"large redundant shards write no record (S1)")
 	require.Empty(t, rec.seq(),
 		"large redundant shards must NOT be fsynced — EC owns durability")
 }
@@ -199,27 +192,6 @@ func TestDBV_ECCommitPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 
 	_, _, gerr := backend.GetObject(context.Background(), "b", "obj-dbv2")
 	require.Error(t, gerr, "a PUT whose durability failed must not be visible via GET")
-}
-
-// TestS2SliceBoundary_NoShardClassWritesWAL proves that after S2 NO non-packed
-// shard class appends an OpShardPut record: small and large-no-redundancy PUTs
-// both leave the shard WAL empty. Durability is write-time fsync; the WAL is no
-// longer the durability for any non-packed class. (Shard-PACKING is a separate,
-// off-by-default exception that still WAL-delegates via OpShardPackPut; disabled
-// in S3. This test does not enable packing.)
-func TestS2SliceBoundary_NoShardClassWritesWAL(t *testing.T) {
-	backend, shardDir, keeper, clusterID := newS1ShardSvc(t,
-		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
-		WithNoRedundancy(func() bool { return true }))
-
-	ctx := context.Background()
-	_, err := backend.PutObject(ctx, "b", "small", bytes.NewReader([]byte("tiny")), "application/octet-stream")
-	require.NoError(t, err)
-	_, err = backend.PutObject(ctx, "b", "large", bytes.NewReader(bytes.Repeat([]byte("s2-"), 1<<19)), "application/octet-stream")
-	require.NoError(t, err)
-
-	require.Equal(t, 0, countShardWALRecords(t, shardDir, keeper, clusterID),
-		"after S2 no non-packed shard class writes an OpShardPut record")
 }
 
 // TestS2Recovery_FsyncedShardReadsBackWithoutWAL proves recovery passivity for

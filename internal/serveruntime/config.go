@@ -66,7 +66,6 @@ type Config struct {
 	RaftElectionTimeout   time.Duration
 
 	// Storage / EC
-	DirectIO           bool
 	MeasureReadAmp     bool
 	ShardCacheSize     int64
 	PackThreshold      int

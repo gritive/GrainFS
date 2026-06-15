@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -16,8 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -45,28 +42,17 @@ func warnIfReducedDataFsync() {
 // assignments the FSM has so far, then flip the router into "explicit-only"
 // mode (post-seed: every bucket must have an explicit assignment).
 //
-// ShardService: applies cfg-driven options (DirectIO, MeasureReadAmp,
-// AddressBook), then constructs the service. effectiveEC is captured here
+// ShardService: applies cfg-driven options (MeasureReadAmp, AddressBook), then
+// constructs the service. effectiveEC is captured here
 // because seedGroups (cluster size * 4, min 8) is the durability headroom
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
 	// Warn if the data-plane fsync policy (GRAINFS_FSYNC_MODE) has been weakened.
 	warnIfReducedDataFsync()
-	// Open the data WAL before any cluster shard service is constructed so that
-	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
-	// before bootShardRoutes registers transport handlers that would otherwise
-	// surface partially-recovered state to peers.
-	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
-	sealer, err := dataWALSealerForState(state)
-	if err != nil {
-		return err
-	}
-	dw, err := datawal.Open(state.dataWALDir, sealer, datawal.NamespaceShard)
-	if err != nil {
-		return fmt.Errorf("open data WAL: %w", err)
-	}
-	state.dataWAL = dw
-	state.AddCleanup(func() { _ = dw.Close() })
+	// The shard data WAL was removed in S4 (WAL-removal epic). Shard durability is
+	// now established at write time — small/no-redundancy shards fsync directly,
+	// large redundant shards rely on EC reconstruction + the background scrubber.
+	// Boot no longer opens, wires, or replays a shard data WAL.
 
 	clusterSize := 1 + len(state.peers)
 	// Option B (uniform genesis seeding): a solo genesis node that declares a
@@ -151,18 +137,11 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		}
 	}
 
-	state.dataWALRepairCollector = cluster.NewDataWALRepairCollector()
 	shardSvcOpts := []cluster.ShardServiceOption{
-		cluster.WithDataWAL(state.dataWAL),
 		// Single-node (ParityShards==0) has no EC redundancy, so a large
 		// metadata-only shard write must fsync the shard file directly — read
 		// live so a later EC reconfig is honored.
 		cluster.WithNoRedundancy(func() bool { return state.effectiveEC.ParityShards == 0 }),
-		cluster.WithDataWALRepairSink(state.dataWALRepairCollector),
-	}
-	if state.cfg.DirectIO {
-		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
-		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
 	}
 	// Shard-packing is disabled (S3): a durable pack index was never built, so
 	// per-blob fsync cannot replace the WAL-replay-reconstructed index. Refuse to
@@ -186,33 +165,9 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithShardDEKKeeper(state.dekKeeper, state.clusterID))
 	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.clusterTransport, shardSvcOpts...)
-	// Stop the shard-pack actor goroutine (spawned when a WAL is wired) on
-	// shutdown. Registered after the data WAL cleanup so the LIFO cleanup stack
-	// closes the shard service first — the actor must not write into a WAL that
-	// has already been closed.
 	state.AddCleanup(func() { _ = state.shardSvc.Close() })
 
-	// Replay the data WAL into the shard service before bootShardRoutes
-	// registers transport handlers; this keeps peers from observing partially-
-	// recovered local shard state.
-	if state.shardSvc != nil {
-		if err := state.shardSvc.RecoverDataWAL(ctx); err != nil {
-			return fmt.Errorf("recover shard data WAL: %w", err)
-		}
-	}
 	return nil
-}
-
-func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
-	switch {
-	case state.dekKeeper != nil:
-		if len(state.clusterID) != 16 {
-			return nil, fmt.Errorf("data WAL DEK sealer requires 16-byte clusterID, got %d", len(state.clusterID))
-		}
-		return storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID), nil
-	default:
-		return nil, nil
-	}
 }
 
 // bootShardRoutes registers the shard data-plane handlers on the cluster

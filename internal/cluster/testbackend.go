@@ -8,8 +8,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metastore"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 type singletonBackendTestTB interface {
@@ -78,12 +76,7 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	if kErr != nil {
 		t.Fatalf("test DEK keeper: %v", kErr)
 	}
-	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	if err != nil {
-		t.Fatalf("open data wal: %v", err)
-	}
-	t.Cleanup(func() { _ = dwal.Close() })
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})

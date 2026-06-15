@@ -34,8 +34,6 @@ const (
 	PutTraceStageShardWriteLocalMkdir     PutTraceStage = "shard_write_local_mkdir"
 	PutTraceStageShardWriteLocalEncode    PutTraceStage = "shard_write_local_encode"
 	PutTraceStageShardWriteLocalFile      PutTraceStage = "shard_write_local_file"
-	PutTraceStageShardWriteLocalDirect    PutTraceStage = "shard_write_local_direct"
-	PutTraceStageShardWriteLocalBuffered  PutTraceStage = "shard_write_local_buffered"
 	PutTraceStageShardWriteLocalEncOpen   PutTraceStage = "shard_write_local_enc_open"
 	PutTraceStageShardWriteLocalEncWrite  PutTraceStage = "shard_write_local_enc_write"
 	PutTraceStageShardWriteLocalEncSync   PutTraceStage = "shard_write_local_enc_sync"

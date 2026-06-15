@@ -5,21 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -47,18 +41,6 @@ func TestShardService_LocalWriteAndRead(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(shardDir, "shard_0"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello shard", string(data))
-}
-
-func TestShardServiceDataWALRecoveryPrefersDEKKeeper(t *testing.T) {
-	kek := bytes.Repeat([]byte{0x71}, encrypt.KEKSize)
-	clusterID := bytes.Repeat([]byte{0x72}, 16)
-	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
-	require.NoError(t, err)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
-
-	sealer, err := svc.dataWALRecoverySealer()
-	require.NoError(t, err)
-	require.IsType(t, &storage.DEKKeeperAdapter{}, sealer)
 }
 
 func TestShardServiceAcceptsDEKKeeperWithoutStaticEncryptor(t *testing.T) {
@@ -271,25 +253,6 @@ func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(buf), n)
 	require.Equal(t, plaintext[offset:offset+int64(len(buf))], buf)
-}
-
-func TestIsUnsupportedDirectIO(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{name: "nil", err: nil, want: false},
-		{name: "invalid argument", err: errors.New("create tmp shard (direct): invalid argument"), want: true},
-		{name: "operation not supported", err: errors.New("create tmp shard (direct): operation not supported"), want: true},
-		{name: "not implemented", err: errors.New("create tmp shard (direct): not implemented"), want: true},
-		{name: "other", err: errors.New("create tmp shard (direct): permission denied"), want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, isUnsupportedDirectIO(tt.err))
-		})
-	}
 }
 
 func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
@@ -685,274 +648,6 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	require.Error(t, err, "shard moved to wrong position must fail decryption")
 }
 
-// seedInlineShardWALRecord mirrors the pre-S2 PUT behavior: it logs an inline
-// OpShardPut record carrying the shard's on-disk (encoded) bytes, so the WAL
-// inline-restore materializer can rebuild the file on RecoverDataWAL. S2 stopped
-// the PUT path from writing this record (small shards fsync directly), but the
-// materializer stays alive (rolling-upgrade / legacy WALs) until S4 — so these
-// tests seed the record directly to keep exercising the inline-restore path.
-func seedInlineShardWALRecord(t *testing.T, dwal *datawal.WAL, svc *ShardService, bucket, key string, shardIdx int) {
-	t.Helper()
-	encoded, err := os.ReadFile(mustShardPath(svc, bucket, key, shardIdx))
-	require.NoError(t, err)
-	_, err = dwal.Append(context.Background(), datawal.Record{
-		Op:      datawal.OpShardPut,
-		Bucket:  bucket,
-		Key:     key,
-		Target:  strconv.Itoa(shardIdx),
-		Size:    int64(len(encoded)),
-		Payload: encoded,
-	})
-	require.NoError(t, err)
-	require.NoError(t, dwal.Flush())
-}
-
-func TestShardService_DataWALRestoresMissingLocalShard(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
-	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("payload")))
-	seedInlineShardWALRecord(t, dwal, svc, "b", "k", 0) // S2: PUT no longer logs the inline record
-	shardPath := mustShardPath(svc, "b", "k", 0)
-	require.NoError(t, os.Remove(shardPath))
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-	got, err := svc.ReadLocalShard("b", "k", 0)
-	require.NoError(t, err)
-	require.Equal(t, []byte("payload"), got)
-}
-
-func TestShardService_DataWALRestoresStreamedLocalShard(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
-	require.NoError(t, svc.WriteLocalShardStream("b", "streamed", 1, strings.NewReader("stream-payload")))
-	seedInlineShardWALRecord(t, dwal, svc, "b", "streamed", 1) // S2: PUT no longer logs the inline record
-	shardPath := mustShardPath(svc, "b", "streamed", 1)
-	require.NoError(t, os.Remove(shardPath))
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-	got, err := svc.ReadLocalShard("b", "streamed", 1)
-	require.NoError(t, err)
-	require.Equal(t, []byte("stream-payload"), got)
-}
-
-func TestShardService_DataWALRestoresEncryptedShard(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithDataWAL(dwal),
-	)
-	require.NoError(t, svc.WriteLocalShard("b", "k", 0, []byte("encrypted-payload")))
-	seedInlineShardWALRecord(t, dwal, svc, "b", "k", 0) // S2: PUT no longer logs the inline record
-	shardPath := mustShardPath(svc, "b", "k", 0)
-	require.NoError(t, os.Remove(shardPath))
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-	got, err := svc.ReadLocalShard("b", "k", 0)
-	require.NoError(t, err)
-	require.Equal(t, []byte("encrypted-payload"), got)
-}
-
-func TestDataWALRepairCollector_CoalescesByBucketShardAndIndex(t *testing.T) {
-	collector := NewDataWALRepairCollector()
-
-	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
-		Bucket:       "b",
-		ShardKey:     "obj/v1",
-		ShardIdx:     2,
-		ExpectedSize: 10,
-		Reason:       DataWALRepairMissing,
-	})
-	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
-		Bucket:       "b",
-		ShardKey:     "obj/v1",
-		ShardIdx:     2,
-		ExpectedSize: 99,
-		Reason:       DataWALRepairSizeMismatch,
-	})
-	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
-		Bucket:       "b",
-		ShardKey:     "obj/v1",
-		ShardIdx:     3,
-		ExpectedSize: 11,
-		Reason:       DataWALRepairMissing,
-	})
-	// Same ShardIdx as the first entry but a different Bucket: must NOT
-	// coalesce, proving the composite key includes Bucket.
-	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
-		Bucket:       "other",
-		ShardKey:     "obj/v1",
-		ShardIdx:     2,
-		ExpectedSize: 22,
-		Reason:       DataWALRepairMissing,
-	})
-	// Same Bucket and ShardIdx as the first entry but a different ShardKey:
-	// must NOT coalesce, proving the composite key includes ShardKey.
-	collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
-		Bucket:       "b",
-		ShardKey:     "obj/v2",
-		ShardIdx:     2,
-		ExpectedSize: 33,
-		Reason:       DataWALRepairMissing,
-	})
-
-	got := collector.Candidates()
-	require.Len(t, got, 4)
-	require.Equal(t, DataWALRepairCandidate{
-		Bucket:       "b",
-		ShardKey:     "obj/v1",
-		ShardIdx:     2,
-		ExpectedSize: 99,
-		Reason:       DataWALRepairSizeMismatch,
-	}, got[0])
-	require.Equal(t, 3, got[1].ShardIdx)
-	require.Equal(t, DataWALRepairCandidate{
-		Bucket:       "other",
-		ShardKey:     "obj/v1",
-		ShardIdx:     2,
-		ExpectedSize: 22,
-		Reason:       DataWALRepairMissing,
-	}, got[2])
-	require.Equal(t, DataWALRepairCandidate{
-		Bucket:       "b",
-		ShardKey:     "obj/v2",
-		ShardIdx:     2,
-		ExpectedSize: 33,
-		Reason:       DataWALRepairMissing,
-	}, got[3])
-}
-
-func TestShardService_DataWALMetadataOnlyMissingQueuesStartupRepair(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	collector := NewDataWALRepairCollector()
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithDataWAL(dwal),
-		WithDataWALRepairSink(collector),
-	)
-
-	_, err = dwal.Append(context.Background(), datawal.Record{
-		Op:     datawal.OpShardPut,
-		Bucket: "b",
-		Key:    "obj/v1",
-		Target: "0",
-		Size:   int64(walPayloadInlineThreshold),
-	})
-	require.NoError(t, err)
-	require.NoError(t, dwal.Flush())
-
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-
-	require.Equal(t, []DataWALRepairCandidate{{
-		Bucket:       "b",
-		ShardKey:     "obj/v1",
-		ShardIdx:     0,
-		ExpectedSize: int64(walPayloadInlineThreshold),
-		Reason:       DataWALRepairMissing,
-	}}, collector.Candidates())
-}
-
-func TestShardService_DataWALMetadataOnlySizeMismatchQueuesStartupRepair(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	collector := NewDataWALRepairCollector()
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithDataWAL(dwal),
-		WithDataWALRepairSink(collector),
-	)
-
-	path := mustShardPath(svc, "b", "obj/v1", 1)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte("short"), 0o600))
-	_, err = dwal.Append(context.Background(), datawal.Record{
-		Op:     datawal.OpShardPut,
-		Bucket: "b",
-		Key:    "obj/v1",
-		Target: "1",
-		Size:   int64(walPayloadInlineThreshold),
-	})
-	require.NoError(t, err)
-	require.NoError(t, dwal.Flush())
-
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-
-	require.Equal(t, []DataWALRepairCandidate{{
-		Bucket:       "b",
-		ShardKey:     "obj/v1",
-		ShardIdx:     1,
-		ExpectedSize: int64(walPayloadInlineThreshold),
-		Reason:       DataWALRepairSizeMismatch,
-	}}, collector.Candidates())
-}
-
-func TestDataWALRepairCollector_ConcurrentAddIsRaceFree(t *testing.T) {
-	collector := NewDataWALRepairCollector()
-
-	const goroutines = 50
-	// Keys 0..39 are distinct; keys 40..49 duplicate key "0".
-	// Distinct key count is 40.
-	var wg sync.WaitGroup
-	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
-		i := i
-		key := strconv.Itoa(i % 40)
-		go func() {
-			defer wg.Done()
-			collector.AddDataWALRepairCandidate(DataWALRepairCandidate{
-				Bucket:   "b",
-				ShardKey: key,
-				ShardIdx: 0,
-				Reason:   DataWALRepairMissing,
-			})
-		}()
-	}
-	wg.Wait()
-
-	require.Len(t, collector.Candidates(), 40)
-}
-
-func TestShardService_DataWALInlineReplayDoesNotQueueStartupRepair(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	collector := NewDataWALRepairCollector()
-	svc := NewShardService(
-		dir,
-		transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID),
-		WithDataWAL(dwal),
-		WithDataWALRepairSink(collector),
-	)
-	require.NoError(t, svc.WriteLocalShard("b", "small", 0, []byte("payload")))
-	seedInlineShardWALRecord(t, dwal, svc, "b", "small", 0) // S2: PUT no longer logs the inline record
-	require.NoError(t, os.Remove(mustShardPath(svc, "b", "small", 0)))
-
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
-
-	require.Empty(t, collector.Candidates())
-	got, err := svc.ReadLocalShard("b", "small", 0)
-	require.NoError(t, err)
-	require.Equal(t, []byte("payload"), got)
-}
-
 func TestWithShardDEKKeeper_SetsSegEncAndClusterID(t *testing.T) {
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x22}, encrypt.KEKSize), bytes.Repeat([]byte{0x33}, 16))
 	if err != nil {
@@ -1036,28 +731,4 @@ func TestShardService_NativeWriteHandler_PlainAndSealed(t *testing.T) {
 	gotSealed, err := svc2.ReadLocalShard("bkt", "key3", 0)
 	require.NoError(t, err)
 	require.Equal(t, []byte("sealed shard plaintext"), gotSealed)
-}
-
-// TestRecoverDataWAL_SkipsLegacyShardPackRecords proves rolling-upgrade safety:
-// after S3 removed the shard-pack subsystem, a WAL containing legacy
-// OpShardPackPut/OpShardPackDelete records still replays without error (the
-// records hit the materializer's default arm and are skipped; their .pack data
-// is intentionally dropped — shard-packing was off by default in practice and
-// not relied upon).
-func TestRecoverDataWAL_SkipsLegacyShardPackRecords(t *testing.T) {
-	dir := t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	dwal, err := datawal.Open(filepath.Join(dir, "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(t, err)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
-
-	// Seed a legacy pack record directly (the writer is gone; the op constant stays).
-	_, err = dwal.Append(context.Background(), datawal.Record{
-		Op: datawal.OpShardPackPut, Bucket: "b", Key: "legacy", Target: "0", Size: 4, Payload: []byte("legacy-pack-bytes"),
-	})
-	require.NoError(t, err)
-	require.NoError(t, dwal.Flush())
-
-	// Recovery must succeed (record skipped, no crash).
-	require.NoError(t, svc.RecoverDataWAL(context.Background()))
 }

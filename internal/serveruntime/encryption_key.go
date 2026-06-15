@@ -89,7 +89,6 @@ func dataDirHasEntries(path string) bool {
 //   - <root>/shards/  — EC shards, cluster mode (shard_service.go:167)
 //   - <root>/data/    — single-node object files + _segments (local.go:128,167)
 //   - under the primary dataDir:
-//   - datawal/        — encrypted WAL records (boot_phases_storage_runtime.go:40)
 //   - blobs/          — packblob, active by default at pack-threshold=65537
 //     (boot_phases_backend.go:48)
 //   - shared-fsm/     — cluster FSM-state BadgerDB with encrypted values
@@ -117,9 +116,6 @@ func BulkDataPresent(dataDir string, dataDirs []string, metaDir string) bool {
 		if dataDirHasEntries(filepath.Join(d, "data")) {
 			return true
 		}
-	}
-	if dataDirHasEntries(filepath.Join(dataDir, "datawal")) {
-		return true
 	}
 	if dataDirHasEntries(filepath.Join(dataDir, "blobs")) {
 		return true
