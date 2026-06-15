@@ -48,6 +48,13 @@ type ShardService struct {
 	clusterID [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
 	addrBook  NodeAddressBook
 	dirCache  sync.Map
+	// dirDurable records, per directory path, that the dir's entry in its PARENT
+	// has been persisted by a COMPLETED fsync (Stored post-fsync, never before).
+	// syncDirChain consults it to skip re-fsyncing ancestor shard directories
+	// whose child link a prior completed write already made durable. Same
+	// process-local coherence model as dirCache (no external-delete invalidation;
+	// shard leaf paths are version/UUID-keyed and never reborn — see syncDirChain).
+	dirDurable sync.Map
 	// syncFileHook / syncDirHook are nil-default test seams. Production leaves
 	// them nil → fsyncFile/fsyncDir call directio.Sync / syncDir directly. Tests
 	// set them to assert the durability fsync call ORDER (DBV / locked-order).
@@ -938,29 +945,69 @@ func (s *ShardService) fsyncDir(dir string) error {
 	return syncDir(dir)
 }
 
-// syncDirChain fsyncs leaf and each ancestor up to (exclusive) stop, so a
-// freshly created shard directory tree is durably LINKED into the namespace —
-// not just its leaf contents. getShardDir builds dir = dataDir/bucket/key and
-// the version-keyed key dir is created per PUT, so fsyncing only the leaf would
-// leave the leaf's own entry in its parent non-durable (a crash could lose the
-// whole shard dir after the quorum-meta commit). stop is the shard's data dir;
-// the bucket dir's own entry in dataDir is a CreateBucket concern, out of scope.
+// syncDirChain durably LINKS a freshly written shard into the namespace: it
+// fsyncs the leaf (its new shard-file entry) and persists each ancestor's entry
+// in its parent up to (exclusive) stop. getShardDir builds dir = dataDir/bucket/key
+// (version-keyed key dir created per PUT), so fsyncing only the leaf would leave
+// the leaf's own entry in its parent non-durable (a crash could lose the whole
+// shard dir after the quorum-meta commit). stop is the shard's data dir; the
+// bucket dir's own entry in dataDir is out of scope (a pre-existing gap — see
+// below — that this function never closed and CreateBucket does not either).
+//
+// Dedup: the leaf is fsynced every write (a new shard FILE lands there). An
+// ancestor only needs fsyncing the first time its child entry is created+
+// persisted; once a COMPLETED prior write made that link durable, the chain stays
+// durable across later writes (which only add shard FILES to leaves, never
+// restructure ancestors). dirDurable(d) records that d's entry in its parent was
+// persisted; the mark is Stored only AFTER the persisting fsync(parent(d))
+// returns, so any skip is backed by durable on-disk data (race-free under the
+// concurrent same-leaf shard writes the errgroup data-shard path issues). A
+// newly-created dir is absent from the map (== not durable) → its parent IS
+// fsynced, persisting the new entry; so a new sibling is never skipped.
+//
+// Coherence: dirDurable is process-local with no external-delete invalidation —
+// the same model as dirCache. Every shard-leaf path is version/UUID-keyed and the
+// delete paths (DeleteLocalShards, orphan RemoveAll) operate on those unique
+// leaves, never reborn, so a stale mark is never consulted again.
 func (s *ShardService) syncDirChain(leaf, stop string) error {
 	stop = filepath.Clean(stop)
-	for d := filepath.Clean(leaf); d != stop; {
-		if err := s.fsyncDir(d); err != nil {
-			return err
+	leaf = filepath.Clean(leaf)
+	if leaf == stop {
+		// Degenerate (unreachable for real shards: dir = dataDir/bucket/key is
+		// always strictly below stop = dataDir). Preserve the pre-dedup contract,
+		// whose `for d := leaf; d != stop` loop fsynced nothing here.
+		return nil
+	}
+	// The leaf always receives a fresh shard-file entry on this write → fsync its
+	// CONTENTS every time, independent of whether its own dir entry is durable.
+	if err := s.fsyncDir(leaf); err != nil {
+		return err
+	}
+	for d := leaf; ; {
+		if _, durable := s.dirDurable.Load(d); durable {
+			return nil // d's entry — and the whole chain above it — already durable
 		}
 		parent := filepath.Dir(d)
+		if parent == stop {
+			// d is the shard-tree bucket dir; stop is the data dir. Match the
+			// pre-dedup contract exactly: never fsync stop (its bucket-dir entry is
+			// a pre-existing, out-of-scope durability gap). Record d so future
+			// writes can stop here too.
+			s.dirDurable.Store(d, struct{}{})
+			return nil
+		}
 		if parent == d { // reached filesystem root WITHOUT hitting stop
-			// stop must be an ancestor of leaf; if not, the caller passed a
-			// wrong data-dir root and we'd otherwise silently report success
-			// (masking a placement/path bug) — fail loudly instead.
+			// stop must be an ancestor of leaf; if not, the caller passed a wrong
+			// data-dir root and we'd otherwise silently report success (masking a
+			// placement/path bug) — fail loudly instead.
 			return fmt.Errorf("syncDirChain: stop %q is not an ancestor of %q", stop, leaf)
 		}
+		if err := s.fsyncDir(parent); err != nil {
+			return err // d NOT marked durable: its entry isn't persisted yet
+		}
+		s.dirDurable.Store(d, struct{}{})
 		d = parent
 	}
-	return nil
 }
 
 // writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes
@@ -1223,6 +1270,7 @@ func (s *ShardService) ensureShardDir(dir string) error {
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		s.dirCache.Delete(dir)
+		s.dirDurable.Delete(dir)
 		return err
 	}
 	s.dirCache.Store(dir, struct{}{})
