@@ -279,7 +279,10 @@ func (r forwardRuntime) listObjectVersions(ctx context.Context, target RouteTarg
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys))
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjectVersions, args)
+	// peersForTarget backfills peers when routeGroup returned none (self was the
+	// leader at route time) and a leader-flip then made ResolveRead defer to a
+	// forward — without this the multi-group fan-out would dial an empty peer set.
+	reply, err := r.sender.Send(ctx, r.peersForTarget(target), target.GroupID, raftpb.ForwardOpListObjectVersions, args)
 	if err != nil {
 		return nil, err
 	}

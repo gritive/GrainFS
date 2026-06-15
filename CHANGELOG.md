@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.587.0] - 2026-06-15
+
+### Fixed
+- **Versioned `ListObjectVersions` now enumerates every version across all shard
+  groups (no longer latest-only under multi-group sharding).** Objects are
+  key-hash placed across shard groups (`RouteObjectWrite` → `groupIDForObject`,
+  a pure function of `(bucket, key)`), but `ListObjectVersions` routed via
+  `RouteBucket` to the bucket's single assigned group — so versions of keys that
+  hashed to other groups were invisible (the LIST returned the latest-only set,
+  often zero old versions). It now fans out across all groups
+  (`c.meta.ShardGroups()`), reading each group's per-version FSM enumeration
+  (local backend or forwarded, read-fenced), unions the results, and reconciles
+  a single authoritative `IsLatest` per key from the groups' `lat:` pointers
+  (never promoting a non-flagged `PreserveLatest` version; on a cross-group
+  `lat:` split the newest UUIDv7 version wins). Fan-out is fail-closed (a group
+  error fails the LIST rather than silently dropping versions). The single-group
+  / internal-bucket path is unchanged. Snapshots (`ListAllObjects`) inherit the
+  fix. Also fixes the per-group leaf: a versioned `obj:{bucket}/{key}/{vid}` row
+  whose `lat:` pointer lives in another group (split key, or a `PreserveLatest`
+  write) was emitted as a corrupt legacy row (`Key="{key}/{vid}"`,
+  `VersionID=""`, `IsLatest=true`); it now disambiguates via the stored
+  `objectMeta.Key` and emits a proper non-latest version.
+
 ## [0.0.586.0] - 2026-06-15
 
 ### Fixed
