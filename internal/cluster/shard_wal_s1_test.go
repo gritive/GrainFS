@@ -76,31 +76,9 @@ func TestAppendShardDataWAL_LargeRedundant_SkipsWAL(t *testing.T) {
 	require.Equal(t, large, got)
 }
 
-// TestAppendShardDataWAL_Small_KeepsInlineWAL proves small shards are unchanged:
-// the WAL still stores inline-payload OpShardPut records (their sole durability).
-func TestAppendShardDataWAL_Small_KeepsInlineWAL(t *testing.T) {
-	backend, shardDir, keeper, clusterID := newS1ShardSvc(t, ECConfig{DataShards: 2, ParityShards: 1}, []string{"self", "self", "self"})
-
-	small := []byte("tiny") // << 1MiB per shard
-	_, err := backend.PutObject(context.Background(), "b", "obj-small", bytes.NewReader(small), "application/octet-stream")
-	require.NoError(t, err)
-
-	require.Greater(t, countShardWALRecords(t, shardDir, keeper, clusterID), 0,
-		"small shards must still write inline-payload WAL records")
-}
-
-// TestAppendShardDataWAL_LargeNoRedundancy_KeepsRecord proves the no-redundancy
-// large path is untouched by S1 (it still writes a metadata-only record; S2 will
-// replace it with a direct fsync). WithNoRedundancy(true) + 1+0.
-func TestAppendShardDataWAL_LargeNoRedundancy_KeepsRecord(t *testing.T) {
-	backend, shardDir, keeper, clusterID := newS1ShardSvc(t,
-		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
-		WithNoRedundancy(func() bool { return true }))
-
-	large := bytes.Repeat([]byte("s1-large-noredund-"), 1<<17)
-	_, err := backend.PutObject(context.Background(), "b", "obj-nr", bytes.NewReader(large), "application/octet-stream")
-	require.NoError(t, err)
-
-	require.Greater(t, countShardWALRecords(t, shardDir, keeper, clusterID), 0,
-		"large no-redundancy shards must still write a metadata-only WAL record (S2 territory)")
-}
+// NOTE: the former TestAppendShardDataWAL_Small_KeepsInlineWAL and
+// TestAppendShardDataWAL_LargeNoRedundancy_KeepsRecord were deleted in S2 —
+// small and no-redundancy-large shards no longer write a WAL record (they fsync
+// directly). The stronger no-record-AND-fsynced property is proven by
+// TestSmallShard_NoWALRecord_Fsynced and
+// TestLargeNoRedundancy_NoWALRecord_Fsynced in shard_wal_s2_test.go.

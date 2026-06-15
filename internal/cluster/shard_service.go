@@ -70,6 +70,11 @@ type ShardService struct {
 	// filesystem confirms the win (see shardio_directio_bench_test.go).
 	directIO bool
 	dirCache sync.Map
+	// syncFileHook / syncDirHook are nil-default test seams. Production leaves
+	// them nil → fsyncFile/fsyncDir call directio.Sync / syncDir directly. Tests
+	// set them to assert the durability fsync call ORDER (DBV / locked-order).
+	syncFileHook func(*os.File) error
+	syncDirHook  func(string) error
 	// dataWAL, when set, receives an OpShardPut record before each local shard
 	// file mutation so that a torn / lost shard file can be replayed on boot.
 	dataWAL DataWALAppender
@@ -992,10 +997,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		ShardTargetClass: "local",
 	})
 	payload := encoded.Bytes()
-	requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, payload)
-	if err != nil {
-		return err
-	}
+	requireFsync := s.shardWriteRequiresFsync(len(payload))
 	fileStart := time.Now()
 	if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
@@ -1011,17 +1013,9 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
-	// Directory metadata durability is owned by the data WAL: the WAL
-	// record was flushed before the on-disk write ran, so a crash after
-	// rename replays the same bytes. The dir-sync trace stage is preserved
-	// as a zero-duration event so dashboards remain stable across the
-	// fsync policy migration.
-	dirSyncStart := time.Now()
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
+	// Directory durability (the DirSync trace stage) now runs inside
+	// writeEncryptedShardFile, where requireFsync is known and the real
+	// syncDirChain fsync happens for the fsync classes (S2).
 	return nil
 }
 
@@ -1044,27 +1038,67 @@ func (s *ShardService) writeLocalSealedShard(ctx context.Context, bucket, key st
 		return fmt.Errorf("create shard dir: %w", err)
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	requireFsync, err := s.appendShardDataWAL(ctx, bucket, key, shardIdx, sealed)
-	if err != nil {
-		return err
-	}
+	requireFsync := s.shardWriteRequiresFsync(len(sealed))
 	return s.writeEncryptedShardFile(ctx, dir, path, sealed, shardIdx, requireFsync)
+}
+
+// fsyncFile fsyncs an open shard tmp file (or the test seam when set).
+func (s *ShardService) fsyncFile(f *os.File) error {
+	if s.syncFileHook != nil {
+		return s.syncFileHook(f)
+	}
+	return directio.Sync(f)
+}
+
+// fsyncDir fsyncs one directory so a rename (the durable link of a shard file
+// into the namespace) survives a crash (or the test seam).
+func (s *ShardService) fsyncDir(dir string) error {
+	if s.syncDirHook != nil {
+		return s.syncDirHook(dir)
+	}
+	return syncDir(dir)
+}
+
+// syncDirChain fsyncs leaf and each ancestor up to (exclusive) stop, so a
+// freshly created shard directory tree is durably LINKED into the namespace —
+// not just its leaf contents. getShardDir builds dir = dataDir/bucket/key and
+// the version-keyed key dir is created per PUT, so fsyncing only the leaf would
+// leave the leaf's own entry in its parent non-durable (a crash could lose the
+// whole shard dir after the quorum-meta commit). stop is the shard's data dir;
+// the bucket dir's own entry in dataDir is a CreateBucket concern, out of scope.
+func (s *ShardService) syncDirChain(leaf, stop string) error {
+	stop = filepath.Clean(stop)
+	for d := filepath.Clean(leaf); d != stop; {
+		if err := s.fsyncDir(d); err != nil {
+			return err
+		}
+		parent := filepath.Dir(d)
+		if parent == d { // reached filesystem root WITHOUT hitting stop
+			// stop must be an ancestor of leaf; if not, the caller passed a
+			// wrong data-dir root and we'd otherwise silently report success
+			// (masking a placement/path bug) — fail loudly instead.
+			return fmt.Errorf("syncDirChain: stop %q is not an ancestor of %q", stop, leaf)
+		}
+		d = parent
+	}
+	return nil
 }
 
 // writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes
 // to disk using the atomic tmp + rename recipe. Encoding happens in the
-// caller so the encrypted payload can be appended to the data WAL before any
-// shard file mutation; this function only handles the on-disk I/O.
+// caller so the encrypted payload is computed before any shard file mutation;
+// this function only handles the on-disk I/O.
 //
-// Durability is owned by internal/storage/datawal. The trace stages below
-// retain their pre-WAL names so dashboards and operator queries keep working;
-// the EncSync / DirSync stages now wrap zero-duration no-ops because durability
-// is committed by the WAL append+flush that happens before this call. Trace
-// stage semantics:
-//   - PutTraceStageShardWriteLocalEncode: encryption into an in-memory buffer.
+// Post-S2 durability is established at WRITE TIME for the fsync classes (small /
+// no-redundancy): when requireFsync the EncSync stage fsyncs the shard file and
+// the DirSync stage fsyncs the shard's directory CHAIN (leaf shard dir + each
+// newly-created ancestor up to the data dir) so a crash cannot lose the file or
+// its namespace link. Large redundant shards (requireFsync=false) skip both —
+// EC reconstruction + the scrubber own their durability (S1). Trace stages:
 //   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload.
+//   - PutTraceStageShardWriteLocalEncSync: shard-file fsync (requireFsync only).
+//   - PutTraceStageShardWriteLocalDirSync: directory-chain fsync (requireFsync only).
 func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int, requireFsync bool) error {
-	_ = dir
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -1105,13 +1139,13 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 	})
 
 	// EncSync fsyncs the shard file only when requireFsync is set: during WAL
-	// replay (the WAL cannot be re-appended) and for large no-redundancy shards
-	// (no parity to reconstruct from). Otherwise it is skipped: small shards have
-	// WAL-inline durability (the WAL Flush), and large redundant shards rely on EC
-	// reconstruction + the scrubber (S1 — no WAL record, no fsync).
+	// replay (the WAL cannot be re-appended), for small shards, and for large
+	// no-redundancy shards (no parity to reconstruct from). It is skipped for
+	// large redundant shards, which rely on EC reconstruction + the scrubber
+	// (S1 — no WAL record, no fsync).
 	encSyncStart := time.Now()
 	if requireFsync {
-		if err := directio.Sync(f); err != nil {
+		if err := s.fsyncFile(f); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
 				Bytes:            int64(len(payload)),
 				ShardIndex:       shardIdx,
@@ -1161,6 +1195,32 @@ func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path st
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
+
+	// D2 (DBV): after the rename, fsync the shard's directory CHAIN (leaf shard
+	// dir + each newly-created ancestor up to the data dir) so the durable link
+	// of the shard file into the namespace cannot be lost on crash. Gated on
+	// requireFsync — large redundant shards (S1) own durability via EC
+	// reconstruction and skip both the file and dir fsync (a vanished dir there
+	// is just a "missing shard" rebuilt lazily). Locked order:
+	// write(tmp) → Sync(tmp) → rename → syncDirChain(dir) → return.
+	if requireFsync {
+		dirSyncStart := time.Now()
+		stop := s.dataDirs[shardIdx%len(s.dataDirs)]
+		if err := s.syncDirChain(dir, stop); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
+			return fmt.Errorf("fsync shard dir chain: %w", err)
+		}
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
+			Bytes:            int64(len(payload)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+		})
+	}
 
 	return nil
 }
@@ -1221,82 +1281,41 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 	return data, nil
 }
 
-// walPayloadInlineThreshold is the size at which the data WAL stops inlining
-// the shard payload. Below the threshold the WAL stores the full encoded
-// payload and provides durability for the subsequent shard file write (a single
-// group-commit fsync amortizes well for small random writes that would
-// otherwise dominate PUT latency). At or above the threshold the payload is
-// never inlined; durability then depends on redundancy (see appendShardDataWAL):
-// a redundant shard (ParityShards>0) skips the WAL entirely and relies on EC +
-// the scrubber (S1), while a no-redundancy shard keeps a metadata-only record
-// and is fsynced directly.
+// walPayloadInlineThreshold is the shard-payload size boundary between
+// fsync-covered small shards and EC-covered large shards. Below the threshold a
+// shard is always fsynced (file + dir chain) at write time; at or above it,
+// durability comes from EC redundancy when present (ParityShards>0), else a
+// direct fsync (no-redundancy). (Name retained from the WAL era for blast-radius
+// reasons; renamed in the S4 cosmetic cleanup.)
 const walPayloadInlineThreshold = 1 << 20
 
-// appendShardDataWAL records shard durability metadata in the data WAL before
-// any file mutation, by shard class:
+// shardWriteRequiresFsync reports whether a freshly written shard file (and its
+// parent directory chain) must be fsynced for durability, by shard class.
+// Post-S2 the data WAL is no longer written on the shard PUT path — durability
+// is established at write time:
 //
-//   - Small payload (< walPayloadInlineThreshold): an inline-payload OpShardPut
-//     record. The WAL Flush IS the durability — RecoverDataWAL rebuilds a missing
-//     file byte-for-byte. Returns requireFsync=false (the shard file is not
-//     fsynced; the WAL covers it).
-//   - Large payload WITH EC redundancy (ParityShards>0, i.e. !noRedundancy):
-//     S1 skips the WAL entirely — no record, no Flush. The record was only an
-//     eager-startup-repair manifest; EC reconstruction + the background scrubber
-//     (S0) provide durability and repair (lazily, at read time or scrub sweep).
-//     Returns requireFsync=false. nil noRedundancy counts as redundant.
-//   - Large payload with NO redundancy (ParityShards==0): a metadata-only
-//     OpShardPut record + Flush, then returns requireFsync=true so the caller
-//     fsyncs the shard file directly (there is no parity to reconstruct from).
-//     (S2 will replace this with a direct file+dir fsync and drop the record.)
+//   - Small (< walPayloadInlineThreshold) OR large with NO EC redundancy
+//     (ParityShards==0, i.e. noRedundancy()): fsync the shard file + parent dir
+//     chain (there is no parity to reconstruct from, or the shard is too small
+//     to be worth an EC stripe) → returns true.
+//   - Large WITH EC redundancy (ParityShards>0, i.e. !noRedundancy): EC
+//     reconstruction + the background scrubber (S0/S1) own durability; the file
+//     is NOT fsynced → returns false. A nil noRedundancy provider counts as
+//     redundant (matches production wiring; nil only occurs in tests).
 //
-// WAL is mandatory where it is used: a nil WAL is rejected with an error.
-// During WAL replay it returns requireFsync=true (the WAL cannot be re-appended,
-// so the caller MUST fsync the shard file itself).
-func (s *ShardService) appendShardDataWAL(ctx context.Context, bucket, key string, shardIdx int, payload []byte) (requireFsync bool, err error) {
-	if s.dataWAL == nil {
-		return false, fmt.Errorf("appendShardDataWAL: shard write requires a data WAL (WAL is mandatory)")
-	}
+// During WAL replay the materializer fsyncs directly (writeShardFile hardcodes
+// requireFsync=true); if a normal write is somehow reached mid-replay this still
+// returns true (fail safe). The shard-write path no longer requires a wired WAL
+// (durability is fsync/EC); a nil WAL is only consulted by boot recovery now.
+func (s *ShardService) shardWriteRequiresFsync(payloadLen int) bool {
 	if s.replayingDataWAL.Load() {
-		return true, nil
+		return true
 	}
-	inlined := len(payload) < walPayloadInlineThreshold
-
-	// S1: large shards WITH EC redundancy skip the WAL entirely. The metadata-only
-	// record was only an eager-startup-repair manifest; EC reconstruction plus the
-	// background scrubber (S0, which now covers regular-PUT objects) provide
-	// durability and repair. Removing the Append+Flush drops one WAL fsync per
-	// shard write on the dominant PUT path. A lost shard is rebuilt lazily at read
-	// time or by the scrubber sweep. nil noRedundancy == redundant (matches the
-	// pre-S1 requireFsync default below). The no-redundancy large case still needs
-	// the WAL record (no parity to reconstruct from) and is handled in S2.
-	if !inlined && (s.noRedundancy == nil || !s.noRedundancy()) {
-		return false, nil
+	large := payloadLen >= walPayloadInlineThreshold
+	if large && (s.noRedundancy == nil || !s.noRedundancy()) {
+		return false // large + redundant: EC durability, no fsync (S1)
 	}
-
-	rec := datawal.Record{
-		Op:     datawal.OpShardPut,
-		Bucket: bucket,
-		Key:    key,
-		Target: strconv.Itoa(shardIdx),
-		Size:   int64(len(payload)),
-	}
-	if inlined {
-		// Small payload: inline so replay can rebuild the file byte-for-byte.
-		rec.Payload = payload
-	}
-	// Large + no-redundancy: metadata-only record (S2 replaces with direct fsync).
-	if _, err := s.dataWAL.Append(ctx, rec); err != nil {
-		return false, fmt.Errorf("data wal append shard: %w", err)
-	}
-	if err := s.dataWAL.Flush(); err != nil {
-		return false, fmt.Errorf("data wal flush shard: %w", err)
-	}
-	// Large + no-redundancy: nothing to reconstruct from, so the shard file must
-	// be fsynced directly (this branch is only reached when noRedundancy is true).
-	if !inlined {
-		return true, nil
-	}
-	return false, nil
+	return true // small, or large + no-redundancy: write-time fsync
 }
 
 // ShardMetadataWALRecord describes one shard's WAL metadata-only entry

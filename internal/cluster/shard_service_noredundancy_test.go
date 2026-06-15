@@ -2,24 +2,22 @@ package cluster
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 // largeShardPayload returns a payload at/above walPayloadInlineThreshold so
-// appendShardDataWAL takes the metadata-only (no-inline) branch.
+// shardWriteRequiresFsync takes the "large" branch.
 func largeShardPayload() []byte {
 	return bytes.Repeat([]byte("x"), walPayloadInlineThreshold)
 }
 
-// TestAppendShardDataWAL_NoRedundancyForcesFsyncForLargeShard asserts that on a
-// single-node deployment (ParityShards==0) a large metadata-only shard write
-// forces a direct shard-file fsync: with no parity and no peers, EC
-// reconstruction cannot rebuild a page-cache-lost shard, so the WAL's
-// metadata-only record is not enough — the file itself must be durable.
-func TestAppendShardDataWAL_NoRedundancyForcesFsyncForLargeShard(t *testing.T) {
+// TestShardWriteRequiresFsync_NoRedundancyForcesFsyncForLargeShard asserts that
+// on a single-node deployment (ParityShards==0) a large shard write forces a
+// direct shard-file + dir fsync: with no parity and no peers, EC reconstruction
+// cannot rebuild a page-cache-lost shard, so the file itself must be durable.
+func TestShardWriteRequiresFsync_NoRedundancyForcesFsyncForLargeShard(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil,
 		WithShardDEKKeeper(keeper, clusterID),
@@ -27,15 +25,13 @@ func TestAppendShardDataWAL_NoRedundancyForcesFsyncForLargeShard(t *testing.T) {
 		WithNoRedundancy(func() bool { return true }),
 	)
 
-	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, largeShardPayload())
-	require.NoError(t, err)
-	require.True(t, requireFsync, "no-redundancy large shard must fsync the shard file directly")
+	require.True(t, svc.shardWriteRequiresFsync(len(largeShardPayload())),
+		"no-redundancy large shard must fsync the shard file directly")
 }
 
-// TestAppendShardDataWAL_NoRedundancyKeepsSmallShardWALOnly asserts the small
-// (inlined) payload path is unchanged even under no-redundancy: the WAL inlines
-// the full payload, so replay rebuilds the file and no direct fsync is needed.
-func TestAppendShardDataWAL_NoRedundancyKeepsSmallShardWALOnly(t *testing.T) {
+// TestShardWriteRequiresFsync_NoRedundancySmallFsynced asserts the S2 flip: a
+// small shard is now fsynced directly (its old WAL-inline durability is gone).
+func TestShardWriteRequiresFsync_NoRedundancySmallFsynced(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil,
 		WithShardDEKKeeper(keeper, clusterID),
@@ -43,15 +39,14 @@ func TestAppendShardDataWAL_NoRedundancyKeepsSmallShardWALOnly(t *testing.T) {
 		WithNoRedundancy(func() bool { return true }),
 	)
 
-	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, []byte("small"))
-	require.NoError(t, err)
-	require.False(t, requireFsync, "small inlined payload is WAL-covered; no direct fsync")
+	require.True(t, svc.shardWriteRequiresFsync(len([]byte("small"))),
+		"small shard is fsynced directly after S2 (no WAL)")
 }
 
-// TestAppendShardDataWAL_RedundancyLargeShardWALOnly asserts the parity>0 case
-// is unchanged: a large metadata-only write relies on EC reconstruction, so no
-// direct shard fsync is forced.
-func TestAppendShardDataWAL_RedundancyLargeShardWALOnly(t *testing.T) {
+// TestShardWriteRequiresFsync_RedundantLargeNoFsync asserts the parity>0 case is
+// unchanged: a large redundant shard relies on EC reconstruction, so no direct
+// shard fsync is forced (keeps the benchmark path fsync-free, S1).
+func TestShardWriteRequiresFsync_RedundantLargeNoFsync(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil,
 		WithShardDEKKeeper(keeper, clusterID),
@@ -59,18 +54,16 @@ func TestAppendShardDataWAL_RedundancyLargeShardWALOnly(t *testing.T) {
 		WithNoRedundancy(func() bool { return false }),
 	)
 
-	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, largeShardPayload())
-	require.NoError(t, err)
-	require.False(t, requireFsync, "with parity, large shard relies on EC reconstruction")
+	require.False(t, svc.shardWriteRequiresFsync(len(largeShardPayload())),
+		"with parity, large shard relies on EC reconstruction; no fsync")
 }
 
-// TestAppendShardDataWAL_NilNoRedundancyNeverForcesFsync asserts the default
-// (no provider wired, as in legacy callers/tests) never forces a direct fsync.
-func TestAppendShardDataWAL_NilNoRedundancyNeverForcesFsync(t *testing.T) {
+// TestShardWriteRequiresFsync_NilNoRedundancyLargeNoFsync asserts the default
+// (no provider wired) counts as redundant: a large shard is not fsynced.
+func TestShardWriteRequiresFsync_NilNoRedundancyLargeNoFsync(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID)) // no WithNoRedundancy
 
-	requireFsync, err := svc.appendShardDataWAL(context.Background(), "b", "k", 0, largeShardPayload())
-	require.NoError(t, err)
-	require.False(t, requireFsync, "nil noRedundancy provider must not force fsync")
+	require.False(t, svc.shardWriteRequiresFsync(len(largeShardPayload())),
+		"nil noRedundancy counts as redundant; large → no fsync")
 }
