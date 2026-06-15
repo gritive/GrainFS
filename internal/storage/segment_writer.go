@@ -6,8 +6,6 @@ package storage
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"errors"
 	"io"
 	"sort"
@@ -70,14 +68,19 @@ func NewSegmentWriterWithChunkSizeAndWorkers(b segmentWriterBackend, chunkSize, 
 }
 
 // Write streams r, returning an Object with segments populated and
-// Object.ETag set to md5(plaintext_full) — the simple-PUT rule.
+// Object.ETag set to the bucket-aware whole-object hash (MD5 for S3-exposed
+// buckets, xxhash3 for internal __grainfs_* buckets) — the simple-PUT rule.
 //
 // On any worker or chunker error, the entire PUT fails: the caller MUST NOT
 // persist the returned Object (which is nil). Any segment blobs already
 // written to disk become orphans cleaned up by the scrubber.
 func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType string, r io.Reader) (*Object, error) {
-	wholeMD5 := md5.New()
-	tee := io.TeeReader(r, wholeMD5)
+	// Bucket-aware whole-object ETag: MD5 for S3-exposed buckets, xxhash3 for
+	// internal __grainfs_* buckets (whose ETag is the EC-rewrap corruption
+	// oracle) — matches spoolHashForBucket so chunked PUTs keep ETag parity.
+	wholeHash, releaseHash := hashForBucket(bucket)
+	defer releaseHash()
+	tee := io.TeeReader(r, wholeHash)
 
 	workCh := make(chan chunkJob, w.workers)
 	resultCh := make(chan segmentWriteResult, w.workers)
@@ -149,7 +152,7 @@ func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType stri
 		Key:          key,
 		Size:         totalSize,
 		ContentType:  contentType,
-		ETag:         hex.EncodeToString(wholeMD5.Sum(nil)),
+		ETag:         etagFromHash(wholeHash),
 		LastModified: time.Now().Unix(),
 		Segments:     segs,
 	}

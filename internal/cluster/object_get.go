@@ -85,7 +85,7 @@ func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, k
 	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.readAtAppendable(ctx, bucket, key, obj, offset, buf)
 	}
-	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
+	if !obj.IsAppendable && len(obj.Segments) > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
 		return readAtChunkedSegments(ctx, store, obj.Segments, offset, buf)
 	}
@@ -146,7 +146,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil
 	}
-	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
+	if !obj.IsAppendable && len(obj.Segments) > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
 		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
 	}

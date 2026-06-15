@@ -214,18 +214,16 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	effectiveCfg := placementPlan.Config
 	placement := placementPlan.NodeIDs
 
-	// Single write path: every non-empty simple PUT (any size) takes the
-	// segmented/chunked path so the route does not branch on object size —
-	// N×16 MiB segments (1 segment for <=16 MiB), single atomic metadata commit.
+	// Single write path: every non-empty simple PUT (any size, internal or
+	// S3-exposed bucket) takes the segmented/chunked path so the route does not
+	// branch on object size — N×16 MiB segments (1 segment for <=16 MiB), single
+	// atomic metadata commit. The chunked SegmentWriter computes a bucket-aware
+	// ETag (xxhash3 for internal buckets) so EC-rewrap verification still holds.
 	// Requires a ShardGroupSource (always wired in production by bootOwnedGroupsAndEC).
-	// Exceptions that keep the existing paths below: empty (0-byte) objects (a
-	// 0-byte segment writes no shard, unreadable by EC); internal buckets
-	// (__grainfs_*), whose ETag is an xxhash3 corruption oracle that the chunked
-	// SegmentWriter would overwrite with MD5 and break EC-rewrap verification;
-	// multipart-complete (multipartUploadID / parts) and internal rewrap
-	// (beforeCommit), which are distinct operations; and test backends that never
-	// wire a ShardGroupSource.
-	if sp.Size > 0 && !storage.IsInternalBucket(bucket) && beforeCommit == nil && multipartUploadID == "" && len(parts) == 0 && b.shardGroup != nil {
+	// Exceptions that keep the existing paths below: multipart-complete
+	// (multipartUploadID / parts) and internal rewrap (beforeCommit), which are
+	// distinct operations; and test backends that never wire a ShardGroupSource.
+	if beforeCommit == nil && multipartUploadID == "" && len(parts) == 0 && b.shardGroup != nil {
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm, acl,

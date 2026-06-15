@@ -221,14 +221,14 @@ func (b *DistributedBackend) putObjectChunked(
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	// Pre-allocate blobIDs + placements sized to exact segment count. Empty
-	// (0-byte) objects are routed away from the chunked path by the caller (a
-	// 0-byte segment writes no shard, which the EC reader cannot satisfy), so a
-	// sub-1 segment count here is a routing bug.
+	// Pre-allocate blobIDs + placements sized to exact segment count. A 0-byte
+	// object still gets one (empty) segment so every simple PUT — including
+	// empty objects — takes this single chunked path (mirrors the multipart
+	// variant + SegmentWriter, which always emits one segment for empty input).
 	chunkSize := int64(b.effectiveChunkedPutChunkSize())
 	numSegments := int((sp.Size + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
-		return nil, fmt.Errorf("putObjectChunked: sp.Size=%d below chunk threshold; caller should not have routed here", sp.Size)
+		numSegments = 1
 	}
 	blobIDs := make([]string, numSegments)
 	for i := range blobIDs {
