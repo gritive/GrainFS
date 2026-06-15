@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.592.0] - 2026-06-16
+
+### Performance
+- **`syncDirChain` no longer re-fsyncs ancestor shard directories whose child
+  link a prior completed write already made durable.** On the fsync classes
+  (small / no-redundancy shards), each shard write previously fsynced the leaf
+  shard dir AND every ancestor up to the data dir, on every write — so a shared
+  ancestor (`<bucket>`, `<obj>_segments`) was re-fsynced once per shard/segment.
+  Now the leaf is fsynced every write (a new shard file always lands there) but an
+  ancestor is fsynced only the first time its child entry is created and
+  persisted; a process-local `dirDurable` marker (Stored only AFTER the persisting
+  fsync returns) lets later writes skip it. A newly-created directory is absent
+  from the marker, so a new child's namespace entry is always persisted before the
+  write returns — and the marker is consulted on the CHILD, so a new sibling is
+  never skipped. The at-write-time durability boundary is byte-identical to before
+  (leaf + full ancestor chain durable at success; the data-dir's own bucket entry
+  remains out of scope, exactly as before). Race-free under the concurrent
+  same-leaf shard writes the EC data-shard path issues (post-fsync marking).
+  The fsync reduction is deployment-dependent (proportional to shards/segments
+  sharing an ancestor sub-tree); no end-to-end latency delta is claimed.
+
 ## [0.0.591.0] - 2026-06-16
 
 ### Changed
