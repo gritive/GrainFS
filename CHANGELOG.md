@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.597.0] - 2026-06-16
+
+### Removed
+- **BREAKING: the `grainfs volume` CLI and the admin volume HTTP API** — Phase B of
+  removing the volume block-storage feature. Deleted the whole `grainfs volume`
+  command tree (list/create/info/stat/delete/resize/recalculate/write-at/read-at and
+  the volume-scrub subcommands), the admin volume handlers/routes
+  (`GET/POST /v1/volumes`, `/v1/volumes/:name[/stat|/scrub]`, the `/ui/api/volumes`
+  UI routes), the dead Web UI "Volumes" dashboard tab, and the volume-specific code
+  in the shared `volumeadmin` package (volume client methods, volume ops, volume wire
+  types). The shared admin client (`volumeadmin.NewClient`/`PrintJSON`, used by every
+  `grainfs` admin subcommand) and the `grainfs scrub <bucket>` EC bucket scrub are
+  unaffected.
+- `volume.Manager`, the block-cache monitoring panel, the volume-health Prometheus
+  metrics, and the read-plane are untouched in this phase (removed in Phase C/D).
+  S3/NFSv4/9P/Iceberg are unaffected.
+
 ## [0.0.596.0] - 2026-06-16
 
 ### Removed

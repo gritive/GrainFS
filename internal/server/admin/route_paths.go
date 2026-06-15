@@ -13,16 +13,6 @@ const (
 	routePathStorageNfsExport  = "/storage/nfs/exports/:name"
 	routePathStorageNfsDebug   = "/storage/nfs/exports/:name/debug"
 
-	routePathVolumes           = "/volumes"
-	routePathVolume            = "/volumes/:name"
-	routePathVolumeStat        = "/volumes/:name/stat"
-	routePathVolumeResize      = "/volumes/:name/resize"
-	routePathVolumeRecalculate = "/volumes/:name/recalculate"
-	routePathVolumeWriteAt     = "/volumes/:name/write-at"
-	routePathVolumeReadAt      = "/volumes/:name/read-at"
-
-	routePathVolumeScrub = "/volumes/:name/scrub"
-
 	routePathScrub           = "/scrub"
 	routePathScrubJobs       = "/scrub/jobs"
 	routePathScrubJob        = "/scrub/jobs/:id"

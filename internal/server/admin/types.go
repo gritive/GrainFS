@@ -53,12 +53,6 @@ type ActorAuthenticator interface {
 	AuthenticateActor(ctx context.Context, bearerToken string) (principal.Principal, error)
 }
 
-type WriteAtVolumeReq = adminapi.WriteAtVolumeReq
-type WriteAtVolumeResp = adminapi.WriteAtVolumeResp
-type ReadAtVolumeReq = adminapi.ReadAtVolumeReq
-type ReadAtVolumeResp = adminapi.ReadAtVolumeResp
-type ScrubVolumeReq = adminapi.ScrubVolumeReq
-type ScrubVolumeResp = adminapi.ScrubVolumeResp
 type ScrubJobInfo = adminapi.ScrubJobInfo
 type ListScrubJobsResp = adminapi.ListScrubJobsResp
 type VolumeInfo = adminapi.VolumeInfo
@@ -73,15 +67,3 @@ type BucketPolicyResp = adminapi.BucketPolicyResp
 type BucketPolicySetReq = adminapi.BucketPolicySetReq
 type BucketVersioningResp = adminapi.BucketVersioningResp
 type BucketVersioningSetReq = adminapi.BucketVersioningSetReq
-
-func toVolumeInfo(v *volume.Volume) VolumeInfo {
-	return VolumeInfo{
-		Name:            v.Name,
-		Size:            v.Size,
-		BlockSize:       v.BlockSize,
-		AllocatedBlocks: v.AllocatedBlocks,
-		AllocatedBytes:  v.AllocatedBytes(),
-		Health:          "ok",
-		HealthReasons:   []string{},
-	}
-}

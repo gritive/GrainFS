@@ -5,28 +5,7 @@ import (
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/volume"
 )
-
-// ScrubVolume triggers a scrub session over the named volume's blocks.
-// Idempotent — repeating the same request returns the existing session id.
-func ScrubVolume(ctx context.Context, d *Deps, req ScrubVolumeReq) (ScrubVolumeResp, error) {
-	if d.Director == nil {
-		return ScrubVolumeResp{}, NewInternal("scrub director not configured")
-	}
-	if req.Name == "" {
-		return ScrubVolumeResp{}, NewInvalid("name required")
-	}
-	id, created := d.Director.Trigger(scrubber.TriggerReq{
-		Bucket:    volume.VolumeBucketName,
-		KeyPrefix: volume.BlockKeyPrefix(req.Name),
-		DryRun:    req.DryRun,
-	})
-	if id == "" {
-		return ScrubVolumeResp{}, NewInternal("scrub queue full")
-	}
-	return ScrubVolumeResp{SessionID: id, Created: created}, nil
-}
 
 // ListScrubJobs returns every scrub session the Director currently tracks.
 func ListScrubJobs(ctx context.Context, d *Deps) (ListScrubJobsResp, error) {

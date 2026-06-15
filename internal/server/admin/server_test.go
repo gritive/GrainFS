@@ -114,7 +114,7 @@ func TestServer_StopRemovesSocket(t *testing.T) {
 	t.Fatal("socket not removed after Stop")
 }
 
-func TestServer_ServesListVolumesOverUnixSocket(t *testing.T) {
+func TestServer_ServesDefaultRouteOverUnixSocket(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "a.sock")
 
@@ -151,7 +151,7 @@ func TestServer_ServesListVolumesOverUnixSocket(t *testing.T) {
 		},
 		Timeout: 5 * time.Second,
 	}
-	resp, err := client.Get("http://unix/v1/volumes")
+	resp, err := client.Get("http://unix/v1/cluster/peers")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestServer_ExtraRoutesNilSafe(t *testing.T) {
 
 	// Default route still works.
 	cli := unixHTTPClient(sock)
-	resp, err := cli.Get("http://unix/v1/volumes")
+	resp, err := cli.Get("http://unix/v1/cluster/peers")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,13 +217,13 @@ func TestServer_ExtraRoutesCalledAfterRegisterAdmin(t *testing.T) {
 	cli := unixHTTPClient(sock)
 
 	// Both default route and extra route respond.
-	resp, err := cli.Get("http://unix/v1/volumes")
+	resp, err := cli.Get("http://unix/v1/cluster/peers")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("/v1/volumes status = %d", resp.StatusCode)
+		t.Fatalf("/v1/cluster/peers status = %d", resp.StatusCode)
 	}
 
 	resp, err = cli.Get("http://unix/v1/test/extra")

@@ -247,36 +247,6 @@ type DashboardTokenResp struct {
 	PublicURLSet bool   `json:"public_url_set"`
 }
 
-// WriteAtVolumeReq is the JSON body for WriteAtVolume.
-type WriteAtVolumeReq struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Data   []byte `json:"data"`
-}
-
-// WriteAtVolumeResp reports how many bytes were written.
-type WriteAtVolumeResp struct {
-	Bytes int64 `json:"bytes"`
-}
-
-// ReadAtVolumeReq is the JSON body for ReadAtVolume.
-type ReadAtVolumeReq struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Length int64  `json:"length"`
-}
-
-// ReadAtVolumeResp carries the read bytes.
-type ReadAtVolumeResp struct {
-	Data []byte `json:"data"`
-}
-
-// ScrubVolumeReq triggers a scrub session over a single volume's blocks.
-type ScrubVolumeReq struct {
-	Name   string `json:"name"`
-	DryRun bool   `json:"dry_run,omitempty"`
-}
-
 // ScrubVolumeResp identifies the resulting session.
 type ScrubVolumeResp struct {
 	SessionID string `json:"session_id"`
@@ -317,49 +287,6 @@ type VolumeInfo struct {
 	AllocatedBytes  int64    `json:"allocated_bytes"`
 	Health          string   `json:"health"`
 	HealthReasons   []string `json:"health_reasons"`
-}
-
-// ListVolumesResp is returned by GET /v1/volumes.
-type ListVolumesResp struct {
-	Volumes []VolumeInfo `json:"volumes"`
-}
-
-// CreateVolumeReq is the body for POST /v1/volumes.
-type CreateVolumeReq struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-}
-
-// StatResp is returned by GET /v1/volumes/<name>/stat.
-type StatResp struct {
-	Volume          VolumeInfo       `json:"volume"`
-	RecentIncidents []map[string]any `json:"recent_incidents,omitempty"`
-}
-
-// DeleteResp is the response of DELETE /v1/volumes/<name>.
-type DeleteResp struct {
-	Deleted bool `json:"deleted"`
-}
-
-// ResizeReq is the body for POST /v1/volumes/<name>/resize.
-type ResizeReq struct {
-	Size int64 `json:"size"`
-}
-
-// ResizeResp is the response of resize.
-type ResizeResp struct {
-	Name    string `json:"name"`
-	OldSize int64  `json:"old_size"`
-	NewSize int64  `json:"new_size"`
-	Changed bool   `json:"changed"`
-}
-
-// RecalculateResp is the response of POST /v1/volumes/<name>/recalculate.
-type RecalculateResp struct {
-	Volume string `json:"volume"`
-	Before int64  `json:"before"`
-	After  int64  `json:"after"`
-	Fixed  bool   `json:"fixed"`
 }
 
 // --- Cluster wire types ---
