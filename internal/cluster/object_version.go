@@ -144,16 +144,7 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 			return nil, nil, fmt.Errorf("resolve placement for %s/%s@%s: %w", bucket, key, versionID, rerr)
 		}
 	}
-	// Prefer the versioned local file; fall back to legacy unversioned path if
-	// the version happens to be the legacy latest (uncommon mid-transition case).
-	if f, oerr := os.Open(b.objectPathV(bucket, key, versionID)); oerr == nil {
-		return f, obj, nil
-	}
-	f, err := os.Open(b.objectPath(bucket, key))
-	if err != nil {
-		return nil, nil, fmt.Errorf("open versioned object: %w", err)
-	}
-	return f, obj, nil
+	return nil, nil, fmt.Errorf("get object version %s/%s@%s: object has no readable layout (not appendable, no segments, not EC)", bucket, key, versionID)
 }
 
 // DeleteObjectVersion hard-deletes a specific version (no tombstone).
