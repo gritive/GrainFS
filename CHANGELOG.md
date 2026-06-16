@@ -3,28 +3,34 @@
 ## [0.0.608.0] - 2026-06-17
 
 ### Added
-- **`--ec-redundancy-upgrade` (default on) + `--ec-redundancy-upgrade-max` (default 8)
-  wire the background EC-redundancy-upgrade sweep.** After a cluster grows, the
-  scrubber can now relocate non-redundant (1+0) objects into a redundant EC group.
-  The sweep is enabled by default; `--ec-redundancy-upgrade=false` is the kill switch,
-  and `--ec-redundancy-upgrade-max` bounds relocations per scrub cycle.
-- **`--ec-redundancy-upgrade-min-age` (default 5m)** makes the sweep's age gate
-  configurable: an object must be at least this old before it is relocated, so the
-  sweep never races an in-flight write. `0` relocates eligible objects immediately
-  (used by the e2e durability test); the previous behavior was a fixed 5-minute gate.
+- **Retroactive EC-redundancy upgrade: a background sweep relocates non-redundant
+  (1+0) objects into a redundant EC group after the cluster grows.** Objects written
+  while a cluster was genuinely single-node (genesis boot, no `--bootstrap-expect-nodes`)
+  land in a single-peer (1+0) group with no redundancy; once the cluster grows, a
+  single-node loss would lose them. The scrubber now detects such objects and
+  re-encodes them into a redundant wide EC group, preserving object identity
+  (key/version/ETag/size/content-type/user-metadata/tags/ACL **and LastModified**),
+  then lets the orphan-segment sweep reclaim the old shards. The relocation is
+  crash-safe (an interrupted re-write leaves reclaimable orphans and the object stays
+  readable via its old placement) and concurrency-safe (it preserves the original
+  ModTime, so a concurrent client write — carrying a newer ModTime — always wins the
+  quorum-meta last-writer-wins; a new internal `MetaSeq` tiebreak lets only the
+  identity-preserving re-write win the otherwise-exact tie). Latest-version-only; an
+  owner-kill e2e proves a relocated genesis object survives losing its original
+  single-owner node. New flags:
+  - `--ec-redundancy-upgrade` (default **on**; `=false` is the kill switch),
+  - `--ec-redundancy-upgrade-max` (default 8) — relocations per scrub cycle,
+  - `--ec-redundancy-upgrade-min-age` (default 5m) — minimum object age before
+    relocation, so the sweep never races an in-flight write.
 
 ### Fixed
-- **The EC-redundancy-upgrade sweep now actually relocates genesis 1+0 objects.**
-  The relocation committed its new metadata with a raw data-raft `PutObjectMeta`
-  propose carrying an ETag CAS guard. For user-bucket objects the authoritative
-  metadata lives in quorum-meta — a chunked PUT never writes the data-raft FSM
-  object key — so the CAS always read an absent FSM key and every relocation failed
-  with `commit meta: ... read current meta: metastore: key not found`. The relocate
-  now commits through the same `writeQuorumMeta` path a normal chunked PUT uses,
-  stamping `MetaSeq = current+1` so the identity-preserving re-write strictly wins
-  the LWW tie. Surfaced by the new owner-kill e2e: a 1+0 genesis object now
-  relocates into a redundant group and survives killing its original single-owner
-  node, where before it was lost.
+- **`ScanObjects` reports each object's own EC profile on the FSM-resident scan
+  path.** The FSM `lat:` scan branch emitted the cluster's *current* EC config
+  instead of the object's recorded `ECData`/`ECParity`, so an object whose profile
+  differed from the current config (e.g. a versioned 1+0 object in a grown 4+2
+  cluster) was enumerated with the wrong shard count — mis-driving EC scrub and
+  hiding non-redundant objects from the new upgrade sweep. It now reports the
+  per-object profile, matching the quorum-meta scan branch.
 
 ## [0.0.607.0] - 2026-06-16
 
