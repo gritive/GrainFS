@@ -591,6 +591,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleShadowMeta(sr)
 	case "WriteQuorumMeta":
 		return s.handleQuorumMetaWrite(sr)
+	case "DeleteQuorumMeta":
+		return s.handleQuorumMetaDelete(sr)
 	case "ReadQuorumMeta":
 		return s.handleQuorumMetaRead(sr)
 	case "ScanQuorumMeta":
@@ -605,6 +607,15 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 // caller so the PUT can fail the quorum check.
 func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) []byte {
 	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// handleQuorumMetaDelete serves a DeleteQuorumMeta RPC: removes the local quorum
+// meta file for (bucket, key). Absent file is not an error (idempotent cleanup).
+func (s *ShardService) handleQuorumMetaDelete(sr *shardRequest) []byte {
+	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)

@@ -594,6 +594,59 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	return nil
 }
 
+// DeleteQuorumMeta removes the quorum-meta replica for (bucket, key) on a remote
+// placement node. Mirrors WriteQuorumMeta; the receiver runs deleteQuorumMetaLocal.
+func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {
+	if s.transport == nil {
+		return fmt.Errorf("quorum meta: no transport")
+	}
+	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return fmt.Errorf("delete quorum meta on %s: %w", addr, err)
+	}
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("unmarshal quorum meta delete response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote quorum meta delete error from %s", addr)
+	}
+	return nil
+}
+
+// deleteQuorumMetaQuorum removes the quorum-meta replica for (bucket, key) on
+// EVERY placement node (self locally, peers via the DeleteQuorumMeta RPC).
+// Best-effort: a failed peer delete is logged-by-omission and tolerated — the
+// scrubber's orphan sweep and the next write reconcile a residual replica, and
+// the BadgerDB record (read fallback) is authoritative either way. nodeIDs is
+// the placement set captured from the object's quorum-meta before migration; an
+// empty set falls back to a local-only delete (object was BadgerDB-only).
+func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) {
+	if b.shardSvc == nil {
+		return
+	}
+	if len(nodeIDs) == 0 {
+		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+		return
+	}
+	self := b.currentSelfAddr()
+	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	for _, node := range nodeIDs {
+		if node == self {
+			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+			continue
+		}
+		addr, rerr := b.shardSvc.resolvePeerAddress(node)
+		if rerr != nil {
+			continue
+		}
+		_ = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key)
+	}
+}
+
 // IterQuorumMetaECShardTargets walks all quorum meta files under
 // {dataDirs[0]}/.quorum_meta/ and emits ECShardScanTarget entries for every
 // object whose segments or coalesced refs carry EC placement. Used by
