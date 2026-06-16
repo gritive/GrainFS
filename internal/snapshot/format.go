@@ -172,4 +172,3 @@ func maxSnapshotSeqFromFilenames(dir string) (uint64, error) {
 	}
 	return maxSeq, nil
 }
-
