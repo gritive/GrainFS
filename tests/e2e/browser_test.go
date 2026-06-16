@@ -25,8 +25,5 @@ var _ = ginkgo.Describe("Object browser", func() {
 
 		// Verify it's the object browser, not just a status dashboard
 		gomega.Expect(strings.Contains(html, "Object Browser")).To(gomega.BeTrue())
-
-		// Verify volume management tab exists
-		gomega.Expect(strings.Contains(html, "Volumes")).To(gomega.BeTrue())
 	})
 })

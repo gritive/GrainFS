@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -320,6 +321,7 @@ func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *sto
 	blobIDs := make([]string, 0, total)
 	kinds := make([]byte, 0, total)
 	ecRefs := make([]*storage.CoalescedRef, 0, total)
+	segRefs := make([]*storage.SegmentRef, 0, total)
 	// Coalesced blobs come first — they represent the older bytes of the object.
 	for i := range obj.Coalesced {
 		c := obj.Coalesced[i]
@@ -327,22 +329,45 @@ func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *sto
 		blobIDs = append(blobIDs, c.CoalescedID)
 		kinds = append(kinds, appendSegKindCoalesced)
 		ecRefs = append(ecRefs, &c)
+		segRefs = append(segRefs, nil)
 	}
-	for _, s := range obj.Segments {
+	for i := range obj.Segments {
+		s := obj.Segments[i]
 		paths = append(paths, b.segmentBlobPath(bucket, key, s.BlobID))
 		blobIDs = append(blobIDs, s.BlobID)
 		kinds = append(kinds, appendSegKindSegment)
 		ecRefs = append(ecRefs, nil)
+		// An object becomes appendable by appending to a chunked PUT, whose
+		// base bytes are EC-backed segments (ECData>0, NodeIDs set) — NOT plain
+		// _segments/<blobID> files. Mark those for EC reconstruction so the
+		// reader stitches EC base segments and plain append blobs in one stream.
+		// Plain append blobs (BlobID+Size+Checksum only) keep a nil ref and use
+		// the local-file + peer-fetch path below.
+		if segmentRefIsECBacked(s) {
+			ref := s
+			segRefs = append(segRefs, &ref)
+		} else {
+			segRefs = append(segRefs, nil)
+		}
 	}
 	return &appendableSegmentReader{
-		backend: b,
-		bucket:  bucket,
-		key:     key,
-		paths:   paths,
-		blobIDs: blobIDs,
-		kinds:   kinds,
-		ecRefs:  ecRefs,
+		backend:  b,
+		bucket:   bucket,
+		key:      key,
+		paths:    paths,
+		blobIDs:  blobIDs,
+		kinds:    kinds,
+		ecRefs:   ecRefs,
+		segRefs:  segRefs,
+		segStore: &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj},
 	}
+}
+
+// segmentRefIsECBacked reports whether a SegmentRef carries EC placement
+// metadata (chunked-PUT base segment) rather than being a plain append blob.
+// Mirrors clusterSegmentStore.placementRecord's gate.
+func segmentRefIsECBacked(s storage.SegmentRef) bool {
+	return s.ECData > 0 && len(s.NodeIDs) > 0
 }
 
 // openCoalescedECReader opens an EC-reconstructed stream for one coalesced
@@ -372,8 +397,21 @@ type appendableSegmentReader struct {
 	// appendSegKindCoalesced, otherwise nil. Used to drive EC reconstruct
 	// when the owner-local file is absent (B3 path).
 	ecRefs []*storage.CoalescedRef
-	idx    int
-	cur    io.ReadCloser
+	// segRefs[i] points to the storage.SegmentRef when kinds[i] is
+	// appendSegKindSegment AND the segment is EC-backed (a chunked-PUT base
+	// segment), otherwise nil. EC-backed segments are reconstructed through
+	// segStore instead of opening a plain _segments/<blobID> file.
+	segRefs  []*storage.SegmentRef
+	segStore appendSegmentECOpener
+	idx      int
+	cur      io.ReadCloser
+}
+
+// appendSegmentECOpener reconstructs one EC-backed segment into a byte stream.
+// Satisfied by *clusterSegmentStore; abstracted so the reader's EC-vs-plain
+// dispatch is unit-testable without a full EC shard service.
+type appendSegmentECOpener interface {
+	OpenSegment(ctx context.Context, ref storage.SegmentRef) (io.ReadCloser, error)
 }
 
 func (r *appendableSegmentReader) Read(p []byte) (int, error) {
@@ -424,6 +462,14 @@ func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
 		// EC reader error; the local/forward path is the legacy fallback.
 	}
 
+	// EC-backed base segment (chunked PUT that was later appended to): the bytes
+	// live as EC shards, not a plain _segments/<blobID> file. Reconstruct via the
+	// segment store. This is authoritative — there is no plain-file fallback for
+	// an EC segment, so an EC reconstruct error surfaces directly.
+	if kind == appendSegKindSegment && r.segStore != nil && r.idx < len(r.segRefs) && r.segRefs[r.idx] != nil {
+		return r.segStore.OpenSegment(context.Background(), *r.segRefs[r.idx])
+	}
+
 	path := r.paths[r.idx]
 	f, err := os.Open(path)
 	if err == nil {
@@ -437,6 +483,21 @@ func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
 	}
 	rc, ferr := r.backend.fetchAppendBlobFromAnyPeer(context.Background(), r.bucket, r.key, r.blobIDs[r.idx], kind)
 	if ferr != nil {
+		// A plain append blob is missing locally and unfetchable from peers. This
+		// also fires if an EC-backed base segment was mis-tagged as a plain blob
+		// (the bug class fixed alongside segmentRefIsECBacked) — log enough to tell
+		// the two apart without re-instrumenting.
+		ecBacked := r.idx < len(r.segRefs) && r.segRefs[r.idx] != nil
+		log.Debug().
+			Str("event", "append_segment_open_failed").
+			Str("bucket", r.bucket).
+			Str("key", r.key).
+			Str("blob_id", r.blobIDs[r.idx]).
+			Int("kind", int(kind)).
+			Bool("ec_backed", ecBacked).
+			Str("path", path).
+			Err(ferr).
+			Msg("appendable segment missing locally and peer fetch failed")
 		return nil, fmt.Errorf("open segment %s (local missing, peer fetch failed): %w", path, ferr)
 	}
 	return rc, nil
@@ -471,7 +532,9 @@ func (b *DistributedBackend) readAtAppendable(ctx context.Context, bucket, key s
 		blobID string
 		path   string
 		ec     *storage.CoalescedRef // non-nil for coalesced entry
+		seg    *storage.SegmentRef   // non-nil for an EC-backed raw segment
 	}
+	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
 	chunks := make([]chunk, 0, len(obj.Coalesced)+len(obj.Segments))
 	for i := range obj.Coalesced {
 		c := obj.Coalesced[i]
@@ -483,13 +546,19 @@ func (b *DistributedBackend) readAtAppendable(ctx context.Context, bucket, key s
 			ec:     &c,
 		})
 	}
-	for _, s := range obj.Segments {
-		chunks = append(chunks, chunk{
+	for i := range obj.Segments {
+		s := obj.Segments[i]
+		ch := chunk{
 			kind:   appendSegKindSegment,
 			size:   s.Size,
 			blobID: s.BlobID,
 			path:   b.segmentBlobPath(bucket, key, s.BlobID),
-		})
+		}
+		if segmentRefIsECBacked(s) {
+			ref := s
+			ch.seg = &ref
+		}
+		chunks = append(chunks, ch)
 	}
 
 	// Locate the starting chunk via prefix sum.
@@ -521,7 +590,7 @@ func (b *DistributedBackend) readAtAppendable(ctx context.Context, bucket, key s
 			want = remaining
 		}
 		dst := buf[totalRead : totalRead+int(want)]
-		n, err := b.readAtChunk(ctx, bucket, key, ch.kind, ch.blobID, ch.path, ch.ec, localOff, dst)
+		n, err := b.readAtChunk(ctx, bucket, key, ch.kind, ch.blobID, ch.path, ch.ec, ch.seg, store, localOff, dst)
 		totalRead += n
 		if err != nil {
 			if errors.Is(err, io.EOF) && totalRead == len(buf) {
@@ -535,7 +604,7 @@ func (b *DistributedBackend) readAtAppendable(ctx context.Context, bucket, key s
 
 // readAtChunk performs a single-chunk partial read with the appropriate
 // backend (EC reader, owner-local file, or forward-on-read peer fetch).
-func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string, kind byte, blobID, path string, ec *storage.CoalescedRef, offset int64, buf []byte) (int, error) {
+func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string, kind byte, blobID, path string, ec *storage.CoalescedRef, seg *storage.SegmentRef, store *clusterSegmentStore, offset int64, buf []byte) (int, error) {
 	// B3 coalesced: prefer EC ReadAt when params are present.
 	if kind == appendSegKindCoalesced && ec != nil && len(ec.NodeIDs) > 0 && ec.ECData > 0 {
 		rec := PlacementRecord{
@@ -549,6 +618,12 @@ func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string
 			return n, nil
 		}
 		// Fall through to local/forward on transient EC error.
+	}
+	// EC-backed base segment (chunked PUT later appended to): bytes are EC shards,
+	// not a plain _segments/<blobID> file. Reconstruct the requested window via the
+	// segment store — authoritative, no plain-file fallback for an EC segment.
+	if kind == appendSegKindSegment && seg != nil && store != nil && segmentRefIsECBacked(*seg) {
+		return store.ReadAtSegment(ctx, *seg, offset, buf)
 	}
 	if f, err := os.Open(path); err == nil {
 		n, rerr := f.ReadAt(buf, offset)
@@ -583,16 +658,18 @@ func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string
 //  2. PlacementGroupFromContext (coordinator-provided).
 //  3. default "group-0" (single-node / test path).
 func (b *DistributedBackend) lookupPlacementGroupForAppend(ctx context.Context, existing *storage.Object) string {
-	// Phase A: storage.Object does not carry PlacementGroupID directly — the FSM
-	// reads it from objectMeta at apply time. For the propose-time hint we fall
-	// back to context / default; the FSM's stale-placement check still works
-	// because applyAppendObjectFromCmd compares cmd.PlacementGroupID against
-	// the freshly-read existing objectMeta.PlacementGroupID.
-	if existing != nil {
-		// existing was decoded from objectMeta; PG isn't exposed on storage.Object,
-		// so fall through to context / default. (Task 21 coordinator threads PG
-		// via context explicitly.)
-		_ = existing
+	// The object's own stored placement group is authoritative. The FSM
+	// stale-placement check (appendable_object.go) compares cmd.PlacementGroupID
+	// against the freshly-read existing objectMeta.PlacementGroupID, so the
+	// propose-time value MUST be the object's stored PG. storage.Object now
+	// carries PlacementGroupID (headObjectMeta populates it; segment_backend
+	// writes group.ID on PUT), so use it directly — sending the routed
+	// data-group from context (or a "group-0" default) instead caused a
+	// routed-group != stored-PG mismatch that falsely tripped ErrStalePlacement
+	// on a plain-PUT-then-append. The check still fires for a REAL placement move
+	// (the FSM's re-read of the object's PG differs from the captured value).
+	if existing != nil && existing.PlacementGroupID != "" {
+		return existing.PlacementGroupID
 	}
 	if pg, ok := PlacementGroupFromContext(ctx); ok {
 		return pg
