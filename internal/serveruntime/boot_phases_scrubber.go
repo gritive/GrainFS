@@ -3,8 +3,6 @@ package serveruntime
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/startuprecovery"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // targetLogKey returns the log-friendly key for an EC shard scan target:
@@ -29,7 +26,7 @@ func targetLogKey(t cluster.ECShardScanTarget) string {
 }
 
 // bootRecoveryAndScrubber wires the per-node startup recovery, the scrubber
-// Director (with replication + EC sources), placement monitors, and the
+// Director (with the EC scrub source), placement monitors, and the
 // scrubber-aware healing emitter.
 //
 // Phase ordering invariant (mirrors PR 4 raft phases): MUST register
@@ -74,42 +71,14 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 
 	clusterIncidentRecorder, scrubberIncidentRecorder := IncidentRecorderInterfaces(state.incidentRecorder)
 
-	// All three plumbings (walk, opener, repair) route through the local
-	// data-group that owns the bucket — single-node serve still sits inside
-	// a multi-raft group structure, so the volume bucket's files live under
-	// {dataDir}/groups/<gid>/ rather than the bare distBackend root.
 	dgMgr := state.dgMgr
 	clusterRouter := state.clusterRouter
-	groupBackendForBucket := func(bucket string) *cluster.DistributedBackend {
-		dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
-		if !ok || dg == nil || dg.Backend() == nil {
-			return nil
-		}
-		return dg.Backend().DistributedBackend
-	}
-	opener := scrubber.LocalOpener(func(bucket, key string) (io.ReadCloser, error) {
-		gb := groupBackendForBucket(bucket)
-		if gb == nil {
-			return nil, fmt.Errorf("scrub opener: no local group for %s", bucket)
-		}
-		return gb.OpenLocalReplica(bucket, key)
-	})
-	repairer := scrubber.ReplicaRepairer(ReplicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
-		gb := groupBackendForBucket(bucket)
-		if gb == nil {
-			return fmt.Errorf("scrub repair: no local group for %s", bucket)
-		}
-		return gb.RepairReplica(rctx, bucket, key)
-	}))
-	replSource := scrubber.NewReplicationObjectSource("replication", volume.VolumeBucketName, volume.MetaPrefix, state.backend)
-	replVerifier := scrubber.NewReplicationVerifier(opener, repairer)
 
 	director := scrubber.NewDirector(scrubber.DirectorOpts{
 		Incident:  scrubberIncidentRecorder,
 		QueueSize: 64,
 		NodeID:    state.nodeID,
 	})
-	director.Register("replication", replSource, replVerifier)
 
 	// PR4: EC scrub source via per-bucket group resolver.
 	ecResolver := func(bucket string) (scrubber.Scrubbable, bool) {
@@ -216,7 +185,6 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		})
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
-		sc.RegisterSource("replication", replSource, replVerifier)
 		sc.Start(ctx)
 
 		placementMonitors := NewPlacementMonitorRegistry()

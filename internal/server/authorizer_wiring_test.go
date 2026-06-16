@@ -17,9 +17,8 @@ func TestNewServer_BuildsRequestAuthorizer(t *testing.T) {
 
 	store := policy.NewCompiledPolicyStore()
 	s := NewWithServerStorage("127.0.0.1:0", ServerStorage{
-		Ops:           storage.NewOperations(backend, storage.WithPolicyStore(store)),
-		Backend:       backend,
-		VolumeBackend: backend,
+		Ops:     storage.NewOperations(backend, storage.WithPolicyStore(store)),
+		Backend: backend,
 	}, store)
 
 	assert.NotNil(t, s.authz, "server must build a non-nil RequestAuthorizer")

@@ -282,8 +282,7 @@ func (s *ShardService) RegisterBufferedRoute(path string, h transport.BufferedRo
 // WriteShard sends a shard to a remote node for storage.
 //
 // PutObject now routes through ecObjectWriter, which calls this with the real
-// Reed-Solomon shard index per split. RepairReplica calls it with shardIdx=0
-// when repairing replicated (pre-EC) objects.
+// Reed-Solomon shard index per split.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
 	peerAddr, err := s.resolvePeerAddress(peer)
 	if err != nil {

@@ -55,13 +55,6 @@ func (a PeerHealthAdapter) Snapshot() []admin.ClusterPeerInfo {
 	return out
 }
 
-// ReplicaRepairerFunc adapts a function to scrubber.ReplicaRepairer.
-type ReplicaRepairerFunc func(ctx context.Context, bucket, key string) error
-
-func (f ReplicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
-	return f(ctx, bucket, key)
-}
-
 // ScrubProposerAdapter implements admin.ScrubProposer over MetaRaft. The
 // adapter does a leader-side dedup pre-check so duplicate triggers don't
 // consume a fresh raft entry per call.

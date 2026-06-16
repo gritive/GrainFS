@@ -22,11 +22,10 @@ import (
 
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
 	return ServerStorage{
-		Ops:           storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
-		Backend:       backend,
-		VolumeBackend: backend,
-		Snapshotable:  storageSnapshotable(backend),
-		DBProvider:    storageDBProvider(backend),
+		Ops:          storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
+		Backend:      backend,
+		Snapshotable: storageSnapshotable(backend),
+		DBProvider:   storageDBProvider(backend),
 	}
 }
 

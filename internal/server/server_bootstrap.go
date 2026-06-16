@@ -39,14 +39,8 @@ func normalizeServerStorage(ss ServerStorage, policyStore *CompiledPolicyStore) 
 	if backend == nil && ss.Ops != nil {
 		backend = ss.Ops.Backend()
 	}
-	if backend == nil {
-		backend = ss.VolumeBackend
-	}
 	if ss.Ops == nil {
 		ss.Ops = storage.NewOperations(backend, storage.WithPolicyStore(policyStore))
-	}
-	if ss.VolumeBackend == nil {
-		ss.VolumeBackend = backend
 	}
 	ss.Backend = backend
 	return ss, policyStore
