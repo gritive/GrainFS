@@ -94,24 +94,6 @@ func TestRegisterUIStorageRoutesDoNotExposeNfsMutations(t *testing.T) {
 	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
 }
 
-func TestRegisterUIDoesNotExposeDestructiveVolumeRoutes(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	d := newServerDeps(t, t.TempDir())
-	_, err := d.Manager.Create("ui-vol", 1<<20)
-	require.NoError(t, err)
-	_, err = d.Manager.WriteAt("ui-vol", []byte("x"), 0)
-	require.NoError(t, err)
-	admin.RegisterUI(h, d)
-	start()
-
-	resp := doRouteTestRequest(t, http.MethodDelete, base+"/ui/api/volumes/ui-vol", nil)
-	resp.Body.Close()
-	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
-
-	_, err = d.Manager.Get("ui-vol")
-	require.NoError(t, err)
-}
-
 func TestBucketPolicyRoute_InvalidStoredPolicyDoesNotPanic(t *testing.T) {
 	cli := startBucketRouteTestServer(t, []byte{0xae, '{', '}'})
 

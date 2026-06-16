@@ -8,7 +8,6 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/snapshot"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 func WithDataDir(dir string) Option {
@@ -62,12 +61,6 @@ func WithReceiptAPI(api *receipt.API) Option {
 func WithIncidentStore(store incident.StateStore) Option {
 	return func(s *Server) {
 		s.incidentStore = store
-	}
-}
-
-func WithVolumeManager(mgr *volume.Manager) Option {
-	return func(s *Server) {
-		s.volMgr = mgr
 	}
 }
 

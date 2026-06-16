@@ -54,7 +54,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
 	opts.ShardPackThreshold, _ = cmd.Flags().GetInt("shard-pack-threshold")
 	opts.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")
-	opts.BlockCacheSize, _ = cmd.Flags().GetInt64("block-cache-size")
 	opts.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
 
 	// Protocols.

@@ -28,7 +28,6 @@ Flags:
       --badger-gc-disable                                   disable BadgerDB vlog GC ticker (debug only)
       --badger-gc-fail-threshold int32                      consecutive RunValueLogGC failures before incident (default 3)
       --badger-gc-interval duration                         BadgerDB vlog GC ticker cadence (default 5m0s)
-      --block-cache-size int                                volume block cache capacity in bytes (0 disables) (default 67108864)
       --bootstrap-expect-nodes int                          EXPERIMENTAL: declared target node count for a fresh cluster. >1 defers genesis shard-group seeding until this many nodes have joined, then seeds all initial groups at the target size's uniform EC width (no RF=1 batch). 0/unset = today's behavior (seed immediately at solo genesis).
       --bootstrap-expect-timeout duration                   EXPERIMENTAL: with --bootstrap-expect-nodes, max wait for the target node count before seeding with whatever joined (loud WARN). Never blocks forever. (default 10m0s)
       --cluster-append-forward-buffer-max-per-request int   Max bytes any single AppendObject forward request may reserve (default 64 MiB). (default 67108864)

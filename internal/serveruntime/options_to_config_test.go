@@ -34,7 +34,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		PackThreshold:      31,
 		ShardPackThreshold: 41,
 		MeasureReadAmp:     true,
-		BlockCacheSize:     int64(1 << 28),
 		ShardCacheSize:     int64(1 << 27),
 
 		NFS4Port:      12049,
@@ -135,7 +134,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 
 	// Lifecycle / cache.
 	require.Equal(t, opts.LifecycleInterval, cfg.LifecycleInterval)
-	require.Equal(t, opts.BlockCacheSize, cfg.BlockCacheSize)
 
 	// Dashboard + vlog ratios (sourced from VlogOpts — single flag origin).
 	require.Equal(t, opts.PublicURL, cfg.PublicURL)

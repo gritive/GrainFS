@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // unwrapBackend returns the innermost backend, unwrapping decorators like CachedBackend.
@@ -96,9 +95,6 @@ func (s *Server) installMiddlewares(h *server.Hertz) {
 }
 
 func (s *Server) ensureRuntimeDefaults(ss ServerStorage) {
-	if s.volMgr == nil {
-		s.volMgr = volume.NewManager(ss.VolumeBackend)
-	}
 	if s.icebergCatalog == nil && !s.icebergDisabled {
 		if dbp := ss.DBProvider; dbp != nil {
 			s.icebergCatalog = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")

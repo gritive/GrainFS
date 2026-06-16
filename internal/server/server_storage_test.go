@@ -24,7 +24,6 @@ func TestNewWithServerStorageUsesProvidedOperationsAndPolicyStore(t *testing.T) 
 
 	require.Same(t, ops, s.ops)
 	require.Same(t, store, s.policyStore)
-	require.NotNil(t, s.volMgr)
 }
 
 func TestNewWithServerStorageUsesStorageBackendAsHandlerBackend(t *testing.T) {

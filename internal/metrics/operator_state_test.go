@@ -31,14 +31,6 @@ func TestOperatorStateCollector_EmitsBoundedStateMetrics(t *testing.T) {
 			HasAppliedIndex: true,
 		}}},
 		Buckets: fakeOperatorBucketSource{state: OperatorBucketState{Active: 2}},
-		Volumes: fakeOperatorVolumeSource{state: OperatorVolumeState{
-			HealthCounts: map[string]int{
-				"healthy":         1,
-				"missing_replica": 1,
-			},
-			CapacityBytesTotal:  4096,
-			AllocatedBytesTotal: 1024,
-		}},
 	})
 
 	want := `# HELP grainfs_server_up Whether this GrainFS server process is serving metrics.
@@ -81,25 +73,11 @@ grainfs_raft_apply_lag{group="meta",node_id="node-a"} 3
 # TYPE grainfs_buckets_by_state gauge
 grainfs_buckets_by_state{state="active"} 2
 grainfs_buckets_by_state{state="list_error"} 0
-# HELP grainfs_volumes_by_health Volume counts by bounded health state.
-# TYPE grainfs_volumes_by_health gauge
-grainfs_volumes_by_health{health="degraded"} 0
-grainfs_volumes_by_health{health="healthy"} 1
-grainfs_volumes_by_health{health="incident"} 0
-grainfs_volumes_by_health{health="missing_replica"} 1
-grainfs_volumes_by_health{health="unknown"} 0
-# HELP grainfs_volume_capacity_bytes_total Aggregate logical capacity bytes across visible volumes.
-# TYPE grainfs_volume_capacity_bytes_total gauge
-grainfs_volume_capacity_bytes_total 4096
-# HELP grainfs_volume_allocated_bytes_total Aggregate allocated bytes across visible volumes.
-# TYPE grainfs_volume_allocated_bytes_total gauge
-grainfs_volume_allocated_bytes_total 1024
 # HELP grainfs_operator_state_scrape_errors_total Cumulative scrape-time failures while reading optional operator state sources.
 # TYPE grainfs_operator_state_scrape_errors_total counter
 grainfs_operator_state_scrape_errors_total{source="buckets"} 0
 grainfs_operator_state_scrape_errors_total{source="raft"} 0
 grainfs_operator_state_scrape_errors_total{source="status"} 0
-grainfs_operator_state_scrape_errors_total{source="volumes"} 0
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(want)))
 }
@@ -107,7 +85,6 @@ grainfs_operator_state_scrape_errors_total{source="volumes"} 0
 func TestOperatorStateCollector_ScrapeErrorsAreMonotonic(t *testing.T) {
 	c := NewOperatorStateCollector(OperatorStateSources{
 		Buckets: fakeOperatorBucketSource{err: errors.New("boom")},
-		Volumes: fakeOperatorVolumeSource{err: errors.New("boom")},
 	})
 
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`# HELP grainfs_buckets_by_state User bucket counts by bounded state.
@@ -119,7 +96,6 @@ grainfs_buckets_by_state{state="list_error"} 1
 grainfs_operator_state_scrape_errors_total{source="buckets"} 1
 grainfs_operator_state_scrape_errors_total{source="raft"} 0
 grainfs_operator_state_scrape_errors_total{source="status"} 0
-grainfs_operator_state_scrape_errors_total{source="volumes"} 1
 `), "first scrape"))
 
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`# HELP grainfs_buckets_by_state User bucket counts by bounded state.
@@ -131,7 +107,6 @@ grainfs_buckets_by_state{state="list_error"} 1
 grainfs_operator_state_scrape_errors_total{source="buckets"} 2
 grainfs_operator_state_scrape_errors_total{source="raft"} 0
 grainfs_operator_state_scrape_errors_total{source="status"} 0
-grainfs_operator_state_scrape_errors_total{source="volumes"} 2
 `), "second scrape"))
 }
 
@@ -161,7 +136,6 @@ grainfs_raft_commit_index{group="data",node_id="node-a"} 3
 grainfs_operator_state_scrape_errors_total{source="buckets"} 0
 grainfs_operator_state_scrape_errors_total{source="raft"} 2
 grainfs_operator_state_scrape_errors_total{source="status"} 0
-grainfs_operator_state_scrape_errors_total{source="volumes"} 0
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(want)))
 }
@@ -196,14 +170,5 @@ type fakeOperatorBucketSource struct {
 }
 
 func (f fakeOperatorBucketSource) BucketStateSnapshot(context.Context) (OperatorBucketState, error) {
-	return f.state, f.err
-}
-
-type fakeOperatorVolumeSource struct {
-	state OperatorVolumeState
-	err   error
-}
-
-func (f fakeOperatorVolumeSource) VolumeStateSnapshot(context.Context) (OperatorVolumeState, error) {
 	return f.state, f.err
 }

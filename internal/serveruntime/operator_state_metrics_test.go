@@ -89,29 +89,6 @@ func TestOperatorRaftStateSource_EmitsOnlyMetaAndPrimaryData(t *testing.T) {
 	}, got)
 }
 
-func TestNormalizeOperatorVolumeHealth(t *testing.T) {
-	tests := []struct {
-		name    string
-		health  string
-		reasons []string
-		want    string
-	}{
-		{name: "ok", health: "ok", want: "healthy"},
-		{name: "warning", health: "warning", want: "degraded"},
-		{name: "degraded", health: "degraded", want: "degraded"},
-		{name: "critical", health: "critical", want: "degraded"},
-		{name: "unknown", health: "unknown", want: "unknown"},
-		{name: "empty", want: "unknown"},
-		{name: "missing replica reason wins", health: "warning", reasons: []string{"replica_missing"}, want: "missing_replica"},
-		{name: "incident reason wins", health: "critical", reasons: []string{"recent_incident"}, want: "incident"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, normalizeOperatorVolumeHealth(tc.health, tc.reasons))
-		})
-	}
-}
-
 type fakeMetaRaftOperatorSource struct {
 	node        *fakeOperatorRaftNode
 	lastApplied uint64

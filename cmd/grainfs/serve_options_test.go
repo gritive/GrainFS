@@ -68,7 +68,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--vlog-smoke-defer", "149ms",
 		"--badger-value-threshold", "12345",
 		"--measure-read-amp=true",
-		"--block-cache-size", "268435456",
 		"--shard-cache-size", "134217728",
 		"--heal-receipt-enabled=false",
 		"--heal-receipt-psk", "sentinel-psk",
@@ -109,7 +108,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, 31, opts.PackThreshold)
 	require.Equal(t, 41, opts.ShardPackThreshold)
 	require.True(t, opts.MeasureReadAmp)
-	require.Equal(t, int64(268435456), opts.BlockCacheSize)
 	require.Equal(t, int64(134217728), opts.ShardCacheSize)
 
 	// Protocols.
