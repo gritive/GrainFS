@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.607.0] - 2026-06-16
+
+### Fixed
+- **Cluster objects are no longer placed in non-redundant single-peer groups during
+  formation — killing one node no longer loses data.** In a per-join multi-node EC
+  cluster, the object→group placement candidate set could be frozen (boot-frozen, or
+  the gen-0 lazy capture from v0.0.606.0) while only single-peer (1+0, no-redundancy)
+  formation groups existed, before the wide EC groups (one shard per node) formed. An
+  object that hash-routed to such a group had its only copy on one node, so killing
+  that node lost it — the `AppendObject Cluster4Node` "survives owner kill after
+  coalesce" case. Placement now refuses non-redundant groups in a multi-node cluster:
+  a redundancy gate requires the chosen group to survive a single-node loss (≥2 peers,
+  parity > 0) whenever the cluster has ≥2 member nodes, so writes during the formation
+  window get a transient `503 SlowDown` instead of a non-redundant placement, and the
+  gen-0 capture is deferred until redundant groups form. A placement generation
+  recorded over a non-redundant set during the one-node formation race self-heals: the
+  next write advances it to the redundant set, while objects written under the old
+  generation stay readable via the newest-first read probe. The operator
+  `expand-placement` path likewise refuses to record a non-redundant generation in a
+  multi-node cluster, so the self-heal invariant cannot be broken from that side. A
+  genuine single-node
+  cluster is unaffected (1+0 is the best available). The forward read path now also
+  waits out a data-group leader re-election (the read-side mirror of the write path's
+  readiness retry), so a GET racing the killed leader's re-election reaches the new
+  leader instead of returning 500. Fixes the last of the six `AppendObject
+  Cluster4Node` e2e cases.
+
 ## [0.0.606.0] - 2026-06-16
 
 ### Fixed

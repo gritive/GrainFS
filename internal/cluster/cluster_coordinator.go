@@ -383,6 +383,14 @@ func (c *ClusterCoordinator) PlanPlacementExpansion() (PlacementExpansionPlan, e
 	if err != nil {
 		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: candidate groups: %w", err)
 	}
+	// Durability invariant: never let the operator record a non-redundant generation
+	// in a multi-node cluster. ensureGenZero's self-heal assumes the latest generation
+	// regresses to non-redundant only at gen-0/boot (all producers append redundant-or-
+	// wider sets); an operator expansion to a 1+0 set would break that and could strand
+	// the self-heal in a non-advancing re-propose. Refuse it here at the proposer.
+	if err := redundantPlacementGate(candidates, metaNodeCount(c.meta)); err != nil {
+		return PlacementExpansionPlan{}, fmt.Errorf("placement expansion: %w", err)
+	}
 	expanded := make([]string, len(candidates))
 	for i, cand := range candidates {
 		expanded[i] = cand.ID
@@ -518,6 +526,13 @@ func (c *ClusterCoordinator) liveCandidateGroupIDs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Durability gate: defer gen-0 capture while the candidate set is non-redundant
+	// (1+0 single-peer groups) in a multi-node cluster. Capturing gen-0 here would
+	// pin every object to a group a single node loss destroys. ensureGenZero treats
+	// the error as "not ready yet" and retries on the next write. See redundantPlacementGate.
+	if err := redundantPlacementGate(candidates, metaNodeCount(c.meta)); err != nil {
+		return nil, err
+	}
 	ids := make([]string, len(candidates))
 	for i, cand := range candidates {
 		ids[i] = cand.ID
@@ -525,23 +540,26 @@ func (c *ClusterCoordinator) liveCandidateGroupIDs() ([]string, error) {
 	return ids, nil
 }
 
-// ensureGenZero lazily establishes a consistent gen-0 on the first object write.
-// In a per-join cluster each node boot-freezes a partial, divergent shard-group
-// snapshot, so the same key hash-routes to different groups on different nodes
-// (append fragments → InvalidWriteOffset). Recording gen-0 once into the meta-FSM
-// (replicated) makes every node's rebuild() apply the SAME candidate set, so
+// ensureGenZero lazily establishes a consistent, REDUNDANT placement generation on
+// object writes. In a per-join cluster each node boot-freezes a partial, divergent
+// shard-group snapshot, so the same key hash-routes to different groups on different
+// nodes (append fragments → InvalidWriteOffset). Recording a generation once into the
+// meta-FSM (replicated) makes every node's rebuild() apply the SAME candidate set, so
 // routing converges.
 //
-// Cheap on the hot path: once any generation exists in the local FSM it returns
-// after a single RLock read. The first write proposes gen-0 = the live converged
-// set via the recorder (which forwards to the meta leader and blocks until the
-// command applies locally — the post-commit hook then rebuilds the OpRouter, so
-// this write already routes over gen-0). Concurrent first-writers all propose the
-// same set; the FSM apply dedups against the whole registry, so they converge to a
-// single gen-0 without a new lock. Best-effort: a propose failure is logged and
-// retried by the next write rather than failing the user's request — the triggering
-// write may then still route on the boot-frozen set (and an append may fragment),
-// exactly as it did before this fix, until a subsequent write establishes gen-0.
+// Durability self-heal: liveCandidateGroupIDs is gated to redundant-only groups, so
+// while the multi-node cluster is still forming (only 1+0 single-peer groups exist)
+// gen-0 capture is DEFERRED — no object is pinned to a group a single node loss would
+// destroy. If a generation was nonetheless recorded over a non-redundant set (the
+// narrow formation-race window where only one node is registered), this advances it:
+// once redundant groups form, it appends a new generation over them so subsequent
+// writes route redundantly, while objects under the old generation stay readable via
+// the newest-first read probe. When the latest generation is already redundant,
+// further growth is the operator's job (expand-placement), so this no-ops.
+//
+// Concurrent writers all propose the same set; the FSM apply dedups against the whole
+// registry, so they converge without a new lock. Best-effort: a propose failure is
+// logged and retried by the next write rather than failing the user's request.
 func (c *ClusterCoordinator) ensureGenZero(ctx context.Context) {
 	if c.recordGenZero == nil {
 		return
@@ -550,19 +568,44 @@ func (c *ClusterCoordinator) ensureGenZero(ctx context.Context) {
 	if !ok {
 		return
 	}
-	if len(src.PlacementGenerations()) > 0 {
-		return // gen-0 (or a later generation) already recorded
+	gens := src.PlacementGenerations()
+	if len(gens) > 0 && c.placementGenerationRedundant(gens[len(gens)-1]) {
+		return // latest generation already redundant — further growth is the operator's
 	}
+	// Invariant that bounds the self-heal: the only producers of placement
+	// generations are this self-heal (appends redundant sets only) and the operator
+	// expand-placement (appends WIDER, so still redundant, sets). So once any
+	// redundant generation is appended the latest stays redundant — the latest is
+	// non-redundant only at gen-0/boot before the first redundant append. Therefore
+	// the redundant set computed below is always NEW (not a registry duplicate), so
+	// the FSM dedup never silently no-ops it into a non-advancing loop.
 	ids, err := c.liveCandidateGroupIDs()
 	if err != nil || len(ids) == 0 {
-		return // no EC-active candidate groups yet — nothing to pin
+		return // no redundant candidate groups yet — defer until the cluster forms them
 	}
 	if err := c.recordGenZero(ctx, ids); err != nil {
 		log.Warn().Err(err).Strs("groups", ids).
-			Msg("gen-0 placement record failed; retrying on next write")
+			Msg("redundant placement generation record failed; retrying on next write")
 		return
 	}
-	log.Debug().Strs("groups", ids).Msg("recorded gen-0 placement generation")
+	log.Debug().Strs("groups", ids).Int("prior_generations", len(gens)).
+		Msg("recorded redundant placement generation")
+}
+
+// placementGenerationRedundant reports whether a placement generation's groups can
+// survive a single-node loss. candidateGroupsFor produces a uniform-width set, so the
+// first live-resolvable group represents the generation. An unresolvable generation
+// (groups gone) is treated as non-redundant so the self-heal re-derives from live.
+func (c *ClusterCoordinator) placementGenerationRedundant(gen placementGeneration) bool {
+	if c.meta == nil {
+		return false
+	}
+	for _, id := range gen.groupIDs {
+		if g, ok := c.meta.ShardGroup(id); ok {
+			return DesiredECConfigForGroup(g).Redundant()
+		}
+	}
+	return false
 }
 
 func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
